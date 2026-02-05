@@ -1,0 +1,205 @@
+# Example Tasks for complex workflow
+# These demonstrate different patterns for AI task execution
+---
+# Task 1: Simple research task using researcher agent
+apiVersion: core.mercan.ai/v1alpha1
+kind: Task
+metadata:
+  name: research-kubernetes-operators
+spec:
+  type: ai
+  agentRef:
+    name: researcher-agent
+  prompt: |
+    Research the current best practices for building Kubernetes operators in 2026.
+
+    I need to understand:
+    1. What frameworks are commonly used (kubebuilder, operator-sdk, etc.)
+    2. Key patterns and anti-patterns
+    3. Testing strategies for operators
+    4. Any new developments in the ecosystem
+
+    Provide a comprehensive summary with sources.
+  sessionRef:
+    name: research-session
+    create: true
+  priority: 500
+  timeout: 5m
+---
+# Task 2: Code generation task using coder agent
+apiVersion: core.mercan.ai/v1alpha1
+kind: Task
+metadata:
+  name: implement-rate-limiter
+spec:
+  type: ai
+  agentRef:
+    name: coder-agent
+  prompt: |
+    Implement a token bucket rate limiter in Go with the following requirements:
+
+    1. Thread-safe implementation using sync primitives
+    2. Configurable bucket size and refill rate
+    3. Support for both Allow() (non-blocking) and Wait() (blocking) methods
+    4. Include unit tests
+
+    The implementation should follow Go best practices and be production-ready.
+  sessionRef:
+    name: coding-session
+    create: true
+  priority: 600
+  timeout: 10m
+---
+# Task 3: Code review task
+apiVersion: core.mercan.ai/v1alpha1
+kind: Task
+metadata:
+  name: review-auth-implementation
+spec:
+  type: ai
+  agentRef:
+    name: reviewer-agent
+  prompt: |
+    Review this authentication middleware implementation for security issues:
+
+    ```go
+    func AuthMiddleware(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            token := r.Header.Get("Authorization")
+            if token == "" {
+                http.Error(w, "Unauthorized", http.StatusUnauthorized)
+                return
+            }
+
+            // Remove "Bearer " prefix
+            token = strings.TrimPrefix(token, "Bearer ")
+
+            claims, err := validateJWT(token)
+            if err != nil {
+                http.Error(w, "Invalid token", http.StatusUnauthorized)
+                return
+            }
+
+            // Add user info to context
+            ctx := context.WithValue(r.Context(), "user", claims.Subject)
+            next.ServeHTTP(w, r.WithContext(ctx))
+        })
+    }
+    ```
+
+    Focus on:
+    1. Security vulnerabilities
+    2. Error handling
+    3. Best practices
+  priority: 700
+  timeout: 3m
+---
+# Task 4: Complex coordinated task
+apiVersion: core.mercan.ai/v1alpha1
+kind: Task
+metadata:
+  name: design-caching-system
+  annotations:
+    mercan.ai/complexity: high
+    mercan.ai/estimated-subtasks: "3"
+spec:
+  type: ai
+  agentRef:
+    name: coordinator-agent
+  prompt: |
+    Design and implement a distributed caching system for our Kubernetes-native application.
+
+    Requirements:
+    1. Must work in a multi-replica environment
+    2. Support for TTL-based expiration
+    3. Cache invalidation strategies
+    4. Metrics and observability
+
+    Please:
+    1. First research existing solutions and patterns (delegate to researcher)
+    2. Design the architecture based on findings
+    3. Implement a proof-of-concept (delegate to coder)
+    4. Review the implementation (delegate to reviewer)
+
+    Provide a complete solution with documentation.
+  sessionRef:
+    name: caching-project
+    create: true
+    maxMessages: 100
+  priority: 800
+  timeout: 30m
+  retryPolicy:
+    maxRetries: 2
+    backoffMultiplier: 2
+    initialDelay: 30s
+---
+# Task 5: Multi-turn conversation (follow-up on previous research)
+apiVersion: core.mercan.ai/v1alpha1
+kind: Task
+metadata:
+  name: research-followup
+spec:
+  type: ai
+  agentRef:
+    name: researcher-agent
+  prompt: |
+    Based on our previous research about Kubernetes operators, I have follow-up questions:
+
+    1. How does kubebuilder compare to operator-sdk for complex reconciliation logic?
+    2. What are the best practices for handling CRD versioning and migrations?
+    3. Are there any case studies of large-scale operator deployments?
+
+    Please dig deeper into these areas.
+  sessionRef:
+    name: research-session  # Continues from task 1
+    create: false
+    append: true
+  priority: 500
+  timeout: 5m
+---
+# Task 6: GitHub-focused research task
+apiVersion: core.mercan.ai/v1alpha1
+kind: Task
+metadata:
+  name: analyze-similar-projects
+spec:
+  type: ai
+  agentRef:
+    name: researcher-agent
+  prompt: |
+    Find and analyze open-source Kubernetes task execution platforms similar to Mercan.
+
+    Search for projects that:
+    1. Use Kubernetes Jobs/Pods for task execution
+    2. Have AI/LLM integration
+    3. Support workflow orchestration
+
+    For each relevant project found:
+    - Summarize its approach and architecture
+    - List key features
+    - Note any interesting patterns we could learn from
+
+    Search GitHub and the web for relevant projects.
+  priority: 500
+  timeout: 10m
+---
+# Task 7: Webhook notification example
+apiVersion: core.mercan.ai/v1alpha1
+kind: Task
+metadata:
+  name: research-with-notification
+spec:
+  type: ai
+  agentRef:
+    name: researcher-agent
+  prompt: |
+    Research the latest trends in AI agent frameworks and orchestration.
+    Focus on:
+    1. Multi-agent coordination patterns
+    2. Tool use and function calling best practices
+    3. Memory and context management
+
+    Provide a summary suitable for a technical blog post.
+  webhookURL: "http://notification-service.default.svc:8080/task-complete"
+  priority: 400
+  timeout: 8m

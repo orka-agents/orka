@@ -285,8 +285,6 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 		}
 		if task.Spec.AI.Prompt != "" {
 			prompt = task.Spec.AI.Prompt
-		} else if task.Spec.Prompt != "" {
-			prompt = task.Spec.Prompt
 		}
 		if task.Spec.AI.SystemPrompt != "" {
 			systemPrompt = task.Spec.AI.SystemPrompt
@@ -294,6 +292,11 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 		if len(task.Spec.AI.Tools) > 0 {
 			tools = append(tools, task.Spec.AI.Tools...)
 		}
+	}
+
+	// Check task.Spec.Prompt (used with agentRef pattern)
+	if prompt == "" && task.Spec.Prompt != "" {
+		prompt = task.Spec.Prompt
 	}
 
 	envVars = append(envVars,
