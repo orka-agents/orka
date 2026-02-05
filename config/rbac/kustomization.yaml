@@ -31,4 +31,6 @@ resources:
 - task_admin_role.yaml
 - task_editor_role.yaml
 - task_viewer_role.yaml
+# Worker ServiceAccount and RBAC for task execution
+- worker_role.yaml
 
