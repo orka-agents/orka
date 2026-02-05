@@ -1,0 +1,167 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package api
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/cors"
+	"github.com/gofiber/fiber/v3/middleware/recover"
+	"github.com/gofiber/fiber/v3/middleware/requestid"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/sozercan/mercan/internal/controller"
+)
+
+var log = logf.Log.WithName("api-server")
+
+// ServerConfig holds configuration for the API server
+type ServerConfig struct {
+	Port           int
+	MetricsPort    int
+	WatchNamespace string
+}
+
+// Server is the REST API server
+type Server struct {
+	app            *fiber.App
+	client         client.Client
+	config         ServerConfig
+	sessionManager *controller.SessionManager
+	handlers       *Handlers
+}
+
+// NewServer creates a new API server
+func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
+	app := fiber.New(fiber.Config{
+		AppName:      "Mercan API",
+		ErrorHandler: customErrorHandler,
+	})
+
+	server := &Server{
+		app:            app,
+		client:         c,
+		config:         config,
+		sessionManager: sessionManager,
+	}
+
+	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace)
+	server.setupMiddleware()
+	server.setupRoutes()
+
+	return server
+}
+
+// setupMiddleware configures middleware for the server
+func (s *Server) setupMiddleware() {
+	// Recovery middleware
+	s.app.Use(recover.New())
+
+	// Request ID middleware
+	s.app.Use(requestid.New())
+
+	// CORS middleware
+	s.app.Use(cors.New(cors.Config{
+		AllowOrigins: []string{"*"},
+		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
+		AllowHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization"},
+	}))
+
+	// Logging middleware
+	s.app.Use(NewLoggingMiddleware())
+
+	// Metrics middleware
+	s.app.Use(NewMetricsMiddleware())
+}
+
+// setupRoutes configures the API routes
+func (s *Server) setupRoutes() {
+	// Health endpoints
+	s.app.Get("/healthz", s.handlers.Healthz)
+	s.app.Get("/readyz", s.handlers.Readyz)
+
+	// API v1 group
+	api := s.app.Group("/api/v1")
+
+	// Auth middleware for API endpoints
+	api.Use(NewAuthMiddleware(s.client))
+
+	// Task endpoints
+	api.Post("/tasks", s.handlers.CreateTask)
+	api.Get("/tasks", s.handlers.ListTasks)
+	api.Get("/tasks/:id", s.handlers.GetTask)
+	api.Delete("/tasks/:id", s.handlers.DeleteTask)
+	api.Get("/tasks/:id/logs", s.handlers.GetTaskLogs)
+	api.Get("/tasks/:id/result", s.handlers.GetTaskResult)
+
+	// Session endpoints
+	api.Get("/sessions", s.handlers.ListSessions)
+	api.Get("/sessions/:id", s.handlers.GetSession)
+	api.Delete("/sessions/:id", s.handlers.DeleteSession)
+
+	// Tool endpoints
+	api.Get("/tools", s.handlers.ListTools)
+	api.Get("/tools/:name", s.handlers.GetTool)
+
+	// Agent endpoints
+	api.Get("/agents", s.handlers.ListAgents)
+	api.Get("/agents/:name", s.handlers.GetAgent)
+}
+
+// Start starts the API server
+func (s *Server) Start(ctx context.Context) error {
+	addr := fmt.Sprintf(":%d", s.config.Port)
+	log.Info("starting API server", "address", addr)
+
+	// Start server in a goroutine
+	errCh := make(chan error, 1)
+	go func() {
+		if err := s.app.Listen(addr); err != nil {
+			errCh <- err
+		}
+	}()
+
+	// Wait for shutdown signal or error
+	select {
+	case <-ctx.Done():
+		log.Info("shutting down API server")
+		return s.app.Shutdown()
+	case err := <-errCh:
+		return err
+	}
+}
+
+// customErrorHandler handles errors returned by handlers
+func customErrorHandler(c fiber.Ctx, err error) error {
+	code := fiber.StatusInternalServerError
+	message := "Internal Server Error"
+
+	if e, ok := err.(*fiber.Error); ok {
+		code = e.Code
+		message = e.Message
+	}
+
+	return c.Status(code).JSON(fiber.Map{
+		"error": fiber.Map{
+			"code":    code,
+			"message": message,
+		},
+	})
+}

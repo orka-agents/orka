@@ -1,0 +1,163 @@
+{{- if .Values.rbac.create -}}
+# Controller ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "mercan.fullname" . }}-controller
+  labels:
+    {{- include "mercan.labels" . | nindent 4 }}
+rules:
+  # Task CRD permissions
+  - apiGroups: ["core.mercan.ai"]
+    resources: ["tasks"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["core.mercan.ai"]
+    resources: ["tasks/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["core.mercan.ai"]
+    resources: ["tasks/finalizers"]
+    verbs: ["update"]
+
+  # Tool CRD permissions
+  - apiGroups: ["core.mercan.ai"]
+    resources: ["tools"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["core.mercan.ai"]
+    resources: ["tools/status"]
+    verbs: ["get", "update", "patch"]
+
+  # Agent CRD permissions
+  - apiGroups: ["core.mercan.ai"]
+    resources: ["agents"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["core.mercan.ai"]
+    resources: ["agents/status"]
+    verbs: ["get", "update", "patch"]
+
+  # Job permissions
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # ConfigMap permissions (results, sessions)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Secret permissions (read-only for API keys)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+
+  # Pod permissions (for logs)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+
+  # TokenReview for authentication
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+
+  # Events
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+# Controller ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "mercan.fullname" . }}-controller
+  labels:
+    {{- include "mercan.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "mercan.fullname" . }}-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mercan.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Client ClusterRole (for API access)
+{{- if .Values.client.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "mercan.fullname" . }}-client
+  labels:
+    {{- include "mercan.labels" . | nindent 4 }}
+rules:
+  # Task permissions
+  - apiGroups: ["core.mercan.ai"]
+    resources: ["tasks"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["core.mercan.ai"]
+    resources: ["tasks/status"]
+    verbs: ["get"]
+
+  # Tool permissions (read-only)
+  - apiGroups: ["core.mercan.ai"]
+    resources: ["tools"]
+    verbs: ["get", "list", "watch"]
+
+  # Agent permissions (read-only)
+  - apiGroups: ["core.mercan.ai"]
+    resources: ["agents"]
+    verbs: ["get", "list", "watch"]
+
+  # ConfigMap permissions (for results and sessions)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "mercan.fullname" . }}-client
+  labels:
+    {{- include "mercan.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "mercan.fullname" . }}-client
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.client.name }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+---
+# Worker Role (for result ConfigMap creation)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "mercan.fullname" . }}-worker
+  labels:
+    {{- include "mercan.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update"]
+  - apiGroups: ["core.mercan.ai"]
+    resources: ["tools"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "mercan.fullname" . }}-worker
+  labels:
+    {{- include "mercan.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "mercan.fullname" . }}-worker
+subjects:
+  - kind: ServiceAccount
+    name: mercan-worker
+    namespace: {{ .Release.Namespace }}
+{{- end }}

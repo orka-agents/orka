@@ -1,0 +1,230 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package tools
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+// CodeExecTool implements code execution functionality
+type CodeExecTool struct {
+	workDir      string
+	timeout      time.Duration
+	allowedLangs map[string]bool
+}
+
+// CodeExecArgs are the arguments for the code execution tool
+type CodeExecArgs struct {
+	Language string `json:"language"`
+	Code     string `json:"code"`
+	Timeout  int    `json:"timeout,omitempty"` // Timeout in seconds
+}
+
+// CodeExecResult represents the execution result
+type CodeExecResult struct {
+	Output   string `json:"output"`
+	Error    string `json:"error,omitempty"`
+	ExitCode int    `json:"exit_code"`
+}
+
+// NewCodeExecTool creates a new code execution tool
+func NewCodeExecTool() *CodeExecTool {
+	workDir := os.Getenv("MERCAN_WORK_DIR")
+	if workDir == "" {
+		workDir = "/tmp/mercan-exec"
+	}
+
+	return &CodeExecTool{
+		workDir: workDir,
+		timeout: 30 * time.Second,
+		allowedLangs: map[string]bool{
+			"python":     true,
+			"python3":    true,
+			"javascript": true,
+			"node":       true,
+			"bash":       true,
+			"sh":         true,
+		},
+	}
+}
+
+// Name returns the tool name
+func (t *CodeExecTool) Name() string {
+	return "code_exec"
+}
+
+// Description returns the tool description
+func (t *CodeExecTool) Description() string {
+	return "Execute code in a sandboxed environment. Supports Python, JavaScript (Node.js), and Bash."
+}
+
+// Parameters returns the JSON Schema for parameters
+func (t *CodeExecTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"language": {
+				"type": "string",
+				"description": "Programming language (python, javascript, bash)",
+				"enum": ["python", "python3", "javascript", "node", "bash", "sh"]
+			},
+			"code": {
+				"type": "string",
+				"description": "The code to execute"
+			},
+			"timeout": {
+				"type": "integer",
+				"description": "Execution timeout in seconds (default: 30, max: 60)",
+				"default": 30
+			}
+		},
+		"required": ["language", "code"]
+	}`)
+}
+
+// Execute runs the code
+func (t *CodeExecTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var execArgs CodeExecArgs
+	if err := json.Unmarshal(args, &execArgs); err != nil {
+		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	if execArgs.Code == "" {
+		return "", fmt.Errorf("code is required")
+	}
+
+	lang := strings.ToLower(execArgs.Language)
+	if !t.allowedLangs[lang] {
+		return "", fmt.Errorf("unsupported language: %s", execArgs.Language)
+	}
+
+	// Set timeout
+	timeout := t.timeout
+	if execArgs.Timeout > 0 && execArgs.Timeout <= 60 {
+		timeout = time.Duration(execArgs.Timeout) * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// Create work directory
+	if err := os.MkdirAll(t.workDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create work directory: %w", err)
+	}
+
+	// Execute based on language
+	var result CodeExecResult
+	switch lang {
+	case "python", "python3":
+		result = t.executePython(ctx, execArgs.Code)
+	case "javascript", "node":
+		result = t.executeNode(ctx, execArgs.Code)
+	case "bash", "sh":
+		result = t.executeBash(ctx, execArgs.Code)
+	default:
+		return "", fmt.Errorf("unsupported language: %s", lang)
+	}
+
+	output, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	return string(output), nil
+}
+
+// executePython executes Python code
+func (t *CodeExecTool) executePython(ctx context.Context, code string) CodeExecResult {
+	// Write code to a temporary file
+	tmpFile := filepath.Join(t.workDir, "script.py")
+	if err := os.WriteFile(tmpFile, []byte(code), 0644); err != nil {
+		return CodeExecResult{Error: fmt.Sprintf("failed to write script: %v", err), ExitCode: -1}
+	}
+	defer os.Remove(tmpFile)
+
+	cmd := exec.CommandContext(ctx, "python3", tmpFile)
+	return t.runCommand(cmd)
+}
+
+// executeNode executes JavaScript code
+func (t *CodeExecTool) executeNode(ctx context.Context, code string) CodeExecResult {
+	// Write code to a temporary file
+	tmpFile := filepath.Join(t.workDir, "script.js")
+	if err := os.WriteFile(tmpFile, []byte(code), 0644); err != nil {
+		return CodeExecResult{Error: fmt.Sprintf("failed to write script: %v", err), ExitCode: -1}
+	}
+	defer os.Remove(tmpFile)
+
+	cmd := exec.CommandContext(ctx, "node", tmpFile)
+	return t.runCommand(cmd)
+}
+
+// executeBash executes Bash code
+func (t *CodeExecTool) executeBash(ctx context.Context, code string) CodeExecResult {
+	// Write code to a temporary file
+	tmpFile := filepath.Join(t.workDir, "script.sh")
+	if err := os.WriteFile(tmpFile, []byte(code), 0755); err != nil {
+		return CodeExecResult{Error: fmt.Sprintf("failed to write script: %v", err), ExitCode: -1}
+	}
+	defer os.Remove(tmpFile)
+
+	cmd := exec.CommandContext(ctx, "bash", tmpFile)
+	return t.runCommand(cmd)
+}
+
+// runCommand executes a command and captures output
+func (t *CodeExecTool) runCommand(cmd *exec.Cmd) CodeExecResult {
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.Dir = t.workDir
+
+	err := cmd.Run()
+
+	result := CodeExecResult{
+		Output:   stdout.String(),
+		ExitCode: 0,
+	}
+
+	if stderr.Len() > 0 {
+		result.Error = stderr.String()
+	}
+
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			result.ExitCode = exitErr.ExitCode()
+		} else {
+			result.ExitCode = -1
+			if result.Error == "" {
+				result.Error = err.Error()
+			}
+		}
+	}
+
+	return result
+}
+
+// Ensure CodeExecTool implements Tool
+var _ Tool = (*CodeExecTool)(nil)

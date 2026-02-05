@@ -1,0 +1,18 @@
+apiVersion: v2
+name: mercan
+description: Kubernetes-native task execution platform with AI agent support
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - kubernetes
+  - task-execution
+  - ai
+  - agents
+  - llm
+maintainers:
+  - name: Sertac Ozercan
+    url: https://github.com/sozercan
+home: https://github.com/sozercan/mercan
+sources:
+  - https://github.com/sozercan/mercan

@@ -1,0 +1,132 @@
+# Mercan Helm Chart Values
+
+# Controller configuration
+controller:
+  # Number of controller replicas
+  replicas: 1
+
+  # Controller image
+  image:
+    repository: ghcr.io/sozercan/mercan
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  # Resource limits
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 100m
+      memory: 64Mi
+
+  # Watch namespace (empty for cluster-scoped)
+  watchNamespace: ""
+
+  # API server port
+  apiPort: 8080
+
+  # Metrics port
+  metricsPort: 8081
+
+  # Health probe port
+  healthPort: 8082
+
+  # Log level (debug, info, warn, error)
+  logLevel: info
+
+# Worker configuration
+workers:
+  ai:
+    image:
+      repository: ghcr.io/sozercan/mercan-ai-worker
+      tag: latest
+      pullPolicy: IfNotPresent
+
+  general:
+    image:
+      repository: ghcr.io/sozercan/mercan-general-worker
+      tag: latest
+      pullPolicy: IfNotPresent
+
+  # Default resources for workers
+  resources:
+    limits:
+      cpu: "1"
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 8080
+
+# ServiceAccount configuration
+serviceAccount:
+  # Create the service account
+  create: true
+  # Name of the service account (auto-generated if not set)
+  name: ""
+  # Annotations to add to the service account
+  annotations: {}
+
+# RBAC configuration
+rbac:
+  # Create RBAC resources
+  create: true
+
+# CRD configuration
+crds:
+  # Install CRDs
+  install: true
+  # Keep CRDs on chart uninstall
+  keep: true
+
+# Security context for pods
+podSecurityContext:
+  runAsNonRoot: true
+  fsGroup: 65532
+
+# Security context for containers
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}
+
+# Additional labels
+labels: {}
+
+# Additional annotations
+annotations: {}
+
+# Prometheus ServiceMonitor
+monitoring:
+  enabled: false
+  # Prometheus namespace (for ServiceMonitor)
+  namespace: ""
+  # Scrape interval
+  interval: 30s
+
+# Client ServiceAccount for API access
+client:
+  # Create a client service account
+  create: true
+  # Name of the client service account
+  name: mercan-client
