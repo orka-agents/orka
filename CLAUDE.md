@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## CRITICAL: Security
+
+**NEVER leak API keys, secrets, credentials, or sensitive data.** This includes:
+- Never commit secrets to version control
+- Never log or print API keys, tokens, or passwords
+- Never include secrets in error messages or responses
+- Always use Kubernetes Secrets or environment variables for sensitive data
+- Never hardcode credentials in code or configuration files
+
 ## Project Overview
 
 Mercan is a Kubernetes-native task execution platform. A controller manages Jobs and Pods for incoming task requests, supporting both container tasks and AI agent tasks with LLM integration.
