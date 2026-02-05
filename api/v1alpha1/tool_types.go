@@ -57,9 +57,24 @@ type HTTPExecution struct {
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
 
 	// AuthSecretRef references a Secret containing authentication token
-	// Token is injected as Authorization: Bearer <token>
+	// Token is injected as Authorization: Bearer <token> (when AuthInject=header)
+	// or into the request body (when AuthInject=body)
 	// +optional
 	AuthSecretRef *SecretKeySelector `json:"authSecretRef,omitempty"`
+
+	// AuthInject specifies where to inject the auth token: "header" (default) or "body"
+	// When "header", the token is added as Authorization: Bearer <token>
+	// When "body", the token is added to the JSON request body using AuthBodyKey
+	// +kubebuilder:validation:Enum=header;body
+	// +kubebuilder:default=header
+	// +optional
+	AuthInject string `json:"authInject,omitempty"`
+
+	// AuthBodyKey is the JSON key name to use when AuthInject=body
+	// For example, "api_key" would inject {"api_key": "<token>", ...}
+	// Only used when AuthInject=body
+	// +optional
+	AuthBodyKey string `json:"authBodyKey,omitempty"`
 }
 
 // SecretKeySelector selects a key from a Secret

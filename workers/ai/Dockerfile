@@ -13,12 +13,23 @@ COPY . .
 # Build the worker
 RUN CGO_ENABLED=0 GOOS=linux go build -a -o worker ./workers/ai
 
-# Runtime stage
-FROM gcr.io/distroless/static:nonroot
+# Runtime stage - using python slim for code_exec tool support
+FROM python:3.12-slim
+
+# Install Node.js for JavaScript execution
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -u 65532 -m nonroot
 
 WORKDIR /
 
 COPY --from=builder /workspace/worker /worker
+
+# Create work directory for code execution
+RUN mkdir -p /tmp/mercan-exec && chown nonroot:nonroot /tmp/mercan-exec
 
 USER 65532:65532
 

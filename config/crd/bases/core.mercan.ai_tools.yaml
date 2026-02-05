@@ -55,10 +55,27 @@ spec:
               http:
                 description: HTTP defines the HTTP execution configuration
                 properties:
+                  authBodyKey:
+                    description: |-
+                      AuthBodyKey is the JSON key name to use when AuthInject=body
+                      For example, "api_key" would inject {"api_key": "<token>", ...}
+                      Only used when AuthInject=body
+                    type: string
+                  authInject:
+                    default: header
+                    description: |-
+                      AuthInject specifies where to inject the auth token: "header" (default) or "body"
+                      When "header", the token is added as Authorization: Bearer <token>
+                      When "body", the token is added to the JSON request body using AuthBodyKey
+                    enum:
+                    - header
+                    - body
+                    type: string
                   authSecretRef:
                     description: |-
                       AuthSecretRef references a Secret containing authentication token
-                      Token is injected as Authorization: Bearer <token>
+                      Token is injected as Authorization: Bearer <token> (when AuthInject=header)
+                      or into the request body (when AuthInject=body)
                     properties:
                       key:
                         description: Key is the key within the Secret

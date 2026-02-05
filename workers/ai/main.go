@@ -25,13 +25,17 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 	"github.com/sozercan/mercan/internal/llm"
 	_ "github.com/sozercan/mercan/internal/llm/anthropic"
 	_ "github.com/sozercan/mercan/internal/llm/openai"
 	"github.com/sozercan/mercan/internal/tools"
+	"github.com/sozercan/mercan/internal/worker"
 )
 
 func main() {
@@ -87,6 +91,18 @@ func run() error {
 		enabledTools = strings.Split(toolsStr, ",")
 	}
 
+	// Create Kubernetes client for Tool CRDs
+	k8sClient, err := createK8sClient()
+	if err != nil {
+		return fmt.Errorf("failed to create k8s client: %w", err)
+	}
+
+	// Load custom Tool CRDs
+	customTools, err := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
+	if err != nil {
+		fmt.Printf("Warning: failed to load custom tools: %v\n", err)
+	}
+
 	// Load session context if available
 	sessionContext := loadSessionContext()
 
@@ -98,14 +114,14 @@ func run() error {
 		Content: prompt,
 	})
 
-	// Build tools for LLM
-	var llmTools []llm.Tool
-	if len(enabledTools) > 0 {
-		llmTools = tools.DefaultRegistry.ToLLMTools(enabledTools)
-	}
+	// Build tools for LLM (built-in + custom)
+	llmTools := buildLLMTools(enabledTools, customTools)
+
+	// Create tool executor for custom tools
+	toolExecutor := worker.NewToolExecutor()
 
 	// Execute the agent loop
-	result, err := executeAgentLoop(ctx, llmProvider, messages, systemPrompt, model, llmTools, enabledTools)
+	result, err := executeAgentLoop(ctx, llmProvider, messages, systemPrompt, model, llmTools, enabledTools, customTools, toolExecutor)
 	if err != nil {
 		return fmt.Errorf("agent execution failed: %w", err)
 	}
@@ -117,6 +133,80 @@ func run() error {
 
 	fmt.Printf("Task %s/%s completed successfully\n", taskNamespace, taskName)
 	return nil
+}
+
+// createK8sClient creates a controller-runtime client for accessing CRDs
+func createK8sClient() (client.Client, error) {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get in-cluster config: %w", err)
+	}
+
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("failed to add scheme: %w", err)
+	}
+
+	k8sClient, err := client.New(config, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create client: %w", err)
+	}
+
+	return k8sClient, nil
+}
+
+// loadCustomTools loads Tool CRDs from the cluster
+func loadCustomTools(ctx context.Context, k8sClient client.Client, namespace string, toolNames []string) (map[string]*corev1alpha1.Tool, error) {
+	customTools := make(map[string]*corev1alpha1.Tool)
+
+	for _, name := range toolNames {
+		// Skip built-in tools
+		if _, ok := tools.DefaultRegistry.Get(name); ok {
+			continue
+		}
+
+		// Try to load as custom Tool CRD
+		tool := &corev1alpha1.Tool{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, tool); err != nil {
+			fmt.Printf("Warning: tool %q not found as built-in or CRD: %v\n", name, err)
+			continue
+		}
+
+		customTools[name] = tool
+	}
+
+	return customTools, nil
+}
+
+// buildLLMTools builds the combined tool list for the LLM
+func buildLLMTools(enabledTools []string, customTools map[string]*corev1alpha1.Tool) []llm.Tool {
+	var llmTools []llm.Tool
+
+	for _, name := range enabledTools {
+		// Check if it's a built-in tool
+		if builtinTools := tools.DefaultRegistry.ToLLMTools([]string{name}); len(builtinTools) > 0 {
+			llmTools = append(llmTools, builtinTools...)
+			continue
+		}
+
+		// Check if it's a custom tool
+		if tool, ok := customTools[name]; ok {
+			var params json.RawMessage
+			if tool.Spec.Parameters != nil {
+				params = tool.Spec.Parameters.Raw
+			} else {
+				params = json.RawMessage(`{"type": "object", "properties": {}}`)
+			}
+
+			llmTools = append(llmTools, llm.Tool{
+				Name:        tool.Name,
+				Description: tool.Spec.Description,
+				Parameters:  params,
+			})
+		}
+	}
+
+	return llmTools
 }
 
 // getAPIKey retrieves the API key for the given provider
@@ -199,6 +289,8 @@ func executeAgentLoop(
 	model string,
 	llmTools []llm.Tool,
 	enabledTools []string,
+	customTools map[string]*corev1alpha1.Tool,
+	toolExecutor *worker.ToolExecutor,
 ) (string, error) {
 	maxIterations := 10
 
@@ -232,9 +324,19 @@ func executeAgentLoop(
 		for _, tc := range resp.ToolCalls {
 			fmt.Printf("Executing tool: %s\n", tc.Name)
 
-			result, err := tools.DefaultRegistry.Execute(ctx, tc.Name, tc.Arguments)
-			if err != nil {
-				result = fmt.Sprintf("Error executing tool: %v", err)
+			var result string
+			var execErr error
+
+			// Check if it's a custom tool
+			if customTool, ok := customTools[tc.Name]; ok {
+				result, execErr = toolExecutor.Execute(ctx, customTool, tc.Arguments)
+			} else {
+				// Fall back to built-in tools
+				result, execErr = tools.DefaultRegistry.Execute(ctx, tc.Name, tc.Arguments)
+			}
+
+			if execErr != nil {
+				result = fmt.Sprintf("Error executing tool: %v", execErr)
 			}
 
 			// Add tool result
