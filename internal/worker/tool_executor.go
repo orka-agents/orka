@@ -27,6 +27,10 @@ import (
 	"strings"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 )
 
@@ -34,15 +38,30 @@ import (
 type ToolExecutor struct {
 	client     *http.Client
 	secretPath string
+	namespace  string
+	k8sClient  kubernetes.Interface
 }
 
 // NewToolExecutor creates a new tool executor
 func NewToolExecutor() *ToolExecutor {
+	namespace := os.Getenv("MERCAN_TASK_NAMESPACE")
+	if namespace == "" {
+		namespace = "default"
+	}
+
+	// Create Kubernetes client for secret access
+	var k8sClient kubernetes.Interface
+	if config, err := rest.InClusterConfig(); err == nil {
+		k8sClient, _ = kubernetes.NewForConfig(config)
+	}
+
 	return &ToolExecutor{
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 		secretPath: "/secrets/tools",
+		namespace:  namespace,
+		k8sClient:  k8sClient,
 	}
 }
 
@@ -139,9 +158,9 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 	return string(respBody), nil
 }
 
-// getSecretKey reads a key from a mounted secret
+// getSecretKey reads a key from a secret (mounted path or Kubernetes API)
 func (e *ToolExecutor) getSecretKey(secretName, key string) (string, error) {
-	// Try multiple secret paths
+	// Try mounted secret paths first
 	paths := []string{
 		fmt.Sprintf("%s/%s/%s", e.secretPath, secretName, key),
 		fmt.Sprintf("/secrets/task/%s", key),
@@ -152,6 +171,16 @@ func (e *ToolExecutor) getSecretKey(secretName, key string) (string, error) {
 		data, err := os.ReadFile(path)
 		if err == nil {
 			return strings.TrimSpace(string(data)), nil
+		}
+	}
+
+	// Fall back to Kubernetes API
+	if e.k8sClient != nil {
+		secret, err := e.k8sClient.CoreV1().Secrets(e.namespace).Get(context.Background(), secretName, metav1.GetOptions{})
+		if err == nil {
+			if data, ok := secret.Data[key]; ok {
+				return strings.TrimSpace(string(data)), nil
+			}
 		}
 	}
 

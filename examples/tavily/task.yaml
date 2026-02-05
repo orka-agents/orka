@@ -1,0 +1,14 @@
+apiVersion: core.mercan.ai/v1alpha1
+kind: Task
+metadata:
+  name: tavily-test
+spec:
+  type: ai
+  ai:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+    prompt: "What are the latest developments in Kubernetes in 2026? Search the web and summarize the key announcements."
+    tools:
+      - tavily-search
+  secretRef:
+    name: anthropic-secret

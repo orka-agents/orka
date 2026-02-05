@@ -1,0 +1,37 @@
+apiVersion: core.mercan.ai/v1alpha1
+kind: Tool
+metadata:
+  name: tavily-search
+spec:
+  description: "Search the web for current information using Tavily. Use this when you need to find up-to-date information, news, or facts from the internet."
+  parameters:
+    type: object
+    properties:
+      query:
+        type: string
+        description: "The search query"
+      max_results:
+        type: integer
+        description: "Maximum number of results to return (default: 5)"
+        default: 5
+      search_depth:
+        type: string
+        description: "Search depth: 'basic' for quick results, 'advanced' for comprehensive search"
+        enum: ["basic", "advanced"]
+        default: "basic"
+      include_answer:
+        type: boolean
+        description: "Include a generated answer based on search results"
+        default: true
+    required: ["query"]
+  http:
+    url: "https://api.tavily.com/search"
+    method: POST
+    headers:
+      Content-Type: application/json
+    timeout: 30s
+    authSecretRef:
+      name: tavily-secret
+      key: api-key
+    authInject: body
+    authBodyKey: api_key
