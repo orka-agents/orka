@@ -189,6 +189,13 @@ func (e *ToolExecutor) executeCreateAITask(ctx context.Context, args map[string]
 		task.Spec.AgentRef = &corev1alpha1.AgentReference{Name: agentRef}
 	}
 
+	// Set provider reference (defaults to "default")
+	providerName := getStringArgDefault(args, "providerRef", "default")
+	if task.Spec.AI == nil {
+		task.Spec.AI = &corev1alpha1.AISpec{}
+	}
+	task.Spec.AI.ProviderRef = &corev1alpha1.ProviderReference{Name: providerName}
+
 	if timeoutStr := getStringArg(args, "timeout"); timeoutStr != "" {
 		d, err := time.ParseDuration(timeoutStr)
 		if err != nil {
@@ -673,20 +680,37 @@ func (e *ToolExecutor) executeCreateAgent(ctx context.Context, args map[string]a
 	}
 
 	// Model configuration
-	modelProvider := getStringArg(args, "model")
-	if modelProvider != "" {
-		parts := strings.SplitN(modelProvider, "/", 2)
-		if len(parts) == 2 {
+	if modelObj, ok := args["model"]; ok {
+		switch m := modelObj.(type) {
+		case map[string]any:
 			agent.Spec.Model = &corev1alpha1.ModelConfig{
-				Provider: parts[0],
-				Name:     parts[1],
+				Name:     getStringArg(m, "name"),
+				Provider: getStringArg(m, "provider"),
 			}
-		} else {
-			agent.Spec.Model = &corev1alpha1.ModelConfig{
-				Name: modelProvider,
+			if temp, ok := m["temperature"]; ok {
+				if t, ok := temp.(float64); ok {
+					agent.Spec.Model.Temperature = &t
+				}
+			}
+		case string:
+			// Support "provider/model" format
+			parts := strings.SplitN(m, "/", 2)
+			if len(parts) == 2 {
+				agent.Spec.Model = &corev1alpha1.ModelConfig{
+					Provider: parts[0],
+					Name:     parts[1],
+				}
+			} else {
+				agent.Spec.Model = &corev1alpha1.ModelConfig{
+					Name: m,
+				}
 			}
 		}
 	}
+
+	// Set providerRef (defaults to "default")
+	providerRefName := getStringArgDefault(args, "providerRef", "default")
+	agent.Spec.ProviderRef = &corev1alpha1.ProviderReference{Name: providerRefName}
 
 	if systemPrompt := getStringArg(args, "systemPrompt"); systemPrompt != "" {
 		agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{

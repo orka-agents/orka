@@ -40,8 +40,9 @@ func CoreTools() []llm.Tool {
 				"properties": map[string]any{
 					"name":       map[string]any{"type": "string", "description": "Task name"},
 					"prompt":     map[string]any{"type": "string", "description": "The prompt/instruction for the AI task"},
-					"agentRef":   map[string]any{"type": "string", "description": "Optional Agent CRD name to use"},
-					"namespace":  map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"agentRef":     map[string]any{"type": "string", "description": "Optional Agent CRD name to use"},
+					"providerRef":  map[string]any{"type": "string", "description": "Provider CRD name (defaults to 'default')"},
+					"namespace":    map[string]any{"type": "string", "description": "Kubernetes namespace"},
 					"timeout":    map[string]any{"type": "string", "description": "Timeout duration, e.g. \"5m\""},
 					"priority":   map[string]any{"type": "integer", "description": "Priority 0-1000"},
 					"sessionRef": map[string]any{"type": "string", "description": "Session name for conversation continuity"},
