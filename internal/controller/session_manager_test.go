@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -602,5 +604,289 @@ func TestGetSessionConfigMapName(t *testing.T) {
 	name := getSessionConfigMapName("my-session")
 	if name != "session-my-session" {
 		t.Errorf("getSessionConfigMapName() = %s, want session-my-session", name)
+	}
+}
+
+func TestSessionManager_AppendMessages_NoSessionRef(t *testing.T) {
+	sm := setupSessionManager()
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: nil,
+		},
+	}
+
+	err := sm.AppendMessages(context.Background(), task)
+	if err != nil {
+		t.Errorf("AppendMessages() error = %v", err)
+	}
+}
+
+func TestSessionManager_AppendMessages_AppendFalse(t *testing.T) {
+	sm := setupSessionManager()
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{
+				Name:   "test-session",
+				Append: false,
+			},
+		},
+	}
+
+	err := sm.AppendMessages(context.Background(), task)
+	if err != nil {
+		t.Errorf("AppendMessages() error = %v", err)
+	}
+}
+
+func TestSessionManager_AppendMessages_WithPromptAndResult(t *testing.T) {
+	sessionCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "session-test-session",
+			Namespace: "default",
+			Labels:    map[string]string{SessionLabelKey: "true"},
+			Annotations: map[string]string{
+				"mercan.ai/updated-at": "2024-01-01T00:00:00Z",
+			},
+		},
+		Data: map[string]string{
+			TranscriptKey: "",
+		},
+	}
+
+	resultCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "task-result",
+			Namespace: "default",
+		},
+		Data: map[string]string{
+			"result": "Here is the answer",
+		},
+	}
+
+	sm := setupSessionManager(sessionCM, resultCM)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-task",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Prompt: "What is the answer?",
+			SessionRef: &corev1alpha1.SessionReference{
+				Name:   "test-session",
+				Append: true,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{
+			ResultRef: &corev1alpha1.ResultReference{
+				ConfigMapName: "task-result",
+				Key:           "result",
+			},
+		},
+	}
+
+	err := sm.AppendMessages(context.Background(), task)
+	if err != nil {
+		t.Fatalf("AppendMessages() error = %v", err)
+	}
+
+	// Verify the transcript was updated
+	cm, err := sm.GetSession(context.Background(), "default", "test-session")
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+
+	transcript := cm.Data[TranscriptKey]
+	if transcript == "" {
+		t.Fatal("transcript should not be empty after appending messages")
+	}
+
+	// Parse the transcript lines
+	lines := strings.Split(strings.TrimSpace(transcript), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 transcript lines, got %d: %q", len(lines), transcript)
+	}
+
+	// Verify user message
+	var userMsg SessionMessage
+	if err := json.Unmarshal([]byte(lines[0]), &userMsg); err != nil {
+		t.Fatalf("failed to parse user message: %v", err)
+	}
+	if userMsg.Role != "user" {
+		t.Errorf("user message role = %q, want 'user'", userMsg.Role)
+	}
+	if userMsg.Content != "What is the answer?" {
+		t.Errorf("user message content = %q, want 'What is the answer?'", userMsg.Content)
+	}
+
+	// Verify assistant message
+	var assistantMsg SessionMessage
+	if err := json.Unmarshal([]byte(lines[1]), &assistantMsg); err != nil {
+		t.Fatalf("failed to parse assistant message: %v", err)
+	}
+	if assistantMsg.Role != "assistant" {
+		t.Errorf("assistant message role = %q, want 'assistant'", assistantMsg.Role)
+	}
+	if assistantMsg.Content != "Here is the answer" {
+		t.Errorf("assistant message content = %q, want 'Here is the answer'", assistantMsg.Content)
+	}
+}
+
+func TestSessionManager_AppendMessages_WithAIPrompt(t *testing.T) {
+	sessionCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "session-test-session",
+			Namespace: "default",
+			Labels:    map[string]string{SessionLabelKey: "true"},
+			Annotations: map[string]string{
+				"mercan.ai/updated-at": "2024-01-01T00:00:00Z",
+			},
+		},
+		Data: map[string]string{
+			TranscriptKey: "",
+		},
+	}
+
+	sm := setupSessionManager(sessionCM)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-task",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			AI: &corev1alpha1.AISpec{
+				Prompt: "AI prompt here",
+			},
+			SessionRef: &corev1alpha1.SessionReference{
+				Name:   "test-session",
+				Append: true,
+			},
+		},
+	}
+
+	err := sm.AppendMessages(context.Background(), task)
+	if err != nil {
+		t.Fatalf("AppendMessages() error = %v", err)
+	}
+
+	cm, err := sm.GetSession(context.Background(), "default", "test-session")
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+
+	transcript := cm.Data[TranscriptKey]
+	lines := strings.Split(strings.TrimSpace(transcript), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 transcript line (user only, no result), got %d", len(lines))
+	}
+
+	var msg SessionMessage
+	if err := json.Unmarshal([]byte(lines[0]), &msg); err != nil {
+		t.Fatalf("failed to parse message: %v", err)
+	}
+	if msg.Content != "AI prompt here" {
+		t.Errorf("message content = %q, want 'AI prompt here'", msg.Content)
+	}
+}
+
+func TestSessionManager_AppendMessages_AppendsToExistingTranscript(t *testing.T) {
+	existingTranscript := `{"role":"user","content":"first question","ts":"2024-01-01T00:00:00Z"}
+{"role":"assistant","content":"first answer","ts":"2024-01-01T00:00:01Z"}`
+
+	sessionCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "session-test-session",
+			Namespace: "default",
+			Labels:    map[string]string{SessionLabelKey: "true"},
+			Annotations: map[string]string{
+				"mercan.ai/updated-at": "2024-01-01T00:00:00Z",
+			},
+		},
+		Data: map[string]string{
+			TranscriptKey: existingTranscript,
+		},
+	}
+
+	sm := setupSessionManager(sessionCM)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-task",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Prompt: "second question",
+			SessionRef: &corev1alpha1.SessionReference{
+				Name:   "test-session",
+				Append: true,
+			},
+		},
+	}
+
+	err := sm.AppendMessages(context.Background(), task)
+	if err != nil {
+		t.Fatalf("AppendMessages() error = %v", err)
+	}
+
+	cm, err := sm.GetSession(context.Background(), "default", "test-session")
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+
+	transcript := cm.Data[TranscriptKey]
+	lines := strings.Split(strings.TrimSpace(transcript), "\n")
+	// 2 existing + 1 new user message
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 transcript lines, got %d: %q", len(lines), transcript)
+	}
+
+	var newMsg SessionMessage
+	if err := json.Unmarshal([]byte(lines[2]), &newMsg); err != nil {
+		t.Fatalf("failed to parse new message: %v", err)
+	}
+	if newMsg.Content != "second question" {
+		t.Errorf("new message content = %q, want 'second question'", newMsg.Content)
+	}
+}
+
+func TestSessionManager_AppendMessages_NoPromptNoResult(t *testing.T) {
+	sessionCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "session-test-session",
+			Namespace: "default",
+			Labels:    map[string]string{SessionLabelKey: "true"},
+			Annotations: map[string]string{
+				"mercan.ai/updated-at": "2024-01-01T00:00:00Z",
+			},
+		},
+		Data: map[string]string{
+			TranscriptKey: "",
+		},
+	}
+
+	sm := setupSessionManager(sessionCM)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-task",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{
+				Name:   "test-session",
+				Append: true,
+			},
+		},
+	}
+
+	err := sm.AppendMessages(context.Background(), task)
+	if err != nil {
+		t.Fatalf("AppendMessages() error = %v", err)
+	}
+
+	// Transcript should remain empty when there's no prompt and no result
+	cm, err := sm.GetSession(context.Background(), "default", "test-session")
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+	if cm.Data[TranscriptKey] != "" {
+		t.Errorf("transcript should be empty, got %q", cm.Data[TranscriptKey])
 	}
 }

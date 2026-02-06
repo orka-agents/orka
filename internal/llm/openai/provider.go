@@ -128,7 +128,7 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 	if len(req.Tools) > 0 {
 		tools := make([]openai.Tool, 0, len(req.Tools))
 		for _, tool := range req.Tools {
-			var params map[string]interface{}
+			var params map[string]any
 			json.Unmarshal(tool.Parameters, &params)
 
 			tools = append(tools, openai.Tool{

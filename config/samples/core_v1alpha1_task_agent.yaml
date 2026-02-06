@@ -1,0 +1,30 @@
+apiVersion: core.mercan.ai/v1alpha1
+kind: Task
+metadata:
+  name: agent-task-example
+  labels:
+    app.kubernetes.io/name: mercan
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # type: agent delegates work to an external CLI runtime (e.g., Claude Code CLI)
+  type: agent
+  # agentRef references an Agent CRD that defines runtime type and credentials
+  agentRef:
+    name: claude-agent
+  # prompt is the instruction sent to the agent CLI
+  prompt: "Refactor the main.go file to use structured logging"
+  # agentRuntime allows task-level overrides of the Agent's runtime defaults
+  agentRuntime:
+    workspace:
+      # gitRepo is the repository URL to clone into the agent's workspace
+      gitRepo: "https://github.com/example/my-project.git"
+      # branch to checkout
+      branch: "main"
+    # maxTurns limits agent loop iterations (overrides Agent's defaultMaxTurns)
+    maxTurns: 100
+    # allowBash enables bash command execution (overrides Agent's defaultAllowBash)
+    allowBash: true
+  # timeout is the maximum duration before the task is terminated
+  timeout: "30m"
+  # priority controls queue ordering (0-1000, higher = more urgent)
+  priority: 500

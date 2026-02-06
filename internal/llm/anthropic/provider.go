@@ -81,7 +81,7 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 					blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
 				}
 				for _, tc := range msg.ToolCalls {
-					var input map[string]interface{}
+					var input map[string]any
 					json.Unmarshal(tc.Arguments, &input)
 					blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, input, tc.Name))
 				}
@@ -123,11 +123,11 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 	if len(req.Tools) > 0 {
 		tools := make([]anthropic.ToolUnionParam, 0, len(req.Tools))
 		for _, tool := range req.Tools {
-			var schema map[string]interface{}
+			var schema map[string]any
 			json.Unmarshal(tool.Parameters, &schema)
 
 			var required []string
-			if reqField, ok := schema["required"].([]interface{}); ok {
+			if reqField, ok := schema["required"].([]any); ok {
 				for _, r := range reqField {
 					if s, ok := r.(string); ok {
 						required = append(required, s)

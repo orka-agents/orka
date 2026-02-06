@@ -237,7 +237,7 @@ func TestToolExecutor_Execute_AuthHeader(t *testing.T) {
 }
 
 func TestToolExecutor_Execute_AuthBody(t *testing.T) {
-	var receivedBody map[string]interface{}
+	var receivedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&receivedBody)
 		w.WriteHeader(http.StatusOK)
@@ -520,7 +520,7 @@ func TestToolExecutor_getSecretKey_TaskSecretPath(t *testing.T) {
 func TestToolExecutor_Execute_EmptyArgs(t *testing.T) {
 	var receivedBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedBody, _ = json.Marshal(map[string]interface{}{})
+		receivedBody, _ = json.Marshal(map[string]any{})
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()

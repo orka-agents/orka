@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Mercan is a Kubernetes-native task execution platform. A controller manages Jobs and Pods for incoming task requests, supporting both container tasks and AI agent tasks with LLM integration.
+Mercan is a Kubernetes-native task execution platform. A controller manages Jobs and Pods for incoming task requests, supporting container tasks, AI agent tasks with LLM integration, and external agent CLI runtimes (Copilot, Claude Code).
 
 ## Build & Development Commands
 
@@ -41,21 +41,55 @@ make docker-build docker-push IMG=<registry>/mercan:tag
 make deploy IMG=<registry>/mercan:tag
 ```
 
+### Agent Worker Images
+
+```bash
+# Build and push agent worker images
+make docker-build-copilot-worker COPILOT_WORKER_IMG=<registry>/mercan-agent-worker-copilot:tag
+make docker-build-claude-worker CLAUDE_WORKER_IMG=<registry>/mercan-agent-worker-claude:tag
+make docker-push-copilot-worker
+make docker-push-claude-worker
+
+# Build/push all images at once (manager + agent workers)
+make docker-build-all
+make docker-push-all
+```
+
 ## Architecture
 
 ### Core Components
 
-- **Controller** (`cmd/controller/`): Main entrypoint with `--watch-namespace` flag for namespace scoping
+- **Controller** (`cmd/controller/`): Main entrypoint with `--watch-namespace`, `--copilot-worker-image`, and `--claude-worker-image` flags
 - **API Server** (`internal/api/`): REST API using Fiber framework with ServiceAccount token auth
 - **Task Reconciler** (`internal/controller/`): Watches Task CRDs, creates Jobs, manages lifecycle
 - **Session Manager**: Manages conversation continuity via ConfigMaps with serial execution enforcement
-- **Workers** (`workers/`): AI worker (LLM agent with tools) and general worker (container commands)
+- **Workers** (`workers/`): AI worker (LLM agent with tools), general worker (container commands), and agent workers (`workers/agent/copilot/`, `workers/agent/claude/`) for external CLI runtimes
 
 ### Custom Resources
 
-- **Task** (`api/v1alpha1/task_types.go`): Core work unit - container or AI type
+- **Task** (`api/v1alpha1/task_types.go`): Core work unit - `container`, `ai`, or `agent` type
 - **Tool** (`api/v1alpha1/tool_types.go`): Custom HTTP-based tool definitions
-- **Agent** (`api/v1alpha1/agent_types.go`): Reusable agent configurations with model, tools, skills
+- **Agent** (`api/v1alpha1/agent_types.go`): Reusable agent configurations with model, tools, skills, and optional `runtime` field for CLI runtimes
+
+### Task Types
+
+- **`container`**: Runs arbitrary container commands
+- **`ai`**: Runs AI agent tasks with built-in LLM integration (Anthropic, OpenAI)
+- **`agent`**: Runs external agent CLI runtimes (Copilot CLI, Claude Code CLI) via dedicated worker images
+
+### Agent Runtime (type: agent)
+
+Tasks with `type: agent` reference an Agent CRD that has `spec.runtime` (`AgentCLIRuntime`) set:
+- `runtime.type`: `copilot` or `claude` — selects the CLI runtime
+- `runtime.defaultMaxTurns`: Default max agent loop iterations (1-1000, default 50)
+- `runtime.defaultAllowedTools`: Default tools allowed for tasks
+- `runtime.defaultAllowBash`: Whether bash is allowed by default
+
+Task-level overrides via `spec.agentRuntime` (`AgentRuntimeSpec`):
+- `workspace`: `WorkspaceConfig` with `gitRepo`, `branch`, `ref`, `gitSecretRef`, `subPath`
+- `maxTurns`: Override max agent loop iterations
+- `allowedTools` / `disallowedTools`: Override tool permissions
+- `allowBash`: Override bash permission
 
 ### Key Patterns
 

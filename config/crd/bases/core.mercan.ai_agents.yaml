@@ -210,6 +210,39 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              runtime:
+                description: |-
+                  Runtime configures this Agent for external CLI runtimes (type: agent tasks).
+                  When set, this Agent is for type: agent tasks only (mutually exclusive with providerRef).
+                properties:
+                  defaultAllowBash:
+                    default: false
+                    description: DefaultAllowBash controls whether bash is allowed
+                      by default for tasks using this Agent
+                    type: boolean
+                  defaultAllowedTools:
+                    description: DefaultAllowedTools lists the default tools allowed
+                      for tasks using this Agent
+                    items:
+                      type: string
+                    type: array
+                  defaultMaxTurns:
+                    default: 50
+                    description: DefaultMaxTurns is the default maximum agent loop
+                      iterations for tasks using this Agent
+                    format: int32
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
+                  type:
+                    description: Type specifies which CLI runtime to use
+                    enum:
+                    - copilot
+                    - claude
+                    type: string
+                required:
+                - type
+                type: object
               secretRef:
                 description: SecretRef references a Secret containing LLM API keys
                 properties:

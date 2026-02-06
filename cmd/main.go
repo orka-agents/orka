@@ -66,6 +66,8 @@ func main() {
 	var enableHTTP2 bool
 	var apiPort int
 	var watchNamespace string
+	var copilotWorkerImage string
+	var claudeWorkerImage string
 	var tlsOpts []func(*tls.Config)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -87,6 +89,10 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.IntVar(&apiPort, "api-port", 8080, "The port the REST API server binds to.")
 	flag.StringVar(&watchNamespace, "watch-namespace", "", "Namespace to watch for resources. Empty for all namespaces.")
+	flag.StringVar(&copilotWorkerImage, "copilot-worker-image",
+		controller.DefaultCopilotWorkerImage, "Container image for Copilot agent worker.")
+	flag.StringVar(&claudeWorkerImage, "claude-worker-image",
+		controller.DefaultClaudeWorkerImage, "Container image for Claude agent worker.")
 
 	opts := zap.Options{
 		Development: true,
@@ -174,6 +180,8 @@ func main() {
 	sessionManager := controller.NewSessionManager(mgr.GetClient())
 	webhookNotifier := controller.NewWebhookNotifier()
 	jobBuilder := controller.NewJobBuilder(mgr.GetClient())
+	jobBuilder.CopilotWorkerImage = copilotWorkerImage
+	jobBuilder.ClaudeWorkerImage = claudeWorkerImage
 	priorityQueue := controller.NewPriorityQueue()
 
 	// Setup Task controller with helper components

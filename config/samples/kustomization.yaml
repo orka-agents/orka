@@ -1,6 +1,10 @@
 ## Append samples of your project ##
 resources:
 - core_v1alpha1_task.yaml
+- core_v1alpha1_task_agent.yaml
+- core_v1alpha1_task_agent_copilot.yaml
+- core_v1alpha1_task_agent_workspace.yaml
 - core_v1alpha1_tool.yaml
 - core_v1alpha1_agent.yaml
+- core_v1alpha1_agent_claude.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

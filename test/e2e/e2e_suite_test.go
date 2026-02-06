@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -61,9 +62,64 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
 
 	setupCertManager()
+
+	By("creating manager namespace")
+	cmd = exec.Command("kubectl", "create", "ns", namespace)
+	_, _ = utils.Run(cmd) // ignore if already exists
+
+	By("labeling the namespace to enforce the restricted security policy")
+	cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
+		"pod-security.kubernetes.io/enforce=restricted")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
+
+	By("installing CRDs")
+	cmd = exec.Command("make", "install")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to install CRDs")
+
+	By("waiting for CRDs to be established")
+	Eventually(func(g Gomega) {
+		for _, crd := range []string{"tasks.core.mercan.ai", "agents.core.mercan.ai"} {
+			cmd := exec.Command("kubectl", "wait", "--for=condition=Established",
+				"crd/"+crd, "--timeout=30s")
+			_, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred(), "CRD %s not established", crd)
+		}
+	}, 60*time.Second, time.Second).Should(Succeed())
+
+	By("deploying the controller-manager")
+	cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+
+	By("waiting for controller-manager to be ready")
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
+			"-n", namespace, "-o", "jsonpath={.items[0].status.phase}")
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(output).To(Equal("Running"))
+	}, 2*time.Minute, time.Second).Should(Succeed())
 })
 
 var _ = AfterSuite(func() {
+	By("cleaning up the curl pod for metrics")
+	cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace, "--ignore-not-found")
+	_, _ = utils.Run(cmd)
+
+	By("undeploying the controller-manager")
+	cmd = exec.Command("make", "undeploy")
+	_, _ = utils.Run(cmd)
+
+	By("uninstalling CRDs")
+	cmd = exec.Command("make", "uninstall")
+	_, _ = utils.Run(cmd)
+
+	By("removing manager namespace")
+	cmd = exec.Command("kubectl", "delete", "ns", namespace, "--ignore-not-found")
+	_, _ = utils.Run(cmd)
+
 	teardownCertManager()
 })
 

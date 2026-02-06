@@ -37,6 +37,7 @@ type WebhookPayload struct {
 	CompletionTime *string                `json:"completionTime,omitempty"`
 	Attempts       int32                  `json:"attempts"`
 	ResultRef      *ResultRefPayload      `json:"resultRef,omitempty"`
+	RuntimeType    string                 `json:"runtimeType,omitempty"`
 }
 
 // ResultRefPayload is the result reference in the webhook payload
@@ -73,6 +74,11 @@ func (w *WebhookNotifier) Notify(ctx context.Context, task *corev1alpha1.Task) e
 		Phase:         task.Status.Phase,
 		Message:       task.Status.Message,
 		Attempts:      task.Status.Attempts,
+	}
+
+	// Set RuntimeType for agent tasks
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
+		payload.RuntimeType = string(task.Spec.Type)
 	}
 
 	if task.Status.StartTime != nil {

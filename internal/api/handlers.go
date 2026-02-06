@@ -54,28 +54,29 @@ func NewHandlers(c client.Client, sessionManager *controller.SessionManager, wat
 
 // CreateTaskRequest is the request body for creating a task
 type CreateTaskRequest struct {
-	Name        string                         `json:"name"`
-	Namespace   string                         `json:"namespace"`
-	Type        corev1alpha1.TaskType          `json:"type"`
-	Image       string                         `json:"image,omitempty"`
-	Command     []string                       `json:"command,omitempty"`
-	Args        []string                       `json:"args,omitempty"`
-	Env         []corev1.EnvVar                `json:"env,omitempty"`
-	Timeout     string                         `json:"timeout,omitempty"`
-	Priority    *int32                         `json:"priority,omitempty"`
-	RetryPolicy *corev1alpha1.RetryPolicy      `json:"retryPolicy,omitempty"`
-	WebhookURL  string                         `json:"webhookURL,omitempty"`
-	SecretRef   *corev1alpha1.SecretReference  `json:"secretRef,omitempty"`
-	SessionRef  *corev1alpha1.SessionReference `json:"sessionRef,omitempty"`
-	AI          *corev1alpha1.AISpec           `json:"ai,omitempty"`
-	AgentRef    *corev1alpha1.AgentReference   `json:"agentRef,omitempty"`
-	Prompt      string                         `json:"prompt,omitempty"`
+	Name         string                         `json:"name"`
+	Namespace    string                         `json:"namespace"`
+	Type         corev1alpha1.TaskType          `json:"type"`
+	Image        string                         `json:"image,omitempty"`
+	Command      []string                       `json:"command,omitempty"`
+	Args         []string                       `json:"args,omitempty"`
+	Env          []corev1.EnvVar                `json:"env,omitempty"`
+	Timeout      string                         `json:"timeout,omitempty"`
+	Priority     *int32                         `json:"priority,omitempty"`
+	RetryPolicy  *corev1alpha1.RetryPolicy      `json:"retryPolicy,omitempty"`
+	WebhookURL   string                         `json:"webhookURL,omitempty"`
+	SecretRef    *corev1alpha1.SecretReference  `json:"secretRef,omitempty"`
+	SessionRef   *corev1alpha1.SessionReference `json:"sessionRef,omitempty"`
+	AI           *corev1alpha1.AISpec           `json:"ai,omitempty"`
+	AgentRef     *corev1alpha1.AgentReference   `json:"agentRef,omitempty"`
+	Prompt       string                         `json:"prompt,omitempty"`
+	AgentRuntime *corev1alpha1.AgentRuntimeSpec `json:"agentRuntime,omitempty"`
 }
 
 // ListResponse is a generic list response with pagination
 type ListResponse struct {
-	Items    interface{} `json:"items"`
-	Metadata ListMeta    `json:"metadata"`
+	Items    any      `json:"items"`
+	Metadata ListMeta `json:"metadata"`
 }
 
 // ListMeta contains pagination metadata
@@ -126,19 +127,20 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 			Namespace: namespace,
 		},
 		Spec: corev1alpha1.TaskSpec{
-			Type:        req.Type,
-			Image:       req.Image,
-			Command:     req.Command,
-			Args:        req.Args,
-			Env:         req.Env,
-			Priority:    req.Priority,
-			RetryPolicy: req.RetryPolicy,
-			WebhookURL:  req.WebhookURL,
-			SecretRef:   req.SecretRef,
-			SessionRef:  req.SessionRef,
-			AI:          req.AI,
-			AgentRef:    req.AgentRef,
-			Prompt:      req.Prompt,
+			Type:         req.Type,
+			Image:        req.Image,
+			Command:      req.Command,
+			Args:         req.Args,
+			Env:          req.Env,
+			Priority:     req.Priority,
+			RetryPolicy:  req.RetryPolicy,
+			WebhookURL:   req.WebhookURL,
+			SecretRef:    req.SecretRef,
+			SessionRef:   req.SessionRef,
+			AI:           req.AI,
+			AgentRef:     req.AgentRef,
+			Prompt:       req.Prompt,
+			AgentRuntime: req.AgentRuntime,
 		},
 	}
 

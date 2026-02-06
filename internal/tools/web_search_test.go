@@ -47,7 +47,7 @@ func TestWebSearchTool_Parameters(t *testing.T) {
 	}
 
 	// Verify it's valid JSON
-	var schema map[string]interface{}
+	var schema map[string]any
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Errorf("Parameters() returned invalid JSON: %v", err)
 	}

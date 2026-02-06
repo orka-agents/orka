@@ -264,7 +264,7 @@ func TestRecordToolCall(t *testing.T) {
 
 func TestMetricsRegistered(t *testing.T) {
 	// Verify that all metrics are not nil (registered during init)
-	metrics := []interface{}{
+	metrics := []any{
 		TasksTotal,
 		TasksActive,
 		TaskDuration,

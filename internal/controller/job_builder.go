@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -37,6 +38,12 @@ const (
 	// DefaultGeneralWorkerImage is the default image for container tasks
 	DefaultGeneralWorkerImage = "mercan-general-worker:latest"
 
+	// DefaultCopilotWorkerImage is the default image for Copilot agent tasks
+	DefaultCopilotWorkerImage = "mercan-agent-worker-copilot:latest"
+
+	// DefaultClaudeWorkerImage is the default image for Claude agent tasks
+	DefaultClaudeWorkerImage = "mercan-agent-worker-claude:latest"
+
 	// ResultConfigMapEnvVar is the env var for result ConfigMap name
 	ResultConfigMapEnvVar = "MERCAN_RESULT_CONFIGMAP"
 
@@ -52,6 +59,8 @@ type JobBuilder struct {
 	client.Client
 	AIWorkerImage      string
 	GeneralWorkerImage string
+	CopilotWorkerImage string
+	ClaudeWorkerImage  string
 }
 
 // NewJobBuilder creates a new JobBuilder
@@ -60,6 +69,8 @@ func NewJobBuilder(c client.Client) *JobBuilder {
 		Client:             c,
 		AIWorkerImage:      DefaultAIWorkerImage,
 		GeneralWorkerImage: DefaultGeneralWorkerImage,
+		CopilotWorkerImage: DefaultCopilotWorkerImage,
+		ClaudeWorkerImage:  DefaultClaudeWorkerImage,
 	}
 }
 
@@ -105,6 +116,11 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 		},
 	})
 
+	// Add agent-specific volumes (workspace, home)
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
+		b.addAgentVolumes(job, task)
+	}
+
 	// Add secret volumes if needed
 	if task.Spec.SecretRef != nil || (agent != nil && agent.Spec.SecretRef != nil) || provider != nil {
 		b.addSecretVolumes(job, task, agent, provider)
@@ -117,7 +133,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 
 	// Set active deadline if timeout is specified
 	if task.Spec.Timeout != nil {
-		seconds := int64(task.Spec.Timeout.Duration.Seconds())
+		seconds := int64(task.Spec.Timeout.Seconds())
 		job.Spec.ActiveDeadlineSeconds = &seconds
 	}
 
@@ -179,6 +195,10 @@ func (b *JobBuilder) buildContainer(task *corev1alpha1.Task, agent *corev1alpha1
 		if len(task.Spec.Args) > 0 {
 			container.Args = task.Spec.Args
 		}
+	case corev1alpha1.TaskTypeAgent:
+		container.Image = b.getAgentWorkerImage(agent)
+		container.Command = []string{"/worker"}
+		container.Args = []string{"--mode=agent"}
 	}
 
 	// Add tmp volume mount for read-only root filesystem
@@ -238,6 +258,11 @@ func (b *JobBuilder) buildEnvVars(task *corev1alpha1.Task, agent *corev1alpha1.A
 	// Add AI-specific env vars
 	if task.Spec.Type == corev1alpha1.TaskTypeAI {
 		envVars = b.addAIEnvVars(envVars, task, agent, provider)
+	}
+
+	// Add agent-specific env vars
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
+		envVars = b.addAgentEnvVars(envVars, task, agent)
 	}
 
 	return envVars
@@ -313,14 +338,14 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 
 	// Add tools as comma-separated list
 	if len(tools) > 0 {
-		toolsStr := ""
+		var toolsStr strings.Builder
 		for i, t := range tools {
 			if i > 0 {
-				toolsStr += ","
+				toolsStr.WriteString(",")
 			}
-			toolsStr += t
+			toolsStr.WriteString(t)
 		}
-		envVars = append(envVars, corev1.EnvVar{Name: "MERCAN_AI_TOOLS", Value: toolsStr})
+		envVars = append(envVars, corev1.EnvVar{Name: "MERCAN_AI_TOOLS", Value: toolsStr.String()})
 	}
 
 	return envVars
@@ -383,6 +408,16 @@ func (b *JobBuilder) addSecretVolumes(job *batchv1.Job, task *corev1alpha1.Task,
 	// Add agent secret
 	if agent != nil && agent.Spec.SecretRef != nil {
 		secretName := agent.Spec.SecretRef.Name
+		// Inject all secret keys as environment variables
+		job.Spec.Template.Spec.Containers[0].EnvFrom = append(
+			job.Spec.Template.Spec.Containers[0].EnvFrom,
+			corev1.EnvFromSource{
+				SecretRef: &corev1.SecretEnvSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+				},
+			},
+		)
+		// Also mount as files for tools that read from filesystem
 		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 			Name: "agent-secrets",
 			VolumeSource: corev1.VolumeSource{
@@ -433,4 +468,216 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 		corev1.EnvVar{Name: "MERCAN_SESSION_NAME", Value: task.Spec.SessionRef.Name},
 		corev1.EnvVar{Name: "MERCAN_SESSION_CONFIGMAP", Value: sessionCMName},
 	)
+}
+
+// getAgentWorkerImage returns the worker image for the given agent runtime type
+func (b *JobBuilder) getAgentWorkerImage(agent *corev1alpha1.Agent) string {
+	if agent == nil || agent.Spec.Runtime == nil {
+		return b.ClaudeWorkerImage // fallback
+	}
+	switch agent.Spec.Runtime.Type {
+	case corev1alpha1.AgentRuntimeCopilot:
+		return b.CopilotWorkerImage
+	case corev1alpha1.AgentRuntimeClaude:
+		return b.ClaudeWorkerImage
+	default:
+		return b.ClaudeWorkerImage
+	}
+}
+
+// addAgentEnvVars adds agent-runtime-specific environment variables
+func (b *JobBuilder) addAgentEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent) []corev1.EnvVar {
+	// Prompt (required)
+	prompt := task.Spec.Prompt
+	if prompt == "" && task.Spec.AI != nil {
+		prompt = task.Spec.AI.Prompt
+	}
+	envVars = append(envVars, corev1.EnvVar{Name: "MERCAN_PROMPT", Value: prompt})
+
+	envVars = b.addAgentModelEnvVars(envVars, agent)
+	envVars = b.addAgentToolsEnvVars(envVars, task, agent)
+	envVars = b.addAgentWorkspaceEnvVars(envVars, task)
+
+	// Timeout (task level)
+	if task.Spec.Timeout != nil {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "MERCAN_TIMEOUT_SECONDS",
+			Value: fmt.Sprintf("%d", int64(task.Spec.Timeout.Seconds())),
+		})
+	}
+
+	return envVars
+}
+
+// addAgentModelEnvVars adds model and system prompt env vars from the Agent.
+func (b *JobBuilder) addAgentModelEnvVars(envVars []corev1.EnvVar, agent *corev1alpha1.Agent) []corev1.EnvVar {
+	if agent == nil {
+		return envVars
+	}
+	if agent.Spec.Model != nil && agent.Spec.Model.Name != "" {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "MERCAN_MODEL", Value: agent.Spec.Model.Name,
+		})
+	}
+	if agent.Spec.SystemPrompt != nil && agent.Spec.SystemPrompt.Inline != "" {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "MERCAN_SYSTEM_PROMPT", Value: agent.Spec.SystemPrompt.Inline,
+		})
+	}
+	return envVars
+}
+
+// addAgentToolsEnvVars adds max turns, allowed/disallowed tools, and bash permission env vars.
+func (b *JobBuilder) addAgentToolsEnvVars(
+	envVars []corev1.EnvVar,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+) []corev1.EnvVar {
+	// MaxTurns: task override > agent default > 50
+	maxTurns := int32(50)
+	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultMaxTurns != nil {
+		maxTurns = *agent.Spec.Runtime.DefaultMaxTurns
+	}
+	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.MaxTurns != nil {
+		maxTurns = *task.Spec.AgentRuntime.MaxTurns
+	}
+	envVars = append(envVars, corev1.EnvVar{
+		Name: "MERCAN_MAX_TURNS", Value: fmt.Sprintf("%d", maxTurns),
+	})
+
+	// AllowedTools: task override > agent default
+	var allowedTools []string
+	if agent != nil && agent.Spec.Runtime != nil {
+		allowedTools = agent.Spec.Runtime.DefaultAllowedTools
+	}
+	if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.AllowedTools) > 0 {
+		allowedTools = task.Spec.AgentRuntime.AllowedTools
+	}
+	if len(allowedTools) > 0 {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "MERCAN_ALLOWED_TOOLS", Value: joinStrings(allowedTools),
+		})
+	}
+
+	// DisallowedTools (task only)
+	if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "MERCAN_DISALLOWED_TOOLS",
+			Value: joinStrings(task.Spec.AgentRuntime.DisallowedTools),
+		})
+	}
+
+	// AllowBash: task override > agent default > false
+	allowBash := false
+	if agent != nil && agent.Spec.Runtime != nil {
+		allowBash = agent.Spec.Runtime.DefaultAllowBash
+	}
+	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowBash != nil {
+		allowBash = *task.Spec.AgentRuntime.AllowBash
+	}
+	if allowBash {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "MERCAN_ALLOW_BASH", Value: "true",
+		})
+	}
+
+	return envVars
+}
+
+// addAgentWorkspaceEnvVars adds workspace-related env vars from the task.
+func (b *JobBuilder) addAgentWorkspaceEnvVars(
+	envVars []corev1.EnvVar,
+	task *corev1alpha1.Task,
+) []corev1.EnvVar {
+	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+		return envVars
+	}
+	ws := task.Spec.AgentRuntime.Workspace
+	if ws.GitRepo != "" {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "MERCAN_GIT_REPO", Value: ws.GitRepo,
+		})
+	}
+	if ws.Branch != "" {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "MERCAN_GIT_BRANCH", Value: ws.Branch,
+		})
+	}
+	if ws.Ref != "" {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "MERCAN_GIT_REF", Value: ws.Ref,
+		})
+	}
+	if ws.SubPath != "" {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "MERCAN_WORKSPACE_SUBPATH", Value: ws.SubPath,
+		})
+	}
+	return envVars
+}
+
+// addAgentVolumes adds agent-specific volumes to the Job (workspace, home)
+func (b *JobBuilder) addAgentVolumes(job *batchv1.Job, task *corev1alpha1.Task) {
+	// /workspace emptyDir for git clone target
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: "workspace",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	})
+	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
+		job.Spec.Template.Spec.Containers[0].VolumeMounts,
+		corev1.VolumeMount{
+			Name:      "workspace",
+			MountPath: "/workspace",
+		},
+	)
+
+	// /home/worker emptyDir for writable home (CLI config/cache)
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: "home",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	})
+	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
+		job.Spec.Template.Spec.Containers[0].VolumeMounts,
+		corev1.VolumeMount{
+			Name:      "home",
+			MountPath: "/home/worker",
+		},
+	)
+
+	// Git secret volume if referenced
+	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil && task.Spec.AgentRuntime.Workspace.GitSecretRef != nil {
+		secretName := task.Spec.AgentRuntime.Workspace.GitSecretRef.Name
+		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+			Name: "git-credentials",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: secretName,
+				},
+			},
+		})
+		job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
+			job.Spec.Template.Spec.Containers[0].VolumeMounts,
+			corev1.VolumeMount{
+				Name:      "git-credentials",
+				MountPath: "/secrets/git",
+				ReadOnly:  true,
+			},
+		)
+	}
+}
+
+// joinStrings joins a string slice with commas
+func joinStrings(s []string) string {
+	var result strings.Builder
+	for i, v := range s {
+		if i > 0 {
+			result.WriteString(",")
+		}
+		result.WriteString(v)
+	}
+	return result.String()
 }

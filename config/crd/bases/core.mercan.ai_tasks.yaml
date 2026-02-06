@@ -65,6 +65,66 @@ spec:
                 required:
                 - name
                 type: object
+              agentRuntime:
+                description: AgentRuntime contains task-level overrides for agent
+                  runtime configuration (when type is "agent")
+                properties:
+                  allowBash:
+                    description: AllowBash enables the agent to run bash commands
+                      (overrides Agent default)
+                    type: boolean
+                  allowedTools:
+                    description: AllowedTools lists the tools the agent is allowed
+                      to use (overrides Agent defaults)
+                    items:
+                      type: string
+                    type: array
+                  disallowedTools:
+                    description: DisallowedTools lists tools the agent is not allowed
+                      to use
+                    items:
+                      type: string
+                    type: array
+                  maxTurns:
+                    description: MaxTurns limits the number of agent loop iterations
+                    format: int32
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
+                  workspace:
+                    description: Workspace defines the working directory configuration
+                    properties:
+                      branch:
+                        description: Branch is the git branch to checkout
+                        type: string
+                      gitRepo:
+                        description: GitRepo is the repository URL to clone
+                        type: string
+                      gitSecretRef:
+                        description: GitSecretRef references a Secret containing git
+                          credentials
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      ref:
+                        description: Ref is a specific git ref (commit SHA, tag) to
+                          checkout
+                        type: string
+                      subPath:
+                        description: SubPath is a subdirectory within the repo to
+                          use as workspace root
+                        type: string
+                    type: object
+                type: object
               ai:
                 description: AI contains AI-specific configuration (when type is "ai")
                 properties:
@@ -446,6 +506,7 @@ spec:
                 enum:
                 - container
                 - ai
+                - agent
                 type: string
               webhookURL:
                 description: WebhookURL is the URL to call when the task completes

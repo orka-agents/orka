@@ -1,0 +1,24 @@
+apiVersion: core.mercan.ai/v1alpha1
+kind: Task
+metadata:
+  name: agent-task-copilot-example
+  labels:
+    app.kubernetes.io/name: mercan
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # type: agent delegates work to an external CLI runtime
+  type: agent
+  # Reference an Agent configured with runtime.type: copilot
+  agentRef:
+    name: copilot-agent
+  # Prompt sent to the Copilot CLI agent
+  prompt: "Add unit tests for the authentication middleware"
+  # Task-level runtime overrides (optional)
+  agentRuntime:
+    maxTurns: 30
+  # Maximum time before the task is terminated
+  timeout: "20m"
+  priority: 500
+  # NOTE: The Copilot CLI worker implementation is pending.
+  # This manifest is valid per the API schema and will work
+  # once the copilot worker is available.

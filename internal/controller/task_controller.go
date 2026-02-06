@@ -219,6 +219,12 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
+	// Validate task-agent compatibility
+	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+		log.Error(err, "task-agent compatibility validation failed")
+		return r.failTask(ctx, task, err.Error())
+	}
+
 	// Resolve provider if referenced
 	var provider *corev1alpha1.Provider
 	providerRef := r.resolveProviderRef(task, agent)
@@ -512,6 +518,11 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 // resolveProviderRef determines which provider reference to use
 // Priority: Task.Spec.AI.ProviderRef > Agent.Spec.ProviderRef
 func (r *TaskReconciler) resolveProviderRef(task *corev1alpha1.Task, agent *corev1alpha1.Agent) *corev1alpha1.ProviderReference {
+	// Agent tasks don't use providers (CLI runtimes manage their own credentials)
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
+		return nil
+	}
+
 	// Check task-level provider ref first
 	if task.Spec.AI != nil && task.Spec.AI.ProviderRef != nil {
 		return task.Spec.AI.ProviderRef
@@ -522,6 +533,41 @@ func (r *TaskReconciler) resolveProviderRef(task *corev1alpha1.Task, agent *core
 		return agent.Spec.ProviderRef
 	}
 
+	return nil
+}
+
+// validateTaskAgentCompatibility validates that the task type and agent configuration are compatible.
+func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	switch task.Spec.Type {
+	case corev1alpha1.TaskTypeAgent:
+		// Agent tasks require an agentRef
+		if agent == nil {
+			return fmt.Errorf("type: agent tasks require an agentRef")
+		}
+		// Agent must have runtime configured
+		if agent.Spec.Runtime == nil {
+			return fmt.Errorf("agent %q does not have a runtime configured (required for type: agent tasks)", agent.Name)
+		}
+		// Agent with runtime must not have providerRef (mutually exclusive)
+		if agent.Spec.ProviderRef != nil {
+			return fmt.Errorf("agent %q has both runtime and providerRef set (mutually exclusive)", agent.Name)
+		}
+		// Agent with runtime must not have a model provider set
+		if agent.Spec.Model != nil && agent.Spec.Model.Provider != "" {
+			return fmt.Errorf("agent %q has both runtime and model.provider set (mutually exclusive for agent tasks)", agent.Name)
+		}
+		// Prompt is required for agent tasks
+		if task.Spec.Prompt == "" {
+			return fmt.Errorf("prompt is required for type: agent tasks")
+		}
+	case corev1alpha1.TaskTypeAI:
+		// AI tasks must not reference an agent with runtime set
+		if agent != nil && agent.Spec.Runtime != nil {
+			return fmt.Errorf("agent %q has runtime configured (use type: agent instead of type: ai)", agent.Name)
+		}
+	case corev1alpha1.TaskTypeContainer:
+		// Container tasks don't use agents, no validation needed
+	}
 	return nil
 }
 

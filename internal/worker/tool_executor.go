@@ -68,13 +68,13 @@ func NewToolExecutor() *ToolExecutor {
 // Execute executes a Tool CRD by making an HTTP request
 func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (string, error) {
 	// Parse the arguments into a map for potential body injection
-	var params map[string]interface{}
+	var params map[string]any
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &params); err != nil {
 			return "", fmt.Errorf("failed to parse tool arguments: %w", err)
 		}
 	} else {
-		params = make(map[string]interface{})
+		params = make(map[string]any)
 	}
 
 	// Get auth token if configured

@@ -18,17 +18,48 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 )
+
+// newReconciler creates a TaskReconciler with all dependencies for testing.
+func newReconciler() *TaskReconciler {
+	return &TaskReconciler{
+		Client:          k8sClient,
+		Scheme:          k8sClient.Scheme(),
+		JobBuilder:      NewJobBuilder(k8sClient),
+		SessionManager:  NewSessionManager(k8sClient),
+		WebhookNotifier: NewWebhookNotifier(),
+		PriorityQueue:   NewPriorityQueue(),
+	}
+}
+
+// cleanupTask removes the task and waits for deletion.
+func cleanupTask(ctx context.Context, nn types.NamespacedName) {
+	task := &corev1alpha1.Task{}
+	if err := k8sClient.Get(ctx, nn, task); err == nil {
+		// Remove finalizer first so delete can proceed
+		if controllerutil.ContainsFinalizer(task, TaskFinalizer) {
+			controllerutil.RemoveFinalizer(task, TaskFinalizer)
+			_ = k8sClient.Update(ctx, task)
+		}
+		_ = k8sClient.Delete(ctx, task)
+	}
+}
 
 var _ = Describe("Task Controller", func() {
 	Context("When reconciling a resource", func() {
@@ -38,7 +69,7 @@ var _ = Describe("Task Controller", func() {
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Namespace: "default",
 		}
 		task := &corev1alpha1.Task{}
 
@@ -62,7 +93,6 @@ var _ = Describe("Task Controller", func() {
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
 			resource := &corev1alpha1.Task{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
@@ -70,23 +100,1207 @@ var _ = Describe("Task Controller", func() {
 			By("Cleanup the specific resource instance Task")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
+
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			controllerReconciler := &TaskReconciler{
-				Client:          k8sClient,
-				Scheme:          k8sClient.Scheme(),
-				JobBuilder:      NewJobBuilder(k8sClient),
-				SessionManager:  NewSessionManager(k8sClient),
-				WebhookNotifier: NewWebhookNotifier(),
-				PriorityQueue:   NewPriorityQueue(),
-			}
+			controllerReconciler := newReconciler()
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+		})
+	})
+
+	Context("handleDeletion", func() {
+		It("should clean up result ConfigMap and remove finalizer", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-handle-deletion"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+
+			// Create result ConfigMap
+			resultCM := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName + "-result",
+					Namespace: ns,
+				},
+				Data: map[string]string{"result": "some-result"},
+			}
+			Expect(k8sClient.Create(ctx, resultCM)).To(Succeed())
+
+			// Create the task with finalizer
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       taskName,
+					Namespace:  ns,
+					Finalizers: []string{TaskFinalizer},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo", "hello"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Set result ref in status
+			task.Status.ResultRef = &corev1alpha1.ResultReference{
+				ConfigMapName: taskName + "-result",
+				Key:           "result",
+			}
+			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
+
+			// Delete the task (sets DeletionTimestamp)
+			Expect(k8sClient.Delete(ctx, task)).To(Succeed())
+
+			// Re-fetch to get DeletionTimestamp
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.DeletionTimestamp.IsZero()).To(BeFalse())
+
+			// Reconcile – should call handleDeletion
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(ctrl.Result{}))
+
+			// Result ConfigMap should be deleted
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: taskName + "-result", Namespace: ns}, &corev1.ConfigMap{})
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+
+			// Task should be gone (finalizer removed → deletion completes)
+			err = k8sClient.Get(ctx, nn, &corev1alpha1.Task{})
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+		})
+
+		It("should clean up associated Job during deletion", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-deletion-job-cleanup"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+
+			// Create job
+			job := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName + "-job",
+					Namespace: ns,
+				},
+				Spec: batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							RestartPolicy: corev1.RestartPolicyNever,
+							Containers: []corev1.Container{
+								{Name: "worker", Image: "alpine:latest"},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, job)).To(Succeed())
+
+			// Create task with finalizer
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       taskName,
+					Namespace:  ns,
+					Finalizers: []string{TaskFinalizer},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Set job name in status
+			task.Status.JobName = taskName + "-job"
+			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
+
+			// Delete the task
+			Expect(k8sClient.Delete(ctx, task)).To(Succeed())
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+
+			// Reconcile to handle deletion
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Job should be deleted
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: taskName + "-job", Namespace: ns}, &batchv1.Job{})
+				return errors.IsNotFound(err)
+			}, 5*time.Second, 200*time.Millisecond).Should(BeTrue())
+		})
+
+		It("should handle deletion when no result ConfigMap exists", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-deletion-no-result"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       taskName,
+					Namespace:  ns,
+					Finalizers: []string{TaskFinalizer},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			Expect(k8sClient.Delete(ctx, task)).To(Succeed())
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(ctrl.Result{}))
+		})
+	})
+
+	Context("handlePending", func() {
+		It("should create a Job and transition to Running", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-handle-pending"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			// Create task
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo", "hello"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// First reconcile: add finalizer
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Second reconcile: initialize status to Pending
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Third reconcile: handlePending → create Job, set Running
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify task is now Running
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
+			Expect(task.Status.JobName).NotTo(BeEmpty())
+			Expect(task.Status.StartTime).NotTo(BeNil())
+			Expect(task.Status.Attempts).To(Equal(int32(1)))
+
+			// Verify JobCreated condition
+			cond := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeJobCreated)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+
+			// Verify Job exists
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: ns}, job)).To(Succeed())
+		})
+
+		It("should fail when agent ref does not exist", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-pending-bad-agent"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAI,
+					Prompt: "test prompt",
+					AgentRef: &corev1alpha1.AgentReference{
+						Name: "nonexistent-agent",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Reconcile through finalizer and status init
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+
+			// handlePending should fail the task because agent doesn't exist
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(task.Status.Message).To(ContainSubstring("failed to get agent"))
+		})
+	})
+
+	Context("handleRunning", func() {
+		It("should complete task when Job succeeds", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-running-success"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			// Create task and reconcile to Running
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo", "hello"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Reconcile to Running
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn}) // finalizer
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn}) // status init
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn}) // handlePending→Running
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
+
+			// Simulate Job success by updating Job status
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: ns}, job)).To(Succeed())
+			job.Status.Succeeded = 1
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+			// Reconcile handleRunning
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseSucceeded))
+			Expect(task.Status.Message).To(Equal("task completed successfully"))
+			Expect(task.Status.CompletionTime).NotTo(BeNil())
+
+			// Verify Complete condition
+			cond := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeComplete)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("TaskSucceeded"))
+		})
+
+		It("should fail task when Job fails and no retry policy", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-running-fail"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"false"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+
+			// Simulate Job failure
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: ns}, job)).To(Succeed())
+			job.Status.Failed = 1
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(task.Status.Message).To(Equal("job failed"))
+
+			cond := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeComplete)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("TaskFailed"))
+		})
+
+		It("should fail task when Job is not found", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-running-job-missing"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       taskName,
+					Namespace:  ns,
+					Finalizers: []string{TaskFinalizer},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Set status to Running with a non-existent job name
+			now := metav1.Now()
+			task.Status.Phase = corev1alpha1.TaskPhaseRunning
+			task.Status.JobName = "nonexistent-job"
+			task.Status.StartTime = &now
+			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(task.Status.Message).To(Equal("job not found"))
+		})
+
+		It("should fail task on timeout", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-running-timeout"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			timeout := metav1.Duration{Duration: 1 * time.Millisecond}
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       taskName,
+					Namespace:  ns,
+					Finalizers: []string{TaskFinalizer},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"sleep", "100"},
+					Timeout: &timeout,
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Set status to Running with a start time far in the past
+			pastTime := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+			task.Status.Phase = corev1alpha1.TaskPhaseRunning
+			task.Status.JobName = "some-job"
+			task.Status.StartTime = &pastTime
+			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(task.Status.Message).To(Equal("task timed out"))
+		})
+
+		It("should requeue when Job is still running", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-running-still-running"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"sleep", "100"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Reconcile to Running
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
+
+			// Job status: no Succeeded, no Failed (still running)
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(5 * time.Second))
+
+			// Phase should still be Running
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
+		})
+	})
+
+	Context("handleCompleted", func() {
+		It("should be a no-op for completed task without webhook", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-completed-no-webhook"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       taskName,
+					Namespace:  ns,
+					Finalizers: []string{TaskFinalizer},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
+
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(ctrl.Result{}))
+		})
+	})
+
+	Context("completeTask / failTask", func() {
+		It("should set Succeeded phase with correct condition", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-complete-success"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       taskName,
+					Namespace:  ns,
+					Finalizers: []string{TaskFinalizer},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			result, err := r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "all good")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Requeue).To(BeTrue())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseSucceeded))
+			Expect(task.Status.Message).To(Equal("all good"))
+			Expect(task.Status.CompletionTime).NotTo(BeNil())
+
+			cond := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeComplete)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("TaskSucceeded"))
+		})
+
+		It("should set Failed phase via failTask", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-fail-task"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       taskName,
+					Namespace:  ns,
+					Finalizers: []string{TaskFinalizer},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			result, err := r.failTask(ctx, task, "something broke")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Requeue).To(BeTrue())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(task.Status.Message).To(Equal("something broke"))
+
+			cond := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeComplete)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("TaskFailed"))
+		})
+	})
+
+	Context("shouldRetry", func() {
+		It("should return false when no retry policy", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{RetryPolicy: nil},
+			}
+			Expect(r.shouldRetry(task)).To(BeFalse())
+		})
+
+		It("should return true when attempts < maxRetries", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+				},
+				Status: corev1alpha1.TaskStatus{Attempts: 1},
+			}
+			Expect(r.shouldRetry(task)).To(BeTrue())
+		})
+
+		It("should return false when attempts >= maxRetries", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+				},
+				Status: corev1alpha1.TaskStatus{Attempts: 3},
+			}
+			Expect(r.shouldRetry(task)).To(BeFalse())
+		})
+
+		It("should return false when attempts equal maxRetries", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 2},
+				},
+				Status: corev1alpha1.TaskStatus{Attempts: 2},
+			}
+			Expect(r.shouldRetry(task)).To(BeFalse())
+		})
+	})
+
+	Context("retryTask", func() {
+		It("should reset task to Pending and schedule retry with delay", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-retry-task"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       taskName,
+					Namespace:  ns,
+					Finalizers: []string{TaskFinalizer},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"false"},
+					RetryPolicy: &corev1alpha1.RetryPolicy{
+						MaxRetries: 3,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Set status to Running
+			now := metav1.Now()
+			task.Status.Phase = corev1alpha1.TaskPhaseRunning
+			task.Status.JobName = ""
+			task.Status.StartTime = &now
+			task.Status.Attempts = 1
+			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
+
+			result, err := r.retryTask(ctx, task)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+			// Task should be back to Pending
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
+			Expect(task.Status.JobName).To(BeEmpty())
+		})
+
+		It("should retry task when Job fails with retry policy", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-running-retry"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"false"},
+					RetryPolicy: &corev1alpha1.RetryPolicy{
+						MaxRetries: 3,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Reconcile to Running
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
+			Expect(task.Status.Attempts).To(Equal(int32(1)))
+
+			// Simulate Job failure
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: ns}, job)).To(Succeed())
+			job.Status.Failed = 1
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+			// Reconcile – should trigger retry (attempts=1 < maxRetries=3)
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+			// Task should be back to Pending for retry
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
+		})
+	})
+
+	Context("calculateRetryDelay", func() {
+		It("should return default delay when no retry policy", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec:   corev1alpha1.TaskSpec{RetryPolicy: nil},
+				Status: corev1alpha1.TaskStatus{Attempts: 1},
+			}
+			Expect(r.calculateRetryDelay(task)).To(Equal(10 * time.Second))
+		})
+
+		It("should return default delay when no initial delay set", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+				},
+				Status: corev1alpha1.TaskStatus{Attempts: 1},
+			}
+			Expect(r.calculateRetryDelay(task)).To(Equal(10 * time.Second))
+		})
+
+		It("should calculate exponential backoff with default multiplier", func() {
+			r := newReconciler()
+			initialDelay := metav1.Duration{Duration: 5 * time.Second}
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					RetryPolicy: &corev1alpha1.RetryPolicy{
+						MaxRetries:   5,
+						InitialDelay: &initialDelay,
+					},
+				},
+				Status: corev1alpha1.TaskStatus{Attempts: 1},
+			}
+			// attempt=1 → delay = 5s (no multiplication)
+			Expect(r.calculateRetryDelay(task)).To(Equal(5 * time.Second))
+
+			// attempt=2 → delay = 5s * 2 = 10s
+			task.Status.Attempts = 2
+			Expect(r.calculateRetryDelay(task)).To(Equal(10 * time.Second))
+
+			// attempt=3 → delay = 5s * 2 * 2 = 20s
+			task.Status.Attempts = 3
+			Expect(r.calculateRetryDelay(task)).To(Equal(20 * time.Second))
+		})
+
+		It("should use custom backoff multiplier", func() {
+			r := newReconciler()
+			initialDelay := metav1.Duration{Duration: 2 * time.Second}
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					RetryPolicy: &corev1alpha1.RetryPolicy{
+						MaxRetries:        5,
+						InitialDelay:      &initialDelay,
+						BackoffMultiplier: 3,
+					},
+				},
+				Status: corev1alpha1.TaskStatus{Attempts: 2},
+			}
+			// attempt=2 → delay = 2s * 3 = 6s
+			Expect(r.calculateRetryDelay(task)).To(Equal(6 * time.Second))
+		})
+
+		It("should cap delay at 5 minutes", func() {
+			r := newReconciler()
+			initialDelay := metav1.Duration{Duration: 1 * time.Minute}
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					RetryPolicy: &corev1alpha1.RetryPolicy{
+						MaxRetries:   10,
+						InitialDelay: &initialDelay,
+					},
+				},
+				Status: corev1alpha1.TaskStatus{Attempts: 10},
+			}
+			Expect(r.calculateRetryDelay(task)).To(Equal(5 * time.Minute))
+		})
+	})
+
+	Context("collectResult", func() {
+		It("should set ResultRef when result ConfigMap exists", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-collect-result"
+			ns := "default"
+
+			// Create result ConfigMap
+			resultCM := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName + "-result",
+					Namespace: ns,
+				},
+				Data: map[string]string{"result": "hello world"},
+			}
+			Expect(k8sClient.Create(ctx, resultCM)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, resultCM)
+			}()
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: ns,
+				},
+			}
+
+			err := r.collectResult(ctx, task)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(task.Status.ResultRef).NotTo(BeNil())
+			Expect(task.Status.ResultRef.ConfigMapName).To(Equal(taskName + "-result"))
+			Expect(task.Status.ResultRef.Key).To(Equal("result"))
+		})
+
+		It("should return nil when result ConfigMap does not exist", func() {
+			ctx := context.Background()
+			r := newReconciler()
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "nonexistent-task",
+					Namespace: "default",
+				},
+			}
+
+			err := r.collectResult(ctx, task)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(task.Status.ResultRef).To(BeNil())
+		})
+	})
+
+	Context("resolveProviderRef", func() {
+		It("should return nil for agent type tasks", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAgent,
+					AI: &corev1alpha1.AISpec{
+						ProviderRef: &corev1alpha1.ProviderReference{Name: "test-provider"},
+					},
+				},
+			}
+			Expect(r.resolveProviderRef(task, nil)).To(BeNil())
+		})
+
+		It("should return task-level provider ref when set", func() {
+			r := newReconciler()
+			taskProviderRef := &corev1alpha1.ProviderReference{
+				Name:      "task-provider",
+				Namespace: "prod",
+			}
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAI,
+					AI: &corev1alpha1.AISpec{
+						ProviderRef: taskProviderRef,
+					},
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				Spec: corev1alpha1.AgentSpec{
+					ProviderRef: &corev1alpha1.ProviderReference{Name: "agent-provider"},
+				},
+			}
+
+			ref := r.resolveProviderRef(task, agent)
+			Expect(ref).NotTo(BeNil())
+			Expect(ref.Name).To(Equal("task-provider"))
+		})
+
+		It("should fall back to agent-level provider ref", func() {
+			r := newReconciler()
+			agentProviderRef := &corev1alpha1.ProviderReference{
+				Name: "agent-provider",
+			}
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAI,
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				Spec: corev1alpha1.AgentSpec{
+					ProviderRef: agentProviderRef,
+				},
+			}
+
+			ref := r.resolveProviderRef(task, agent)
+			Expect(ref).NotTo(BeNil())
+			Expect(ref.Name).To(Equal("agent-provider"))
+		})
+
+		It("should return nil when no provider ref is set", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAI,
+				},
+			}
+			Expect(r.resolveProviderRef(task, nil)).To(BeNil())
+		})
+
+		It("should return nil for container type tasks with no AI spec", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeContainer,
+				},
+			}
+			Expect(r.resolveProviderRef(task, nil)).To(BeNil())
+		})
+	})
+
+	Context("validateTaskAgentCompatibility", func() {
+		It("should succeed for container tasks without agent", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+			}
+			Expect(r.validateTaskAgentCompatibility(task, nil)).To(Succeed())
+		})
+
+		It("should succeed for AI tasks without agent", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+			}
+			Expect(r.validateTaskAgentCompatibility(task, nil)).To(Succeed())
+		})
+
+		It("should succeed for AI tasks with agent without runtime", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+			}
+			agent := &corev1alpha1.Agent{
+				Spec: corev1alpha1.AgentSpec{
+					Model: &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"},
+				},
+			}
+			Expect(r.validateTaskAgentCompatibility(task, agent)).To(Succeed())
+		})
+
+		It("should fail for agent tasks without agentRef", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+			}
+			err := r.validateTaskAgentCompatibility(task, nil)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("agent tasks require an agentRef"))
+		})
+
+		It("should fail for agent tasks when agent has no runtime", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAgent,
+					Prompt: "test",
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-agent"},
+				Spec:       corev1alpha1.AgentSpec{},
+			}
+			err := r.validateTaskAgentCompatibility(task, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("does not have a runtime configured"))
+		})
+
+		It("should fail for agent tasks when agent has both runtime and providerRef", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAgent,
+					Prompt: "test",
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-agent"},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime:     &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+					ProviderRef: &corev1alpha1.ProviderReference{Name: "p"},
+				},
+			}
+			err := r.validateTaskAgentCompatibility(task, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("both runtime and providerRef set"))
+		})
+
+		It("should fail for agent tasks when agent has runtime and model.provider", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAgent,
+					Prompt: "test",
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-agent"},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+					Model:   &corev1alpha1.ModelConfig{Provider: "openai"},
+				},
+			}
+			err := r.validateTaskAgentCompatibility(task, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("both runtime and model.provider set"))
+		})
+
+		It("should fail for agent tasks without prompt", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAgent,
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-agent"},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+				},
+			}
+			err := r.validateTaskAgentCompatibility(task, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("prompt is required"))
+		})
+
+		It("should succeed for valid agent tasks", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAgent,
+					Prompt: "fix this bug",
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-agent"},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+				},
+			}
+			Expect(r.validateTaskAgentCompatibility(task, agent)).To(Succeed())
+		})
+
+		It("should fail for AI tasks with agent that has runtime", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-agent"},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+				},
+			}
+			err := r.validateTaskAgentCompatibility(task, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("use type: agent instead of type: ai"))
+		})
+	})
+
+	Context("SetupWithManager", func() {
+		It("should set up the controller without error", func() {
+			r := newReconciler()
+			mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+				Scheme: k8sClient.Scheme(),
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			err = r.SetupWithManager(mgr)
+			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
+	Context("Reconcile edge cases", func() {
+		It("should return no error when task is not found (deleted)", func() {
+			ctx := context.Background()
+			r := newReconciler()
+
+			nn := types.NamespacedName{Name: "nonexistent-task", Namespace: "default"}
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(ctrl.Result{}))
+		})
+
+		It("should add finalizer on first reconcile", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-add-finalizer"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Requeue).To(BeTrue())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(controllerutil.ContainsFinalizer(task, TaskFinalizer)).To(BeTrue())
+		})
+
+		It("should initialize status to Pending on second reconcile", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-init-status"
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// First reconcile: add finalizer
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+
+			// Second reconcile: initialize status
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Requeue).To(BeTrue())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
+		})
+	})
+
+	Context("collectResult with existing result", func() {
+		It("should set ResultRef for completeTask flow", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := fmt.Sprintf("test-complete-with-result-%d", time.Now().UnixNano())
+			ns := "default"
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			// Create result ConfigMap first
+			resultCM := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName + "-result",
+					Namespace: ns,
+				},
+				Data: map[string]string{"result": "task output"},
+			}
+			Expect(k8sClient.Create(ctx, resultCM)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, resultCM)
+			}()
+
+			// Create task
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       taskName,
+					Namespace:  ns,
+					Finalizers: []string{TaskFinalizer},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Complete the task – collectResult should pick up the ConfigMap
+			_, err := r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "done")
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.ResultRef).NotTo(BeNil())
+			Expect(task.Status.ResultRef.ConfigMapName).To(Equal(taskName + "-result"))
 		})
 	})
 })

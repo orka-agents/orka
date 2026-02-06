@@ -64,6 +64,34 @@ type AgentSpec struct {
 	// Coordination enables agent-to-agent delegation
 	// +optional
 	Coordination *CoordinationConfig `json:"coordination,omitempty"`
+
+	// Runtime configures this Agent for external CLI runtimes (type: agent tasks).
+	// When set, this Agent is for type: agent tasks only (mutually exclusive with providerRef).
+	// +optional
+	Runtime *AgentCLIRuntime `json:"runtime,omitempty"`
+}
+
+// AgentCLIRuntime defines agent CLI runtime configuration for an Agent.
+type AgentCLIRuntime struct {
+	// Type specifies which CLI runtime to use
+	// +kubebuilder:validation:Required
+	Type AgentRuntimeType `json:"type"`
+
+	// DefaultMaxTurns is the default maximum agent loop iterations for tasks using this Agent
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000
+	// +kubebuilder:default=50
+	// +optional
+	DefaultMaxTurns *int32 `json:"defaultMaxTurns,omitempty"`
+
+	// DefaultAllowedTools lists the default tools allowed for tasks using this Agent
+	// +optional
+	DefaultAllowedTools []string `json:"defaultAllowedTools,omitempty"`
+
+	// DefaultAllowBash controls whether bash is allowed by default for tasks using this Agent
+	// +kubebuilder:default=false
+	// +optional
+	DefaultAllowBash bool `json:"defaultAllowBash,omitempty"`
 }
 
 // ModelConfig defines LLM model configuration

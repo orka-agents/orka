@@ -1,5 +1,7 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+COPILOT_WORKER_IMG ?= mercan-agent-worker-copilot:latest
+CLAUDE_WORKER_IMG ?= mercan-agent-worker-claude:latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -122,6 +124,28 @@ docker-build: ## Build docker image with the manager.
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
+
+.PHONY: docker-build-copilot-worker
+docker-build-copilot-worker: ## Build docker image for the Copilot agent worker.
+	$(CONTAINER_TOOL) build -t ${COPILOT_WORKER_IMG} -f workers/agent/copilot/Dockerfile .
+
+.PHONY: docker-build-claude-worker
+docker-build-claude-worker: ## Build docker image for the Claude agent worker.
+	$(CONTAINER_TOOL) build -t ${CLAUDE_WORKER_IMG} -f workers/agent/claude/Dockerfile .
+
+.PHONY: docker-push-copilot-worker
+docker-push-copilot-worker: ## Push docker image for the Copilot agent worker.
+	$(CONTAINER_TOOL) push ${COPILOT_WORKER_IMG}
+
+.PHONY: docker-push-claude-worker
+docker-push-claude-worker: ## Push docker image for the Claude agent worker.
+	$(CONTAINER_TOOL) push ${CLAUDE_WORKER_IMG}
+
+.PHONY: docker-build-all
+docker-build-all: docker-build docker-build-copilot-worker docker-build-claude-worker ## Build all docker images.
+
+.PHONY: docker-push-all
+docker-push-all: docker-push docker-push-copilot-worker docker-push-claude-worker ## Push all docker images.
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:

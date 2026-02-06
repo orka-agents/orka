@@ -254,8 +254,8 @@ func loadSessionContext() []llm.Message {
 	}
 
 	var messages []llm.Message
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(string(data), "\n")
+	for line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -294,7 +294,7 @@ func executeAgentLoop(
 ) (string, error) {
 	maxIterations := 10
 
-	for i := 0; i < maxIterations; i++ {
+	for range maxIterations {
 		req := &llm.CompletionRequest{
 			Model:        model,
 			Messages:     messages,

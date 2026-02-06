@@ -22,7 +22,7 @@ import (
 )
 
 // TaskType defines the type of task
-// +kubebuilder:validation:Enum=container;ai
+// +kubebuilder:validation:Enum=container;ai;agent
 type TaskType string
 
 const (
@@ -30,6 +30,8 @@ const (
 	TaskTypeContainer TaskType = "container"
 	// TaskTypeAI runs AI agent tasks with LLM integration
 	TaskTypeAI TaskType = "ai"
+	// TaskTypeAgent runs external agent CLI runtimes (e.g., Copilot CLI, Claude Code CLI)
+	TaskTypeAgent TaskType = "agent"
 )
 
 // TaskPhase defines the phase of task execution
@@ -107,6 +109,10 @@ type TaskSpec struct {
 	// Prompt is the task-specific prompt (used with agentRef)
 	// +optional
 	Prompt string `json:"prompt,omitempty"`
+
+	// AgentRuntime contains task-level overrides for agent runtime configuration (when type is "agent")
+	// +optional
+	AgentRuntime *AgentRuntimeSpec `json:"agentRuntime,omitempty"`
 }
 
 // RetryPolicy defines retry behavior for failed tasks
@@ -338,6 +344,66 @@ type TaskList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Task `json:"items"`
+}
+
+// AgentRuntimeType defines the agent runtime to use
+// +kubebuilder:validation:Enum=copilot;claude
+type AgentRuntimeType string
+
+const (
+	// AgentRuntimeCopilot uses GitHub Copilot CLI as the agent runtime
+	AgentRuntimeCopilot AgentRuntimeType = "copilot"
+	// AgentRuntimeClaude uses Claude Code CLI as the agent runtime
+	AgentRuntimeClaude AgentRuntimeType = "claude"
+)
+
+// AgentRuntimeSpec defines task-level overrides for agent runtime configuration.
+// Runtime type and credentials come from the referenced Agent CRD.
+type AgentRuntimeSpec struct {
+	// Workspace defines the working directory configuration
+	// +optional
+	Workspace *WorkspaceConfig `json:"workspace,omitempty"`
+
+	// MaxTurns limits the number of agent loop iterations
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000
+	// +optional
+	MaxTurns *int32 `json:"maxTurns,omitempty"`
+
+	// AllowedTools lists the tools the agent is allowed to use (overrides Agent defaults)
+	// +optional
+	AllowedTools []string `json:"allowedTools,omitempty"`
+
+	// DisallowedTools lists tools the agent is not allowed to use
+	// +optional
+	DisallowedTools []string `json:"disallowedTools,omitempty"`
+
+	// AllowBash enables the agent to run bash commands (overrides Agent default)
+	// +optional
+	AllowBash *bool `json:"allowBash,omitempty"`
+}
+
+// WorkspaceConfig defines workspace setup for agent tasks
+type WorkspaceConfig struct {
+	// GitRepo is the repository URL to clone
+	// +optional
+	GitRepo string `json:"gitRepo,omitempty"`
+
+	// Branch is the git branch to checkout
+	// +optional
+	Branch string `json:"branch,omitempty"`
+
+	// Ref is a specific git ref (commit SHA, tag) to checkout
+	// +optional
+	Ref string `json:"ref,omitempty"`
+
+	// GitSecretRef references a Secret containing git credentials
+	// +optional
+	GitSecretRef *corev1.LocalObjectReference `json:"gitSecretRef,omitempty"`
+
+	// SubPath is a subdirectory within the repo to use as workspace root
+	// +optional
+	SubPath string `json:"subPath,omitempty"`
 }
 
 func init() {

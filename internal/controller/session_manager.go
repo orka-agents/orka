@@ -54,11 +54,11 @@ const (
 
 // SessionMessage represents a message in the session transcript
 type SessionMessage struct {
-	Role      string                 `json:"role"`
-	Content   string                 `json:"content,omitempty"`
-	Name      string                 `json:"name,omitempty"`
-	Input     map[string]interface{} `json:"input,omitempty"`
-	Timestamp time.Time              `json:"ts"`
+	Role      string         `json:"role"`
+	Content   string         `json:"content,omitempty"`
+	Name      string         `json:"name,omitempty"`
+	Input     map[string]any `json:"input,omitempty"`
+	Timestamp time.Time      `json:"ts"`
 }
 
 // SessionManager manages session ConfigMaps for conversation continuity
@@ -321,9 +321,9 @@ func (m *SessionManager) LoadTranscript(ctx context.Context, task *corev1alpha1.
 	}
 
 	var messages []SessionMessage
-	lines := strings.Split(strings.TrimSpace(transcript), "\n")
+	lines := strings.SplitSeq(strings.TrimSpace(transcript), "\n")
 
-	for _, line := range lines {
+	for line := range lines {
 		if line == "" {
 			continue
 		}
