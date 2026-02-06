@@ -213,8 +213,17 @@ func (e *ToolExecutor) executeCreateAITask(ctx context.Context, args map[string]
 		task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: sessionRef}
 	}
 
+	if schedule := getStringArg(args, "schedule"); schedule != "" {
+		task.Spec.Schedule = schedule
+	}
+
 	if err := e.client.Create(ctx, task); err != nil {
 		return classifyK8sError(err)
+	}
+
+	msg := "Task created"
+	if task.Spec.Schedule != "" {
+		msg = fmt.Sprintf("Recurring task scheduled (schedule: %s)", task.Spec.Schedule)
 	}
 
 	e.tasksCreated++
@@ -224,7 +233,7 @@ func (e *ToolExecutor) executeCreateAITask(ctx context.Context, args map[string]
 			"name":      task.Name,
 			"namespace": task.Namespace,
 			"phase":     "Pending",
-			"message":   "Task created",
+			"message":   msg,
 		},
 	}
 }
@@ -271,8 +280,17 @@ func (e *ToolExecutor) executeCreateContainerTask(ctx context.Context, args map[
 		task.Spec.Priority = &p
 	}
 
+	if schedule := getStringArg(args, "schedule"); schedule != "" {
+		task.Spec.Schedule = schedule
+	}
+
 	if err := e.client.Create(ctx, task); err != nil {
 		return classifyK8sError(err)
+	}
+
+	msg := "Task created"
+	if task.Spec.Schedule != "" {
+		msg = fmt.Sprintf("Recurring task scheduled (schedule: %s)", task.Spec.Schedule)
 	}
 
 	e.tasksCreated++
@@ -282,7 +300,7 @@ func (e *ToolExecutor) executeCreateContainerTask(ctx context.Context, args map[
 			"name":      task.Name,
 			"namespace": task.Namespace,
 			"phase":     "Pending",
-			"message":   "Task created",
+			"message":   msg,
 		},
 	}
 }
@@ -362,8 +380,17 @@ func (e *ToolExecutor) executeCreateAgentTask(ctx context.Context, args map[stri
 
 	task.Spec.AgentRuntime = agentRuntime
 
+	if schedule := getStringArg(args, "schedule"); schedule != "" {
+		task.Spec.Schedule = schedule
+	}
+
 	if err := e.client.Create(ctx, task); err != nil {
 		return classifyK8sError(err)
+	}
+
+	msg := "Task created"
+	if task.Spec.Schedule != "" {
+		msg = fmt.Sprintf("Recurring task scheduled (schedule: %s)", task.Spec.Schedule)
 	}
 
 	e.tasksCreated++
@@ -373,7 +400,7 @@ func (e *ToolExecutor) executeCreateAgentTask(ctx context.Context, args map[stri
 			"name":      task.Name,
 			"namespace": task.Namespace,
 			"phase":     "Pending",
-			"message":   "Task created",
+			"message":   msg,
 		},
 	}
 }

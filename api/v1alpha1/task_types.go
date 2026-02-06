@@ -35,7 +35,7 @@ const (
 )
 
 // TaskPhase defines the phase of task execution
-// +kubebuilder:validation:Enum=Pending;Running;Succeeded;Failed
+// +kubebuilder:validation:Enum=Pending;Running;Succeeded;Failed;Scheduled
 type TaskPhase string
 
 const (
@@ -43,6 +43,18 @@ const (
 	TaskPhaseRunning   TaskPhase = "Running"
 	TaskPhaseSucceeded TaskPhase = "Succeeded"
 	TaskPhaseFailed    TaskPhase = "Failed"
+	TaskPhaseScheduled TaskPhase = "Scheduled"
+)
+
+// ConcurrencyPolicy describes how the controller will handle concurrent scheduled runs.
+// +kubebuilder:validation:Enum=Allow;Forbid
+type ConcurrencyPolicy string
+
+const (
+	// AllowConcurrent allows child tasks to run concurrently.
+	AllowConcurrent ConcurrencyPolicy = "Allow"
+	// ForbidConcurrent skips the new run if a previous run is still active.
+	ForbidConcurrent ConcurrencyPolicy = "Forbid"
 )
 
 // TaskSpec defines the desired state of Task
@@ -97,6 +109,44 @@ type TaskSpec struct {
 	// Resources defines the compute resources for the task
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Schedule is a cron expression for recurring tasks (e.g., "0 */6 * * *").
+	// When set, the controller creates child Task CRs on each cron tick.
+	// +optional
+	Schedule string `json:"schedule,omitempty"`
+
+	// TimeZone is the IANA time zone for the schedule (e.g., "America/New_York").
+	// Defaults to UTC if not set.
+	// +optional
+	TimeZone *string `json:"timeZone,omitempty"`
+
+	// ConcurrencyPolicy specifies how to treat concurrent runs (Allow or Forbid).
+	// +kubebuilder:default="Forbid"
+	// +optional
+	ConcurrencyPolicy ConcurrencyPolicy `json:"concurrencyPolicy,omitempty"`
+
+	// StartingDeadlineSeconds is the deadline in seconds for starting a missed scheduled run.
+	// If the schedule is missed by more than this many seconds, the run is skipped.
+	// +kubebuilder:default=100
+	// +optional
+	StartingDeadlineSeconds *int64 `json:"startingDeadlineSeconds,omitempty"`
+
+	// SuccessfulRunsHistoryLimit is the number of successful child tasks to retain.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=3
+	// +optional
+	SuccessfulRunsHistoryLimit *int32 `json:"successfulRunsHistoryLimit,omitempty"`
+
+	// FailedRunsHistoryLimit is the number of failed child tasks to retain.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=1
+	// +optional
+	FailedRunsHistoryLimit *int32 `json:"failedRunsHistoryLimit,omitempty"`
+
+	// Suspend tells the controller to suspend subsequent scheduled runs.
+	// It does not apply to already started child tasks. Defaults to false.
+	// +optional
+	Suspend *bool `json:"suspend,omitempty"`
 
 	// AI contains AI-specific configuration (when type is "ai")
 	// +optional
@@ -293,6 +343,14 @@ type TaskStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// LastScheduleTime is the last time a child task was created for a scheduled run.
+	// +optional
+	LastScheduleTime *metav1.Time `json:"lastScheduleTime,omitempty"`
+
+	// NextScheduleTime is the next time a child task will be created.
+	// +optional
+	NextScheduleTime *metav1.Time `json:"nextScheduleTime,omitempty"`
 }
 
 // ResultReference references the ConfigMap containing the task result

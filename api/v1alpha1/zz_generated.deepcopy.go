@@ -884,6 +884,31 @@ func (in *TaskSpec) DeepCopyInto(out *TaskSpec) {
 		**out = **in
 	}
 	in.Resources.DeepCopyInto(&out.Resources)
+	if in.TimeZone != nil {
+		in, out := &in.TimeZone, &out.TimeZone
+		*out = new(string)
+		**out = **in
+	}
+	if in.StartingDeadlineSeconds != nil {
+		in, out := &in.StartingDeadlineSeconds, &out.StartingDeadlineSeconds
+		*out = new(int64)
+		**out = **in
+	}
+	if in.SuccessfulRunsHistoryLimit != nil {
+		in, out := &in.SuccessfulRunsHistoryLimit, &out.SuccessfulRunsHistoryLimit
+		*out = new(int32)
+		**out = **in
+	}
+	if in.FailedRunsHistoryLimit != nil {
+		in, out := &in.FailedRunsHistoryLimit, &out.FailedRunsHistoryLimit
+		*out = new(int32)
+		**out = **in
+	}
+	if in.Suspend != nil {
+		in, out := &in.Suspend, &out.Suspend
+		*out = new(bool)
+		**out = **in
+	}
 	if in.AI != nil {
 		in, out := &in.AI, &out.AI
 		*out = new(AISpec)
@@ -938,6 +963,14 @@ func (in *TaskStatus) DeepCopyInto(out *TaskStatus) {
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
+	}
+	if in.LastScheduleTime != nil {
+		in, out := &in.LastScheduleTime, &out.LastScheduleTime
+		*out = (*in).DeepCopy()
+	}
+	if in.NextScheduleTime != nil {
+		in, out := &in.NextScheduleTime, &out.NextScheduleTime
+		*out = (*in).DeepCopy()
 	}
 }
 

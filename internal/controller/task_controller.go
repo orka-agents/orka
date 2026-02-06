@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"time"
 
+	cron "github.com/robfig/cron/v3"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -55,6 +57,7 @@ type TaskReconciler struct {
 	SessionManager  *SessionManager
 	WebhookNotifier *WebhookNotifier
 	PriorityQueue   *PriorityQueue
+	Recorder        record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=core.mercan.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
@@ -67,6 +70,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile handles the reconciliation loop for Task resources
 func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -112,6 +116,8 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	switch task.Status.Phase {
 	case corev1alpha1.TaskPhasePending:
 		return r.handlePending(ctx, task)
+	case corev1alpha1.TaskPhaseScheduled:
+		return r.handleScheduled(ctx, task)
 	case corev1alpha1.TaskPhaseRunning:
 		return r.handleRunning(ctx, task)
 	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed:
@@ -181,6 +187,40 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 // handlePending handles Tasks in Pending phase
 func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+
+	// If this is a scheduled task, validate cron and transition to Scheduled phase
+	if task.Spec.Schedule != "" {
+		// Validate cron expression
+		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+		sched, err := parser.Parse(task.Spec.Schedule)
+		if err != nil {
+			task.Status.Phase = corev1alpha1.TaskPhaseFailed
+			task.Status.Message = fmt.Sprintf("invalid cron expression: %v", err)
+			if updateErr := r.Status().Update(ctx, task); updateErr != nil {
+				return ctrl.Result{}, updateErr
+			}
+			return ctrl.Result{}, nil
+		}
+
+		// Calculate next schedule time
+		now := time.Now()
+		if task.Spec.TimeZone != nil {
+			if loc, err := time.LoadLocation(*task.Spec.TimeZone); err == nil {
+				now = now.In(loc)
+			}
+		}
+		next := sched.Next(now)
+
+		task.Status.Phase = corev1alpha1.TaskPhaseScheduled
+		task.Status.NextScheduleTime = &metav1.Time{Time: next}
+		task.Status.Message = fmt.Sprintf("Scheduled with cron: %s", task.Spec.Schedule)
+		if err := r.Status().Update(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		log.Info("Task scheduled", "schedule", task.Spec.Schedule, "nextRun", next)
+		return ctrl.Result{RequeueAfter: time.Until(next)}, nil
+	}
 
 	// Check session lock if session is referenced
 	if task.Spec.SessionRef != nil {
@@ -571,11 +611,211 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 	return nil
 }
 
+// handleScheduled manages the scheduling loop for recurring tasks.
+func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	// Check if suspended
+	if task.Spec.Suspend != nil && *task.Spec.Suspend {
+		log.Info("Task is suspended, skipping schedule check")
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
+	}
+
+	// Parse schedule
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	sched, err := parser.Parse(task.Spec.Schedule)
+	if err != nil {
+		task.Status.Phase = corev1alpha1.TaskPhaseFailed
+		task.Status.Message = fmt.Sprintf("invalid cron expression: %v", err)
+		_ = r.Status().Update(ctx, task)
+		return ctrl.Result{}, nil
+	}
+
+	// Determine time zone
+	now := time.Now().UTC()
+	loc := time.UTC
+	if task.Spec.TimeZone != nil {
+		if l, err := time.LoadLocation(*task.Spec.TimeZone); err == nil {
+			loc = l
+			now = now.In(loc)
+		}
+	}
+
+	// Calculate the scheduled time for the next (or current) run
+	var scheduledTime time.Time
+	if task.Status.LastScheduleTime != nil {
+		scheduledTime = sched.Next(task.Status.LastScheduleTime.Time.In(loc))
+	} else {
+		scheduledTime = sched.Next(task.CreationTimestamp.Time.In(loc))
+	}
+
+	// Not yet time
+	if now.Before(scheduledTime) {
+		nextSchedule := metav1.NewTime(scheduledTime)
+		task.Status.NextScheduleTime = &nextSchedule
+		_ = r.Status().Update(ctx, task)
+		return ctrl.Result{RequeueAfter: time.Until(scheduledTime)}, nil
+	}
+
+	// Check starting deadline
+	deadlineSeconds := int64(100) // default
+	if task.Spec.StartingDeadlineSeconds != nil {
+		deadlineSeconds = *task.Spec.StartingDeadlineSeconds
+	}
+	if now.Sub(scheduledTime) > time.Duration(deadlineSeconds)*time.Second {
+		log.Info("Missed schedule beyond deadline, skipping", "scheduledTime", scheduledTime, "deadline", deadlineSeconds)
+		r.Recorder.Eventf(task, "Warning", "MissedSchedule", "Missed scheduled run at %s (deadline %ds exceeded)", scheduledTime.Format(time.RFC3339), deadlineSeconds)
+		// Advance to next schedule time
+		next := sched.Next(now)
+		nextSchedule := metav1.NewTime(next)
+		task.Status.NextScheduleTime = &nextSchedule
+		_ = r.Status().Update(ctx, task)
+		return ctrl.Result{RequeueAfter: time.Until(next)}, nil
+	}
+
+	// Check concurrency policy
+	if task.Spec.ConcurrencyPolicy == corev1alpha1.ForbidConcurrent || task.Spec.ConcurrencyPolicy == "" {
+		var childList corev1alpha1.TaskList
+		if err := r.List(ctx, &childList, client.InNamespace(task.Namespace), client.MatchingLabels{
+			"mercan.ai/parent-task": task.Name,
+		}); err != nil {
+			return ctrl.Result{}, fmt.Errorf("listing child tasks: %w", err)
+		}
+		for i := range childList.Items {
+			if childList.Items[i].Status.Phase == corev1alpha1.TaskPhasePending ||
+				childList.Items[i].Status.Phase == corev1alpha1.TaskPhaseRunning {
+				log.Info("Concurrency policy Forbid: active child task exists, skipping", "activeChild", childList.Items[i].Name)
+				next := sched.Next(now)
+				nextSchedule := metav1.NewTime(next)
+				task.Status.NextScheduleTime = &nextSchedule
+				_ = r.Status().Update(ctx, task)
+				return ctrl.Result{RequeueAfter: time.Until(next)}, nil
+			}
+		}
+	}
+
+	// Create child task with deterministic name
+	childName := fmt.Sprintf("%s-%d", task.Name, scheduledTime.Unix())
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      childName,
+			Namespace: task.Namespace,
+			Labels: map[string]string{
+				"mercan.ai/parent-task":   task.Name,
+				"mercan.ai/scheduled-run": "true",
+			},
+		},
+		Spec: *task.Spec.DeepCopy(),
+	}
+
+	// Strip scheduling fields from child
+	child.Spec.Schedule = ""
+	child.Spec.TimeZone = nil
+	child.Spec.ConcurrencyPolicy = ""
+	child.Spec.StartingDeadlineSeconds = nil
+	child.Spec.SuccessfulRunsHistoryLimit = nil
+	child.Spec.FailedRunsHistoryLimit = nil
+	child.Spec.Suspend = nil
+
+	// Set owner reference
+	if err := ctrl.SetControllerReference(task, child, r.Scheme); err != nil {
+		return ctrl.Result{}, fmt.Errorf("setting owner reference: %w", err)
+	}
+
+	if err := r.Create(ctx, child); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			log.Info("Child task already exists (idempotent)", "child", childName)
+		} else {
+			return ctrl.Result{}, fmt.Errorf("creating child task: %w", err)
+		}
+	} else {
+		log.Info("Created scheduled child task", "child", childName)
+		r.Recorder.Eventf(task, "Normal", "ScheduledRun", "Created child task %s", childName)
+	}
+
+	// Update status
+	nowTime := metav1.NewTime(scheduledTime)
+	next := sched.Next(now)
+	nextSchedule := metav1.NewTime(next)
+	task.Status.LastScheduleTime = &nowTime
+	task.Status.NextScheduleTime = &nextSchedule
+	if err := r.Status().Update(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Enforce history limits
+	if err := r.enforceHistoryLimits(ctx, task); err != nil {
+		log.Error(err, "Failed to enforce history limits")
+	}
+
+	return ctrl.Result{RequeueAfter: time.Until(next)}, nil
+}
+
+// enforceHistoryLimits removes old child tasks beyond the configured limits.
+func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1alpha1.Task) error {
+	var childList corev1alpha1.TaskList
+	if err := r.List(ctx, &childList, client.InNamespace(task.Namespace), client.MatchingLabels{
+		"mercan.ai/parent-task": task.Name,
+	}); err != nil {
+		return fmt.Errorf("listing child tasks: %w", err)
+	}
+
+	successLimit := int32(3)
+	if task.Spec.SuccessfulRunsHistoryLimit != nil {
+		successLimit = *task.Spec.SuccessfulRunsHistoryLimit
+	}
+	failedLimit := int32(1)
+	if task.Spec.FailedRunsHistoryLimit != nil {
+		failedLimit = *task.Spec.FailedRunsHistoryLimit
+	}
+
+	var succeeded, failed []*corev1alpha1.Task
+	for i := range childList.Items {
+		child := &childList.Items[i]
+		switch child.Status.Phase {
+		case corev1alpha1.TaskPhaseSucceeded:
+			succeeded = append(succeeded, child)
+		case corev1alpha1.TaskPhaseFailed:
+			failed = append(failed, child)
+		}
+	}
+
+	// Sort by creation time (oldest first) and delete excess
+	sortByCreation := func(tasks []*corev1alpha1.Task) {
+		for i := 0; i < len(tasks); i++ {
+			for j := i + 1; j < len(tasks); j++ {
+				if tasks[j].CreationTimestamp.Before(&tasks[i].CreationTimestamp) {
+					tasks[i], tasks[j] = tasks[j], tasks[i]
+				}
+			}
+		}
+	}
+
+	sortByCreation(succeeded)
+	sortByCreation(failed)
+
+	for i := 0; i < len(succeeded)-int(successLimit); i++ {
+		if err := r.Delete(ctx, succeeded[i]); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting old succeeded child: %w", err)
+		}
+	}
+
+	for i := 0; i < len(failed)-int(failedLimit); i++ {
+		if err := r.Delete(ctx, failed[i]); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting old failed child: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.Recorder = mgr.GetEventRecorderFor("task-controller")
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Task{}).
 		Owns(&batchv1.Job{}).
+		Owns(&corev1alpha1.Task{}).
 		Named("task").
 		Complete(r)
 }

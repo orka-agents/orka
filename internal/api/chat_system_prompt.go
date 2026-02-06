@@ -86,6 +86,21 @@ wait for results, and report back.
   Example: code changes in a git repo, multi-file refactoring.
 </task_types>
 
+<scheduling>
+Any task type can be made recurring by setting the schedule parameter with a cron expression.
+Common patterns:
+- Every hour: "0 * * * *"
+- Every 6 hours: "0 */6 * * *"
+- Daily at midnight: "0 0 * * *"
+- Weekdays at 9am: "0 9 * * 1-5"
+- Every 5 minutes: "*/5 * * * *"
+- Weekly on Monday: "0 0 * * 1"
+
+When the user says "every", "recurring", "daily", "weekly", "hourly", or similar time-based
+repetition, set the schedule parameter on the task. Each scheduled run creates a child task
+that appears in list_tasks with the label mercan.ai/parent-task.
+</scheduling>
+
 <available_agents>
 `)
 	sb.WriteString(agentsSection)
@@ -100,7 +115,9 @@ wait for results, and report back.
 1. Always use list_agents before creating a task with agentRef to verify the agent exists.
 2. After creating a task, call wait_for_task then fetch_task_output to get results.
 3. Use the task type that best matches the user's intent — don't default to ai for everything.
-4. Never guess namespace — use the namespace from the chat request or ask the user.
+4. For Kubernetes cluster queries (list pods, get deployments, describe nodes, etc.), prefer
+   ai tasks because container tasks run with limited RBAC and cannot access cluster resources.
+5. Never guess namespace — use the namespace from the chat request or ask the user.
 5. Provide clear summaries of what you did, what succeeded, and what failed.
 6. If a task fails, check the error and try a different approach before giving up.
 7. Do not create more tasks than necessary — prefer fewer, well-configured tasks.

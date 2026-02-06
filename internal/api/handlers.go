@@ -82,7 +82,11 @@ type CreateTaskRequest struct {
 	AI           *corev1alpha1.AISpec           `json:"ai,omitempty"`
 	AgentRef     *corev1alpha1.AgentReference   `json:"agentRef,omitempty"`
 	Prompt       string                         `json:"prompt,omitempty"`
-	AgentRuntime *corev1alpha1.AgentRuntimeSpec `json:"agentRuntime,omitempty"`
+	AgentRuntime      *corev1alpha1.AgentRuntimeSpec `json:"agentRuntime,omitempty"`
+	Schedule          string                         `json:"schedule,omitempty"`
+	TimeZone          *string                        `json:"timeZone,omitempty"`
+	ConcurrencyPolicy string                         `json:"concurrencyPolicy,omitempty"`
+	Suspend           *bool                          `json:"suspend,omitempty"`
 }
 
 // ListResponse is a generic list response with pagination
@@ -153,6 +157,8 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 			AgentRef:     req.AgentRef,
 			Prompt:       req.Prompt,
 			AgentRuntime: req.AgentRuntime,
+			Schedule:     req.Schedule,
+			Suspend:      req.Suspend,
 		},
 	}
 
@@ -163,6 +169,14 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid timeout: %v", err))
 		}
 		task.Spec.Timeout = duration
+	}
+
+	if req.Schedule != "" {
+		task.Spec.Schedule = req.Schedule
+		task.Spec.TimeZone = req.TimeZone
+		if req.ConcurrencyPolicy != "" {
+			task.Spec.ConcurrencyPolicy = corev1alpha1.ConcurrencyPolicy(req.ConcurrencyPolicy)
+		}
 	}
 
 	ctx := c.Context()

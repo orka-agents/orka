@@ -210,6 +210,14 @@ spec:
                 items:
                   type: string
                 type: array
+              concurrencyPolicy:
+                default: Forbid
+                description: ConcurrencyPolicy specifies how to treat concurrent runs
+                  (Allow or Forbid).
+                enum:
+                - Allow
+                - Forbid
+                type: string
               env:
                 description: Env is a list of environment variables to set in the
                   container
@@ -368,6 +376,13 @@ spec:
                   - name
                   type: object
                 type: array
+              failedRunsHistoryLimit:
+                default: 1
+                description: FailedRunsHistoryLimit is the number of failed child
+                  tasks to retain.
+                format: int32
+                minimum: 0
+                type: integer
               image:
                 description: Image is the container image to run for the task
                 type: string
@@ -459,6 +474,11 @@ spec:
                     minimum: 0
                     type: integer
                 type: object
+              schedule:
+                description: |-
+                  Schedule is a cron expression for recurring tasks (e.g., "0 */6 * * *").
+                  When set, the controller creates child Task CRs on each cron tick.
+                type: string
               secretRef:
                 description: SecretRef references a Kubernetes Secret containing credentials
                 properties:
@@ -498,6 +518,30 @@ spec:
                 required:
                 - name
                 type: object
+              startingDeadlineSeconds:
+                default: 100
+                description: |-
+                  StartingDeadlineSeconds is the deadline in seconds for starting a missed scheduled run.
+                  If the schedule is missed by more than this many seconds, the run is skipped.
+                format: int64
+                type: integer
+              successfulRunsHistoryLimit:
+                default: 3
+                description: SuccessfulRunsHistoryLimit is the number of successful
+                  child tasks to retain.
+                format: int32
+                minimum: 0
+                type: integer
+              suspend:
+                description: |-
+                  Suspend tells the controller to suspend subsequent scheduled runs.
+                  It does not apply to already started child tasks. Defaults to false.
+                type: boolean
+              timeZone:
+                description: |-
+                  TimeZone is the IANA time zone for the schedule (e.g., "America/New_York").
+                  Defaults to UTC if not set.
+                type: string
               timeout:
                 description: Timeout is the maximum duration for the task
                 type: string
@@ -541,6 +585,7 @@ spec:
                       - Running
                       - Succeeded
                       - Failed
+                      - Scheduled
                       type: string
                     result:
                       description: Result is the result from the child task (if completed)
@@ -619,8 +664,18 @@ spec:
                 description: JobName is the name of the Kubernetes Job running the
                   task
                 type: string
+              lastScheduleTime:
+                description: LastScheduleTime is the last time a child task was created
+                  for a scheduled run.
+                format: date-time
+                type: string
               message:
                 description: Message provides additional status information
+                type: string
+              nextScheduleTime:
+                description: NextScheduleTime is the next time a child task will be
+                  created.
+                format: date-time
                 type: string
               phase:
                 description: Phase is the current phase of the task
@@ -629,6 +684,7 @@ spec:
                 - Running
                 - Succeeded
                 - Failed
+                - Scheduled
                 type: string
               resultRef:
                 description: ResultRef references the ConfigMap containing the result

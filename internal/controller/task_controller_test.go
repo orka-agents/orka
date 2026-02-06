@@ -29,7 +29,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -45,6 +47,7 @@ func newReconciler() *TaskReconciler {
 		SessionManager:  NewSessionManager(k8sClient),
 		WebhookNotifier: NewWebhookNotifier(),
 		PriorityQueue:   NewPriorityQueue(),
+		Recorder:        record.NewFakeRecorder(100),
 	}
 }
 
@@ -1254,6 +1257,274 @@ var _ = Describe("Task Controller", func() {
 
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
+		})
+	})
+
+	Context("Scheduled Tasks", func() {
+		It("should transition from Pending to Scheduled when schedule is set", func() {
+			ctx := context.Background()
+			r := newReconciler()
+
+			taskName := "test-scheduled-pending"
+			nn := types.NamespacedName{Name: taskName, Namespace: "default"}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: "default",
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:     corev1alpha1.TaskTypeContainer,
+					Image:    "alpine:latest",
+					Command:  []string{"echo", "hello"},
+					Schedule: "*/5 * * * *",
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// First reconcile: add finalizer
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Second reconcile: initialize status to Pending
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Third reconcile: should transition to Scheduled
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseScheduled))
+			Expect(task.Status.NextScheduleTime).NotTo(BeNil())
+		})
+
+		It("should fail with invalid cron expression", func() {
+			ctx := context.Background()
+			r := newReconciler()
+
+			taskName := "test-scheduled-invalid-cron"
+			nn := types.NamespacedName{Name: taskName, Namespace: "default"}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: "default",
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:     corev1alpha1.TaskTypeContainer,
+					Image:    "alpine:latest",
+					Schedule: "not-a-cron",
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// First reconcile: add finalizer
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Second reconcile: initialize to Pending
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Third reconcile: should fail with invalid cron
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(task.Status.Message).To(ContainSubstring("invalid cron expression"))
+		})
+
+		It("should create child task when schedule time is reached", func() {
+			ctx := context.Background()
+			r := newReconciler()
+
+			taskName := "test-scheduled-child"
+			nn := types.NamespacedName{Name: taskName, Namespace: "default"}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: "default",
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:     corev1alpha1.TaskTypeContainer,
+					Image:    "alpine:latest",
+					Command:  []string{"echo", "hello"},
+					Schedule: "*/1 * * * *",
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Reconcile through: finalizer → Pending → Scheduled
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate time passing: set LastScheduleTime to the past
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseScheduled))
+			pastTime := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+			task.Status.LastScheduleTime = &pastTime
+			task.Status.NextScheduleTime = &metav1.Time{Time: time.Now().Add(-1 * time.Minute)}
+			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
+
+			// Reconcile should create a child task
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify child task was created
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.LastScheduleTime).NotTo(BeNil())
+
+			// List child tasks
+			var childList corev1alpha1.TaskList
+			Expect(k8sClient.List(ctx, &childList,
+				client.InNamespace("default"),
+				client.MatchingLabels{"mercan.ai/parent-task": taskName},
+			)).To(Succeed())
+			Expect(childList.Items).NotTo(BeEmpty())
+
+			// Verify child has correct properties
+			child := &childList.Items[0]
+			Expect(child.Spec.Schedule).To(BeEmpty(), "child should not have schedule")
+			Expect(child.Spec.Image).To(Equal("alpine:latest"))
+			Expect(child.Labels["mercan.ai/scheduled-run"]).To(Equal("true"))
+
+			// Clean up child
+			for i := range childList.Items {
+				cleanupTask(ctx, types.NamespacedName{Name: childList.Items[i].Name, Namespace: "default"})
+			}
+		})
+
+		It("should skip run when Forbid policy and active child exists", func() {
+			ctx := context.Background()
+			r := newReconciler()
+
+			taskName := "test-scheduled-forbid"
+			nn := types.NamespacedName{Name: taskName, Namespace: "default"}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: "default",
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:              corev1alpha1.TaskTypeContainer,
+					Image:             "alpine:latest",
+					Schedule:          "*/1 * * * *",
+					ConcurrencyPolicy: corev1alpha1.ForbidConcurrent,
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Create an active child task
+			activeChild := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName + "-active-child",
+					Namespace: "default",
+					Labels: map[string]string{
+						"mercan.ai/parent-task":   taskName,
+						"mercan.ai/scheduled-run": "true",
+					},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:  corev1alpha1.TaskTypeContainer,
+					Image: "alpine:latest",
+				},
+			}
+			Expect(k8sClient.Create(ctx, activeChild)).To(Succeed())
+			defer cleanupTask(ctx, types.NamespacedName{Name: activeChild.Name, Namespace: "default"})
+
+			// Set child to Running
+			activeChild.Status.Phase = corev1alpha1.TaskPhaseRunning
+			Expect(k8sClient.Status().Update(ctx, activeChild)).To(Succeed())
+
+			// Reconcile parent through to Scheduled
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Set LastScheduleTime in the past to trigger a run
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			pastTime := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+			task.Status.LastScheduleTime = &pastTime
+			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
+
+			// Reconcile should NOT create a new child (Forbid)
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify no additional child was created
+			var childList corev1alpha1.TaskList
+			Expect(k8sClient.List(ctx, &childList,
+				client.InNamespace("default"),
+				client.MatchingLabels{"mercan.ai/parent-task": taskName},
+			)).To(Succeed())
+			Expect(childList.Items).To(HaveLen(1), "should only have the original active child")
+		})
+
+		It("should not create runs when suspended", func() {
+			ctx := context.Background()
+			r := newReconciler()
+
+			taskName := "test-scheduled-suspend"
+			nn := types.NamespacedName{Name: taskName, Namespace: "default"}
+			defer cleanupTask(ctx, nn)
+
+			suspend := true
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: "default",
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:     corev1alpha1.TaskTypeContainer,
+					Image:    "alpine:latest",
+					Schedule: "*/1 * * * *",
+					Suspend:  &suspend,
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Reconcile through to Scheduled
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Set LastScheduleTime in the past
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			pastTime := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+			task.Status.LastScheduleTime = &pastTime
+			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
+
+			// Reconcile — should skip because suspended
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Minute))
+
+			// No children should be created
+			var childList corev1alpha1.TaskList
+			Expect(k8sClient.List(ctx, &childList,
+				client.InNamespace("default"),
+				client.MatchingLabels{"mercan.ai/parent-task": taskName},
+			)).To(Succeed())
+			Expect(childList.Items).To(BeEmpty())
 		})
 	})
 
