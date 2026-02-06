@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with code in this repository.
 
 ## CRITICAL: Security
 
@@ -13,46 +13,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Mercan is a Kubernetes-native task execution platform. A controller manages Jobs and Pods for incoming task requests, supporting container tasks, AI agent tasks with LLM integration, and external agent CLI runtimes (Copilot, Claude Code).
+Mercan is a Kubernetes-native task execution platform. A controller manages Jobs and Pods for incoming task requests, supporting container tasks, AI agent tasks with LLM integration, and external agent CLI runtimes (Copilot, Claude Code). See @docs/architecture.md for full architecture details.
 
 ## Build & Development Commands
 
 ```bash
-# Initialize project (one-time setup)
-kubebuilder init --domain mercan.ai --repo github.com/sozercan/mercan
-kubebuilder create api --group core --version v1alpha1 --kind Task
-
-# Generate CRD manifests and Go types
-make generate
+# Generate CRD manifests and Go types (run after editing *_types.go or markers)
 make manifests
+make generate
 
-# Build
+# Build (includes UI)
 make build
 
 # Run tests
 make test
 
-# Deploy to cluster
-make deploy
+# Lint
+make lint-fix
 
-# Local development with kind
-kind create cluster
-make docker-build docker-push IMG=<registry>/mercan:tag
-make deploy IMG=<registry>/mercan:tag
-```
+# UI development
+cd ui && bun install && bun run dev   # Dev server on :5173
+cd ui && bun run test                 # UI tests
+cd ui && bun run test:coverage        # UI tests with coverage
 
-### Agent Worker Images
-
-```bash
-# Build and push agent worker images
-make docker-build-copilot-worker COPILOT_WORKER_IMG=<registry>/mercan-agent-worker-copilot:tag
-make docker-build-claude-worker CLAUDE_WORKER_IMG=<registry>/mercan-agent-worker-claude:tag
-make docker-push-copilot-worker
-make docker-push-claude-worker
-
-# Build/push all images at once (manager + agent workers)
-make docker-build-all
+# Docker images
+make docker-build-all                 # Controller + all agent workers
 make docker-push-all
+
+# Deploy
+make deploy IMG=<registry>/mercan:tag
 ```
 
 ## Architecture
@@ -61,35 +50,24 @@ make docker-push-all
 
 - **Controller** (`cmd/controller/`): Main entrypoint with `--watch-namespace`, `--copilot-worker-image`, and `--claude-worker-image` flags
 - **API Server** (`internal/api/`): REST API using Fiber framework with ServiceAccount token auth
+- **Chat Endpoint** (`internal/api/chat.go`): Agentic chat with SSE streaming, tool execution loop, session persistence
 - **Task Reconciler** (`internal/controller/`): Watches Task CRDs, creates Jobs, manages lifecycle
 - **Session Manager**: Manages conversation continuity via ConfigMaps with serial execution enforcement
 - **Workers** (`workers/`): AI worker (LLM agent with tools), general worker (container commands), and agent workers (`workers/agent/copilot/`, `workers/agent/claude/`) for external CLI runtimes
+- **Web UI** (`ui/`): React SPA embedded into controller binary via `//go:embed`
 
 ### Custom Resources
 
-- **Task** (`api/v1alpha1/task_types.go`): Core work unit - `container`, `ai`, or `agent` type
+- **Task** (`api/v1alpha1/task_types.go`): Core work unit — `container`, `ai`, or `agent` type with optional scheduling
 - **Tool** (`api/v1alpha1/tool_types.go`): Custom HTTP-based tool definitions
 - **Agent** (`api/v1alpha1/agent_types.go`): Reusable agent configurations with model, tools, skills, and optional `runtime` field for CLI runtimes
+- **Provider** (`api/v1alpha1/provider_types.go`): LLM provider configuration (anthropic, openai, azure-openai)
 
 ### Task Types
 
 - **`container`**: Runs arbitrary container commands
 - **`ai`**: Runs AI agent tasks with built-in LLM integration (Anthropic, OpenAI)
 - **`agent`**: Runs external agent CLI runtimes (Copilot CLI, Claude Code CLI) via dedicated worker images
-
-### Agent Runtime (type: agent)
-
-Tasks with `type: agent` reference an Agent CRD that has `spec.runtime` (`AgentCLIRuntime`) set:
-- `runtime.type`: `copilot` or `claude` — selects the CLI runtime
-- `runtime.defaultMaxTurns`: Default max agent loop iterations (1-1000, default 50)
-- `runtime.defaultAllowedTools`: Default tools allowed for tasks
-- `runtime.defaultAllowBash`: Whether bash is allowed by default
-
-Task-level overrides via `spec.agentRuntime` (`AgentRuntimeSpec`):
-- `workspace`: `WorkspaceConfig` with `gitRepo`, `branch`, `ref`, `gitSecretRef`, `subPath`
-- `maxTurns`: Override max agent loop iterations
-- `allowedTools` / `disallowedTools`: Override tool permissions
-- `allowBash`: Override bash permission
 
 ### Key Patterns
 
@@ -99,14 +77,48 @@ Task-level overrides via `spec.agentRuntime` (`AgentRuntimeSpec`):
 - Tools execute via HTTP calls to internal services
 - Priority queue (0-1000) for task scheduling
 - Finalizers ensure cleanup of result ConfigMaps and session locks
+- LLM tool args for nested objects arrive as `map[string]any`, not strings — always type-switch
+
+## Auto-Generated Files — Do NOT Edit
+
+- `config/crd/bases/*.yaml` — regenerate with `make manifests`
+- `config/rbac/role.yaml` — regenerate with `make manifests`
+- `**/zz_generated.*.go` — regenerate with `make generate`
+- `PROJECT` — managed by kubebuilder CLI
+- `ui/src/routeTree.gen.ts` — managed by TanStack Router
+
+Do NOT delete `// +kubebuilder:scaffold:*` comments — the CLI injects code at these markers.
+
+## Code Style & Conventions
+
+### Go
+
+- Use table-driven tests with descriptive subtests
+- Use `sigs.k8s.io/controller-runtime/pkg/client/fake` for K8s client mocking in tests
+- Use `httptest.NewServer` for HTTP mocking
+- Structured logging: `log := log.FromContext(ctx); log.Info("msg", "key", val)`
+- Idempotent reconciliation — safe to run multiple times
+- Re-fetch before updates: `r.Get(ctx, req.NamespacedName, obj)` before `r.Update`
+- Owner references for automatic garbage collection (`SetControllerReference`)
+- RBAC markers above reconciler methods, then run `make manifests`
+
+### TypeScript (UI)
+
+- React 19 + TanStack Router (file-based routes in `ui/src/routes/`)
+- Zustand stores for auth and UI state (`ui/src/stores/`)
+- TanStack Query hooks per resource (`ui/src/hooks/use-*.ts`)
+- Zod schemas matching Go API types (`ui/src/schemas/`)
+- shadcn/ui components (new-york style) with Tailwind CSS 4
+- Mock `zustand/middleware` with `vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))` in tests
 
 ## Dependencies
 
-- `sigs.k8s.io/controller-runtime` - Controller framework
-- `k8s.io/client-go` - Kubernetes client
-- `github.com/gofiber/fiber/v3` - HTTP router
-- `github.com/anthropics/anthropic-sdk-go` - Anthropic Claude API
-- `github.com/sashabaranov/go-openai` - OpenAI API
+- `sigs.k8s.io/controller-runtime` — Controller framework
+- `k8s.io/client-go` — Kubernetes client
+- `github.com/gofiber/fiber/v3` — HTTP router
+- `github.com/anthropics/anthropic-sdk-go` — Anthropic Claude API
+- `github.com/sashabaranov/go-openai` — OpenAI API
+- `github.com/github/copilot-sdk/go` — GitHub Copilot SDK
 
 ## API Endpoints
 
@@ -121,9 +133,51 @@ GET    /api/v1/sessions        List sessions
 GET    /api/v1/sessions/{id}   Get session transcript
 DELETE /api/v1/sessions/{id}   Delete session
 GET    /api/v1/tools           List tools
+GET    /api/v1/tools/{name}    Get tool details
+POST   /api/v1/agents          Create agent
 GET    /api/v1/agents          List agents
+GET    /api/v1/agents/{name}   Get agent details
+PUT    /api/v1/agents/{name}   Update agent
+DELETE /api/v1/agents/{name}   Delete agent
+GET    /api/v1/secrets         List secret names (metadata only)
+POST   /api/v1/chat            Chat with SSE streaming (if enabled)
+GET    /api/v1/chat/config     Get chat configuration
+DELETE /api/v1/chat/{sessionId} Cancel chat session
+GET    /healthz                Health check
+GET    /readyz                 Readiness check
+```
+
+## Verification
+
+After making changes, always verify:
+
+```bash
+# After editing *_types.go or markers
+make manifests generate
+
+# After editing any *.go files
+make lint-fix
+make test
+
+# After editing UI code
+cd ui && bun run lint && bun run test
+```
+
+Prefer running single tests over the whole suite for faster feedback:
+```bash
+go test ./internal/api/ -run TestHandlerName -v
+cd ui && bun run test -- src/components/tasks/task-list.test.tsx
 ```
 
 ## Worker Security Context
 
 All worker pods run with: non-root (uid 1000), read-only rootfs, all capabilities dropped, seccomp RuntimeDefault.
+
+## Documentation
+
+See @docs/ for detailed documentation:
+- @docs/architecture.md — System design and components
+- @docs/agent-runtimes.md — Claude Code CLI and Copilot CLI runtime configuration
+- @docs/chat.md — Chat endpoint, tools, SSE streaming
+- @docs/ui.md — Web dashboard architecture
+- @docs/testing.md — Test structure and patterns
