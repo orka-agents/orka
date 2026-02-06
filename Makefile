@@ -124,6 +124,14 @@ ui-build: ui-install ## Build UI and copy to embed directory.
 ui-lint: ## Run UI linter.
 	cd ui && bun run lint
 
+.PHONY: ui-test
+ui-test: ## Run UI unit tests.
+	cd ui && bun run test
+
+.PHONY: ui-test-coverage
+ui-test-coverage: ## Run UI unit tests with coverage.
+	cd ui && bun run test:coverage
+
 ##@ Build
 
 .PHONY: build
