@@ -1,3 +1,11 @@
+# Build the UI
+FROM oven/bun:1 AS ui-builder
+WORKDIR /app
+COPY ui/package.json ui/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY ui/ .
+RUN bun run build
+
 # Build the manager binary
 FROM golang:1.25 AS builder
 ARG TARGETOS
@@ -13,6 +21,9 @@ RUN go mod download
 
 # Copy the Go source (relies on .dockerignore to filter)
 COPY . .
+
+# Copy the built UI assets into the embed directory
+COPY --from=ui-builder /app/dist/ internal/uiembed/dist/
 
 # Build
 # the GOARCH has no default value to allow the binary to be built according to the host where the command

@@ -156,11 +156,11 @@ func TestCustomErrorHandler(t *testing.T) {
 			app := fiber.New(fiber.Config{
 				ErrorHandler: customErrorHandler,
 			})
-			app.Get("/test", func(c fiber.Ctx) error {
+			app.Get("/api/test", func(c fiber.Ctx) error {
 				return tt.err
 			})
 
-			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
 			resp, err := app.Test(req)
 			if err != nil {
 				t.Fatalf("Test request failed: %v", err)

@@ -19,6 +19,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"io/fs"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
@@ -28,6 +29,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/sozercan/mercan/internal/controller"
+	"github.com/sozercan/mercan/internal/uiembed"
 )
 
 var log = logf.Log.WithName("api-server")
@@ -65,6 +67,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace)
 	server.setupMiddleware()
 	server.setupRoutes()
+	server.setupStaticFiles()
 
 	return server
 }
@@ -121,8 +124,14 @@ func (s *Server) setupRoutes() {
 	api.Get("/tools/:name", s.handlers.GetTool)
 
 	// Agent endpoints
+	api.Post("/agents", s.handlers.CreateAgent)
 	api.Get("/agents", s.handlers.ListAgents)
 	api.Get("/agents/:name", s.handlers.GetAgent)
+	api.Put("/agents/:name", s.handlers.UpdateAgent)
+	api.Delete("/agents/:name", s.handlers.DeleteAgent)
+
+	// Reference endpoints (for dropdowns)
+	api.Get("/secrets", s.handlers.ListSecretNames)
 }
 
 // Start starts the API server
@@ -156,6 +165,22 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 	if e, ok := err.(*fiber.Error); ok {
 		code = e.Code
 		message = e.Message
+	}
+
+	// For 404s on non-API paths, serve the SPA index.html
+	if code == fiber.StatusNotFound {
+		path := c.Path()
+		isAPI := len(path) >= 4 && path[:4] == "/api"
+		if !isAPI && path != "/healthz" && path != "/readyz" {
+			distFS, fsErr := uiembed.FS()
+			if fsErr == nil {
+				data, readErr := fs.ReadFile(distFS, "index.html")
+				if readErr == nil {
+					c.Set("Content-Type", "text/html; charset=utf-8")
+					return c.Status(fiber.StatusOK).Send(data)
+				}
+			}
+		}
 	}
 
 	return c.Status(code).JSON(fiber.Map{

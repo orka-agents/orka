@@ -52,6 +52,18 @@ func NewHandlers(c client.Client, sessionManager *controller.SessionManager, wat
 	}
 }
 
+// CreateAgentRequest is the request body for creating an agent
+type CreateAgentRequest struct {
+	Name      string                 `json:"name"`
+	Namespace string                 `json:"namespace"`
+	Spec      corev1alpha1.AgentSpec `json:"spec"`
+}
+
+// UpdateAgentRequest is the request body for updating an agent
+type UpdateAgentRequest struct {
+	Spec corev1alpha1.AgentSpec `json:"spec"`
+}
+
 // CreateTaskRequest is the request body for creating a task
 type CreateTaskRequest struct {
 	Name         string                         `json:"name"`
@@ -593,6 +605,139 @@ func (h *Handlers) GetAgent(c fiber.Ctx) error {
 	}
 
 	return c.JSON(agent)
+}
+
+// CreateAgent creates a new agent
+func (h *Handlers) CreateAgent(c fiber.Ctx) error {
+	var req CreateAgentRequest
+	if err := c.Bind().JSON(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+
+	if req.Name == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "name is required")
+	}
+
+	namespace := req.Namespace
+	if namespace == "" {
+		namespace = "default"
+	}
+
+	if h.watchNamespace != "" && h.watchNamespace != namespace {
+		return fiber.NewError(fiber.StatusForbidden, "namespace not allowed")
+	}
+
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      req.Name,
+			Namespace: namespace,
+		},
+		Spec: req.Spec,
+	}
+
+	ctx := c.Context()
+	if err := h.client.Create(ctx, agent); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return fiber.NewError(fiber.StatusConflict, "agent already exists")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create agent: %v", err))
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(agent)
+}
+
+// UpdateAgent updates an existing agent
+func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
+	name := c.Params("name")
+	namespace := c.Query("namespace", "default")
+
+	if h.watchNamespace != "" {
+		namespace = h.watchNamespace
+	}
+
+	agent := &corev1alpha1.Agent{}
+	ctx := c.Context()
+	if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "agent not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent: %v", err))
+	}
+
+	var req UpdateAgentRequest
+	if err := c.Bind().JSON(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+
+	agent.Spec = req.Spec
+	if err := h.client.Update(ctx, agent); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update agent: %v", err))
+	}
+
+	return c.JSON(agent)
+}
+
+// DeleteAgent deletes an agent
+func (h *Handlers) DeleteAgent(c fiber.Ctx) error {
+	name := c.Params("name")
+	namespace := c.Query("namespace", "default")
+
+	if h.watchNamespace != "" {
+		namespace = h.watchNamespace
+	}
+
+	agent := &corev1alpha1.Agent{}
+	ctx := c.Context()
+	if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "agent not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent: %v", err))
+	}
+
+	if err := h.client.Delete(ctx, agent); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to delete agent: %v", err))
+	}
+
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// SecretNameResponse is a minimal representation of a Secret for dropdown lists
+type SecretNameResponse struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	Type      string `json:"type"`
+}
+
+// ListSecretNames lists secret names in a namespace (metadata only, no data)
+func (h *Handlers) ListSecretNames(c fiber.Ctx) error {
+	namespace := c.Query("namespace", "default")
+
+	if h.watchNamespace != "" {
+		namespace = h.watchNamespace
+	}
+
+	secretList := &corev1.SecretList{}
+	ctx := c.Context()
+	opts := &client.ListOptions{Namespace: namespace}
+	if err := h.client.List(ctx, secretList, opts); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list secrets: %v", err))
+	}
+
+	// Return only names and types, never secret data
+	names := make([]SecretNameResponse, 0, len(secretList.Items))
+	for _, s := range secretList.Items {
+		if s.Type == corev1.SecretTypeServiceAccountToken || s.Type == "kubernetes.io/service-account-token" {
+			continue
+		}
+		names = append(names, SecretNameResponse{
+			Name:      s.Name,
+			Namespace: s.Namespace,
+			Type:      string(s.Type),
+		})
+	}
+
+	return c.JSON(fiber.Map{"items": names})
 }
 
 // StreamPodLogs streams logs from a pod

@@ -9,3 +9,17 @@
 # Re-include Go module files
 !go.mod
 !go.sum
+
+# Re-include UI source files for frontend build
+!ui/
+!ui/package.json
+!ui/bun.lock
+!ui/index.html
+!ui/tsconfig.json
+!ui/tsconfig.node.json
+!ui/vite.config.ts
+!ui/components.json
+!ui/public/
+!ui/public/**
+!ui/src/
+!ui/src/**

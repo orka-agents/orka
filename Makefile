@@ -104,11 +104,35 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	"$(GOLANGCI_LINT)" config verify
 
+##@ UI
+
+.PHONY: ui-install
+ui-install: ## Install UI dependencies.
+	cd ui && bun install
+
+.PHONY: ui-dev
+ui-dev: ## Run UI dev server.
+	cd ui && bun run dev
+
+.PHONY: ui-build
+ui-build: ui-install ## Build UI and copy to embed directory.
+	cd ui && bun run build
+	rm -rf internal/uiembed/dist
+	cp -r ui/dist internal/uiembed/dist
+
+.PHONY: ui-lint
+ui-lint: ## Run UI linter.
+	cd ui && bun run lint
+
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
+build: manifests generate fmt vet ui-build ## Build manager binary.
 	go build -o bin/manager cmd/main.go
+
+.PHONY: build-cli
+build-cli: ## Build mercan CLI binary.
+	go build -o bin/mercan cmd/cli/main.go
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
