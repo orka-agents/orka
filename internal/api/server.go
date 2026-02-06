@@ -39,6 +39,7 @@ type ServerConfig struct {
 	Port           int
 	MetricsPort    int
 	WatchNamespace string
+	Chat           ChatConfig
 }
 
 // Server is the REST API server
@@ -48,6 +49,7 @@ type Server struct {
 	config         ServerConfig
 	sessionManager *controller.SessionManager
 	handlers       *Handlers
+	chatHandler    *ChatHandler
 }
 
 // NewServer creates a new API server
@@ -65,6 +67,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	}
 
 	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace)
+	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace)
 	server.setupMiddleware()
 	server.setupRoutes()
 	server.setupStaticFiles()
@@ -132,6 +135,13 @@ func (s *Server) setupRoutes() {
 
 	// Reference endpoints (for dropdowns)
 	api.Get("/secrets", s.handlers.ListSecretNames)
+
+	// Chat endpoints
+	if s.config.Chat.Enabled {
+		api.Post("/chat", s.chatHandler.HandleChat)
+		api.Get("/chat/config", s.chatHandler.HandleChatConfig)
+		api.Delete("/chat/:sessionId", s.chatHandler.HandleCancelChat)
+	}
 }
 
 // Start starts the API server

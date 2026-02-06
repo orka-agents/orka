@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -39,6 +40,8 @@ import (
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 	"github.com/sozercan/mercan/internal/api"
 	"github.com/sozercan/mercan/internal/controller"
+	_ "github.com/sozercan/mercan/internal/llm/anthropic"
+	_ "github.com/sozercan/mercan/internal/llm/openai"
 	_ "github.com/sozercan/mercan/internal/metrics"
 	// +kubebuilder:scaffold:imports
 )
@@ -68,6 +71,15 @@ func main() {
 	var watchNamespace string
 	var copilotWorkerImage string
 	var claudeWorkerImage string
+	var chatEnabled bool
+	var chatProvider string
+	var chatModel string
+	var chatMaxIterations int
+	var chatMaxDuration time.Duration
+	var chatToolTimeout time.Duration
+	var chatMaxConcurrent int
+	var chatMaxTasksPerTurn int
+	var chatMaxSessionSize int
 	var tlsOpts []func(*tls.Config)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -93,6 +105,15 @@ func main() {
 		controller.DefaultCopilotWorkerImage, "Container image for Copilot agent worker.")
 	flag.StringVar(&claudeWorkerImage, "claude-worker-image",
 		controller.DefaultClaudeWorkerImage, "Container image for Claude agent worker.")
+	flag.BoolVar(&chatEnabled, "chat-enabled", true, "Enable the chat endpoint.")
+	flag.StringVar(&chatProvider, "chat-provider", "", "Default Provider CRD name for chat.")
+	flag.StringVar(&chatModel, "chat-model", "", "Default model for chat.")
+	flag.IntVar(&chatMaxIterations, "chat-max-iterations", 20, "Max tool execution loops per chat request.")
+	flag.DurationVar(&chatMaxDuration, "chat-max-duration", 5*time.Minute, "Max wall-clock time per chat request.")
+	flag.DurationVar(&chatToolTimeout, "chat-tool-timeout", 60*time.Second, "Max time for a single tool execution.")
+	flag.IntVar(&chatMaxConcurrent, "chat-max-concurrent", 10, "Max concurrent chat sessions.")
+	flag.IntVar(&chatMaxTasksPerTurn, "chat-max-tasks-per-turn", 5, "Max tasks created per chat turn.")
+	flag.IntVar(&chatMaxSessionSize, "chat-max-session-size", 500*1024, "Soft limit for session ConfigMap size before truncation (bytes).")
 
 	opts := zap.Options{
 		Development: true,
@@ -235,6 +256,17 @@ func main() {
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
 		Port:           apiPort,
 		WatchNamespace: watchNamespace,
+		Chat: api.ChatConfig{
+			Enabled:         chatEnabled,
+			Provider:        chatProvider,
+			Model:           chatModel,
+			MaxIterations:   chatMaxIterations,
+			MaxDuration:     chatMaxDuration,
+			ToolTimeout:     chatToolTimeout,
+			MaxConcurrent:   chatMaxConcurrent,
+			MaxTasksPerTurn: chatMaxTasksPerTurn,
+			MaxSessionSize:  chatMaxSessionSize,
+		},
 	})
 
 	// Add API server as a runnable
