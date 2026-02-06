@@ -258,7 +258,18 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	c.Set("Connection", "keep-alive")
 	c.Set("X-Accel-Buffering", "no")
 
+	// Capture values for the streaming closure (ctx from outer scope is cancelled
+	// when HandleChat returns, so we create a new context inside the callback)
+	sseProvider := provider
+	sseMessages := messages
+	sseSystemPrompt := systemPrompt
+	sseTools := tools
+	sseExecutor := executor
+
 	return c.SendStreamWriter(func(w *bufio.Writer) {
+		sseCtx, sseCancel := context.WithTimeout(context.Background(), ch.config.MaxDuration)
+		defer sseCancel()
+
 		emitSSE := func(event, data string) {
 			_ = writeSSE(w, event, data)
 		}
@@ -266,12 +277,12 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		// Emit status event
 		statusData, _ := json.Marshal(map[string]string{
 			"sessionId": sessionID,
-			"provider":  provider.Name(),
+			"provider":  sseProvider.Name(),
 			"model":     model,
 		})
 		emitSSE("status", string(statusData))
 
-		content, usage, _, err := ch.runToolLoop(ctx, provider, messages, systemPrompt, tools, executor, sessionID, namespace, model, temperature, maxTokens, emitSSE)
+		content, usage, _, err := ch.runToolLoop(sseCtx, sseProvider, sseMessages, sseSystemPrompt, sseTools, sseExecutor, sessionID, namespace, model, temperature, maxTokens, emitSSE)
 		if err != nil {
 			errData, _ := json.Marshal(map[string]string{"error": err.Error()})
 			emitSSE("error", string(errData))
