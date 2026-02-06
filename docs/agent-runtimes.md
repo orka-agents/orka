@@ -6,7 +6,7 @@ Agent runtimes let Mercan delegate task execution to external agent CLIs—such 
 
 | Runtime | `runtime.type` | Secret Key | Status |
 |---------|---------------|------------|--------|
-| Claude Code CLI | `claude` | `ANTHROPIC_API_KEY` | GA |
+| Claude Code CLI | `claude` | `ANTHROPIC_API_KEY` (direct) or `ANTHROPIC_FOUNDRY_API_KEY` (Azure AI Foundry) | GA |
 | GitHub Copilot CLI | `copilot` | `GITHUB_TOKEN` | Technical Preview |
 
 ## Quick Start
@@ -22,6 +22,29 @@ kubectl create secret generic claude-api-key \
 kubectl create secret generic copilot-token \
   --from-literal=GITHUB_TOKEN=ghp_...
 ```
+
+### Azure AI Foundry
+
+Claude Code CLI supports Azure AI Foundry as an alternative to direct Anthropic API access. To use Azure AI Foundry, include the Foundry-specific environment variables in the secret:
+
+```bash
+kubectl create secret generic claude-credentials \
+  --from-literal=CLAUDE_CODE_USE_FOUNDRY=1 \
+  --from-literal=ANTHROPIC_FOUNDRY_API_KEY=your-key \
+  --from-literal=ANTHROPIC_FOUNDRY_RESOURCE=your-resource-name \
+  --from-literal=ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-5
+```
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `CLAUDE_CODE_USE_FOUNDRY` | Yes | Set to `1` to enable Azure AI Foundry |
+| `ANTHROPIC_FOUNDRY_API_KEY` | Yes | Azure AI Foundry API key |
+| `ANTHROPIC_FOUNDRY_RESOURCE` | Yes | Azure AI Foundry resource name |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | Yes | Deployment name (e.g. `claude-sonnet-4-5`) |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | No | Optional Haiku deployment name |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | No | Optional Opus deployment name |
+
+All secret keys are injected as environment variables into the worker pod via `envFrom`, so any Claude Code CLI environment variable can be passed through the secret.
 
 ### 2. Create an Agent
 

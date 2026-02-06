@@ -4,7 +4,8 @@ Mercan is a Kubernetes-native task execution platform that supports both contain
 
 ## Features
 
-- **Two Task Types**: Container tasks for arbitrary workloads, AI tasks for LLM-powered agents
+- **Three Task Types**: Container tasks for arbitrary workloads, AI tasks for LLM-powered agents, and agent tasks for external CLI runtimes
+- **Agent Runtimes**: Run tasks via Claude Code CLI or GitHub Copilot CLI with full autonomous coding capabilities
 - **Custom Resources**: Task, Agent, Tool, and Provider CRDs for declarative configuration
 - **Multi-Agent Coordination**: Coordinator agents can delegate work to specialist agents
 - **Session Continuity**: Multi-turn conversations with context preserved in ConfigMaps
@@ -32,20 +33,21 @@ Mercan is a Kubernetes-native task execution platform that supports both contain
 │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
                               │
-              ┌───────────────┴───────────────┐
-              │                               │
-       ┌──────┴──────┐                 ┌──────┴──────┐
-       │   General   │                 │     AI      │
-       │   Worker    │                 │   Worker    │
-       │ (containers)│                 │ (LLM agent) │
-       └─────────────┘                 └─────────────┘
+              ┌───────────────┼───────────────┐
+              │               │               │
+       ┌──────┴──────┐ ┌─────┴───────┐ ┌─────┴───────┐
+       │   General   │ │     AI      │ │    Agent    │
+       │   Worker    │ │   Worker    │ │   Workers   │
+       │ (containers)│ │ (LLM agent) │ │(Claude CLI, │
+       └─────────────┘ └─────────────┘ │ Copilot CLI)│
+                                       └─────────────┘
 ```
 
 ## Custom Resources
 
 ### Task
 
-The core work unit. Supports container commands or AI agent prompts.
+The core work unit. Supports container commands, AI agent prompts, or external agent CLI runtimes.
 
 ```yaml
 apiVersion: core.mercan.ai/v1alpha1
@@ -53,7 +55,7 @@ kind: Task
 metadata:
   name: my-task
 spec:
-  type: ai  # or "container"
+  type: ai  # or "container" or "agent"
   agentRef:
     name: my-agent
   prompt: "Analyze the latest Kubernetes security best practices"
@@ -140,11 +142,53 @@ spec:
     requestsPerMinute: 60
 ```
 
+### Agent (with Runtime)
+
+Agent configuration for external CLI runtimes (Claude Code CLI or GitHub Copilot CLI).
+
+```yaml
+apiVersion: core.mercan.ai/v1alpha1
+kind: Agent
+metadata:
+  name: claude-agent
+spec:
+  secretRef:
+    name: claude-credentials
+  runtime:
+    type: claude
+    defaultMaxTurns: 50
+    defaultAllowBash: true
+    defaultAllowedTools:
+      - Read
+      - Write
+      - Edit
+      - Bash
+```
+
+Agent runtime tasks reference an Agent with `runtime` configured:
+
+```yaml
+apiVersion: core.mercan.ai/v1alpha1
+kind: Task
+metadata:
+  name: code-review
+spec:
+  type: agent
+  agentRef:
+    name: claude-agent
+  prompt: "Review the code in this repo for security issues"
+  agentRuntime:
+    workspace:
+      gitRepo: "https://github.com/example/repo.git"
+      branch: main
+```
+
 ## Getting Started
 
 ### Prerequisites
 
-- Go 1.24+
+- Go 1.25+
+- Node.js 22+ (for agent worker images)
 - Docker 17.03+
 - kubectl 1.11.3+
 - Access to a Kubernetes 1.11.3+ cluster
@@ -236,6 +280,77 @@ kubectl get task hello-task
 kubectl get configmap task-hello-task-result -o jsonpath='{.data.result}'
 ```
 
+### Agent Runtimes Quick Start
+
+Agent runtimes let you run tasks via Claude Code CLI or GitHub Copilot CLI with full autonomous coding capabilities.
+
+1. Create credentials secret:
+
+```bash
+# For Claude Code CLI (direct API)
+kubectl create secret generic claude-credentials \
+  --from-literal=ANTHROPIC_API_KEY=sk-ant-your-key
+
+# For Claude Code CLI (Azure AI Foundry)
+kubectl create secret generic claude-credentials \
+  --from-literal=CLAUDE_CODE_USE_FOUNDRY=1 \
+  --from-literal=ANTHROPIC_FOUNDRY_API_KEY=your-key \
+  --from-literal=ANTHROPIC_FOUNDRY_RESOURCE=your-resource \
+  --from-literal=ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-5
+```
+
+2. Create an Agent with runtime:
+
+```yaml
+kubectl apply -f - <<EOF
+apiVersion: core.mercan.ai/v1alpha1
+kind: Agent
+metadata:
+  name: claude-agent
+spec:
+  secretRef:
+    name: claude-credentials
+  runtime:
+    type: claude
+    defaultMaxTurns: 50
+    defaultAllowBash: true
+    defaultAllowedTools:
+      - Read
+      - Write
+      - Edit
+      - Bash
+EOF
+```
+
+3. Run an agent task:
+
+```yaml
+kubectl apply -f - <<EOF
+apiVersion: core.mercan.ai/v1alpha1
+kind: Task
+metadata:
+  name: code-review
+spec:
+  type: agent
+  agentRef:
+    name: claude-agent
+  prompt: "Review the code in this repo for security issues"
+  agentRuntime:
+    workspace:
+      gitRepo: "https://github.com/example/repo.git"
+      branch: main
+EOF
+```
+
+4. Check the result:
+
+```bash
+kubectl get task code-review
+kubectl get configmap task-code-review-result -o jsonpath='{.data.result}'
+```
+
+See [Agent Runtimes Documentation](docs/agent-runtimes.md) for full configuration reference.
+
 ## REST API
 
 The controller exposes a REST API for programmatic access.
@@ -296,6 +411,11 @@ make build
 # Run tests
 make test
 
+# Build agent worker images
+make docker-build-claude-worker
+make docker-build-copilot-worker
+make docker-build-all
+
 # Local development with kind
 kind create cluster
 make docker-build docker-push IMG=<registry>/mercan:tag
@@ -308,6 +428,7 @@ See the [examples](examples/) directory for complete examples:
 
 - [Complex Workflow](examples/complex-workflow/) - Multi-agent coordination with custom tools and skills
 - [Tavily Integration](examples/tavily/) - Web search tool integration
+- [Agent Runtimes](docs/agent-runtimes.md) - Detailed agent runtime documentation
 
 ## Security
 
