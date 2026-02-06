@@ -58,7 +58,7 @@ func CoreTools() []llm.Tool {
 				"type": "object",
 				"properties": map[string]any{
 					"name":      map[string]any{"type": "string", "description": "Task name"},
-					"image":     map[string]any{"type": "string", "description": "Container image to run"},
+					"image":     map[string]any{"type": "string", "description": "Container image to run. Leave empty to use the default worker image which includes common tools (kubectl, sh) and writes results to a ConfigMap. Only set a custom image if you need a specific runtime not in the default worker."},
 					"command":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Command to execute"},
 					"args":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Arguments to the command"},
 					"namespace": map[string]any{"type": "string", "description": "Kubernetes namespace"},
@@ -66,7 +66,7 @@ func CoreTools() []llm.Tool {
 					"priority":  map[string]any{"type": "integer", "description": "Priority 0-1000"},
 					"schedule":  map[string]any{"type": "string", "description": "Cron schedule for recurring tasks (e.g., '0 */6 * * *' for every 6 hours, '0 9 * * 1-5' for weekdays at 9am, '*/5 * * * *' for every 5 minutes). Leave empty for one-time tasks."},
 				},
-				"required": []string{"name", "image"},
+				"required": []string{"name"},
 			}),
 		},
 		{

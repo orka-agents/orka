@@ -186,14 +186,20 @@ func (b *JobBuilder) buildContainer(task *corev1alpha1.Task, agent *corev1alpha1
 	case corev1alpha1.TaskTypeContainer:
 		if task.Spec.Image != "" {
 			container.Image = task.Spec.Image
+			if len(task.Spec.Command) > 0 {
+				container.Command = task.Spec.Command
+			}
+			if len(task.Spec.Args) > 0 {
+				container.Args = task.Spec.Args
+			}
 		} else {
 			container.Image = b.GeneralWorkerImage
-		}
-		if len(task.Spec.Command) > 0 {
-			container.Command = task.Spec.Command
-		}
-		if len(task.Spec.Args) > 0 {
-			container.Args = task.Spec.Args
+			container.Command = []string{"/worker"}
+			// Pass the user command as args to the worker binary
+			var workerArgs []string
+			workerArgs = append(workerArgs, task.Spec.Command...)
+			workerArgs = append(workerArgs, task.Spec.Args...)
+			container.Args = workerArgs
 		}
 	case corev1alpha1.TaskTypeAgent:
 		container.Image = b.getAgentWorkerImage(agent)

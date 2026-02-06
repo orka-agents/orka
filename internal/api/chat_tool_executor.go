@@ -244,9 +244,6 @@ func (e *ToolExecutor) executeCreateContainerTask(ctx context.Context, args map[
 	}
 
 	image := getStringArg(args, "image")
-	if image == "" {
-		return toolError("invalid_arguments", "image is required", "Provide a container image")
-	}
 
 	namespace := getStringArgDefault(args, "namespace", e.namespace)
 	if ns := e.checkNamespaceScope(namespace); ns != nil {

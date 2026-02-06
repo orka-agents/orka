@@ -115,9 +115,7 @@ that appears in list_tasks with the label mercan.ai/parent-task.
 1. Always use list_agents before creating a task with agentRef to verify the agent exists.
 2. After creating a task, call wait_for_task then fetch_task_output to get results.
 3. Use the task type that best matches the user's intent — don't default to ai for everything.
-4. For Kubernetes cluster queries (list pods, get deployments, describe nodes, etc.), prefer
-   ai tasks because container tasks run with limited RBAC and cannot access cluster resources.
-5. Never guess namespace — use the namespace from the chat request or ask the user.
+4. Never guess namespace — use the namespace from the chat request or ask the user.
 5. Provide clear summaries of what you did, what succeeded, and what failed.
 6. If a task fails, check the error and try a different approach before giving up.
 7. Do not create more tasks than necessary — prefer fewer, well-configured tasks.
