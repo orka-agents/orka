@@ -78,6 +78,18 @@ make deploy IMG=<registry>/mercan:tag
 - Priority queue (0-1000) for task scheduling
 - Finalizers ensure cleanup of result ConfigMaps and session locks
 - LLM tool args for nested objects arrive as `map[string]any`, not strings — always type-switch
+- Multi-agent coordination: coordinator agents delegate to specialists via `delegate_task`/`wait_for_tasks` tools; controller enforces depth, allowedAgents, concurrency limits
+
+### Multi-Agent Coordination
+
+- **Coordination tools** (`internal/tools/delegate_task.go`, `internal/tools/wait_for_tasks.go`): LLM tools that create child Tasks and poll for results
+- **Controller enforcement** (`internal/controller/task_controller.go`): Validates `maxDepth`, `allowedAgents`, `maxConcurrentChildren` in `handlePending`; populates `status.childTasks` in `handleRunning`
+- **Job builder** (`internal/controller/job_builder.go`): Injects `MERCAN_COORDINATION_*` env vars and auto-adds coordination tools when `agent.Spec.Coordination.Enabled`
+- **AI worker** (`workers/ai/main.go`): Registers coordination tools via `tools.RegisterCoordinationTools()` when `MERCAN_COORDINATION_ENABLED=true`; increases `maxIterations` to 50
+- **RBAC** (`config/rbac/worker_role.yaml`): Workers have Task `create/get/list/watch` and ConfigMap `get/list` for coordination
+- Child tasks use labels (`mercan.ai/parent-task`, `mercan.ai/delegated-agent`) and annotations (`mercan.ai/coordination-depth`) for tracking
+- Owner references enable cascade deletion of child tasks
+- See @docs/multi-agent-coordination.md for full details
 
 ## Auto-Generated Files — Do NOT Edit
 
@@ -179,5 +191,6 @@ See @docs/ for detailed documentation:
 - @docs/architecture.md — System design and components
 - @docs/agent-runtimes.md — Claude Code CLI and Copilot CLI runtime configuration
 - @docs/chat.md — Chat endpoint, tools, SSE streaming
+- @docs/multi-agent-coordination.md — Coordinator agents, delegation tools, controller enforcement
 - @docs/ui.md — Web dashboard architecture
 - @docs/testing.md — Test structure and patterns

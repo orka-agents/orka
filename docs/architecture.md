@@ -62,7 +62,7 @@ Mercan uses four CRDs:
 | Worker | Description |
 |--------|-------------|
 | **General Worker** (`workers/general/`) | Runs arbitrary container commands |
-| **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in tools (web search, code exec, file read) |
+| **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in tools (web search, code exec, file read) and coordination tools (delegate_task, wait_for_tasks) |
 | **Copilot Agent Worker** (`workers/agent/copilot/`) | Runs tasks via GitHub Copilot CLI using the Go SDK |
 | **Claude Agent Worker** (`workers/agent/claude/`) | Runs tasks via Claude Code CLI |
 
@@ -142,6 +142,29 @@ Session lock released
 Webhook delivered (if configured)
 ```
 
+## Multi-Agent Coordination
+
+Coordinator agents can delegate subtasks to specialist agents at runtime. The LLM uses `delegate_task` and `wait_for_tasks` tools to create child Tasks and collect results. The controller enforces guardrails:
+
+```
+Coordinator Agent (depth 0)
+├── delegate_task(agent: "specialist-a", prompt: "...")  → Child Task (depth 1)
+├── delegate_task(agent: "specialist-b", prompt: "...")  → Child Task (depth 1)
+│   └── delegate_task(agent: "sub-specialist", ...)      → Grandchild Task (depth 2)
+└── wait_for_tasks(tasks: [...])  → aggregated results
+```
+
+**Controller enforcement** (in `handlePending`):
+- **maxDepth**: Rejects child tasks exceeding the coordinator's depth limit
+- **allowedAgents**: Rejects delegation to agents not in the coordinator's allow list
+- **maxConcurrentChildren**: Requeues (not fails) child tasks when the active sibling count is at the limit
+
+**ChildTaskStatus tracking** (in `handleRunning`): Coordinator tasks get `status.childTasks[]` populated with each child's name, agent, phase, and truncated result.
+
+Child tasks use owner references for cascade deletion and labels (`mercan.ai/parent-task`, `mercan.ai/delegated-agent`) for querying.
+
+See [multi-agent-coordination.md](multi-agent-coordination.md) for full details.
+
 ## LLM Provider Architecture
 
 The AI worker uses a pluggable provider interface:
@@ -167,7 +190,7 @@ Mercan supports extensible AI capabilities through a three-layer system:
 │  - Teaching/guidance for built-in tools                         │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 2: Built-in Tools (in worker image)                      │
-│  - web_search, file_read, code_exec                             │
+│  - web_search, file_read, code_exec, delegate_task, wait_for_tasks│
 │  - Fast, no extra infrastructure                                │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 3: Custom Tools (Tool CRD + HTTP)                        │
