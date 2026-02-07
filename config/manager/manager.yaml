@@ -66,6 +66,7 @@ spec:
           - --health-probe-bind-address=:8081
           - --store-backend=sqlite
           - --store-path=/data/mercan.db
+          - --controller-url=http://mercan-api.mercan-system.svc:8080
         image: controller:latest
         name: manager
         ports: []
