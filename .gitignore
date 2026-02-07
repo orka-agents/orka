@@ -33,7 +33,7 @@ go.work
 # UI
 ui/node_modules/
 ui/dist/
-internal/uiembed/dist/
+internal/uiembed/dist/*
 !internal/uiembed/dist/.gitkeep
 
 main
