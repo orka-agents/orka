@@ -127,8 +127,8 @@ spec:
       - Grep
 
     # defaultAllowBash: allow bash commands by default
-    # Default: false
-    defaultAllowBash: false
+    # Default: true
+    defaultAllowBash: true
 
   # secretRef: Secret containing API credentials
   # Claude runtime expects: ANTHROPIC_API_KEY
@@ -363,11 +363,11 @@ Writable directories are provided via `emptyDir` volumes:
 | Grep | Allowed | Low |
 | WebSearch | Allowed | Low |
 | WebFetch | Allowed | Medium |
-| Write | Denied | High |
-| Edit | Denied | High |
-| Bash | Denied | High |
+| Write | Allowed | High |
+| Edit | Allowed | High |
+| Bash | Allowed | High |
 
-Enable high-risk tools explicitly via `allowedTools` and `allowBash` on the Agent or Task.
+All tools are allowed by default for autonomous operation. To restrict high-risk tools, set `defaultAllowBash: false` on the Agent or `allowBash: false` on individual Tasks.
 
 ### Secrets
 

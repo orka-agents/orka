@@ -89,7 +89,7 @@ type AgentCLIRuntime struct {
 	DefaultAllowedTools []string `json:"defaultAllowedTools,omitempty"`
 
 	// DefaultAllowBash controls whether bash is allowed by default for tasks using this Agent
-	// +kubebuilder:default=false
+	// +kubebuilder:default=true
 	// +optional
 	DefaultAllowBash bool `json:"defaultAllowBash,omitempty"`
 }

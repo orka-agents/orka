@@ -216,7 +216,7 @@ spec:
                   When set, this Agent is for type: agent tasks only (mutually exclusive with providerRef).
                 properties:
                   defaultAllowBash:
-                    default: false
+                    default: true
                     description: DefaultAllowBash controls whether bash is allowed
                       by default for tasks using this Agent
                     type: boolean
