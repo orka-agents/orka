@@ -36,12 +36,22 @@ type DelegateTaskTool struct {
 	k8sClient client.Client
 }
 
+// WorkspaceArgs specifies a git workspace for agent runtime tasks
+type WorkspaceArgs struct {
+	GitRepo string `json:"gitRepo,omitempty"`
+	Branch  string `json:"branch,omitempty"`
+	Ref     string `json:"ref,omitempty"`
+}
+
 // DelegateTaskArgs are the arguments for the delegate_task tool
 type DelegateTaskArgs struct {
-	Agent     string `json:"agent"`
-	Prompt    string `json:"prompt"`
-	Namespace string `json:"namespace,omitempty"`
-	Priority  *int32 `json:"priority,omitempty"`
+	Agent     string         `json:"agent"`
+	Prompt    string         `json:"prompt"`
+	Namespace string         `json:"namespace,omitempty"`
+	Priority  *int32         `json:"priority,omitempty"`
+	Workspace *WorkspaceArgs `json:"workspace,omitempty"`
+	MaxTurns  *int32         `json:"maxTurns,omitempty"`
+	AllowBash *bool          `json:"allowBash,omitempty"`
 }
 
 // DelegateTaskResult represents the delegation result
@@ -87,6 +97,32 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 			"priority": {
 				"type": "integer",
 				"description": "Priority 0-1000 (defaults to parent priority)"
+			},
+			"workspace": {
+				"type": "object",
+				"description": "Git workspace configuration for agent runtime tasks",
+				"properties": {
+					"gitRepo": {
+						"type": "string",
+						"description": "Git repository URL"
+					},
+					"branch": {
+						"type": "string",
+						"description": "Git branch name"
+					},
+					"ref": {
+						"type": "string",
+						"description": "Git ref (commit SHA or tag)"
+					}
+				}
+			},
+			"maxTurns": {
+				"type": "integer",
+				"description": "Maximum number of turns for the agent"
+			},
+			"allowBash": {
+				"type": "boolean",
+				"description": "Whether to allow bash execution in the agent"
 			}
 		},
 		"required": ["agent", "prompt"]
@@ -178,6 +214,20 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		priority = parentTask.Spec.Priority
 	}
 
+	// Look up the target Agent to determine task type
+	targetAgent := &corev1alpha1.Agent{}
+	if err := t.k8sClient.Get(ctx, types.NamespacedName{
+		Name: delegateArgs.Agent, Namespace: ns,
+	}, targetAgent); err != nil {
+		return "", fmt.Errorf("failed to get agent %q: %w", delegateArgs.Agent, err)
+	}
+
+	// Auto-detect task type based on agent configuration
+	taskType := corev1alpha1.TaskTypeAI
+	if targetAgent.Spec.Runtime != nil {
+		taskType = corev1alpha1.TaskTypeAgent
+	}
+
 	// Build child Task
 	childTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -193,13 +243,34 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
-			Type: corev1alpha1.TaskTypeAI,
+			Type: taskType,
 			AgentRef: &corev1alpha1.AgentReference{
 				Name: delegateArgs.Agent,
 			},
 			Prompt:   delegateArgs.Prompt,
 			Priority: priority,
 		},
+	}
+
+	// Set agent runtime config for agent-type tasks
+	if taskType == corev1alpha1.TaskTypeAgent {
+		childTask.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
+
+		if delegateArgs.Workspace != nil {
+			childTask.Spec.AgentRuntime.Workspace = &corev1alpha1.WorkspaceConfig{
+				GitRepo: delegateArgs.Workspace.GitRepo,
+				Branch:  delegateArgs.Workspace.Branch,
+				Ref:     delegateArgs.Workspace.Ref,
+			}
+		}
+
+		if delegateArgs.MaxTurns != nil {
+			childTask.Spec.AgentRuntime.MaxTurns = delegateArgs.MaxTurns
+		}
+
+		if delegateArgs.AllowBash != nil {
+			childTask.Spec.AgentRuntime.AllowBash = delegateArgs.AllowBash
+		}
 	}
 
 	// Set owner reference if parent task exists

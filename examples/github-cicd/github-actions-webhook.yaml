@@ -1,0 +1,43 @@
+# .github/workflows/ci-feedback.yml
+# Copy this to your repository to trigger Mercan auto-fix on CI failure
+#
+# Required secrets:
+#   MERCAN_API_URL: URL of your Mercan API (e.g., https://mercan.example.com)
+#   MERCAN_TOKEN: ServiceAccount token for Mercan API auth
+name: CI Feedback to Mercan
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+jobs:
+  trigger-fix:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get failure logs
+        id: logs
+        run: |
+          echo "run_id=${{ github.event.workflow_run.id }}" >> $GITHUB_OUTPUT
+          echo "branch=${{ github.event.workflow_run.head_branch }}" >> $GITHUB_OUTPUT
+          echo "sha=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
+          echo "repo=${{ github.repository }}" >> $GITHUB_OUTPUT
+
+      - name: Trigger Mercan fix agent
+        run: |
+          curl -s -X POST "${{ secrets.MERCAN_API_URL }}/api/v1/tasks" \
+            -H "Authorization: Bearer ${{ secrets.MERCAN_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "type": "agent",
+              "agentRef": {"name": "claude-coder"},
+              "prompt": "CI failed on branch ${{ steps.logs.outputs.branch }} (commit ${{ steps.logs.outputs.sha }}). Check the CI failures, fix the code, and push to the same branch.",
+              "agentRuntime": {
+                "workspace": {
+                  "gitRepo": "https://github.com/${{ steps.logs.outputs.repo }}.git",
+                  "branch": "${{ steps.logs.outputs.branch }}"
+                }
+              },
+              "timeout": "15m",
+              "priority": 900
+            }'

@@ -1,0 +1,61 @@
+# Claude Code agent that writes code and creates PRs
+apiVersion: core.mercan.ai/v1alpha1
+kind: Agent
+metadata:
+  name: claude-coder
+spec:
+  runtime:
+    type: claude
+    defaultMaxTurns: 100
+    defaultAllowBash: true
+  systemPrompt:
+    inline: |
+      You are a software developer. When given a task:
+      1. Create a feature branch from main
+      2. Implement the changes
+      3. Run any existing tests
+      4. Commit with a descriptive message
+      5. Push and create a PR using `gh pr create`
+      6. Report the PR number and URL in your final output
+  secretRef:
+    name: claude-coder-secrets
+---
+# Coordinator agent that orchestrates the full CI/CD flow
+apiVersion: core.mercan.ai/v1alpha1
+kind: Agent
+metadata:
+  name: cicd-coordinator
+spec:
+  providerRef:
+    name: anthropic-provider
+  model:
+    name: claude-sonnet-4-20250514
+  systemPrompt:
+    inline: |
+      You are a CI/CD coordinator. You manage the full lifecycle of code changes:
+
+      1. Use delegate_task to assign coding work to the claude-coder agent.
+         Include workspace.gitRepo and workspace.branch so the agent clones the right repo.
+      2. Use wait_for_tasks to get the result (which should include the PR number).
+      3. Use github-check-ci to poll CI status on the PR's head commit.
+         Poll every 30 seconds until checks complete (allow up to 10 minutes).
+      4. If CI passes: use github-merge-pr to merge the PR.
+      5. If CI fails: delegate_task to claude-coder to fix the failures,
+         referencing the same branch.
+      6. Report the final outcome.
+
+      Always include the full owner/repo when calling GitHub tools.
+  tools:
+    - name: delegate_task
+    - name: wait_for_tasks
+    - name: github-check-ci
+    - name: github-merge-pr
+    - name: github-get-pr
+  coordination:
+    enabled: true
+    maxConcurrentChildren: 3
+    maxDepth: 2
+    allowedAgents:
+      - name: claude-coder
+  secretRef:
+    name: llm-credentials

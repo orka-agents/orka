@@ -592,3 +592,147 @@ func TestToolExecutor_Execute_DefaultAuthInject(t *testing.T) {
 		t.Errorf("Authorization = %s, want Bearer test-token", receivedAuth)
 	}
 }
+
+func TestToolExecutor_Execute_URLInterpolation(t *testing.T) {
+	var receivedPath string
+	var receivedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&receivedBody)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status": "ok"}`))
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: corev1alpha1.HTTPExecution{
+				URL:    server.URL + "/repos/{{owner}}/{{repo}}/commits/{{ref}}/check-runs",
+				Method: http.MethodGet,
+			},
+		},
+	}
+
+	args := json.RawMessage(`{"owner": "myorg", "repo": "myrepo", "ref": "abc123"}`)
+	_, err := executor.Execute(context.Background(), tool, args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// Verify URL was interpolated
+	expectedPath := "/repos/myorg/myrepo/commits/abc123/check-runs"
+	if receivedPath != expectedPath {
+		t.Errorf("path = %q, want %q", receivedPath, expectedPath)
+	}
+
+	// Verify interpolated keys were removed from body
+	if receivedBody != nil {
+		if _, ok := receivedBody["owner"]; ok {
+			t.Error("body should not contain 'owner' after interpolation")
+		}
+		if _, ok := receivedBody["repo"]; ok {
+			t.Error("body should not contain 'repo' after interpolation")
+		}
+		if _, ok := receivedBody["ref"]; ok {
+			t.Error("body should not contain 'ref' after interpolation")
+		}
+	}
+}
+
+func TestToolExecutor_Execute_URLInterpolation_Partial(t *testing.T) {
+	var receivedPath string
+	var receivedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&receivedBody)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: corev1alpha1.HTTPExecution{
+				URL:    server.URL + "/repos/{{owner}}/{{repo}}/pulls/{{pull_number}}/merge",
+				Method: http.MethodPut,
+			},
+		},
+	}
+
+	args := json.RawMessage(`{"owner": "myorg", "repo": "myrepo", "pull_number": 42, "merge_method": "squash"}`)
+	_, err := executor.Execute(context.Background(), tool, args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// Verify URL was interpolated (pull_number is numeric, should be converted to string)
+	expectedPath := "/repos/myorg/myrepo/pulls/42/merge"
+	if receivedPath != expectedPath {
+		t.Errorf("path = %q, want %q", receivedPath, expectedPath)
+	}
+
+	// Verify non-interpolated key remains in body
+	if receivedBody == nil {
+		t.Fatal("body should not be nil")
+	}
+	if receivedBody["merge_method"] != "squash" {
+		t.Errorf("body merge_method = %v, want squash", receivedBody["merge_method"])
+	}
+
+	// Interpolated keys should be removed
+	if _, ok := receivedBody["owner"]; ok {
+		t.Error("body should not contain 'owner'")
+	}
+}
+
+func TestToolExecutor_Execute_URLInterpolation_NoPlaceholders(t *testing.T) {
+	var receivedPath string
+	var receivedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&receivedBody)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: corev1alpha1.HTTPExecution{
+				URL: server.URL + "/api/search",
+			},
+		},
+	}
+
+	args := json.RawMessage(`{"query": "test", "limit": 10}`)
+	_, err := executor.Execute(context.Background(), tool, args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// URL should be unchanged
+	if receivedPath != "/api/search" {
+		t.Errorf("path = %q, want /api/search", receivedPath)
+	}
+
+	// All params should remain in body
+	if receivedBody["query"] != "test" {
+		t.Errorf("body query = %v, want test", receivedBody["query"])
+	}
+}

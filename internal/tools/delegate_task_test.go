@@ -27,6 +27,16 @@ import (
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 )
 
+func researcherAgent() *corev1alpha1.Agent {
+	return &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "researcher",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.AgentSpec{},
+	}
+}
+
 func parentTask() *corev1alpha1.Task {
 	priority := int32(500)
 	return &corev1alpha1.Task{
@@ -193,8 +203,8 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 				t.Setenv(k, v)
 			}
 
-			// Create fake client with parent task
-			k8sClient := newFakeClient(parentTask())
+			// Create fake client with parent task and agent
+			k8sClient := newFakeClient(parentTask(), researcherAgent())
 			tool := NewDelegateTaskTool(k8sClient)
 
 			result, err := tool.Execute(context.Background(), tt.args)
@@ -234,7 +244,7 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
 	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "5")
 
-	k8sClient := newFakeClient(parentTask())
+	k8sClient := newFakeClient(parentTask(), researcherAgent())
 	tool := NewDelegateTaskTool(k8sClient)
 
 	args := json.RawMessage(`{"agent": "researcher", "prompt": "Investigate this"}`)
@@ -315,6 +325,220 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 	// Verify priority inherited from parent
 	if childTask.Spec.Priority == nil || *childTask.Spec.Priority != 500 {
 		t.Errorf("spec.priority = %v, want 500", childTask.Spec.Priority)
+	}
+}
+
+func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
+	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
+	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "claude-coder")
+	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "3")
+
+	maxTurns := int32(100)
+	agentTask := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "claude-coder",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:             "claude",
+				DefaultMaxTurns:  &maxTurns,
+				DefaultAllowBash: true,
+			},
+		},
+	}
+
+	k8sClient := newFakeClient(parentTask(), agentTask)
+	tool := NewDelegateTaskTool(k8sClient)
+
+	args := json.RawMessage(`{
+		"agent": "claude-coder",
+		"prompt": "Fix the auth module",
+		"workspace": {
+			"gitRepo": "https://github.com/myorg/myrepo.git",
+			"branch": "main"
+		},
+		"maxTurns": 50,
+		"allowBash": true
+	}`)
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var delegateResult DelegateTaskResult
+	if err := json.Unmarshal([]byte(result), &delegateResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if delegateResult.Status != "created" {
+		t.Errorf("status = %q, want %q", delegateResult.Status, "created")
+	}
+
+	// Fetch the child task
+	taskList := &corev1alpha1.TaskList{}
+	if err := k8sClient.List(context.Background(), taskList); err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+
+	var childTask *corev1alpha1.Task
+	for i := range taskList.Items {
+		if taskList.Items[i].Name != "parent-task" {
+			childTask = &taskList.Items[i]
+			break
+		}
+	}
+	if childTask == nil {
+		t.Fatal("child task not found")
+	}
+
+	// Verify task type is agent
+	if childTask.Spec.Type != corev1alpha1.TaskTypeAgent {
+		t.Errorf("spec.type = %q, want %q", childTask.Spec.Type, corev1alpha1.TaskTypeAgent)
+	}
+
+	// Verify agent runtime config
+	if childTask.Spec.AgentRuntime == nil {
+		t.Fatal("spec.agentRuntime is nil")
+	}
+	if childTask.Spec.AgentRuntime.Workspace == nil {
+		t.Fatal("spec.agentRuntime.workspace is nil")
+	}
+	if childTask.Spec.AgentRuntime.Workspace.GitRepo != "https://github.com/myorg/myrepo.git" {
+		t.Errorf("workspace.gitRepo = %q, want %q", childTask.Spec.AgentRuntime.Workspace.GitRepo, "https://github.com/myorg/myrepo.git")
+	}
+	if childTask.Spec.AgentRuntime.Workspace.Branch != "main" {
+		t.Errorf("workspace.branch = %q, want %q", childTask.Spec.AgentRuntime.Workspace.Branch, "main")
+	}
+	if childTask.Spec.AgentRuntime.MaxTurns == nil || *childTask.Spec.AgentRuntime.MaxTurns != 50 {
+		t.Errorf("agentRuntime.maxTurns = %v, want 50", childTask.Spec.AgentRuntime.MaxTurns)
+	}
+	if childTask.Spec.AgentRuntime.AllowBash == nil || !*childTask.Spec.AgentRuntime.AllowBash {
+		t.Error("agentRuntime.allowBash should be true")
+	}
+}
+
+func TestDelegateTaskTool_Execute_AgentNotFound(t *testing.T) {
+	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
+	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "nonexistent-agent")
+	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "3")
+
+	// No agent registered in the fake client
+	k8sClient := newFakeClient(parentTask())
+	tool := NewDelegateTaskTool(k8sClient)
+
+	args := json.RawMessage(`{"agent": "nonexistent-agent", "prompt": "Do something"}`)
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("Execute() expected error for nonexistent agent")
+	}
+	if !contains(err.Error(), "failed to get agent") {
+		t.Errorf("Execute() error = %v, want error containing %q", err, "failed to get agent")
+	}
+}
+
+func TestDelegateTaskTool_Execute_AgentTypeNoWorkspace(t *testing.T) {
+	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
+	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "claude-coder")
+	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "3")
+
+	agentWithRuntime := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "claude-coder",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: "claude",
+			},
+		},
+	}
+
+	k8sClient := newFakeClient(parentTask(), agentWithRuntime)
+	tool := NewDelegateTaskTool(k8sClient)
+
+	// No workspace, maxTurns, or allowBash args
+	args := json.RawMessage(`{"agent": "claude-coder", "prompt": "Fix bugs"}`)
+	_, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	taskList := &corev1alpha1.TaskList{}
+	if err := k8sClient.List(context.Background(), taskList); err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+
+	var childTask *corev1alpha1.Task
+	for i := range taskList.Items {
+		if taskList.Items[i].Name != "parent-task" {
+			childTask = &taskList.Items[i]
+			break
+		}
+	}
+	if childTask == nil {
+		t.Fatal("child task not found")
+	}
+
+	if childTask.Spec.Type != corev1alpha1.TaskTypeAgent {
+		t.Errorf("spec.type = %q, want %q", childTask.Spec.Type, corev1alpha1.TaskTypeAgent)
+	}
+	if childTask.Spec.AgentRuntime == nil {
+		t.Fatal("spec.agentRuntime should not be nil for agent-type tasks")
+	}
+	if childTask.Spec.AgentRuntime.Workspace != nil {
+		t.Error("spec.agentRuntime.workspace should be nil when not provided")
+	}
+	if childTask.Spec.AgentRuntime.MaxTurns != nil {
+		t.Error("spec.agentRuntime.maxTurns should be nil when not provided")
+	}
+	if childTask.Spec.AgentRuntime.AllowBash != nil {
+		t.Error("spec.agentRuntime.allowBash should be nil when not provided")
+	}
+}
+
+func TestDelegateTaskTool_Execute_AITypeNoRuntime(t *testing.T) {
+	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
+	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
+	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "3")
+
+	k8sClient := newFakeClient(parentTask(), researcherAgent())
+	tool := NewDelegateTaskTool(k8sClient)
+
+	args := json.RawMessage(`{"agent": "researcher", "prompt": "Research the topic"}`)
+	_, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	taskList := &corev1alpha1.TaskList{}
+	if err := k8sClient.List(context.Background(), taskList); err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+
+	var childTask *corev1alpha1.Task
+	for i := range taskList.Items {
+		if taskList.Items[i].Name != "parent-task" {
+			childTask = &taskList.Items[i]
+			break
+		}
+	}
+	if childTask == nil {
+		t.Fatal("child task not found")
+	}
+
+	if childTask.Spec.Type != corev1alpha1.TaskTypeAI {
+		t.Errorf("spec.type = %q, want %q", childTask.Spec.Type, corev1alpha1.TaskTypeAI)
+	}
+	if childTask.Spec.AgentRuntime != nil {
+		t.Error("spec.agentRuntime should be nil for AI-type tasks")
 	}
 }
 
