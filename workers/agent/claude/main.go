@@ -29,16 +29,12 @@ import (
 	"syscall"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
+	"github.com/sozercan/mercan/workers/common"
 )
 
 const (
 	defaultMaxTurns   = 50
 	workspaceDir      = "/workspace"
-	maxResultBytes    = 900 * 1024 // 900 KB to stay under ConfigMap 1MB limit
 	defaultClaudePath = "claude"
 )
 
@@ -77,7 +73,6 @@ func run() error {
 	if err != nil {
 		// On failure, still try to write partial result
 		writeErr := writeResult(
-			ctx, cfg.taskNamespace, cfg.resultConfigMap,
 			fmt.Sprintf("Error: %v\n\n%s", err, result),
 		)
 		if writeErr != nil {
@@ -86,8 +81,8 @@ func run() error {
 		return fmt.Errorf("claude execution failed: %w", err)
 	}
 
-	// Write result to ConfigMap
-	if err := writeResult(ctx, cfg.taskNamespace, cfg.resultConfigMap, result); err != nil {
+	// Write result to controller via HTTP
+	if err := writeResult(result); err != nil {
 		return fmt.Errorf("failed to write result: %w", err)
 	}
 
@@ -99,7 +94,6 @@ func run() error {
 type config struct {
 	taskName        string
 	taskNamespace   string
-	resultConfigMap string
 	prompt          string
 	model           string
 	systemPrompt    string
@@ -117,17 +111,16 @@ type config struct {
 // loadConfig reads and validates configuration from environment variables.
 func loadConfig() (*config, error) {
 	cfg := &config{
-		taskName:        os.Getenv("MERCAN_TASK_NAME"),
-		taskNamespace:   os.Getenv("MERCAN_TASK_NAMESPACE"),
-		resultConfigMap: os.Getenv("MERCAN_RESULT_CONFIGMAP"),
-		prompt:          os.Getenv("MERCAN_PROMPT"),
-		model:           os.Getenv("MERCAN_MODEL"),
-		systemPrompt:    os.Getenv("MERCAN_SYSTEM_PROMPT"),
-		gitRepo:         os.Getenv("MERCAN_GIT_REPO"),
-		gitBranch:       os.Getenv("MERCAN_GIT_BRANCH"),
-		gitRef:          os.Getenv("MERCAN_GIT_REF"),
-		subPath:         os.Getenv("MERCAN_WORKSPACE_SUBPATH"),
-		maxTurns:        defaultMaxTurns,
+		taskName:      os.Getenv("MERCAN_TASK_NAME"),
+		taskNamespace: os.Getenv("MERCAN_TASK_NAMESPACE"),
+		prompt:        os.Getenv("MERCAN_PROMPT"),
+		model:         os.Getenv("MERCAN_MODEL"),
+		systemPrompt:  os.Getenv("MERCAN_SYSTEM_PROMPT"),
+		gitRepo:       os.Getenv("MERCAN_GIT_REPO"),
+		gitBranch:     os.Getenv("MERCAN_GIT_BRANCH"),
+		gitRef:        os.Getenv("MERCAN_GIT_REF"),
+		subPath:       os.Getenv("MERCAN_WORKSPACE_SUBPATH"),
+		maxTurns:      defaultMaxTurns,
 	}
 
 	if cfg.prompt == "" {
@@ -328,46 +321,7 @@ func claudePath() string {
 	return defaultClaudePath
 }
 
-// writeResult writes the task result to a Kubernetes ConfigMap.
-func writeResult(ctx context.Context, namespace, name, result string) error {
-	k8sConfig, err := rest.InClusterConfig()
-	if err != nil {
-		return fmt.Errorf("failed to get in-cluster config: %w", err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(k8sConfig)
-	if err != nil {
-		return fmt.Errorf("failed to create clientset: %w", err)
-	}
-
-	// Truncate result if too large for ConfigMap
-	if len(result) > maxResultBytes {
-		truncMsg := "\n\n--- [result truncated: exceeded ConfigMap size limit] ---"
-		result = result[:maxResultBytes-len(truncMsg)] + truncMsg
-	}
-
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"mercan.ai/result": "true",
-			},
-		},
-		Data: map[string]string{
-			"result": result,
-		},
-	}
-
-	_, err = clientset.CoreV1().ConfigMaps(namespace).Create(
-		ctx, cm, metav1.CreateOptions{},
-	)
-	if err != nil {
-		// Try update if create fails (idempotent)
-		_, err = clientset.CoreV1().ConfigMaps(namespace).Update(
-			ctx, cm, metav1.UpdateOptions{},
-		)
-	}
-
-	return err
+// writeResult submits the task result to the controller via HTTP POST.
+func writeResult(result string) error {
+	return common.SubmitResult([]byte(result))
 }

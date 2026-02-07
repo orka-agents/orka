@@ -88,8 +88,7 @@ func TestWebhookNotifier_Notify_Success(t *testing.T) {
 			StartTime:      &startTime,
 			CompletionTime: &completionTime,
 			ResultRef: &corev1alpha1.ResultReference{
-				ConfigMapName: "test-result",
-				Key:           "output",
+				Available: true,
 			},
 		},
 	}
@@ -124,8 +123,8 @@ func TestWebhookNotifier_Notify_Success(t *testing.T) {
 	if receivedPayload.ResultRef == nil {
 		t.Fatal("ResultRef should not be nil")
 	}
-	if receivedPayload.ResultRef.ConfigMapName != "test-result" {
-		t.Errorf("ResultRef.ConfigMapName = %s, want test-result", receivedPayload.ResultRef.ConfigMapName)
+	if !receivedPayload.ResultRef.Available {
+		t.Error("ResultRef.Available should be true")
 	}
 
 	// Verify headers
@@ -426,8 +425,7 @@ func TestWebhookPayload_Structure(t *testing.T) {
 
 func TestResultRefPayload_Structure(t *testing.T) {
 	payload := ResultRefPayload{
-		ConfigMapName: "test-config",
-		Key:           "output",
+		Available: true,
 	}
 
 	data, err := json.Marshal(payload)
@@ -440,10 +438,7 @@ func TestResultRefPayload_Structure(t *testing.T) {
 		t.Fatalf("Unmarshal error: %v", err)
 	}
 
-	if decoded.ConfigMapName != payload.ConfigMapName {
-		t.Errorf("ConfigMapName = %s, want %s", decoded.ConfigMapName, payload.ConfigMapName)
-	}
-	if decoded.Key != payload.Key {
-		t.Errorf("Key = %s, want %s", decoded.Key, payload.Key)
+	if decoded.Available != payload.Available {
+		t.Errorf("Available = %v, want %v", decoded.Available, payload.Available)
 	}
 }

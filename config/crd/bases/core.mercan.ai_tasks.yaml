@@ -687,18 +687,14 @@ spec:
                 - Scheduled
                 type: string
               resultRef:
-                description: ResultRef references the ConfigMap containing the result
+                description: ResultRef indicates whether a result is available
                 properties:
-                  configMapName:
-                    description: ConfigMapName is the name of the ConfigMap
-                    type: string
-                  key:
-                    default: result
-                    description: Key is the key within the ConfigMap containing the
-                      result
-                    type: string
+                  available:
+                    description: Available indicates whether a result has been stored
+                      for this task
+                    type: boolean
                 required:
-                - configMapName
+                - available
                 type: object
               startTime:
                 description: StartTime is when the task started running

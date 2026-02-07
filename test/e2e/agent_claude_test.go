@@ -49,8 +49,7 @@ var _ = Describe("Agent Claude Runtime", Ordered, func() {
 		cmd = exec.Command("kubectl", "delete", "secret", secretName, "-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
-		cmd = exec.Command("kubectl", "delete", "configmap", taskName+"-result", "-n", namespace, "--ignore-not-found")
-		_, _ = utils.Run(cmd)
+		// Results are stored in SQLite — no ConfigMap cleanup needed
 	})
 
 	It("should create a Job with Claude runtime configuration", func() {

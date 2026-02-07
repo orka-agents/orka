@@ -184,7 +184,7 @@ Structured error responses help the LLM self-correct:
 
 ## Session Management
 
-- Chat sessions use prefix `chat-session-` and label `mercan.ai/session-type: chat`
+- Chat sessions use prefix `chat-session-` and type `chat` in the session store
 - Sessions store message summaries, not full tool outputs
 - Auto-truncation when session exceeds `--chat-max-session-size` (default 500KB)
 - First user message is always preserved for context

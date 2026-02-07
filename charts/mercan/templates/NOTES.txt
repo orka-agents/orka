@@ -1,0 +1,20 @@
+Mercan has been installed.
+
+Controller: {{ include "mercan.fullname" . }}-controller
+Namespace:  {{ .Release.Namespace }}
+
+{{- if not .Values.store.persistence.enabled }}
+
+⚠️  STORAGE WARNING: SQLite store is using ephemeral storage (emptyDir).
+   Task results and session data will be LOST on pod restart.
+   For production use, enable persistent storage:
+
+     helm upgrade {{ .Release.Name }} mercan \
+       --set store.persistence.enabled=true
+
+{{- else }}
+
+✅ SQLite store is using persistent storage (PVC: {{ include "mercan.fullname" . }}-store).
+   Data will survive pod restarts.
+
+{{- end }}

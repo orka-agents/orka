@@ -322,7 +322,7 @@ type TaskStatus struct {
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
-	// ResultRef references the ConfigMap containing the result
+	// ResultRef indicates whether a result is available
 	// +optional
 	ResultRef *ResultReference `json:"resultRef,omitempty"`
 
@@ -353,14 +353,10 @@ type TaskStatus struct {
 	NextScheduleTime *metav1.Time `json:"nextScheduleTime,omitempty"`
 }
 
-// ResultReference references the ConfigMap containing the task result
+// ResultReference indicates whether a result is available for the task
 type ResultReference struct {
-	// ConfigMapName is the name of the ConfigMap
-	ConfigMapName string `json:"configMapName"`
-
-	// Key is the key within the ConfigMap containing the result
-	// +kubebuilder:default="result"
-	Key string `json:"key,omitempty"`
+	// Available indicates whether a result has been stored for this task
+	Available bool `json:"available"`
 }
 
 // ChildTaskStatus tracks the status of a delegated child task

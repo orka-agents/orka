@@ -20,10 +20,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -154,21 +156,13 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 				continue
 			}
 
-			// Fetch result from ConfigMap if available
-			if task.Status.ResultRef != nil {
-				var cm corev1.ConfigMap
-				cmErr := t.k8sClient.Get(ctx, types.NamespacedName{
-					Name:      task.Status.ResultRef.ConfigMapName,
-					Namespace: ns,
-				}, &cm)
-				if cmErr == nil {
-					key := task.Status.ResultRef.Key
-					if key == "" {
-						key = "result"
-					}
-					results[taskName].Result = cm.Data[key]
+			// Fetch result if available via HTTP GET to controller
+			if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
+				resultStr, fetchErr := fetchTaskResult(taskName)
+				if fetchErr == nil {
+					results[taskName].Result = resultStr
 				} else {
-					results[taskName].Result = fmt.Sprintf("error reading result: %v", cmErr)
+					results[taskName].Result = fmt.Sprintf("error reading result: %v", fetchErr)
 				}
 			} else if task.Status.Message != "" {
 				results[taskName].Result = task.Status.Message
@@ -215,3 +209,52 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 
 // Ensure WaitForTasksTool implements Tool
 var _ Tool = (*WaitForTasksTool)(nil)
+
+const saTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+// fetchTaskResult fetches a task result from the controller via HTTP GET.
+func fetchTaskResult(taskName string) (string, error) {
+	controllerURL := os.Getenv("MERCAN_CONTROLLER_URL")
+	if controllerURL == "" {
+		return "", fmt.Errorf("MERCAN_CONTROLLER_URL is not set")
+	}
+
+	controllerURL = strings.TrimRight(controllerURL, "/")
+	url := fmt.Sprintf("%s/api/v1/tasks/%s/result", controllerURL, taskName)
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Add SA token for auth
+	if token, readErr := os.ReadFile(saTokenPath); readErr == nil {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
+	}
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB limit
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	// The public endpoint returns JSON: {"result": "..."}
+	var result struct {
+		Result string `json:"result"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("failed to parse result JSON: %w", err)
+	}
+
+	return result.Result, nil
+}

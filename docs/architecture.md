@@ -41,7 +41,7 @@ The controller is the central component that runs as a Kubernetes Deployment. It
 
 - **API Server**: REST endpoints for task CRUD operations, built on the Fiber framework
 - **Task Reconciler**: Watches Task resources, creates/manages Jobs, handles lifecycle
-- **Session Manager**: Manages session ConfigMaps for conversation continuity with serial execution enforcement
+- **Session Manager**: Manages session persistence (via SQLite store) for conversation continuity with serial execution enforcement
 - **Priority Queue**: Schedules tasks based on priority (0-1000)
 - **Webhook Notifier**: Delivers completion notifications via HTTP callbacks
 - **Embedded Web UI**: The React dashboard is compiled into the controller binary
@@ -70,8 +70,8 @@ Mercan uses four CRDs:
 
 | Area | Decision | Rationale |
 |------|----------|-----------|
-| **Result Storage** | ConfigMap | Simple, no extra infrastructure. Limited to 1MB per result. |
-| **Session Storage** | ConfigMap | Conversation history in JSONL format. Limited to ~1MB (~50-100 messages). |
+| **Result Storage** | SQLite (embedded) | No size limit, zero external dependencies, pure Go via `modernc.org/sqlite`. |
+| **Session Storage** | SQLite (embedded) | Normalized schema with efficient querying and pagination. No size limit. |
 | **API Authentication** | Kubernetes ServiceAccount tokens | Native K8s auth with RBAC integration. |
 | **Task Queue** | Priority queuing (0-1000) | Higher priority tasks are scheduled first. |
 | **Secret Management** | Reference K8s Secrets in specs | Controller mounts secrets to worker pods. |
@@ -95,6 +95,8 @@ mercan/
 │   ├── llm/                # LLM provider interface and implementations
 │   │   ├── anthropic/      # Anthropic Claude provider
 │   │   └── openai/         # OpenAI provider
+│   ├── store/              # Storage interfaces and SQLite implementation
+│   │   └── sqlite/         # SQLite backend (ResultStore + SessionStore)
 │   ├── tools/              # Built-in tool implementations
 │   ├── metrics/            # Prometheus metrics
 │   ├── worker/             # Tool executor for custom Tool CRDs
@@ -137,7 +139,7 @@ Task Created
 └──────┘ └──────┘
       │
       ▼
-Result stored in ConfigMap
+Result stored in SQLite (workers POST to controller via HTTP)
 Session lock released
 Webhook delivered (if configured)
 ```
@@ -202,13 +204,14 @@ Mercan supports extensible AI capabilities through a three-layer system:
 
 ## Session Management
 
-Sessions provide conversation continuity across multiple Tasks. Each session is stored as a ConfigMap containing a JSONL transcript.
+Sessions provide conversation continuity across multiple Tasks. Each session is stored in SQLite with a normalized schema (session metadata + individual messages).
 
 Key behaviors:
 - **Serial execution**: Tasks sharing a session execute one-at-a-time via a lock mechanism
-- **Token tracking**: Input/output token counts tracked in ConfigMap annotations
+- **Token tracking**: Input/output token counts tracked in the session record
 - **Cross-runtime**: Sessions store user/assistant messages only, enabling cross-runtime continuation (AI ↔ agent tasks)
-- **1MB limit**: ConfigMap size constraint; use `maxMessages` to limit loaded context
+- **No size limit**: SQLite storage removes the old ConfigMap 1MB constraint
+- **Init container delivery**: Session transcripts are delivered to worker pods via an init container that fetches from the controller's internal API
 
 ## Security Model
 
@@ -229,3 +232,4 @@ Key behaviors:
 | `github.com/anthropics/anthropic-sdk-go` | Anthropic Claude API |
 | `github.com/sashabaranov/go-openai` | OpenAI API |
 | `github.com/github/copilot-sdk/go` | GitHub Copilot SDK |
+| `modernc.org/sqlite` | Embedded SQLite (pure Go, no CGO) |

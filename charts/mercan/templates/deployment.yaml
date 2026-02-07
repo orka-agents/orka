@@ -7,6 +7,10 @@ metadata:
     app.kubernetes.io/component: controller
 spec:
   replicas: {{ .Values.controller.replicas }}
+  {{- if .Values.store.persistence.enabled }}
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "mercan.selectorLabels" . | nindent 6 }}
@@ -38,6 +42,8 @@ spec:
             - --watch-namespace={{ .Values.controller.watchNamespace }}
             {{- end }}
             - --log-level={{ .Values.controller.logLevel }}
+            - --store-backend=sqlite
+            - --store-path={{ .Values.store.path }}
           ports:
             - name: api
               containerPort: {{ .Values.controller.apiPort }}
@@ -71,9 +77,18 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: store
+              mountPath: /data
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: store
+          {{- if .Values.store.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "mercan.fullname" . }}-store
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

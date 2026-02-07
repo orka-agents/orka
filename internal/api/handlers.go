@@ -19,6 +19,8 @@ package api
 import (
 	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -34,6 +36,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 	"github.com/sozercan/mercan/internal/controller"
+	"github.com/sozercan/mercan/internal/store"
 )
 
 // Handlers contains all API handlers
@@ -41,14 +44,18 @@ type Handlers struct {
 	client         client.Client
 	sessionManager *controller.SessionManager
 	watchNamespace string
+	resultStore    store.ResultStore
+	sessionStore   store.SessionStore
 }
 
 // NewHandlers creates a new Handlers instance
-func NewHandlers(c client.Client, sessionManager *controller.SessionManager, watchNamespace string) *Handlers {
+func NewHandlers(c client.Client, sessionManager *controller.SessionManager, watchNamespace string, rs store.ResultStore, ss store.SessionStore) *Handlers {
 	return &Handlers{
 		client:         c,
 		sessionManager: sessionManager,
 		watchNamespace: watchNamespace,
+		resultStore:    rs,
+		sessionStore:   ss,
 	}
 }
 
@@ -325,42 +332,26 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
 	}
 
-	if task.Status.ResultRef == nil {
+	if task.Status.ResultRef == nil || !task.Status.ResultRef.Available {
 		return fiber.NewError(fiber.StatusNotFound, "task has no result")
 	}
 
-	// Get the result ConfigMap
-	resultCM := &corev1.ConfigMap{}
-	if err := h.client.Get(ctx, types.NamespacedName{
-		Name:      task.Status.ResultRef.ConfigMapName,
-		Namespace: namespace,
-	}, resultCM); err != nil {
-		if apierrors.IsNotFound(err) {
+	data, err := h.resultStore.GetResult(ctx, namespace, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "result not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get result: %v", err))
 	}
 
-	key := task.Status.ResultRef.Key
-	if key == "" {
-		key = "result"
-	}
-
-	result, ok := resultCM.Data[key]
-	if !ok {
-		return fiber.NewError(fiber.StatusNotFound, "result key not found in ConfigMap")
-	}
-
 	return c.JSON(fiber.Map{
-		"result": result,
+		"result": string(data),
 	})
 }
 
 // ListSessions lists sessions
 func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	namespace := c.Query("namespace", "")
-	limit := c.Query("limit", "100")
-	continueToken := c.Query("continue", "")
 
 	if namespace == "" && h.watchNamespace != "" {
 		namespace = h.watchNamespace
@@ -369,49 +360,30 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 		namespace = "default"
 	}
 
-	opts := &client.ListOptions{
-		Namespace: namespace,
-	}
-
-	// Apply pagination
-	pagination, err := ParsePagination(limit, continueToken)
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
-	}
-	opts.Limit = pagination.Limit
-	opts.Continue = pagination.Continue
-
-	// List session ConfigMaps
-	cmList := &corev1.ConfigMapList{}
 	ctx := c.Context()
-	if err := h.client.List(ctx, cmList, opts, client.MatchingLabels{
-		"mercan.ai/session": "true",
-	}); err != nil {
+	sessions, err := h.sessionStore.ListSessions(ctx, namespace)
+	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list sessions: %v", err))
 	}
 
-	// Convert to session response
-	sessions := make([]fiber.Map, 0, len(cmList.Items))
-	for _, cm := range cmList.Items {
-		sessionName := strings.TrimPrefix(cm.Name, "session-")
-		sessions = append(sessions, fiber.Map{
-			"name":         sessionName,
-			"namespace":    cm.Namespace,
-			"messageCount": cm.Annotations["mercan.ai/message-count"],
-			"inputTokens":  cm.Annotations["mercan.ai/input-tokens"],
-			"outputTokens": cm.Annotations["mercan.ai/output-tokens"],
-			"activeTask":   cm.Annotations["mercan.ai/active-task"],
-			"createdAt":    cm.Annotations["mercan.ai/created-at"],
-			"updatedAt":    cm.Annotations["mercan.ai/updated-at"],
+	items := make([]fiber.Map, 0, len(sessions))
+	for _, s := range sessions {
+		items = append(items, fiber.Map{
+			"name":         s.Name,
+			"namespace":    namespace,
+			"sessionType":  s.SessionType,
+			"messageCount": s.MessageCount,
+			"inputTokens":  s.InputTokens,
+			"outputTokens": s.OutputTokens,
+			"activeTask":   s.ActiveTask,
+			"createdAt":    s.CreatedAt.Format(time.RFC3339),
+			"updatedAt":    s.UpdatedAt.Format(time.RFC3339),
 		})
 	}
 
 	response := ListResponse{
-		Items: sessions,
-		Metadata: ListMeta{
-			Continue:           cmList.Continue,
-			RemainingItemCount: cmList.RemainingItemCount,
-		},
+		Items:    items,
+		Metadata: ListMeta{},
 	}
 
 	return c.JSON(response)
@@ -427,24 +399,38 @@ func (h *Handlers) GetSession(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
-	cm, err := h.sessionManager.GetSession(ctx, namespace, id)
+	session, err := h.sessionStore.GetSession(ctx, namespace, id)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "session not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session: %v", err))
 	}
 
+	// Build JSONL transcript from messages for backward compatibility
+	var transcript string
+	if len(session.Messages) > 0 {
+		lines := make([]string, 0, len(session.Messages))
+		for _, msg := range session.Messages {
+			b, err := json.Marshal(msg)
+			if err != nil {
+				continue
+			}
+			lines = append(lines, string(b))
+		}
+		transcript = strings.Join(lines, "\n")
+	}
+
 	return c.JSON(fiber.Map{
 		"name":         id,
-		"namespace":    cm.Namespace,
-		"transcript":   cm.Data["transcript.jsonl"],
-		"messageCount": cm.Annotations["mercan.ai/message-count"],
-		"inputTokens":  cm.Annotations["mercan.ai/input-tokens"],
-		"outputTokens": cm.Annotations["mercan.ai/output-tokens"],
-		"activeTask":   cm.Annotations["mercan.ai/active-task"],
-		"createdAt":    cm.Annotations["mercan.ai/created-at"],
-		"updatedAt":    cm.Annotations["mercan.ai/updated-at"],
+		"namespace":    namespace,
+		"transcript":   transcript,
+		"messageCount": session.MessageCount,
+		"inputTokens":  session.InputTokens,
+		"outputTokens": session.OutputTokens,
+		"activeTask":   session.ActiveTask,
+		"createdAt":    session.CreatedAt.Format(time.RFC3339),
+		"updatedAt":    session.UpdatedAt.Format(time.RFC3339),
 	})
 }
 
@@ -458,8 +444,8 @@ func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
-	if err := h.sessionManager.DeleteSession(ctx, namespace, id); err != nil {
-		if apierrors.IsNotFound(err) {
+	if err := h.sessionStore.DeleteSession(ctx, namespace, id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "session not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to delete session: %v", err))

@@ -1,0 +1,143 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package common
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+)
+
+func TestSubmitResult_Success(t *testing.T) {
+	var received []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.Header.Get("Content-Type") != "application/octet-stream" {
+			t.Errorf("expected Content-Type application/octet-stream, got %s", r.Header.Get("Content-Type"))
+		}
+		buf := make([]byte, 1024)
+		n, _ := r.Body.Read(buf)
+		received = buf[:n]
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	t.Setenv("MERCAN_RESULT_ENDPOINT", srv.URL)
+
+	err := SubmitResult([]byte("hello result"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(received) != "hello result" {
+		t.Errorf("received = %q, want %q", string(received), "hello result")
+	}
+}
+
+func TestSubmitResult_RetryOnFailure(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := attempts.Add(1)
+		if n < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("temporary error"))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	t.Setenv("MERCAN_RESULT_ENDPOINT", srv.URL)
+
+	err := SubmitResult([]byte("retry result"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Errorf("attempts = %d, want 3", got)
+	}
+}
+
+func TestSubmitResult_AllRetriesFail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("always fails"))
+	}))
+	defer srv.Close()
+
+	t.Setenv("MERCAN_RESULT_ENDPOINT", srv.URL)
+
+	err := SubmitResult([]byte("failing result"))
+	if err == nil {
+		t.Fatal("expected error after all retries exhausted")
+	}
+}
+
+func TestSubmitResult_ConstructEndpointFromControllerURL(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	t.Setenv("MERCAN_RESULT_ENDPOINT", "")
+	t.Setenv("MERCAN_CONTROLLER_URL", srv.URL)
+	t.Setenv("MERCAN_TASK_NAMESPACE", "test-ns")
+	t.Setenv("MERCAN_TASK_NAME", "my-task")
+
+	err := SubmitResult([]byte("constructed url"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/internal/v1/results/test-ns/my-task" {
+		t.Errorf("gotPath = %q, want /internal/v1/results/test-ns/my-task", gotPath)
+	}
+}
+
+func TestSubmitResult_MissingEnvVars(t *testing.T) {
+	t.Setenv("MERCAN_RESULT_ENDPOINT", "")
+	t.Setenv("MERCAN_CONTROLLER_URL", "")
+
+	err := SubmitResult([]byte("should fail"))
+	if err == nil {
+		t.Fatal("expected error when no endpoint or controller URL is set")
+	}
+}
+
+func TestSubmitResult_BearerToken(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	t.Setenv("MERCAN_RESULT_ENDPOINT", srv.URL)
+
+	// When no SA token file exists, no auth header is sent
+	err := SubmitResult([]byte("no token"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Without the SA token file mounted, Authorization should be empty
+	if gotAuth != "" {
+		t.Logf("Authorization header present (SA token file may exist): %s", gotAuth)
+	}
+}

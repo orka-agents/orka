@@ -42,8 +42,7 @@ type WebhookPayload struct {
 
 // ResultRefPayload is the result reference in the webhook payload
 type ResultRefPayload struct {
-	ConfigMapName string `json:"configMapName"`
-	Key           string `json:"key"`
+	Available bool `json:"available"`
 }
 
 // WebhookNotifier sends webhook notifications for task completion
@@ -93,8 +92,7 @@ func (w *WebhookNotifier) Notify(ctx context.Context, task *corev1alpha1.Task) e
 
 	if task.Status.ResultRef != nil {
 		payload.ResultRef = &ResultRefPayload{
-			ConfigMapName: task.Status.ResultRef.ConfigMapName,
-			Key:           task.Status.ResultRef.Key,
+			Available: task.Status.ResultRef.Available,
 		}
 	}
 

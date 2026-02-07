@@ -48,12 +48,13 @@ make deploy IMG=<registry>/mercan:tag
 
 ### Core Components
 
-- **Controller** (`cmd/controller/`): Main entrypoint with `--watch-namespace`, `--copilot-worker-image`, and `--claude-worker-image` flags
+- **Controller** (`cmd/controller/`): Main entrypoint with `--watch-namespace`, `--copilot-worker-image`, `--claude-worker-image`, `--store-backend`, and `--store-path` flags
 - **API Server** (`internal/api/`): REST API using Fiber framework with ServiceAccount token auth
 - **Chat Endpoint** (`internal/api/chat.go`): Agentic chat with SSE streaming, tool execution loop, session persistence
 - **Task Reconciler** (`internal/controller/`): Watches Task CRDs, creates Jobs, manages lifecycle
-- **Session Manager**: Manages conversation continuity via ConfigMaps with serial execution enforcement
-- **Workers** (`workers/`): AI worker (LLM agent with tools), general worker (container commands), and agent workers (`workers/agent/copilot/`, `workers/agent/claude/`) for external CLI runtimes
+- **Session Manager**: Manages conversation continuity via SQLite store with serial execution enforcement
+- **Store** (`internal/store/`): Storage interfaces (`ResultStore`, `SessionStore`) with SQLite implementation (`internal/store/sqlite/`)
+- **Workers** (`workers/`): AI worker (LLM agent with tools), general worker (container commands), and agent workers (`workers/agent/copilot/`, `workers/agent/claude/`) for external CLI runtimes; workers POST results to controller via HTTP
 - **Web UI** (`ui/`): React SPA embedded into controller binary via `//go:embed`
 
 ### Custom Resources
@@ -71,12 +72,14 @@ make deploy IMG=<registry>/mercan:tag
 
 ### Key Patterns
 
-- Results stored in ConfigMaps (1MB limit per result)
-- Sessions stored in ConfigMaps with JSONL transcript format
+- Results stored in SQLite via the `ResultStore` interface (no size limit)
+- Sessions stored in SQLite with normalized schema (session metadata + messages) via the `SessionStore` interface
+- Workers POST results to the controller's internal HTTP endpoint (`/internal/v1/results/:namespace/:taskName`)
+- Session transcripts delivered to worker pods via an init container that fetches from the controller
 - Skills are ConfigMaps with `skill.md` content injected into system prompts
 - Tools execute via HTTP calls to internal services
 - Priority queue (0-1000) for task scheduling
-- Finalizers ensure cleanup of result ConfigMaps and session locks
+- Finalizers ensure cleanup of session locks
 - LLM tool args for nested objects arrive as `map[string]any`, not strings — always type-switch
 - Multi-agent coordination: coordinator agents delegate to specialists via `delegate_task`/`wait_for_tasks` tools; controller enforces depth, allowedAgents, concurrency limits
 
@@ -86,7 +89,7 @@ make deploy IMG=<registry>/mercan:tag
 - **Controller enforcement** (`internal/controller/task_controller.go`): Validates `maxDepth`, `allowedAgents`, `maxConcurrentChildren` in `handlePending`; populates `status.childTasks` in `handleRunning`
 - **Job builder** (`internal/controller/job_builder.go`): Injects `MERCAN_COORDINATION_*` env vars and auto-adds coordination tools when `agent.Spec.Coordination.Enabled`
 - **AI worker** (`workers/ai/main.go`): Registers coordination tools via `tools.RegisterCoordinationTools()` when `MERCAN_COORDINATION_ENABLED=true`; increases `maxIterations` to 50
-- **RBAC** (`config/rbac/worker_role.yaml`): Workers have Task `create/get/list/watch` and ConfigMap `get/list` for coordination
+- **RBAC** (`config/rbac/worker_role.yaml`): Workers have Task `create/get/list/watch` for coordination
 - Child tasks use labels (`mercan.ai/parent-task`, `mercan.ai/delegated-agent`) and annotations (`mercan.ai/coordination-depth`) for tracking
 - Owner references enable cascade deletion of child tasks
 - See @docs/multi-agent-coordination.md for full details
@@ -131,6 +134,7 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments — the CLI injects code at 
 - `github.com/anthropics/anthropic-sdk-go` — Anthropic Claude API
 - `github.com/sashabaranov/go-openai` — OpenAI API
 - `github.com/github/copilot-sdk/go` — GitHub Copilot SDK
+- `modernc.org/sqlite` — Embedded SQLite (pure Go, no CGO)
 
 ## API Endpoints
 
@@ -140,7 +144,7 @@ GET    /api/v1/tasks           List tasks (?namespace=, ?limit=, ?continue=)
 GET    /api/v1/tasks/{id}      Get task details
 DELETE /api/v1/tasks/{id}      Cancel/delete task
 GET    /api/v1/tasks/{id}/logs Stream logs
-GET    /api/v1/tasks/{id}/result  Get result from ConfigMap
+GET    /api/v1/tasks/{id}/result  Get result from SQLite store
 GET    /api/v1/sessions        List sessions
 GET    /api/v1/sessions/{id}   Get session transcript
 DELETE /api/v1/sessions/{id}   Delete session

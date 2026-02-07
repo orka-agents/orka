@@ -24,9 +24,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -36,6 +34,7 @@ import (
 	_ "github.com/sozercan/mercan/internal/llm/openai"
 	"github.com/sozercan/mercan/internal/tools"
 	"github.com/sozercan/mercan/internal/worker"
+	"github.com/sozercan/mercan/workers/common"
 )
 
 func main() {
@@ -51,7 +50,6 @@ func run() error {
 	// Get configuration from environment
 	taskName := os.Getenv("MERCAN_TASK_NAME")
 	taskNamespace := os.Getenv("MERCAN_TASK_NAMESPACE")
-	resultConfigMap := os.Getenv("MERCAN_RESULT_CONFIGMAP")
 
 	provider := os.Getenv("MERCAN_AI_PROVIDER")
 	model := os.Getenv("MERCAN_AI_MODEL")
@@ -131,8 +129,8 @@ func run() error {
 		return fmt.Errorf("agent execution failed: %w", err)
 	}
 
-	// Write result to ConfigMap
-	if err := writeResult(ctx, taskNamespace, resultConfigMap, result); err != nil {
+	// Write result to controller via HTTP
+	if err := writeResult(result); err != nil {
 		return fmt.Errorf("failed to write result: %w", err)
 	}
 
@@ -368,36 +366,7 @@ func executeAgentLoop(
 	return "", fmt.Errorf("max iterations reached without completion")
 }
 
-// writeResult writes the result to a ConfigMap
-func writeResult(ctx context.Context, namespace, name, result string) error {
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		return fmt.Errorf("failed to get in-cluster config: %w", err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("failed to create clientset: %w", err)
-	}
-
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"mercan.ai/result": "true",
-			},
-		},
-		Data: map[string]string{
-			"result": result,
-		},
-	}
-
-	_, err = clientset.CoreV1().ConfigMaps(namespace).Create(ctx, cm, metav1.CreateOptions{})
-	if err != nil {
-		// Try update if create fails
-		_, err = clientset.CoreV1().ConfigMaps(namespace).Update(ctx, cm, metav1.UpdateOptions{})
-	}
-
-	return err
+// writeResult submits the result to the controller via HTTP POST.
+func writeResult(result string) error {
+	return common.SubmitResult([]byte(result))
 }

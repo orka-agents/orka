@@ -37,7 +37,9 @@ func setupJobBuilder() *JobBuilder {
 	corev1alpha1.AddToScheme(scheme)
 	corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	return NewJobBuilder(fakeClient)
+	b := NewJobBuilder(fakeClient)
+	b.ControllerURL = "http://mercan-controller.mercan-system.svc:8080"
+	return b
 }
 
 func TestNewJobBuilder(t *testing.T) {
@@ -168,16 +170,28 @@ func TestJobBuilder_Build_WithSession(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	// Verify session volume
+	// Verify session-data emptyDir volume
 	hasSessionVolume := false
 	for _, vol := range job.Spec.Template.Spec.Volumes {
-		if vol.Name == "session" {
+		if vol.Name == "session-data" {
 			hasSessionVolume = true
+			if vol.VolumeSource.EmptyDir == nil {
+				t.Error("session-data volume should be emptyDir")
+			}
 			break
 		}
 	}
 	if !hasSessionVolume {
-		t.Error("Job should have session volume")
+		t.Error("Job should have session-data volume")
+	}
+
+	// Verify init container exists
+	if len(job.Spec.Template.Spec.InitContainers) == 0 {
+		t.Fatal("Job should have init container for session fetch")
+	}
+	initContainer := job.Spec.Template.Spec.InitContainers[0]
+	if initContainer.Name != "fetch-session" {
+		t.Errorf("Init container name = %s, want fetch-session", initContainer.Name)
 	}
 }
 
@@ -289,7 +303,8 @@ func TestJobBuilder_buildEnvVars(t *testing.T) {
 	// Check required env vars
 	hasTaskName := false
 	hasTaskNamespace := false
-	hasResultConfigMap := false
+	hasResultEndpoint := false
+	hasControllerURL := false
 	hasCustomVar := false
 
 	for _, env := range envVars {
@@ -304,8 +319,10 @@ func TestJobBuilder_buildEnvVars(t *testing.T) {
 			if env.Value != "default" {
 				t.Errorf("MERCAN_TASK_NAMESPACE = %s, want default", env.Value)
 			}
-		case ResultConfigMapEnvVar:
-			hasResultConfigMap = true
+		case ResultEndpointEnvVar:
+			hasResultEndpoint = true
+		case ControllerURLEnvVar:
+			hasControllerURL = true
 		case "CUSTOM_VAR":
 			hasCustomVar = true
 			if env.Value != "custom-value" {
@@ -320,8 +337,11 @@ func TestJobBuilder_buildEnvVars(t *testing.T) {
 	if !hasTaskNamespace {
 		t.Error("Missing MERCAN_TASK_NAMESPACE")
 	}
-	if !hasResultConfigMap {
-		t.Error("Missing MERCAN_RESULT_CONFIGMAP")
+	if !hasResultEndpoint {
+		t.Error("Missing MERCAN_RESULT_ENDPOINT")
+	}
+	if !hasControllerURL {
+		t.Error("Missing MERCAN_CONTROLLER_URL")
 	}
 	if !hasCustomVar {
 		t.Error("Missing CUSTOM_VAR")
@@ -500,8 +520,11 @@ func TestConstants(t *testing.T) {
 	if DefaultGeneralWorkerImage != "mercan-general-worker:latest" {
 		t.Errorf("DefaultGeneralWorkerImage = %s", DefaultGeneralWorkerImage)
 	}
-	if ResultConfigMapEnvVar != "MERCAN_RESULT_CONFIGMAP" {
-		t.Errorf("ResultConfigMapEnvVar = %s", ResultConfigMapEnvVar)
+	if ResultEndpointEnvVar != "MERCAN_RESULT_ENDPOINT" {
+		t.Errorf("ResultEndpointEnvVar = %s", ResultEndpointEnvVar)
+	}
+	if ControllerURLEnvVar != "MERCAN_CONTROLLER_URL" {
+		t.Errorf("ControllerURLEnvVar = %s", ControllerURLEnvVar)
 	}
 	if TaskNameEnvVar != "MERCAN_TASK_NAME" {
 		t.Errorf("TaskNameEnvVar = %s", TaskNameEnvVar)
@@ -864,7 +887,8 @@ func TestJobBuilder_Build_AgentTask_EnvVars(t *testing.T) {
 	}{
 		{TaskNameEnvVar, "agent-task"},
 		{TaskNamespaceEnvVar, "test-ns"},
-		{ResultConfigMapEnvVar, "agent-task-result"},
+		{ResultEndpointEnvVar, "http://mercan-controller.mercan-system.svc:8080/internal/v1/results/test-ns/agent-task"},
+		{ControllerURLEnvVar, "http://mercan-controller.mercan-system.svc:8080"},
 		{"MERCAN_PROMPT", "Refactor the code"},
 		{"MERCAN_MODEL", "claude-sonnet-4-20250514"},
 		{"MERCAN_SYSTEM_PROMPT", "You are a coding assistant"},

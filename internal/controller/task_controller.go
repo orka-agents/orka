@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -40,6 +41,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	"github.com/sozercan/mercan/internal/store"
 )
 
 const (
@@ -63,6 +65,8 @@ type TaskReconciler struct {
 	PriorityQueue   *PriorityQueue
 	Recorder        record.EventRecorder
 	KubeClient      kubernetes.Interface
+	ResultStore     store.ResultStore
+	SessionStore    store.SessionStore
 }
 
 // +kubebuilder:rbac:groups=core.mercan.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
@@ -155,18 +159,11 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 	log := logf.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(task, TaskFinalizer) {
-		// Clean up result ConfigMap
-		if task.Status.ResultRef != nil {
-			resultCM := &corev1.ConfigMap{}
-			err := r.Get(ctx, types.NamespacedName{
-				Name:      task.Status.ResultRef.ConfigMapName,
-				Namespace: task.Namespace,
-			}, resultCM)
-			if err == nil {
-				if err := r.Delete(ctx, resultCM); err != nil && !apierrors.IsNotFound(err) {
-					log.Error(err, "failed to delete result ConfigMap")
-					return ctrl.Result{}, err
-				}
+		// Clean up result data from store
+		if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
+			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
+				log.Error(err, "failed to delete result from store", "task", task.Name)
+				// Continue with finalizer removal anyway
 			}
 		}
 
@@ -461,17 +458,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 				if child.Spec.AgentRef != nil {
 					cs.Agent = child.Spec.AgentRef.Name
 				}
-				if child.Status.ResultRef != nil {
-					resultCM := &corev1.ConfigMap{}
-					if err := r.Get(ctx, types.NamespacedName{
-						Name: child.Status.ResultRef.ConfigMapName, Namespace: task.Namespace,
-					}, resultCM); err == nil {
-						result := resultCM.Data[child.Status.ResultRef.Key]
-						if len(result) > 500 {
-							result = result[:500] + "..."
-						}
-						cs.Result = result
-					}
+				if child.Status.ResultRef != nil && child.Status.ResultRef.Available {
+					// TODO: Will be replaced with ResultStore.GetResult() in Step 5
+					cs.Result = "(result available)"
 				}
 				childStatuses = append(childStatuses, cs)
 			}
@@ -555,7 +544,7 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 
 	// Update session if configured
 	if task.Spec.SessionRef != nil && task.Spec.SessionRef.Append {
-		if err := r.SessionManager.AppendMessages(ctx, task); err != nil {
+		if err := r.SessionManager.AppendMessages(ctx, task, r.ResultStore); err != nil {
 			log.Error(err, "failed to append session messages")
 			// Continue anyway
 		}
@@ -665,28 +654,21 @@ func (r *TaskReconciler) calculateRetryDelay(task *corev1alpha1.Task) time.Durat
 
 // collectResult collects the task result from the Job's output
 func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.Task) error {
-	resultCMName := fmt.Sprintf("%s-result", task.Name)
-	resultCM := &corev1.ConfigMap{}
-
-	err := r.Get(ctx, types.NamespacedName{
-		Name:      resultCMName,
-		Namespace: task.Namespace,
-	}, resultCM)
-
+	// Check if result already exists in store (written by worker via HTTP)
+	_, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
 	if err == nil {
-		// Result ConfigMap already exists (written by worker)
+		// Result already exists (written by worker)
 		task.Status.ResultRef = &corev1alpha1.ResultReference{
-			ConfigMapName: resultCMName,
-			Key:           "result",
+			Available: true,
 		}
 		return nil
 	}
 
-	if !apierrors.IsNotFound(err) {
+	if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
 
-	// No result ConfigMap yet — capture pod logs for container tasks
+	// No result yet — capture pod logs for container tasks
 	if task.Spec.Type != corev1alpha1.TaskTypeContainer || r.KubeClient == nil {
 		return nil
 	}
@@ -696,39 +678,12 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 		return fmt.Errorf("reading pod logs: %w", err)
 	}
 
-	// Truncate to fit ConfigMap 1MB limit
-	const maxResultSize = 900 * 1024
-	if len(logs) > maxResultSize {
-		logs = logs[:maxResultSize] + "\n... (truncated)"
-	}
-
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      resultCMName,
-			Namespace: task.Namespace,
-			Labels: map[string]string{
-				"mercan.ai/result": "true",
-			},
-		},
-		Data: map[string]string{
-			"result": logs,
-		},
-	}
-
-	if err := ctrl.SetControllerReference(task, cm, r.Scheme); err != nil {
-		return fmt.Errorf("setting owner reference: %w", err)
-	}
-
-	if err := r.Create(ctx, cm); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return nil
-		}
-		return fmt.Errorf("creating result ConfigMap: %w", err)
+	if err := r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, []byte(logs)); err != nil {
+		return fmt.Errorf("saving result: %w", err)
 	}
 
 	task.Status.ResultRef = &corev1alpha1.ResultReference{
-		ConfigMapName: resultCMName,
-		Key:           "result",
+		Available: true,
 	}
 
 	return nil

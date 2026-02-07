@@ -92,7 +92,9 @@ spec:
 
 ```bash
 kubectl get task refactor-task
-kubectl get configmap task-refactor-task-result -o jsonpath='{.data.result}'
+# Get the result via the REST API
+curl http://localhost:8080/api/v1/tasks/refactor-task/result \
+  -H "Authorization: Bearer $(kubectl create token mercan-client)"
 ```
 
 ## Agent Configuration
@@ -296,15 +298,16 @@ agentRuntime:
 
 ## Session Continuity
 
-Sessions enable multi-turn conversations across tasks. Session data is stored in ConfigMaps using JSONL format.
+Sessions enable multi-turn conversations across tasks. Session data is stored in SQLite with a normalized schema.
 
 ### How Sessions Work
 
 - Sessions store **user and assistant messages only** (the lowest common denominator across runtimes)
 - **Cross-runtime continuation is supported**: a `type: ai` session can be continued by a `type: agent` task and vice versa
-- Agent-specific metadata (token counts, message counts) is tracked in ConfigMap annotations
-- Full agent transcripts are logged to pod stdout but **not stored** in the session ConfigMap (1MB ConfigMap limit)
+- Agent-specific metadata (token counts, message counts) is tracked in the session record
+- Full agent transcripts are logged to pod stdout but **not stored** in the session (keep sessions focused)
 - Sessions enforce **serial execution**: only one task can hold a session lock at a time
+- Session transcripts are delivered to worker pods via an **init container** that fetches from the controller's internal API
 
 ### Using Sessions
 
@@ -325,24 +328,11 @@ spec:
     maxMessages: 50   # Max messages to load from history (default: 50)
 ```
 
-### Session ConfigMap Format
+### Session Storage
 
-Sessions are stored as ConfigMaps named `session-<name>`:
-
-```
-ConfigMap: session-my-session
-  Labels:
-    mercan.ai/session: "true"
-  Annotations:
-    mercan.ai/active-task: ""          # Lock field (empty = unlocked)
-    mercan.ai/message-count: "4"
-    mercan.ai/input-tokens: "1200"
-    mercan.ai/output-tokens: "800"
-  Data:
-    transcript.jsonl: |
-      {"role":"user","content":"Write a hello world","ts":"..."}
-      {"role":"assistant","content":"Here is...","ts":"..."}
-```
+Sessions are stored in the controller's SQLite database with a normalized schema:
+- **Session record**: metadata (name, namespace, type, active task, token counts, timestamps)
+- **Session messages**: individual transcript entries (role, content, timestamp)
 
 ## Security
 
@@ -478,7 +468,8 @@ EOF
 kubectl get task fix-tests -w
 
 # 5. Get the result
-kubectl get configmap task-fix-tests-result -o jsonpath='{.data.result}'
+curl http://localhost:8080/api/v1/tasks/fix-tests/result \
+  -H "Authorization: Bearer $(kubectl create token mercan-client)"
 
 # 6. Check worker pod logs for full transcript
 kubectl logs -l job-name=$(kubectl get task fix-tests -o jsonpath='{.status.jobName}')
@@ -492,9 +483,10 @@ kubectl logs -l job-name=$(kubectl get task fix-tests -o jsonpath='{.status.jobN
   ```bash
   kubectl get secret claude-api-key -o jsonpath='{.data}' | keys
   ```
-- **Session locked**: Another task may hold the session lock. Check the session ConfigMap:
+- **Session locked**: Another task may hold the session lock. Check via the REST API:
   ```bash
-  kubectl get configmap session-<name> -o jsonpath='{.metadata.annotations.mercan\.ai/active-task}'
+  curl http://localhost:8080/api/v1/sessions/<name> \
+    -H "Authorization: Bearer $(kubectl create token mercan-client)"
   ```
 - **Agent not found**: Verify the Agent exists and has `runtime` configured:
   ```bash
@@ -512,14 +504,13 @@ kubectl logs -l job-name=$(kubectl get task fix-tests -o jsonpath='{.status.jobN
 
 ### Result too large
 
-Task results are stored in ConfigMaps, which have a 1MB limit. If the agent produces a very large output:
+Task results are stored in SQLite, which has no practical size limit. If the agent produces a very large output:
 
 - The final text result is stored; full transcripts are logged to pod stdout only
 - Check pod logs for the complete output:
   ```bash
   kubectl logs <pod-name>
   ```
-- Consider using session `maxMessages` to limit loaded history for follow-up tasks
 
 ### Pod in CrashLoopBackOff
 

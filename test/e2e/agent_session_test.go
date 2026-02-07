@@ -37,7 +37,6 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 		taskName2  = "e2e-session-task-2"
 		agentName  = "e2e-session-agent"
 		sessionID  = "e2e-test-session"
-		sessionCM  = "session-" + sessionID
 	)
 
 	AfterAll(func() {
@@ -51,14 +50,7 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 		cmd = exec.Command("kubectl", "delete", "agent", agentName, "-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
-		cmd = exec.Command("kubectl", "delete", "configmap", taskName1+"-result", "-n", namespace, "--ignore-not-found")
-		_, _ = utils.Run(cmd)
-
-		cmd = exec.Command("kubectl", "delete", "configmap", taskName2+"-result", "-n", namespace, "--ignore-not-found")
-		_, _ = utils.Run(cmd)
-
-		cmd = exec.Command("kubectl", "delete", "configmap", sessionCM, "-n", namespace, "--ignore-not-found")
-		_, _ = utils.Run(cmd)
+		// Results and sessions are stored in SQLite — no ConfigMap cleanup needed
 	})
 
 	It("should reference the same session across multiple tasks", func() {
@@ -149,8 +141,6 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 
 			g.Expect(envMap).To(HaveKey("MERCAN_SESSION_NAME"))
 			g.Expect(envMap["MERCAN_SESSION_NAME"]).To(Equal(sessionID))
-			g.Expect(envMap).To(HaveKey("MERCAN_SESSION_CONFIGMAP"))
-			g.Expect(envMap["MERCAN_SESSION_CONFIGMAP"]).To(Equal(sessionCM))
 		}
 		Eventually(verifySessionEnvVars, 30*time.Second, time.Second).Should(Succeed())
 

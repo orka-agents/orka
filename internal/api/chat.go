@@ -23,15 +23,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"maps"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -39,6 +37,7 @@ import (
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 	"github.com/sozercan/mercan/internal/controller"
 	"github.com/sozercan/mercan/internal/llm"
+	"github.com/sozercan/mercan/internal/store"
 )
 
 var chatLog = logf.Log.WithName("chat-handler")
@@ -125,16 +124,20 @@ type ChatHandler struct {
 	config         ChatConfig
 	semaphore      chan struct{}
 	watchNamespace string
+	sessionStore   store.SessionStore
+	resultStore    store.ResultStore
 }
 
 // NewChatHandler creates a new ChatHandler.
-func NewChatHandler(c client.Client, sm *controller.SessionManager, config ChatConfig, watchNamespace string) *ChatHandler {
+func NewChatHandler(c client.Client, sm *controller.SessionManager, config ChatConfig, watchNamespace string, ss store.SessionStore, rs store.ResultStore) *ChatHandler {
 	return &ChatHandler{
 		client:         c,
 		sessionManager: sm,
 		config:         config,
 		semaphore:      make(chan struct{}, config.MaxConcurrent),
 		watchNamespace: watchNamespace,
+		sessionStore:   ss,
+		resultStore:    rs,
 	}
 }
 
@@ -221,7 +224,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	}
 
 	// Create tool executor
-	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout)
+	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout, ch.resultStore)
 
 	// Build completion request parameters
 	temperature := 0.7
@@ -478,104 +481,65 @@ func (ch *ChatHandler) runToolLoop(
 	}
 }
 
-// loadChatSession loads chat session messages from a ConfigMap.
+// loadChatSession loads chat session messages from the session store.
 func (ch *ChatHandler) loadChatSession(ctx context.Context, namespace, sessionID string) ([]llm.Message, error) {
-	cmName := fmt.Sprintf("chat-session-%s", sessionID)
-	cm := &corev1.ConfigMap{}
-	if err := ch.client.Get(ctx, types.NamespacedName{Name: cmName, Namespace: namespace}, cm); err != nil {
+	messages, err := ch.sessionStore.LoadTranscript(ctx, namespace, sessionID, 0)
+	if err != nil {
 		return nil, err
 	}
 
-	transcript, ok := cm.Data["transcript.jsonl"]
-	if !ok || transcript == "" {
+	if len(messages) == 0 {
 		return nil, nil
 	}
 
-	lines := strings.Split(transcript, "\n")
-	messages := make([]llm.Message, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var msg llm.Message
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			chatLog.Info("skipping invalid transcript line", "error", err)
-			continue
-		}
-		messages = append(messages, msg)
+	// Convert store.SessionMessage to llm.Message
+	llmMessages := make([]llm.Message, 0, len(messages))
+	for _, msg := range messages {
+		llmMessages = append(llmMessages, llm.Message{
+			Role:    msg.Role,
+			Content: msg.Content,
+			Name:    msg.Name,
+		})
 	}
 
-	return messages, nil
+	return llmMessages, nil
 }
 
-// saveChatSession saves chat session messages to a ConfigMap.
+// saveChatSession saves chat session messages to the session store.
 func (ch *ChatHandler) saveChatSession(ctx context.Context, namespace, sessionID string, messages []llm.Message, usage ChatUsage) error {
-	// Serialize messages to JSONL
-	msgLines := make([]string, 0, len(messages))
-	for _, msg := range messages {
-		b, err := json.Marshal(msg)
-		if err != nil {
-			continue
-		}
-		msgLines = append(msgLines, string(b))
-	}
-	transcript := strings.Join(msgLines, "\n")
-
-	// Truncate if needed
-	if len(transcript) > ch.config.MaxSessionSize {
-		// Keep only the most recent messages that fit
-		transcript = truncateTranscript(transcript, ch.config.MaxSessionSize)
-	}
-
-	cmName := fmt.Sprintf("chat-session-%s", sessionID)
-	now := time.Now().UTC().Format(time.RFC3339)
-	annotations := map[string]string{
-		"mercan.ai/message-count": fmt.Sprintf("%d", len(messages)),
-		"mercan.ai/input-tokens":  fmt.Sprintf("%d", usage.InputTokens),
-		"mercan.ai/output-tokens": fmt.Sprintf("%d", usage.OutputTokens),
-		"mercan.ai/updated-at":    now,
-	}
-	labels := map[string]string{
-		"mercan.ai/session-type": "chat",
-		"mercan.ai/session":      "true",
-	}
-
-	// Try to get existing ConfigMap
-	cm := &corev1.ConfigMap{}
-	err := ch.client.Get(ctx, types.NamespacedName{Name: cmName, Namespace: namespace}, cm)
+	// Check if session exists
+	_, err := ch.sessionStore.GetSession(ctx, namespace, sessionID)
 	if err != nil {
-		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("failed to get session ConfigMap: %w", err)
+		if !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("failed to get session: %w", err)
 		}
-		// Create new ConfigMap
-		annotations["mercan.ai/created-at"] = now
-		cm = &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        cmName,
-				Namespace:   namespace,
-				Labels:      labels,
-				Annotations: annotations,
-			},
-			Data: map[string]string{
-				"transcript.jsonl": transcript,
-			},
+		// Create new session
+		now := time.Now()
+		session := &store.SessionRecord{
+			Namespace:   namespace,
+			Name:        sessionID,
+			SessionType: "chat",
+			CreatedAt:   now,
+			UpdatedAt:   now,
 		}
-		return ch.client.Create(ctx, cm)
+		if err := ch.sessionStore.CreateSession(ctx, session); err != nil {
+			return fmt.Errorf("failed to create session: %w", err)
+		}
 	}
 
-	// Update existing ConfigMap
-	cm.Labels = labels
-	if cm.Annotations == nil {
-		cm.Annotations = make(map[string]string)
+	// Convert llm.Message to store.SessionMessage
+	storeMessages := make([]store.SessionMessage, 0, len(messages))
+	now := time.Now()
+	for _, msg := range messages {
+		storeMessages = append(storeMessages, store.SessionMessage{
+			Role:      msg.Role,
+			Content:   msg.Content,
+			Name:      msg.Name,
+			Timestamp: now,
+		})
 	}
-	maps.Copy(cm.Annotations, annotations)
-	if cm.Data == nil {
-		cm.Data = make(map[string]string)
-	}
-	cm.Data["transcript.jsonl"] = transcript
 
-	return ch.client.Update(ctx, cm)
+	return ch.sessionStore.AppendMessages(ctx, namespace, sessionID, storeMessages)
 }
 
 // HandleChatConfig handles GET /api/v1/chat/config.
@@ -611,21 +575,17 @@ func (ch *ChatHandler) HandleCancelChat(c fiber.Ctx) error {
 		namespace = ch.watchNamespace
 	}
 
-	cmName := fmt.Sprintf("chat-session-%s", sessionID)
-	cm := &corev1.ConfigMap{}
-	if err := ch.client.Get(c.Context(), types.NamespacedName{Name: cmName, Namespace: namespace}, cm); err != nil {
-		if apierrors.IsNotFound(err) {
+	ctx := c.Context()
+	_, err := ch.sessionStore.GetSession(ctx, namespace, sessionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "chat session not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session: %v", err))
 	}
 
-	if cm.Annotations == nil {
-		cm.Annotations = make(map[string]string)
-	}
-	cm.Annotations["mercan.ai/cancelled"] = "true"
-
-	if err := ch.client.Update(c.Context(), cm); err != nil {
+	// Delete the session to cancel it
+	if err := ch.sessionStore.DeleteSession(ctx, namespace, sessionID); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to cancel session: %v", err))
 	}
 

@@ -36,18 +36,26 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	"github.com/sozercan/mercan/internal/store/sqlite"
 )
 
 // newReconciler creates a TaskReconciler with all dependencies for testing.
 func newReconciler() *TaskReconciler {
+	db, err := sqlite.NewDB(":memory:")
+	if err != nil {
+		panic(err)
+	}
+	ss := sqlite.NewStore(db, ":memory:")
 	return &TaskReconciler{
 		Client:          k8sClient,
 		Scheme:          k8sClient.Scheme(),
 		JobBuilder:      NewJobBuilder(k8sClient),
-		SessionManager:  NewSessionManager(k8sClient),
+		SessionManager:  NewSessionManager(ss),
 		WebhookNotifier: NewWebhookNotifier(),
 		PriorityQueue:   NewPriorityQueue(),
 		Recorder:        record.NewFakeRecorder(100),
+		ResultStore:     ss,
+		SessionStore:    ss,
 	}
 }
 
@@ -123,15 +131,8 @@ var _ = Describe("Task Controller", func() {
 			ns := "default"
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 
-			// Create result ConfigMap
-			resultCM := &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      taskName + "-result",
-					Namespace: ns,
-				},
-				Data: map[string]string{"result": "some-result"},
-			}
-			Expect(k8sClient.Create(ctx, resultCM)).To(Succeed())
+			// Save result to store
+			Expect(r.ResultStore.SaveResult(ctx, ns, taskName, []byte("some-result"))).To(Succeed())
 
 			// Create the task with finalizer
 			task := &corev1alpha1.Task{
@@ -150,8 +151,7 @@ var _ = Describe("Task Controller", func() {
 
 			// Set result ref in status
 			task.Status.ResultRef = &corev1alpha1.ResultReference{
-				ConfigMapName: taskName + "-result",
-				Key:           "result",
+				Available: true,
 			}
 			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
 
@@ -167,9 +167,9 @@ var _ = Describe("Task Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(ctrl.Result{}))
 
-			// Result ConfigMap should be deleted
-			err = k8sClient.Get(ctx, types.NamespacedName{Name: taskName + "-result", Namespace: ns}, &corev1.ConfigMap{})
-			Expect(errors.IsNotFound(err)).To(BeTrue())
+			// Result should be deleted from store
+			_, err = r.ResultStore.GetResult(ctx, ns, taskName)
+			Expect(err).NotTo(BeNil())
 
 			// Task should be gone (finalizer removed → deletion completes)
 			err = k8sClient.Get(ctx, nn, &corev1alpha1.Task{})
@@ -893,24 +893,14 @@ var _ = Describe("Task Controller", func() {
 	})
 
 	Context("collectResult", func() {
-		It("should set ResultRef when result ConfigMap exists", func() {
+		It("should set ResultRef when result exists in store", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-collect-result"
 			ns := "default"
 
-			// Create result ConfigMap
-			resultCM := &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      taskName + "-result",
-					Namespace: ns,
-				},
-				Data: map[string]string{"result": "hello world"},
-			}
-			Expect(k8sClient.Create(ctx, resultCM)).To(Succeed())
-			defer func() {
-				_ = k8sClient.Delete(ctx, resultCM)
-			}()
+			// Save result to store
+			Expect(r.ResultStore.SaveResult(ctx, ns, taskName, []byte("hello world"))).To(Succeed())
 
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
@@ -922,11 +912,10 @@ var _ = Describe("Task Controller", func() {
 			err := r.collectResult(ctx, task)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(task.Status.ResultRef).NotTo(BeNil())
-			Expect(task.Status.ResultRef.ConfigMapName).To(Equal(taskName + "-result"))
-			Expect(task.Status.ResultRef.Key).To(Equal("result"))
+			Expect(task.Status.ResultRef.Available).To(BeTrue())
 		})
 
-		It("should return nil when result ConfigMap does not exist", func() {
+		It("should return nil when result does not exist in store", func() {
 			ctx := context.Background()
 			r := newReconciler()
 
@@ -1903,18 +1892,8 @@ var _ = Describe("Task Controller", func() {
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
-			// Create result ConfigMap first
-			resultCM := &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      taskName + "-result",
-					Namespace: ns,
-				},
-				Data: map[string]string{"result": "task output"},
-			}
-			Expect(k8sClient.Create(ctx, resultCM)).To(Succeed())
-			defer func() {
-				_ = k8sClient.Delete(ctx, resultCM)
-			}()
+			// Save result to store
+			Expect(r.ResultStore.SaveResult(ctx, ns, taskName, []byte("task output"))).To(Succeed())
 
 			// Create task
 			task := &corev1alpha1.Task{
@@ -1931,13 +1910,13 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Complete the task – collectResult should pick up the ConfigMap
+			// Complete the task – collectResult should pick up the store result
 			_, err := r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "done")
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.ResultRef).NotTo(BeNil())
-			Expect(task.Status.ResultRef.ConfigMapName).To(Equal(taskName + "-result"))
+			Expect(task.Status.ResultRef.Available).To(BeTrue())
 		})
 	})
 })

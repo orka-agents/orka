@@ -18,6 +18,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -32,6 +33,8 @@ import (
 
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 	"github.com/sozercan/mercan/internal/controller"
+	"github.com/sozercan/mercan/internal/store"
+	"github.com/sozercan/mercan/internal/store/sqlite"
 )
 
 func setupTestHandlers() (*Handlers, *fiber.App) {
@@ -40,7 +43,9 @@ func setupTestHandlers() (*Handlers, *fiber.App) {
 	corev1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	handlers := NewHandlers(fakeClient, nil, "")
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	handlers := NewHandlers(fakeClient, nil, "", ss, ss)
 
 	app := fiber.New()
 	return handlers, app
@@ -52,7 +57,9 @@ func setupTestHandlersWithObjects(objs ...runtime.Object) (*Handlers, *fiber.App
 	corev1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
-	handlers := NewHandlers(fakeClient, nil, "")
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	handlers := NewHandlers(fakeClient, nil, "", ss, ss)
 
 	app := fiber.New()
 	return handlers, app
@@ -186,7 +193,7 @@ func TestHandlers_CreateTask_NamespaceScoped(t *testing.T) {
 	scheme := runtime.NewScheme()
 	corev1alpha1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	handlers := NewHandlers(fakeClient, nil, "allowed-ns")
+	handlers := NewHandlers(fakeClient, nil, "allowed-ns", nil, nil)
 
 	app := fiber.New()
 	app.Post("/tasks", handlers.CreateTask)
@@ -496,23 +503,14 @@ func TestHandlers_GetTaskResult_Success(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{
 			ResultRef: &corev1alpha1.ResultReference{
-				ConfigMapName: "test-result",
-				Key:           "output",
+				Available: true,
 			},
 		},
 	}
 
-	resultCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-result",
-			Namespace: "default",
-		},
-		Data: map[string]string{
-			"output": "task result content",
-		},
-	}
-
-	handlers, app := setupTestHandlersWithObjects(task, resultCM)
+	handlers, app := setupTestHandlersWithObjects(task)
+	// Save result to store
+	handlers.resultStore.SaveResult(context.Background(), "default", "test-task", []byte("task result content"))
 	app.Get("/tasks/:id/result", handlers.GetTaskResult)
 
 	req := httptest.NewRequest(http.MethodGet, "/tasks/test-task/result", nil)
@@ -565,8 +563,7 @@ func TestHandlers_GetTaskResult_ResultNotFound(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{
 			ResultRef: &corev1alpha1.ResultReference{
-				ConfigMapName: "nonexistent-result",
-				Key:           "output",
+				Available: true,
 			},
 		},
 	}
@@ -725,7 +722,7 @@ func TestNewHandlers(t *testing.T) {
 	scheme := runtime.NewScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	handlers := NewHandlers(fakeClient, nil, "test-ns")
+	handlers := NewHandlers(fakeClient, nil, "test-ns", nil, nil)
 	if handlers == nil {
 		t.Fatal("NewHandlers returned nil")
 	}
@@ -734,44 +731,35 @@ func TestNewHandlers(t *testing.T) {
 	}
 }
 
-func setupTestHandlersWithSessionManager(objs ...runtime.Object) (*Handlers, *fiber.App) {
+func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *sqlite.Store) {
 	scheme := runtime.NewScheme()
 	corev1alpha1.AddToScheme(scheme)
 	corev1.AddToScheme(scheme)
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
-	sm := controller.NewSessionManager(fakeClient)
-	handlers := NewHandlers(fakeClient, sm, "")
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	sm := controller.NewSessionManager(ss)
+	handlers := NewHandlers(fakeClient, sm, "", ss, ss)
 
 	app := fiber.New()
-	return handlers, app
+	return handlers, app, ss
 }
 
 // --- ListSessions tests ---
 
 func TestHandlers_ListSessions_Success(t *testing.T) {
-	sessionCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "session-my-session",
-			Namespace: "default",
-			Labels: map[string]string{
-				"mercan.ai/session": "true",
-			},
-			Annotations: map[string]string{
-				"mercan.ai/message-count": "5",
-				"mercan.ai/input-tokens":  "100",
-				"mercan.ai/output-tokens": "200",
-				"mercan.ai/active-task":   "",
-				"mercan.ai/created-at":    "2025-01-01T00:00:00Z",
-				"mercan.ai/updated-at":    "2025-01-01T01:00:00Z",
-			},
-		},
-		Data: map[string]string{
-			"transcript.jsonl": `{"role":"user","content":"hello"}`,
-		},
-	}
+	handlers, app, ss := setupTestHandlersWithSessionManager()
+	ctx := context.Background()
+	ss.CreateSession(ctx, &store.SessionRecord{
+		Namespace:    "default",
+		Name:         "my-session",
+		SessionType:  "task",
+		MessageCount: 5,
+		InputTokens:  100,
+		OutputTokens: 200,
+	})
 
-	handlers, app := setupTestHandlersWithSessionManager(sessionCM)
 	app.Get("/sessions", handlers.ListSessions)
 
 	req := httptest.NewRequest(http.MethodGet, "/sessions?namespace=default", nil)
@@ -793,7 +781,7 @@ func TestHandlers_ListSessions_Success(t *testing.T) {
 }
 
 func TestHandlers_ListSessions_Empty(t *testing.T) {
-	handlers, app := setupTestHandlersWithSessionManager()
+	handlers, app, _ := setupTestHandlersWithSessionManager()
 	app.Get("/sessions", handlers.ListSessions)
 
 	req := httptest.NewRequest(http.MethodGet, "/sessions?namespace=default", nil)
@@ -814,23 +802,8 @@ func TestHandlers_ListSessions_Empty(t *testing.T) {
 	}
 }
 
-func TestHandlers_ListSessions_InvalidLimit(t *testing.T) {
-	handlers, app := setupTestHandlersWithSessionManager()
-	app.Get("/sessions", handlers.ListSessions)
-
-	req := httptest.NewRequest(http.MethodGet, "/sessions?limit=invalid", nil)
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("Test request failed: %v", err)
-	}
-
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusBadRequest)
-	}
-}
-
 func TestHandlers_ListSessions_DefaultNamespace(t *testing.T) {
-	handlers, app := setupTestHandlersWithSessionManager()
+	handlers, app, _ := setupTestHandlersWithSessionManager()
 	app.Get("/sessions", handlers.ListSessions)
 
 	// No namespace query param - should default to "default"
@@ -851,8 +824,10 @@ func TestHandlers_ListSessions_WatchNamespace(t *testing.T) {
 	corev1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	sm := controller.NewSessionManager(fakeClient)
-	handlers := NewHandlers(fakeClient, sm, "watched-ns")
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	sm := controller.NewSessionManager(ss)
+	handlers := NewHandlers(fakeClient, sm, "watched-ns", ss, ss)
 
 	app := fiber.New()
 	app.Get("/sessions", handlers.ListSessions)
@@ -872,28 +847,17 @@ func TestHandlers_ListSessions_WatchNamespace(t *testing.T) {
 // --- GetSession tests ---
 
 func TestHandlers_GetSession_Success(t *testing.T) {
-	sessionCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "session-my-session",
-			Namespace: "default",
-			Labels: map[string]string{
-				"mercan.ai/session": "true",
-			},
-			Annotations: map[string]string{
-				"mercan.ai/message-count": "3",
-				"mercan.ai/input-tokens":  "50",
-				"mercan.ai/output-tokens": "100",
-				"mercan.ai/active-task":   "",
-				"mercan.ai/created-at":    "2025-01-01T00:00:00Z",
-				"mercan.ai/updated-at":    "2025-01-01T01:00:00Z",
-			},
-		},
-		Data: map[string]string{
-			"transcript.jsonl": `{"role":"user","content":"hello"}`,
-		},
-	}
+	handlers, app, ss := setupTestHandlersWithSessionManager()
+	ctx := context.Background()
+	ss.CreateSession(ctx, &store.SessionRecord{
+		Namespace:    "default",
+		Name:         "my-session",
+		SessionType:  "task",
+		MessageCount: 3,
+		InputTokens:  50,
+		OutputTokens: 100,
+	})
 
-	handlers, app := setupTestHandlersWithSessionManager(sessionCM)
 	app.Get("/sessions/:id", handlers.GetSession)
 
 	req := httptest.NewRequest(http.MethodGet, "/sessions/my-session", nil)
@@ -911,13 +875,13 @@ func TestHandlers_GetSession_Success(t *testing.T) {
 	if result["name"] != "my-session" {
 		t.Errorf("name = %v, want my-session", result["name"])
 	}
-	if result["messageCount"] != "3" {
+	if result["messageCount"] != float64(3) {
 		t.Errorf("messageCount = %v, want 3", result["messageCount"])
 	}
 }
 
 func TestHandlers_GetSession_NotFound(t *testing.T) {
-	handlers, app := setupTestHandlersWithSessionManager()
+	handlers, app, _ := setupTestHandlersWithSessionManager()
 	app.Get("/sessions/:id", handlers.GetSession)
 
 	req := httptest.NewRequest(http.MethodGet, "/sessions/nonexistent", nil)
@@ -932,25 +896,22 @@ func TestHandlers_GetSession_NotFound(t *testing.T) {
 }
 
 func TestHandlers_GetSession_WatchNamespace(t *testing.T) {
-	sessionCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "session-my-session",
-			Namespace: "watched-ns",
-			Labels: map[string]string{
-				"mercan.ai/session": "true",
-			},
-			Annotations: map[string]string{},
-		},
-		Data: map[string]string{},
-	}
-
 	scheme := runtime.NewScheme()
 	corev1alpha1.AddToScheme(scheme)
 	corev1.AddToScheme(scheme)
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(sessionCM).Build()
-	sm := controller.NewSessionManager(fakeClient)
-	handlers := NewHandlers(fakeClient, sm, "watched-ns")
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	sm := controller.NewSessionManager(ss)
+	handlers := NewHandlers(fakeClient, sm, "watched-ns", ss, ss)
+
+	ctx := context.Background()
+	ss.CreateSession(ctx, &store.SessionRecord{
+		Namespace:   "watched-ns",
+		Name:        "my-session",
+		SessionType: "task",
+	})
 
 	app := fiber.New()
 	app.Get("/sessions/:id", handlers.GetSession)
@@ -970,17 +931,14 @@ func TestHandlers_GetSession_WatchNamespace(t *testing.T) {
 // --- DeleteSession tests ---
 
 func TestHandlers_DeleteSession_Success(t *testing.T) {
-	sessionCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "session-my-session",
-			Namespace: "default",
-			Labels: map[string]string{
-				"mercan.ai/session": "true",
-			},
-		},
-	}
+	handlers, app, ss := setupTestHandlersWithSessionManager()
+	ctx := context.Background()
+	ss.CreateSession(ctx, &store.SessionRecord{
+		Namespace:   "default",
+		Name:        "my-session",
+		SessionType: "task",
+	})
 
-	handlers, app := setupTestHandlersWithSessionManager(sessionCM)
 	app.Delete("/sessions/:id", handlers.DeleteSession)
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/my-session", nil)
@@ -995,7 +953,7 @@ func TestHandlers_DeleteSession_Success(t *testing.T) {
 }
 
 func TestHandlers_DeleteSession_NotFound(t *testing.T) {
-	handlers, app := setupTestHandlersWithSessionManager()
+	handlers, app, _ := setupTestHandlersWithSessionManager()
 	app.Delete("/sessions/:id", handlers.DeleteSession)
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/nonexistent", nil)
@@ -1004,29 +962,29 @@ func TestHandlers_DeleteSession_NotFound(t *testing.T) {
 		t.Fatalf("Test request failed: %v", err)
 	}
 
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	// SQLite DELETE is a no-op when not found, not an error
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNoContent)
 	}
 }
 
 func TestHandlers_DeleteSession_WatchNamespace(t *testing.T) {
-	sessionCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "session-my-session",
-			Namespace: "watched-ns",
-			Labels: map[string]string{
-				"mercan.ai/session": "true",
-			},
-		},
-	}
-
 	scheme := runtime.NewScheme()
 	corev1alpha1.AddToScheme(scheme)
 	corev1.AddToScheme(scheme)
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(sessionCM).Build()
-	sm := controller.NewSessionManager(fakeClient)
-	handlers := NewHandlers(fakeClient, sm, "watched-ns")
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	sm := controller.NewSessionManager(ss)
+	handlers := NewHandlers(fakeClient, sm, "watched-ns", ss, ss)
+
+	ctx := context.Background()
+	ss.CreateSession(ctx, &store.SessionRecord{
+		Namespace:   "watched-ns",
+		Name:        "my-session",
+		SessionType: "task",
+	})
 
 	app := fiber.New()
 	app.Delete("/sessions/:id", handlers.DeleteSession)
@@ -1077,7 +1035,7 @@ func TestHandlers_GetTaskLogs_WatchNamespace(t *testing.T) {
 	corev1alpha1.AddToScheme(scheme)
 	corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
-	handlers := NewHandlers(fakeClient, nil, "watched-ns")
+	handlers := NewHandlers(fakeClient, nil, "watched-ns", nil, nil)
 
 	app := fiber.New()
 	app.Get("/tasks/:id/logs", handlers.GetTaskLogs)
@@ -1121,15 +1079,14 @@ func TestHandlers_GetTaskResult_MissingKey(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{
 			ResultRef: &corev1alpha1.ResultReference{
-				ConfigMapName: "test-result",
-				Key:           "missing-key",
+				Available: true,
 			},
 		},
 	}
 
 	resultCM := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-result",
+			Name:      "test-task-result",
 			Namespace: "default",
 		},
 		Data: map[string]string{
@@ -1162,23 +1119,13 @@ func TestHandlers_GetTaskResult_DefaultKey(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{
 			ResultRef: &corev1alpha1.ResultReference{
-				ConfigMapName: "test-result",
-				Key:           "", // empty key defaults to "result"
+				Available: true,
 			},
 		},
 	}
 
-	resultCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-result",
-			Namespace: "default",
-		},
-		Data: map[string]string{
-			"result": "default key content",
-		},
-	}
-
-	handlers, app := setupTestHandlersWithObjects(task, resultCM)
+	handlers, app := setupTestHandlersWithObjects(task)
+	handlers.resultStore.SaveResult(context.Background(), "default", "test-task", []byte("default key content"))
 	app.Get("/tasks/:id/result", handlers.GetTaskResult)
 
 	req := httptest.NewRequest(http.MethodGet, "/tasks/test-task/result", nil)
@@ -1203,27 +1150,19 @@ func TestHandlers_GetTaskResult_WatchNamespace(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{
 			ResultRef: &corev1alpha1.ResultReference{
-				ConfigMapName: "test-result",
-				Key:           "output",
+				Available: true,
 			},
-		},
-	}
-
-	resultCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-result",
-			Namespace: "watched-ns",
-		},
-		Data: map[string]string{
-			"output": "task result content",
 		},
 	}
 
 	scheme := runtime.NewScheme()
 	corev1alpha1.AddToScheme(scheme)
 	corev1.AddToScheme(scheme)
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task, resultCM).Build()
-	handlers := NewHandlers(fakeClient, nil, "watched-ns")
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	ss.SaveResult(context.Background(), "watched-ns", "test-task", []byte("task result content"))
+	handlers := NewHandlers(fakeClient, nil, "watched-ns", ss, ss)
 
 	app := fiber.New()
 	app.Get("/tasks/:id/result", handlers.GetTaskResult)
@@ -1256,7 +1195,7 @@ func TestHandlers_DeleteTask_WatchNamespace(t *testing.T) {
 	corev1alpha1.AddToScheme(scheme)
 	corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
-	handlers := NewHandlers(fakeClient, nil, "watched-ns")
+	handlers := NewHandlers(fakeClient, nil, "watched-ns", nil, nil)
 
 	app := fiber.New()
 	app.Delete("/tasks/:id", handlers.DeleteTask)

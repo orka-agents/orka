@@ -142,6 +142,10 @@ build: manifests generate fmt vet ui-build ## Build manager binary.
 build-cli: ## Build mercan CLI binary.
 	go build -o bin/mercan cmd/cli/main.go
 
+.PHONY: build-migrate
+build-migrate: ## Build ConfigMap to SQLite migration binary.
+	go build -o bin/mercan-migrate ./cmd/migrate/
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go

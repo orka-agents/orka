@@ -31,7 +31,6 @@ func TestLoadConfig_RequiredFields(t *testing.T) {
 	t.Setenv("MERCAN_PROMPT", "")
 	t.Setenv("MERCAN_TASK_NAME", "t1")
 	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_RESULT_CONFIGMAP", "t1-result")
 
 	_, err := loadConfig()
 	if err == nil {
@@ -43,7 +42,6 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	t.Setenv("MERCAN_PROMPT", "hello")
 	t.Setenv("MERCAN_TASK_NAME", "t1")
 	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_RESULT_CONFIGMAP", "t1-result")
 	t.Setenv("MERCAN_MAX_TURNS", "")
 	t.Setenv("MERCAN_ALLOWED_TOOLS", "")
 	t.Setenv("MERCAN_DISALLOWED_TOOLS", "")
@@ -68,7 +66,6 @@ func TestLoadConfig_AllFields(t *testing.T) {
 	t.Setenv("MERCAN_PROMPT", "refactor code")
 	t.Setenv("MERCAN_TASK_NAME", "task1")
 	t.Setenv("MERCAN_TASK_NAMESPACE", "ns1")
-	t.Setenv("MERCAN_RESULT_CONFIGMAP", "task1-result")
 	t.Setenv("MERCAN_MODEL", "gpt-4.1")
 	t.Setenv("MERCAN_SYSTEM_PROMPT", "Be helpful")
 	t.Setenv("MERCAN_MAX_TURNS", "100")

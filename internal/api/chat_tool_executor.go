@@ -19,12 +19,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -33,6 +33,7 @@ import (
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 	"github.com/sozercan/mercan/internal/controller"
 	"github.com/sozercan/mercan/internal/llm"
+	"github.com/sozercan/mercan/internal/store"
 )
 
 // ToolExecutor executes orchestrator LLM tool calls by creating and managing
@@ -47,10 +48,11 @@ type ToolExecutor struct {
 	maxTasks       int
 	toolTimeout    time.Duration
 	watchNamespace string
+	resultStore    store.ResultStore
 }
 
 // NewToolExecutor creates a new ToolExecutor.
-func NewToolExecutor(c client.Client, sm *controller.SessionManager, namespace, sessionID, watchNamespace string, maxTasks int, toolTimeout time.Duration) *ToolExecutor {
+func NewToolExecutor(c client.Client, sm *controller.SessionManager, namespace, sessionID, watchNamespace string, maxTasks int, toolTimeout time.Duration, rs store.ResultStore) *ToolExecutor {
 	return &ToolExecutor{
 		client:         c,
 		sessionManager: sm,
@@ -59,6 +61,7 @@ func NewToolExecutor(c client.Client, sm *controller.SessionManager, namespace, 
 		maxTasks:       maxTasks,
 		toolTimeout:    toolTimeout,
 		watchNamespace: watchNamespace,
+		resultStore:    rs,
 	}
 }
 
@@ -456,27 +459,22 @@ func (e *ToolExecutor) executeFetchTaskOutput(ctx context.Context, args map[stri
 		return classifyK8sError(err)
 	}
 
-	if task.Status.ResultRef == nil {
+	if task.Status.ResultRef == nil || !task.Status.ResultRef.Available {
 		return toolError("not_found", "task has no result yet", "Wait for the task to complete, then try again")
 	}
 
-	cm := &corev1.ConfigMap{}
-	if err := e.client.Get(ctx, types.NamespacedName{
-		Name:      task.Status.ResultRef.ConfigMapName,
-		Namespace: namespace,
-	}, cm); err != nil {
-		return classifyK8sError(err)
+	data, err := e.resultStore.GetResult(ctx, namespace, name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return toolError("not_found", "result not found in store", "The result may have been deleted")
+		}
+		return toolError("internal_error", fmt.Sprintf("failed to get result: %v", err), "")
 	}
 
-	key := task.Status.ResultRef.Key
-	if key == "" {
-		key = "result"
-	}
-	result := cm.Data[key]
-
+	result := string(data)
 	const maxLen = 2048
 	if len(result) > maxLen {
-		result = result[:maxLen] + fmt.Sprintf(" [truncated, full output: %d chars]", len(cm.Data[key]))
+		result = result[:maxLen] + fmt.Sprintf(" [truncated, full output: %d chars]", len(data))
 	}
 
 	return ToolResult{

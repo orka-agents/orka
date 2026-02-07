@@ -36,10 +36,10 @@ Controller reconciles child Tasks:
 LLM calls wait_for_tasks(tasks: ["child-1", "child-2"])
   - Worker polls child Task status via K8s API
   - Blocks until all reach terminal phase
-  - Reads result ConfigMaps, returns aggregated results
+  - Reads results from SQLite (via controller's internal API), returns aggregated results
   │
   ▼
-LLM synthesizes final answer from child results → writes to result ConfigMap
+LLM synthesizes final answer from child results → writes result via HTTP POST to controller
   │
   ▼
 Controller: parent Job succeeded → parent Task → Succeeded
@@ -102,7 +102,7 @@ Implementation (`internal/tools/wait_for_tasks.go`):
    - Checks if all are in terminal phase (Succeeded/Failed)
    - If timeout exceeded, returns partial results with timeout flag
    - Respects context cancellation
-3. For each completed child, reads result from ConfigMap (`{childName}-result`)
+3. For each completed child, reads result via the controller's result API
 4. Returns aggregated JSON:
    ```json
    {
@@ -191,13 +191,11 @@ if _, hasChildren := task.Labels["mercan.ai/parent-task"]; !hasChildren {
             if child.Spec.AgentRef != nil {
                 cs.Agent = child.Spec.AgentRef.Name
             }
-            // Include truncated result summary
-            if child.Status.ResultRef != nil {
-                resultCM := &corev1.ConfigMap{}
-                if err := r.Get(ctx, types.NamespacedName{
-                    Name: child.Status.ResultRef.ConfigMapName, Namespace: task.Namespace,
-                }, resultCM); err == nil {
-                    result := resultCM.Data[child.Status.ResultRef.Key]
+            // Include truncated result summary from SQLite store
+            if child.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+                data, err := r.resultStore.GetResult(ctx, task.Namespace, child.Name)
+                if err == nil {
+                    result := string(data)
                     if len(result) > 500 {
                         result = result[:500] + "..."
                     }
@@ -261,9 +259,6 @@ The worker ServiceAccount (`mercan-worker`) ClusterRole in `config/rbac/worker_r
 - apiGroups: ["core.mercan.ai"]
   resources: ["tasks"]
   verbs: ["get", "list", "watch", "create"]
-- apiGroups: [""]
-  resources: ["configmaps"]
-  verbs: ["get", "list"]
 ```
 
 ## Example YAML

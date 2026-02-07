@@ -19,9 +19,11 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -63,7 +65,7 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 	tests := []struct {
 		name          string
 		tasks         []corev1alpha1.Task
-		configMaps    []corev1.ConfigMap
+		resultMap     map[string]string // taskName -> result (served via HTTP)
 		args          WaitForTasksArgs
 		wantCompleted bool
 		wantResults   []TaskResultInfo
@@ -81,8 +83,7 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 					Status: corev1alpha1.TaskStatus{
 						Phase: corev1alpha1.TaskPhaseSucceeded,
 						ResultRef: &corev1alpha1.ResultReference{
-							ConfigMapName: "result-task-a",
-							Key:           "result",
+							Available: true,
 						},
 					},
 				},
@@ -95,21 +96,14 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 					Status: corev1alpha1.TaskStatus{
 						Phase: corev1alpha1.TaskPhaseSucceeded,
 						ResultRef: &corev1alpha1.ResultReference{
-							ConfigMapName: "result-task-b",
-							Key:           "result",
+							Available: true,
 						},
 					},
 				},
 			},
-			configMaps: []corev1.ConfigMap{
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "result-task-a", Namespace: "test-ns"},
-					Data:       map[string]string{"result": "result from task-a"},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "result-task-b", Namespace: "test-ns"},
-					Data:       map[string]string{"result": "result from task-b"},
-				},
+			resultMap: map[string]string{
+				"task-a": "result from task-a",
+				"task-b": "result from task-b",
 			},
 			args:          WaitForTasksArgs{Tasks: []string{"task-a", "task-b"}, Timeout: "1s"},
 			wantCompleted: true,
@@ -130,8 +124,7 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 					Status: corev1alpha1.TaskStatus{
 						Phase: corev1alpha1.TaskPhaseSucceeded,
 						ResultRef: &corev1alpha1.ResultReference{
-							ConfigMapName: "result-task-ok",
-							Key:           "result",
+							Available: true,
 						},
 					},
 				},
@@ -147,11 +140,8 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 					},
 				},
 			},
-			configMaps: []corev1.ConfigMap{
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "result-task-ok", Namespace: "test-ns"},
-					Data:       map[string]string{"result": "success output"},
-				},
+			resultMap: map[string]string{
+				"task-ok": "success output",
 			},
 			args:          WaitForTasksArgs{Tasks: []string{"task-ok", "task-fail"}, Timeout: "1s"},
 			wantCompleted: true,
@@ -194,13 +184,33 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("MERCAN_TASK_NAMESPACE", "test-ns")
 
+			// Set up HTTP test server for result fetching
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Extract task name from path: /api/v1/tasks/{taskName}/result
+				parts := make([]string, 0)
+				for _, p := range splitPath(r.URL.Path) {
+					if p != "" {
+						parts = append(parts, p)
+					}
+				}
+				// path: api/v1/tasks/{taskName}/result
+				if len(parts) >= 5 && parts[3] != "" {
+					taskName := parts[3]
+					if result, ok := tt.resultMap[taskName]; ok {
+						w.Header().Set("Content-Type", "application/json")
+						json.NewEncoder(w).Encode(map[string]string{"result": result})
+						return
+					}
+				}
+				http.NotFound(w, r)
+			}))
+			defer srv.Close()
+			t.Setenv("MERCAN_CONTROLLER_URL", srv.URL)
+
 			scheme := newTestScheme()
-			objs := make([]client.Object, 0, len(tt.tasks)+len(tt.configMaps))
+			objs := make([]client.Object, 0, len(tt.tasks))
 			for i := range tt.tasks {
 				objs = append(objs, &tt.tasks[i])
-			}
-			for i := range tt.configMaps {
-				objs = append(objs, &tt.configMaps[i])
 			}
 
 			fakeClient := fake.NewClientBuilder().
@@ -258,6 +268,17 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 			}
 		})
 	}
+}
+
+// splitPath splits a URL path into non-empty segments.
+func splitPath(path string) []string {
+	var result []string
+	for _, s := range strings.Split(path, "/") {
+		if s != "" {
+			result = append(result, s)
+		}
+	}
+	return result
 }
 
 func TestWaitForTasksTool_Execute_EmptyTasks(t *testing.T) {

@@ -45,8 +45,14 @@ const (
 	// DefaultClaudeWorkerImage is the default image for Claude agent tasks
 	DefaultClaudeWorkerImage = "mercan-agent-worker-claude:latest"
 
-	// ResultConfigMapEnvVar is the env var for result ConfigMap name
-	ResultConfigMapEnvVar = "MERCAN_RESULT_CONFIGMAP"
+	// DefaultInitImage is the default image for init containers
+	DefaultInitImage = "busybox:1.37"
+
+	// ResultEndpointEnvVar is the env var for the result submission URL
+	ResultEndpointEnvVar = "MERCAN_RESULT_ENDPOINT"
+
+	// ControllerURLEnvVar is the env var for the controller base URL
+	ControllerURLEnvVar = "MERCAN_CONTROLLER_URL"
 
 	// TaskNameEnvVar is the env var for the task name
 	TaskNameEnvVar = "MERCAN_TASK_NAME"
@@ -62,6 +68,8 @@ type JobBuilder struct {
 	GeneralWorkerImage string
 	CopilotWorkerImage string
 	ClaudeWorkerImage  string
+	InitImage          string
+	ControllerURL      string // e.g. http://mercan-controller.mercan-system.svc:8080
 }
 
 // NewJobBuilder creates a new JobBuilder
@@ -72,6 +80,7 @@ func NewJobBuilder(c client.Client) *JobBuilder {
 		GeneralWorkerImage: DefaultGeneralWorkerImage,
 		CopilotWorkerImage: DefaultCopilotWorkerImage,
 		ClaudeWorkerImage:  DefaultClaudeWorkerImage,
+		InitImage:          DefaultInitImage,
 	}
 }
 
@@ -254,8 +263,12 @@ func (b *JobBuilder) buildEnvVars(task *corev1alpha1.Task, agent *corev1alpha1.A
 			Value: task.Namespace,
 		},
 		{
-			Name:  ResultConfigMapEnvVar,
-			Value: fmt.Sprintf("%s-result", task.Name),
+			Name:  ResultEndpointEnvVar,
+			Value: fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name),
+		},
+		{
+			Name:  ControllerURLEnvVar,
+			Value: b.ControllerURL,
 		},
 	}
 
@@ -484,36 +497,60 @@ func (b *JobBuilder) addSecretVolumes(job *batchv1.Job, task *corev1alpha1.Task,
 	}
 }
 
-// addSessionVolume adds session ConfigMap volume to the Job
+// addSessionVolume adds a session emptyDir volume and init container to the Job.
+// The init container fetches the session transcript from the controller via HTTP
+// and writes it to /session/transcript.jsonl for the main worker container.
 func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task) {
-	sessionCMName := fmt.Sprintf("session-%s", task.Spec.SessionRef.Name)
+	sessionName := task.Spec.SessionRef.Name
 
+	// Add shared emptyDir volume for session data
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
-		Name: "session",
+		Name: "session-data",
 		VolumeSource: corev1.VolumeSource{
-			ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: sessionCMName,
-				},
-				Optional: ptr.To(true), // Session might not exist yet
-			},
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		},
 	})
 
+	// Mount in the main worker container
 	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
 		job.Spec.Template.Spec.Containers[0].VolumeMounts,
 		corev1.VolumeMount{
-			Name:      "session",
+			Name:      "session-data",
 			MountPath: "/session",
 			ReadOnly:  true,
 		},
 	)
 
+	// Build the transcript fetch URL
+	transcriptURL := fmt.Sprintf("%s/internal/v1/sessions/%s/%s/transcript",
+		b.ControllerURL, task.Namespace, sessionName)
+
+	// Add init container that fetches the transcript via HTTP
+	initContainer := corev1.Container{
+		Name:            "fetch-session",
+		Image:           b.InitImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		SecurityContext: b.buildContainerSecurityContext(),
+		Command: []string{"sh", "-c", fmt.Sprintf(
+			`TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token) && `+
+				`wget --header="Authorization: Bearer $TOKEN" -q -O /session/transcript.jsonl "%s" || `+
+				`touch /session/transcript.jsonl`,
+			transcriptURL,
+		)},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      "session-data",
+				MountPath: "/session",
+			},
+		},
+	}
+
+	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, initContainer)
+
 	// Add session env vars
 	job.Spec.Template.Spec.Containers[0].Env = append(
 		job.Spec.Template.Spec.Containers[0].Env,
-		corev1.EnvVar{Name: "MERCAN_SESSION_NAME", Value: task.Spec.SessionRef.Name},
-		corev1.EnvVar{Name: "MERCAN_SESSION_CONFIGMAP", Value: sessionCMName},
+		corev1.EnvVar{Name: "MERCAN_SESSION_NAME", Value: sessionName},
 	)
 }
 

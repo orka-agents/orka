@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
@@ -44,6 +45,7 @@ import (
 	_ "github.com/sozercan/mercan/internal/llm/anthropic"
 	_ "github.com/sozercan/mercan/internal/llm/openai"
 	_ "github.com/sozercan/mercan/internal/metrics"
+	"github.com/sozercan/mercan/internal/store/sqlite"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -81,6 +83,9 @@ func main() {
 	var chatMaxConcurrent int
 	var chatMaxTasksPerTurn int
 	var chatMaxSessionSize int
+	var storeBackend string
+	var storePath string
+	var controllerURL string
 	var tlsOpts []func(*tls.Config)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -115,6 +120,9 @@ func main() {
 	flag.IntVar(&chatMaxConcurrent, "chat-max-concurrent", 10, "Max concurrent chat sessions.")
 	flag.IntVar(&chatMaxTasksPerTurn, "chat-max-tasks-per-turn", 5, "Max tasks created per chat turn.")
 	flag.IntVar(&chatMaxSessionSize, "chat-max-session-size", 500*1024, "Soft limit for session ConfigMap size before truncation (bytes).")
+	flag.StringVar(&storeBackend, "store-backend", "sqlite", "Storage backend (sqlite)")
+	flag.StringVar(&storePath, "store-path", "/data/mercan.db", "Path to SQLite database file")
+	flag.StringVar(&controllerURL, "controller-url", "", "Base URL for the controller API, used by workers. E.g. http://mercan-controller.mercan-system.svc:8080")
 
 	opts := zap.Options{
 		Development: true,
@@ -198,20 +206,39 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create helper components
-	sessionManager := controller.NewSessionManager(mgr.GetClient())
-	webhookNotifier := controller.NewWebhookNotifier()
-	jobBuilder := controller.NewJobBuilder(mgr.GetClient())
-	jobBuilder.CopilotWorkerImage = copilotWorkerImage
-	jobBuilder.ClaudeWorkerImage = claudeWorkerImage
-	priorityQueue := controller.NewPriorityQueue()
-
 	// Create Kubernetes clientset for pod log reading
 	kubeClient, err := kubernetes.NewForConfig(mgr.GetConfig())
 	if err != nil {
 		setupLog.Error(err, "unable to create kubernetes clientset")
 		os.Exit(1)
 	}
+
+	// Create SQLite store
+	if storeBackend != "sqlite" {
+		setupLog.Error(fmt.Errorf("unsupported store backend: %s", storeBackend), "unknown store backend")
+		os.Exit(1)
+	}
+
+	db, err := sqlite.NewDB(storePath)
+	if err != nil {
+		setupLog.Error(err, "unable to create SQLite database", "path", storePath)
+		os.Exit(1)
+	}
+
+	sqliteStore := sqlite.NewStore(db, storePath)
+	if err := mgr.Add(sqliteStore); err != nil {
+		setupLog.Error(err, "unable to add SQLite store as runnable")
+		os.Exit(1)
+	}
+
+	// Create helper components
+	sessionManager := controller.NewSessionManager(sqliteStore)
+	webhookNotifier := controller.NewWebhookNotifier()
+	jobBuilder := controller.NewJobBuilder(mgr.GetClient())
+	jobBuilder.CopilotWorkerImage = copilotWorkerImage
+	jobBuilder.ClaudeWorkerImage = claudeWorkerImage
+	jobBuilder.ControllerURL = controllerURL
+	priorityQueue := controller.NewPriorityQueue()
 
 	// Setup Task controller with helper components
 	if err := (&controller.TaskReconciler{
@@ -222,6 +249,8 @@ func main() {
 		WebhookNotifier: webhookNotifier,
 		PriorityQueue:   priorityQueue,
 		KubeClient:      kubeClient,
+		ResultStore:     sqliteStore,
+		SessionStore:    sqliteStore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)
@@ -265,6 +294,8 @@ func main() {
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
 		Port:           apiPort,
 		WatchNamespace: watchNamespace,
+		ResultStore:    sqliteStore,
+		SessionStore:   sqliteStore,
 		Chat: api.ChatConfig{
 			Enabled:         chatEnabled,
 			Provider:        chatProvider,

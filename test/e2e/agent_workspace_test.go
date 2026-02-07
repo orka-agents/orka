@@ -45,8 +45,7 @@ var _ = Describe("Agent Workspace", Ordered, func() {
 		cmd = exec.Command("kubectl", "delete", "agent", agentName, "-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
-		cmd = exec.Command("kubectl", "delete", "configmap", taskName+"-result", "-n", namespace, "--ignore-not-found")
-		_, _ = utils.Run(cmd)
+		// Results are stored in SQLite — no ConfigMap cleanup needed
 	})
 
 	It("should configure workspace volumes and env vars for git clone", func() {

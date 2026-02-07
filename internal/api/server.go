@@ -29,6 +29,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/sozercan/mercan/internal/controller"
+	"github.com/sozercan/mercan/internal/store"
 	"github.com/sozercan/mercan/internal/uiembed"
 )
 
@@ -40,6 +41,8 @@ type ServerConfig struct {
 	MetricsPort    int
 	WatchNamespace string
 	Chat           ChatConfig
+	ResultStore    store.ResultStore
+	SessionStore   store.SessionStore
 }
 
 // Server is the REST API server
@@ -51,6 +54,9 @@ type Server struct {
 	handlers         *Handlers
 	chatHandler      *ChatHandler
 	openaiHandler    *OpenAICompatHandler
+	internalHandlers *InternalHandlers
+	ResultStore      store.ResultStore
+	SessionStore     store.SessionStore
 }
 
 // NewServer creates a new API server
@@ -65,10 +71,12 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		client:         c,
 		config:         config,
 		sessionManager: sessionManager,
+		ResultStore:    config.ResultStore,
+		SessionStore:   config.SessionStore,
 	}
 
-	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace)
-	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace)
+	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace, config.ResultStore, config.SessionStore)
+	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.SessionStore, config.ResultStore)
 	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.Chat)
 	server.setupMiddleware()
 	server.setupRoutes()
@@ -151,6 +159,15 @@ func (s *Server) setupRoutes() {
 	oai.Use(NewAuthMiddleware(s.client))
 	oai.Post("/chat/completions", s.openaiHandler.HandleChatCompletions)
 	oai.Get("/models", s.openaiHandler.HandleListModels)
+
+	// Internal API for worker communication
+	if s.ResultStore != nil && s.SessionStore != nil {
+		s.internalHandlers = NewInternalHandlers(s.ResultStore, s.SessionStore)
+		internal := s.app.Group("/internal/v1")
+		internal.Use(NewAuthMiddleware(s.client))
+		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
+		internal.Get("/sessions/:namespace/:name/transcript", s.internalHandlers.GetSessionTranscript)
+	}
 }
 
 // Start starts the API server

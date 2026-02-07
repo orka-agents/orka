@@ -11,7 +11,7 @@ Mercan is a Kubernetes-native task execution platform that supports container ta
 - **Interactive Chat**: Agentic chat endpoint with SSE streaming, tool execution loop, and session persistence
 - **CLI Tool**: `mercan login` for browser-based authentication with kubeconfig token extraction
 - **Multi-Agent Coordination**: Coordinator agents can delegate work to specialist agents with depth and concurrency limits
-- **Session Continuity**: Multi-turn conversations with context preserved in ConfigMaps (JSONL format)
+- **Session Continuity**: Multi-turn conversations with context preserved in SQLite
 - **Custom Tools**: Define HTTP-based tools with header or body auth injection
 - **Skills**: Reusable prompt templates (ConfigMaps) injected into agent system prompts
 - **Multiple LLM Providers**: Anthropic Claude, OpenAI, and Azure OpenAI via the Provider CRD
@@ -116,7 +116,7 @@ spec:
     - configMapRef:
         name: skill-researcher
   session:
-    persistence: configmap  # configmap, pvc, or none
+    persistence: sqlite    # sqlite or none
     ttl: 24h
     maxMessages: 50
   coordination:
@@ -309,7 +309,7 @@ The chat endpoint provides an agentic conversational interface with tool executi
 **Features:**
 - SSE streaming with event types: `status`, `tool_call`, `tool_result`, `message`, `error`, `done`
 - JSON response mode (`Accept: application/json`)
-- Session persistence in ConfigMaps with automatic truncation
+- Session persistence in SQLite with automatic truncation
 - Concurrency control with 429 rate limiting
 - Repetition detection to prevent infinite tool loops
 - Progress check injection every 5 iterations
@@ -408,7 +408,9 @@ EOF
 
 ```bash
 kubectl get task hello-task
-kubectl get configmap task-hello-task-result -o jsonpath='{.data.result}'
+# Get the result via the REST API
+curl http://localhost:8080/api/v1/tasks/hello-task/result \
+  -H "Authorization: Bearer $(kubectl create token mercan-client)"
 ```
 
 ### Agent Runtimes Quick Start
@@ -477,7 +479,9 @@ EOF
 
 ```bash
 kubectl get task code-review
-kubectl get configmap task-code-review-result -o jsonpath='{.data.result}'
+# Get the result via the REST API
+curl http://localhost:8080/api/v1/tasks/code-review/result \
+  -H "Authorization: Bearer $(kubectl create token mercan-client)"
 ```
 
 See [Agent Runtimes Documentation](docs/agent-runtimes.md) for full configuration reference.
@@ -495,7 +499,7 @@ The controller exposes a REST API for programmatic access. All `/api/v1/*` endpo
 | `/api/v1/tasks/:id` | GET | Get task details |
 | `/api/v1/tasks/:id` | DELETE | Cancel/delete task |
 | `/api/v1/tasks/:id/logs` | GET | Stream task logs |
-| `/api/v1/tasks/:id/result` | GET | Get task result from ConfigMap |
+| `/api/v1/tasks/:id/result` | GET | Get task result |
 
 ### Sessions
 
@@ -737,6 +741,8 @@ See the [examples](examples/) directory for complete examples:
 | `--watch-namespace` | `""` | Namespace to watch (empty = all) |
 | `--copilot-worker-image` | `mercan-agent-worker-copilot:latest` | Copilot agent worker image |
 | `--claude-worker-image` | `mercan-agent-worker-claude:latest` | Claude agent worker image |
+| `--store-backend` | `sqlite` | Storage backend (sqlite) |
+| `--store-path` | `/data/mercan.db` | Path to SQLite database file |
 | `--chat-enabled` | `true` | Enable the chat endpoint |
 | `--chat-provider` | `""` | Default Provider CRD name for chat |
 | `--chat-model` | `""` | Default model for chat |

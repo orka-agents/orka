@@ -55,6 +55,7 @@ spec:
         # This ensures that deployments meet the highest security requirements for Kubernetes.
         # For more details, see: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
         runAsNonRoot: true
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -63,6 +64,8 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+          - --store-backend=sqlite
+          - --store-path=/data/mercan.db
         image: controller:latest
         name: manager
         ports: []
@@ -93,7 +96,11 @@ spec:
           requests:
             cpu: 10m
             memory: 64Mi
-        volumeMounts: []
-      volumes: []
+        volumeMounts:
+          - name: store
+            mountPath: /data
+      volumes:
+        - name: store
+          emptyDir: {}
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10

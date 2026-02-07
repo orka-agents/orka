@@ -116,6 +116,15 @@ labels: {}
 # Additional annotations
 annotations: {}
 
+# SQLite store configuration
+store:
+  path: /data/mercan.db
+  persistence:
+    enabled: false       # default: ephemeral (emptyDir), no PVC
+    size: 1Gi            # only when enabled: true
+    storageClass: ""     # use cluster default
+    accessMode: ReadWriteOnce
+
 # Prometheus ServiceMonitor
 monitoring:
   enabled: false

@@ -48,9 +48,7 @@ var _ = Describe("Agent Task", Ordered, func() {
 		cmd = exec.Command("kubectl", "delete", "agent", agentName, "-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
-		By("deleting the result ConfigMap")
-		cmd = exec.Command("kubectl", "delete", "configmap", taskName+"-result", "-n", namespace, "--ignore-not-found")
-		_, _ = utils.Run(cmd)
+		// Results are stored in SQLite — no ConfigMap cleanup needed
 	})
 
 	It("should create a Job and complete for an agent-type task", func() {
@@ -151,8 +149,8 @@ var _ = Describe("Agent Task", Ordered, func() {
 			g.Expect(envMap["MERCAN_TASK_NAME"]).To(Equal(taskName))
 			g.Expect(envMap).To(HaveKey("MERCAN_TASK_NAMESPACE"))
 			g.Expect(envMap["MERCAN_TASK_NAMESPACE"]).To(Equal(namespace))
-			g.Expect(envMap).To(HaveKey("MERCAN_RESULT_CONFIGMAP"))
-			g.Expect(envMap["MERCAN_RESULT_CONFIGMAP"]).To(Equal(taskName + "-result"))
+			g.Expect(envMap).To(HaveKey("MERCAN_RESULT_ENDPOINT"))
+			g.Expect(envMap).To(HaveKey("MERCAN_CONTROLLER_URL"))
 			g.Expect(envMap).To(HaveKey("MERCAN_PROMPT"))
 			g.Expect(envMap["MERCAN_PROMPT"]).To(Equal("echo hello world"))
 			g.Expect(envMap).To(HaveKey("MERCAN_MAX_TURNS"))

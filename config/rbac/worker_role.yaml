@@ -10,7 +10,7 @@ kind: ClusterRole
 metadata:
   name: mercan-worker-role
 rules:
-# ConfigMaps: read + write (for result storage by AI/agent workers)
+# ConfigMaps: read-only (skills, secrets lookup)
 - apiGroups:
   - ""
   resources:
@@ -18,8 +18,7 @@ rules:
   verbs:
   - get
   - list
-  - create
-  - update
+  - watch
 # Mercan Tool CRDs
 - apiGroups:
   - core.mercan.ai
