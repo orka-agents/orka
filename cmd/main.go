@@ -28,6 +28,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -205,6 +206,13 @@ func main() {
 	jobBuilder.ClaudeWorkerImage = claudeWorkerImage
 	priorityQueue := controller.NewPriorityQueue()
 
+	// Create Kubernetes clientset for pod log reading
+	kubeClient, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "unable to create kubernetes clientset")
+		os.Exit(1)
+	}
+
 	// Setup Task controller with helper components
 	if err := (&controller.TaskReconciler{
 		Client:          mgr.GetClient(),
@@ -213,6 +221,7 @@ func main() {
 		SessionManager:  sessionManager,
 		WebhookNotifier: webhookNotifier,
 		PriorityQueue:   priorityQueue,
+		KubeClient:      kubeClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)

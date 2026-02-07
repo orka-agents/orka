@@ -23,21 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
-
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 )
-
-// Result represents the execution result
-type Result struct {
-	ExitCode int    `json:"exit_code"`
-	Stdout   string `json:"stdout"`
-	Stderr   string `json:"stderr"`
-	Duration string `json:"duration"`
-}
 
 func main() {
 	if err := run(); err != nil {
@@ -48,11 +34,6 @@ func main() {
 
 func run() error {
 	ctx := context.Background()
-
-	// Get configuration from environment
-	taskName := os.Getenv("MERCAN_TASK_NAME")
-	taskNamespace := os.Getenv("MERCAN_TASK_NAMESPACE")
-	resultConfigMap := os.Getenv("MERCAN_RESULT_CONFIGMAP")
 
 	// Get command from arguments or environment
 	var command []string
@@ -70,39 +51,8 @@ func run() error {
 		return fmt.Errorf("command cannot be empty")
 	}
 
-	fmt.Printf("Executing command: %v\n", command)
-
-	// Execute the command
-	start := time.Now()
-	result := executeCommand(ctx, command)
-	result.Duration = time.Since(start).String()
-
-	// Print output
-	if result.Stdout != "" {
-		fmt.Printf("stdout:\n%s\n", result.Stdout)
-	}
-	if result.Stderr != "" {
-		fmt.Fprintf(os.Stderr, "stderr:\n%s\n", result.Stderr)
-	}
-
-	// Write result to ConfigMap
-	if resultConfigMap != "" {
-		if err := writeResult(ctx, taskNamespace, resultConfigMap, result); err != nil {
-			return fmt.Errorf("failed to write result: %w", err)
-		}
-	}
-
-	fmt.Printf("Task %s/%s completed with exit code %d\n", taskNamespace, taskName, result.ExitCode)
-
-	if result.ExitCode != 0 {
-		os.Exit(result.ExitCode)
-	}
-
-	return nil
-}
-
-// executeCommand runs the command and captures output
-func executeCommand(ctx context.Context, command []string) Result {
+	// Execute the command and print output to stdout/stderr.
+	// The controller captures pod logs and writes them to a result ConfigMap.
 	var stdout, stderr bytes.Buffer
 
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
@@ -112,65 +62,19 @@ func executeCommand(ctx context.Context, command []string) Result {
 
 	err := cmd.Run()
 
-	result := Result{
-		ExitCode: 0,
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
+	if stdout.Len() > 0 {
+		fmt.Print(stdout.String())
+	}
+	if stderr.Len() > 0 {
+		fmt.Fprint(os.Stderr, stderr.String())
 	}
 
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			result.ExitCode = exitErr.ExitCode()
-		} else {
-			result.ExitCode = -1
-			if result.Stderr == "" {
-				result.Stderr = err.Error()
-			}
+			os.Exit(exitErr.ExitCode())
 		}
+		return err
 	}
 
-	return result
-}
-
-// writeResult writes the result to a ConfigMap
-func writeResult(ctx context.Context, namespace, name string, result Result) error {
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		return fmt.Errorf("failed to get in-cluster config: %w", err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("failed to create clientset: %w", err)
-	}
-
-	// Prepare result content
-	content := result.Stdout
-	if result.ExitCode != 0 && result.Stderr != "" {
-		content = fmt.Sprintf("stdout:\n%s\n\nstderr:\n%s\n\nexit_code: %d",
-			result.Stdout, result.Stderr, result.ExitCode)
-	}
-
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"mercan.ai/result": "true",
-			},
-		},
-		Data: map[string]string{
-			"result":    content,
-			"exit_code": fmt.Sprintf("%d", result.ExitCode),
-			"duration":  result.Duration,
-		},
-	}
-
-	_, err = clientset.CoreV1().ConfigMaps(namespace).Create(ctx, cm, metav1.CreateOptions{})
-	if err != nil {
-		// Try update if create fails
-		_, err = clientset.CoreV1().ConfigMaps(namespace).Update(ctx, cm, metav1.UpdateOptions{})
-	}
-
-	return err
+	return nil
 }

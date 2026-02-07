@@ -19,16 +19,19 @@ package controller
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	cron "github.com/robfig/cron/v3"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -58,6 +61,7 @@ type TaskReconciler struct {
 	WebhookNotifier *WebhookNotifier
 	PriorityQueue   *PriorityQueue
 	Recorder        record.EventRecorder
+	KubeClient      kubernetes.Interface
 }
 
 // +kubebuilder:rbac:groups=core.mercan.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
@@ -70,7 +74,25 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
-// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=replicationcontrollers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=deployments;replicasets;statefulsets;daemonsets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses;networkpolicies,verbs=get;list;watch
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings;roles;rolebindings,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list
+// +kubebuilder:rbac:groups=metrics.k8s.io,resources=pods;nodes,verbs=get;list
 
 // Reconcile handles the reconciliation loop for Task resources
 func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -286,6 +308,12 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 			log.Info("provider is not ready", "provider", providerRef.Name)
 			return r.failTask(ctx, task, fmt.Sprintf("provider %s is not ready: %s", providerRef.Name, provider.Status.Message))
 		}
+	}
+
+	// Ensure worker ServiceAccount and RBAC exist in the task namespace
+	if err := r.ensureWorkerRBAC(ctx, task.Namespace); err != nil {
+		log.Error(err, "failed to ensure worker RBAC")
+		// Non-fatal: continue with job creation, it may still work
 	}
 
 	// Create the Job
@@ -530,7 +558,6 @@ func (r *TaskReconciler) calculateRetryDelay(task *corev1alpha1.Task) time.Durat
 
 // collectResult collects the task result from the Job's output
 func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.Task) error {
-	// Result is stored in a ConfigMap by the worker
 	resultCMName := fmt.Sprintf("%s-result", task.Name)
 	resultCM := &corev1.ConfigMap{}
 
@@ -539,12 +566,57 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 		Namespace: task.Namespace,
 	}, resultCM)
 
+	if err == nil {
+		// Result ConfigMap already exists (written by worker)
+		task.Status.ResultRef = &corev1alpha1.ResultReference{
+			ConfigMapName: resultCMName,
+			Key:           "result",
+		}
+		return nil
+	}
+
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	// No result ConfigMap yet — capture pod logs for container tasks
+	if task.Spec.Type != corev1alpha1.TaskTypeContainer || r.KubeClient == nil {
+		return nil
+	}
+
+	logs, err := r.readPodLogs(ctx, task)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			// No result ConfigMap yet, might be created by worker
+		return fmt.Errorf("reading pod logs: %w", err)
+	}
+
+	// Truncate to fit ConfigMap 1MB limit
+	const maxResultSize = 900 * 1024
+	if len(logs) > maxResultSize {
+		logs = logs[:maxResultSize] + "\n... (truncated)"
+	}
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      resultCMName,
+			Namespace: task.Namespace,
+			Labels: map[string]string{
+				"mercan.ai/result": "true",
+			},
+		},
+		Data: map[string]string{
+			"result": logs,
+		},
+	}
+
+	if err := ctrl.SetControllerReference(task, cm, r.Scheme); err != nil {
+		return fmt.Errorf("setting owner reference: %w", err)
+	}
+
+	if err := r.Create(ctx, cm); err != nil {
+		if apierrors.IsAlreadyExists(err) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("creating result ConfigMap: %w", err)
 	}
 
 	task.Status.ResultRef = &corev1alpha1.ResultReference{
@@ -553,6 +625,36 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 	}
 
 	return nil
+}
+
+// readPodLogs reads logs from the first pod of a task's job.
+func (r *TaskReconciler) readPodLogs(ctx context.Context, task *corev1alpha1.Task) (string, error) {
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList,
+		client.InNamespace(task.Namespace),
+		client.MatchingLabels{"job-name": task.Status.JobName},
+	); err != nil {
+		return "", fmt.Errorf("listing pods: %w", err)
+	}
+
+	if len(podList.Items) == 0 {
+		return "", fmt.Errorf("no pods found for job %s", task.Status.JobName)
+	}
+
+	pod := podList.Items[len(podList.Items)-1]
+	req := r.KubeClient.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{})
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return "", fmt.Errorf("streaming logs: %w", err)
+	}
+	defer stream.Close()
+
+	data, err := io.ReadAll(stream)
+	if err != nil {
+		return "", fmt.Errorf("reading logs: %w", err)
+	}
+
+	return string(data), nil
 }
 
 // resolveProviderRef determines which provider reference to use
@@ -818,4 +920,71 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1alpha1.Task{}).
 		Named("task").
 		Complete(r)
+}
+
+const (
+	workerServiceAccountName = "mercan-worker"
+	workerClusterRoleName    = "mercan-mercan-worker-role"
+)
+
+// ensureWorkerRBAC ensures the mercan-worker ServiceAccount and ClusterRoleBinding
+// exist in the given namespace so that task jobs have the correct permissions.
+func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string) error {
+	log := logf.FromContext(ctx)
+
+	// Ensure ServiceAccount exists
+	sa := &corev1.ServiceAccount{}
+	err := r.Get(ctx, types.NamespacedName{Name: workerServiceAccountName, Namespace: namespace}, sa)
+	if apierrors.IsNotFound(err) {
+		sa = &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      workerServiceAccountName,
+				Namespace: namespace,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": "mercan",
+				},
+			},
+		}
+		if err := r.Create(ctx, sa); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("creating ServiceAccount: %w", err)
+		}
+		log.Info("Created worker ServiceAccount", "namespace", namespace)
+	} else if err != nil {
+		return fmt.Errorf("getting ServiceAccount: %w", err)
+	}
+
+	// Ensure ClusterRoleBinding includes this namespace
+	bindingName := fmt.Sprintf("mercan-worker-%s", namespace)
+	crb := &rbacv1.ClusterRoleBinding{}
+	err = r.Get(ctx, types.NamespacedName{Name: bindingName}, crb)
+	if apierrors.IsNotFound(err) {
+		crb = &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: bindingName,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": "mercan",
+				},
+			},
+			RoleRef: rbacv1.RoleRef{
+				APIGroup: "rbac.authorization.k8s.io",
+				Kind:     "ClusterRole",
+				Name:     workerClusterRoleName,
+			},
+			Subjects: []rbacv1.Subject{
+				{
+					Kind:      "ServiceAccount",
+					Name:      workerServiceAccountName,
+					Namespace: namespace,
+				},
+			},
+		}
+		if err := r.Create(ctx, crb); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("creating ClusterRoleBinding: %w", err)
+		}
+		log.Info("Created worker ClusterRoleBinding", "namespace", namespace, "binding", bindingName)
+	} else if err != nil {
+		return fmt.Errorf("getting ClusterRoleBinding: %w", err)
+	}
+
+	return nil
 }
