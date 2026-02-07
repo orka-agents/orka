@@ -17,6 +17,7 @@ rules:
   - configmaps
   verbs:
   - get
+  - list
   - create
   - update
 # Mercan Tool CRDs
@@ -27,6 +28,16 @@ rules:
   verbs:
   - get
   - list
+# Mercan Task CRDs (for coordination - delegate and wait)
+- apiGroups:
+  - core.mercan.ai
+  resources:
+  - tasks
+  verbs:
+  - get
+  - list
+  - watch
+  - create
 # Broad read-only access to common cluster resources
 - apiGroups:
   - ""

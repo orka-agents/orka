@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -507,6 +508,148 @@ func TestConstants(t *testing.T) {
 	}
 	if TaskNamespaceEnvVar != "MERCAN_TASK_NAMESPACE" {
 		t.Errorf("TaskNamespaceEnvVar = %s", TaskNamespaceEnvVar)
+	}
+}
+
+func TestJobBuilder_buildEnvVars_WithCoordination(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-task",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAI,
+			Prompt: "Coordinate work",
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Provider: "anthropic",
+				Name:     "claude-3-5-sonnet",
+			},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled:               true,
+				MaxDepth:              3,
+				MaxConcurrentChildren: 5,
+				AllowedAgents: []corev1alpha1.AllowedAgent{
+					{Name: "backend-dev"},
+					{Name: "frontend-dev"},
+				},
+			},
+		},
+	}
+
+	envVars := builder.buildEnvVars(task, agent, nil)
+
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{"MERCAN_COORDINATION_ENABLED", "true"},
+		{"MERCAN_COORDINATION_MAX_DEPTH", "3"},
+		{"MERCAN_COORDINATION_MAX_CHILDREN", "5"},
+		{"MERCAN_COORDINATION_ALLOWED_AGENTS", "backend-dev,frontend-dev"},
+		{"MERCAN_COORDINATION_DEPTH", "0"},
+	}
+	for _, tt := range tests {
+		env, found := findEnvVar(envVars, tt.name)
+		if !found {
+			t.Errorf("Missing %s", tt.name)
+		} else if env.Value != tt.value {
+			t.Errorf("%s = %s, want %s", tt.name, env.Value, tt.value)
+		}
+	}
+
+	toolsEnv, found := findEnvVar(envVars, "MERCAN_AI_TOOLS")
+	if !found {
+		t.Fatal("Missing MERCAN_AI_TOOLS")
+	}
+	for _, tool := range []string{"delegate_task", "wait_for_tasks"} {
+		if !strings.Contains(toolsEnv.Value, tool) {
+			t.Errorf("MERCAN_AI_TOOLS = %s, want to contain %s", toolsEnv.Value, tool)
+		}
+	}
+}
+
+func TestJobBuilder_buildEnvVars_WithCoordination_ChildTask(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-task",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"mercan.ai/coordination-depth": "2",
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAI,
+			Prompt: "Sub-task work",
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Provider: "anthropic",
+				Name:     "claude-3-5-sonnet",
+			},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled:               true,
+				MaxDepth:              3,
+				MaxConcurrentChildren: 5,
+				AllowedAgents: []corev1alpha1.AllowedAgent{
+					{Name: "backend-dev"},
+				},
+			},
+		},
+	}
+
+	envVars := builder.buildEnvVars(task, agent, nil)
+
+	env, found := findEnvVar(envVars, "MERCAN_COORDINATION_DEPTH")
+	if !found {
+		t.Fatal("Missing MERCAN_COORDINATION_DEPTH")
+	}
+	if env.Value != "2" {
+		t.Errorf("MERCAN_COORDINATION_DEPTH = %s, want 2", env.Value)
+	}
+}
+
+func TestJobBuilder_buildEnvVars_NoCoordination(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-task",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAI,
+			Prompt: "Simple task",
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Provider: "anthropic",
+				Name:     "claude-3-5-sonnet",
+			},
+		},
+	}
+
+	envVars := builder.buildEnvVars(task, agent, nil)
+
+	coordinationVars := []string{
+		"MERCAN_COORDINATION_ENABLED",
+		"MERCAN_COORDINATION_MAX_DEPTH",
+		"MERCAN_COORDINATION_MAX_CHILDREN",
+		"MERCAN_COORDINATION_ALLOWED_AGENTS",
+		"MERCAN_COORDINATION_DEPTH",
+	}
+	for _, name := range coordinationVars {
+		if _, found := findEnvVar(envVars, name); found {
+			t.Errorf("Unexpected env var %s present without coordination", name)
+		}
 	}
 }
 
@@ -1059,7 +1202,7 @@ func TestJobBuilder_Build_AgentTask_Volumes(t *testing.T) {
 	// Verify workspace is emptyDir
 	for _, v := range volumes {
 		if v.Name == "workspace" {
-			if v.VolumeSource.EmptyDir == nil {
+			if v.EmptyDir == nil {
 				t.Error("workspace volume should be emptyDir")
 			}
 		}
@@ -1075,7 +1218,7 @@ func TestJobBuilder_Build_AgentTask_Volumes(t *testing.T) {
 	// Verify home is emptyDir
 	for _, v := range volumes {
 		if v.Name == "home" {
-			if v.VolumeSource.EmptyDir == nil {
+			if v.EmptyDir == nil {
 				t.Error("home volume should be emptyDir")
 			}
 		}
@@ -1136,10 +1279,10 @@ func TestJobBuilder_Build_AgentTask_GitSecretVolume(t *testing.T) {
 	}
 	for _, v := range volumes {
 		if v.Name == "git-credentials" {
-			if v.VolumeSource.Secret == nil {
+			if v.Secret == nil {
 				t.Error("git-credentials should be a Secret volume")
-			} else if v.VolumeSource.Secret.SecretName != "my-git-creds" {
-				t.Errorf("git-credentials secretName = %s, want my-git-creds", v.VolumeSource.Secret.SecretName)
+			} else if v.Secret.SecretName != "my-git-creds" {
+				t.Errorf("git-credentials secretName = %s, want my-git-creds", v.Secret.SecretName)
 			}
 		}
 	}

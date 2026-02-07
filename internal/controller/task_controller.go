@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"time"
 
 	cron "github.com/robfig/cron/v3"
@@ -287,6 +288,75 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		return r.failTask(ctx, task, err.Error())
 	}
 
+	// Validate coordination constraints for child tasks
+	if depthStr, ok := task.Annotations["mercan.ai/coordination-depth"]; ok {
+		parentName := task.Labels["mercan.ai/parent-task"]
+		depthInt, _ := strconv.Atoi(depthStr)
+
+		// Look up parent task to find its agent's coordination config
+		parentTask := &corev1alpha1.Task{}
+		if err := r.Get(ctx, types.NamespacedName{Name: parentName, Namespace: task.Namespace}, parentTask); err != nil {
+			log.Error(err, "failed to get parent task")
+			return r.failTask(ctx, task, fmt.Sprintf("failed to get parent task: %v", err))
+		}
+
+		parentAgent := &corev1alpha1.Agent{}
+		if parentTask.Spec.AgentRef != nil {
+			agentNS := parentTask.Spec.AgentRef.Namespace
+			if agentNS == "" {
+				agentNS = task.Namespace
+			}
+			if err := r.Get(ctx, types.NamespacedName{Name: parentTask.Spec.AgentRef.Name, Namespace: agentNS}, parentAgent); err != nil {
+				log.Error(err, "failed to get parent agent")
+				return r.failTask(ctx, task, fmt.Sprintf("failed to get parent agent: %v", err))
+			}
+		}
+
+		coord := parentAgent.Spec.Coordination
+		if coord == nil || !coord.Enabled {
+			return r.failTask(ctx, task, "parent agent does not have coordination enabled")
+		}
+
+		// 1. Enforce maxDepth
+		if coord.MaxDepth > 0 && int32(depthInt) > coord.MaxDepth {
+			return r.failTask(ctx, task, fmt.Sprintf("coordination depth %d exceeds max %d", depthInt, coord.MaxDepth))
+		}
+
+		// 2. Enforce allowedAgents
+		if task.Spec.AgentRef != nil {
+			allowed := false
+			for _, a := range coord.AllowedAgents {
+				if a.Name == task.Spec.AgentRef.Name {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return r.failTask(ctx, task, fmt.Sprintf("agent %q not in parent's allowedAgents", task.Spec.AgentRef.Name))
+			}
+		}
+
+		// 3. Enforce maxConcurrentChildren (requeue if at limit)
+		if coord.MaxConcurrentChildren > 0 {
+			var siblings corev1alpha1.TaskList
+			if err := r.List(ctx, &siblings, client.InNamespace(task.Namespace),
+				client.MatchingLabels{"mercan.ai/parent-task": parentName}); err != nil {
+				log.Error(err, "failed to list sibling tasks")
+				return ctrl.Result{}, err
+			}
+			active := int32(0)
+			for _, s := range siblings.Items {
+				if s.Name != task.Name && (s.Status.Phase == corev1alpha1.TaskPhasePending || s.Status.Phase == corev1alpha1.TaskPhaseRunning) {
+					active++
+				}
+			}
+			if active >= coord.MaxConcurrentChildren {
+				log.Info("coordination concurrency limit reached", "active", active, "max", coord.MaxConcurrentChildren)
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
+		}
+	}
+
 	// Resolve provider if referenced
 	var provider *corev1alpha1.Provider
 	providerRef := r.resolveProviderRef(task, agent)
@@ -374,6 +444,43 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		if elapsed > task.Spec.Timeout.Duration {
 			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
 			return r.failTask(ctx, task, "task timed out")
+		}
+	}
+
+	// Populate ChildTaskStatus for coordinator tasks
+	if _, isChild := task.Labels["mercan.ai/parent-task"]; !isChild {
+		var children corev1alpha1.TaskList
+		if err := r.List(ctx, &children, client.InNamespace(task.Namespace),
+			client.MatchingLabels{"mercan.ai/parent-task": task.Name}); err == nil && len(children.Items) > 0 {
+			childStatuses := make([]corev1alpha1.ChildTaskStatus, 0, len(children.Items))
+			for _, child := range children.Items {
+				cs := corev1alpha1.ChildTaskStatus{
+					Name:  child.Name,
+					Phase: child.Status.Phase,
+				}
+				if child.Spec.AgentRef != nil {
+					cs.Agent = child.Spec.AgentRef.Name
+				}
+				if child.Status.ResultRef != nil {
+					resultCM := &corev1.ConfigMap{}
+					if err := r.Get(ctx, types.NamespacedName{
+						Name: child.Status.ResultRef.ConfigMapName, Namespace: task.Namespace,
+					}, resultCM); err == nil {
+						result := resultCM.Data[child.Status.ResultRef.Key]
+						if len(result) > 500 {
+							result = result[:500] + "..."
+						}
+						cs.Result = result
+					}
+				}
+				childStatuses = append(childStatuses, cs)
+			}
+			if len(childStatuses) > 0 {
+				task.Status.ChildTasks = childStatuses
+				if err := r.Status().Update(ctx, task); err != nil {
+					log.Error(err, "failed to update child task status")
+				}
+			}
 		}
 	}
 
@@ -746,9 +853,9 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	// Calculate the scheduled time for the next (or current) run
 	var scheduledTime time.Time
 	if task.Status.LastScheduleTime != nil {
-		scheduledTime = sched.Next(task.Status.LastScheduleTime.Time.In(loc))
+		scheduledTime = sched.Next(task.Status.LastScheduleTime.In(loc))
 	} else {
-		scheduledTime = sched.Next(task.CreationTimestamp.Time.In(loc))
+		scheduledTime = sched.Next(task.CreationTimestamp.In(loc))
 	}
 
 	// Not yet time
@@ -884,7 +991,7 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 
 	// Sort by creation time (oldest first) and delete excess
 	sortByCreation := func(tasks []*corev1alpha1.Task) {
-		for i := 0; i < len(tasks); i++ {
+		for i := range tasks {
 			for j := i + 1; j < len(tasks); j++ {
 				if tasks[j].CreationTimestamp.Before(&tasks[i].CreationTimestamp) {
 					tasks[i], tasks[j] = tasks[j], tasks[i]
