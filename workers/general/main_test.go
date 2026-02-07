@@ -17,148 +17,56 @@ limitations under the License.
 package main
 
 import (
-	"context"
+	"os"
+	"os/exec"
 	"testing"
 )
 
-func TestExecuteCommand_Success(t *testing.T) {
-	result := executeCommand(context.Background(), []string{"echo", "hello"})
-
-	if result.ExitCode != 0 {
-		t.Errorf("ExitCode = %d, want 0", result.ExitCode)
-	}
-	if result.Stdout != "hello\n" {
-		t.Errorf("Stdout = %q, want %q", result.Stdout, "hello\n")
-	}
-	if result.Stderr != "" {
-		t.Errorf("Stderr = %q, want empty", result.Stderr)
+func TestRun_Success(t *testing.T) {
+	os.Args = []string{"worker", "echo", "hello"}
+	err := run()
+	if err != nil {
+		t.Errorf("run() returned error: %v", err)
 	}
 }
 
-func TestExecuteCommand_Failed(t *testing.T) {
-	result := executeCommand(context.Background(), []string{"false"})
+func TestRun_NoCommand(t *testing.T) {
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
 
-	if result.ExitCode == 0 {
-		t.Error("ExitCode should not be 0 for 'false' command")
+	os.Args = []string{"worker"}
+	os.Unsetenv("MERCAN_COMMAND")
+	err := run()
+	if err == nil {
+		t.Error("run() should return error when no command specified")
 	}
 }
 
-func TestExecuteCommand_CommandNotFound(t *testing.T) {
-	result := executeCommand(context.Background(), []string{"nonexistent_command_12345"})
+func TestRun_CommandFromEnv(t *testing.T) {
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
 
-	if result.ExitCode == 0 {
-		t.Error("ExitCode should not be 0 for nonexistent command")
+	os.Args = []string{"worker"}
+	os.Setenv("MERCAN_COMMAND", "echo hello")
+	defer os.Unsetenv("MERCAN_COMMAND")
+
+	err := run()
+	if err != nil {
+		t.Errorf("run() returned error: %v", err)
 	}
 }
 
-func TestExecuteCommand_WithStderr(t *testing.T) {
-	// Use a command that writes to stderr
-	result := executeCommand(context.Background(), []string{"sh", "-c", "echo error >&2"})
+func TestRun_CommandNotFound(t *testing.T) {
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
 
-	if result.Stderr != "error\n" {
-		t.Errorf("Stderr = %q, want %q", result.Stderr, "error\n")
+	// run() calls os.Exit for exec failures, so we test the underlying exec
+	os.Args = []string{"worker", "nonexistent_command_12345"}
+	err := run()
+	if err == nil {
+		t.Error("run() should return error for nonexistent command")
 	}
-}
-
-func TestExecuteCommand_MixedOutput(t *testing.T) {
-	result := executeCommand(context.Background(), []string{"sh", "-c", "echo stdout; echo stderr >&2"})
-
-	if result.Stdout != "stdout\n" {
-		t.Errorf("Stdout = %q, want %q", result.Stdout, "stdout\n")
-	}
-	if result.Stderr != "stderr\n" {
-		t.Errorf("Stderr = %q, want %q", result.Stderr, "stderr\n")
-	}
-}
-
-func TestExecuteCommand_ExitCode(t *testing.T) {
-	tests := []struct {
-		name     string
-		command  []string
-		wantCode int
-	}{
-		{
-			name:     "exit 0",
-			command:  []string{"sh", "-c", "exit 0"},
-			wantCode: 0,
-		},
-		{
-			name:     "exit 1",
-			command:  []string{"sh", "-c", "exit 1"},
-			wantCode: 1,
-		},
-		{
-			name:     "exit 42",
-			command:  []string{"sh", "-c", "exit 42"},
-			wantCode: 42,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := executeCommand(context.Background(), tt.command)
-			if result.ExitCode != tt.wantCode {
-				t.Errorf("ExitCode = %d, want %d", result.ExitCode, tt.wantCode)
-			}
-		})
-	}
-}
-
-func TestExecuteCommand_ContextCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
-
-	result := executeCommand(ctx, []string{"sleep", "10"})
-
-	// Should fail due to cancelled context
-	if result.ExitCode == 0 {
-		t.Error("Command should fail with cancelled context")
-	}
-}
-
-func TestResult_Fields(t *testing.T) {
-	result := Result{
-		ExitCode: 0,
-		Stdout:   "output",
-		Stderr:   "error",
-		Duration: "1s",
-	}
-
-	if result.ExitCode != 0 {
-		t.Errorf("ExitCode = %d, want 0", result.ExitCode)
-	}
-	if result.Stdout != "output" {
-		t.Errorf("Stdout = %s, want output", result.Stdout)
-	}
-	if result.Stderr != "error" {
-		t.Errorf("Stderr = %s, want error", result.Stderr)
-	}
-	if result.Duration != "1s" {
-		t.Errorf("Duration = %s, want 1s", result.Duration)
-	}
-}
-
-func TestExecuteCommand_MultipleArgs(t *testing.T) {
-	result := executeCommand(context.Background(), []string{"echo", "hello", "world"})
-
-	if result.ExitCode != 0 {
-		t.Errorf("ExitCode = %d, want 0", result.ExitCode)
-	}
-	if result.Stdout != "hello world\n" {
-		t.Errorf("Stdout = %q, want %q", result.Stdout, "hello world\n")
-	}
-}
-
-func TestExecuteCommand_EmptyOutput(t *testing.T) {
-	result := executeCommand(context.Background(), []string{"true"})
-
-	if result.ExitCode != 0 {
-		t.Errorf("ExitCode = %d, want 0", result.ExitCode)
-	}
-	if result.Stdout != "" {
-		t.Errorf("Stdout = %q, want empty", result.Stdout)
-	}
-	if result.Stderr != "" {
-		t.Errorf("Stderr = %q, want empty", result.Stderr)
+	if _, ok := err.(*exec.Error); !ok {
+		t.Errorf("expected *exec.Error, got %T", err)
 	}
 }
