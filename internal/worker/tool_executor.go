@@ -101,6 +101,22 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 		params[bodyKey] = authToken
 	}
 
+	// Interpolate URL path parameters
+	url := tool.Spec.HTTP.URL
+	interpolatedKeys := map[string]bool{}
+	for key, val := range params {
+		placeholder := "{{" + key + "}}"
+		if strings.Contains(url, placeholder) {
+			url = strings.ReplaceAll(url, placeholder, fmt.Sprintf("%v", val))
+			interpolatedKeys[key] = true
+		}
+	}
+
+	// Remove interpolated keys from body params
+	for key := range interpolatedKeys {
+		delete(params, key)
+	}
+
 	// Build request body
 	body, err := json.Marshal(params)
 	if err != nil {
@@ -114,7 +130,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 	}
 
 	// Create request
-	req, err := http.NewRequestWithContext(ctx, method, tool.Spec.HTTP.URL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
