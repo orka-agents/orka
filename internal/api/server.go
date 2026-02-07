@@ -44,12 +44,13 @@ type ServerConfig struct {
 
 // Server is the REST API server
 type Server struct {
-	app            *fiber.App
-	client         client.Client
-	config         ServerConfig
-	sessionManager *controller.SessionManager
-	handlers       *Handlers
-	chatHandler    *ChatHandler
+	app              *fiber.App
+	client           client.Client
+	config           ServerConfig
+	sessionManager   *controller.SessionManager
+	handlers         *Handlers
+	chatHandler      *ChatHandler
+	openaiHandler    *OpenAICompatHandler
 }
 
 // NewServer creates a new API server
@@ -68,6 +69,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 
 	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace)
 	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace)
+	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.Chat)
 	server.setupMiddleware()
 	server.setupRoutes()
 	server.setupStaticFiles()
@@ -142,6 +144,13 @@ func (s *Server) setupRoutes() {
 		api.Get("/chat/config", s.chatHandler.HandleChatConfig)
 		api.Delete("/chat/:sessionId", s.chatHandler.HandleCancelChat)
 	}
+
+	// OpenAI-compatible API (under /v1, separate from /api/v1)
+	// This allows tools like OpenCode to use Mercan as a custom provider.
+	oai := s.app.Group("/v1")
+	oai.Use(NewAuthMiddleware(s.client))
+	oai.Post("/chat/completions", s.openaiHandler.HandleChatCompletions)
+	oai.Get("/models", s.openaiHandler.HandleListModels)
 }
 
 // Start starts the API server

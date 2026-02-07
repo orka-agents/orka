@@ -38,3 +38,6 @@ internal/uiembed/dist/*
 
 main
 ui/coverage/
+
+# Claude CLI binary
+/claude

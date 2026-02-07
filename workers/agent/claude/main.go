@@ -62,6 +62,9 @@ func run() error {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
+	// Configure git credentials globally (for both clone and agent push operations)
+	setupGitCredentials()
+
 	// Clone git repo if configured
 	if cfg.gitRepo != "" {
 		if err := cloneRepo(ctx, cfg); err != nil {
@@ -203,11 +206,9 @@ func cloneRepo(ctx context.Context, cfg *config) error {
 	return nil
 }
 
-// configureGitAuth sets up git credential helpers from mounted secrets.
-func configureGitAuth(cmd *exec.Cmd) {
-	env := os.Environ()
-
-	// Check for git token in mounted secrets
+// setupGitCredentials sets git credential env vars globally so both clone and
+// agent-initiated git operations (push, fetch) can authenticate.
+func setupGitCredentials() {
 	tokenPaths := []string{
 		"/secrets/git/token",
 		"/secrets/git/password",
@@ -216,25 +217,23 @@ func configureGitAuth(cmd *exec.Cmd) {
 		if data, err := os.ReadFile(path); err == nil {
 			token := strings.TrimSpace(string(data))
 			if token != "" {
-				// Use GIT_ASKPASS to provide the token
-				env = append(env,
-					fmt.Sprintf("GIT_TOKEN=%s", token),
-					"GIT_ASKPASS=/bin/echo-token",
-				)
+				os.Setenv("GIT_TOKEN", token)
+				os.Setenv("GIT_ASKPASS", "/bin/echo-token")
 				break
 			}
 		}
 	}
-
-	// Check for username
 	if data, err := os.ReadFile("/secrets/git/username"); err == nil {
 		username := strings.TrimSpace(string(data))
 		if username != "" {
-			env = append(env, fmt.Sprintf("GIT_USERNAME=%s", username))
+			os.Setenv("GIT_USERNAME", username)
 		}
 	}
+}
 
-	cmd.Env = env
+// configureGitAuth sets up git credential helpers from mounted secrets.
+func configureGitAuth(cmd *exec.Cmd) {
+	cmd.Env = os.Environ()
 }
 
 // executeClaude invokes the Claude Code CLI and returns its output.
@@ -305,6 +304,9 @@ func buildClaudeArgs(cfg *config) []string {
 	args = append(args, "--max-turns", strconv.Itoa(cfg.maxTurns))
 
 	// Tool permissions
+	if cfg.allowBash {
+		args = append(args, "--dangerously-skip-permissions")
+	}
 	for _, tool := range cfg.allowedTools {
 		args = append(args, "--allowedTools", strings.TrimSpace(tool))
 	}

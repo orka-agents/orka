@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -38,9 +39,10 @@ type DelegateTaskTool struct {
 
 // WorkspaceArgs specifies a git workspace for agent runtime tasks
 type WorkspaceArgs struct {
-	GitRepo string `json:"gitRepo,omitempty"`
-	Branch  string `json:"branch,omitempty"`
-	Ref     string `json:"ref,omitempty"`
+	GitRepo      string `json:"gitRepo,omitempty"`
+	Branch       string `json:"branch,omitempty"`
+	Ref          string `json:"ref,omitempty"`
+	GitSecretRef string `json:"gitSecretRef,omitempty"`
 }
 
 // DelegateTaskArgs are the arguments for the delegate_task tool
@@ -113,6 +115,10 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 					"ref": {
 						"type": "string",
 						"description": "Git ref (commit SHA or tag)"
+					},
+					"gitSecretRef": {
+						"type": "string",
+						"description": "Name of the Kubernetes Secret containing git credentials (must have a 'token' key)"
 					}
 				}
 			},
@@ -261,6 +267,11 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 				GitRepo: delegateArgs.Workspace.GitRepo,
 				Branch:  delegateArgs.Workspace.Branch,
 				Ref:     delegateArgs.Workspace.Ref,
+			}
+			if delegateArgs.Workspace.GitSecretRef != "" {
+				childTask.Spec.AgentRuntime.Workspace.GitSecretRef = &corev1.LocalObjectReference{
+					Name: delegateArgs.Workspace.GitSecretRef,
+				}
 			}
 		}
 

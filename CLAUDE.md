@@ -157,6 +157,8 @@ GET    /api/v1/chat/config     Get chat configuration
 DELETE /api/v1/chat/{sessionId} Cancel chat session
 GET    /healthz                Health check
 GET    /readyz                 Readiness check
+POST   /v1/chat/completions   OpenAI-compatible chat completions (streaming & non-streaming)
+GET    /v1/models             OpenAI-compatible model listing
 ```
 
 ## Verification
