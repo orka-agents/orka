@@ -786,7 +786,7 @@ func TestHandlers_ListSessions_Success(t *testing.T) {
 
 	var result ListResponse
 	json.NewDecoder(resp.Body).Decode(&result)
-	items, ok := result.Items.([]interface{})
+	items, ok := result.Items.([]any)
 	if !ok || len(items) != 1 {
 		t.Errorf("Expected 1 session, got %v", result.Items)
 	}
@@ -808,7 +808,7 @@ func TestHandlers_ListSessions_Empty(t *testing.T) {
 
 	var result ListResponse
 	json.NewDecoder(resp.Body).Decode(&result)
-	items, ok := result.Items.([]interface{})
+	items, ok := result.Items.([]any)
 	if !ok || len(items) != 0 {
 		t.Errorf("Expected 0 sessions, got %v", result.Items)
 	}
@@ -906,7 +906,7 @@ func TestHandlers_GetSession_Success(t *testing.T) {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	json.NewDecoder(resp.Body).Decode(&result)
 	if result["name"] != "my-session" {
 		t.Errorf("name = %v, want my-session", result["name"])

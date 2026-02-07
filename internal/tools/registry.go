@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/sozercan/mercan/internal/llm"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Tool is the interface for built-in tools
@@ -114,6 +115,12 @@ func RegisterBuiltinTools() {
 	DefaultRegistry.Register(NewWebSearchTool())
 	DefaultRegistry.Register(NewCodeExecTool())
 	DefaultRegistry.Register(NewFileReadTool())
+}
+
+// RegisterCoordinationTools registers coordination tools that require a K8s client
+func RegisterCoordinationTools(k8sClient client.Client) {
+	DefaultRegistry.Register(NewDelegateTaskTool(k8sClient))
+	DefaultRegistry.Register(NewWaitForTasksTool(k8sClient))
 }
 
 func init() {

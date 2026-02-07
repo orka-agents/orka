@@ -97,6 +97,11 @@ func run() error {
 		return fmt.Errorf("failed to create k8s client: %w", err)
 	}
 
+	// Register coordination tools if enabled
+	if os.Getenv("MERCAN_COORDINATION_ENABLED") == "true" {
+		tools.RegisterCoordinationTools(k8sClient)
+	}
+
 	// Load custom Tool CRDs
 	customTools, err := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
 	if err != nil {
@@ -144,7 +149,10 @@ func createK8sClient() (client.Client, error) {
 
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		return nil, fmt.Errorf("failed to add scheme: %w", err)
+		return nil, fmt.Errorf("failed to add CRD scheme: %w", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("failed to add core scheme: %w", err)
 	}
 
 	k8sClient, err := client.New(config, client.Options{Scheme: scheme})
@@ -293,6 +301,9 @@ func executeAgentLoop(
 	toolExecutor *worker.ToolExecutor,
 ) (string, error) {
 	maxIterations := 10
+	if os.Getenv("MERCAN_COORDINATION_ENABLED") == "true" {
+		maxIterations = 50
+	}
 
 	for range maxIterations {
 		req := &llm.CompletionRequest{

@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -342,6 +343,17 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 		envVars = append(envVars, corev1.EnvVar{Name: "MERCAN_AI_BASE_URL", Value: baseURL})
 	}
 
+	// Auto-inject coordination tools when coordination is enabled
+	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
+		coordinationTools := []string{"delegate_task", "wait_for_tasks"}
+		for _, ct := range coordinationTools {
+			alreadyPresent := slices.Contains(tools, ct)
+			if !alreadyPresent {
+				tools = append(tools, ct)
+			}
+		}
+	}
+
 	// Add tools as comma-separated list
 	if len(tools) > 0 {
 		var toolsStr strings.Builder
@@ -352,6 +364,35 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 			toolsStr.WriteString(t)
 		}
 		envVars = append(envVars, corev1.EnvVar{Name: "MERCAN_AI_TOOLS", Value: toolsStr.String()})
+	}
+
+	// Add coordination env vars when coordination is enabled
+	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
+		envVars = append(envVars,
+			corev1.EnvVar{Name: "MERCAN_COORDINATION_ENABLED", Value: "true"},
+			corev1.EnvVar{Name: "MERCAN_COORDINATION_MAX_DEPTH",
+				Value: fmt.Sprintf("%d", agent.Spec.Coordination.MaxDepth)},
+			corev1.EnvVar{Name: "MERCAN_COORDINATION_MAX_CHILDREN",
+				Value: fmt.Sprintf("%d", agent.Spec.Coordination.MaxConcurrentChildren)},
+		)
+
+		var agentNames []string
+		for _, a := range agent.Spec.Coordination.AllowedAgents {
+			agentNames = append(agentNames, a.Name)
+		}
+		envVars = append(envVars,
+			corev1.EnvVar{Name: "MERCAN_COORDINATION_ALLOWED_AGENTS",
+				Value: strings.Join(agentNames, ",")},
+		)
+
+		// Current depth (0 for top-level coordinator)
+		depth := "0"
+		if d, ok := task.Annotations["mercan.ai/coordination-depth"]; ok {
+			depth = d
+		}
+		envVars = append(envVars,
+			corev1.EnvVar{Name: "MERCAN_COORDINATION_DEPTH", Value: depth},
+		)
 	}
 
 	return envVars

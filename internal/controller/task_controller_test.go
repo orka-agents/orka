@@ -1528,6 +1528,372 @@ var _ = Describe("Task Controller", func() {
 		})
 	})
 
+	Context("coordination enforcement", func() {
+		It("should fail child task when depth exceeds maxDepth", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			ns := "default"
+
+			// Create parent agent with coordination enabled, maxDepth=1
+			parentAgent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "coord-parent-agent-depth",
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.AgentSpec{
+					Model: &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"},
+					Coordination: &corev1alpha1.CoordinationConfig{
+						Enabled:  true,
+						MaxDepth: 1,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, parentAgent)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, parentAgent) }()
+
+			// Create parent task referencing the agent
+			parentTask := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "coord-parent-task-depth",
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAI,
+					Prompt: "parent task",
+					AgentRef: &corev1alpha1.AgentReference{
+						Name: "coord-parent-agent-depth",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, parentTask)).To(Succeed())
+			defer cleanupTask(ctx, types.NamespacedName{Name: parentTask.Name, Namespace: ns})
+
+			// Create child task with depth=2 (exceeds maxDepth=1)
+			childName := "coord-child-depth-exceeded"
+			childNN := types.NamespacedName{Name: childName, Namespace: ns}
+			childTask := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      childName,
+					Namespace: ns,
+					Labels: map[string]string{
+						"mercan.ai/parent-task": "coord-parent-task-depth",
+					},
+					Annotations: map[string]string{
+						"mercan.ai/coordination-depth": "2",
+					},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo", "hello"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, childTask)).To(Succeed())
+			defer cleanupTask(ctx, childNN)
+
+			// Reconcile through: finalizer → status init → handlePending
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, childNN, childTask)).To(Succeed())
+			Expect(childTask.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(childTask.Status.Message).To(ContainSubstring("depth"))
+			Expect(childTask.Status.Message).To(ContainSubstring("exceeds max"))
+		})
+
+		It("should fail child task when agent is not in allowedAgents", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			ns := "default"
+
+			// Create parent agent with allowedAgents=[allowed-agent]
+			parentAgent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "coord-parent-agent-allow",
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.AgentSpec{
+					Model: &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"},
+					Coordination: &corev1alpha1.CoordinationConfig{
+						Enabled: true,
+						AllowedAgents: []corev1alpha1.AllowedAgent{
+							{Name: "allowed-agent"},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, parentAgent)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, parentAgent) }()
+
+			// Create the disallowed agent so the child's agentRef resolves
+			disallowedAgent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "disallowed-agent",
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.AgentSpec{
+					Model: &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, disallowedAgent)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, disallowedAgent) }()
+
+			// Create parent task
+			parentTask := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "coord-parent-task-allow",
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAI,
+					Prompt: "parent task",
+					AgentRef: &corev1alpha1.AgentReference{
+						Name: "coord-parent-agent-allow",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, parentTask)).To(Succeed())
+			defer cleanupTask(ctx, types.NamespacedName{Name: parentTask.Name, Namespace: ns})
+
+			// Create child task referencing disallowed-agent
+			childName := "coord-child-not-allowed"
+			childNN := types.NamespacedName{Name: childName, Namespace: ns}
+			childTask := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      childName,
+					Namespace: ns,
+					Labels: map[string]string{
+						"mercan.ai/parent-task": "coord-parent-task-allow",
+					},
+					Annotations: map[string]string{
+						"mercan.ai/coordination-depth": "1",
+					},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAI,
+					Prompt: "child task",
+					AgentRef: &corev1alpha1.AgentReference{
+						Name: "disallowed-agent",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, childTask)).To(Succeed())
+			defer cleanupTask(ctx, childNN)
+
+			// Reconcile through: finalizer → status init → handlePending
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, childNN, childTask)).To(Succeed())
+			Expect(childTask.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(childTask.Status.Message).To(ContainSubstring("not in parent's allowedAgents"))
+		})
+
+		It("should requeue child task when max concurrent children reached", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			ns := "default"
+
+			// Create parent agent with maxConcurrentChildren=1
+			parentAgent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "coord-parent-agent-conc",
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.AgentSpec{
+					Model: &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"},
+					Coordination: &corev1alpha1.CoordinationConfig{
+						Enabled:               true,
+						MaxConcurrentChildren: 1,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, parentAgent)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, parentAgent) }()
+
+			// Create parent task
+			parentTaskName := "coord-parent-task-conc"
+			parentTask := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      parentTaskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAI,
+					Prompt: "parent task",
+					AgentRef: &corev1alpha1.AgentReference{
+						Name: "coord-parent-agent-conc",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, parentTask)).To(Succeed())
+			defer cleanupTask(ctx, types.NamespacedName{Name: parentTaskName, Namespace: ns})
+
+			// Create a running sibling child task
+			siblingName := "coord-sibling-running"
+			siblingNN := types.NamespacedName{Name: siblingName, Namespace: ns}
+			sibling := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      siblingName,
+					Namespace: ns,
+					Labels: map[string]string{
+						"mercan.ai/parent-task": parentTaskName,
+					},
+					Annotations: map[string]string{
+						"mercan.ai/coordination-depth": "1",
+					},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo", "sibling"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sibling)).To(Succeed())
+			defer cleanupTask(ctx, siblingNN)
+
+			// Set sibling to Running phase
+			sibling.Status.Phase = corev1alpha1.TaskPhaseRunning
+			Expect(k8sClient.Status().Update(ctx, sibling)).To(Succeed())
+
+			// Create the new child task that should be requeued
+			childName := "coord-child-conc-pending"
+			childNN := types.NamespacedName{Name: childName, Namespace: ns}
+			childTask := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      childName,
+					Namespace: ns,
+					Labels: map[string]string{
+						"mercan.ai/parent-task": parentTaskName,
+					},
+					Annotations: map[string]string{
+						"mercan.ai/coordination-depth": "1",
+					},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo", "child"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, childTask)).To(Succeed())
+			defer cleanupTask(ctx, childNN)
+
+			// Reconcile through: finalizer → status init
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
+
+			// Third reconcile: handlePending → should requeue due to concurrency
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+			// Task should still be Pending, not Failed
+			Expect(k8sClient.Get(ctx, childNN, childTask)).To(Succeed())
+			Expect(childTask.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
+		})
+
+		It("should pass coordination checks for valid child task", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			ns := "default"
+
+			// Create parent agent with coordination allowing "child-agent"
+			parentAgent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "coord-parent-agent-valid",
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.AgentSpec{
+					Model: &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"},
+					Coordination: &corev1alpha1.CoordinationConfig{
+						Enabled:  true,
+						MaxDepth: 3,
+						AllowedAgents: []corev1alpha1.AllowedAgent{
+							{Name: "child-agent-valid"},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, parentAgent)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, parentAgent) }()
+
+			// Create the child agent so agentRef resolves
+			childAgent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "child-agent-valid",
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.AgentSpec{
+					Model: &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, childAgent)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, childAgent) }()
+
+			// Create parent task
+			parentTask := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "coord-parent-task-valid",
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAI,
+					Prompt: "parent task",
+					AgentRef: &corev1alpha1.AgentReference{
+						Name: "coord-parent-agent-valid",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, parentTask)).To(Succeed())
+			defer cleanupTask(ctx, types.NamespacedName{Name: parentTask.Name, Namespace: ns})
+
+			// Create child task with valid depth and allowed agent
+			childName := "coord-child-valid"
+			childNN := types.NamespacedName{Name: childName, Namespace: ns}
+			childTask := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      childName,
+					Namespace: ns,
+					Labels: map[string]string{
+						"mercan.ai/parent-task": "coord-parent-task-valid",
+					},
+					Annotations: map[string]string{
+						"mercan.ai/coordination-depth": "1",
+					},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAI,
+					Prompt: "child task",
+					AgentRef: &corev1alpha1.AgentReference{
+						Name: "child-agent-valid",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, childTask)).To(Succeed())
+			defer cleanupTask(ctx, childNN)
+
+			// Reconcile through: finalizer → status init → handlePending
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Task should NOT have failed with coordination errors
+			// It may fail later due to provider/job creation, but not coordination
+			Expect(k8sClient.Get(ctx, childNN, childTask)).To(Succeed())
+			if childTask.Status.Phase == corev1alpha1.TaskPhaseFailed {
+				Expect(childTask.Status.Message).NotTo(ContainSubstring("depth"))
+				Expect(childTask.Status.Message).NotTo(ContainSubstring("allowedAgents"))
+				Expect(childTask.Status.Message).NotTo(ContainSubstring("coordination"))
+			}
+		})
+	})
+
 	Context("collectResult with existing result", func() {
 		It("should set ResultRef for completeTask flow", func() {
 			ctx := context.Background()
