@@ -168,7 +168,7 @@ func (t *ReviewPullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 		return "", fmt.Errorf("git secret %s does not contain a 'token' or 'password' key", ws.GitSecretRef.Name)
 	}
 
-	baseURL := "https://api.github.com"
+	baseURL := githubAPIBaseURL
 	if t.apiBaseURL != "" {
 		baseURL = t.apiBaseURL
 	}

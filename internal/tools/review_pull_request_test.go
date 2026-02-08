@@ -33,6 +33,8 @@ import (
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 )
 
+const testPRPath = "/repos/sozercan/ayna/pulls/42"
+
 func TestReviewPullRequestTool_Metadata(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -145,12 +147,12 @@ func TestReviewPullRequestTool_Success(t *testing.T) {
 		path := r.URL.Path
 
 		switch {
-		case path == "/repos/sozercan/ayna/pulls/42" && accept == "application/vnd.github.v3.diff":
+		case path == testPRPath && accept == "application/vnd.github.v3.diff":
 			// PR diff endpoint
 			w.Header().Set("Content-Type", "text/plain")
 			_, _ = fmt.Fprint(w, "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1,3 +1,4 @@\n package main\n+// new comment\n")
 
-		case path == "/repos/sozercan/ayna/pulls/42":
+		case path == testPRPath:
 			// PR details endpoint
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{
@@ -267,5 +269,235 @@ func TestReviewPullRequestTool_Success(t *testing.T) {
 	}
 	if f.Patch == "" {
 		t.Error("patch should not be empty")
+	}
+}
+
+func TestReviewPullRequestTool_Execute_APIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = fmt.Fprint(w, `{"message":"internal server error"}`)
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/sozercan/ayna",
+					Branch:  "main",
+					GitSecretRef: &corev1.LocalObjectReference{
+						Name: "git-creds",
+					},
+				},
+			},
+		},
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data: map[string][]byte{
+			"token": []byte("test-token"),
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := &ReviewPullRequestTool{
+		k8sClient:  k8sClient,
+		apiBaseURL: server.URL,
+	}
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(ReviewPullRequestArgs{
+		TaskName: "coder-task",
+		PRNumber: 42,
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for API 500 response")
+	}
+	if got := err.Error(); !strings.Contains(got, "500") {
+		t.Errorf("expected error to mention 500, got: %s", got)
+	}
+}
+
+func TestReviewPullRequestTool_Execute_InvalidArgs(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tool := NewReviewPullRequestTool(k8sClient)
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	// Missing both required fields (empty JSON object)
+	args := json.RawMessage(`{}`)
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for missing required fields")
+	}
+	if got := err.Error(); !strings.Contains(got, "task_name and pr_number are required") {
+		t.Errorf("unexpected error: %s", got)
+	}
+}
+
+func TestReviewPullRequestTool_Execute_PRNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = fmt.Fprint(w, `{"message":"Not Found"}`)
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/sozercan/ayna",
+					Branch:  "main",
+					GitSecretRef: &corev1.LocalObjectReference{
+						Name: "git-creds",
+					},
+				},
+			},
+		},
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data: map[string][]byte{
+			"token": []byte("test-token"),
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := &ReviewPullRequestTool{
+		k8sClient:  k8sClient,
+		apiBaseURL: server.URL,
+	}
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(ReviewPullRequestArgs{
+		TaskName: "coder-task",
+		PRNumber: 9999,
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for PR not found")
+	}
+	if got := err.Error(); !strings.Contains(got, "404") {
+		t.Errorf("expected error to mention 404, got: %s", got)
+	}
+	if got := err.Error(); !strings.Contains(got, "Not Found") {
+		t.Errorf("expected error to mention Not Found, got: %s", got)
+	}
+}
+
+func TestReviewPullRequestTool_Execute_EmptyDiff(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accept := r.Header.Get("Accept")
+		path := r.URL.Path
+
+		switch {
+		case path == testPRPath && accept == "application/vnd.github.v3.diff":
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = fmt.Fprint(w, "")
+
+		case path == testPRPath:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{
+				"title": "empty PR",
+				"body": "no changes",
+				"user": {"login": "testuser"},
+				"base": {"ref": "main"},
+				"head": {"ref": "feature/empty"}
+			}`)
+
+		case path == "/repos/sozercan/ayna/pulls/42/files":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `[]`)
+
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/sozercan/ayna",
+					Branch:  "main",
+					GitSecretRef: &corev1.LocalObjectReference{
+						Name: "git-creds",
+					},
+				},
+			},
+		},
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data: map[string][]byte{
+			"token": []byte("test-token"),
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := &ReviewPullRequestTool{
+		k8sClient:  k8sClient,
+		apiBaseURL: server.URL,
+	}
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(ReviewPullRequestArgs{
+		TaskName: "coder-task",
+		PRNumber: 42,
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var reviewResult ReviewPullRequestResult
+	if err := json.Unmarshal([]byte(result), &reviewResult); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if reviewResult.Diff != "" {
+		t.Errorf("expected empty diff, got: %s", reviewResult.Diff)
+	}
+	if len(reviewResult.Files) != 0 {
+		t.Errorf("expected 0 files, got %d", len(reviewResult.Files))
+	}
+	if reviewResult.Status != "fetched" {
+		t.Errorf("unexpected status: %s", reviewResult.Status)
+	}
+	if reviewResult.PRTitle != "empty PR" {
+		t.Errorf("unexpected PR title: %s", reviewResult.PRTitle)
 	}
 }

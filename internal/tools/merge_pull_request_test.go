@@ -311,3 +311,241 @@ func TestMergePullRequestTool_Success(t *testing.T) {
 		t.Errorf("unexpected message: %s", mergeResult.Message)
 	}
 }
+
+func TestMergePullRequestTool_Execute_APIError(t *testing.T) {
+	// Mock GitHub API returning 500 on PR details fetch
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = fmt.Fprintf(w, `{"message":"internal server error"}`)
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/sozercan/ayna",
+					Branch:  "main",
+					GitSecretRef: &corev1.LocalObjectReference{
+						Name: "git-creds",
+					},
+				},
+			},
+		},
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data: map[string][]byte{
+			"token": []byte("test-token"),
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := &MergePullRequestTool{
+		k8sClient:  k8sClient,
+		apiBaseURL: server.URL,
+	}
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(MergePullRequestArgs{
+		TaskName: "coder-task",
+		PRNumber: 42,
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for API failure")
+	}
+	if got := err.Error(); !strings.Contains(got, "failed to get PR head SHA") {
+		t.Errorf("unexpected error: %s", got)
+	}
+}
+
+func TestMergePullRequestTool_Execute_InvalidArgs(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tool := NewMergePullRequestTool(k8sClient)
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	// Pass args missing required fields
+	args := json.RawMessage(`{"bad": true}`)
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for invalid args")
+	}
+	if got := err.Error(); !strings.Contains(got, "task_name and pr_number are required") {
+		t.Errorf("unexpected error: %s", got)
+	}
+}
+
+func TestMergePullRequestTool_Execute_DifferentMergeMethods(t *testing.T) {
+	for _, method := range []string{"merge", "rebase"} {
+		t.Run(method, func(t *testing.T) {
+			var capturedMethod string
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/10"):
+					w.WriteHeader(200)
+					_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"number":10}`)
+				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
+					w.WriteHeader(200)
+					_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}`)
+				case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/pulls/10/merge"):
+					var body map[string]any
+					_ = json.NewDecoder(r.Body).Decode(&body)
+					if mm, ok := body["merge_method"].(string); ok {
+						capturedMethod = mm
+					}
+					w.WriteHeader(200)
+					_, _ = fmt.Fprintf(w, `{"sha":"merged123","merged":true,"message":"merged"}`)
+				default:
+					w.WriteHeader(404)
+				}
+			}))
+			defer server.Close()
+
+			scheme := runtime.NewScheme()
+			_ = corev1alpha1.AddToScheme(scheme)
+			_ = corev1.AddToScheme(scheme)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAgent,
+					AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+						Workspace: &corev1alpha1.WorkspaceConfig{
+							GitRepo: "https://github.com/sozercan/ayna",
+							Branch:  "main",
+							GitSecretRef: &corev1.LocalObjectReference{
+								Name: "git-creds",
+							},
+						},
+					},
+				},
+			}
+
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+				Data: map[string][]byte{
+					"token": []byte("test-token"),
+				},
+			}
+
+			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+			tool := &MergePullRequestTool{
+				k8sClient:  k8sClient,
+				apiBaseURL: server.URL,
+			}
+
+			t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+			args, _ := json.Marshal(MergePullRequestArgs{
+				TaskName:    "coder-task",
+				PRNumber:    10,
+				MergeMethod: method,
+			})
+
+			result, err := tool.Execute(context.Background(), args)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if capturedMethod != method {
+				t.Errorf("expected merge_method %q, got %q", method, capturedMethod)
+			}
+
+			var mergeResult MergePullRequestResult
+			if err := json.Unmarshal([]byte(result), &mergeResult); err != nil {
+				t.Fatalf("failed to parse result: %v", err)
+			}
+			if !mergeResult.Merged {
+				t.Error("expected merged to be true")
+			}
+		})
+	}
+}
+
+func TestMergePullRequestTool_Execute_PRAlreadyMerged(t *testing.T) {
+	// Mock GitHub API: PR fetch and checks succeed, but merge returns 405
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"number":42}`)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}`)
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/pulls/42/merge"):
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_, _ = fmt.Fprintf(w, `{"message":"Pull Request is not mergeable","documentation_url":"https://docs.github.com"}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/sozercan/ayna",
+					Branch:  "main",
+					GitSecretRef: &corev1.LocalObjectReference{
+						Name: "git-creds",
+					},
+				},
+			},
+		},
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data: map[string][]byte{
+			"token": []byte("test-token"),
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := &MergePullRequestTool{
+		k8sClient:  k8sClient,
+		apiBaseURL: server.URL,
+	}
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(MergePullRequestArgs{
+		TaskName: "coder-task",
+		PRNumber: 42,
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for already-merged PR")
+	}
+	if got := err.Error(); !strings.Contains(got, "failed to merge pull request") {
+		t.Errorf("unexpected error: %s", got)
+	}
+	if got := err.Error(); !strings.Contains(got, "405") {
+		t.Errorf("expected error to contain status code 405, got: %s", got)
+	}
+}

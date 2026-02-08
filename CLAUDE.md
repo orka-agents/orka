@@ -85,10 +85,12 @@ make deploy IMG=<registry>/mercan:tag
 - Iterative coordination: `delegate_task` supports `prior_task`, `feedback`, and `pushBranch` params; workers apply prior diffs via `PrepareWorkspace()` and produce structured results via `FinalizeResult()`
 - Auto-push: When `pushBranch` is set on workspace config, `FinalizeResult` commits and pushes changes to that branch automatically
 - PR creation: `create_pull_request` coordination tool creates GitHub PRs from pushed branches using git credentials from task workspace config
+- PR management: `merge_pull_request` merges PRs after CI checks pass; `review_pull_request` fetches PR diffs for analysis; `post_review_comment` posts reviews with verdicts and line-level comments
 
 ### Multi-Agent Coordination
 
 - **Coordination tools** (`internal/tools/delegate_task.go`, `internal/tools/wait_for_tasks.go`): LLM tools that create child Tasks and poll for results
+- **PR workflow tools** (`internal/tools/create_pull_request.go`, `internal/tools/merge_pull_request.go`, `internal/tools/review_pull_request.go`, `internal/tools/post_review_comment.go`): GitHub PR creation, merging, review fetching, and review posting
 - **Controller enforcement** (`internal/controller/task_controller.go`): Validates `maxDepth`, `allowedAgents`, `maxConcurrentChildren` in `handlePending`; populates `status.childTasks` in `handleRunning`
 - **Job builder** (`internal/controller/job_builder.go`): Injects `MERCAN_COORDINATION_*` env vars and auto-adds coordination tools when `agent.Spec.Coordination.Enabled`
 - **AI worker** (`workers/ai/main.go`): Registers coordination tools via `tools.RegisterCoordinationTools()` when `MERCAN_COORDINATION_ENABLED=true`; increases `maxIterations` to 50
@@ -98,6 +100,9 @@ make deploy IMG=<registry>/mercan:tag
 - **Iterative workflows**: `prior_task` param in `delegate_task` sets `PriorTaskRef` on child tasks; job builder injects `MERCAN_PRIOR_TASK`/`MERCAN_PRIOR_TASK_NAMESPACE` env vars; workers apply prior diffs before starting
 - **Auto-push**: `PushBranch` field on `WorkspaceConfig` → `MERCAN_PUSH_BRANCH` env var → `FinalizeResult` commits and pushes to that branch
 - **PR creation tool** (`internal/tools/create_pull_request.go`): Reads git secret from child task's workspace config, creates PR via GitHub REST API
+- **PR merge tool** (`internal/tools/merge_pull_request.go`): Verifies CI checks pass, then merges PR via GitHub REST API
+- **PR review tool** (`internal/tools/review_pull_request.go`): Fetches PR diff, file changes, and metadata for code review
+- **PR comment tool** (`internal/tools/post_review_comment.go`): Posts review with verdict (APPROVE/REQUEST_CHANGES/COMMENT) and line-level comments
 - **Structured results** (`workers/common/result.go`): `StructuredResult` envelope with summary, diff, verdict, feedback, files, pushBranch; `wait_for_tasks` strips diffs from coordinator context
 - See @docs/multi-agent-coordination.md for full details
 

@@ -62,7 +62,7 @@ Mercan uses four CRDs:
 | Worker | Description |
 |--------|-------------|
 | **General Worker** (`workers/general/`) | Runs arbitrary container commands |
-| **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in tools (web search, code exec, file read) and coordination tools (delegate_task, wait_for_tasks) |
+| **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in tools (web search, code exec, file read) and coordination tools (delegate_task, wait_for_tasks, create_pull_request, merge_pull_request, review_pull_request, post_review_comment) |
 | **Copilot Agent Worker** (`workers/agent/copilot/`) | Runs tasks via GitHub Copilot CLI using the Go SDK |
 | **Claude Agent Worker** (`workers/agent/claude/`) | Runs tasks via Claude Code CLI |
 
@@ -146,7 +146,7 @@ Webhook delivered (if configured)
 
 ## Multi-Agent Coordination
 
-Coordinator agents can delegate subtasks to specialist agents at runtime. The LLM uses `delegate_task` and `wait_for_tasks` tools to create child Tasks and collect results. The controller enforces guardrails:
+Coordinator agents can delegate subtasks to specialist agents at runtime. The LLM uses `delegate_task` and `wait_for_tasks` tools to create child Tasks and collect results. GitHub PR tools (`create_pull_request`, `merge_pull_request`, `review_pull_request`, `post_review_comment`) enable end-to-end code review workflows. The controller enforces guardrails:
 
 ```
 Coordinator Agent (depth 0)
@@ -193,6 +193,8 @@ Mercan supports extensible AI capabilities through a three-layer system:
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 2: Built-in Tools (in worker image)                      │
 │  - web_search, file_read, code_exec, delegate_task, wait_for_tasks│
+│  - create_pull_request, merge_pull_request, review_pull_request,  │
+│    post_review_comment                                            │
 │  - Fast, no extra infrastructure                                │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 3: Custom Tools (Tool CRD + HTTP)                        │

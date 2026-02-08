@@ -374,6 +374,14 @@ status:
 | `internal/tools/delegate_task_test.go` | Unit tests with fake K8s client |
 | `internal/tools/wait_for_tasks.go` | wait_for_tasks tool implementation |
 | `internal/tools/wait_for_tasks_test.go` | Unit tests with fake K8s client |
+| `internal/tools/create_pull_request.go` | create_pull_request tool implementation |
+| `internal/tools/create_pull_request_test.go` | Unit tests with fake K8s client |
+| `internal/tools/merge_pull_request.go` | merge_pull_request tool implementation |
+| `internal/tools/merge_pull_request_test.go` | Unit tests with fake K8s client |
+| `internal/tools/review_pull_request.go` | review_pull_request tool implementation |
+| `internal/tools/review_pull_request_test.go` | Unit tests with fake K8s client |
+| `internal/tools/post_review_comment.go` | post_review_comment tool implementation |
+| `internal/tools/post_review_comment_test.go` | Unit tests with fake K8s client |
 | `internal/tools/registry.go` | `RegisterCoordinationTools()` function |
 | `internal/controller/task_controller.go` | Coordination validation + ChildTaskStatus population |
 | `internal/controller/task_controller_test.go` | Tests for coordination enforcement |
@@ -424,7 +432,17 @@ COORDINATOR (AI worker)
   │                       base_branch="main", title="feat: my change")
   │     → creates PR via GitHub API using git credentials from task
   │
-  └── COMPLETE with PR URL
+  ├── review_pull_request(task_name="coder-task-xyz", pr_number=42)
+  │     → fetches PR diff and file changes for analysis
+  │
+  ├── post_review_comment(task_name="coder-task-xyz", pr_number=42,
+  │                       body="LGTM", event="APPROVE")
+  │     → posts review with verdict and optional line comments
+  │
+  ├── merge_pull_request(task_name="coder-task-xyz", pr_number=42)
+  │     → verifies CI checks pass, then merges the PR
+  │
+  └── COMPLETE with merged PR
 ```
 
 ### delegate_task Iteration Parameters
@@ -511,6 +529,86 @@ Creates a GitHub pull request from a branch that was pushed by a completed agent
 
 The tool reads the git credentials from the child task's `gitSecretRef` secret (looks for `token` or `password` key) and calls the GitHub REST API. The coordinator must have RBAC access to read Secrets.
 
+### review_pull_request Tool
+
+Fetches a GitHub pull request's diff, file changes, and metadata for code review. Returns the full unified diff, individual file patches with change statistics, and PR metadata (title, body, author, branches).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_name` | string | yes | Name of the child task whose workspace config has the repo and git credentials |
+| `pr_number` | integer | yes | GitHub pull request number to review |
+
+Returns:
+```json
+{
+  "pr_title": "feat: add auth middleware",
+  "pr_body": "Adds JWT-based authentication...",
+  "pr_author": "dev-bot",
+  "base_branch": "main",
+  "head_branch": "feature/jwt-auth",
+  "diff": "diff --git a/auth.go ...",
+  "files": [
+    {"filename": "auth.go", "status": "added", "additions": 42, "deletions": 0, "patch": "..."}
+  ],
+  "status": "fetched"
+}
+```
+
+Usage: Call `review_pull_request` after `create_pull_request` to fetch the PR diff, then analyze the changes and submit feedback via `post_review_comment`.
+
+### post_review_comment Tool
+
+Posts a review on a GitHub pull request with a verdict (APPROVE, REQUEST_CHANGES, or COMMENT) and optional line-level comments.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_name` | string | yes | Name of the child task whose workspace config has the repo and git credentials |
+| `pr_number` | integer | yes | GitHub pull request number |
+| `body` | string | yes | Top-level review body text |
+| `event` | string | yes | Review verdict: `APPROVE`, `REQUEST_CHANGES`, or `COMMENT` |
+| `comments` | array | no | Line-level review comments (each with `path`, `line`, `body`) |
+
+Each item in `comments`:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `path` | string | yes | File path relative to repo root |
+| `line` | integer | yes | Line number in the diff (new file line number) |
+| `body` | string | yes | Comment text |
+
+Returns:
+```json
+{
+  "review_id": 12345,
+  "status": "submitted",
+  "html_url": "https://github.com/owner/repo/pull/1#pullrequestreview-12345"
+}
+```
+
+### merge_pull_request Tool
+
+Merges a GitHub pull request after verifying all CI checks have passed. Supports merge, squash, and rebase merge methods.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_name` | string | yes | Name of the child task whose workspace config has the repo and git credentials |
+| `pr_number` | integer | yes | GitHub pull request number to merge |
+| `merge_method` | string | no | Merge method: `merge`, `squash`, or `rebase` (defaults to `squash`) |
+| `commit_title` | string | no | Custom merge commit title |
+| `commit_message` | string | no | Custom merge commit message |
+
+Returns:
+```json
+{
+  "sha": "abc123def456",
+  "merged": true,
+  "checks_passed": true,
+  "message": "Pull request merged successfully"
+}
+```
+
+If CI checks have not passed, returns `{"merged": false, "checks_passed": false, "message": "CI checks have not all passed: ..."}` without failing.
+
 ### Recommended Coordinator System Prompt
 
 ```
@@ -525,6 +623,9 @@ You are a coordinator agent. Follow this protocol:
    Go to step 2.
 6. IF verdict == "APPROVED":
    Call create_pull_request with the coder's task name and pushBranch.
+   Call review_pull_request to fetch the PR diff for final review.
+   Call post_review_comment to approve the PR.
+   Call merge_pull_request to merge the PR after CI passes.
 7. Report final result with the PR URL.
 ```
 

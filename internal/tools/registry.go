@@ -26,6 +26,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const githubAPIBaseURL = "https://api.github.com"
+
 // Tool is the interface for built-in tools
 type Tool interface {
 	// Name returns the tool name

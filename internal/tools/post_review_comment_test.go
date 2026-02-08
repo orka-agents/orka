@@ -33,6 +33,8 @@ import (
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 )
 
+const testReviewStatus = "submitted"
+
 func TestPostReviewCommentTool_Metadata(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -158,7 +160,7 @@ func TestPostReviewCommentTool_Success(t *testing.T) {
 	if reviewResult.ReviewID != 101 {
 		t.Errorf("unexpected review ID: %d", reviewResult.ReviewID)
 	}
-	if reviewResult.Status != "submitted" {
+	if reviewResult.Status != testReviewStatus {
 		t.Errorf("unexpected status: %s", reviewResult.Status)
 	}
 	if reviewResult.HTMLURL != "https://github.com/sozercan/ayna/pull/10#pullrequestreview-101" {
@@ -238,7 +240,7 @@ func TestPostReviewCommentTool_WithoutComments(t *testing.T) {
 	if reviewResult.ReviewID != 102 {
 		t.Errorf("unexpected review ID: %d", reviewResult.ReviewID)
 	}
-	if reviewResult.Status != "submitted" {
+	if reviewResult.Status != testReviewStatus {
 		t.Errorf("unexpected status: %s", reviewResult.Status)
 	}
 }
@@ -325,5 +327,193 @@ func TestPostReviewCommentTool_NoWorkspace(t *testing.T) {
 	}
 	if got := err.Error(); !strings.Contains(got, "does not have workspace") {
 		t.Errorf("unexpected error: %s", got)
+	}
+}
+
+func TestPostReviewCommentTool_Execute_MissingSecret(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "secret-missing-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/sozercan/ayna",
+					Branch:  "main",
+					GitSecretRef: &corev1.LocalObjectReference{
+						Name: "nonexistent-secret",
+					},
+				},
+			},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
+	tool := NewPostReviewCommentTool(k8sClient)
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(PostReviewCommentArgs{
+		TaskName: "secret-missing-task",
+		PRNumber: 1,
+		Body:     "review",
+		Event:    "COMMENT",
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for missing secret")
+	}
+	if got := err.Error(); !strings.Contains(got, "failed to get git secret") {
+		t.Errorf("unexpected error: %s", got)
+	}
+}
+
+func TestPostReviewCommentTool_Execute_APIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, `{"message":"Internal Server Error"}`)
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "api-error-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/sozercan/ayna",
+					Branch:  "main",
+					GitSecretRef: &corev1.LocalObjectReference{
+						Name: "git-creds",
+					},
+				},
+			},
+		},
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data: map[string][]byte{
+			"token": []byte("test-token"),
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := &PostReviewCommentTool{
+		k8sClient:  k8sClient,
+		apiBaseURL: server.URL,
+	}
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(PostReviewCommentArgs{
+		TaskName: "api-error-task",
+		PRNumber: 10,
+		Body:     "review body",
+		Event:    "COMMENT",
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for API failure")
+	}
+	if got := err.Error(); !strings.Contains(got, "GitHub API returned 500") {
+		t.Errorf("unexpected error: %s", got)
+	}
+}
+
+func TestPostReviewCommentTool_Execute_AllEventTypes(t *testing.T) {
+	tests := []struct {
+		name  string
+		event string
+	}{
+		{name: "approve", event: "APPROVE"},
+		{name: "request_changes", event: "REQUEST_CHANGES"},
+		{name: "comment", event: "COMMENT"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			receivedEvent := ""
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				json.NewDecoder(r.Body).Decode(&body)
+				receivedEvent = body["event"].(string)
+
+				w.WriteHeader(200)
+				fmt.Fprintf(w, `{"id":200,"html_url":"https://github.com/sozercan/ayna/pull/3#pullrequestreview-200"}`)
+			}))
+			defer server.Close()
+
+			scheme := runtime.NewScheme()
+			_ = corev1alpha1.AddToScheme(scheme)
+			_ = corev1.AddToScheme(scheme)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "event-task", Namespace: "default"},
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAgent,
+					AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+						Workspace: &corev1alpha1.WorkspaceConfig{
+							GitRepo: "https://github.com/sozercan/ayna",
+							Branch:  "main",
+							GitSecretRef: &corev1.LocalObjectReference{
+								Name: "git-creds",
+							},
+						},
+					},
+				},
+			}
+
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+				Data: map[string][]byte{
+					"token": []byte("test-token"),
+				},
+			}
+
+			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+			tool := &PostReviewCommentTool{
+				k8sClient:  k8sClient,
+				apiBaseURL: server.URL,
+			}
+
+			t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+			args, _ := json.Marshal(PostReviewCommentArgs{
+				TaskName: "event-task",
+				PRNumber: 3,
+				Body:     "Review with event " + tc.event,
+				Event:    tc.event,
+			})
+
+			result, err := tool.Execute(context.Background(), args)
+			if err != nil {
+				t.Fatalf("unexpected error for event %s: %v", tc.event, err)
+			}
+
+			if receivedEvent != tc.event {
+				t.Errorf("expected event %s, got %s", tc.event, receivedEvent)
+			}
+
+			var reviewResult PostReviewCommentResult
+			if err := json.Unmarshal([]byte(result), &reviewResult); err != nil {
+				t.Fatalf("failed to parse result: %v", err)
+			}
+			if reviewResult.ReviewID != 200 {
+				t.Errorf("unexpected review ID: %d", reviewResult.ReviewID)
+			}
+			if reviewResult.Status != testReviewStatus {
+				t.Errorf("unexpected status: %s", reviewResult.Status)
+			}
+		})
 	}
 }

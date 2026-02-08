@@ -82,26 +82,26 @@ func (t *CreatePullRequestTool) Description() string {
 
 // Parameters returns the JSON schema for tool parameters.
 func (t *CreatePullRequestTool) Parameters() json.RawMessage {
-	schema := map[string]interface{}{
+	schema := map[string]any{
 		"type": "object",
-		"properties": map[string]interface{}{
-			"task_name": map[string]interface{}{
+		"properties": map[string]any{
+			"task_name": map[string]any{
 				"type":        "string",
 				"description": "Name of the completed child task whose workspace config has the repo and git credentials",
 			},
-			"head_branch": map[string]interface{}{
+			"head_branch": map[string]any{
 				"type":        "string",
 				"description": "The branch containing the changes (the pushBranch used by the coder)",
 			},
-			"base_branch": map[string]interface{}{
+			"base_branch": map[string]any{
 				"type":        "string",
 				"description": "The target branch to merge into (e.g. 'main')",
 			},
-			"title": map[string]interface{}{
+			"title": map[string]any{
 				"type":        "string",
 				"description": "Pull request title",
 			},
-			"body": map[string]interface{}{
+			"body": map[string]any{
 				"type":        "string",
 				"description": "Pull request body in Markdown format",
 			},
@@ -197,8 +197,8 @@ func parseGitHubRepo(repoURL string) (string, string, error) {
 
 	// Try HTTPS format: https://github.com/owner/repo
 	for _, prefix := range []string{"https://github.com/", "http://github.com/"} {
-		if strings.HasPrefix(repoURL, prefix) {
-			path := strings.TrimPrefix(repoURL, prefix)
+		if after, ok := strings.CutPrefix(repoURL, prefix); ok {
+			path := after
 			parts := strings.SplitN(path, "/", 3)
 			if len(parts) >= 2 {
 				return parts[0], parts[1], nil
@@ -207,8 +207,8 @@ func parseGitHubRepo(repoURL string) (string, string, error) {
 	}
 
 	// Try SSH format: git@github.com:owner/repo
-	if strings.HasPrefix(repoURL, "git@github.com:") {
-		path := strings.TrimPrefix(repoURL, "git@github.com:")
+	if after, ok := strings.CutPrefix(repoURL, "git@github.com:"); ok {
+		path := after
 		parts := strings.SplitN(path, "/", 3)
 		if len(parts) >= 2 {
 			return parts[0], parts[1], nil
@@ -221,7 +221,7 @@ func parseGitHubRepo(repoURL string) (string, string, error) {
 // createGitHubPR creates a pull request via the GitHub REST API.
 // An optional apiBaseURL can be provided for testing; if empty, uses https://api.github.com.
 func createGitHubPR(token, owner, repo, head, base, title, body string, apiBaseURL ...string) (string, int, error) {
-	baseURL := "https://api.github.com"
+	baseURL := githubAPIBaseURL
 	if len(apiBaseURL) > 0 && apiBaseURL[0] != "" {
 		baseURL = apiBaseURL[0]
 	}

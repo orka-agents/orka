@@ -226,7 +226,7 @@ func (t *PostReviewCommentTool) Execute(ctx context.Context, argsJSON json.RawMe
 
 // postGitHubReview posts a pull request review via the GitHub REST API.
 func postGitHubReview(token, owner, repo string, prNumber int, body, event string, comments []ReviewComment, apiBaseURL string) (int, string, error) {
-	baseURL := "https://api.github.com"
+	baseURL := githubAPIBaseURL
 	if apiBaseURL != "" {
 		baseURL = apiBaseURL
 	}

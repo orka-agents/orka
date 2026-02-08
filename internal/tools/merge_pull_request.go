@@ -178,7 +178,7 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 		return "", fmt.Errorf("git secret %s does not contain a 'token' or 'password' key", ws.GitSecretRef.Name)
 	}
 
-	baseURL := "https://api.github.com"
+	baseURL := githubAPIBaseURL
 	if t.apiBaseURL != "" {
 		baseURL = t.apiBaseURL
 	}
