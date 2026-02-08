@@ -18,6 +18,7 @@ package common
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,8 +28,8 @@ import (
 )
 
 const (
-	maxRetries     = 3
-	saTokenPath    = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	maxRetries      = 3
+	saTokenPath     = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	saNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 )
 
@@ -115,4 +116,41 @@ func doPost(endpoint string, data []byte, saToken string) error {
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+}
+
+// StructuredResult is an optional structured envelope for task results.
+// Workers can use this to include diffs, verdicts, and metadata alongside
+// the human-readable summary. Plain-text results remain backward compatible.
+type StructuredResult struct {
+	Version    int               `json:"version"`
+	Summary    string            `json:"summary"`
+	BaseSHA    string            `json:"baseSHA,omitempty"`
+	Diff       string            `json:"diff,omitempty"`
+	Verdict    string            `json:"verdict,omitempty"`
+	Feedback   string            `json:"feedback,omitempty"`
+	Files      []string          `json:"files,omitempty"`
+	PushBranch string            `json:"pushBranch,omitempty"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+}
+
+// FormatStructuredResult serializes a StructuredResult to JSON bytes.
+func FormatStructuredResult(r *StructuredResult) ([]byte, error) {
+	if r.Version == 0 {
+		r.Version = 1
+	}
+	return json.Marshal(r)
+}
+
+// ParseStructuredResult attempts to parse a result string as a StructuredResult.
+// If the input is not valid JSON or doesn't have the expected structure,
+// it returns a StructuredResult with the raw input as Summary (backward compatible).
+func ParseStructuredResult(raw string) *StructuredResult {
+	var sr StructuredResult
+	if err := json.Unmarshal([]byte(raw), &sr); err != nil || sr.Version == 0 {
+		return &StructuredResult{
+			Version: 1,
+			Summary: raw,
+		}
+	}
+	return &sr
 }

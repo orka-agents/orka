@@ -19,6 +19,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -553,4 +554,206 @@ func searchString(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
+	// Create a prior task in the fake client
+	prior := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "prior-task-1",
+			Namespace: "default",
+			UID:       "prior-uid",
+			Labels: map[string]string{
+				"mercan.ai/iteration":       "1",
+				"mercan.ai/iteration-group": "group-abc",
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAgent,
+			Prompt: "original prompt",
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/example/repo",
+					Branch:  "main",
+				},
+			},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseSucceeded,
+		},
+	}
+
+	parent := parentTask()
+	agent := researcherAgent()
+
+	fakeClient := newFakeClient(parent, agent, prior)
+	tool := NewDelegateTaskTool(fakeClient)
+
+	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
+	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
+
+	args, _ := json.Marshal(map[string]any{
+		"agent":      "researcher",
+		"prompt":     "fix the bug",
+		"prior_task": "prior-task-1",
+		"feedback":   "Add error handling",
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	var delegateResult DelegateTaskResult
+	if err := json.Unmarshal([]byte(result), &delegateResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if delegateResult.Status != "created" {
+		t.Errorf("expected status 'created', got %q", delegateResult.Status)
+	}
+
+	// Verify the child task was created with PriorTaskRef
+	childTask := &corev1alpha1.Task{}
+	if err := fakeClient.Get(context.Background(), apitypes.NamespacedName{
+		Name: delegateResult.TaskName, Namespace: "default",
+	}, childTask); err != nil {
+		t.Fatalf("get child task: %v", err)
+	}
+
+	if childTask.Spec.PriorTaskRef == nil {
+		t.Fatal("expected PriorTaskRef to be set")
+	}
+	if childTask.Spec.PriorTaskRef.Name != "prior-task-1" {
+		t.Errorf("expected PriorTaskRef.Name 'prior-task-1', got %q", childTask.Spec.PriorTaskRef.Name)
+	}
+
+	// Verify feedback was prepended to prompt
+	if !strings.Contains(childTask.Spec.Prompt, "FEEDBACK FROM REVIEW") {
+		t.Errorf("expected prompt to contain feedback, got %q", childTask.Spec.Prompt)
+	}
+	if !strings.Contains(childTask.Spec.Prompt, "Add error handling") {
+		t.Errorf("expected prompt to contain feedback text")
+	}
+
+	// Verify iteration labels
+	if childTask.Labels["mercan.ai/iteration"] != "2" {
+		t.Errorf("expected iteration=2, got %q", childTask.Labels["mercan.ai/iteration"])
+	}
+	if childTask.Labels["mercan.ai/iteration-group"] != "group-abc" {
+		t.Errorf("expected iteration-group=group-abc, got %q", childTask.Labels["mercan.ai/iteration-group"])
+	}
+
+	// Verify workspace was copied from prior task
+	if childTask.Spec.AgentRuntime == nil || childTask.Spec.AgentRuntime.Workspace == nil {
+		t.Fatal("expected workspace to be copied from prior task")
+	}
+	if childTask.Spec.AgentRuntime.Workspace.GitRepo != "https://github.com/example/repo" {
+		t.Errorf("expected git repo from prior task, got %q", childTask.Spec.AgentRuntime.Workspace.GitRepo)
+	}
+}
+
+func TestDelegateTaskTool_Execute_FeedbackOnly(t *testing.T) {
+	parent := parentTask()
+	agent := researcherAgent()
+
+	fakeClient := newFakeClient(parent, agent)
+	tool := NewDelegateTaskTool(fakeClient)
+
+	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
+	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
+
+	args, _ := json.Marshal(map[string]any{
+		"agent":    "researcher",
+		"prompt":   "implement feature",
+		"feedback": "Use dependency injection",
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	var delegateResult DelegateTaskResult
+	json.Unmarshal([]byte(result), &delegateResult)
+
+	// Verify the child task was created with feedback in prompt
+	childTask := &corev1alpha1.Task{}
+	fakeClient.Get(context.Background(), apitypes.NamespacedName{
+		Name: delegateResult.TaskName, Namespace: "default",
+	}, childTask)
+
+	if !strings.Contains(childTask.Spec.Prompt, "FEEDBACK FROM REVIEW") {
+		t.Errorf("expected feedback in prompt, got %q", childTask.Spec.Prompt)
+	}
+	// PriorTaskRef should NOT be set
+	if childTask.Spec.PriorTaskRef != nil {
+		t.Errorf("expected PriorTaskRef to be nil when prior_task not specified")
+	}
+}
+
+func TestDelegateTaskTool_Execute_PushBranch(t *testing.T) {
+	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
+	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "claude-coder")
+	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "3")
+
+	agentWithRuntime := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "claude-coder",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: "claude",
+			},
+		},
+	}
+
+	k8sClient := newFakeClient(parentTask(), agentWithRuntime)
+	tool := NewDelegateTaskTool(k8sClient)
+
+	args := json.RawMessage(`{
+		"agent": "claude-coder",
+		"prompt": "Implement feature",
+		"workspace": {
+			"gitRepo": "https://github.com/sozercan/ayna",
+			"branch": "main",
+			"gitSecretRef": "git-credentials",
+			"pushBranch": "feature/edit-message"
+		}
+	}`)
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var delegateResult DelegateTaskResult
+	json.Unmarshal([]byte(result), &delegateResult)
+
+	childTask := &corev1alpha1.Task{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
+		Name: delegateResult.TaskName, Namespace: "default",
+	}, childTask); err != nil {
+		t.Fatalf("failed to get child task: %v", err)
+	}
+
+	if childTask.Spec.AgentRuntime == nil || childTask.Spec.AgentRuntime.Workspace == nil {
+		t.Fatal("expected workspace to be set")
+	}
+	ws := childTask.Spec.AgentRuntime.Workspace
+	if ws.PushBranch != "feature/edit-message" {
+		t.Errorf("pushBranch = %q, want %q", ws.PushBranch, "feature/edit-message")
+	}
+	if ws.GitRepo != "https://github.com/sozercan/ayna" {
+		t.Errorf("gitRepo = %q, want %q", ws.GitRepo, "https://github.com/sozercan/ayna")
+	}
+	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != "git-credentials" {
+		t.Errorf("gitSecretRef = %v, want git-credentials", ws.GitSecretRef)
+	}
 }

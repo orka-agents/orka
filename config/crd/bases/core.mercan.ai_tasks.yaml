@@ -97,6 +97,10 @@ spec:
                       branch:
                         description: Branch is the git branch to checkout
                         type: string
+                      forkRepo:
+                        description: ForkRepo is the writable fork repository URL
+                          for pushing changes
+                        type: string
                       gitRepo:
                         description: GitRepo is the repository URL to clone
                         type: string
@@ -115,6 +119,15 @@ spec:
                             type: string
                         type: object
                         x-kubernetes-map-type: atomic
+                      prBaseBranch:
+                        description: PRBaseBranch is the upstream branch to target
+                          for pull requests
+                        type: string
+                      pushBranch:
+                        description: |-
+                          PushBranch is the remote branch name to push changes to after the agent completes.
+                          When set, FinalizeResult will commit and push changes to this branch.
+                        type: string
                       ref:
                         description: Ref is a specific git ref (commit SHA, tag) to
                           checkout
@@ -386,6 +399,21 @@ spec:
               image:
                 description: Image is the container image to run for the task
                 type: string
+              priorTaskRef:
+                description: |-
+                  PriorTaskRef references a previously completed task whose diff should be
+                  applied to the workspace before this task begins execution.
+                properties:
+                  name:
+                    description: Name is the name of the prior task
+                    type: string
+                  namespace:
+                    description: Namespace is the namespace of the prior task (defaults
+                      to Task namespace)
+                    type: string
+                required:
+                - name
+                type: object
               priority:
                 default: 500
                 description: Priority is the queue priority (0-1000, higher = more

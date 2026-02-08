@@ -80,7 +80,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 	// Get auth token if configured
 	var authToken string
 	if tool.Spec.HTTP.AuthSecretRef != nil {
-		token, err := e.getSecretKey(tool.Spec.HTTP.AuthSecretRef.Name, tool.Spec.HTTP.AuthSecretRef.Key)
+		token, err := e.getSecretKey(ctx, tool.Spec.HTTP.AuthSecretRef.Name, tool.Spec.HTTP.AuthSecretRef.Key)
 		if err != nil {
 			return "", fmt.Errorf("failed to get auth secret: %w", err)
 		}
@@ -175,7 +175,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 }
 
 // getSecretKey reads a key from a secret (mounted path or Kubernetes API)
-func (e *ToolExecutor) getSecretKey(secretName, key string) (string, error) {
+func (e *ToolExecutor) getSecretKey(ctx context.Context, secretName, key string) (string, error) {
 	// Try mounted secret paths first
 	paths := []string{
 		fmt.Sprintf("%s/%s/%s", e.secretPath, secretName, key),
@@ -192,7 +192,7 @@ func (e *ToolExecutor) getSecretKey(secretName, key string) (string, error) {
 
 	// Fall back to Kubernetes API
 	if e.k8sClient != nil {
-		secret, err := e.k8sClient.CoreV1().Secrets(e.namespace).Get(context.Background(), secretName, metav1.GetOptions{})
+		secret, err := e.k8sClient.CoreV1().Secrets(e.namespace).Get(ctx, secretName, metav1.GetOptions{})
 		if err == nil {
 			if data, ok := secret.Data[key]; ok {
 				return strings.TrimSpace(string(data)), nil

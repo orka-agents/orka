@@ -852,10 +852,11 @@ func TestJobBuilder_Build_AgentTask_EnvVars(t *testing.T) {
 				DisallowedTools: []string{"WebFetch"},
 				AllowBash:       &allowBash,
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/example/repo",
-					Branch:  "main",
-					Ref:     "abc123",
-					SubPath: "src",
+					GitRepo:    "https://github.com/example/repo",
+					Branch:     "main",
+					Ref:        "abc123",
+					SubPath:    "src",
+					PushBranch: "feature/my-change",
 				},
 			},
 		},
@@ -900,6 +901,7 @@ func TestJobBuilder_Build_AgentTask_EnvVars(t *testing.T) {
 		{"MERCAN_GIT_BRANCH", "main"},
 		{"MERCAN_GIT_REF", "abc123"},
 		{"MERCAN_WORKSPACE_SUBPATH", "src"},
+		{"MERCAN_PUSH_BRANCH", "feature/my-change"},
 	}
 
 	for _, tt := range tests {
@@ -1545,4 +1547,77 @@ func TestJobBuilder_Build_AgentTask_WithTimeout(t *testing.T) {
 	if *job.Spec.ActiveDeadlineSeconds != 600 {
 		t.Errorf("ActiveDeadlineSeconds = %d, want 600", *job.Spec.ActiveDeadlineSeconds)
 	}
+}
+
+func TestJobBuilder_Build_PriorTaskRef(t *testing.T) {
+	jb := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-task",
+			Namespace: "default",
+			UID:       "uid-1234-5678",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAgent,
+			Prompt: "fix the issue",
+			PriorTaskRef: &corev1alpha1.PriorTaskReference{
+				Name:      "prior-task-abc",
+				Namespace: "staging",
+			},
+		},
+	}
+
+	job, err := jb.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	envVars := job.Spec.Template.Spec.Containers[0].Env
+	var foundPriorTask, foundPriorNS bool
+	for _, env := range envVars {
+		if env.Name == "MERCAN_PRIOR_TASK" && env.Value == "prior-task-abc" {
+			foundPriorTask = true
+		}
+		if env.Name == "MERCAN_PRIOR_TASK_NAMESPACE" && env.Value == "staging" {
+			foundPriorNS = true
+		}
+	}
+	if !foundPriorTask {
+		t.Error("expected MERCAN_PRIOR_TASK env var")
+	}
+	if !foundPriorNS {
+		t.Error("expected MERCAN_PRIOR_TASK_NAMESPACE env var")
+	}
+}
+
+func TestJobBuilder_Build_PriorTaskRef_DefaultNamespace(t *testing.T) {
+	jb := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-task",
+			Namespace: "my-ns",
+			UID:       "uid-4567-8901",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAgent,
+			Prompt: "fix it",
+			PriorTaskRef: &corev1alpha1.PriorTaskReference{
+				Name: "prior-task-def",
+				// No namespace — should default to task namespace
+			},
+		},
+	}
+
+	job, err := jb.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	envVars := job.Spec.Template.Spec.Containers[0].Env
+	for _, env := range envVars {
+		if env.Name == "MERCAN_PRIOR_TASK_NAMESPACE" && env.Value == "my-ns" {
+			return // success
+		}
+	}
+	t.Error("expected MERCAN_PRIOR_TASK_NAMESPACE to default to task namespace 'my-ns'")
 }

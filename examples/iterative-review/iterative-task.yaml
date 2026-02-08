@@ -1,0 +1,16 @@
+apiVersion: mercan.ai/v1alpha1
+kind: Task
+metadata:
+  name: deliver-auth-feature
+spec:
+  type: ai
+  agentRef:
+    name: coordinator
+  prompt: |
+    Implement JWT authentication for the API.
+    Requirements:
+    - Login endpoint with username/password
+    - Token refresh endpoint
+    - Middleware for protected routes
+    - Unit tests for all endpoints
+  timeout: 1h

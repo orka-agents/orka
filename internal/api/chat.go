@@ -25,7 +25,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -210,6 +209,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		chatLog.Info("no existing session, starting fresh", "sessionId", sessionID, "error", err)
 		messages = []llm.Message{}
 	}
+	persistedCount := len(messages)
 
 	// Append user message
 	messages = append(messages, llm.Message{
@@ -240,7 +240,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	accept := c.Get("Accept")
 	if accept == "application/json" {
 		// JSON mode: run tool loop, collect all content, return JSON
-		content, usage, toolCalls, err := ch.runToolLoop(ctx, provider, messages, systemPrompt, tools, executor, sessionID, namespace, model, temperature, maxTokens, nil)
+		content, usage, toolCalls, err := ch.runToolLoop(ctx, provider, messages, systemPrompt, tools, executor, sessionID, namespace, model, temperature, maxTokens, persistedCount, nil)
 		if err != nil {
 			chatLog.Error(err, "tool loop error")
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("chat error: %v", err))
@@ -284,7 +284,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		})
 		emitSSE("status", string(statusData))
 
-		content, usage, _, err := ch.runToolLoop(sseCtx, sseProvider, sseMessages, sseSystemPrompt, sseTools, sseExecutor, sessionID, namespace, model, temperature, maxTokens, emitSSE)
+		content, usage, _, err := ch.runToolLoop(sseCtx, sseProvider, sseMessages, sseSystemPrompt, sseTools, sseExecutor, sessionID, namespace, model, temperature, maxTokens, persistedCount, emitSSE)
 		if err != nil {
 			errData, _ := json.Marshal(map[string]string{"error": err.Error()})
 			emitSSE("error", string(errData))
@@ -309,6 +309,7 @@ func (ch *ChatHandler) runToolLoop(
 	sessionID, namespace, model string,
 	temperature float64,
 	maxTokens int,
+	persistedCount int,
 	emitSSE func(event, data string),
 ) (string, ChatUsage, []ToolCallInfo, error) {
 	var usage ChatUsage
@@ -357,7 +358,10 @@ func (ch *ChatHandler) runToolLoop(
 			finalMessages := append(messages, llm.Message{Role: "assistant", Content: resp.Content})
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
 			usage.TasksCreated = executor.tasksCreated
-			_ = ch.saveChatSession(ctx, namespace, sessionID, finalMessages, usage)
+			_ = ch.saveChatSession(ctx, namespace, sessionID, finalMessages, persistedCount, usage)
+			if err := ch.sessionStore.UpdateTokenCounts(ctx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
+				chatLog.Error(err, "failed to update token counts")
+			}
 			return resp.Content, usage, allToolCalls, nil
 		}
 
@@ -475,7 +479,10 @@ func (ch *ChatHandler) runToolLoop(
 		finalMessages := append(messages, llm.Message{Role: "assistant", Content: resp.Content})
 		usage.Duration = time.Since(start).Round(time.Millisecond).String()
 		usage.TasksCreated = executor.tasksCreated
-		_ = ch.saveChatSession(ctx, namespace, sessionID, finalMessages, usage)
+		_ = ch.saveChatSession(ctx, namespace, sessionID, finalMessages, persistedCount, usage)
+		if err := ch.sessionStore.UpdateTokenCounts(ctx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
+			chatLog.Error(err, "failed to update token counts")
+		}
 
 		return resp.Content, usage, allToolCalls, nil
 	}
@@ -506,7 +513,7 @@ func (ch *ChatHandler) loadChatSession(ctx context.Context, namespace, sessionID
 }
 
 // saveChatSession saves chat session messages to the session store.
-func (ch *ChatHandler) saveChatSession(ctx context.Context, namespace, sessionID string, messages []llm.Message, usage ChatUsage) error {
+func (ch *ChatHandler) saveChatSession(ctx context.Context, namespace, sessionID string, messages []llm.Message, persistedCount int, usage ChatUsage) error {
 	// Check if session exists
 	_, err := ch.sessionStore.GetSession(ctx, namespace, sessionID)
 	if err != nil {
@@ -527,10 +534,16 @@ func (ch *ChatHandler) saveChatSession(ctx context.Context, namespace, sessionID
 		}
 	}
 
+	// Only append messages that haven't been persisted yet
+	newMessages := messages[persistedCount:]
+	if len(newMessages) == 0 {
+		return nil
+	}
+
 	// Convert llm.Message to store.SessionMessage
-	storeMessages := make([]store.SessionMessage, 0, len(messages))
+	storeMessages := make([]store.SessionMessage, 0, len(newMessages))
 	now := time.Now()
-	for _, msg := range messages {
+	for _, msg := range newMessages {
 		storeMessages = append(storeMessages, store.SessionMessage{
 			Role:      msg.Role,
 			Content:   msg.Content,
@@ -712,22 +725,6 @@ func hashArgs(name string, args json.RawMessage) string {
 	h.Write([]byte(name))
 	h.Write(args)
 	return fmt.Sprintf("%x", h.Sum(nil))[:16]
-}
-
-// truncateTranscript keeps the most recent lines that fit within maxSize bytes.
-func truncateTranscript(transcript string, maxSize int) string {
-	lines := strings.Split(transcript, "\n")
-	var kept []string
-	size := 0
-	for i := len(lines) - 1; i >= 0; i-- {
-		lineSize := len(lines[i]) + 1 // +1 for newline
-		if size+lineSize > maxSize {
-			break
-		}
-		size += lineSize
-		kept = append([]string{lines[i]}, kept...)
-	}
-	return strings.Join(kept, "\n")
 }
 
 // writeSSE writes a server-sent event to the writer.

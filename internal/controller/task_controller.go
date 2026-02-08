@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/utils/ptr"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -459,8 +461,16 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 					cs.Agent = child.Spec.AgentRef.Name
 				}
 				if child.Status.ResultRef != nil && child.Status.ResultRef.Available {
-					// TODO: Will be replaced with ResultStore.GetResult() in Step 5
-					cs.Result = "(result available)"
+					result, err := r.ResultStore.GetResult(ctx, child.Namespace, child.Name)
+					if err != nil {
+						log.Error(err, "failed to get child task result", "child", child.Name)
+						cs.Result = "(result fetch error)"
+					} else {
+						cs.Result = string(result)
+						if len(cs.Result) > 4096 {
+							cs.Result = cs.Result[:4096] + "\n[truncated]"
+						}
+					}
 				}
 				childStatuses = append(childStatuses, cs)
 			}
@@ -703,17 +713,25 @@ func (r *TaskReconciler) readPodLogs(ctx context.Context, task *corev1alpha1.Tas
 		return "", fmt.Errorf("no pods found for job %s", task.Status.JobName)
 	}
 
+	const maxLogBytes = int64(5 << 20) // 5MB
+
 	pod := podList.Items[len(podList.Items)-1]
-	req := r.KubeClient.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{})
+	req := r.KubeClient.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+		LimitBytes: ptr.To(maxLogBytes),
+	})
 	stream, err := req.Stream(ctx)
 	if err != nil {
 		return "", fmt.Errorf("streaming logs: %w", err)
 	}
 	defer stream.Close()
 
-	data, err := io.ReadAll(stream)
+	data, err := io.ReadAll(io.LimitReader(stream, maxLogBytes))
 	if err != nil {
 		return "", fmt.Errorf("reading logs: %w", err)
+	}
+
+	if int64(len(data)) == maxLogBytes {
+		data = append(data, "\n[truncated]"...)
 	}
 
 	return string(data), nil
@@ -946,13 +964,9 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 
 	// Sort by creation time (oldest first) and delete excess
 	sortByCreation := func(tasks []*corev1alpha1.Task) {
-		for i := range tasks {
-			for j := i + 1; j < len(tasks); j++ {
-				if tasks[j].CreationTimestamp.Before(&tasks[i].CreationTimestamp) {
-					tasks[i], tasks[j] = tasks[j], tasks[i]
-				}
-			}
-		}
+		slices.SortFunc(tasks, func(a, b *corev1alpha1.Task) int {
+			return a.CreationTimestamp.Time.Compare(b.CreationTimestamp.Time)
+		})
 	}
 
 	sortByCreation(succeeded)

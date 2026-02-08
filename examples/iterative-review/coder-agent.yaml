@@ -1,0 +1,17 @@
+apiVersion: mercan.ai/v1alpha1
+kind: Agent
+metadata:
+  name: coder
+spec:
+  runtime:
+    type: claude
+    defaultMaxTurns: 100
+    defaultAllowBash: true
+  model:
+    name: claude-sonnet-4-20250514
+  systemPrompt:
+    inline: |
+      You are a coding agent. Write clean, well-tested code.
+      If you receive FEEDBACK FROM REVIEW, address all feedback items.
+  secretRef:
+    name: anthropic-credentials

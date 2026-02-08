@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	"github.com/sozercan/mercan/workers/common"
 )
 
 // WaitForTasksTool implements waiting for child tasks to complete
@@ -51,10 +52,17 @@ type WaitForTasksResult struct {
 
 // TaskResultInfo holds individual task result information
 type TaskResultInfo struct {
-	Task   string `json:"task"`
-	Agent  string `json:"agent,omitempty"`
-	Phase  string `json:"phase"`
-	Result string `json:"result,omitempty"`
+	Task       string   `json:"task"`
+	Agent      string   `json:"agent,omitempty"`
+	Phase      string   `json:"phase"`
+	Result     string   `json:"result,omitempty"`
+	Summary    string   `json:"summary,omitempty"`
+	Verdict    string   `json:"verdict,omitempty"`
+	Feedback   string   `json:"feedback,omitempty"`
+	Files      []string `json:"files,omitempty"`
+	BaseSHA    string   `json:"baseSHA,omitempty"`
+	PushBranch string   `json:"pushBranch,omitempty"`
+	Iteration  string   `json:"iteration,omitempty"`
 }
 
 // NewWaitForTasksTool creates a new wait_for_tasks tool
@@ -160,12 +168,26 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
 				resultStr, fetchErr := fetchTaskResult(taskName)
 				if fetchErr == nil {
-					results[taskName].Result = resultStr
+					// Parse structured result and strip diff to avoid context bloat
+					sr := common.ParseStructuredResult(resultStr)
+					results[taskName].Summary = sr.Summary
+					results[taskName].Verdict = sr.Verdict
+					results[taskName].Feedback = sr.Feedback
+					results[taskName].Files = sr.Files
+					results[taskName].BaseSHA = sr.BaseSHA
+					results[taskName].PushBranch = sr.PushBranch
+					// Set Result to summary only (never include raw diff)
+					results[taskName].Result = sr.Summary
 				} else {
 					results[taskName].Result = fmt.Sprintf("error reading result: %v", fetchErr)
 				}
 			} else if task.Status.Message != "" {
 				results[taskName].Result = task.Status.Message
+			}
+
+			// Add iteration label if present
+			if iterStr, ok := task.Labels["mercan.ai/iteration"]; ok {
+				results[taskName].Iteration = iterStr
 			}
 		}
 

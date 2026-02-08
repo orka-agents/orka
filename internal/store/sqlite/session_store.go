@@ -230,6 +230,14 @@ func (s *Store) LoadTranscript(ctx context.Context, namespace, name string, maxM
 	return messages, rows.Err()
 }
 
+// UpdateTokenCounts atomically increments the token counters for a session.
+func (s *Store) UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?, updated_at = ? WHERE namespace = ? AND name = ?`,
+		inputTokens, outputTokens, time.Now(), namespace, name)
+	return err
+}
+
 // nilIfEmpty returns nil if s is empty, otherwise returns a pointer to s.
 func nilIfEmpty(s string) *string {
 	if s == "" {

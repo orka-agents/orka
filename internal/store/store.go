@@ -30,4 +30,7 @@ type SessionStore interface {
 	// Transcript
 	AppendMessages(ctx context.Context, namespace, name string, messages []SessionMessage) error
 	LoadTranscript(ctx context.Context, namespace, name string, maxMessages int) ([]SessionMessage, error)
+
+	// Token tracking
+	UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error
 }

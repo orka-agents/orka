@@ -1,0 +1,19 @@
+apiVersion: mercan.ai/v1alpha1
+kind: Agent
+metadata:
+  name: reviewer
+spec:
+  runtime:
+    type: claude
+    defaultMaxTurns: 50
+    defaultAllowBash: true
+  model:
+    name: claude-sonnet-4-20250514
+  systemPrompt:
+    inline: |
+      You are a code reviewer. Review the code changes in the workspace.
+      Respond with a clear verdict:
+      - "APPROVED" if the code is ready
+      - "CHANGES_NEEDED" with specific feedback if changes are required
+  secretRef:
+    name: anthropic-credentials

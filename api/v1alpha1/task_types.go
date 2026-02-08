@@ -163,6 +163,11 @@ type TaskSpec struct {
 	// AgentRuntime contains task-level overrides for agent runtime configuration (when type is "agent")
 	// +optional
 	AgentRuntime *AgentRuntimeSpec `json:"agentRuntime,omitempty"`
+
+	// PriorTaskRef references a previously completed task whose diff should be
+	// applied to the workspace before this task begins execution.
+	// +optional
+	PriorTaskRef *PriorTaskReference `json:"priorTaskRef,omitempty"`
 }
 
 // RetryPolicy defines retry behavior for failed tasks
@@ -224,6 +229,18 @@ type AgentReference struct {
 	Name string `json:"name"`
 
 	// Namespace is the namespace of the Agent (defaults to Task namespace)
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// PriorTaskReference references a previously completed task whose diff should be
+// applied to the workspace before this task begins execution.
+type PriorTaskReference struct {
+	// Name is the name of the prior task
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Namespace is the namespace of the prior task (defaults to Task namespace)
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 }
@@ -458,6 +475,19 @@ type WorkspaceConfig struct {
 	// SubPath is a subdirectory within the repo to use as workspace root
 	// +optional
 	SubPath string `json:"subPath,omitempty"`
+
+	// ForkRepo is the writable fork repository URL for pushing changes
+	// +optional
+	ForkRepo string `json:"forkRepo,omitempty"`
+
+	// PRBaseBranch is the upstream branch to target for pull requests
+	// +optional
+	PRBaseBranch string `json:"prBaseBranch,omitempty"`
+
+	// PushBranch is the remote branch name to push changes to after the agent completes.
+	// When set, FinalizeResult will commit and push changes to this branch.
+	// +optional
+	PushBranch string `json:"pushBranch,omitempty"`
 }
 
 func init() {

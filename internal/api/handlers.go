@@ -40,6 +40,22 @@ import (
 )
 
 // Handlers contains all API handlers
+//
+// builtinToolsList defines the built-in tools returned by list/get endpoints.
+var builtinToolsList = []fiber.Map{
+	{"name": "web_search", "builtin": true, "description": "Search the web"},
+	{"name": "code_exec", "builtin": true, "description": "Execute code in sandbox"},
+	{"name": "file_read", "builtin": true, "description": "Read files from workspace"},
+}
+
+// builtinToolsMap indexes built-in tools by name for single-tool lookup.
+var builtinToolsMap = func() map[string]fiber.Map {
+	m := make(map[string]fiber.Map, len(builtinToolsList))
+	for _, t := range builtinToolsList {
+		m[t["name"].(string)] = t
+	}
+	return m
+}()
 type Handlers struct {
 	client         client.Client
 	sessionManager *controller.SessionManager
@@ -301,15 +317,28 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
 	}
 
-	if task.Status.JobName == "" {
-		return fiber.NewError(fiber.StatusNotFound, "task has no associated job")
+	// For completed tasks with results available, serve from ResultStore
+	if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
+		data, err := h.resultStore.GetResult(ctx, namespace, id)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return fiber.NewError(fiber.StatusNotFound, "logs not found in result store")
+			}
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get logs: %v", err))
+		}
+		return c.JSON(fiber.Map{
+			"logs": string(data),
+		})
 	}
 
-	// Get pod logs
-	// Note: This requires a kubernetes clientset, which we'd need to inject
-	// For now, return a placeholder
+	// For pending/scheduled tasks with no job yet
+	if task.Status.JobName == "" {
+		return fiber.NewError(fiber.StatusNotFound, "task is pending, no logs available yet")
+	}
+
+	// For running tasks, live log streaming is not available without a kubernetes clientset
 	return c.JSON(fiber.Map{
-		"message": "Log streaming requires kubernetes clientset",
+		"message": "live log streaming not available",
 		"jobName": task.Status.JobName,
 	})
 }
@@ -483,14 +512,8 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 	}
 
 	// Add built-in tools to the response
-	builtinTools := []fiber.Map{
-		{"name": "web_search", "builtin": true, "description": "Search the web"},
-		{"name": "code_exec", "builtin": true, "description": "Execute code in sandbox"},
-		{"name": "file_read", "builtin": true, "description": "Read files from workspace"},
-	}
-
-	tools := make([]fiber.Map, 0, len(toolList.Items)+len(builtinTools))
-	tools = append(tools, builtinTools...)
+	tools := make([]fiber.Map, 0, len(toolList.Items)+len(builtinToolsList))
+	tools = append(tools, builtinToolsList...)
 
 	for _, tool := range toolList.Items {
 		tools = append(tools, fiber.Map{
@@ -524,13 +547,7 @@ func (h *Handlers) GetTool(c fiber.Ctx) error {
 	}
 
 	// Check if it's a built-in tool
-	builtinTools := map[string]fiber.Map{
-		"web_search": {"name": "web_search", "builtin": true, "description": "Search the web"},
-		"code_exec":  {"name": "code_exec", "builtin": true, "description": "Execute code in sandbox"},
-		"file_read":  {"name": "file_read", "builtin": true, "description": "Read files from workspace"},
-	}
-
-	if builtin, ok := builtinTools[name]; ok {
+	if builtin, ok := builtinToolsMap[name]; ok {
 		return c.JSON(builtin)
 	}
 

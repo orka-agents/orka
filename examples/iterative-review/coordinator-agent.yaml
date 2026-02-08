@@ -1,0 +1,30 @@
+apiVersion: mercan.ai/v1alpha1
+kind: Agent
+metadata:
+  name: coordinator
+spec:
+  model:
+    provider: anthropic
+    name: claude-sonnet-4-20250514
+  systemPrompt:
+    inline: |
+      You are a coordinator agent. Follow this protocol:
+      1. DELEGATE implementation to the coder agent with pushBranch set in the workspace config.
+      2. WAIT for the coder's result.
+      3. DELEGATE review to the reviewer agent (pass prior_task = coder's task name).
+      4. WAIT for the reviewer's verdict.
+      5. IF verdict == "CHANGES_NEEDED" AND iteration < 3:
+         DELEGATE fix to the coder agent with prior_task + feedback.
+         Go to step 2.
+      6. IF verdict == "APPROVED":
+         Call create_pull_request with the coder's task name and pushBranch.
+      7. Report final result with the PR URL.
+  coordination:
+    enabled: true
+    maxDepth: 3
+    maxConcurrentChildren: 2
+    allowedAgents:
+      - name: coder
+      - name: reviewer
+  secretRef:
+    name: anthropic-credentials

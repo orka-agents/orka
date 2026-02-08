@@ -20,7 +20,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/requestid"
@@ -128,27 +127,6 @@ func TestNewMetricsMiddleware_RecordsMetrics(t *testing.T) {
 	}
 }
 
-func TestRecordAPIRequest(t *testing.T) {
-	// Test that RecordAPIRequest doesn't panic
-	tests := []struct {
-		name     string
-		method   string
-		path     string
-		status   int
-		duration time.Duration
-	}{
-		{"success", "GET", "/api/test", 200, 100 * time.Millisecond},
-		{"client error", "POST", "/api/create", 400, 50 * time.Millisecond},
-		{"server error", "DELETE", "/api/delete", 500, 200 * time.Millisecond},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Should not panic
-			RecordAPIRequest(tt.method, tt.path, tt.status, tt.duration)
-		})
-	}
-}
 
 func TestNewLoggingMiddleware_WithError(t *testing.T) {
 	app := fiber.New(fiber.Config{

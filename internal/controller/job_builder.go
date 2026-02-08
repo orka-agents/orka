@@ -275,6 +275,20 @@ func (b *JobBuilder) buildEnvVars(task *corev1alpha1.Task, agent *corev1alpha1.A
 	// Add task-level env vars
 	envVars = append(envVars, task.Spec.Env...)
 
+	// Add prior task env vars for iterative coordination
+	if task.Spec.PriorTaskRef != nil {
+		envVars = append(envVars,
+			corev1.EnvVar{Name: "MERCAN_PRIOR_TASK", Value: task.Spec.PriorTaskRef.Name},
+		)
+		priorNS := task.Spec.PriorTaskRef.Namespace
+		if priorNS == "" {
+			priorNS = task.Namespace
+		}
+		envVars = append(envVars,
+			corev1.EnvVar{Name: "MERCAN_PRIOR_TASK_NAMESPACE", Value: priorNS},
+		)
+	}
+
 	// Add AI-specific env vars
 	if task.Spec.Type == corev1alpha1.TaskTypeAI {
 		envVars = b.addAIEnvVars(envVars, task, agent, provider)
@@ -695,6 +709,21 @@ func (b *JobBuilder) addAgentWorkspaceEnvVars(
 	if ws.SubPath != "" {
 		envVars = append(envVars, corev1.EnvVar{
 			Name: "MERCAN_WORKSPACE_SUBPATH", Value: ws.SubPath,
+		})
+	}
+	if ws.ForkRepo != "" {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "MERCAN_FORK_REPO", Value: ws.ForkRepo,
+		})
+	}
+	if ws.PRBaseBranch != "" {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "MERCAN_PR_BASE_BRANCH", Value: ws.PRBaseBranch,
+		})
+	}
+	if ws.PushBranch != "" {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "MERCAN_PUSH_BRANCH", Value: ws.PushBranch,
 		})
 	}
 	return envVars

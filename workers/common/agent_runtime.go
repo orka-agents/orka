@@ -1,0 +1,226 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package common
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+)
+
+// AgentConfig holds worker configuration from environment variables.
+type AgentConfig struct {
+	TaskName        string
+	TaskNamespace   string
+	Prompt          string
+	Model           string
+	SystemPrompt    string
+	MaxTurns        int
+	AllowedTools    []string
+	DisallowedTools []string
+	GitRepo         string
+	GitBranch       string
+	GitRef          string
+	SubPath         string
+	TimeoutSeconds  int
+}
+
+// LoadConfig reads and validates configuration from environment variables.
+func LoadConfig(defaultMaxTurns int) (*AgentConfig, error) {
+	cfg := &AgentConfig{
+		TaskName:      os.Getenv("MERCAN_TASK_NAME"),
+		TaskNamespace: os.Getenv("MERCAN_TASK_NAMESPACE"),
+		Prompt:        os.Getenv("MERCAN_PROMPT"),
+		Model:         os.Getenv("MERCAN_MODEL"),
+		SystemPrompt:  os.Getenv("MERCAN_SYSTEM_PROMPT"),
+		GitRepo:       os.Getenv("MERCAN_GIT_REPO"),
+		GitBranch:     os.Getenv("MERCAN_GIT_BRANCH"),
+		GitRef:        os.Getenv("MERCAN_GIT_REF"),
+		SubPath:       os.Getenv("MERCAN_WORKSPACE_SUBPATH"),
+		MaxTurns:      defaultMaxTurns,
+	}
+
+	if cfg.Prompt == "" {
+		return nil, fmt.Errorf("MERCAN_PROMPT is required")
+	}
+
+	if v := os.Getenv("MERCAN_MAX_TURNS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid MERCAN_MAX_TURNS: %w", err)
+		}
+		cfg.MaxTurns = n
+	}
+
+	if v := os.Getenv("MERCAN_ALLOWED_TOOLS"); v != "" {
+		cfg.AllowedTools = strings.Split(v, ",")
+	}
+	if v := os.Getenv("MERCAN_DISALLOWED_TOOLS"); v != "" {
+		cfg.DisallowedTools = strings.Split(v, ",")
+	}
+
+	if v := os.Getenv("MERCAN_TIMEOUT_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid MERCAN_TIMEOUT_SECONDS: %w", err)
+		}
+		cfg.TimeoutSeconds = n
+	}
+
+	return cfg, nil
+}
+
+// SetupGitCredentials sets git credential env vars globally so both clone and
+// agent-initiated git operations (push, fetch) can authenticate.
+func SetupGitCredentials() {
+	tokenPaths := []string{
+		"/secrets/git/token",
+		"/secrets/git/password",
+	}
+	for _, path := range tokenPaths {
+		if data, err := os.ReadFile(path); err == nil {
+			token := strings.TrimSpace(string(data))
+			if token != "" {
+				os.Setenv("GIT_TOKEN", token)
+				os.Setenv("GIT_ASKPASS", "/bin/echo-token")
+				break
+			}
+		}
+	}
+	if data, err := os.ReadFile("/secrets/git/username"); err == nil {
+		username := strings.TrimSpace(string(data))
+		if username != "" {
+			os.Setenv("GIT_USERNAME", username)
+		}
+	}
+}
+
+// CloneRepo clones the configured git repository into the workspace directory.
+func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error {
+	fmt.Printf("Cloning %s into %s\n", cfg.GitRepo, workspaceDir)
+
+	args := []string{"clone"}
+
+	if cfg.GitBranch != "" {
+		args = append(args, "--branch", cfg.GitBranch)
+	}
+
+	args = append(args, "--single-branch", "--depth=1", cfg.GitRepo, workspaceDir)
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git clone failed: %w", err)
+	}
+
+	// Checkout specific ref if provided (overrides branch)
+	if cfg.GitRef != "" {
+		fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin", cfg.GitRef)
+		fetchCmd.Dir = workspaceDir
+		fetchCmd.Stdout = os.Stdout
+		fetchCmd.Stderr = os.Stderr
+		if err := fetchCmd.Run(); err != nil {
+			return fmt.Errorf("git fetch ref failed: %w", err)
+		}
+
+		checkoutCmd := exec.CommandContext(ctx, "git", "checkout", cfg.GitRef)
+		checkoutCmd.Dir = workspaceDir
+		checkoutCmd.Stdout = os.Stdout
+		checkoutCmd.Stderr = os.Stderr
+		if err := checkoutCmd.Run(); err != nil {
+			return fmt.Errorf("git checkout ref failed: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// AgentExecutor is a function that runs the agent and returns its output.
+type AgentExecutor func(ctx context.Context, cfg *AgentConfig) (string, error)
+
+// RunAgent orchestrates the common agent worker lifecycle: signal handling,
+// config loading, git setup, workspace preparation, agent execution, and
+// result submission.
+func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExecutor) error {
+	ctx, cancel := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGTERM, syscall.SIGINT,
+	)
+	defer cancel()
+
+	cfg, err := LoadConfig(defaultMaxTurns)
+	if err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	// Configure git credentials globally (for both clone and agent push operations)
+	SetupGitCredentials()
+
+	// Clone git repo if configured
+	if cfg.GitRepo != "" {
+		if err := CloneRepo(ctx, cfg, workspaceDir); err != nil {
+			return fmt.Errorf("git clone failed: %w", err)
+		}
+	}
+
+	// Apply prior task diff if iterating
+	if err := PrepareWorkspace(workspaceDir); err != nil {
+		return fmt.Errorf("workspace preparation failed: %w", err)
+	}
+
+	result, err := executor(ctx, cfg)
+	if err != nil {
+		// On failure, still try to submit partial result with any diffs
+		errorOutput := fmt.Sprintf("Error: %v\n\n%s", err, result)
+		resultDir := ""
+		if cfg.GitRepo != "" {
+			resultDir = workspaceDir
+		}
+		resultBytes, finalizeErr := FinalizeResult(resultDir, errorOutput)
+		if finalizeErr != nil {
+			fmt.Fprintf(os.Stderr, "failed to finalize error result: %v\n", finalizeErr)
+			resultBytes = []byte(errorOutput)
+		}
+		if submitErr := SubmitResult(resultBytes); submitErr != nil {
+			fmt.Fprintf(os.Stderr, "failed to submit error result: %v\n", submitErr)
+		}
+		return fmt.Errorf("%s execution failed: %w", name, err)
+	}
+
+	// Build structured result with diff if workspace has changes
+	resultDir := ""
+	if cfg.GitRepo != "" {
+		resultDir = workspaceDir
+	}
+	resultBytes, err := FinalizeResult(resultDir, result)
+	if err != nil {
+		return fmt.Errorf("failed to finalize result: %w", err)
+	}
+	if err := SubmitResult(resultBytes); err != nil {
+		return fmt.Errorf("failed to submit result: %w", err)
+	}
+
+	fmt.Printf("Task %s/%s completed successfully\n", cfg.TaskNamespace, cfg.TaskName)
+	return nil
+}

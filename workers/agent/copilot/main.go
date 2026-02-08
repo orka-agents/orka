@@ -20,11 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
-	"os/signal"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	copilot "github.com/github/copilot-sdk/go"
@@ -40,204 +36,21 @@ const (
 )
 
 func main() {
-	if err := run(); err != nil {
+	if err := common.RunAgent("copilot", workspaceDir, defaultMaxTurns, executeCopilot); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	// Set up context with signal handling for graceful shutdown
-	ctx, cancel := signal.NotifyContext(
-		context.Background(),
-		syscall.SIGTERM, syscall.SIGINT,
-	)
-	defer cancel()
-
-	cfg, err := loadConfig()
-	if err != nil {
-		return fmt.Errorf("invalid configuration: %w", err)
-	}
-
-	// Clone git repo if configured
-	if cfg.gitRepo != "" {
-		if err := cloneRepo(ctx, cfg); err != nil {
-			return fmt.Errorf("git clone failed: %w", err)
-		}
-	}
-
-	// Execute Copilot SDK session
-	result, err := executeCopilot(ctx, cfg)
-	if err != nil {
-		// On failure, still try to write partial result
-		writeErr := writeResult(
-			fmt.Sprintf("Error: %v\n\n%s", err, result),
-		)
-		if writeErr != nil {
-			fmt.Fprintf(os.Stderr, "failed to write error result: %v\n", writeErr)
-		}
-		return fmt.Errorf("copilot execution failed: %w", err)
-	}
-
-	// Write result to controller via HTTP
-	if err := writeResult(result); err != nil {
-		return fmt.Errorf("failed to write result: %w", err)
-	}
-
-	fmt.Printf("Task %s/%s completed successfully\n", cfg.taskNamespace, cfg.taskName)
-	return nil
-}
-
-// config holds all worker configuration from environment variables.
-type config struct {
-	taskName        string
-	taskNamespace   string
-	prompt          string
-	model           string
-	systemPrompt    string
-	maxTurns        int
-	allowedTools    []string
-	disallowedTools []string
-	gitRepo         string
-	gitBranch       string
-	gitRef          string
-	subPath         string
-	timeoutSeconds  int
-}
-
-// loadConfig reads and validates configuration from environment variables.
-func loadConfig() (*config, error) {
-	cfg := &config{
-		taskName:      os.Getenv("MERCAN_TASK_NAME"),
-		taskNamespace: os.Getenv("MERCAN_TASK_NAMESPACE"),
-		prompt:        os.Getenv("MERCAN_PROMPT"),
-		model:         os.Getenv("MERCAN_MODEL"),
-		systemPrompt:  os.Getenv("MERCAN_SYSTEM_PROMPT"),
-		gitRepo:       os.Getenv("MERCAN_GIT_REPO"),
-		gitBranch:     os.Getenv("MERCAN_GIT_BRANCH"),
-		gitRef:        os.Getenv("MERCAN_GIT_REF"),
-		subPath:       os.Getenv("MERCAN_WORKSPACE_SUBPATH"),
-		maxTurns:      defaultMaxTurns,
-	}
-
-	if cfg.prompt == "" {
-		return nil, fmt.Errorf("MERCAN_PROMPT is required")
-	}
-
-	if v := os.Getenv("MERCAN_MAX_TURNS"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return nil, fmt.Errorf("invalid MERCAN_MAX_TURNS: %w", err)
-		}
-		cfg.maxTurns = n
-	}
-
-	if v := os.Getenv("MERCAN_ALLOWED_TOOLS"); v != "" {
-		cfg.allowedTools = strings.Split(v, ",")
-	}
-	if v := os.Getenv("MERCAN_DISALLOWED_TOOLS"); v != "" {
-		cfg.disallowedTools = strings.Split(v, ",")
-	}
-
-	if v := os.Getenv("MERCAN_TIMEOUT_SECONDS"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return nil, fmt.Errorf("invalid MERCAN_TIMEOUT_SECONDS: %w", err)
-		}
-		cfg.timeoutSeconds = n
-	}
-
-	return cfg, nil
-}
-
-// cloneRepo clones the configured git repository into the workspace.
-func cloneRepo(ctx context.Context, cfg *config) error {
-	fmt.Printf("Cloning %s into %s\n", cfg.gitRepo, workspaceDir)
-
-	args := []string{"clone"}
-
-	if cfg.gitBranch != "" {
-		args = append(args, "--branch", cfg.gitBranch)
-	}
-
-	args = append(args, "--single-branch", "--depth=1", cfg.gitRepo, workspaceDir)
-
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	// Set up git credentials if available
-	configureGitAuth(cmd)
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git clone failed: %w", err)
-	}
-
-	// Checkout specific ref if provided (overrides branch)
-	if cfg.gitRef != "" {
-		fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin", cfg.gitRef)
-		fetchCmd.Dir = workspaceDir
-		fetchCmd.Stdout = os.Stdout
-		fetchCmd.Stderr = os.Stderr
-		if err := fetchCmd.Run(); err != nil {
-			return fmt.Errorf("git fetch ref failed: %w", err)
-		}
-
-		checkoutCmd := exec.CommandContext(ctx, "git", "checkout", cfg.gitRef)
-		checkoutCmd.Dir = workspaceDir
-		checkoutCmd.Stdout = os.Stdout
-		checkoutCmd.Stderr = os.Stderr
-		if err := checkoutCmd.Run(); err != nil {
-			return fmt.Errorf("git checkout ref failed: %w", err)
-		}
-	}
-
-	return nil
-}
-
-// configureGitAuth sets up git credential helpers from mounted secrets.
-func configureGitAuth(cmd *exec.Cmd) {
-	env := os.Environ()
-
-	// Check for git token in mounted secrets
-	tokenPaths := []string{
-		"/secrets/git/token",
-		"/secrets/git/password",
-	}
-	for _, path := range tokenPaths {
-		if data, err := os.ReadFile(path); err == nil {
-			token := strings.TrimSpace(string(data))
-			if token != "" {
-				// Use GIT_ASKPASS to provide the token
-				env = append(env,
-					fmt.Sprintf("GIT_TOKEN=%s", token),
-					"GIT_ASKPASS=/bin/echo-token",
-				)
-				break
-			}
-		}
-	}
-
-	// Check for username
-	if data, err := os.ReadFile("/secrets/git/username"); err == nil {
-		username := strings.TrimSpace(string(data))
-		if username != "" {
-			env = append(env, fmt.Sprintf("GIT_USERNAME=%s", username))
-		}
-	}
-
-	cmd.Env = env
-}
-
 // buildSessionConfig constructs a Copilot SDK SessionConfig from the worker config.
-func buildSessionConfig(cfg *config) *copilot.SessionConfig {
+func buildSessionConfig(cfg *common.AgentConfig) *copilot.SessionConfig {
 	dir := workspaceDir
-	if cfg.subPath != "" {
-		dir = workspaceDir + "/" + cfg.subPath
+	if cfg.SubPath != "" {
+		dir = workspaceDir + "/" + cfg.SubPath
 	}
 
 	sessionCfg := &copilot.SessionConfig{
-		Model:            cfg.model,
+		Model:            cfg.Model,
 		WorkingDirectory: dir,
 		// Auto-approve all permission requests for autonomous operation
 		OnPermissionRequest: func(_ copilot.PermissionRequest, _ copilot.PermissionInvocation) (copilot.PermissionRequestResult, error) {
@@ -245,24 +58,24 @@ func buildSessionConfig(cfg *config) *copilot.SessionConfig {
 		},
 	}
 
-	if cfg.systemPrompt != "" {
+	if cfg.SystemPrompt != "" {
 		sessionCfg.SystemMessage = &copilot.SystemMessageConfig{
 			Mode:    "append",
-			Content: cfg.systemPrompt,
+			Content: cfg.SystemPrompt,
 		}
 	}
 
-	if len(cfg.allowedTools) > 0 {
-		tools := make([]string, len(cfg.allowedTools))
-		for i, t := range cfg.allowedTools {
+	if len(cfg.AllowedTools) > 0 {
+		tools := make([]string, len(cfg.AllowedTools))
+		for i, t := range cfg.AllowedTools {
 			tools[i] = strings.TrimSpace(t)
 		}
 		sessionCfg.AvailableTools = tools
 	}
 
-	if len(cfg.disallowedTools) > 0 {
-		tools := make([]string, len(cfg.disallowedTools))
-		for i, t := range cfg.disallowedTools {
+	if len(cfg.DisallowedTools) > 0 {
+		tools := make([]string, len(cfg.DisallowedTools))
+		for i, t := range cfg.DisallowedTools {
 			tools[i] = strings.TrimSpace(t)
 		}
 		sessionCfg.ExcludedTools = tools
@@ -272,13 +85,13 @@ func buildSessionConfig(cfg *config) *copilot.SessionConfig {
 }
 
 // executeCopilot runs the Copilot SDK session and returns the result text.
-func executeCopilot(ctx context.Context, cfg *config) (string, error) {
+func executeCopilot(ctx context.Context, cfg *common.AgentConfig) (string, error) {
 	// Apply timeout if configured
 	execCtx := ctx
-	if cfg.timeoutSeconds > 0 {
+	if cfg.TimeoutSeconds > 0 {
 		var timeoutCancel context.CancelFunc
 		execCtx, timeoutCancel = context.WithTimeout(
-			ctx, time.Duration(cfg.timeoutSeconds)*time.Second,
+			ctx, time.Duration(cfg.TimeoutSeconds)*time.Second,
 		)
 		defer timeoutCancel()
 	}
@@ -305,7 +118,7 @@ func executeCopilot(ctx context.Context, cfg *config) (string, error) {
 	sessionCfg := buildSessionConfig(cfg)
 
 	fmt.Printf("Creating Copilot session (model=%s, workspace=%s)\n",
-		cfg.model, sessionCfg.WorkingDirectory)
+		cfg.Model, sessionCfg.WorkingDirectory)
 
 	session, err := client.CreateSession(execCtx, sessionCfg)
 	if err != nil {
@@ -314,15 +127,15 @@ func executeCopilot(ctx context.Context, cfg *config) (string, error) {
 
 	// Determine the wait timeout for SendAndWait
 	timeout := defaultTimeout
-	if cfg.timeoutSeconds > 0 {
-		timeout = time.Duration(cfg.timeoutSeconds) * time.Second
+	if cfg.TimeoutSeconds > 0 {
+		timeout = time.Duration(cfg.TimeoutSeconds) * time.Second
 	}
 
 	// Send the prompt and wait for completion
-	fmt.Printf("Sending prompt (maxTurns=%d, timeout=%s)\n", cfg.maxTurns, timeout)
+	fmt.Printf("Sending prompt (maxTurns=%d, timeout=%s)\n", cfg.MaxTurns, timeout)
 
 	response, err := session.SendAndWait(execCtx, copilot.MessageOptions{
-		Prompt: cfg.prompt,
+		Prompt: cfg.Prompt,
 	})
 	if err != nil {
 		return "", fmt.Errorf("send and wait failed: %w", err)
@@ -357,9 +170,4 @@ func copilotCLIPath() string {
 		return p
 	}
 	return defaultCopilotPath
-}
-
-// writeResult submits the task result to the controller via HTTP POST.
-func writeResult(result string) error {
-	return common.SubmitResult([]byte(result))
 }

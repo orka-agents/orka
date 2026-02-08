@@ -43,6 +43,7 @@ type WorkspaceArgs struct {
 	Branch       string `json:"branch,omitempty"`
 	Ref          string `json:"ref,omitempty"`
 	GitSecretRef string `json:"gitSecretRef,omitempty"`
+	PushBranch   string `json:"pushBranch,omitempty"`
 }
 
 // DelegateTaskArgs are the arguments for the delegate_task tool
@@ -54,6 +55,14 @@ type DelegateTaskArgs struct {
 	Workspace *WorkspaceArgs `json:"workspace,omitempty"`
 	MaxTurns  *int32         `json:"maxTurns,omitempty"`
 	AllowBash *bool          `json:"allowBash,omitempty"`
+
+	// PriorTask references a previously completed task whose diff should be
+	// applied to the workspace before this task begins. Optional.
+	PriorTask string `json:"prior_task,omitempty"`
+
+	// Feedback provides review feedback to include in the task prompt.
+	// Used with prior_task for iterative code review workflows. Optional.
+	Feedback string `json:"feedback,omitempty"`
 }
 
 // DelegateTaskResult represents the delegation result
@@ -76,7 +85,7 @@ func (t *DelegateTaskTool) Name() string {
 
 // Description returns the tool description
 func (t *DelegateTaskTool) Description() string {
-	return "Delegate a task to another agent. Creates a child Task CR that will be picked up by the specified agent."
+	return "Delegate a task to another agent. Creates a child Task CR that will be picked up by the specified agent. Supports iterative workflows via prior_task (applies previous diff) and feedback (prepends review feedback to prompt)."
 }
 
 // Parameters returns the JSON Schema for parameters
@@ -119,6 +128,10 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 					"gitSecretRef": {
 						"type": "string",
 						"description": "Name of the Kubernetes Secret containing git credentials (must have a 'token' key)"
+					},
+					"pushBranch": {
+						"type": "string",
+						"description": "Remote branch name to push changes to after the agent completes. When set, changes are committed and pushed automatically."
 					}
 				}
 			},
@@ -129,6 +142,14 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 			"allowBash": {
 				"type": "boolean",
 				"description": "Whether to allow bash execution in the agent"
+			},
+			"prior_task": {
+				"type": "string",
+				"description": "Name of a previously completed task whose diff should be applied to the workspace before this task starts. Used for iterative workflows."
+			},
+			"feedback": {
+				"type": "string",
+				"description": "Review feedback to prepend to the task prompt. Used with prior_task for iterative code review workflows."
 			}
 		},
 		"required": ["agent", "prompt"]
@@ -264,9 +285,10 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 
 		if delegateArgs.Workspace != nil {
 			childTask.Spec.AgentRuntime.Workspace = &corev1alpha1.WorkspaceConfig{
-				GitRepo: delegateArgs.Workspace.GitRepo,
-				Branch:  delegateArgs.Workspace.Branch,
-				Ref:     delegateArgs.Workspace.Ref,
+				GitRepo:    delegateArgs.Workspace.GitRepo,
+				Branch:     delegateArgs.Workspace.Branch,
+				Ref:        delegateArgs.Workspace.Ref,
+				PushBranch: delegateArgs.Workspace.PushBranch,
 			}
 			if delegateArgs.Workspace.GitSecretRef != "" {
 				childTask.Spec.AgentRuntime.Workspace.GitSecretRef = &corev1.LocalObjectReference{
@@ -281,6 +303,48 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 
 		if delegateArgs.AllowBash != nil {
 			childTask.Spec.AgentRuntime.AllowBash = delegateArgs.AllowBash
+		}
+	}
+
+	// Prepend feedback to prompt if provided
+	if delegateArgs.Feedback != "" {
+		childTask.Spec.Prompt = fmt.Sprintf("FEEDBACK FROM REVIEW:\n%s\n\nTASK:\n%s", delegateArgs.Feedback, childTask.Spec.Prompt)
+	}
+
+	// Handle prior task reference for iterative workflows
+	if delegateArgs.PriorTask != "" {
+		childTask.Spec.PriorTaskRef = &corev1alpha1.PriorTaskReference{
+			Name:      delegateArgs.PriorTask,
+			Namespace: ns,
+		}
+
+		priorTask := &corev1alpha1.Task{}
+		if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: delegateArgs.PriorTask, Namespace: ns}, priorTask); err == nil {
+			// Copy workspace from prior task if not explicitly provided
+			if delegateArgs.Workspace == nil {
+				if priorTask.Spec.AgentRuntime != nil && priorTask.Spec.AgentRuntime.Workspace != nil {
+					if childTask.Spec.AgentRuntime == nil {
+						childTask.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
+					}
+					childTask.Spec.AgentRuntime.Workspace = priorTask.Spec.AgentRuntime.Workspace.DeepCopy()
+				}
+			}
+
+			// Increment iteration count
+			iteration := 1
+			if iterStr, ok := priorTask.Labels["mercan.ai/iteration"]; ok {
+				if iter, err := strconv.Atoi(iterStr); err == nil {
+					iteration = iter + 1
+				}
+			}
+			childTask.Labels["mercan.ai/iteration"] = strconv.Itoa(iteration)
+
+			// Copy or generate iteration group
+			if group, ok := priorTask.Labels["mercan.ai/iteration-group"]; ok {
+				childTask.Labels["mercan.ai/iteration-group"] = group
+			} else {
+				childTask.Labels["mercan.ai/iteration-group"] = string(priorTask.UID)
+			}
 		}
 	}
 

@@ -433,7 +433,7 @@ func TestToolExecutor_getSecretKey_MountedSecret(t *testing.T) {
 		namespace:  "default",
 	}
 
-	value, err := executor.getSecretKey("my-secret", "my-key")
+	value, err := executor.getSecretKey(context.Background(), "my-secret", "my-key")
 	if err != nil {
 		t.Fatalf("getSecretKey() error = %v", err)
 	}
@@ -464,7 +464,7 @@ func TestToolExecutor_getSecretKey_K8sAPISecret(t *testing.T) {
 		k8sClient:  fakeClient,
 	}
 
-	value, err := executor.getSecretKey("k8s-secret", "api-key")
+	value, err := executor.getSecretKey(context.Background(), "k8s-secret", "api-key")
 	if err != nil {
 		t.Fatalf("getSecretKey() error = %v", err)
 	}
@@ -483,7 +483,7 @@ func TestToolExecutor_getSecretKey_NotFound(t *testing.T) {
 		k8sClient:  fakeClient,
 	}
 
-	_, err := executor.getSecretKey("nonexistent-secret", "key")
+	_, err := executor.getSecretKey(context.Background(), "nonexistent-secret", "key")
 	if err == nil {
 		t.Error("getSecretKey() expected error for nonexistent secret")
 	}
@@ -507,7 +507,7 @@ func TestToolExecutor_getSecretKey_TaskSecretPath(t *testing.T) {
 	os.MkdirAll(secretDir, 0755)
 	os.WriteFile(filepath.Join(secretDir, "key"), []byte("mounted-secret"), 0644)
 
-	value, err := executor.getSecretKey("my-secret", "key")
+	value, err := executor.getSecretKey(context.Background(), "my-secret", "key")
 	if err != nil {
 		t.Fatalf("getSecretKey() error = %v", err)
 	}

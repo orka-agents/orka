@@ -18,7 +18,11 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -36,6 +40,21 @@ const (
 	// UserInfoContextKey is the context key for storing user info
 	UserInfoContextKey = "userInfo"
 )
+
+type tokenCacheEntry struct {
+	userInfo *UserInfo
+	expiry   time.Time
+}
+
+var (
+	tokenCache sync.Map
+	cacheTTL   = 60 * time.Second
+)
+
+func getTokenHash(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:])
+}
 
 // UserInfo contains information about the authenticated user
 type UserInfo struct {
@@ -77,8 +96,18 @@ func NewAuthMiddleware(c client.Client) fiber.Handler {
 	}
 }
 
-// validateToken validates a ServiceAccount token using TokenReview
+// validateToken validates a ServiceAccount token using TokenReview with caching
 func validateToken(ctx context.Context, c client.Client, token string) (*UserInfo, error) {
+	hash := getTokenHash(token)
+
+	// Check cache
+	if entry, ok := tokenCache.Load(hash); ok {
+		if cached := entry.(*tokenCacheEntry); time.Now().Before(cached.expiry) {
+			return cached.userInfo, nil
+		}
+		tokenCache.Delete(hash)
+	}
+
 	// Create a TokenReview request
 	review := &authenticationv1.TokenReview{
 		ObjectMeta: metav1.ObjectMeta{
@@ -96,14 +125,23 @@ func validateToken(ctx context.Context, c client.Client, token string) (*UserInf
 
 	// Check if the token is valid
 	if !review.Status.Authenticated {
+		tokenCache.Delete(hash)
 		return nil, fiber.NewError(fiber.StatusUnauthorized, "token not authenticated")
 	}
 
-	return &UserInfo{
+	userInfo := &UserInfo{
 		Username: review.Status.User.Username,
 		UID:      review.Status.User.UID,
 		Groups:   review.Status.User.Groups,
-	}, nil
+	}
+
+	// Cache the successful result
+	tokenCache.Store(hash, &tokenCacheEntry{
+		userInfo: userInfo,
+		expiry:   time.Now().Add(cacheTTL),
+	})
+
+	return userInfo, nil
 }
 
 // GetUserInfo retrieves user info from the context

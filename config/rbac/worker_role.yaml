@@ -19,6 +19,13 @@ rules:
   - get
   - list
   - watch
+# Secrets: read-only (git credentials for create_pull_request tool)
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
 # Mercan Tool CRDs
 - apiGroups:
   - core.mercan.ai

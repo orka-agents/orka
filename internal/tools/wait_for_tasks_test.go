@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	"github.com/sozercan/mercan/workers/common"
 )
 
 func TestWaitForTasksTool_Name(t *testing.T) {
@@ -315,5 +316,104 @@ func TestWaitForTasksTool_Execute_MissingNamespace(t *testing.T) {
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
 		t.Error("Execute() expected error for missing namespace")
+	}
+}
+
+func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
+	// Create a structured result with diff (which should be stripped)
+	sr := common.StructuredResult{
+		Version:  1,
+		Summary:  "Implemented auth middleware",
+		BaseSHA:  "abc123def",
+		Diff:     "diff --git a/auth.go b/auth.go\n+package auth\n+// lots of code",
+		Verdict:  "APPROVED",
+		Feedback: "Looks great!",
+		Files:    []string{"auth.go", "middleware.go"},
+	}
+	srJSON, _ := json.Marshal(sr)
+
+	// Mock server that returns the structured result
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"result": string(srJSON)})
+	}))
+	defer server.Close()
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("MERCAN_CONTROLLER_URL", server.URL)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-task-1",
+			Namespace: "default",
+			Labels: map[string]string{
+				"mercan.ai/iteration": "2",
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "coder"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseSucceeded,
+			ResultRef: &corev1alpha1.ResultReference{Available: true},
+		},
+	}
+
+	scheme := newTestScheme()
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(task).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+
+	tool := NewWaitForTasksTool(fakeClient)
+
+	args, _ := json.Marshal(WaitForTasksArgs{
+		Tasks:   []string{"child-task-1"},
+		Timeout: "5s",
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	var waitResult WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	if !waitResult.Completed {
+		t.Error("expected completed=true")
+	}
+	if len(waitResult.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(waitResult.Results))
+	}
+
+	r := waitResult.Results[0]
+
+	// Result should contain summary but NOT the diff
+	if r.Summary != "Implemented auth middleware" {
+		t.Errorf("expected summary, got %q", r.Summary)
+	}
+	if r.Verdict != "APPROVED" {
+		t.Errorf("expected verdict APPROVED, got %q", r.Verdict)
+	}
+	if r.Feedback != "Looks great!" {
+		t.Errorf("expected feedback, got %q", r.Feedback)
+	}
+	if r.BaseSHA != "abc123def" {
+		t.Errorf("expected baseSHA, got %q", r.BaseSHA)
+	}
+	if r.Iteration != "2" {
+		t.Errorf("expected iteration=2, got %q", r.Iteration)
+	}
+	// Most important: diff should NOT be in the result
+	if strings.Contains(r.Result, "diff --git") {
+		t.Error("result should NOT contain raw diff")
+	}
+	if len(r.Files) != 2 {
+		t.Errorf("expected 2 files, got %d", len(r.Files))
 	}
 }

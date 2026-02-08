@@ -82,6 +82,9 @@ make deploy IMG=<registry>/mercan:tag
 - Finalizers ensure cleanup of session locks
 - LLM tool args for nested objects arrive as `map[string]any`, not strings — always type-switch
 - Multi-agent coordination: coordinator agents delegate to specialists via `delegate_task`/`wait_for_tasks` tools; controller enforces depth, allowedAgents, concurrency limits
+- Iterative coordination: `delegate_task` supports `prior_task`, `feedback`, and `pushBranch` params; workers apply prior diffs via `PrepareWorkspace()` and produce structured results via `FinalizeResult()`
+- Auto-push: When `pushBranch` is set on workspace config, `FinalizeResult` commits and pushes changes to that branch automatically
+- PR creation: `create_pull_request` coordination tool creates GitHub PRs from pushed branches using git credentials from task workspace config
 
 ### Multi-Agent Coordination
 
@@ -92,6 +95,10 @@ make deploy IMG=<registry>/mercan:tag
 - **RBAC** (`config/rbac/worker_role.yaml`): Workers have Task `create/get/list/watch` for coordination
 - Child tasks use labels (`mercan.ai/parent-task`, `mercan.ai/delegated-agent`) and annotations (`mercan.ai/coordination-depth`) for tracking
 - Owner references enable cascade deletion of child tasks
+- **Iterative workflows**: `prior_task` param in `delegate_task` sets `PriorTaskRef` on child tasks; job builder injects `MERCAN_PRIOR_TASK`/`MERCAN_PRIOR_TASK_NAMESPACE` env vars; workers apply prior diffs before starting
+- **Auto-push**: `PushBranch` field on `WorkspaceConfig` → `MERCAN_PUSH_BRANCH` env var → `FinalizeResult` commits and pushes to that branch
+- **PR creation tool** (`internal/tools/create_pull_request.go`): Reads git secret from child task's workspace config, creates PR via GitHub REST API
+- **Structured results** (`workers/common/result.go`): `StructuredResult` envelope with summary, diff, verdict, feedback, files, pushBranch; `wait_for_tasks` strips diffs from coordinator context
 - See @docs/multi-agent-coordination.md for full details
 
 ## Auto-Generated Files — Do NOT Edit

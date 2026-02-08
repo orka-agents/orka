@@ -388,7 +388,145 @@ status:
 2. **Controller tests** for coordination validation (depth, allowedAgents, concurrency) using envtest
 3. **Job builder tests** verifying coordination env vars are set correctly
 
-## Future Extensions (Not in Scope)
+## Iterative Code Review Workflows
+
+Mercan supports iterative multi-agent workflows where a coordinator orchestrates coding, review, and feedback loops until code is approved.
+
+### Flow
+
+```
+COORDINATOR (AI worker)
+  │
+  ├── delegate_task(agent="coder", prompt="Implement feature",
+  │                 workspace={gitRepo: "upstream/repo",
+  │                            pushBranch: "feature/my-change",
+  │                            gitSecretRef: "git-credentials"})
+  │     Coder: clones repo → writes code → auto-pushes to branch
+  │            → result includes cumulative diff + pushBranch
+  │
+  ├── wait_for_tasks → gets {summary, files, pushBranch} (diff stripped)
+  │
+  ├── delegate_task(agent="reviewer", prompt="Review changes",
+  │                 prior_task="coder-task-xyz")
+  │     Reviewer: clones repo → applies coder's diff → reviews
+  │               → result: {verdict: "CHANGES_NEEDED", feedback: "Add tests"}
+  │
+  ├── wait_for_tasks → gets {verdict, feedback}
+  │
+  ├── delegate_task(agent="coder", prompt="Fix: add tests",
+  │                 prior_task="coder-task-xyz", feedback="Add tests")
+  │     Coder iter 2: clones repo → applies iter 1 diff → fixes → pushes
+  │
+  ├── (review loop repeats until APPROVED or max iterations)
+  │
+  ├── create_pull_request(task_name="coder-task-xyz",
+  │                       head_branch="feature/my-change",
+  │                       base_branch="main", title="feat: my change")
+  │     → creates PR via GitHub API using git credentials from task
+  │
+  └── COMPLETE with PR URL
+```
+
+### delegate_task Iteration Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `prior_task` | string | Name of a previously completed task whose diff to apply before starting |
+| `feedback` | string | Review feedback prepended to the prompt as `FEEDBACK FROM REVIEW: ...` |
+| `workspace.pushBranch` | string | Remote branch to auto-push changes to after the agent completes |
+
+When `prior_task` is set:
+- `PriorTaskRef` is set on the child Task, triggering diff application in the worker
+- Workspace config is copied from the prior task if not explicitly provided
+- Iteration labels are tracked: `mercan.ai/iteration` (incremented) and `mercan.ai/iteration-group` (shared ID)
+
+### Structured Result Format
+
+Workers with git workspaces produce structured results:
+
+```json
+{
+  "version": 1,
+  "summary": "Implemented JWT authentication middleware",
+  "baseSHA": "abc123def456",
+  "diff": "diff --git a/auth.go ...",
+  "verdict": "APPROVED",
+  "feedback": "Looks good, minor nit on line 42",
+  "files": ["auth.go", "middleware.go"],
+  "pushBranch": "feature/jwt-auth",
+  "metadata": {}
+}
+```
+
+- `diff` is always **cumulative** (`git diff --binary --full-index` from clean checkout)
+- `verdict`: `APPROVED` or `CHANGES_NEEDED`
+- `wait_for_tasks` **strips the diff** from results returned to the coordinator to prevent context bloat
+- Plain-text results remain backward compatible
+
+### Iteration Labels
+
+| Label | Description |
+|-------|-------------|
+| `mercan.ai/iteration` | Iteration number (1, 2, 3...) |
+| `mercan.ai/iteration-group` | Shared ID grouping all iterations of the same logical task |
+
+### Recommended Coordinator System Prompt
+
+```
+You are a coordinator agent. Follow this protocol:
+
+1. DELEGATE implementation to the coder agent.
+2. WAIT for the coder's result.
+3. DELEGATE review to the reviewer agent (pass prior_task = coder's task name).
+4. WAIT for the reviewer's verdict.
+5. IF verdict == "CHANGES_NEEDED" AND iteration < 3:
+   DELEGATE fix to the coder agent with prior_task + feedback.
+   Go to step 2.
+6. IF verdict == "APPROVED":
+   Report final result.
+7. Report final result.
+```
+
+### Environment Variables
+
+| Variable | Set When | Description |
+|----------|----------|-------------|
+| `MERCAN_PRIOR_TASK` | Task has PriorTaskRef | Name of the prior task |
+| `MERCAN_PRIOR_TASK_NAMESPACE` | Task has PriorTaskRef | Namespace of the prior task |
+| `MERCAN_FORK_REPO` | Workspace has ForkRepo | Fork repository URL |
+| `MERCAN_PR_BASE_BRANCH` | Workspace has PRBaseBranch | PR target branch |
+| `MERCAN_PUSH_BRANCH` | Workspace has PushBranch | Branch to auto-push changes to |
+
+### create_pull_request Tool
+
+Creates a GitHub pull request from a branch that was pushed by a completed agent task.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_name` | string | yes | Name of the completed child task (used to look up workspace config and git credentials) |
+| `head_branch` | string | yes | Branch containing the changes (the `pushBranch` from the coder task) |
+| `base_branch` | string | yes | Target branch to merge into (e.g. `main`) |
+| `title` | string | yes | Pull request title |
+| `body` | string | no | Pull request body in Markdown |
+
+The tool reads the git credentials from the child task's `gitSecretRef` secret (looks for `token` or `password` key) and calls the GitHub REST API. The coordinator must have RBAC access to read Secrets.
+
+### Recommended Coordinator System Prompt
+
+```
+You are a coordinator agent. Follow this protocol:
+
+1. DELEGATE implementation to the coder agent with pushBranch set.
+2. WAIT for the coder's result.
+3. DELEGATE review to the reviewer agent (pass prior_task = coder's task name).
+4. WAIT for the reviewer's verdict.
+5. IF verdict == "CHANGES_NEEDED" AND iteration < 3:
+   DELEGATE fix to the coder agent with prior_task + feedback.
+   Go to step 2.
+6. IF verdict == "APPROVED":
+   Call create_pull_request with the coder's task name and pushBranch.
+7. Report final result with the PR URL.
+```
 
 - **TaskGroup CRD** — Declarative DAG-based workflows (Layer 2)
 - **Agent-to-Agent Messaging** — Real-time inter-agent communication (Layer 3)

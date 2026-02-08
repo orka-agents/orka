@@ -21,6 +21,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/requestid"
+	"github.com/sozercan/mercan/internal/metrics"
 )
 
 // NewLoggingMiddleware creates a logging middleware
@@ -66,16 +67,8 @@ func NewMetricsMiddleware() fiber.Handler {
 		path := c.Route().Path
 
 		// Record in Prometheus metrics
-		RecordAPIRequest(method, path, status, duration)
+		metrics.RecordAPIRequest(path, method, status, duration.Seconds())
 
 		return err
 	}
-}
-
-// RecordAPIRequest records an API request in Prometheus metrics
-// This is a placeholder - actual implementation would use Prometheus client
-func RecordAPIRequest(method, path string, status int, duration time.Duration) {
-	// TODO: Implement Prometheus metrics recording
-	// apiRequestsTotal.WithLabelValues(method, path, strconv.Itoa(status)).Inc()
-	// apiRequestDuration.WithLabelValues(method, path).Observe(duration.Seconds())
 }
