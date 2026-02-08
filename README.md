@@ -723,7 +723,7 @@ See [charts/mercan/values.yaml](charts/mercan/values.yaml) for the full list of 
 | [Interactive Chat](docs/chat.md) | Chat endpoint, tools, SSE streaming, and session management |
 | [Web Dashboard](docs/ui.md) | Frontend architecture, development, and pages |
 | [Testing](docs/testing.md) | Test structure, patterns, and commands |
-| [Competitive Analysis](docs/competitive-analysis.md) | Comparison with Gastown and Multiclaude |
+
 
 ## Examples
 

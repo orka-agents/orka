@@ -521,17 +521,17 @@ jobs:
 | Code change quality | Limited custom tool | Full coding agent, battle-tested |
 | CI polling logic | Custom implementation | LLM naturally loops with check-ci tool |
 
-## Comparison with Multiclaude
+## Comparison with Other Approaches
 
-| Capability | Multiclaude | Mercan (after this plan) |
+| Capability | Fixed-Role Systems | Mercan |
 |---|---|---|
 | Agent creates branch + PR | Worker agent (fixed role) | Claude Code agent (flexible) |
 | CI pass → auto-merge | Merge-queue agent (hardcoded) | Coordinator + merge-pr Tool CRD |
 | CI fail → auto-fix | Not built-in | GitHub Actions webhook → new task |
-| Human review flow | PR-shepherd agent (fixed role) | Coordinator prompt variation |
-| Code review | Reviewer agent (fixed role) | Coordinator + delegate_task |
-| Git provider | GitHub only | Any (swap Tool CRDs) |
-| Behavior customization | Edit markdown templates | Edit coordinator system prompt |
-| Deployment | Local tmux | K8s Jobs with isolation + RBAC |
+| Human review flow | Fixed role agent | Coordinator prompt variation |
+| Code review | Fixed role agent | Coordinator + delegate_task |
+| Git provider | Often GitHub only | Any (swap Tool CRDs) |
+| Behavior customization | Edit templates/code | Edit coordinator system prompt |
+| Deployment | Local process | K8s Jobs with isolation + RBAC |
 
-Mercan's advantage: the workflow logic lives in the coordinator's **prompt**, not in code. The same coordinator can be reconfigured by changing its system prompt — no code changes, no redeployment. Multiclaude's fixed roles require code changes to modify behavior.
+Mercan's advantage: the workflow logic lives in the coordinator's **prompt**, not in code. The same coordinator can be reconfigured by changing its system prompt — no code changes, no redeployment.
