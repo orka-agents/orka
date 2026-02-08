@@ -257,7 +257,7 @@ func postGitHubReview(token, owner, repo string, prNumber int, body, event strin
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return 0, "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
