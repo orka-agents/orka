@@ -120,7 +120,7 @@ func TestIntegration_LargeSessionTranscript(t *testing.T) {
 	// Append 500 messages in batches
 	const totalMessages = 500
 	const batchSize = 50
-	for batch := 0; batch < totalMessages/batchSize; batch++ {
+	for batch := range totalMessages / batchSize {
 		msgs := make([]store.SessionMessage, batchSize)
 		for i := range msgs {
 			idx := batch*batchSize + i
@@ -201,7 +201,7 @@ func TestIntegration_ConcurrentReadWrite(t *testing.T) {
 			defer wg.Done()
 			for j := range readsPerWriter {
 				key := fmt.Sprintf("task-%d-%d", i, j)
-				if err := s.SaveResult(ctx, "ns", key, []byte(fmt.Sprintf("data-%d-%d", i, j))); err != nil {
+				if err := s.SaveResult(ctx, "ns", key, fmt.Appendf(nil, "data-%d-%d", i, j)); err != nil {
 					t.Errorf("concurrent SaveResult %s: %v", key, err)
 				}
 			}

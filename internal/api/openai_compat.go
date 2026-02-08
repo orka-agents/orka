@@ -80,18 +80,18 @@ type StreamOptions struct {
 
 // OAIMessage represents an OpenAI chat message.
 type OAIMessage struct {
-	Role       string          `json:"role"`
-	Content    any             `json:"content"` // string or []ContentPart
-	Name       string          `json:"name,omitempty"`
-	ToolCalls  []OAIToolCall   `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-	Refusal    *string         `json:"refusal,omitempty"`
+	Role       string        `json:"role"`
+	Content    any           `json:"content"` // string or []ContentPart
+	Name       string        `json:"name,omitempty"`
+	ToolCalls  []OAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string        `json:"tool_call_id,omitempty"`
+	Refusal    *string       `json:"refusal,omitempty"`
 }
 
 // OAITool is an OpenAI tool definition.
 type OAITool struct {
-	Type     string          `json:"type"` // "function"
-	Function OAIFunctionDef  `json:"function"`
+	Type     string         `json:"type"` // "function"
+	Function OAIFunctionDef `json:"function"`
 }
 
 // OAIFunctionDef is an OpenAI function definition.
@@ -116,13 +116,13 @@ type OAIFunctionCall struct {
 
 // OAIResponse is the OpenAI chat completion response.
 type OAIResponse struct {
-	ID                string     `json:"id"`
-	Object            string     `json:"object"`
-	Created           int64      `json:"created"`
-	Model             string     `json:"model"`
+	ID                string      `json:"id"`
+	Object            string      `json:"object"`
+	Created           int64       `json:"created"`
+	Model             string      `json:"model"`
 	Choices           []OAIChoice `json:"choices"`
-	Usage             *OAIUsage  `json:"usage,omitempty"`
-	SystemFingerprint string     `json:"system_fingerprint,omitempty"`
+	Usage             *OAIUsage   `json:"usage,omitempty"`
+	SystemFingerprint string      `json:"system_fingerprint,omitempty"`
 }
 
 // OAIChoice is a choice in the response.

@@ -471,7 +471,7 @@ func TestConcurrentAccess(t *testing.T) {
 	errs := make(chan error, n)
 	for i := range n {
 		go func(i int) {
-			errs <- s.SaveResult(ctx, "ns1", fmt.Sprintf("task-%d", i), []byte(fmt.Sprintf("data-%d", i)))
+			errs <- s.SaveResult(ctx, "ns1", fmt.Sprintf("task-%d", i), fmt.Appendf(nil, "data-%d", i))
 		}(i)
 	}
 

@@ -127,7 +127,6 @@ func TestNewMetricsMiddleware_RecordsMetrics(t *testing.T) {
 	}
 }
 
-
 func TestNewLoggingMiddleware_WithError(t *testing.T) {
 	app := fiber.New(fiber.Config{
 		ErrorHandler: func(c fiber.Ctx, err error) error {

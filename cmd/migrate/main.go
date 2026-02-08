@@ -263,12 +263,12 @@ func extractTaskNameFromResult(cmName string) string {
 // Task sessions: "session-{name}" → "{name}"
 // Chat sessions: "chat-session-{id}" → "chat-session-{id}" (kept as-is since that's the session ID)
 func extractSessionName(cmName string) string {
-	if strings.HasPrefix(cmName, "chat-session-") {
+	if after, ok := strings.CutPrefix(cmName, "chat-session-"); ok {
 		// Chat session: the session name includes the "chat-session-" prefix stripped to just the ID
-		return strings.TrimPrefix(cmName, "chat-session-")
+		return after
 	}
-	if strings.HasPrefix(cmName, "session-") {
-		return strings.TrimPrefix(cmName, "session-")
+	if after, ok := strings.CutPrefix(cmName, "session-"); ok {
+		return after
 	}
 	// Fallback: use full ConfigMap name
 	return cmName

@@ -274,7 +274,7 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 // splitPath splits a URL path into non-empty segments.
 func splitPath(path string) []string {
 	var result []string
-	for _, s := range strings.Split(path, "/") {
+	for s := range strings.SplitSeq(path, "/") {
 		if s != "" {
 			result = append(result, s)
 		}

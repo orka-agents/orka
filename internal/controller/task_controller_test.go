@@ -169,7 +169,7 @@ var _ = Describe("Task Controller", func() {
 
 			// Result should be deleted from store
 			_, err = r.ResultStore.GetResult(ctx, ns, taskName)
-			Expect(err).NotTo(BeNil())
+			Expect(err).To(HaveOccurred())
 
 			// Task should be gone (finalizer removed → deletion completes)
 			err = k8sClient.Get(ctx, nn, &corev1alpha1.Task{})

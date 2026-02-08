@@ -175,7 +175,7 @@ func TestJobBuilder_Build_WithSession(t *testing.T) {
 	for _, vol := range job.Spec.Template.Spec.Volumes {
 		if vol.Name == "session-data" {
 			hasSessionVolume = true
-			if vol.VolumeSource.EmptyDir == nil {
+			if vol.EmptyDir == nil {
 				t.Error("session-data volume should be emptyDir")
 			}
 			break

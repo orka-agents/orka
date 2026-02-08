@@ -56,6 +56,7 @@ var builtinToolsMap = func() map[string]fiber.Map {
 	}
 	return m
 }()
+
 type Handlers struct {
 	client         client.Client
 	sessionManager *controller.SessionManager

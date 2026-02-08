@@ -228,7 +228,7 @@ func execGit(dir string, args ...string) (string, error) {
 // Each line looks like: " path/to/file | 5 ++-" and the last line is a summary.
 func parseDiffStatFiles(stat string) []string {
 	var files []string
-	for _, line := range strings.Split(stat, "\n") {
+	for line := range strings.SplitSeq(stat, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

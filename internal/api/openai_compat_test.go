@@ -188,12 +188,12 @@ func TestHandleListModels_WithProviders(t *testing.T) {
 
 func TestConvertOAIMessages(t *testing.T) {
 	tests := []struct {
-		name           string
-		messages       []OAIMessage
-		wantMsgCount   int
-		wantSystem     string
-		wantFirstRole  string
-		wantFirstText  string
+		name          string
+		messages      []OAIMessage
+		wantMsgCount  int
+		wantSystem    string
+		wantFirstRole string
+		wantFirstText string
 	}{
 		{
 			name: "simple user message",

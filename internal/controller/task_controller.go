@@ -35,8 +35,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/utils/ptr"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -965,7 +965,7 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 	// Sort by creation time (oldest first) and delete excess
 	sortByCreation := func(tasks []*corev1alpha1.Task) {
 		slices.SortFunc(tasks, func(a, b *corev1alpha1.Task) int {
-			return a.CreationTimestamp.Time.Compare(b.CreationTimestamp.Time)
+			return a.CreationTimestamp.Compare(b.CreationTimestamp.Time)
 		})
 	}
 
