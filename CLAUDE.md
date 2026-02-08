@@ -8,6 +8,10 @@ This file provides guidance to Claude Code when working with code in this reposi
 - Never commit secrets to version control
 - Never log or print API keys, tokens, or passwords
 - Never include secrets in error messages or responses
+
+## CRITICAL: No Binaries in Repo
+
+**NEVER commit compiled binaries to the repository.** Build artifacts belong in `bin/` (which is gitignored) or CI release pipelines — not in version control.
 - Always use Kubernetes Secrets or environment variables for sensitive data
 - Never hardcode credentials in code or configuration files
 
