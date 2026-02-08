@@ -757,3 +757,114 @@ func TestDelegateTaskTool_Execute_PushBranch(t *testing.T) {
 		t.Errorf("gitSecretRef = %v, want git-credentials", ws.GitSecretRef)
 	}
 }
+
+func TestDelegateTaskTool_Execute_AutoRetry(t *testing.T) {
+	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
+	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
+	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "3")
+
+	k8sClient := newFakeClient(parentTask(), researcherAgent())
+	tool := NewDelegateTaskTool(k8sClient)
+
+	args := json.RawMessage(`{"agent": "researcher", "prompt": "Do the work", "auto_retry": true, "max_retries": 3}`)
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var delegateResult DelegateTaskResult
+	if err := json.Unmarshal([]byte(result), &delegateResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// Fetch child task and verify annotations
+	childTask := &corev1alpha1.Task{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
+		Name: delegateResult.TaskName, Namespace: "default",
+	}, childTask); err != nil {
+		t.Fatalf("get child task: %v", err)
+	}
+
+	if childTask.Annotations["mercan.ai/auto-retry"] != "true" {
+		t.Errorf("expected auto-retry=true, got %q", childTask.Annotations["mercan.ai/auto-retry"])
+	}
+	if childTask.Annotations["mercan.ai/max-retries"] != "3" {
+		t.Errorf("expected max-retries=3, got %q", childTask.Annotations["mercan.ai/max-retries"])
+	}
+	if childTask.Annotations["mercan.ai/retry-count"] != "0" {
+		t.Errorf("expected retry-count=0, got %q", childTask.Annotations["mercan.ai/retry-count"])
+	}
+	if childTask.Annotations["mercan.ai/original-prompt"] != "Do the work" {
+		t.Errorf("expected original-prompt stored, got %q", childTask.Annotations["mercan.ai/original-prompt"])
+	}
+}
+
+func TestDelegateTaskTool_Execute_AutoRetryDefault(t *testing.T) {
+	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
+	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
+	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "3")
+
+	k8sClient := newFakeClient(parentTask(), researcherAgent())
+	tool := NewDelegateTaskTool(k8sClient)
+
+	// auto_retry without max_retries should default to 2
+	args := json.RawMessage(`{"agent": "researcher", "prompt": "Do work", "auto_retry": true}`)
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var delegateResult DelegateTaskResult
+	if err := json.Unmarshal([]byte(result), &delegateResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	childTask := &corev1alpha1.Task{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
+		Name: delegateResult.TaskName, Namespace: "default",
+	}, childTask); err != nil {
+		t.Fatalf("get child task: %v", err)
+	}
+
+	if childTask.Annotations["mercan.ai/max-retries"] != "2" {
+		t.Errorf("expected default max-retries=2, got %q", childTask.Annotations["mercan.ai/max-retries"])
+	}
+}
+
+func TestDelegateTaskTool_Execute_NoAutoRetry(t *testing.T) {
+	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
+	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
+	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "3")
+
+	k8sClient := newFakeClient(parentTask(), researcherAgent())
+	tool := NewDelegateTaskTool(k8sClient)
+
+	args := json.RawMessage(`{"agent": "researcher", "prompt": "Do work"}`)
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var delegateResult DelegateTaskResult
+	if err := json.Unmarshal([]byte(result), &delegateResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	childTask := &corev1alpha1.Task{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
+		Name: delegateResult.TaskName, Namespace: "default",
+	}, childTask); err != nil {
+		t.Fatalf("get child task: %v", err)
+	}
+
+	// When auto_retry is not set, no retry annotations should be present
+	if _, ok := childTask.Annotations["mercan.ai/auto-retry"]; ok {
+		t.Error("expected no auto-retry annotation when auto_retry is false")
+	}
+}

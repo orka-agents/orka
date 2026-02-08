@@ -63,6 +63,15 @@ type DelegateTaskArgs struct {
 	// Feedback provides review feedback to include in the task prompt.
 	// Used with prior_task for iterative code review workflows. Optional.
 	Feedback string `json:"feedback,omitempty"`
+
+	// AutoRetry enables automatic re-creation of this child task if it fails.
+	// When enabled, wait_for_tasks will automatically re-delegate failed tasks
+	// with the error context as feedback. Optional.
+	AutoRetry bool `json:"auto_retry,omitempty"`
+
+	// MaxRetries is the maximum number of auto-retry attempts (default: 2).
+	// Only used when auto_retry is true.
+	MaxRetries *int `json:"max_retries,omitempty"`
 }
 
 // DelegateTaskResult represents the delegation result
@@ -150,6 +159,14 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 			"feedback": {
 				"type": "string",
 				"description": "Review feedback to prepend to the task prompt. Used with prior_task for iterative code review workflows."
+			},
+			"auto_retry": {
+				"type": "boolean",
+				"description": "Enable automatic re-creation of this task if it fails. wait_for_tasks will re-delegate with error context."
+			},
+			"max_retries": {
+				"type": "integer",
+				"description": "Maximum number of auto-retry attempts (default: 2). Only used when auto_retry is true."
 			}
 		},
 		"required": ["agent", "prompt"]
@@ -277,6 +294,19 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 			Prompt:   delegateArgs.Prompt,
 			Priority: priority,
 		},
+	}
+
+	// Store auto-retry config as annotations
+	if delegateArgs.AutoRetry {
+		childTask.Annotations["mercan.ai/auto-retry"] = "true"
+		maxRetries := 2
+		if delegateArgs.MaxRetries != nil && *delegateArgs.MaxRetries >= 0 {
+			maxRetries = *delegateArgs.MaxRetries
+		}
+		childTask.Annotations["mercan.ai/max-retries"] = strconv.Itoa(maxRetries)
+		childTask.Annotations["mercan.ai/retry-count"] = "0"
+		// Store original prompt so retries can prepend error context
+		childTask.Annotations["mercan.ai/original-prompt"] = delegateArgs.Prompt
 	}
 
 	// Set agent runtime config for agent-type tasks

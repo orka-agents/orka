@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,17 +53,27 @@ type WaitForTasksResult struct {
 
 // TaskResultInfo holds individual task result information
 type TaskResultInfo struct {
-	Task       string   `json:"task"`
-	Agent      string   `json:"agent,omitempty"`
-	Phase      string   `json:"phase"`
-	Result     string   `json:"result,omitempty"`
-	Summary    string   `json:"summary,omitempty"`
-	Verdict    string   `json:"verdict,omitempty"`
-	Feedback   string   `json:"feedback,omitempty"`
-	Files      []string `json:"files,omitempty"`
-	BaseSHA    string   `json:"baseSHA,omitempty"`
-	PushBranch string   `json:"pushBranch,omitempty"`
-	Iteration  string   `json:"iteration,omitempty"`
+	Task           string          `json:"task"`
+	Agent          string          `json:"agent,omitempty"`
+	Phase          string          `json:"phase"`
+	Result         string          `json:"result,omitempty"`
+	Summary        string          `json:"summary,omitempty"`
+	Verdict        string          `json:"verdict,omitempty"`
+	Feedback       string          `json:"feedback,omitempty"`
+	Files          []string        `json:"files,omitempty"`
+	BaseSHA        string          `json:"baseSHA,omitempty"`
+	PushBranch     string          `json:"pushBranch,omitempty"`
+	Iteration      string          `json:"iteration,omitempty"`
+	FailureDetails *FailureDetails `json:"failureDetails,omitempty"`
+	Retried        bool            `json:"retried,omitempty"`
+	RetryTaskName  string          `json:"retryTaskName,omitempty"`
+}
+
+// FailureDetails provides structured information about a failed task
+type FailureDetails struct {
+	Message    string `json:"message"`
+	RetryCount int    `json:"retryCount"`
+	MaxRetries int    `json:"maxRetries"`
 }
 
 // NewWaitForTasksTool creates a new wait_for_tasks tool
@@ -164,6 +175,46 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 				continue
 			}
 
+			// Handle auto-retry for failed tasks
+			if phase == corev1alpha1.TaskPhaseFailed {
+				retryTaskName, retried := t.tryAutoRetry(ctx, &task, ns)
+				if retried {
+					// Track the retry — replace this task with the new one
+					results[taskName].Retried = true
+					results[taskName].RetryTaskName = retryTaskName
+					results[taskName].Phase = "Retried"
+					results[taskName].Result = fmt.Sprintf("auto-retried as %s", retryTaskName)
+
+					// Add failure details
+					retryCount, maxRetries := getRetryInfo(&task)
+					results[taskName].FailureDetails = &FailureDetails{
+						Message:    task.Status.Message,
+						RetryCount: retryCount,
+						MaxRetries: maxRetries,
+					}
+
+					// Start tracking the retry task
+					waitArgs.Tasks = append(waitArgs.Tasks, retryTaskName)
+					results[retryTaskName] = &TaskResultInfo{
+						Task:  retryTaskName,
+						Agent: results[taskName].Agent,
+						Phase: "Pending",
+					}
+					allTerminal = false
+					continue
+				}
+
+				// Not retried — add failure details
+				retryCount, maxRetries := getRetryInfo(&task)
+				if task.Annotations["mercan.ai/auto-retry"] == "true" {
+					results[taskName].FailureDetails = &FailureDetails{
+						Message:    task.Status.Message,
+						RetryCount: retryCount,
+						MaxRetries: maxRetries,
+					}
+				}
+			}
+
 			// Fetch result if available via HTTP GET to controller
 			if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
 				resultStr, fetchErr := fetchTaskResult(taskName)
@@ -231,6 +282,63 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 
 // Ensure WaitForTasksTool implements Tool
 var _ Tool = (*WaitForTasksTool)(nil)
+
+// tryAutoRetry checks if a failed task should be auto-retried and creates a new child task if so.
+// Returns the new task name and true if a retry was created, or empty string and false otherwise.
+func (t *WaitForTasksTool) tryAutoRetry(ctx context.Context, failedTask *corev1alpha1.Task, _ string) (string, bool) {
+	if failedTask.Annotations["mercan.ai/auto-retry"] != "true" {
+		return "", false
+	}
+
+	retryCount, maxRetries := getRetryInfo(failedTask)
+	if retryCount >= maxRetries {
+		return "", false
+	}
+
+	// Get the original prompt (stored at delegation time)
+	originalPrompt := failedTask.Annotations["mercan.ai/original-prompt"]
+	if originalPrompt == "" {
+		originalPrompt = failedTask.Spec.Prompt
+	}
+
+	// Build error context
+	errorMsg := failedTask.Status.Message
+	if errorMsg == "" {
+		errorMsg = "task failed with no message"
+	}
+
+	// Create retry task with error feedback prepended
+	retryTask := failedTask.DeepCopy()
+	retryTask.Name = ""
+	retryTask.GenerateName = failedTask.Name + "-retry-"
+	retryTask.ResourceVersion = ""
+	retryTask.UID = ""
+	retryTask.Status = corev1alpha1.TaskStatus{}
+	retryTask.Spec.Prompt = fmt.Sprintf("PREVIOUS ATTEMPT FAILED (attempt %d of %d):\n%s\n\nPlease retry the original task, avoiding the previous error:\n%s",
+		retryCount+1, maxRetries, errorMsg, originalPrompt)
+
+	// Update retry annotations
+	retryTask.Annotations["mercan.ai/retry-count"] = strconv.Itoa(retryCount + 1)
+	retryTask.Annotations["mercan.ai/retried-from"] = failedTask.Name
+
+	if err := t.k8sClient.Create(ctx, retryTask); err != nil {
+		return "", false
+	}
+
+	return retryTask.Name, true
+}
+
+// getRetryInfo extracts retry count and max retries from task annotations.
+func getRetryInfo(task *corev1alpha1.Task) (retryCount, maxRetries int) {
+	if countStr, ok := task.Annotations["mercan.ai/retry-count"]; ok {
+		retryCount, _ = strconv.Atoi(countStr)
+	}
+	maxRetries = 2 // default
+	if maxStr, ok := task.Annotations["mercan.ai/max-retries"]; ok {
+		maxRetries, _ = strconv.Atoi(maxStr)
+	}
+	return
+}
 
 const saTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 

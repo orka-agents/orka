@@ -60,10 +60,12 @@ LLM-visible parameter schema:
 {
   "type": "object",
   "properties": {
-    "agent":     {"type": "string", "description": "Name of the agent to delegate to"},
-    "prompt":    {"type": "string", "description": "The task prompt for the agent"},
-    "namespace": {"type": "string", "description": "Namespace (defaults to current)"},
-    "priority":  {"type": "integer", "description": "Priority 0-1000 (defaults to parent priority)"}
+    "agent":       {"type": "string", "description": "Name of the agent to delegate to"},
+    "prompt":      {"type": "string", "description": "The task prompt for the agent"},
+    "namespace":   {"type": "string", "description": "Namespace (defaults to current)"},
+    "priority":    {"type": "integer", "description": "Priority 0-1000 (defaults to parent priority)"},
+    "auto_retry":  {"type": "boolean", "description": "Enable automatic re-creation if task fails"},
+    "max_retries": {"type": "integer", "description": "Max auto-retry attempts (default: 2)"}
   },
   "required": ["agent", "prompt"]
 }
@@ -79,7 +81,8 @@ Implementation (`internal/tools/delegate_task.go`):
    - `Annotations: mercan.ai/coordination-depth`
    - `OwnerReferences` pointing to parent Task
    - `Spec.Type: ai`, `Spec.AgentRef.Name: <agent>`, `Spec.Prompt: <prompt>`
-5. Returns `{"taskName": "<name>", "status": "created"}` to LLM
+5. If `auto_retry: true`, stores retry config as annotations: `mercan.ai/auto-retry`, `mercan.ai/max-retries`, `mercan.ai/retry-count`, `mercan.ai/original-prompt`
+6. Returns `{"taskName": "<name>", "status": "created"}` to LLM
 
 #### `wait_for_tasks` Tool
 
@@ -100,6 +103,7 @@ Implementation (`internal/tools/wait_for_tasks.go`):
 2. Poll loop (5s interval):
    - Gets each child Task by name via K8s API
    - Checks if all are in terminal phase (Succeeded/Failed)
+   - **Auto-retry**: If a failed task has `mercan.ai/auto-retry=true` and retry count < max retries, automatically creates a new child task with the error context prepended to the original prompt, and continues polling the retry task
    - If timeout exceeded, returns partial results with timeout flag
    - Respects context cancellation
 3. For each completed child, reads result via the controller's result API
@@ -395,6 +399,62 @@ status:
 1. **Unit tests** for `delegate_task` and `wait_for_tasks` tools using `sigs.k8s.io/controller-runtime/pkg/client/fake`
 2. **Controller tests** for coordination validation (depth, allowedAgents, concurrency) using envtest
 3. **Job builder tests** verifying coordination env vars are set correctly
+
+## Self-Healing Coordination
+
+When `auto_retry` is enabled on a delegated task, `wait_for_tasks` automatically re-creates failed child tasks with the error context prepended to the original prompt.
+
+### How It Works
+
+1. Coordinator calls `delegate_task` with `auto_retry: true` (and optional `max_retries`, default 2)
+2. `delegate_task` stores retry config as annotations on the child task:
+   - `mercan.ai/auto-retry: "true"`
+   - `mercan.ai/max-retries: "2"`
+   - `mercan.ai/retry-count: "0"`
+   - `mercan.ai/original-prompt: "<original prompt>"`
+3. If the child task fails, `wait_for_tasks` detects the failure and:
+   - Checks `retry-count < max-retries`
+   - Creates a new child task with the error message prepended:
+     ```
+     PREVIOUS ATTEMPT FAILED (attempt 1 of 2):
+     <error message>
+
+     Please retry the original task, avoiding the previous error:
+     <original prompt>
+     ```
+   - Sets `mercan.ai/retried-from` annotation on the retry task
+   - Increments `retry-count`
+   - Continues polling the retry task
+4. The original failed task result includes `failureDetails` with message, retryCount, and maxRetries
+5. If retries are exhausted, the task is reported as failed with full failure details
+
+### Example
+
+```json
+{
+  "agent": "coder",
+  "prompt": "Implement the feature",
+  "auto_retry": true,
+  "max_retries": 3
+}
+```
+
+### Result Format
+
+When a task is retried, its result includes:
+```json
+{
+  "task": "parent-task-child-abc",
+  "phase": "Retried",
+  "retried": true,
+  "retryTaskName": "parent-task-child-abc-retry-xyz",
+  "failureDetails": {
+    "message": "out of memory",
+    "retryCount": 0,
+    "maxRetries": 3
+  }
+}
+```
 
 ## Iterative Code Review Workflows
 

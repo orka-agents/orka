@@ -86,6 +86,7 @@ make deploy IMG=<registry>/mercan:tag
 - Auto-push: When `pushBranch` is set on workspace config, `FinalizeResult` commits and pushes changes to that branch automatically
 - PR creation: `create_pull_request` coordination tool creates GitHub PRs from pushed branches using git credentials from task workspace config
 - PR management: `merge_pull_request` merges PRs after CI checks pass; `review_pull_request` fetches PR diffs for analysis; `post_review_comment` posts reviews with verdicts and line-level comments
+- Self-healing coordination: `delegate_task` supports `auto_retry` and `max_retries` params; `wait_for_tasks` automatically re-creates failed child tasks with error context prepended to original prompt; retry config stored as annotations (`mercan.ai/auto-retry`, `mercan.ai/max-retries`, `mercan.ai/retry-count`)
 
 ### Multi-Agent Coordination
 

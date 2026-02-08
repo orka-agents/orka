@@ -417,3 +417,279 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 		t.Errorf("expected 2 files, got %d", len(r.Files))
 	}
 }
+
+func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
+	t.Setenv("MERCAN_TASK_NAMESPACE", "test-ns")
+
+	// Create a failed task with auto-retry annotations
+	failedTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "task-fail-retry",
+			Namespace: "test-ns",
+			Annotations: map[string]string{
+				"mercan.ai/auto-retry":      "true",
+				"mercan.ai/max-retries":     "2",
+				"mercan.ai/retry-count":     "0",
+				"mercan.ai/original-prompt": "Implement the feature",
+			},
+			Labels: map[string]string{
+				"mercan.ai/parent-task":     "parent",
+				"mercan.ai/delegated-agent": "coder",
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "coder"},
+			Prompt:   "Implement the feature",
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseFailed,
+			Message: "out of memory",
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	t.Setenv("MERCAN_CONTROLLER_URL", srv.URL)
+
+	scheme := newTestScheme()
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(failedTask).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+
+	tool := NewWaitForTasksTool(fakeClient)
+
+	args, _ := json.Marshal(WaitForTasksArgs{
+		Tasks:   []string{"task-fail-retry"},
+		Timeout: "1s",
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	var waitResult WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	// The original task should be marked as retried
+	var originalResult *TaskResultInfo
+	for i := range waitResult.Results {
+		if waitResult.Results[i].Task == "task-fail-retry" {
+			originalResult = &waitResult.Results[i]
+			break
+		}
+	}
+	if originalResult == nil {
+		t.Fatal("original task not found in results")
+	}
+
+	if !originalResult.Retried {
+		t.Error("expected Retried=true")
+	}
+	if originalResult.RetryTaskName == "" {
+		t.Error("expected non-empty RetryTaskName")
+	}
+	if originalResult.Phase != "Retried" {
+		t.Errorf("expected Phase=Retried, got %q", originalResult.Phase)
+	}
+	if originalResult.FailureDetails == nil {
+		t.Fatal("expected FailureDetails to be set")
+	}
+	if originalResult.FailureDetails.Message != "out of memory" {
+		t.Errorf("expected failure message 'out of memory', got %q", originalResult.FailureDetails.Message)
+	}
+	if originalResult.FailureDetails.RetryCount != 0 {
+		t.Errorf("expected retryCount=0, got %d", originalResult.FailureDetails.RetryCount)
+	}
+	if originalResult.FailureDetails.MaxRetries != 2 {
+		t.Errorf("expected maxRetries=2, got %d", originalResult.FailureDetails.MaxRetries)
+	}
+
+	// Verify the retry task was created
+	taskList := &corev1alpha1.TaskList{}
+	if err := fakeClient.List(context.Background(), taskList); err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+
+	var retryTask *corev1alpha1.Task
+	for i := range taskList.Items {
+		if taskList.Items[i].Name != "task-fail-retry" {
+			retryTask = &taskList.Items[i]
+			break
+		}
+	}
+	if retryTask == nil {
+		t.Fatal("retry task not created")
+	}
+
+	if retryTask.Annotations["mercan.ai/retry-count"] != "1" {
+		t.Errorf("retry task retry-count = %q, want 1", retryTask.Annotations["mercan.ai/retry-count"])
+	}
+	if retryTask.Annotations["mercan.ai/retried-from"] != "task-fail-retry" {
+		t.Errorf("retry task retried-from = %q, want task-fail-retry", retryTask.Annotations["mercan.ai/retried-from"])
+	}
+	if !strings.Contains(retryTask.Spec.Prompt, "PREVIOUS ATTEMPT FAILED") {
+		t.Error("retry task prompt should contain error context")
+	}
+	if !strings.Contains(retryTask.Spec.Prompt, "out of memory") {
+		t.Error("retry task prompt should contain original error message")
+	}
+	if !strings.Contains(retryTask.Spec.Prompt, "Implement the feature") {
+		t.Error("retry task prompt should contain original prompt")
+	}
+}
+
+func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
+	t.Setenv("MERCAN_TASK_NAMESPACE", "test-ns")
+
+	// Task with retries already exhausted
+	failedTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "task-exhausted",
+			Namespace: "test-ns",
+			Annotations: map[string]string{
+				"mercan.ai/auto-retry":      "true",
+				"mercan.ai/max-retries":     "2",
+				"mercan.ai/retry-count":     "2",
+				"mercan.ai/original-prompt": "Do something",
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "coder"},
+			Prompt:   "Do something",
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseFailed,
+			Message: "failed again",
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	t.Setenv("MERCAN_CONTROLLER_URL", srv.URL)
+
+	scheme := newTestScheme()
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(failedTask).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+
+	tool := NewWaitForTasksTool(fakeClient)
+
+	args, _ := json.Marshal(WaitForTasksArgs{
+		Tasks:   []string{"task-exhausted"},
+		Timeout: "1s",
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	var waitResult WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	if len(waitResult.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(waitResult.Results))
+	}
+
+	r := waitResult.Results[0]
+	if r.Retried {
+		t.Error("expected Retried=false when retries exhausted")
+	}
+	if r.Phase != "Failed" {
+		t.Errorf("expected Phase=Failed, got %q", r.Phase)
+	}
+	if r.FailureDetails == nil {
+		t.Fatal("expected FailureDetails")
+	}
+	if r.FailureDetails.RetryCount != 2 {
+		t.Errorf("expected retryCount=2, got %d", r.FailureDetails.RetryCount)
+	}
+	if r.FailureDetails.MaxRetries != 2 {
+		t.Errorf("expected maxRetries=2, got %d", r.FailureDetails.MaxRetries)
+	}
+
+	// No retry task should have been created
+	taskList := &corev1alpha1.TaskList{}
+	if err := fakeClient.List(context.Background(), taskList); err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	if len(taskList.Items) != 1 {
+		t.Errorf("expected 1 task (no retry created), got %d", len(taskList.Items))
+	}
+}
+
+func TestWaitForTasksTool_Execute_NoAutoRetryOnSuccess(t *testing.T) {
+	t.Setenv("MERCAN_TASK_NAMESPACE", "test-ns")
+
+	// Succeeded task with auto-retry — should NOT trigger retry
+	succeededTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "task-success",
+			Namespace: "test-ns",
+			Annotations: map[string]string{
+				"mercan.ai/auto-retry":  "true",
+				"mercan.ai/max-retries": "2",
+				"mercan.ai/retry-count": "0",
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "coder"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseSucceeded,
+			Message: "all good",
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	t.Setenv("MERCAN_CONTROLLER_URL", srv.URL)
+
+	scheme := newTestScheme()
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(succeededTask).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+
+	tool := NewWaitForTasksTool(fakeClient)
+
+	args, _ := json.Marshal(WaitForTasksArgs{
+		Tasks:   []string{"task-success"},
+		Timeout: "1s",
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	var waitResult WaitForTasksResult
+	json.Unmarshal([]byte(result), &waitResult)
+
+	r := waitResult.Results[0]
+	if r.Retried {
+		t.Error("should not retry a succeeded task")
+	}
+	if r.Phase != "Succeeded" {
+		t.Errorf("expected Phase=Succeeded, got %q", r.Phase)
+	}
+}
