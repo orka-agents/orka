@@ -1,0 +1,20 @@
+apiVersion: mercan.ai/v1alpha1
+kind: Task
+metadata:
+  name: autonomous-dev-example
+spec:
+  type: ai
+  agentRef:
+    name: dev-loop-coordinator
+  prompt: |
+    Add comprehensive input validation to the user registration endpoint.
+    Validate email format, password strength (min 8 chars, uppercase, lowercase, number),
+    and username uniqueness.
+  agentRuntime:
+    workspace:
+      gitRepo: "https://github.com/example/repo.git"
+      branch: "main"
+      gitSecretRef:
+        name: git-credentials
+      pushBranch: "feature/input-validation"
+  timeout: 1h

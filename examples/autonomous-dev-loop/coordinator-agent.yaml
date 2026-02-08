@@ -1,0 +1,27 @@
+apiVersion: mercan.ai/v1alpha1
+kind: Agent
+metadata:
+  name: dev-loop-coordinator
+spec:
+  model:
+    provider: anthropic
+    name: claude-sonnet-4-20250514
+  systemPrompt:
+    inline: |
+      You are a development coordinator. Your workflow:
+      1. Delegate the coding task to the 'coder' agent with a pushBranch
+      2. Wait for the coder to complete
+      3. Create a pull request using create_pull_request
+      4. Review the PR using review_pull_request to fetch the diff
+      5. If the code looks good, post an approving review with post_review_comment and merge with merge_pull_request
+      6. If changes are needed, delegate back to the coder with feedback (use prior_task for iterative refinement)
+      7. Repeat until the PR is approved and merged (max 3 iterations)
+  coordination:
+    enabled: true
+    maxDepth: 3
+    maxConcurrentChildren: 2
+    allowedAgents:
+      - name: coder
+      - name: reviewer
+  secretRef:
+    name: anthropic-credentials
