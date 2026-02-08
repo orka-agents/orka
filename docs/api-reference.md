@@ -1,0 +1,109 @@
+# API Reference
+
+The controller exposes a REST API for programmatic access. All `/api/v1/*` endpoints require a ServiceAccount bearer token.
+
+## Tasks
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/tasks` | POST | Create a task |
+| `/api/v1/tasks` | GET | List tasks (paginated) |
+| `/api/v1/tasks/:id` | GET | Get task details |
+| `/api/v1/tasks/:id` | DELETE | Cancel/delete task |
+| `/api/v1/tasks/:id/logs` | GET | Stream task logs |
+| `/api/v1/tasks/:id/result` | GET | Get task result |
+
+## Sessions
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/sessions` | GET | List sessions |
+| `/api/v1/sessions/:id` | GET | Get session transcript |
+| `/api/v1/sessions/:id` | DELETE | Delete session |
+
+## Agents
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/agents` | POST | Create an agent |
+| `/api/v1/agents` | GET | List agents |
+| `/api/v1/agents/:name` | GET | Get agent details |
+| `/api/v1/agents/:name` | PUT | Update an agent |
+| `/api/v1/agents/:name` | DELETE | Delete an agent |
+
+## Tools
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/tools` | GET | List tools (built-in + CRDs) |
+| `/api/v1/tools/:name` | GET | Get tool details |
+
+## Secrets
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/secrets` | GET | List secret names (metadata only) |
+
+## Chat
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/chat` | POST | Send message (SSE streaming or JSON) |
+| `/api/v1/chat/config` | GET | Get chat configuration and available tools |
+| `/api/v1/chat/:sessionId` | DELETE | Cancel a chat session |
+
+See [Interactive Chat](chat.md) for full chat documentation.
+
+## OpenAI-Compatible API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/chat/completions` | POST | Chat completions (streaming & non-streaming) |
+| `/v1/models` | GET | List available models |
+
+See [OpenAI Compatibility](openai-compat.md) for details.
+
+## Health
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/healthz` | GET | Health check |
+| `/readyz` | GET | Readiness check |
+
+## Example Usage
+
+```bash
+# Create a task
+curl -X POST http://localhost:8080/api/v1/tasks \
+  -H "Authorization: Bearer $(kubectl create token mercan-client)" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-task",
+    "type": "ai",
+    "agentRef": {"name": "assistant"},
+    "prompt": "Explain microservices architecture"
+  }'
+
+# Get task result
+curl http://localhost:8080/api/v1/tasks/my-task/result \
+  -H "Authorization: Bearer $(kubectl create token mercan-client)"
+
+# Chat with SSE streaming
+curl -N http://localhost:8080/api/v1/chat \
+  -H "Authorization: Bearer $(kubectl create token mercan-client)" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Create an AI task that summarizes Kubernetes best practices",
+    "sessionId": "my-session"
+  }'
+```
+
+## Built-in Tools
+
+These tools are available to AI worker agents:
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `web_search` | Search the web via configurable API (Tavily, etc.) | `query` (required), `limit` (default 5) |
+| `code_exec` | Execute code in a sandboxed environment | `language` (python/javascript/bash), `code`, `timeout` (max 60s) |
+| `file_read` | Read files from the workspace | `path`, `offset`, `limit` (max 1MB) |
