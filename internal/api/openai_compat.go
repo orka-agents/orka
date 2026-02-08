@@ -70,7 +70,7 @@ type StreamOptions struct {
 
 // OAIMessage represents an OpenAI chat message.
 type OAIMessage struct {
-	Role       string        `json:"role"`
+	Role       string        `json:"role,omitempty"`
 	Content    any           `json:"content"` // string or []ContentPart
 	Name       string        `json:"name,omitempty"`
 	ToolCalls  []OAIToolCall `json:"tool_calls,omitempty"`
