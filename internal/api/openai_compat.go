@@ -93,8 +93,9 @@ type OAIFunctionDef struct {
 
 // OAIToolCall is an OpenAI tool call.
 type OAIToolCall struct {
-	ID       string          `json:"id"`
-	Type     string          `json:"type"` // "function"
+	Index    *int            `json:"index,omitempty"`
+	ID       string          `json:"id,omitempty"`
+	Type     string          `json:"type,omitempty"` // "function"
 	Function OAIFunctionCall `json:"function"`
 }
 
@@ -273,10 +274,12 @@ func (h *OpenAICompatHandler) handleNonStreamingCompletion(
 	// Convert tool calls
 	if len(resp.ToolCalls) > 0 {
 		msg.ToolCalls = make([]OAIToolCall, 0, len(resp.ToolCalls))
-		for _, tc := range resp.ToolCalls {
+		for i, tc := range resp.ToolCalls {
+			idx := i
 			msg.ToolCalls = append(msg.ToolCalls, OAIToolCall{
-				ID:   tc.ID,
-				Type: "function",
+				Index: &idx,
+				ID:    tc.ID,
+				Type:  "function",
 				Function: OAIFunctionCall{
 					Name:      tc.Name,
 					Arguments: string(tc.Arguments),
@@ -378,7 +381,8 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 			}
 
 			// Send tool calls if any
-			for _, tc := range resp.ToolCalls {
+			for i, tc := range resp.ToolCalls {
+				idx := i
 				tcChunk := OAIResponse{
 					ID:      completionID,
 					Object:  "chat.completion.chunk",
@@ -388,8 +392,9 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 						Index: 0,
 						Delta: &OAIMessage{
 							ToolCalls: []OAIToolCall{{
-								ID:   tc.ID,
-								Type: "function",
+								Index: &idx,
+								ID:    tc.ID,
+								Type:  "function",
 								Function: OAIFunctionCall{
 									Name:      tc.Name,
 									Arguments: string(tc.Arguments),
@@ -453,6 +458,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 		}
 		writeStreamChunk(w, roleChunk)
 
+		toolCallIndex := 0
 		for chunk := range streamCh {
 			if chunk.Error != nil {
 				oaiLog.Error(chunk.Error, "stream error")
@@ -475,6 +481,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 
 			if chunk.ToolCall != nil {
 				tc := chunk.ToolCall
+				idx := toolCallIndex
 				tcChunk := OAIResponse{
 					ID:      completionID,
 					Object:  "chat.completion.chunk",
@@ -484,8 +491,9 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 						Index: 0,
 						Delta: &OAIMessage{
 							ToolCalls: []OAIToolCall{{
-								ID:   tc.ID,
-								Type: "function",
+								Index: &idx,
+								ID:    tc.ID,
+								Type:  "function",
 								Function: OAIFunctionCall{
 									Name:      tc.Name,
 									Arguments: string(tc.Arguments),
@@ -495,13 +503,11 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 					}},
 				}
 				writeStreamChunk(w, tcChunk)
+				toolCallIndex++
 			}
 
 			if chunk.Done {
-				finishReason := "stop"
-				if chunk.ToolCall != nil {
-					finishReason = "tool_calls"
-				}
+				finishReason := mapFinishReason(chunk.StopReason)
 				finishChunk := OAIResponse{
 					ID:      completionID,
 					Object:  "chat.completion.chunk",
