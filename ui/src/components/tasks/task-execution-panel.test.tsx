@@ -1,0 +1,95 @@
+import { describe, it, expect, vi } from 'vitest'
+import { render, screen } from '@/test/test-utils'
+
+vi.mock('zustand/middleware', () => ({
+  persist: (fn: unknown) => fn,
+}))
+
+vi.mock('@tanstack/react-router', async () => {
+  const actual = await vi.importActual('@tanstack/react-router')
+  return {
+    ...actual,
+    Link: ({ children, to, ...props }: any) => <a href={to} {...props}>{children}</a>,
+    useNavigate: () => vi.fn(),
+    useLocation: () => ({ pathname: '/tasks' }),
+  }
+})
+
+import { TaskExecutionPanel } from './task-execution-panel'
+import type { Task } from '@/schemas/task'
+
+function makeTask(overrides: Partial<Task> = {}): Task {
+  return {
+    metadata: { name: 'test-task', namespace: 'default', uid: 'uid-1' },
+    spec: { type: 'container', image: 'alpine' },
+    status: { phase: 'Running', attempts: 1 },
+    ...overrides,
+  }
+}
+
+describe('TaskExecutionPanel', () => {
+  it('renders with Pending phase', () => {
+    render(<TaskExecutionPanel task={makeTask({ status: { phase: 'Pending', attempts: 0 } })} />)
+    expect(screen.getAllByText('Pending').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText('Execution')).toBeInTheDocument()
+    expect(screen.getByTestId('progress-steps')).toBeInTheDocument()
+  })
+
+  it('renders with Running phase', () => {
+    render(<TaskExecutionPanel task={makeTask({
+      status: { phase: 'Running', attempts: 1, startTime: new Date().toISOString() },
+    })} />)
+    expect(screen.getAllByText('Running').length).toBeGreaterThanOrEqual(1)
+    const elapsed = screen.getByTestId('elapsed-time')
+    expect(elapsed.textContent).toMatch(/\d+s/)
+  })
+
+  it('renders with Succeeded phase', () => {
+    const start = new Date(Date.now() - 120000).toISOString()
+    const end = new Date().toISOString()
+    render(<TaskExecutionPanel task={makeTask({
+      status: { phase: 'Succeeded', attempts: 2, startTime: start, completionTime: end },
+    })} />)
+    expect(screen.getByText('Succeeded')).toBeInTheDocument()
+    const elapsed = screen.getByTestId('elapsed-time')
+    expect(elapsed.textContent).toMatch(/2m/)
+  })
+
+  it('renders with Failed phase and message', () => {
+    render(<TaskExecutionPanel task={makeTask({
+      status: { phase: 'Failed', attempts: 3, message: 'OOMKilled' },
+    })} />)
+    expect(screen.getByText('Failed')).toBeInTheDocument()
+    expect(screen.getByText('OOMKilled')).toBeInTheDocument()
+    // Attempts count "3" appears both in step indicator and attempts display
+    expect(screen.getAllByText('3').length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('shows elapsed as dash when no startTime', () => {
+    render(<TaskExecutionPanel task={makeTask({ status: { phase: 'Pending', attempts: 0 } })} />)
+    const elapsed = screen.getByTestId('elapsed-time')
+    expect(elapsed.textContent).toBe('-')
+  })
+
+  it('displays child task summary', () => {
+    render(<TaskExecutionPanel task={makeTask({
+      status: {
+        phase: 'Running',
+        attempts: 1,
+        childTasks: [
+          { name: 'child-1', agent: 'agent-a', phase: 'Running' },
+          { name: 'child-2', agent: 'agent-b', phase: 'Succeeded' },
+          { name: 'child-3', agent: 'agent-a', phase: 'Failed' },
+          { name: 'child-4', agent: 'agent-c', phase: 'Pending' },
+        ],
+      },
+    })} />)
+    const summary = screen.getByTestId('child-task-summary')
+    expect(summary).toBeInTheDocument()
+    expect(summary.textContent).toContain('4 total')
+    expect(summary.textContent).toContain('1 running')
+    expect(summary.textContent).toContain('1 succeeded')
+    expect(summary.textContent).toContain('1 failed')
+    expect(summary.textContent).toContain('1 pending')
+  })
+})

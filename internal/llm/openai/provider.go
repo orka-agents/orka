@@ -273,18 +273,19 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 				fc.args.WriteString(evt.Delta)
 			case "response.function_call_arguments.done":
 				fc := active[evt.ItemID]
-				args, name, callID := evt.Arguments, evt.Name, evt.ItemID
+				args, name, callID := evt.Arguments, evt.Name, ""
 				if fc != nil {
+					callID = fc.callID
 					if args == "" {
 						args = fc.args.String()
 					}
 					if name == "" {
 						name = fc.name
 					}
-					if callID == "" {
-						callID = fc.callID
-					}
 					delete(active, evt.ItemID)
+				}
+				if callID == "" {
+					callID = evt.ItemID
 				}
 				ch <- llm.StreamChunk{
 					ToolCall: &llm.ToolCall{ID: callID, Name: name, Arguments: json.RawMessage(args)},

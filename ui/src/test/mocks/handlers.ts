@@ -26,6 +26,9 @@ export const handlers = [
   http.get(`${API}/tasks/:id/result`, () => {
     return HttpResponse.json({ result: 'task output' })
   }),
+  http.get(`${API}/tasks/:id/children`, () => {
+    return HttpResponse.json({ items: [], metadata: {} })
+  }),
 
   // Sessions
   http.get(`${API}/sessions`, () => {

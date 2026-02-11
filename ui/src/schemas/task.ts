@@ -50,6 +50,7 @@ export const workspaceConfigSchema = z.object({
   gitRepo: z.string().optional(),
   branch: z.string().optional(),
   ref: z.string().optional(),
+  pushBranch: z.string().optional(),
   gitSecretRef: z.object({ name: z.string() }).optional(),
   subPath: z.string().optional(),
 })

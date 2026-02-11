@@ -116,6 +116,7 @@ func (s *Server) setupRoutes() {
 	api.Delete("/tasks/:id", s.handlers.DeleteTask)
 	api.Get("/tasks/:id/logs", s.handlers.GetTaskLogs)
 	api.Get("/tasks/:id/result", s.handlers.GetTaskResult)
+	api.Get("/tasks/:id/children", s.handlers.GetTaskChildren)
 
 	// Session endpoints
 	api.Get("/sessions", s.handlers.ListSessions)

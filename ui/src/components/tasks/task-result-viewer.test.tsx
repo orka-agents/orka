@@ -66,4 +66,95 @@ describe('TaskResultViewer', () => {
       expect(screen.queryByText('Load Result')).not.toBeInTheDocument()
     })
   })
+
+  it('renders structured result with verdict badge', async () => {
+    const structured = JSON.stringify({
+      summary: 'All tests pass',
+      verdict: 'APPROVE',
+      feedback: 'Looks good',
+      files: ['src/main.go'],
+      pushBranch: 'feature/test',
+    })
+    const user = userEvent.setup()
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () =>
+        HttpResponse.json({ result: structured }),
+      ),
+    )
+    render(<TaskResultViewer taskId="task-structured" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      expect(screen.getByTestId('verdict-badge')).toHaveTextContent('APPROVE')
+    })
+    expect(screen.getByText('All tests pass')).toBeInTheDocument()
+    expect(screen.getByText('Looks good')).toBeInTheDocument()
+    expect(screen.getByText('src/main.go')).toBeInTheDocument()
+    expect(screen.getByText('feature/test')).toBeInTheDocument()
+  })
+
+  it('renders REQUEST_CHANGES verdict with red styling', async () => {
+    const structured = JSON.stringify({ verdict: 'REQUEST_CHANGES', summary: 'Needs work' })
+    const user = userEvent.setup()
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () =>
+        HttpResponse.json({ result: structured }),
+      ),
+    )
+    render(<TaskResultViewer taskId="task-rc" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      const badge = screen.getByTestId('verdict-badge')
+      expect(badge).toHaveTextContent('REQUEST_CHANGES')
+      expect(badge.className).toContain('bg-red-100')
+    })
+  })
+
+  it('falls back to plain text for non-JSON result', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () =>
+        HttpResponse.json({ result: 'Just plain text output' }),
+      ),
+    )
+    render(<TaskResultViewer taskId="task-plain" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      expect(screen.getByText('Just plain text output')).toBeInTheDocument()
+    })
+    // Should not show structured elements
+    expect(screen.queryByTestId('verdict-badge')).not.toBeInTheDocument()
+  })
+
+  it('falls back to plain text for JSON without structured fields', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () =>
+        HttpResponse.json({ result: '{"foo": "bar"}' }),
+      ),
+    )
+    render(<TaskResultViewer taskId="task-json" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      expect(screen.getByText('{"foo": "bar"}')).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId('verdict-badge')).not.toBeInTheDocument()
+  })
+
+  it('renders structured result with diff section', async () => {
+    const structured = JSON.stringify({
+      summary: 'Changes applied',
+      diff: '--- a/file.go\n+++ b/file.go\n@@ -1,2 +1,2 @@\n-old line\n+new line',
+    })
+    const user = userEvent.setup()
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () =>
+        HttpResponse.json({ result: structured }),
+      ),
+    )
+    render(<TaskResultViewer taskId="task-diff" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      expect(screen.getByTestId('diff-viewer')).toBeInTheDocument()
+    })
+  })
 })

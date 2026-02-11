@@ -1268,3 +1268,103 @@ func TestReadLines_MultipleLines_NoTrailingNewline(t *testing.T) {
 		t.Errorf("Unexpected lines: %v", lines)
 	}
 }
+
+func TestGetTaskChildren(t *testing.T) {
+	parentTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "parent-task",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+		},
+	}
+
+	childTask1 := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-1",
+			Namespace: "default",
+			Labels:    map[string]string{"mercan.ai/parent-task": "parent-task"},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+		},
+	}
+
+	childTask2 := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-2",
+			Namespace: "default",
+			Labels:    map[string]string{"mercan.ai/parent-task": "parent-task"},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+		},
+	}
+
+	unrelatedTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "unrelated",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeContainer,
+		},
+	}
+
+	handlers, app := setupTestHandlersWithObjects(parentTask, childTask1, childTask2, unrelatedTask)
+	app.Get("/tasks/:id/children", handlers.GetTaskChildren)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks/parent-task/children", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var result ListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	items, ok := result.Items.([]any)
+	if !ok {
+		t.Fatalf("Items is not a slice")
+	}
+
+	if len(items) != 2 {
+		t.Errorf("Expected 2 children, got %d", len(items))
+	}
+}
+
+func TestGetTaskChildren_Empty(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Get("/tasks/:id/children", handlers.GetTaskChildren)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks/no-parent/children", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var result ListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	items, ok := result.Items.([]any)
+	if !ok {
+		t.Fatalf("Items is not a slice")
+	}
+
+	if len(items) != 0 {
+		t.Errorf("Expected 0 children, got %d", len(items))
+	}
+}

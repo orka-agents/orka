@@ -769,6 +769,28 @@ func parseDuration(s string) (*metav1.Duration, error) {
 	return &metav1.Duration{Duration: duration}, nil
 }
 
+// GetTaskChildren returns child tasks for a given parent task
+func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
+	taskName := c.Params("id")
+	namespace := c.Query("namespace", h.watchNamespace)
+	if namespace == "" {
+		namespace = "default"
+	}
+
+	var taskList corev1alpha1.TaskList
+	if err := h.client.List(c.Context(), &taskList,
+		client.InNamespace(namespace),
+		client.MatchingLabels{"mercan.ai/parent-task": taskName},
+	); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list child tasks: %v", err))
+	}
+
+	return c.JSON(ListResponse{
+		Items:    taskList.Items,
+		Metadata: ListMeta{},
+	})
+}
+
 // Helper to read lines from a reader
 func readLines(r io.Reader) <-chan string {
 	ch := make(chan string)

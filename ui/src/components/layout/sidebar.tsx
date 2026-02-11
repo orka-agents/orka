@@ -1,5 +1,5 @@
 import { Link, useLocation } from '@tanstack/react-router'
-import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles } from 'lucide-react'
+import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Activity } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useUIStore } from '@/stores/ui'
 import { Button } from '@/components/ui/button'
@@ -8,6 +8,8 @@ const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/chat', label: 'Chat', icon: Sparkles },
   { to: '/tasks', label: 'Tasks', icon: ListTodo },
+  { to: '/kanban', label: 'Board', icon: Columns3 },
+  { to: '/live', label: 'Live', icon: Activity },
   { to: '/sessions', label: 'Sessions', icon: MessageSquare },
   { to: '/agents', label: 'Agents', icon: Bot },
   { to: '/tools', label: 'Tools', icon: Wrench },

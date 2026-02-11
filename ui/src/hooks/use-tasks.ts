@@ -8,12 +8,12 @@ interface ListResponse<T> {
   metadata: { continue?: string; remainingItemCount?: number }
 }
 
-export function useTaskList(limit = '25') {
+export function useTaskList(limit = '25', refetchInterval = 10000) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
     queryKey: ['tasks', namespace, limit],
     queryFn: () => api.get<ListResponse<Task>>('/tasks', { namespace, limit }),
-    refetchInterval: 10000,
+    refetchInterval,
   })
 }
 

@@ -64,6 +64,13 @@ describe('TaskCreateForm', () => {
     if (!Element.prototype.scrollIntoView) {
       Element.prototype.scrollIntoView = () => {}
     }
+    if (!globalThis.ResizeObserver) {
+      globalThis.ResizeObserver = class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      } as unknown as typeof ResizeObserver
+    }
   })
 
   it('renders form with name and type fields', () => {
@@ -218,5 +225,102 @@ describe('TaskCreateForm', () => {
       expect(toast.success).toHaveBeenCalledWith('Task created')
     })
     expect(mockNavigate).toHaveBeenCalledWith({ to: '/tasks' })
+  })
+
+  it('toggles advanced options visibility', async () => {
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    expect(screen.queryByText('Priority')).not.toBeInTheDocument()
+    expect(screen.queryByText('Timeout')).not.toBeInTheDocument()
+
+    await user.click(screen.getByText(/Advanced Options/))
+
+    expect(screen.getByText('Priority')).toBeInTheDocument()
+    expect(screen.getByText('Timeout')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('500')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('30m')).toBeInTheDocument()
+  })
+
+  it('shows workspace config fields when agent type is selected and advanced expanded', async () => {
+    useStateTypeOverride = 'agent'
+    server.use(
+      http.get('/api/v1/agents', () =>
+        HttpResponse.json({
+          items: [
+            { metadata: { name: 'my-agent', namespace: 'default' }, spec: { model: { name: 'claude' } } },
+          ],
+        }),
+      ),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    await user.click(screen.getByText(/Advanced Options/))
+
+    expect(screen.getByText('Max Turns')).toBeInTheDocument()
+    expect(screen.getByText('Allow Bash')).toBeInTheDocument()
+
+    await user.click(screen.getByText(/Workspace Configuration/))
+
+    expect(screen.getByText('Git Repo URL')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('https://github.com/org/repo')).toBeInTheDocument()
+    expect(screen.getByText('Branch')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('main')).toBeInTheDocument()
+    expect(screen.getByText('Push Branch')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('feature/my-task')).toBeInTheDocument()
+    expect(screen.getByText('Git Secret Ref')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('git-credentials')).toBeInTheDocument()
+  })
+
+  it('does not show workspace config for non-agent types', async () => {
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    await user.click(screen.getByText(/Advanced Options/))
+
+    expect(screen.queryByText('Max Turns')).not.toBeInTheDocument()
+    expect(screen.queryByText('Workspace Configuration')).not.toBeInTheDocument()
+  })
+
+  it('shows agent info card when agent is selected', async () => {
+    useStateTypeOverride = 'agent'
+    server.use(
+      http.get('/api/v1/agents', () =>
+        HttpResponse.json({
+          items: [
+            {
+              metadata: { name: 'coord-agent', namespace: 'default' },
+              spec: {
+                model: { provider: 'anthropic', name: 'claude-sonnet' },
+                runtime: { type: 'copilot' },
+                coordination: { enabled: true },
+                tools: [{ name: 'tool1' }, { name: 'tool2' }],
+              },
+            },
+          ],
+        }),
+      ),
+    )
+    render(<TaskCreateForm />)
+
+    // Wait for agents to load and select the agent
+    await waitFor(() => {
+      const trigger = screen.getByText('Agent Reference').closest('.space-y-2')!.querySelector('[role="combobox"]')!
+      fireEvent.pointerDown(trigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
+    })
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: /coord-agent/ })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('option', { name: /coord-agent/ }))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('agent-info-card')).toBeInTheDocument()
+    })
+    expect(screen.getByText('anthropic')).toBeInTheDocument()
+    expect(screen.getByText('claude-sonnet')).toBeInTheDocument()
+    expect(screen.getByText('copilot runtime')).toBeInTheDocument()
+    expect(screen.getByText('Coordination')).toBeInTheDocument()
+    expect(screen.getByText('2 tools')).toBeInTheDocument()
   })
 })

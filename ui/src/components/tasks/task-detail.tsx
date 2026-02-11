@@ -6,7 +6,11 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ArrowLeft, Trash2 } from 'lucide-react'
 import { TaskStatusBadge } from './task-status-badge'
+import { PRStatusBadge } from './pr-status-badge'
+import { PRCreateDialog } from './pr-create-dialog'
 import { TaskResultViewer } from './task-result-viewer'
+import { StructuredLogViewer } from './structured-log-viewer'
+import { TaskExecutionPanel } from './task-execution-panel'
 import { useTask, useDeleteTask } from '@/hooks/use-tasks'
 import { useNavigate } from '@tanstack/react-router'
 
@@ -47,24 +51,37 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             <p className="text-muted-foreground">{task.metadata.namespace} · {task.spec.type}</p>
           </div>
           <TaskStatusBadge phase={task.status?.phase} />
+          <PRStatusBadge annotations={task.metadata.annotations} />
         </div>
-        <Button
-          variant="destructive"
-          size="sm"
-          onClick={async () => {
-            await deleteTask.mutateAsync(task.metadata.name)
-            navigate({ to: '/tasks' })
-          }}
-        >
-          <Trash2 className="mr-2 h-4 w-4" /> Delete
-        </Button>
+        <div className="flex items-center gap-2">
+          {task.status?.phase === 'Succeeded' && task.spec.agentRuntime?.workspace?.pushBranch && (
+            <PRCreateDialog
+              taskName={task.metadata.name}
+              pushBranch={task.spec.agentRuntime.workspace.pushBranch}
+            />
+          )}
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={async () => {
+              await deleteTask.mutateAsync(task.metadata.name)
+              navigate({ to: '/tasks' })
+            }}
+          >
+            <Trash2 className="mr-2 h-4 w-4" /> Delete
+          </Button>
+        </div>
       </div>
 
       <Tabs defaultValue="overview">
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="execution">Execution</TabsTrigger>
           <TabsTrigger value="result">Result</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
+          {(task.status?.childTasks?.length ?? 0) > 0 && (
+            <TabsTrigger value="children">Children</TabsTrigger>
+          )}
         </TabsList>
 
         <TabsContent value="overview" className="space-y-4">
@@ -146,14 +163,47 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           <TaskResultViewer taskId={taskId} />
         </TabsContent>
 
-        <TabsContent value="logs">
-          <Card>
-            <CardHeader><CardTitle>Logs</CardTitle></CardHeader>
-            <CardContent>
-              <p className="text-sm text-muted-foreground">Log streaming is not yet available.</p>
-            </CardContent>
-          </Card>
+        <TabsContent value="execution">
+          <TaskExecutionPanel task={task} />
         </TabsContent>
+
+        <TabsContent value="logs">
+          <StructuredLogViewer taskId={taskId} />
+        </TabsContent>
+
+        {(task.status?.childTasks?.length ?? 0) > 0 && (
+          <TabsContent value="children">
+            <Card>
+              <CardHeader><CardTitle>Child Tasks</CardTitle></CardHeader>
+              <CardContent>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b text-left text-muted-foreground">
+                        <th className="pb-2 pr-4">Name</th>
+                        <th className="pb-2 pr-4">Agent</th>
+                        <th className="pb-2">Phase</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {task.status!.childTasks!.map((child) => (
+                        <tr key={child.name} className="border-b last:border-0">
+                          <td className="py-2 pr-4">
+                            <Link to="/tasks/$taskId" params={{ taskId: child.name }} className="text-blue-600 hover:underline dark:text-blue-400">
+                              {child.name}
+                            </Link>
+                          </td>
+                          <td className="py-2 pr-4">{child.agent}</td>
+                          <td className="py-2"><TaskStatusBadge phase={child.phase} /></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+        )}
       </Tabs>
     </div>
   )

@@ -1,9 +1,11 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Badge } from '@/components/ui/badge'
+import { Switch } from '@/components/ui/switch'
 import { useCreateTask } from '@/hooks/use-tasks'
 import { useAgentList } from '@/hooks/use-agents'
 import { useUIStore } from '@/stores/ui'
@@ -24,6 +26,25 @@ export function TaskCreateForm() {
   const [prompt, setPrompt] = useState('')
   const [agentRef, setAgentRef] = useState('')
 
+  // Advanced options
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [priority, setPriority] = useState('')
+  const [timeout, setTimeout] = useState('')
+
+  // Agent workspace options
+  const [showWorkspace, setShowWorkspace] = useState(false)
+  const [gitRepo, setGitRepo] = useState('')
+  const [branch, setBranch] = useState('')
+  const [pushBranch, setPushBranch] = useState('')
+  const [gitSecretRef, setGitSecretRef] = useState('')
+  const [maxTurns, setMaxTurns] = useState('')
+  const [allowBash, setAllowBash] = useState(false)
+
+  const selectedAgent = useMemo(
+    () => (agentsData?.items ?? []).find((a) => a.metadata.name === agentRef),
+    [agentsData, agentRef],
+  )
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     const body: Record<string, unknown> = { name, namespace, type }
@@ -36,6 +57,22 @@ export function TaskCreateForm() {
     } else if (type === 'agent') {
       body.agentRef = { name: agentRef }
       body.prompt = prompt
+    }
+
+    if (priority) body.priority = parseInt(priority)
+    if (timeout) body.timeout = timeout
+
+    if (type === 'agent') {
+      const workspace: Record<string, unknown> = {}
+      if (gitRepo) workspace.gitRepo = gitRepo
+      if (branch) workspace.branch = branch
+      if (pushBranch) workspace.pushBranch = pushBranch
+      if (gitSecretRef) workspace.gitSecretRef = { name: gitSecretRef }
+      if (Object.keys(workspace).length > 0) {
+        body.agentRuntime = { ...(body.agentRuntime as Record<string, unknown> || {}), workspace }
+      }
+      if (maxTurns) body.agentRuntime = { ...(body.agentRuntime as Record<string, unknown> || {}), maxTurns: parseInt(maxTurns) }
+      if (allowBash) body.agentRuntime = { ...(body.agentRuntime as Record<string, unknown> || {}), allowBash }
     }
 
     try {
@@ -138,6 +175,27 @@ export function TaskCreateForm() {
                     </SelectContent>
                   </Select>
                 </div>
+                {selectedAgent && (
+                  <div className="rounded-md border border-border bg-muted/50 p-3 text-sm" data-testid="agent-info-card">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {selectedAgent.spec.model?.provider && (
+                        <Badge variant="secondary">{selectedAgent.spec.model.provider}</Badge>
+                      )}
+                      {selectedAgent.spec.model?.name && (
+                        <Badge variant="outline">{selectedAgent.spec.model.name}</Badge>
+                      )}
+                      {selectedAgent.spec.runtime && (
+                        <Badge variant="secondary">{selectedAgent.spec.runtime.type} runtime</Badge>
+                      )}
+                      {selectedAgent.spec.coordination?.enabled && (
+                        <Badge>Coordination</Badge>
+                      )}
+                      {(selectedAgent.spec.tools?.length ?? 0) > 0 && (
+                        <Badge variant="outline">{selectedAgent.spec.tools!.length} tool{selectedAgent.spec.tools!.length !== 1 ? 's' : ''}</Badge>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Prompt</label>
                   <textarea
@@ -148,6 +206,110 @@ export function TaskCreateForm() {
                     required
                   />
                 </div>
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              className="text-sm text-muted-foreground hover:text-foreground flex items-center gap-1"
+            >
+              {showAdvanced ? '▼' : '▶'} Advanced Options
+            </button>
+            {showAdvanced && (
+              <div className="space-y-4 border-l-2 border-border pl-4">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Priority</label>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={1000}
+                      value={priority}
+                      onChange={(e) => setPriority(e.target.value)}
+                      placeholder="500"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Timeout</label>
+                    <Input
+                      value={timeout}
+                      onChange={(e) => setTimeout(e.target.value)}
+                      placeholder="30m"
+                    />
+                  </div>
+                </div>
+
+                {type === 'agent' && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setShowWorkspace(!showWorkspace)}
+                      className="text-sm text-muted-foreground hover:text-foreground flex items-center gap-1"
+                    >
+                      {showWorkspace ? '▼' : '▶'} Workspace Configuration
+                    </button>
+                    {showWorkspace && (
+                      <div className="space-y-4 border-l-2 border-border pl-4">
+                        <div className="grid gap-4 md:grid-cols-2">
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium">Git Repo URL</label>
+                            <Input
+                              value={gitRepo}
+                              onChange={(e) => setGitRepo(e.target.value)}
+                              placeholder="https://github.com/org/repo"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium">Branch</label>
+                            <Input
+                              value={branch}
+                              onChange={(e) => setBranch(e.target.value)}
+                              placeholder="main"
+                            />
+                          </div>
+                        </div>
+                        <div className="grid gap-4 md:grid-cols-2">
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium">Push Branch</label>
+                            <Input
+                              value={pushBranch}
+                              onChange={(e) => setPushBranch(e.target.value)}
+                              placeholder="feature/my-task"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium">Git Secret Ref</label>
+                            <Input
+                              value={gitSecretRef}
+                              onChange={(e) => setGitSecretRef(e.target.value)}
+                              placeholder="git-credentials"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium">Max Turns</label>
+                        <Input
+                          type="number"
+                          min={1}
+                          value={maxTurns}
+                          onChange={(e) => setMaxTurns(e.target.value)}
+                          placeholder="10"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium">Allow Bash</label>
+                        <div className="flex items-center gap-2 pt-1">
+                          <Switch checked={allowBash} onCheckedChange={setAllowBash} />
+                          <span className="text-sm text-muted-foreground">{allowBash ? 'Enabled' : 'Disabled'}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
             )}
 

@@ -23,3 +23,7 @@
 !ui/public/**
 !ui/src/
 !ui/src/**
+
+# Re-include pre-built UI assets for embed
+!internal/uiembed/dist/
+!internal/uiembed/dist/**
