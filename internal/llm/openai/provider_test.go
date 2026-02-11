@@ -109,7 +109,8 @@ func TestProvider_ClientNotNil(t *testing.T) {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
 
-	if provider.client == nil {
-		t.Error("client should not be nil")
+	// Verify the provider was created (client is a value type, always initialized)
+	if provider == nil {
+		t.Error("provider should not be nil")
 	}
 }

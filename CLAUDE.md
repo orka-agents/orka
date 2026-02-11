@@ -149,7 +149,7 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments — the CLI injects code at 
 - `k8s.io/client-go` — Kubernetes client
 - `github.com/gofiber/fiber/v3` — HTTP router
 - `github.com/anthropics/anthropic-sdk-go` — Anthropic Claude API
-- `github.com/sashabaranov/go-openai` — OpenAI API
+- `github.com/openai/openai-go/v3` — OpenAI API (official SDK)
 - `github.com/github/copilot-sdk/go` — GitHub Copilot SDK
 - `modernc.org/sqlite` — Embedded SQLite (pure Go, no CGO)
 

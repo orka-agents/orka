@@ -651,10 +651,16 @@ func (h *OpenAICompatHandler) resolveProviderFromModel(ctx context.Context, mode
 		return nil, "", fmt.Errorf("no model specified and no default model configured")
 	}
 
-	provider, err := llm.NewProvider(string(providerCRD.Spec.Type), llm.ProviderConfig{
-		APIKey:  string(apiKeyBytes),
-		BaseURL: providerCRD.Spec.BaseURL,
-	})
+	providerConfig := llm.ProviderConfig{
+		APIKey:       string(apiKeyBytes),
+		BaseURL:      providerCRD.Spec.BaseURL,
+		ProviderType: string(providerCRD.Spec.Type),
+	}
+	if providerCRD.Spec.Azure != nil {
+		providerConfig.AzureAPIVersion = providerCRD.Spec.Azure.APIVersion
+	}
+
+	provider, err := llm.NewProvider(string(providerCRD.Spec.Type), providerConfig)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to create LLM provider: %w", err)
 	}
