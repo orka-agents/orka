@@ -217,7 +217,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout, ch.resultStore)
 
 	// Build completion request parameters
-	temperature := 0.7
+	var temperature float64
 	if req.Temperature != nil {
 		temperature = *req.Temperature
 	}
@@ -682,10 +682,16 @@ func (ch *ChatHandler) resolveProvider(ctx context.Context, req ChatRequest, nam
 		model = ch.config.Model
 	}
 
-	provider, err := llm.NewProvider(string(providerType), llm.ProviderConfig{
-		APIKey:  apiKey,
-		BaseURL: baseURL,
-	})
+	providerConfig := llm.ProviderConfig{
+		APIKey:       apiKey,
+		BaseURL:      baseURL,
+		ProviderType: string(providerType),
+	}
+	if providerCRD.Spec.Azure != nil {
+		providerConfig.AzureAPIVersion = providerCRD.Spec.Azure.APIVersion
+	}
+
+	provider, err := llm.NewProvider(string(providerType), providerConfig)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to create LLM provider: %w", err)
 	}

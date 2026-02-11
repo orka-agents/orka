@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openai-api-key
+type: Opaque
+stringData:
+  api-key: "${OPENAI_API_KEY}"
+---
+apiVersion: core.mercan.ai/v1alpha1
+kind: Provider
+metadata:
+  name: openai
+spec:
+  type: openai
+  secretRef:
+    name: openai-api-key
+  defaultModel: gpt-4o

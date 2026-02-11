@@ -24,10 +24,10 @@ import (
 
 const (
 	// DefaultAIWorkerImage is the default image for AI tasks
-	DefaultAIWorkerImage = "mercan-ai-worker:latest"
+	DefaultAIWorkerImage = "docker.io/sozercan/mercan-ai-worker:latest"
 
 	// DefaultGeneralWorkerImage is the default image for container tasks
-	DefaultGeneralWorkerImage = "mercan-general-worker:latest"
+	DefaultGeneralWorkerImage = "docker.io/sozercan/mercan-general-worker:latest"
 
 	// DefaultCopilotWorkerImage is the default image for Copilot agent tasks
 	DefaultCopilotWorkerImage = "mercan-agent-worker-copilot:latest"
@@ -170,7 +170,7 @@ func (b *JobBuilder) buildContainerSecurityContext() *corev1.SecurityContext {
 func (b *JobBuilder) buildContainer(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) corev1.Container {
 	container := corev1.Container{
 		Name:            "worker",
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: corev1.PullAlways,
 		SecurityContext: b.buildContainerSecurityContext(),
 		Resources:       b.buildResources(task, agent),
 		Env:             b.buildEnvVars(task, agent, provider),

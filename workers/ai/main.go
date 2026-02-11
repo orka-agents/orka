@@ -65,9 +65,12 @@ func run() error {
 	}
 
 	// Create LLM provider
+	azureAPIVersion := os.Getenv("MERCAN_AI_AZURE_API_VERSION")
 	llmProvider, err := llm.NewProvider(provider, llm.ProviderConfig{
-		APIKey:  apiKey,
-		BaseURL: baseURL,
+		APIKey:          apiKey,
+		BaseURL:         baseURL,
+		ProviderType:    provider,
+		AzureAPIVersion: azureAPIVersion,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create LLM provider: %w", err)
@@ -213,7 +216,7 @@ func getAPIKey(provider string) string {
 		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
 			return key
 		}
-	case "openai":
+	case "openai", "azure-openai":
 		if key := os.Getenv("OPENAI_API_KEY"); key != "" {
 			return key
 		}

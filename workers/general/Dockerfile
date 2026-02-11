@@ -13,8 +13,12 @@ COPY . .
 # Build the worker
 RUN CGO_ENABLED=0 GOOS=linux go build -a -o worker ./workers/general
 
-# Runtime stage
-FROM gcr.io/distroless/static:nonroot
+# Runtime stage — alpine with common tools (sh, curl, etc.)
+FROM alpine:3.22
+
+RUN apk add --no-cache curl bash && \
+    wget -q "https://dl.k8s.io/release/$(wget -qO- https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+      -O /usr/local/bin/kubectl && chmod +x /usr/local/bin/kubectl
 
 WORKDIR /
 

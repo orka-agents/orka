@@ -29,10 +29,10 @@ import (
 // A test PR must be created before running (see TestIntegration_ReviewPullRequest for PR number).
 
 const (
-	integrationRepo      = "https://github.com/sozercan/ayna"
-	integrationTaskName  = "integration-test-task"
+	integrationRepo       = "https://github.com/sozercan/ayna"
+	integrationTaskName   = "integration-test-task"
 	integrationSecretName = "integration-git-secret"
-	integrationPRNumber  = 67
+	integrationPRNumber   = 67
 )
 
 func setupIntegrationClient(t *testing.T) (*fake.ClientBuilder, string) {

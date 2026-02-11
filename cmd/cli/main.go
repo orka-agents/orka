@@ -12,123 +12,112 @@ import (
 	"os/exec"
 	"runtime"
 
+	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		printUsage()
+	rootCmd := newRootCmd()
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-
-	switch os.Args[0] + " " + os.Args[1] {
-	case programName() + " login":
-		loginCmd(os.Args[2:])
-	default:
-		// If called as just "mercan login" or with other subcommands
-		if os.Args[1] == "login" {
-			loginCmd(os.Args[2:])
-		} else {
-			fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
-			printUsage()
-			os.Exit(1)
-		}
-	}
 }
 
-func programName() string {
-	if len(os.Args) > 0 {
-		return os.Args[0]
+func newRootCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:           "mercan",
+		Short:         "Mercan CLI — Kubernetes-native task execution platform",
+		Long:          "Mercan CLI — Kubernetes-native task execution platform",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			// Load config file defaults for flags not explicitly set.
+			if cfg, err := loadConfig(); err == nil {
+				flags := cmd.Root().PersistentFlags()
+				if cfg.Server != "" && !flags.Changed("server") {
+					_ = flags.Set("server", cfg.Server)
+				}
+				if cfg.Token != "" && !flags.Changed("token") {
+					_ = flags.Set("token", cfg.Token)
+				}
+			}
+
+			// Skip auth resolution for login and config commands
+			if cmd.Name() == "login" || cmd.Parent() != nil && cmd.Parent().Name() == "config" {
+				return nil
+			}
+			token, _ := cmd.Root().PersistentFlags().GetString("token")
+			if token != "" {
+				return nil
+			}
+			kubeconfig, _ := cmd.Root().PersistentFlags().GetString("kubeconfig")
+			extracted, err := extractToken(kubeconfig)
+			if err != nil {
+				return nil // non-fatal: some commands may not need auth
+			}
+			if extracted != "" {
+				_ = cmd.Root().PersistentFlags().Set("token", extracted)
+			}
+			return nil
+		},
 	}
-	return "mercan"
+
+	cmd.PersistentFlags().String("server", "http://localhost:8080", "Mercan server URL")
+	cmd.PersistentFlags().String("token", "", "Authentication token")
+	cmd.PersistentFlags().String("kubeconfig", "", "Path to kubeconfig file")
+	cmd.PersistentFlags().StringP("namespace", "n", "default", "Kubernetes namespace")
+	cmd.PersistentFlags().StringP("output", "o", "table", "Output format (table, json, yaml)")
+
+	cmd.AddCommand(
+		newLoginCmd(),
+		newTaskCmd(),
+		newAgentCmd(),
+		newSessionCmd(),
+		newToolCmd(),
+		newRunCmd(),
+		newConfigCmd(),
+	)
+
+	return cmd
 }
 
-func printUsage() {
-	fmt.Fprintf(os.Stderr, `Usage: mercan <command>
+func newLoginCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "login",
+		Short: "Authenticate with the Mercan dashboard",
+		Long:  "Extract a token from your kubeconfig and open the Mercan dashboard in your browser.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			server, _ := cmd.Root().PersistentFlags().GetString("server")
+			token, _ := cmd.Flags().GetString("token")
+			kubeconfig, _ := cmd.Root().PersistentFlags().GetString("kubeconfig")
 
-Commands:
-  login    Authenticate with the Mercan dashboard
-
-Run 'mercan login --help' for more information.
-`)
-}
-
-func loginCmd(args []string) {
-	var server string
-	var kubeconfig string
-	var token string
-	var help bool
-
-	// Simple flag parsing for the login subcommand
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--server", "-s":
-			if i+1 < len(args) {
-				i++
-				server = args[i]
+			if token == "" {
+				var err error
+				token, err = extractToken(kubeconfig)
+				if err != nil {
+					return fmt.Errorf("error extracting token from kubeconfig: %w\nYou can provide a token directly with --token", err)
+				}
 			}
-		case "--kubeconfig":
-			if i+1 < len(args) {
-				i++
-				kubeconfig = args[i]
+
+			if token == "" {
+				return fmt.Errorf("no token found in kubeconfig. Use --token to provide one directly")
 			}
-		case "--token", "-t":
-			if i+1 < len(args) {
-				i++
-				token = args[i]
+
+			loginURL := fmt.Sprintf("%s/#token=%s", server, token)
+
+			fmt.Printf("Opening Mercan dashboard at %s\n", server)
+			if err := openBrowser(loginURL); err != nil {
+				fmt.Fprintf(os.Stderr, "Could not open browser: %v\n", err)
+				fmt.Printf("\nOpen this URL manually:\n  %s\n", loginURL)
 			}
-		case "--help", "-h":
-			help = true
-		default:
-			if args[i][0] == '-' {
-				fmt.Fprintf(os.Stderr, "Unknown flag: %s\n", args[i])
-				os.Exit(1)
-			}
-		}
+			return nil
+		},
 	}
 
-	if help {
-		fmt.Print(`Usage: mercan login [flags]
+	cmd.Flags().StringP("token", "t", "", "Use a specific token instead of extracting from kubeconfig")
 
-Extract a token from your kubeconfig and open the Mercan dashboard in your browser.
-
-Flags:
-  -s, --server string       Mercan server URL (default "http://localhost:8080")
-  -t, --token string        Use a specific token instead of extracting from kubeconfig
-      --kubeconfig string   Path to kubeconfig file (default: $KUBECONFIG or ~/.kube/config)
-  -h, --help                Show this help message
-`)
-		return
-	}
-
-	if server == "" {
-		server = "http://localhost:8080"
-	}
-
-	// Get token
-	if token == "" {
-		var err error
-		token, err = extractToken(kubeconfig)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error extracting token from kubeconfig: %v\n", err)
-			fmt.Fprintf(os.Stderr, "You can provide a token directly with --token\n")
-			os.Exit(1)
-		}
-	}
-
-	if token == "" {
-		fmt.Fprintln(os.Stderr, "No token found in kubeconfig. Use --token to provide one directly.")
-		os.Exit(1)
-	}
-
-	// Build the login URL
-	loginURL := fmt.Sprintf("%s/#token=%s", server, token)
-
-	fmt.Printf("Opening Mercan dashboard at %s\n", server)
-	if err := openBrowser(loginURL); err != nil {
-		fmt.Fprintf(os.Stderr, "Could not open browser: %v\n", err)
-		fmt.Printf("\nOpen this URL manually:\n  %s\n", loginURL)
-	}
+	return cmd
 }
 
 // extractToken reads the bearer token from the current kubeconfig context.
@@ -147,7 +136,6 @@ func extractToken(kubeconfigPath string) (string, error) {
 		return "", fmt.Errorf("failed to load kubeconfig: %w", err)
 	}
 
-	// Get current context
 	contextName := rawConfig.CurrentContext
 	if contextName == "" {
 		return "", fmt.Errorf("no current context set in kubeconfig")
@@ -163,12 +151,10 @@ func extractToken(kubeconfigPath string) (string, error) {
 		return "", fmt.Errorf("user %q not found in kubeconfig", ctx.AuthInfo)
 	}
 
-	// Try bearer token first
 	if authInfo.Token != "" {
 		return authInfo.Token, nil
 	}
 
-	// Try token file
 	if authInfo.TokenFile != "" {
 		data, err := os.ReadFile(authInfo.TokenFile)
 		if err != nil {
@@ -177,7 +163,6 @@ func extractToken(kubeconfigPath string) (string, error) {
 		return string(data), nil
 	}
 
-	// Try exec-based auth (e.g., gke-gcloud-auth-plugin, aws-iam-authenticator)
 	if authInfo.Exec != nil {
 		restConfig, err := config.ClientConfig()
 		if err != nil {
@@ -188,7 +173,6 @@ func extractToken(kubeconfigPath string) (string, error) {
 		}
 	}
 
-	// Try auth provider (e.g., OIDC)
 	if authInfo.AuthProvider != nil {
 		restConfig, err := config.ClientConfig()
 		if err != nil {

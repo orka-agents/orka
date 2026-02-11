@@ -747,6 +747,35 @@ func (e *ToolExecutor) executeCreateAgent(ctx context.Context, args map[string]a
 		}
 	}
 
+	if coord, ok := args["coordination"]; ok {
+		if coordMap, ok := coord.(map[string]any); ok {
+			coordCfg := &corev1alpha1.CoordinationConfig{}
+			if enabled, ok := coordMap["enabled"].(bool); ok {
+				coordCfg.Enabled = enabled
+			}
+			if maxCC, ok := coordMap["maxConcurrentChildren"].(float64); ok {
+				coordCfg.MaxConcurrentChildren = int32(maxCC)
+			}
+			if maxD, ok := coordMap["maxDepth"].(float64); ok {
+				coordCfg.MaxDepth = int32(maxD)
+			}
+			if allowed, ok := coordMap["allowedAgents"].([]any); ok {
+				for _, a := range allowed {
+					if aMap, ok := a.(map[string]any); ok {
+						aa := corev1alpha1.AllowedAgent{
+							Name:      getStringArg(aMap, "name"),
+							Namespace: getStringArg(aMap, "namespace"),
+						}
+						if aa.Name != "" {
+							coordCfg.AllowedAgents = append(coordCfg.AllowedAgents, aa)
+						}
+					}
+				}
+			}
+			agent.Spec.Coordination = coordCfg
+		}
+	}
+
 	if err := e.client.Create(ctx, agent); err != nil {
 		return classifyK8sError(err)
 	}

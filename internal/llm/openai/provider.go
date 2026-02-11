@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"strings"
 
 	"github.com/sashabaranov/go-openai"
 
@@ -18,6 +19,9 @@ import (
 
 func init() {
 	llm.RegisterProvider("openai", func(config llm.ProviderConfig) (llm.Provider, error) {
+		return NewProvider(config)
+	})
+	llm.RegisterProvider("azure-openai", func(config llm.ProviderConfig) (llm.Provider, error) {
 		return NewProvider(config)
 	})
 }
@@ -34,9 +38,17 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 		return nil, llm.ErrAPIKeyRequired
 	}
 
-	clientConfig := openai.DefaultConfig(config.APIKey)
-	if config.BaseURL != "" {
-		clientConfig.BaseURL = config.BaseURL
+	var clientConfig openai.ClientConfig
+	if config.ProviderType == "azure-openai" {
+		// Azure OpenAI v1 endpoint: {baseURL}/openai/v1/chat/completions
+		// Uses Bearer token auth (same as OpenAI), no api-version needed.
+		clientConfig = openai.DefaultConfig(config.APIKey)
+		clientConfig.BaseURL = strings.TrimRight(config.BaseURL, "/") + "/openai/v1"
+	} else {
+		clientConfig = openai.DefaultConfig(config.APIKey)
+		if config.BaseURL != "" {
+			clientConfig.BaseURL = config.BaseURL
+		}
 	}
 
 	client := openai.NewClientWithConfig(clientConfig)
@@ -107,7 +119,7 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 	}
 
 	if req.MaxTokens > 0 {
-		chatReq.MaxTokens = req.MaxTokens
+		chatReq.MaxCompletionTokens = req.MaxTokens
 	}
 
 	if req.Temperature > 0 {
@@ -212,7 +224,7 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 		}
 
 		if req.MaxTokens > 0 {
-			chatReq.MaxTokens = req.MaxTokens
+			chatReq.MaxCompletionTokens = req.MaxTokens
 		}
 
 		stream, err := p.client.CreateChatCompletionStream(ctx, chatReq)

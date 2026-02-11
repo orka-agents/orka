@@ -23,3 +23,5 @@
 !ui/public/**
 !ui/src/
 !ui/src/**
+!internal/uiembed/dist/
+!internal/uiembed/dist/**

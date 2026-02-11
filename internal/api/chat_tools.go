@@ -175,7 +175,7 @@ func ManagementTools() []llm.Tool {
 	return []llm.Tool{
 		{
 			Name:        "create_agent",
-			Description: "Create an Agent CRD with model, tools, and optional runtime configuration.",
+			Description: "Create an Agent CRD with model, tools, and optional runtime and coordination configuration. Enable coordination to allow this agent to delegate tasks to other agents.",
 			Parameters: mustMarshal(map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -196,6 +196,27 @@ func ManagementTools() []llm.Tool {
 						"properties": map[string]any{
 							"type":            map[string]any{"type": "string", "description": "Runtime type: copilot or claude"},
 							"defaultMaxTurns": map[string]any{"type": "integer", "description": "Default max agent loop iterations"},
+						},
+					},
+					"coordination": map[string]any{
+						"type":        "object",
+						"description": "Enable multi-agent coordination so this agent can delegate tasks to other agents via delegate_task/wait_for_tasks tools",
+						"properties": map[string]any{
+							"enabled":               map[string]any{"type": "boolean", "description": "Enable coordination (delegate_task/wait_for_tasks tools)"},
+							"maxConcurrentChildren": map[string]any{"type": "integer", "description": "Max concurrent child tasks (default 5)"},
+							"maxDepth":              map[string]any{"type": "integer", "description": "Max delegation depth (default 3)"},
+							"allowedAgents": map[string]any{
+								"type":        "array",
+								"description": "List of agent names this agent can delegate to. If empty, can delegate to any agent.",
+								"items": map[string]any{
+									"type": "object",
+									"properties": map[string]any{
+										"name":      map[string]any{"type": "string", "description": "Agent name"},
+										"namespace": map[string]any{"type": "string", "description": "Agent namespace (defaults to same namespace)"},
+									},
+									"required": []string{"name"},
+								},
+							},
 						},
 					},
 				},
