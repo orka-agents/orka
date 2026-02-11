@@ -16,7 +16,7 @@ import (
 
 func TestPrepareWorkspace_NoOp(t *testing.T) {
 	// When MERCAN_PRIOR_TASK is not set, PrepareWorkspace should be a no-op
-	os.Unsetenv("MERCAN_PRIOR_TASK")
+	os.Unsetenv("MERCAN_PRIOR_TASK") //nolint:errcheck
 	err := PrepareWorkspace("/tmp/test")
 	if err != nil {
 		t.Errorf("expected no error when MERCAN_PRIOR_TASK not set, got: %v", err)
@@ -37,7 +37,7 @@ func TestPrepareWorkspace_NoDiffInResult(t *testing.T) {
 	sr := StructuredResult{Version: 1, Summary: "completed"}
 	resultJSON, _ := json.Marshal(sr)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]string{"result": string(resultJSON)})
+		json.NewEncoder(w).Encode(map[string]string{"result": string(resultJSON)}) //nolint:errcheck
 	}))
 	defer server.Close()
 

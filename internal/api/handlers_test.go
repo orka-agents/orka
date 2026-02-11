@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -29,8 +30,8 @@ import (
 
 func setupTestHandlers() (*Handlers, *fiber.App) {
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
@@ -43,8 +44,8 @@ func setupTestHandlers() (*Handlers, *fiber.App) {
 
 func setupTestHandlersWithObjects(objs ...runtime.Object) (*Handlers, *fiber.App) {
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	db, _ := sqlite.NewDB(":memory:")
@@ -181,7 +182,7 @@ func TestHandlers_CreateTask_DefaultNamespace(t *testing.T) {
 
 func TestHandlers_CreateTask_NamespaceScoped(t *testing.T) {
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	handlers := NewHandlers(fakeClient, nil, "allowed-ns", nil, nil)
 
@@ -500,7 +501,7 @@ func TestHandlers_GetTaskResult_Success(t *testing.T) {
 
 	handlers, app := setupTestHandlersWithObjects(task)
 	// Save result to store
-	handlers.resultStore.SaveResult(context.Background(), "default", "test-task", []byte("task result content"))
+	require.NoError(t, handlers.resultStore.SaveResult(context.Background(), "default", "test-task", []byte("task result content")))
 	app.Get("/tasks/:id/result", handlers.GetTaskResult)
 
 	req := httptest.NewRequest(http.MethodGet, "/tasks/test-task/result", nil)
@@ -723,8 +724,8 @@ func TestNewHandlers(t *testing.T) {
 
 func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *sqlite.Store) {
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
@@ -741,7 +742,7 @@ func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *sqlite.Store
 func TestHandlers_ListSessions_Success(t *testing.T) {
 	handlers, app, ss := setupTestHandlersWithSessionManager()
 	ctx := context.Background()
-	ss.CreateSession(ctx, &store.SessionRecord{
+	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
 		Namespace:    "default",
 		Name:         "my-session",
 		SessionType:  "task",
@@ -763,7 +764,7 @@ func TestHandlers_ListSessions_Success(t *testing.T) {
 	}
 
 	var result ListResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
 	items, ok := result.Items.([]any)
 	if !ok || len(items) != 1 {
 		t.Errorf("Expected 1 session, got %v", result.Items)
@@ -785,7 +786,7 @@ func TestHandlers_ListSessions_Empty(t *testing.T) {
 	}
 
 	var result ListResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
 	items, ok := result.Items.([]any)
 	if !ok || len(items) != 0 {
 		t.Errorf("Expected 0 sessions, got %v", result.Items)
@@ -810,8 +811,8 @@ func TestHandlers_ListSessions_DefaultNamespace(t *testing.T) {
 
 func TestHandlers_ListSessions_WatchNamespace(t *testing.T) {
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
@@ -839,7 +840,7 @@ func TestHandlers_ListSessions_WatchNamespace(t *testing.T) {
 func TestHandlers_GetSession_Success(t *testing.T) {
 	handlers, app, ss := setupTestHandlersWithSessionManager()
 	ctx := context.Background()
-	ss.CreateSession(ctx, &store.SessionRecord{
+	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
 		Namespace:    "default",
 		Name:         "my-session",
 		SessionType:  "task",
@@ -861,7 +862,7 @@ func TestHandlers_GetSession_Success(t *testing.T) {
 	}
 
 	var result map[string]any
-	json.NewDecoder(resp.Body).Decode(&result)
+	json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
 	if result["name"] != "my-session" {
 		t.Errorf("name = %v, want my-session", result["name"])
 	}
@@ -887,8 +888,8 @@ func TestHandlers_GetSession_NotFound(t *testing.T) {
 
 func TestHandlers_GetSession_WatchNamespace(t *testing.T) {
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
@@ -897,7 +898,7 @@ func TestHandlers_GetSession_WatchNamespace(t *testing.T) {
 	handlers := NewHandlers(fakeClient, sm, "watched-ns", ss, ss)
 
 	ctx := context.Background()
-	ss.CreateSession(ctx, &store.SessionRecord{
+	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
 		Namespace:   "watched-ns",
 		Name:        "my-session",
 		SessionType: "task",
@@ -923,7 +924,7 @@ func TestHandlers_GetSession_WatchNamespace(t *testing.T) {
 func TestHandlers_DeleteSession_Success(t *testing.T) {
 	handlers, app, ss := setupTestHandlersWithSessionManager()
 	ctx := context.Background()
-	ss.CreateSession(ctx, &store.SessionRecord{
+	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
 		Namespace:   "default",
 		Name:        "my-session",
 		SessionType: "task",
@@ -960,8 +961,8 @@ func TestHandlers_DeleteSession_NotFound(t *testing.T) {
 
 func TestHandlers_DeleteSession_WatchNamespace(t *testing.T) {
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
@@ -970,7 +971,7 @@ func TestHandlers_DeleteSession_WatchNamespace(t *testing.T) {
 	handlers := NewHandlers(fakeClient, sm, "watched-ns", ss, ss)
 
 	ctx := context.Background()
-	ss.CreateSession(ctx, &store.SessionRecord{
+	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
 		Namespace:   "watched-ns",
 		Name:        "my-session",
 		SessionType: "task",
@@ -1022,8 +1023,8 @@ func TestHandlers_GetTaskLogs_WatchNamespace(t *testing.T) {
 	}
 
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
 	handlers := NewHandlers(fakeClient, nil, "watched-ns", nil, nil)
 
@@ -1115,7 +1116,7 @@ func TestHandlers_GetTaskResult_DefaultKey(t *testing.T) {
 	}
 
 	handlers, app := setupTestHandlersWithObjects(task)
-	handlers.resultStore.SaveResult(context.Background(), "default", "test-task", []byte("default key content"))
+	handlers.resultStore.SaveResult(context.Background(), "default", "test-task", []byte("default key content")) //nolint:errcheck
 	app.Get("/tasks/:id/result", handlers.GetTaskResult)
 
 	req := httptest.NewRequest(http.MethodGet, "/tasks/test-task/result", nil)
@@ -1146,12 +1147,12 @@ func TestHandlers_GetTaskResult_WatchNamespace(t *testing.T) {
 	}
 
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	ss.SaveResult(context.Background(), "watched-ns", "test-task", []byte("task result content"))
+	ss.SaveResult(context.Background(), "watched-ns", "test-task", []byte("task result content")) //nolint:errcheck
 	handlers := NewHandlers(fakeClient, nil, "watched-ns", ss, ss)
 
 	app := fiber.New()
@@ -1182,8 +1183,8 @@ func TestHandlers_DeleteTask_WatchNamespace(t *testing.T) {
 	}
 
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
 	handlers := NewHandlers(fakeClient, nil, "watched-ns", nil, nil)
 
@@ -1208,7 +1209,7 @@ func TestReadLines(t *testing.T) {
 	r := strings.NewReader(input)
 	ch := readLines(r)
 
-	var lines []string
+	lines := make([]string, 0, 3)
 	for line := range ch {
 		lines = append(lines, line)
 	}
@@ -1225,7 +1226,7 @@ func TestReadLines_Empty(t *testing.T) {
 	r := strings.NewReader("")
 	ch := readLines(r)
 
-	var lines []string
+	lines := make([]string, 0)
 	for line := range ch {
 		lines = append(lines, line)
 	}
@@ -1239,7 +1240,7 @@ func TestReadLines_SingleLine(t *testing.T) {
 	r := strings.NewReader("single line")
 	ch := readLines(r)
 
-	var lines []string
+	lines := make([]string, 0, 1)
 	for line := range ch {
 		lines = append(lines, line)
 	}
@@ -1256,7 +1257,7 @@ func TestReadLines_MultipleLines_NoTrailingNewline(t *testing.T) {
 	r := strings.NewReader("line1\nline2")
 	ch := readLines(r)
 
-	var lines []string
+	lines := make([]string, 0, 2)
 	for line := range ch {
 		lines = append(lines, line)
 	}

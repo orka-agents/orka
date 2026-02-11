@@ -57,7 +57,7 @@ func PrepareWorkspace(workDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to fetch prior task result: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
@@ -92,7 +92,7 @@ func PrepareWorkspace(workDir string) error {
 	if err := os.WriteFile(diffPath, []byte(sr.Diff), 0o600); err != nil {
 		return fmt.Errorf("failed to write diff to temp file: %w", err)
 	}
-	defer os.Remove(diffPath)
+	defer os.Remove(diffPath) //nolint:errcheck
 
 	// Dry-run check.
 	if out, err := execGit(workDir, "apply", "--check", diffPath); err != nil {
@@ -126,7 +126,7 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 	baseSHA = strings.TrimSpace(baseSHA)
 
 	// Stage any new untracked files so they appear in the diff
-	execGit(workDir, "add", "-A")
+	execGit(workDir, "add", "-A") //nolint:errcheck
 
 	diff, err := execGit(workDir, "diff", "--cached", "--binary", "--full-index")
 	if err != nil {
@@ -186,8 +186,8 @@ func pushChanges(workDir, branch string) error {
 	}
 
 	// Configure committer identity
-	execGit(workDir, "config", "user.email", "mercan@ai")
-	execGit(workDir, "config", "user.name", "Mercan AI")
+	execGit(workDir, "config", "user.email", "mercan@ai") //nolint:errcheck
+	execGit(workDir, "config", "user.name", "Mercan AI")  //nolint:errcheck
 
 	// Commit
 	if out, err := execGit(workDir, "commit", "-m", "feat: changes from mercan agent"); err != nil {

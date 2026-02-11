@@ -57,86 +57,8 @@ func (p *Provider) Name() string {
 
 // Complete sends a completion request
 func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
-	// Convert messages to Anthropic format
-	messages := make([]anthropic.MessageParam, 0, len(req.Messages))
-	for _, msg := range req.Messages {
-		switch msg.Role {
-		case "user":
-			messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)))
-		case "assistant":
-			if len(msg.ToolCalls) > 0 {
-				// Handle tool use response
-				blocks := make([]anthropic.ContentBlockParamUnion, 0)
-				if msg.Content != "" {
-					blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
-				}
-				for _, tc := range msg.ToolCalls {
-					var input map[string]any
-					json.Unmarshal(tc.Arguments, &input)
-					blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, input, tc.Name))
-				}
-				messages = append(messages, anthropic.NewAssistantMessage(blocks...))
-			} else {
-				messages = append(messages, anthropic.NewAssistantMessage(anthropic.NewTextBlock(msg.Content)))
-			}
-		case "tool":
-			// Tool result
-			messages = append(messages, anthropic.NewUserMessage(
-				anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false),
-			))
-		}
-	}
-
-	// Build request params
-	maxTokens := int64(4096)
-	if req.MaxTokens > 0 {
-		maxTokens = int64(req.MaxTokens)
-	}
-
-	params := anthropic.MessageNewParams{
-		Model:     anthropic.Model(req.Model),
-		Messages:  messages,
-		MaxTokens: maxTokens,
-	}
-
-	if req.SystemPrompt != "" {
-		params.System = []anthropic.TextBlockParam{
-			{Text: req.SystemPrompt},
-		}
-	}
-
-	if req.Temperature > 0 {
-		params.Temperature = anthropic.Float(req.Temperature)
-	}
-
-	// Add tools if present
-	if len(req.Tools) > 0 {
-		tools := make([]anthropic.ToolUnionParam, 0, len(req.Tools))
-		for _, tool := range req.Tools {
-			var schema map[string]any
-			json.Unmarshal(tool.Parameters, &schema)
-
-			var required []string
-			if reqField, ok := schema["required"].([]any); ok {
-				for _, r := range reqField {
-					if s, ok := r.(string); ok {
-						required = append(required, s)
-					}
-				}
-			}
-
-			toolParam := anthropic.ToolParam{
-				Name:        tool.Name,
-				Description: anthropic.String(tool.Description),
-				InputSchema: anthropic.ToolInputSchemaParam{
-					Properties: schema["properties"],
-					Required:   required,
-				},
-			}
-			tools = append(tools, anthropic.ToolUnionParam{OfTool: &toolParam})
-		}
-		params.Tools = tools
-	}
+	messages := buildMessages(req.Messages)
+	params := buildRequestParams(req, messages)
 
 	// Make the request
 	message, err := p.client.Messages.New(ctx, params)
@@ -172,6 +94,147 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 	return resp, nil
 }
 
+// buildMessages converts llm messages to Anthropic format.
+func buildMessages(msgs []llm.Message) []anthropic.MessageParam {
+	messages := make([]anthropic.MessageParam, 0, len(msgs))
+	for _, msg := range msgs {
+		switch msg.Role {
+		case "user":
+			messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)))
+		case "assistant":
+			if len(msg.ToolCalls) > 0 {
+				blocks := []anthropic.ContentBlockParamUnion{}
+				if msg.Content != "" {
+					blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
+				}
+				for _, tc := range msg.ToolCalls {
+					var input any
+					_ = json.Unmarshal(tc.Arguments, &input)
+					blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, input, tc.Name))
+				}
+				messages = append(messages, anthropic.NewAssistantMessage(blocks...))
+			} else {
+				messages = append(messages, anthropic.NewAssistantMessage(anthropic.NewTextBlock(msg.Content)))
+			}
+		case "tool":
+			messages = append(messages, anthropic.NewUserMessage(
+				anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false),
+			))
+		}
+	}
+	return messages
+}
+
+// buildToolParams converts llm tool definitions to Anthropic tool params.
+func buildToolParams(tools []llm.Tool) []anthropic.ToolUnionParam {
+	params := make([]anthropic.ToolUnionParam, 0, len(tools))
+	for _, tool := range tools {
+		var schema map[string]any
+		_ = json.Unmarshal(tool.Parameters, &schema)
+
+		var required []string
+		if reqField, ok := schema["required"].([]any); ok {
+			for _, r := range reqField {
+				if s, ok := r.(string); ok {
+					required = append(required, s)
+				}
+			}
+		}
+
+		toolParam := anthropic.ToolParam{
+			Name:        tool.Name,
+			Description: anthropic.String(tool.Description),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: schema["properties"],
+				Required:   required,
+			},
+		}
+		params = append(params, anthropic.ToolUnionParam{OfTool: &toolParam})
+	}
+	return params
+}
+
+// buildRequestParams creates Anthropic MessageNewParams from a completion request.
+func buildRequestParams(req *llm.CompletionRequest, messages []anthropic.MessageParam) anthropic.MessageNewParams {
+	maxTokens := int64(4096)
+	if req.MaxTokens > 0 {
+		maxTokens = int64(req.MaxTokens)
+	}
+
+	params := anthropic.MessageNewParams{
+		Model:     anthropic.Model(req.Model),
+		Messages:  messages,
+		MaxTokens: maxTokens,
+	}
+
+	if req.SystemPrompt != "" {
+		params.System = []anthropic.TextBlockParam{
+			{Text: req.SystemPrompt},
+		}
+	}
+
+	if req.Temperature > 0 {
+		params.Temperature = anthropic.Float(req.Temperature)
+	}
+
+	if len(req.Tools) > 0 {
+		params.Tools = buildToolParams(req.Tools)
+	}
+
+	return params
+}
+
+// handleStreamEvent processes a single stream event and sends chunks to the channel.
+// Returns true if the event was a tool_use start.
+func handleStreamEvent(
+	event anthropic.MessageStreamEventUnion,
+	ch chan<- llm.StreamChunk,
+	currentToolCall **llm.ToolCall,
+	toolCallArgs *[]byte,
+	hasToolCalls *bool,
+) {
+	switch e := event.AsAny().(type) {
+	case anthropic.ContentBlockStartEvent:
+		cb := e.ContentBlock
+		if cb.Type == "tool_use" {
+			*currentToolCall = &llm.ToolCall{
+				ID:   cb.ID,
+				Name: cb.Name,
+			}
+			*toolCallArgs = nil
+			*hasToolCalls = true
+		}
+	case anthropic.ContentBlockDeltaEvent:
+		switch delta := e.Delta.AsAny().(type) {
+		case anthropic.TextDelta:
+			ch <- llm.StreamChunk{Content: delta.Text}
+		case anthropic.InputJSONDelta:
+			if *currentToolCall != nil {
+				*toolCallArgs = append(*toolCallArgs, []byte(delta.PartialJSON)...)
+			}
+		}
+	case anthropic.ContentBlockStopEvent:
+		if *currentToolCall != nil {
+			if len(*toolCallArgs) > 0 {
+				(*currentToolCall).Arguments = json.RawMessage(*toolCallArgs)
+			} else {
+				(*currentToolCall).Arguments = json.RawMessage("{}")
+			}
+			ch <- llm.StreamChunk{ToolCall: *currentToolCall}
+			*currentToolCall = nil
+			*toolCallArgs = nil
+		}
+	case anthropic.MessageDeltaEvent:
+		stopReason := string(e.Delta.StopReason)
+		if *hasToolCalls && stopReason == "" {
+			stopReason = "tool_use"
+		}
+		ch <- llm.StreamChunk{Done: true, StopReason: stopReason}
+	case anthropic.MessageStopEvent:
+		// Final stop if not already sent via MessageDeltaEvent
+	}
+}
+
 // Stream sends a streaming completion request
 func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-chan llm.StreamChunk, error) {
 	ch := make(chan llm.StreamChunk)
@@ -179,135 +242,16 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 	go func() {
 		defer close(ch)
 
-		// Convert messages to Anthropic format
-		messages := make([]anthropic.MessageParam, 0, len(req.Messages))
-		for _, msg := range req.Messages {
-			switch msg.Role {
-			case "user":
-				messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)))
-			case "assistant":
-				if len(msg.ToolCalls) > 0 {
-					blocks := []anthropic.ContentBlockParamUnion{}
-					if msg.Content != "" {
-						blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
-					}
-					for _, tc := range msg.ToolCalls {
-						var input any
-						json.Unmarshal(tc.Arguments, &input)
-						blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, input, tc.Name))
-					}
-					messages = append(messages, anthropic.NewAssistantMessage(blocks...))
-				} else {
-					messages = append(messages, anthropic.NewAssistantMessage(anthropic.NewTextBlock(msg.Content)))
-				}
-			case "tool":
-				messages = append(messages, anthropic.NewUserMessage(
-					anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false),
-				))
-			}
-		}
-
-		maxTokens := int64(4096)
-		if req.MaxTokens > 0 {
-			maxTokens = int64(req.MaxTokens)
-		}
-
-		params := anthropic.MessageNewParams{
-			Model:     anthropic.Model(req.Model),
-			Messages:  messages,
-			MaxTokens: maxTokens,
-		}
-
-		if req.SystemPrompt != "" {
-			params.System = []anthropic.TextBlockParam{
-				{Text: req.SystemPrompt},
-			}
-		}
-
-		if req.Temperature > 0 {
-			params.Temperature = anthropic.Float(req.Temperature)
-		}
-
-		// Add tools if present
-		if len(req.Tools) > 0 {
-			tools := make([]anthropic.ToolUnionParam, 0, len(req.Tools))
-			for _, tool := range req.Tools {
-				var schema map[string]any
-				json.Unmarshal(tool.Parameters, &schema)
-
-				var required []string
-				if reqField, ok := schema["required"].([]any); ok {
-					for _, r := range reqField {
-						if s, ok := r.(string); ok {
-							required = append(required, s)
-						}
-					}
-				}
-
-				toolParam := anthropic.ToolParam{
-					Name:        tool.Name,
-					Description: anthropic.String(tool.Description),
-					InputSchema: anthropic.ToolInputSchemaParam{
-						Properties: schema["properties"],
-						Required:   required,
-					},
-				}
-				tools = append(tools, anthropic.ToolUnionParam{OfTool: &toolParam})
-			}
-			params.Tools = tools
-		}
-
+		messages := buildMessages(req.Messages)
+		params := buildRequestParams(req, messages)
 		stream := p.client.Messages.NewStreaming(ctx, params)
 
-		// Track tool calls being built from streaming events
 		var currentToolCall *llm.ToolCall
 		var toolCallArgs []byte
 		hasToolCalls := false
 
 		for stream.Next() {
-			event := stream.Current()
-			switch e := event.AsAny().(type) {
-			case anthropic.ContentBlockStartEvent:
-				cb := e.ContentBlock
-				if cb.Type == "tool_use" {
-					// Start of a tool_use block
-					currentToolCall = &llm.ToolCall{
-						ID:   cb.ID,
-						Name: cb.Name,
-					}
-					toolCallArgs = nil
-					hasToolCalls = true
-				}
-			case anthropic.ContentBlockDeltaEvent:
-				switch delta := e.Delta.AsAny().(type) {
-				case anthropic.TextDelta:
-					ch <- llm.StreamChunk{Content: delta.Text}
-				case anthropic.InputJSONDelta:
-					if currentToolCall != nil {
-						toolCallArgs = append(toolCallArgs, []byte(delta.PartialJSON)...)
-					}
-				}
-			case anthropic.ContentBlockStopEvent:
-				if currentToolCall != nil {
-					if len(toolCallArgs) > 0 {
-						currentToolCall.Arguments = json.RawMessage(toolCallArgs)
-					} else {
-						currentToolCall.Arguments = json.RawMessage("{}")
-					}
-					ch <- llm.StreamChunk{ToolCall: currentToolCall}
-					currentToolCall = nil
-					toolCallArgs = nil
-				}
-			case anthropic.MessageDeltaEvent:
-				// Message is ending; send done with stop reason
-				stopReason := string(e.Delta.StopReason)
-				if hasToolCalls && stopReason == "" {
-					stopReason = "tool_use"
-				}
-				ch <- llm.StreamChunk{Done: true, StopReason: stopReason}
-			case anthropic.MessageStopEvent:
-				// Final stop if not already sent via MessageDeltaEvent
-			}
+			handleStreamEvent(stream.Current(), ch, &currentToolCall, &toolCallArgs, &hasToolCalls)
 		}
 
 		if err := stream.Err(); err != nil {

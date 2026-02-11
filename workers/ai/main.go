@@ -94,10 +94,7 @@ func run() error {
 	}
 
 	// Load custom Tool CRDs
-	customTools, err := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
-	if err != nil {
-		fmt.Printf("Warning: failed to load custom tools: %v\n", err)
-	}
+	customTools := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
 
 	// Load session context if available
 	sessionContext := loadSessionContext()
@@ -117,7 +114,10 @@ func run() error {
 	toolExecutor := worker.NewToolExecutor()
 
 	// Execute the agent loop
-	result, err := executeAgentLoop(ctx, llmProvider, messages, systemPrompt, model, llmTools, enabledTools, customTools, toolExecutor)
+	result, err := executeAgentLoop(
+		ctx, llmProvider, messages, systemPrompt, model,
+		llmTools, enabledTools, customTools, toolExecutor,
+	)
 	if err != nil {
 		return fmt.Errorf("agent execution failed: %w", err)
 	}
@@ -155,7 +155,12 @@ func createK8sClient() (client.Client, error) {
 }
 
 // loadCustomTools loads Tool CRDs from the cluster
-func loadCustomTools(ctx context.Context, k8sClient client.Client, namespace string, toolNames []string) (map[string]*corev1alpha1.Tool, error) {
+func loadCustomTools(
+	ctx context.Context,
+	k8sClient client.Client,
+	namespace string,
+	toolNames []string,
+) map[string]*corev1alpha1.Tool {
 	customTools := make(map[string]*corev1alpha1.Tool)
 
 	for _, name := range toolNames {
@@ -174,7 +179,7 @@ func loadCustomTools(ctx context.Context, k8sClient client.Client, namespace str
 		customTools[name] = tool
 	}
 
-	return customTools, nil
+	return customTools
 }
 
 // buildLLMTools builds the combined tool list for the LLM
@@ -287,7 +292,7 @@ func executeAgentLoop(
 	systemPrompt string,
 	model string,
 	llmTools []llm.Tool,
-	enabledTools []string,
+	_ []string,
 	customTools map[string]*corev1alpha1.Tool,
 	toolExecutor *worker.ToolExecutor,
 ) (string, error) {

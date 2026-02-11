@@ -26,6 +26,8 @@ import (
 	"github.com/sozercan/mercan/internal/store"
 )
 
+const taskCreatedMsg = "Task created"
+
 // ToolExecutor executes orchestrator LLM tool calls by creating and managing
 // Kubernetes resources (Tasks, Agents, Tools, Sessions).
 type ToolExecutor struct {
@@ -214,7 +216,7 @@ func (e *ToolExecutor) executeCreateAITask(ctx context.Context, args map[string]
 		return classifyK8sError(err)
 	}
 
-	msg := "Task created"
+	msg := taskCreatedMsg
 	if task.Spec.Schedule != "" {
 		msg = fmt.Sprintf("Recurring task scheduled (schedule: %s)", task.Spec.Schedule)
 	}
@@ -278,7 +280,7 @@ func (e *ToolExecutor) executeCreateContainerTask(ctx context.Context, args map[
 		return classifyK8sError(err)
 	}
 
-	msg := "Task created"
+	msg := taskCreatedMsg
 	if task.Spec.Schedule != "" {
 		msg = fmt.Sprintf("Recurring task scheduled (schedule: %s)", task.Spec.Schedule)
 	}
@@ -378,7 +380,7 @@ func (e *ToolExecutor) executeCreateAgentTask(ctx context.Context, args map[stri
 		return classifyK8sError(err)
 	}
 
-	msg := "Task created"
+	msg := taskCreatedMsg
 	if task.Spec.Schedule != "" {
 		msg = fmt.Sprintf("Recurring task scheduled (schedule: %s)", task.Spec.Schedule)
 	}

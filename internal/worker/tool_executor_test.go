@@ -37,8 +37,8 @@ func TestNewToolExecutor(t *testing.T) {
 
 func TestNewToolExecutor_WithNamespaceEnv(t *testing.T) {
 	originalNamespace := os.Getenv("MERCAN_TASK_NAMESPACE")
-	os.Setenv("MERCAN_TASK_NAMESPACE", "custom-namespace")
-	defer os.Setenv("MERCAN_TASK_NAMESPACE", originalNamespace)
+	os.Setenv("MERCAN_TASK_NAMESPACE", "custom-namespace")      //nolint:errcheck
+	defer os.Setenv("MERCAN_TASK_NAMESPACE", originalNamespace) //nolint:errcheck
 
 	executor := NewToolExecutor()
 	if executor.namespace != "custom-namespace" {
@@ -50,7 +50,7 @@ func TestToolExecutor_Execute_Success(t *testing.T) {
 	expectedResponse := `{"result": "success"}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(expectedResponse))
+		w.Write([]byte(expectedResponse)) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -194,8 +194,8 @@ func TestToolExecutor_Execute_AuthHeader(t *testing.T) {
 	// Create temp secret file
 	tmpDir := t.TempDir()
 	secretDir := filepath.Join(tmpDir, "secret-name")
-	os.MkdirAll(secretDir, 0755)
-	os.WriteFile(filepath.Join(secretDir, "token"), []byte("test-token"), 0644)
+	os.MkdirAll(secretDir, 0755)                                                //nolint:errcheck
+	os.WriteFile(filepath.Join(secretDir, "token"), []byte("test-token"), 0644) //nolint:errcheck
 
 	executor := &ToolExecutor{
 		client:     server.Client(),
@@ -229,7 +229,7 @@ func TestToolExecutor_Execute_AuthHeader(t *testing.T) {
 func TestToolExecutor_Execute_AuthBody(t *testing.T) {
 	var receivedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&receivedBody)
+		json.NewDecoder(r.Body).Decode(&receivedBody) //nolint:errcheck
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -237,8 +237,8 @@ func TestToolExecutor_Execute_AuthBody(t *testing.T) {
 	// Create temp secret file
 	tmpDir := t.TempDir()
 	secretDir := filepath.Join(tmpDir, "secret-name")
-	os.MkdirAll(secretDir, 0755)
-	os.WriteFile(filepath.Join(secretDir, "api_key"), []byte("secret-api-key"), 0644)
+	os.MkdirAll(secretDir, 0755)                                                      //nolint:errcheck
+	os.WriteFile(filepath.Join(secretDir, "api_key"), []byte("secret-api-key"), 0644) //nolint:errcheck
 
 	executor := &ToolExecutor{
 		client:     server.Client(),
@@ -277,8 +277,8 @@ func TestToolExecutor_Execute_AuthBodyMissingKey(t *testing.T) {
 	// Create temp secret file
 	tmpDir := t.TempDir()
 	secretDir := filepath.Join(tmpDir, "secret-name")
-	os.MkdirAll(secretDir, 0755)
-	os.WriteFile(filepath.Join(secretDir, "api_key"), []byte("secret-api-key"), 0644)
+	os.MkdirAll(secretDir, 0755)                                                      //nolint:errcheck
+	os.WriteFile(filepath.Join(secretDir, "api_key"), []byte("secret-api-key"), 0644) //nolint:errcheck
 
 	executor := &ToolExecutor{
 		client:     &http.Client{},
@@ -309,7 +309,7 @@ func TestToolExecutor_Execute_AuthBodyMissingKey(t *testing.T) {
 func TestToolExecutor_Execute_HTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal error"))
+		w.Write([]byte("internal error")) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -415,8 +415,8 @@ func TestToolExecutor_Execute_MissingAuthSecret(t *testing.T) {
 func TestToolExecutor_getSecretKey_MountedSecret(t *testing.T) {
 	tmpDir := t.TempDir()
 	secretDir := filepath.Join(tmpDir, "my-secret")
-	os.MkdirAll(secretDir, 0755)
-	os.WriteFile(filepath.Join(secretDir, "my-key"), []byte("  secret-value  "), 0644)
+	os.MkdirAll(secretDir, 0755)                                                       //nolint:errcheck
+	os.WriteFile(filepath.Join(secretDir, "my-key"), []byte("  secret-value  "), 0644) //nolint:errcheck
 
 	executor := &ToolExecutor{
 		secretPath: tmpDir,
@@ -446,7 +446,7 @@ func TestToolExecutor_getSecretKey_K8sAPISecret(t *testing.T) {
 		},
 	}
 
-	fakeClient := fake.NewSimpleClientset(secret)
+	fakeClient := fake.NewSimpleClientset(secret) //nolint:staticcheck // NewClientset requires apply configs
 
 	executor := &ToolExecutor{
 		secretPath: "/nonexistent", // Mount doesn't exist
@@ -465,7 +465,7 @@ func TestToolExecutor_getSecretKey_K8sAPISecret(t *testing.T) {
 }
 
 func TestToolExecutor_getSecretKey_NotFound(t *testing.T) {
-	fakeClient := fake.NewSimpleClientset()
+	fakeClient := fake.NewSimpleClientset() //nolint:staticcheck // NewClientset requires apply configs
 
 	executor := &ToolExecutor{
 		secretPath: "/nonexistent",
@@ -482,8 +482,8 @@ func TestToolExecutor_getSecretKey_NotFound(t *testing.T) {
 func TestToolExecutor_getSecretKey_TaskSecretPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	taskSecretPath := filepath.Join(tmpDir, "task")
-	os.MkdirAll(taskSecretPath, 0755)
-	os.WriteFile(filepath.Join(taskSecretPath, "my-key"), []byte("task-secret"), 0644)
+	os.MkdirAll(taskSecretPath, 0755)                                                  //nolint:errcheck
+	os.WriteFile(filepath.Join(taskSecretPath, "my-key"), []byte("task-secret"), 0644) //nolint:errcheck
 
 	// The getSecretKey function checks /secrets/task/{key} as one of the paths
 	// We need to mock this properly
@@ -494,8 +494,8 @@ func TestToolExecutor_getSecretKey_TaskSecretPath(t *testing.T) {
 
 	// This test verifies the mounted secret paths work
 	secretDir := filepath.Join(tmpDir, "my-secret")
-	os.MkdirAll(secretDir, 0755)
-	os.WriteFile(filepath.Join(secretDir, "key"), []byte("mounted-secret"), 0644)
+	os.MkdirAll(secretDir, 0755)                                                  //nolint:errcheck
+	os.WriteFile(filepath.Join(secretDir, "key"), []byte("mounted-secret"), 0644) //nolint:errcheck
 
 	value, err := executor.getSecretKey(context.Background(), "my-secret", "key")
 	if err != nil {
@@ -550,8 +550,8 @@ func TestToolExecutor_Execute_DefaultAuthInject(t *testing.T) {
 	// Create temp secret file
 	tmpDir := t.TempDir()
 	secretDir := filepath.Join(tmpDir, "secret-name")
-	os.MkdirAll(secretDir, 0755)
-	os.WriteFile(filepath.Join(secretDir, "token"), []byte("test-token"), 0644)
+	os.MkdirAll(secretDir, 0755)                                                //nolint:errcheck
+	os.WriteFile(filepath.Join(secretDir, "token"), []byte("test-token"), 0644) //nolint:errcheck
 
 	executor := &ToolExecutor{
 		client:     server.Client(),
@@ -588,9 +588,9 @@ func TestToolExecutor_Execute_URLInterpolation(t *testing.T) {
 	var receivedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
-		json.NewDecoder(r.Body).Decode(&receivedBody)
+		json.NewDecoder(r.Body).Decode(&receivedBody) //nolint:errcheck
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status": "ok"}`))
+		w.Write([]byte(`{"status": "ok"}`)) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -640,7 +640,7 @@ func TestToolExecutor_Execute_URLInterpolation_Partial(t *testing.T) {
 	var receivedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
-		json.NewDecoder(r.Body).Decode(&receivedBody)
+		json.NewDecoder(r.Body).Decode(&receivedBody) //nolint:errcheck
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -691,7 +691,7 @@ func TestToolExecutor_Execute_URLInterpolation_NoPlaceholders(t *testing.T) {
 	var receivedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
-		json.NewDecoder(r.Body).Decode(&receivedBody)
+		json.NewDecoder(r.Body).Decode(&receivedBody) //nolint:errcheck
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()

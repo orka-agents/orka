@@ -129,7 +129,7 @@ func TestReviewPullRequestTool_Success(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Errorf("expected GET, got %s", r.Method)
 		}
-		if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+		if auth := r.Header.Get("Authorization"); auth != testBearerToken {
 			t.Errorf("unexpected auth header: %s", auth)
 		}
 

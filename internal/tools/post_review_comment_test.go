@@ -67,7 +67,7 @@ func TestPostReviewCommentTool_Success(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
-		if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+		if auth := r.Header.Get("Authorization"); auth != testBearerToken {
 			t.Errorf("unexpected auth header: %s", auth)
 		}
 		if !strings.HasSuffix(r.URL.Path, "/pulls/10/reviews") {
@@ -75,7 +75,7 @@ func TestPostReviewCommentTool_Success(t *testing.T) {
 		}
 
 		var body map[string]any
-		json.NewDecoder(r.Body).Decode(&body)
+		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
 		if body["body"] != "Looks good overall" {
 			t.Errorf("unexpected body: %v", body["body"])
 		}
@@ -89,7 +89,7 @@ func TestPostReviewCommentTool_Success(t *testing.T) {
 		}
 
 		w.WriteHeader(200)
-		fmt.Fprintf(w, `{"id":101,"html_url":"https://github.com/sozercan/ayna/pull/10#pullrequestreview-101"}`)
+		fmt.Fprintf(w, `{"id":101,"html_url":"https://github.com/sozercan/ayna/pull/10#pullrequestreview-101"}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -161,7 +161,7 @@ func TestPostReviewCommentTool_Success(t *testing.T) {
 func TestPostReviewCommentTool_WithoutComments(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
-		json.NewDecoder(r.Body).Decode(&body)
+		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
 
 		// Verify comments are NOT present in the payload
 		if _, ok := body["comments"]; ok {
@@ -172,7 +172,7 @@ func TestPostReviewCommentTool_WithoutComments(t *testing.T) {
 		}
 
 		w.WriteHeader(200)
-		fmt.Fprintf(w, `{"id":102,"html_url":"https://github.com/sozercan/ayna/pull/5#pullrequestreview-102"}`)
+		fmt.Fprintf(w, `{"id":102,"html_url":"https://github.com/sozercan/ayna/pull/5#pullrequestreview-102"}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -365,7 +365,7 @@ func TestPostReviewCommentTool_Execute_MissingSecret(t *testing.T) {
 func TestPostReviewCommentTool_Execute_APIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprintf(w, `{"message":"Internal Server Error"}`)
+		fmt.Fprintf(w, `{"message":"Internal Server Error"}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -435,11 +435,11 @@ func TestPostReviewCommentTool_Execute_AllEventTypes(t *testing.T) {
 			receivedEvent := ""
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var body map[string]any
-				json.NewDecoder(r.Body).Decode(&body)
+				json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
 				receivedEvent = body["event"].(string)
 
 				w.WriteHeader(200)
-				fmt.Fprintf(w, `{"id":200,"html_url":"https://github.com/sozercan/ayna/pull/3#pullrequestreview-200"}`)
+				fmt.Fprintf(w, `{"id":200,"html_url":"https://github.com/sozercan/ayna/pull/3#pullrequestreview-200"}`) //nolint:errcheck
 			}))
 			defer server.Close()
 

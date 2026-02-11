@@ -26,6 +26,11 @@ import (
 
 var oaiLog = logf.Log.WithName("openai-compat")
 
+const (
+	finishReasonStop      = "stop"
+	finishReasonToolCalls = "tool_calls"
+)
+
 // OpenAICompatHandler implements OpenAI-compatible /v1/chat/completions and /v1/models endpoints.
 // This allows tools like OpenCode to use Mercan as a custom provider.
 type OpenAICompatHandler struct {
@@ -286,8 +291,8 @@ func (h *OpenAICompatHandler) handleNonStreamingCompletion(
 				},
 			})
 		}
-		if finishReason == "stop" {
-			finishReason = "tool_calls"
+		if finishReason == finishReasonStop {
+			finishReason = finishReasonToolCalls
 		}
 	}
 
@@ -312,7 +317,7 @@ func (h *OpenAICompatHandler) handleNonStreamingCompletion(
 // handleStreamingCompletion handles a streaming chat completion request.
 func (h *OpenAICompatHandler) handleStreamingCompletion(
 	c fiber.Ctx,
-	ctx context.Context,
+	_ context.Context,
 	provider llm.Provider,
 	req *llm.CompletionRequest,
 	completionID, model string,
@@ -409,7 +414,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 			// Send finish
 			finishReason := mapFinishReason(resp.StopReason)
 			if len(resp.ToolCalls) > 0 {
-				finishReason = "tool_calls"
+				finishReason = finishReasonToolCalls
 			}
 			finishChunk := OAIResponse{
 				ID:      completionID,
@@ -672,7 +677,7 @@ func (h *OpenAICompatHandler) resolveProviderFromModel(ctx context.Context, mode
 // Extracts the system prompt from system messages.
 func convertOAIMessages(msgs []OAIMessage) ([]llm.Message, string) {
 	var systemPrompt string
-	var messages []llm.Message
+	messages := make([]llm.Message, 0, len(msgs))
 
 	for _, m := range msgs {
 		if m.Role == "system" {
@@ -765,16 +770,16 @@ func convertOAITools(tools []OAITool) []llm.Tool {
 // mapFinishReason maps internal stop reasons to OpenAI finish_reason values.
 func mapFinishReason(reason string) string {
 	switch strings.ToLower(reason) {
-	case "end_turn", "stop", "":
-		return "stop"
-	case "tool_use", "tool_calls":
-		return "tool_calls"
+	case "end_turn", finishReasonStop, "":
+		return finishReasonStop
+	case "tool_use", finishReasonToolCalls:
+		return finishReasonToolCalls
 	case "max_tokens", "length":
 		return "length"
 	case "content_filter":
 		return "content_filter"
 	default:
-		return "stop"
+		return finishReasonStop
 	}
 }
 
@@ -784,12 +789,12 @@ func writeStreamChunk(w *bufio.Writer, chunk OAIResponse) {
 	if err != nil {
 		return
 	}
-	fmt.Fprintf(w, "data: %s\n\n", data)
-	w.Flush()
+	_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+	_ = w.Flush()
 }
 
 // writeStreamDone writes the final [DONE] marker for OpenAI streaming.
 func writeStreamDone(w *bufio.Writer) {
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	w.Flush()
+	_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
+	_ = w.Flush()
 }

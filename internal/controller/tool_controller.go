@@ -131,7 +131,7 @@ func (r *ToolReconciler) healthCheck(ctx context.Context, tool *corev1alpha1.Too
 	if err != nil {
 		return fmt.Errorf("endpoint unreachable: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	// Any response (even 4xx/5xx) means the endpoint is reachable.
 	// We only mark unavailable if the connection itself fails.

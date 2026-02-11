@@ -152,7 +152,7 @@ func (t *CodeExecTool) executePython(ctx context.Context, code string) CodeExecR
 	if err := os.WriteFile(tmpFile, []byte(code), 0644); err != nil {
 		return CodeExecResult{Error: fmt.Sprintf("failed to write script: %v", err), ExitCode: -1}
 	}
-	defer os.Remove(tmpFile)
+	defer os.Remove(tmpFile) //nolint:errcheck
 
 	cmd := exec.CommandContext(ctx, "python3", tmpFile)
 	return t.runCommand(cmd)
@@ -165,7 +165,7 @@ func (t *CodeExecTool) executeNode(ctx context.Context, code string) CodeExecRes
 	if err := os.WriteFile(tmpFile, []byte(code), 0644); err != nil {
 		return CodeExecResult{Error: fmt.Sprintf("failed to write script: %v", err), ExitCode: -1}
 	}
-	defer os.Remove(tmpFile)
+	defer os.Remove(tmpFile) //nolint:errcheck
 
 	cmd := exec.CommandContext(ctx, "node", tmpFile)
 	return t.runCommand(cmd)
@@ -178,7 +178,7 @@ func (t *CodeExecTool) executeBash(ctx context.Context, code string) CodeExecRes
 	if err := os.WriteFile(tmpFile, []byte(code), 0755); err != nil {
 		return CodeExecResult{Error: fmt.Sprintf("failed to write script: %v", err), ExitCode: -1}
 	}
-	defer os.Remove(tmpFile)
+	defer os.Remove(tmpFile) //nolint:errcheck
 
 	cmd := exec.CommandContext(ctx, "bash", tmpFile)
 	return t.runCommand(cmd)

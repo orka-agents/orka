@@ -18,6 +18,10 @@ import (
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 )
 
+const (
+	parentTaskName = "parent-task"
+)
+
 func researcherAgent() *corev1alpha1.Agent {
 	return &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
@@ -32,7 +36,7 @@ func parentTask() *corev1alpha1.Task {
 	priority := int32(500)
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "parent-task",
+			Name:      parentTaskName,
 			Namespace: "default",
 			UID:       apitypes.UID("parent-uid-1234"),
 		},
@@ -68,7 +72,7 @@ func TestDelegateTaskTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Errorf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != "object" {
+	if schema["type"] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 }
@@ -86,7 +90,7 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "successful delegation",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":                   "parent-task",
+				"MERCAN_TASK_NAME":                   parentTaskName,
 				"MERCAN_TASK_NAMESPACE":              "default",
 				"MERCAN_COORDINATION_DEPTH":          "0",
 				"MERCAN_COORDINATION_ALLOWED_AGENTS": "researcher,coder",
@@ -100,7 +104,7 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "agent not allowed",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":                   "parent-task",
+				"MERCAN_TASK_NAME":                   parentTaskName,
 				"MERCAN_TASK_NAMESPACE":              "default",
 				"MERCAN_COORDINATION_DEPTH":          "0",
 				"MERCAN_COORDINATION_ALLOWED_AGENTS": "researcher,coder",
@@ -113,7 +117,7 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "depth exceeded",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":                   "parent-task",
+				"MERCAN_TASK_NAME":                   parentTaskName,
 				"MERCAN_TASK_NAMESPACE":              "default",
 				"MERCAN_COORDINATION_DEPTH":          "3",
 				"MERCAN_COORDINATION_ALLOWED_AGENTS": "researcher",
@@ -126,7 +130,7 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "missing agent arg",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":                   "parent-task",
+				"MERCAN_TASK_NAME":                   parentTaskName,
 				"MERCAN_TASK_NAMESPACE":              "default",
 				"MERCAN_COORDINATION_DEPTH":          "0",
 				"MERCAN_COORDINATION_ALLOWED_AGENTS": "researcher",
@@ -139,7 +143,7 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "missing prompt arg",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":                   "parent-task",
+				"MERCAN_TASK_NAME":                   parentTaskName,
 				"MERCAN_TASK_NAMESPACE":              "default",
 				"MERCAN_COORDINATION_DEPTH":          "0",
 				"MERCAN_COORDINATION_ALLOWED_AGENTS": "researcher",
@@ -152,7 +156,7 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "invalid JSON args",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":      "parent-task",
+				"MERCAN_TASK_NAME":      parentTaskName,
 				"MERCAN_TASK_NAMESPACE": "default",
 			},
 			args:       json.RawMessage(`{invalid}`),
@@ -162,7 +166,7 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "custom priority",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":                   "parent-task",
+				"MERCAN_TASK_NAME":                   parentTaskName,
 				"MERCAN_TASK_NAMESPACE":              "default",
 				"MERCAN_COORDINATION_DEPTH":          "0",
 				"MERCAN_COORDINATION_ALLOWED_AGENTS": "researcher",
@@ -176,7 +180,7 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "custom namespace",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":                   "parent-task",
+				"MERCAN_TASK_NAME":                   parentTaskName,
 				"MERCAN_TASK_NAMESPACE":              "default",
 				"MERCAN_COORDINATION_DEPTH":          "0",
 				"MERCAN_COORDINATION_ALLOWED_AGENTS": "researcher",
@@ -229,7 +233,7 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
 	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
 	t.Setenv("MERCAN_COORDINATION_DEPTH", "1")
 	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
@@ -258,7 +262,7 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 	// Find the child task (not the parent)
 	var childTask *corev1alpha1.Task
 	for i := range taskList.Items {
-		if taskList.Items[i].Name != "parent-task" {
+		if taskList.Items[i].Name != parentTaskName {
 			childTask = &taskList.Items[i]
 			break
 		}
@@ -269,11 +273,11 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 	}
 
 	// Verify labels
-	if childTask.Labels["mercan.ai/parent-task"] != "parent-task" {
+	if childTask.Labels["mercan.ai/parent-task"] != parentTaskName {
 		t.Errorf("label mercan.ai/parent-task = %q, want %q", childTask.Labels["mercan.ai/parent-task"], "parent-task")
 	}
-	if childTask.Labels["mercan.ai/coordinator"] != "true" {
-		t.Errorf("label mercan.ai/coordinator = %q, want %q", childTask.Labels["mercan.ai/coordinator"], "true")
+	if childTask.Labels["mercan.ai/coordinator"] != trueStr {
+		t.Errorf("label mercan.ai/coordinator = %q, want %q", childTask.Labels["mercan.ai/coordinator"], trueStr)
 	}
 	if childTask.Labels["mercan.ai/delegated-agent"] != "researcher" {
 		t.Errorf("label mercan.ai/delegated-agent = %q, want %q", childTask.Labels["mercan.ai/delegated-agent"], "researcher")
@@ -300,8 +304,8 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 		t.Fatalf("expected 1 owner reference, got %d", len(childTask.OwnerReferences))
 	}
 	ownerRef := childTask.OwnerReferences[0]
-	if ownerRef.Name != "parent-task" {
-		t.Errorf("ownerRef.Name = %q, want %q", ownerRef.Name, "parent-task")
+	if ownerRef.Name != parentTaskName {
+		t.Errorf("ownerRef.Name = %q, want %q", ownerRef.Name, parentTaskName)
 	}
 	if ownerRef.UID != apitypes.UID("parent-uid-1234") {
 		t.Errorf("ownerRef.UID = %q, want %q", ownerRef.UID, "parent-uid-1234")
@@ -320,7 +324,7 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
 	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
 	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
 	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "claude-coder")
@@ -375,7 +379,7 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 
 	var childTask *corev1alpha1.Task
 	for i := range taskList.Items {
-		if taskList.Items[i].Name != "parent-task" {
+		if taskList.Items[i].Name != parentTaskName {
 			childTask = &taskList.Items[i]
 			break
 		}
@@ -411,7 +415,7 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_AgentNotFound(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
 	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
 	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
 	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "nonexistent-agent")
@@ -432,7 +436,7 @@ func TestDelegateTaskTool_Execute_AgentNotFound(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_AgentTypeNoWorkspace(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
 	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
 	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
 	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "claude-coder")
@@ -467,7 +471,7 @@ func TestDelegateTaskTool_Execute_AgentTypeNoWorkspace(t *testing.T) {
 
 	var childTask *corev1alpha1.Task
 	for i := range taskList.Items {
-		if taskList.Items[i].Name != "parent-task" {
+		if taskList.Items[i].Name != parentTaskName {
 			childTask = &taskList.Items[i]
 			break
 		}
@@ -494,7 +498,7 @@ func TestDelegateTaskTool_Execute_AgentTypeNoWorkspace(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_AITypeNoRuntime(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
 	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
 	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
 	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
@@ -516,7 +520,7 @@ func TestDelegateTaskTool_Execute_AITypeNoRuntime(t *testing.T) {
 
 	var childTask *corev1alpha1.Task
 	for i := range taskList.Items {
-		if taskList.Items[i].Name != "parent-task" {
+		if taskList.Items[i].Name != parentTaskName {
 			childTask = &taskList.Items[i]
 			break
 		}
@@ -579,7 +583,7 @@ func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
 	fakeClient := newFakeClient(parent, agent, prior)
 	tool := NewDelegateTaskTool(fakeClient)
 
-	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
 	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
 	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
 	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
@@ -651,7 +655,7 @@ func TestDelegateTaskTool_Execute_FeedbackOnly(t *testing.T) {
 	fakeClient := newFakeClient(parent, agent)
 	tool := NewDelegateTaskTool(fakeClient)
 
-	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
 	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
 	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
 	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
@@ -668,11 +672,11 @@ func TestDelegateTaskTool_Execute_FeedbackOnly(t *testing.T) {
 	}
 
 	var delegateResult DelegateTaskResult
-	json.Unmarshal([]byte(result), &delegateResult)
+	_ = json.Unmarshal([]byte(result), &delegateResult)
 
 	// Verify the child task was created with feedback in prompt
 	childTask := &corev1alpha1.Task{}
-	fakeClient.Get(context.Background(), apitypes.NamespacedName{
+	_ = fakeClient.Get(context.Background(), apitypes.NamespacedName{
 		Name: delegateResult.TaskName, Namespace: "default",
 	}, childTask)
 
@@ -686,7 +690,7 @@ func TestDelegateTaskTool_Execute_FeedbackOnly(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_PushBranch(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
 	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
 	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
 	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "claude-coder")
@@ -724,7 +728,7 @@ func TestDelegateTaskTool_Execute_PushBranch(t *testing.T) {
 	}
 
 	var delegateResult DelegateTaskResult
-	json.Unmarshal([]byte(result), &delegateResult)
+	_ = json.Unmarshal([]byte(result), &delegateResult)
 
 	childTask := &corev1alpha1.Task{}
 	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
@@ -749,7 +753,7 @@ func TestDelegateTaskTool_Execute_PushBranch(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_AutoRetry(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
 	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
 	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
 	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
@@ -777,7 +781,7 @@ func TestDelegateTaskTool_Execute_AutoRetry(t *testing.T) {
 		t.Fatalf("get child task: %v", err)
 	}
 
-	if childTask.Annotations["mercan.ai/auto-retry"] != "true" {
+	if childTask.Annotations["mercan.ai/auto-retry"] != trueStr {
 		t.Errorf("expected auto-retry=true, got %q", childTask.Annotations["mercan.ai/auto-retry"])
 	}
 	if childTask.Annotations["mercan.ai/max-retries"] != "3" {
@@ -792,7 +796,7 @@ func TestDelegateTaskTool_Execute_AutoRetry(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_AutoRetryDefault(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
 	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
 	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
 	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
@@ -826,7 +830,7 @@ func TestDelegateTaskTool_Execute_AutoRetryDefault(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_NoAutoRetry(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", "parent-task")
+	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
 	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
 	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
 	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")

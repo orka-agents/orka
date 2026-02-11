@@ -22,10 +22,15 @@ import (
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 )
 
+const (
+	testTask  = "test-task"
+	defaultNS = "default"
+)
+
 func setupJobBuilder() *JobBuilder {
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	b := NewJobBuilder(fakeClient)
 	b.ControllerURL = "http://mercan-controller.mercan-system.svc:8080"
@@ -49,8 +54,8 @@ func TestJobBuilder_Build_ContainerTask(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
-			Namespace: "default",
+			Name:      testTask,
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -87,8 +92,8 @@ func TestJobBuilder_Build_AITask(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
-			Namespace: "default",
+			Name:      testTask,
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -116,8 +121,8 @@ func TestJobBuilder_Build_WithTimeout(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
-			Namespace: "default",
+			Name:      testTask,
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -143,8 +148,8 @@ func TestJobBuilder_Build_WithSession(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
-			Namespace: "default",
+			Name:      testTask,
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -277,8 +282,8 @@ func TestJobBuilder_buildEnvVars(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
-			Namespace: "default",
+			Name:      testTask,
+			Namespace: defaultNS,
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeContainer,
@@ -301,12 +306,12 @@ func TestJobBuilder_buildEnvVars(t *testing.T) {
 		switch env.Name {
 		case TaskNameEnvVar:
 			hasTaskName = true
-			if env.Value != "test-task" {
+			if env.Value != testTask {
 				t.Errorf("MERCAN_TASK_NAME = %s, want test-task", env.Value)
 			}
 		case TaskNamespaceEnvVar:
 			hasTaskNamespace = true
-			if env.Value != "default" {
+			if env.Value != defaultNS {
 				t.Errorf("MERCAN_TASK_NAMESPACE = %s, want default", env.Value)
 			}
 		case ResultEndpointEnvVar:
@@ -342,8 +347,8 @@ func TestJobBuilder_buildEnvVars_AITask(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
-			Namespace: "default",
+			Name:      testTask,
+			Namespace: defaultNS,
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAI,
@@ -399,8 +404,8 @@ func TestJobBuilder_buildEnvVars_WithAgent(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
-			Namespace: "default",
+			Name:      testTask,
+			Namespace: defaultNS,
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:   corev1alpha1.TaskTypeAI,
@@ -455,8 +460,8 @@ func TestJobBuilder_buildEnvVars_WithProvider(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
-			Namespace: "default",
+			Name:      testTask,
+			Namespace: defaultNS,
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:   corev1alpha1.TaskTypeAI,
@@ -528,8 +533,8 @@ func TestJobBuilder_buildEnvVars_WithCoordination(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
-			Namespace: "default",
+			Name:      testTask,
+			Namespace: defaultNS,
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:   corev1alpha1.TaskTypeAI,
@@ -591,7 +596,7 @@ func TestJobBuilder_buildEnvVars_WithCoordination_ChildTask(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "child-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			Annotations: map[string]string{
 				"mercan.ai/coordination-depth": "2",
 			},
@@ -633,8 +638,8 @@ func TestJobBuilder_buildEnvVars_NoCoordination(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
-			Namespace: "default",
+			Name:      testTask,
+			Namespace: defaultNS,
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:   corev1alpha1.TaskTypeAI,
@@ -703,7 +708,7 @@ func TestJobBuilder_Build_AgentTask_CopilotRuntime(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -741,7 +746,7 @@ func TestJobBuilder_Build_AgentTask_ClaudeRuntime(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -773,7 +778,7 @@ func TestJobBuilder_Build_AgentTask_NilAgent_FallbackToClaude(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -798,7 +803,7 @@ func TestJobBuilder_Build_AgentTask_NilRuntime_FallbackToClaude(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -911,7 +916,7 @@ func TestJobBuilder_Build_AgentTask_MaxTurns_Default(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -940,7 +945,7 @@ func TestJobBuilder_Build_AgentTask_MaxTurns_AgentDefault(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -978,7 +983,7 @@ func TestJobBuilder_Build_AgentTask_MaxTurns_TaskOverridesAgent(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -1017,7 +1022,7 @@ func TestJobBuilder_Build_AgentTask_AllowedTools_AgentDefault(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -1053,7 +1058,7 @@ func TestJobBuilder_Build_AgentTask_AllowedTools_TaskOverridesAgent(t *testing.T
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -1092,7 +1097,7 @@ func TestJobBuilder_Build_AgentTask_AllowBash_AgentDefault(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -1128,7 +1133,7 @@ func TestJobBuilder_Build_AgentTask_AllowBash_NotSetWhenFalse(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -1153,7 +1158,7 @@ func TestJobBuilder_Build_AgentTask_PromptFromAISpec(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -1183,7 +1188,7 @@ func TestJobBuilder_Build_AgentTask_Volumes(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -1264,7 +1269,7 @@ func TestJobBuilder_Build_AgentTask_GitSecretVolume(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -1324,7 +1329,7 @@ func TestJobBuilder_Build_AgentTask_NoGitSecretVolume_WhenNotSpecified(t *testin
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -1354,7 +1359,7 @@ func TestJobBuilder_Build_AgentTask_SecurityContext(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -1413,7 +1418,7 @@ func TestJobBuilder_Build_AgentTask_NoAgentEnvVars_WhenNoWorkspace(t *testing.T)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -1450,7 +1455,7 @@ func TestJobBuilder_Build_AgentTask_ContainerTaskNoAgentVolumes(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "container-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -1479,7 +1484,7 @@ func TestJobBuilder_Build_AgentTask_Labels(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -1506,7 +1511,7 @@ func TestJobBuilder_Build_AgentTask_WithTimeout(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "agent-task",
-			Namespace: "default",
+			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -1543,8 +1548,8 @@ func TestJobBuilder_Build_PriorTaskRef(t *testing.T) {
 	jb := setupJobBuilder()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
-			Namespace: "default",
+			Name:      testTask,
+			Namespace: defaultNS,
 			UID:       "uid-1234-5678",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -1584,7 +1589,7 @@ func TestJobBuilder_Build_PriorTaskRef_DefaultNamespace(t *testing.T) {
 	jb := setupJobBuilder()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
+			Name:      testTask,
 			Namespace: "my-ns",
 			UID:       "uid-4567-8901",
 		},

@@ -16,6 +16,8 @@ import (
 	"github.com/sozercan/mercan/internal/llm"
 )
 
+const customToolName = "custom_tool"
+
 func TestGetAPIKey_EnvVar(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -44,8 +46,8 @@ func TestGetAPIKey_EnvVar(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Save and restore original env
 			original := os.Getenv(tt.envVar)
-			os.Setenv(tt.envVar, tt.envValue)
-			defer os.Setenv(tt.envVar, original)
+			os.Setenv(tt.envVar, tt.envValue)    //nolint:errcheck
+			defer os.Setenv(tt.envVar, original) //nolint:errcheck
 
 			key := getAPIKey(tt.provider)
 			if key != tt.wantKey {
@@ -59,14 +61,14 @@ func TestGetAPIKey_NotFound(t *testing.T) {
 	// Clear environment variables
 	originalAnthropic := os.Getenv("ANTHROPIC_API_KEY")
 	originalOpenAI := os.Getenv("OPENAI_API_KEY")
-	os.Unsetenv("ANTHROPIC_API_KEY")
-	os.Unsetenv("OPENAI_API_KEY")
+	os.Unsetenv("ANTHROPIC_API_KEY") //nolint:errcheck
+	os.Unsetenv("OPENAI_API_KEY")    //nolint:errcheck
 	defer func() {
 		if originalAnthropic != "" {
-			os.Setenv("ANTHROPIC_API_KEY", originalAnthropic)
+			os.Setenv("ANTHROPIC_API_KEY", originalAnthropic) //nolint:errcheck
 		}
 		if originalOpenAI != "" {
-			os.Setenv("OPENAI_API_KEY", originalOpenAI)
+			os.Setenv("OPENAI_API_KEY", originalOpenAI) //nolint:errcheck
 		}
 	}()
 
@@ -88,14 +90,14 @@ func TestLoadSessionContext_ValidFile(t *testing.T) {
 	// Create a temp directory and file
 	tmpDir := t.TempDir()
 	sessionDir := filepath.Join(tmpDir, "session")
-	os.MkdirAll(sessionDir, 0755)
+	os.MkdirAll(sessionDir, 0755) //nolint:errcheck
 
 	transcriptContent := `{"role":"user","content":"Hello"}
 {"role":"assistant","content":"Hi there!"}
 {"role":"user","content":"How are you?"}`
 
 	transcriptPath := filepath.Join(sessionDir, "transcript.jsonl")
-	os.WriteFile(transcriptPath, []byte(transcriptContent), 0644)
+	os.WriteFile(transcriptPath, []byte(transcriptContent), 0644) //nolint:errcheck
 
 	// Override the transcript path temporarily
 	// Note: This test would need to mock the file path or modify the function
@@ -168,23 +170,23 @@ func TestBuildLLMTools_BuiltinTools(t *testing.T) {
 }
 
 func TestBuildLLMTools_CustomTools(t *testing.T) {
-	enabledTools := []string{"custom_tool"}
+	enabledTools := []string{customToolName}
 	customTools := map[string]*corev1alpha1.Tool{
-		"custom_tool": {
+		customToolName: {
 			Spec: corev1alpha1.ToolSpec{
 				Description: "A custom tool",
 				Parameters:  nil,
 			},
 		},
 	}
-	customTools["custom_tool"].Name = "custom_tool"
+	customTools[customToolName].Name = customToolName
 
 	llmTools := buildLLMTools(enabledTools, customTools)
 
 	if len(llmTools) != 1 {
 		t.Errorf("Expected 1 tool, got %d", len(llmTools))
 	}
-	if llmTools[0].Name != "custom_tool" {
+	if llmTools[0].Name != customToolName {
 		t.Errorf("Expected custom_tool, got %s", llmTools[0].Name)
 	}
 	if llmTools[0].Description != "A custom tool" {
@@ -193,15 +195,15 @@ func TestBuildLLMTools_CustomTools(t *testing.T) {
 }
 
 func TestBuildLLMTools_Mixed(t *testing.T) {
-	enabledTools := []string{"web_search", "custom_tool"}
+	enabledTools := []string{"web_search", customToolName}
 	customTools := map[string]*corev1alpha1.Tool{
-		"custom_tool": {
+		customToolName: {
 			Spec: corev1alpha1.ToolSpec{
 				Description: "A custom tool",
 			},
 		},
 	}
-	customTools["custom_tool"].Name = "custom_tool"
+	customTools[customToolName].Name = customToolName
 
 	llmTools := buildLLMTools(enabledTools, customTools)
 

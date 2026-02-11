@@ -292,34 +292,43 @@ func (b *JobBuilder) buildEnvVars(task *corev1alpha1.Task, agent *corev1alpha1.A
 	return envVars
 }
 
-// addAIEnvVars adds AI-specific environment variables
-func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, providerCRD *corev1alpha1.Provider) []corev1.EnvVar {
-	var providerType, model, prompt, systemPrompt, baseURL string
-	var tools []string
+// aiConfig holds resolved AI configuration from provider, agent, and task.
+type aiConfig struct {
+	providerType string
+	model        string
+	prompt       string
+	systemPrompt string
+	baseURL      string
+	tools        []string
+}
+
+// resolveAIConfig merges AI configuration from provider, agent, and task (in priority order).
+func resolveAIConfig(task *corev1alpha1.Task, agent *corev1alpha1.Agent, providerCRD *corev1alpha1.Provider) aiConfig {
+	var cfg aiConfig
 
 	// Get values from Provider CRD if present (lowest priority - defaults)
 	if providerCRD != nil {
-		providerType = string(providerCRD.Spec.Type)
-		model = providerCRD.Spec.DefaultModel
-		baseURL = providerCRD.Spec.BaseURL
+		cfg.providerType = string(providerCRD.Spec.Type)
+		cfg.model = providerCRD.Spec.DefaultModel
+		cfg.baseURL = providerCRD.Spec.BaseURL
 	}
 
 	// Get values from agent if present (overrides provider defaults)
 	if agent != nil {
 		if agent.Spec.Model != nil {
 			if agent.Spec.Model.Provider != "" {
-				providerType = agent.Spec.Model.Provider
+				cfg.providerType = agent.Spec.Model.Provider
 			}
 			if agent.Spec.Model.Name != "" {
-				model = agent.Spec.Model.Name
+				cfg.model = agent.Spec.Model.Name
 			}
 		}
 		if agent.Spec.SystemPrompt != nil {
-			systemPrompt = agent.Spec.SystemPrompt.Inline
+			cfg.systemPrompt = agent.Spec.SystemPrompt.Inline
 		}
 		for _, t := range agent.Spec.Tools {
 			if t.Enabled == nil || *t.Enabled {
-				tools = append(tools, t.Name)
+				cfg.tools = append(cfg.tools, t.Name)
 			}
 		}
 	}
@@ -327,89 +336,91 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 	// Override with task values if present (highest priority)
 	if task.Spec.AI != nil {
 		if task.Spec.AI.Provider != "" {
-			providerType = task.Spec.AI.Provider
+			cfg.providerType = task.Spec.AI.Provider
 		}
 		if task.Spec.AI.Model != "" {
-			model = task.Spec.AI.Model
+			cfg.model = task.Spec.AI.Model
 		}
 		if task.Spec.AI.Prompt != "" {
-			prompt = task.Spec.AI.Prompt
+			cfg.prompt = task.Spec.AI.Prompt
 		}
 		if task.Spec.AI.SystemPrompt != "" {
-			systemPrompt = task.Spec.AI.SystemPrompt
+			cfg.systemPrompt = task.Spec.AI.SystemPrompt
 		}
 		if len(task.Spec.AI.Tools) > 0 {
-			tools = append(tools, task.Spec.AI.Tools...)
+			cfg.tools = append(cfg.tools, task.Spec.AI.Tools...)
 		}
 	}
 
 	// Check task.Spec.Prompt (used with agentRef pattern)
-	if prompt == "" && task.Spec.Prompt != "" {
-		prompt = task.Spec.Prompt
+	if cfg.prompt == "" && task.Spec.Prompt != "" {
+		cfg.prompt = task.Spec.Prompt
 	}
 
+	return cfg
+}
+
+// addCoordinationEnvVars appends coordination-related environment variables.
+func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent) []corev1.EnvVar {
 	envVars = append(envVars,
-		corev1.EnvVar{Name: "MERCAN_AI_PROVIDER", Value: providerType},
-		corev1.EnvVar{Name: "MERCAN_AI_MODEL", Value: model},
-		corev1.EnvVar{Name: "MERCAN_AI_PROMPT", Value: prompt},
-		corev1.EnvVar{Name: "MERCAN_AI_SYSTEM_PROMPT", Value: systemPrompt},
+		corev1.EnvVar{Name: "MERCAN_COORDINATION_ENABLED", Value: "true"},
+		corev1.EnvVar{Name: "MERCAN_COORDINATION_MAX_DEPTH",
+			Value: fmt.Sprintf("%d", agent.Spec.Coordination.MaxDepth)},
+		corev1.EnvVar{Name: "MERCAN_COORDINATION_MAX_CHILDREN",
+			Value: fmt.Sprintf("%d", agent.Spec.Coordination.MaxConcurrentChildren)},
 	)
 
-	// Add base URL if configured
-	if baseURL != "" {
-		envVars = append(envVars, corev1.EnvVar{Name: "MERCAN_AI_BASE_URL", Value: baseURL})
+	agentNames := make([]string, 0, len(agent.Spec.Coordination.AllowedAgents))
+	for _, a := range agent.Spec.Coordination.AllowedAgents {
+		agentNames = append(agentNames, a.Name)
+	}
+	envVars = append(envVars,
+		corev1.EnvVar{Name: "MERCAN_COORDINATION_ALLOWED_AGENTS",
+			Value: strings.Join(agentNames, ",")},
+	)
+
+	// Current depth (0 for top-level coordinator)
+	depth := "0"
+	if d, ok := task.Annotations["mercan.ai/coordination-depth"]; ok {
+		depth = d
+	}
+	envVars = append(envVars,
+		corev1.EnvVar{Name: "MERCAN_COORDINATION_DEPTH", Value: depth},
+	)
+
+	return envVars
+}
+
+// addAIEnvVars adds AI-specific environment variables
+func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, providerCRD *corev1alpha1.Provider) []corev1.EnvVar {
+	cfg := resolveAIConfig(task, agent, providerCRD)
+
+	envVars = append(envVars,
+		corev1.EnvVar{Name: "MERCAN_AI_PROVIDER", Value: cfg.providerType},
+		corev1.EnvVar{Name: "MERCAN_AI_MODEL", Value: cfg.model},
+		corev1.EnvVar{Name: "MERCAN_AI_PROMPT", Value: cfg.prompt},
+		corev1.EnvVar{Name: "MERCAN_AI_SYSTEM_PROMPT", Value: cfg.systemPrompt},
+	)
+
+	if cfg.baseURL != "" {
+		envVars = append(envVars, corev1.EnvVar{Name: "MERCAN_AI_BASE_URL", Value: cfg.baseURL})
 	}
 
 	// Auto-inject coordination tools when coordination is enabled
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
-		coordinationTools := []string{"delegate_task", "wait_for_tasks"}
-		for _, ct := range coordinationTools {
-			alreadyPresent := slices.Contains(tools, ct)
-			if !alreadyPresent {
-				tools = append(tools, ct)
+		for _, ct := range []string{"delegate_task", "wait_for_tasks"} {
+			if !slices.Contains(cfg.tools, ct) {
+				cfg.tools = append(cfg.tools, ct)
 			}
 		}
 	}
 
-	// Add tools as comma-separated list
-	if len(tools) > 0 {
-		var toolsStr strings.Builder
-		for i, t := range tools {
-			if i > 0 {
-				toolsStr.WriteString(",")
-			}
-			toolsStr.WriteString(t)
-		}
-		envVars = append(envVars, corev1.EnvVar{Name: "MERCAN_AI_TOOLS", Value: toolsStr.String()})
+	if len(cfg.tools) > 0 {
+		envVars = append(envVars, corev1.EnvVar{Name: "MERCAN_AI_TOOLS", Value: strings.Join(cfg.tools, ",")})
 	}
 
-	// Add coordination env vars when coordination is enabled
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
-		envVars = append(envVars,
-			corev1.EnvVar{Name: "MERCAN_COORDINATION_ENABLED", Value: "true"},
-			corev1.EnvVar{Name: "MERCAN_COORDINATION_MAX_DEPTH",
-				Value: fmt.Sprintf("%d", agent.Spec.Coordination.MaxDepth)},
-			corev1.EnvVar{Name: "MERCAN_COORDINATION_MAX_CHILDREN",
-				Value: fmt.Sprintf("%d", agent.Spec.Coordination.MaxConcurrentChildren)},
-		)
-
-		var agentNames []string
-		for _, a := range agent.Spec.Coordination.AllowedAgents {
-			agentNames = append(agentNames, a.Name)
-		}
-		envVars = append(envVars,
-			corev1.EnvVar{Name: "MERCAN_COORDINATION_ALLOWED_AGENTS",
-				Value: strings.Join(agentNames, ",")},
-		)
-
-		// Current depth (0 for top-level coordinator)
-		depth := "0"
-		if d, ok := task.Annotations["mercan.ai/coordination-depth"]; ok {
-			depth = d
-		}
-		envVars = append(envVars,
-			corev1.EnvVar{Name: "MERCAN_COORDINATION_DEPTH", Value: depth},
-		)
+		envVars = b.addCoordinationEnvVars(envVars, task, agent)
 	}
 
 	return envVars

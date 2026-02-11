@@ -129,7 +129,7 @@ func (t *FileReadTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	if err != nil {
 		return "", fmt.Errorf("failed to open file: %w", err)
 	}
-	defer file.Close()
+	defer file.Close() //nolint:errcheck
 
 	// Handle offset
 	if readArgs.Offset > 0 {

@@ -503,7 +503,7 @@ func (ch *ChatHandler) loadChatSession(ctx context.Context, namespace, sessionID
 }
 
 // saveChatSession saves chat session messages to the session store.
-func (ch *ChatHandler) saveChatSession(ctx context.Context, namespace, sessionID string, messages []llm.Message, persistedCount int, usage ChatUsage) error {
+func (ch *ChatHandler) saveChatSession(ctx context.Context, namespace, sessionID string, messages []llm.Message, persistedCount int, _ ChatUsage) error {
 	// Check if session exists
 	_, err := ch.sessionStore.GetSession(ctx, namespace, sessionID)
 	if err != nil {

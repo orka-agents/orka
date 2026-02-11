@@ -143,7 +143,7 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 
 	namespace := req.Namespace
 	if namespace == "" {
-		namespace = "default"
+		namespace = defaultNamespace
 	}
 
 	// Check namespace scope
@@ -247,7 +247,7 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 // GetTask gets a task by ID
 func (h *Handlers) GetTask(c fiber.Ctx) error {
 	id := c.Params("id")
-	namespace := c.Query("namespace", "default")
+	namespace := c.Query("namespace", defaultNamespace)
 
 	if h.watchNamespace != "" {
 		namespace = h.watchNamespace
@@ -268,7 +268,7 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 // DeleteTask deletes a task
 func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 	id := c.Params("id")
-	namespace := c.Query("namespace", "default")
+	namespace := c.Query("namespace", defaultNamespace)
 
 	if h.watchNamespace != "" {
 		namespace = h.watchNamespace
@@ -293,7 +293,7 @@ func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 // GetTaskLogs gets logs for a task
 func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	id := c.Params("id")
-	namespace := c.Query("namespace", "default")
+	namespace := c.Query("namespace", defaultNamespace)
 
 	if h.watchNamespace != "" {
 		namespace = h.watchNamespace
@@ -337,7 +337,7 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 // GetTaskResult gets the result of a task
 func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	id := c.Params("id")
-	namespace := c.Query("namespace", "default")
+	namespace := c.Query("namespace", defaultNamespace)
 
 	if h.watchNamespace != "" {
 		namespace = h.watchNamespace
@@ -377,7 +377,7 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 		namespace = h.watchNamespace
 	}
 	if namespace == "" {
-		namespace = "default"
+		namespace = defaultNamespace
 	}
 
 	ctx := c.Context()
@@ -412,7 +412,7 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 // GetSession gets a session
 func (h *Handlers) GetSession(c fiber.Ctx) error {
 	id := c.Params("id")
-	namespace := c.Query("namespace", "default")
+	namespace := c.Query("namespace", defaultNamespace)
 
 	if h.watchNamespace != "" {
 		namespace = h.watchNamespace
@@ -457,7 +457,7 @@ func (h *Handlers) GetSession(c fiber.Ctx) error {
 // DeleteSession deletes a session
 func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 	id := c.Params("id")
-	namespace := c.Query("namespace", "default")
+	namespace := c.Query("namespace", defaultNamespace)
 
 	if h.watchNamespace != "" {
 		namespace = h.watchNamespace
@@ -531,7 +531,7 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 // GetTool gets a tool by name
 func (h *Handlers) GetTool(c fiber.Ctx) error {
 	name := c.Params("name")
-	namespace := c.Query("namespace", "default")
+	namespace := c.Query("namespace", defaultNamespace)
 
 	if h.watchNamespace != "" {
 		namespace = h.watchNamespace
@@ -597,7 +597,7 @@ func (h *Handlers) ListAgents(c fiber.Ctx) error {
 // GetAgent gets an agent by name
 func (h *Handlers) GetAgent(c fiber.Ctx) error {
 	name := c.Params("name")
-	namespace := c.Query("namespace", "default")
+	namespace := c.Query("namespace", defaultNamespace)
 
 	if h.watchNamespace != "" {
 		namespace = h.watchNamespace
@@ -628,7 +628,7 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 
 	namespace := req.Namespace
 	if namespace == "" {
-		namespace = "default"
+		namespace = defaultNamespace
 	}
 
 	if h.watchNamespace != "" && h.watchNamespace != namespace {
@@ -657,7 +657,7 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 // UpdateAgent updates an existing agent
 func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 	name := c.Params("name")
-	namespace := c.Query("namespace", "default")
+	namespace := c.Query("namespace", defaultNamespace)
 
 	if h.watchNamespace != "" {
 		namespace = h.watchNamespace
@@ -688,7 +688,7 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 // DeleteAgent deletes an agent
 func (h *Handlers) DeleteAgent(c fiber.Ctx) error {
 	name := c.Params("name")
-	namespace := c.Query("namespace", "default")
+	namespace := c.Query("namespace", defaultNamespace)
 
 	if h.watchNamespace != "" {
 		namespace = h.watchNamespace
@@ -719,7 +719,7 @@ type SecretNameResponse struct {
 
 // ListSecretNames lists secret names in a namespace (metadata only, no data)
 func (h *Handlers) ListSecretNames(c fiber.Ctx) error {
-	namespace := c.Query("namespace", "default")
+	namespace := c.Query("namespace", defaultNamespace)
 
 	if h.watchNamespace != "" {
 		namespace = h.watchNamespace
@@ -774,7 +774,7 @@ func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
 	taskName := c.Params("id")
 	namespace := c.Query("namespace", h.watchNamespace)
 	if namespace == "" {
-		namespace = "default"
+		namespace = defaultNamespace
 	}
 
 	var taskList corev1alpha1.TaskList

@@ -116,7 +116,7 @@ func (t *CreatePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 	// Determine namespace from environment
 	ns := os.Getenv("MERCAN_TASK_NAMESPACE")
 	if ns == "" {
-		ns = "default"
+		ns = defaultNamespace
 	}
 
 	// Look up the child task to get workspace config
@@ -234,12 +234,12 @@ func createGitHubPR(token, owner, repo, head, base, title, body string, apiBaseU
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", 0, fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 

@@ -152,7 +152,7 @@ func (t *PostReviewCommentTool) Execute(ctx context.Context, argsJSON json.RawMe
 	// Determine namespace from environment
 	ns := os.Getenv("MERCAN_TASK_NAMESPACE")
 	if ns == "" {
-		ns = "default"
+		ns = defaultNamespace
 	}
 
 	// Look up the child task to get workspace config
@@ -245,7 +245,7 @@ func postGitHubReview(token, owner, repo string, prNumber int, body, event strin
 	if err != nil {
 		return 0, "", fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 

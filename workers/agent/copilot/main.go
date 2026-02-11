@@ -43,7 +43,9 @@ func buildSessionConfig(cfg *common.AgentConfig) *copilot.SessionConfig {
 		Model:            cfg.Model,
 		WorkingDirectory: dir,
 		// Auto-approve all permission requests for autonomous operation
-		OnPermissionRequest: func(_ copilot.PermissionRequest, _ copilot.PermissionInvocation) (copilot.PermissionRequestResult, error) {
+		OnPermissionRequest: func(
+			_ copilot.PermissionRequest, _ copilot.PermissionInvocation,
+		) (copilot.PermissionRequestResult, error) {
 			return copilot.PermissionRequestResult{Kind: "allow"}, nil
 		},
 	}

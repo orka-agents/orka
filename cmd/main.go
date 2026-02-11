@@ -109,10 +109,12 @@ func main() {
 	flag.DurationVar(&chatToolTimeout, "chat-tool-timeout", 60*time.Second, "Max time for a single tool execution.")
 	flag.IntVar(&chatMaxConcurrent, "chat-max-concurrent", 10, "Max concurrent chat sessions.")
 	flag.IntVar(&chatMaxTasksPerTurn, "chat-max-tasks-per-turn", 5, "Max tasks created per chat turn.")
-	flag.IntVar(&chatMaxSessionSize, "chat-max-session-size", 500*1024, "Soft limit for session ConfigMap size before truncation (bytes).")
+	flag.IntVar(&chatMaxSessionSize, "chat-max-session-size", 500*1024,
+		"Soft limit for session ConfigMap size before truncation (bytes).")
 	flag.StringVar(&storeBackend, "store-backend", "sqlite", "Storage backend (sqlite)")
 	flag.StringVar(&storePath, "store-path", "/data/mercan.db", "Path to SQLite database file")
-	flag.StringVar(&controllerURL, "controller-url", "", "Base URL for the controller API, used by workers. E.g. http://mercan-controller.mercan-system.svc:8080")
+	flag.StringVar(&controllerURL, "controller-url", "",
+		"Base URL for the controller API, used by workers. E.g. http://mercan-controller.mercan-system.svc:8080")
 
 	opts := zap.Options{
 		Development: true,

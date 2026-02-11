@@ -22,6 +22,8 @@ import (
 	"github.com/sozercan/mercan/workers/common"
 )
 
+const taskFailRetry = "task-fail-retry"
+
 func TestWaitForTasksTool_Name(t *testing.T) {
 	tool := NewWaitForTasksTool(nil)
 	if got := tool.Name(); got != "wait_for_tasks" {
@@ -47,7 +49,7 @@ func TestWaitForTasksTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Errorf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != "object" {
+	if schema["type"] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 }
@@ -189,7 +191,7 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 					taskName := parts[3]
 					if result, ok := tt.resultMap[taskName]; ok {
 						w.Header().Set("Content-Type", "application/json")
-						json.NewEncoder(w).Encode(map[string]string{"result": result})
+						json.NewEncoder(w).Encode(map[string]string{"result": result}) //nolint:errcheck
 						return
 					}
 				}
@@ -325,7 +327,7 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 	// Mock server that returns the structured result
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"result": string(srJSON)})
+		json.NewEncoder(w).Encode(map[string]string{"result": string(srJSON)}) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -414,7 +416,7 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 	// Create a failed task with auto-retry annotations
 	failedTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "task-fail-retry",
+			Name:      taskFailRetry,
 			Namespace: "test-ns",
 			Annotations: map[string]string{
 				"mercan.ai/auto-retry":      "true",
@@ -454,7 +456,7 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 	tool := NewWaitForTasksTool(fakeClient)
 
 	args, _ := json.Marshal(WaitForTasksArgs{
-		Tasks:   []string{"task-fail-retry"},
+		Tasks:   []string{taskFailRetry},
 		Timeout: "1s",
 	})
 
@@ -471,7 +473,7 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 	// The original task should be marked as retried
 	var originalResult *TaskResultInfo
 	for i := range waitResult.Results {
-		if waitResult.Results[i].Task == "task-fail-retry" {
+		if waitResult.Results[i].Task == taskFailRetry {
 			originalResult = &waitResult.Results[i]
 			break
 		}
@@ -510,7 +512,7 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 
 	var retryTask *corev1alpha1.Task
 	for i := range taskList.Items {
-		if taskList.Items[i].Name != "task-fail-retry" {
+		if taskList.Items[i].Name != taskFailRetry {
 			retryTask = &taskList.Items[i]
 			break
 		}
@@ -522,7 +524,7 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 	if retryTask.Annotations["mercan.ai/retry-count"] != "1" {
 		t.Errorf("retry task retry-count = %q, want 1", retryTask.Annotations["mercan.ai/retry-count"])
 	}
-	if retryTask.Annotations["mercan.ai/retried-from"] != "task-fail-retry" {
+	if retryTask.Annotations["mercan.ai/retried-from"] != taskFailRetry {
 		t.Errorf("retry task retried-from = %q, want task-fail-retry", retryTask.Annotations["mercan.ai/retried-from"])
 	}
 	if !strings.Contains(retryTask.Spec.Prompt, "PREVIOUS ATTEMPT FAILED") {
@@ -673,7 +675,7 @@ func TestWaitForTasksTool_Execute_NoAutoRetryOnSuccess(t *testing.T) {
 	}
 
 	var waitResult WaitForTasksResult
-	json.Unmarshal([]byte(result), &waitResult)
+	_ = json.Unmarshal([]byte(result), &waitResult)
 
 	r := waitResult.Results[0]
 	if r.Retried {

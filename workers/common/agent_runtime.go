@@ -90,8 +90,8 @@ func SetupGitCredentials() {
 		if data, err := os.ReadFile(path); err == nil {
 			token := strings.TrimSpace(string(data))
 			if token != "" {
-				os.Setenv("GIT_TOKEN", token)
-				os.Setenv("GIT_ASKPASS", "/bin/echo-token")
+				os.Setenv("GIT_TOKEN", token)               //nolint:errcheck
+				os.Setenv("GIT_ASKPASS", "/bin/echo-token") //nolint:errcheck
 				break
 			}
 		}
@@ -99,7 +99,7 @@ func SetupGitCredentials() {
 	if data, err := os.ReadFile("/secrets/git/username"); err == nil {
 		username := strings.TrimSpace(string(data))
 		if username != "" {
-			os.Setenv("GIT_USERNAME", username)
+			os.Setenv("GIT_USERNAME", username) //nolint:errcheck
 		}
 	}
 }

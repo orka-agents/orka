@@ -121,7 +121,7 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 	// Determine namespace from environment
 	ns := os.Getenv("MERCAN_TASK_NAMESPACE")
 	if ns == "" {
-		ns = "default"
+		ns = defaultNamespace
 	}
 
 	// Look up the child task to get workspace config
@@ -228,7 +228,7 @@ func getGitHubPRHeadSHA(token, owner, repo string, prNumber int, baseURL string)
 	if err != nil {
 		return "", fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
@@ -265,7 +265,7 @@ func checkGitHubCIStatus(token, owner, repo, sha, baseURL string) (bool, string,
 	if err != nil {
 		return false, "", fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
@@ -328,7 +328,7 @@ func mergeGitHubPR(token, owner, repo string, prNumber int, mergeMethod, commitT
 	if err != nil {
 		return "", fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 

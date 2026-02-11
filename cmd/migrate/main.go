@@ -88,7 +88,7 @@ func main() {
 			log.Error(err, "Failed to open SQLite database", "path", storePath)
 			os.Exit(1)
 		}
-		defer db.Close()
+		defer db.Close() //nolint:errcheck
 		s := sqlite.NewStore(db, storePath)
 		resultStore = s
 		sessionStore = s
@@ -155,7 +155,8 @@ func main() {
 
 		transcript, ok := cm.Data["transcript.jsonl"]
 		if !ok {
-			log.Info("Skipping session ConfigMap with no 'transcript.jsonl' key", "namespace", cm.Namespace, "configmap", cm.Name)
+			log.Info("Skipping session ConfigMap with no 'transcript.jsonl' key",
+				"namespace", cm.Namespace, "configmap", cm.Name)
 			continue
 		}
 
@@ -167,7 +168,8 @@ func main() {
 		}
 
 		if dryRun {
-			log.Info("Would migrate session", "namespace", cm.Namespace, "session", sessionName, "type", sessionType, "messages", len(messages))
+			log.Info("Would migrate session", "namespace", cm.Namespace,
+				"session", sessionName, "type", sessionType, "messages", len(messages))
 			sessionsMigrated++
 			continue
 		}
@@ -197,12 +199,14 @@ func main() {
 			}
 		}
 
-		log.Info("Migrated session", "namespace", cm.Namespace, "session", sessionName, "type", sessionType, "messages", len(messages))
+		log.Info("Migrated session", "namespace", cm.Namespace,
+			"session", sessionName, "type", sessionType, "messages", len(messages))
 		sessionsMigrated++
 
 		if cleanup {
 			if err := deleteConfigMap(ctx, clientset, cm.Namespace, cm.Name); err != nil {
-				log.Error(err, "Failed to delete session ConfigMap after migration", "namespace", cm.Namespace, "configmap", cm.Name)
+				log.Error(err, "Failed to delete session ConfigMap after migration",
+					"namespace", cm.Namespace, "configmap", cm.Name)
 				hadErrors = true
 			}
 		}
@@ -217,7 +221,11 @@ func main() {
 
 // listConfigMaps returns ConfigMaps matching the given label selector, either in a
 // specific namespace or across all namespaces.
-func listConfigMaps(ctx context.Context, clientset kubernetes.Interface, namespace, labelSelector string) ([]corev1.ConfigMap, error) {
+func listConfigMaps(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	namespace, labelSelector string,
+) ([]corev1.ConfigMap, error) {
 	opts := metav1.ListOptions{LabelSelector: labelSelector}
 	var allCMs []corev1.ConfigMap
 

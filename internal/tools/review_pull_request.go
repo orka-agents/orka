@@ -111,7 +111,7 @@ func (t *ReviewPullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 	// Determine namespace from environment
 	ns := os.Getenv("MERCAN_TASK_NAMESPACE")
 	if ns == "" {
-		ns = "default"
+		ns = defaultNamespace
 	}
 
 	// Look up the child task to get workspace config
@@ -213,7 +213,7 @@ func fetchPRDetails(httpClient *http.Client, baseURL, token, owner, repo string,
 	if err != nil {
 		return "", "", "", "", "", fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
@@ -257,7 +257,7 @@ func fetchPRDiff(httpClient *http.Client, baseURL, token, owner, repo string, pr
 	if err != nil {
 		return "", fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 
@@ -284,7 +284,7 @@ func fetchPRFiles(httpClient *http.Client, baseURL, token, owner, repo string, p
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 

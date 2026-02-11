@@ -43,7 +43,7 @@ func TestWebSearchTool_Parameters(t *testing.T) {
 	}
 
 	// Check required fields
-	if schema["type"] != "object" {
+	if schema["type"] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 }
@@ -145,7 +145,7 @@ func TestWebSearchTool_Execute_APISearch(t *testing.T) {
 		}
 
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(expectedResponse))
+		w.Write([]byte(expectedResponse)) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -170,7 +170,7 @@ func TestWebSearchTool_Execute_APIError(t *testing.T) {
 	// Create a test server that returns an error
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal server error"))
+		w.Write([]byte("internal server error")) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -191,7 +191,7 @@ func TestWebSearchTool_Execute_WithAuthHeader(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedAuthHeader = r.Header.Get("Authorization")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`[]`))
+		w.Write([]byte(`[]`)) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -214,12 +214,9 @@ func TestWebSearchTool_Execute_WithAuthHeader(t *testing.T) {
 }
 
 func TestWebSearchTool_Execute_ContextCancellation(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		// Slow response
-		select {
-		case <-r.Context().Done():
-			return
-		}
+		<-r.Context().Done()
 	}))
 	defer server.Close()
 

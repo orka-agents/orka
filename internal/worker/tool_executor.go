@@ -148,7 +148,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 	if err != nil {
 		return "", fmt.Errorf("tool request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	// Read response
 	respBody, err := io.ReadAll(resp.Body)

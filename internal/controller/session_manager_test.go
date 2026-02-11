@@ -10,6 +10,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 	"github.com/sozercan/mercan/internal/store"
 	"github.com/sozercan/mercan/internal/store/sqlite"
@@ -54,7 +56,7 @@ func TestSessionManager_IsLocked_SessionNotFound(t *testing.T) {
 	sm, _ := setupSessionManager()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
+			Name:      testTask,
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -78,15 +80,15 @@ func TestSessionManager_IsLocked_NotLocked(t *testing.T) {
 	ctx := context.Background()
 
 	// Create session with no active task
-	ss.CreateSession(ctx, &store.SessionRecord{
+	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
 		Namespace:   "default",
 		Name:        "test-session",
 		SessionType: "task",
-	})
+	}))
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
+			Name:      testTask,
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -110,16 +112,16 @@ func TestSessionManager_IsLocked_LockedByOther(t *testing.T) {
 	ctx := context.Background()
 
 	// Create session locked by another task
-	ss.CreateSession(ctx, &store.SessionRecord{
+	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
 		Namespace:   "default",
 		Name:        "test-session",
 		SessionType: "task",
 		ActiveTask:  "other-task",
-	})
+	}))
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
+			Name:      testTask,
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -143,16 +145,16 @@ func TestSessionManager_IsLocked_LockedBySelf(t *testing.T) {
 	ctx := context.Background()
 
 	// Create session locked by this task
-	ss.CreateSession(ctx, &store.SessionRecord{
+	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
 		Namespace:   "default",
 		Name:        "test-session",
 		SessionType: "task",
-		ActiveTask:  "test-task",
-	})
+		ActiveTask:  testTask,
+	}))
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
+			Name:      testTask,
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -189,7 +191,7 @@ func TestSessionManager_AcquireLock_CreateSession(t *testing.T) {
 	sm, _ := setupSessionManager()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
+			Name:      testTask,
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -210,7 +212,7 @@ func TestSessionManager_AcquireLock_CreateSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSession() error = %v", err)
 	}
-	if session.ActiveTask != "test-task" {
+	if session.ActiveTask != testTask {
 		t.Errorf("ActiveTask = %s, want test-task", session.ActiveTask)
 	}
 }
@@ -219,7 +221,7 @@ func TestSessionManager_AcquireLock_SessionNotFound_NoCreate(t *testing.T) {
 	sm, _ := setupSessionManager()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
+			Name:      testTask,
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -241,7 +243,7 @@ func TestSessionManager_AcquireLock_AlreadyLockedByOther(t *testing.T) {
 	ctx := context.Background()
 
 	// Create session locked by another task
-	ss.CreateSession(ctx, &store.SessionRecord{
+	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
 		Namespace:   "default",
 		Name:        "test-session",
 		SessionType: "task",
@@ -250,7 +252,7 @@ func TestSessionManager_AcquireLock_AlreadyLockedByOther(t *testing.T) {
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
+			Name:      testTask,
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -284,7 +286,7 @@ func TestSessionManager_ReleaseLock_SessionNotFound(t *testing.T) {
 	sm, _ := setupSessionManager()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
+			Name:      testTask,
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -305,7 +307,7 @@ func TestSessionManager_ReleaseLock_NotOwner(t *testing.T) {
 	ctx := context.Background()
 
 	// Create session locked by another task
-	ss.CreateSession(ctx, &store.SessionRecord{
+	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
 		Namespace:   "default",
 		Name:        "test-session",
 		SessionType: "task",
@@ -314,7 +316,7 @@ func TestSessionManager_ReleaseLock_NotOwner(t *testing.T) {
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
+			Name:      testTask,
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -357,7 +359,7 @@ func TestSessionManager_LoadTranscript_SessionNotFound(t *testing.T) {
 	sm, _ := setupSessionManager()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
+			Name:      testTask,
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -381,19 +383,19 @@ func TestSessionManager_LoadTranscript_WithMessages(t *testing.T) {
 	ctx := context.Background()
 
 	// Create session with messages
-	ss.CreateSession(ctx, &store.SessionRecord{
+	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
 		Namespace:   "default",
 		Name:        "test-session",
 		SessionType: "task",
-	})
-	ss.AppendMessages(ctx, "default", "test-session", []store.SessionMessage{
+	}))
+	require.NoError(t, ss.AppendMessages(ctx, "default", "test-session", []store.SessionMessage{
 		{Role: "user", Content: "hello"},
 		{Role: "assistant", Content: "hi"},
-	})
+	}))
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
+			Name:      testTask,
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -417,22 +419,22 @@ func TestSessionManager_LoadTranscript_MaxMessages(t *testing.T) {
 	ctx := context.Background()
 
 	// Create session with messages
-	ss.CreateSession(ctx, &store.SessionRecord{
+	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
 		Namespace:   "default",
 		Name:        "test-session",
 		SessionType: "task",
-	})
-	ss.AppendMessages(ctx, "default", "test-session", []store.SessionMessage{
+	}))
+	require.NoError(t, ss.AppendMessages(ctx, "default", "test-session", []store.SessionMessage{
 		{Role: "user", Content: "msg1"},
 		{Role: "assistant", Content: "msg2"},
 		{Role: "user", Content: "msg3"},
 		{Role: "assistant", Content: "msg4"},
 		{Role: "user", Content: "msg5"},
-	})
+	}))
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
+			Name:      testTask,
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -456,7 +458,7 @@ func TestSessionManager_GetSession(t *testing.T) {
 	sm, ss := setupSessionManager()
 	ctx := context.Background()
 
-	ss.CreateSession(ctx, &store.SessionRecord{
+	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
 		Namespace:   "default",
 		Name:        "test-session",
 		SessionType: "task",
@@ -475,7 +477,7 @@ func TestSessionManager_DeleteSession(t *testing.T) {
 	sm, ss := setupSessionManager()
 	ctx := context.Background()
 
-	ss.CreateSession(ctx, &store.SessionRecord{
+	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
 		Namespace:   "default",
 		Name:        "test-session",
 		SessionType: "task",
@@ -497,12 +499,12 @@ func TestSessionManager_ListSessions(t *testing.T) {
 	sm, ss := setupSessionManager()
 	ctx := context.Background()
 
-	ss.CreateSession(ctx, &store.SessionRecord{
+	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
 		Namespace:   "default",
 		Name:        "s1",
 		SessionType: "task",
 	})
-	ss.CreateSession(ctx, &store.SessionRecord{
+	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
 		Namespace:   "default",
 		Name:        "s2",
 		SessionType: "task",
@@ -553,18 +555,18 @@ func TestSessionManager_AppendMessages_WithPromptAndResult(t *testing.T) {
 	ctx := context.Background()
 
 	// Create session
-	ss.CreateSession(ctx, &store.SessionRecord{
+	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
 		Namespace:   "default",
 		Name:        "test-session",
 		SessionType: "task",
-	})
+	}))
 
 	// Save result
-	ss.SaveResult(ctx, "default", "test-task", []byte("Here is the answer"))
+	require.NoError(t, ss.SaveResult(ctx, defaultNS, testTask, []byte("Here is the answer")))
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
+			Name:      testTask,
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -606,7 +608,7 @@ func TestSessionManager_AppendMessages_NoPromptNoResult(t *testing.T) {
 	sm, ss := setupSessionManager()
 	ctx := context.Background()
 
-	ss.CreateSession(ctx, &store.SessionRecord{
+	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
 		Namespace:   "default",
 		Name:        "test-session",
 		SessionType: "task",
@@ -614,7 +616,7 @@ func TestSessionManager_AppendMessages_NoPromptNoResult(t *testing.T) {
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
+			Name:      testTask,
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{

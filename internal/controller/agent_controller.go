@@ -80,38 +80,65 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 		}
 	}
 
-	// Validate providerRef if set
-	if agent.Spec.ProviderRef != nil {
-		provider := &corev1alpha1.Provider{}
-		ns := agent.Namespace
-		if agent.Spec.ProviderRef.Namespace != "" {
-			ns = agent.Spec.ProviderRef.Namespace
-		}
-		key := client.ObjectKey{Name: agent.Spec.ProviderRef.Name, Namespace: ns}
-		if err := r.Get(ctx, key, provider); err != nil {
-			if errors.IsNotFound(err) {
-				return fmt.Errorf("referenced provider %q not found", agent.Spec.ProviderRef.Name)
-			}
-			return fmt.Errorf("failed to get provider %q: %w", agent.Spec.ProviderRef.Name, err)
-		}
-		if !provider.Status.Ready {
-			return fmt.Errorf("referenced provider %q is not ready", agent.Spec.ProviderRef.Name)
-		}
+	if err := r.validateProviderRef(ctx, agent); err != nil {
+		return err
 	}
-
-	// Validate secretRef if set
-	if agent.Spec.SecretRef != nil {
-		secret := &corev1.Secret{}
-		key := client.ObjectKey{Name: agent.Spec.SecretRef.Name, Namespace: agent.Namespace}
-		if err := r.Get(ctx, key, secret); err != nil {
-			if errors.IsNotFound(err) {
-				return fmt.Errorf("referenced secret %q not found", agent.Spec.SecretRef.Name)
-			}
-			return fmt.Errorf("failed to get secret %q: %w", agent.Spec.SecretRef.Name, err)
-		}
+	if err := r.validateSecretRef(ctx, agent); err != nil {
+		return err
 	}
+	if err := r.validateTools(ctx, agent); err != nil {
+		return err
+	}
+	if err := r.validateSkills(ctx, agent); err != nil {
+		return err
+	}
+	if err := r.validateSystemPromptConfigMap(ctx, agent); err != nil {
+		return err
+	}
+	return r.validateCoordination(ctx, agent)
+}
 
-	// Validate referenced tools exist
+// validateProviderRef validates the providerRef if set.
+func (r *AgentReconciler) validateProviderRef(ctx context.Context, agent *corev1alpha1.Agent) error {
+	if agent.Spec.ProviderRef == nil {
+		return nil
+	}
+	provider := &corev1alpha1.Provider{}
+	ns := agent.Namespace
+	if agent.Spec.ProviderRef.Namespace != "" {
+		ns = agent.Spec.ProviderRef.Namespace
+	}
+	key := client.ObjectKey{Name: agent.Spec.ProviderRef.Name, Namespace: ns}
+	if err := r.Get(ctx, key, provider); err != nil {
+		if errors.IsNotFound(err) {
+			return fmt.Errorf("referenced provider %q not found", agent.Spec.ProviderRef.Name)
+		}
+		return fmt.Errorf("failed to get provider %q: %w", agent.Spec.ProviderRef.Name, err)
+	}
+	if !provider.Status.Ready {
+		return fmt.Errorf("referenced provider %q is not ready", agent.Spec.ProviderRef.Name)
+	}
+	return nil
+}
+
+// validateSecretRef validates the secretRef if set.
+func (r *AgentReconciler) validateSecretRef(ctx context.Context, agent *corev1alpha1.Agent) error {
+	if agent.Spec.SecretRef == nil {
+		return nil
+	}
+	secret := &corev1.Secret{}
+	key := client.ObjectKey{Name: agent.Spec.SecretRef.Name, Namespace: agent.Namespace}
+	if err := r.Get(ctx, key, secret); err != nil {
+		if errors.IsNotFound(err) {
+			return fmt.Errorf("referenced secret %q not found", agent.Spec.SecretRef.Name)
+		}
+		return fmt.Errorf("failed to get secret %q: %w", agent.Spec.SecretRef.Name, err)
+	}
+	return nil
+}
+
+// validateTools validates that referenced tools exist.
+func (r *AgentReconciler) validateTools(ctx context.Context, agent *corev1alpha1.Agent) error {
 	for _, toolRef := range agent.Spec.Tools {
 		if toolRef.Enabled != nil && !*toolRef.Enabled {
 			continue
@@ -126,8 +153,11 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 			return fmt.Errorf("failed to check tool %q: %w", toolRef.Name, err)
 		}
 	}
+	return nil
+}
 
-	// Validate referenced skills (ConfigMaps) exist
+// validateSkills validates that referenced skill ConfigMaps exist.
+func (r *AgentReconciler) validateSkills(ctx context.Context, agent *corev1alpha1.Agent) error {
 	for _, skillRef := range agent.Spec.Skills {
 		cm := &corev1.ConfigMap{}
 		key := client.ObjectKey{Name: skillRef.ConfigMapRef.Name, Namespace: agent.Namespace}
@@ -138,40 +168,47 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 			return fmt.Errorf("failed to get skill ConfigMap %q: %w", skillRef.ConfigMapRef.Name, err)
 		}
 	}
+	return nil
+}
 
-	// Validate systemPrompt configMapRef if set
-	if agent.Spec.SystemPrompt != nil && agent.Spec.SystemPrompt.ConfigMapRef != nil {
-		cm := &corev1.ConfigMap{}
-		key := client.ObjectKey{Name: agent.Spec.SystemPrompt.ConfigMapRef.Name, Namespace: agent.Namespace}
-		if err := r.Get(ctx, key, cm); err != nil {
+// validateSystemPromptConfigMap validates the systemPrompt configMapRef if set.
+func (r *AgentReconciler) validateSystemPromptConfigMap(ctx context.Context, agent *corev1alpha1.Agent) error {
+	if agent.Spec.SystemPrompt == nil || agent.Spec.SystemPrompt.ConfigMapRef == nil {
+		return nil
+	}
+	cm := &corev1.ConfigMap{}
+	key := client.ObjectKey{Name: agent.Spec.SystemPrompt.ConfigMapRef.Name, Namespace: agent.Namespace}
+	if err := r.Get(ctx, key, cm); err != nil {
+		if errors.IsNotFound(err) {
+			return fmt.Errorf("systemPrompt ConfigMap %q not found", agent.Spec.SystemPrompt.ConfigMapRef.Name)
+		}
+		return fmt.Errorf("failed to get systemPrompt ConfigMap %q: %w", agent.Spec.SystemPrompt.ConfigMapRef.Name, err)
+	}
+	if _, ok := cm.Data[agent.Spec.SystemPrompt.ConfigMapRef.Key]; !ok {
+		return fmt.Errorf("key %q not found in systemPrompt ConfigMap %q", agent.Spec.SystemPrompt.ConfigMapRef.Key, agent.Spec.SystemPrompt.ConfigMapRef.Name)
+	}
+	return nil
+}
+
+// validateCoordination validates the coordination config and referenced agents.
+func (r *AgentReconciler) validateCoordination(ctx context.Context, agent *corev1alpha1.Agent) error {
+	if agent.Spec.Coordination == nil || !agent.Spec.Coordination.Enabled {
+		return nil
+	}
+	for _, allowed := range agent.Spec.Coordination.AllowedAgents {
+		ns := agent.Namespace
+		if allowed.Namespace != "" {
+			ns = allowed.Namespace
+		}
+		delegateAgent := &corev1alpha1.Agent{}
+		key := client.ObjectKey{Name: allowed.Name, Namespace: ns}
+		if err := r.Get(ctx, key, delegateAgent); err != nil {
 			if errors.IsNotFound(err) {
-				return fmt.Errorf("systemPrompt ConfigMap %q not found", agent.Spec.SystemPrompt.ConfigMapRef.Name)
+				return fmt.Errorf("coordination target agent %q not found", allowed.Name)
 			}
-			return fmt.Errorf("failed to get systemPrompt ConfigMap %q: %w", agent.Spec.SystemPrompt.ConfigMapRef.Name, err)
-		}
-		if _, ok := cm.Data[agent.Spec.SystemPrompt.ConfigMapRef.Key]; !ok {
-			return fmt.Errorf("key %q not found in systemPrompt ConfigMap %q", agent.Spec.SystemPrompt.ConfigMapRef.Key, agent.Spec.SystemPrompt.ConfigMapRef.Name)
+			return fmt.Errorf("failed to check coordination target agent %q: %w", allowed.Name, err)
 		}
 	}
-
-	// Validate coordination config
-	if agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
-		for _, allowed := range agent.Spec.Coordination.AllowedAgents {
-			ns := agent.Namespace
-			if allowed.Namespace != "" {
-				ns = allowed.Namespace
-			}
-			delegateAgent := &corev1alpha1.Agent{}
-			key := client.ObjectKey{Name: allowed.Name, Namespace: ns}
-			if err := r.Get(ctx, key, delegateAgent); err != nil {
-				if errors.IsNotFound(err) {
-					return fmt.Errorf("coordination target agent %q not found", allowed.Name)
-				}
-				return fmt.Errorf("failed to check coordination target agent %q: %w", allowed.Name, err)
-			}
-		}
-	}
-
 	return nil
 }
 

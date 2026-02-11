@@ -14,6 +14,8 @@ import (
 	"testing"
 )
 
+const testDigits = "0123456789"
+
 func TestFileReadTool_Name(t *testing.T) {
 	tool := NewFileReadTool()
 	if got := tool.Name(); got != "file_read" {
@@ -43,7 +45,7 @@ func TestFileReadTool_Parameters(t *testing.T) {
 	}
 
 	// Check required fields
-	if schema["type"] != "object" {
+	if schema["type"] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 }
@@ -193,7 +195,7 @@ func TestFileReadTool_Execute_InvalidJSON(t *testing.T) {
 func TestFileReadTool_Execute_WithOffset(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
-	testContent := "0123456789"
+	testContent := testDigits
 	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
 		t.Fatalf("failed to create test file: %v", err)
 	}
@@ -223,7 +225,7 @@ func TestFileReadTool_Execute_WithOffset(t *testing.T) {
 func TestFileReadTool_Execute_WithLimit(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
-	testContent := "0123456789"
+	testContent := testDigits
 	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
 		t.Fatalf("failed to create test file: %v", err)
 	}
@@ -256,7 +258,7 @@ func TestFileReadTool_Execute_WithLimit(t *testing.T) {
 func TestFileReadTool_Execute_OffsetAndLimit(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
-	testContent := "0123456789"
+	testContent := testDigits
 	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
 		t.Fatalf("failed to create test file: %v", err)
 	}
@@ -358,8 +360,8 @@ func TestNewFileReadTool(t *testing.T) {
 
 func TestNewFileReadTool_WithEnvVar(t *testing.T) {
 	originalWorkDir := os.Getenv("MERCAN_WORK_DIR")
-	os.Setenv("MERCAN_WORK_DIR", "/custom/workspace")
-	defer os.Setenv("MERCAN_WORK_DIR", originalWorkDir)
+	os.Setenv("MERCAN_WORK_DIR", "/custom/workspace")   //nolint:errcheck
+	defer os.Setenv("MERCAN_WORK_DIR", originalWorkDir) //nolint:errcheck
 
 	tool := NewFileReadTool()
 	if tool.workDir != "/custom/workspace" {

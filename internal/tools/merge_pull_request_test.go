@@ -205,7 +205,7 @@ func TestMergePullRequestTool_CIChecksFailed(t *testing.T) {
 func TestMergePullRequestTool_Success(t *testing.T) {
 	// Mock GitHub API
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+		if auth := r.Header.Get("Authorization"); auth != testBearerToken {
 			t.Errorf("unexpected auth header: %s", auth)
 		}
 
@@ -221,7 +221,7 @@ func TestMergePullRequestTool_Success(t *testing.T) {
 		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/pulls/42/merge"):
 			// Verify merge request body
 			var body map[string]any
-			json.NewDecoder(r.Body).Decode(&body)
+			json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
 			if body["merge_method"] != "squash" {
 				t.Errorf("unexpected merge_method: %v", body["merge_method"])
 			}

@@ -30,8 +30,8 @@ import (
 
 func setupTestOpenAIHandler(objs ...runtime.Object) (*OpenAICompatHandler, *fiber.App) {
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	handler := NewOpenAICompatHandler(fakeClient, "default", DefaultChatConfig())
@@ -58,7 +58,7 @@ func TestHandleChatCompletions_MissingMessages(t *testing.T) {
 	}
 
 	var oaiErr OAIError
-	json.NewDecoder(resp.Body).Decode(&oaiErr)
+	json.NewDecoder(resp.Body).Decode(&oaiErr) //nolint:errcheck
 	if oaiErr.Error.Type != "invalid_request_error" {
 		t.Errorf("expected error type invalid_request_error, got %s", oaiErr.Error.Type)
 	}
@@ -99,7 +99,7 @@ func TestHandleChatCompletions_NoProvider(t *testing.T) {
 	}
 
 	var oaiErr OAIError
-	json.NewDecoder(resp.Body).Decode(&oaiErr)
+	json.NewDecoder(resp.Body).Decode(&oaiErr) //nolint:errcheck
 	if !strings.Contains(oaiErr.Error.Message, "provider") {
 		t.Errorf("expected error about provider, got: %s", oaiErr.Error.Message)
 	}
@@ -120,7 +120,7 @@ func TestHandleListModels_Empty(t *testing.T) {
 	}
 
 	var modelList OAIModelList
-	json.NewDecoder(resp.Body).Decode(&modelList)
+	json.NewDecoder(resp.Body).Decode(&modelList) //nolint:errcheck
 	if modelList.Object != "list" {
 		t.Errorf("expected object 'list', got %s", modelList.Object)
 	}
@@ -158,7 +158,7 @@ func TestHandleListModels_WithProviders(t *testing.T) {
 	}
 
 	var modelList OAIModelList
-	json.NewDecoder(resp.Body).Decode(&modelList)
+	json.NewDecoder(resp.Body).Decode(&modelList) //nolint:errcheck
 	if len(modelList.Data) != 2 {
 		t.Fatalf("expected 2 models (prefixed and plain), got %d", len(modelList.Data))
 	}

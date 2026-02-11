@@ -9,13 +9,18 @@ import (
 	"github.com/sozercan/mercan/internal/store"
 )
 
+const (
+	roleUser      = "user"
+	roleAssistant = "assistant"
+)
+
 func setupTestStore(t *testing.T) *Store {
 	t.Helper()
 	db, err := NewDB(":memory:")
 	if err != nil {
 		t.Fatalf("NewDB(:memory:) failed: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { db.Close() }) //nolint:errcheck
 	return NewStore(db, ":memory:")
 }
 
@@ -283,8 +288,8 @@ func TestSessionMessages(t *testing.T) {
 
 	t.Run("append and load messages", func(t *testing.T) {
 		messages := []store.SessionMessage{
-			{Role: "user", Content: "hello", Timestamp: now},
-			{Role: "assistant", Content: "hi there", Timestamp: now},
+			{Role: roleUser, Content: "hello", Timestamp: now},
+			{Role: roleAssistant, Content: "hi there", Timestamp: now},
 		}
 		if err := s.AppendMessages(ctx, "ns1", "msg-session", messages); err != nil {
 			t.Fatalf("AppendMessages: %v", err)
@@ -297,10 +302,10 @@ func TestSessionMessages(t *testing.T) {
 		if len(got) != 2 {
 			t.Fatalf("got %d messages, want 2", len(got))
 		}
-		if got[0].Role != "user" || got[0].Content != "hello" {
+		if got[0].Role != roleUser || got[0].Content != "hello" {
 			t.Errorf("message 0: got %+v", got[0])
 		}
-		if got[1].Role != "assistant" || got[1].Content != "hi there" {
+		if got[1].Role != roleAssistant || got[1].Content != "hi there" {
 			t.Errorf("message 1: got %+v", got[1])
 		}
 	})
@@ -316,7 +321,7 @@ func TestSessionMessages(t *testing.T) {
 
 		// Append more
 		moreMessages := []store.SessionMessage{
-			{Role: "user", Content: "follow up", Timestamp: now},
+			{Role: roleUser, Content: "follow up", Timestamp: now},
 		}
 		if err := s.AppendMessages(ctx, "ns1", "msg-session", moreMessages); err != nil {
 			t.Fatalf("AppendMessages: %v", err)
@@ -359,7 +364,7 @@ func TestSessionMessages(t *testing.T) {
 
 		messages := []store.SessionMessage{
 			{
-				Role:       "assistant",
+				Role:       roleAssistant,
 				Content:    "",
 				Name:       "tool-use",
 				Input:      map[string]any{"key": "value", "num": float64(42)},
@@ -422,8 +427,8 @@ func TestCascadeDelete(t *testing.T) {
 	}
 
 	messages := []store.SessionMessage{
-		{Role: "user", Content: "msg1", Timestamp: now},
-		{Role: "assistant", Content: "msg2", Timestamp: now},
+		{Role: roleUser, Content: "msg1", Timestamp: now},
+		{Role: roleAssistant, Content: "msg2", Timestamp: now},
 	}
 	if err := s.AppendMessages(ctx, "ns1", "cascade-session", messages); err != nil {
 		t.Fatalf("AppendMessages: %v", err)
@@ -512,8 +517,8 @@ func TestGetSessionIncludesMessages(t *testing.T) {
 	}
 
 	messages := []store.SessionMessage{
-		{Role: "user", Content: "first", Timestamp: now},
-		{Role: "assistant", Content: "second", Timestamp: now},
+		{Role: roleUser, Content: "first", Timestamp: now},
+		{Role: roleAssistant, Content: "second", Timestamp: now},
 	}
 	if err := s.AppendMessages(ctx, "ns1", "full-session", messages); err != nil {
 		t.Fatalf("AppendMessages: %v", err)

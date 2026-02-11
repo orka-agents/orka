@@ -18,6 +18,10 @@ import (
 
 const githubAPIBaseURL = "https://api.github.com"
 
+const defaultNamespace = "default"
+
+const trueStr = "true"
+
 // Tool is the interface for built-in tools
 type Tool interface {
 	// Name returns the tool name

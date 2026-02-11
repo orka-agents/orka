@@ -70,7 +70,7 @@ var _ = Describe("Task Controller", func() {
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default",
+			Namespace: defaultNS,
 		}
 		task := &corev1alpha1.Task{}
 
@@ -81,7 +81,7 @@ var _ = Describe("Task Controller", func() {
 				resource := &corev1alpha1.Task{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
-						Namespace: "default",
+						Namespace: defaultNS,
 					},
 					Spec: corev1alpha1.TaskSpec{
 						Type:    corev1alpha1.TaskTypeContainer,
@@ -118,7 +118,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-handle-deletion"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 
 			// Save result to store
@@ -170,7 +170,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-deletion-job-cleanup"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 
 			// Create job
@@ -230,7 +230,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-deletion-no-result"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 
 			task := &corev1alpha1.Task{
@@ -261,7 +261,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-handle-pending"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
@@ -312,7 +312,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-pending-bad-agent"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
@@ -350,7 +350,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-running-success"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
@@ -402,7 +402,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-running-fail"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
@@ -448,7 +448,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-running-job-missing"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
@@ -485,7 +485,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-running-timeout"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
@@ -524,7 +524,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-running-still-running"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
@@ -565,7 +565,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-completed-no-webhook"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
@@ -597,7 +597,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-complete-success"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
@@ -617,7 +617,7 @@ var _ = Describe("Task Controller", func() {
 
 			result, err := r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "all good")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).To(BeTrue())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseSucceeded))
@@ -634,7 +634,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-fail-task"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
@@ -654,7 +654,7 @@ var _ = Describe("Task Controller", func() {
 
 			result, err := r.failTask(ctx, task, "something broke")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).To(BeTrue())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
@@ -715,7 +715,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-retry-task"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
@@ -758,7 +758,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-running-retry"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
@@ -887,7 +887,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-collect-result"
-			ns := "default"
+			ns := defaultNS
 
 			// Save result to store
 			Expect(r.ResultStore.SaveResult(ctx, ns, taskName, []byte("hello world"))).To(Succeed())
@@ -912,7 +912,7 @@ var _ = Describe("Task Controller", func() {
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "nonexistent-task",
-					Namespace: "default",
+					Namespace: defaultNS,
 				},
 			}
 
@@ -1170,7 +1170,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 
-			nn := types.NamespacedName{Name: "nonexistent-task", Namespace: "default"}
+			nn := types.NamespacedName{Name: "nonexistent-task", Namespace: defaultNS}
 			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(ctrl.Result{}))
@@ -1180,7 +1180,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-add-finalizer"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
@@ -1199,7 +1199,7 @@ var _ = Describe("Task Controller", func() {
 
 			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).To(BeTrue())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(controllerutil.ContainsFinalizer(task, TaskFinalizer)).To(BeTrue())
@@ -1209,7 +1209,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := "test-init-status"
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
@@ -1232,7 +1232,7 @@ var _ = Describe("Task Controller", func() {
 			// Second reconcile: initialize status
 			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).To(BeTrue())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
@@ -1245,13 +1245,13 @@ var _ = Describe("Task Controller", func() {
 			r := newReconciler()
 
 			taskName := "test-scheduled-pending"
-			nn := types.NamespacedName{Name: taskName, Namespace: "default"}
+			nn := types.NamespacedName{Name: taskName, Namespace: defaultNS}
 			defer cleanupTask(ctx, nn)
 
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      taskName,
-					Namespace: "default",
+					Namespace: defaultNS,
 				},
 				Spec: corev1alpha1.TaskSpec{
 					Type:     corev1alpha1.TaskTypeContainer,
@@ -1285,13 +1285,13 @@ var _ = Describe("Task Controller", func() {
 			r := newReconciler()
 
 			taskName := "test-scheduled-invalid-cron"
-			nn := types.NamespacedName{Name: taskName, Namespace: "default"}
+			nn := types.NamespacedName{Name: taskName, Namespace: defaultNS}
 			defer cleanupTask(ctx, nn)
 
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      taskName,
-					Namespace: "default",
+					Namespace: defaultNS,
 				},
 				Spec: corev1alpha1.TaskSpec{
 					Type:     corev1alpha1.TaskTypeContainer,
@@ -1323,19 +1323,21 @@ var _ = Describe("Task Controller", func() {
 			r := newReconciler()
 
 			taskName := "test-scheduled-child"
-			nn := types.NamespacedName{Name: taskName, Namespace: "default"}
+			nn := types.NamespacedName{Name: taskName, Namespace: defaultNS}
 			defer cleanupTask(ctx, nn)
 
+			deadline := int64(300)
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      taskName,
-					Namespace: "default",
+					Namespace: defaultNS,
 				},
 				Spec: corev1alpha1.TaskSpec{
-					Type:     corev1alpha1.TaskTypeContainer,
-					Image:    "alpine:latest",
-					Command:  []string{"echo", "hello"},
-					Schedule: "*/1 * * * *",
+					Type:                    corev1alpha1.TaskTypeContainer,
+					Image:                   "alpine:latest",
+					Command:                 []string{"echo", "hello"},
+					Schedule:                "*/1 * * * *",
+					StartingDeadlineSeconds: &deadline,
 				},
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
@@ -1367,7 +1369,7 @@ var _ = Describe("Task Controller", func() {
 			// List child tasks
 			var childList corev1alpha1.TaskList
 			Expect(k8sClient.List(ctx, &childList,
-				client.InNamespace("default"),
+				client.InNamespace(defaultNS),
 				client.MatchingLabels{"mercan.ai/parent-task": taskName},
 			)).To(Succeed())
 			Expect(childList.Items).NotTo(BeEmpty())
@@ -1380,7 +1382,7 @@ var _ = Describe("Task Controller", func() {
 
 			// Clean up child
 			for i := range childList.Items {
-				cleanupTask(ctx, types.NamespacedName{Name: childList.Items[i].Name, Namespace: "default"})
+				cleanupTask(ctx, types.NamespacedName{Name: childList.Items[i].Name, Namespace: defaultNS})
 			}
 		})
 
@@ -1389,13 +1391,13 @@ var _ = Describe("Task Controller", func() {
 			r := newReconciler()
 
 			taskName := "test-scheduled-forbid"
-			nn := types.NamespacedName{Name: taskName, Namespace: "default"}
+			nn := types.NamespacedName{Name: taskName, Namespace: defaultNS}
 			defer cleanupTask(ctx, nn)
 
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      taskName,
-					Namespace: "default",
+					Namespace: defaultNS,
 				},
 				Spec: corev1alpha1.TaskSpec{
 					Type:              corev1alpha1.TaskTypeContainer,
@@ -1410,7 +1412,7 @@ var _ = Describe("Task Controller", func() {
 			activeChild := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      taskName + "-active-child",
-					Namespace: "default",
+					Namespace: defaultNS,
 					Labels: map[string]string{
 						"mercan.ai/parent-task":   taskName,
 						"mercan.ai/scheduled-run": "true",
@@ -1422,7 +1424,7 @@ var _ = Describe("Task Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, activeChild)).To(Succeed())
-			defer cleanupTask(ctx, types.NamespacedName{Name: activeChild.Name, Namespace: "default"})
+			defer cleanupTask(ctx, types.NamespacedName{Name: activeChild.Name, Namespace: defaultNS})
 
 			// Set child to Running
 			activeChild.Status.Phase = corev1alpha1.TaskPhaseRunning
@@ -1449,7 +1451,7 @@ var _ = Describe("Task Controller", func() {
 			// Verify no additional child was created
 			var childList corev1alpha1.TaskList
 			Expect(k8sClient.List(ctx, &childList,
-				client.InNamespace("default"),
+				client.InNamespace(defaultNS),
 				client.MatchingLabels{"mercan.ai/parent-task": taskName},
 			)).To(Succeed())
 			Expect(childList.Items).To(HaveLen(1), "should only have the original active child")
@@ -1460,14 +1462,14 @@ var _ = Describe("Task Controller", func() {
 			r := newReconciler()
 
 			taskName := "test-scheduled-suspend"
-			nn := types.NamespacedName{Name: taskName, Namespace: "default"}
+			nn := types.NamespacedName{Name: taskName, Namespace: defaultNS}
 			defer cleanupTask(ctx, nn)
 
 			suspend := true
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      taskName,
-					Namespace: "default",
+					Namespace: defaultNS,
 				},
 				Spec: corev1alpha1.TaskSpec{
 					Type:     corev1alpha1.TaskTypeContainer,
@@ -1500,7 +1502,7 @@ var _ = Describe("Task Controller", func() {
 			// No children should be created
 			var childList corev1alpha1.TaskList
 			Expect(k8sClient.List(ctx, &childList,
-				client.InNamespace("default"),
+				client.InNamespace(defaultNS),
 				client.MatchingLabels{"mercan.ai/parent-task": taskName},
 			)).To(Succeed())
 			Expect(childList.Items).To(BeEmpty())
@@ -1511,7 +1513,7 @@ var _ = Describe("Task Controller", func() {
 		It("should fail child task when depth exceeds maxDepth", func() {
 			ctx := context.Background()
 			r := newReconciler()
-			ns := "default"
+			ns := defaultNS
 
 			// Create parent agent with coordination enabled, maxDepth=1
 			parentAgent := &corev1alpha1.Agent{
@@ -1585,7 +1587,7 @@ var _ = Describe("Task Controller", func() {
 		It("should fail child task when agent is not in allowedAgents", func() {
 			ctx := context.Background()
 			r := newReconciler()
-			ns := "default"
+			ns := defaultNS
 
 			// Create parent agent with allowedAgents=[allowed-agent]
 			parentAgent := &corev1alpha1.Agent{
@@ -1675,7 +1677,7 @@ var _ = Describe("Task Controller", func() {
 		It("should requeue child task when max concurrent children reached", func() {
 			ctx := context.Background()
 			r := newReconciler()
-			ns := "default"
+			ns := defaultNS
 
 			// Create parent agent with maxConcurrentChildren=1
 			parentAgent := &corev1alpha1.Agent{
@@ -1779,7 +1781,7 @@ var _ = Describe("Task Controller", func() {
 		It("should pass coordination checks for valid child task", func() {
 			ctx := context.Background()
 			r := newReconciler()
-			ns := "default"
+			ns := defaultNS
 
 			// Create parent agent with coordination allowing "child-agent"
 			parentAgent := &corev1alpha1.Agent{
@@ -1878,7 +1880,7 @@ var _ = Describe("Task Controller", func() {
 			ctx := context.Background()
 			r := newReconciler()
 			taskName := fmt.Sprintf("test-complete-with-result-%d", time.Now().UnixNano())
-			ns := "default"
+			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 

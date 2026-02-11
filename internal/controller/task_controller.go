@@ -118,7 +118,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			log.Error(err, "failed to add finalizer")
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	// Initialize status if empty
@@ -128,7 +128,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			log.Error(err, "failed to update initial status")
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	// Handle based on current phase
@@ -202,73 +202,21 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 
 	// If this is a scheduled task, validate cron and transition to Scheduled phase
 	if task.Spec.Schedule != "" {
-		// Validate cron expression
-		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-		sched, err := parser.Parse(task.Spec.Schedule)
-		if err != nil {
-			task.Status.Phase = corev1alpha1.TaskPhaseFailed
-			task.Status.Message = fmt.Sprintf("invalid cron expression: %v", err)
-			if updateErr := r.Status().Update(ctx, task); updateErr != nil {
-				return ctrl.Result{}, updateErr
-			}
-			return ctrl.Result{}, nil
-		}
-
-		// Calculate next schedule time
-		now := time.Now()
-		if task.Spec.TimeZone != nil {
-			if loc, err := time.LoadLocation(*task.Spec.TimeZone); err == nil {
-				now = now.In(loc)
-			}
-		}
-		next := sched.Next(now)
-
-		task.Status.Phase = corev1alpha1.TaskPhaseScheduled
-		task.Status.NextScheduleTime = &metav1.Time{Time: next}
-		task.Status.Message = fmt.Sprintf("Scheduled with cron: %s", task.Spec.Schedule)
-		if err := r.Status().Update(ctx, task); err != nil {
-			return ctrl.Result{}, err
-		}
-
-		log.Info("Task scheduled", "schedule", task.Spec.Schedule, "nextRun", next)
-		return ctrl.Result{RequeueAfter: time.Until(next)}, nil
+		return r.handleScheduledTask(ctx, task)
 	}
 
 	// Check session lock if session is referenced
 	if task.Spec.SessionRef != nil {
-		locked, err := r.SessionManager.IsLocked(ctx, task)
-		if err != nil {
-			log.Error(err, "failed to check session lock")
-			return ctrl.Result{}, err
-		}
-		if locked {
-			// Session is locked by another task, requeue
-			log.Info("session is locked, waiting", "session", task.Spec.SessionRef.Name)
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-
-		// Acquire session lock
-		if err := r.SessionManager.AcquireLock(ctx, task); err != nil {
-			log.Error(err, "failed to acquire session lock")
-			return ctrl.Result{}, err
+		if result, err, locked := r.acquireSessionLock(ctx, task); locked {
+			return result, err
 		}
 	}
 
 	// Resolve agent if referenced
-	var agent *corev1alpha1.Agent
-	if task.Spec.AgentRef != nil {
-		agent = &corev1alpha1.Agent{}
-		agentNS := task.Spec.AgentRef.Namespace
-		if agentNS == "" {
-			agentNS = task.Namespace
-		}
-		if err := r.Get(ctx, types.NamespacedName{
-			Name:      task.Spec.AgentRef.Name,
-			Namespace: agentNS,
-		}, agent); err != nil {
-			log.Error(err, "failed to get Agent", "agent", task.Spec.AgentRef.Name)
-			return r.failTask(ctx, task, fmt.Sprintf("failed to get agent: %v", err))
-		}
+	agent, err := r.resolveAgent(ctx, task)
+	if err != nil {
+		log.Error(err, "failed to resolve agent")
+		return r.failTask(ctx, task, err.Error())
 	}
 
 	// Validate task-agent compatibility
@@ -278,96 +226,204 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 
 	// Validate coordination constraints for child tasks
-	if depthStr, ok := task.Annotations["mercan.ai/coordination-depth"]; ok {
-		parentName := task.Labels["mercan.ai/parent-task"]
-		depthInt, _ := strconv.Atoi(depthStr)
-
-		// Look up parent task to find its agent's coordination config
-		parentTask := &corev1alpha1.Task{}
-		if err := r.Get(ctx, types.NamespacedName{Name: parentName, Namespace: task.Namespace}, parentTask); err != nil {
-			log.Error(err, "failed to get parent task")
-			return r.failTask(ctx, task, fmt.Sprintf("failed to get parent task: %v", err))
-		}
-
-		parentAgent := &corev1alpha1.Agent{}
-		if parentTask.Spec.AgentRef != nil {
-			agentNS := parentTask.Spec.AgentRef.Namespace
-			if agentNS == "" {
-				agentNS = task.Namespace
-			}
-			if err := r.Get(ctx, types.NamespacedName{Name: parentTask.Spec.AgentRef.Name, Namespace: agentNS}, parentAgent); err != nil {
-				log.Error(err, "failed to get parent agent")
-				return r.failTask(ctx, task, fmt.Sprintf("failed to get parent agent: %v", err))
-			}
-		}
-
-		coord := parentAgent.Spec.Coordination
-		if coord == nil || !coord.Enabled {
-			return r.failTask(ctx, task, "parent agent does not have coordination enabled")
-		}
-
-		// 1. Enforce maxDepth
-		if coord.MaxDepth > 0 && int32(depthInt) > coord.MaxDepth {
-			return r.failTask(ctx, task, fmt.Sprintf("coordination depth %d exceeds max %d", depthInt, coord.MaxDepth))
-		}
-
-		// 2. Enforce allowedAgents
-		if task.Spec.AgentRef != nil {
-			allowed := false
-			for _, a := range coord.AllowedAgents {
-				if a.Name == task.Spec.AgentRef.Name {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
-				return r.failTask(ctx, task, fmt.Sprintf("agent %q not in parent's allowedAgents", task.Spec.AgentRef.Name))
-			}
-		}
-
-		// 3. Enforce maxConcurrentChildren (requeue if at limit)
-		if coord.MaxConcurrentChildren > 0 {
-			var siblings corev1alpha1.TaskList
-			if err := r.List(ctx, &siblings, client.InNamespace(task.Namespace),
-				client.MatchingLabels{"mercan.ai/parent-task": parentName}); err != nil {
-				log.Error(err, "failed to list sibling tasks")
-				return ctrl.Result{}, err
-			}
-			active := int32(0)
-			for _, s := range siblings.Items {
-				if s.Name != task.Name && (s.Status.Phase == corev1alpha1.TaskPhasePending || s.Status.Phase == corev1alpha1.TaskPhaseRunning) {
-					active++
-				}
-			}
-			if active >= coord.MaxConcurrentChildren {
-				log.Info("coordination concurrency limit reached", "active", active, "max", coord.MaxConcurrentChildren)
-				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-			}
-		}
+	if result, err, done := r.validateCoordinationConstraints(ctx, task); done {
+		return result, err
 	}
 
 	// Resolve provider if referenced
-	var provider *corev1alpha1.Provider
-	providerRef := r.resolveProviderRef(task, agent)
-	if providerRef != nil {
-		provider = &corev1alpha1.Provider{}
-		providerNS := providerRef.Namespace
-		if providerNS == "" {
-			providerNS = task.Namespace
+	provider, err := r.resolveProvider(ctx, task, agent)
+	if err != nil {
+		log.Error(err, "failed to resolve provider")
+		return r.failTask(ctx, task, err.Error())
+	}
+
+	return r.createTaskJob(ctx, task, agent, provider)
+}
+
+// handleScheduledTask handles transition to Scheduled phase for cron-scheduled tasks.
+func (r *TaskReconciler) handleScheduledTask(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	sched, err := parser.Parse(task.Spec.Schedule)
+	if err != nil {
+		task.Status.Phase = corev1alpha1.TaskPhaseFailed
+		task.Status.Message = fmt.Sprintf("invalid cron expression: %v", err)
+		if updateErr := r.Status().Update(ctx, task); updateErr != nil {
+			return ctrl.Result{}, updateErr
 		}
-		if err := r.Get(ctx, types.NamespacedName{
-			Name:      providerRef.Name,
-			Namespace: providerNS,
-		}, provider); err != nil {
-			log.Error(err, "failed to get Provider", "provider", providerRef.Name)
-			return r.failTask(ctx, task, fmt.Sprintf("failed to get provider: %v", err))
-		}
-		// Check provider is ready
-		if !provider.Status.Ready {
-			log.Info("provider is not ready", "provider", providerRef.Name)
-			return r.failTask(ctx, task, fmt.Sprintf("provider %s is not ready: %s", providerRef.Name, provider.Status.Message))
+		return ctrl.Result{}, nil
+	}
+
+	now := time.Now()
+	if task.Spec.TimeZone != nil {
+		if loc, err := time.LoadLocation(*task.Spec.TimeZone); err == nil {
+			now = now.In(loc)
 		}
 	}
+	next := sched.Next(now)
+
+	task.Status.Phase = corev1alpha1.TaskPhaseScheduled
+	task.Status.NextScheduleTime = &metav1.Time{Time: next}
+	task.Status.Message = fmt.Sprintf("Scheduled with cron: %s", task.Spec.Schedule)
+	if err := r.Status().Update(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	log.Info("Task scheduled", "schedule", task.Spec.Schedule, "nextRun", next)
+	return ctrl.Result{RequeueAfter: time.Until(next)}, nil
+}
+
+// acquireSessionLock checks and acquires a session lock. Returns (result, err, locked)
+// where locked=true means the caller should return the result/err immediately.
+func (r *TaskReconciler) acquireSessionLock(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error, bool) {
+	log := logf.FromContext(ctx)
+
+	locked, err := r.SessionManager.IsLocked(ctx, task)
+	if err != nil {
+		log.Error(err, "failed to check session lock")
+		return ctrl.Result{}, err, true
+	}
+	if locked {
+		log.Info("session is locked, waiting", "session", task.Spec.SessionRef.Name)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
+	}
+
+	if err := r.SessionManager.AcquireLock(ctx, task); err != nil {
+		log.Error(err, "failed to acquire session lock")
+		return ctrl.Result{}, err, true
+	}
+	return ctrl.Result{}, nil, false
+}
+
+// resolveAgent fetches the Agent referenced by the task, if any.
+func (r *TaskReconciler) resolveAgent(ctx context.Context, task *corev1alpha1.Task) (*corev1alpha1.Agent, error) {
+	if task.Spec.AgentRef == nil {
+		return nil, nil
+	}
+	agent := &corev1alpha1.Agent{}
+	agentNS := task.Spec.AgentRef.Namespace
+	if agentNS == "" {
+		agentNS = task.Namespace
+	}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      task.Spec.AgentRef.Name,
+		Namespace: agentNS,
+	}, agent); err != nil {
+		return nil, fmt.Errorf("failed to get agent: %v", err)
+	}
+	return agent, nil
+}
+
+// validateCoordinationConstraints validates depth, allowed agents, and concurrency for child tasks.
+// Returns (result, err, done) where done=true means the caller should return the result/err.
+func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error, bool) {
+	depthStr, ok := task.Annotations["mercan.ai/coordination-depth"]
+	if !ok {
+		return ctrl.Result{}, nil, false
+	}
+
+	log := logf.FromContext(ctx)
+	parentName := task.Labels["mercan.ai/parent-task"]
+	depthInt, _ := strconv.Atoi(depthStr)
+
+	// Look up parent task to find its agent's coordination config
+	parentTask := &corev1alpha1.Task{}
+	if err := r.Get(ctx, types.NamespacedName{Name: parentName, Namespace: task.Namespace}, parentTask); err != nil {
+		log.Error(err, "failed to get parent task")
+		result, err := r.failTask(ctx, task, fmt.Sprintf("failed to get parent task: %v", err))
+		return result, err, true
+	}
+
+	parentAgent := &corev1alpha1.Agent{}
+	if parentTask.Spec.AgentRef != nil {
+		agentNS := parentTask.Spec.AgentRef.Namespace
+		if agentNS == "" {
+			agentNS = task.Namespace
+		}
+		if err := r.Get(ctx, types.NamespacedName{Name: parentTask.Spec.AgentRef.Name, Namespace: agentNS}, parentAgent); err != nil {
+			log.Error(err, "failed to get parent agent")
+			result, err := r.failTask(ctx, task, fmt.Sprintf("failed to get parent agent: %v", err))
+			return result, err, true
+		}
+	}
+
+	coord := parentAgent.Spec.Coordination
+	if coord == nil || !coord.Enabled {
+		result, err := r.failTask(ctx, task, "parent agent does not have coordination enabled")
+		return result, err, true
+	}
+
+	// Enforce maxDepth
+	if coord.MaxDepth > 0 && int32(depthInt) > coord.MaxDepth {
+		result, err := r.failTask(ctx, task, fmt.Sprintf("coordination depth %d exceeds max %d", depthInt, coord.MaxDepth))
+		return result, err, true
+	}
+
+	// Enforce allowedAgents
+	if task.Spec.AgentRef != nil {
+		allowed := false
+		for _, a := range coord.AllowedAgents {
+			if a.Name == task.Spec.AgentRef.Name {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			result, err := r.failTask(ctx, task, fmt.Sprintf("agent %q not in parent's allowedAgents", task.Spec.AgentRef.Name))
+			return result, err, true
+		}
+	}
+
+	// Enforce maxConcurrentChildren (requeue if at limit)
+	if coord.MaxConcurrentChildren > 0 {
+		var siblings corev1alpha1.TaskList
+		if err := r.List(ctx, &siblings, client.InNamespace(task.Namespace),
+			client.MatchingLabels{"mercan.ai/parent-task": parentName}); err != nil {
+			log.Error(err, "failed to list sibling tasks")
+			return ctrl.Result{}, err, true
+		}
+		active := int32(0)
+		for _, s := range siblings.Items {
+			if s.Name != task.Name && (s.Status.Phase == corev1alpha1.TaskPhasePending || s.Status.Phase == corev1alpha1.TaskPhaseRunning) {
+				active++
+			}
+		}
+		if active >= coord.MaxConcurrentChildren {
+			log.Info("coordination concurrency limit reached", "active", active, "max", coord.MaxConcurrentChildren)
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
+		}
+	}
+
+	return ctrl.Result{}, nil, false
+}
+
+// resolveProvider fetches the Provider referenced by the task or agent, if any.
+func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (*corev1alpha1.Provider, error) {
+	providerRef := r.resolveProviderRef(task, agent)
+	if providerRef == nil {
+		return nil, nil
+	}
+	provider := &corev1alpha1.Provider{}
+	providerNS := providerRef.Namespace
+	if providerNS == "" {
+		providerNS = task.Namespace
+	}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      providerRef.Name,
+		Namespace: providerNS,
+	}, provider); err != nil {
+		return nil, fmt.Errorf("failed to get provider: %v", err)
+	}
+	if !provider.Status.Ready {
+		return nil, fmt.Errorf("provider %s is not ready: %s", providerRef.Name, provider.Status.Message)
+	}
+	return provider, nil
+}
+
+// createTaskJob builds the Job, sets owner reference, creates it, and updates the task status.
+func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
 
 	// Ensure worker ServiceAccount and RBAC exist in the task namespace
 	if err := r.ensureWorkerRBAC(ctx, task.Namespace); err != nil {
@@ -574,7 +630,7 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{Requeue: true}, nil
+	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
 // failTask marks a task as failed
@@ -713,7 +769,7 @@ func (r *TaskReconciler) readPodLogs(ctx context.Context, task *corev1alpha1.Tas
 	if err != nil {
 		return "", fmt.Errorf("streaming logs: %w", err)
 	}
-	defer stream.Close()
+	defer stream.Close() //nolint:errcheck
 
 	data, err := io.ReadAll(io.LimitReader(stream, maxLogBytes))
 	if err != nil {
@@ -979,7 +1035,7 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	r.Recorder = mgr.GetEventRecorderFor("task-controller")
+	r.Recorder = mgr.GetEventRecorderFor("task-controller") //nolint:staticcheck
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Task{}).
 		Owns(&batchv1.Job{}).

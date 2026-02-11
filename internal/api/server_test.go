@@ -20,7 +20,7 @@ import (
 
 func TestNewServer(t *testing.T) {
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	config := ServerConfig{
@@ -47,7 +47,7 @@ func TestNewServer(t *testing.T) {
 
 func TestServer_HealthEndpoints(t *testing.T) {
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	config := ServerConfig{
@@ -81,7 +81,7 @@ func TestServer_HealthEndpoints(t *testing.T) {
 
 func TestServer_APIRoutes_RequireAuth(t *testing.T) {
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	config := ServerConfig{
@@ -183,7 +183,7 @@ func TestServerConfig(t *testing.T) {
 
 func TestServer_CORS(t *testing.T) {
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	config := ServerConfig{
@@ -211,7 +211,7 @@ func TestServer_CORS(t *testing.T) {
 
 func TestServer_RequestID(t *testing.T) {
 	scheme := runtime.NewScheme()
-	corev1alpha1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	config := ServerConfig{

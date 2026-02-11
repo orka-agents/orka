@@ -51,7 +51,7 @@ func TestWebhookNotifier_Notify_Success(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedHeaders = r.Header
-		json.NewDecoder(r.Body).Decode(&receivedPayload)
+		_ = json.NewDecoder(r.Body).Decode(&receivedPayload)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -313,7 +313,7 @@ func TestWebhookNotifier_Notify_NoResultRef(t *testing.T) {
 	var receivedPayload WebhookPayload
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&receivedPayload)
+		_ = json.NewDecoder(r.Body).Decode(&receivedPayload)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -351,7 +351,7 @@ func TestWebhookNotifier_Notify_NoStartOrCompletionTime(t *testing.T) {
 	var receivedPayload WebhookPayload
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&receivedPayload)
+		_ = json.NewDecoder(r.Body).Decode(&receivedPayload)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()

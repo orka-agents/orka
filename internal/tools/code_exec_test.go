@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+const typeObject = "object"
+
 func TestCodeExecTool_Name(t *testing.T) {
 	tool := NewCodeExecTool()
 	if got := tool.Name(); got != "code_exec" {
@@ -44,7 +46,7 @@ func TestCodeExecTool_Parameters(t *testing.T) {
 	}
 
 	// Check required fields
-	if schema["type"] != "object" {
+	if schema["type"] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 }
@@ -331,8 +333,8 @@ func TestNewCodeExecTool(t *testing.T) {
 
 func TestNewCodeExecTool_WithEnvVar(t *testing.T) {
 	originalWorkDir := os.Getenv("MERCAN_WORK_DIR")
-	os.Setenv("MERCAN_WORK_DIR", "/custom/work/dir")
-	defer os.Setenv("MERCAN_WORK_DIR", originalWorkDir)
+	os.Setenv("MERCAN_WORK_DIR", "/custom/work/dir")    //nolint:errcheck
+	defer os.Setenv("MERCAN_WORK_DIR", originalWorkDir) //nolint:errcheck
 
 	tool := NewCodeExecTool()
 	if tool.workDir != "/custom/work/dir" {

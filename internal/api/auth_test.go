@@ -29,7 +29,7 @@ func setupTestApp(c client.Client) *fiber.App {
 
 func TestNewAuthMiddleware_MissingAuthHeader(t *testing.T) {
 	scheme := runtime.NewScheme()
-	authenticationv1.AddToScheme(scheme)
+	_ = authenticationv1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	app := setupTestApp(fakeClient)
@@ -47,7 +47,7 @@ func TestNewAuthMiddleware_MissingAuthHeader(t *testing.T) {
 
 func TestNewAuthMiddleware_InvalidFormat(t *testing.T) {
 	scheme := runtime.NewScheme()
-	authenticationv1.AddToScheme(scheme)
+	_ = authenticationv1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	app := setupTestApp(fakeClient)
@@ -67,7 +67,7 @@ func TestNewAuthMiddleware_InvalidFormat(t *testing.T) {
 
 func TestNewAuthMiddleware_EmptyToken(t *testing.T) {
 	scheme := runtime.NewScheme()
-	authenticationv1.AddToScheme(scheme)
+	_ = authenticationv1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	app := setupTestApp(fakeClient)

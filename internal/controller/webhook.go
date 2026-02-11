@@ -105,7 +105,7 @@ func (w *WebhookNotifier) Notify(ctx context.Context, task *corev1alpha1.Task) e
 	if err != nil {
 		return fmt.Errorf("failed to send webhook: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("webhook returned non-2xx status: %d", resp.StatusCode)

@@ -163,26 +163,36 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 	}`)
 }
 
-// Execute delegates a task to another agent
-func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
-	// Read environment variables
+// delegationContext holds validated delegation parameters.
+type delegationContext struct {
+	args            DelegateTaskArgs
+	parentName      string
+	parentNamespace string
+	currentDepth    int
+	namespace       string
+	parentTask      *corev1alpha1.Task
+	targetAgent     *corev1alpha1.Agent
+	priority        *int32
+}
+
+// parseDelegateArgs parses and validates the delegation arguments and environment.
+func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawMessage) (*delegationContext, error) {
 	parentName := os.Getenv("MERCAN_TASK_NAME")
 	parentNamespace := os.Getenv("MERCAN_TASK_NAMESPACE")
 	depthStr := os.Getenv("MERCAN_COORDINATION_DEPTH")
 	allowedAgents := os.Getenv("MERCAN_COORDINATION_ALLOWED_AGENTS")
 	maxDepthStr := os.Getenv("MERCAN_COORDINATION_MAX_DEPTH")
 
-	// Parse args
 	var delegateArgs DelegateTaskArgs
 	if err := json.Unmarshal(args, &delegateArgs); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
 	if delegateArgs.Agent == "" {
-		return "", fmt.Errorf("agent is required")
+		return nil, fmt.Errorf("agent is required")
 	}
 	if delegateArgs.Prompt == "" {
-		return "", fmt.Errorf("prompt is required")
+		return nil, fmt.Errorf("prompt is required")
 	}
 
 	// Validate agent is allowed
@@ -196,7 +206,7 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 			}
 		}
 		if !found {
-			return "", fmt.Errorf("agent %q is not in the allowed agents list", delegateArgs.Agent)
+			return nil, fmt.Errorf("agent %q is not in the allowed agents list", delegateArgs.Agent)
 		}
 	}
 
@@ -206,21 +216,21 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		var err error
 		currentDepth, err = strconv.Atoi(depthStr)
 		if err != nil {
-			return "", fmt.Errorf("invalid coordination depth %q: %w", depthStr, err)
+			return nil, fmt.Errorf("invalid coordination depth %q: %w", depthStr, err)
 		}
 	}
 
-	maxDepth := 3 // default max depth
+	maxDepth := 3
 	if maxDepthStr != "" {
 		var err error
 		maxDepth, err = strconv.Atoi(maxDepthStr)
 		if err != nil {
-			return "", fmt.Errorf("invalid max coordination depth %q: %w", maxDepthStr, err)
+			return nil, fmt.Errorf("invalid max coordination depth %q: %w", maxDepthStr, err)
 		}
 	}
 
 	if currentDepth+1 > maxDepth {
-		return "", fmt.Errorf("coordination depth exceeded: current depth %d, max depth %d", currentDepth, maxDepth)
+		return nil, fmt.Errorf("coordination depth exceeded: current depth %d, max depth %d", currentDepth, maxDepth)
 	}
 
 	// Determine namespace
@@ -229,14 +239,14 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		ns = parentNamespace
 	}
 	if ns == "" {
-		ns = "default"
+		ns = defaultNamespace
 	}
 
 	// Fetch parent Task for owner reference
 	parentTask := &corev1alpha1.Task{}
 	if parentName != "" {
 		if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: parentName, Namespace: ns}, parentTask); err != nil {
-			return "", fmt.Errorf("failed to get parent task: %w", err)
+			return nil, fmt.Errorf("failed to get parent task: %w", err)
 		}
 	}
 
@@ -253,138 +263,170 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	if err := t.k8sClient.Get(ctx, types.NamespacedName{
 		Name: delegateArgs.Agent, Namespace: ns,
 	}, targetAgent); err != nil {
-		return "", fmt.Errorf("failed to get agent %q: %w", delegateArgs.Agent, err)
+		return nil, fmt.Errorf("failed to get agent %q: %w", delegateArgs.Agent, err)
 	}
 
+	return &delegationContext{
+		args:            delegateArgs,
+		parentName:      parentName,
+		parentNamespace: parentNamespace,
+		currentDepth:    currentDepth,
+		namespace:       ns,
+		parentTask:      parentTask,
+		targetAgent:     targetAgent,
+		priority:        priority,
+	}, nil
+}
+
+// buildDelegatedTask creates the child Task object from a validated delegation context.
+func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegationContext) *corev1alpha1.Task {
 	// Auto-detect task type based on agent configuration
 	taskType := corev1alpha1.TaskTypeAI
-	if targetAgent.Spec.Runtime != nil {
+	if dc.targetAgent.Spec.Runtime != nil {
 		taskType = corev1alpha1.TaskTypeAgent
 	}
 
-	// Build child Task
 	childTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: parentName + "-child-",
-			Namespace:    ns,
+			GenerateName: dc.parentName + "-child-",
+			Namespace:    dc.namespace,
 			Labels: map[string]string{
-				"mercan.ai/parent-task":     parentName,
-				"mercan.ai/coordinator":     "true",
-				"mercan.ai/delegated-agent": delegateArgs.Agent,
+				"mercan.ai/parent-task":     dc.parentName,
+				"mercan.ai/coordinator":     trueStr,
+				"mercan.ai/delegated-agent": dc.args.Agent,
 			},
 			Annotations: map[string]string{
-				"mercan.ai/coordination-depth": strconv.Itoa(currentDepth + 1),
+				"mercan.ai/coordination-depth": strconv.Itoa(dc.currentDepth + 1),
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type: taskType,
 			AgentRef: &corev1alpha1.AgentReference{
-				Name: delegateArgs.Agent,
+				Name: dc.args.Agent,
 			},
-			Prompt:   delegateArgs.Prompt,
-			Priority: priority,
+			Prompt:   dc.args.Prompt,
+			Priority: dc.priority,
 		},
 	}
 
 	// Store auto-retry config as annotations
-	if delegateArgs.AutoRetry {
-		childTask.Annotations["mercan.ai/auto-retry"] = "true"
+	if dc.args.AutoRetry {
+		childTask.Annotations["mercan.ai/auto-retry"] = trueStr
 		maxRetries := 2
-		if delegateArgs.MaxRetries != nil && *delegateArgs.MaxRetries >= 0 {
-			maxRetries = *delegateArgs.MaxRetries
+		if dc.args.MaxRetries != nil && *dc.args.MaxRetries >= 0 {
+			maxRetries = *dc.args.MaxRetries
 		}
 		childTask.Annotations["mercan.ai/max-retries"] = strconv.Itoa(maxRetries)
 		childTask.Annotations["mercan.ai/retry-count"] = "0"
-		// Store original prompt so retries can prepend error context
-		childTask.Annotations["mercan.ai/original-prompt"] = delegateArgs.Prompt
+		childTask.Annotations["mercan.ai/original-prompt"] = dc.args.Prompt
 	}
 
 	// Set agent runtime config for agent-type tasks
 	if taskType == corev1alpha1.TaskTypeAgent {
-		childTask.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
-
-		if delegateArgs.Workspace != nil {
-			childTask.Spec.AgentRuntime.Workspace = &corev1alpha1.WorkspaceConfig{
-				GitRepo:    delegateArgs.Workspace.GitRepo,
-				Branch:     delegateArgs.Workspace.Branch,
-				Ref:        delegateArgs.Workspace.Ref,
-				PushBranch: delegateArgs.Workspace.PushBranch,
-			}
-			if delegateArgs.Workspace.GitSecretRef != "" {
-				childTask.Spec.AgentRuntime.Workspace.GitSecretRef = &corev1.LocalObjectReference{
-					Name: delegateArgs.Workspace.GitSecretRef,
-				}
-			}
-		}
-
-		if delegateArgs.MaxTurns != nil {
-			childTask.Spec.AgentRuntime.MaxTurns = delegateArgs.MaxTurns
-		}
-
-		if delegateArgs.AllowBash != nil {
-			childTask.Spec.AgentRuntime.AllowBash = delegateArgs.AllowBash
-		}
+		t.applyAgentRuntimeConfig(childTask, dc)
 	}
 
 	// Prepend feedback to prompt if provided
-	if delegateArgs.Feedback != "" {
-		childTask.Spec.Prompt = fmt.Sprintf("FEEDBACK FROM REVIEW:\n%s\n\nTASK:\n%s", delegateArgs.Feedback, childTask.Spec.Prompt)
+	if dc.args.Feedback != "" {
+		childTask.Spec.Prompt = fmt.Sprintf("FEEDBACK FROM REVIEW:\n%s\n\nTASK:\n%s", dc.args.Feedback, childTask.Spec.Prompt)
 	}
 
 	// Handle prior task reference for iterative workflows
-	if delegateArgs.PriorTask != "" {
-		childTask.Spec.PriorTaskRef = &corev1alpha1.PriorTaskReference{
-			Name:      delegateArgs.PriorTask,
-			Namespace: ns,
-		}
-
-		priorTask := &corev1alpha1.Task{}
-		if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: delegateArgs.PriorTask, Namespace: ns}, priorTask); err == nil {
-			// Copy workspace from prior task if not explicitly provided
-			if delegateArgs.Workspace == nil {
-				if priorTask.Spec.AgentRuntime != nil && priorTask.Spec.AgentRuntime.Workspace != nil {
-					if childTask.Spec.AgentRuntime == nil {
-						childTask.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
-					}
-					childTask.Spec.AgentRuntime.Workspace = priorTask.Spec.AgentRuntime.Workspace.DeepCopy()
-				}
-			}
-
-			// Increment iteration count
-			iteration := 1
-			if iterStr, ok := priorTask.Labels["mercan.ai/iteration"]; ok {
-				if iter, err := strconv.Atoi(iterStr); err == nil {
-					iteration = iter + 1
-				}
-			}
-			childTask.Labels["mercan.ai/iteration"] = strconv.Itoa(iteration)
-
-			// Copy or generate iteration group
-			if group, ok := priorTask.Labels["mercan.ai/iteration-group"]; ok {
-				childTask.Labels["mercan.ai/iteration-group"] = group
-			} else {
-				childTask.Labels["mercan.ai/iteration-group"] = string(priorTask.UID)
-			}
-		}
+	if dc.args.PriorTask != "" {
+		t.applyPriorTaskConfig(ctx, childTask, dc)
 	}
 
 	// Set owner reference if parent task exists
-	if parentTask.UID != "" {
+	if dc.parentTask.UID != "" {
 		blockOwnerDeletion := true
 		isController := true
 		childTask.OwnerReferences = []metav1.OwnerReference{
 			{
 				APIVersion:         corev1alpha1.GroupVersion.String(),
 				Kind:               "Task",
-				Name:               parentTask.Name,
-				UID:                parentTask.UID,
+				Name:               dc.parentTask.Name,
+				UID:                dc.parentTask.UID,
 				Controller:         &isController,
 				BlockOwnerDeletion: &blockOwnerDeletion,
 			},
 		}
 	}
 
-	// Create the child task
+	return childTask
+}
+
+// applyAgentRuntimeConfig sets agent runtime configuration on the child task.
+func (t *DelegateTaskTool) applyAgentRuntimeConfig(childTask *corev1alpha1.Task, dc *delegationContext) {
+	childTask.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
+
+	if dc.args.Workspace != nil {
+		childTask.Spec.AgentRuntime.Workspace = &corev1alpha1.WorkspaceConfig{
+			GitRepo:    dc.args.Workspace.GitRepo,
+			Branch:     dc.args.Workspace.Branch,
+			Ref:        dc.args.Workspace.Ref,
+			PushBranch: dc.args.Workspace.PushBranch,
+		}
+		if dc.args.Workspace.GitSecretRef != "" {
+			childTask.Spec.AgentRuntime.Workspace.GitSecretRef = &corev1.LocalObjectReference{
+				Name: dc.args.Workspace.GitSecretRef,
+			}
+		}
+	}
+
+	if dc.args.MaxTurns != nil {
+		childTask.Spec.AgentRuntime.MaxTurns = dc.args.MaxTurns
+	}
+	if dc.args.AllowBash != nil {
+		childTask.Spec.AgentRuntime.AllowBash = dc.args.AllowBash
+	}
+}
+
+// applyPriorTaskConfig sets prior task reference and copies workspace config from the prior task.
+func (t *DelegateTaskTool) applyPriorTaskConfig(ctx context.Context, childTask *corev1alpha1.Task, dc *delegationContext) {
+	childTask.Spec.PriorTaskRef = &corev1alpha1.PriorTaskReference{
+		Name:      dc.args.PriorTask,
+		Namespace: dc.namespace,
+	}
+
+	priorTask := &corev1alpha1.Task{}
+	if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: dc.args.PriorTask, Namespace: dc.namespace}, priorTask); err == nil {
+		// Copy workspace from prior task if not explicitly provided
+		if dc.args.Workspace == nil {
+			if priorTask.Spec.AgentRuntime != nil && priorTask.Spec.AgentRuntime.Workspace != nil {
+				if childTask.Spec.AgentRuntime == nil {
+					childTask.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
+				}
+				childTask.Spec.AgentRuntime.Workspace = priorTask.Spec.AgentRuntime.Workspace.DeepCopy()
+			}
+		}
+
+		// Increment iteration count
+		iteration := 1
+		if iterStr, ok := priorTask.Labels["mercan.ai/iteration"]; ok {
+			if iter, err := strconv.Atoi(iterStr); err == nil {
+				iteration = iter + 1
+			}
+		}
+		childTask.Labels["mercan.ai/iteration"] = strconv.Itoa(iteration)
+
+		// Copy or generate iteration group
+		if group, ok := priorTask.Labels["mercan.ai/iteration-group"]; ok {
+			childTask.Labels["mercan.ai/iteration-group"] = group
+		} else {
+			childTask.Labels["mercan.ai/iteration-group"] = string(priorTask.UID)
+		}
+	}
+}
+
+// Execute delegates a task to another agent
+func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	dc, err := t.parseDelegateArgs(ctx, args)
+	if err != nil {
+		return "", err
+	}
+
+	childTask := t.buildDelegatedTask(ctx, dc)
+
 	if err := t.k8sClient.Create(ctx, childTask); err != nil {
 		return "", fmt.Errorf("failed to create child task: %w", err)
 	}

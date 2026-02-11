@@ -196,7 +196,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 
 				// Not retried — add failure details
 				retryCount, maxRetries := getRetryInfo(&task)
-				if task.Annotations["mercan.ai/auto-retry"] == "true" {
+				if task.Annotations["mercan.ai/auto-retry"] == trueStr {
 					results[taskName].FailureDetails = &FailureDetails{
 						Message:    task.Status.Message,
 						RetryCount: retryCount,
@@ -276,7 +276,7 @@ var _ Tool = (*WaitForTasksTool)(nil)
 // tryAutoRetry checks if a failed task should be auto-retried and creates a new child task if so.
 // Returns the new task name and true if a retry was created, or empty string and false otherwise.
 func (t *WaitForTasksTool) tryAutoRetry(ctx context.Context, failedTask *corev1alpha1.Task, _ string) (string, bool) {
-	if failedTask.Annotations["mercan.ai/auto-retry"] != "true" {
+	if failedTask.Annotations["mercan.ai/auto-retry"] != trueStr {
 		return "", false
 	}
 
@@ -357,7 +357,7 @@ func fetchTaskResult(taskName string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB limit
 	if err != nil {

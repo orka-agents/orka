@@ -164,7 +164,7 @@ func convertResponsesTools(tools []llm.Tool) []responses.ToolUnionParam {
 	rTools := make([]responses.ToolUnionParam, 0, len(tools))
 	for _, tool := range tools {
 		var params map[string]any
-		json.Unmarshal(tool.Parameters, &params)
+		_ = json.Unmarshal(tool.Parameters, &params)
 
 		rTools = append(rTools, responses.ToolUnionParam{
 			OfFunction: &responses.FunctionToolParam{
@@ -365,7 +365,7 @@ func convertChatTools(tools []llm.Tool) []openai.ChatCompletionToolUnionParam {
 	cTools := make([]openai.ChatCompletionToolUnionParam, 0, len(tools))
 	for _, tool := range tools {
 		var params map[string]any
-		json.Unmarshal(tool.Parameters, &params)
+		_ = json.Unmarshal(tool.Parameters, &params)
 		cTools = append(cTools, openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
 			Name:        tool.Name,
 			Description: openai.String(tool.Description),

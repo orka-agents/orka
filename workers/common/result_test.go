@@ -47,7 +47,7 @@ func TestSubmitResult_RetryOnFailure(t *testing.T) {
 		n := attempts.Add(1)
 		if n < 3 {
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte("temporary error"))
+			w.Write([]byte("temporary error")) //nolint:errcheck
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -68,7 +68,7 @@ func TestSubmitResult_RetryOnFailure(t *testing.T) {
 func TestSubmitResult_AllRetriesFail(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("always fails"))
+		w.Write([]byte("always fails")) //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -168,7 +168,7 @@ func TestFormatStructuredResult_PreservesVersion(t *testing.T) {
 		t.Fatalf("FormatStructuredResult: %v", err)
 	}
 	var parsed StructuredResult
-	json.Unmarshal(data, &parsed)
+	_ = json.Unmarshal(data, &parsed)
 	if parsed.Version != 2 {
 		t.Errorf("expected version 2, got %d", parsed.Version)
 	}

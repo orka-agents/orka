@@ -24,7 +24,7 @@ func setupDiskStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("NewDB(%s) failed: %v", dbPath, err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 	return NewStore(db, dbPath)
 }
 
@@ -56,14 +56,14 @@ func TestIntegration_DiskPersistence(t *testing.T) {
 		t.Fatalf("AppendMessages: %v", err)
 	}
 
-	db1.Close()
+	_ = db1.Close()
 
 	// Reopen and verify
 	db2, err := NewDB(dbPath)
 	if err != nil {
 		t.Fatalf("NewDB reopen: %v", err)
 	}
-	defer db2.Close()
+	defer db2.Close() //nolint:errcheck
 	s2 := NewStore(db2, dbPath)
 
 	got, err := s2.GetResult(ctx, "ns", "task1")
@@ -294,7 +294,7 @@ func TestIntegration_ConcurrentLocking(t *testing.T) {
 	wg.Wait()
 	close(winners)
 
-	var winnerList []int
+	winnerList := make([]int, 0, 1)
 	for w := range winners {
 		winnerList = append(winnerList, w)
 	}
@@ -599,7 +599,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDB reopen: %v", err)
 	}
-	defer db2.Close()
+	defer db2.Close() //nolint:errcheck
 	s2 := NewStore(db2, dbPath)
 
 	got, err := s2.GetResult(ctx, "ns", "pre-shutdown")
@@ -628,7 +628,7 @@ func TestIntegration_DBSizeMetric(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDB: %v", err)
 	}
-	defer db.Close()
+	defer db.Close() //nolint:errcheck
 	s := NewStore(db, dbPath)
 	ctx := context.Background()
 
@@ -735,13 +735,13 @@ func TestIntegration_MigrateIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDB first: %v", err)
 	}
-	db1.Close()
+	_ = db1.Close()
 
 	db2, err := NewDB(dbPath)
 	if err != nil {
 		t.Fatalf("NewDB second (idempotent migration): %v", err)
 	}
-	defer db2.Close()
+	defer db2.Close() //nolint:errcheck
 
 	// Verify DB is functional
 	s := NewStore(db2, dbPath)
@@ -758,7 +758,7 @@ func TestIntegration_WALModeEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDB: %v", err)
 	}
-	defer db.Close()
+	defer db.Close() //nolint:errcheck
 
 	var journalMode string
 	if err := db.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
@@ -777,7 +777,7 @@ func TestIntegration_ForeignKeysEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDB: %v", err)
 	}
-	defer db.Close()
+	defer db.Close() //nolint:errcheck
 
 	var fk int
 	if err := db.QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil {

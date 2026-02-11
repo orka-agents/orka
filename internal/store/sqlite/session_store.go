@@ -61,7 +61,7 @@ func (s *Store) ListSessions(ctx context.Context, namespace string) ([]store.Ses
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var sessions []store.SessionMetadata
 	for rows.Next() {
@@ -144,7 +144,7 @@ func (s *Store) AppendMessages(ctx context.Context, namespace, name string, mess
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer stmt.Close() //nolint:errcheck
 
 	for _, msg := range messages {
 		var inputJSON, toolCallsJSON *string
@@ -201,7 +201,7 @@ func (s *Store) LoadTranscript(ctx context.Context, namespace, name string, maxM
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var messages []store.SessionMessage
 	for rows.Next() {

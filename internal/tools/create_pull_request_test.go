@@ -23,6 +23,12 @@ import (
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 )
 
+const (
+	testBearerToken = "Bearer test-token"
+	testBranch      = "main"
+	statusCreated   = "created"
+)
+
 func TestParseGitHubRepo(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -97,7 +103,7 @@ func TestCreatePullRequestTool_MissingTask(t *testing.T) {
 	args, _ := json.Marshal(CreatePullRequestArgs{
 		TaskName:   "nonexistent",
 		HeadBranch: "feature/x",
-		BaseBranch: "main",
+		BaseBranch: testBranch,
 		Title:      "Test PR",
 	})
 
@@ -130,7 +136,7 @@ func TestCreatePullRequestTool_NoWorkspace(t *testing.T) {
 	args, _ := json.Marshal(CreatePullRequestArgs{
 		TaskName:   "coder-task",
 		HeadBranch: "feature/x",
-		BaseBranch: "main",
+		BaseBranch: testBranch,
 		Title:      "Test PR",
 	})
 
@@ -149,24 +155,24 @@ func TestCreatePullRequestTool_Success(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
-		if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+		if auth := r.Header.Get("Authorization"); auth != testBearerToken {
 			t.Errorf("unexpected auth header: %s", auth)
 		}
 
 		var body map[string]string
-		json.NewDecoder(r.Body).Decode(&body)
+		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
 		if body["title"] != "feat: edit message" {
 			t.Errorf("unexpected title: %s", body["title"])
 		}
 		if body["head"] != "feature/edit-msg" {
 			t.Errorf("unexpected head: %s", body["head"])
 		}
-		if body["base"] != "main" {
+		if body["base"] != testBranch {
 			t.Errorf("unexpected base: %s", body["base"])
 		}
 
 		w.WriteHeader(201)
-		fmt.Fprintf(w, `{"html_url":"https://github.com/sozercan/ayna/pull/42","number":42}`)
+		fmt.Fprintf(w, `{"html_url":"https://github.com/sozercan/ayna/pull/42","number":42}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -181,7 +187,7 @@ func TestCreatePullRequestTool_Success(t *testing.T) {
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
 					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					Branch:  testBranch,
 					GitSecretRef: &corev1.LocalObjectReference{
 						Name: "git-creds",
 					},
@@ -208,7 +214,7 @@ func TestCreatePullRequestTool_Success(t *testing.T) {
 	args, _ := json.Marshal(CreatePullRequestArgs{
 		TaskName:   "coder-task",
 		HeadBranch: "feature/edit-msg",
-		BaseBranch: "main",
+		BaseBranch: testBranch,
 		Title:      "feat: edit message",
 		Body:       "Implements #19",
 	})
@@ -228,7 +234,7 @@ func TestCreatePullRequestTool_Success(t *testing.T) {
 	if prResult.PRNumber != 42 {
 		t.Errorf("unexpected PR number: %d", prResult.PRNumber)
 	}
-	if prResult.Status != "created" {
+	if prResult.Status != statusCreated {
 		t.Errorf("unexpected status: %s", prResult.Status)
 	}
 

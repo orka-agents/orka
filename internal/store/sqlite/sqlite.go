@@ -51,13 +51,13 @@ func NewDB(path string) (*sql.DB, error) {
 	}
 	for _, p := range pragmas {
 		if _, err := db.Exec(p); err != nil {
-			db.Close()
+			db.Close() //nolint:errcheck
 			return nil, fmt.Errorf("failed to set pragma %q: %w", p, err)
 		}
 	}
 
 	if err := migrate(db); err != nil {
-		db.Close()
+		db.Close() //nolint:errcheck
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
