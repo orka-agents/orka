@@ -64,6 +64,33 @@ func TestHandleChatCompletions_MissingMessages(t *testing.T) {
 	}
 }
 
+func TestHandleChatCompletions_NGreaterThanOne(t *testing.T) {
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/v1/chat/completions", handler.HandleChatCompletions)
+
+	body := `{"model":"test-model","messages":[{"role":"user","content":"hello"}],"n":2}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected status 400, got %d", resp.StatusCode)
+	}
+
+	var oaiErr OAIError
+	json.NewDecoder(resp.Body).Decode(&oaiErr) //nolint:errcheck
+	if oaiErr.Error.Type != "invalid_request_error" {
+		t.Errorf("expected error type invalid_request_error, got %s", oaiErr.Error.Type)
+	}
+	if oaiErr.Error.Param == nil || *oaiErr.Error.Param != "n" {
+		t.Errorf("expected error param 'n', got %v", oaiErr.Error.Param)
+	}
+}
+
 func TestHandleChatCompletions_InvalidBody(t *testing.T) {
 	handler, app := setupTestOpenAIHandler()
 	app.Post("/v1/chat/completions", handler.HandleChatCompletions)

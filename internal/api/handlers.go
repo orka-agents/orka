@@ -49,6 +49,7 @@ var builtinToolsMap = func() map[string]fiber.Map {
 
 type Handlers struct {
 	client         client.Client
+	clientset      kubernetes.Interface
 	sessionManager *controller.SessionManager
 	watchNamespace string
 	resultStore    store.ResultStore
@@ -56,9 +57,10 @@ type Handlers struct {
 }
 
 // NewHandlers creates a new Handlers instance
-func NewHandlers(c client.Client, sessionManager *controller.SessionManager, watchNamespace string, rs store.ResultStore, ss store.SessionStore) *Handlers {
+func NewHandlers(c client.Client, sessionManager *controller.SessionManager, watchNamespace string, rs store.ResultStore, ss store.SessionStore, clientset kubernetes.Interface) *Handlers {
 	return &Handlers{
 		client:         c,
+		clientset:      clientset,
 		sessionManager: sessionManager,
 		watchNamespace: watchNamespace,
 		resultStore:    rs,
@@ -66,10 +68,17 @@ func NewHandlers(c client.Client, sessionManager *controller.SessionManager, wat
 	}
 }
 
+// MetadataRequest holds Kubernetes-style metadata fields
+type MetadataRequest struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+}
+
 // CreateAgentRequest is the request body for creating an agent
 type CreateAgentRequest struct {
 	Name      string                 `json:"name"`
 	Namespace string                 `json:"namespace"`
+	Metadata  MetadataRequest        `json:"metadata"`
 	Spec      corev1alpha1.AgentSpec `json:"spec"`
 }
 
@@ -327,10 +336,73 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "task is pending, no logs available yet")
 	}
 
-	// For running tasks, live log streaming is not available without a kubernetes clientset
+	// For running tasks, stream logs from the pod if clientset is available
+	if h.clientset == nil {
+		return c.JSON(fiber.Map{
+			"message": "live log streaming not available",
+			"jobName": task.Status.JobName,
+		})
+	}
+
+	// Find the pod for this job
+	pods, err := h.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("job-name=%s", task.Status.JobName),
+	})
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list pods: %v", err))
+	}
+	if len(pods.Items) == 0 {
+		return fiber.NewError(fiber.StatusNotFound, "no pods found for task job")
+	}
+
+	podName := pods.Items[0].Name
+	follow := c.Query("follow") == "true"
+
+	if follow {
+		streamCtx, streamCancel := context.WithCancel(context.Background())
+		stream, err := StreamPodLogs(streamCtx, h.clientset, namespace, podName, "worker")
+		if err != nil {
+			streamCancel()
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to stream logs: %v", err))
+		}
+
+		c.Set("Content-Type", "text/event-stream")
+		c.Set("Cache-Control", "no-cache")
+		c.Set("Connection", "keep-alive")
+
+		return c.SendStreamWriter(func(w *bufio.Writer) {
+			defer streamCancel()
+			defer func() { _ = stream.Close() }()
+			scanner := bufio.NewScanner(stream)
+			for scanner.Scan() {
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", scanner.Text())
+				if err := w.Flush(); err != nil {
+					return
+				}
+			}
+		})
+	}
+
+	// Non-follow mode: return the last N lines
+	var tailLines int64 = 100
+	opts := &corev1.PodLogOptions{
+		Container: "worker",
+		TailLines: &tailLines,
+	}
+	req := h.clientset.CoreV1().Pods(namespace).GetLogs(podName, opts)
+	logStream, err := req.Stream(ctx)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get logs: %v", err))
+	}
+	defer func() { _ = logStream.Close() }()
+
+	logBytes, err := io.ReadAll(logStream)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to read logs: %v", err))
+	}
+
 	return c.JSON(fiber.Map{
-		"message": "live log streaming not available",
-		"jobName": task.Status.JobName,
+		"logs": string(logBytes),
 	})
 }
 
@@ -389,6 +461,7 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	items := make([]fiber.Map, 0, len(sessions))
 	for _, s := range sessions {
 		items = append(items, fiber.Map{
+			"id":           s.Name,
 			"name":         s.Name,
 			"namespace":    namespace,
 			"sessionType":  s.SessionType,
@@ -622,11 +695,19 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
 
-	if req.Name == "" {
+	// Support both flat format {"name":"x"} and Kubernetes-style {"metadata":{"name":"x"}}
+	name := req.Name
+	if name == "" {
+		name = req.Metadata.Name
+	}
+	if name == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "name is required")
 	}
 
 	namespace := req.Namespace
+	if namespace == "" {
+		namespace = req.Metadata.Namespace
+	}
 	if namespace == "" {
 		namespace = defaultNamespace
 	}
@@ -637,7 +718,7 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      req.Name,
+			Name:      name,
 			Namespace: namespace,
 		},
 		Spec: req.Spec,

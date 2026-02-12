@@ -13,6 +13,16 @@ import (
 	"runtime"
 
 	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/sozercan/mercan/internal/cli"
+)
+
+const (
+	flagServer    = "--server"
+	flagToken     = "--token"
+	flagHelp      = "--help"
+	flagNamespace = "--namespace"
+	defaultServer = "http://localhost:8080"
 )
 
 func main() {
@@ -21,26 +31,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	switch os.Args[0] + " " + os.Args[1] {
-	case programName() + " login":
+	switch os.Args[1] {
+	case "login":
 		loginCmd(os.Args[2:])
+	case "chat":
+		chatCmd(os.Args[2:])
+	case "agent":
+		agentCmd(os.Args[2:])
+	case "task":
+		cli.RunTaskCmd(os.Args[2:])
+	case "status":
+		statusCmd(os.Args[2:])
 	default:
-		// If called as just "mercan login" or with other subcommands
-		if os.Args[1] == "login" {
-			loginCmd(os.Args[2:])
-		} else {
-			fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
-			printUsage()
-			os.Exit(1)
-		}
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
+		printUsage()
+		os.Exit(1)
 	}
-}
-
-func programName() string {
-	if len(os.Args) > 0 {
-		return os.Args[0]
-	}
-	return "mercan"
 }
 
 func printUsage() {
@@ -48,8 +54,12 @@ func printUsage() {
 
 Commands:
   login    Authenticate with the Mercan dashboard
+  chat     Interactive chat with the Mercan AI assistant
+  status   Show system overview (health, tasks, agents)
+  agent    Manage agents
+  task     Manage tasks
 
-Run 'mercan login --help' for more information.
+Run 'mercan <command> --help' for more information.
 `)
 }
 
@@ -62,7 +72,7 @@ func loginCmd(args []string) {
 	// Simple flag parsing for the login subcommand
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--server", "-s":
+		case flagServer, "-s":
 			if i+1 < len(args) {
 				i++
 				server = args[i]
@@ -72,12 +82,12 @@ func loginCmd(args []string) {
 				i++
 				kubeconfig = args[i]
 			}
-		case "--token", "-t":
+		case flagToken, "-t":
 			if i+1 < len(args) {
 				i++
 				token = args[i]
 			}
-		case "--help", "-h":
+		case flagHelp, "-h":
 			help = true
 		default:
 			if args[i][0] == '-' {
@@ -93,7 +103,7 @@ func loginCmd(args []string) {
 Extract a token from your kubeconfig and open the Mercan dashboard in your browser.
 
 Flags:
-  -s, --server string       Mercan server URL (default "http://localhost:8080")
+  -s, --server string       Mercan server URL (default defaultServer)
   -t, --token string        Use a specific token instead of extracting from kubeconfig
       --kubeconfig string   Path to kubeconfig file (default: $KUBECONFIG or ~/.kube/config)
   -h, --help                Show this help message
@@ -102,7 +112,7 @@ Flags:
 	}
 
 	if server == "" {
-		server = "http://localhost:8080"
+		server = defaultServer
 	}
 
 	// Get token
@@ -216,4 +226,122 @@ func openBrowser(url string) error {
 		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
 	return cmd.Start()
+}
+
+func chatCmd(args []string) {
+	var opts cli.ChatOptions
+	var help bool
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case flagServer, "-s":
+			if i+1 < len(args) {
+				i++
+				opts.Server = args[i]
+			}
+		case flagToken, "-t":
+			if i+1 < len(args) {
+				i++
+				opts.Token = args[i]
+			}
+		case flagNamespace, "-n":
+			if i+1 < len(args) {
+				i++
+				opts.Namespace = args[i]
+			}
+		case "--session":
+			if i+1 < len(args) {
+				i++
+				opts.SessionID = args[i]
+			}
+		case flagHelp, "-h":
+			help = true
+		default:
+			if len(args[i]) > 0 && args[i][0] == '-' {
+				fmt.Fprintf(os.Stderr, "Unknown flag: %s\n", args[i])
+				os.Exit(1)
+			}
+		}
+	}
+
+	if help {
+		fmt.Print(`Usage: mercan chat [flags]
+
+Start an interactive chat session with the Mercan AI assistant.
+
+Flags:
+  -s, --server string       Mercan server URL (default defaultServer)
+  -t, --token string        Bearer token for authentication
+  -n, --namespace string    Kubernetes namespace (default "default")
+      --session string      Resume a specific session ID
+  -h, --help                Show this help message
+
+Commands (during chat):
+  /help      Show available commands
+  /clear     Start a new session
+  /session   Show current session ID
+  /quit      Exit chat
+`)
+		return
+	}
+
+	// If no token provided, try to extract from kubeconfig
+	if opts.Token == "" {
+		token, err := extractToken("")
+		if err == nil && token != "" {
+			opts.Token = token
+		}
+	}
+
+	cli.RunChat(opts)
+}
+
+func statusCmd(args []string) {
+	var opts cli.StatusOptions
+	var help bool
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case flagServer, "-s":
+			if i+1 < len(args) {
+				i++
+				opts.Server = args[i]
+			}
+		case flagToken, "-t":
+			if i+1 < len(args) {
+				i++
+				opts.Token = args[i]
+			}
+		case flagHelp, "-h":
+			help = true
+		default:
+			if len(args[i]) > 0 && args[i][0] == '-' {
+				fmt.Fprintf(os.Stderr, "Unknown flag: %s\n", args[i])
+				os.Exit(1)
+			}
+		}
+	}
+
+	if help {
+		fmt.Print(`Usage: mercan status [flags]
+
+Show system overview including health status, task counts, and agent count.
+
+Flags:
+  -s, --server string   Mercan server URL (default defaultServer)
+  -t, --token string    Bearer token for authentication
+  -h, --help            Show this help message
+`)
+		return
+	}
+
+	// If no token provided, try to extract from kubeconfig
+	if opts.Token == "" {
+		token, err := extractToken("")
+		if err == nil && token != "" {
+			opts.Token = token
+		}
+	}
+
+	cli.RunStatus(opts)
 }

@@ -357,6 +357,12 @@ func resolveAIConfig(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provide
 		cfg.prompt = task.Spec.Prompt
 	}
 
+	// Provider CRD type is authoritative when resolved via providerRef.
+	// model.provider and task AI provider are hints for when no Provider CRD exists.
+	if providerCRD != nil {
+		cfg.providerType = string(providerCRD.Spec.Type)
+	}
+
 	return cfg
 }
 
@@ -408,7 +414,7 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 
 	// Auto-inject coordination tools when coordination is enabled
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
-		for _, ct := range []string{"delegate_task", "wait_for_tasks"} {
+		for _, ct := range []string{"delegate_task", "wait_for_tasks", "create_agent", "delete_agent"} {
 			if !slices.Contains(cfg.tools, ct) {
 				cfg.tools = append(cfg.tools, ct)
 			}

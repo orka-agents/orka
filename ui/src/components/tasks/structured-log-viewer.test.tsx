@@ -33,6 +33,7 @@ describe('StructuredLogViewer', () => {
     mockedUseTaskLogs.mockReturnValue({
       logs: [],
       isStreaming: false,
+      isLive: false,
       error: null,
       refetch: vi.fn(),
       clear: vi.fn(),
@@ -46,6 +47,7 @@ describe('StructuredLogViewer', () => {
     mockedUseTaskLogs.mockReturnValue({
       logs: ['[INFO] Starting process', '[ERROR] Something failed', '[DEBUG] Trace info'],
       isStreaming: false,
+      isLive: false,
       error: null,
       refetch: vi.fn(),
       clear: vi.fn(),
@@ -63,6 +65,7 @@ describe('StructuredLogViewer', () => {
     mockedUseTaskLogs.mockReturnValue({
       logs: ['[INFO] Starting process', '[ERROR] Something failed', '[DEBUG] Trace info'],
       isStreaming: false,
+      isLive: false,
       error: null,
       refetch: vi.fn(),
       clear: vi.fn(),
@@ -85,6 +88,7 @@ describe('StructuredLogViewer', () => {
     mockedUseTaskLogs.mockReturnValue({
       logs: [],
       isStreaming: false,
+      isLive: false,
       error: 'Failed to fetch logs: Internal Server Error',
       refetch: refetchFn,
       clear: vi.fn(),
@@ -99,6 +103,7 @@ describe('StructuredLogViewer', () => {
     mockedUseTaskLogs.mockReturnValue({
       logs: ['[INFO] Running...'],
       isStreaming: true,
+      isLive: false,
       error: null,
       refetch: vi.fn(),
       clear: vi.fn(),
@@ -106,5 +111,19 @@ describe('StructuredLogViewer', () => {
 
     render(<StructuredLogViewer taskId="task-1" />)
     expect(screen.getByText('● Streaming')).toBeInTheDocument()
+  })
+
+  it('shows live indicator for running tasks', () => {
+    mockedUseTaskLogs.mockReturnValue({
+      logs: ['[INFO] Running...'],
+      isStreaming: false,
+      isLive: true,
+      error: null,
+      refetch: vi.fn(),
+      clear: vi.fn(),
+    })
+
+    render(<StructuredLogViewer taskId="task-1" taskPhase="Running" />)
+    expect(screen.getByText('● Live')).toBeInTheDocument()
   })
 })

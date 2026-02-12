@@ -52,20 +52,35 @@ func NewOpenAICompatHandler(c client.Client, watchNamespace string, config ChatC
 
 // OAIRequest is the OpenAI chat completion request format.
 type OAIRequest struct {
-	Model            string         `json:"model"`
-	Messages         []OAIMessage   `json:"messages"`
-	Tools            []OAITool      `json:"tools,omitempty"`
-	Temperature      *float64       `json:"temperature,omitempty"`
-	MaxTokens        *int           `json:"max_tokens,omitempty"`
-	MaxCompTokens    *int           `json:"max_completion_tokens,omitempty"`
-	Stream           bool           `json:"stream,omitempty"`
-	StreamOptions    *StreamOptions `json:"stream_options,omitempty"`
-	Stop             any            `json:"stop,omitempty"`
-	TopP             *float64       `json:"top_p,omitempty"`
-	FrequencyPenalty *float64       `json:"frequency_penalty,omitempty"`
-	PresencePenalty  *float64       `json:"presence_penalty,omitempty"`
-	N                *int           `json:"n,omitempty"`
-	User             string         `json:"user,omitempty"`
+	Model            string             `json:"model"`
+	Messages         []OAIMessage       `json:"messages"`
+	Tools            []OAITool          `json:"tools,omitempty"`
+	Temperature      *float64           `json:"temperature,omitempty"`
+	MaxTokens        *int               `json:"max_tokens,omitempty"`
+	MaxCompTokens    *int               `json:"max_completion_tokens,omitempty"`
+	Stream           bool               `json:"stream,omitempty"`
+	StreamOptions    *StreamOptions     `json:"stream_options,omitempty"`
+	Stop             any                `json:"stop,omitempty"`
+	TopP             *float64           `json:"top_p,omitempty"`
+	FrequencyPenalty *float64           `json:"frequency_penalty,omitempty"`
+	PresencePenalty  *float64           `json:"presence_penalty,omitempty"`
+	N                *int               `json:"n,omitempty"`
+	User             string             `json:"user,omitempty"`
+	ResponseFormat   *OAIResponseFormat `json:"response_format,omitempty"`
+}
+
+// OAIResponseFormat is the OpenAI response_format field.
+type OAIResponseFormat struct {
+	Type       string             `json:"type"` // "text", "json_object", "json_schema"
+	JSONSchema *OAIJSONSchemaSpec `json:"json_schema,omitempty"`
+}
+
+// OAIJSONSchemaSpec holds the json_schema details within response_format.
+type OAIJSONSchemaSpec struct {
+	Name        string         `json:"name"`
+	Schema      map[string]any `json:"schema,omitempty"`
+	Strict      *bool          `json:"strict,omitempty"`
+	Description string         `json:"description,omitempty"`
 }
 
 // StreamOptions holds stream-specific options.
@@ -180,6 +195,15 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		}})
 	}
 
+	if req.N != nil && *req.N > 1 {
+		nParam := "n"
+		return c.Status(400).JSON(OAIError{Error: OAIErrorDetail{
+			Message: "n > 1 is not supported: underlying providers do not support multiple choices",
+			Type:    "invalid_request_error",
+			Param:   &nParam,
+		}})
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
 	defer cancel()
 
@@ -224,6 +248,15 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		maxTokens = *req.MaxTokens
 	}
 	if maxTokens > 0 {
+		if maxTokens < 16 {
+			oaiLog.Info("max_tokens too small", "max_tokens", maxTokens)
+			param := "max_tokens"
+			return c.Status(400).JSON(OAIError{Error: OAIErrorDetail{
+				Message: fmt.Sprintf("max_tokens must be at least 16, got %d", maxTokens),
+				Type:    "invalid_request_error",
+				Param:   &param,
+			}})
+		}
 		compReq.MaxTokens = maxTokens
 	}
 
@@ -237,6 +270,21 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 				if str, ok := s.(string); ok {
 					compReq.StopSequences = append(compReq.StopSequences, str)
 				}
+			}
+		}
+	}
+
+	// Convert response format
+	if req.ResponseFormat != nil {
+		compReq.ResponseFormat = &llm.ResponseFormat{
+			Type: req.ResponseFormat.Type,
+		}
+		if req.ResponseFormat.JSONSchema != nil {
+			compReq.ResponseFormat.JSONSchema = &llm.JSONSchemaFormat{
+				Name:        req.ResponseFormat.JSONSchema.Name,
+				Schema:      req.ResponseFormat.JSONSchema.Schema,
+				Strict:      req.ResponseFormat.JSONSchema.Strict,
+				Description: req.ResponseFormat.JSONSchema.Description,
 			}
 		}
 	}

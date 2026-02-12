@@ -492,11 +492,21 @@ func (ch *ChatHandler) loadChatSession(ctx context.Context, namespace, sessionID
 	// Convert store.SessionMessage to llm.Message
 	llmMessages := make([]llm.Message, 0, len(messages))
 	for _, msg := range messages {
-		llmMessages = append(llmMessages, llm.Message{
-			Role:    msg.Role,
-			Content: msg.Content,
-			Name:    msg.Name,
-		})
+		m := llm.Message{
+			Role:       msg.Role,
+			Content:    msg.Content,
+			Name:       msg.Name,
+			ToolCallID: msg.ToolCallID,
+		}
+		if msg.ToolCalls != nil {
+			if data, err := json.Marshal(msg.ToolCalls); err == nil {
+				var toolCalls []llm.ToolCall
+				if json.Unmarshal(data, &toolCalls) == nil {
+					m.ToolCalls = toolCalls
+				}
+			}
+		}
+		llmMessages = append(llmMessages, m)
 	}
 
 	return llmMessages, nil
@@ -534,12 +544,17 @@ func (ch *ChatHandler) saveChatSession(ctx context.Context, namespace, sessionID
 	storeMessages := make([]store.SessionMessage, 0, len(newMessages))
 	now := time.Now()
 	for _, msg := range newMessages {
-		storeMessages = append(storeMessages, store.SessionMessage{
-			Role:      msg.Role,
-			Content:   msg.Content,
-			Name:      msg.Name,
-			Timestamp: now,
-		})
+		sm := store.SessionMessage{
+			Role:       msg.Role,
+			Content:    msg.Content,
+			Name:       msg.Name,
+			ToolCallID: msg.ToolCallID,
+			Timestamp:  now,
+		}
+		if len(msg.ToolCalls) > 0 {
+			sm.ToolCalls = msg.ToolCalls
+		}
+		storeMessages = append(storeMessages, sm)
 	}
 
 	return ch.sessionStore.AppendMessages(ctx, namespace, sessionID, storeMessages)

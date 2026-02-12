@@ -17,11 +17,10 @@ describe('useTaskLogs', () => {
   })
 
   it('fetches logs with correct URL and auth header', async () => {
-    const mockResponse = new Response('line1\nline2\nline3\n', {
+    const mockResponse = new Response(JSON.stringify({ logs: 'line1\nline2\nline3' }), {
       status: 200,
-      headers: { 'Content-Type': 'text/plain' },
+      headers: { 'Content-Type': 'application/json' },
     })
-    // Force no body reader to use text() path
     Object.defineProperty(mockResponse, 'body', { value: null })
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(mockResponse)
 
@@ -54,7 +53,7 @@ describe('useTaskLogs', () => {
   })
 
   it('clear function resets logs', async () => {
-    const mockResponse = new Response('line1\n', { status: 200 })
+    const mockResponse = new Response(JSON.stringify({ logs: 'line1' }), { status: 200 })
     Object.defineProperty(mockResponse, 'body', { value: null })
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(mockResponse)
 
@@ -73,5 +72,44 @@ describe('useTaskLogs', () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch')
     renderHook(() => useTaskLogs('my-task', false))
     expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('uses tailLines param for running tasks', async () => {
+    const mockResponse = new Response(JSON.stringify({ logs: 'live-line1\nlive-line2' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+    Object.defineProperty(mockResponse, 'body', { value: null })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(mockResponse)
+
+    const { result } = renderHook(() => useTaskLogs('my-task', true, 'Running'))
+
+    await waitFor(() => {
+      expect(result.current.logs.length).toBeGreaterThan(0)
+    })
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      expect.stringContaining('tailLines=200'),
+      expect.any(Object)
+    )
+    expect(result.current.logs).toEqual(['live-line1', 'live-line2'])
+    expect(result.current.isLive).toBe(true)
+  })
+
+  it('sets isLive false for completed tasks', async () => {
+    const mockResponse = new Response(JSON.stringify({ logs: 'done-line' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+    Object.defineProperty(mockResponse, 'body', { value: null })
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(mockResponse)
+
+    const { result } = renderHook(() => useTaskLogs('my-task', true, 'Succeeded'))
+
+    await waitFor(() => {
+      expect(result.current.logs.length).toBeGreaterThan(0)
+    })
+
+    expect(result.current.isLive).toBe(false)
   })
 })

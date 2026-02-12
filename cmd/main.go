@@ -73,6 +73,7 @@ func main() {
 	var chatMaxConcurrent int
 	var chatMaxTasksPerTurn int
 	var chatMaxSessionSize int
+	var aiWorkerImage string
 	var storeBackend string
 	var storePath string
 	var controllerURL string
@@ -101,6 +102,8 @@ func main() {
 		controller.DefaultCopilotWorkerImage, "Container image for Copilot agent worker.")
 	flag.StringVar(&claudeWorkerImage, "claude-worker-image",
 		controller.DefaultClaudeWorkerImage, "Container image for Claude agent worker.")
+	flag.StringVar(&aiWorkerImage, "ai-worker-image",
+		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.BoolVar(&chatEnabled, "chat-enabled", true, "Enable the chat endpoint.")
 	flag.StringVar(&chatProvider, "chat-provider", "", "Default Provider CRD name for chat.")
 	flag.StringVar(&chatModel, "chat-model", "", "Default model for chat.")
@@ -229,6 +232,7 @@ func main() {
 	jobBuilder := controller.NewJobBuilder(mgr.GetClient())
 	jobBuilder.CopilotWorkerImage = copilotWorkerImage
 	jobBuilder.ClaudeWorkerImage = claudeWorkerImage
+	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.ControllerURL = controllerURL
 	priorityQueue := controller.NewPriorityQueue()
 
@@ -288,6 +292,7 @@ func main() {
 		WatchNamespace: watchNamespace,
 		ResultStore:    sqliteStore,
 		SessionStore:   sqliteStore,
+		Clientset:      kubeClient,
 		Chat: api.ChatConfig{
 			Enabled:         chatEnabled,
 			Provider:        chatProvider,

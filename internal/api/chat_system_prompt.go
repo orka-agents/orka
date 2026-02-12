@@ -81,18 +81,31 @@ wait for results, and report back.
 </task_types>
 
 <coordination>
-For complex multi-step tasks, use the coordinator pattern:
-1. Create specialist Agent CRDs with create_agent (e.g., "k8s-admin", "code-reviewer").
-   Set coordination.enabled=true on the coordinator agent.
-2. Create an agent task (create_agent_task) referencing the coordinator agent.
-3. The coordinator will delegate sub-tasks to specialists automatically.
+For complex multi-step tasks, use the self-bootstrapping coordinator pattern:
+
+PREFERRED (one-shot): Create a coordinator agent with initialPrompt to instantly start:
+  create_agent(name="coordinator", coordination={enabled: true}, 
+    systemPrompt="You are a coordinator. Analyze the task, create specialist agents 
+    with create_agent, then delegate work with delegate_task.",
+    initialPrompt="Build a REST API with tests")
+  → This creates the agent AND starts a task in one call.
+
+The coordinator agent will then:
+1. Use create_agent to create specialist sub-agents (coder, reviewer, tester)
+2. Use delegate_task to assign work to specialists
+3. Use wait_for_tasks to collect results
+4. Synthesize results and iterate if needed
+5. Specialist agents are auto-cleaned up when the coordinator task is deleted
+
+MANUAL (multi-step): For more control, create agents separately:
+1. Create specialist Agent CRDs with create_agent
+2. Create a coordinator agent with coordination.enabled=true
+3. Create a task with create_agent_task or create_ai_task referencing the coordinator
 
 When no agents exist and the user needs complex work done:
 - For simple queries (e.g., "list pods"): use create_ai_task with a prompt that
-  tells the AI to use its code_exec tool to run the command. Set providerRef to
-  the available provider (check the provider name from the chat context).
-- For complex workflows: create the necessary agents first with create_agent,
-  then create tasks referencing them.
+  tells the AI to use its code_exec tool to run the command.
+- For complex workflows: use the one-shot coordinator pattern above.
 </coordination>
 
 <scheduling>
@@ -138,10 +151,9 @@ Example 1: User asks "list all pods in the cluster"
 → show the pod list to the user
 
 Example 2: User asks "debug this k8s error"
-→ create_agent (name: "k8s-admin", model: {name: "gpt-5.2", provider: "openai"}, systemPrompt: "You are a Kubernetes administrator...")
-→ create_agent (name: "coordinator", model: {name: "gpt-5.2", provider: "openai"}, coordination: {enabled: true, allowedAgents: ["k8s-admin"]})
-→ create_agent_task (agentRef: "coordinator", prompt: "Investigate and debug...")
-→ wait_for_task
+→ create_agent (name: "k8s-debugger", systemPrompt: "You are a Kubernetes debugging coordinator...", 
+   coordination: {enabled: true}, initialPrompt: "Investigate and debug the k8s error: ...")
+→ wait_for_task (the auto-created task)
 → fetch_task_output
 → summarize findings
 

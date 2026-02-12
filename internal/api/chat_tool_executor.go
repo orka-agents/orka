@@ -726,6 +726,12 @@ func (e *ToolExecutor) executeCreateAgent(ctx context.Context, args map[string]a
 	providerRefName := getStringArgDefault(args, "providerRef", "default")
 	agent.Spec.ProviderRef = &corev1alpha1.ProviderReference{Name: providerRefName}
 
+	// Clear model.provider when providerRef is set to avoid type mismatch
+	// (e.g., model.provider="openai" vs providerRef resolving to "azure-openai")
+	if agent.Spec.Model != nil && agent.Spec.Model.Provider != "" {
+		agent.Spec.Model.Provider = ""
+	}
+
 	if systemPrompt := getStringArg(args, "systemPrompt"); systemPrompt != "" {
 		agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{
 			Inline: systemPrompt,
@@ -782,6 +788,11 @@ func (e *ToolExecutor) executeCreateAgent(ctx context.Context, args map[string]a
 		return classifyK8sError(err)
 	}
 
+	// After agent creation succeeds, check for initialPrompt
+	if result := e.handleInitialPrompt(ctx, agent, namespace, args); result != nil {
+		return *result
+	}
+
 	return ToolResult{
 		Success: true,
 		Data: map[string]any{
@@ -790,6 +801,81 @@ func (e *ToolExecutor) executeCreateAgent(ctx context.Context, args map[string]a
 			"message":   "Agent created",
 		},
 	}
+}
+
+// handleInitialPrompt creates a Task for the agent if an initialPrompt argument is provided.
+func (e *ToolExecutor) handleInitialPrompt(ctx context.Context, agent *corev1alpha1.Agent, namespace string, args map[string]any) *ToolResult {
+	initialPrompt := getStringArg(args, "initialPrompt")
+	if initialPrompt == "" {
+		return nil
+	}
+
+	// Check task limit
+	if limit := e.checkTaskLimit(); limit != nil {
+		result := ToolResult{
+			Success: true,
+			Data: map[string]any{
+				"name":      agent.Name,
+				"namespace": agent.Namespace,
+				"message":   "Agent created, but task creation skipped: task limit reached",
+			},
+		}
+		return &result
+	}
+
+	// Determine task type based on agent config
+	taskType := corev1alpha1.TaskTypeAI
+	if agent.Spec.Runtime != nil {
+		taskType = corev1alpha1.TaskTypeAgent
+	}
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      e.generateTaskName(),
+			Namespace: namespace,
+			Labels:    e.taskLabels(),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   taskType,
+			Prompt: initialPrompt,
+			AgentRef: &corev1alpha1.AgentReference{
+				Name: agent.Name,
+			},
+		},
+	}
+
+	// Set provider reference from agent
+	if agent.Spec.ProviderRef != nil && taskType == corev1alpha1.TaskTypeAI {
+		if task.Spec.AI == nil {
+			task.Spec.AI = &corev1alpha1.AISpec{}
+		}
+		task.Spec.AI.ProviderRef = agent.Spec.ProviderRef
+	}
+
+	if err := e.client.Create(ctx, task); err != nil {
+		result := ToolResult{
+			Success: true,
+			Data: map[string]any{
+				"agentName":      agent.Name,
+				"agentNamespace": agent.Namespace,
+				"message":        fmt.Sprintf("Agent created, but task creation failed: %v", err),
+			},
+		}
+		return &result
+	}
+
+	e.tasksCreated++
+	result := ToolResult{
+		Success: true,
+		Data: map[string]any{
+			"agentName":      agent.Name,
+			"agentNamespace": agent.Namespace,
+			"taskName":       task.Name,
+			"taskNamespace":  task.Namespace,
+			"message":        "Agent created and task started",
+		},
+	}
+	return &result
 }
 
 func (e *ToolExecutor) executeUpdateAgent(ctx context.Context, args map[string]any) ToolResult {

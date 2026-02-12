@@ -493,6 +493,47 @@ func TestJobBuilder_buildEnvVars_WithProvider(t *testing.T) {
 	}
 }
 
+func TestJobBuilder_buildEnvVars_ProviderCRDTypeOverridesModelProvider(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: defaultNS,
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAI,
+			Prompt: "Hello",
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Provider: "openai",
+				Name:     "gpt-4",
+			},
+		},
+	}
+	provider := &corev1alpha1.Provider{
+		Spec: corev1alpha1.ProviderSpec{
+			Type:    corev1alpha1.ProviderTypeAzureOpenAI,
+			BaseURL: "https://my-azure.openai.azure.com",
+		},
+	}
+
+	envVars := builder.buildEnvVars(task, agent, provider)
+
+	for _, env := range envVars {
+		if env.Name == "MERCAN_AI_PROVIDER" {
+			if env.Value != string(corev1alpha1.ProviderTypeAzureOpenAI) {
+				t.Errorf("MERCAN_AI_PROVIDER = %s, want %s (Provider CRD type should override model.provider)",
+					env.Value, corev1alpha1.ProviderTypeAzureOpenAI)
+			}
+			return
+		}
+	}
+	t.Error("Missing MERCAN_AI_PROVIDER")
+}
+
 func TestJobBuilder_buildContainer_ContainerWithoutImage(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{

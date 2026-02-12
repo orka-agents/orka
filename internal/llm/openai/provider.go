@@ -197,6 +197,9 @@ func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionReq
 	if len(req.Tools) > 0 {
 		params.Tools = convertResponsesTools(req.Tools)
 	}
+	if req.ResponseFormat != nil {
+		params.Text = convertResponsesTextFormat(req.ResponseFormat)
+	}
 
 	resp, err := p.client.Responses.New(ctx, params)
 	if err != nil {
@@ -246,6 +249,9 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 		}
 		if len(req.Tools) > 0 {
 			params.Tools = convertResponsesTools(req.Tools)
+		}
+		if req.ResponseFormat != nil {
+			params.Text = convertResponsesTextFormat(req.ResponseFormat)
 		}
 
 		stream := p.client.Responses.NewStreaming(ctx, params)
@@ -376,6 +382,63 @@ func convertChatTools(tools []llm.Tool) []openai.ChatCompletionToolUnionParam {
 	return cTools
 }
 
+// convertResponsesTextFormat maps an llm.ResponseFormat to the Responses API text config.
+func convertResponsesTextFormat(rf *llm.ResponseFormat) responses.ResponseTextConfigParam {
+	var cfg responses.ResponseTextConfigParam
+	switch rf.Type {
+	case "json_object":
+		cfg.Format = responses.ResponseFormatTextConfigUnionParam{
+			OfJSONObject: &shared.ResponseFormatJSONObjectParam{},
+		}
+	case "json_schema":
+		if rf.JSONSchema != nil {
+			param := &responses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   rf.JSONSchema.Name,
+				Schema: rf.JSONSchema.Schema,
+			}
+			if rf.JSONSchema.Strict != nil {
+				param.Strict = openai.Bool(*rf.JSONSchema.Strict)
+			}
+			if rf.JSONSchema.Description != "" {
+				param.Description = openai.String(rf.JSONSchema.Description)
+			}
+			cfg.Format = responses.ResponseFormatTextConfigUnionParam{
+				OfJSONSchema: param,
+			}
+		}
+	}
+	return cfg
+}
+
+// convertChatResponseFormat maps an llm.ResponseFormat to the Chat Completions API response_format.
+func convertChatResponseFormat(rf *llm.ResponseFormat) openai.ChatCompletionNewParamsResponseFormatUnion {
+	switch rf.Type {
+	case "json_object":
+		return openai.ChatCompletionNewParamsResponseFormatUnion{
+			OfJSONObject: &shared.ResponseFormatJSONObjectParam{},
+		}
+	case "json_schema":
+		if rf.JSONSchema != nil {
+			schemaParam := shared.ResponseFormatJSONSchemaJSONSchemaParam{
+				Name:   rf.JSONSchema.Name,
+				Schema: rf.JSONSchema.Schema,
+			}
+			if rf.JSONSchema.Strict != nil {
+				schemaParam.Strict = openai.Bool(*rf.JSONSchema.Strict)
+			}
+			if rf.JSONSchema.Description != "" {
+				schemaParam.Description = openai.String(rf.JSONSchema.Description)
+			}
+			return openai.ChatCompletionNewParamsResponseFormatUnion{
+				OfJSONSchema: &shared.ResponseFormatJSONSchemaParam{
+					JSONSchema: schemaParam,
+				},
+			}
+		}
+	}
+	return openai.ChatCompletionNewParamsResponseFormatUnion{}
+}
+
 func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	params := openai.ChatCompletionNewParams{
 		Model:    req.Model,
@@ -389,6 +452,9 @@ func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.Complet
 	}
 	if len(req.Tools) > 0 {
 		params.Tools = convertChatTools(req.Tools)
+	}
+	if req.ResponseFormat != nil {
+		params.ResponseFormat = convertChatResponseFormat(req.ResponseFormat)
 	}
 
 	resp, err := p.client.Chat.Completions.New(ctx, params)
@@ -430,6 +496,9 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 		}
 		if len(req.Tools) > 0 {
 			params.Tools = convertChatTools(req.Tools)
+		}
+		if req.ResponseFormat != nil {
+			params.ResponseFormat = convertChatResponseFormat(req.ResponseFormat)
 		}
 
 		stream := p.client.Chat.Completions.NewStreaming(ctx, params)

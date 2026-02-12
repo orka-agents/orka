@@ -41,8 +41,8 @@ function HighlightedText({ text, search }: { text: string; search: string }) {
   )
 }
 
-export function StructuredLogViewer({ taskId }: { taskId: string }) {
-  const { logs, isStreaming, error, refetch, clear } = useTaskLogs(taskId)
+export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; taskPhase?: string }) {
+  const { logs, isStreaming, isLive, error, refetch, clear } = useTaskLogs(taskId, true, taskPhase as import('@/schemas/task').TaskPhase | undefined)
   const [search, setSearch] = useState('')
   const [pinToBottom, setPinToBottom] = useState(true)
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -113,7 +113,10 @@ export function StructuredLogViewer({ taskId }: { taskId: string }) {
             <span className="text-xs font-normal text-muted-foreground">
               ({filteredLogs.length} line{filteredLogs.length !== 1 ? 's' : ''})
             </span>
-            {isStreaming && (
+            {isLive && (
+              <span className="text-xs font-normal text-green-600 dark:text-green-400 animate-pulse">● Live</span>
+            )}
+            {isStreaming && !isLive && (
               <span className="text-xs font-normal text-blue-600 dark:text-blue-400">● Streaming</span>
             )}
           </CardTitle>

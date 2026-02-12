@@ -1,0 +1,115 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+)
+
+// DeleteAgentTool implements agent cleanup for dynamically created agents
+type DeleteAgentTool struct {
+	k8sClient client.Client
+}
+
+// DeleteAgentArgs are the arguments for the delete_agent tool
+type DeleteAgentArgs struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// DeleteAgentResult represents the deletion result
+type DeleteAgentResult struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+// NewDeleteAgentTool creates a new delete agent tool
+func NewDeleteAgentTool(k8sClient client.Client) *DeleteAgentTool {
+	return &DeleteAgentTool{
+		k8sClient: k8sClient,
+	}
+}
+
+// Name returns the tool name
+func (t *DeleteAgentTool) Name() string {
+	return "delete_agent"
+}
+
+// Description returns the tool description
+func (t *DeleteAgentTool) Description() string {
+	return "Delete a dynamically created agent. Removes the Agent CR from the cluster."
+}
+
+// Parameters returns the JSON Schema for parameters
+func (t *DeleteAgentTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"name": {
+				"type": "string",
+				"description": "Name of the agent to delete"
+			},
+			"namespace": {
+				"type": "string",
+				"description": "Namespace (defaults to current task namespace)"
+			}
+		},
+		"required": ["name"]
+	}`)
+}
+
+// Execute deletes an agent CR
+func (t *DeleteAgentTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var a DeleteAgentArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return "", fmt.Errorf("failed to parse args: %w", err)
+	}
+
+	if a.Name == "" {
+		return "", fmt.Errorf("agent name is required")
+	}
+
+	namespace := a.Namespace
+	if namespace == "" {
+		namespace = os.Getenv("MERCAN_TASK_NAMESPACE")
+	}
+	if namespace == "" {
+		namespace = "default"
+	}
+
+	// Get the agent to ensure it exists
+	var agent corev1alpha1.Agent
+	if err := t.k8sClient.Get(ctx, types.NamespacedName{
+		Name:      a.Name,
+		Namespace: namespace,
+	}, &agent); err != nil {
+		return "", fmt.Errorf("failed to get agent %s/%s: %w", namespace, a.Name, err)
+	}
+
+	// Delete the agent
+	if err := t.k8sClient.Delete(ctx, &agent); err != nil {
+		return "", fmt.Errorf("failed to delete agent %s/%s: %w", namespace, a.Name, err)
+	}
+
+	result := DeleteAgentResult{
+		Name:   a.Name,
+		Status: "deleted",
+	}
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal result: %w", err)
+	}
+	return string(resultJSON), nil
+}

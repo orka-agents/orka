@@ -1,0 +1,16 @@
+apiVersion: core.mercan.ai/v1alpha1
+kind: Task
+metadata:
+  name: build-rest-api
+spec:
+  type: ai
+  agentRef:
+    name: coordinator
+  prompt: |
+    Build a simple TODO REST API in Go with the following requirements:
+    - CRUD endpoints (GET, POST, PUT, DELETE) for /api/todos
+    - In-memory storage
+    - Unit tests for all handlers
+    - Clean code with proper error handling
+
+    Create specialist agents for coding and reviewing, then coordinate the work.

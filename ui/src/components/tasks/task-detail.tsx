@@ -168,7 +168,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         </TabsContent>
 
         <TabsContent value="logs">
-          <StructuredLogViewer taskId={taskId} />
+          <StructuredLogViewer taskId={taskId} taskPhase={task.status?.phase} />
         </TabsContent>
 
         {(task.status?.childTasks?.length ?? 0) > 0 && (

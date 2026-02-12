@@ -15,6 +15,7 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/gofiber/fiber/v3/middleware/recover"
 	"github.com/gofiber/fiber/v3/middleware/requestid"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -33,6 +34,7 @@ type ServerConfig struct {
 	Chat           ChatConfig
 	ResultStore    store.ResultStore
 	SessionStore   store.SessionStore
+	Clientset      kubernetes.Interface
 }
 
 // Server is the REST API server
@@ -65,7 +67,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		SessionStore:   config.SessionStore,
 	}
 
-	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace, config.ResultStore, config.SessionStore)
+	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace, config.ResultStore, config.SessionStore, config.Clientset)
 	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.SessionStore, config.ResultStore)
 	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.Chat)
 	server.setupMiddleware()

@@ -25,13 +25,28 @@ type Provider interface {
 
 // CompletionRequest represents a completion request
 type CompletionRequest struct {
-	Model         string    `json:"model"`
-	Messages      []Message `json:"messages"`
-	SystemPrompt  string    `json:"system_prompt,omitempty"`
-	MaxTokens     int       `json:"max_tokens,omitempty"`
-	Temperature   float64   `json:"temperature,omitempty"`
-	Tools         []Tool    `json:"tools,omitempty"`
-	StopSequences []string  `json:"stop_sequences,omitempty"`
+	Model          string          `json:"model"`
+	Messages       []Message       `json:"messages"`
+	SystemPrompt   string          `json:"system_prompt,omitempty"`
+	MaxTokens      int             `json:"max_tokens,omitempty"`
+	Temperature    float64         `json:"temperature,omitempty"`
+	Tools          []Tool          `json:"tools,omitempty"`
+	StopSequences  []string        `json:"stop_sequences,omitempty"`
+	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+}
+
+// ResponseFormat specifies the output format the model must produce.
+type ResponseFormat struct {
+	Type       string            `json:"type"` // "text", "json_object", "json_schema"
+	JSONSchema *JSONSchemaFormat `json:"json_schema,omitempty"`
+}
+
+// JSONSchemaFormat holds the schema details for json_schema response format.
+type JSONSchemaFormat struct {
+	Name        string         `json:"name"`
+	Schema      map[string]any `json:"schema,omitempty"`
+	Strict      *bool          `json:"strict,omitempty"`
+	Description string         `json:"description,omitempty"`
 }
 
 // CompletionResponse represents a completion response

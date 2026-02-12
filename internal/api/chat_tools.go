@@ -175,12 +175,13 @@ func ManagementTools() []llm.Tool {
 	return []llm.Tool{
 		{
 			Name:        "create_agent",
-			Description: "Create an Agent CRD with model, tools, and optional runtime and coordination configuration. Enable coordination to allow this agent to delegate tasks to other agents.",
+			Description: "Create an Agent CRD with model, tools, and optional runtime and coordination configuration. Enable coordination to allow this agent to delegate tasks to other agents. Provide initialPrompt to also create and start a Task immediately.",
 			Parameters: mustMarshal(map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"name":         map[string]any{"type": "string", "description": "Agent name"},
 					"namespace":    map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"providerRef":  map[string]any{"type": "string", "description": "Provider CRD name (defaults to 'default')"},
 					"systemPrompt": map[string]any{"type": "string", "description": "System prompt for the agent"},
 					"tools":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Tool names to attach"},
 					"model": map[string]any{
@@ -197,6 +198,10 @@ func ManagementTools() []llm.Tool {
 							"type":            map[string]any{"type": "string", "description": "Runtime type: copilot or claude"},
 							"defaultMaxTurns": map[string]any{"type": "integer", "description": "Default max agent loop iterations"},
 						},
+					},
+					"initialPrompt": map[string]any{
+						"type":        "string",
+						"description": "When provided, automatically create and start a Task using this agent with this prompt. One tool call = agent + task. Leave empty to only create the agent config without running it.",
 					},
 					"coordination": map[string]any{
 						"type":        "object",
@@ -306,14 +311,19 @@ func ShouldLoadManagementTools(message string) bool {
 	signals := []string{
 		"create an agent",
 		"create agent",
+		"delete agent",
+		"delete the agent",
 		"delete the tool",
 		"delete tool",
 		"update agent",
+		"remove agent",
 		"remove tool",
 		"new agent",
 		"make a tool",
 		"delete session",
 		"create tool",
+		"bootstrap agent",
+		"self-assembl",
 	}
 	for _, s := range signals {
 		if strings.Contains(lower, s) {
