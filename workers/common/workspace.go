@@ -194,12 +194,12 @@ func pushChanges(workDir, branch string) error {
 		return fmt.Errorf("git commit failed: %s: %w", out, err)
 	}
 
-	// Create and push the branch
-	if out, err := execGit(workDir, "checkout", "-b", branch); err != nil {
-		return fmt.Errorf("git checkout -b %s failed: %s: %w", branch, out, err)
+	// Create/reset the branch locally (handles pre-existing local branch names)
+	if out, err := execGit(workDir, "checkout", "-B", branch); err != nil {
+		return fmt.Errorf("git checkout -B %s failed: %s: %w", branch, out, err)
 	}
 
-	if out, err := execGit(workDir, "push", "origin", branch); err != nil {
+	if out, err := execGit(workDir, "push", "-u", "origin", branch); err != nil {
 		return fmt.Errorf("git push failed: %s: %w", out, err)
 	}
 

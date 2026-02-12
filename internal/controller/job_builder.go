@@ -414,7 +414,7 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 
 	// Auto-inject coordination tools when coordination is enabled
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
-		for _, ct := range []string{"delegate_task", "wait_for_tasks", "create_agent", "delete_agent"} {
+		for _, ct := range []string{"delegate_task", "wait_for_tasks", "create_pull_request", "merge_pull_request", "review_pull_request", "post_review_comment", "create_agent", "delete_agent"} {
 			if !slices.Contains(cfg.tools, ct) {
 				cfg.tools = append(cfg.tools, ct)
 			}

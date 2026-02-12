@@ -22,7 +22,7 @@ const (
 	defaultMaxTurns    = 50
 	workspaceDir       = "/workspace"
 	defaultCopilotPath = "copilot"
-	defaultTimeout     = 10 * time.Minute
+	defaultTimeout     = 20 * time.Minute
 )
 
 func main() {
@@ -46,7 +46,7 @@ func buildSessionConfig(cfg *common.AgentConfig) *copilot.SessionConfig {
 		OnPermissionRequest: func(
 			_ copilot.PermissionRequest, _ copilot.PermissionInvocation,
 		) (copilot.PermissionRequestResult, error) {
-			return copilot.PermissionRequestResult{Kind: "allow"}, nil
+			return copilot.PermissionRequestResult{Kind: "approved"}, nil
 		},
 	}
 
@@ -78,15 +78,15 @@ func buildSessionConfig(cfg *common.AgentConfig) *copilot.SessionConfig {
 
 // executeCopilot runs the Copilot SDK session and returns the result text.
 func executeCopilot(ctx context.Context, cfg *common.AgentConfig) (string, error) {
-	// Apply timeout if configured
-	execCtx := ctx
+	// Always apply a timeout so the Copilot SDK doesn't fall back to its
+	// built-in 60-second default (SendAndWait adds one when the context
+	// has no deadline).
+	timeout := defaultTimeout
 	if cfg.TimeoutSeconds > 0 {
-		var timeoutCancel context.CancelFunc
-		execCtx, timeoutCancel = context.WithTimeout(
-			ctx, time.Duration(cfg.TimeoutSeconds)*time.Second,
-		)
-		defer timeoutCancel()
+		timeout = time.Duration(cfg.TimeoutSeconds) * time.Second
 	}
+	execCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
+	defer timeoutCancel()
 
 	// Create and start the Copilot client
 	opts := &copilot.ClientOptions{
@@ -115,12 +115,6 @@ func executeCopilot(ctx context.Context, cfg *common.AgentConfig) (string, error
 	session, err := client.CreateSession(execCtx, sessionCfg)
 	if err != nil {
 		return "", fmt.Errorf("failed to create session: %w", err)
-	}
-
-	// Determine the wait timeout for SendAndWait
-	timeout := defaultTimeout
-	if cfg.TimeoutSeconds > 0 {
-		timeout = time.Duration(cfg.TimeoutSeconds) * time.Second
 	}
 
 	// Send the prompt and wait for completion

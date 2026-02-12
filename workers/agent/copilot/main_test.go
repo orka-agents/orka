@@ -85,8 +85,8 @@ func TestBuildSessionConfig_Full(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OnPermissionRequest error: %v", err)
 	}
-	if result.Kind != "allow" {
-		t.Errorf("OnPermissionRequest result.Kind = %q, want allow", result.Kind)
+	if result.Kind != "approved" {
+		t.Errorf("OnPermissionRequest result.Kind = %q, want approved", result.Kind)
 	}
 }
 
