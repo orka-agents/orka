@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	"k8s.io/client-go/tools/clientcmd"
 
@@ -65,7 +66,8 @@ Run 'mercan <command> --help' for more information.
 
 func loginCmd(args []string) {
 	var server string
-	var kubeconfig string
+	var namespace string
+	var serviceAccount string
 	var token string
 	var help bool
 
@@ -77,10 +79,15 @@ func loginCmd(args []string) {
 				i++
 				server = args[i]
 			}
-		case "--kubeconfig":
+		case flagNamespace, "-n":
 			if i+1 < len(args) {
 				i++
-				kubeconfig = args[i]
+				namespace = args[i]
+			}
+		case "--service-account":
+			if i+1 < len(args) {
+				i++
+				serviceAccount = args[i]
 			}
 		case flagToken, "-t":
 			if i+1 < len(args) {
@@ -100,13 +107,14 @@ func loginCmd(args []string) {
 	if help {
 		fmt.Print(`Usage: mercan login [flags]
 
-Extract a token from your kubeconfig and open the Mercan dashboard in your browser.
+Generate a ServiceAccount token and open the Mercan dashboard in your browser.
 
 Flags:
-  -s, --server string       Mercan server URL (default defaultServer)
-  -t, --token string        Use a specific token instead of extracting from kubeconfig
-      --kubeconfig string   Path to kubeconfig file (default: $KUBECONFIG or ~/.kube/config)
-  -h, --help                Show this help message
+  -s, --server string            Mercan server URL (default "http://localhost:8080")
+  -n, --namespace string         Namespace of the ServiceAccount (default "default")
+      --service-account string   ServiceAccount name (default "default")
+  -t, --token string             Use a specific token instead of generating one
+  -h, --help                     Show this help message
 `)
 		return
 	}
@@ -114,31 +122,57 @@ Flags:
 	if server == "" {
 		server = defaultServer
 	}
+	if namespace == "" {
+		namespace = "default"
+	}
+	if serviceAccount == "" {
+		serviceAccount = "default"
+	}
 
 	// Get token
 	if token == "" {
 		var err error
-		token, err = extractToken(kubeconfig)
+		token, err = createServiceAccountToken(serviceAccount, namespace)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error extracting token from kubeconfig: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error creating token: %v\n", err)
 			fmt.Fprintf(os.Stderr, "You can provide a token directly with --token\n")
 			os.Exit(1)
 		}
 	}
 
-	if token == "" {
-		fmt.Fprintln(os.Stderr, "No token found in kubeconfig. Use --token to provide one directly.")
-		os.Exit(1)
-	}
-
 	// Build the login URL
-	loginURL := fmt.Sprintf("%s/#token=%s", server, token)
+	loginURL := fmt.Sprintf("%s/login#token=%s", server, token)
 
-	fmt.Printf("Opening Mercan dashboard at %s\n", server)
+	fmt.Printf("Login URL: %s\n", loginURL)
 	if err := openBrowser(loginURL); err != nil {
 		fmt.Fprintf(os.Stderr, "Could not open browser: %v\n", err)
-		fmt.Printf("\nOpen this URL manually:\n  %s\n", loginURL)
+		fmt.Fprintln(os.Stderr, "Open the URL above in your browser manually.")
+		return
 	}
+	fmt.Println("Browser opened successfully. You can now log in to the Mercan dashboard.")
+}
+
+// createServiceAccountToken generates a token for the given ServiceAccount using kubectl.
+func createServiceAccountToken(serviceAccount, namespace string) (string, error) {
+	kubectlPath, err := exec.LookPath("kubectl")
+	if err != nil {
+		return "", fmt.Errorf("kubectl not found in PATH: %w", err)
+	}
+
+	cmd := exec.Command(kubectlPath, "create", "token", serviceAccount, "-n", namespace, "--duration=24h")
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("kubectl create token failed: %s", string(exitErr.Stderr))
+		}
+		return "", fmt.Errorf("kubectl create token failed: %w", err)
+	}
+
+	token := strings.TrimSpace(string(out))
+	if token == "" {
+		return "", fmt.Errorf("kubectl returned an empty token")
+	}
+	return token, nil
 }
 
 // extractToken reads the bearer token from the current kubeconfig context.

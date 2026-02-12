@@ -872,6 +872,11 @@ func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
 	})
 }
 
+// handleAuthValidate returns success if the request passes auth middleware
+func (s *Server) handleAuthValidate(c fiber.Ctx) error {
+	return c.JSON(fiber.Map{"authenticated": true})
+}
+
 // Helper to read lines from a reader
 func readLines(r io.Reader) <-chan string {
 	ch := make(chan string)

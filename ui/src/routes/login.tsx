@@ -11,6 +11,8 @@ export const Route = createFileRoute('/login')({
 
 function LoginPage() {
   const [tokenInput, setTokenInput] = useState('')
+  const [error, setError] = useState('')
+  const [isValidating, setIsValidating] = useState(false)
   const { setToken, token } = useAuthStore()
   const navigate = useNavigate()
 
@@ -33,10 +35,26 @@ function LoginPage() {
     }
   }, [token, navigate])
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (tokenInput.trim()) {
-      setToken(tokenInput.trim())
+    const trimmed = tokenInput.trim()
+    if (!trimmed) return
+
+    setError('')
+    setIsValidating(true)
+    try {
+      const res = await fetch('/api/v1/auth/validate', {
+        headers: { 'Authorization': `Bearer ${trimmed}` },
+      })
+      if (res.ok) {
+        setToken(trimmed)
+      } else {
+        setError('Invalid token. Please check your token and try again.')
+      }
+    } catch {
+      setError('Invalid token. Please check your token and try again.')
+    } finally {
+      setIsValidating(false)
     }
   }
 
@@ -56,13 +74,27 @@ function LoginPage() {
               type="password"
               placeholder="Paste your token here..."
               value={tokenInput}
-              onChange={(e) => setTokenInput(e.target.value)}
+              onChange={(e) => { setTokenInput(e.target.value); setError('') }}
               autoFocus
             />
-            <Button type="submit" className="w-full" disabled={!tokenInput.trim()}>
-              Sign In
+            {error && (
+              <p className="text-sm text-destructive">{error}</p>
+            )}
+            <Button type="submit" className="w-full" disabled={!tokenInput.trim() || isValidating}>
+              {isValidating ? 'Validating…' : 'Sign In'}
             </Button>
           </form>
+          <div className="mt-6 space-y-3 border-t pt-4">
+            <p className="text-sm text-muted-foreground font-medium">How to get a token:</p>
+            <div className="rounded-md bg-muted p-3">
+              <code className="text-xs break-all select-all">
+                kubectl create token default -n default
+              </code>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Or use the CLI: <code className="text-xs">mercan login --server http://localhost:8080</code>
+            </p>
+          </div>
         </CardContent>
       </Card>
     </div>

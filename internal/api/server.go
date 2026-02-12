@@ -136,6 +136,9 @@ func (s *Server) setupRoutes() {
 	api.Put("/agents/:name", s.handlers.UpdateAgent)
 	api.Delete("/agents/:name", s.handlers.DeleteAgent)
 
+	// Auth validation endpoint
+	api.Get("/auth/validate", s.handleAuthValidate)
+
 	// Reference endpoints (for dropdowns)
 	api.Get("/secrets", s.handlers.ListSecretNames)
 
