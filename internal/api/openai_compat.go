@@ -32,7 +32,7 @@ const (
 )
 
 // OpenAICompatHandler implements OpenAI-compatible /v1/chat/completions and /v1/models endpoints.
-// This allows tools like OpenCode to use Mercan as a custom provider.
+// This allows OpenAI-compatible clients to use Mercan as a custom provider.
 type OpenAICompatHandler struct {
 	client         client.Client
 	watchNamespace string

@@ -1,6 +1,6 @@
 # OpenAI-Compatible API
 
-Mercan exposes an **OpenAI-compatible API** at `/v1/chat/completions` and `/v1/models`, allowing any OpenAI-compatible client to use Mercan as a provider. This includes tools like [OpenCode](https://github.com/anomalyco/opencode), [Continue](https://continue.dev/), [Cursor](https://cursor.sh/), and others.
+Mercan exposes an **OpenAI-compatible API** at `/v1/chat/completions` and `/v1/models`, allowing any OpenAI-compatible client to use Mercan as a provider. This includes tools like [Continue](https://continue.dev/), [Cursor](https://cursor.sh/), and others.
 
 Mercan acts as a **proxy** to whichever LLM provider is configured in your cluster (Anthropic, OpenAI, Azure OpenAI, etc.), with credentials managed securely via Kubernetes Secrets and Provider CRDs.
 
@@ -66,41 +66,23 @@ kubectl create clusterrolebinding mercan-client-binding \
 export MERCAN_TOKEN=$(kubectl create token mercan-client)
 ```
 
-## Using with OpenCode
+## Using with Continue
 
 ### Configuration
 
-Create or update `opencode.json` in your project:
+Configure Continue to use Mercan as an OpenAI-compatible provider. Add to your Continue configuration:
 
 ```json
 {
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "mercan": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Mercan",
-      "options": {
-        "baseURL": "https://mercan.example.com/v1",
-        "apiKey": "{env:MERCAN_TOKEN}"
-      },
-      "models": {
-        "anthropic/claude-sonnet-4-20250514": {
-          "name": "Claude Sonnet 4 (via Mercan)",
-          "limit": {
-            "context": 200000,
-            "output": 8192
-          }
-        },
-        "openai/gpt-4o": {
-          "name": "GPT-4o (via Mercan)",
-          "limit": {
-            "context": 128000,
-            "output": 16384
-          }
-        }
-      }
+  "models": [
+    {
+      "title": "Claude Sonnet 4 (via Mercan)",
+      "provider": "openai",
+      "model": "anthropic/claude-sonnet-4-20250514",
+      "apiBase": "https://mercan.example.com/v1",
+      "apiKey": "YOUR_MERCAN_TOKEN"
     }
-  }
+  ]
 }
 ```
 
@@ -110,14 +92,6 @@ Set your Mercan API token:
 
 ```bash
 export MERCAN_TOKEN=$(kubectl create token mercan-client)
-```
-
-### Run OpenCode
-
-```bash
-opencode
-# Use /models to select your Mercan model
-/models
 ```
 
 ## Using with curl
@@ -177,7 +151,7 @@ curl https://mercan.example.com/v1/models \
 
 ```
 ┌──────────────┐     ┌─────────────────────────┐     ┌──────────────────┐
-│   OpenCode   │────▶│  Mercan API Server       │────▶│  Anthropic API   │
+│  Continue    │────▶│  Mercan API Server       │────▶│  Anthropic API   │
 │  (or any     │     │  /v1/chat/completions    │     │  OpenAI API      │
 │   OAI client)│◀────│                          │◀────│  Azure OpenAI    │
 └──────────────┘     │  Provider resolution:    │     └──────────────────┘
@@ -187,4 +161,4 @@ curl https://mercan.example.com/v1/models \
                      └─────────────────────────┘
 ```
 
-Mercan transparently proxies requests to the backend LLM provider. The client (OpenCode) manages its own tool execution loop — Mercan simply forwards the messages and tool definitions to the LLM and returns the response.
+Mercan transparently proxies requests to the backend LLM provider. The client manages its own tool execution loop — Mercan simply forwards the messages and tool definitions to the LLM and returns the response.

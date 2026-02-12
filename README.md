@@ -28,7 +28,7 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 
 **Scheduled operations** — Cron-based agents that run daily security scans, dependency audits, or report generation — all with retry policies and webhook notifications.
 
-**Use your favorite coding agent** — Connect [OpenCode](https://github.com/anomalyco/opencode), Continue, or Cursor to Mercan's OpenAI-compatible API. Your cluster manages the LLM credentials — developers just code.
+**Use your favorite AI client** — Connect Continue, Cursor, or any OpenAI-compatible client to Mercan's API. Your cluster manages the LLM credentials — developers just code.
 
 **CI/CD integration** — Trigger agent tasks from GitHub Actions, monitor progress via the REST API, and gate deployments on agent analysis.
 
@@ -41,7 +41,7 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 - 🖥️ **Web Dashboard** — Built-in React UI embedded in the controller binary — zero extra deployments
 - 📦 **Declarative CRDs** — Task, Agent, Tool, and Provider custom resources for GitOps workflows
 - ⏰ **Scheduled Tasks** — Cron-based recurring execution with concurrency policies
-- 🔌 **REST & OpenAI-Compatible API** — Full CRUD + `/v1/chat/completions` endpoint for [OpenCode](https://github.com/anomalyco/opencode), Continue, Cursor, and any OpenAI-compatible client
+- 🔌 **REST & OpenAI-Compatible API** — Full CRUD + `/v1/chat/completions` endpoint for Continue, Cursor, and any OpenAI-compatible client
 - 📊 **Observability** — Prometheus metrics, structured logging, health probes
 - 🔒 **Hardened by Default** — Non-root containers, read-only rootfs, ServiceAccount token auth
 
@@ -82,15 +82,11 @@ Use the built-in dashboard, or connect any OpenAI-compatible client:
 ```bash
 kubectl port-forward -n mercan-system svc/mercan-controller 8080:8080
 
-# Option 1: Open the web dashboard
+# Open the web dashboard
 open http://localhost:8080
-
-# Option 2: Use OpenCode
-export MERCAN_TOKEN=$(kubectl create token mercan-client -n mercan-system)
-opencode --provider mercan --baseURL http://localhost:8080/v1 --apiKey $MERCAN_TOKEN
 ```
 
-The built-in orchestrator creates agents, runs tasks, monitors progress, and returns results — all from natural language. See the [OpenAI Compatibility](docs/openai-compat.md) docs for full setup with OpenCode, Continue, or Cursor.
+The built-in orchestrator creates agents, runs tasks, monitors progress, and returns results — all from natural language. See the [OpenAI Compatibility](docs/openai-compat.md) docs for full setup with Continue, Cursor, or other OpenAI-compatible clients.
 
 ## Documentation
 

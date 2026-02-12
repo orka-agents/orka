@@ -147,7 +147,7 @@ func (s *Server) setupRoutes() {
 	}
 
 	// OpenAI-compatible API (under /v1, separate from /api/v1)
-	// This allows tools like OpenCode to use Mercan as a custom provider.
+	// This allows OpenAI-compatible clients to use Mercan as a custom provider.
 	oai := s.app.Group("/v1")
 	oai.Use(NewAuthMiddleware(s.client))
 	oai.Post("/chat/completions", s.openaiHandler.HandleChatCompletions)
