@@ -108,25 +108,27 @@ type SSEEvent struct {
 
 // ChatHandler implements the orchestrator chat endpoints.
 type ChatHandler struct {
-	client         client.Client
-	sessionManager *controller.SessionManager
-	config         ChatConfig
-	semaphore      chan struct{}
-	watchNamespace string
-	sessionStore   store.SessionStore
-	resultStore    store.ResultStore
+	client                    client.Client
+	sessionManager            *controller.SessionManager
+	config                    ChatConfig
+	semaphore                 chan struct{}
+	watchNamespace            string
+	enforceNamespaceIsolation bool
+	sessionStore              store.SessionStore
+	resultStore               store.ResultStore
 }
 
 // NewChatHandler creates a new ChatHandler.
-func NewChatHandler(c client.Client, sm *controller.SessionManager, config ChatConfig, watchNamespace string, ss store.SessionStore, rs store.ResultStore) *ChatHandler {
+func NewChatHandler(c client.Client, sm *controller.SessionManager, config ChatConfig, watchNamespace string, enforceNS bool, ss store.SessionStore, rs store.ResultStore) *ChatHandler {
 	return &ChatHandler{
-		client:         c,
-		sessionManager: sm,
-		config:         config,
-		semaphore:      make(chan struct{}, config.MaxConcurrent),
-		watchNamespace: watchNamespace,
-		sessionStore:   ss,
-		resultStore:    rs,
+		client:                    c,
+		sessionManager:            sm,
+		config:                    config,
+		semaphore:                 make(chan struct{}, config.MaxConcurrent),
+		watchNamespace:            watchNamespace,
+		enforceNamespaceIsolation: enforceNS,
+		sessionStore:              ss,
+		resultStore:               rs,
 	}
 }
 
@@ -159,13 +161,16 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(context.Background(), ch.config.MaxDuration)
 	defer cancel()
 
-	// Resolve namespace
-	namespace := req.Namespace
-	if namespace == "" {
-		namespace = ch.watchNamespace
+	// Resolve namespace from request or token
+	namespace := GetEffectiveNamespace(c, req.Namespace)
+	if ch.watchNamespace != "" && namespace != ch.watchNamespace {
+		return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("namespace %q not allowed, restricted to %q", namespace, ch.watchNamespace))
 	}
-	if namespace == "" {
-		namespace = defaultNamespace
+	if ch.enforceNamespaceIsolation {
+		ui := GetUserInfo(c)
+		if ui != nil && ui.Namespace != "" && namespace != ui.Namespace {
+			return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("namespace %q not allowed, restricted to %q", namespace, ui.Namespace))
+		}
 	}
 
 	if blockedNamespaces[namespace] {
@@ -214,7 +219,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	}
 
 	// Create tool executor
-	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout, ch.resultStore)
+	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout, ch.resultStore)
 
 	// Build completion request parameters
 	var temperature float64
@@ -588,7 +593,7 @@ func (ch *ChatHandler) HandleCancelChat(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "sessionId is required")
 	}
 
-	namespace := c.Query("namespace", defaultNamespace)
+	namespace := GetEffectiveNamespace(c, c.Query("namespace", ""))
 	if ch.watchNamespace != "" {
 		namespace = ch.watchNamespace
 	}

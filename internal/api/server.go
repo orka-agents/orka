@@ -28,13 +28,14 @@ var log = logf.Log.WithName("api-server")
 
 // ServerConfig holds configuration for the API server
 type ServerConfig struct {
-	Port           int
-	MetricsPort    int
-	WatchNamespace string
-	Chat           ChatConfig
-	ResultStore    store.ResultStore
-	SessionStore   store.SessionStore
-	Clientset      kubernetes.Interface
+	Port                      int
+	MetricsPort               int
+	WatchNamespace            string
+	EnforceNamespaceIsolation bool
+	Chat                      ChatConfig
+	ResultStore               store.ResultStore
+	SessionStore              store.SessionStore
+	Clientset                 kubernetes.Interface
 }
 
 // Server is the REST API server
@@ -67,9 +68,9 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		SessionStore:   config.SessionStore,
 	}
 
-	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace, config.ResultStore, config.SessionStore, config.Clientset)
-	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.SessionStore, config.ResultStore)
-	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.Chat)
+	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace, config.EnforceNamespaceIsolation, config.ResultStore, config.SessionStore, config.Clientset)
+	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore)
+	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat)
 	server.setupMiddleware()
 	server.setupRoutes()
 	server.setupStaticFiles()

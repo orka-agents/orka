@@ -34,17 +34,19 @@ const (
 // OpenAICompatHandler implements OpenAI-compatible /v1/chat/completions and /v1/models endpoints.
 // This allows OpenAI-compatible clients to use Mercan as a custom provider.
 type OpenAICompatHandler struct {
-	client         client.Client
-	watchNamespace string
-	config         ChatConfig
+	client                    client.Client
+	watchNamespace            string
+	enforceNamespaceIsolation bool
+	config                    ChatConfig
 }
 
 // NewOpenAICompatHandler creates an OpenAI-compatible API handler.
-func NewOpenAICompatHandler(c client.Client, watchNamespace string, config ChatConfig) *OpenAICompatHandler {
+func NewOpenAICompatHandler(c client.Client, watchNamespace string, enforceNS bool, config ChatConfig) *OpenAICompatHandler {
 	return &OpenAICompatHandler{
-		client:         c,
-		watchNamespace: watchNamespace,
-		config:         config,
+		client:                    c,
+		watchNamespace:            watchNamespace,
+		enforceNamespaceIsolation: enforceNS,
+		config:                    config,
 	}
 }
 
@@ -207,9 +209,9 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
 	defer cancel()
 
-	namespace := h.watchNamespace
-	if namespace == "" {
-		namespace = defaultNamespace
+	namespace := GetEffectiveNamespace(c, "")
+	if h.watchNamespace != "" {
+		namespace = h.watchNamespace
 	}
 
 	// Resolve provider and model from the request model field.
@@ -584,9 +586,9 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 	ctx := c.Context()
 
-	namespace := h.watchNamespace
-	if namespace == "" {
-		namespace = defaultNamespace
+	namespace := GetEffectiveNamespace(c, "")
+	if h.watchNamespace != "" {
+		namespace = h.watchNamespace
 	}
 
 	// List Provider CRDs to build a model list

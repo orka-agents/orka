@@ -22,8 +22,21 @@ function LoginPage() {
     if (hash.startsWith('#token=')) {
       const t = hash.slice(7)
       if (t) {
-        setToken(t)
         window.location.hash = ''
+        setIsValidating(true)
+        fetch('/api/v1/auth/validate', {
+          headers: { 'Authorization': `Bearer ${t}` },
+        }).then(res => {
+          if (res.ok) {
+            setToken(t)
+          } else {
+            setError('Token from CLI is invalid or expired. Please generate a new one.')
+          }
+        }).catch(() => {
+          setError('Could not validate token. Is the server running?')
+        }).finally(() => {
+          setIsValidating(false)
+        })
       }
     }
   }, [setToken])

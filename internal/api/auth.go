@@ -48,9 +48,25 @@ func getTokenHash(token string) string {
 
 // UserInfo contains information about the authenticated user
 type UserInfo struct {
-	Username string
-	UID      string
-	Groups   []string
+	Username  string
+	UID       string
+	Groups    []string
+	Namespace string // Extracted from ServiceAccount username (system:serviceaccount:<ns>:<name>)
+}
+
+// parseServiceAccountNamespace extracts the namespace from a ServiceAccount username.
+// Format: system:serviceaccount:<namespace>:<name>
+func parseServiceAccountNamespace(username string) string {
+	const prefix = "system:serviceaccount:"
+	if !strings.HasPrefix(username, prefix) {
+		return ""
+	}
+	rest := strings.TrimPrefix(username, prefix)
+	parts := strings.SplitN(rest, ":", 2)
+	if len(parts) < 2 || parts[0] == "" {
+		return ""
+	}
+	return parts[0]
 }
 
 // NewAuthMiddleware creates a new authentication middleware
@@ -120,9 +136,10 @@ func validateToken(ctx context.Context, c client.Client, token string) (*UserInf
 	}
 
 	userInfo := &UserInfo{
-		Username: review.Status.User.Username,
-		UID:      review.Status.User.UID,
-		Groups:   review.Status.User.Groups,
+		Username:  review.Status.User.Username,
+		UID:       review.Status.User.UID,
+		Groups:    review.Status.User.Groups,
+		Namespace: parseServiceAccountNamespace(review.Status.User.Username),
 	}
 
 	// Cache the successful result
@@ -141,4 +158,16 @@ func GetUserInfo(ctx fiber.Ctx) *UserInfo {
 		return nil
 	}
 	return userInfo
+}
+
+// GetEffectiveNamespace returns the namespace to use for a request.
+// Priority: explicit namespace > SA namespace from token > "default"
+func GetEffectiveNamespace(ctx fiber.Ctx, explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if ui := GetUserInfo(ctx); ui != nil && ui.Namespace != "" {
+		return ui.Namespace
+	}
+	return defaultNamespace
 }

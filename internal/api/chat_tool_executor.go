@@ -31,29 +31,31 @@ const taskCreatedMsg = "Task created"
 // ToolExecutor executes orchestrator LLM tool calls by creating and managing
 // Kubernetes resources (Tasks, Agents, Tools, Sessions).
 type ToolExecutor struct {
-	client         client.Client
-	sessionManager *controller.SessionManager
-	namespace      string
-	sessionID      string
-	taskSeq        atomic.Int32
-	tasksCreated   int
-	maxTasks       int
-	toolTimeout    time.Duration
-	watchNamespace string
-	resultStore    store.ResultStore
+	client                    client.Client
+	sessionManager            *controller.SessionManager
+	namespace                 string
+	sessionID                 string
+	taskSeq                   atomic.Int32
+	tasksCreated              int
+	maxTasks                  int
+	toolTimeout               time.Duration
+	watchNamespace            string
+	enforceNamespaceIsolation bool
+	resultStore               store.ResultStore
 }
 
 // NewToolExecutor creates a new ToolExecutor.
-func NewToolExecutor(c client.Client, sm *controller.SessionManager, namespace, sessionID, watchNamespace string, maxTasks int, toolTimeout time.Duration, rs store.ResultStore) *ToolExecutor {
+func NewToolExecutor(c client.Client, sm *controller.SessionManager, namespace, sessionID, watchNamespace string, enforceNS bool, maxTasks int, toolTimeout time.Duration, rs store.ResultStore) *ToolExecutor {
 	return &ToolExecutor{
-		client:         c,
-		sessionManager: sm,
-		namespace:      namespace,
-		sessionID:      sessionID,
-		maxTasks:       maxTasks,
-		toolTimeout:    toolTimeout,
-		watchNamespace: watchNamespace,
-		resultStore:    rs,
+		client:                    c,
+		sessionManager:            sm,
+		namespace:                 namespace,
+		sessionID:                 sessionID,
+		maxTasks:                  maxTasks,
+		toolTimeout:               toolTimeout,
+		watchNamespace:            watchNamespace,
+		enforceNamespaceIsolation: enforceNS,
+		resultStore:               rs,
 	}
 }
 
@@ -148,6 +150,10 @@ func (e *ToolExecutor) checkTaskLimit() *ToolResult {
 func (e *ToolExecutor) checkNamespaceScope(namespace string) *ToolResult {
 	if e.watchNamespace != "" && namespace != e.watchNamespace {
 		r := toolError("permission_denied", fmt.Sprintf("cannot create resources in namespace %q, restricted to %q", namespace, e.watchNamespace), "Use the allowed namespace")
+		return &r
+	}
+	if e.enforceNamespaceIsolation && namespace != e.namespace {
+		r := toolError("permission_denied", fmt.Sprintf("cannot create resources in namespace %q, restricted to %q", namespace, e.namespace), "Use your namespace")
 		return &r
 	}
 	return nil

@@ -77,6 +77,7 @@ func main() {
 	var storeBackend string
 	var storePath string
 	var controllerURL string
+	var enforceNamespaceIsolation bool
 	var tlsOpts []func(*tls.Config)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -118,6 +119,8 @@ func main() {
 	flag.StringVar(&storePath, "store-path", "/data/mercan.db", "Path to SQLite database file")
 	flag.StringVar(&controllerURL, "controller-url", "",
 		"Base URL for the controller API, used by workers. E.g. http://mercan-controller.mercan-system.svc:8080")
+	flag.BoolVar(&enforceNamespaceIsolation, "enforce-namespace-isolation", false,
+		"When true, restrict users to their ServiceAccount's namespace for all operations.")
 
 	opts := zap.Options{
 		Development: true,
@@ -288,11 +291,12 @@ func main() {
 
 	// Start REST API server
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
-		Port:           apiPort,
-		WatchNamespace: watchNamespace,
-		ResultStore:    sqliteStore,
-		SessionStore:   sqliteStore,
-		Clientset:      kubeClient,
+		Port:                      apiPort,
+		WatchNamespace:            watchNamespace,
+		EnforceNamespaceIsolation: enforceNamespaceIsolation,
+		ResultStore:               sqliteStore,
+		SessionStore:              sqliteStore,
+		Clientset:                 kubeClient,
 		Chat: api.ChatConfig{
 			Enabled:         chatEnabled,
 			Provider:        chatProvider,
