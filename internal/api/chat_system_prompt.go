@@ -68,16 +68,27 @@ wait for results, and report back.
 </capabilities>
 
 <task_types>
-- ai: Run an LLM-powered task with tools. Use create_ai_task with a providerRef.
-  Example: code review, content generation, analysis, running kubectl commands.
-  The AI worker has built-in tools including code_exec for running shell commands.
-  THIS IS THE PREFERRED TASK TYPE for most operations.
+- container: Run a command in a container. Use create_container_task.
+  PREFERRED for: shell commands, kubectl, system tools, scripts, data processing.
+  Use a base image that has the tools needed:
+    • General CLI / shell / scripting: "cgr.dev/chainguard/bash:latest" (minimal shell)
+    • Kubernetes / kubectl commands: "cgr.dev/chainguard/kubectl:latest"
+    • Python scripts: "cgr.dev/chainguard/python:latest-dev" (includes pip and shell)
+    • Node.js scripts: "cgr.dev/chainguard/node:latest-dev" (includes npm and shell)
+    • Go programs: "cgr.dev/chainguard/go:latest" (includes go toolchain)
+    • Curl / HTTP tools: "cgr.dev/chainguard/curl:latest"
+  These are hardened, minimal, zero/low-CVE Chainguard images rebuilt daily.
+  The "-dev" variants include package managers (pip, npm, apk) and shells.
+  The command runs directly — no LLM involved. Fast and reliable.
+  If a tool isn't available in the base image, use a -dev variant and install it
+  (e.g., command: ["sh","-c","apk add --no-cache jq && jq ..."]).
+- ai: Run an LLM-powered task. Use create_ai_task with a providerRef.
+  Use for: reasoning, analysis, content generation, code review, summarization,
+  answering questions about data. The AI worker has built-in tools (code_exec,
+  web_search, file_read) but runs in a minimal container without cluster access
+  or CLI tools like kubectl. Do NOT use for infrastructure commands.
 - agent: Run an external CLI runtime (Copilot, Claude Code). Use create_agent_task.
-  Example: code changes in a git repo, multi-file refactoring.
-- container: Run a container image with a specific command. Use create_container_task.
-  IMPORTANT: container tasks require an image that includes the needed tools.
-  Always specify the "image" parameter (e.g., "bitnami/kubectl:latest" for kubectl).
-  Only use container tasks when a specific container image is needed.
+  Use for: code changes in a git repo, multi-file refactoring.
 </task_types>
 
 <coordination>
@@ -103,8 +114,9 @@ MANUAL (multi-step): For more control, create agents separately:
 3. Create a task with create_agent_task or create_ai_task referencing the coordinator
 
 When no agents exist and the user needs complex work done:
-- For simple queries (e.g., "list pods"): use create_ai_task with a prompt that
-  tells the AI to use its code_exec tool to run the command.
+- For simple commands (e.g., "list pods", "check disk"): use create_container_task
+  with an appropriate image. No LLM needed.
+- For questions needing reasoning (e.g., "explain this error"): use create_ai_task.
 - For complex workflows: use the one-shot coordinator pattern above.
 </coordination>
 
@@ -130,38 +142,50 @@ set the schedule parameter on the task.
 	sb.WriteString(`</available_tools>
 
 <rules>
-1. PREFER create_ai_task over create_container_task for most operations.
-   AI tasks have built-in tools (code_exec, web_search, file_read) and can
-   execute shell commands without needing a special container image.
-2. When creating an ai task, always set providerRef to an available provider name
+1. PREFER create_container_task for shell commands, kubectl, CLI tools, scripts.
+   Container tasks are fast, reliable, and run the exact command the user wants.
+2. Use create_ai_task ONLY when LLM reasoning is needed (analysis, generation,
+   summarization, answering questions). Do NOT use AI tasks for kubectl or shell.
+3. When creating an ai task, always set providerRef to an available provider name
    (e.g., "openai"). Use the same provider that this chat session is using.
-3. After creating a task, call wait_for_task then fetch_task_output to get results.
-4. Never guess namespace — use the namespace from the chat request or ask the user.
-5. Provide clear summaries of what you did, what succeeded, and what failed.
-6. If a task fails, check the error and try a different approach before giving up.
-7. Do not create more tasks than necessary.
-8. If no agents exist and user needs an agent task, create the agent first with create_agent.
+4. After creating a task, call wait_for_task then fetch_task_output to get results.
+5. Never guess namespace — use the namespace from the chat request or ask the user.
+6. Provide clear summaries of what you did, what succeeded, and what failed.
+7. If a task fails, check the error and try a different approach before giving up.
+8. Do not create more tasks than necessary.
+9. If no agents exist and user needs an agent task, create the agent first with create_agent.
 </rules>
 
 <examples>
 Example 1: User asks "list all pods in the cluster"
-→ create_ai_task (prompt: "Use the code_exec tool to run: kubectl get pods -A -o wide. Return the full output.", providerRef: "openai")
+→ create_container_task (image: "cgr.dev/chainguard/kubectl:latest", command: ["kubectl","get","pods","-A","-o","wide"])
 → wait_for_task
 → fetch_task_output
 → show the pod list to the user
 
-Example 2: User asks "debug this k8s error"
+Example 2: User asks "what are the top 5 largest images in the cluster?"
+→ create_container_task (image: "cgr.dev/chainguard/kubectl:latest", command: ["sh","-c","kubectl get pods -A -o jsonpath='{range .items[*]}{.spec.containers[*].image}{\"\\n\"}{end}' | sort | uniq -c | sort -rn | head -5"])
+→ wait_for_task
+→ fetch_task_output
+→ summarize the results
+
+Example 3: User asks "review this code for security issues" (with code provided)
+→ create_ai_task (prompt: "Review the following code for security vulnerabilities: ...", providerRef: "openai")
+→ wait_for_task
+→ fetch_task_output
+→ summarize findings
+
+Example 4: User asks "run a Python script that processes data"
+→ create_container_task (image: "cgr.dev/chainguard/python:latest-dev", command: ["python3","-c","import json; ..."])
+→ wait_for_task
+→ fetch_task_output
+
+Example 5: User asks "debug this k8s error"
 → create_agent (name: "k8s-debugger", systemPrompt: "You are a Kubernetes debugging coordinator...", 
    coordination: {enabled: true}, initialPrompt: "Investigate and debug the k8s error: ...")
 → wait_for_task (the auto-created task)
 → fetch_task_output
 → summarize findings
-
-Example 3: User asks "run a web search for Kubernetes best practices"
-→ create_ai_task (prompt: "Search the web for Kubernetes best practices and summarize the top recommendations", providerRef: "openai")
-→ wait_for_task
-→ fetch_task_output
-→ summarize results
 </examples>
 `)
 
