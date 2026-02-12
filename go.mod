@@ -4,7 +4,7 @@ go 1.25.3
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.20.0
-	github.com/github/copilot-sdk/go v0.1.22
+	github.com/github/copilot-sdk/go v0.1.23
 	github.com/gofiber/fiber/v3 v3.0.0
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
