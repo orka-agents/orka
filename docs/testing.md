@@ -33,13 +33,14 @@ Tests use **Ginkgo + Gomega** (BDD style) for controller/integration tests and s
 
 | Package | Test Files | Coverage Areas |
 |---------|-----------|----------------|
-| `internal/api/` | `handlers_test.go`, `auth_test.go`, `middleware_test.go`, `pagination_test.go`, `server_test.go` | REST API handlers, authentication, middleware, pagination |
+| `internal/api/` | `handlers_test.go`, `auth_test.go`, `middleware_test.go`, `pagination_test.go`, `server_test.go`, `openai_compat_test.go` | REST API handlers, authentication, middleware, pagination, OpenAI compatibility |
 | `internal/controller/` | `task_controller_test.go`, `agent_controller_test.go`, `tool_controller_test.go`, `session_manager_test.go`, `job_builder_test.go`, `priority_queue_test.go`, `webhook_test.go` | Reconciliation logic, session management, job building, coordination enforcement |
 | `internal/llm/` | `provider_test.go` | Provider registry |
 | `internal/llm/anthropic/` | `provider_test.go` | Anthropic API integration |
 | `internal/llm/openai/` | `provider_test.go` | OpenAI API integration |
 | `internal/metrics/` | `metrics_test.go` | Prometheus metrics recording |
-| `internal/tools/` | `registry_test.go`, `web_search_test.go`, `code_exec_test.go`, `file_read_test.go`, `delegate_task_test.go`, `wait_for_tasks_test.go` | Built-in tool implementations, coordination tools |
+| `internal/tools/` | `registry_test.go`, `web_search_test.go`, `code_exec_test.go`, `file_read_test.go`, `delegate_task_test.go`, `wait_for_tasks_test.go`, `create_pull_request_test.go`, `merge_pull_request_test.go`, `review_pull_request_test.go`, `post_review_comment_test.go`, `create_agent_test.go`, `delete_agent_test.go`, `integration_test.go` | Built-in tool implementations, coordination tools, PR tools, agent management tools |
+| `internal/worker/` | `tool_executor_test.go` | Custom Tool CRD executor |
 | `workers/ai/` | `main_test.go` | AI worker functions |
 | `workers/general/` | `main_test.go` | General worker functions |
 | `workers/agent/copilot/` | `main_test.go` | Copilot agent worker |

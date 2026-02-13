@@ -35,7 +35,7 @@ Mercan is a Kubernetes-native task execution platform where a controller manages
 
 ## Core Components
 
-### Controller (`cmd/controller/`)
+### Controller (`cmd/main.go`)
 
 The controller is the central component that runs as a Kubernetes Deployment. It contains:
 
@@ -62,7 +62,7 @@ Mercan uses four CRDs:
 | Worker | Description |
 |--------|-------------|
 | **General Worker** (`workers/general/`) | Runs arbitrary container commands |
-| **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in tools (web search, code exec, file read) and coordination tools (delegate_task, wait_for_tasks, create_pull_request, merge_pull_request, review_pull_request, post_review_comment) |
+| **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in tools (web search, code exec, file read) and coordination tools (delegate_task, wait_for_tasks, create_pull_request, merge_pull_request, review_pull_request, post_review_comment, create_agent, delete_agent) |
 | **Copilot Agent Worker** (`workers/agent/copilot/`) | Runs tasks via GitHub Copilot CLI using the Go SDK |
 | **Claude Agent Worker** (`workers/agent/claude/`) | Runs tasks via Claude Code CLI |
 
@@ -87,8 +87,9 @@ Mercan uses four CRDs:
 mercan/
 ├── api/v1alpha1/           # CRD type definitions (Task, Agent, Tool, Provider)
 ├── cmd/
-│   ├── controller/         # Controller entrypoint
-│   └── cli/                # CLI tool (mercan login)
+│   ├── main.go                # Controller entrypoint
+│   ├── cli/                   # CLI tool (login, chat, agent, task, status)
+│   └── migrate/               # Database migration (ConfigMaps → SQLite)
 ├── internal/
 │   ├── api/                # REST API server, handlers, auth, chat endpoint
 │   ├── controller/         # Reconcilers, job builder, session manager, priority queue
@@ -100,6 +101,7 @@ mercan/
 │   ├── tools/              # Built-in tool implementations
 │   ├── metrics/            # Prometheus metrics
 │   ├── worker/             # Tool executor for custom Tool CRDs
+│   ├── cli/                # CLI command implementations
 │   └── uiembed/            # Go embed for UI static assets
 ├── workers/
 │   ├── ai/                 # AI worker (LLM agent with tools)
@@ -194,7 +196,7 @@ Mercan supports extensible AI capabilities through a three-layer system:
 │  Layer 2: Built-in Tools (in worker image)                      │
 │  - web_search, file_read, code_exec, delegate_task, wait_for_tasks│
 │  - create_pull_request, merge_pull_request, review_pull_request,  │
-│    post_review_comment                                            │
+│    post_review_comment, create_agent, delete_agent                 │
 │  - Fast, no extra infrastructure                                │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 3: Custom Tools (Tool CRD + HTTP)                        │

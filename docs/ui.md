@@ -117,6 +117,7 @@ ui/
 │   ├── schemas/                 # Zod schemas matching Go API types
 │   ├── stores/
 │   │   ├── auth.ts              # Zustand: token, user info
+│   │   ├── chat.ts              # Zustand: chat state
 │   │   └── ui.ts                # Zustand: sidebar, theme, namespace
 │   ├── hooks/                   # TanStack Query hooks per resource
 │   ├── components/

@@ -12,6 +12,7 @@ The controller exposes a REST API for programmatic access. All `/api/v1/*` endpo
 | `/api/v1/tasks/:id` | DELETE | Cancel/delete task |
 | `/api/v1/tasks/:id/logs` | GET | Stream task logs |
 | `/api/v1/tasks/:id/result` | GET | Get task result |
+| `/api/v1/tasks/:id/children` | GET | Get child tasks |
 
 ## Sessions
 
@@ -38,6 +39,12 @@ The controller exposes a REST API for programmatic access. All `/api/v1/*` endpo
 | `/api/v1/tools` | GET | List tools (built-in + CRDs) |
 | `/api/v1/tools/:name` | GET | Get tool details |
 
+## Auth
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/auth/validate` | GET | Validate auth token |
+
 ## Secrets
 
 | Endpoint | Method | Description |
@@ -62,6 +69,13 @@ See [Interactive Chat](chat.md) for full chat documentation.
 | `/v1/models` | GET | List available models |
 
 See [OpenAI Compatibility](openai-compat.md) for details.
+
+## Internal API (Worker Communication)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/internal/v1/results/:namespace/:taskName` | POST | Submit task result |
+| `/internal/v1/sessions/:namespace/:name/transcript` | GET | Get session transcript |
 
 ## Health
 
@@ -107,3 +121,18 @@ These tools are available to AI worker agents:
 | `web_search` | Search the web via configurable API (Tavily, etc.) | `query` (required), `limit` (default 5) |
 | `code_exec` | Execute code in a sandboxed environment | `language` (python/javascript/bash), `code`, `timeout` (max 60s) |
 | `file_read` | Read files from the workspace | `path`, `offset`, `limit` (max 1MB) |
+
+### Coordination Tools
+
+These tools are registered when `MERCAN_COORDINATION_ENABLED=true`:
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `delegate_task` | Delegate a subtask to another agent | `agent`, `prompt` (required); `namespace`, `priority`, `auto_retry`, `max_retries` |
+| `wait_for_tasks` | Wait for delegated tasks to complete | `tasks` (required), `timeout` (default 10m) |
+| `create_pull_request` | Create a GitHub pull request | `task_name`, `head_branch`, `base_branch`, `title` (required); `body` |
+| `merge_pull_request` | Merge a GitHub pull request | `task_name`, `pr_number` (required); `merge_method`, `commit_title`, `commit_message` |
+| `review_pull_request` | Fetch PR diff for review | `task_name`, `pr_number` (required) |
+| `post_review_comment` | Post a review on a PR | `task_name`, `pr_number`, `body`, `event` (required); `comments` |
+| `create_agent` | Create an Agent CRD at runtime | `name`, `provider`, `model` (required); `systemPrompt`, `tools`, `coordination` |
+| `delete_agent` | Delete an Agent CRD | `name` (required), `namespace` |
