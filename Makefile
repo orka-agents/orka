@@ -55,8 +55,15 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 fmt: ## Run go fmt against code.
 	go fmt ./...
 
+.PHONY: ensure-ui-embed
+ensure-ui-embed: ## Create stub UI embed directory if not present (for go vet/build without full UI build).
+	@if [ ! -d internal/uiembed/dist ]; then \
+		mkdir -p internal/uiembed/dist && \
+		echo '<!doctype html><html><body>stub</body></html>' > internal/uiembed/dist/index.html; \
+	fi
+
 .PHONY: vet
-vet: ## Run go vet against code.
+vet: ensure-ui-embed ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
@@ -140,11 +147,14 @@ build: manifests generate fmt vet ui-build ## Build manager binary.
 
 .PHONY: build-cli
 build-cli: ## Build mercan CLI binary.
-	go build -o bin/mercan cmd/cli/main.go
+	go build -ldflags "-X main.version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)" -o bin/mercan ./cmd/cli/
 
 .PHONY: build-migrate
 build-migrate: ## Build ConfigMap to SQLite migration binary.
 	go build -o bin/mercan-migrate ./cmd/migrate/
+
+.PHONY: build-all
+build-all: build build-cli build-migrate ## Build all binaries.
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
@@ -164,6 +174,10 @@ docker-push: ## Push docker image with the manager.
 .PHONY: docker-build-copilot-worker
 docker-build-copilot-worker: ## Build docker image for the Copilot agent worker.
 	$(CONTAINER_TOOL) build -t ${COPILOT_WORKER_IMG} -f workers/agent/copilot/Dockerfile .
+
+.PHONY: bundle-copilot-cli
+bundle-copilot-cli: ## Bundle the Copilot CLI binary for the current platform (for local development).
+	go run github.com/github/copilot-sdk/go/cmd/bundler --output workers/agent/copilot/
 
 .PHONY: docker-build-claude-worker
 docker-build-claude-worker: ## Build docker image for the Claude agent worker.

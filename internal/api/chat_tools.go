@@ -73,9 +73,10 @@ func CoreTools() []llm.Tool {
 					"workspace": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
-							"gitRepo": map[string]any{"type": "string", "description": "Git repository URL"},
-							"branch":  map[string]any{"type": "string", "description": "Git branch"},
-							"subPath": map[string]any{"type": "string", "description": "Sub-path within the repo"},
+							"gitRepo":    map[string]any{"type": "string", "description": "Git repository URL"},
+							"branch":     map[string]any{"type": "string", "description": "Git branch to clone from (must exist). Omit to use the default branch."},
+							"pushBranch": map[string]any{"type": "string", "description": "Branch name to push changes to (will be created if it doesn't exist). Use this for new feature branches."},
+							"subPath":    map[string]any{"type": "string", "description": "Sub-path within the repo"},
 						},
 					},
 					"schedule": map[string]any{"type": "string", "description": "Cron schedule for recurring tasks (e.g., '0 */6 * * *' for every 6 hours, '0 9 * * 1-5' for weekdays at 9am, '*/5 * * * *' for every 5 minutes). Leave empty for one-time tasks."},

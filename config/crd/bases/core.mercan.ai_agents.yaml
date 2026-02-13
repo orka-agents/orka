@@ -343,6 +343,12 @@ spec:
                   - name
                   type: object
                 type: array
+              ttlAfterLastTask:
+                description: |-
+                  TTLAfterLastTask defines how long the agent persists after its last task completes.
+                  When set and no tasks are active, the agent is deleted after this duration.
+                  Zero means the agent is never auto-deleted (permanent). Default is no TTL (permanent).
+                type: string
             type: object
           status:
             description: AgentStatus defines the observed state of Agent

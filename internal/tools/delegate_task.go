@@ -323,7 +323,7 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 
 	// Set agent runtime config for agent-type tasks
 	if taskType == corev1alpha1.TaskTypeAgent {
-		t.applyAgentRuntimeConfig(childTask, dc)
+		t.applyAgentRuntimeConfig(ctx, childTask, dc)
 	}
 
 	// Prepend feedback to prompt if provided
@@ -356,7 +356,7 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 }
 
 // applyAgentRuntimeConfig sets agent runtime configuration on the child task.
-func (t *DelegateTaskTool) applyAgentRuntimeConfig(childTask *corev1alpha1.Task, dc *delegationContext) {
+func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTask *corev1alpha1.Task, dc *delegationContext) {
 	childTask.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
 
 	if dc.args.Workspace != nil {
@@ -370,6 +370,13 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(childTask *corev1alpha1.Task,
 			childTask.Spec.AgentRuntime.Workspace.GitSecretRef = &corev1.LocalObjectReference{
 				Name: dc.args.Workspace.GitSecretRef,
 			}
+		} else if dc.args.Workspace.GitRepo != "" {
+			// Auto-detect git credentials secret in the namespace
+			if secretName := t.findGitSecret(ctx, dc.namespace); secretName != "" {
+				childTask.Spec.AgentRuntime.Workspace.GitSecretRef = &corev1.LocalObjectReference{
+					Name: secretName,
+				}
+			}
 		}
 	}
 
@@ -379,6 +386,24 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(childTask *corev1alpha1.Task,
 	if dc.args.AllowBash != nil {
 		childTask.Spec.AgentRuntime.AllowBash = dc.args.AllowBash
 	}
+}
+
+// findGitSecret looks for a git credentials secret in the namespace.
+// It checks well-known names first, then looks for secrets with a "token" key.
+func (t *DelegateTaskTool) findGitSecret(ctx context.Context, namespace string) string {
+	// Check well-known secret names
+	for _, name := range []string{"github-credentials", "git-credentials", "github-token", "git-token"} {
+		secret := &corev1.Secret{}
+		if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err == nil {
+			if _, hasToken := secret.Data["token"]; hasToken {
+				return name
+			}
+			if _, hasPassword := secret.Data["password"]; hasPassword {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 // applyPriorTaskConfig sets prior task reference and copies workspace config from the prior task.

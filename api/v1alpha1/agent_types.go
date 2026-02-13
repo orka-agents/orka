@@ -59,6 +59,12 @@ type AgentSpec struct {
 	// When set, this Agent is for type: agent tasks only (mutually exclusive with providerRef).
 	// +optional
 	Runtime *AgentCLIRuntime `json:"runtime,omitempty"`
+
+	// TTLAfterLastTask defines how long the agent persists after its last task completes.
+	// When set and no tasks are active, the agent is deleted after this duration.
+	// Zero means the agent is never auto-deleted (permanent). Default is no TTL (permanent).
+	// +optional
+	TTLAfterLastTask *metav1.Duration `json:"ttlAfterLastTask,omitempty"`
 }
 
 // AgentCLIRuntime defines agent CLI runtime configuration for an Agent.

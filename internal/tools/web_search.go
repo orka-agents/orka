@@ -48,9 +48,11 @@ func NewWebSearchTool() *WebSearchTool {
 	}
 }
 
+const webSearchToolName = "web_search"
+
 // Name returns the tool name
 func (t *WebSearchTool) Name() string {
-	return "web_search"
+	return webSearchToolName
 }
 
 // Description returns the tool description

@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -541,6 +542,122 @@ var _ = Describe("Agent Controller", func() {
 			agent := &corev1alpha1.Agent{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, agent)).To(Succeed())
 			Expect(agent.Status.ActiveTasks).To(Equal(int32(1)))
+		})
+
+		It("should set LastUsed when active tasks exist", func() {
+			controllerReconciler := &AgentReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			agent := &corev1alpha1.Agent{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, agent)).To(Succeed())
+			Expect(agent.Status.LastUsed).NotTo(BeNil())
+		})
+	})
+
+	Context("TTL-based agent cleanup", func() {
+		ctx := context.Background()
+
+		It("should delete an agent whose TTL has expired", func() {
+			expiredName := "test-agent-ttl-expired"
+			ttlNN := types.NamespacedName{Name: expiredName, Namespace: "default"}
+			ttl := metav1.Duration{Duration: 1 * time.Second}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      expiredName,
+					Namespace: "default",
+				},
+				Spec: corev1alpha1.AgentSpec{
+					Model: &corev1alpha1.ModelConfig{
+						Provider: "anthropic",
+						Name:     "claude-sonnet-4-20250514",
+					},
+					TTLAfterLastTask: &ttl,
+				},
+			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+
+			// Set LastUsed to the past
+			Expect(k8sClient.Get(ctx, ttlNN, agent)).To(Succeed())
+			past := metav1.NewTime(time.Now().Add(-10 * time.Second))
+			agent.Status.LastUsed = &past
+			Expect(k8sClient.Status().Update(ctx, agent)).To(Succeed())
+
+			// Reconcile — should delete the agent
+			r := &AgentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: ttlNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Agent should be gone
+			err = k8sClient.Get(ctx, ttlNN, &corev1alpha1.Agent{})
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+		})
+
+		It("should NOT delete an agent without TTL", func() {
+			noTTLName := "test-agent-no-ttl"
+			noTTLNN := types.NamespacedName{Name: noTTLName, Namespace: "default"}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      noTTLName,
+					Namespace: "default",
+				},
+				Spec: corev1alpha1.AgentSpec{
+					Model: &corev1alpha1.ModelConfig{
+						Provider: "anthropic",
+						Name:     "claude-sonnet-4-20250514",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+
+			r := &AgentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: noTTLNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Agent should still exist
+			Expect(k8sClient.Get(ctx, noTTLNN, agent)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
+		})
+
+		It("should requeue when TTL has not expired yet", func() {
+			futureName := "test-agent-ttl-future"
+			futureNN := types.NamespacedName{Name: futureName, Namespace: "default"}
+			ttl := metav1.Duration{Duration: 1 * time.Hour}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      futureName,
+					Namespace: "default",
+				},
+				Spec: corev1alpha1.AgentSpec{
+					Model: &corev1alpha1.ModelConfig{
+						Provider: "anthropic",
+						Name:     "claude-sonnet-4-20250514",
+					},
+					TTLAfterLastTask: &ttl,
+				},
+			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+
+			// Set LastUsed to now (TTL not expired)
+			Expect(k8sClient.Get(ctx, futureNN, agent)).To(Succeed())
+			now := metav1.Now()
+			agent.Status.LastUsed = &now
+			Expect(k8sClient.Status().Update(ctx, agent)).To(Succeed())
+
+			r := &AgentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: futureNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+			// Agent should still exist
+			Expect(k8sClient.Get(ctx, futureNN, agent)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
 		})
 	})
 })
