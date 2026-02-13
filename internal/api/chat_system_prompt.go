@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
-	"github.com/sozercan/mercan/internal/llm"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -289,110 +288,4 @@ func (b *SystemPromptBuilder) computeHash(agents, tools string) string {
 	h.Write([]byte(agents))
 	h.Write([]byte(tools))
 	return fmt.Sprintf("%x", h.Sum(nil))[:16]
-}
-
-// EstimateTokens returns an approximate token count (~4 chars per token).
-func EstimateTokens(text string) int {
-	return (len(text) + 3) / 4
-}
-
-// estimateMessageTokens returns approximate tokens for an llm.Message including tool call content.
-func estimateMessageTokens(m llm.Message) int {
-	tokens := EstimateTokens(m.Content)
-	for _, tc := range m.ToolCalls {
-		tokens += EstimateTokens(tc.Name) + EstimateTokens(string(tc.Arguments))
-	}
-	return tokens
-}
-
-// messageBlock is a group of messages that must be kept or dropped together.
-// An assistant message with tool calls and its corresponding tool results form one block.
-type messageBlock struct {
-	messages []llm.Message
-	tokens   int
-}
-
-// groupMessageBlocks splits messages into atomic blocks. An assistant message
-// with tool calls is grouped with all immediately following tool-result messages.
-func groupMessageBlocks(messages []llm.Message) []messageBlock {
-	var blocks []messageBlock
-	i := 0
-	for i < len(messages) {
-		m := messages[i]
-		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
-			block := messageBlock{messages: []llm.Message{m}, tokens: estimateMessageTokens(m)}
-			i++
-			for i < len(messages) && messages[i].Role == "tool" {
-				block.messages = append(block.messages, messages[i])
-				block.tokens += estimateMessageTokens(messages[i])
-				i++
-			}
-			blocks = append(blocks, block)
-		} else {
-			blocks = append(blocks, messageBlock{
-				messages: []llm.Message{m},
-				tokens:   estimateMessageTokens(m),
-			})
-			i++
-		}
-	}
-	return blocks
-}
-
-// TruncateMessages keeps the first message and the newest messages that fit
-// within the token budget. Tool-call/tool-result groups are kept or dropped
-// atomically so the LLM never sees orphaned tool results.
-func TruncateMessages(messages []llm.Message, tokenBudget int) []llm.Message {
-	if len(messages) == 0 {
-		return messages
-	}
-
-	totalTokens := 0
-	for _, m := range messages {
-		totalTokens += estimateMessageTokens(m)
-	}
-	if totalTokens <= tokenBudget {
-		return messages
-	}
-
-	// Always keep the first message
-	first := messages[0]
-	firstTokens := estimateMessageTokens(first)
-	remaining := tokenBudget - firstTokens
-	if remaining <= 0 {
-		return []llm.Message{first}
-	}
-
-	// Group remaining messages into atomic blocks
-	blocks := groupMessageBlocks(messages[1:])
-
-	// From the tail, collect blocks that fit
-	var kept []messageBlock
-	for i := len(blocks) - 1; i >= 0; i-- {
-		if remaining-blocks[i].tokens < 0 {
-			break
-		}
-		remaining -= blocks[i].tokens
-		kept = append([]messageBlock{blocks[i]}, kept...)
-	}
-
-	// Count how many blocks we dropped
-	droppedBlocks := len(blocks) - len(kept)
-	if droppedBlocks > 0 {
-		note := llm.Message{
-			Role:    "system",
-			Content: "[Earlier messages truncated. Use list_tasks to check what has already been done.]",
-		}
-		result := []llm.Message{first, note}
-		for _, b := range kept {
-			result = append(result, b.messages...)
-		}
-		return result
-	}
-
-	result := []llm.Message{first}
-	for _, b := range kept {
-		result = append(result, b.messages...)
-	}
-	return result
 }
