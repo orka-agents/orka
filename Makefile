@@ -168,6 +168,10 @@ docker-push: ## Push docker image with the manager.
 docker-build-copilot-worker: ## Build docker image for the Copilot agent worker.
 	$(CONTAINER_TOOL) build -t ${COPILOT_WORKER_IMG} -f workers/agent/copilot/Dockerfile .
 
+.PHONY: bundle-copilot-cli
+bundle-copilot-cli: ## Bundle the Copilot CLI binary for the current platform (for local development).
+	go run github.com/github/copilot-sdk/go/cmd/bundler --output workers/agent/copilot/
+
 .PHONY: docker-build-claude-worker
 docker-build-claude-worker: ## Build docker image for the Claude agent worker.
 	$(CONTAINER_TOOL) build -t ${CLAUDE_WORKER_IMG} -f workers/agent/claude/Dockerfile .

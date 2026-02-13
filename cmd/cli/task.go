@@ -75,13 +75,15 @@ func newTaskCreateCmd() *cobra.Command {
 
 			if taskType == "ai" {
 				req.AI = &struct {
-					Provider struct {
+					ProviderRef *struct {
 						Name string `json:"name"`
-					} `json:"provider"`
+					} `json:"providerRef,omitempty"`
+					Prompt string `json:"prompt,omitempty"`
 				}{
-					Provider: struct {
+					ProviderRef: &struct {
 						Name string `json:"name"`
 					}{Name: provider},
+					Prompt: prompt,
 				}
 			}
 

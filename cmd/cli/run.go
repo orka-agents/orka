@@ -204,7 +204,7 @@ func runREPL(c *client.Client, session, agent, model, provider string, verbosity
 		if code == 2 {
 			fmt.Fprintln(os.Stderr, "\nLLM error occurred, but you can continue chatting.")
 		}
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(os.Stdout) //nolint:errcheck
 	}
 	return nil
 }
@@ -254,20 +254,18 @@ func streamChat(ctx context.Context, c *client.Client, req client.ChatRequest, v
 
 		switch evt.Event {
 		case "status":
-			if data.SessionID != "" {
-				// Session acknowledged
-			}
+			// Session acknowledged — no action needed
 		case "message":
 			if data.Content != "" {
 				contentBuf.WriteString(data.Content)
 				hadContent = true
 				if !stdoutTTY {
-					fmt.Fprint(os.Stdout, data.Content)
+					fmt.Fprint(os.Stdout, data.Content) //nolint:errcheck
 				}
 			}
 		case "tool_call":
 			if hadContent {
-				fmt.Fprintln(os.Stdout)
+				fmt.Fprintln(os.Stdout) //nolint:errcheck
 				hadContent = false
 			}
 			// Show tool activity (tracker handles agent-specific display)
@@ -328,12 +326,12 @@ func streamChat(ctx context.Context, c *client.Client, req client.ChatRequest, v
 			if stdoutTTY && contentBuf.Len() > 0 {
 				rendered := renderMarkdown(contentBuf.String())
 				if rendered != "" {
-					fmt.Fprint(os.Stdout, rendered)
+					fmt.Fprint(os.Stdout, rendered) //nolint:errcheck
 				} else {
-					fmt.Fprintln(os.Stdout, contentBuf.String())
+					fmt.Fprintln(os.Stdout, contentBuf.String()) //nolint:errcheck
 				}
 			} else if hadContent {
-				fmt.Fprintln(os.Stdout)
+				fmt.Fprintln(os.Stdout) //nolint:errcheck
 			}
 			return 0
 		}
@@ -345,7 +343,7 @@ func streamChat(ctx context.Context, c *client.Client, req client.ChatRequest, v
 	}
 
 	if hadContent {
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(os.Stdout) //nolint:errcheck
 	}
 	return 0
 }

@@ -206,10 +206,21 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	}
 	persistedCount := len(messages)
 
-	// Append user message
+	// Append user message — if an agentRef is set and the agent has a runtime,
+	// prepend context so the LLM knows to use create_agent_task.
+	userContent := req.Message
+	if req.AgentRef != "" {
+		agentObj := &corev1alpha1.Agent{}
+		if err := ch.client.Get(ctx, types.NamespacedName{Name: req.AgentRef, Namespace: namespace}, agentObj); err == nil {
+			if agentObj.Spec.Runtime != nil {
+				userContent = fmt.Sprintf("[Using agent %q which has runtime %q — use create_agent_task with agent=%q for this request.]\n\n%s",
+					req.AgentRef, agentObj.Spec.Runtime.Type, req.AgentRef, req.Message)
+			}
+		}
+	}
 	messages = append(messages, llm.Message{
 		Role:    "user",
-		Content: req.Message,
+		Content: userContent,
 	})
 
 	// Build tools — always include management tools so the LLM can
@@ -469,7 +480,7 @@ func (ch *ChatHandler) runToolLoop(
 			continue
 		}
 
-		// No tool calls — this is the final response
+		// This is the final response
 		if emitSSE != nil && resp.Content != "" {
 			msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
 			emitSSE("message", string(msgData))

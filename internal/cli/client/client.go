@@ -156,13 +156,13 @@ func (c *Client) StreamChat(ctx context.Context, req ChatRequest) (*SSEReader, *
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, nil, fmt.Errorf("authentication failed (HTTP 401): try 'mercan login' or provide --token")
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, nil, fmt.Errorf("server error (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
@@ -293,9 +293,10 @@ type CreateTaskRequest struct {
 		Name string `json:"name"`
 	} `json:"agentRef,omitempty"`
 	AI *struct {
-		Provider struct {
+		ProviderRef *struct {
 			Name string `json:"name"`
-		} `json:"provider"`
+		} `json:"providerRef,omitempty"`
+		Prompt string `json:"prompt,omitempty"`
 	} `json:"ai,omitempty"`
 }
 

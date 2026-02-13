@@ -9,7 +9,7 @@ type ChatRequest struct {
 	Message   string `json:"message"`
 	SessionID string `json:"sessionId,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
-	Agent     string `json:"agent,omitempty"`
+	Agent     string `json:"agentRef,omitempty"`
 	Model     string `json:"model,omitempty"`
 	Provider  string `json:"provider,omitempty"`
 }
@@ -37,7 +37,7 @@ type SSEEventData struct {
 	Content string `json:"content,omitempty"`
 
 	// tool_call / tool_result event
-	Name string `json:"name,omitempty"`
+	Name string          `json:"name,omitempty"`
 	Args json.RawMessage `json:"args,omitempty"`
 
 	// tool_result event — raw JSON (may be object or string)

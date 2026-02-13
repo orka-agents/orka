@@ -23,12 +23,12 @@ import (
 	"github.com/sozercan/mercan/internal/cli/client"
 )
 
-// portForwardCleanup holds the cleanup function for the kubectl port-forward process.
-var portForwardCleanup func()
-
 const (
 	configDir  = ".mercan"
 	configFile = "config.yaml"
+
+	// defaultNamespace is the Kubernetes default namespace.
+	defaultNamespace = "default"
 
 	// mercanServiceLabel is used to discover the Mercan service in a cluster.
 	mercanServiceLabel = "app.kubernetes.io/name=mercan"
@@ -124,7 +124,7 @@ func newClientFromCmd(cmd *cobra.Command) *client.Client {
 	}
 
 	if ns == "" {
-		ns = "default"
+		ns = defaultNamespace
 	}
 
 	// Try cached port-forward first
@@ -154,8 +154,7 @@ func newClientFromCmd(cmd *cobra.Command) *client.Client {
 		if svcNS, svcName := discoverService(kubeconfigFlag, ns); svcName != "" {
 			localPort, pid, cleanup, err := startPortForward(kubeconfigFlag, svcNS, svcName)
 			if err == nil {
-				portForwardCleanup = cleanup
-				// Also register cleanup for interrupt as a fallback
+				// Register cleanup for interrupt
 				go func() {
 					c := make(chan os.Signal, 1)
 					signal.Notify(c, os.Interrupt)
@@ -199,7 +198,7 @@ func discoverService(kubeconfigPath, defaultNS string) (string, string) {
 
 	// Try the user's namespace first, then well-known mercan namespaces
 	namespacesToTry := []string{defaultNS}
-	for _, ns := range []string{"mercan-system", "mercan", "default"} {
+	for _, ns := range []string{"mercan-system", "mercan", defaultNamespace} {
 		if ns != defaultNS {
 			namespacesToTry = append(namespacesToTry, ns)
 		}
@@ -245,7 +244,7 @@ func startPortForward(kubeconfigPath, namespace, service string) (int, int, func
 
 	// Wait for port-forward to be ready
 	ready := false
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		time.Sleep(100 * time.Millisecond)
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", localPort), 200*time.Millisecond)
 		if err == nil {

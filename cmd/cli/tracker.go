@@ -22,6 +22,14 @@ const (
 	VerbosityVV      = 2
 )
 
+// Tool names used in tracker event handling.
+const (
+	toolCheckTaskProgress = "check_task_progress"
+	toolWaitForTask       = "wait_for_task"
+	toolFetchTaskOutput   = "fetch_task_output"
+	statusDone            = "done"
+)
+
 // agentEntry tracks one delegated sub-agent.
 type agentEntry struct {
 	name      string
@@ -117,7 +125,7 @@ func (t *tracker) stop() {
 			if !a.done {
 				a.done = true
 				a.success = true
-				a.status = "done"
+				a.status = statusDone
 			}
 		}
 		// Clear spinner lines and render final state
@@ -140,22 +148,23 @@ func (t *tracker) handleEvent(evt client.SSEEvent) {
 		switch data.Name {
 		case "delegate_task", "create_agent_task":
 			t.addAgent(data)
-		case "check_task_progress", "wait_for_task":
+		case toolCheckTaskProgress, toolWaitForTask:
 			// Show that we're polling a task
 			t.updateAgentStatus(data, "checking…")
 		}
 		if t.verbosity >= VerbosityVV {
 			t.mu.Lock()
-			fmt.Fprintf(t.w, "%s tool_call: %s %s\n", t.dimStyle.Render("│"), data.Name, t.dimStyle.Render(string(data.Args)))
+			fmt.Fprintf(t.w, "%s tool_call: %s %s\n", //nolint:errcheck
+				t.dimStyle.Render("│"), data.Name, t.dimStyle.Render(string(data.Args)))
 			t.mu.Unlock()
 		}
 	case "tool_result":
 		switch data.Name {
-		case "wait_for_tasks", "wait_for_task":
+		case "wait_for_tasks", toolWaitForTask:
 			t.completeAgents(data)
-		case "check_task_progress":
+		case toolCheckTaskProgress:
 			t.updateAgentFromProgress(data)
-		case "fetch_task_output":
+		case toolFetchTaskOutput:
 			t.completeAgentByName(data)
 		}
 		if t.verbosity >= VerbosityVV {
@@ -164,7 +173,8 @@ func (t *tracker) handleEvent(evt client.SSEEvent) {
 			if len(truncated) > 200 {
 				truncated = truncated[:200] + "..."
 			}
-			fmt.Fprintf(t.w, "%s tool_result: %s %s\n", t.dimStyle.Render("│"), data.Name, t.dimStyle.Render(truncated))
+			fmt.Fprintf(t.w, "%s tool_result: %s %s\n", //nolint:errcheck
+				t.dimStyle.Render("│"), data.Name, t.dimStyle.Render(truncated))
 			t.mu.Unlock()
 		}
 	}
@@ -215,12 +225,12 @@ func (t *tracker) addAgent(data client.SSEEventData) {
 		if t.verbosity >= VerbosityV && prompt != "" {
 			line += fmt.Sprintf("  %s", prompt)
 		}
-		fmt.Fprintln(t.w, line)
+		fmt.Fprintln(t.w, line) //nolint:errcheck
 	}
 }
 
 // completeAgents marks all pending agents as done.
-func (t *tracker) completeAgents(data client.SSEEventData) {
+func (t *tracker) completeAgents(_ client.SSEEventData) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -228,12 +238,12 @@ func (t *tracker) completeAgents(data client.SSEEventData) {
 		if !a.done {
 			a.done = true
 			a.success = true // Default success; real status parsed from result
-			a.status = "done"
+			a.status = statusDone
 			elapsed := time.Since(a.startTime).Round(time.Second)
 
 			if !t.isTTY {
 				status := "✓"
-				fmt.Fprintf(t.w, "├─ %s %s  %s\n", status, a.name, elapsed)
+				fmt.Fprintf(t.w, "├─ %s %s  %s\n", status, a.name, elapsed) //nolint:errcheck
 			}
 		}
 	}
@@ -276,20 +286,17 @@ func (t *tracker) updateAgentFromProgress(data client.SSEEventData) {
 		for _, a := range t.agents {
 			if !a.done && (a.taskName == taskName || taskName == "") {
 				a.status = phase
-				if phase == "Succeeded" {
+				switch phase {
+				case "Succeeded":
 					a.done = true
 					a.success = true
-				} else if phase == "Failed" {
+				case "Failed":
 					a.done = true
 					a.success = false
 				}
 				break
 			}
 		}
-	}
-
-	if t.isTTY {
-		// Re-render to show updated status
 	}
 }
 
@@ -305,7 +312,7 @@ func (t *tracker) completeAgentByName(data client.SSEEventData) {
 			if !a.done && (a.taskName == taskName || taskName == "") {
 				a.done = true
 				a.success = true
-				a.status = "done"
+				a.status = statusDone
 				break
 			}
 		}
@@ -321,7 +328,7 @@ func (t *tracker) render() {
 	// Move cursor up to overwrite previous render
 	if t.spinIdx > 0 || len(t.agents) > 0 {
 		for range t.agents {
-			fmt.Fprint(t.w, "\033[A\033[2K")
+			fmt.Fprint(t.w, "\033[A\033[2K") //nolint:errcheck
 		}
 	}
 
@@ -332,7 +339,8 @@ func (t *tracker) render() {
 				icon = t.failStyle.Render("✗")
 			}
 			elapsed := time.Since(a.startTime).Round(time.Second)
-			fmt.Fprintf(t.w, "├─ %s %s  %s\n", icon, t.nameStyle.Render(a.name), t.timeStyle.Render(elapsed.String()))
+			fmt.Fprintf(t.w, "├─ %s %s  %s\n", //nolint:errcheck
+				icon, t.nameStyle.Render(a.name), t.timeStyle.Render(elapsed.String()))
 		} else {
 			frame := t.spinnerStyle.Render(spinnerFrames[t.spinIdx])
 			elapsed := time.Since(a.startTime).Round(time.Second)
@@ -340,11 +348,12 @@ func (t *tracker) render() {
 			if a.status != "" {
 				status = t.dimStyle.Render(" [" + a.status + "]")
 			}
-			line := fmt.Sprintf("├─ %s %s  %s%s", frame, t.nameStyle.Render(a.name), t.timeStyle.Render(elapsed.String()), status)
+			line := fmt.Sprintf("├─ %s %s  %s%s",
+				frame, t.nameStyle.Render(a.name), t.timeStyle.Render(elapsed.String()), status)
 			if t.verbosity >= VerbosityV && a.prompt != "" {
 				line += "  " + t.dimStyle.Render(a.prompt)
 			}
-			fmt.Fprintln(t.w, line)
+			fmt.Fprintln(t.w, line) //nolint:errcheck
 		}
 	}
 }
@@ -363,22 +372,15 @@ func (t *tracker) renderFinal() {
 		if t.verbosity >= VerbosityV && a.result != "" {
 			line += "  " + t.dimStyle.Render(a.result)
 		}
-		fmt.Fprintln(t.w, line)
+		fmt.Fprintln(t.w, line) //nolint:errcheck
 	}
 }
 
 // clearLines clears n lines above the cursor.
 func (t *tracker) clearLines(n int) {
-	for i := 0; i < n; i++ {
-		fmt.Fprint(t.w, "\033[A\033[2K")
+	for range n {
+		fmt.Fprint(t.w, "\033[A\033[2K") //nolint:errcheck
 	}
-}
-
-// hasAgents returns true if any agents were tracked.
-func (t *tracker) hasAgents() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return len(t.agents) > 0
 }
 
 // isTTYCheck returns true if the given writer is a TTY.

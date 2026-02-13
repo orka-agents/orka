@@ -19,10 +19,9 @@ import (
 )
 
 const (
-	defaultMaxTurns    = 50
-	workspaceDir       = "/workspace"
-	defaultCopilotPath = "copilot"
-	defaultTimeout     = 20 * time.Minute
+	defaultMaxTurns = 50
+	workspaceDir    = "/workspace"
+	defaultTimeout  = 20 * time.Minute
 )
 
 func main() {
@@ -88,10 +87,15 @@ func executeCopilot(ctx context.Context, cfg *common.AgentConfig) (string, error
 	execCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
 	defer timeoutCancel()
 
-	// Create and start the Copilot client
+	// Create and start the Copilot client.
+	// The SDK auto-discovers the bundled CLI via embeddedcli.Setup() (called
+	// from the generated init() in zcopilot_<os>_<arch>.go), falling back to
+	// "copilot" in PATH when not bundled (e.g. local development on macOS).
 	opts := &copilot.ClientOptions{
-		CLIPath: copilotCLIPath(),
-		Cwd:     workspaceDir,
+		Cwd: workspaceDir,
+	}
+	if p := os.Getenv("COPILOT_CLI_PATH"); p != "" {
+		opts.CLIPath = p
 	}
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
 		opts.GithubToken = token
@@ -148,12 +152,4 @@ func extractResult(event *copilot.SessionEvent) string {
 	}
 
 	return ""
-}
-
-// copilotCLIPath returns the path to the copilot CLI binary.
-func copilotCLIPath() string {
-	if p := os.Getenv("COPILOT_CLI_PATH"); p != "" {
-		return p
-	}
-	return defaultCopilotPath
 }

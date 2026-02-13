@@ -775,6 +775,9 @@ func (e *ToolExecutor) executeCreateAgent(ctx context.Context, args map[string]a
 				agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
 					Type: corev1alpha1.AgentRuntimeType(runtimeType),
 				}
+				// Runtime agents don't use providerRef — clear it to avoid mutual exclusion error
+				agent.Spec.ProviderRef = nil
+				agent.Spec.Model = nil
 			}
 		}
 	}

@@ -54,6 +54,7 @@ func newConfigSetTokenCmd() *cobra.Command {
 }
 
 func newConfigViewCmd() *cobra.Command {
+	const notSet = "(not set)"
 	return &cobra.Command{
 		Use:   "view",
 		Short: "Show current configuration",
@@ -61,15 +62,15 @@ func newConfigViewCmd() *cobra.Command {
 			cfg := loadConfig()
 			server := cfg.Server
 			if server == "" {
-				server = "(not set)"
+				server = notSet
 			}
-			token := "(not set)"
+			token := notSet
 			if cfg.Token != "" {
 				token = maskToken(cfg.Token)
 			}
 			ns := cfg.Namespace
 			if ns == "" {
-				ns = "(not set)"
+				ns = notSet
 			}
 			path := configPath()
 			if path == "" {
