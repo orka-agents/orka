@@ -192,7 +192,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 
 	// Build system prompt
 	promptBuilder := NewSystemPromptBuilder(ch.client, namespace)
-	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt)
+	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt, PromptModeFull)
 	if err != nil {
 		chatLog.Error(err, "failed to build system prompt")
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to build system prompt")

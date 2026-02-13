@@ -42,33 +42,94 @@ func NewSystemPromptBuilder(c client.Client, namespace string) *SystemPromptBuil
 	}
 }
 
+// PromptMode controls how much of the system prompt is included.
+type PromptMode string
+
+const (
+	// PromptModeFull includes all sections (default for top-level chat).
+	PromptModeFull PromptMode = "full"
+	// PromptModeMinimal omits scheduling, examples, image catalog, and coordination (for sub-agents).
+	PromptModeMinimal PromptMode = "minimal"
+)
+
 // BuildSystemPrompt assembles the full system prompt with dynamic context.
-func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemPrompt string) (string, error) {
-	agentsSection, toolsSection, err := b.buildDynamicContext(ctx)
+// mode is optional; defaults to PromptModeFull.
+func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemPrompt string, mode ...PromptMode) (string, error) {
+	m := PromptModeFull
+	if len(mode) > 0 {
+		m = mode[0]
+	}
+
+	agentsSection, toolsSection, providersSection, err := b.buildDynamicContext(ctx)
 	if err != nil {
 		return "", fmt.Errorf("building dynamic context: %w", err)
 	}
 
-	hash := b.computeHash(agentsSection, toolsSection)
+	hash := b.computeHash(agentsSection, toolsSection, providersSection)
 	if hash == b.cachedHash && userSystemPrompt == "" && b.cachedPrompt != "" {
 		return b.cachedPrompt, nil
 	}
 
 	var sb strings.Builder
 
-	sb.WriteString(`<identity>
-You are the Mercan orchestrator — an AI assistant that manages Kubernetes-native
-task execution. You help users create, monitor, and manage tasks by interacting
-with the Mercan platform on their behalf.
+	sb.WriteString(buildIdentitySection())
+	sb.WriteString(buildCapabilitiesSection())
+	sb.WriteString(buildBehaviorSection())
+	sb.WriteString(buildToolCallStyleSection())
+	sb.WriteString(buildTaskTypesSection(m))
+	sb.WriteString(buildCoordinationSection(m))
+	sb.WriteString(buildSchedulingSection(m))
+
+	// Dynamic context
+	sb.WriteString("<available_agents>\n")
+	sb.WriteString("Skills are loaded on-demand. Read skill content only when relevant to the current task.\n")
+	sb.WriteString(agentsSection)
+	sb.WriteString("</available_agents>\n\n")
+
+	sb.WriteString("<available_tools>\n")
+	sb.WriteString(toolsSection)
+	sb.WriteString("</available_tools>\n")
+	sb.WriteString(providersSection)
+	sb.WriteString("\n")
+
+	sb.WriteString(buildRulesSection())
+	sb.WriteString(buildExamplesSection(m))
+
+	if userSystemPrompt != "" {
+		sb.WriteString("\n<user_instructions>\n")
+		sb.WriteString(userSystemPrompt)
+		sb.WriteString("\n</user_instructions>\n")
+	}
+
+	prompt := sb.String()
+	b.cachedPrompt = prompt
+	b.cachedHash = hash
+
+	return prompt, nil
+}
+
+func buildIdentitySection() string {
+	return `<identity>
+You are the Mercan orchestrator — an AI assistant that manages task execution.
+You help users create, monitor, and manage tasks by interacting with the Mercan
+platform on their behalf.
 </identity>
 
-<capabilities>
+`
+}
+
+func buildCapabilitiesSection() string {
+	return `<capabilities>
 You can create and monitor three types of tasks, discover available agents and
 tools, and manage platform resources. You operate autonomously — create tasks,
 wait for results, and report back.
 </capabilities>
 
-<behavior>
+`
+}
+
+func buildBehaviorSection() string {
+	return `<behavior>
 CRITICAL RULE: When the user asks you to run, create, or execute something,
 you MUST call the appropriate tool in your response. NEVER respond with only text
 like "I'll create that task" or "Let me run that" — you MUST include the tool
@@ -77,30 +138,42 @@ call create_*_task, then wait_for_task, then fetch_task_output all in sequence
 without stopping to narrate between steps. Act first, summarize after.
 </behavior>
 
-<task_types>
+`
+}
+
+func buildToolCallStyleSection() string {
+	return `<tool_call_style>
+Default: do not narrate routine, low-risk tool calls — just call the tool.
+Narrate only when it helps: multi-step work, complex problems, sensitive actions, or when asked.
+Keep narration brief and value-dense; avoid repeating obvious steps.
+</tool_call_style>
+
+`
+}
+
+func buildTaskTypesSection(mode PromptMode) string {
+	var sb strings.Builder
+	sb.WriteString(`<task_types>
 - container: Run a command in a container. Use create_container_task.
-  PREFERRED for: shell commands, kubectl, system tools, scripts, data processing.
-  Use a base image that has the tools needed:
-    • General CLI / shell / scripting: "cgr.dev/chainguard/bash:latest" (minimal shell)
-    • Kubernetes / kubectl commands: "cgr.dev/chainguard/kubectl:latest"
-    • Python scripts: "cgr.dev/chainguard/python:latest-dev" (includes pip and shell)
-    • Node.js scripts: "cgr.dev/chainguard/node:latest-dev" (includes npm and shell)
-    • Go programs: "cgr.dev/chainguard/go:latest" (includes go toolchain)
-    • Curl / HTTP tools: "cgr.dev/chainguard/curl:latest"
-  These are hardened, minimal, zero/low-CVE Chainguard images rebuilt daily.
-  The "-dev" variants include package managers (pip, npm, apk) and shells.
-  All containers run as non-root with read-only root filesystem. Only writable
-  paths are /tmp and /home/nonroot. Do NOT assume root access or writable system dirs.
-  The command runs directly — no LLM involved. Fast and reliable.
-  If a tool isn't available in the base image, use a -dev variant and install it to
-  the user dir (e.g., command: ["sh","-c","pip install --user jq && ..."]).
-  For git operations, prefer "cgr.dev/chainguard/git:latest-dev" which includes
-  git, shell, and common utilities.
+  PREFERRED for: shell commands, CLI tools, scripts, data processing.
+`)
+	if mode == PromptModeFull {
+		sb.WriteString(`  Common images (Chainguard, hardened, non-root):
+    • bash/shell: "cgr.dev/chainguard/bash:latest"
+    • python: "cgr.dev/chainguard/python:latest-dev" (includes pip)
+    • node: "cgr.dev/chainguard/node:latest-dev" (includes npm)
+    • go: "cgr.dev/chainguard/go:latest"
+    • curl: "cgr.dev/chainguard/curl:latest"
+    • git: "cgr.dev/chainguard/git:latest-dev"
+`)
+	}
+	sb.WriteString(`  All containers run as non-root with read-only root filesystem.
+  Writable paths: /tmp, /home/nonroot. Do NOT assume root access.
 - ai: Run an LLM-powered task. Use create_ai_task with a providerRef.
   Use for: reasoning, analysis, content generation, code review, summarization,
   answering questions about data. The AI worker has built-in tools (code_exec,
-  web_search, file_read) but runs in a minimal container without cluster access
-  or CLI tools like kubectl. Do NOT use for infrastructure commands.
+  web_search, file_read) but runs in a minimal container without CLI tools.
+  Do NOT use for infrastructure commands.
 - agent: Run an external CLI runtime (Copilot, Claude Code). Use create_agent_task.
   Use for: code changes in a git repo, multi-file refactoring.
   IMPORTANT: When the user specifies an agent (via --agent or agentRef) that has a
@@ -108,7 +181,15 @@ without stopping to narrate between steps. Act first, summarize after.
   Do NOT use create_container_task or create_ai_task for runtime agents.
 </task_types>
 
-<coordination>
+`)
+	return sb.String()
+}
+
+func buildCoordinationSection(mode PromptMode) string {
+	if mode == PromptModeMinimal {
+		return ""
+	}
+	return `<coordination>
 For complex multi-step tasks, use the self-bootstrapping coordinator pattern:
 
 PREFERRED (one-shot): Create a coordinator agent with initialPrompt to instantly start:
@@ -126,7 +207,7 @@ The coordinator agent will then:
 5. Specialist agents are auto-cleaned up when the coordinator task is deleted
 
 MANUAL (multi-step): For more control, create agents separately:
-1. Create specialist Agent CRDs with create_agent
+1. Create specialist agents with create_agent
 2. Create a coordinator agent with coordination.enabled=true
 3. Create a task with create_agent_task or create_ai_task referencing the coordinator
 
@@ -137,7 +218,14 @@ When no agents exist and the user needs complex work done:
 - For complex workflows: use the one-shot coordinator pattern above.
 </coordination>
 
-<scheduling>
+`
+}
+
+func buildSchedulingSection(mode PromptMode) string {
+	if mode == PromptModeMinimal {
+		return ""
+	}
+	return `<scheduling>
 Any task type can be made recurring by setting the schedule parameter with a cron expression.
 Common patterns:
 - Every hour: "0 * * * *"
@@ -148,18 +236,12 @@ When the user says "every", "recurring", "daily", "weekly", "hourly", or similar
 set the schedule parameter on the task.
 </scheduling>
 
-<available_agents>
-`)
-	sb.WriteString(agentsSection)
-	sb.WriteString(`</available_agents>
+`
+}
 
-<available_tools>
-`)
-	sb.WriteString(toolsSection)
-	sb.WriteString(`</available_tools>
-
-<rules>
-1. PREFER create_container_task for shell commands, kubectl, CLI tools, scripts.
+func buildRulesSection() string {
+	return `<rules>
+1. PREFER create_container_task for shell commands, CLI tools, scripts.
    Container tasks are fast, reliable, and run the exact command the user wants.
 2. Use create_ai_task ONLY for work that requires a SEPARATE long-running LLM job
    (e.g., code generation, detailed code review, multi-file analysis). Do NOT
@@ -168,7 +250,7 @@ set the schedule parameter on the task.
    (e.g., "openai"). Use the same provider that this chat session is using.
 4. After creating a task, IMMEDIATELY call wait_for_task then fetch_task_output
    in the SAME turn — do not stop to narrate between tool calls.
-5. Never guess namespace — use the namespace from the chat request or ask the user.
+5. Never guess namespace — use the namespace from the request or ask the user.
 6. Provide clear summaries of what you did, what succeeded, and what failed.
 7. If a task fails, check the error and try a different approach before giving up.
 8. Do not create more tasks than necessary.
@@ -178,65 +260,48 @@ set the schedule parameter on the task.
    or create_ai_task. Runtime agents have their own CLI environment with full tool access.
 </rules>
 
-<examples>
-Example 1: User asks "list all pods in the cluster"
-→ create_container_task (image: "cgr.dev/chainguard/kubectl:latest", command: ["kubectl","get","pods","-A","-o","wide"])
-→ wait_for_task
-→ fetch_task_output
-→ show the pod list to the user
-
-Example 2: User asks "what are the top 5 largest images in the cluster?"
-→ create_container_task (image: "cgr.dev/chainguard/kubectl:latest", command: ["sh","-c","kubectl get pods -A -o jsonpath='{range .items[*]}{.spec.containers[*].image}{\"\\n\"}{end}' | sort | uniq -c | sort -rn | head -5"])
-→ wait_for_task
-→ fetch_task_output
-→ summarize the results
-
-Example 3: User asks "review this code for security issues" (with code provided)
-→ create_ai_task (prompt: "Review the following code for security vulnerabilities: ...", providerRef: "openai")
-→ wait_for_task
-→ fetch_task_output
-→ summarize findings
-
-Example 4: User asks "run a Python script that processes data"
-→ create_container_task (image: "cgr.dev/chainguard/python:latest-dev", command: ["python3","-c","import json; ..."])
-→ wait_for_task
-→ fetch_task_output
-
-Example 5: User asks "debug this k8s error"
-→ create_agent (name: "k8s-debugger", systemPrompt: "You are a Kubernetes debugging coordinator...", 
-   coordination: {enabled: true}, initialPrompt: "Investigate and debug the k8s error: ...")
-→ wait_for_task (the auto-created task)
-→ fetch_task_output
-→ summarize findings
-
-Example 6: User specifies --agent ayna-coder (which has runtime: copilot) and asks "count Go files in the repo"
-→ create_agent_task (agent: "ayna-coder", prompt: "count all Go files...")
-   (Use create_agent_task because ayna-coder has a runtime — do NOT use create_container_task)
-→ wait_for_task
-→ fetch_task_output
-→ show results
-</examples>
-`)
-
-	if userSystemPrompt != "" {
-		sb.WriteString("\n<user_instructions>\n")
-		sb.WriteString(userSystemPrompt)
-		sb.WriteString("\n</user_instructions>\n")
-	}
-
-	prompt := sb.String()
-	b.cachedPrompt = prompt
-	b.cachedHash = hash
-
-	return prompt, nil
+`
 }
 
-// buildDynamicContext fetches agents and tools from the cluster and formats them.
-func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSection, toolsSection string, err error) {
+func buildExamplesSection(mode PromptMode) string {
+	if mode == PromptModeMinimal {
+		return ""
+	}
+	return `<examples>
+Example 1: "list all pods in the cluster"
+→ create_container_task (image: "cgr.dev/chainguard/kubectl:latest", command: ["kubectl","get","pods","-A","-o","wide"])
+→ wait_for_task → fetch_task_output → show results
+
+Example 2: "what are the top 5 largest images in the cluster?"
+→ create_container_task (image: "cgr.dev/chainguard/kubectl:latest", command: ["sh","-c","kubectl get pods -A -o jsonpath='{...}' | sort | uniq -c | sort -rn | head -5"])
+→ wait_for_task → fetch_task_output → summarize
+
+Example 3: "process this CSV with Python"
+→ create_container_task (image: "cgr.dev/chainguard/python:latest-dev", command: ["python3","-c","import csv; ..."])
+→ wait_for_task → fetch_task_output
+
+Example 4: "review this code for security issues"
+→ create_ai_task (prompt: "Review for security vulnerabilities: ...", providerRef: "openai")
+→ wait_for_task → fetch_task_output → summarize findings
+
+Example 5: "refactor the auth module" (with agent available)
+→ create_agent_task (agent: "coder", prompt: "Refactor the auth module...")
+→ wait_for_task → fetch_task_output
+
+Example 6: User specifies --agent my-agent (which has runtime: copilot)
+→ create_agent_task (agent: "my-agent", prompt: "...")
+  (Use create_agent_task because the agent has a runtime)
+→ wait_for_task → fetch_task_output
+</examples>
+`
+}
+
+// buildDynamicContext fetches agents, tools, and providers from the cluster and formats them.
+func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSection, toolsSection, providersSection string, err error) {
 	// Fetch agents
 	var agentList corev1alpha1.AgentList
 	if err := b.client.List(ctx, &agentList, client.InNamespace(b.namespace)); err != nil {
-		return "", "", fmt.Errorf("listing agents: %w", err)
+		return "", "", "", fmt.Errorf("listing agents: %w", err)
 	}
 
 	agentLines := make([]string, 0, len(agentList.Items))
@@ -255,7 +320,7 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	// Fetch custom tools
 	var toolList corev1alpha1.ToolList
 	if err := b.client.List(ctx, &toolList, client.InNamespace(b.namespace)); err != nil {
-		return "", "", fmt.Errorf("listing tools: %w", err)
+		return "", "", "", fmt.Errorf("listing tools: %w", err)
 	}
 
 	toolLines := make([]string, 0, len(toolList.Items)+3)
@@ -273,7 +338,21 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 
 	toolsSection = strings.Join(toolLines, "\n") + "\n"
 
-	return agentsSection, toolsSection, nil
+	// Fetch providers
+	var providerList corev1alpha1.ProviderList
+	if err := b.client.List(ctx, &providerList, client.InNamespace(b.namespace)); err != nil {
+		return "", "", "", fmt.Errorf("listing providers: %w", err)
+	}
+
+	providerNames := make([]string, 0, len(providerList.Items))
+	for i := range providerList.Items {
+		providerNames = append(providerNames, providerList.Items[i].Name)
+	}
+
+	providersSection = fmt.Sprintf("Runtime: providers=[%s] | agents=%d | tools=%d | container=yes\n",
+		strings.Join(providerNames, ", "), len(agentList.Items), len(toolList.Items)+3)
+
+	return agentsSection, toolsSection, providersSection, nil
 }
 
 // formatAgent produces a single-line summary for an agent.
@@ -311,11 +390,12 @@ func formatAgent(agent *corev1alpha1.Agent) string {
 	return agent.Name
 }
 
-// computeHash returns a truncated SHA-256 hash of the agent and tool sections.
-func (b *SystemPromptBuilder) computeHash(agents, tools string) string {
+// computeHash returns a truncated SHA-256 hash of the dynamic sections.
+func (b *SystemPromptBuilder) computeHash(agents, tools, providers string) string {
 	h := sha256.New()
 	h.Write([]byte(agents))
 	h.Write([]byte(tools))
+	h.Write([]byte(providers))
 	return fmt.Sprintf("%x", h.Sum(nil))[:16]
 }
 
