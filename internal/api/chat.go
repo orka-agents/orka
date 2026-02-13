@@ -23,10 +23,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 	"github.com/sozercan/mercan/internal/controller"
 	"github.com/sozercan/mercan/internal/llm"
 	"github.com/sozercan/mercan/internal/store"
+	"github.com/sozercan/mercan/internal/tracing"
 )
 
 var chatLog = logf.Log.WithName("chat-handler")
@@ -190,6 +195,20 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("failed to resolve provider: %v", err))
 	}
 
+	// Wrap provider with tracing
+	provider = llm.NewTracingProvider(provider)
+
+	// Start chat.request span
+	tracer := tracing.Tracer("mercan.chat")
+	ctx, span := tracer.Start(ctx, "chat.request",
+		trace.WithAttributes(
+			attribute.String("session.id", sessionID),
+			attribute.String("chat.provider", provider.Name()),
+			attribute.String("chat.model", model),
+		),
+	)
+	defer span.End()
+
 	// Build system prompt
 	promptBuilder := NewSystemPromptBuilder(ch.client, namespace)
 	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt)
@@ -237,6 +256,8 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		content, usage, toolCalls, err := ch.runToolLoop(ctx, provider, messages, systemPrompt, tools, executor, sessionID, namespace, model, temperature, maxTokens, persistedCount, nil)
 		if err != nil {
 			chatLog.Error(err, "tool loop error")
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("chat error: %v", err))
 		}
 
@@ -312,10 +333,19 @@ func (ch *ChatHandler) runToolLoop(
 	start := time.Now()
 
 	for iteration := 0; ; iteration++ {
+		// Start a span for this iteration
+		iterTracer := tracing.Tracer("mercan.chat")
+		iterCtx, iterSpan := iterTracer.Start(ctx, "chat.tool_loop.iteration",
+			trace.WithAttributes(
+				attribute.Int("chat.iteration", iteration),
+			),
+		)
+
 		// Check context cancellation
 		select {
-		case <-ctx.Done():
+		case <-iterCtx.Done():
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
+			iterSpan.End()
 			return "I ran out of time. Here's what I accomplished so far.", usage, allToolCalls, nil
 		default:
 		}
@@ -328,7 +358,7 @@ func (ch *ChatHandler) runToolLoop(
 				Content: "[System: You have reached the maximum number of iterations. Please provide a final summary of what you accomplished.]",
 			})
 
-			resp, err := provider.Complete(ctx, &llm.CompletionRequest{
+			resp, err := provider.Complete(iterCtx, &llm.CompletionRequest{
 				Model:        model,
 				SystemPrompt: systemPrompt,
 				Messages:     messages,
@@ -337,6 +367,7 @@ func (ch *ChatHandler) runToolLoop(
 			})
 			if err != nil {
 				usage.Duration = time.Since(start).Round(time.Millisecond).String()
+				iterSpan.End()
 				return "Reached iteration limit.", usage, allToolCalls, nil
 			}
 			usage.LLMCalls++
@@ -352,10 +383,16 @@ func (ch *ChatHandler) runToolLoop(
 			finalMessages := append(messages, llm.Message{Role: "assistant", Content: resp.Content})
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
 			usage.TasksCreated = executor.tasksCreated
-			_ = ch.saveChatSession(ctx, namespace, sessionID, finalMessages, persistedCount, usage)
-			if err := ch.sessionStore.UpdateTokenCounts(ctx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
+			_ = ch.saveChatSession(iterCtx, namespace, sessionID, finalMessages, persistedCount, usage)
+			if err := ch.sessionStore.UpdateTokenCounts(iterCtx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
 				chatLog.Error(err, "failed to update token counts")
 			}
+			iterSpan.SetAttributes(
+				attribute.Int("chat.llm_calls", usage.LLMCalls),
+				attribute.Int("chat.input_tokens", usage.InputTokens),
+				attribute.Int("chat.output_tokens", usage.OutputTokens),
+			)
+			iterSpan.End()
 			return resp.Content, usage, allToolCalls, nil
 		}
 
@@ -374,7 +411,7 @@ func (ch *ChatHandler) runToolLoop(
 		}
 
 		// Call LLM
-		resp, err := provider.Complete(ctx, &llm.CompletionRequest{
+		resp, err := provider.Complete(iterCtx, &llm.CompletionRequest{
 			Model:        model,
 			SystemPrompt: systemPrompt,
 			Messages:     messages,
@@ -384,6 +421,9 @@ func (ch *ChatHandler) runToolLoop(
 		})
 		if err != nil {
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
+			iterSpan.RecordError(err)
+			iterSpan.SetStatus(codes.Error, err.Error())
+			iterSpan.End()
 			return "", usage, allToolCalls, fmt.Errorf("LLM completion failed: %w", err)
 		}
 		usage.LLMCalls++
@@ -420,7 +460,7 @@ func (ch *ChatHandler) runToolLoop(
 				}
 
 				// Execute tool
-				result, execErr := executor.Execute(ctx, tc)
+				result, execErr := executor.Execute(iterCtx, tc)
 				if execErr != nil {
 					result = fmt.Sprintf(`{"success":false,"error":"%s"}`, execErr.Error())
 				}
@@ -466,6 +506,7 @@ func (ch *ChatHandler) runToolLoop(
 			}
 
 			// Continue loop for next LLM call
+			iterSpan.End()
 			continue
 		}
 
@@ -479,11 +520,17 @@ func (ch *ChatHandler) runToolLoop(
 		finalMessages := append(messages, llm.Message{Role: "assistant", Content: resp.Content})
 		usage.Duration = time.Since(start).Round(time.Millisecond).String()
 		usage.TasksCreated = executor.tasksCreated
-		_ = ch.saveChatSession(ctx, namespace, sessionID, finalMessages, persistedCount, usage)
-		if err := ch.sessionStore.UpdateTokenCounts(ctx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
+		_ = ch.saveChatSession(iterCtx, namespace, sessionID, finalMessages, persistedCount, usage)
+		if err := ch.sessionStore.UpdateTokenCounts(iterCtx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
 			chatLog.Error(err, "failed to update token counts")
 		}
 
+		iterSpan.SetAttributes(
+			attribute.Int("chat.llm_calls", usage.LLMCalls),
+			attribute.Int("chat.input_tokens", usage.InputTokens),
+			attribute.Int("chat.output_tokens", usage.OutputTokens),
+		)
+		iterSpan.End()
 		return resp.Content, usage, allToolCalls, nil
 	}
 }

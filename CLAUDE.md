@@ -61,6 +61,7 @@ make deploy IMG=<registry>/mercan:tag
 - **Session Manager**: Manages conversation continuity via SQLite store with serial execution enforcement
 - **Store** (`internal/store/`): Storage interfaces (`ResultStore`, `SessionStore`) with SQLite implementation (`internal/store/sqlite/`)
 - **Workers** (`workers/`): AI worker (LLM agent with tools), general worker (container commands), and agent workers (`workers/agent/copilot/`, `workers/agent/claude/`) for external CLI runtimes; workers POST results to controller via HTTP
+- **Tracing** (`internal/tracing/`): Optional OpenTelemetry tracing with OTLP gRPC export, enabled via `--enable-tracing`
 - **Web UI** (`ui/`): React SPA embedded into controller binary via `//go:embed`
 
 ### Custom Resources
@@ -212,6 +213,10 @@ Prefer running single tests over the whole suite for faster feedback:
 ```bash
 go test ./internal/api/ -run TestHandlerName -v
 cd ui && bun run test -- src/components/tasks/task-list.test.tsx
+
+# After editing tracing code
+go test ./internal/tracing/ -v
+go test ./internal/llm/ -run TestTracing -v
 ```
 
 ## Worker Security Context

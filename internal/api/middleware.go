@@ -7,11 +7,17 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/requestid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/sozercan/mercan/internal/metrics"
+	"github.com/sozercan/mercan/internal/tracing"
 )
 
 // NewLoggingMiddleware creates a logging middleware
@@ -58,6 +64,38 @@ func NewMetricsMiddleware() fiber.Handler {
 
 		// Record in Prometheus metrics
 		metrics.RecordAPIRequest(path, method, status, duration.Seconds())
+
+		return err
+	}
+}
+
+// NewTracingMiddleware creates an OpenTelemetry tracing middleware.
+func NewTracingMiddleware() fiber.Handler {
+	return func(c fiber.Ctx) error {
+		tracer := tracing.Tracer("mercan.api")
+		ctx, span := tracer.Start(c.Context(), fmt.Sprintf("%s %s", c.Method(), c.Route().Path),
+			trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(
+				attribute.String("http.method", c.Method()),
+				attribute.String("http.route", c.Route().Path),
+				attribute.String("http.url", c.OriginalURL()),
+			),
+		)
+		defer span.End()
+
+		c.SetContext(ctx)
+
+		if reqID := requestid.FromContext(c); reqID != "" {
+			span.SetAttributes(attribute.String("http.request_id", reqID))
+		}
+
+		err := c.Next()
+
+		status := c.Response().StatusCode()
+		span.SetAttributes(attribute.Int("http.status_code", status))
+		if status >= 400 {
+			span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", status))
+		}
 
 		return err
 	}

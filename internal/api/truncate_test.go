@@ -33,9 +33,9 @@ func TestTruncateMessages_EmptyInput(t *testing.T) {
 
 func TestTruncateMessages_DropsMiddleKeepsFirstAndRecent(t *testing.T) {
 	msgs := []llm.Message{
-		{Role: "user", Content: "original request"},   // ~4 tokens
-		{Role: "assistant", Content: "first response"}, // ~4 tokens — will be dropped
-		{Role: "user", Content: "second question"},     // ~4 tokens — will be dropped
+		{Role: "user", Content: "original request"},     // ~4 tokens
+		{Role: "assistant", Content: "first response"},  // ~4 tokens — will be dropped
+		{Role: "user", Content: "second question"},      // ~4 tokens — will be dropped
 		{Role: "assistant", Content: "second response"}, // ~4 tokens
 		{Role: "user", Content: "latest question"},      // ~4 tokens
 	}

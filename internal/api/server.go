@@ -87,6 +87,9 @@ func (s *Server) setupMiddleware() {
 	// Request ID middleware
 	s.app.Use(requestid.New())
 
+	// Tracing middleware (after request ID so spans include it)
+	s.app.Use(NewTracingMiddleware())
+
 	// CORS middleware
 	s.app.Use(cors.New(cors.Config{
 		AllowOrigins: []string{"*"},
