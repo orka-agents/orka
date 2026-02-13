@@ -708,8 +708,13 @@ func (e *ToolExecutor) executeCreateAgent(ctx context.Context, args map[string]a
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
+			Labels: map[string]string{
+				"mercan.ai/created-by": "chat",
+			},
 		},
-		Spec: corev1alpha1.AgentSpec{},
+		Spec: corev1alpha1.AgentSpec{
+			TTLAfterLastTask: &metav1.Duration{Duration: time.Hour},
+		},
 	}
 
 	// Model configuration
