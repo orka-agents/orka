@@ -130,7 +130,7 @@ func verifyCallerNamespace(c fiber.Ctx, namespace string) error {
 
 	// SA usernames follow the format: system:serviceaccount:<namespace>:<name>
 	parts := strings.Split(userInfo.Username, ":")
-	if len(parts) == 4 && parts[0] == "system" && parts[1] == "serviceaccount" {
+	if len(parts) == 4 && parts[0] == "system" && parts[1] == "serviceaccount" { //nolint:goconst // "system" here is K8s SA prefix, not chat role
 		if parts[2] != namespace {
 			return fiber.NewError(fiber.StatusForbidden, "cross-namespace access denied")
 		}

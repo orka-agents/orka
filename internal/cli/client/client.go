@@ -23,6 +23,7 @@ import (
 type Client struct {
 	BaseURL    string
 	Token      string
+	Namespace  string
 	HTTPClient *http.Client
 }
 
@@ -31,6 +32,16 @@ func New(baseURL, token string) *Client {
 	return &Client{
 		BaseURL:    baseURL,
 		Token:      token,
+		HTTPClient: http.DefaultClient,
+	}
+}
+
+// NewWithNamespace creates a new Mercan API client with a default namespace.
+func NewWithNamespace(baseURL, token, namespace string) *Client {
+	return &Client{
+		BaseURL:    baseURL,
+		Token:      token,
+		Namespace:  namespace,
 		HTTPClient: http.DefaultClient,
 	}
 }
@@ -116,6 +127,59 @@ func (c *Client) GetAgent(ctx context.Context, name string, opts GetOptions) (*A
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 	return &detail, nil
+}
+
+// StreamChat sends a chat message and returns an SSE reader for streaming the response.
+func (c *Client) StreamChat(ctx context.Context, req ChatRequest) (*SSEReader, *http.Response, error) {
+	if req.Namespace == "" && c.Namespace != "" {
+		req.Namespace = c.Namespace
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/v1/chat", bytes.NewReader(body))
+	if err != nil {
+		return nil, nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+	if c.Token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, nil, fmt.Errorf("send request: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		_ = resp.Body.Close()
+		return nil, nil, fmt.Errorf("authentication failed (HTTP 401): try 'mercan login' or provide --token")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		return nil, nil, fmt.Errorf("server error (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	return NewSSEReader(resp.Body), resp, nil
+}
+
+// GetChatConfig fetches the chat configuration from the server.
+func (c *Client) GetChatConfig(ctx context.Context) (*ChatConfigResponse, error) {
+	body, err := c.doGet(ctx, c.BaseURL+"/api/v1/chat/config")
+	if err != nil {
+		return nil, err
+	}
+	var cfg ChatConfigResponse
+	if err := json.Unmarshal(body, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to decode chat config: %w", err)
+	}
+	return &cfg, nil
 }
 
 func (c *Client) doGet(ctx context.Context, reqURL string) ([]byte, error) {
@@ -229,9 +293,10 @@ type CreateTaskRequest struct {
 		Name string `json:"name"`
 	} `json:"agentRef,omitempty"`
 	AI *struct {
-		Provider struct {
+		ProviderRef *struct {
 			Name string `json:"name"`
-		} `json:"provider"`
+		} `json:"providerRef,omitempty"`
+		Prompt string `json:"prompt,omitempty"`
 	} `json:"ai,omitempty"`
 }
 
@@ -375,6 +440,39 @@ func (c *Client) GetTask(ctx context.Context, name string, opts GetOptions) (*Ta
 // DeleteTask deletes a task by name.
 func (c *Client) DeleteTask(ctx context.Context, name string, opts GetOptions) error {
 	u, err := url.Parse(c.BaseURL + "/api/v1/tasks/" + url.PathEscape(name))
+	if err != nil {
+		return fmt.Errorf("invalid base URL: %w", err)
+	}
+	q := u.Query()
+	if opts.Namespace != "" {
+		q.Set("namespace", opts.Namespace)
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u.String(), nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// DeleteAgent deletes an agent by name.
+func (c *Client) DeleteAgent(ctx context.Context, name string, opts GetOptions) error {
+	u, err := url.Parse(c.BaseURL + "/api/v1/agents/" + url.PathEscape(name))
 	if err != nil {
 		return fmt.Errorf("invalid base URL: %w", err)
 	}

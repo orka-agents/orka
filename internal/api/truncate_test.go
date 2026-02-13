@@ -33,9 +33,9 @@ func TestTruncateMessages_EmptyInput(t *testing.T) {
 
 func TestTruncateMessages_DropsMiddleKeepsFirstAndRecent(t *testing.T) {
 	msgs := []llm.Message{
-		{Role: "user", Content: "original request"},   // ~4 tokens
-		{Role: "assistant", Content: "first response"}, // ~4 tokens — will be dropped
-		{Role: "user", Content: "second question"},     // ~4 tokens — will be dropped
+		{Role: "user", Content: "original request"},     // ~4 tokens
+		{Role: "assistant", Content: "first response"},  // ~4 tokens — will be dropped
+		{Role: "user", Content: "second question"},      // ~4 tokens — will be dropped
 		{Role: "assistant", Content: "second response"}, // ~4 tokens
 		{Role: "user", Content: "latest question"},      // ~4 tokens
 	}
@@ -45,7 +45,7 @@ func TestTruncateMessages_DropsMiddleKeepsFirstAndRecent(t *testing.T) {
 	if result[0].Content != "original request" {
 		t.Errorf("first message should be preserved, got %q", result[0].Content)
 	}
-	if result[1].Role != "system" {
+	if result[1].Role != "system" { //nolint:goconst // test string, not worth a constant
 		t.Errorf("second message should be truncation note, got role %q", result[1].Role)
 	}
 	last := result[len(result)-1]

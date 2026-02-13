@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -60,6 +61,11 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	if err != nil {
 		logger.Error(err, "Failed to count active tasks")
 		// Non-fatal: continue with status update
+	}
+
+	// TTL-based cleanup: if agent has TTL, no active tasks, and TTL has expired, delete it
+	if result, deleted := r.checkTTLExpiry(ctx, agent, activeTasks); deleted {
+		return result, nil
 	}
 
 	// Update status
@@ -237,6 +243,9 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 	now := metav1.Now()
 
 	agent.Status.ActiveTasks = activeTasks
+	if activeTasks > 0 {
+		agent.Status.LastUsed = &now
+	}
 
 	condition := metav1.Condition{
 		Type:               "Ready",
@@ -260,7 +269,46 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 		return ctrl.Result{}, err
 	}
 
+	// Schedule requeue for TTL check if agent has TTL and is idle
+	if agent.Spec.TTLAfterLastTask != nil && activeTasks == 0 && agent.Status.LastUsed != nil {
+		ttl := agent.Spec.TTLAfterLastTask.Duration
+		elapsed := time.Since(agent.Status.LastUsed.Time)
+		if remaining := ttl - elapsed; remaining > 0 {
+			return ctrl.Result{RequeueAfter: remaining}, nil
+		}
+	}
+
 	return ctrl.Result{}, nil
+}
+
+// checkTTLExpiry deletes the agent if its TTL has expired and no tasks are active.
+func (r *AgentReconciler) checkTTLExpiry(ctx context.Context, agent *corev1alpha1.Agent, activeTasks int32) (ctrl.Result, bool) {
+	if agent.Spec.TTLAfterLastTask == nil || agent.Spec.TTLAfterLastTask.Duration == 0 {
+		return ctrl.Result{}, false
+	}
+	if activeTasks > 0 {
+		return ctrl.Result{}, false
+	}
+
+	// Need a LastUsed timestamp to compute expiry
+	if agent.Status.LastUsed == nil {
+		// Never used — use creation time as fallback
+		agent.Status.LastUsed = &metav1.Time{Time: agent.CreationTimestamp.Time}
+	}
+
+	elapsed := time.Since(agent.Status.LastUsed.Time)
+	ttl := agent.Spec.TTLAfterLastTask.Duration
+	if elapsed < ttl {
+		return ctrl.Result{}, false
+	}
+
+	logger := log.FromContext(ctx)
+	logger.Info("TTL expired, deleting agent", "agent", agent.Name, "ttl", ttl, "lastUsed", agent.Status.LastUsed.Time)
+	if err := r.Delete(ctx, agent); err != nil {
+		logger.Error(err, "Failed to delete expired agent")
+		return ctrl.Result{RequeueAfter: time.Second}, false //nolint:staticcheck
+	}
+	return ctrl.Result{}, true
 }
 
 // SetupWithManager sets up the controller with the Manager.

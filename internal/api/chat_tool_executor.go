@@ -20,6 +20,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	corev1 "k8s.io/api/core/v1"
+
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 	"github.com/sozercan/mercan/internal/controller"
 	"github.com/sozercan/mercan/internal/llm"
@@ -372,6 +374,17 @@ func (e *ToolExecutor) executeCreateAgentTask(ctx context.Context, args map[stri
 			if subPath := getStringArg(wsMap, "subPath"); subPath != "" {
 				wsCfg.SubPath = subPath
 			}
+			if pushBranch := getStringArg(wsMap, "pushBranch"); pushBranch != "" {
+				wsCfg.PushBranch = pushBranch
+			}
+			if gitSecretRef := getStringArg(wsMap, "gitSecretRef"); gitSecretRef != "" {
+				wsCfg.GitSecretRef = &corev1.LocalObjectReference{Name: gitSecretRef}
+			} else if wsCfg.GitRepo != "" {
+				// Auto-detect git credentials secret
+				if secretName := e.findGitSecret(ctx, task.Namespace); secretName != "" {
+					wsCfg.GitSecretRef = &corev1.LocalObjectReference{Name: secretName}
+				}
+			}
 			agentRuntime.Workspace = wsCfg
 		}
 	}
@@ -695,8 +708,13 @@ func (e *ToolExecutor) executeCreateAgent(ctx context.Context, args map[string]a
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
+			Labels: map[string]string{
+				"mercan.ai/created-by": "chat",
+			},
 		},
-		Spec: corev1alpha1.AgentSpec{},
+		Spec: corev1alpha1.AgentSpec{
+			TTLAfterLastTask: &metav1.Duration{Duration: time.Hour},
+		},
 	}
 
 	// Model configuration
@@ -757,6 +775,9 @@ func (e *ToolExecutor) executeCreateAgent(ctx context.Context, args map[string]a
 				agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
 					Type: corev1alpha1.AgentRuntimeType(runtimeType),
 				}
+				// Runtime agents don't use providerRef — clear it to avoid mutual exclusion error
+				agent.Spec.ProviderRef = nil
+				agent.Spec.Model = nil
 			}
 		}
 	}
@@ -1157,4 +1178,20 @@ func getStringSliceArg(args map[string]any, key string) []string {
 		}
 	}
 	return result
+}
+
+// findGitSecret looks for a git credentials secret in the namespace.
+func (e *ToolExecutor) findGitSecret(ctx context.Context, namespace string) string {
+	for _, name := range []string{"github-credentials", "git-credentials", "github-token", "git-token"} {
+		secret := &corev1.Secret{}
+		if err := e.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err == nil {
+			if _, hasToken := secret.Data["token"]; hasToken {
+				return name
+			}
+			if _, hasPassword := secret.Data["password"]; hasPassword {
+				return name
+			}
+		}
+	}
+	return ""
 }

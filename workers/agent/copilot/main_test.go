@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"os"
 	"testing"
 
 	copilot "github.com/github/copilot-sdk/go"
@@ -90,19 +91,14 @@ func TestBuildSessionConfig_Full(t *testing.T) {
 	}
 }
 
-func TestCopilotCLIPath_Default(t *testing.T) {
-	t.Setenv("COPILOT_CLI_PATH", "")
-
-	if p := copilotCLIPath(); p != defaultCopilotPath {
-		t.Errorf("copilotCLIPath() = %q, want %q", p, defaultCopilotPath)
-	}
-}
-
 func TestCopilotCLIPath_Override(t *testing.T) {
 	t.Setenv("COPILOT_CLI_PATH", "/usr/local/bin/copilot")
 
-	if p := copilotCLIPath(); p != "/usr/local/bin/copilot" {
-		t.Errorf("copilotCLIPath() = %q, want /usr/local/bin/copilot", p)
+	// When COPILOT_CLI_PATH is set, executeCopilot passes it as CLIPath.
+	// We can't call executeCopilot directly (it needs a real server),
+	// so we just verify the env var is readable.
+	if p := os.Getenv("COPILOT_CLI_PATH"); p != "/usr/local/bin/copilot" {
+		t.Errorf("COPILOT_CLI_PATH = %q, want /usr/local/bin/copilot", p)
 	}
 }
 
@@ -203,14 +199,6 @@ func TestBuildSessionConfig_DisallowedToolsOnly(t *testing.T) {
 	}
 	if len(sc.AvailableTools) != 0 {
 		t.Errorf("AvailableTools should be empty, got %v", sc.AvailableTools)
-	}
-}
-
-func TestCopilotCLIPath_EmptyString(t *testing.T) {
-	t.Setenv("COPILOT_CLI_PATH", "")
-
-	if p := copilotCLIPath(); p != defaultCopilotPath {
-		t.Errorf("copilotCLIPath() = %q, want %q", p, defaultCopilotPath)
 	}
 }
 

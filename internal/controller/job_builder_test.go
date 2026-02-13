@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	testTask  = "test-task"
-	defaultNS = "default"
+	testTask         = "test-task"
+	defaultNS        = "default"
+	envAIProviderKey = "MERCAN_AI_PROVIDER"
 )
 
 func setupJobBuilder() *JobBuilder {
@@ -371,7 +372,7 @@ func TestJobBuilder_buildEnvVars_AITask(t *testing.T) {
 
 	for _, env := range envVars {
 		switch env.Name {
-		case "MERCAN_AI_PROVIDER":
+		case envAIProviderKey:
 			hasProvider = true
 			if env.Value != "anthropic" {
 				t.Errorf("MERCAN_AI_PROVIDER = %s, want anthropic", env.Value)
@@ -435,7 +436,7 @@ func TestJobBuilder_buildEnvVars_WithAgent(t *testing.T) {
 
 	for _, env := range envVars {
 		switch env.Name {
-		case "MERCAN_AI_PROVIDER":
+		case envAIProviderKey:
 			hasProvider = true
 			if env.Value != "openai" {
 				t.Errorf("MERCAN_AI_PROVIDER = %s, want openai", env.Value)
@@ -523,7 +524,7 @@ func TestJobBuilder_buildEnvVars_ProviderCRDTypeOverridesModelProvider(t *testin
 	envVars := builder.buildEnvVars(task, agent, provider)
 
 	for _, env := range envVars {
-		if env.Name == "MERCAN_AI_PROVIDER" {
+		if env.Name == envAIProviderKey {
 			if env.Value != string(corev1alpha1.ProviderTypeAzureOpenAI) {
 				t.Errorf("MERCAN_AI_PROVIDER = %s, want %s (Provider CRD type should override model.provider)",
 					env.Value, corev1alpha1.ProviderTypeAzureOpenAI)
