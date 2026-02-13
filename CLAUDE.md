@@ -15,6 +15,10 @@ This file provides guidance to Claude Code when working with code in this reposi
 - Always use Kubernetes Secrets or environment variables for sensitive data
 - Never hardcode credentials in code or configuration files
 
+## CRITICAL: Fix Pre-existing Issues
+
+When you encounter pre-existing bugs, failing tests, or broken CI — **fix them**. Do not skip or ignore issues just because they existed before your change. Leave the codebase better than you found it.
+
 ## Project Overview
 
 Mercan is a Kubernetes-native task execution platform. A controller manages Jobs and Pods for incoming task requests, supporting container tasks, AI agent tasks with LLM integration, and external agent CLI runtimes (Copilot, Claude Code). See @docs/architecture.md for full architecture details.
