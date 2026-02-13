@@ -112,7 +112,15 @@ func (t *tracker) stop() {
 	if !t.stopped {
 		t.stopped = true
 		close(t.stopCh)
-		// Clear spinner lines
+		// Mark remaining agents as done (stream completed normally)
+		for _, a := range t.agents {
+			if !a.done {
+				a.done = true
+				a.success = true
+				a.status = "done"
+			}
+		}
+		// Clear spinner lines and render final state
 		if t.isTTY && len(t.agents) > 0 {
 			t.clearLines(len(t.agents))
 			t.renderFinal()
@@ -132,7 +140,7 @@ func (t *tracker) handleEvent(evt client.SSEEvent) {
 		switch data.Name {
 		case "delegate_task", "create_agent_task":
 			t.addAgent(data)
-		case "check_task_progress":
+		case "check_task_progress", "wait_for_task":
 			// Show that we're polling a task
 			t.updateAgentStatus(data, "checking…")
 		}
@@ -143,7 +151,7 @@ func (t *tracker) handleEvent(evt client.SSEEvent) {
 		}
 	case "tool_result":
 		switch data.Name {
-		case "wait_for_tasks":
+		case "wait_for_tasks", "wait_for_task":
 			t.completeAgents(data)
 		case "check_task_progress":
 			t.updateAgentFromProgress(data)

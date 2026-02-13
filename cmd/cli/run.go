@@ -272,7 +272,7 @@ func streamChat(ctx context.Context, c *client.Client, req client.ChatRequest, v
 						fmt.Fprintf(os.Stderr, "⚙ Delegating to %s\n", agentName)
 					}
 				}
-			case "check_task_progress":
+			case "check_task_progress", "wait_for_task":
 				// Suppressed — tracker shows status
 			case "fetch_task_output":
 				if verbosity >= VerbosityV {
@@ -285,7 +285,7 @@ func streamChat(ctx context.Context, c *client.Client, req client.ChatRequest, v
 			}
 		case "tool_result":
 			switch data.Name {
-			case "check_task_progress":
+			case "check_task_progress", "wait_for_task":
 				// Show task phase update inline
 				var result map[string]any
 				if json.Unmarshal(data.Result, &result) == nil {
