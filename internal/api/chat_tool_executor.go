@@ -20,6 +20,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	corev1 "k8s.io/api/core/v1"
+
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 	"github.com/sozercan/mercan/internal/controller"
 	"github.com/sozercan/mercan/internal/llm"
@@ -371,6 +373,17 @@ func (e *ToolExecutor) executeCreateAgentTask(ctx context.Context, args map[stri
 			}
 			if subPath := getStringArg(wsMap, "subPath"); subPath != "" {
 				wsCfg.SubPath = subPath
+			}
+			if pushBranch := getStringArg(wsMap, "pushBranch"); pushBranch != "" {
+				wsCfg.PushBranch = pushBranch
+			}
+			if gitSecretRef := getStringArg(wsMap, "gitSecretRef"); gitSecretRef != "" {
+				wsCfg.GitSecretRef = &corev1.LocalObjectReference{Name: gitSecretRef}
+			} else if wsCfg.GitRepo != "" {
+				// Auto-detect git credentials secret
+				if secretName := e.findGitSecret(ctx, task.Namespace); secretName != "" {
+					wsCfg.GitSecretRef = &corev1.LocalObjectReference{Name: secretName}
+				}
 			}
 			agentRuntime.Workspace = wsCfg
 		}
@@ -1157,4 +1170,20 @@ func getStringSliceArg(args map[string]any, key string) []string {
 		}
 	}
 	return result
+}
+
+// findGitSecret looks for a git credentials secret in the namespace.
+func (e *ToolExecutor) findGitSecret(ctx context.Context, namespace string) string {
+	for _, name := range []string{"github-credentials", "git-credentials", "github-token", "git-token"} {
+		secret := &corev1.Secret{}
+		if err := e.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err == nil {
+			if _, hasToken := secret.Data["token"]; hasToken {
+				return name
+			}
+			if _, hasPassword := secret.Data["password"]; hasPassword {
+				return name
+			}
+		}
+	}
+	return ""
 }

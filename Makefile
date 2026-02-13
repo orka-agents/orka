@@ -140,11 +140,14 @@ build: manifests generate fmt vet ui-build ## Build manager binary.
 
 .PHONY: build-cli
 build-cli: ## Build mercan CLI binary.
-	go build -o bin/mercan cmd/cli/main.go
+	go build -ldflags "-X main.version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)" -o bin/mercan ./cmd/cli/
 
 .PHONY: build-migrate
 build-migrate: ## Build ConfigMap to SQLite migration binary.
 	go build -o bin/mercan-migrate ./cmd/migrate/
+
+.PHONY: build-all
+build-all: build build-cli build-migrate ## Build all binaries.
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
