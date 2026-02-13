@@ -252,7 +252,7 @@ func streamChat(ctx context.Context, c *client.Client, req client.ChatRequest, v
 			case "create_agent_task", "delegate_task":
 				// Handled by tracker — show a brief note
 				var args map[string]any
-				if json.Unmarshal([]byte(data.Args), &args) == nil {
+				if json.Unmarshal(data.Args, &args) == nil {
 					agentName, _ := args["agentRef"].(string)
 					if agentName == "" {
 						agentName, _ = args["agent"].(string)

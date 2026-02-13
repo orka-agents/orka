@@ -138,7 +138,7 @@ func (t *tracker) handleEvent(evt client.SSEEvent) {
 		}
 		if t.verbosity >= VerbosityVV {
 			t.mu.Lock()
-			fmt.Fprintf(t.w, "%s tool_call: %s %s\n", t.dimStyle.Render("│"), data.Name, t.dimStyle.Render(data.Args))
+			fmt.Fprintf(t.w, "%s tool_call: %s %s\n", t.dimStyle.Render("│"), data.Name, t.dimStyle.Render(string(data.Args)))
 			t.mu.Unlock()
 		}
 	case "tool_result":
@@ -172,7 +172,7 @@ func (t *tracker) addAgent(data client.SSEEventData) {
 	agentName := "agent"
 	taskName := ""
 	prompt := ""
-	if err := json.Unmarshal([]byte(data.Args), &args); err == nil {
+	if err := json.Unmarshal(data.Args, &args); err == nil {
 		// delegate_task uses "agent", create_agent_task uses "agentRef"
 		if name, ok := args["agent"].(string); ok {
 			agentName = name
@@ -242,7 +242,7 @@ func (t *tracker) updateAgentStatus(data client.SSEEventData, status string) {
 	defer t.mu.Unlock()
 
 	var args map[string]any
-	if err := json.Unmarshal([]byte(data.Args), &args); err == nil {
+	if err := json.Unmarshal(data.Args, &args); err == nil {
 		taskName, _ := args["name"].(string)
 		for _, a := range t.agents {
 			if !a.done && (a.taskName == taskName || taskName == "") {
@@ -291,7 +291,7 @@ func (t *tracker) completeAgentByName(data client.SSEEventData) {
 	defer t.mu.Unlock()
 
 	var args map[string]any
-	if err := json.Unmarshal([]byte(data.Args), &args); err == nil {
+	if err := json.Unmarshal(data.Args, &args); err == nil {
 		taskName, _ := args["name"].(string)
 		for _, a := range t.agents {
 			if !a.done && (a.taskName == taskName || taskName == "") {

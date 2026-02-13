@@ -37,6 +37,11 @@ func newRootCmd() *cobra.Command {
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		PersistentPostRun: func(cmd *cobra.Command, args []string) {
+			if portForwardCleanup != nil {
+				portForwardCleanup()
+			}
+		},
 	}
 
 	// Global flags

@@ -23,6 +23,9 @@ import (
 	"github.com/sozercan/mercan/internal/cli/client"
 )
 
+// portForwardCleanup holds the cleanup function for the kubectl port-forward process.
+var portForwardCleanup func()
+
 const (
 	configDir  = ".mercan"
 	configFile = "config.yaml"
@@ -78,7 +81,8 @@ func newClientFromCmd(cmd *cobra.Command) *client.Client {
 		if svcNS, svcName := discoverService(kubeconfigFlag, ns); svcName != "" {
 			localPort, cleanup, err := startPortForward(kubeconfigFlag, svcNS, svcName)
 			if err == nil {
-				// Register cleanup for process exit
+				portForwardCleanup = cleanup
+				// Also register cleanup for interrupt as a fallback
 				go func() {
 					c := make(chan os.Signal, 1)
 					signal.Notify(c, os.Interrupt)
