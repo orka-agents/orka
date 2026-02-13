@@ -25,6 +25,7 @@ func newAgentCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newAgentListCmd())
 	cmd.AddCommand(newAgentGetCmd())
+	cmd.AddCommand(newAgentDeleteCmd())
 	return cmd
 }
 
@@ -84,6 +85,24 @@ func newAgentGetCmd() *cobra.Command {
 				return fmt.Errorf("formatting output: %w", err)
 			}
 			fmt.Println(string(out))
+			return nil
+		},
+	}
+}
+
+func newAgentDeleteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "delete <name>",
+		Short: "Delete an agent",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := newClientFromCmd(cmd)
+			if err := c.DeleteAgent(context.Background(), args[0], client.GetOptions{
+				Namespace: c.Namespace,
+			}); err != nil {
+				return err
+			}
+			fmt.Printf("Agent deleted: %s\n", args[0])
 			return nil
 		},
 	}

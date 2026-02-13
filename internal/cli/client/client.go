@@ -469,6 +469,39 @@ func (c *Client) DeleteTask(ctx context.Context, name string, opts GetOptions) e
 	return nil
 }
 
+// DeleteAgent deletes an agent by name.
+func (c *Client) DeleteAgent(ctx context.Context, name string, opts GetOptions) error {
+	u, err := url.Parse(c.BaseURL + "/api/v1/agents/" + url.PathEscape(name))
+	if err != nil {
+		return fmt.Errorf("invalid base URL: %w", err)
+	}
+	q := u.Query()
+	if opts.Namespace != "" {
+		q.Set("namespace", opts.Namespace)
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u.String(), nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
 // GetTaskLogs gets logs for a task.
 func (c *Client) GetTaskLogs(ctx context.Context, name string, opts GetOptions) (*TaskLogsResponse, error) {
 	u, err := url.Parse(c.BaseURL + "/api/v1/tasks/" + url.PathEscape(name) + "/logs")
