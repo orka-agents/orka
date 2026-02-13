@@ -32,6 +32,9 @@ controller:
   # Health probe port
   healthPort: 8082
 
+  # Enable leader election for HA
+  leaderElect: true
+
   # Log level (debug, info, warn, error)
   logLevel: info
 

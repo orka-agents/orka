@@ -368,6 +368,12 @@ func (ch *ChatHandler) runToolLoop(
 			})
 		}
 
+		// Truncate conversation if it exceeds the session size budget
+		if ch.config.MaxSessionSize > 0 {
+			tokenBudget := ch.config.MaxSessionSize / 4 // bytes to approximate tokens
+			messages = TruncateMessages(messages, tokenBudget)
+		}
+
 		// Call LLM
 		resp, err := provider.Complete(ctx, &llm.CompletionRequest{
 			Model:        model,

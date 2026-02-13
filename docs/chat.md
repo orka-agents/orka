@@ -78,14 +78,10 @@ Event types:
 |-------|-------------|
 | `status` | Stream opened — confirms session, provider, model |
 | `message` | Text content delta |
-| `thinking` | Chain-of-thought / reasoning content |
 | `tool_call` | Tool invocation (name + args) |
 | `tool_result` | Tool execution result |
-| `progress` | Task progress updates during `wait_for_task` |
 | `error` | Error with code and message |
 | `done` | Stream complete with usage stats |
-
-Heartbeat comments (`: heartbeat\n\n`) are sent every 15 seconds during idle periods.
 
 ### JSON Response
 

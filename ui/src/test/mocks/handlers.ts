@@ -90,6 +90,11 @@ export const handlers = [
     return HttpResponse.json({ items: [] })
   }),
 
+  // Auth
+  http.get(`${API}/auth/validate`, () => {
+    return new HttpResponse(null, { status: 200 })
+  }),
+
   // Chat
   http.get(`${API}/chat/config`, () => {
     return HttpResponse.json({

@@ -41,6 +41,7 @@ spec:
             {{- if .Values.controller.watchNamespace }}
             - --watch-namespace={{ .Values.controller.watchNamespace }}
             {{- end }}
+            - --leader-elect={{ .Values.controller.leaderElect }}
             - --log-level={{ .Values.controller.logLevel }}
             - --store-backend=sqlite
             - --store-path={{ .Values.store.path }}

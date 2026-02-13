@@ -416,6 +416,15 @@ func TestHandleChatCompletions_NonStreamingResponse(t *testing.T) {
 }
 
 func TestHandleChatCompletions_ProviderSlashModel(t *testing.T) {
+	// Mock API server returns a quick error so the test doesn't time out
+	// reaching the real Anthropic API.
+	mockAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"authentication_error","message":"invalid key"}}`))
+	}))
+	defer mockAPI.Close()
+
 	// Create provider and secret
 	provider := &corev1alpha1.Provider{
 		ObjectMeta: metav1.ObjectMeta{
@@ -425,6 +434,7 @@ func TestHandleChatCompletions_ProviderSlashModel(t *testing.T) {
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeAnthropic,
 			DefaultModel: "claude-sonnet-4-20250514",
+			BaseURL:      mockAPI.URL,
 			SecretRef: corev1alpha1.ProviderSecretRef{
 				Name: "anthropic-secret",
 				Key:  "api-key",

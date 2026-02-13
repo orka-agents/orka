@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, fireEvent } from '@/test/test-utils'
+import { render, screen, fireEvent, waitFor } from '@/test/test-utils'
 
 vi.mock('zustand/middleware', async () => {
   const actual = await vi.importActual('zustand/middleware')
@@ -57,13 +57,15 @@ describe('login route', () => {
     expect(button).not.toBeDisabled()
   })
 
-  it('submitting sets token in auth store', () => {
+  it('submitting sets token in auth store', async () => {
     const LoginPage = Route.component!
     render(<LoginPage />)
     const input = screen.getByPlaceholderText('Paste your token here...')
     fireEvent.change(input, { target: { value: 'my-secret-token' } })
     fireEvent.click(screen.getByRole('button', { name: /sign in/i }))
-    expect(useAuthStore.getState().token).toBe('my-secret-token')
+    await waitFor(() => {
+      expect(useAuthStore.getState().token).toBe('my-secret-token')
+    })
   })
 
   it('navigates to / when already authenticated', () => {
@@ -73,12 +75,14 @@ describe('login route', () => {
     expect(mockNavigate).toHaveBeenCalledWith({ to: '/' })
   })
 
-  it('handles #token=... hash fragment from CLI login', () => {
+  it('handles #token=... hash fragment from CLI login', async () => {
     const originalHash = window.location.hash
     window.location.hash = '#token=hash-cli-token'
     const LoginPage = Route.component!
     render(<LoginPage />)
-    expect(useAuthStore.getState().token).toBe('hash-cli-token')
+    await waitFor(() => {
+      expect(useAuthStore.getState().token).toBe('hash-cli-token')
+    })
     window.location.hash = originalHash
   })
 })
