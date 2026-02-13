@@ -85,6 +85,14 @@ func savePortForwardCache(cache *portForwardCache) {
 	os.WriteFile(filepath.Join(dir, "portforward.json"), data, 0o600) //nolint:errcheck
 }
 
+func clearPortForwardCache() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	os.Remove(filepath.Join(home, configDir, "portforward.json")) //nolint:errcheck
+}
+
 // newClientFromCmd creates a client.Client using flag values resolved against config.
 func newClientFromCmd(cmd *cobra.Command) *client.Client {
 	server, _ := cmd.Flags().GetString("server")

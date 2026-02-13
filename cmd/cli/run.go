@@ -40,10 +40,16 @@ func newRunCmd() *cobra.Command {
 
 			c := newClientFromCmd(cmd)
 
-			// Pre-flight check
+			// Pre-flight check (retry once on stale cache)
 			cfg, err := c.GetChatConfig(context.Background())
 			if err != nil {
-				return fmt.Errorf("cannot reach server: %w", err)
+				// Clear stale cache and re-discover
+				clearPortForwardCache()
+				c = newClientFromCmd(cmd)
+				cfg, err = c.GetChatConfig(context.Background())
+				if err != nil {
+					return fmt.Errorf("cannot reach server: %w", err)
+				}
 			}
 			if !cfg.Enabled {
 				return fmt.Errorf("chat is disabled on this server")

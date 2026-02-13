@@ -7,16 +7,23 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gofiber/fiber/v3"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 )
+
+// mockHealthChecker implements store.HealthChecker for tests.
+type mockHealthChecker struct{}
+
+func (m *mockHealthChecker) HealthCheck(_ context.Context) error { return nil }
 
 func TestNewServer(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -48,10 +55,12 @@ func TestNewServer(t *testing.T) {
 func TestServer_HealthEndpoints(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	config := ServerConfig{
-		Port: 8080,
+		Port:          8080,
+		HealthChecker: &mockHealthChecker{},
 	}
 
 	server := NewServer(fakeClient, nil, config)

@@ -80,9 +80,13 @@ wait for results, and report back.
     • Curl / HTTP tools: "cgr.dev/chainguard/curl:latest"
   These are hardened, minimal, zero/low-CVE Chainguard images rebuilt daily.
   The "-dev" variants include package managers (pip, npm, apk) and shells.
+  All containers run as non-root with read-only root filesystem. Only writable
+  paths are /tmp and /home/nonroot. Do NOT assume root access or writable system dirs.
   The command runs directly — no LLM involved. Fast and reliable.
-  If a tool isn't available in the base image, use a -dev variant and install it
-  (e.g., command: ["sh","-c","apk add --no-cache jq && jq ..."]).
+  If a tool isn't available in the base image, use a -dev variant and install it to
+  the user dir (e.g., command: ["sh","-c","pip install --user jq && ..."]).
+  For git operations, prefer "cgr.dev/chainguard/git:latest-dev" which includes
+  git, shell, and common utilities.
 - ai: Run an LLM-powered task. Use create_ai_task with a providerRef.
   Use for: reasoning, analysis, content generation, code review, summarization,
   answering questions about data. The AI worker has built-in tools (code_exec,
@@ -90,6 +94,9 @@ wait for results, and report back.
   or CLI tools like kubectl. Do NOT use for infrastructure commands.
 - agent: Run an external CLI runtime (Copilot, Claude Code). Use create_agent_task.
   Use for: code changes in a git repo, multi-file refactoring.
+  IMPORTANT: When the user specifies an agent (via --agent or agentRef) that has a
+  runtime configured, ALWAYS use create_agent_task with that agent name.
+  Do NOT use create_container_task or create_ai_task for runtime agents.
 </task_types>
 
 <coordination>
@@ -155,6 +162,9 @@ set the schedule parameter on the task.
 7. If a task fails, check the error and try a different approach before giving up.
 8. Do not create more tasks than necessary.
 9. If no agents exist and user needs an agent task, create the agent first with create_agent.
+10. When the user specifies an agent (agentRef) that has a "runtime" listed in the
+   available_agents section, ALWAYS use create_agent_task — never create_container_task
+   or create_ai_task. Runtime agents have their own CLI environment with full tool access.
 </rules>
 
 <examples>
@@ -187,6 +197,13 @@ Example 5: User asks "debug this k8s error"
 → wait_for_task (the auto-created task)
 → fetch_task_output
 → summarize findings
+
+Example 6: User specifies --agent ayna-coder (which has runtime: copilot) and asks "count Go files in the repo"
+→ create_agent_task (agent: "ayna-coder", prompt: "count all Go files...")
+   (Use create_agent_task because ayna-coder has a runtime — do NOT use create_container_task)
+→ wait_for_task
+→ fetch_task_output
+→ show results
 </examples>
 `)
 
