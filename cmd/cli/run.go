@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 
 	"github.com/charmbracelet/glamour"
@@ -173,6 +174,11 @@ func runREPL(c *client.Client, session, agent, model, provider string, verbosity
 		case "/session":
 			fmt.Fprintf(os.Stderr, "Session: %s\n\n", session)
 			continue
+		default:
+			if strings.HasPrefix(input, "/") {
+				fmt.Fprintf(os.Stderr, "Unknown command: %s (type /help for commands)\n\n", input)
+				continue
+			}
 		}
 
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -338,6 +344,9 @@ func streamChat(ctx context.Context, c *client.Client, req client.ChatRequest, v
 	return 0
 }
 
+// trailingAnsiPad matches trailing ANSI escape sequences interspersed with whitespace.
+var trailingAnsiPad = regexp.MustCompile(`(?:\x1b\[[0-9;]*m[\t ]*)+[\t ]*$`)
+
 // renderMarkdown renders Markdown text using glamour.
 func renderMarkdown(text string) string {
 	r, err := glamour.NewTermRenderer(
@@ -351,5 +360,10 @@ func renderMarkdown(text string) string {
 	if err != nil {
 		return ""
 	}
-	return out
+	// Strip trailing ANSI-colored padding glamour adds to fill word-wrap width.
+	lines := strings.Split(out, "\n")
+	for i, line := range lines {
+		lines[i] = trailingAnsiPad.ReplaceAllString(line, "")
+	}
+	return strings.Join(lines, "\n")
 }
