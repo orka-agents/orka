@@ -55,8 +55,15 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 fmt: ## Run go fmt against code.
 	go fmt ./...
 
+.PHONY: ensure-ui-embed
+ensure-ui-embed: ## Create stub UI embed directory if not present (for go vet/build without full UI build).
+	@if [ ! -d internal/uiembed/dist ]; then \
+		mkdir -p internal/uiembed/dist && \
+		echo '<!doctype html><html><body>stub</body></html>' > internal/uiembed/dist/index.html; \
+	fi
+
 .PHONY: vet
-vet: ## Run go vet against code.
+vet: ensure-ui-embed ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
