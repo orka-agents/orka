@@ -71,7 +71,16 @@ func newRunCmd() *cobra.Command {
 			stderrTTY := isTTYCheck(os.Stderr)
 			stdoutTTY := isTTYCheck(os.Stdout)
 
-			fmt.Fprintf(os.Stderr, "Using %s/%s\n", displayProvider, displayModel)
+			if displayProvider != "" || displayModel != "" {
+				switch {
+				case displayProvider != "" && displayModel != "":
+					fmt.Fprintf(os.Stderr, "Using %s/%s\n", displayProvider, displayModel)
+				case displayProvider != "":
+					fmt.Fprintf(os.Stderr, "Using %s\n", displayProvider)
+				case displayModel != "":
+					fmt.Fprintf(os.Stderr, "Using model %s\n", displayModel)
+				}
+			}
 			fmt.Fprintf(os.Stderr, "Session: %s (use --session to continue)\n\n", session)
 
 			// Determine prompt source
@@ -238,9 +247,11 @@ func streamChat(ctx context.Context, c *client.Client, req client.ChatRequest, v
 			}
 		case "message":
 			if data.Content != "" {
-				fmt.Fprint(os.Stdout, data.Content)
 				contentBuf.WriteString(data.Content)
 				hadContent = true
+				if !stdoutTTY {
+					fmt.Fprint(os.Stdout, data.Content)
+				}
 			}
 		case "tool_call":
 			if hadContent {
@@ -302,20 +313,15 @@ func streamChat(ctx context.Context, c *client.Client, req client.ChatRequest, v
 			fmt.Fprintf(os.Stderr, "\n✗ Error: %s\n", data.Error)
 			return 2
 		case "done":
-			if hadContent {
-				fmt.Fprintln(os.Stdout)
-			}
-			// Re-render with glamour if TTY and we have content
 			if stdoutTTY && contentBuf.Len() > 0 {
 				rendered := renderMarkdown(contentBuf.String())
 				if rendered != "" {
-					// Move up and clear the raw output, then print rendered
-					lines := strings.Count(contentBuf.String(), "\n") + 1
-					for i := 0; i < lines; i++ {
-						fmt.Fprint(os.Stdout, "\033[A\033[2K")
-					}
 					fmt.Fprint(os.Stdout, rendered)
+				} else {
+					fmt.Fprintln(os.Stdout, contentBuf.String())
 				}
+			} else if hadContent {
+				fmt.Fprintln(os.Stdout)
 			}
 			return 0
 		}

@@ -41,6 +41,50 @@ type mercanConfig struct {
 	Namespace string `yaml:"namespace,omitempty"`
 }
 
+// portForwardCache holds cached port-forward connection info to avoid re-creating on every command.
+type portForwardCache struct {
+	Port      int    `json:"port"`
+	PID       int    `json:"pid"`
+	Service   string `json:"service"`
+	Namespace string `json:"namespace"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+func loadPortForwardCache() *portForwardCache {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(home, configDir, "portforward.json"))
+	if err != nil {
+		return nil
+	}
+	var cache portForwardCache
+	if json.Unmarshal(data, &cache) != nil {
+		return nil
+	}
+	// Expire after 30 minutes
+	if time.Now().Unix()-cache.Timestamp > 1800 {
+		return nil
+	}
+	return &cache
+}
+
+func savePortForwardCache(cache *portForwardCache) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	dir := filepath.Join(home, configDir)
+	os.MkdirAll(dir, 0o700) //nolint:errcheck
+	cache.Timestamp = time.Now().Unix()
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return
+	}
+	os.WriteFile(filepath.Join(dir, "portforward.json"), data, 0o600) //nolint:errcheck
+}
+
 // newClientFromCmd creates a client.Client using flag values resolved against config.
 func newClientFromCmd(cmd *cobra.Command) *client.Client {
 	server, _ := cmd.Flags().GetString("server")
@@ -75,11 +119,32 @@ func newClientFromCmd(cmd *cobra.Command) *client.Client {
 		ns = "default"
 	}
 
+	// Try cached port-forward first
+	if server == "" {
+		if cached := loadPortForwardCache(); cached != nil {
+			conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", cached.Port), 500*time.Millisecond)
+			if err == nil {
+				conn.Close() //nolint:errcheck
+				server = fmt.Sprintf("http://localhost:%d", cached.Port)
+				fmt.Fprintf(os.Stderr, "Connected to %s in %s (cached port %d)\n",
+					cached.Service, cached.Namespace, cached.Port)
+			}
+		}
+	}
+
 	// Auto-discover server via K8s service discovery + port-forward
 	if server == "" {
 		kubeconfigFlag := kubeconfigPath
+		// Show connecting indicator if stderr is a terminal
+		stderrIsTTY := false
+		if fi, err := os.Stderr.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+			stderrIsTTY = true
+		}
+		if stderrIsTTY {
+			fmt.Fprint(os.Stderr, "⠋ Connecting to cluster…")
+		}
 		if svcNS, svcName := discoverService(kubeconfigFlag, ns); svcName != "" {
-			localPort, cleanup, err := startPortForward(kubeconfigFlag, svcNS, svcName)
+			localPort, pid, cleanup, err := startPortForward(kubeconfigFlag, svcNS, svcName)
 			if err == nil {
 				portForwardCleanup = cleanup
 				// Also register cleanup for interrupt as a fallback
@@ -90,9 +155,22 @@ func newClientFromCmd(cmd *cobra.Command) *client.Client {
 					cleanup()
 				}()
 				server = fmt.Sprintf("http://localhost:%d", localPort)
-				fmt.Fprintf(os.Stderr, "Auto-connected to %s/%s in namespace %s (port-forward :%d)\n",
-					svcName, "api", svcNS, localPort)
+				savePortForwardCache(&portForwardCache{
+					Port:      localPort,
+					PID:       pid,
+					Service:   svcName,
+					Namespace: svcNS,
+				})
+				if stderrIsTTY {
+					fmt.Fprint(os.Stderr, "\r\033[2K")
+				}
+				fmt.Fprintf(os.Stderr, "Connected to %s in %s (port %d)\n",
+					svcName, svcNS, localPort)
+			} else if stderrIsTTY {
+				fmt.Fprint(os.Stderr, "\r\033[2K")
 			}
+		} else if stderrIsTTY {
+			fmt.Fprint(os.Stderr, "\r\033[2K")
 		}
 	}
 
@@ -128,12 +206,12 @@ func discoverService(kubeconfigPath, defaultNS string) (string, string) {
 }
 
 // startPortForward starts a kubectl port-forward to the Mercan service.
-// Returns the local port, a cleanup function, and any error.
-func startPortForward(kubeconfigPath, namespace, service string) (int, func(), error) {
+// Returns the local port, the process PID, a cleanup function, and any error.
+func startPortForward(kubeconfigPath, namespace, service string) (int, int, func(), error) {
 	// Find a free port
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return 0, nil, fmt.Errorf("find free port: %w", err)
+		return 0, 0, nil, fmt.Errorf("find free port: %w", err)
 	}
 	localPort := listener.Addr().(*net.TCPAddr).Port
 	listener.Close() //nolint:errcheck
@@ -148,7 +226,7 @@ func startPortForward(kubeconfigPath, namespace, service string) (int, func(), e
 	cmd.Stdout = nil
 
 	if err := cmd.Start(); err != nil {
-		return 0, nil, fmt.Errorf("start port-forward: %w", err)
+		return 0, 0, nil, fmt.Errorf("start port-forward: %w", err)
 	}
 
 	cleanup := func() {
@@ -171,10 +249,10 @@ func startPortForward(kubeconfigPath, namespace, service string) (int, func(), e
 
 	if !ready {
 		cleanup()
-		return 0, nil, fmt.Errorf("port-forward not ready after 3s")
+		return 0, 0, nil, fmt.Errorf("port-forward not ready after 3s")
 	}
 
-	return localPort, cleanup, nil
+	return localPort, cmd.Process.Pid, cleanup, nil
 }
 
 // discoverMercanService finds the Mercan API service in the given namespace.

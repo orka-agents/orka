@@ -38,9 +38,8 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPostRun: func(cmd *cobra.Command, args []string) {
-			if portForwardCleanup != nil {
-				portForwardCleanup()
-			}
+			// Don't kill port-forward on normal exit — let it persist for caching.
+			// It will be cleaned up when the cache expires or on interrupt.
 		},
 	}
 
