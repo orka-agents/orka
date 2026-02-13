@@ -209,7 +209,10 @@ func runREPL(c *client.Client, session, agent, model, provider string, verbosity
 	return nil
 }
 
-func streamChat(ctx context.Context, c *client.Client, req client.ChatRequest, verbosity int, stderrTTY, stdoutTTY bool) int {
+func streamChat(
+	ctx context.Context, c *client.Client, req client.ChatRequest,
+	verbosity int, stderrTTY, stdoutTTY bool,
+) int {
 	reader, resp, err := c.StreamChat(ctx, req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -268,72 +271,14 @@ func streamChat(ctx context.Context, c *client.Client, req client.ChatRequest, v
 				fmt.Fprintln(os.Stdout) //nolint:errcheck
 				hadContent = false
 			}
-			// Show tool activity (tracker handles agent-specific display)
-			switch data.Name {
-			case "create_agent_task", "delegate_task":
-				// Handled by tracker — show a brief note
-				var args map[string]any
-				if json.Unmarshal(data.Args, &args) == nil {
-					agentName, _ := args["agentRef"].(string)
-					if agentName == "" {
-						agentName, _ = args["agent"].(string)
-					}
-					if verbosity < VerbosityVV {
-						fmt.Fprintf(os.Stderr, "⚙ Delegating to %s\n", agentName)
-					}
-				}
-			case "check_task_progress", "wait_for_task":
-				// Suppressed — tracker shows status
-			case "fetch_task_output":
-				if verbosity >= VerbosityV {
-					fmt.Fprintf(os.Stderr, "⚙ Fetching result\n")
-				}
-			default:
-				if verbosity < VerbosityVV {
-					fmt.Fprintf(os.Stderr, "⚙ %s\n", data.Name)
-				}
-			}
+			handleToolCallEvent(data, verbosity)
 		case "tool_result":
-			switch data.Name {
-			case "check_task_progress", "wait_for_task":
-				// Show task phase update inline
-				var result map[string]any
-				if json.Unmarshal(data.Result, &result) == nil {
-					if phase, ok := result["phase"].(string); ok {
-						taskName, _ := result["name"].(string)
-						elapsed, _ := result["duration"].(string)
-						if taskName == "" {
-							taskName = "task"
-						}
-						if verbosity < VerbosityVV {
-							fmt.Fprintf(os.Stderr, "  ↻ %s: %s %s\n", taskName, phase, elapsed)
-						}
-					}
-				}
-			case "fetch_task_output":
-				if verbosity >= VerbosityV {
-					fmt.Fprintf(os.Stderr, "✓ Result received\n")
-				}
-			default:
-				if verbosity < VerbosityVV && verbosity >= VerbosityV {
-					fmt.Fprintf(os.Stderr, "✓ %s\n", data.Name)
-				}
-			}
+			handleToolResultEvent(data, verbosity)
 		case "error":
 			fmt.Fprintf(os.Stderr, "\n✗ Error: %s\n", data.Error)
 			return 2
 		case "done":
-			if stdoutTTY && contentBuf.Len() > 0 {
-				rendered := renderMarkdown(contentBuf.String())
-				if rendered != "" {
-					fmt.Fprint(os.Stdout, rendered) //nolint:errcheck
-				} else {
-					fmt.Fprintln(os.Stdout, contentBuf.String()) //nolint:errcheck
-				}
-			} else if hadContent {
-				fmt.Fprintln(os.Stdout) //nolint:errcheck
-			}
-			return 0
+			return finishStream(&contentBuf, hadContent, stdoutTTY)
 		}
 	}
 
@@ -343,6 +288,73 @@ func streamChat(ctx context.Context, c *client.Client, req client.ChatRequest, v
 	}
 
 	if hadContent {
+		fmt.Fprintln(os.Stdout) //nolint:errcheck
+	}
+	return 0
+}
+
+func handleToolCallEvent(data client.SSEEventData, verbosity int) {
+	switch data.Name {
+	case "create_agent_task", "delegate_task":
+		var args map[string]any
+		if json.Unmarshal(data.Args, &args) == nil {
+			agentName, _ := args["agentRef"].(string)
+			if agentName == "" {
+				agentName, _ = args["agent"].(string)
+			}
+			if verbosity < VerbosityVV {
+				fmt.Fprintf(os.Stderr, "⚙ Delegating to %s\n", agentName)
+			}
+		}
+	case "check_task_progress", "wait_for_task":
+		// Suppressed — tracker shows status
+	case "fetch_task_output":
+		if verbosity >= VerbosityV {
+			fmt.Fprintf(os.Stderr, "⚙ Fetching result\n")
+		}
+	default:
+		if verbosity < VerbosityVV {
+			fmt.Fprintf(os.Stderr, "⚙ %s\n", data.Name)
+		}
+	}
+}
+
+func handleToolResultEvent(data client.SSEEventData, verbosity int) {
+	switch data.Name {
+	case "check_task_progress", "wait_for_task":
+		var result map[string]any
+		if json.Unmarshal(data.Result, &result) == nil {
+			if phase, ok := result["phase"].(string); ok {
+				taskName, _ := result["name"].(string)
+				elapsed, _ := result["duration"].(string)
+				if taskName == "" {
+					taskName = "task"
+				}
+				if verbosity < VerbosityVV {
+					fmt.Fprintf(os.Stderr, "  ↻ %s: %s %s\n", taskName, phase, elapsed)
+				}
+			}
+		}
+	case "fetch_task_output":
+		if verbosity >= VerbosityV {
+			fmt.Fprintf(os.Stderr, "✓ Result received\n")
+		}
+	default:
+		if verbosity < VerbosityVV && verbosity >= VerbosityV {
+			fmt.Fprintf(os.Stderr, "✓ %s\n", data.Name)
+		}
+	}
+}
+
+func finishStream(contentBuf *strings.Builder, hadContent, stdoutTTY bool) int {
+	if stdoutTTY && contentBuf.Len() > 0 {
+		rendered := renderMarkdown(contentBuf.String())
+		if rendered != "" {
+			fmt.Fprint(os.Stdout, rendered) //nolint:errcheck
+		} else {
+			fmt.Fprintln(os.Stdout, contentBuf.String()) //nolint:errcheck
+		}
+	} else if hadContent {
 		fmt.Fprintln(os.Stdout) //nolint:errcheck
 	}
 	return 0

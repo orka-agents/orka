@@ -60,9 +60,11 @@ func NewCodeExecTool() *CodeExecTool {
 	}
 }
 
+const codeExecToolName = "code_exec"
+
 // Name returns the tool name
 func (t *CodeExecTool) Name() string {
-	return "code_exec"
+	return codeExecToolName
 }
 
 // Description returns the tool description

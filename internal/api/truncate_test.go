@@ -45,7 +45,7 @@ func TestTruncateMessages_DropsMiddleKeepsFirstAndRecent(t *testing.T) {
 	if result[0].Content != "original request" {
 		t.Errorf("first message should be preserved, got %q", result[0].Content)
 	}
-	if result[1].Role != "system" {
+	if result[1].Role != "system" { //nolint:goconst // test string, not worth a constant
 		t.Errorf("second message should be truncation note, got role %q", result[1].Role)
 	}
 	last := result[len(result)-1]
