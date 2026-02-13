@@ -8,6 +8,11 @@ import (
 // ErrNotFound is returned when a requested resource does not exist.
 var ErrNotFound = errors.New("not found")
 
+// HealthChecker can verify its underlying storage is reachable.
+type HealthChecker interface {
+	HealthCheck(ctx context.Context) error
+}
+
 // ResultStore handles task result persistence.
 type ResultStore interface {
 	SaveResult(ctx context.Context, namespace, taskName string, data []byte) error

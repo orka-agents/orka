@@ -54,7 +54,6 @@ type TaskReconciler struct {
 	JobBuilder      *JobBuilder
 	SessionManager  *SessionManager
 	WebhookNotifier *WebhookNotifier
-	PriorityQueue   *PriorityQueue
 	Recorder        record.EventRecorder
 	KubeClient      kubernetes.Interface
 	ResultStore     store.ResultStore

@@ -237,8 +237,6 @@ func main() {
 	jobBuilder.ClaudeWorkerImage = claudeWorkerImage
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.ControllerURL = controllerURL
-	priorityQueue := controller.NewPriorityQueue()
-
 	// Setup Task controller with helper components
 	if err := (&controller.TaskReconciler{
 		Client:          mgr.GetClient(),
@@ -246,7 +244,6 @@ func main() {
 		JobBuilder:      jobBuilder,
 		SessionManager:  sessionManager,
 		WebhookNotifier: webhookNotifier,
-		PriorityQueue:   priorityQueue,
 		KubeClient:      kubeClient,
 		ResultStore:     sqliteStore,
 		SessionStore:    sqliteStore,
@@ -296,6 +293,7 @@ func main() {
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 		ResultStore:               sqliteStore,
 		SessionStore:              sqliteStore,
+		HealthChecker:             sqliteStore,
 		Clientset:                 kubeClient,
 		Chat: api.ChatConfig{
 			Enabled:         chatEnabled,

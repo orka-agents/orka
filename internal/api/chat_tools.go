@@ -8,7 +8,6 @@ package api
 
 import (
 	"encoding/json"
-	"strings"
 
 	"github.com/sozercan/mercan/internal/llm"
 )
@@ -302,33 +301,4 @@ func ManagementTools() []llm.Tool {
 			}),
 		},
 	}
-}
-
-// ShouldLoadManagementTools checks if the user message contains intent signals
-// for management operations (create/update/delete agents, tools, or sessions).
-func ShouldLoadManagementTools(message string) bool {
-	lower := strings.ToLower(message)
-	signals := []string{
-		"create an agent",
-		"create agent",
-		"delete agent",
-		"delete the agent",
-		"delete the tool",
-		"delete tool",
-		"update agent",
-		"remove agent",
-		"remove tool",
-		"new agent",
-		"make a tool",
-		"delete session",
-		"create tool",
-		"bootstrap agent",
-		"self-assembl",
-	}
-	for _, s := range signals {
-		if strings.Contains(lower, s) {
-			return true
-		}
-	}
-	return false
 }

@@ -42,7 +42,6 @@ func newReconciler() *TaskReconciler {
 		JobBuilder:      NewJobBuilder(k8sClient),
 		SessionManager:  NewSessionManager(ss),
 		WebhookNotifier: NewWebhookNotifier(),
-		PriorityQueue:   NewPriorityQueue(),
 		Recorder:        record.NewFakeRecorder(100),
 		ResultStore:     ss,
 		SessionStore:    ss,

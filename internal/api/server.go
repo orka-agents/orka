@@ -35,6 +35,7 @@ type ServerConfig struct {
 	Chat                      ChatConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
+	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
 }
 
@@ -68,7 +69,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		SessionStore:   config.SessionStore,
 	}
 
-	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace, config.EnforceNamespaceIsolation, config.ResultStore, config.SessionStore, config.Clientset)
+	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace, config.EnforceNamespaceIsolation, config.ResultStore, config.SessionStore, config.Clientset, config.HealthChecker)
 	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore)
 	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat)
 	server.setupMiddleware()

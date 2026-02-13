@@ -212,11 +212,10 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		Content: req.Message,
 	})
 
-	// Build tools
+	// Build tools — always include management tools so the LLM can
+	// handle agent/tool/session operations regardless of phrasing.
 	tools := CoreTools()
-	if ShouldLoadManagementTools(req.Message) {
-		tools = append(tools, ManagementTools()...)
-	}
+	tools = append(tools, ManagementTools()...)
 
 	// Create tool executor
 	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout, ch.resultStore)

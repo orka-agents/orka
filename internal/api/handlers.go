@@ -55,10 +55,11 @@ type Handlers struct {
 	enforceNamespaceIsolation bool
 	resultStore               store.ResultStore
 	sessionStore              store.SessionStore
+	healthChecker             store.HealthChecker
 }
 
 // NewHandlers creates a new Handlers instance
-func NewHandlers(c client.Client, sessionManager *controller.SessionManager, watchNamespace string, enforceNS bool, rs store.ResultStore, ss store.SessionStore, clientset kubernetes.Interface) *Handlers {
+func NewHandlers(c client.Client, sessionManager *controller.SessionManager, watchNamespace string, enforceNS bool, rs store.ResultStore, ss store.SessionStore, clientset kubernetes.Interface, hc store.HealthChecker) *Handlers {
 	return &Handlers{
 		client:                    c,
 		clientset:                 clientset,
@@ -67,6 +68,7 @@ func NewHandlers(c client.Client, sessionManager *controller.SessionManager, wat
 		enforceNamespaceIsolation: enforceNS,
 		resultStore:               rs,
 		sessionStore:              ss,
+		healthChecker:             hc,
 	}
 }
 
@@ -161,8 +163,40 @@ func (h *Handlers) Healthz(c fiber.Ctx) error {
 
 // Readyz handles readiness check requests
 func (h *Handlers) Readyz(c fiber.Ctx) error {
-	// Could add more sophisticated checks here
-	return c.JSON(fiber.Map{"status": "ok"})
+	ctx, cancel := context.WithTimeout(c.Context(), 2*time.Second)
+	defer cancel()
+
+	checks := fiber.Map{}
+
+	// Verify database connectivity
+	if h.healthChecker != nil {
+		if err := h.healthChecker.HealthCheck(ctx); err != nil {
+			checks["store"] = "unhealthy"
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"status": "not ready",
+				"checks": checks,
+			})
+		}
+		checks["store"] = "ok"
+	}
+
+	// Verify Kubernetes API connectivity
+	if h.client != nil {
+		var ns corev1.NamespaceList
+		if err := h.client.List(ctx, &ns, client.Limit(1)); err != nil {
+			checks["kubernetes"] = "unhealthy"
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"status": "not ready",
+				"checks": checks,
+			})
+		}
+		checks["kubernetes"] = "ok"
+	}
+
+	return c.JSON(fiber.Map{
+		"status": "ok",
+		"checks": checks,
+	})
 }
 
 // CreateTask creates a new task

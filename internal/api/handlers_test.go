@@ -36,7 +36,7 @@ func setupTestHandlers() (*Handlers, *fiber.App) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	handlers := NewHandlers(fakeClient, nil, "", false, ss, ss, nil)
+	handlers := NewHandlers(fakeClient, nil, "", false, ss, ss, nil, nil)
 
 	app := fiber.New()
 	return handlers, app
@@ -50,7 +50,7 @@ func setupTestHandlersWithObjects(objs ...runtime.Object) (*Handlers, *fiber.App
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	handlers := NewHandlers(fakeClient, nil, "", false, ss, ss, nil)
+	handlers := NewHandlers(fakeClient, nil, "", false, ss, ss, nil, nil)
 
 	app := fiber.New()
 	return handlers, app
@@ -184,7 +184,7 @@ func TestHandlers_CreateTask_NamespaceScoped(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	handlers := NewHandlers(fakeClient, nil, "allowed-ns", false, nil, nil, nil)
+	handlers := NewHandlers(fakeClient, nil, "allowed-ns", false, nil, nil, nil, nil)
 
 	app := fiber.New()
 	app.Post("/tasks", handlers.CreateTask)
@@ -713,7 +713,7 @@ func TestNewHandlers(t *testing.T) {
 	scheme := runtime.NewScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	handlers := NewHandlers(fakeClient, nil, "test-ns", false, nil, nil, nil)
+	handlers := NewHandlers(fakeClient, nil, "test-ns", false, nil, nil, nil, nil)
 	if handlers == nil {
 		t.Fatal("NewHandlers returned nil")
 	}
@@ -731,7 +731,7 @@ func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *sqlite.Store
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(fakeClient, sm, "", false, ss, ss, nil)
+	handlers := NewHandlers(fakeClient, sm, "", false, ss, ss, nil, nil)
 
 	app := fiber.New()
 	return handlers, app, ss
@@ -818,7 +818,7 @@ func TestHandlers_ListSessions_WatchNamespace(t *testing.T) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(fakeClient, sm, "watched-ns", false, ss, ss, nil)
+	handlers := NewHandlers(fakeClient, sm, "watched-ns", false, ss, ss, nil, nil)
 
 	app := fiber.New()
 	app.Get("/sessions", handlers.ListSessions)
@@ -895,7 +895,7 @@ func TestHandlers_GetSession_WatchNamespace(t *testing.T) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(fakeClient, sm, "watched-ns", false, ss, ss, nil)
+	handlers := NewHandlers(fakeClient, sm, "watched-ns", false, ss, ss, nil, nil)
 
 	ctx := context.Background()
 	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
@@ -968,7 +968,7 @@ func TestHandlers_DeleteSession_WatchNamespace(t *testing.T) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(fakeClient, sm, "watched-ns", false, ss, ss, nil)
+	handlers := NewHandlers(fakeClient, sm, "watched-ns", false, ss, ss, nil, nil)
 
 	ctx := context.Background()
 	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
@@ -1026,7 +1026,7 @@ func TestHandlers_GetTaskLogs_WatchNamespace(t *testing.T) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
-	handlers := NewHandlers(fakeClient, nil, "watched-ns", false, nil, nil, nil)
+	handlers := NewHandlers(fakeClient, nil, "watched-ns", false, nil, nil, nil, nil)
 
 	app := fiber.New()
 	app.Get("/tasks/:id/logs", handlers.GetTaskLogs)
@@ -1153,7 +1153,7 @@ func TestHandlers_GetTaskResult_WatchNamespace(t *testing.T) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	ss.SaveResult(context.Background(), "watched-ns", "test-task", []byte("task result content")) //nolint:errcheck
-	handlers := NewHandlers(fakeClient, nil, "watched-ns", false, ss, ss, nil)
+	handlers := NewHandlers(fakeClient, nil, "watched-ns", false, ss, ss, nil, nil)
 
 	app := fiber.New()
 	app.Get("/tasks/:id/result", handlers.GetTaskResult)
@@ -1186,7 +1186,7 @@ func TestHandlers_DeleteTask_WatchNamespace(t *testing.T) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
-	handlers := NewHandlers(fakeClient, nil, "watched-ns", false, nil, nil, nil)
+	handlers := NewHandlers(fakeClient, nil, "watched-ns", false, nil, nil, nil, nil)
 
 	app := fiber.New()
 	app.Delete("/tasks/:id", handlers.DeleteTask)
