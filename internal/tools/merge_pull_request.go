@@ -115,7 +115,7 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 	}
 
 	if args.MergeMethod == "" {
-		args.MergeMethod = "squash"
+		args.MergeMethod = defaultMergeMethod
 	}
 
 	// Determine namespace from environment

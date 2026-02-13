@@ -52,7 +52,9 @@ make deploy IMG=<registry>/mercan:tag
 
 ### Core Components
 
-- **Controller** (`cmd/controller/`): Main entrypoint with `--watch-namespace`, `--copilot-worker-image`, `--claude-worker-image`, `--store-backend`, and `--store-path` flags
+- **Controller** (`cmd/main.go`): Main entrypoint with `--watch-namespace`, `--copilot-worker-image`, `--claude-worker-image`, `--ai-worker-image`, `--store-backend`, `--store-path`, `--controller-url`, and `--enforce-namespace-isolation` flags
+- **CLI** (`cmd/cli/`): Command-line tool with `login`, `chat`, `agent`, `task`, and `status` commands
+- **Migrate** (`cmd/migrate/`): Database migration tool for moving data from ConfigMaps to SQLite
 - **API Server** (`internal/api/`): REST API using Fiber framework with ServiceAccount token auth
 - **Chat Endpoint** (`internal/api/chat.go`): Agentic chat with SSE streaming, tool execution loop, session persistence
 - **Task Reconciler** (`internal/controller/`): Watches Task CRDs, creates Jobs, manages lifecycle
@@ -89,23 +91,25 @@ make deploy IMG=<registry>/mercan:tag
 - Iterative coordination: `delegate_task` supports `prior_task`, `feedback`, and `pushBranch` params; workers apply prior diffs via `PrepareWorkspace()` and produce structured results via `FinalizeResult()`
 - Auto-push: When `pushBranch` is set on workspace config, `FinalizeResult` commits and pushes changes to that branch automatically
 - PR creation: `create_pull_request` coordination tool creates GitHub PRs from pushed branches using git credentials from task workspace config
-- PR management: `merge_pull_request` merges PRs after CI checks pass; `review_pull_request` fetches PR diffs for analysis; `post_review_comment` posts reviews with verdicts and line-level comments
+- PR management: `merge_pull_request` merges PRs after CI checks pass (instant); `auto_merge_pull_request` polls CI and auto-merges when green (blocking with timeout); `review_pull_request` fetches PR diffs for analysis; `post_review_comment` posts reviews with verdicts and line-level comments
 - Self-healing coordination: `delegate_task` supports `auto_retry` and `max_retries` params; `wait_for_tasks` automatically re-creates failed child tasks with error context prepended to original prompt; retry config stored as annotations (`mercan.ai/auto-retry`, `mercan.ai/max-retries`, `mercan.ai/retry-count`)
 
 ### Multi-Agent Coordination
 
 - **Coordination tools** (`internal/tools/delegate_task.go`, `internal/tools/wait_for_tasks.go`): LLM tools that create child Tasks and poll for results
-- **PR workflow tools** (`internal/tools/create_pull_request.go`, `internal/tools/merge_pull_request.go`, `internal/tools/review_pull_request.go`, `internal/tools/post_review_comment.go`): GitHub PR creation, merging, review fetching, and review posting
+- **PR workflow tools** (`internal/tools/create_pull_request.go`, `internal/tools/merge_pull_request.go`, `internal/tools/auto_merge_pull_request.go`, `internal/tools/review_pull_request.go`, `internal/tools/post_review_comment.go`): GitHub PR creation, merging (instant and polling), review fetching, and review posting
+- **Agent management tools** (`internal/tools/create_agent.go`, `internal/tools/delete_agent.go`): Dynamic Agent CRD creation and deletion at runtime
 - **Controller enforcement** (`internal/controller/task_controller.go`): Validates `maxDepth`, `allowedAgents`, `maxConcurrentChildren` in `handlePending`; populates `status.childTasks` in `handleRunning`
 - **Job builder** (`internal/controller/job_builder.go`): Injects `MERCAN_COORDINATION_*` env vars and auto-adds coordination tools when `agent.Spec.Coordination.Enabled`
 - **AI worker** (`workers/ai/main.go`): Registers coordination tools via `tools.RegisterCoordinationTools()` when `MERCAN_COORDINATION_ENABLED=true`; increases `maxIterations` to 50
-- **RBAC** (`config/rbac/worker_role.yaml`): Workers have Task `create/get/list/watch` for coordination
+- **RBAC** (`config/rbac/worker_role.yaml`): Workers have Task `create/get/list/watch` and Agent `get/create/update/delete` for coordination
 - Child tasks use labels (`mercan.ai/parent-task`, `mercan.ai/delegated-agent`) and annotations (`mercan.ai/coordination-depth`) for tracking
 - Owner references enable cascade deletion of child tasks
 - **Iterative workflows**: `prior_task` param in `delegate_task` sets `PriorTaskRef` on child tasks; job builder injects `MERCAN_PRIOR_TASK`/`MERCAN_PRIOR_TASK_NAMESPACE` env vars; workers apply prior diffs before starting
 - **Auto-push**: `PushBranch` field on `WorkspaceConfig` → `MERCAN_PUSH_BRANCH` env var → `FinalizeResult` commits and pushes to that branch
 - **PR creation tool** (`internal/tools/create_pull_request.go`): Reads git secret from child task's workspace config, creates PR via GitHub REST API
 - **PR merge tool** (`internal/tools/merge_pull_request.go`): Verifies CI checks pass, then merges PR via GitHub REST API
+- **PR auto-merge tool** (`internal/tools/auto_merge_pull_request.go`): Polls CI checks every 30s and auto-merges when green; handles force-pushes, external closures, and transient API errors
 - **PR review tool** (`internal/tools/review_pull_request.go`): Fetches PR diff, file changes, and metadata for code review
 - **PR comment tool** (`internal/tools/post_review_comment.go`): Posts review with verdict (APPROVE/REQUEST_CHANGES/COMMENT) and line-level comments
 - **Structured results** (`workers/common/result.go`): `StructuredResult` envelope with summary, diff, verdict, feedback, files, pushBranch; `wait_for_tasks` strips diffs from coordinator context
@@ -156,30 +160,36 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments — the CLI injects code at 
 ## API Endpoints
 
 ```
-POST   /api/v1/tasks           Create task
-GET    /api/v1/tasks           List tasks (?namespace=, ?limit=, ?continue=)
-GET    /api/v1/tasks/{id}      Get task details
-DELETE /api/v1/tasks/{id}      Cancel/delete task
-GET    /api/v1/tasks/{id}/logs Stream logs
+POST   /api/v1/tasks              Create task
+GET    /api/v1/tasks              List tasks (?namespace=, ?limit=, ?continue=)
+GET    /api/v1/tasks/{id}         Get task details
+DELETE /api/v1/tasks/{id}         Cancel/delete task
+GET    /api/v1/tasks/{id}/logs    Stream logs
 GET    /api/v1/tasks/{id}/result  Get result from SQLite store
-GET    /api/v1/sessions        List sessions
-GET    /api/v1/sessions/{id}   Get session transcript
-DELETE /api/v1/sessions/{id}   Delete session
-GET    /api/v1/tools           List tools
-GET    /api/v1/tools/{name}    Get tool details
-POST   /api/v1/agents          Create agent
-GET    /api/v1/agents          List agents
-GET    /api/v1/agents/{name}   Get agent details
-PUT    /api/v1/agents/{name}   Update agent
-DELETE /api/v1/agents/{name}   Delete agent
-GET    /api/v1/secrets         List secret names (metadata only)
-POST   /api/v1/chat            Chat with SSE streaming (if enabled)
-GET    /api/v1/chat/config     Get chat configuration
-DELETE /api/v1/chat/{sessionId} Cancel chat session
-GET    /healthz                Health check
-GET    /readyz                 Readiness check
-POST   /v1/chat/completions   OpenAI-compatible chat completions (streaming & non-streaming)
-GET    /v1/models             OpenAI-compatible model listing
+GET    /api/v1/tasks/{id}/children Get child tasks
+GET    /api/v1/sessions           List sessions
+GET    /api/v1/sessions/{id}      Get session transcript
+DELETE /api/v1/sessions/{id}      Delete session
+GET    /api/v1/tools              List tools
+GET    /api/v1/tools/{name}       Get tool details
+POST   /api/v1/agents             Create agent
+GET    /api/v1/agents             List agents
+GET    /api/v1/agents/{name}      Get agent details
+PUT    /api/v1/agents/{name}      Update agent
+DELETE /api/v1/agents/{name}      Delete agent
+GET    /api/v1/auth/validate      Validate auth token
+GET    /api/v1/secrets            List secret names (metadata only)
+POST   /api/v1/chat               Chat with SSE streaming (if enabled)
+GET    /api/v1/chat/config        Get chat configuration
+DELETE /api/v1/chat/{sessionId}   Cancel chat session
+GET    /healthz                   Health check
+GET    /readyz                    Readiness check
+POST   /v1/chat/completions      OpenAI-compatible chat completions (streaming & non-streaming)
+GET    /v1/models                OpenAI-compatible model listing
+
+Internal endpoints (worker communication):
+POST   /internal/v1/results/{namespace}/{taskName}              Submit task result
+GET    /internal/v1/sessions/{namespace}/{name}/transcript      Get session transcript
 ```
 
 ## Verification
@@ -213,7 +223,14 @@ All worker pods run with: non-root (uid 1000), read-only rootfs, all capabilitie
 See @docs/ for detailed documentation:
 - @docs/architecture.md — System design and components
 - @docs/agent-runtimes.md — Claude Code CLI and Copilot CLI runtime configuration
+- @docs/api-reference.md — REST API endpoint reference
 - @docs/chat.md — Chat endpoint, tools, SSE streaming
+- @docs/cicd-integration.md — CI/CD integration patterns
+- @docs/configuration.md — CRD configuration reference
+- @docs/development.md — Build, test, and development setup
+- @docs/getting-started.md — Installation and quick start
 - @docs/multi-agent-coordination.md — Coordinator agents, delegation tools, controller enforcement
-- @docs/ui.md — Web dashboard architecture
+- @docs/openai-compat.md — OpenAI-compatible API proxy
+- @docs/security.md — Security model and hardening
 - @docs/testing.md — Test structure and patterns
+- @docs/ui.md — Web dashboard architecture

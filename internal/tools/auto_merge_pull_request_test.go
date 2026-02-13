@@ -1,0 +1,849 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+)
+
+const prStateOpen = "open"
+
+func TestAutoMergePullRequestTool_Metadata(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tool := NewAutoMergePullRequestTool(k8sClient)
+
+	if tool.Name() != "auto_merge_pull_request" {
+		t.Errorf("unexpected name: %s", tool.Name())
+	}
+	if tool.Description() == "" {
+		t.Error("description should not be empty")
+	}
+	if !strings.Contains(tool.Description(), "Poll GitHub CI checks") {
+		t.Errorf("unexpected description: %s", tool.Description())
+	}
+	params := tool.Parameters()
+	if len(params) == 0 {
+		t.Error("parameters should not be empty")
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(params, &schema); err != nil {
+		t.Fatalf("failed to parse parameters: %v", err)
+	}
+	props := schema["properties"].(map[string]any)
+	for _, field := range []string{"task_name", "pr_number", "merge_method", "commit_title", "commit_message", "timeout"} {
+		if _, ok := props[field]; !ok {
+			t.Errorf("parameters should contain %s", field)
+		}
+	}
+}
+
+func TestAutoMergePullRequestTool_CIPassesImmediately(t *testing.T) {
+	var mergeCalled atomic.Bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != testBearerToken {
+			t.Errorf("unexpected auth header: %s", auth)
+		}
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"total_count":2,"check_runs":[{"name":"build","status":"completed","conclusion":"success"},{"name":"lint","status":"completed","conclusion":"success"}]}`)
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/pulls/42/merge"):
+			mergeCalled.Store(true)
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"sha":"merged456","merged":true,"message":"Pull Request successfully merged"}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/sozercan/ayna",
+					Branch:       "main",
+					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data:       map[string][]byte{"token": []byte("test-token")},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(AutoMergePullRequestArgs{
+		TaskName: "coder-task",
+		PRNumber: 42,
+		Timeout:  "1s",
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var res AutoMergePullRequestResult
+	if err := json.Unmarshal([]byte(result), &res); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !res.Merged {
+		t.Error("expected merged to be true")
+	}
+	if !res.ChecksPassed {
+		t.Error("expected checks_passed to be true")
+	}
+	if res.SHA != "merged456" {
+		t.Errorf("unexpected SHA: %s", res.SHA)
+	}
+	if res.Outcome != "merged" {
+		t.Errorf("unexpected outcome: %s", res.Outcome)
+	}
+	if !mergeCalled.Load() {
+		t.Error("expected merge API to be called")
+	}
+}
+
+func TestAutoMergePullRequestTool_CIFails(t *testing.T) {
+	var mergeCalled atomic.Bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"total_count":2,"check_runs":[{"name":"build","status":"completed","conclusion":"success"},{"name":"lint","status":"completed","conclusion":"failure"}]}`)
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/merge"):
+			mergeCalled.Store(true)
+			w.WriteHeader(200)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/sozercan/ayna",
+					Branch:       "main",
+					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data:       map[string][]byte{"token": []byte("test-token")},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(AutoMergePullRequestArgs{
+		TaskName: "coder-task",
+		PRNumber: 42,
+		Timeout:  "1s",
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var res AutoMergePullRequestResult
+	if err := json.Unmarshal([]byte(result), &res); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if res.Merged {
+		t.Error("expected merged to be false")
+	}
+	if res.Outcome != "ci_failed" {
+		t.Errorf("unexpected outcome: %s", res.Outcome)
+	}
+	if !strings.Contains(res.ChecksDetails, "lint") {
+		t.Errorf("expected checks_details to mention 'lint', got: %s", res.ChecksDetails)
+	}
+	if mergeCalled.Load() {
+		t.Error("merge API should not have been called when CI fails")
+	}
+}
+
+func TestAutoMergePullRequestTool_Timeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"name":"build","status":"in_progress","conclusion":""}]}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/sozercan/ayna",
+					Branch:       "main",
+					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data:       map[string][]byte{"token": []byte("test-token")},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(AutoMergePullRequestArgs{
+		TaskName: "coder-task",
+		PRNumber: 42,
+		Timeout:  "1s",
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var res AutoMergePullRequestResult
+	if err := json.Unmarshal([]byte(result), &res); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if res.Outcome != "timeout" {
+		t.Errorf("expected outcome 'timeout', got: %s", res.Outcome)
+	}
+}
+
+func TestAutoMergePullRequestTool_ContextCancelled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"name":"build","status":"in_progress","conclusion":""}]}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/sozercan/ayna",
+					Branch:       "main",
+					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data:       map[string][]byte{"token": []byte("test-token")},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	args, _ := json.Marshal(AutoMergePullRequestArgs{
+		TaskName: "coder-task",
+		PRNumber: 42,
+		Timeout:  "2m",
+	})
+
+	result, err := tool.Execute(ctx, args)
+	// The first iteration runs immediately with a cancelled context.
+	// Depending on timing, either the HTTP call fails or we get a timeout/cancelled outcome.
+	if err != nil {
+		// Error is acceptable when context is cancelled during HTTP calls
+		return
+	}
+
+	var res AutoMergePullRequestResult
+	if err := json.Unmarshal([]byte(result), &res); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if res.Outcome != "timeout" {
+		t.Errorf("expected outcome 'timeout', got: %s", res.Outcome)
+	}
+}
+
+func TestAutoMergePullRequestTool_MergeMethods(t *testing.T) {
+	for _, method := range []string{"merge", "rebase"} {
+		t.Run(method, func(t *testing.T) {
+			var capturedMethod string
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/10"):
+					w.WriteHeader(200)
+					_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
+					w.WriteHeader(200)
+					_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}`)
+				case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/pulls/10/merge"):
+					var body map[string]any
+					_ = json.NewDecoder(r.Body).Decode(&body)
+					if mm, ok := body["merge_method"].(string); ok {
+						capturedMethod = mm
+					}
+					w.WriteHeader(200)
+					_, _ = fmt.Fprintf(w, `{"sha":"merged123","merged":true,"message":"merged"}`)
+				default:
+					w.WriteHeader(404)
+				}
+			}))
+			defer server.Close()
+
+			scheme := runtime.NewScheme()
+			_ = corev1alpha1.AddToScheme(scheme)
+			_ = corev1.AddToScheme(scheme)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAgent,
+					AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+						Workspace: &corev1alpha1.WorkspaceConfig{
+							GitRepo:      "https://github.com/sozercan/ayna",
+							Branch:       "main",
+							GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+						},
+					},
+				},
+			}
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+				Data:       map[string][]byte{"token": []byte("test-token")},
+			}
+
+			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+			tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
+
+			t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+			args, _ := json.Marshal(AutoMergePullRequestArgs{
+				TaskName:    "coder-task",
+				PRNumber:    10,
+				MergeMethod: method,
+				Timeout:     "1s",
+			})
+
+			result, err := tool.Execute(context.Background(), args)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if capturedMethod != method {
+				t.Errorf("expected merge_method %q, got %q", method, capturedMethod)
+			}
+
+			var res AutoMergePullRequestResult
+			if err := json.Unmarshal([]byte(result), &res); err != nil {
+				t.Fatalf("failed to parse result: %v", err)
+			}
+			if !res.Merged {
+				t.Error("expected merged to be true")
+			}
+		})
+	}
+}
+
+func TestAutoMergePullRequestTool_PRClosedExternally(t *testing.T) {
+	var mergeCalled atomic.Bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"closed","merged":false}`)
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/merge"):
+			mergeCalled.Store(true)
+			w.WriteHeader(200)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/sozercan/ayna",
+					Branch:       "main",
+					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data:       map[string][]byte{"token": []byte("test-token")},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(AutoMergePullRequestArgs{
+		TaskName: "coder-task",
+		PRNumber: 42,
+		Timeout:  "1s",
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var res AutoMergePullRequestResult
+	if err := json.Unmarshal([]byte(result), &res); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if res.Merged {
+		t.Error("expected merged to be false")
+	}
+	if res.Outcome != "closed" {
+		t.Errorf("unexpected outcome: %s", res.Outcome)
+	}
+	if mergeCalled.Load() {
+		t.Error("merge API should not have been called for closed PR")
+	}
+}
+
+func TestAutoMergePullRequestTool_PRAlreadyMerged(t *testing.T) {
+	var mergeCalled atomic.Bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"closed","merged":true}`)
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/merge"):
+			mergeCalled.Store(true)
+			w.WriteHeader(200)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/sozercan/ayna",
+					Branch:       "main",
+					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data:       map[string][]byte{"token": []byte("test-token")},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(AutoMergePullRequestArgs{
+		TaskName: "coder-task",
+		PRNumber: 42,
+		Timeout:  "1s",
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var res AutoMergePullRequestResult
+	if err := json.Unmarshal([]byte(result), &res); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !res.Merged {
+		t.Error("expected merged to be true")
+	}
+	if res.Outcome != "already_merged" {
+		t.Errorf("unexpected outcome: %s", res.Outcome)
+	}
+	if mergeCalled.Load() {
+		t.Error("merge API should not have been called for already-merged PR")
+	}
+}
+
+func TestAutoMergePullRequestTool_InvalidArgs(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tool := NewAutoMergePullRequestTool(k8sClient)
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	args := json.RawMessage(`{"bad": true}`)
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for invalid args")
+	}
+	if got := err.Error(); !strings.Contains(got, "task_name and pr_number are required") {
+		t.Errorf("unexpected error: %s", got)
+	}
+}
+
+func TestAutoMergePullRequestTool_MissingTask(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tool := NewAutoMergePullRequestTool(k8sClient)
+
+	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(AutoMergePullRequestArgs{
+		TaskName: "nonexistent",
+		PRNumber: 42,
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for missing task")
+	}
+	if got := err.Error(); !strings.Contains(got, "failed to get task") {
+		t.Errorf("unexpected error: %s", got)
+	}
+}
+
+// --- Helper function unit tests ---
+
+func TestGetGitHubPRDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != testBearerToken {
+			t.Errorf("unexpected auth header: %s", auth)
+		}
+		if !strings.HasSuffix(r.URL.Path, "/repos/sozercan/ayna/pulls/42") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(200)
+		_, _ = fmt.Fprintf(w, `{"head":{"sha":"sha999"},"state":"open","merged":false}`)
+	}))
+	defer server.Close()
+
+	headSHA, state, merged, err := getGitHubPRDetails("test-token", "sozercan", "ayna", 42, server.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if headSHA != "sha999" {
+		t.Errorf("unexpected headSHA: %s", headSHA)
+	}
+	if state != prStateOpen {
+		t.Errorf("unexpected state: %s", state)
+	}
+	if merged {
+		t.Error("expected merged to be false")
+	}
+}
+
+func TestGetGitHubPRDetails_APIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = fmt.Fprintf(w, `{"message":"internal server error"}`)
+	}))
+	defer server.Close()
+
+	_, _, _, err := getGitHubPRDetails("test-token", "sozercan", "ayna", 42, server.URL)
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+	apiErr, ok := err.(*githubAPIError) //nolint:errorlint
+	if !ok {
+		t.Fatalf("expected githubAPIError, got %T", err)
+	}
+	if apiErr.StatusCode != 500 {
+		t.Errorf("unexpected status code: %d", apiErr.StatusCode)
+	}
+}
+
+func TestCheckCIStatusDetailed_AllPassed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+		_, _ = fmt.Fprintf(w, `{"total_count":3,"check_runs":[{"name":"build","status":"completed","conclusion":"success"},{"name":"lint","status":"completed","conclusion":"success"},{"name":"optional","status":"completed","conclusion":"neutral"}]}`)
+	}))
+	defer server.Close()
+
+	result, err := checkCIStatusDetailed("test-token", "sozercan", "ayna", "abc123", server.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Passed {
+		t.Error("expected Passed to be true")
+	}
+	if result.Failed {
+		t.Error("expected Failed to be false")
+	}
+	if result.Pending {
+		t.Error("expected Pending to be false")
+	}
+}
+
+func TestCheckCIStatusDetailed_SomePending(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+		_, _ = fmt.Fprintf(w, `{"total_count":2,"check_runs":[{"name":"build","status":"completed","conclusion":"success"},{"name":"deploy","status":"in_progress","conclusion":""}]}`)
+	}))
+	defer server.Close()
+
+	result, err := checkCIStatusDetailed("test-token", "sozercan", "ayna", "abc123", server.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Passed {
+		t.Error("expected Passed to be false")
+	}
+	if result.Failed {
+		t.Error("expected Failed to be false")
+	}
+	if !result.Pending {
+		t.Error("expected Pending to be true")
+	}
+	if !strings.Contains(result.Details, "deploy") {
+		t.Errorf("expected details to mention 'deploy', got: %s", result.Details)
+	}
+}
+
+func TestCheckCIStatusDetailed_SomeFailed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+		_, _ = fmt.Fprintf(w, `{"total_count":2,"check_runs":[{"name":"build","status":"completed","conclusion":"success"},{"name":"e2e","status":"completed","conclusion":"failure"}]}`)
+	}))
+	defer server.Close()
+
+	result, err := checkCIStatusDetailed("test-token", "sozercan", "ayna", "abc123", server.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Passed {
+		t.Error("expected Passed to be false")
+	}
+	if !result.Failed {
+		t.Error("expected Failed to be true")
+	}
+	if result.Pending {
+		t.Error("expected Pending to be false")
+	}
+	if !strings.Contains(result.Details, "e2e") {
+		t.Errorf("expected details to mention 'e2e', got: %s", result.Details)
+	}
+}
+
+func TestIsTransientHTTPError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{"429 rate limit", &githubAPIError{StatusCode: 429, Body: "rate limit"}, true},
+		{"500 server error", &githubAPIError{StatusCode: 500, Body: "server error"}, true},
+		{"503 unavailable", &githubAPIError{StatusCode: 503, Body: "unavailable"}, true},
+		{"404 not found", &githubAPIError{StatusCode: 404, Body: "not found"}, false},
+		{"non-github error", fmt.Errorf("random error"), false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isTransientHTTPError(tc.err)
+			if got != tc.expected {
+				t.Errorf("isTransientHTTPError(%v) = %v, want %v", tc.err, got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestAutoMergePullRequestTool_ForcePushNewSHA(t *testing.T) {
+	// Test getGitHubPRDetails returns different SHAs on successive calls
+	var callCount atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/pulls/"):
+			n := callCount.Add(1)
+			if n == 1 {
+				w.WriteHeader(200)
+				_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+			} else {
+				w.WriteHeader(200)
+				_, _ = fmt.Fprintf(w, `{"head":{"sha":"def456"},"state":"open","merged":false}`)
+			}
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+
+	sha1, state1, merged1, err := getGitHubPRDetails("test-token", "sozercan", "ayna", 42, server.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sha1 != "abc123" {
+		t.Errorf("expected first SHA 'abc123', got: %s", sha1)
+	}
+	if state1 != prStateOpen {
+		t.Errorf("unexpected state: %s", state1)
+	}
+	if merged1 {
+		t.Error("expected merged to be false")
+	}
+
+	sha2, _, _, err := getGitHubPRDetails("test-token", "sozercan", "ayna", 42, server.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sha2 != "def456" {
+		t.Errorf("expected second SHA 'def456', got: %s", sha2)
+	}
+}
+
+func TestAutoMergePullRequestTool_Transient5xx(t *testing.T) {
+	// Test that getGitHubPRDetails returns a transient error on 500, and succeeds on retry
+	var callCount atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/pulls/") {
+			w.WriteHeader(404)
+			return
+		}
+		n := callCount.Add(1)
+		if n == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = fmt.Fprintf(w, `{"message":"server error"}`)
+		} else {
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+		}
+	}))
+	defer server.Close()
+
+	// First call: should return transient error
+	_, _, _, err := getGitHubPRDetails("test-token", "sozercan", "ayna", 42, server.URL)
+	if err == nil {
+		t.Fatal("expected error on first call")
+	}
+	if !isTransientHTTPError(err) {
+		t.Errorf("expected transient HTTP error, got: %v", err)
+	}
+
+	// Second call: should succeed
+	sha, state, merged, err := getGitHubPRDetails("test-token", "sozercan", "ayna", 42, server.URL)
+	if err != nil {
+		t.Fatalf("unexpected error on retry: %v", err)
+	}
+	if sha != "abc123" {
+		t.Errorf("unexpected SHA: %s", sha)
+	}
+	if state != prStateOpen {
+		t.Errorf("unexpected state: %s", state)
+	}
+	if merged {
+		t.Error("expected merged to be false")
+	}
+}

@@ -51,7 +51,7 @@ Controller: parent Job succeeded → parent Task → Succeeded
 
 ### Coordination Tools
 
-Located in `internal/tools/delegate_task.go` and `internal/tools/wait_for_tasks.go`. Registered via `RegisterCoordinationTools(k8sClient)` in `internal/tools/registry.go` when `MERCAN_COORDINATION_ENABLED=true`.
+Located in `internal/tools/`. Coordination tools include `delegate_task`, `wait_for_tasks`, PR tools (`create_pull_request`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`), and agent management tools (`create_agent`, `delete_agent`). All are registered via `RegisterCoordinationTools(k8sClient)` in `internal/tools/registry.go` when `MERCAN_COORDINATION_ENABLED=true`.
 
 #### `delegate_task` Tool
 
@@ -263,6 +263,9 @@ The worker ServiceAccount (`mercan-worker`) ClusterRole in `config/rbac/worker_r
 - apiGroups: ["core.mercan.ai"]
   resources: ["tasks"]
   verbs: ["get", "list", "watch", "create"]
+- apiGroups: ["core.mercan.ai"]
+  resources: ["agents"]
+  verbs: ["get", "create", "update", "delete"]
 ```
 
 ## Example YAML
@@ -382,10 +385,16 @@ status:
 | `internal/tools/create_pull_request_test.go` | Unit tests with fake K8s client |
 | `internal/tools/merge_pull_request.go` | merge_pull_request tool implementation |
 | `internal/tools/merge_pull_request_test.go` | Unit tests with fake K8s client |
+| `internal/tools/auto_merge_pull_request.go` | auto_merge_pull_request tool implementation |
+| `internal/tools/auto_merge_pull_request_test.go` | Unit tests with fake K8s client |
 | `internal/tools/review_pull_request.go` | review_pull_request tool implementation |
 | `internal/tools/review_pull_request_test.go` | Unit tests with fake K8s client |
 | `internal/tools/post_review_comment.go` | post_review_comment tool implementation |
 | `internal/tools/post_review_comment_test.go` | Unit tests with fake K8s client |
+| `internal/tools/create_agent.go` | create_agent tool implementation |
+| `internal/tools/create_agent_test.go` | Unit tests with fake K8s client |
+| `internal/tools/delete_agent.go` | delete_agent tool implementation |
+| `internal/tools/delete_agent_test.go` | Unit tests with fake K8s client |
 | `internal/tools/registry.go` | `RegisterCoordinationTools()` function |
 | `internal/controller/task_controller.go` | Coordination validation + ChildTaskStatus population |
 | `internal/controller/task_controller_test.go` | Tests for coordination enforcement |
@@ -500,7 +509,10 @@ COORDINATOR (AI worker)
   │     → posts review with verdict and optional line comments
   │
   ├── merge_pull_request(task_name="coder-task-xyz", pr_number=42)
-  │     → verifies CI checks pass, then merges the PR
+  │     → verifies CI checks pass, then merges the PR (instant, fails if CI not green)
+  │
+  ├── auto_merge_pull_request(task_name="coder-task-xyz", pr_number=42)
+  │     → polls CI checks every 30s and auto-merges when green (blocks up to timeout)
   │
   └── COMPLETE with merged PR
 ```
@@ -669,6 +681,37 @@ Returns:
 
 If CI checks have not passed, returns `{"merged": false, "checks_passed": false, "message": "CI checks have not all passed: ..."}` without failing.
 
+### auto_merge_pull_request Tool
+
+Polls GitHub CI checks and automatically merges a pull request when all checks pass. Unlike `merge_pull_request` which checks CI once and fails if not green, this tool blocks with a configurable timeout (default 30 minutes), polling every 30 seconds until CI passes, fails, or the PR is closed/merged externally. Resilient to transient GitHub API errors (429/5xx).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_name` | string | yes | Name of the child task whose workspace config has the repo and git credentials |
+| `pr_number` | integer | yes | GitHub pull request number to merge |
+| `merge_method` | string | no | Merge method: `merge`, `squash`, or `rebase` (defaults to `squash`) |
+| `commit_title` | string | no | Custom merge commit title |
+| `commit_message` | string | no | Custom merge commit message |
+| `timeout` | string | no | Maximum wait duration, e.g. `30m`, `1h` (defaults to `30m`) |
+
+Returns:
+```json
+{
+  "merged": true,
+  "checks_passed": true,
+  "sha": "abc123def456",
+  "message": "Pull request merged successfully",
+  "outcome": "merged"
+}
+```
+
+Possible `outcome` values:
+- `"merged"` — CI passed and PR was merged successfully
+- `"ci_failed"` — A CI check completed with failure; returns immediately with `checks_details`
+- `"closed"` — PR was closed externally during polling
+- `"already_merged"` — PR was already merged when checked
+- `"timeout"` — Timeout exceeded while CI checks were still pending
+
 ### Recommended Coordinator System Prompt
 
 ```
@@ -686,6 +729,7 @@ You are a coordinator agent. Follow this protocol:
    Call review_pull_request to fetch the PR diff for final review.
    Call post_review_comment to approve the PR.
    Call merge_pull_request to merge the PR after CI passes.
+   Or call auto_merge_pull_request to wait for CI and merge automatically.
 7. Report final result with the PR URL.
 ```
 

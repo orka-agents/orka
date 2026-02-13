@@ -22,6 +22,8 @@ const defaultNamespace = "default"
 
 const trueStr = "true"
 
+const defaultMergeMethod = "squash"
+
 // Tool is the interface for built-in tools
 type Tool interface {
 	// Name returns the tool name
@@ -119,6 +121,7 @@ func RegisterCoordinationTools(k8sClient client.Client) {
 	DefaultRegistry.Register(NewWaitForTasksTool(k8sClient))
 	DefaultRegistry.Register(NewCreatePullRequestTool(k8sClient))
 	DefaultRegistry.Register(NewMergePullRequestTool(k8sClient))
+	DefaultRegistry.Register(NewAutoMergePullRequestTool(k8sClient))
 	DefaultRegistry.Register(NewReviewPullRequestTool(k8sClient))
 	DefaultRegistry.Register(NewPostReviewCommentTool(k8sClient))
 	DefaultRegistry.Register(NewCreateAgentTool(k8sClient))
