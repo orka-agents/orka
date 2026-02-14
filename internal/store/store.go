@@ -39,3 +39,10 @@ type SessionStore interface {
 	// Token tracking
 	UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error
 }
+
+// PlanStore handles autonomous plan state persistence.
+type PlanStore interface {
+	SavePlan(ctx context.Context, namespace, taskName string, plan *PlanState) error
+	GetPlan(ctx context.Context, namespace, taskName string) (*PlanState, error)
+	DeletePlan(ctx context.Context, namespace, taskName string) error
+}

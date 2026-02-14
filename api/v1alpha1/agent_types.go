@@ -201,6 +201,17 @@ type CoordinationConfig struct {
 	// +kubebuilder:default=3
 	// +optional
 	MaxDepth int32 `json:"maxDepth,omitempty"`
+
+	// Autonomous enables autonomous loop mode for coordinator agents using this config.
+	// When enabled, the controller re-creates Jobs in a loop instead of marking the task as Succeeded.
+	// +optional
+	Autonomous bool `json:"autonomous,omitempty"`
+
+	// MaxIterations limits the number of autonomous loop iterations (0 = unlimited).
+	// Only used when Autonomous is true.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxIterations int32 `json:"maxIterations,omitempty"`
 }
 
 // AllowedAgent defines an agent that can be delegated to

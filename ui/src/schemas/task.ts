@@ -99,6 +99,7 @@ export const taskStatusSchema = z.object({
   startTime: z.string().optional(),
   completionTime: z.string().optional(),
   attempts: z.number().optional(),
+  iteration: z.number().optional(),
   jobName: z.string().optional(),
   resultRef: resultRefSchema.optional(),
   webhookDelivered: z.boolean().optional(),
@@ -129,3 +130,18 @@ export type TaskSpec = z.infer<typeof taskSpecSchema>
 export type TaskStatus = z.infer<typeof taskStatusSchema>
 export type TaskType = z.infer<typeof taskTypeSchema>
 export type TaskPhase = z.infer<typeof taskPhaseSchema>
+
+export const planStateSchema = z.object({
+  summary: z.string().optional(),
+  progressPct: z.number().optional(),
+  goalComplete: z.boolean().optional(),
+  planDocument: z.string().optional(),
+  iteration: z.number().optional(),
+})
+
+export const taskWithPlanSchema = taskSchema.extend({
+  plan: planStateSchema.optional(),
+})
+
+export type PlanState = z.infer<typeof planStateSchema>
+export type TaskWithPlan = z.infer<typeof taskWithPlanSchema>

@@ -73,6 +73,11 @@ spec:
                       - name
                       type: object
                     type: array
+                  autonomous:
+                    description: |-
+                      Autonomous enables autonomous loop mode for coordinator agents using this config.
+                      When enabled, the controller re-creates Jobs in a loop instead of marking the task as Succeeded.
+                    type: boolean
                   enabled:
                     default: false
                     description: Enabled indicates if coordination is enabled
@@ -90,6 +95,13 @@ spec:
                     format: int32
                     maximum: 10
                     minimum: 1
+                    type: integer
+                  maxIterations:
+                    description: |-
+                      MaxIterations limits the number of autonomous loop iterations (0 = unlimited).
+                      Only used when Autonomous is true.
+                    format: int32
+                    minimum: 0
                     type: integer
                 required:
                 - enabled

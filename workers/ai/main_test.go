@@ -8,8 +8,11 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
@@ -233,4 +236,90 @@ func TestBuildLLMTools_NotFound(t *testing.T) {
 	if len(llmTools) != 0 {
 		t.Errorf("Expected 0 tools, got %d", len(llmTools))
 	}
+}
+
+func TestLoadPlanContext(t *testing.T) {
+	t.Run("successful plan fetch", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/internal/v1/plans/default/test-task" {
+				t.Errorf("unexpected path: %s", r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Summary":      "Phase 1 complete",
+				"ProgressPct":  25,
+				"GoalComplete": false,
+				"PlanDocument": "# My Plan\n- Step 1 done",
+				"Iteration":    1,
+			})
+		}))
+		defer server.Close()
+
+		t.Setenv("MERCAN_CONTROLLER_URL", server.URL)
+		t.Setenv("MERCAN_TASK_NAME", "test-task")
+		t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+		result := loadPlanContext()
+		if result == "" {
+			t.Fatal("expected non-empty plan context")
+		}
+		if !strings.Contains(result, "Phase 1 complete") {
+			t.Errorf("result should contain summary, got: %s", result)
+		}
+		if !strings.Contains(result, "25%") {
+			t.Errorf("result should contain progress, got: %s", result)
+		}
+	})
+
+	t.Run("no plan (404)", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer server.Close()
+
+		t.Setenv("MERCAN_CONTROLLER_URL", server.URL)
+		t.Setenv("MERCAN_TASK_NAME", "test-task")
+		t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+
+		result := loadPlanContext()
+		if result != "" {
+			t.Errorf("expected empty result for 404, got: %s", result)
+		}
+	})
+
+	t.Run("missing env vars", func(t *testing.T) {
+		t.Setenv("MERCAN_CONTROLLER_URL", "")
+		t.Setenv("MERCAN_TASK_NAME", "")
+		t.Setenv("MERCAN_TASK_NAMESPACE", "")
+
+		result := loadPlanContext()
+		if result != "" {
+			t.Errorf("expected empty result for missing env vars, got: %s", result)
+		}
+	})
+}
+
+func TestAutonomousSystemPromptSuffix(t *testing.T) {
+	t.Run("with max iterations", func(t *testing.T) {
+		result := autonomousSystemPromptSuffix(3, 10)
+		if !strings.Contains(result, "iteration: 3") {
+			t.Errorf("should contain current iteration, got: %s", result)
+		}
+		if !strings.Contains(result, "of 10") {
+			t.Errorf("should contain max iterations, got: %s", result)
+		}
+		if !strings.Contains(result, "Autonomous Coordinator") {
+			t.Errorf("should contain autonomous instructions, got: %s", result)
+		}
+	})
+
+	t.Run("unlimited iterations", func(t *testing.T) {
+		result := autonomousSystemPromptSuffix(0, 0)
+		if !strings.Contains(result, "iteration: 0") {
+			t.Errorf("should contain current iteration, got: %s", result)
+		}
+		if strings.Contains(result, "of 0") {
+			t.Errorf("should not contain 'of 0' for unlimited, got: %s", result)
+		}
+	})
 }

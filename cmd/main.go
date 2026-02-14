@@ -247,6 +247,7 @@ func main() {
 		KubeClient:      kubeClient,
 		ResultStore:     sqliteStore,
 		SessionStore:    sqliteStore,
+		PlanStore:       sqliteStore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)
@@ -293,6 +294,7 @@ func main() {
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 		ResultStore:               sqliteStore,
 		SessionStore:              sqliteStore,
+		PlanStore:                 sqliteStore,
 		HealthChecker:             sqliteStore,
 		Clientset:                 kubeClient,
 		Chat: api.ChatConfig{

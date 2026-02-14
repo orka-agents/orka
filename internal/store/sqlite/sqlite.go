@@ -100,9 +100,22 @@ func migrate(db *sql.DB) error {
 			created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (namespace, session_name) REFERENCES sessions(namespace, name) ON DELETE CASCADE
 		)`,
+		`CREATE TABLE IF NOT EXISTS plan_states (
+			namespace     TEXT NOT NULL,
+			task_name     TEXT NOT NULL,
+			iteration     INTEGER NOT NULL DEFAULT 0,
+			summary       TEXT NOT NULL DEFAULT '',
+			progress_pct  INTEGER NOT NULL DEFAULT 0,
+			goal_complete BOOLEAN NOT NULL DEFAULT FALSE,
+			plan_document TEXT NOT NULL DEFAULT '',
+			created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (namespace, task_name)
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_session_messages_order ON session_messages(namespace, session_name, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_namespace ON sessions(namespace)`,
 		`CREATE INDEX IF NOT EXISTS idx_results_namespace ON results(namespace)`,
+		`CREATE INDEX IF NOT EXISTS idx_plan_states_namespace ON plan_states(namespace)`,
 	}
 
 	for _, stmt := range statements {

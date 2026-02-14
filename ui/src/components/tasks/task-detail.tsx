@@ -79,6 +79,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           <TabsTrigger value="execution">Execution</TabsTrigger>
           <TabsTrigger value="result">Result</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
+          {(task.status?.iteration ?? 0) > 0 && (
+            <TabsTrigger value="plan">Plan</TabsTrigger>
+          )}
           {(task.status?.childTasks?.length ?? 0) > 0 && (
             <TabsTrigger value="children">Children</TabsTrigger>
           )}
@@ -96,8 +99,43 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               {task.status?.startTime && <div><span className="text-muted-foreground">Started:</span> {timeAgo(task.status.startTime)}</div>}
               {task.status?.completionTime && <div><span className="text-muted-foreground">Completed:</span> {timeAgo(task.status.completionTime)}</div>}
               {task.status?.message && <div className="md:col-span-2"><span className="text-muted-foreground">Message:</span> {task.status.message}</div>}
+              {(task.status?.iteration ?? 0) > 0 && <div><span className="text-muted-foreground">Iteration:</span> {task.status?.iteration}</div>}
             </CardContent>
           </Card>
+
+          {(task.status?.iteration ?? 0) > 0 && !!(task as Record<string, unknown>).plan && (
+            <Card>
+              <CardHeader><CardTitle>Autonomous Plan</CardTitle></CardHeader>
+              <CardContent className="space-y-3 text-sm">
+                {(() => {
+                  const plan = (task as Record<string, unknown>).plan as { summary?: string; progressPct?: number; goalComplete?: boolean; planDocument?: string }
+                  return (
+                    <>
+                      {plan.summary && <div><span className="text-muted-foreground">Summary:</span> {plan.summary}</div>}
+                      {plan.progressPct !== undefined && (
+                        <div className="space-y-1">
+                          <div className="flex justify-between">
+                            <span className="text-muted-foreground">Progress:</span>
+                            <span>{plan.progressPct}%</span>
+                          </div>
+                          <div className="h-2 rounded-full bg-muted overflow-hidden">
+                            <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${plan.progressPct}%` }} />
+                          </div>
+                        </div>
+                      )}
+                      {plan.goalComplete && <Badge variant="default">Goal Complete</Badge>}
+                      {plan.planDocument && (
+                        <div>
+                          <span className="text-muted-foreground">Plan:</span>
+                          <pre className="mt-1 rounded-md bg-muted p-3 whitespace-pre-wrap max-h-96 overflow-y-auto">{plan.planDocument}</pre>
+                        </div>
+                      )}
+                    </>
+                  )
+                })()}
+              </CardContent>
+            </Card>
+          )}
 
           {task.spec.type === 'container' && (
             <Card>
@@ -170,6 +208,40 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         <TabsContent value="logs">
           <StructuredLogViewer taskId={taskId} taskPhase={task.status?.phase} />
         </TabsContent>
+
+        {(task.status?.iteration ?? 0) > 0 && (
+          <TabsContent value="plan">
+            <Card>
+              <CardHeader><CardTitle>Autonomous Plan</CardTitle></CardHeader>
+              <CardContent>
+                {(() => {
+                  const plan = (task as Record<string, unknown>).plan as { summary?: string; progressPct?: number; goalComplete?: boolean; planDocument?: string } | undefined
+                  if (!plan) return <p className="text-muted-foreground">No plan data available. Plan state is loaded when viewing task details.</p>
+                  return (
+                    <div className="space-y-3 text-sm">
+                      {plan.summary && <div><span className="font-medium">Summary:</span> {plan.summary}</div>}
+                      {plan.progressPct !== undefined && (
+                        <div className="space-y-1">
+                          <div className="flex justify-between">
+                            <span className="font-medium">Progress:</span>
+                            <span>{plan.progressPct}%</span>
+                          </div>
+                          <div className="h-2 rounded-full bg-muted overflow-hidden">
+                            <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${plan.progressPct}%` }} />
+                          </div>
+                        </div>
+                      )}
+                      {plan.goalComplete && <Badge variant="default">Goal Complete ✓</Badge>}
+                      {plan.planDocument && (
+                        <pre className="mt-2 rounded-md bg-muted p-4 whitespace-pre-wrap max-h-[600px] overflow-y-auto text-xs">{plan.planDocument}</pre>
+                      )}
+                    </div>
+                  )
+                })()}
+              </CardContent>
+            </Card>
+          </TabsContent>
+        )}
 
         {(task.status?.childTasks?.length ?? 0) > 0 && (
           <TabsContent value="children">

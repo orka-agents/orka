@@ -66,11 +66,24 @@ spec:
     maxMessages: 50
   coordination:
     enabled: true
+    autonomous: true          # Enable autonomous loop mode
+    maxIterations: 20         # Max loop iterations (0 = unlimited)
     allowedAgents:
       - name: coder-agent
     maxConcurrentChildren: 5
     maxDepth: 3
 ```
+
+**Coordination fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable agent-to-agent coordination tools |
+| `autonomous` | bool | `false` | Enables autonomous loop mode. When true, the controller re-creates Jobs in a loop instead of marking the task as Succeeded |
+| `maxIterations` | int32 | `0` | Limits the number of autonomous loop iterations. Only used when `autonomous` is true. `0` means unlimited |
+| `allowedAgents` | list | `[]` | List of agent names this agent is allowed to delegate to |
+| `maxConcurrentChildren` | int32 | `0` | Maximum number of concurrent child tasks. `0` means unlimited |
+| `maxDepth` | int32 | `0` | Maximum delegation depth. `0` means unlimited |
 
 ### Agent (with Runtime)
 

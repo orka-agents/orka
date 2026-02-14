@@ -126,6 +126,7 @@ func RegisterCoordinationTools(k8sClient client.Client) {
 	DefaultRegistry.Register(NewPostReviewCommentTool(k8sClient))
 	DefaultRegistry.Register(NewCreateAgentTool(k8sClient))
 	DefaultRegistry.Register(NewDeleteAgentTool(k8sClient))
+	DefaultRegistry.Register(NewUpdatePlanTool())
 }
 
 func init() {

@@ -688,6 +688,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              iteration:
+                description: |-
+                  Iteration is the current autonomous loop iteration (0-based).
+                  Only used when the task's coordination config has autonomous mode enabled.
+                format: int32
+                type: integer
               jobName:
                 description: JobName is the name of the Kubernetes Job running the
                   task

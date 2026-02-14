@@ -733,6 +733,12 @@ You are a coordinator agent. Follow this protocol:
 7. Report final result with the PR URL.
 ```
 
+## Autonomous Mode
+
+For long-running goals that require multiple planning and execution cycles, enable autonomous mode on the coordinator agent. See [Autonomous Task Execution](autonomous-tasks.md) for details.
+
+When `coordination.autonomous: true` is set, the controller runs the coordinator in a loop — each iteration gets the accumulated plan state, delegates sub-tasks, and updates the plan. The loop continues until the goal is complete, max iterations are reached, or the task is suspended.
+
 - **TaskGroup CRD** — Declarative DAG-based workflows (Layer 2)
 - **Agent-to-Agent Messaging** — Real-time inter-agent communication (Layer 3)
 - **Cost tracking** — Per-task/child token usage aggregation
