@@ -75,16 +75,19 @@ func NewAuthMiddleware(c client.Client) fiber.Handler {
 		// Get the authorization header
 		authHeader := ctx.Get(AuthHeader)
 		if authHeader == "" {
+			log.Info("authentication failed: missing authorization header", "ip", ctx.IP())
 			return fiber.NewError(fiber.StatusUnauthorized, "missing authorization header")
 		}
 
 		// Check for bearer token
 		if !strings.HasPrefix(authHeader, BearerPrefix) {
+			log.Info("authentication failed: invalid authorization header format", "ip", ctx.IP())
 			return fiber.NewError(fiber.StatusUnauthorized, "invalid authorization header format")
 		}
 
 		token := strings.TrimPrefix(authHeader, BearerPrefix)
 		if token == "" {
+			log.Info("authentication failed: empty bearer token", "ip", ctx.IP())
 			return fiber.NewError(fiber.StatusUnauthorized, "empty bearer token")
 		}
 

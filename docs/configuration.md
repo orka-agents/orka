@@ -268,6 +268,8 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 |------|---------|-------------|
 | `--api-port` | `8080` | REST API server port |
 | `--watch-namespace` | `""` | Namespace to watch (empty = all) |
+| `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
+| `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
 | `--copilot-worker-image` | `orka-agent-worker-copilot:latest` | Copilot agent worker image |
 | `--claude-worker-image` | `orka-agent-worker-claude:latest` | Claude agent worker image |
 | `--store-backend` | `sqlite` | Storage backend (sqlite) |

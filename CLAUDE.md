@@ -56,7 +56,7 @@ make deploy IMG=<registry>/orka:tag
 
 ### Core Components
 
-- **Controller** (`cmd/main.go`): Main entrypoint with `--watch-namespace`, `--copilot-worker-image`, `--claude-worker-image`, `--ai-worker-image`, `--store-backend`, `--store-path`, `--controller-url`, and `--enforce-namespace-isolation` flags
+- **Controller** (`cmd/main.go`): Main entrypoint with `--watch-namespace`, `--copilot-worker-image`, `--claude-worker-image`, `--ai-worker-image`, `--store-backend`, `--store-path`, `--controller-url`, `--enforce-namespace-isolation`, and `--max-tasks-per-namespace` flags
 - **CLI** (`cmd/cli/`): Command-line tool with `login`, `chat`, `agent`, `task`, and `status` commands
 - **Migrate** (`cmd/migrate/`): Database migration tool for moving data from ConfigMaps to SQLite
 - **API Server** (`internal/api/`): REST API using Fiber framework with ServiceAccount token auth
