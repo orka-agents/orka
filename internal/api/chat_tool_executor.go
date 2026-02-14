@@ -22,10 +22,15 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 	"github.com/sozercan/mercan/internal/controller"
 	"github.com/sozercan/mercan/internal/llm"
 	"github.com/sozercan/mercan/internal/store"
+	"github.com/sozercan/mercan/internal/tracing"
 )
 
 const taskCreatedMsg = "Task created"
@@ -73,8 +78,18 @@ type ToolResult struct {
 // Execute dispatches a tool call to the appropriate handler and returns
 // the JSON-serialized result.
 func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (string, error) {
+	tracer := tracing.Tracer("mercan.tools")
+	ctx, span := tracer.Start(ctx, "tool.execute",
+		trace.WithAttributes(
+			attribute.String("tool.name", toolCall.Name),
+		),
+	)
+	defer span.End()
+
 	var args map[string]any
 	if err := json.Unmarshal(toolCall.Arguments, &args); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		result := toolError("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
 		return marshalResult(result)
 	}
@@ -118,6 +133,12 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		result = e.executeDeleteSession(toolCtx, args)
 	default:
 		result = toolError("unknown_tool", fmt.Sprintf("unknown tool: %s", toolCall.Name), "Use one of the available tools")
+	}
+
+	if result.Success {
+		span.SetAttributes(attribute.Bool("tool.success", true))
+	} else {
+		span.SetStatus(codes.Error, result.Error)
 	}
 
 	return marshalResult(result)

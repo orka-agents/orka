@@ -305,3 +305,47 @@ monitoring:
 | `mercan_agent_tasks_active` | Gauge | Active tasks per agent |
 | `mercan_agent_tasks_total` | Counter | Total tasks per agent |
 | `mercan_skills_loaded_total` | Counter | Skills loaded |
+
+## OpenTelemetry Tracing
+
+Mercan supports opt-in OpenTelemetry distributed tracing for debugging and performance analysis. Tracing is disabled by default (zero overhead).
+
+### Enabling Tracing
+
+Add the `--enable-tracing` flag to the controller:
+
+```yaml
+args:
+  - --enable-tracing
+env:
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: "jaeger-collector.observability.svc:4317"
+```
+
+| Flag / Environment Variable | Default | Description |
+|------------------------------|---------|-------------|
+| `--enable-tracing` | `false` | Enable OpenTelemetry tracing |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP gRPC collector endpoint |
+
+### Instrumented Components
+
+| Tracer | Span | Attributes |
+|--------|------|------------|
+| `mercan.api` | `GET /api/v1/tasks` | `http.method`, `http.route`, `http.status_code`, `http.request_id` |
+| `mercan.chat` | `chat.request` | `session.id`, `chat.provider`, `chat.model` |
+| `mercan.chat` | `chat.tool_loop.iteration` | `chat.iteration` |
+| `mercan.llm` | `llm.complete` | `llm.provider`, `llm.model`, `llm.input_tokens`, `llm.output_tokens` |
+| `mercan.tools` | `tool.execute` | `tool.name`, `tool.success` |
+| `mercan.controller` | `task.reconcile` | `task.name`, `task.namespace`, `task.type` |
+
+### Example: Jaeger Setup
+
+```bash
+# Deploy Jaeger all-in-one (development only)
+kubectl create namespace observability
+kubectl apply -n observability -f https://raw.githubusercontent.com/jaegertracing/jaeger-operator/main/examples/simplest.yaml
+
+# Configure the controller
+kubectl set env deployment/mercan-controller \
+  OTEL_EXPORTER_OTLP_ENDPOINT=jaeger-collector.observability.svc:4317
+```

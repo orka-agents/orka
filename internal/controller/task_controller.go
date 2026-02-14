@@ -34,6 +34,10 @@ import (
 
 	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
 	"github.com/sozercan/mercan/internal/store"
+	"github.com/sozercan/mercan/internal/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -105,6 +109,16 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
+	tracer := tracing.Tracer("mercan.controller")
+	ctx, span := tracer.Start(ctx, "task.reconcile",
+		trace.WithAttributes(
+			attribute.String("task.name", task.Name),
+			attribute.String("task.namespace", task.Namespace),
+			attribute.String("task.type", string(task.Spec.Type)),
+		),
+	)
+	defer span.End()
+
 	// Handle deletion with finalizer
 	if !task.DeletionTimestamp.IsZero() {
 		return r.handleDeletion(ctx, task)
@@ -115,6 +129,8 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		controllerutil.AddFinalizer(task, TaskFinalizer)
 		if err := r.Update(ctx, task); err != nil {
 			log.Error(err, "failed to add finalizer")
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -125,6 +141,8 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		task.Status.Phase = corev1alpha1.TaskPhasePending
 		if err := r.Status().Update(ctx, task); err != nil {
 			log.Error(err, "failed to update initial status")
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -462,6 +480,12 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	task.Status.StartTime = &now
 	task.Status.Attempts++
 
+	if s := trace.SpanFromContext(ctx); s.IsRecording() {
+		s.AddEvent("phase.transition", trace.WithAttributes(
+			attribute.String("task.phase", string(corev1alpha1.TaskPhaseRunning)),
+		))
+	}
+
 	meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
 		Type:               ConditionTypeJobCreated,
 		Status:             metav1.ConditionTrue,
@@ -590,6 +614,12 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 	task.Status.Phase = phase
 	task.Status.CompletionTime = &now
 	task.Status.Message = message
+
+	if s := trace.SpanFromContext(ctx); s.IsRecording() {
+		s.AddEvent("phase.transition", trace.WithAttributes(
+			attribute.String("task.phase", string(phase)),
+		))
+	}
 
 	// Collect result from Job output
 	if err := r.collectResult(ctx, task); err != nil {
