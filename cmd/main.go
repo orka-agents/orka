@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -36,6 +37,7 @@ import (
 	_ "github.com/sozercan/mercan/internal/llm/openai"
 	_ "github.com/sozercan/mercan/internal/metrics"
 	"github.com/sozercan/mercan/internal/store/sqlite"
+	"github.com/sozercan/mercan/internal/tracing"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -78,6 +80,7 @@ func main() {
 	var storePath string
 	var controllerURL string
 	var enforceNamespaceIsolation bool
+	var enableTracing bool
 	var tlsOpts []func(*tls.Config)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -121,6 +124,8 @@ func main() {
 		"Base URL for the controller API, used by workers. E.g. http://mercan-controller.mercan-system.svc:8080")
 	flag.BoolVar(&enforceNamespaceIsolation, "enforce-namespace-isolation", false,
 		"When true, restrict users to their ServiceAccount's namespace for all operations.")
+	flag.BoolVar(&enableTracing, "enable-tracing", false,
+		"Enable OpenTelemetry tracing. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
 
 	opts := zap.Options{
 		Development: true,
@@ -129,6 +134,20 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Initialize OpenTelemetry tracing (noop when disabled)
+	tracingShutdown, err := tracing.Init("mercan-controller", enableTracing)
+	if err != nil {
+		setupLog.Error(err, "failed to initialize tracing")
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracingShutdown(shutdownCtx); err != nil {
+			setupLog.Error(err, "failed to shutdown tracing")
+		}
+	}()
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will

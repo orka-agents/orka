@@ -90,6 +90,17 @@ type AgentCLIRuntime struct {
 	DefaultAllowBash bool `json:"defaultAllowBash,omitempty"`
 }
 
+// ModelFallback defines a fallback provider configuration
+type ModelFallback struct {
+	// ProviderRef is the name of a Provider CRD to fall back to
+	// +kubebuilder:validation:Required
+	ProviderRef string `json:"providerRef"`
+
+	// Model to use with this provider (optional, uses provider's defaultModel if empty)
+	// +optional
+	Model string `json:"model,omitempty"`
+}
+
 // ModelConfig defines LLM model configuration
 type ModelConfig struct {
 	// Provider is the LLM provider (anthropic, openai)
@@ -113,6 +124,11 @@ type ModelConfig struct {
 	// MaxTokens limits the response length
 	// +optional
 	MaxTokens *int32 `json:"maxTokens,omitempty"`
+
+	// Fallbacks defines alternative providers to try when the primary fails.
+	// Each fallback specifies a Provider CRD and optional model override.
+	// +optional
+	Fallbacks []ModelFallback `json:"fallbacks,omitempty"`
 }
 
 // PromptSource defines where to get a prompt from

@@ -9,6 +9,7 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -63,10 +64,7 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 	// Make the request
 	message, err := p.client.Messages.New(ctx, params)
 	if err != nil {
-		return nil, &llm.ProviderError{
-			Provider: "anthropic",
-			Message:  err.Error(),
-		}
+		return nil, toProviderError(err)
 	}
 
 	// Convert response
@@ -255,11 +253,22 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 		}
 
 		if err := stream.Err(); err != nil {
-			ch <- llm.StreamChunk{Error: err, Done: true}
+			ch <- llm.StreamChunk{Error: toProviderError(err), Done: true}
 		}
 	}()
 
 	return ch, nil
+}
+
+// toProviderError wraps an error as a ProviderError, extracting the HTTP status
+// code from the Anthropic SDK error type when available.
+func toProviderError(err error) *llm.ProviderError {
+	pe := &llm.ProviderError{Provider: "anthropic", Message: err.Error()}
+	var apiErr *anthropic.Error
+	if errors.As(err, &apiErr) {
+		pe.StatusCode = apiErr.StatusCode
+	}
+	return pe
 }
 
 // Ensure Provider implements llm.Provider

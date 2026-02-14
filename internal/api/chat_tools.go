@@ -29,9 +29,9 @@ func CoreTools() []llm.Tool {
 				"properties": map[string]any{
 					"name":        map[string]any{"type": "string", "description": "Task name"},
 					"prompt":      map[string]any{"type": "string", "description": "The prompt/instruction for the AI task"},
-					"agentRef":    map[string]any{"type": "string", "description": "Optional Agent CRD name to use"},
-					"providerRef": map[string]any{"type": "string", "description": "Provider CRD name (defaults to 'default')"},
-					"namespace":   map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"agentRef":    map[string]any{"type": "string", "description": "Optional Agent name to use"},
+					"providerRef": map[string]any{"type": "string", "description": "Provider name (defaults to 'default')"},
+					"namespace":   map[string]any{"type": "string", "description": "Namespace"},
 					"timeout":     map[string]any{"type": "string", "description": "Timeout duration, e.g. \"5m\""},
 					"priority":    map[string]any{"type": "integer", "description": "Priority 0-1000"},
 					"sessionRef":  map[string]any{"type": "string", "description": "Session name for conversation continuity"},
@@ -50,7 +50,7 @@ func CoreTools() []llm.Tool {
 					"image":     map[string]any{"type": "string", "description": "Container image to run. Leave empty to use the default worker image which includes common tools (kubectl, sh) and writes results to a ConfigMap. Only set a custom image if you need a specific runtime not in the default worker."},
 					"command":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Command to execute"},
 					"args":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Arguments to the command"},
-					"namespace": map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"namespace": map[string]any{"type": "string", "description": "Namespace"},
 					"timeout":   map[string]any{"type": "string", "description": "Timeout duration, e.g. \"5m\""},
 					"priority":  map[string]any{"type": "integer", "description": "Priority 0-1000"},
 					"schedule":  map[string]any{"type": "string", "description": "Cron schedule for recurring tasks (e.g., '0 */6 * * *' for every 6 hours, '0 9 * * 1-5' for weekdays at 9am, '*/5 * * * *' for every 5 minutes). Leave empty for one-time tasks."},
@@ -66,8 +66,8 @@ func CoreTools() []llm.Tool {
 				"properties": map[string]any{
 					"name":      map[string]any{"type": "string", "description": "Task name"},
 					"prompt":    map[string]any{"type": "string", "description": "The prompt/instruction for the agent"},
-					"agentRef":  map[string]any{"type": "string", "description": "Agent CRD name with runtime configured"},
-					"namespace": map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"agentRef":  map[string]any{"type": "string", "description": "Agent name with runtime configured"},
+					"namespace": map[string]any{"type": "string", "description": "Namespace"},
 					"timeout":   map[string]any{"type": "string", "description": "Timeout duration, e.g. \"5m\""},
 					"maxTurns":  map[string]any{"type": "integer", "description": "Maximum agent loop iterations"},
 					"workspace": map[string]any{
@@ -91,7 +91,7 @@ func CoreTools() []llm.Tool {
 				"type": "object",
 				"properties": map[string]any{
 					"name":      map[string]any{"type": "string", "description": "Task name"},
-					"namespace": map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"namespace": map[string]any{"type": "string", "description": "Namespace"},
 				},
 				"required": []string{"name"},
 			}),
@@ -103,7 +103,7 @@ func CoreTools() []llm.Tool {
 				"type": "object",
 				"properties": map[string]any{
 					"name":      map[string]any{"type": "string", "description": "Task name"},
-					"namespace": map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"namespace": map[string]any{"type": "string", "description": "Namespace"},
 				},
 				"required": []string{"name"},
 			}),
@@ -115,7 +115,7 @@ func CoreTools() []llm.Tool {
 				"type": "object",
 				"properties": map[string]any{
 					"name":      map[string]any{"type": "string", "description": "Task name"},
-					"namespace": map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"namespace": map[string]any{"type": "string", "description": "Namespace"},
 					"timeout":   map[string]any{"type": "integer", "description": "Seconds to wait (max 60, default 30)"},
 				},
 				"required": []string{"name"},
@@ -128,7 +128,7 @@ func CoreTools() []llm.Tool {
 				"type": "object",
 				"properties": map[string]any{
 					"name":      map[string]any{"type": "string", "description": "Task name"},
-					"namespace": map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"namespace": map[string]any{"type": "string", "description": "Namespace"},
 				},
 				"required": []string{"name"},
 			}),
@@ -137,21 +137,21 @@ func CoreTools() []llm.Tool {
 		// --- Discovery tools ---
 		{
 			Name:        "list_agents",
-			Description: "List available Agent CRDs with their model, tools, and runtime configuration. Use before creating a task with agentRef to find the right agent.",
+			Description: "List available agents with their model, tools, and runtime configuration. Use before creating a task with agentRef to find the right agent.",
 			Parameters: mustMarshal(map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"namespace": map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"namespace": map[string]any{"type": "string", "description": "Namespace"},
 				},
 			}),
 		},
 		{
 			Name:        "list_tools",
-			Description: "List available Tool CRDs and built-in tools with their descriptions.",
+			Description: "List available tools and built-in tools with their descriptions.",
 			Parameters: mustMarshal(map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"namespace": map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"namespace": map[string]any{"type": "string", "description": "Namespace"},
 				},
 			}),
 		},
@@ -161,7 +161,7 @@ func CoreTools() []llm.Tool {
 			Parameters: mustMarshal(map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"namespace": map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"namespace": map[string]any{"type": "string", "description": "Namespace"},
 					"status":    map[string]any{"type": "string", "description": "Filter by status: Pending, Running, Succeeded, Failed"},
 					"limit":     map[string]any{"type": "integer", "description": "Max results to return (default 20)"},
 				},
@@ -175,13 +175,13 @@ func ManagementTools() []llm.Tool {
 	return []llm.Tool{
 		{
 			Name:        "create_agent",
-			Description: "Create an Agent CRD with model, tools, and optional runtime and coordination configuration. Enable coordination to allow this agent to delegate tasks to other agents. Provide initialPrompt to also create and start a Task immediately.",
+			Description: "Create an agent with model, tools, and optional runtime and coordination configuration. Enable coordination to allow this agent to delegate tasks to other agents. Provide initialPrompt to also create and start a Task immediately.",
 			Parameters: mustMarshal(map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"name":         map[string]any{"type": "string", "description": "Agent name"},
-					"namespace":    map[string]any{"type": "string", "description": "Kubernetes namespace"},
-					"providerRef":  map[string]any{"type": "string", "description": "Provider CRD name (defaults to 'default')"},
+					"namespace":    map[string]any{"type": "string", "description": "Namespace"},
+					"providerRef":  map[string]any{"type": "string", "description": "Provider name (defaults to 'default')"},
 					"systemPrompt": map[string]any{"type": "string", "description": "System prompt for the agent"},
 					"tools":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Tool names to attach"},
 					"model": map[string]any{
@@ -230,12 +230,12 @@ func ManagementTools() []llm.Tool {
 		},
 		{
 			Name:        "update_agent",
-			Description: "Update an existing Agent CRD.",
+			Description: "Update an existing agent.",
 			Parameters: mustMarshal(map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"name":         map[string]any{"type": "string", "description": "Agent name"},
-					"namespace":    map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"namespace":    map[string]any{"type": "string", "description": "Namespace"},
 					"systemPrompt": map[string]any{"type": "string", "description": "System prompt for the agent"},
 					"tools":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Tool names to attach"},
 					"model": map[string]any{
@@ -252,24 +252,24 @@ func ManagementTools() []llm.Tool {
 		},
 		{
 			Name:        "delete_agent",
-			Description: "Delete an Agent CRD.",
+			Description: "Delete an agent.",
 			Parameters: mustMarshal(map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"name":      map[string]any{"type": "string", "description": "Agent name"},
-					"namespace": map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"namespace": map[string]any{"type": "string", "description": "Namespace"},
 				},
 				"required": []string{"name"},
 			}),
 		},
 		{
 			Name:        "create_tool",
-			Description: "Create a Tool CRD with an HTTP endpoint.",
+			Description: "Create a tool with an HTTP endpoint.",
 			Parameters: mustMarshal(map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"name":        map[string]any{"type": "string", "description": "Tool name"},
-					"namespace":   map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"namespace":   map[string]any{"type": "string", "description": "Namespace"},
 					"description": map[string]any{"type": "string", "description": "Tool description"},
 					"url":         map[string]any{"type": "string", "description": "HTTP endpoint URL"},
 					"method":      map[string]any{"type": "string", "description": "HTTP method (default POST)"},
@@ -279,12 +279,12 @@ func ManagementTools() []llm.Tool {
 		},
 		{
 			Name:        "delete_tool",
-			Description: "Delete a Tool CRD.",
+			Description: "Delete a tool.",
 			Parameters: mustMarshal(map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"name":      map[string]any{"type": "string", "description": "Tool name"},
-					"namespace": map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"namespace": map[string]any{"type": "string", "description": "Namespace"},
 				},
 				"required": []string{"name"},
 			}),
@@ -296,7 +296,7 @@ func ManagementTools() []llm.Tool {
 				"type": "object",
 				"properties": map[string]any{
 					"sessionId": map[string]any{"type": "string", "description": "Session ID to delete"},
-					"namespace": map[string]any{"type": "string", "description": "Kubernetes namespace"},
+					"namespace": map[string]any{"type": "string", "description": "Namespace"},
 				},
 				"required": []string{"sessionId"},
 			}),
