@@ -116,6 +116,7 @@ type ChatHandler struct {
 	enforceNamespaceIsolation bool
 	sessionStore              store.SessionStore
 	resultStore               store.ResultStore
+	cooldownTracker           *llm.CooldownTracker
 }
 
 // NewChatHandler creates a new ChatHandler.
@@ -129,6 +130,7 @@ func NewChatHandler(c client.Client, sm *controller.SessionManager, config ChatC
 		enforceNamespaceIsolation: enforceNS,
 		sessionStore:              ss,
 		resultStore:               rs,
+		cooldownTracker:           llm.NewCooldownTracker(),
 	}
 }
 
@@ -381,7 +383,7 @@ func (ch *ChatHandler) runToolLoop(
 		// Truncate conversation if it exceeds the session size budget
 		if ch.config.MaxSessionSize > 0 {
 			tokenBudget := ch.config.MaxSessionSize / 4 // bytes to approximate tokens
-			messages = TruncateMessages(messages, tokenBudget)
+			messages = llm.TruncateMessages(messages, tokenBudget)
 		}
 
 		// Call LLM
@@ -393,6 +395,22 @@ func (ch *ChatHandler) runToolLoop(
 			MaxTokens:    maxTokens,
 			Temperature:  temperature,
 		})
+		if err != nil && llm.IsContextTooLongErr(err) {
+			// Halve the messages and retry once
+			tokenEstimate := 0
+			for _, m := range messages {
+				tokenEstimate += len(m.Content) / 4
+			}
+			messages = llm.TruncateMessages(messages, tokenEstimate/2)
+			resp, err = provider.Complete(ctx, &llm.CompletionRequest{
+				Model:        model,
+				SystemPrompt: systemPrompt,
+				Messages:     messages,
+				Tools:        tools,
+				MaxTokens:    maxTokens,
+				Temperature:  temperature,
+			})
+		}
 		if err != nil {
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
 			return "", usage, allToolCalls, fmt.Errorf("LLM completion failed: %w", err)
@@ -634,7 +652,6 @@ func (ch *ChatHandler) HandleCancelChat(c fiber.Ctx) error {
 // resolveProvider resolves the LLM provider from the request, agent, or config.
 func (ch *ChatHandler) resolveProvider(ctx context.Context, req ChatRequest, namespace string) (llm.Provider, string, error) {
 	var providerType corev1alpha1.ProviderType
-	var apiKey string
 	var baseURL string
 	var model string
 	var providerCRD *corev1alpha1.Provider
@@ -691,21 +708,10 @@ func (ch *ChatHandler) resolveProvider(ctx context.Context, req ChatRequest, nam
 	baseURL = providerCRD.Spec.BaseURL
 
 	// Resolve API key from secret
-	secretName := providerCRD.Spec.SecretRef.Name
-	secretKey := providerCRD.Spec.SecretRef.Key
-	if secretKey == "" {
-		secretKey = "api-key"
+	apiKey, err := ch.resolveAPIKey(ctx, providerCRD)
+	if err != nil {
+		return nil, "", err
 	}
-
-	secret := &corev1.Secret{}
-	if err := ch.client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: providerCRD.Namespace}, secret); err != nil {
-		return nil, "", fmt.Errorf("failed to get provider secret %q: %w", secretName, err)
-	}
-	apiKeyBytes, ok := secret.Data[secretKey]
-	if !ok {
-		return nil, "", fmt.Errorf("secret %q has no key %q", secretName, secretKey)
-	}
-	apiKey = string(apiKeyBytes)
 
 	// Model resolution priority: req.Model > agent model > provider default > config model
 	if req.Model != "" {
@@ -732,7 +738,68 @@ func (ch *ChatHandler) resolveProvider(ctx context.Context, req ChatRequest, nam
 		return nil, "", fmt.Errorf("failed to create LLM provider: %w", err)
 	}
 
-	return provider, model, nil
+	// Wrap primary with retry and add fallbacks if configured
+	resultProvider := ch.wrapWithRetryAndFallback(ctx, provider, req, namespace)
+
+	return resultProvider, model, nil
+}
+
+// wrapWithRetryAndFallback wraps a provider with retry logic and adds fallback
+// providers if the agent has them configured.
+func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, provider llm.Provider, req ChatRequest, namespace string) llm.Provider {
+	var resultProvider llm.Provider = llm.NewRetryProvider(provider, 0)
+
+	if req.AgentRef == "" {
+		return resultProvider
+	}
+
+	agent := &corev1alpha1.Agent{}
+	if err := ch.client.Get(ctx, types.NamespacedName{Name: req.AgentRef, Namespace: namespace}, agent); err != nil {
+		return resultProvider
+	}
+	if agent.Spec.Model == nil || len(agent.Spec.Model.Fallbacks) == 0 {
+		return resultProvider
+	}
+
+	fallbacks := make([]llm.FallbackEntry, 0, len(agent.Spec.Model.Fallbacks))
+	for _, fb := range agent.Spec.Model.Fallbacks {
+		fbProviderCRD, err := ch.lookupProvider(ctx, fb.ProviderRef, namespace)
+		if err != nil {
+			continue
+		}
+
+		fbAPIKey, err := ch.resolveAPIKey(ctx, fbProviderCRD)
+		if err != nil {
+			continue
+		}
+
+		fbConfig := llm.ProviderConfig{
+			APIKey:       fbAPIKey,
+			BaseURL:      fbProviderCRD.Spec.BaseURL,
+			ProviderType: string(fbProviderCRD.Spec.Type),
+		}
+		if fbProviderCRD.Spec.Azure != nil {
+			fbConfig.AzureAPIVersion = fbProviderCRD.Spec.Azure.APIVersion
+		}
+
+		fbProvider, err := llm.NewProvider(string(fbProviderCRD.Spec.Type), fbConfig)
+		if err != nil {
+			continue
+		}
+
+		fallbacks = append(fallbacks, llm.FallbackEntry{
+			Provider: llm.NewRetryProvider(fbProvider, 0),
+			Model:    fb.Model,
+		})
+	}
+
+	if len(fallbacks) > 0 {
+		fp := llm.NewFallbackProvider(resultProvider, fallbacks)
+		fp.SetCooldownTracker(ch.cooldownTracker)
+		resultProvider = fp
+	}
+
+	return resultProvider
 }
 
 // lookupProvider fetches a Provider CRD by name and namespace.
@@ -742,6 +809,24 @@ func (ch *ChatHandler) lookupProvider(ctx context.Context, name, namespace strin
 		return nil, fmt.Errorf("provider %q not found in namespace %q: %w", name, namespace, err)
 	}
 	return p, nil
+}
+
+// resolveAPIKey extracts the API key from a Provider CRD's secret reference.
+func (ch *ChatHandler) resolveAPIKey(ctx context.Context, providerCRD *corev1alpha1.Provider) (string, error) {
+	secretName := providerCRD.Spec.SecretRef.Name
+	secretKey := providerCRD.Spec.SecretRef.Key
+	if secretKey == "" {
+		secretKey = "api-key"
+	}
+	secret := &corev1.Secret{}
+	if err := ch.client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: providerCRD.Namespace}, secret); err != nil {
+		return "", fmt.Errorf("failed to get provider secret %q: %w", secretName, err)
+	}
+	apiKeyBytes, ok := secret.Data[secretKey]
+	if !ok {
+		return "", fmt.Errorf("secret %q has no key %q", secretName, secretKey)
+	}
+	return string(apiKeyBytes), nil
 }
 
 // generateChatID returns 8 random hex characters.

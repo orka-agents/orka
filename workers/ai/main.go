@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -74,6 +75,52 @@ func run() error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create LLM provider: %w", err)
+	}
+
+	// Wrap with retry logic for transient errors
+	llmProvider = llm.NewRetryProvider(llmProvider, 0)
+
+	// Set up fallback providers if configured
+	fallbackCountStr := os.Getenv("MERCAN_AI_FALLBACK_COUNT")
+	if fallbackCountStr != "" {
+		fallbackCount, _ := strconv.Atoi(fallbackCountStr)
+		if fallbackCount > 0 {
+			var fallbacks []llm.FallbackEntry
+			for i := range fallbackCount {
+				prefix := fmt.Sprintf("MERCAN_AI_FALLBACK_%d", i)
+				fbProviderType := os.Getenv(prefix + "_PROVIDER")
+				fbAPIKey := os.Getenv(prefix + "_API_KEY")
+				fbModel := os.Getenv(prefix + "_MODEL")
+				fbBaseURL := os.Getenv(prefix + "_BASE_URL")
+				fbAzureAPIVersion := os.Getenv(prefix + "_AZURE_API_VERSION")
+
+				if fbProviderType == "" || fbAPIKey == "" {
+					fmt.Printf("Warning: skipping fallback %d: missing provider or API key\n", i)
+					continue
+				}
+
+				fbProvider, err := llm.NewProvider(fbProviderType, llm.ProviderConfig{
+					APIKey:          fbAPIKey,
+					BaseURL:         fbBaseURL,
+					ProviderType:    fbProviderType,
+					AzureAPIVersion: fbAzureAPIVersion,
+				})
+				if err != nil {
+					fmt.Printf("Warning: skipping fallback %d: %v\n", i, err)
+					continue
+				}
+
+				fallbacks = append(fallbacks, llm.FallbackEntry{
+					Provider: llm.NewRetryProvider(fbProvider, 0),
+					Model:    fbModel,
+				})
+			}
+			if len(fallbacks) > 0 {
+				fp := llm.NewFallbackProvider(llmProvider, fallbacks)
+				fp.SetCooldownTracker(llm.NewCooldownTracker())
+				llmProvider = fp
+			}
+		}
 	}
 
 	// Parse enabled tools
@@ -311,6 +358,15 @@ func executeAgentLoop(
 		}
 
 		resp, err := provider.Complete(ctx, req)
+		if err != nil && llm.IsContextTooLongErr(err) {
+			tokenEstimate := 0
+			for _, m := range messages {
+				tokenEstimate += len(m.Content) / 4
+			}
+			messages = llm.TruncateMessages(messages, tokenEstimate/2)
+			req.Messages = messages
+			resp, err = provider.Complete(ctx, req)
+		}
 		if err != nil {
 			return "", fmt.Errorf("completion failed: %w", err)
 		}

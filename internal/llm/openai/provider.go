@@ -203,7 +203,7 @@ func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionReq
 
 	resp, err := p.client.Responses.New(ctx, params)
 	if err != nil {
-		return nil, err
+		return nil, toProviderError(err)
 	}
 
 	result := &llm.CompletionResponse{
@@ -319,7 +319,7 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 			}
 		}
 		if err := stream.Err(); err != nil {
-			ch <- llm.StreamChunk{Error: err, Done: true}
+			ch <- llm.StreamChunk{Error: toProviderError(err), Done: true}
 			return
 		}
 		ch <- llm.StreamChunk{Done: true}
@@ -459,7 +459,7 @@ func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.Complet
 
 	resp, err := p.client.Chat.Completions.New(ctx, params)
 	if err != nil {
-		return nil, &llm.ProviderError{Provider: "openai", Message: err.Error()}
+		return nil, toProviderError(err)
 	}
 
 	result := &llm.CompletionResponse{Model: resp.Model}
@@ -533,12 +533,23 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 		}
 
 		if err := stream.Err(); err != nil {
-			ch <- llm.StreamChunk{Error: err, Done: true}
+			ch <- llm.StreamChunk{Error: toProviderError(err), Done: true}
 			return
 		}
 		ch <- llm.StreamChunk{Done: true}
 	}()
 	return ch
+}
+
+// toProviderError wraps an error as a ProviderError, extracting the HTTP status
+// code from the OpenAI SDK error type when available.
+func toProviderError(err error) *llm.ProviderError {
+	pe := &llm.ProviderError{Provider: "openai", Message: err.Error()}
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) {
+		pe.StatusCode = apiErr.StatusCode
+	}
+	return pe
 }
 
 // -------------------------------------------------------------------------
@@ -556,7 +567,7 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 	if mode == apiModeResponses {
 		resp, err := p.completeResponses(ctx, req)
 		if err != nil {
-			return nil, &llm.ProviderError{Provider: "openai", Message: err.Error()}
+			return nil, toProviderError(err)
 		}
 		return resp, nil
 	}
@@ -571,7 +582,7 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 		p.mode.Store(int32(apiModeChatCompletions))
 		return p.completeChatCompletions(ctx, req)
 	}
-	return nil, &llm.ProviderError{Provider: "openai", Message: err.Error()}
+	return nil, toProviderError(err)
 }
 
 // Stream sends a streaming completion request, auto-detecting Responses vs Chat Completions.
@@ -600,7 +611,7 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 		p.mode.Store(int32(apiModeChatCompletions))
 		return p.streamChatCompletions(ctx, req), nil
 	}
-	return nil, &llm.ProviderError{Provider: "openai", Message: err.Error()}
+	return nil, toProviderError(err)
 }
 
 // Ensure Provider implements llm.Provider
