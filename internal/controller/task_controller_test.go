@@ -1998,4 +1998,191 @@ var _ = Describe("Task Controller", func() {
 			}, 5*time.Second, 200*time.Millisecond).Should(BeTrue())
 		})
 	})
+
+	Context("Namespace isolation", func() {
+		It("should reject cross-namespace agent ref when isolation is enforced", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			r.EnforceNamespaceIsolation = true
+			taskName := "test-cross-ns-agent-reject"
+			ns := defaultNS
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			// Create task with cross-namespace agent ref
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAI,
+					Prompt: "test prompt",
+					AgentRef: &corev1alpha1.AgentReference{
+						Name:      "some-agent",
+						Namespace: "other-namespace",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Reconcile through finalizer, status init, then handlePending
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Task should be Failed with isolation error
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(task.Status.Message).To(ContainSubstring("cross-namespace agent reference not allowed"))
+		})
+
+		It("should allow cross-namespace agent ref when isolation is NOT enforced", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			r.EnforceNamespaceIsolation = false
+			taskName := "test-cross-ns-agent-allow"
+			ns := defaultNS
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAI,
+					Prompt: "test prompt",
+					AgentRef: &corev1alpha1.AgentReference{
+						Name:      "some-agent",
+						Namespace: "other-namespace",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Reconcile through finalizer, status init, then handlePending
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Task should NOT be Failed with isolation error (it will fail because agent doesn't exist, but that's a different error)
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(task.Status.Message).To(ContainSubstring("failed to get agent"))
+			Expect(task.Status.Message).NotTo(ContainSubstring("cross-namespace"))
+		})
+
+		It("should requeue when namespace task limit is reached", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			r.MaxTasksPerNamespace = 1
+			ns := defaultNS
+
+			// Create a running task to fill the limit
+			existingTaskName := "test-ns-limit-existing"
+			existingNN := types.NamespacedName{Name: existingTaskName, Namespace: ns}
+			defer cleanupTask(ctx, existingNN)
+
+			existingTask := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      existingTaskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo", "hello"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, existingTask)).To(Succeed())
+
+			// Drive it to Running phase
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: existingNN})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: existingNN})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: existingNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify it's Running
+			Expect(k8sClient.Get(ctx, existingNN, existingTask)).To(Succeed())
+			Expect(existingTask.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
+
+			// Create a new task that should be throttled
+			newTaskName := "test-ns-limit-throttled"
+			newNN := types.NamespacedName{Name: newTaskName, Namespace: ns}
+			defer cleanupTask(ctx, newNN)
+
+			newTask := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      newTaskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo", "world"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, newTask)).To(Succeed())
+
+			// Drive the new task to Pending phase
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: newNN})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: newNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Third reconcile should requeue (not create job)
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: newNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(10 * time.Second))
+
+			// Task should still be Pending
+			Expect(k8sClient.Get(ctx, newNN, newTask)).To(Succeed())
+			Expect(newTask.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
+		})
+
+		It("should allow tasks when under namespace limit", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			r.MaxTasksPerNamespace = 10
+			taskName := "test-ns-limit-under"
+			ns := defaultNS
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo", "hello"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Drive through to Running
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Task should proceed to Running (not throttled)
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
+		})
+	})
 })

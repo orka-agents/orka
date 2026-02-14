@@ -1444,3 +1444,88 @@ func TestGetTaskPlan(t *testing.T) {
 		require.Equal(t, http.StatusNotFound, resp.StatusCode)
 	})
 }
+
+func TestResolveNamespace_IsolationEnforced(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	handlers := NewHandlers(fakeClient, nil, "", true, ss, ss, nil, nil, nil)
+
+	app := fiber.New()
+	app.Get("/test", func(c fiber.Ctx) error {
+		// Set user info in context (simulating auth middleware)
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username:  "system:serviceaccount:team-a:default",
+			Namespace: "team-a",
+		})
+		ns, err := handlers.resolveNamespace(c, "team-b")
+		if err != nil {
+			return err
+		}
+		return c.SendString(ns)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestResolveNamespace_IsolationAllowsSameNamespace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	handlers := NewHandlers(fakeClient, nil, "", true, ss, ss, nil, nil, nil)
+
+	app := fiber.New()
+	app.Get("/test", func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username:  "system:serviceaccount:team-a:default",
+			Namespace: "team-a",
+		})
+		ns, err := handlers.resolveNamespace(c, "team-a")
+		if err != nil {
+			return err
+		}
+		return c.SendString(ns)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestResolveNamespace_WatchNamespaceMismatch(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	// Set watchNamespace to "production"
+	handlers := NewHandlers(fakeClient, nil, "production", false, ss, ss, nil, nil, nil)
+
+	app := fiber.New()
+	app.Get("/test", func(c fiber.Ctx) error {
+		ns, err := handlers.resolveNamespace(c, "staging")
+		if err != nil {
+			return err
+		}
+		return c.SendString(ns)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}

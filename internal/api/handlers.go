@@ -87,6 +87,11 @@ func (h *Handlers) resolveNamespace(c fiber.Ctx, explicit string) (string, error
 	var ns string
 	if h.watchNamespace != "" {
 		if explicit != "" && explicit != h.watchNamespace {
+			log.Info("namespace access denied: watchNamespace mismatch",
+				"requestedNamespace", explicit,
+				"allowedNamespace", h.watchNamespace,
+				"ip", c.IP(),
+			)
 			return "", fiber.NewError(fiber.StatusForbidden, "namespace not allowed")
 		}
 		ns = h.watchNamespace
@@ -100,6 +105,12 @@ func (h *Handlers) resolveNamespace(c fiber.Ctx, explicit string) (string, error
 	if h.enforceNamespaceIsolation {
 		ui := GetUserInfo(c)
 		if ui != nil && ui.Namespace != "" && ns != ui.Namespace {
+			log.Info("namespace access denied: isolation violation",
+				"username", ui.Username,
+				"userNamespace", ui.Namespace,
+				"requestedNamespace", ns,
+				"ip", c.IP(),
+			)
 			return "", fiber.NewError(fiber.StatusForbidden,
 				fmt.Sprintf("namespace %q not allowed, restricted to %q", ns, ui.Namespace))
 		}
