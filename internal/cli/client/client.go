@@ -310,6 +310,7 @@ type TaskSummary struct {
 	Type      string
 	Phase     string
 	Age       string
+	Iteration int
 }
 
 // taskListResponse matches the API ListResponse shape.
@@ -614,6 +615,11 @@ func extractTaskSummary(item TaskDetail) TaskSummary {
 		Type:      StringField(item, "spec", "type"),
 		Phase:     StringField(item, "status", "phase"),
 		Age:       StringField(item, "metadata", "creationTimestamp"),
+	}
+	if status, ok := item["status"].(map[string]any); ok {
+		if v, ok := status["iteration"].(float64); ok {
+			s.Iteration = int(v)
+		}
 	}
 	return s
 }

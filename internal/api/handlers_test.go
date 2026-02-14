@@ -36,7 +36,7 @@ func setupTestHandlers() (*Handlers, *fiber.App) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	handlers := NewHandlers(fakeClient, nil, "", false, ss, ss, nil, nil)
+	handlers := NewHandlers(fakeClient, nil, "", false, ss, ss, nil, nil, nil)
 
 	app := fiber.New()
 	return handlers, app
@@ -50,7 +50,7 @@ func setupTestHandlersWithObjects(objs ...runtime.Object) (*Handlers, *fiber.App
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	handlers := NewHandlers(fakeClient, nil, "", false, ss, ss, nil, nil)
+	handlers := NewHandlers(fakeClient, nil, "", false, ss, ss, nil, nil, nil)
 
 	app := fiber.New()
 	return handlers, app
@@ -184,7 +184,7 @@ func TestHandlers_CreateTask_NamespaceScoped(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	handlers := NewHandlers(fakeClient, nil, "allowed-ns", false, nil, nil, nil, nil)
+	handlers := NewHandlers(fakeClient, nil, "allowed-ns", false, nil, nil, nil, nil, nil)
 
 	app := fiber.New()
 	app.Post("/tasks", handlers.CreateTask)
@@ -713,7 +713,7 @@ func TestNewHandlers(t *testing.T) {
 	scheme := runtime.NewScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	handlers := NewHandlers(fakeClient, nil, "test-ns", false, nil, nil, nil, nil)
+	handlers := NewHandlers(fakeClient, nil, "test-ns", false, nil, nil, nil, nil, nil)
 	if handlers == nil {
 		t.Fatal("NewHandlers returned nil")
 	}
@@ -731,7 +731,7 @@ func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *sqlite.Store
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(fakeClient, sm, "", false, ss, ss, nil, nil)
+	handlers := NewHandlers(fakeClient, sm, "", false, ss, ss, nil, nil, nil)
 
 	app := fiber.New()
 	return handlers, app, ss
@@ -818,7 +818,7 @@ func TestHandlers_ListSessions_WatchNamespace(t *testing.T) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(fakeClient, sm, "watched-ns", false, ss, ss, nil, nil)
+	handlers := NewHandlers(fakeClient, sm, "watched-ns", false, ss, ss, nil, nil, nil)
 
 	app := fiber.New()
 	app.Get("/sessions", handlers.ListSessions)
@@ -895,7 +895,7 @@ func TestHandlers_GetSession_WatchNamespace(t *testing.T) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(fakeClient, sm, "watched-ns", false, ss, ss, nil, nil)
+	handlers := NewHandlers(fakeClient, sm, "watched-ns", false, ss, ss, nil, nil, nil)
 
 	ctx := context.Background()
 	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
@@ -968,7 +968,7 @@ func TestHandlers_DeleteSession_WatchNamespace(t *testing.T) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(fakeClient, sm, "watched-ns", false, ss, ss, nil, nil)
+	handlers := NewHandlers(fakeClient, sm, "watched-ns", false, ss, ss, nil, nil, nil)
 
 	ctx := context.Background()
 	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
@@ -1026,7 +1026,7 @@ func TestHandlers_GetTaskLogs_WatchNamespace(t *testing.T) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
-	handlers := NewHandlers(fakeClient, nil, "watched-ns", false, nil, nil, nil, nil)
+	handlers := NewHandlers(fakeClient, nil, "watched-ns", false, nil, nil, nil, nil, nil)
 
 	app := fiber.New()
 	app.Get("/tasks/:id/logs", handlers.GetTaskLogs)
@@ -1153,7 +1153,7 @@ func TestHandlers_GetTaskResult_WatchNamespace(t *testing.T) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	ss.SaveResult(context.Background(), "watched-ns", "test-task", []byte("task result content")) //nolint:errcheck
-	handlers := NewHandlers(fakeClient, nil, "watched-ns", false, ss, ss, nil, nil)
+	handlers := NewHandlers(fakeClient, nil, "watched-ns", false, ss, ss, nil, nil, nil)
 
 	app := fiber.New()
 	app.Get("/tasks/:id/result", handlers.GetTaskResult)
@@ -1186,7 +1186,7 @@ func TestHandlers_DeleteTask_WatchNamespace(t *testing.T) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
-	handlers := NewHandlers(fakeClient, nil, "watched-ns", false, nil, nil, nil, nil)
+	handlers := NewHandlers(fakeClient, nil, "watched-ns", false, nil, nil, nil, nil, nil)
 
 	app := fiber.New()
 	app.Delete("/tasks/:id", handlers.DeleteTask)
@@ -1368,4 +1368,79 @@ func TestGetTaskChildren_Empty(t *testing.T) {
 	if len(items) != 0 {
 		t.Errorf("Expected 0 children, got %d", len(items))
 	}
+}
+
+func TestGetTaskPlan(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "plan-task",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	handlers := NewHandlers(fakeClient, nil, "", false, ss, ss, ss, nil, nil)
+
+	app := fiber.New()
+	app.Get("/api/v1/tasks/:id/plan", handlers.GetTaskPlan)
+
+	// Pre-save a plan into the store
+	err := ss.SavePlan(context.Background(), "default", "plan-task", &store.PlanState{
+		TaskName:     "plan-task",
+		Namespace:    "default",
+		Summary:      "working on it",
+		ProgressPct:  75,
+		GoalComplete: false,
+		PlanDocument: "# My Plan\n- item 1",
+	})
+	require.NoError(t, err)
+
+	t.Run("plan exists", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/plan-task/plan?namespace=default", nil)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var plan store.PlanState
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&plan))
+		require.Equal(t, "working on it", plan.Summary)
+		require.Equal(t, 75, plan.ProgressPct)
+		require.Equal(t, "# My Plan\n- item 1", plan.PlanDocument)
+	})
+
+	t.Run("no plan", func(t *testing.T) {
+		taskNoPlan := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "no-plan-task",
+				Namespace: "default",
+			},
+			Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAI,
+			},
+		}
+
+		scheme2 := runtime.NewScheme()
+		_ = corev1alpha1.AddToScheme(scheme2)
+		_ = corev1.AddToScheme(scheme2)
+		fakeClient2 := fake.NewClientBuilder().WithScheme(scheme2).WithRuntimeObjects(taskNoPlan).Build()
+		db2, _ := sqlite.NewDB(":memory:")
+		ss2 := sqlite.NewStore(db2, ":memory:")
+		handlers2 := NewHandlers(fakeClient2, nil, "", false, ss2, ss2, ss2, nil, nil)
+
+		app2 := fiber.New()
+		app2.Get("/api/v1/tasks/:id/plan", handlers2.GetTaskPlan)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/no-plan-task/plan?namespace=default", nil)
+		resp, err := app2.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	})
 }

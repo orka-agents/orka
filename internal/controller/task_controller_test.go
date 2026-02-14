@@ -45,6 +45,7 @@ func newReconciler() *TaskReconciler {
 		Recorder:        record.NewFakeRecorder(100),
 		ResultStore:     ss,
 		SessionStore:    ss,
+		PlanStore:       ss,
 	}
 }
 
@@ -1908,6 +1909,93 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.ResultRef).NotTo(BeNil())
 			Expect(task.Status.ResultRef.Available).To(BeTrue())
+		})
+	})
+
+	Context("autonomous mode", func() {
+		It("should re-create Job and increment iteration when autonomous task Job succeeds", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-autonomous-loop"
+			agentName := "test-autonomous-agent"
+			ns := defaultNS
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			agentNN := types.NamespacedName{Name: agentName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			// Create Agent with Coordination.Autonomous = true
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      agentName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.AgentSpec{
+					Coordination: &corev1alpha1.CoordinationConfig{
+						Enabled:       true,
+						Autonomous:    true,
+						MaxIterations: 10,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, &corev1alpha1.Agent{
+					ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: ns},
+				})
+			}()
+
+			// Verify the agent was created
+			Expect(k8sClient.Get(ctx, agentNN, agent)).To(Succeed())
+
+			// Create Task referencing the autonomous agent
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAI,
+					Prompt: "autonomous test prompt",
+					AgentRef: &corev1alpha1.AgentReference{
+						Name: agentName,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			// Reconcile through: finalizer → status init → handlePending→Running
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
+			Expect(task.Status.JobName).NotTo(BeEmpty())
+			oldJobName := task.Status.JobName
+
+			// Simulate Job success
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: oldJobName, Namespace: ns}, job)).To(Succeed())
+			job.Status.Succeeded = 1
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+			// Reconcile handleRunning — autonomous path should reset to Pending
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+			// Verify: task is NOT Succeeded, phase is reset to Pending
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
+			Expect(task.Status.Iteration).To(Equal(int32(1)))
+			Expect(task.Status.JobName).To(BeEmpty())
+			Expect(task.Status.Message).To(ContainSubstring("autonomous iteration"))
+
+			// Old Job should be deleted
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: oldJobName, Namespace: ns}, &batchv1.Job{})
+				return errors.IsNotFound(err)
+			}, 5*time.Second, 200*time.Millisecond).Should(BeTrue())
 		})
 	})
 })

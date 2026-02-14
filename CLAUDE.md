@@ -63,7 +63,7 @@ make deploy IMG=<registry>/mercan:tag
 - **Chat Endpoint** (`internal/api/chat.go`): Agentic chat with SSE streaming, tool execution loop, session persistence
 - **Task Reconciler** (`internal/controller/`): Watches Task CRDs, creates Jobs, manages lifecycle
 - **Session Manager**: Manages conversation continuity via SQLite store with serial execution enforcement
-- **Store** (`internal/store/`): Storage interfaces (`ResultStore`, `SessionStore`) with SQLite implementation (`internal/store/sqlite/`)
+- **Store** (`internal/store/`): Storage interfaces (`ResultStore`, `SessionStore`, `PlanStore`) with SQLite implementation (`internal/store/sqlite/`)
 - **Workers** (`workers/`): AI worker (LLM agent with tools), general worker (container commands), and agent workers (`workers/agent/copilot/`, `workers/agent/claude/`) for external CLI runtimes; workers POST results to controller via HTTP
 - **Web UI** (`ui/`): React SPA embedded into controller binary via `//go:embed`
 
@@ -97,10 +97,11 @@ make deploy IMG=<registry>/mercan:tag
 - PR creation: `create_pull_request` coordination tool creates GitHub PRs from pushed branches using git credentials from task workspace config
 - PR management: `merge_pull_request` merges PRs after CI checks pass (instant); `auto_merge_pull_request` polls CI and auto-merges when green (blocking with timeout); `review_pull_request` fetches PR diffs for analysis; `post_review_comment` posts reviews with verdicts and line-level comments
 - Self-healing coordination: `delegate_task` supports `auto_retry` and `max_retries` params; `wait_for_tasks` automatically re-creates failed child tasks with error context prepended to original prompt; retry config stored as annotations (`mercan.ai/auto-retry`, `mercan.ai/max-retries`, `mercan.ai/retry-count`)
+- Autonomous mode: When `coordination.autonomous: true`, controller loops Jobs instead of completing; plan state persisted in SQLite via `PlanStore`; worker fetches plan via HTTP GET; `update_plan` tool saves progress; termination via goal_complete flag, maxIterations, or Suspend
 
 ### Multi-Agent Coordination
 
-- **Coordination tools** (`internal/tools/delegate_task.go`, `internal/tools/wait_for_tasks.go`): LLM tools that create child Tasks and poll for results
+- **Coordination tools** (`internal/tools/delegate_task.go`, `internal/tools/wait_for_tasks.go`, `internal/tools/update_plan.go`): LLM tools that create child Tasks, poll for results, and update autonomous plan state
 - **PR workflow tools** (`internal/tools/create_pull_request.go`, `internal/tools/merge_pull_request.go`, `internal/tools/auto_merge_pull_request.go`, `internal/tools/review_pull_request.go`, `internal/tools/post_review_comment.go`): GitHub PR creation, merging (instant and polling), review fetching, and review posting
 - **Agent management tools** (`internal/tools/create_agent.go`, `internal/tools/delete_agent.go`): Dynamic Agent CRD creation and deletion at runtime
 - **Controller enforcement** (`internal/controller/task_controller.go`): Validates `maxDepth`, `allowedAgents`, `maxConcurrentChildren` in `handlePending`; populates `status.childTasks` in `handleRunning`
@@ -116,6 +117,7 @@ make deploy IMG=<registry>/mercan:tag
 - **PR auto-merge tool** (`internal/tools/auto_merge_pull_request.go`): Polls CI checks every 30s and auto-merges when green; handles force-pushes, external closures, and transient API errors
 - **PR review tool** (`internal/tools/review_pull_request.go`): Fetches PR diff, file changes, and metadata for code review
 - **PR comment tool** (`internal/tools/post_review_comment.go`): Posts review with verdict (APPROVE/REQUEST_CHANGES/COMMENT) and line-level comments
+- **Autonomous mode** (`api/v1alpha1/agent_types.go`): `CoordinationConfig.Autonomous` enables controller-level Job loop; `MaxIterations` caps iterations; `TaskStatus.Iteration` tracks current iteration; `PlanStore` persists plan state in SQLite
 - **Structured results** (`workers/common/result.go`): `StructuredResult` envelope with summary, diff, verdict, feedback, files, pushBranch; `wait_for_tasks` strips diffs from coordinator context
 - See @docs/multi-agent-coordination.md for full details
 
@@ -170,6 +172,7 @@ GET    /api/v1/tasks/{id}         Get task details
 DELETE /api/v1/tasks/{id}         Cancel/delete task
 GET    /api/v1/tasks/{id}/logs    Stream logs
 GET    /api/v1/tasks/{id}/result  Get result from SQLite store
+GET    /api/v1/tasks/{id}/plan    Get autonomous plan state
 GET    /api/v1/tasks/{id}/children Get child tasks
 GET    /api/v1/sessions           List sessions
 GET    /api/v1/sessions/{id}      Get session transcript
@@ -194,6 +197,8 @@ GET    /v1/models                OpenAI-compatible model listing
 Internal endpoints (worker communication):
 POST   /internal/v1/results/{namespace}/{taskName}              Submit task result
 GET    /internal/v1/sessions/{namespace}/{name}/transcript      Get session transcript
+POST   /internal/v1/plans/{namespace}/{taskName}                Save autonomous plan state
+GET    /internal/v1/plans/{namespace}/{taskName}                Get autonomous plan state
 ```
 
 ## Verification
@@ -234,6 +239,7 @@ See @docs/ for detailed documentation:
 - @docs/development.md — Build, test, and development setup
 - @docs/getting-started.md — Installation and quick start
 - @docs/multi-agent-coordination.md — Coordinator agents, delegation tools, controller enforcement
+- @docs/autonomous-tasks.md — Autonomous task execution and planning loops
 - @docs/openai-compat.md — OpenAI-compatible API proxy
 - @docs/security.md — Security model and hardening
 - @docs/testing.md — Test structure and patterns
