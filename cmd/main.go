@@ -80,6 +80,7 @@ func main() {
 	var storePath string
 	var controllerURL string
 	var enforceNamespaceIsolation bool
+	var maxTasksPerNamespace int
 	var enableTracing bool
 	var tlsOpts []func(*tls.Config)
 
@@ -124,6 +125,8 @@ func main() {
 		"Base URL for the controller API, used by workers. E.g. http://orka-controller.orka-system.svc:8080")
 	flag.BoolVar(&enforceNamespaceIsolation, "enforce-namespace-isolation", false,
 		"When true, restrict users to their ServiceAccount's namespace for all operations.")
+	flag.IntVar(&maxTasksPerNamespace, "max-tasks-per-namespace", 0,
+		"Maximum active tasks per namespace (0 = unlimited).")
 	flag.BoolVar(&enableTracing, "enable-tracing", false,
 		"Enable OpenTelemetry tracing. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
 
@@ -266,7 +269,9 @@ func main() {
 		KubeClient:      kubeClient,
 		ResultStore:     sqliteStore,
 		SessionStore:    sqliteStore,
-		PlanStore:       sqliteStore,
+		PlanStore:                 sqliteStore,
+		EnforceNamespaceIsolation: enforceNamespaceIsolation,
+		MaxTasksPerNamespace:      int32(maxTasksPerNamespace), //nolint:gosec // validated non-negative by flag default
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)

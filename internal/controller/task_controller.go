@@ -54,15 +54,17 @@ const (
 // TaskReconciler reconciles a Task object
 type TaskReconciler struct {
 	client.Client
-	Scheme          *runtime.Scheme
-	JobBuilder      *JobBuilder
-	SessionManager  *SessionManager
-	WebhookNotifier *WebhookNotifier
-	Recorder        record.EventRecorder
-	KubeClient      kubernetes.Interface
-	ResultStore     store.ResultStore
-	SessionStore    store.SessionStore
-	PlanStore       store.PlanStore
+	Scheme                    *runtime.Scheme
+	JobBuilder                *JobBuilder
+	SessionManager            *SessionManager
+	WebhookNotifier           *WebhookNotifier
+	Recorder                  record.EventRecorder
+	KubeClient                kubernetes.Interface
+	ResultStore               store.ResultStore
+	SessionStore              store.SessionStore
+	PlanStore                 store.PlanStore
+	EnforceNamespaceIsolation bool
+	MaxTasksPerNamespace      int32
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
@@ -238,6 +240,31 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
+	// Enforce per-namespace task limit
+	if r.MaxTasksPerNamespace > 0 {
+		var namespaceTasks corev1alpha1.TaskList
+		if err := r.List(ctx, &namespaceTasks, client.InNamespace(task.Namespace)); err != nil {
+			log.Error(err, "failed to list namespace tasks for limit check")
+			return ctrl.Result{}, err
+		}
+		active := int32(0)
+		for _, t := range namespaceTasks.Items {
+			if t.Name != task.Name && (t.Status.Phase == corev1alpha1.TaskPhasePending || t.Status.Phase == corev1alpha1.TaskPhaseRunning) {
+				active++
+			}
+		}
+		if active >= r.MaxTasksPerNamespace {
+			log.Info("namespace task limit reached, requeueing",
+				"namespace", task.Namespace,
+				"active", active,
+				"limit", r.MaxTasksPerNamespace,
+			)
+			r.Recorder.Eventf(task, corev1.EventTypeNormal, "NamespaceTaskLimitReached",
+				"namespace %q has %d active tasks (limit: %d), requeueing", task.Namespace, active, r.MaxTasksPerNamespace)
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+	}
+
 	// Resolve agent if referenced
 	agent, err := r.resolveAgent(ctx, task)
 	if err != nil {
@@ -331,6 +358,11 @@ func (r *TaskReconciler) resolveAgent(ctx context.Context, task *corev1alpha1.Ta
 	agentNS := task.Spec.AgentRef.Namespace
 	if agentNS == "" {
 		agentNS = task.Namespace
+	}
+	if r.EnforceNamespaceIsolation && agentNS != task.Namespace {
+		r.Recorder.Eventf(task, corev1.EventTypeWarning, "NamespaceIsolationViolation",
+			"cross-namespace agent reference not allowed: agent %q is in namespace %q", task.Spec.AgentRef.Name, agentNS)
+		return nil, fmt.Errorf("cross-namespace agent reference not allowed when namespace isolation is enforced: agent %q in namespace %q, task in %q", task.Spec.AgentRef.Name, agentNS, task.Namespace)
 	}
 	if err := r.Get(ctx, types.NamespacedName{
 		Name:      task.Spec.AgentRef.Name,
@@ -434,6 +466,11 @@ func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1
 	providerNS := providerRef.Namespace
 	if providerNS == "" {
 		providerNS = task.Namespace
+	}
+	if r.EnforceNamespaceIsolation && providerNS != task.Namespace {
+		r.Recorder.Eventf(task, corev1.EventTypeWarning, "NamespaceIsolationViolation",
+			"cross-namespace provider reference not allowed: provider %q is in namespace %q", providerRef.Name, providerNS)
+		return nil, fmt.Errorf("cross-namespace provider reference not allowed when namespace isolation is enforced: provider %q in namespace %q, task in %q", providerRef.Name, providerNS, task.Namespace)
 	}
 	if err := r.Get(ctx, types.NamespacedName{
 		Name:      providerRef.Name,
