@@ -45,6 +45,12 @@ spec:
             - --log-level={{ .Values.controller.logLevel }}
             - --store-backend=sqlite
             - --store-path={{ .Values.store.path }}
+            {{- if .Values.controller.enforceNamespaceIsolation }}
+            - --enforce-namespace-isolation=true
+            {{- end }}
+            {{- if gt (int .Values.controller.maxTasksPerNamespace) 0 }}
+            - --max-tasks-per-namespace={{ .Values.controller.maxTasksPerNamespace }}
+            {{- end }}
           ports:
             - name: api
               containerPort: {{ .Values.controller.apiPort }}

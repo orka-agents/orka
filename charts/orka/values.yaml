@@ -38,6 +38,12 @@ controller:
   # Log level (debug, info, warn, error)
   logLevel: info
 
+  # Enforce namespace isolation (restrict users to their SA namespace)
+  enforceNamespaceIsolation: false
+
+  # Max active tasks per namespace (0 = unlimited)
+  maxTasksPerNamespace: 0
+
 # Worker configuration
 workers:
   ai:
