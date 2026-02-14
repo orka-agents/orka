@@ -25,14 +25,16 @@ type InternalHandlers struct {
 	resultStore  store.ResultStore
 	sessionStore store.SessionStore
 	planStore    store.PlanStore
+	messageStore store.MessageStore
 }
 
 // NewInternalHandlers creates a new InternalHandlers instance.
-func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.PlanStore) *InternalHandlers {
+func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.PlanStore, ms store.MessageStore) *InternalHandlers {
 	return &InternalHandlers{
 		resultStore:  rs,
 		sessionStore: ss,
 		planStore:    ps,
+		messageStore: ms,
 	}
 }
 
@@ -208,4 +210,84 @@ func verifyCallerNamespace(c fiber.Ctx, namespace string) error {
 	}
 
 	return nil
+}
+
+// SendMessage handles POST /internal/v1/messages/{namespace}.
+// Workers call this to send messages to sibling tasks.
+func (h *InternalHandlers) SendMessage(c fiber.Ctx) error {
+	if h.messageStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "messaging not enabled")
+	}
+
+	namespace := c.Params("namespace")
+	if namespace == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "namespace is required")
+	}
+
+	if err := verifyCallerNamespace(c, namespace); err != nil {
+		return err
+	}
+
+	var req struct {
+		FromTask   string `json:"fromTask"`
+		ToTask     string `json:"toTask"`
+		ParentTask string `json:"parentTask"`
+		Content    string `json:"content"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+	}
+
+	if req.FromTask == "" || req.ToTask == "" || req.Content == "" || req.ParentTask == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "fromTask, toTask, parentTask, and content are required")
+	}
+
+	msg := &store.Message{
+		Namespace:  namespace,
+		FromTask:   req.FromTask,
+		ToTask:     req.ToTask,
+		ParentTask: req.ParentTask,
+		Content:    req.Content,
+	}
+
+	ctx := c.Context()
+	if err := h.messageStore.SendMessage(ctx, msg); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to send message: %v", err))
+	}
+
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// GetMessages handles GET /internal/v1/messages/{namespace}/{taskName}.
+// Workers call this to check for messages from sibling tasks.
+func (h *InternalHandlers) GetMessages(c fiber.Ctx) error {
+	if h.messageStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "messaging not enabled")
+	}
+
+	namespace := c.Params("namespace")
+	taskName := c.Params("taskName")
+
+	if namespace == "" || taskName == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
+	}
+
+	parentTask := c.Query("parentTask")
+	if parentTask == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "parentTask query parameter is required")
+	}
+
+	markRead := c.Query("markRead", "true") == "true"
+
+	ctx := c.Context()
+	messages, err := h.messageStore.GetMessages(ctx, namespace, taskName, parentTask, markRead)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get messages: %v", err))
+	}
+
+	if messages == nil {
+		messages = []store.Message{}
+	}
+
+	return c.JSON(messages)
 }
