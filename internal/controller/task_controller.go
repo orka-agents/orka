@@ -63,6 +63,7 @@ type TaskReconciler struct {
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
 	PlanStore                 store.PlanStore
+	MessageStore              store.MessageStore
 	EnforceNamespaceIsolation bool
 	MaxTasksPerNamespace      int32
 }
@@ -159,7 +160,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.handleScheduled(ctx, task)
 	case corev1alpha1.TaskPhaseRunning:
 		return r.handleRunning(ctx, task)
-	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed:
+	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
 		return r.handleCompleted(ctx, task)
 	}
 
@@ -184,6 +185,17 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			if err := r.PlanStore.DeletePlan(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete plan state", "task", task.Name)
 				// Continue with finalizer removal anyway
+			}
+		}
+
+		// Clean up inter-agent messages
+		if r.MessageStore != nil {
+			if err := r.MessageStore.DeleteTaskMessages(ctx, task.Namespace, task.Name); err != nil {
+				log.Error(err, "failed to delete task messages", "task", task.Name)
+			}
+			// If this is a coordinator, clean up all children's messages
+			if err := r.MessageStore.DeleteParentMessages(ctx, task.Namespace, task.Name); err != nil {
+				log.Error(err, "failed to delete parent messages", "task", task.Name)
 			}
 		}
 
@@ -698,9 +710,13 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 
 	conditionStatus := metav1.ConditionTrue
 	reason := "TaskSucceeded"
-	if phase == corev1alpha1.TaskPhaseFailed {
+	switch phase {
+	case corev1alpha1.TaskPhaseFailed:
 		conditionStatus = metav1.ConditionFalse
 		reason = "TaskFailed"
+	case corev1alpha1.TaskPhaseCancelled:
+		conditionStatus = metav1.ConditionFalse
+		reason = "TaskCancelled"
 	}
 
 	meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{

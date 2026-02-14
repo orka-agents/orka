@@ -46,3 +46,30 @@ type PlanStore interface {
 	GetPlan(ctx context.Context, namespace, taskName string) (*PlanState, error)
 	DeletePlan(ctx context.Context, namespace, taskName string) error
 }
+
+// Message represents an inter-agent message.
+type Message struct {
+	ID         int64  `json:"id"`
+	Namespace  string `json:"namespace"`
+	FromTask   string `json:"fromTask"`
+	ToTask     string `json:"toTask"` // "*" for broadcast to all siblings
+	ParentTask string `json:"parentTask"`
+	Content    string `json:"content"`
+	Read       bool   `json:"read"`
+	CreatedAt  string `json:"createdAt"`
+}
+
+// MessageStore handles inter-agent message persistence.
+type MessageStore interface {
+	// SendMessage stores a new message. Use toTask="*" for broadcast.
+	SendMessage(ctx context.Context, msg *Message) error
+
+	// GetMessages returns unread messages for a task, optionally marking them as read.
+	GetMessages(ctx context.Context, namespace, taskName, parentTask string, markRead bool) ([]Message, error)
+
+	// DeleteTaskMessages deletes all messages involving a task (sent or received).
+	DeleteTaskMessages(ctx context.Context, namespace, taskName string) error
+
+	// DeleteParentMessages deletes all messages for children of a parent task.
+	DeleteParentMessages(ctx context.Context, namespace, parentTask string) error
+}

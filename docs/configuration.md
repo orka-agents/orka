@@ -85,6 +85,10 @@ spec:
 | `maxConcurrentChildren` | int32 | `0` | Maximum number of concurrent child tasks. `0` means unlimited |
 | `maxDepth` | int32 | `0` | Maximum delegation depth. `0` means unlimited |
 
+**Auto-injected coordination tools** (when `enabled: true`):
+
+`delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, `create_pull_request`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `create_agent`, `delete_agent`, `update_plan`
+
 ### Provider Fallback Chain
 
 You can configure fallback providers that are automatically tried when the primary provider fails (e.g., due to auth errors, provider outages, or rate limiting). Fallbacks are configured on the Agent CRD's `spec.model.fallbacks` field.

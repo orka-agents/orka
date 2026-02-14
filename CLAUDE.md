@@ -63,7 +63,7 @@ make deploy IMG=<registry>/orka:tag
 - **Chat Endpoint** (`internal/api/chat.go`): Agentic chat with SSE streaming, tool execution loop, session persistence
 - **Task Reconciler** (`internal/controller/`): Watches Task CRDs, creates Jobs, manages lifecycle
 - **Session Manager**: Manages conversation continuity via SQLite store with serial execution enforcement
-- **Store** (`internal/store/`): Storage interfaces (`ResultStore`, `SessionStore`, `PlanStore`) with SQLite implementation (`internal/store/sqlite/`)
+- **Store** (`internal/store/`): Storage interfaces (`ResultStore`, `SessionStore`, `PlanStore`, `MessageStore`) with SQLite implementation (`internal/store/sqlite/`)
 - **Workers** (`workers/`): AI worker (LLM agent with tools), general worker (container commands), and agent workers (`workers/agent/copilot/`, `workers/agent/claude/`) for external CLI runtimes; workers POST results to controller via HTTP
 - **Tracing** (`internal/tracing/`): Optional OpenTelemetry tracing with OTLP gRPC export, enabled via `--enable-tracing`
 - **Web UI** (`ui/`): React SPA embedded into controller binary via `//go:embed`
@@ -92,7 +92,8 @@ make deploy IMG=<registry>/orka:tag
 - Priority queue (0-1000) for task scheduling
 - Finalizers ensure cleanup of session locks
 - LLM tool args for nested objects arrive as `map[string]any`, not strings — always type-switch
-- Multi-agent coordination: coordinator agents delegate to specialists via `delegate_task`/`wait_for_tasks` tools; controller enforces depth, allowedAgents, concurrency limits
+- Multi-agent coordination: coordinator agents delegate to specialists via `delegate_task`/`wait_for_tasks`/`cancel_task` tools; controller enforces depth, allowedAgents, concurrency limits
+- Inter-agent messaging: sibling tasks (same parent) exchange messages via `send_message`/`check_messages` tools; messages flow through controller's internal API; scoped to siblings only; broadcast via `to_task="*"`
 - Iterative coordination: `delegate_task` supports `prior_task`, `feedback`, and `pushBranch` params; workers apply prior diffs via `PrepareWorkspace()` and produce structured results via `FinalizeResult()`
 - Auto-push: When `pushBranch` is set on workspace config, `FinalizeResult` commits and pushes changes to that branch automatically
 - PR creation: `create_pull_request` coordination tool creates GitHub PRs from pushed branches using git credentials from task workspace config
@@ -102,7 +103,8 @@ make deploy IMG=<registry>/orka:tag
 
 ### Multi-Agent Coordination
 
-- **Coordination tools** (`internal/tools/delegate_task.go`, `internal/tools/wait_for_tasks.go`, `internal/tools/update_plan.go`): LLM tools that create child Tasks, poll for results, and update autonomous plan state
+- **Coordination tools** (`internal/tools/delegate_task.go`, `internal/tools/wait_for_tasks.go`, `internal/tools/cancel_task.go`, `internal/tools/update_plan.go`): LLM tools that create child Tasks, poll for results, cancel tasks, and update autonomous plan state
+- **Messaging tools** (`internal/tools/send_message.go`, `internal/tools/check_messages.go`): Inter-agent messaging between sibling tasks (same parent coordinator); messages stored in SQLite via `MessageStore`
 - **PR workflow tools** (`internal/tools/create_pull_request.go`, `internal/tools/merge_pull_request.go`, `internal/tools/auto_merge_pull_request.go`, `internal/tools/review_pull_request.go`, `internal/tools/post_review_comment.go`): GitHub PR creation, merging (instant and polling), review fetching, and review posting
 - **Agent management tools** (`internal/tools/create_agent.go`, `internal/tools/delete_agent.go`): Dynamic Agent CRD creation and deletion at runtime
 - **Controller enforcement** (`internal/controller/task_controller.go`): Validates `maxDepth`, `allowedAgents`, `maxConcurrentChildren` in `handlePending`; populates `status.childTasks` in `handleRunning`
@@ -200,6 +202,8 @@ POST   /internal/v1/results/{namespace}/{taskName}              Submit task resu
 GET    /internal/v1/sessions/{namespace}/{name}/transcript      Get session transcript
 POST   /internal/v1/plans/{namespace}/{taskName}                Save autonomous plan state
 GET    /internal/v1/plans/{namespace}/{taskName}                Get autonomous plan state
+POST   /internal/v1/messages/{namespace}                        Send inter-agent message
+GET    /internal/v1/messages/{namespace}/{taskName}             Get messages for a task
 ```
 
 ## Verification

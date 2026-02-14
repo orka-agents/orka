@@ -26,5 +26,6 @@ func newFakeClient(objs ...client.Object) client.Client {
 	return fake.NewClientBuilder().
 		WithScheme(newTestScheme()).
 		WithObjects(objs...).
+		WithStatusSubresource(&corev1alpha1.Task{}).
 		Build()
 }

@@ -261,15 +261,16 @@ func main() {
 	jobBuilder.ControllerURL = controllerURL
 	// Setup Task controller with helper components
 	if err := (&controller.TaskReconciler{
-		Client:          mgr.GetClient(),
-		Scheme:          mgr.GetScheme(),
-		JobBuilder:      jobBuilder,
-		SessionManager:  sessionManager,
-		WebhookNotifier: webhookNotifier,
-		KubeClient:      kubeClient,
-		ResultStore:     sqliteStore,
-		SessionStore:    sqliteStore,
+		Client:                    mgr.GetClient(),
+		Scheme:                    mgr.GetScheme(),
+		JobBuilder:                jobBuilder,
+		SessionManager:            sessionManager,
+		WebhookNotifier:           webhookNotifier,
+		KubeClient:                kubeClient,
+		ResultStore:               sqliteStore,
+		SessionStore:              sqliteStore,
 		PlanStore:                 sqliteStore,
+		MessageStore:              sqliteStore,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 		MaxTasksPerNamespace:      int32(maxTasksPerNamespace), //nolint:gosec // validated non-negative by flag default
 	}).SetupWithManager(mgr); err != nil {
@@ -319,6 +320,7 @@ func main() {
 		ResultStore:               sqliteStore,
 		SessionStore:              sqliteStore,
 		PlanStore:                 sqliteStore,
+		MessageStore:              sqliteStore,
 		HealthChecker:             sqliteStore,
 		Clientset:                 kubeClient,
 		Chat: api.ChatConfig{
