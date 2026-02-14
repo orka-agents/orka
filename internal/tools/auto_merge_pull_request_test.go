@@ -21,7 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 const prStateOpen = "open"
@@ -107,7 +107,7 @@ func TestAutoMergePullRequestTool_CIPassesImmediately(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
 		TaskName: "coder-task",
@@ -187,7 +187,7 @@ func TestAutoMergePullRequestTool_CIFails(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
 		TaskName: "coder-task",
@@ -258,7 +258,7 @@ func TestAutoMergePullRequestTool_Timeout(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
 		TaskName: "coder-task",
@@ -320,7 +320,7 @@ func TestAutoMergePullRequestTool_ContextCancelled(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
@@ -400,7 +400,7 @@ func TestAutoMergePullRequestTool_MergeMethods(t *testing.T) {
 			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 			tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-			t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+			t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 			args, _ := json.Marshal(AutoMergePullRequestArgs{
 				TaskName:    "coder-task",
@@ -471,7 +471,7 @@ func TestAutoMergePullRequestTool_PRClosedExternally(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
 		TaskName: "coder-task",
@@ -541,7 +541,7 @@ func TestAutoMergePullRequestTool_PRAlreadyMerged(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
 		TaskName: "coder-task",
@@ -577,7 +577,7 @@ func TestAutoMergePullRequestTool_InvalidArgs(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewAutoMergePullRequestTool(k8sClient)
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args := json.RawMessage(`{"bad": true}`)
 
@@ -598,7 +598,7 @@ func TestAutoMergePullRequestTool_MissingTask(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewAutoMergePullRequestTool(k8sClient)
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
 		TaskName: "nonexistent",

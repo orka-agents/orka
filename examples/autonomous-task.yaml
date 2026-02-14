@@ -7,7 +7,7 @@
 # Usage:
 #   kubectl apply -f examples/autonomous-task.yaml
 ---
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: autonomous-coordinator
@@ -32,7 +32,7 @@ spec:
       - name: coder
       - name: reviewer
 ---
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: build-todo-api

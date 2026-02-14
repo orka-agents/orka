@@ -1,6 +1,6 @@
 # Agent Runtimes
 
-Agent runtimes let Mercan delegate task execution to external agent CLIs—such as Claude Code CLI and GitHub Copilot CLI—instead of running tasks through Mercan's built-in AI worker. This gives your tasks access to full autonomous coding capabilities (file read/write/edit, bash execution, git operations) provided by battle-tested agent runtimes, while Mercan handles scheduling, lifecycle management, secrets, sessions, and Kubernetes-native orchestration.
+Agent runtimes let Orka delegate task execution to external agent CLIs—such as Claude Code CLI and GitHub Copilot CLI—instead of running tasks through Orka's built-in AI worker. This gives your tasks access to full autonomous coding capabilities (file read/write/edit, bash execution, git operations) provided by battle-tested agent runtimes, while Orka handles scheduling, lifecycle management, secrets, sessions, and Kubernetes-native orchestration.
 
 ## Supported Runtimes
 
@@ -49,7 +49,7 @@ All secret keys are injected as environment variables into the worker pod via `e
 ### 2. Create an Agent
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: claude-agent
@@ -76,7 +76,7 @@ spec:
 ### 3. Create a Task
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: refactor-task
@@ -94,7 +94,7 @@ spec:
 kubectl get task refactor-task
 # Get the result via the REST API
 curl http://localhost:8080/api/v1/tasks/refactor-task/result \
-  -H "Authorization: Bearer $(kubectl create token mercan-client)"
+  -H "Authorization: Bearer $(kubectl create token orka-client)"
 ```
 
 ## Agent Configuration
@@ -104,7 +104,7 @@ An Agent resource with a `runtime` field defines the CLI runtime to use for `typ
 ### Full Reference
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: my-agent
@@ -164,7 +164,7 @@ Tasks with `type: agent` reference an Agent and can override its runtime default
 ### Full Reference
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: my-agent-task
@@ -312,7 +312,7 @@ Sessions enable multi-turn conversations across tasks. Session data is stored in
 ### Using Sessions
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: follow-up-task
@@ -389,15 +389,15 @@ The controller accepts flags to configure agent worker images:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--copilot-worker-image` | `mercan-agent-worker-copilot:latest` | Container image for Copilot agent workers |
-| `--claude-worker-image` | `mercan-agent-worker-claude:latest` | Container image for Claude agent workers |
+| `--copilot-worker-image` | `orka-agent-worker-copilot:latest` | Container image for Copilot agent workers |
+| `--claude-worker-image` | `orka-agent-worker-claude:latest` | Container image for Claude agent workers |
 
 Example:
 
 ```bash
-mercan-controller \
-  --copilot-worker-image=ghcr.io/sozercan/mercan/agent-worker-copilot:v1.0.0 \
-  --claude-worker-image=ghcr.io/sozercan/mercan/agent-worker-claude:v1.0.0
+orka-controller \
+  --copilot-worker-image=ghcr.io/sozercan/orka/agent-worker-copilot:v1.0.0 \
+  --claude-worker-image=ghcr.io/sozercan/orka/agent-worker-claude:v1.0.0
 ```
 
 ## Examples
@@ -420,7 +420,7 @@ kubectl create secret generic claude-api-key \
 
 # 2. Create the Agent
 kubectl apply -f - <<EOF
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: claude-agent
@@ -446,7 +446,7 @@ EOF
 
 # 3. Create a Task that clones a repo and works on it
 kubectl apply -f - <<EOF
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: fix-tests
@@ -469,7 +469,7 @@ kubectl get task fix-tests -w
 
 # 5. Get the result
 curl http://localhost:8080/api/v1/tasks/fix-tests/result \
-  -H "Authorization: Bearer $(kubectl create token mercan-client)"
+  -H "Authorization: Bearer $(kubectl create token orka-client)"
 
 # 6. Check worker pod logs for full transcript
 kubectl logs -l job-name=$(kubectl get task fix-tests -o jsonpath='{.status.jobName}')
@@ -486,7 +486,7 @@ kubectl logs -l job-name=$(kubectl get task fix-tests -o jsonpath='{.status.jobN
 - **Session locked**: Another task may hold the session lock. Check via the REST API:
   ```bash
   curl http://localhost:8080/api/v1/sessions/<name> \
-    -H "Authorization: Bearer $(kubectl create token mercan-client)"
+    -H "Authorization: Bearer $(kubectl create token orka-client)"
   ```
 - **Agent not found**: Verify the Agent exists and has `runtime` configured:
   ```bash
@@ -499,7 +499,7 @@ kubectl logs -l job-name=$(kubectl get task fix-tests -o jsonpath='{.status.jobN
 - **Invalid runtime type**: `runtime.type` must be `copilot` or `claude`.
 - **Worker image not available**: Check that the worker image is accessible from your cluster:
   ```bash
-  kubectl describe pod -l mercan.ai/worker-type=agent
+  kubectl describe pod -l orka.ai/worker-type=agent
   ```
 
 ### Result too large

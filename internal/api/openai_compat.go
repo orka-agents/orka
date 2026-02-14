@@ -20,8 +20,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
-	"github.com/sozercan/mercan/internal/llm"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/llm"
 )
 
 var oaiLog = logf.Log.WithName("openai-compat")
@@ -32,7 +32,7 @@ const (
 )
 
 // OpenAICompatHandler implements OpenAI-compatible /v1/chat/completions and /v1/models endpoints.
-// This allows OpenAI-compatible clients to use Mercan as a custom provider.
+// This allows OpenAI-compatible clients to use Orka as a custom provider.
 type OpenAICompatHandler struct {
 	client                    client.Client
 	watchNamespace            string

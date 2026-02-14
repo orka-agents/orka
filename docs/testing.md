@@ -1,6 +1,6 @@
 # Testing
 
-Mercan has comprehensive test coverage across all packages, including unit tests, integration tests (envtest), end-to-end tests (Kind cluster), and frontend tests.
+Orka has comprehensive test coverage across all packages, including unit tests, integration tests (envtest), end-to-end tests (Kind cluster), and frontend tests.
 
 ## Running Tests
 

@@ -2,7 +2,7 @@
 # These demonstrate different patterns for AI task execution
 ---
 # Task 1: Simple research task using researcher agent
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: research-kubernetes-operators
@@ -27,7 +27,7 @@ spec:
   timeout: 5m
 ---
 # Task 2: Code generation task using coder agent
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: implement-rate-limiter
@@ -51,7 +51,7 @@ spec:
   timeout: 10m
 ---
 # Task 3: Code review task
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: review-auth-implementation
@@ -95,13 +95,13 @@ spec:
   timeout: 3m
 ---
 # Task 4: Complex coordinated task
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: design-caching-system
   annotations:
-    mercan.ai/complexity: high
-    mercan.ai/estimated-subtasks: "3"
+    orka.ai/complexity: high
+    orka.ai/estimated-subtasks: "3"
 spec:
   type: ai
   agentRef:
@@ -134,7 +134,7 @@ spec:
     initialDelay: 30s
 ---
 # Task 5: Multi-turn conversation (follow-up on previous research)
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: research-followup
@@ -158,7 +158,7 @@ spec:
   timeout: 5m
 ---
 # Task 6: GitHub-focused research task
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: analyze-similar-projects
@@ -167,7 +167,7 @@ spec:
   agentRef:
     name: researcher-agent
   prompt: |
-    Find and analyze open-source Kubernetes task execution platforms similar to Mercan.
+    Find and analyze open-source Kubernetes task execution platforms similar to Orka.
 
     Search for projects that:
     1. Use Kubernetes Jobs/Pods for task execution
@@ -184,7 +184,7 @@ spec:
   timeout: 10m
 ---
 # Task 7: Webhook notification example
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: research-with-notification

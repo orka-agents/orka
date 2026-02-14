@@ -158,7 +158,7 @@ describe('agentStatusSchema', () => {
 describe('agentSchema', () => {
   it('parses valid full agent', () => {
     const data = {
-      apiVersion: 'core.mercan.ai/v1alpha1',
+      apiVersion: 'core.orka.ai/v1alpha1',
       kind: 'Agent',
       metadata: {
         name: 'my-agent',

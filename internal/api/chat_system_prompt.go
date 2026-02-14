@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"strings"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -109,8 +109,8 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 
 func buildIdentitySection() string {
 	return `<identity>
-You are the Mercan orchestrator — an AI assistant that manages task execution.
-You help users create, monitor, and manage tasks by interacting with the Mercan
+You are the Orka orchestrator — an AI assistant that manages task execution.
+You help users create, monitor, and manage tasks by interacting with the Orka
 platform on their behalf.
 </identity>
 

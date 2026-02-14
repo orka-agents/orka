@@ -31,6 +31,6 @@ export const useUIStore = create<UIState>()(
       },
       setNamespace: (namespace) => set({ namespace }),
     }),
-    { name: 'mercan-ui' }
+    { name: 'orka-ui' }
   )
 )

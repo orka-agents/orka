@@ -1,8 +1,8 @@
 # OpenAI-Compatible API
 
-Mercan exposes an **OpenAI-compatible API** at `/v1/chat/completions` and `/v1/models`, allowing any OpenAI-compatible client to use Mercan as a provider. This includes tools like [Continue](https://continue.dev/), [Cursor](https://cursor.sh/), and others.
+Orka exposes an **OpenAI-compatible API** at `/v1/chat/completions` and `/v1/models`, allowing any OpenAI-compatible client to use Orka as a provider. This includes tools like [Continue](https://continue.dev/), [Cursor](https://cursor.sh/), and others.
 
-Mercan acts as a **proxy** to whichever LLM provider is configured in your cluster (Anthropic, OpenAI, Azure OpenAI, etc.), with credentials managed securely via Kubernetes Secrets and Provider CRDs.
+Orka acts as a **proxy** to whichever LLM provider is configured in your cluster (Anthropic, OpenAI, Azure OpenAI, etc.), with credentials managed securely via Kubernetes Secrets and Provider CRDs.
 
 ## Endpoints
 
@@ -25,7 +25,7 @@ The `model` field supports two formats:
 1. **Provider CRD** configured in the cluster:
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Provider
 metadata:
   name: anthropic
@@ -55,32 +55,32 @@ stringData:
 
 ```bash
 # Create a service account
-kubectl create serviceaccount mercan-client
+kubectl create serviceaccount orka-client
 
-# Bind it to the mercan viewer role (or a custom role)
-kubectl create clusterrolebinding mercan-client-binding \
-  --clusterrole=mercan-task-viewer \
-  --serviceaccount=default:mercan-client
+# Bind it to the orka viewer role (or a custom role)
+kubectl create clusterrolebinding orka-client-binding \
+  --clusterrole=orka-task-viewer \
+  --serviceaccount=default:orka-client
 
 # Get a token
-export MERCAN_TOKEN=$(kubectl create token mercan-client)
+export ORKA_TOKEN=$(kubectl create token orka-client)
 ```
 
 ## Using with Continue
 
 ### Configuration
 
-Configure Continue to use Mercan as an OpenAI-compatible provider. Add to your Continue configuration:
+Configure Continue to use Orka as an OpenAI-compatible provider. Add to your Continue configuration:
 
 ```json
 {
   "models": [
     {
-      "title": "Claude Sonnet 4 (via Mercan)",
+      "title": "Claude Sonnet 4 (via Orka)",
       "provider": "openai",
       "model": "anthropic/claude-sonnet-4-20250514",
-      "apiBase": "https://mercan.example.com/v1",
-      "apiKey": "YOUR_MERCAN_TOKEN"
+      "apiBase": "https://orka.example.com/v1",
+      "apiKey": "YOUR_ORKA_TOKEN"
     }
   ]
 }
@@ -88,10 +88,10 @@ Configure Continue to use Mercan as an OpenAI-compatible provider. Add to your C
 
 ### Environment
 
-Set your Mercan API token:
+Set your Orka API token:
 
 ```bash
-export MERCAN_TOKEN=$(kubectl create token mercan-client)
+export ORKA_TOKEN=$(kubectl create token orka-client)
 ```
 
 ## Using with curl
@@ -99,8 +99,8 @@ export MERCAN_TOKEN=$(kubectl create token mercan-client)
 ### Non-streaming
 
 ```bash
-curl -X POST https://mercan.example.com/v1/chat/completions \
-  -H "Authorization: Bearer $MERCAN_TOKEN" \
+curl -X POST https://orka.example.com/v1/chat/completions \
+  -H "Authorization: Bearer $ORKA_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "anthropic/claude-sonnet-4-20250514",
@@ -112,8 +112,8 @@ curl -X POST https://mercan.example.com/v1/chat/completions \
 ### Streaming
 
 ```bash
-curl -X POST https://mercan.example.com/v1/chat/completions \
-  -H "Authorization: Bearer $MERCAN_TOKEN" \
+curl -X POST https://orka.example.com/v1/chat/completions \
+  -H "Authorization: Bearer $ORKA_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "anthropic/claude-sonnet-4-20250514",
@@ -126,8 +126,8 @@ curl -X POST https://mercan.example.com/v1/chat/completions \
 ### List models
 
 ```bash
-curl https://mercan.example.com/v1/models \
-  -H "Authorization: Bearer $MERCAN_TOKEN"
+curl https://orka.example.com/v1/models \
+  -H "Authorization: Bearer $ORKA_TOKEN"
 ```
 
 ## Supported Features
@@ -151,7 +151,7 @@ curl https://mercan.example.com/v1/models \
 
 ```
 ┌──────────────┐     ┌─────────────────────────┐     ┌──────────────────┐
-│  Continue    │────▶│  Mercan API Server       │────▶│  Anthropic API   │
+│  Continue    │────▶│  Orka API Server       │────▶│  Anthropic API   │
 │  (or any     │     │  /v1/chat/completions    │     │  OpenAI API      │
 │   OAI client)│◀────│                          │◀────│  Azure OpenAI    │
 └──────────────┘     │  Provider resolution:    │     └──────────────────┘
@@ -161,4 +161,4 @@ curl https://mercan.example.com/v1/models \
                      └─────────────────────────┘
 ```
 
-Mercan transparently proxies requests to the backend LLM provider. The client manages its own tool execution loop — Mercan simply forwards the messages and tool definitions to the LLM and returns the response.
+Orka transparently proxies requests to the backend LLM provider. The client manages its own tool execution loop — Orka simply forwards the messages and tool definitions to the LLM and returns the response.

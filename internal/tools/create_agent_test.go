@@ -15,7 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 const createAgentToolName = "create_agent"
@@ -63,8 +63,8 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 		{
 			name: "success with all args",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":      parentTaskName,
-				"MERCAN_TASK_NAMESPACE": "default",
+				"ORKA_TASK_NAME":      parentTaskName,
+				"ORKA_TASK_NAMESPACE": "default",
 			},
 			args: json.RawMessage(`{
 				"role": "coder",
@@ -87,10 +87,10 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 		{
 			name: "success with minimal args inherited model/provider",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":      parentTaskName,
-				"MERCAN_TASK_NAMESPACE": "default",
-				"MERCAN_AI_PROVIDER":    "openai",
-				"MERCAN_AI_MODEL":       "gpt-4o",
+				"ORKA_TASK_NAME":      parentTaskName,
+				"ORKA_TASK_NAMESPACE": "default",
+				"ORKA_AI_PROVIDER":    "openai",
+				"ORKA_AI_MODEL":       "gpt-4o",
 			},
 			args:        json.RawMessage(`{"role": "reviewer", "systemPrompt": "You review code"}`),
 			wantErr:     false,
@@ -100,8 +100,8 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 		{
 			name: "error when role is empty",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":      parentTaskName,
-				"MERCAN_TASK_NAMESPACE": "default",
+				"ORKA_TASK_NAME":      parentTaskName,
+				"ORKA_TASK_NAMESPACE": "default",
 			},
 			args:       json.RawMessage(`{"role": "", "systemPrompt": "prompt"}`),
 			wantErr:    true,
@@ -110,8 +110,8 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 		{
 			name: "error when systemPrompt is empty",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":      parentTaskName,
-				"MERCAN_TASK_NAMESPACE": "default",
+				"ORKA_TASK_NAME":      parentTaskName,
+				"ORKA_TASK_NAMESPACE": "default",
 			},
 			args:       json.RawMessage(`{"role": "coder", "systemPrompt": ""}`),
 			wantErr:    true,
@@ -120,8 +120,8 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 		{
 			name: "invalid JSON args",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":      parentTaskName,
-				"MERCAN_TASK_NAMESPACE": "default",
+				"ORKA_TASK_NAME":      parentTaskName,
+				"ORKA_TASK_NAMESPACE": "default",
 			},
 			args:       json.RawMessage(`{invalid}`),
 			wantErr:    true,
@@ -172,8 +172,8 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 }
 
 func TestCreateAgentTool_Execute_OwnerReference(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	k8sClient := newFakeClient(parentTask())
 	tool := NewCreateAgentTool(k8sClient)
@@ -220,8 +220,8 @@ func TestCreateAgentTool_Execute_OwnerReference(t *testing.T) {
 }
 
 func TestCreateAgentTool_Execute_AutoNaming(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	k8sClient := newFakeClient(parentTask())
 	tool := NewCreateAgentTool(k8sClient)
@@ -254,8 +254,8 @@ func TestCreateAgentTool_Execute_AutoNaming(t *testing.T) {
 }
 
 func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	k8sClient := newFakeClient(parentTask())
 	tool := NewCreateAgentTool(k8sClient)
@@ -357,22 +357,22 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 	}
 
 	// Verify labels
-	if agent.Labels["mercan.ai/parent-task"] != parentTaskName {
-		t.Errorf("label mercan.ai/parent-task = %q, want %q", agent.Labels["mercan.ai/parent-task"], parentTaskName)
+	if agent.Labels["orka.ai/parent-task"] != parentTaskName {
+		t.Errorf("label orka.ai/parent-task = %q, want %q", agent.Labels["orka.ai/parent-task"], parentTaskName)
 	}
-	if agent.Labels["mercan.ai/created-by"] != createAgentToolName {
-		t.Errorf("label mercan.ai/created-by = %q, want %q", agent.Labels["mercan.ai/created-by"], createAgentToolName)
+	if agent.Labels["orka.ai/created-by"] != createAgentToolName {
+		t.Errorf("label orka.ai/created-by = %q, want %q", agent.Labels["orka.ai/created-by"], createAgentToolName)
 	}
-	if agent.Labels["mercan.ai/agent-role"] != "coder" {
-		t.Errorf("label mercan.ai/agent-role = %q, want %q", agent.Labels["mercan.ai/agent-role"], "coder")
+	if agent.Labels["orka.ai/agent-role"] != "coder" {
+		t.Errorf("label orka.ai/agent-role = %q, want %q", agent.Labels["orka.ai/agent-role"], "coder")
 	}
 }
 
 func TestCreateAgentTool_Execute_InheritedModelProvider(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_AI_PROVIDER", "openai")
-	t.Setenv("MERCAN_AI_MODEL", "gpt-4o")
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_AI_PROVIDER", "openai")
+	t.Setenv("ORKA_AI_MODEL", "gpt-4o")
 
 	k8sClient := newFakeClient(parentTask())
 	tool := NewCreateAgentTool(k8sClient)
@@ -413,8 +413,8 @@ func TestCreateAgentTool_Execute_InheritedModelProvider(t *testing.T) {
 }
 
 func TestCreateAgentTool_Execute_DefaultNamespace(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
-	// No MERCAN_TASK_NAMESPACE set — should default to "default"
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	// No ORKA_TASK_NAMESPACE set — should default to "default"
 
 	// Create parent task in "default" namespace
 	parent := &corev1alpha1.Task{

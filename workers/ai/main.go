@@ -20,13 +20,13 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
-	"github.com/sozercan/mercan/internal/llm"
-	_ "github.com/sozercan/mercan/internal/llm/anthropic"
-	_ "github.com/sozercan/mercan/internal/llm/openai"
-	"github.com/sozercan/mercan/internal/tools"
-	"github.com/sozercan/mercan/internal/worker"
-	"github.com/sozercan/mercan/workers/common"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/llm"
+	_ "github.com/sozercan/orka/internal/llm/anthropic"
+	_ "github.com/sozercan/orka/internal/llm/openai"
+	"github.com/sozercan/orka/internal/tools"
+	"github.com/sozercan/orka/internal/worker"
+	"github.com/sozercan/orka/workers/common"
 )
 
 const trueStr = "true"
@@ -42,24 +42,24 @@ func run() error {
 	ctx := context.Background()
 
 	// Get configuration from environment
-	taskName := os.Getenv("MERCAN_TASK_NAME")
-	taskNamespace := os.Getenv("MERCAN_TASK_NAMESPACE")
+	taskName := os.Getenv("ORKA_TASK_NAME")
+	taskNamespace := os.Getenv("ORKA_TASK_NAMESPACE")
 
-	provider := os.Getenv("MERCAN_AI_PROVIDER")
-	model := os.Getenv("MERCAN_AI_MODEL")
-	prompt := os.Getenv("MERCAN_AI_PROMPT")
-	systemPrompt := os.Getenv("MERCAN_AI_SYSTEM_PROMPT")
-	toolsStr := os.Getenv("MERCAN_AI_TOOLS")
-	baseURL := os.Getenv("MERCAN_AI_BASE_URL")
+	provider := os.Getenv("ORKA_AI_PROVIDER")
+	model := os.Getenv("ORKA_AI_MODEL")
+	prompt := os.Getenv("ORKA_AI_PROMPT")
+	systemPrompt := os.Getenv("ORKA_AI_SYSTEM_PROMPT")
+	toolsStr := os.Getenv("ORKA_AI_TOOLS")
+	baseURL := os.Getenv("ORKA_AI_BASE_URL")
 
 	if provider == "" {
-		return fmt.Errorf("MERCAN_AI_PROVIDER is required")
+		return fmt.Errorf("ORKA_AI_PROVIDER is required")
 	}
 	if model == "" {
-		return fmt.Errorf("MERCAN_AI_MODEL is required")
+		return fmt.Errorf("ORKA_AI_MODEL is required")
 	}
 	if prompt == "" {
-		return fmt.Errorf("MERCAN_AI_PROMPT is required")
+		return fmt.Errorf("ORKA_AI_PROMPT is required")
 	}
 
 	// Get API key
@@ -69,7 +69,7 @@ func run() error {
 	}
 
 	// Create LLM provider
-	azureAPIVersion := os.Getenv("MERCAN_AI_AZURE_API_VERSION")
+	azureAPIVersion := os.Getenv("ORKA_AI_AZURE_API_VERSION")
 	llmProvider, err := llm.NewProvider(provider, llm.ProviderConfig{
 		APIKey:          apiKey,
 		BaseURL:         baseURL,
@@ -84,13 +84,13 @@ func run() error {
 	llmProvider = llm.NewRetryProvider(llmProvider, 0)
 
 	// Set up fallback providers if configured
-	fallbackCountStr := os.Getenv("MERCAN_AI_FALLBACK_COUNT")
+	fallbackCountStr := os.Getenv("ORKA_AI_FALLBACK_COUNT")
 	if fallbackCountStr != "" {
 		fallbackCount, _ := strconv.Atoi(fallbackCountStr)
 		if fallbackCount > 0 {
 			var fallbacks []llm.FallbackEntry
 			for i := range fallbackCount {
-				prefix := fmt.Sprintf("MERCAN_AI_FALLBACK_%d", i)
+				prefix := fmt.Sprintf("ORKA_AI_FALLBACK_%d", i)
 				fbProviderType := os.Getenv(prefix + "_PROVIDER")
 				fbAPIKey := os.Getenv(prefix + "_API_KEY")
 				fbModel := os.Getenv(prefix + "_MODEL")
@@ -139,7 +139,7 @@ func run() error {
 	}
 
 	// Register coordination tools if enabled
-	if os.Getenv("MERCAN_COORDINATION_ENABLED") == trueStr {
+	if os.Getenv("ORKA_COORDINATION_ENABLED") == trueStr {
 		tools.RegisterCoordinationTools(k8sClient)
 	}
 
@@ -150,15 +150,15 @@ func run() error {
 	sessionContext := loadSessionContext()
 
 	// Autonomous mode: fetch plan state and augment system prompt
-	if os.Getenv("MERCAN_AUTONOMOUS_MODE") == trueStr {
+	if os.Getenv("ORKA_AUTONOMOUS_MODE") == trueStr {
 		iteration := 0
-		if v := os.Getenv("MERCAN_AUTONOMOUS_ITERATION"); v != "" {
+		if v := os.Getenv("ORKA_AUTONOMOUS_ITERATION"); v != "" {
 			if i, err := strconv.Atoi(v); err == nil {
 				iteration = i
 			}
 		}
 		maxIter := 0
-		if v := os.Getenv("MERCAN_AUTONOMOUS_MAX_ITERATIONS"); v != "" {
+		if v := os.Getenv("ORKA_AUTONOMOUS_MAX_ITERATIONS"); v != "" {
 			if i, err := strconv.Atoi(v); err == nil {
 				maxIter = i
 			}
@@ -363,9 +363,9 @@ func loadSessionContext() []llm.Message {
 
 // loadPlanContext fetches the current plan state from the controller API.
 func loadPlanContext() string {
-	controllerURL := os.Getenv("MERCAN_CONTROLLER_URL")
-	taskName := os.Getenv("MERCAN_TASK_NAME")
-	taskNamespace := os.Getenv("MERCAN_TASK_NAMESPACE")
+	controllerURL := os.Getenv("ORKA_CONTROLLER_URL")
+	taskName := os.Getenv("ORKA_TASK_NAME")
+	taskNamespace := os.Getenv("ORKA_TASK_NAMESPACE")
 
 	if controllerURL == "" || taskName == "" || taskNamespace == "" {
 		return ""
@@ -437,10 +437,10 @@ func executeAgentLoop(
 	toolExecutor *worker.ToolExecutor,
 ) (string, error) {
 	maxIterations := 10
-	if os.Getenv("MERCAN_COORDINATION_ENABLED") == trueStr {
+	if os.Getenv("ORKA_COORDINATION_ENABLED") == trueStr {
 		maxIterations = 50
 	}
-	if os.Getenv("MERCAN_AUTONOMOUS_MODE") == trueStr {
+	if os.Getenv("ORKA_AUTONOMOUS_MODE") == trueStr {
 		maxIterations = 100
 	}
 

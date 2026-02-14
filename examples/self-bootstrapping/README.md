@@ -1,6 +1,6 @@
 # Self-Bootstrapping Coordinator Example
 
-This example demonstrates Mercan's self-bootstrapping agent pattern, where a coordinator
+This example demonstrates Orka's self-bootstrapping agent pattern, where a coordinator
 agent dynamically creates specialist agents and delegates work to them.
 
 ## How It Works
@@ -20,14 +20,14 @@ kubectl apply -f coordinator-task.yaml
 ```
 
 ### Via Chat (One-Shot)
-In the Mercan chat, simply ask:
+In the Orka chat, simply ask:
 > "Create a coordinator to build a TODO REST API in Go with tests"
 
 The chat will use `create_agent` with `initialPrompt` to bootstrap everything in one step.
 
 ### Via CLI
 ```bash
-mercan task create --agent coordinator "Build a TODO REST API in Go with CRUD endpoints and tests"
+orka task create --agent coordinator "Build a TODO REST API in Go with CRUD endpoints and tests"
 ```
 
 ## Key Concepts

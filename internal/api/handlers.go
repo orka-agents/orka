@@ -24,9 +24,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
-	"github.com/sozercan/mercan/internal/controller"
-	"github.com/sozercan/mercan/internal/store"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/controller"
+	"github.com/sozercan/orka/internal/store"
 )
 
 // Handlers contains all API handlers
@@ -952,7 +952,7 @@ func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
 	var taskList corev1alpha1.TaskList
 	if err := h.client.List(c.Context(), &taskList,
 		client.InNamespace(namespace),
-		client.MatchingLabels{"mercan.ai/parent-task": taskName},
+		client.MatchingLabels{"orka.ai/parent-task": taskName},
 	); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list child tasks: %v", err))
 	}

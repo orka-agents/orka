@@ -358,7 +358,7 @@ describe('k8sMetadataSchema', () => {
 describe('taskSchema', () => {
   it('parses valid full task', () => {
     const data = {
-      apiVersion: 'core.mercan.ai/v1alpha1',
+      apiVersion: 'core.orka.ai/v1alpha1',
       kind: 'Task',
       metadata: { name: 'my-task', namespace: 'default' },
       spec: { type: 'container', image: 'alpine' },

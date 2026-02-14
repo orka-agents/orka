@@ -18,7 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 // CreateAgentTool implements dynamic Agent CRD creation
@@ -171,8 +171,8 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return "", fmt.Errorf("systemPrompt is required")
 	}
 
-	parentName := os.Getenv("MERCAN_TASK_NAME")
-	parentNamespace := os.Getenv("MERCAN_TASK_NAMESPACE")
+	parentName := os.Getenv("ORKA_TASK_NAME")
+	parentNamespace := os.Getenv("ORKA_TASK_NAMESPACE")
 
 	ns := parentNamespace
 	if ns == "" {
@@ -197,16 +197,16 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		model.Name = a.Model.Name
 	}
 	if model.Provider == "" {
-		model.Provider = os.Getenv("MERCAN_AI_PROVIDER")
+		model.Provider = os.Getenv("ORKA_AI_PROVIDER")
 	}
 	if model.Name == "" {
-		model.Name = os.Getenv("MERCAN_AI_MODEL")
+		model.Name = os.Getenv("ORKA_AI_MODEL")
 	}
 
 	// Build provider ref
 	providerRefName := a.ProviderRef
 	if providerRefName == "" {
-		providerRefName = os.Getenv("MERCAN_AI_PROVIDER")
+		providerRefName = os.Getenv("ORKA_AI_PROVIDER")
 	}
 	if providerRefName == "" {
 		providerRefName = defaultNamespace
@@ -231,9 +231,9 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 			Name:      agentName,
 			Namespace: ns,
 			Labels: map[string]string{
-				"mercan.ai/parent-task": parentName,
-				"mercan.ai/created-by":  "create_agent",
-				"mercan.ai/agent-role":  a.Role,
+				"orka.ai/parent-task": parentName,
+				"orka.ai/created-by":  "create_agent",
+				"orka.ai/agent-role":  a.Role,
 			},
 		},
 		Spec: corev1alpha1.AgentSpec{

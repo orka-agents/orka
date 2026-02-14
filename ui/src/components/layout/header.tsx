@@ -24,7 +24,7 @@ export function Header() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="default">default</SelectItem>
-            <SelectItem value="mercan-system">mercan-system</SelectItem>
+            <SelectItem value="orka-system">orka-system</SelectItem>
           </SelectContent>
         </Select>
       </div>

@@ -7,7 +7,7 @@
 The core work unit. Supports container commands, AI agent prompts, or external agent CLI runtimes.
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: my-task
@@ -42,7 +42,7 @@ spec:
 Reusable agent configurations with model settings, tools, skills, and optional agent-to-agent coordination.
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: researcher-agent
@@ -90,7 +90,7 @@ spec:
 You can configure fallback providers that are automatically tried when the primary provider fails (e.g., due to auth errors, provider outages, or rate limiting). Fallbacks are configured on the Agent CRD's `spec.model.fallbacks` field.
 
 ```yaml
-apiVersion: mercan.ai/v1alpha1
+apiVersion: orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: resilient-agent
@@ -132,7 +132,7 @@ spec:
 Agent configuration for external CLI runtimes (Claude Code CLI or GitHub Copilot CLI).
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: claude-agent
@@ -157,7 +157,7 @@ spec:
 Agent runtime tasks reference an Agent with `runtime` configured:
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: code-review
@@ -189,7 +189,7 @@ spec:
 Custom HTTP-based tool definitions for agents. Supports header-based or body-based auth injection.
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
   name: tavily-search
@@ -218,7 +218,7 @@ spec:
 LLM provider configuration with credentials. Supports Anthropic, OpenAI, and Azure OpenAI.
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Provider
 metadata:
   name: anthropic-prod
@@ -245,22 +245,22 @@ Key configuration values for the Helm chart:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `controller.replicas` | `1` | Controller replicas |
-| `controller.image.repository` | `ghcr.io/sozercan/mercan` | Controller image |
+| `controller.image.repository` | `ghcr.io/sozercan/orka` | Controller image |
 | `controller.watchNamespace` | `""` | Namespace scope (empty = cluster-wide) |
 | `controller.apiPort` | `8080` | REST API port |
 | `controller.metricsPort` | `8081` | Metrics endpoint port |
 | `controller.healthPort` | `8082` | Health probe port |
 | `controller.logLevel` | `info` | Log level (debug/info/warn/error) |
-| `workers.ai.image.repository` | `ghcr.io/sozercan/mercan-ai-worker` | AI worker image |
-| `workers.general.image.repository` | `ghcr.io/sozercan/mercan-general-worker` | General worker image |
+| `workers.ai.image.repository` | `ghcr.io/sozercan/orka-ai-worker` | AI worker image |
+| `workers.general.image.repository` | `ghcr.io/sozercan/orka-general-worker` | General worker image |
 | `service.type` | `ClusterIP` | Service type |
 | `crds.install` | `true` | Install CRDs |
 | `crds.keep` | `true` | Keep CRDs on uninstall |
 | `monitoring.enabled` | `false` | Enable Prometheus ServiceMonitor |
 | `client.create` | `true` | Create client ServiceAccount for API access |
-| `client.name` | `mercan-client` | Client ServiceAccount name |
+| `client.name` | `orka-client` | Client ServiceAccount name |
 
-See [charts/mercan/values.yaml](../charts/mercan/values.yaml) for the full list.
+See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 
 ## Controller Flags
 
@@ -268,10 +268,10 @@ See [charts/mercan/values.yaml](../charts/mercan/values.yaml) for the full list.
 |------|---------|-------------|
 | `--api-port` | `8080` | REST API server port |
 | `--watch-namespace` | `""` | Namespace to watch (empty = all) |
-| `--copilot-worker-image` | `mercan-agent-worker-copilot:latest` | Copilot agent worker image |
-| `--claude-worker-image` | `mercan-agent-worker-claude:latest` | Claude agent worker image |
+| `--copilot-worker-image` | `orka-agent-worker-copilot:latest` | Copilot agent worker image |
+| `--claude-worker-image` | `orka-agent-worker-claude:latest` | Claude agent worker image |
 | `--store-backend` | `sqlite` | Storage backend (sqlite) |
-| `--store-path` | `/data/mercan.db` | Path to SQLite database file |
+| `--store-path` | `/data/orka.db` | Path to SQLite database file |
 | `--chat-enabled` | `true` | Enable the chat endpoint |
 | `--chat-provider` | `""` | Default Provider CRD name for chat |
 | `--chat-model` | `""` | Default model for chat |
@@ -289,7 +289,7 @@ See [charts/mercan/values.yaml](../charts/mercan/values.yaml) for the full list.
 
 ## Prometheus Metrics
 
-Mercan exposes 19 Prometheus metrics. Enable monitoring with the Helm chart:
+Orka exposes 19 Prometheus metrics. Enable monitoring with the Helm chart:
 
 ```yaml
 monitoring:
@@ -299,29 +299,29 @@ monitoring:
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `mercan_tasks_total` | Counter | Total tasks created (by type, phase, namespace) |
-| `mercan_tasks_active` | Gauge | Currently running tasks |
-| `mercan_task_duration_seconds` | Histogram | Task execution duration |
-| `mercan_task_queue_depth` | Gauge | Tasks waiting by priority |
-| `mercan_task_retries_total` | Counter | Retry attempts |
-| `mercan_webhook_deliveries_total` | Counter | Webhook deliveries (success/failure) |
-| `mercan_api_requests_total` | Counter | API requests (by endpoint, method, status) |
-| `mercan_api_request_duration_seconds` | Histogram | API latency |
-| `mercan_sessions_total` | Gauge | Active sessions |
-| `mercan_session_messages_total` | Counter | Messages appended to sessions |
-| `mercan_session_queue_waiting` | Gauge | Tasks waiting for session lock |
-| `mercan_tools_discovered` | Gauge | Tool CRDs discovered |
-| `mercan_tool_calls_total` | Counter | Tool invocations (by tool, status) |
-| `mercan_tool_call_duration_seconds` | Histogram | Tool HTTP call latency |
-| `mercan_tool_health_status` | Gauge | Tool availability (1/0) |
-| `mercan_agents_total` | Gauge | Agent count |
-| `mercan_agent_tasks_active` | Gauge | Active tasks per agent |
-| `mercan_agent_tasks_total` | Counter | Total tasks per agent |
-| `mercan_skills_loaded_total` | Counter | Skills loaded |
+| `orka_tasks_total` | Counter | Total tasks created (by type, phase, namespace) |
+| `orka_tasks_active` | Gauge | Currently running tasks |
+| `orka_task_duration_seconds` | Histogram | Task execution duration |
+| `orka_task_queue_depth` | Gauge | Tasks waiting by priority |
+| `orka_task_retries_total` | Counter | Retry attempts |
+| `orka_webhook_deliveries_total` | Counter | Webhook deliveries (success/failure) |
+| `orka_api_requests_total` | Counter | API requests (by endpoint, method, status) |
+| `orka_api_request_duration_seconds` | Histogram | API latency |
+| `orka_sessions_total` | Gauge | Active sessions |
+| `orka_session_messages_total` | Counter | Messages appended to sessions |
+| `orka_session_queue_waiting` | Gauge | Tasks waiting for session lock |
+| `orka_tools_discovered` | Gauge | Tool CRDs discovered |
+| `orka_tool_calls_total` | Counter | Tool invocations (by tool, status) |
+| `orka_tool_call_duration_seconds` | Histogram | Tool HTTP call latency |
+| `orka_tool_health_status` | Gauge | Tool availability (1/0) |
+| `orka_agents_total` | Gauge | Agent count |
+| `orka_agent_tasks_active` | Gauge | Active tasks per agent |
+| `orka_agent_tasks_total` | Counter | Total tasks per agent |
+| `orka_skills_loaded_total` | Counter | Skills loaded |
 
 ## OpenTelemetry Tracing
 
-Mercan supports opt-in OpenTelemetry distributed tracing for debugging and performance analysis. Tracing is disabled by default (zero overhead).
+Orka supports opt-in OpenTelemetry distributed tracing for debugging and performance analysis. Tracing is disabled by default (zero overhead).
 
 ### Enabling Tracing
 
@@ -344,12 +344,12 @@ env:
 
 | Tracer | Span | Attributes |
 |--------|------|------------|
-| `mercan.api` | `GET /api/v1/tasks` | `http.method`, `http.route`, `http.status_code`, `http.request_id` |
-| `mercan.chat` | `chat.request` | `session.id`, `chat.provider`, `chat.model` |
-| `mercan.chat` | `chat.tool_loop.iteration` | `chat.iteration` |
-| `mercan.llm` | `llm.complete` | `llm.provider`, `llm.model`, `llm.input_tokens`, `llm.output_tokens` |
-| `mercan.tools` | `tool.execute` | `tool.name`, `tool.success` |
-| `mercan.controller` | `task.reconcile` | `task.name`, `task.namespace`, `task.type` |
+| `orka.api` | `GET /api/v1/tasks` | `http.method`, `http.route`, `http.status_code`, `http.request_id` |
+| `orka.chat` | `chat.request` | `session.id`, `chat.provider`, `chat.model` |
+| `orka.chat` | `chat.tool_loop.iteration` | `chat.iteration` |
+| `orka.llm` | `llm.complete` | `llm.provider`, `llm.model`, `llm.input_tokens`, `llm.output_tokens` |
+| `orka.tools` | `tool.execute` | `tool.name`, `tool.success` |
+| `orka.controller` | `task.reconcile` | `task.name`, `task.namespace`, `task.type` |
 
 ### Example: Jaeger Setup
 
@@ -359,6 +359,6 @@ kubectl create namespace observability
 kubectl apply -n observability -f https://raw.githubusercontent.com/jaegertracing/jaeger-operator/main/examples/simplest.yaml
 
 # Configure the controller
-kubectl set env deployment/mercan-controller \
+kubectl set env deployment/orka-controller \
   OTEL_EXPORTER_OTLP_ENDPOINT=jaeger-collector.observability.svc:4317
 ```

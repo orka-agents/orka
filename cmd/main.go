@@ -30,14 +30,14 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
-	"github.com/sozercan/mercan/internal/api"
-	"github.com/sozercan/mercan/internal/controller"
-	_ "github.com/sozercan/mercan/internal/llm/anthropic"
-	_ "github.com/sozercan/mercan/internal/llm/openai"
-	_ "github.com/sozercan/mercan/internal/metrics"
-	"github.com/sozercan/mercan/internal/store/sqlite"
-	"github.com/sozercan/mercan/internal/tracing"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/api"
+	"github.com/sozercan/orka/internal/controller"
+	_ "github.com/sozercan/orka/internal/llm/anthropic"
+	_ "github.com/sozercan/orka/internal/llm/openai"
+	_ "github.com/sozercan/orka/internal/metrics"
+	"github.com/sozercan/orka/internal/store/sqlite"
+	"github.com/sozercan/orka/internal/tracing"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -119,9 +119,9 @@ func main() {
 	flag.IntVar(&chatMaxSessionSize, "chat-max-session-size", 500*1024,
 		"Soft limit for session ConfigMap size before truncation (bytes).")
 	flag.StringVar(&storeBackend, "store-backend", "sqlite", "Storage backend (sqlite)")
-	flag.StringVar(&storePath, "store-path", "/data/mercan.db", "Path to SQLite database file")
+	flag.StringVar(&storePath, "store-path", "/data/orka.db", "Path to SQLite database file")
 	flag.StringVar(&controllerURL, "controller-url", "",
-		"Base URL for the controller API, used by workers. E.g. http://mercan-controller.mercan-system.svc:8080")
+		"Base URL for the controller API, used by workers. E.g. http://orka-controller.orka-system.svc:8080")
 	flag.BoolVar(&enforceNamespaceIsolation, "enforce-namespace-isolation", false,
 		"When true, restrict users to their ServiceAccount's namespace for all operations.")
 	flag.BoolVar(&enableTracing, "enable-tracing", false,
@@ -136,7 +136,7 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// Initialize OpenTelemetry tracing (noop when disabled)
-	tracingShutdown, err := tracing.Init("mercan-controller", enableTracing)
+	tracingShutdown, err := tracing.Init("orka-controller", enableTracing)
 	if err != nil {
 		setupLog.Error(err, "failed to initialize tracing")
 		os.Exit(1)
@@ -207,7 +207,7 @@ func main() {
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "03b49a10.mercan.ai",
+		LeaderElectionID:       "03b49a10.orka.ai",
 	}
 
 	// Set namespace scope if specified

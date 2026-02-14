@@ -14,7 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/sozercan/mercan/internal/cli/client"
+	"github.com/sozercan/orka/internal/cli/client"
 )
 
 func newStatusCmd() *cobra.Command {
@@ -26,7 +26,7 @@ func newStatusCmd() *cobra.Command {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
-			fmt.Println("Mercan Status")
+			fmt.Println("Orka Status")
 			fmt.Println("─────────────")
 
 			healthy, healthErr := c.HealthCheck(ctx)

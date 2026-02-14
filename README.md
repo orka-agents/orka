@@ -1,8 +1,8 @@
-# Mercan
+# Orka
 
 **Kubernetes-native AI agent orchestration.**
 
-Mercan turns your Kubernetes cluster into an AI-powered task execution platform. Spin up swarms of AI agents that write code, review PRs, research topics, or run containers — each as an isolated Kubernetes Job with full scheduling, retries, and observability. A coordinator agent dynamically decomposes complex tasks, spawns specialist agents to work in parallel, and synthesizes their results — no manual orchestration graphs required.
+Orka turns your Kubernetes cluster into an AI-powered task execution platform. Spin up swarms of AI agents that write code, review PRs, research topics, or run containers — each as an isolated Kubernetes Job with full scheduling, retries, and observability. A coordinator agent dynamically decomposes complex tasks, spawns specialist agents to work in parallel, and synthesizes their results — no manual orchestration graphs required.
 
 One `helm install`, one LLM secret, and you're chatting with an orchestrator that handles the rest.
 
@@ -28,7 +28,7 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 
 **Scheduled operations** — Cron-based agents that run daily security scans, dependency audits, or report generation — all with retry policies and webhook notifications.
 
-**Use your favorite AI client** — Connect Continue, Cursor, or any OpenAI-compatible client to Mercan's API. Your cluster manages the LLM credentials — developers just code.
+**Use your favorite AI client** — Connect Continue, Cursor, or any OpenAI-compatible client to Orka's API. Your cluster manages the LLM credentials — developers just code.
 
 **CI/CD integration** — Trigger agent tasks from GitHub Actions, monitor progress via the REST API, and gate deployments on agent analysis.
 
@@ -50,8 +50,8 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 ### Install
 
 ```bash
-helm install mercan charts/mercan \
-  --namespace mercan-system \
+helm install orka charts/orka \
+  --namespace orka-system \
   --create-namespace
 ```
 
@@ -62,7 +62,7 @@ kubectl create secret generic anthropic-secret \
   --from-literal=api-key=your-api-key
 
 kubectl apply -f - <<EOF
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Provider
 metadata:
   name: anthropic
@@ -80,7 +80,7 @@ EOF
 Use the built-in dashboard, or connect any OpenAI-compatible client:
 
 ```bash
-kubectl port-forward -n mercan-system svc/mercan-controller 8080:8080
+kubectl port-forward -n orka-system svc/orka-controller 8080:8080
 
 # Open the web dashboard
 open http://localhost:8080

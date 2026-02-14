@@ -32,8 +32,8 @@ func main() {
 
 func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:           "mercan",
-		Short:         "Mercan CLI — Kubernetes-native task execution platform",
+		Use:           "orka",
+		Short:         "Orka CLI — Kubernetes-native task execution platform",
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -44,7 +44,7 @@ func newRootCmd() *cobra.Command {
 	}
 
 	// Global flags
-	cmd.PersistentFlags().StringP("server", "s", "", "Mercan server URL (default \"http://localhost:8080\")")
+	cmd.PersistentFlags().StringP("server", "s", "", "Orka server URL (default \"http://localhost:8080\")")
 	cmd.PersistentFlags().StringP("token", "t", "", "Bearer token for authentication")
 	cmd.PersistentFlags().StringP("namespace", "n", "", "Kubernetes namespace (default \"default\")")
 	cmd.PersistentFlags().String("kubeconfig", "", "Path to kubeconfig file")

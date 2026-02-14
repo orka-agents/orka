@@ -18,7 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 // ProviderReconciler reconciles a Provider object
@@ -27,9 +27,9 @@ type ProviderReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=providers,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=providers/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=providers/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core.orka.ai,resources=providers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core.orka.ai,resources=providers/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=core.orka.ai,resources=providers/finalizers,verbs=update
 
 // Reconcile handles Provider reconciliation
 func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

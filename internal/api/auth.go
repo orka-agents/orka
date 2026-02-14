@@ -117,7 +117,7 @@ func validateToken(ctx context.Context, c client.Client, token string) (*UserInf
 	// Create a TokenReview request
 	review := &authenticationv1.TokenReview{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "mercan-token-review",
+			Name: "orka-token-review",
 		},
 		Spec: authenticationv1.TokenReviewSpec{
 			Token: token,

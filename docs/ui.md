@@ -1,6 +1,6 @@
 # Web Dashboard
 
-Mercan includes a built-in React web dashboard embedded into the controller binary. No separate frontend deployment is needed.
+Orka includes a built-in React web dashboard embedded into the controller binary. No separate frontend deployment is needed.
 
 ## Tech Stack
 
@@ -60,9 +60,9 @@ Production:
 
 The UI uses ServiceAccount bearer tokens stored in localStorage:
 
-1. **CLI login**: `mercan login` extracts the OIDC token from kubeconfig and opens the browser with `#token=<token>`
+1. **CLI login**: `orka login` extracts the OIDC token from kubeconfig and opens the browser with `#token=<token>`
 2. **Manual login**: Paste a ServiceAccount token on the login page
-3. **Token creation**: `kubectl create token mercan-client -n mercan-system`
+3. **Token creation**: `kubectl create token orka-client -n orka-system`
 
 All API requests include `Authorization: Bearer <token>`.
 

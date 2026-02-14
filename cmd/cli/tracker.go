@@ -12,7 +12,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/sozercan/mercan/internal/cli/client"
+	"github.com/sozercan/orka/internal/cli/client"
 )
 
 // Verbosity levels for the tracker.

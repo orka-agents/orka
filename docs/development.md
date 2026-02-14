@@ -72,12 +72,12 @@ make docker-push-all
 
 ```bash
 kind create cluster
-make docker-build docker-push IMG=<registry>/mercan:tag
-make deploy IMG=<registry>/mercan:tag
+make docker-build docker-push IMG=<registry>/orka:tag
+make deploy IMG=<registry>/orka:tag
 ```
 
 ## Generate Installer YAML
 
 ```bash
-make build-installer IMG=ghcr.io/sozercan/mercan:latest
+make build-installer IMG=ghcr.io/sozercan/orka:latest
 ```

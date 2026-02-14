@@ -17,7 +17,7 @@ import (
 var (
 	dbSizeBytes = prometheus.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "mercan_store_db_size_bytes",
+			Name: "orka_store_db_size_bytes",
 			Help: "Size of the SQLite database file in bytes",
 		},
 	)

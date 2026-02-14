@@ -18,8 +18,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
-	"github.com/sozercan/mercan/workers/common"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/workers/common"
 )
 
 const taskFailRetry = "task-fail-retry"
@@ -175,7 +175,7 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("MERCAN_TASK_NAMESPACE", "test-ns")
+			t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 
 			// Set up HTTP test server for result fetching
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -198,7 +198,7 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 				http.NotFound(w, r)
 			}))
 			defer srv.Close()
-			t.Setenv("MERCAN_CONTROLLER_URL", srv.URL)
+			t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
 
 			scheme := newTestScheme()
 			objs := make([]client.Object, 0, len(tt.tasks))
@@ -302,7 +302,7 @@ func TestWaitForTasksTool_Execute_InvalidTimeout(t *testing.T) {
 }
 
 func TestWaitForTasksTool_Execute_MissingNamespace(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAMESPACE", "")
+	t.Setenv("ORKA_TASK_NAMESPACE", "")
 	tool := NewWaitForTasksTool(nil)
 	args := json.RawMessage(`{"tasks": ["t1"]}`)
 	_, err := tool.Execute(context.Background(), args)
@@ -331,15 +331,15 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_CONTROLLER_URL", server.URL)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_CONTROLLER_URL", server.URL)
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "child-task-1",
 			Namespace: "default",
 			Labels: map[string]string{
-				"mercan.ai/iteration": "2",
+				"orka.ai/iteration": "2",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -411,7 +411,7 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 }
 
 func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAMESPACE", "test-ns")
+	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 
 	// Create a failed task with auto-retry annotations
 	failedTask := &corev1alpha1.Task{
@@ -419,14 +419,14 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 			Name:      taskFailRetry,
 			Namespace: "test-ns",
 			Annotations: map[string]string{
-				"mercan.ai/auto-retry":      "true",
-				"mercan.ai/max-retries":     "2",
-				"mercan.ai/retry-count":     "0",
-				"mercan.ai/original-prompt": "Implement the feature",
+				"orka.ai/auto-retry":      "true",
+				"orka.ai/max-retries":     "2",
+				"orka.ai/retry-count":     "0",
+				"orka.ai/original-prompt": "Implement the feature",
 			},
 			Labels: map[string]string{
-				"mercan.ai/parent-task":     "parent",
-				"mercan.ai/delegated-agent": "coder",
+				"orka.ai/parent-task":     "parent",
+				"orka.ai/delegated-agent": "coder",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -444,7 +444,7 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer srv.Close()
-	t.Setenv("MERCAN_CONTROLLER_URL", srv.URL)
+	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
 
 	scheme := newTestScheme()
 	fakeClient := fake.NewClientBuilder().
@@ -521,11 +521,11 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 		t.Fatal("retry task not created")
 	}
 
-	if retryTask.Annotations["mercan.ai/retry-count"] != "1" {
-		t.Errorf("retry task retry-count = %q, want 1", retryTask.Annotations["mercan.ai/retry-count"])
+	if retryTask.Annotations["orka.ai/retry-count"] != "1" {
+		t.Errorf("retry task retry-count = %q, want 1", retryTask.Annotations["orka.ai/retry-count"])
 	}
-	if retryTask.Annotations["mercan.ai/retried-from"] != taskFailRetry {
-		t.Errorf("retry task retried-from = %q, want task-fail-retry", retryTask.Annotations["mercan.ai/retried-from"])
+	if retryTask.Annotations["orka.ai/retried-from"] != taskFailRetry {
+		t.Errorf("retry task retried-from = %q, want task-fail-retry", retryTask.Annotations["orka.ai/retried-from"])
 	}
 	if !strings.Contains(retryTask.Spec.Prompt, "PREVIOUS ATTEMPT FAILED") {
 		t.Error("retry task prompt should contain error context")
@@ -539,7 +539,7 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 }
 
 func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAMESPACE", "test-ns")
+	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 
 	// Task with retries already exhausted
 	failedTask := &corev1alpha1.Task{
@@ -547,10 +547,10 @@ func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
 			Name:      "task-exhausted",
 			Namespace: "test-ns",
 			Annotations: map[string]string{
-				"mercan.ai/auto-retry":      "true",
-				"mercan.ai/max-retries":     "2",
-				"mercan.ai/retry-count":     "2",
-				"mercan.ai/original-prompt": "Do something",
+				"orka.ai/auto-retry":      "true",
+				"orka.ai/max-retries":     "2",
+				"orka.ai/retry-count":     "2",
+				"orka.ai/original-prompt": "Do something",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -568,7 +568,7 @@ func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer srv.Close()
-	t.Setenv("MERCAN_CONTROLLER_URL", srv.URL)
+	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
 
 	scheme := newTestScheme()
 	fakeClient := fake.NewClientBuilder().
@@ -626,7 +626,7 @@ func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
 }
 
 func TestWaitForTasksTool_Execute_NoAutoRetryOnSuccess(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAMESPACE", "test-ns")
+	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 
 	// Succeeded task with auto-retry — should NOT trigger retry
 	succeededTask := &corev1alpha1.Task{
@@ -634,9 +634,9 @@ func TestWaitForTasksTool_Execute_NoAutoRetryOnSuccess(t *testing.T) {
 			Name:      "task-success",
 			Namespace: "test-ns",
 			Annotations: map[string]string{
-				"mercan.ai/auto-retry":  "true",
-				"mercan.ai/max-retries": "2",
-				"mercan.ai/retry-count": "0",
+				"orka.ai/auto-retry":  "true",
+				"orka.ai/max-retries": "2",
+				"orka.ai/retry-count": "0",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -653,7 +653,7 @@ func TestWaitForTasksTool_Execute_NoAutoRetryOnSuccess(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer srv.Close()
-	t.Setenv("MERCAN_CONTROLLER_URL", srv.URL)
+	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
 
 	scheme := newTestScheme()
 	fakeClient := fake.NewClientBuilder().

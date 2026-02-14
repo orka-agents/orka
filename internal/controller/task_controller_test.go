@@ -25,8 +25,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
-	"github.com/sozercan/mercan/internal/store/sqlite"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/store/sqlite"
 )
 
 // newReconciler creates a TaskReconciler with all dependencies for testing.
@@ -1370,7 +1370,7 @@ var _ = Describe("Task Controller", func() {
 			var childList corev1alpha1.TaskList
 			Expect(k8sClient.List(ctx, &childList,
 				client.InNamespace(defaultNS),
-				client.MatchingLabels{"mercan.ai/parent-task": taskName},
+				client.MatchingLabels{"orka.ai/parent-task": taskName},
 			)).To(Succeed())
 			Expect(childList.Items).NotTo(BeEmpty())
 
@@ -1378,7 +1378,7 @@ var _ = Describe("Task Controller", func() {
 			child := &childList.Items[0]
 			Expect(child.Spec.Schedule).To(BeEmpty(), "child should not have schedule")
 			Expect(child.Spec.Image).To(Equal("alpine:latest"))
-			Expect(child.Labels["mercan.ai/scheduled-run"]).To(Equal("true"))
+			Expect(child.Labels["orka.ai/scheduled-run"]).To(Equal("true"))
 
 			// Clean up child
 			for i := range childList.Items {
@@ -1414,8 +1414,8 @@ var _ = Describe("Task Controller", func() {
 					Name:      taskName + "-active-child",
 					Namespace: defaultNS,
 					Labels: map[string]string{
-						"mercan.ai/parent-task":   taskName,
-						"mercan.ai/scheduled-run": "true",
+						"orka.ai/parent-task":   taskName,
+						"orka.ai/scheduled-run": "true",
 					},
 				},
 				Spec: corev1alpha1.TaskSpec{
@@ -1452,7 +1452,7 @@ var _ = Describe("Task Controller", func() {
 			var childList corev1alpha1.TaskList
 			Expect(k8sClient.List(ctx, &childList,
 				client.InNamespace(defaultNS),
-				client.MatchingLabels{"mercan.ai/parent-task": taskName},
+				client.MatchingLabels{"orka.ai/parent-task": taskName},
 			)).To(Succeed())
 			Expect(childList.Items).To(HaveLen(1), "should only have the original active child")
 		})
@@ -1503,7 +1503,7 @@ var _ = Describe("Task Controller", func() {
 			var childList corev1alpha1.TaskList
 			Expect(k8sClient.List(ctx, &childList,
 				client.InNamespace(defaultNS),
-				client.MatchingLabels{"mercan.ai/parent-task": taskName},
+				client.MatchingLabels{"orka.ai/parent-task": taskName},
 			)).To(Succeed())
 			Expect(childList.Items).To(BeEmpty())
 		})
@@ -1557,10 +1557,10 @@ var _ = Describe("Task Controller", func() {
 					Name:      childName,
 					Namespace: ns,
 					Labels: map[string]string{
-						"mercan.ai/parent-task": "coord-parent-task-depth",
+						"orka.ai/parent-task": "coord-parent-task-depth",
 					},
 					Annotations: map[string]string{
-						"mercan.ai/coordination-depth": "2",
+						"orka.ai/coordination-depth": "2",
 					},
 				},
 				Spec: corev1alpha1.TaskSpec{
@@ -1646,10 +1646,10 @@ var _ = Describe("Task Controller", func() {
 					Name:      childName,
 					Namespace: ns,
 					Labels: map[string]string{
-						"mercan.ai/parent-task": "coord-parent-task-allow",
+						"orka.ai/parent-task": "coord-parent-task-allow",
 					},
 					Annotations: map[string]string{
-						"mercan.ai/coordination-depth": "1",
+						"orka.ai/coordination-depth": "1",
 					},
 				},
 				Spec: corev1alpha1.TaskSpec{
@@ -1722,10 +1722,10 @@ var _ = Describe("Task Controller", func() {
 					Name:      siblingName,
 					Namespace: ns,
 					Labels: map[string]string{
-						"mercan.ai/parent-task": parentTaskName,
+						"orka.ai/parent-task": parentTaskName,
 					},
 					Annotations: map[string]string{
-						"mercan.ai/coordination-depth": "1",
+						"orka.ai/coordination-depth": "1",
 					},
 				},
 				Spec: corev1alpha1.TaskSpec{
@@ -1749,10 +1749,10 @@ var _ = Describe("Task Controller", func() {
 					Name:      childName,
 					Namespace: ns,
 					Labels: map[string]string{
-						"mercan.ai/parent-task": parentTaskName,
+						"orka.ai/parent-task": parentTaskName,
 					},
 					Annotations: map[string]string{
-						"mercan.ai/coordination-depth": "1",
+						"orka.ai/coordination-depth": "1",
 					},
 				},
 				Spec: corev1alpha1.TaskSpec{
@@ -1841,10 +1841,10 @@ var _ = Describe("Task Controller", func() {
 					Name:      childName,
 					Namespace: ns,
 					Labels: map[string]string{
-						"mercan.ai/parent-task": "coord-parent-task-valid",
+						"orka.ai/parent-task": "coord-parent-task-valid",
 					},
 					Annotations: map[string]string{
-						"mercan.ai/coordination-depth": "1",
+						"orka.ai/coordination-depth": "1",
 					},
 				},
 				Spec: corev1alpha1.TaskSpec{

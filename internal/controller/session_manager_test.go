@@ -12,9 +12,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
-	"github.com/sozercan/mercan/internal/store"
-	"github.com/sozercan/mercan/internal/store/sqlite"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/store/sqlite"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )

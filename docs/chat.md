@@ -132,7 +132,7 @@ The system prompt uses XML-delimited sections for optimal tool-calling accuracy:
 
 ```xml
 <identity>
-You are the Mercan orchestrator — an AI assistant that manages
+You are the Orka orchestrator — an AI assistant that manages
 Kubernetes-native task execution.
 </identity>
 
@@ -189,7 +189,7 @@ Structured error responses help the LLM self-correct:
 
 - Default to namespace from `ChatRequest` or authenticated user's namespace
 - `kube-system`, `kube-public`, and the operator's namespace are blocked
-- All orchestrator-created resources get labels: `mercan.ai/created-by: orchestrator`, `mercan.ai/chat-session: <sessionId>`
+- All orchestrator-created resources get labels: `orka.ai/created-by: orchestrator`, `orka.ai/chat-session: <sessionId>`
 
 ## Configuration Flags
 
@@ -210,7 +210,7 @@ Structured error responses help the LLM self-correct:
 ```bash
 # Chat with SSE streaming
 curl -N http://localhost:8080/api/v1/chat \
-  -H "Authorization: Bearer $(kubectl create token mercan-client)" \
+  -H "Authorization: Bearer $(kubectl create token orka-client)" \
   -H "Content-Type: application/json" \
   -d '{
     "message": "Create an AI task that summarizes Kubernetes best practices",
@@ -219,16 +219,16 @@ curl -N http://localhost:8080/api/v1/chat \
 
 # Chat with JSON response
 curl http://localhost:8080/api/v1/chat \
-  -H "Authorization: Bearer $(kubectl create token mercan-client)" \
+  -H "Authorization: Bearer $(kubectl create token orka-client)" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
   -d '{"message": "List all available agents"}'
 
 # Get chat configuration
 curl http://localhost:8080/api/v1/chat/config \
-  -H "Authorization: Bearer $(kubectl create token mercan-client)"
+  -H "Authorization: Bearer $(kubectl create token orka-client)"
 
 # Cancel a chat session
 curl -X DELETE http://localhost:8080/api/v1/chat/my-session \
-  -H "Authorization: Bearer $(kubectl create token mercan-client)"
+  -H "Authorization: Bearer $(kubectl create token orka-client)"
 ```

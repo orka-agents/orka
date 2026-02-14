@@ -62,10 +62,10 @@ func TestUpdatePlanTool_Execute_MissingEnvVars(t *testing.T) {
 		"plan_document": "# Test Plan"
 	}`)
 
-	// Without MERCAN_CONTROLLER_URL set, should fail
-	t.Setenv("MERCAN_CONTROLLER_URL", "")
-	t.Setenv("MERCAN_TASK_NAME", "")
-	t.Setenv("MERCAN_TASK_NAMESPACE", "")
+	// Without ORKA_CONTROLLER_URL set, should fail
+	t.Setenv("ORKA_CONTROLLER_URL", "")
+	t.Setenv("ORKA_TASK_NAME", "")
+	t.Setenv("ORKA_TASK_NAMESPACE", "")
 
 	_, err := tool.Execute(t.Context(), args)
 	if err == nil {

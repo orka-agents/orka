@@ -20,22 +20,22 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/transport"
 
-	"github.com/sozercan/mercan/internal/cli/client"
+	"github.com/sozercan/orka/internal/cli/client"
 )
 
 const (
-	configDir  = ".mercan"
+	configDir  = ".orka"
 	configFile = "config.yaml"
 
 	// defaultNamespace is the Kubernetes default namespace.
 	defaultNamespace = "default"
 
-	// mercanServiceLabel is used to discover the Mercan service in a cluster.
-	mercanServiceLabel = "app.kubernetes.io/name=mercan"
+	// orkaServiceLabel is used to discover the Orka service in a cluster.
+	orkaServiceLabel = "app.kubernetes.io/name=orka"
 )
 
-// mercanConfig holds the persisted CLI configuration.
-type mercanConfig struct {
+// orkaConfig holds the persisted CLI configuration.
+type orkaConfig struct {
 	Server    string `yaml:"server,omitempty"`
 	Token     string `yaml:"token,omitempty"`
 	Namespace string `yaml:"namespace,omitempty"`
@@ -188,7 +188,7 @@ func newClientFromCmd(cmd *cobra.Command) *client.Client {
 	return client.NewWithNamespace(server, token, ns)
 }
 
-// discoverService finds the Mercan service in the cluster.
+// discoverService finds the Orka service in the cluster.
 // Returns the namespace and service name, or empty strings if not found.
 func discoverService(kubeconfigPath, defaultNS string) (string, string) {
 	restConfig, err := buildRESTConfig(kubeconfigPath)
@@ -196,23 +196,23 @@ func discoverService(kubeconfigPath, defaultNS string) (string, string) {
 		return "", ""
 	}
 
-	// Try the user's namespace first, then well-known mercan namespaces
+	// Try the user's namespace first, then well-known orka namespaces
 	namespacesToTry := []string{defaultNS}
-	for _, ns := range []string{"mercan-system", "mercan", defaultNamespace} {
+	for _, ns := range []string{"orka-system", "orka", defaultNamespace} {
 		if ns != defaultNS {
 			namespacesToTry = append(namespacesToTry, ns)
 		}
 	}
 
 	for _, ns := range namespacesToTry {
-		if name := discoverMercanService(restConfig, ns); name != "" {
+		if name := discoverOrkaService(restConfig, ns); name != "" {
 			return ns, name
 		}
 	}
 	return "", ""
 }
 
-// startPortForward starts a kubectl port-forward to the Mercan service.
+// startPortForward starts a kubectl port-forward to the Orka service.
 // Returns the local port, the process PID, a cleanup function, and any error.
 func startPortForward(kubeconfigPath, namespace, service string) (int, int, func(), error) {
 	// Find a free port
@@ -262,9 +262,9 @@ func startPortForward(kubeconfigPath, namespace, service string) (int, int, func
 	return localPort, cmd.Process.Pid, cleanup, nil
 }
 
-// discoverMercanService finds the Mercan API service in the given namespace.
+// discoverOrkaService finds the Orka API service in the given namespace.
 // Tries well-known service names first, then falls back to label selector.
-func discoverMercanService(restConfig *rest.Config, namespace string) string {
+func discoverOrkaService(restConfig *rest.Config, namespace string) string {
 	transportConfig, err := restConfig.TransportConfig()
 	if err != nil {
 		return ""
@@ -277,7 +277,7 @@ func discoverMercanService(restConfig *rest.Config, namespace string) string {
 	httpClient := &http.Client{Transport: rt, Timeout: 5 * time.Second}
 
 	// Strategy 1: check well-known service names
-	for _, candidate := range []string{"mercan-api", "mercan", "mercan-controller-manager"} {
+	for _, candidate := range []string{"orka-api", "orka", "orka-controller-manager"} {
 		if checkServiceExists(httpClient, restConfig.Host, namespace, candidate) {
 			return candidate
 		}
@@ -293,7 +293,7 @@ func discoverMercanService(restConfig *rest.Config, namespace string) string {
 
 func findServiceByLabel(httpClient *http.Client, host, namespace string) string {
 	listURL := fmt.Sprintf("%s/api/v1/namespaces/%s/services?labelSelector=%s",
-		host, namespace, mercanServiceLabel)
+		host, namespace, orkaServiceLabel)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -389,8 +389,8 @@ func configPath() string {
 }
 
 // loadConfig reads the config file. Returns empty config on error.
-func loadConfig() mercanConfig {
-	var cfg mercanConfig
+func loadConfig() orkaConfig {
+	var cfg orkaConfig
 	path := configPath()
 	if path == "" {
 		return cfg
@@ -404,7 +404,7 @@ func loadConfig() mercanConfig {
 }
 
 // saveConfig writes the config file with 0600 permissions.
-func saveConfig(cfg mercanConfig) error {
+func saveConfig(cfg orkaConfig) error {
 	path := configPath()
 	if path == "" {
 		return fmt.Errorf("cannot determine home directory")

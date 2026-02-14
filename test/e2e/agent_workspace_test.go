@@ -18,7 +18,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/sozercan/mercan/test/utils"
+	"github.com/sozercan/orka/test/utils"
 )
 
 var _ = Describe("Agent Workspace", Ordered, func() {
@@ -41,7 +41,7 @@ var _ = Describe("Agent Workspace", Ordered, func() {
 	It("should configure workspace volumes and env vars for git clone", func() {
 		By("creating an Agent with claude runtime for workspace test")
 		agentManifest := fmt.Sprintf(`{
-			"apiVersion": "core.mercan.ai/v1alpha1",
+			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Agent",
 			"metadata": {
 				"name": "%s",
@@ -63,7 +63,7 @@ var _ = Describe("Agent Workspace", Ordered, func() {
 
 		By("creating a Task with workspace config (gitRepo and branch)")
 		taskManifest := fmt.Sprintf(`{
-			"apiVersion": "core.mercan.ai/v1alpha1",
+			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Task",
 			"metadata": {
 				"name": "%s",
@@ -93,7 +93,7 @@ var _ = Describe("Agent Workspace", Ordered, func() {
 		By("verifying that a Job is created for the workspace task")
 		verifyJobCreated := func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("mercan.ai/task=%s,mercan.ai/task-type=agent", taskName),
+				"-l", fmt.Sprintf("orka.ai/task=%s,orka.ai/task-type=agent", taskName),
 				"-o", "jsonpath={.items[0].metadata.name}",
 				"-n", namespace,
 			)
@@ -106,7 +106,7 @@ var _ = Describe("Agent Workspace", Ordered, func() {
 		By("verifying the Job pod has workspace-related env vars")
 		verifyWorkspaceEnvVars := func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("mercan.ai/task=%s", taskName),
+				"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
 				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
 				"-n", namespace,
 			)
@@ -123,10 +123,10 @@ var _ = Describe("Agent Workspace", Ordered, func() {
 				envMap[e.Name] = e.Value
 			}
 
-			g.Expect(envMap).To(HaveKey("MERCAN_GIT_REPO"))
-			g.Expect(envMap["MERCAN_GIT_REPO"]).To(Equal("https://github.com/example/repo"))
-			g.Expect(envMap).To(HaveKey("MERCAN_GIT_BRANCH"))
-			g.Expect(envMap["MERCAN_GIT_BRANCH"]).To(Equal("main"))
+			g.Expect(envMap).To(HaveKey("ORKA_GIT_REPO"))
+			g.Expect(envMap["ORKA_GIT_REPO"]).To(Equal("https://github.com/example/repo"))
+			g.Expect(envMap).To(HaveKey("ORKA_GIT_BRANCH"))
+			g.Expect(envMap["ORKA_GIT_BRANCH"]).To(Equal("main"))
 		}
 		Eventually(verifyWorkspaceEnvVars, 30*time.Second, time.Second).Should(Succeed())
 
@@ -134,7 +134,7 @@ var _ = Describe("Agent Workspace", Ordered, func() {
 		verifyWorkspaceVolume := func(g Gomega) {
 			// Check that the workspace volume exists
 			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("mercan.ai/task=%s", taskName),
+				"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
 				"-o", "jsonpath={.items[0].spec.template.spec.volumes[*].name}",
 				"-n", namespace,
 			)
@@ -144,7 +144,7 @@ var _ = Describe("Agent Workspace", Ordered, func() {
 
 			// Check that the volume mount exists at /workspace
 			cmd = exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("mercan.ai/task=%s", taskName),
+				"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
 				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].volumeMounts}",
 				"-n", namespace,
 			)

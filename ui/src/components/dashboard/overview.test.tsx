@@ -33,6 +33,6 @@ describe('Overview', () => {
 
   it('renders without crashing', () => {
     render(<Overview />)
-    expect(screen.getByText('Overview of your Mercan workspace')).toBeInTheDocument()
+    expect(screen.getByText('Overview of your Orka workspace')).toBeInTheDocument()
   })
 })

@@ -20,7 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 const testPRPath = "/repos/sozercan/ayna/pulls/42"
@@ -67,7 +67,7 @@ func TestReviewPullRequestTool_MissingTask(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewReviewPullRequestTool(k8sClient)
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{
 		TaskName: "nonexistent",
@@ -107,7 +107,7 @@ func TestReviewPullRequestTool_MissingSecret(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewReviewPullRequestTool(k8sClient)
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{
 		TaskName: "coder-task",
@@ -204,7 +204,7 @@ func TestReviewPullRequestTool_Success(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{
 		TaskName: "coder-task",
@@ -302,7 +302,7 @@ func TestReviewPullRequestTool_Execute_APIError(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{
 		TaskName: "coder-task",
@@ -326,7 +326,7 @@ func TestReviewPullRequestTool_Execute_InvalidArgs(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewReviewPullRequestTool(k8sClient)
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	// Missing both required fields (empty JSON object)
 	args := json.RawMessage(`{}`)
@@ -380,7 +380,7 @@ func TestReviewPullRequestTool_Execute_PRNotFound(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{
 		TaskName: "coder-task",
@@ -462,7 +462,7 @@ func TestReviewPullRequestTool_Execute_EmptyDiff(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{
 		TaskName: "coder-task",

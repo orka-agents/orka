@@ -19,36 +19,36 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 const (
 	// DefaultAIWorkerImage is the default image for AI tasks
-	DefaultAIWorkerImage = "mercan-ai-worker:latest"
+	DefaultAIWorkerImage = "orka-ai-worker:latest"
 
 	// DefaultGeneralWorkerImage is the default image for container tasks
-	DefaultGeneralWorkerImage = "mercan-general-worker:latest"
+	DefaultGeneralWorkerImage = "orka-general-worker:latest"
 
 	// DefaultCopilotWorkerImage is the default image for Copilot agent tasks
-	DefaultCopilotWorkerImage = "mercan-agent-worker-copilot:latest"
+	DefaultCopilotWorkerImage = "orka-agent-worker-copilot:latest"
 
 	// DefaultClaudeWorkerImage is the default image for Claude agent tasks
-	DefaultClaudeWorkerImage = "mercan-agent-worker-claude:latest"
+	DefaultClaudeWorkerImage = "orka-agent-worker-claude:latest"
 
 	// DefaultInitImage is the default image for init containers
 	DefaultInitImage = "busybox:1.37"
 
 	// ResultEndpointEnvVar is the env var for the result submission URL
-	ResultEndpointEnvVar = "MERCAN_RESULT_ENDPOINT"
+	ResultEndpointEnvVar = "ORKA_RESULT_ENDPOINT"
 
 	// ControllerURLEnvVar is the env var for the controller base URL
-	ControllerURLEnvVar = "MERCAN_CONTROLLER_URL"
+	ControllerURLEnvVar = "ORKA_CONTROLLER_URL"
 
 	// TaskNameEnvVar is the env var for the task name
-	TaskNameEnvVar = "MERCAN_TASK_NAME"
+	TaskNameEnvVar = "ORKA_TASK_NAME"
 
 	// TaskNamespaceEnvVar is the env var for the task namespace
-	TaskNamespaceEnvVar = "MERCAN_TASK_NAMESPACE"
+	TaskNamespaceEnvVar = "ORKA_TASK_NAMESPACE"
 
 	// defaultSecretKey is the default key name in provider secrets
 	defaultSecretKey = "api-key"
@@ -62,7 +62,7 @@ type JobBuilder struct {
 	CopilotWorkerImage string
 	ClaudeWorkerImage  string
 	InitImage          string
-	ControllerURL      string // e.g. http://mercan-controller.mercan-system.svc:8080
+	ControllerURL      string // e.g. http://orka-controller.orka-system.svc:8080
 }
 
 // NewJobBuilder creates a new JobBuilder
@@ -86,8 +86,8 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 			Name:      jobName,
 			Namespace: task.Namespace,
 			Labels: map[string]string{
-				"mercan.ai/task":      task.Name,
-				"mercan.ai/task-type": string(task.Spec.Type),
+				"orka.ai/task":      task.Name,
+				"orka.ai/task-type": string(task.Spec.Type),
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -95,13 +95,13 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						"mercan.ai/task":      task.Name,
-						"mercan.ai/task-type": string(task.Spec.Type),
+						"orka.ai/task":      task.Name,
+						"orka.ai/task-type": string(task.Spec.Type),
 					},
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
-					ServiceAccountName: "mercan-worker",
+					ServiceAccountName: "orka-worker",
 					SecurityContext:    b.buildPodSecurityContext(),
 					Containers: []corev1.Container{
 						b.buildContainer(task, agent, provider),
@@ -271,14 +271,14 @@ func (b *JobBuilder) buildEnvVars(task *corev1alpha1.Task, agent *corev1alpha1.A
 	// Add prior task env vars for iterative coordination
 	if task.Spec.PriorTaskRef != nil {
 		envVars = append(envVars,
-			corev1.EnvVar{Name: "MERCAN_PRIOR_TASK", Value: task.Spec.PriorTaskRef.Name},
+			corev1.EnvVar{Name: "ORKA_PRIOR_TASK", Value: task.Spec.PriorTaskRef.Name},
 		)
 		priorNS := task.Spec.PriorTaskRef.Namespace
 		if priorNS == "" {
 			priorNS = task.Namespace
 		}
 		envVars = append(envVars,
-			corev1.EnvVar{Name: "MERCAN_PRIOR_TASK_NAMESPACE", Value: priorNS},
+			corev1.EnvVar{Name: "ORKA_PRIOR_TASK_NAMESPACE", Value: priorNS},
 		)
 	}
 
@@ -372,10 +372,10 @@ func resolveAIConfig(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provide
 // addCoordinationEnvVars appends coordination-related environment variables.
 func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent) []corev1.EnvVar {
 	envVars = append(envVars,
-		corev1.EnvVar{Name: "MERCAN_COORDINATION_ENABLED", Value: "true"},
-		corev1.EnvVar{Name: "MERCAN_COORDINATION_MAX_DEPTH",
+		corev1.EnvVar{Name: "ORKA_COORDINATION_ENABLED", Value: "true"},
+		corev1.EnvVar{Name: "ORKA_COORDINATION_MAX_DEPTH",
 			Value: fmt.Sprintf("%d", agent.Spec.Coordination.MaxDepth)},
-		corev1.EnvVar{Name: "MERCAN_COORDINATION_MAX_CHILDREN",
+		corev1.EnvVar{Name: "ORKA_COORDINATION_MAX_CHILDREN",
 			Value: fmt.Sprintf("%d", agent.Spec.Coordination.MaxConcurrentChildren)},
 	)
 
@@ -384,29 +384,29 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 		agentNames = append(agentNames, a.Name)
 	}
 	envVars = append(envVars,
-		corev1.EnvVar{Name: "MERCAN_COORDINATION_ALLOWED_AGENTS",
+		corev1.EnvVar{Name: "ORKA_COORDINATION_ALLOWED_AGENTS",
 			Value: strings.Join(agentNames, ",")},
 	)
 
 	// Current depth (0 for top-level coordinator)
 	depth := "0"
-	if d, ok := task.Annotations["mercan.ai/coordination-depth"]; ok {
+	if d, ok := task.Annotations["orka.ai/coordination-depth"]; ok {
 		depth = d
 	}
 	envVars = append(envVars,
-		corev1.EnvVar{Name: "MERCAN_COORDINATION_DEPTH", Value: depth},
+		corev1.EnvVar{Name: "ORKA_COORDINATION_DEPTH", Value: depth},
 	)
 
 	// Autonomous mode env vars
 	if agent.Spec.Coordination.Autonomous {
 		envVars = append(envVars,
-			corev1.EnvVar{Name: "MERCAN_AUTONOMOUS_MODE", Value: "true"},
-			corev1.EnvVar{Name: "MERCAN_AUTONOMOUS_ITERATION",
+			corev1.EnvVar{Name: "ORKA_AUTONOMOUS_MODE", Value: "true"},
+			corev1.EnvVar{Name: "ORKA_AUTONOMOUS_ITERATION",
 				Value: fmt.Sprintf("%d", task.Status.Iteration)},
 		)
 		if agent.Spec.Coordination.MaxIterations > 0 {
 			envVars = append(envVars,
-				corev1.EnvVar{Name: "MERCAN_AUTONOMOUS_MAX_ITERATIONS",
+				corev1.EnvVar{Name: "ORKA_AUTONOMOUS_MAX_ITERATIONS",
 					Value: fmt.Sprintf("%d", agent.Spec.Coordination.MaxIterations)},
 			)
 		}
@@ -420,14 +420,14 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 	cfg := resolveAIConfig(task, agent, providerCRD)
 
 	envVars = append(envVars,
-		corev1.EnvVar{Name: "MERCAN_AI_PROVIDER", Value: cfg.providerType},
-		corev1.EnvVar{Name: "MERCAN_AI_MODEL", Value: cfg.model},
-		corev1.EnvVar{Name: "MERCAN_AI_PROMPT", Value: cfg.prompt},
-		corev1.EnvVar{Name: "MERCAN_AI_SYSTEM_PROMPT", Value: cfg.systemPrompt},
+		corev1.EnvVar{Name: "ORKA_AI_PROVIDER", Value: cfg.providerType},
+		corev1.EnvVar{Name: "ORKA_AI_MODEL", Value: cfg.model},
+		corev1.EnvVar{Name: "ORKA_AI_PROMPT", Value: cfg.prompt},
+		corev1.EnvVar{Name: "ORKA_AI_SYSTEM_PROMPT", Value: cfg.systemPrompt},
 	)
 
 	if cfg.baseURL != "" {
-		envVars = append(envVars, corev1.EnvVar{Name: "MERCAN_AI_BASE_URL", Value: cfg.baseURL})
+		envVars = append(envVars, corev1.EnvVar{Name: "ORKA_AI_BASE_URL", Value: cfg.baseURL})
 	}
 
 	// Auto-inject coordination tools when coordination is enabled
@@ -440,7 +440,7 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 	}
 
 	if len(cfg.tools) > 0 {
-		envVars = append(envVars, corev1.EnvVar{Name: "MERCAN_AI_TOOLS", Value: strings.Join(cfg.tools, ",")})
+		envVars = append(envVars, corev1.EnvVar{Name: "ORKA_AI_TOOLS", Value: strings.Join(cfg.tools, ",")})
 	}
 
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
@@ -450,7 +450,7 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 	// Add fallback provider environment variables
 	if agent != nil && agent.Spec.Model != nil && len(agent.Spec.Model.Fallbacks) > 0 {
 		envVars = append(envVars, corev1.EnvVar{
-			Name:  "MERCAN_AI_FALLBACK_COUNT",
+			Name:  "ORKA_AI_FALLBACK_COUNT",
 			Value: fmt.Sprintf("%d", len(agent.Spec.Model.Fallbacks)),
 		})
 		for i, fb := range agent.Spec.Model.Fallbacks {
@@ -462,7 +462,7 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 			}, fbProvider); err != nil {
 				continue // skip unresolvable fallbacks
 			}
-			prefix := fmt.Sprintf("MERCAN_AI_FALLBACK_%d", i)
+			prefix := fmt.Sprintf("ORKA_AI_FALLBACK_%d", i)
 			envVars = append(envVars,
 				corev1.EnvVar{Name: prefix + "_PROVIDER", Value: string(fbProvider.Spec.Type)},
 				corev1.EnvVar{Name: prefix + "_MODEL", Value: fb.Model},
@@ -527,7 +527,7 @@ func (b *JobBuilder) addSecretVolumes(job *batchv1.Job, task *corev1alpha1.Task,
 			if secretKey == "" {
 				secretKey = defaultSecretKey
 			}
-			envVarName := fmt.Sprintf("MERCAN_AI_FALLBACK_%d_API_KEY", i)
+			envVarName := fmt.Sprintf("ORKA_AI_FALLBACK_%d_API_KEY", i)
 			job.Spec.Template.Spec.Containers[0].Env = append(
 				job.Spec.Template.Spec.Containers[0].Env,
 				corev1.EnvVar{
@@ -651,7 +651,7 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 	// Add session env vars
 	job.Spec.Template.Spec.Containers[0].Env = append(
 		job.Spec.Template.Spec.Containers[0].Env,
-		corev1.EnvVar{Name: "MERCAN_SESSION_NAME", Value: sessionName},
+		corev1.EnvVar{Name: "ORKA_SESSION_NAME", Value: sessionName},
 	)
 }
 
@@ -677,7 +677,7 @@ func (b *JobBuilder) addAgentEnvVars(envVars []corev1.EnvVar, task *corev1alpha1
 	if prompt == "" && task.Spec.AI != nil {
 		prompt = task.Spec.AI.Prompt
 	}
-	envVars = append(envVars, corev1.EnvVar{Name: "MERCAN_PROMPT", Value: prompt})
+	envVars = append(envVars, corev1.EnvVar{Name: "ORKA_PROMPT", Value: prompt})
 
 	envVars = b.addAgentModelEnvVars(envVars, agent)
 	envVars = b.addAgentToolsEnvVars(envVars, task, agent)
@@ -686,7 +686,7 @@ func (b *JobBuilder) addAgentEnvVars(envVars []corev1.EnvVar, task *corev1alpha1
 	// Timeout (task level)
 	if task.Spec.Timeout != nil {
 		envVars = append(envVars, corev1.EnvVar{
-			Name:  "MERCAN_TIMEOUT_SECONDS",
+			Name:  "ORKA_TIMEOUT_SECONDS",
 			Value: fmt.Sprintf("%d", int64(task.Spec.Timeout.Seconds())),
 		})
 	}
@@ -701,12 +701,12 @@ func (b *JobBuilder) addAgentModelEnvVars(envVars []corev1.EnvVar, agent *corev1
 	}
 	if agent.Spec.Model != nil && agent.Spec.Model.Name != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "MERCAN_MODEL", Value: agent.Spec.Model.Name,
+			Name: "ORKA_MODEL", Value: agent.Spec.Model.Name,
 		})
 	}
 	if agent.Spec.SystemPrompt != nil && agent.Spec.SystemPrompt.Inline != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "MERCAN_SYSTEM_PROMPT", Value: agent.Spec.SystemPrompt.Inline,
+			Name: "ORKA_SYSTEM_PROMPT", Value: agent.Spec.SystemPrompt.Inline,
 		})
 	}
 	return envVars
@@ -727,7 +727,7 @@ func (b *JobBuilder) addAgentToolsEnvVars(
 		maxTurns = *task.Spec.AgentRuntime.MaxTurns
 	}
 	envVars = append(envVars, corev1.EnvVar{
-		Name: "MERCAN_MAX_TURNS", Value: fmt.Sprintf("%d", maxTurns),
+		Name: "ORKA_MAX_TURNS", Value: fmt.Sprintf("%d", maxTurns),
 	})
 
 	// AllowedTools: task override > agent default
@@ -740,14 +740,14 @@ func (b *JobBuilder) addAgentToolsEnvVars(
 	}
 	if len(allowedTools) > 0 {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "MERCAN_ALLOWED_TOOLS", Value: joinStrings(allowedTools),
+			Name: "ORKA_ALLOWED_TOOLS", Value: joinStrings(allowedTools),
 		})
 	}
 
 	// DisallowedTools (task only)
 	if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
 		envVars = append(envVars, corev1.EnvVar{
-			Name:  "MERCAN_DISALLOWED_TOOLS",
+			Name:  "ORKA_DISALLOWED_TOOLS",
 			Value: joinStrings(task.Spec.AgentRuntime.DisallowedTools),
 		})
 	}
@@ -762,7 +762,7 @@ func (b *JobBuilder) addAgentToolsEnvVars(
 	}
 	if allowBash {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "MERCAN_ALLOW_BASH", Value: "true",
+			Name: "ORKA_ALLOW_BASH", Value: "true",
 		})
 	}
 
@@ -780,37 +780,37 @@ func (b *JobBuilder) addAgentWorkspaceEnvVars(
 	ws := task.Spec.AgentRuntime.Workspace
 	if ws.GitRepo != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "MERCAN_GIT_REPO", Value: ws.GitRepo,
+			Name: "ORKA_GIT_REPO", Value: ws.GitRepo,
 		})
 	}
 	if ws.Branch != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "MERCAN_GIT_BRANCH", Value: ws.Branch,
+			Name: "ORKA_GIT_BRANCH", Value: ws.Branch,
 		})
 	}
 	if ws.Ref != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "MERCAN_GIT_REF", Value: ws.Ref,
+			Name: "ORKA_GIT_REF", Value: ws.Ref,
 		})
 	}
 	if ws.SubPath != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "MERCAN_WORKSPACE_SUBPATH", Value: ws.SubPath,
+			Name: "ORKA_WORKSPACE_SUBPATH", Value: ws.SubPath,
 		})
 	}
 	if ws.ForkRepo != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "MERCAN_FORK_REPO", Value: ws.ForkRepo,
+			Name: "ORKA_FORK_REPO", Value: ws.ForkRepo,
 		})
 	}
 	if ws.PRBaseBranch != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "MERCAN_PR_BASE_BRANCH", Value: ws.PRBaseBranch,
+			Name: "ORKA_PR_BASE_BRANCH", Value: ws.PRBaseBranch,
 		})
 	}
 	if ws.PushBranch != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "MERCAN_PUSH_BRANCH", Value: ws.PushBranch,
+			Name: "ORKA_PUSH_BRANCH", Value: ws.PushBranch,
 		})
 	}
 	return envVars

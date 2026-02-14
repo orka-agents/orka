@@ -3,37 +3,37 @@
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
 cliVersion: 4.11.1
-domain: mercan.ai
+domain: orka.ai
 layout:
 - go.kubebuilder.io/v4
-projectName: mercan
-repo: github.com/sozercan/mercan
+projectName: orka
+repo: github.com/sozercan/orka
 resources:
 - api:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: mercan.ai
+  domain: orka.ai
   group: core
   kind: Task
-  path: github.com/sozercan/mercan/api/v1alpha1
+  path: github.com/sozercan/orka/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: mercan.ai
+  domain: orka.ai
   group: core
   kind: Tool
-  path: github.com/sozercan/mercan/api/v1alpha1
+  path: github.com/sozercan/orka/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: mercan.ai
+  domain: orka.ai
   group: core
   kind: Agent
-  path: github.com/sozercan/mercan/api/v1alpha1
+  path: github.com/sozercan/orka/api/v1alpha1
   version: v1alpha1
 version: "3"

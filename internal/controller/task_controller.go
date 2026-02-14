@@ -32,9 +32,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
-	"github.com/sozercan/mercan/internal/store"
-	"github.com/sozercan/mercan/internal/tracing"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -42,7 +42,7 @@ import (
 
 const (
 	// TaskFinalizer is the finalizer for Task cleanup
-	TaskFinalizer = "mercan.ai/cleanup"
+	TaskFinalizer = "orka.ai/cleanup"
 
 	// ConditionTypeComplete indicates the task has completed
 	ConditionTypeComplete = "Complete"
@@ -65,11 +65,11 @@ type TaskReconciler struct {
 	PlanStore       store.PlanStore
 }
 
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=tasks/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=tasks/finalizers,verbs=update
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=agents,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=tools,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
@@ -110,7 +110,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	tracer := tracing.Tracer("mercan.controller")
+	tracer := tracing.Tracer("orka.controller")
 	ctx, span := tracer.Start(ctx, "task.reconcile",
 		trace.WithAttributes(
 			attribute.String("task.name", task.Name),
@@ -344,13 +344,13 @@ func (r *TaskReconciler) resolveAgent(ctx context.Context, task *corev1alpha1.Ta
 // validateCoordinationConstraints validates depth, allowed agents, and concurrency for child tasks.
 // Returns (result, err, done) where done=true means the caller should return the result/err.
 func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error, bool) {
-	depthStr, ok := task.Annotations["mercan.ai/coordination-depth"]
+	depthStr, ok := task.Annotations["orka.ai/coordination-depth"]
 	if !ok {
 		return ctrl.Result{}, nil, false
 	}
 
 	log := logf.FromContext(ctx)
-	parentName := task.Labels["mercan.ai/parent-task"]
+	parentName := task.Labels["orka.ai/parent-task"]
 	depthInt, _ := strconv.Atoi(depthStr)
 
 	// Look up parent task to find its agent's coordination config
@@ -405,7 +405,7 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 	if coord.MaxConcurrentChildren > 0 {
 		var siblings corev1alpha1.TaskList
 		if err := r.List(ctx, &siblings, client.InNamespace(task.Namespace),
-			client.MatchingLabels{"mercan.ai/parent-task": parentName}); err != nil {
+			client.MatchingLabels{"orka.ai/parent-task": parentName}); err != nil {
 			log.Error(err, "failed to list sibling tasks")
 			return ctrl.Result{}, err, true
 		}
@@ -525,10 +525,10 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	}
 
 	// Populate ChildTaskStatus for coordinator tasks
-	if _, isChild := task.Labels["mercan.ai/parent-task"]; !isChild {
+	if _, isChild := task.Labels["orka.ai/parent-task"]; !isChild {
 		var children corev1alpha1.TaskList
 		if err := r.List(ctx, &children, client.InNamespace(task.Namespace),
-			client.MatchingLabels{"mercan.ai/parent-task": task.Name}); err == nil && len(children.Items) > 0 {
+			client.MatchingLabels{"orka.ai/parent-task": task.Name}); err == nil && len(children.Items) > 0 {
 			childStatuses := make([]corev1alpha1.ChildTaskStatus, 0, len(children.Items))
 			for _, child := range children.Items {
 				cs := corev1alpha1.ChildTaskStatus{
@@ -954,7 +954,7 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	if task.Spec.ConcurrencyPolicy == corev1alpha1.ForbidConcurrent || task.Spec.ConcurrencyPolicy == "" {
 		var childList corev1alpha1.TaskList
 		if err := r.List(ctx, &childList, client.InNamespace(task.Namespace), client.MatchingLabels{
-			"mercan.ai/parent-task": task.Name,
+			"orka.ai/parent-task": task.Name,
 		}); err != nil {
 			return ctrl.Result{}, fmt.Errorf("listing child tasks: %w", err)
 		}
@@ -978,8 +978,8 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 			Name:      childName,
 			Namespace: task.Namespace,
 			Labels: map[string]string{
-				"mercan.ai/parent-task":   task.Name,
-				"mercan.ai/scheduled-run": "true",
+				"orka.ai/parent-task":   task.Name,
+				"orka.ai/scheduled-run": "true",
 			},
 		},
 		Spec: *task.Spec.DeepCopy(),
@@ -1032,7 +1032,7 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1alpha1.Task) error {
 	var childList corev1alpha1.TaskList
 	if err := r.List(ctx, &childList, client.InNamespace(task.Namespace), client.MatchingLabels{
-		"mercan.ai/parent-task": task.Name,
+		"orka.ai/parent-task": task.Name,
 	}); err != nil {
 		return fmt.Errorf("listing child tasks: %w", err)
 	}
@@ -1094,11 +1094,11 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 const (
-	workerServiceAccountName = "mercan-worker"
-	workerClusterRoleName    = "mercan-mercan-worker-role"
+	workerServiceAccountName = "orka-worker"
+	workerClusterRoleName    = "orka-orka-worker-role"
 )
 
-// ensureWorkerRBAC ensures the mercan-worker ServiceAccount and ClusterRoleBinding
+// ensureWorkerRBAC ensures the orka-worker ServiceAccount and ClusterRoleBinding
 // exist in the given namespace so that task jobs have the correct permissions.
 func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string) error {
 	log := logf.FromContext(ctx)
@@ -1112,7 +1112,7 @@ func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string)
 				Name:      workerServiceAccountName,
 				Namespace: namespace,
 				Labels: map[string]string{
-					"app.kubernetes.io/managed-by": "mercan",
+					"app.kubernetes.io/managed-by": "orka",
 				},
 			},
 		}
@@ -1125,7 +1125,7 @@ func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string)
 	}
 
 	// Ensure ClusterRoleBinding includes this namespace
-	bindingName := fmt.Sprintf("mercan-worker-%s", namespace)
+	bindingName := fmt.Sprintf("orka-worker-%s", namespace)
 	crb := &rbacv1.ClusterRoleBinding{}
 	err = r.Get(ctx, types.NamespacedName{Name: bindingName}, crb)
 	if apierrors.IsNotFound(err) {
@@ -1133,7 +1133,7 @@ func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string)
 			ObjectMeta: metav1.ObjectMeta{
 				Name: bindingName,
 				Labels: map[string]string{
-					"app.kubernetes.io/managed-by": "mercan",
+					"app.kubernetes.io/managed-by": "orka",
 				},
 			},
 			RoleRef: rbacv1.RoleRef{

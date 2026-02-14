@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sozercan/mercan/workers/common"
+	"github.com/sozercan/orka/workers/common"
 )
 
 const (
@@ -101,7 +101,7 @@ func buildClaudeArgs(cfg *common.AgentConfig) []string {
 	args = append(args, "--max-turns", strconv.Itoa(cfg.MaxTurns))
 
 	// Tool permissions
-	if os.Getenv("MERCAN_ALLOW_BASH") == "true" {
+	if os.Getenv("ORKA_ALLOW_BASH") == "true" {
 		args = append(args, "--dangerously-skip-permissions")
 	}
 	for _, tool := range cfg.AllowedTools {

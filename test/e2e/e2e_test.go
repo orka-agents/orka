@@ -20,20 +20,20 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/sozercan/mercan/test/utils"
+	"github.com/sozercan/orka/test/utils"
 )
 
 // namespace where the project is deployed in
-const namespace = "mercan-system"
+const namespace = "orka-system"
 
 // serviceAccountName created for the project
-const serviceAccountName = "mercan-controller-manager"
+const serviceAccountName = "orka-controller-manager"
 
 // metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "mercan-controller-manager-metrics-service"
+const metricsServiceName = "orka-controller-manager-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
-const metricsRoleBindingName = "mercan-metrics-binding"
+const metricsRoleBindingName = "orka-metrics-binding"
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
@@ -134,7 +134,7 @@ var _ = Describe("Manager", Ordered, func() {
 			cmd := exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 			cmd = exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
-				"--clusterrole=mercan-metrics-reader",
+				"--clusterrole=orka-metrics-reader",
 				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
 			)
 			_, err := utils.Run(cmd)

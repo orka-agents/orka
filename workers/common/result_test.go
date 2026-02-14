@@ -30,7 +30,7 @@ func TestSubmitResult_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("MERCAN_RESULT_ENDPOINT", srv.URL)
+	t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
 
 	err := SubmitResult([]byte("hello result"))
 	if err != nil {
@@ -54,7 +54,7 @@ func TestSubmitResult_RetryOnFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("MERCAN_RESULT_ENDPOINT", srv.URL)
+	t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
 
 	err := SubmitResult([]byte("retry result"))
 	if err != nil {
@@ -72,7 +72,7 @@ func TestSubmitResult_AllRetriesFail(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("MERCAN_RESULT_ENDPOINT", srv.URL)
+	t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
 
 	err := SubmitResult([]byte("failing result"))
 	if err == nil {
@@ -88,10 +88,10 @@ func TestSubmitResult_ConstructEndpointFromControllerURL(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("MERCAN_RESULT_ENDPOINT", "")
-	t.Setenv("MERCAN_CONTROLLER_URL", srv.URL)
-	t.Setenv("MERCAN_TASK_NAMESPACE", "test-ns")
-	t.Setenv("MERCAN_TASK_NAME", "my-task")
+	t.Setenv("ORKA_RESULT_ENDPOINT", "")
+	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
+	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
+	t.Setenv("ORKA_TASK_NAME", "my-task")
 
 	err := SubmitResult([]byte("constructed url"))
 	if err != nil {
@@ -103,8 +103,8 @@ func TestSubmitResult_ConstructEndpointFromControllerURL(t *testing.T) {
 }
 
 func TestSubmitResult_MissingEnvVars(t *testing.T) {
-	t.Setenv("MERCAN_RESULT_ENDPOINT", "")
-	t.Setenv("MERCAN_CONTROLLER_URL", "")
+	t.Setenv("ORKA_RESULT_ENDPOINT", "")
+	t.Setenv("ORKA_CONTROLLER_URL", "")
 
 	err := SubmitResult([]byte("should fail"))
 	if err == nil {
@@ -120,7 +120,7 @@ func TestSubmitResult_BearerToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("MERCAN_RESULT_ENDPOINT", srv.URL)
+	t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
 
 	// When no SA token file exists, no auth header is sent
 	err := SubmitResult([]byte("no token"))

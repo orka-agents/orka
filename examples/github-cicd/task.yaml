@@ -1,5 +1,5 @@
 # Trigger the full CI/CD flow
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: implement-feature

@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sozercan/mercan/internal/store"
+	"github.com/sozercan/orka/internal/store"
 )
 
 // CreateSession inserts a new session record.

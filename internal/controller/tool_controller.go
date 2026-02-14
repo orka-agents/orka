@@ -23,7 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 const (
@@ -43,9 +43,9 @@ type ToolReconciler struct {
 	HTTPClient *http.Client
 }
 
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=tools,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=tools/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=tools/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core.orka.ai,resources=tools/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=core.orka.ai,resources=tools/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 
 // Reconcile validates the Tool configuration, performs a health check on the HTTP endpoint,

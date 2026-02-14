@@ -1,5 +1,5 @@
 # Claude Code agent that writes code and creates PRs
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: claude-coder
@@ -21,7 +21,7 @@ spec:
     name: claude-coder-secrets
 ---
 # Coordinator agent that orchestrates the full CI/CD flow
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: cicd-coordinator

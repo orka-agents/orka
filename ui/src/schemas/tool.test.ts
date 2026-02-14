@@ -109,7 +109,7 @@ describe('toolStatusSchema', () => {
 describe('toolSchema', () => {
   it('parses valid full tool', () => {
     const data = {
-      apiVersion: 'core.mercan.ai/v1alpha1',
+      apiVersion: 'core.orka.ai/v1alpha1',
       kind: 'Tool',
       metadata: {
         name: 'search-tool',

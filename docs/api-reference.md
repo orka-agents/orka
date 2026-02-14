@@ -146,7 +146,7 @@ Workers call this to load the current plan state at startup.
 ```bash
 # Create a task
 curl -X POST http://localhost:8080/api/v1/tasks \
-  -H "Authorization: Bearer $(kubectl create token mercan-client)" \
+  -H "Authorization: Bearer $(kubectl create token orka-client)" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "my-task",
@@ -157,11 +157,11 @@ curl -X POST http://localhost:8080/api/v1/tasks \
 
 # Get task result
 curl http://localhost:8080/api/v1/tasks/my-task/result \
-  -H "Authorization: Bearer $(kubectl create token mercan-client)"
+  -H "Authorization: Bearer $(kubectl create token orka-client)"
 
 # Chat with SSE streaming
 curl -N http://localhost:8080/api/v1/chat \
-  -H "Authorization: Bearer $(kubectl create token mercan-client)" \
+  -H "Authorization: Bearer $(kubectl create token orka-client)" \
   -H "Content-Type: application/json" \
   -d '{
     "message": "Create an AI task that summarizes Kubernetes best practices",
@@ -181,7 +181,7 @@ These tools are available to AI worker agents:
 
 ### Coordination Tools
 
-These tools are registered when `MERCAN_COORDINATION_ENABLED=true`:
+These tools are registered when `ORKA_COORDINATION_ENABLED=true`:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|

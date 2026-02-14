@@ -19,7 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 // Integration tests for coordination tools against real GitHub API.
@@ -44,7 +44,7 @@ func setupIntegrationClient(t *testing.T) (*fake.ClientBuilder, string) {
 	}
 
 	// Set namespace env var
-	os.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	os.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	return fake.NewClientBuilder(), token
 }
@@ -154,7 +154,7 @@ func TestIntegration_PostReviewComment(t *testing.T) {
 	args, _ := json.Marshal(PostReviewCommentArgs{
 		TaskName: integrationTaskName,
 		PRNumber: integrationPRNumber,
-		Body:     "🤖 Automated integration test review from Mercan coordination tools. This review will be cleaned up.",
+		Body:     "🤖 Automated integration test review from Orka coordination tools. This review will be cleaned up.",
 		Event:    "COMMENT",
 	})
 
@@ -203,7 +203,7 @@ func TestIntegration_PostReviewComment_WithLineComment(t *testing.T) {
 			{
 				Path: "main.go",
 				Line: 1,
-				Body: "🤖 Integration test line comment from Mercan",
+				Body: "🤖 Integration test line comment from Orka",
 			},
 		},
 	})

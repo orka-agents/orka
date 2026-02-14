@@ -1,12 +1,12 @@
 # Architecture
 
-Mercan is a Kubernetes-native task execution platform where a controller manages Jobs and Pods for incoming task requests, supporting container tasks, AI agent tasks with LLM integration, and external agent CLI runtimes.
+Orka is a Kubernetes-native task execution platform where a controller manages Jobs and Pods for incoming task requests, supporting container tasks, AI agent tasks with LLM integration, and external agent CLI runtimes.
 
 ## Overview
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                          Mercan Controller                           │
+│                          Orka Controller                           │
 │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────────┐    │
 │  │   Task      │  │   Agent      │  │   Tool & Provider        │    │
 │  │ Reconciler  │  │  Controller  │  │   Controllers            │    │
@@ -48,7 +48,7 @@ The controller is the central component that runs as a Kubernetes Deployment. It
 
 ### Custom Resource Definitions (`api/v1alpha1/`)
 
-Mercan uses four CRDs:
+Orka uses four CRDs:
 
 | CRD | Purpose |
 |-----|---------|
@@ -85,7 +85,7 @@ Mercan uses four CRDs:
 ## Project Structure
 
 ```
-mercan/
+orka/
 ├── api/v1alpha1/           # CRD type definitions (Task, Agent, Tool, Provider)
 ├── cmd/
 │   ├── main.go                # Controller entrypoint
@@ -112,7 +112,7 @@ mercan/
 │       └── claude/         # Claude Code CLI agent worker
 ├── ui/                     # React SPA (Vite + TanStack Router + shadcn/ui)
 ├── config/                 # Kustomize manifests (CRDs, RBAC, samples)
-├── charts/mercan/          # Helm chart
+├── charts/orka/          # Helm chart
 ├── docs/                   # Documentation
 ├── examples/               # Example workflows
 └── test/                   # E2E tests
@@ -166,7 +166,7 @@ Coordinator Agent (depth 0)
 
 **ChildTaskStatus tracking** (in `handleRunning`): Coordinator tasks get `status.childTasks[]` populated with each child's name, agent, phase, and truncated result.
 
-Child tasks use owner references for cascade deletion and labels (`mercan.ai/parent-task`, `mercan.ai/delegated-agent`) for querying.
+Child tasks use owner references for cascade deletion and labels (`orka.ai/parent-task`, `orka.ai/delegated-agent`) for querying.
 
 See [multi-agent-coordination.md](multi-agent-coordination.md) for full details.
 
@@ -196,7 +196,7 @@ Implementations exist for Anthropic Claude and OpenAI. Provider selection is con
 
 ## Skills & Tools System
 
-Mercan supports extensible AI capabilities through a three-layer system:
+Orka supports extensible AI capabilities through a three-layer system:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐

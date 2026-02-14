@@ -26,11 +26,11 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
-	"github.com/sozercan/mercan/internal/controller"
-	"github.com/sozercan/mercan/internal/llm"
-	"github.com/sozercan/mercan/internal/store"
-	"github.com/sozercan/mercan/internal/tracing"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/controller"
+	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/tracing"
 )
 
 const taskCreatedMsg = "Task created"
@@ -78,7 +78,7 @@ type ToolResult struct {
 // Execute dispatches a tool call to the appropriate handler and returns
 // the JSON-serialized result.
 func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (string, error) {
-	tracer := tracing.Tracer("mercan.tools")
+	tracer := tracing.Tracer("orka.tools")
 	ctx, span := tracer.Start(ctx, "tool.execute",
 		trace.WithAttributes(
 			attribute.String("tool.name", toolCall.Name),
@@ -157,8 +157,8 @@ func (e *ToolExecutor) generateTaskName() string {
 
 func (e *ToolExecutor) taskLabels() map[string]string {
 	return map[string]string{
-		"mercan.ai/created-by":   "orchestrator",
-		"mercan.ai/chat-session": e.sessionID,
+		"orka.ai/created-by":   "orchestrator",
+		"orka.ai/chat-session": e.sessionID,
 	}
 }
 
@@ -730,7 +730,7 @@ func (e *ToolExecutor) executeCreateAgent(ctx context.Context, args map[string]a
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				"mercan.ai/created-by": "chat",
+				"orka.ai/created-by": "chat",
 			},
 		},
 		Spec: corev1alpha1.AgentSpec{

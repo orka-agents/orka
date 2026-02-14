@@ -1,7 +1,7 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
-COPILOT_WORKER_IMG ?= mercan-agent-worker-copilot:latest
-CLAUDE_WORKER_IMG ?= mercan-agent-worker-claude:latest
+COPILOT_WORKER_IMG ?= orka-agent-worker-copilot:latest
+CLAUDE_WORKER_IMG ?= orka-agent-worker-claude:latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -74,7 +74,7 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 # CertManager is installed by default; skip with:
 # - CERT_MANAGER_INSTALL_SKIP=true
-KIND_CLUSTER ?= mercan-test-e2e
+KIND_CLUSTER ?= orka-test-e2e
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -146,12 +146,12 @@ build: manifests generate fmt vet ui-build ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
 .PHONY: build-cli
-build-cli: ## Build mercan CLI binary.
-	go build -ldflags "-X main.version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)" -o bin/mercan ./cmd/cli/
+build-cli: ## Build orka CLI binary.
+	go build -ldflags "-X main.version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)" -o bin/orka ./cmd/cli/
 
 .PHONY: build-migrate
 build-migrate: ## Build ConfigMap to SQLite migration binary.
-	go build -o bin/mercan-migrate ./cmd/migrate/
+	go build -o bin/orka-migrate ./cmd/migrate/
 
 .PHONY: build-all
 build-all: build build-cli build-migrate ## Build all binaries.
@@ -208,10 +208,10 @@ PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
-	- $(CONTAINER_TOOL) buildx create --name mercan-builder
-	$(CONTAINER_TOOL) buildx use mercan-builder
+	- $(CONTAINER_TOOL) buildx create --name orka-builder
+	$(CONTAINER_TOOL) buildx use orka-builder
 	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
-	- $(CONTAINER_TOOL) buildx rm mercan-builder
+	- $(CONTAINER_TOOL) buildx rm orka-builder
 	rm Dockerfile.cross
 
 .PHONY: build-installer

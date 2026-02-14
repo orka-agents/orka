@@ -30,7 +30,7 @@ func run() error {
 	if len(os.Args) > 1 {
 		command = os.Args[1:]
 	} else {
-		cmdStr := os.Getenv("MERCAN_COMMAND")
+		cmdStr := os.Getenv("ORKA_COMMAND")
 		if cmdStr == "" {
 			return fmt.Errorf("no command specified")
 		}

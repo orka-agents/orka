@@ -27,11 +27,11 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
-	"github.com/sozercan/mercan/internal/controller"
-	"github.com/sozercan/mercan/internal/llm"
-	"github.com/sozercan/mercan/internal/store"
-	"github.com/sozercan/mercan/internal/tracing"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/controller"
+	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/tracing"
 )
 
 var chatLog = logf.Log.WithName("chat-handler")
@@ -201,7 +201,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	provider = llm.NewTracingProvider(provider)
 
 	// Start chat.request span
-	tracer := tracing.Tracer("mercan.chat")
+	tracer := tracing.Tracer("orka.chat")
 	ctx, span := tracer.Start(ctx, "chat.request",
 		trace.WithAttributes(
 			attribute.String("session.id", sessionID),
@@ -347,7 +347,7 @@ func (ch *ChatHandler) runToolLoop(
 
 	for iteration := 0; ; iteration++ {
 		// Start a span for this iteration
-		iterTracer := tracing.Tracer("mercan.chat")
+		iterTracer := tracing.Tracer("orka.chat")
 		iterCtx, iterSpan := iterTracer.Start(ctx, "chat.tool_loop.iteration",
 			trace.WithAttributes(
 				attribute.Int("chat.iteration", iteration),

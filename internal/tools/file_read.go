@@ -41,7 +41,7 @@ type FileReadResult struct {
 
 // NewFileReadTool creates a new file read tool
 func NewFileReadTool() *FileReadTool {
-	workDir := os.Getenv("MERCAN_WORK_DIR")
+	workDir := os.Getenv("ORKA_WORK_DIR")
 	if workDir == "" {
 		workDir = "/workspace"
 	}

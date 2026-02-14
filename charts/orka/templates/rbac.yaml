@@ -3,34 +3,34 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "mercan.fullname" . }}-controller
+  name: {{ include "orka.fullname" . }}-controller
   labels:
-    {{- include "mercan.labels" . | nindent 4 }}
+    {{- include "orka.labels" . | nindent 4 }}
 rules:
   # Task CRD permissions
-  - apiGroups: ["core.mercan.ai"]
+  - apiGroups: ["core.orka.ai"]
     resources: ["tasks"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["core.mercan.ai"]
+  - apiGroups: ["core.orka.ai"]
     resources: ["tasks/status"]
     verbs: ["get", "update", "patch"]
-  - apiGroups: ["core.mercan.ai"]
+  - apiGroups: ["core.orka.ai"]
     resources: ["tasks/finalizers"]
     verbs: ["update"]
 
   # Tool CRD permissions
-  - apiGroups: ["core.mercan.ai"]
+  - apiGroups: ["core.orka.ai"]
     resources: ["tools"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["core.mercan.ai"]
+  - apiGroups: ["core.orka.ai"]
     resources: ["tools/status"]
     verbs: ["get", "update", "patch"]
 
   # Agent CRD permissions
-  - apiGroups: ["core.mercan.ai"]
+  - apiGroups: ["core.orka.ai"]
     resources: ["agents"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["core.mercan.ai"]
+  - apiGroups: ["core.orka.ai"]
     resources: ["agents/status"]
     verbs: ["get", "update", "patch"]
 
@@ -71,16 +71,16 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "mercan.fullname" . }}-controller
+  name: {{ include "orka.fullname" . }}-controller
   labels:
-    {{- include "mercan.labels" . | nindent 4 }}
+    {{- include "orka.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "mercan.fullname" . }}-controller
+  name: {{ include "orka.fullname" . }}-controller
 subjects:
   - kind: ServiceAccount
-    name: {{ include "mercan.serviceAccountName" . }}
+    name: {{ include "orka.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 ---
 # Client ClusterRole (for API access)
@@ -88,25 +88,25 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "mercan.fullname" . }}-client
+  name: {{ include "orka.fullname" . }}-client
   labels:
-    {{- include "mercan.labels" . | nindent 4 }}
+    {{- include "orka.labels" . | nindent 4 }}
 rules:
   # Task permissions
-  - apiGroups: ["core.mercan.ai"]
+  - apiGroups: ["core.orka.ai"]
     resources: ["tasks"]
     verbs: ["get", "list", "watch", "create", "delete"]
-  - apiGroups: ["core.mercan.ai"]
+  - apiGroups: ["core.orka.ai"]
     resources: ["tasks/status"]
     verbs: ["get"]
 
   # Tool permissions (read-only)
-  - apiGroups: ["core.mercan.ai"]
+  - apiGroups: ["core.orka.ai"]
     resources: ["tools"]
     verbs: ["get", "list", "watch"]
 
   # Agent permissions (read-only)
-  - apiGroups: ["core.mercan.ai"]
+  - apiGroups: ["core.orka.ai"]
     resources: ["agents"]
     verbs: ["get", "list", "watch"]
 
@@ -118,13 +118,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "mercan.fullname" . }}-client
+  name: {{ include "orka.fullname" . }}-client
   labels:
-    {{- include "mercan.labels" . | nindent 4 }}
+    {{- include "orka.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "mercan.fullname" . }}-client
+  name: {{ include "orka.fullname" . }}-client
 subjects:
   - kind: ServiceAccount
     name: {{ .Values.client.name }}
@@ -135,29 +135,29 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "mercan.fullname" . }}-worker
+  name: {{ include "orka.fullname" . }}-worker
   labels:
-    {{- include "mercan.labels" . | nindent 4 }}
+    {{- include "orka.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "create", "update"]
-  - apiGroups: ["core.mercan.ai"]
+  - apiGroups: ["core.orka.ai"]
     resources: ["tools"]
     verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "mercan.fullname" . }}-worker
+  name: {{ include "orka.fullname" . }}-worker
   labels:
-    {{- include "mercan.labels" . | nindent 4 }}
+    {{- include "orka.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "mercan.fullname" . }}-worker
+  name: {{ include "orka.fullname" . }}-worker
 subjects:
   - kind: ServiceAccount
-    name: mercan-worker
+    name: orka-worker
     namespace: {{ .Release.Namespace }}
 {{- end }}

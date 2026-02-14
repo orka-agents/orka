@@ -2,7 +2,7 @@
 
 ## Problem Statement
 
-Mercan supports basic multi-agent coordination (delegate → wait → read results), but lacks the tooling for **iterative code review loops**: a coordinator agent delegates coding, reviews the output, provides feedback, and iterates until the code is approved — then creates a PR.
+Orka supports basic multi-agent coordination (delegate → wait → read results), but lacks the tooling for **iterative code review loops**: a coordinator agent delegates coding, reviews the output, provides feedback, and iterates until the code is approved — then creates a PR.
 
 ## Proposed Approach
 
@@ -72,8 +72,8 @@ COORDINATOR (AI worker)
   PRBaseBranch string `json:"prBaseBranch,omitempty"`
   ```
 - Iteration tracking labels (convention, no type changes needed):
-  - `mercan.ai/iteration`: "1", "2", "3"...
-  - `mercan.ai/iteration-group`: groups all iterations of the same logical task
+  - `orka.ai/iteration`: "1", "2", "3"...
+  - `orka.ai/iteration-group`: groups all iterations of the same logical task
 
 **Run:** `make manifests generate` after type changes.
 
@@ -121,7 +121,7 @@ Each worker calls `common.FinalizeResult(workDir, agentOutput)` — one line cha
 **Files:** `workers/common/workspace.go`, all 3 workers
 
 Add shared `PrepareWorkspace()` function in `workers/common/workspace.go`:
-1. Check for `MERCAN_PRIOR_TASK` and `MERCAN_PRIOR_TASK_NAMESPACE` env vars
+1. Check for `ORKA_PRIOR_TASK` and `ORKA_PRIOR_TASK_NAMESPACE` env vars
 2. If not set, return immediately (no-op for non-iterative tasks)
 3. Fetch the prior task's result from controller via HTTP (`GET /api/v1/tasks/{name}/result?namespace=...`)
 4. If result is missing (prior task GC'd), **fail fast** with clear error: "prior task result not found: {name}"
@@ -158,8 +158,8 @@ Behavior when `prior_task` is set:
 - Set `Spec.PriorTaskRef` on the child Task, pointing to the prior task
 - If `feedback` is also set, prepend it to the prompt: `"FEEDBACK FROM REVIEW: {feedback}\n\nTASK: {prompt}"`
 - Copy workspace config from the prior task (if not explicitly provided)
-- Increment iteration label: read prior task's `mercan.ai/iteration` label, add 1
-- Set `mercan.ai/iteration-group` label (copy from prior task, or generate new UUID for first iteration)
+- Increment iteration label: read prior task's `orka.ai/iteration` label, add 1
+- Set `orka.ai/iteration-group` label (copy from prior task, or generate new UUID for first iteration)
 
 Update tool description to mention the optional iteration parameters so the LLM knows they exist.
 
@@ -168,9 +168,9 @@ Update tool description to mention the optional iteration parameters so the LLM 
 **Files:** `internal/controller/job_builder.go`
 
 When building a Job for a Task that has `Spec.PriorTaskRef`:
-- Inject `MERCAN_PRIOR_TASK` env var with the referenced task name
-- Inject `MERCAN_PRIOR_TASK_NAMESPACE` env var (from PriorTaskRef.Namespace or task's own namespace)
-- `MERCAN_CONTROLLER_URL` is already injected for coordination tasks; ensure it's also injected for tasks with PriorTaskRef even if coordination is not explicitly enabled
+- Inject `ORKA_PRIOR_TASK` env var with the referenced task name
+- Inject `ORKA_PRIOR_TASK_NAMESPACE` env var (from PriorTaskRef.Namespace or task's own namespace)
+- `ORKA_CONTROLLER_URL` is already injected for coordination tasks; ensure it's also injected for tasks with PriorTaskRef even if coordination is not explicitly enabled
 
 ### Phase 7: `wait_for_tasks` Enhancement
 
@@ -180,7 +180,7 @@ Enhance the result returned to the coordinator LLM:
 - Parse structured results when available
 - **Strip the `diff` field** — never send raw diffs to the coordinator LLM context
 - Return: `{summary, verdict, feedback, files, baseSHA, iteration}` to the coordinator
-- Include iteration number from `mercan.ai/iteration` label
+- Include iteration number from `orka.ai/iteration` label
 - Fall back to raw result string for plain-text results (backward compatible)
 
 ### Phase 8: Testing
@@ -206,7 +206,7 @@ Enhance the result returned to the coordinator LLM:
   - `coder-agent.yaml` — CLI runtime specialist for coding
   - `reviewer-agent.yaml` — CLI runtime specialist for code review
   - `iterative-task.yaml` — example task that triggers the full flow
-- Update `CLAUDE.md` with new env vars (`MERCAN_PRIOR_TASK`, `MERCAN_PRIOR_TASK_NAMESPACE`)
+- Update `CLAUDE.md` with new env vars (`ORKA_PRIOR_TASK`, `ORKA_PRIOR_TASK_NAMESPACE`)
 
 #### Recommended Coordinator System Prompt Template (for docs)
 ```
@@ -250,7 +250,7 @@ You are a coordinator agent. Follow this protocol:
 | `api/v1alpha1/task_types.go` | Add PriorTaskRef type, PriorTaskRef field, ForkRepo/PRBaseBranch to WorkspaceConfig |
 | `internal/tools/delegate_task.go` | Add optional `prior_task` and `feedback` params with iteration logic |
 | `internal/tools/wait_for_tasks.go` | Parse structured results, strip diffs, return summaries |
-| `internal/controller/job_builder.go` | Inject MERCAN_PRIOR_TASK env vars when PriorTaskRef is set |
+| `internal/controller/job_builder.go` | Inject ORKA_PRIOR_TASK env vars when PriorTaskRef is set |
 | `workers/common/result.go` | Add StructuredResult type, FormatStructuredResult, ParseStructuredResult |
 | `workers/common/workspace.go` | New file — PrepareWorkspace (patch apply) + FinalizeResult (diff gen) |
 | `workers/agent/copilot/main.go` | Call PrepareWorkspace + FinalizeResult (one line each) |

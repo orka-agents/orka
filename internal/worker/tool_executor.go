@@ -21,7 +21,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 // ToolExecutor handles execution of custom Tool CRDs via HTTP
@@ -34,7 +34,7 @@ type ToolExecutor struct {
 
 // NewToolExecutor creates a new tool executor
 func NewToolExecutor() *ToolExecutor {
-	namespace := os.Getenv("MERCAN_TASK_NAMESPACE")
+	namespace := os.Getenv("ORKA_TASK_NAMESPACE")
 	if namespace == "" {
 		namespace = "default"
 	}

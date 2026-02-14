@@ -1,7 +1,7 @@
 # Custom Tools for complex workflow
 # These tools enable agents to interact with external services
 ---
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
   name: tavily-search
@@ -47,7 +47,7 @@ spec:
     authInject: body
     authBodyKey: api_key
 ---
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
   name: github-search-repos
@@ -87,7 +87,7 @@ spec:
       key: token
     authInject: header
 ---
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
   name: github-get-repo
@@ -117,7 +117,7 @@ spec:
       key: token
     authInject: header
 ---
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
   name: github-list-issues
@@ -158,7 +158,7 @@ spec:
       key: token
     authInject: header
 ---
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
   name: github-get-readme

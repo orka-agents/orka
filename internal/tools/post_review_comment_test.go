@@ -20,7 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 const testReviewStatus = "submitted"
@@ -126,7 +126,7 @@ func TestPostReviewCommentTool_Success(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
 		TaskName: "review-task",
@@ -209,7 +209,7 @@ func TestPostReviewCommentTool_WithoutComments(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
 		TaskName: "comment-task",
@@ -243,7 +243,7 @@ func TestPostReviewCommentTool_MissingTask(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewPostReviewCommentTool(k8sClient)
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
 		TaskName: "nonexistent",
@@ -269,7 +269,7 @@ func TestPostReviewCommentTool_InvalidEvent(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewPostReviewCommentTool(k8sClient)
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
 		TaskName: "some-task",
@@ -302,7 +302,7 @@ func TestPostReviewCommentTool_NoWorkspace(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewPostReviewCommentTool(k8sClient)
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
 		TaskName: "no-ws-task",
@@ -344,7 +344,7 @@ func TestPostReviewCommentTool_Execute_MissingSecret(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewPostReviewCommentTool(k8sClient)
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
 		TaskName: "secret-missing-task",
@@ -402,7 +402,7 @@ func TestPostReviewCommentTool_Execute_APIError(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
 		TaskName: "api-error-task",
@@ -476,7 +476,7 @@ func TestPostReviewCommentTool_Execute_AllEventTypes(t *testing.T) {
 				apiBaseURL: server.URL,
 			}
 
-			t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+			t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 			args, _ := json.Marshal(PostReviewCommentArgs{
 				TaskName: "event-task",

@@ -8,9 +8,9 @@ interface PRStatusBadgeProps {
 export function PRStatusBadge({ annotations }: PRStatusBadgeProps) {
   if (!annotations) return null
 
-  const prUrl = annotations['mercan.ai/pr-url']
-  const prNumber = annotations['mercan.ai/pr-number']
-  const prStatus = annotations['mercan.ai/pr-status'] // open, merged, closed
+  const prUrl = annotations['orka.ai/pr-url']
+  const prNumber = annotations['orka.ai/pr-number']
+  const prStatus = annotations['orka.ai/pr-status'] // open, merged, closed
 
   if (!prUrl && !prNumber) return null
 

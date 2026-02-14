@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/mercan/internal/store"
+	"github.com/sozercan/orka/internal/store"
 )
 
 // setupDiskStore creates a Store backed by a real on-disk SQLite file.

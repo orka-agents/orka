@@ -22,7 +22,7 @@ func newConfigCmd() *cobra.Command {
 func newConfigSetServerCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "set-server <url>",
-		Short: "Set the default Mercan server URL",
+		Short: "Set the default Orka server URL",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			cfg := loadConfig()

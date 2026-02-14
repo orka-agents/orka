@@ -10,7 +10,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/sozercan/mercan/internal/llm"
+	"github.com/sozercan/orka/internal/llm"
 )
 
 func TestTruncateMessages_UnderBudget(t *testing.T) {

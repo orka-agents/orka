@@ -19,13 +19,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 const (
 	testTask         = "test-task"
 	defaultNS        = "default"
-	envAIProviderKey = "MERCAN_AI_PROVIDER"
+	envAIProviderKey = "ORKA_AI_PROVIDER"
 )
 
 func setupJobBuilder() *JobBuilder {
@@ -34,7 +34,7 @@ func setupJobBuilder() *JobBuilder {
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	b := NewJobBuilder(fakeClient)
-	b.ControllerURL = "http://mercan-controller.mercan-system.svc:8080"
+	b.ControllerURL = "http://orka-controller.orka-system.svc:8080"
 	return b
 }
 
@@ -308,12 +308,12 @@ func TestJobBuilder_buildEnvVars(t *testing.T) {
 		case TaskNameEnvVar:
 			hasTaskName = true
 			if env.Value != testTask {
-				t.Errorf("MERCAN_TASK_NAME = %s, want test-task", env.Value)
+				t.Errorf("ORKA_TASK_NAME = %s, want test-task", env.Value)
 			}
 		case TaskNamespaceEnvVar:
 			hasTaskNamespace = true
 			if env.Value != defaultNS {
-				t.Errorf("MERCAN_TASK_NAMESPACE = %s, want default", env.Value)
+				t.Errorf("ORKA_TASK_NAMESPACE = %s, want default", env.Value)
 			}
 		case ResultEndpointEnvVar:
 			hasResultEndpoint = true
@@ -328,16 +328,16 @@ func TestJobBuilder_buildEnvVars(t *testing.T) {
 	}
 
 	if !hasTaskName {
-		t.Error("Missing MERCAN_TASK_NAME")
+		t.Error("Missing ORKA_TASK_NAME")
 	}
 	if !hasTaskNamespace {
-		t.Error("Missing MERCAN_TASK_NAMESPACE")
+		t.Error("Missing ORKA_TASK_NAMESPACE")
 	}
 	if !hasResultEndpoint {
-		t.Error("Missing MERCAN_RESULT_ENDPOINT")
+		t.Error("Missing ORKA_RESULT_ENDPOINT")
 	}
 	if !hasControllerURL {
-		t.Error("Missing MERCAN_CONTROLLER_URL")
+		t.Error("Missing ORKA_CONTROLLER_URL")
 	}
 	if !hasCustomVar {
 		t.Error("Missing CUSTOM_VAR")
@@ -375,29 +375,29 @@ func TestJobBuilder_buildEnvVars_AITask(t *testing.T) {
 		case envAIProviderKey:
 			hasProvider = true
 			if env.Value != "anthropic" {
-				t.Errorf("MERCAN_AI_PROVIDER = %s, want anthropic", env.Value)
+				t.Errorf("ORKA_AI_PROVIDER = %s, want anthropic", env.Value)
 			}
-		case "MERCAN_AI_MODEL":
+		case "ORKA_AI_MODEL":
 			hasModel = true
 			if env.Value != "claude-3-5-sonnet" {
-				t.Errorf("MERCAN_AI_MODEL = %s, want claude-3-5-sonnet", env.Value)
+				t.Errorf("ORKA_AI_MODEL = %s, want claude-3-5-sonnet", env.Value)
 			}
-		case "MERCAN_AI_PROMPT":
+		case "ORKA_AI_PROMPT":
 			hasPrompt = true
 			if env.Value != "Hello" {
-				t.Errorf("MERCAN_AI_PROMPT = %s, want Hello", env.Value)
+				t.Errorf("ORKA_AI_PROMPT = %s, want Hello", env.Value)
 			}
 		}
 	}
 
 	if !hasProvider {
-		t.Error("Missing MERCAN_AI_PROVIDER")
+		t.Error("Missing ORKA_AI_PROVIDER")
 	}
 	if !hasModel {
-		t.Error("Missing MERCAN_AI_MODEL")
+		t.Error("Missing ORKA_AI_MODEL")
 	}
 	if !hasPrompt {
-		t.Error("Missing MERCAN_AI_PROMPT")
+		t.Error("Missing ORKA_AI_PROMPT")
 	}
 }
 
@@ -439,21 +439,21 @@ func TestJobBuilder_buildEnvVars_WithAgent(t *testing.T) {
 		case envAIProviderKey:
 			hasProvider = true
 			if env.Value != "openai" {
-				t.Errorf("MERCAN_AI_PROVIDER = %s, want openai", env.Value)
+				t.Errorf("ORKA_AI_PROVIDER = %s, want openai", env.Value)
 			}
-		case "MERCAN_AI_MODEL":
+		case "ORKA_AI_MODEL":
 			hasModel = true
 			if env.Value != "gpt-4" {
-				t.Errorf("MERCAN_AI_MODEL = %s, want gpt-4", env.Value)
+				t.Errorf("ORKA_AI_MODEL = %s, want gpt-4", env.Value)
 			}
 		}
 	}
 
 	if !hasProvider {
-		t.Error("Missing MERCAN_AI_PROVIDER")
+		t.Error("Missing ORKA_AI_PROVIDER")
 	}
 	if !hasModel {
-		t.Error("Missing MERCAN_AI_MODEL")
+		t.Error("Missing ORKA_AI_MODEL")
 	}
 }
 
@@ -481,16 +481,16 @@ func TestJobBuilder_buildEnvVars_WithProvider(t *testing.T) {
 
 	hasBaseURL := false
 	for _, env := range envVars {
-		if env.Name == "MERCAN_AI_BASE_URL" {
+		if env.Name == "ORKA_AI_BASE_URL" {
 			hasBaseURL = true
 			if env.Value != "https://custom.api.com" {
-				t.Errorf("MERCAN_AI_BASE_URL = %s, want https://custom.api.com", env.Value)
+				t.Errorf("ORKA_AI_BASE_URL = %s, want https://custom.api.com", env.Value)
 			}
 		}
 	}
 
 	if !hasBaseURL {
-		t.Error("Missing MERCAN_AI_BASE_URL")
+		t.Error("Missing ORKA_AI_BASE_URL")
 	}
 }
 
@@ -526,13 +526,13 @@ func TestJobBuilder_buildEnvVars_ProviderCRDTypeOverridesModelProvider(t *testin
 	for _, env := range envVars {
 		if env.Name == envAIProviderKey {
 			if env.Value != string(corev1alpha1.ProviderTypeAzureOpenAI) {
-				t.Errorf("MERCAN_AI_PROVIDER = %s, want %s (Provider CRD type should override model.provider)",
+				t.Errorf("ORKA_AI_PROVIDER = %s, want %s (Provider CRD type should override model.provider)",
 					env.Value, corev1alpha1.ProviderTypeAzureOpenAI)
 			}
 			return
 		}
 	}
-	t.Error("Missing MERCAN_AI_PROVIDER")
+	t.Error("Missing ORKA_AI_PROVIDER")
 }
 
 func TestJobBuilder_buildContainer_ContainerWithoutImage(t *testing.T) {
@@ -551,22 +551,22 @@ func TestJobBuilder_buildContainer_ContainerWithoutImage(t *testing.T) {
 }
 
 func TestConstants(t *testing.T) {
-	if DefaultAIWorkerImage != "mercan-ai-worker:latest" {
+	if DefaultAIWorkerImage != "orka-ai-worker:latest" {
 		t.Errorf("DefaultAIWorkerImage = %s", DefaultAIWorkerImage)
 	}
-	if DefaultGeneralWorkerImage != "mercan-general-worker:latest" {
+	if DefaultGeneralWorkerImage != "orka-general-worker:latest" {
 		t.Errorf("DefaultGeneralWorkerImage = %s", DefaultGeneralWorkerImage)
 	}
-	if ResultEndpointEnvVar != "MERCAN_RESULT_ENDPOINT" {
+	if ResultEndpointEnvVar != "ORKA_RESULT_ENDPOINT" {
 		t.Errorf("ResultEndpointEnvVar = %s", ResultEndpointEnvVar)
 	}
-	if ControllerURLEnvVar != "MERCAN_CONTROLLER_URL" {
+	if ControllerURLEnvVar != "ORKA_CONTROLLER_URL" {
 		t.Errorf("ControllerURLEnvVar = %s", ControllerURLEnvVar)
 	}
-	if TaskNameEnvVar != "MERCAN_TASK_NAME" {
+	if TaskNameEnvVar != "ORKA_TASK_NAME" {
 		t.Errorf("TaskNameEnvVar = %s", TaskNameEnvVar)
 	}
-	if TaskNamespaceEnvVar != "MERCAN_TASK_NAMESPACE" {
+	if TaskNamespaceEnvVar != "ORKA_TASK_NAMESPACE" {
 		t.Errorf("TaskNamespaceEnvVar = %s", TaskNamespaceEnvVar)
 	}
 }
@@ -607,11 +607,11 @@ func TestJobBuilder_buildEnvVars_WithCoordination(t *testing.T) {
 		name  string
 		value string
 	}{
-		{"MERCAN_COORDINATION_ENABLED", "true"},
-		{"MERCAN_COORDINATION_MAX_DEPTH", "3"},
-		{"MERCAN_COORDINATION_MAX_CHILDREN", "5"},
-		{"MERCAN_COORDINATION_ALLOWED_AGENTS", "backend-dev,frontend-dev"},
-		{"MERCAN_COORDINATION_DEPTH", "0"},
+		{"ORKA_COORDINATION_ENABLED", "true"},
+		{"ORKA_COORDINATION_MAX_DEPTH", "3"},
+		{"ORKA_COORDINATION_MAX_CHILDREN", "5"},
+		{"ORKA_COORDINATION_ALLOWED_AGENTS", "backend-dev,frontend-dev"},
+		{"ORKA_COORDINATION_DEPTH", "0"},
 	}
 	for _, tt := range tests {
 		env, found := findEnvVar(envVars, tt.name)
@@ -622,13 +622,13 @@ func TestJobBuilder_buildEnvVars_WithCoordination(t *testing.T) {
 		}
 	}
 
-	toolsEnv, found := findEnvVar(envVars, "MERCAN_AI_TOOLS")
+	toolsEnv, found := findEnvVar(envVars, "ORKA_AI_TOOLS")
 	if !found {
-		t.Fatal("Missing MERCAN_AI_TOOLS")
+		t.Fatal("Missing ORKA_AI_TOOLS")
 	}
 	for _, tool := range []string{"delegate_task", "wait_for_tasks"} {
 		if !strings.Contains(toolsEnv.Value, tool) {
-			t.Errorf("MERCAN_AI_TOOLS = %s, want to contain %s", toolsEnv.Value, tool)
+			t.Errorf("ORKA_AI_TOOLS = %s, want to contain %s", toolsEnv.Value, tool)
 		}
 	}
 }
@@ -640,7 +640,7 @@ func TestJobBuilder_buildEnvVars_WithCoordination_ChildTask(t *testing.T) {
 			Name:      "child-task",
 			Namespace: defaultNS,
 			Annotations: map[string]string{
-				"mercan.ai/coordination-depth": "2",
+				"orka.ai/coordination-depth": "2",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -667,12 +667,12 @@ func TestJobBuilder_buildEnvVars_WithCoordination_ChildTask(t *testing.T) {
 
 	envVars := builder.buildEnvVars(task, agent, nil)
 
-	env, found := findEnvVar(envVars, "MERCAN_COORDINATION_DEPTH")
+	env, found := findEnvVar(envVars, "ORKA_COORDINATION_DEPTH")
 	if !found {
-		t.Fatal("Missing MERCAN_COORDINATION_DEPTH")
+		t.Fatal("Missing ORKA_COORDINATION_DEPTH")
 	}
 	if env.Value != "2" {
-		t.Errorf("MERCAN_COORDINATION_DEPTH = %s, want 2", env.Value)
+		t.Errorf("ORKA_COORDINATION_DEPTH = %s, want 2", env.Value)
 	}
 }
 
@@ -700,11 +700,11 @@ func TestJobBuilder_buildEnvVars_NoCoordination(t *testing.T) {
 	envVars := builder.buildEnvVars(task, agent, nil)
 
 	coordinationVars := []string{
-		"MERCAN_COORDINATION_ENABLED",
-		"MERCAN_COORDINATION_MAX_DEPTH",
-		"MERCAN_COORDINATION_MAX_CHILDREN",
-		"MERCAN_COORDINATION_ALLOWED_AGENTS",
-		"MERCAN_COORDINATION_DEPTH",
+		"ORKA_COORDINATION_ENABLED",
+		"ORKA_COORDINATION_MAX_DEPTH",
+		"ORKA_COORDINATION_MAX_CHILDREN",
+		"ORKA_COORDINATION_ALLOWED_AGENTS",
+		"ORKA_COORDINATION_DEPTH",
 	}
 	for _, name := range coordinationVars {
 		if _, found := findEnvVar(envVars, name); found {
@@ -925,20 +925,20 @@ func TestJobBuilder_Build_AgentTask_EnvVars(t *testing.T) {
 	}{
 		{TaskNameEnvVar, "agent-task"},
 		{TaskNamespaceEnvVar, "test-ns"},
-		{ResultEndpointEnvVar, "http://mercan-controller.mercan-system.svc:8080/internal/v1/results/test-ns/agent-task"},
-		{ControllerURLEnvVar, "http://mercan-controller.mercan-system.svc:8080"},
-		{"MERCAN_PROMPT", "Refactor the code"},
-		{"MERCAN_MODEL", "claude-sonnet-4-20250514"},
-		{"MERCAN_SYSTEM_PROMPT", "You are a coding assistant"},
-		{"MERCAN_MAX_TURNS", "20"},
-		{"MERCAN_ALLOWED_TOOLS", "Read,Write,Bash"},
-		{"MERCAN_DISALLOWED_TOOLS", "WebFetch"},
-		{"MERCAN_ALLOW_BASH", "true"},
-		{"MERCAN_GIT_REPO", "https://github.com/example/repo"},
-		{"MERCAN_GIT_BRANCH", "main"},
-		{"MERCAN_GIT_REF", "abc123"},
-		{"MERCAN_WORKSPACE_SUBPATH", "src"},
-		{"MERCAN_PUSH_BRANCH", "feature/my-change"},
+		{ResultEndpointEnvVar, "http://orka-controller.orka-system.svc:8080/internal/v1/results/test-ns/agent-task"},
+		{ControllerURLEnvVar, "http://orka-controller.orka-system.svc:8080"},
+		{"ORKA_PROMPT", "Refactor the code"},
+		{"ORKA_MODEL", "claude-sonnet-4-20250514"},
+		{"ORKA_SYSTEM_PROMPT", "You are a coding assistant"},
+		{"ORKA_MAX_TURNS", "20"},
+		{"ORKA_ALLOWED_TOOLS", "Read,Write,Bash"},
+		{"ORKA_DISALLOWED_TOOLS", "WebFetch"},
+		{"ORKA_ALLOW_BASH", "true"},
+		{"ORKA_GIT_REPO", "https://github.com/example/repo"},
+		{"ORKA_GIT_BRANCH", "main"},
+		{"ORKA_GIT_REF", "abc123"},
+		{"ORKA_WORKSPACE_SUBPATH", "src"},
+		{"ORKA_PUSH_BRANCH", "feature/my-change"},
 	}
 
 	for _, tt := range tests {
@@ -972,12 +972,12 @@ func TestJobBuilder_Build_AgentTask_MaxTurns_Default(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "MERCAN_MAX_TURNS")
+	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "ORKA_MAX_TURNS")
 	if !ok {
-		t.Fatal("Missing MERCAN_MAX_TURNS")
+		t.Fatal("Missing ORKA_MAX_TURNS")
 	}
 	if ev.Value != "50" {
-		t.Errorf("MERCAN_MAX_TURNS = %s, want 50 (default)", ev.Value)
+		t.Errorf("ORKA_MAX_TURNS = %s, want 50 (default)", ev.Value)
 	}
 }
 
@@ -1009,12 +1009,12 @@ func TestJobBuilder_Build_AgentTask_MaxTurns_AgentDefault(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "MERCAN_MAX_TURNS")
+	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "ORKA_MAX_TURNS")
 	if !ok {
-		t.Fatal("Missing MERCAN_MAX_TURNS")
+		t.Fatal("Missing ORKA_MAX_TURNS")
 	}
 	if ev.Value != "100" {
-		t.Errorf("MERCAN_MAX_TURNS = %s, want 100 (from agent)", ev.Value)
+		t.Errorf("ORKA_MAX_TURNS = %s, want 100 (from agent)", ev.Value)
 	}
 }
 
@@ -1050,12 +1050,12 @@ func TestJobBuilder_Build_AgentTask_MaxTurns_TaskOverridesAgent(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "MERCAN_MAX_TURNS")
+	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "ORKA_MAX_TURNS")
 	if !ok {
-		t.Fatal("Missing MERCAN_MAX_TURNS")
+		t.Fatal("Missing ORKA_MAX_TURNS")
 	}
 	if ev.Value != "30" {
-		t.Errorf("MERCAN_MAX_TURNS = %s, want 30 (task override)", ev.Value)
+		t.Errorf("ORKA_MAX_TURNS = %s, want 30 (task override)", ev.Value)
 	}
 }
 
@@ -1086,12 +1086,12 @@ func TestJobBuilder_Build_AgentTask_AllowedTools_AgentDefault(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "MERCAN_ALLOWED_TOOLS")
+	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "ORKA_ALLOWED_TOOLS")
 	if !ok {
-		t.Fatal("Missing MERCAN_ALLOWED_TOOLS")
+		t.Fatal("Missing ORKA_ALLOWED_TOOLS")
 	}
 	if ev.Value != "Read,Write" {
-		t.Errorf("MERCAN_ALLOWED_TOOLS = %s, want Read,Write", ev.Value)
+		t.Errorf("ORKA_ALLOWED_TOOLS = %s, want Read,Write", ev.Value)
 	}
 }
 
@@ -1125,12 +1125,12 @@ func TestJobBuilder_Build_AgentTask_AllowedTools_TaskOverridesAgent(t *testing.T
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "MERCAN_ALLOWED_TOOLS")
+	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "ORKA_ALLOWED_TOOLS")
 	if !ok {
-		t.Fatal("Missing MERCAN_ALLOWED_TOOLS")
+		t.Fatal("Missing ORKA_ALLOWED_TOOLS")
 	}
 	if ev.Value != "Bash" {
-		t.Errorf("MERCAN_ALLOWED_TOOLS = %s, want Bash (task override)", ev.Value)
+		t.Errorf("ORKA_ALLOWED_TOOLS = %s, want Bash (task override)", ev.Value)
 	}
 }
 
@@ -1161,12 +1161,12 @@ func TestJobBuilder_Build_AgentTask_AllowBash_AgentDefault(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "MERCAN_ALLOW_BASH")
+	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "ORKA_ALLOW_BASH")
 	if !ok {
-		t.Fatal("Missing MERCAN_ALLOW_BASH")
+		t.Fatal("Missing ORKA_ALLOW_BASH")
 	}
 	if ev.Value != "true" {
-		t.Errorf("MERCAN_ALLOW_BASH = %s, want true", ev.Value)
+		t.Errorf("ORKA_ALLOW_BASH = %s, want true", ev.Value)
 	}
 }
 
@@ -1189,9 +1189,9 @@ func TestJobBuilder_Build_AgentTask_AllowBash_NotSetWhenFalse(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	_, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "MERCAN_ALLOW_BASH")
+	_, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "ORKA_ALLOW_BASH")
 	if ok {
-		t.Error("MERCAN_ALLOW_BASH should not be set when allowBash is false")
+		t.Error("ORKA_ALLOW_BASH should not be set when allowBash is false")
 	}
 }
 
@@ -1216,12 +1216,12 @@ func TestJobBuilder_Build_AgentTask_PromptFromAISpec(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "MERCAN_PROMPT")
+	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "ORKA_PROMPT")
 	if !ok {
-		t.Fatal("Missing MERCAN_PROMPT")
+		t.Fatal("Missing ORKA_PROMPT")
 	}
 	if ev.Value != "Prompt from AI spec" {
-		t.Errorf("MERCAN_PROMPT = %q, want %q", ev.Value, "Prompt from AI spec")
+		t.Errorf("ORKA_PROMPT = %q, want %q", ev.Value, "Prompt from AI spec")
 	}
 }
 
@@ -1477,18 +1477,18 @@ func TestJobBuilder_Build_AgentTask_NoAgentEnvVars_WhenNoWorkspace(t *testing.T)
 	envVars := job.Spec.Template.Spec.Containers[0].Env
 
 	// Workspace env vars should not be present
-	for _, name := range []string{"MERCAN_GIT_REPO", "MERCAN_GIT_BRANCH", "MERCAN_GIT_REF", "MERCAN_WORKSPACE_SUBPATH"} {
+	for _, name := range []string{"ORKA_GIT_REPO", "ORKA_GIT_BRANCH", "ORKA_GIT_REF", "ORKA_WORKSPACE_SUBPATH"} {
 		if _, ok := findEnvVar(envVars, name); ok {
 			t.Errorf("%s should not be set when no workspace is configured", name)
 		}
 	}
 
 	// But core env vars and agent env vars should still exist
-	if _, ok := findEnvVar(envVars, "MERCAN_PROMPT"); !ok {
-		t.Error("Missing MERCAN_PROMPT")
+	if _, ok := findEnvVar(envVars, "ORKA_PROMPT"); !ok {
+		t.Error("Missing ORKA_PROMPT")
 	}
-	if _, ok := findEnvVar(envVars, "MERCAN_MAX_TURNS"); !ok {
-		t.Error("Missing MERCAN_MAX_TURNS")
+	if _, ok := findEnvVar(envVars, "ORKA_MAX_TURNS"); !ok {
+		t.Error("Missing ORKA_MAX_TURNS")
 	}
 }
 
@@ -1540,11 +1540,11 @@ func TestJobBuilder_Build_AgentTask_Labels(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	if job.Labels["mercan.ai/task-type"] != "agent" {
-		t.Errorf("Job label mercan.ai/task-type = %s, want agent", job.Labels["mercan.ai/task-type"])
+	if job.Labels["orka.ai/task-type"] != "agent" {
+		t.Errorf("Job label orka.ai/task-type = %s, want agent", job.Labels["orka.ai/task-type"])
 	}
-	if job.Spec.Template.Labels["mercan.ai/task-type"] != "agent" {
-		t.Errorf("Pod label mercan.ai/task-type = %s, want agent", job.Spec.Template.Labels["mercan.ai/task-type"])
+	if job.Spec.Template.Labels["orka.ai/task-type"] != "agent" {
+		t.Errorf("Pod label orka.ai/task-type = %s, want agent", job.Spec.Template.Labels["orka.ai/task-type"])
 	}
 }
 
@@ -1569,12 +1569,12 @@ func TestJobBuilder_Build_AgentTask_WithTimeout(t *testing.T) {
 	}
 
 	// Verify timeout env var
-	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "MERCAN_TIMEOUT_SECONDS")
+	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "ORKA_TIMEOUT_SECONDS")
 	if !ok {
-		t.Fatal("Missing MERCAN_TIMEOUT_SECONDS")
+		t.Fatal("Missing ORKA_TIMEOUT_SECONDS")
 	}
 	if ev.Value != "600" {
-		t.Errorf("MERCAN_TIMEOUT_SECONDS = %s, want 600", ev.Value)
+		t.Errorf("ORKA_TIMEOUT_SECONDS = %s, want 600", ev.Value)
 	}
 
 	// Verify job active deadline
@@ -1612,18 +1612,18 @@ func TestJobBuilder_Build_PriorTaskRef(t *testing.T) {
 	envVars := job.Spec.Template.Spec.Containers[0].Env
 	var foundPriorTask, foundPriorNS bool
 	for _, env := range envVars {
-		if env.Name == "MERCAN_PRIOR_TASK" && env.Value == "prior-task-abc" {
+		if env.Name == "ORKA_PRIOR_TASK" && env.Value == "prior-task-abc" {
 			foundPriorTask = true
 		}
-		if env.Name == "MERCAN_PRIOR_TASK_NAMESPACE" && env.Value == "staging" {
+		if env.Name == "ORKA_PRIOR_TASK_NAMESPACE" && env.Value == "staging" {
 			foundPriorNS = true
 		}
 	}
 	if !foundPriorTask {
-		t.Error("expected MERCAN_PRIOR_TASK env var")
+		t.Error("expected ORKA_PRIOR_TASK env var")
 	}
 	if !foundPriorNS {
-		t.Error("expected MERCAN_PRIOR_TASK_NAMESPACE env var")
+		t.Error("expected ORKA_PRIOR_TASK_NAMESPACE env var")
 	}
 }
 
@@ -1652,9 +1652,9 @@ func TestJobBuilder_Build_PriorTaskRef_DefaultNamespace(t *testing.T) {
 
 	envVars := job.Spec.Template.Spec.Containers[0].Env
 	for _, env := range envVars {
-		if env.Name == "MERCAN_PRIOR_TASK_NAMESPACE" && env.Value == "my-ns" {
+		if env.Name == "ORKA_PRIOR_TASK_NAMESPACE" && env.Value == "my-ns" {
 			return // success
 		}
 	}
-	t.Error("expected MERCAN_PRIOR_TASK_NAMESPACE to default to task namespace 'my-ns'")
+	t.Error("expected ORKA_PRIOR_TASK_NAMESPACE to default to task namespace 'my-ns'")
 }
