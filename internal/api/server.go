@@ -35,6 +35,7 @@ type ServerConfig struct {
 	Chat                      ChatConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
+	PlanStore                 store.PlanStore
 	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
 }
@@ -51,6 +52,7 @@ type Server struct {
 	internalHandlers *InternalHandlers
 	ResultStore      store.ResultStore
 	SessionStore     store.SessionStore
+	PlanStore        store.PlanStore
 }
 
 // NewServer creates a new API server
@@ -67,9 +69,10 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		sessionManager: sessionManager,
 		ResultStore:    config.ResultStore,
 		SessionStore:   config.SessionStore,
+		PlanStore:      config.PlanStore,
 	}
 
-	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace, config.EnforceNamespaceIsolation, config.ResultStore, config.SessionStore, config.Clientset, config.HealthChecker)
+	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace, config.EnforceNamespaceIsolation, config.ResultStore, config.SessionStore, config.PlanStore, config.Clientset, config.HealthChecker)
 	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore)
 	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat)
 	server.setupMiddleware()
@@ -123,6 +126,7 @@ func (s *Server) setupRoutes() {
 	api.Delete("/tasks/:id", s.handlers.DeleteTask)
 	api.Get("/tasks/:id/logs", s.handlers.GetTaskLogs)
 	api.Get("/tasks/:id/result", s.handlers.GetTaskResult)
+	api.Get("/tasks/:id/plan", s.handlers.GetTaskPlan)
 	api.Get("/tasks/:id/children", s.handlers.GetTaskChildren)
 
 	// Session endpoints
@@ -163,11 +167,15 @@ func (s *Server) setupRoutes() {
 
 	// Internal API for worker communication
 	if s.ResultStore != nil && s.SessionStore != nil {
-		s.internalHandlers = NewInternalHandlers(s.ResultStore, s.SessionStore)
+		s.internalHandlers = NewInternalHandlers(s.ResultStore, s.SessionStore, s.PlanStore)
 		internal := s.app.Group("/internal/v1")
 		internal.Use(NewAuthMiddleware(s.client))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
 		internal.Get("/sessions/:namespace/:name/transcript", s.internalHandlers.GetSessionTranscript)
+		if s.PlanStore != nil {
+			internal.Post("/plans/:namespace/:taskName", s.internalHandlers.SubmitPlan)
+			internal.Get("/plans/:namespace/:taskName", s.internalHandlers.GetPlan)
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -535,4 +536,126 @@ func TestGetSessionIncludesMessages(t *testing.T) {
 	if got.Messages[0].Content != "first" || got.Messages[1].Content != "second" {
 		t.Errorf("unexpected messages: %+v", got.Messages)
 	}
+}
+
+func TestPlanStore(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	t.Run("save and get plan", func(t *testing.T) {
+		plan := &store.PlanState{
+			TaskName:     "test-task",
+			Namespace:    "default",
+			Iteration:    0,
+			Summary:      "Initial planning phase",
+			ProgressPct:  10,
+			GoalComplete: false,
+			PlanDocument: "# Plan\n- Step 1\n- Step 2",
+		}
+		if err := s.SavePlan(ctx, "default", "test-task", plan); err != nil {
+			t.Fatalf("SavePlan: %v", err)
+		}
+
+		got, err := s.GetPlan(ctx, "default", "test-task")
+		if err != nil {
+			t.Fatalf("GetPlan: %v", err)
+		}
+		if got.Summary != plan.Summary {
+			t.Errorf("Summary = %q, want %q", got.Summary, plan.Summary)
+		}
+		if got.ProgressPct != plan.ProgressPct {
+			t.Errorf("ProgressPct = %d, want %d", got.ProgressPct, plan.ProgressPct)
+		}
+		if got.PlanDocument != plan.PlanDocument {
+			t.Errorf("PlanDocument = %q, want %q", got.PlanDocument, plan.PlanDocument)
+		}
+		if got.GoalComplete {
+			t.Error("GoalComplete should be false")
+		}
+	})
+
+	t.Run("upsert plan", func(t *testing.T) {
+		plan := &store.PlanState{
+			Iteration:    1,
+			Summary:      "Updated progress",
+			ProgressPct:  50,
+			GoalComplete: false,
+			PlanDocument: "# Updated Plan",
+		}
+		if err := s.SavePlan(ctx, "default", "test-task", plan); err != nil {
+			t.Fatalf("SavePlan (update): %v", err)
+		}
+
+		got, err := s.GetPlan(ctx, "default", "test-task")
+		if err != nil {
+			t.Fatalf("GetPlan: %v", err)
+		}
+		if got.Summary != "Updated progress" {
+			t.Errorf("Summary = %q, want %q", got.Summary, "Updated progress")
+		}
+		if got.ProgressPct != 50 {
+			t.Errorf("ProgressPct = %d, want %d", got.ProgressPct, 50)
+		}
+	})
+
+	t.Run("get nonexistent plan", func(t *testing.T) {
+		_, err := s.GetPlan(ctx, "default", "nonexistent")
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("expected ErrNotFound, got %v", err)
+		}
+	})
+
+	t.Run("delete plan", func(t *testing.T) {
+		plan := &store.PlanState{
+			Summary:      "To be deleted",
+			PlanDocument: "# Delete me",
+		}
+		if err := s.SavePlan(ctx, "default", "delete-task", plan); err != nil {
+			t.Fatalf("SavePlan: %v", err)
+		}
+
+		if err := s.DeletePlan(ctx, "default", "delete-task"); err != nil {
+			t.Fatalf("DeletePlan: %v", err)
+		}
+
+		_, err := s.GetPlan(ctx, "default", "delete-task")
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("expected ErrNotFound after delete, got %v", err)
+		}
+	})
+
+	t.Run("goal complete flag", func(t *testing.T) {
+		plan := &store.PlanState{
+			Summary:      "All done",
+			ProgressPct:  100,
+			GoalComplete: true,
+			PlanDocument: "# Complete",
+		}
+		if err := s.SavePlan(ctx, "default", "complete-task", plan); err != nil {
+			t.Fatalf("SavePlan: %v", err)
+		}
+
+		got, err := s.GetPlan(ctx, "default", "complete-task")
+		if err != nil {
+			t.Fatalf("GetPlan: %v", err)
+		}
+		if !got.GoalComplete {
+			t.Error("GoalComplete should be true")
+		}
+	})
+
+	t.Run("namespace isolation", func(t *testing.T) {
+		plan := &store.PlanState{
+			Summary:      "NS1 plan",
+			PlanDocument: "# NS1",
+		}
+		if err := s.SavePlan(ctx, "ns1", "task-a", plan); err != nil {
+			t.Fatalf("SavePlan ns1: %v", err)
+		}
+
+		_, err := s.GetPlan(ctx, "ns2", "task-a")
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("expected ErrNotFound for different namespace, got %v", err)
+		}
+	})
 }

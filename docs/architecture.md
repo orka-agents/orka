@@ -72,6 +72,7 @@ Mercan uses four CRDs:
 |------|----------|-----------|
 | **Result Storage** | SQLite (embedded) | No size limit, zero external dependencies, pure Go via `modernc.org/sqlite`. |
 | **Session Storage** | SQLite (embedded) | Normalized schema with efficient querying and pagination. No size limit. |
+| **Plan Storage** | SQLite (embedded) | Persists autonomous coordination plan state across iterations. |
 | **API Authentication** | Kubernetes ServiceAccount tokens | Native K8s auth with RBAC integration. |
 | **Task Queue** | Priority queuing (0-1000) | Higher priority tasks are scheduled first. |
 | **Secret Management** | Reference K8s Secrets in specs | Controller mounts secrets to worker pods. |
@@ -97,7 +98,7 @@ mercan/
 │   │   ├── anthropic/      # Anthropic Claude provider
 │   │   └── openai/         # OpenAI provider
 │   ├── store/              # Storage interfaces and SQLite implementation
-│   │   └── sqlite/         # SQLite backend (ResultStore + SessionStore)
+│   │   └── sqlite/         # SQLite backend (ResultStore + SessionStore + PlanStore)
 │   ├── tools/              # Built-in tool implementations
 │   ├── metrics/            # Prometheus metrics
 │   ├── worker/             # Tool executor for custom Tool CRDs
@@ -168,6 +169,16 @@ Coordinator Agent (depth 0)
 Child tasks use owner references for cascade deletion and labels (`mercan.ai/parent-task`, `mercan.ai/delegated-agent`) for querying.
 
 See [multi-agent-coordination.md](multi-agent-coordination.md) for full details.
+
+### Autonomous Mode
+
+When an agent's coordination config has `autonomous: true`, the controller runs the coordinator in a loop instead of completing the task after a single Job. Each iteration:
+
+1. The coordinator Job runs, delegates sub-tasks, and updates the plan via the `update_plan` tool
+2. The controller saves plan state to `PlanStore` (SQLite) and checks termination conditions
+3. If not complete, a new Job is created for the next iteration with the accumulated plan state
+
+Termination occurs when the LLM signals goal completion, max iterations are reached, or the task is suspended.
 
 ## LLM Provider Architecture
 

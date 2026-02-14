@@ -39,3 +39,16 @@ type SessionMessage struct {
 	ToolCallID string         `json:"toolCallID,omitempty"`
 	Timestamp  time.Time      `json:"ts"`
 }
+
+// PlanState represents the autonomous plan state for a coordinator task.
+type PlanState struct {
+	TaskName     string
+	Namespace    string
+	Iteration    int
+	Summary      string // Human-readable progress summary
+	ProgressPct  int    // 0-100 progress estimate
+	GoalComplete bool   // LLM determined goal is met
+	PlanDocument string // Freeform markdown plan managed by LLM
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}

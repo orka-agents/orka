@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -27,6 +28,8 @@ import (
 	"github.com/sozercan/mercan/internal/worker"
 	"github.com/sozercan/mercan/workers/common"
 )
+
+const trueStr = "true"
 
 func main() {
 	if err := run(); err != nil {
@@ -136,7 +139,7 @@ func run() error {
 	}
 
 	// Register coordination tools if enabled
-	if os.Getenv("MERCAN_COORDINATION_ENABLED") == "true" {
+	if os.Getenv("MERCAN_COORDINATION_ENABLED") == trueStr {
 		tools.RegisterCoordinationTools(k8sClient)
 	}
 
@@ -146,8 +149,35 @@ func run() error {
 	// Load session context if available
 	sessionContext := loadSessionContext()
 
+	// Autonomous mode: fetch plan state and augment system prompt
+	if os.Getenv("MERCAN_AUTONOMOUS_MODE") == trueStr {
+		iteration := 0
+		if v := os.Getenv("MERCAN_AUTONOMOUS_ITERATION"); v != "" {
+			if i, err := strconv.Atoi(v); err == nil {
+				iteration = i
+			}
+		}
+		maxIter := 0
+		if v := os.Getenv("MERCAN_AUTONOMOUS_MAX_ITERATIONS"); v != "" {
+			if i, err := strconv.Atoi(v); err == nil {
+				maxIter = i
+			}
+		}
+
+		// Augment system prompt with autonomous instructions
+		systemPrompt += autonomousSystemPromptSuffix(iteration, maxIter)
+
+		// Fetch existing plan state from controller
+		planContext := loadPlanContext()
+		if planContext != "" {
+			prompt = fmt.Sprintf("## Previous Plan State\n\n%s\n\n## Task\n\n%s", planContext, prompt)
+		}
+
+		fmt.Printf("Autonomous mode: iteration %d\n", iteration)
+	}
+
 	// Build messages
-	messages := []llm.Message{}
+	messages := make([]llm.Message, 0, len(sessionContext)+1)
 	messages = append(messages, sessionContext...)
 	messages = append(messages, llm.Message{
 		Role:    "user",
@@ -331,6 +361,69 @@ func loadSessionContext() []llm.Message {
 	return messages
 }
 
+// loadPlanContext fetches the current plan state from the controller API.
+func loadPlanContext() string {
+	controllerURL := os.Getenv("MERCAN_CONTROLLER_URL")
+	taskName := os.Getenv("MERCAN_TASK_NAME")
+	taskNamespace := os.Getenv("MERCAN_TASK_NAMESPACE")
+
+	if controllerURL == "" || taskName == "" || taskNamespace == "" {
+		return ""
+	}
+
+	url := fmt.Sprintf("%s/internal/v1/plans/%s/%s", controllerURL, taskNamespace, taskName)
+
+	// Read SA token
+	saToken := ""
+	if data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token"); err == nil {
+		saToken = strings.TrimSpace(string(data))
+	}
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		fmt.Printf("Warning: failed to create plan request: %v\n", err)
+		return ""
+	}
+	if saToken != "" {
+		req.Header.Set("Authorization", "Bearer "+saToken)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Printf("Warning: failed to fetch plan: %v\n", err)
+		return ""
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode == http.StatusNotFound {
+		// No plan yet (first iteration)
+		return ""
+	}
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("Warning: plan fetch returned HTTP %d\n", resp.StatusCode)
+		return ""
+	}
+
+	var plan struct {
+		Summary      string `json:"Summary"`
+		ProgressPct  int    `json:"ProgressPct"`
+		GoalComplete bool   `json:"GoalComplete"`
+		PlanDocument string `json:"PlanDocument"`
+		Iteration    int    `json:"Iteration"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&plan); err != nil {
+		fmt.Printf("Warning: failed to decode plan: %v\n", err)
+		return ""
+	}
+
+	if plan.PlanDocument == "" {
+		return ""
+	}
+
+	return fmt.Sprintf("**Progress: %d%% (iteration %d)**\n\n**Summary:** %s\n\n%s",
+		plan.ProgressPct, plan.Iteration, plan.Summary, plan.PlanDocument)
+}
+
 // executeAgentLoop runs the agent loop with tool execution
 func executeAgentLoop(
 	ctx context.Context,
@@ -344,8 +437,11 @@ func executeAgentLoop(
 	toolExecutor *worker.ToolExecutor,
 ) (string, error) {
 	maxIterations := 10
-	if os.Getenv("MERCAN_COORDINATION_ENABLED") == "true" {
+	if os.Getenv("MERCAN_COORDINATION_ENABLED") == trueStr {
 		maxIterations = 50
+	}
+	if os.Getenv("MERCAN_AUTONOMOUS_MODE") == trueStr {
+		maxIterations = 100
 	}
 
 	for range maxIterations {

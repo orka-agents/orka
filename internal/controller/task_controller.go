@@ -62,6 +62,7 @@ type TaskReconciler struct {
 	KubeClient      kubernetes.Interface
 	ResultStore     store.ResultStore
 	SessionStore    store.SessionStore
+	PlanStore       store.PlanStore
 }
 
 // +kubebuilder:rbac:groups=core.mercan.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
@@ -164,7 +165,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 }
 
 // handleDeletion handles Task cleanup when deleted
-func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
+func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) { //nolint:unparam // Result is always nil but kept for interface consistency
 	log := logf.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(task, TaskFinalizer) {
@@ -172,6 +173,14 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
 			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete result from store", "task", task.Name)
+				// Continue with finalizer removal anyway
+			}
+		}
+
+		// Clean up plan state if any
+		if r.PlanStore != nil {
+			if err := r.PlanStore.DeletePlan(ctx, task.Namespace, task.Name); err != nil {
+				log.Error(err, "failed to delete plan state", "task", task.Name)
 				// Continue with finalizer removal anyway
 			}
 		}
@@ -568,6 +577,10 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 
 	// Check Job status
 	if job.Status.Succeeded > 0 {
+		// Check if this is an autonomous task that should continue iterating
+		if r.isAutonomousTask(ctx, task) {
+			return r.handleAutonomousIteration(ctx, task)
+		}
 		// Job succeeded
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "task completed successfully")
 	}
@@ -636,6 +649,13 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 		// Release session lock
 		if err := r.SessionManager.ReleaseLock(ctx, task); err != nil {
 			log.Error(err, "failed to release session lock")
+		}
+	}
+
+	// Clean up plan state on completion (best-effort)
+	if r.PlanStore != nil {
+		if err := r.PlanStore.DeletePlan(ctx, task.Namespace, task.Name); err != nil {
+			log.Error(err, "failed to delete plan state on completion")
 		}
 	}
 
@@ -1138,4 +1158,113 @@ func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string)
 	}
 
 	return nil
+}
+
+// isAutonomousTask checks if this task has autonomous mode enabled via its agent.
+func (r *TaskReconciler) isAutonomousTask(ctx context.Context, task *corev1alpha1.Task) bool {
+	if task.Spec.AgentRef == nil {
+		return false
+	}
+
+	agent := &corev1alpha1.Agent{}
+	agentNS := task.Namespace
+	if task.Spec.AgentRef.Namespace != "" {
+		agentNS = task.Spec.AgentRef.Namespace
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.AgentRef.Name, Namespace: agentNS}, agent); err != nil {
+		return false
+	}
+
+	return agent.Spec.Coordination != nil && agent.Spec.Coordination.Autonomous
+}
+
+// handleAutonomousIteration handles the completion of one autonomous loop iteration.
+// It saves plan state, checks termination conditions, and creates a new Job if needed.
+func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	log.Info("handling autonomous iteration", "iteration", task.Status.Iteration)
+
+	// Collect result from this iteration (best-effort)
+	if err := r.collectResult(ctx, task); err != nil {
+		log.Error(err, "failed to collect iteration result")
+	}
+
+	// Check plan state for termination signals
+	if r.PlanStore != nil {
+		plan, err := r.PlanStore.GetPlan(ctx, task.Namespace, task.Name)
+		if err == nil && plan.GoalComplete {
+			log.Info("autonomous task goal complete", "iteration", task.Status.Iteration, "summary", plan.Summary)
+			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded,
+				fmt.Sprintf("goal complete after %d iterations: %s", task.Status.Iteration+1, plan.Summary))
+		}
+	}
+
+	// Check max iterations
+	agent := &corev1alpha1.Agent{}
+	agentNS := task.Namespace
+	if task.Spec.AgentRef.Namespace != "" {
+		agentNS = task.Spec.AgentRef.Namespace
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.AgentRef.Name, Namespace: agentNS}, agent); err != nil {
+		log.Error(err, "failed to get agent for autonomous check")
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "failed to resolve agent for autonomous iteration")
+	}
+
+	maxIter := agent.Spec.Coordination.MaxIterations
+	if maxIter > 0 && task.Status.Iteration+1 >= maxIter {
+		log.Info("autonomous task reached max iterations", "maxIterations", maxIter)
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded,
+			fmt.Sprintf("reached max iterations (%d)", maxIter))
+	}
+
+	// Check if suspended — keep task Running so it can resume when Suspend is unset
+	if task.Spec.Suspend != nil && *task.Spec.Suspend {
+		log.Info("autonomous task suspended, waiting for resume")
+		task.Status.Message = fmt.Sprintf("autonomous task suspended at iteration %d", task.Status.Iteration)
+		if err := r.Status().Update(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Enforce child task history limits
+	if err := r.enforceHistoryLimits(ctx, task); err != nil {
+		log.Error(err, "failed to enforce history limits for autonomous task")
+	}
+
+	// Delete old Job
+	if task.Status.JobName != "" {
+		job := &batchv1.Job{}
+		err := r.Get(ctx, types.NamespacedName{
+			Name:      task.Status.JobName,
+			Namespace: task.Namespace,
+		}, job)
+		if err == nil {
+			propagationPolicy := metav1.DeletePropagationBackground
+			if err := r.Delete(ctx, job, &client.DeleteOptions{
+				PropagationPolicy: &propagationPolicy,
+			}); err != nil && !apierrors.IsNotFound(err) {
+				log.Error(err, "failed to delete old Job for autonomous iteration")
+			}
+		}
+	}
+
+	// Increment iteration and reset to Pending for next Job creation
+	task.Status.Iteration++
+	task.Status.Phase = corev1alpha1.TaskPhasePending
+	task.Status.JobName = ""
+	task.Status.Message = fmt.Sprintf("autonomous iteration %d", task.Status.Iteration)
+
+	if err := r.Status().Update(ctx, task); err != nil {
+		log.Error(err, "failed to update status for autonomous iteration")
+		return ctrl.Result{}, err
+	}
+
+	log.Info("autonomous task advancing to next iteration", "nextIteration", task.Status.Iteration)
+	if r.Recorder != nil {
+		r.Recorder.Event(task, corev1.EventTypeNormal, "AutonomousIteration",
+			fmt.Sprintf("Starting iteration %d", task.Status.Iteration))
+	}
+
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
