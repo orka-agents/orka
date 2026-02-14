@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -40,7 +41,11 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 	}
 
 	if config.BaseURL != "" {
-		opts = append(opts, option.WithBaseURL(config.BaseURL))
+		// The Anthropic SDK appends "v1/messages" to the base URL, so strip
+		// a trailing "/v1" or "/v1/" to avoid a doubled path segment.
+		base := strings.TrimRight(config.BaseURL, "/")
+		base = strings.TrimSuffix(base, "/v1")
+		opts = append(opts, option.WithBaseURL(base))
 	}
 
 	client := anthropic.NewClient(opts...)

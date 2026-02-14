@@ -40,6 +40,14 @@ func TestNewProvider(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "with base URL ending in /v1",
+			config: llm.ProviderConfig{
+				APIKey:  "test-api-key",
+				BaseURL: "https://proxy.example.com/v1",
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
