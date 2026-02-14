@@ -6,7 +6,7 @@ kind: ConfigMap
 metadata:
   name: skill-researcher
   labels:
-    mercan.ai/skill: "true"
+    orka.ai/skill: "true"
 data:
   skill.md: |
     # Research Methodology Skill
@@ -58,7 +58,7 @@ kind: ConfigMap
 metadata:
   name: skill-code-review
   labels:
-    mercan.ai/skill: "true"
+    orka.ai/skill: "true"
 data:
   skill.md: |
     # Code Review Skill
@@ -116,7 +116,7 @@ kind: ConfigMap
 metadata:
   name: skill-architect
   labels:
-    mercan.ai/skill: "true"
+    orka.ai/skill: "true"
 data:
   skill.md: |
     # Software Architecture Skill
@@ -171,7 +171,7 @@ kind: ConfigMap
 metadata:
   name: skill-coordinator
   labels:
-    mercan.ai/skill: "true"
+    orka.ai/skill: "true"
 data:
   skill.md: |
     # Task Coordination Skill

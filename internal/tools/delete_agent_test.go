@@ -14,7 +14,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 func testAgent() *corev1alpha1.Agent {
@@ -81,7 +81,7 @@ func TestDeleteAgentTool_Execute(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.envNS != "" {
-				t.Setenv("MERCAN_TASK_NAMESPACE", tt.envNS)
+				t.Setenv("ORKA_TASK_NAMESPACE", tt.envNS)
 			}
 
 			tool := tt.setup()

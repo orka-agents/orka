@@ -12,8 +12,8 @@ import (
 	"fmt"
 	"time"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
-	"github.com/sozercan/mercan/internal/store"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/store"
 )
 
 // SessionManager manages sessions for conversation continuity.

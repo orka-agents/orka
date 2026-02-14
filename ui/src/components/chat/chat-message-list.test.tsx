@@ -23,7 +23,7 @@ describe('ChatMessageList', () => {
   it('empty state shows welcome text with fish emoji', () => {
     render(<ChatMessageList />)
     expect(screen.getByText('🪸')).toBeInTheDocument()
-    expect(screen.getByText('Mercan Meta Agent')).toBeInTheDocument()
+    expect(screen.getByText('Orka Meta Agent')).toBeInTheDocument()
   })
 
   it('with messages in store, renders ChatMessage for each', () => {

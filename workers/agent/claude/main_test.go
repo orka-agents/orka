@@ -10,11 +10,11 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/sozercan/mercan/workers/common"
+	"github.com/sozercan/orka/workers/common"
 )
 
 func TestBuildClaudeArgs_Minimal(t *testing.T) {
-	t.Setenv("MERCAN_ALLOW_BASH", "")
+	t.Setenv("ORKA_ALLOW_BASH", "")
 
 	cfg := &common.AgentConfig{
 		Prompt:   "hello world",
@@ -36,7 +36,7 @@ func TestBuildClaudeArgs_Minimal(t *testing.T) {
 }
 
 func TestBuildClaudeArgs_Full(t *testing.T) {
-	t.Setenv("MERCAN_ALLOW_BASH", "")
+	t.Setenv("ORKA_ALLOW_BASH", "")
 
 	cfg := &common.AgentConfig{
 		Prompt:          "fix bugs",
@@ -68,12 +68,12 @@ func TestBuildClaudeArgs_Full(t *testing.T) {
 
 	// --dangerously-skip-permissions should NOT be present
 	if slices.Contains(args, "--dangerously-skip-permissions") {
-		t.Error("--dangerously-skip-permissions should not be set when MERCAN_ALLOW_BASH is not true")
+		t.Error("--dangerously-skip-permissions should not be set when ORKA_ALLOW_BASH is not true")
 	}
 }
 
 func TestBuildClaudeArgs_AllowBash(t *testing.T) {
-	t.Setenv("MERCAN_ALLOW_BASH", "true")
+	t.Setenv("ORKA_ALLOW_BASH", "true")
 
 	cfg := &common.AgentConfig{
 		Prompt:   "hello",

@@ -19,7 +19,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/sozercan/mercan/test/utils"
+	"github.com/sozercan/orka/test/utils"
 )
 
 var _ = Describe("SQLite Storage", Ordered, func() {
@@ -51,7 +51,7 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(output).To(ContainSubstring("--store-backend=sqlite"))
-			g.Expect(output).To(ContainSubstring("--store-path=/data/mercan.db"))
+			g.Expect(output).To(ContainSubstring("--store-path=/data/orka.db"))
 		}
 		Eventually(verifyStoreArgs, 30*time.Second, time.Second).Should(Succeed())
 
@@ -104,7 +104,7 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(output).To(ContainSubstring("SQLite store is configured"),
-				"Controller logs should confirm SQLite DB was created at /data/mercan.db")
+				"Controller logs should confirm SQLite DB was created at /data/orka.db")
 		}
 		Eventually(verifyDBExists, 30*time.Second, time.Second).Should(Succeed())
 
@@ -126,7 +126,7 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 	It("should complete a container task and store the result in SQLite", func() {
 		By("creating a container task that produces output")
 		taskManifest := fmt.Sprintf(`{
-			"apiVersion": "core.mercan.ai/v1alpha1",
+			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Task",
 			"metadata": {
 				"name": "%s",
@@ -188,7 +188,7 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 	It("should configure agent tasks with HTTP result endpoint env vars", func() {
 		By("creating an Agent CRD")
 		agentManifest := fmt.Sprintf(`{
-			"apiVersion": "core.mercan.ai/v1alpha1",
+			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Agent",
 			"metadata": {
 				"name": "%s",
@@ -210,7 +210,7 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 
 		By("creating an agent task")
 		taskManifest := fmt.Sprintf(`{
-			"apiVersion": "core.mercan.ai/v1alpha1",
+			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Task",
 			"metadata": {
 				"name": "%s",
@@ -233,10 +233,10 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create agent task")
 
-		By("verifying the Job has MERCAN_RESULT_ENDPOINT env var")
+		By("verifying the Job has ORKA_RESULT_ENDPOINT env var")
 		verifyResultEndpoint := func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("mercan.ai/task=%s", agentTaskName),
+				"-l", fmt.Sprintf("orka.ai/task=%s", agentTaskName),
 				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
 				"-n", namespace,
 			)
@@ -253,20 +253,20 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 				envMap[e.Name] = e.Value
 			}
 
-			g.Expect(envMap).To(HaveKey("MERCAN_RESULT_ENDPOINT"),
-				"Worker should have MERCAN_RESULT_ENDPOINT for HTTP result submission")
-			g.Expect(envMap["MERCAN_RESULT_ENDPOINT"]).To(ContainSubstring("/internal/v1/results/"),
+			g.Expect(envMap).To(HaveKey("ORKA_RESULT_ENDPOINT"),
+				"Worker should have ORKA_RESULT_ENDPOINT for HTTP result submission")
+			g.Expect(envMap["ORKA_RESULT_ENDPOINT"]).To(ContainSubstring("/internal/v1/results/"),
 				"Result endpoint should point to internal API")
 
-			g.Expect(envMap).To(HaveKey("MERCAN_CONTROLLER_URL"),
-				"Worker should have MERCAN_CONTROLLER_URL for coordination")
+			g.Expect(envMap).To(HaveKey("ORKA_CONTROLLER_URL"),
+				"Worker should have ORKA_CONTROLLER_URL for coordination")
 		}
 		Eventually(verifyResultEndpoint, 2*time.Minute, time.Second).Should(Succeed())
 
-		By("verifying the Job does NOT have MERCAN_RESULT_CONFIGMAP env var (removed)")
+		By("verifying the Job does NOT have ORKA_RESULT_CONFIGMAP env var (removed)")
 		verifyNoConfigMapEnv := func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("mercan.ai/task=%s", agentTaskName),
+				"-l", fmt.Sprintf("orka.ai/task=%s", agentTaskName),
 				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
 				"-n", namespace,
 			)
@@ -278,15 +278,15 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 			g.Expect(err).NotTo(HaveOccurred())
 
 			for _, e := range envVars {
-				g.Expect(e.Name).NotTo(Equal("MERCAN_RESULT_CONFIGMAP"),
-					"MERCAN_RESULT_CONFIGMAP should not be present — replaced by MERCAN_RESULT_ENDPOINT")
+				g.Expect(e.Name).NotTo(Equal("ORKA_RESULT_CONFIGMAP"),
+					"ORKA_RESULT_CONFIGMAP should not be present — replaced by ORKA_RESULT_ENDPOINT")
 			}
 		}
 		Eventually(verifyNoConfigMapEnv, 30*time.Second, time.Second).Should(Succeed())
 	})
 
 	// Test 5: Verify the DB size metric is exposed via the metrics endpoint
-	It("should expose mercan_store_db_size_bytes metric", func() {
+	It("should expose orka_store_db_size_bytes metric", func() {
 		By("checking the controller logs for SQLite store startup message")
 		verifyStoreStartup := func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "pods",
@@ -328,7 +328,7 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 	It("should not grant ConfigMap write permissions to workers", func() {
 		By("checking the worker ClusterRole for ConfigMap permissions")
 		verifyWorkerRBAC := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "clusterrole", "mercan-worker-role",
+			cmd := exec.Command("kubectl", "get", "clusterrole", "orka-worker-role",
 				"-o", "jsonpath={.rules}", "--ignore-not-found")
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())

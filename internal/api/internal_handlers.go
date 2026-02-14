@@ -15,7 +15,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"github.com/sozercan/mercan/internal/store"
+	"github.com/sozercan/orka/internal/store"
 )
 
 const maxResultSize = 10 << 20 // 10MB

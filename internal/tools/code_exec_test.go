@@ -332,9 +332,9 @@ func TestNewCodeExecTool(t *testing.T) {
 }
 
 func TestNewCodeExecTool_WithEnvVar(t *testing.T) {
-	originalWorkDir := os.Getenv("MERCAN_WORK_DIR")
-	os.Setenv("MERCAN_WORK_DIR", "/custom/work/dir")    //nolint:errcheck
-	defer os.Setenv("MERCAN_WORK_DIR", originalWorkDir) //nolint:errcheck
+	originalWorkDir := os.Getenv("ORKA_WORK_DIR")
+	os.Setenv("ORKA_WORK_DIR", "/custom/work/dir")    //nolint:errcheck
+	defer os.Setenv("ORKA_WORK_DIR", originalWorkDir) //nolint:errcheck
 
 	tool := NewCodeExecTool()
 	if tool.workDir != "/custom/work/dir" {

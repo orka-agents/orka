@@ -11,5 +11,5 @@ resources:
 
 # Common labels for all resources
 commonLabels:
-  app.kubernetes.io/part-of: mercan-complex-workflow
+  app.kubernetes.io/part-of: orka-complex-workflow
   app.kubernetes.io/example: "true"

@@ -13,27 +13,27 @@ import (
 )
 
 func TestLoadConfig_RequiredFields(t *testing.T) {
-	t.Setenv("MERCAN_PROMPT", "")
-	t.Setenv("MERCAN_TASK_NAME", "t1")
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_PROMPT", "")
+	t.Setenv("ORKA_TASK_NAME", "t1")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	_, err := LoadConfig(50)
 	if err == nil {
-		t.Fatal("expected error for missing MERCAN_PROMPT")
+		t.Fatal("expected error for missing ORKA_PROMPT")
 	}
 }
 
 func TestLoadConfig_Defaults(t *testing.T) {
-	t.Setenv("MERCAN_PROMPT", "hello")
-	t.Setenv("MERCAN_TASK_NAME", "t1")
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_MAX_TURNS", "")
-	t.Setenv("MERCAN_ALLOWED_TOOLS", "")
-	t.Setenv("MERCAN_DISALLOWED_TOOLS", "")
-	t.Setenv("MERCAN_MODEL", "")
-	t.Setenv("MERCAN_SYSTEM_PROMPT", "")
-	t.Setenv("MERCAN_GIT_REPO", "")
-	t.Setenv("MERCAN_TIMEOUT_SECONDS", "")
+	t.Setenv("ORKA_PROMPT", "hello")
+	t.Setenv("ORKA_TASK_NAME", "t1")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_MAX_TURNS", "")
+	t.Setenv("ORKA_ALLOWED_TOOLS", "")
+	t.Setenv("ORKA_DISALLOWED_TOOLS", "")
+	t.Setenv("ORKA_MODEL", "")
+	t.Setenv("ORKA_SYSTEM_PROMPT", "")
+	t.Setenv("ORKA_GIT_REPO", "")
+	t.Setenv("ORKA_TIMEOUT_SECONDS", "")
 
 	cfg, err := LoadConfig(50)
 	if err != nil {
@@ -48,19 +48,19 @@ func TestLoadConfig_Defaults(t *testing.T) {
 }
 
 func TestLoadConfig_AllFields(t *testing.T) {
-	t.Setenv("MERCAN_PROMPT", "refactor code")
-	t.Setenv("MERCAN_TASK_NAME", "task1")
-	t.Setenv("MERCAN_TASK_NAMESPACE", "ns1")
-	t.Setenv("MERCAN_MODEL", "test-model")
-	t.Setenv("MERCAN_SYSTEM_PROMPT", "Be helpful")
-	t.Setenv("MERCAN_MAX_TURNS", "100")
-	t.Setenv("MERCAN_ALLOWED_TOOLS", "Read,Write,Edit")
-	t.Setenv("MERCAN_DISALLOWED_TOOLS", "Bash")
-	t.Setenv("MERCAN_GIT_REPO", "https://github.com/example/repo.git")
-	t.Setenv("MERCAN_GIT_BRANCH", "main")
-	t.Setenv("MERCAN_GIT_REF", "abc123")
-	t.Setenv("MERCAN_WORKSPACE_SUBPATH", "src")
-	t.Setenv("MERCAN_TIMEOUT_SECONDS", "600")
+	t.Setenv("ORKA_PROMPT", "refactor code")
+	t.Setenv("ORKA_TASK_NAME", "task1")
+	t.Setenv("ORKA_TASK_NAMESPACE", "ns1")
+	t.Setenv("ORKA_MODEL", "test-model")
+	t.Setenv("ORKA_SYSTEM_PROMPT", "Be helpful")
+	t.Setenv("ORKA_MAX_TURNS", "100")
+	t.Setenv("ORKA_ALLOWED_TOOLS", "Read,Write,Edit")
+	t.Setenv("ORKA_DISALLOWED_TOOLS", "Bash")
+	t.Setenv("ORKA_GIT_REPO", "https://github.com/example/repo.git")
+	t.Setenv("ORKA_GIT_BRANCH", "main")
+	t.Setenv("ORKA_GIT_REF", "abc123")
+	t.Setenv("ORKA_WORKSPACE_SUBPATH", "src")
+	t.Setenv("ORKA_TIMEOUT_SECONDS", "600")
 
 	cfg, err := LoadConfig(50)
 	if err != nil {
@@ -90,31 +90,31 @@ func TestLoadConfig_AllFields(t *testing.T) {
 }
 
 func TestLoadConfig_InvalidMaxTurns(t *testing.T) {
-	t.Setenv("MERCAN_PROMPT", "hello")
-	t.Setenv("MERCAN_MAX_TURNS", "not-a-number")
-	t.Setenv("MERCAN_ALLOWED_TOOLS", "")
-	t.Setenv("MERCAN_DISALLOWED_TOOLS", "")
-	t.Setenv("MERCAN_TIMEOUT_SECONDS", "")
+	t.Setenv("ORKA_PROMPT", "hello")
+	t.Setenv("ORKA_MAX_TURNS", "not-a-number")
+	t.Setenv("ORKA_ALLOWED_TOOLS", "")
+	t.Setenv("ORKA_DISALLOWED_TOOLS", "")
+	t.Setenv("ORKA_TIMEOUT_SECONDS", "")
 
 	_, err := LoadConfig(50)
 	if err == nil {
-		t.Fatal("expected error for invalid MERCAN_MAX_TURNS")
+		t.Fatal("expected error for invalid ORKA_MAX_TURNS")
 	}
 }
 
 func TestLoadConfig_InvalidTimeoutSeconds(t *testing.T) {
-	t.Setenv("MERCAN_PROMPT", "hello")
-	t.Setenv("MERCAN_MAX_TURNS", "")
-	t.Setenv("MERCAN_ALLOWED_TOOLS", "")
-	t.Setenv("MERCAN_DISALLOWED_TOOLS", "")
-	t.Setenv("MERCAN_TIMEOUT_SECONDS", "not-a-number")
+	t.Setenv("ORKA_PROMPT", "hello")
+	t.Setenv("ORKA_MAX_TURNS", "")
+	t.Setenv("ORKA_ALLOWED_TOOLS", "")
+	t.Setenv("ORKA_DISALLOWED_TOOLS", "")
+	t.Setenv("ORKA_TIMEOUT_SECONDS", "not-a-number")
 
 	_, err := LoadConfig(50)
 	if err == nil {
-		t.Fatal("expected error for invalid MERCAN_TIMEOUT_SECONDS")
+		t.Fatal("expected error for invalid ORKA_TIMEOUT_SECONDS")
 	}
-	if !strings.Contains(err.Error(), "invalid MERCAN_TIMEOUT_SECONDS") {
-		t.Errorf("error = %q, want it to mention MERCAN_TIMEOUT_SECONDS", err.Error())
+	if !strings.Contains(err.Error(), "invalid ORKA_TIMEOUT_SECONDS") {
+		t.Errorf("error = %q, want it to mention ORKA_TIMEOUT_SECONDS", err.Error())
 	}
 }
 

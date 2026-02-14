@@ -1,9 +1,9 @@
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: agent-task-workspace-example
   labels:
-    app.kubernetes.io/name: mercan
+    app.kubernetes.io/name: orka
     app.kubernetes.io/managed-by: kustomize
 spec:
   # type: agent delegates work to an external CLI runtime

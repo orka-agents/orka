@@ -1,9 +1,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "mercan.fullname" . }}-controller
+  name: {{ include "orka.fullname" . }}-controller
   labels:
-    {{- include "mercan.labels" . | nindent 4 }}
+    {{- include "orka.labels" . | nindent 4 }}
     app.kubernetes.io/component: controller
 spec:
   replicas: {{ .Values.controller.replicas }}
@@ -13,19 +13,19 @@ spec:
   {{- end }}
   selector:
     matchLabels:
-      {{- include "mercan.selectorLabels" . | nindent 6 }}
+      {{- include "orka.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: controller
   template:
     metadata:
       labels:
-        {{- include "mercan.selectorLabels" . | nindent 8 }}
+        {{- include "orka.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: controller
       {{- with .Values.annotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      serviceAccountName: {{ include "mercan.serviceAccountName" . }}
+      serviceAccountName: {{ include "orka.serviceAccountName" . }}
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -86,7 +86,7 @@ spec:
         - name: store
           {{- if .Values.store.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: {{ include "mercan.fullname" . }}-store
+            claimName: {{ include "orka.fullname" . }}-store
           {{- else }}
           emptyDir: {}
           {{- end }}

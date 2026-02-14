@@ -24,7 +24,7 @@ const (
 )
 
 // SubmitResult sends the task result to the controller via HTTP POST.
-// It reads MERCAN_RESULT_ENDPOINT or constructs the URL from MERCAN_CONTROLLER_URL.
+// It reads ORKA_RESULT_ENDPOINT or constructs the URL from ORKA_CONTROLLER_URL.
 // Retries with exponential backoff (1s, 2s, 4s) on failure.
 func SubmitResult(result []byte) error {
 	endpoint, err := resultEndpoint()
@@ -54,29 +54,29 @@ func SubmitResult(result []byte) error {
 
 func resultEndpoint() (string, error) {
 	// Prefer explicit endpoint
-	if ep := os.Getenv("MERCAN_RESULT_ENDPOINT"); ep != "" {
+	if ep := os.Getenv("ORKA_RESULT_ENDPOINT"); ep != "" {
 		return ep, nil
 	}
 
 	// Construct from controller URL + task identity
-	controllerURL := os.Getenv("MERCAN_CONTROLLER_URL")
+	controllerURL := os.Getenv("ORKA_CONTROLLER_URL")
 	if controllerURL == "" {
-		return "", fmt.Errorf("MERCAN_RESULT_ENDPOINT or MERCAN_CONTROLLER_URL must be set")
+		return "", fmt.Errorf("ORKA_RESULT_ENDPOINT or ORKA_CONTROLLER_URL must be set")
 	}
 
-	namespace := os.Getenv("MERCAN_TASK_NAMESPACE")
+	namespace := os.Getenv("ORKA_TASK_NAMESPACE")
 	if namespace == "" {
 		// Fall back to downward API namespace file
 		data, err := os.ReadFile(saNamespacePath)
 		if err != nil {
-			return "", fmt.Errorf("MERCAN_TASK_NAMESPACE not set and cannot read namespace from SA: %w", err)
+			return "", fmt.Errorf("ORKA_TASK_NAMESPACE not set and cannot read namespace from SA: %w", err)
 		}
 		namespace = strings.TrimSpace(string(data))
 	}
 
-	taskName := os.Getenv("MERCAN_TASK_NAME")
+	taskName := os.Getenv("ORKA_TASK_NAME")
 	if taskName == "" {
-		return "", fmt.Errorf("MERCAN_TASK_NAME must be set")
+		return "", fmt.Errorf("ORKA_TASK_NAME must be set")
 	}
 
 	controllerURL = strings.TrimRight(controllerURL, "/")

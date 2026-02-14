@@ -1,10 +1,10 @@
 # .github/workflows/ci-feedback.yml
-# Copy this to your repository to trigger Mercan auto-fix on CI failure
+# Copy this to your repository to trigger Orka auto-fix on CI failure
 #
 # Required secrets:
-#   MERCAN_API_URL: URL of your Mercan API (e.g., https://mercan.example.com)
-#   MERCAN_TOKEN: ServiceAccount token for Mercan API auth
-name: CI Feedback to Mercan
+#   ORKA_API_URL: URL of your Orka API (e.g., https://orka.example.com)
+#   ORKA_TOKEN: ServiceAccount token for Orka API auth
+name: CI Feedback to Orka
 on:
   workflow_run:
     workflows: ["CI"]
@@ -23,10 +23,10 @@ jobs:
           echo "sha=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
           echo "repo=${{ github.repository }}" >> $GITHUB_OUTPUT
 
-      - name: Trigger Mercan fix agent
+      - name: Trigger Orka fix agent
         run: |
-          curl -s -X POST "${{ secrets.MERCAN_API_URL }}/api/v1/tasks" \
-            -H "Authorization: Bearer ${{ secrets.MERCAN_TOKEN }}" \
+          curl -s -X POST "${{ secrets.ORKA_API_URL }}/api/v1/tasks" \
+            -H "Authorization: Bearer ${{ secrets.ORKA_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d '{
               "type": "agent",

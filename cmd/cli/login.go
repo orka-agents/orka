@@ -14,8 +14,8 @@ func newLoginCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Authenticate with the Mercan dashboard",
-		Long:  "Generate a ServiceAccount token and open the Mercan dashboard in your browser.",
+		Short: "Authenticate with the Orka dashboard",
+		Long:  "Generate a ServiceAccount token and open the Orka dashboard in your browser.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			server, _ := cmd.Flags().GetString("server")
 			token, _ := cmd.Flags().GetString("token")
@@ -50,7 +50,7 @@ func newLoginCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "Open the URL above in your browser manually.")
 				return nil
 			}
-			fmt.Println("Browser opened successfully. You can now log in to the Mercan dashboard.")
+			fmt.Println("Browser opened successfully. You can now log in to the Orka dashboard.")
 			return nil
 		},
 	}

@@ -2,10 +2,10 @@
 # since it depends on service name and namespace that are out of this kustomize package.
 # It should be run by config/default
 resources:
-- bases/core.mercan.ai_tasks.yaml
-- bases/core.mercan.ai_tools.yaml
-- bases/core.mercan.ai_agents.yaml
-- bases/core.mercan.ai_providers.yaml
+- bases/core.orka.ai_tasks.yaml
+- bases/core.orka.ai_tools.yaml
+- bases/core.orka.ai_agents.yaml
+- bases/core.orka.ai_providers.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

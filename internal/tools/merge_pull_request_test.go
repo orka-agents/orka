@@ -20,7 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 func TestMergePullRequestTool_Metadata(t *testing.T) {
@@ -67,7 +67,7 @@ func TestMergePullRequestTool_MissingTask(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewMergePullRequestTool(k8sClient)
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(MergePullRequestArgs{
 		TaskName: "nonexistent",
@@ -107,7 +107,7 @@ func TestMergePullRequestTool_MissingSecret(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewMergePullRequestTool(k8sClient)
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(MergePullRequestArgs{
 		TaskName: "coder-task",
@@ -175,7 +175,7 @@ func TestMergePullRequestTool_CIChecksFailed(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(MergePullRequestArgs{
 		TaskName: "coder-task",
@@ -270,7 +270,7 @@ func TestMergePullRequestTool_Success(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(MergePullRequestArgs{
 		TaskName:      "coder-task",
@@ -343,7 +343,7 @@ func TestMergePullRequestTool_Execute_APIError(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(MergePullRequestArgs{
 		TaskName: "coder-task",
@@ -367,7 +367,7 @@ func TestMergePullRequestTool_Execute_InvalidArgs(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewMergePullRequestTool(k8sClient)
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	// Pass args missing required fields
 	args := json.RawMessage(`{"bad": true}`)
@@ -441,7 +441,7 @@ func TestMergePullRequestTool_Execute_DifferentMergeMethods(t *testing.T) {
 				apiBaseURL: server.URL,
 			}
 
-			t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+			t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 			args, _ := json.Marshal(MergePullRequestArgs{
 				TaskName:    "coder-task",
@@ -521,7 +521,7 @@ func TestMergePullRequestTool_Execute_PRAlreadyMerged(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(MergePullRequestArgs{
 		TaskName: "coder-task",

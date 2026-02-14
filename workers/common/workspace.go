@@ -20,21 +20,21 @@ import (
 
 // PrepareWorkspace applies the diff from a prior task's result to the working
 // directory. It is called after git clone and before the LLM agent starts.
-// If MERCAN_PRIOR_TASK is not set the function is a no-op.
+// If ORKA_PRIOR_TASK is not set the function is a no-op.
 func PrepareWorkspace(workDir string) error {
-	priorTask := os.Getenv("MERCAN_PRIOR_TASK")
+	priorTask := os.Getenv("ORKA_PRIOR_TASK")
 	if priorTask == "" {
 		return nil
 	}
 
-	ns := os.Getenv("MERCAN_PRIOR_TASK_NAMESPACE")
+	ns := os.Getenv("ORKA_PRIOR_TASK_NAMESPACE")
 	if ns == "" {
-		ns = os.Getenv("MERCAN_TASK_NAMESPACE")
+		ns = os.Getenv("ORKA_TASK_NAMESPACE")
 	}
 
-	controllerURL := os.Getenv("MERCAN_CONTROLLER_URL")
+	controllerURL := os.Getenv("ORKA_CONTROLLER_URL")
 	if controllerURL == "" {
-		return fmt.Errorf("MERCAN_CONTROLLER_URL must be set when MERCAN_PRIOR_TASK is specified")
+		return fmt.Errorf("ORKA_CONTROLLER_URL must be set when ORKA_PRIOR_TASK is specified")
 	}
 	controllerURL = strings.TrimRight(controllerURL, "/")
 
@@ -88,7 +88,7 @@ func PrepareWorkspace(workDir string) error {
 	}
 
 	// Write diff to a temp file.
-	diffPath := filepath.Join(workDir, ".mercan-prior.patch")
+	diffPath := filepath.Join(workDir, ".orka-prior.patch")
 	if err := os.WriteFile(diffPath, []byte(sr.Diff), 0o600); err != nil {
 		return fmt.Errorf("failed to write diff to temp file: %w", err)
 	}
@@ -111,7 +111,7 @@ func PrepareWorkspace(workDir string) error {
 // FinalizeResult builds a structured result from the agent output and any
 // uncommitted changes in workDir. If workDir is empty, it returns the raw
 // agent output as plain text bytes.
-// When MERCAN_PUSH_BRANCH is set, changes are committed and pushed to that branch.
+// When ORKA_PUSH_BRANCH is set, changes are committed and pushed to that branch.
 func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 	if workDir == "" {
 		return []byte(agentOutput), nil
@@ -149,8 +149,8 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 		files = append(files, parseDiffStatFiles(unstagedStat)...)
 	}
 
-	// Auto-push if MERCAN_PUSH_BRANCH is set and there are changes
-	pushBranch := os.Getenv("MERCAN_PUSH_BRANCH")
+	// Auto-push if ORKA_PUSH_BRANCH is set and there are changes
+	pushBranch := os.Getenv("ORKA_PUSH_BRANCH")
 	if pushBranch != "" && diff != "" {
 		if pushErr := pushChanges(workDir, pushBranch); pushErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to push to %s: %v\n", pushBranch, pushErr)
@@ -186,11 +186,11 @@ func pushChanges(workDir, branch string) error {
 	}
 
 	// Configure committer identity
-	execGit(workDir, "config", "user.email", "mercan@ai") //nolint:errcheck
-	execGit(workDir, "config", "user.name", "Mercan AI")  //nolint:errcheck
+	execGit(workDir, "config", "user.email", "orka@ai") //nolint:errcheck
+	execGit(workDir, "config", "user.name", "Orka AI")  //nolint:errcheck
 
 	// Commit
-	if out, err := execGit(workDir, "commit", "-m", "feat: changes from mercan agent"); err != nil {
+	if out, err := execGit(workDir, "commit", "-m", "feat: changes from orka agent"); err != nil {
 		return fmt.Errorf("git commit failed: %s: %w", out, err)
 	}
 

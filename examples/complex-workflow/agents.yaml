@@ -6,13 +6,13 @@
 # - Update providerRef.name below to match your provider
 ---
 # Researcher Agent - specializes in finding information
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: researcher-agent
   labels:
-    mercan.ai/role: specialist
-    mercan.ai/specialty: research
+    orka.ai/role: specialist
+    orka.ai/specialty: research
 spec:
   # Use provider for model and credentials
   providerRef:
@@ -43,13 +43,13 @@ spec:
     maxMessages: 30
 ---
 # Coder Agent - specializes in writing and modifying code
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: coder-agent
   labels:
-    mercan.ai/role: specialist
-    mercan.ai/specialty: coding
+    orka.ai/role: specialist
+    orka.ai/specialty: coding
 spec:
   providerRef:
     name: anthropic-prod  # Change to your provider name
@@ -79,13 +79,13 @@ spec:
     maxMessages: 50
 ---
 # Reviewer Agent - specializes in code review and quality
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: reviewer-agent
   labels:
-    mercan.ai/role: specialist
-    mercan.ai/specialty: review
+    orka.ai/role: specialist
+    orka.ai/specialty: review
 spec:
   providerRef:
     name: anthropic-prod  # Change to your provider name
@@ -112,12 +112,12 @@ spec:
     maxMessages: 30
 ---
 # Coordinator Agent - orchestrates multi-agent workflows
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: coordinator-agent
   labels:
-    mercan.ai/role: coordinator
+    orka.ai/role: coordinator
 spec:
   providerRef:
     name: anthropic-prod  # Change to your provider name

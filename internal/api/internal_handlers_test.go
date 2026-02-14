@@ -17,8 +17,8 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sozercan/mercan/internal/store"
-	"github.com/sozercan/mercan/internal/store/sqlite"
+	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/store/sqlite"
 )
 
 func setupTestInternalHandlers() (*InternalHandlers, *fiber.App, *sqlite.Store) {

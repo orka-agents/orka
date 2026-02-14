@@ -19,7 +19,7 @@ import (
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 
-	"github.com/sozercan/mercan/internal/llm"
+	"github.com/sozercan/orka/internal/llm"
 )
 
 // apiMode tracks which API surface to use.

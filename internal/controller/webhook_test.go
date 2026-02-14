@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -121,14 +121,14 @@ func TestWebhookNotifier_Notify_Success(t *testing.T) {
 	if receivedHeaders.Get("Content-Type") != "application/json" {
 		t.Errorf("Content-Type = %s, want application/json", receivedHeaders.Get("Content-Type"))
 	}
-	if receivedHeaders.Get("User-Agent") != "Mercan-Controller/1.0" {
-		t.Errorf("User-Agent = %s, want Mercan-Controller/1.0", receivedHeaders.Get("User-Agent"))
+	if receivedHeaders.Get("User-Agent") != "Orka-Controller/1.0" {
+		t.Errorf("User-Agent = %s, want Orka-Controller/1.0", receivedHeaders.Get("User-Agent"))
 	}
-	if receivedHeaders.Get("X-Mercan-Task") != "test-task" {
-		t.Errorf("X-Mercan-Task = %s, want test-task", receivedHeaders.Get("X-Mercan-Task"))
+	if receivedHeaders.Get("X-Orka-Task") != "test-task" {
+		t.Errorf("X-Orka-Task = %s, want test-task", receivedHeaders.Get("X-Orka-Task"))
 	}
-	if receivedHeaders.Get("X-Mercan-Namespace") != "default" {
-		t.Errorf("X-Mercan-Namespace = %s, want default", receivedHeaders.Get("X-Mercan-Namespace"))
+	if receivedHeaders.Get("X-Orka-Namespace") != "default" {
+		t.Errorf("X-Orka-Namespace = %s, want default", receivedHeaders.Get("X-Orka-Namespace"))
 	}
 }
 

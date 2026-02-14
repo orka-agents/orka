@@ -21,7 +21,7 @@ The controller runs with:
 
 - All API endpoints require a Kubernetes ServiceAccount bearer token
 - Token validation uses the Kubernetes TokenReview API
-- The `mercan` CLI extracts tokens from kubeconfig for browser-based login
+- The `orka` CLI extracts tokens from kubeconfig for browser-based login
 
 ## Secret Management
 

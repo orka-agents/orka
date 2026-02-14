@@ -41,9 +41,9 @@ type CodeExecResult struct {
 
 // NewCodeExecTool creates a new code execution tool
 func NewCodeExecTool() *CodeExecTool {
-	workDir := os.Getenv("MERCAN_WORK_DIR")
+	workDir := os.Getenv("ORKA_WORK_DIR")
 	if workDir == "" {
-		workDir = "/tmp/mercan-exec"
+		workDir = "/tmp/orka-exec"
 	}
 
 	return &CodeExecTool{

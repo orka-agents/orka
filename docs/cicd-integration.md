@@ -6,17 +6,17 @@
 
 Additionally, the Tool CRD HTTP executor sends all parameters as JSON body — it cannot do URL path interpolation (e.g., `/repos/{owner}/{repo}/pulls/{number}/merge`). This blocks lightweight GitHub/GitLab API calls from Tool CRDs.
 
-Fixing these two issues — plus shipping sample YAML — gives Mercan a full CI/CD workflow using existing primitives, with no new tools or agent roles needed.
+Fixing these two issues — plus shipping sample YAML — gives Orka a full CI/CD workflow using existing primitives, with no new tools or agent roles needed.
 
 ## Key Insight
 
-Mercan doesn't need built-in PR lifecycle tools. The `type: agent` tasks run Claude Code or Copilot CLI, which natively know how to create branches, write code, commit, push, and run `gh pr create`. These are full coding agents with filesystem access, bash, and git — they do PR creation **better than any custom tool we'd build**.
+Orka doesn't need built-in PR lifecycle tools. The `type: agent` tasks run Claude Code or Copilot CLI, which natively know how to create branches, write code, commit, push, and run `gh pr create`. These are full coding agents with filesystem access, bash, and git — they do PR creation **better than any custom tool we'd build**.
 
 What's needed is:
 1. Let `delegate_task` create agent tasks (not just AI tasks)
 2. Let Tool CRDs make REST API calls with URL path interpolation (for GitHub API)
 3. Ship sample Tool CRDs for GitHub CI status checks and PR merges
-4. Ship a sample GitHub Actions workflow that triggers Mercan tasks on CI failure
+4. Ship a sample GitHub Actions workflow that triggers Orka tasks on CI failure
 
 ## Architecture
 
@@ -224,7 +224,7 @@ For GET requests with no remaining params, send an empty body (or no body).
 #### `github-check-ci` Tool
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
   name: github-check-ci
@@ -260,7 +260,7 @@ spec:
 #### `github-merge-pr` Tool
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
   name: github-merge-pr
@@ -304,7 +304,7 @@ spec:
 #### `github-get-pr` Tool
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
   name: github-get-pr
@@ -355,7 +355,7 @@ stringData:
 
 ```yaml
 # Claude Code agent that writes code and creates PRs
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: claude-coder
@@ -377,7 +377,7 @@ spec:
     name: claude-coder-secrets  # ANTHROPIC_API_KEY + GITHUB_TOKEN
 ---
 # Coordinator agent that orchestrates the full CI/CD flow
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: cicd-coordinator
@@ -421,7 +421,7 @@ spec:
 
 ```yaml
 # Trigger the full CI/CD flow
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: implement-feature
@@ -445,8 +445,8 @@ This is a GitHub Actions workflow snippet users add to their repo:
 
 ```yaml
 # .github/workflows/ci-feedback.yml
-# Call Mercan API when CI fails to trigger auto-fix agent
-name: CI Feedback to Mercan
+# Call Orka API when CI fails to trigger auto-fix agent
+name: CI Feedback to Orka
 on:
   workflow_run:
     workflows: ["CI"]  # name of your CI workflow
@@ -466,10 +466,10 @@ jobs:
           echo "sha=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
           echo "repo=${{ github.repository }}" >> $GITHUB_OUTPUT
 
-      - name: Trigger Mercan fix agent
+      - name: Trigger Orka fix agent
         run: |
-          curl -s -X POST "${{ secrets.MERCAN_API_URL }}/api/v1/tasks" \
-            -H "Authorization: Bearer ${{ secrets.MERCAN_TOKEN }}" \
+          curl -s -X POST "${{ secrets.ORKA_API_URL }}/api/v1/tasks" \
+            -H "Authorization: Bearer ${{ secrets.ORKA_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d '{
               "type": "agent",
@@ -499,7 +499,7 @@ jobs:
 | `examples/github-cicd/tools.yaml` | Create | ~70 | GitHub Tool CRDs (check-ci, merge-pr, get-pr) |
 | `examples/github-cicd/secret.yaml` | Create | ~10 | GitHub token secret template |
 | `examples/github-cicd/task.yaml` | Create | ~15 | Example task to trigger CI/CD flow |
-| `examples/github-cicd/github-actions-webhook.yaml` | Create | ~40 | GitHub Actions CI failure → Mercan task |
+| `examples/github-cicd/github-actions-webhook.yaml` | Create | ~40 | GitHub Actions CI failure → Orka task |
 | **Total** | | **~395** | |
 
 ## Testing
@@ -523,7 +523,7 @@ jobs:
 
 ## Comparison with Other Approaches
 
-| Capability | Fixed-Role Systems | Mercan |
+| Capability | Fixed-Role Systems | Orka |
 |---|---|---|
 | Agent creates branch + PR | Worker agent (fixed role) | Claude Code agent (flexible) |
 | CI pass → auto-merge | Merge-queue agent (hardcoded) | Coordinator + merge-pr Tool CRD |
@@ -534,4 +534,4 @@ jobs:
 | Behavior customization | Edit templates/code | Edit coordinator system prompt |
 | Deployment | Local process | K8s Jobs with isolation + RBAC |
 
-Mercan's advantage: the workflow logic lives in the coordinator's **prompt**, not in code. The same coordinator can be reconfigured by changing its system prompt — no code changes, no redeployment.
+Orka's advantage: the workflow logic lives in the coordinator's **prompt**, not in code. The same coordinator can be reconfigured by changing its system prompt — no code changes, no redeployment.

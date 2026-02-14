@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/mercan/internal/store"
+	"github.com/sozercan/orka/internal/store"
 )
 
 const (

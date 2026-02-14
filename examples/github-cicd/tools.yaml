@@ -1,5 +1,5 @@
 # Check CI/check-run status on a GitHub commit
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
   name: github-check-ci
@@ -32,7 +32,7 @@ spec:
     timeout: 15s
 ---
 # Merge a GitHub pull request
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
   name: github-merge-pr
@@ -73,7 +73,7 @@ spec:
     timeout: 15s
 ---
 # Get details about a GitHub pull request
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
   name: github-get-pr

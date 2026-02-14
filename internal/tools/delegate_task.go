@@ -19,7 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 // DelegateTaskTool implements multi-agent task delegation
@@ -177,11 +177,11 @@ type delegationContext struct {
 
 // parseDelegateArgs parses and validates the delegation arguments and environment.
 func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawMessage) (*delegationContext, error) {
-	parentName := os.Getenv("MERCAN_TASK_NAME")
-	parentNamespace := os.Getenv("MERCAN_TASK_NAMESPACE")
-	depthStr := os.Getenv("MERCAN_COORDINATION_DEPTH")
-	allowedAgents := os.Getenv("MERCAN_COORDINATION_ALLOWED_AGENTS")
-	maxDepthStr := os.Getenv("MERCAN_COORDINATION_MAX_DEPTH")
+	parentName := os.Getenv("ORKA_TASK_NAME")
+	parentNamespace := os.Getenv("ORKA_TASK_NAMESPACE")
+	depthStr := os.Getenv("ORKA_COORDINATION_DEPTH")
+	allowedAgents := os.Getenv("ORKA_COORDINATION_ALLOWED_AGENTS")
+	maxDepthStr := os.Getenv("ORKA_COORDINATION_MAX_DEPTH")
 
 	var delegateArgs DelegateTaskArgs
 	if err := json.Unmarshal(args, &delegateArgs); err != nil {
@@ -291,12 +291,12 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 			GenerateName: dc.parentName + "-child-",
 			Namespace:    dc.namespace,
 			Labels: map[string]string{
-				"mercan.ai/parent-task":     dc.parentName,
-				"mercan.ai/coordinator":     trueStr,
-				"mercan.ai/delegated-agent": dc.args.Agent,
+				"orka.ai/parent-task":     dc.parentName,
+				"orka.ai/coordinator":     trueStr,
+				"orka.ai/delegated-agent": dc.args.Agent,
 			},
 			Annotations: map[string]string{
-				"mercan.ai/coordination-depth": strconv.Itoa(dc.currentDepth + 1),
+				"orka.ai/coordination-depth": strconv.Itoa(dc.currentDepth + 1),
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -311,14 +311,14 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 
 	// Store auto-retry config as annotations
 	if dc.args.AutoRetry {
-		childTask.Annotations["mercan.ai/auto-retry"] = trueStr
+		childTask.Annotations["orka.ai/auto-retry"] = trueStr
 		maxRetries := 2
 		if dc.args.MaxRetries != nil && *dc.args.MaxRetries >= 0 {
 			maxRetries = *dc.args.MaxRetries
 		}
-		childTask.Annotations["mercan.ai/max-retries"] = strconv.Itoa(maxRetries)
-		childTask.Annotations["mercan.ai/retry-count"] = "0"
-		childTask.Annotations["mercan.ai/original-prompt"] = dc.args.Prompt
+		childTask.Annotations["orka.ai/max-retries"] = strconv.Itoa(maxRetries)
+		childTask.Annotations["orka.ai/retry-count"] = "0"
+		childTask.Annotations["orka.ai/original-prompt"] = dc.args.Prompt
 	}
 
 	// Set agent runtime config for agent-type tasks
@@ -427,18 +427,18 @@ func (t *DelegateTaskTool) applyPriorTaskConfig(ctx context.Context, childTask *
 
 		// Increment iteration count
 		iteration := 1
-		if iterStr, ok := priorTask.Labels["mercan.ai/iteration"]; ok {
+		if iterStr, ok := priorTask.Labels["orka.ai/iteration"]; ok {
 			if iter, err := strconv.Atoi(iterStr); err == nil {
 				iteration = iter + 1
 			}
 		}
-		childTask.Labels["mercan.ai/iteration"] = strconv.Itoa(iteration)
+		childTask.Labels["orka.ai/iteration"] = strconv.Itoa(iteration)
 
 		// Copy or generate iteration group
-		if group, ok := priorTask.Labels["mercan.ai/iteration-group"]; ok {
-			childTask.Labels["mercan.ai/iteration-group"] = group
+		if group, ok := priorTask.Labels["orka.ai/iteration-group"]; ok {
+			childTask.Labels["orka.ai/iteration-group"] = group
 		} else {
-			childTask.Labels["mercan.ai/iteration-group"] = string(priorTask.UID)
+			childTask.Labels["orka.ai/iteration-group"] = string(priorTask.UID)
 		}
 	}
 }

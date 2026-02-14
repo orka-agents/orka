@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 // DeleteAgentTool implements agent cleanup for dynamically created agents
@@ -83,7 +83,7 @@ func (t *DeleteAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 
 	namespace := a.Namespace
 	if namespace == "" {
-		namespace = os.Getenv("MERCAN_TASK_NAMESPACE")
+		namespace = os.Getenv("ORKA_TASK_NAMESPACE")
 	}
 	if namespace == "" {
 		namespace = "default"

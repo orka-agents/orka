@@ -18,7 +18,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/spf13/cobra"
 
-	"github.com/sozercan/mercan/internal/cli/client"
+	"github.com/sozercan/orka/internal/cli/client"
 )
 
 func newRunCmd() *cobra.Command {
@@ -27,12 +27,12 @@ func newRunCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "run [prompt]",
-		Short: "Chat with the Mercan AI assistant",
+		Short: "Chat with the Orka AI assistant",
 		Long: `Ollama-style chat interface.
 
-  One-shot:    mercan run "explain kubernetes pods"
-  Interactive: mercan run
-  Piped:       echo "fix bugs" | mercan run`,
+  One-shot:    orka run "explain kubernetes pods"
+  Interactive: orka run
+  Piped:       echo "fix bugs" | orka run`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if agent != "" && provider != "" {
 				return fmt.Errorf("--agent and --provider are mutually exclusive")

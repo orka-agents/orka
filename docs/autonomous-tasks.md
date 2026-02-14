@@ -17,7 +17,7 @@ When a task's agent has `coordination.autonomous: true`, the controller runs a l
 Enable autonomous mode on an Agent's coordination config:
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: autonomous-coordinator
@@ -40,7 +40,7 @@ spec:
 Then create a task:
 
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: build-feature
@@ -142,9 +142,9 @@ These environment variables are injected into autonomous worker pods:
 
 | Variable | Description |
 |----------|-------------|
-| `MERCAN_AUTONOMOUS_MODE` | Set to `true` for autonomous tasks |
-| `MERCAN_AUTONOMOUS_ITERATION` | Current iteration number (0-based) |
-| `MERCAN_AUTONOMOUS_MAX_ITERATIONS` | Max iterations limit (if configured) |
+| `ORKA_AUTONOMOUS_MODE` | Set to `true` for autonomous tasks |
+| `ORKA_AUTONOMOUS_ITERATION` | Current iteration number (0-based) |
+| `ORKA_AUTONOMOUS_MAX_ITERATIONS` | Max iterations limit (if configured) |
 
 ## Tools
 

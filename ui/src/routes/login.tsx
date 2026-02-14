@@ -76,9 +76,9 @@ function LoginPage() {
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
           <div className="mb-2 text-4xl">🪸</div>
-          <CardTitle className="text-2xl">Mercan</CardTitle>
+          <CardTitle className="text-2xl">Orka</CardTitle>
           <CardDescription>
-            Enter your Kubernetes service account token or use <code className="text-xs">mercan login</code> from the CLI.
+            Enter your Kubernetes service account token or use <code className="text-xs">orka login</code> from the CLI.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -105,7 +105,7 @@ function LoginPage() {
               </code>
             </div>
             <p className="text-xs text-muted-foreground">
-              Or use the CLI: <code className="text-xs">mercan login --server http://localhost:8080</code>
+              Or use the CLI: <code className="text-xs">orka login --server http://localhost:8080</code>
             </p>
           </div>
         </CardContent>

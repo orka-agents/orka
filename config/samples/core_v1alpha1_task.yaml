@@ -1,8 +1,8 @@
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   labels:
-    app.kubernetes.io/name: mercan
+    app.kubernetes.io/name: orka
     app.kubernetes.io/managed-by: kustomize
   name: task-sample
 spec:

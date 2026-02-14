@@ -38,7 +38,7 @@ describe('login route', () => {
     render(<LoginPage />)
     expect(screen.getByPlaceholderText('Paste your token here...')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument()
-    expect(screen.getByText('Mercan')).toBeInTheDocument()
+    expect(screen.getByText('Orka')).toBeInTheDocument()
   })
 
   it('submit button is disabled when input is empty', () => {

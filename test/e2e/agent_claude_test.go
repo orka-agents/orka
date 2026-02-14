@@ -18,7 +18,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/sozercan/mercan/test/utils"
+	"github.com/sozercan/orka/test/utils"
 )
 
 var _ = Describe("Agent Claude Runtime", Ordered, func() {
@@ -64,7 +64,7 @@ var _ = Describe("Agent Claude Runtime", Ordered, func() {
 
 		By("creating an Agent with runtime.type: claude")
 		agentManifest := fmt.Sprintf(`{
-			"apiVersion": "core.mercan.ai/v1alpha1",
+			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Agent",
 			"metadata": {
 				"name": "%s",
@@ -89,7 +89,7 @@ var _ = Describe("Agent Claude Runtime", Ordered, func() {
 
 		By("creating a Task with type agent referencing the Claude Agent")
 		taskManifest := fmt.Sprintf(`{
-			"apiVersion": "core.mercan.ai/v1alpha1",
+			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Task",
 			"metadata": {
 				"name": "%s",
@@ -115,7 +115,7 @@ var _ = Describe("Agent Claude Runtime", Ordered, func() {
 		By("verifying that a Job is created for the claude agent task")
 		verifyJobCreated := func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("mercan.ai/task=%s,mercan.ai/task-type=agent", taskName),
+				"-l", fmt.Sprintf("orka.ai/task=%s,orka.ai/task-type=agent", taskName),
 				"-o", "jsonpath={.items[0].metadata.name}",
 				"-n", namespace,
 			)
@@ -128,7 +128,7 @@ var _ = Describe("Agent Claude Runtime", Ordered, func() {
 		By("verifying the Job has the correct Claude worker image")
 		verifyContainerImage := func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("mercan.ai/task=%s", taskName),
+				"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
 				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].image}",
 				"-n", namespace,
 			)
@@ -141,7 +141,7 @@ var _ = Describe("Agent Claude Runtime", Ordered, func() {
 		By("verifying the Job has ANTHROPIC_API_KEY env var from secret")
 		verifySecretEnv := func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("mercan.ai/task=%s", taskName),
+				"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
 				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
 				"-n", namespace,
 			)
@@ -158,14 +158,14 @@ var _ = Describe("Agent Claude Runtime", Ordered, func() {
 				envMap[e.Name] = e.Value
 			}
 
-			g.Expect(envMap).To(HaveKey("MERCAN_TASK_NAME"))
-			g.Expect(envMap["MERCAN_TASK_NAME"]).To(Equal(taskName))
-			g.Expect(envMap).To(HaveKey("MERCAN_TASK_NAMESPACE"))
-			g.Expect(envMap["MERCAN_TASK_NAMESPACE"]).To(Equal(namespace))
-			g.Expect(envMap).To(HaveKey("MERCAN_PROMPT"))
-			g.Expect(envMap["MERCAN_PROMPT"]).To(Equal("say hello"))
-			g.Expect(envMap).To(HaveKey("MERCAN_MAX_TURNS"))
-			g.Expect(envMap["MERCAN_MAX_TURNS"]).To(Equal("3"))
+			g.Expect(envMap).To(HaveKey("ORKA_TASK_NAME"))
+			g.Expect(envMap["ORKA_TASK_NAME"]).To(Equal(taskName))
+			g.Expect(envMap).To(HaveKey("ORKA_TASK_NAMESPACE"))
+			g.Expect(envMap["ORKA_TASK_NAMESPACE"]).To(Equal(namespace))
+			g.Expect(envMap).To(HaveKey("ORKA_PROMPT"))
+			g.Expect(envMap["ORKA_PROMPT"]).To(Equal("say hello"))
+			g.Expect(envMap).To(HaveKey("ORKA_MAX_TURNS"))
+			g.Expect(envMap["ORKA_MAX_TURNS"]).To(Equal("3"))
 		}
 		Eventually(verifySecretEnv, 30*time.Second, time.Second).Should(Succeed())
 

@@ -37,41 +37,41 @@ type AgentConfig struct {
 // LoadConfig reads and validates configuration from environment variables.
 func LoadConfig(defaultMaxTurns int) (*AgentConfig, error) {
 	cfg := &AgentConfig{
-		TaskName:      os.Getenv("MERCAN_TASK_NAME"),
-		TaskNamespace: os.Getenv("MERCAN_TASK_NAMESPACE"),
-		Prompt:        os.Getenv("MERCAN_PROMPT"),
-		Model:         os.Getenv("MERCAN_MODEL"),
-		SystemPrompt:  os.Getenv("MERCAN_SYSTEM_PROMPT"),
-		GitRepo:       os.Getenv("MERCAN_GIT_REPO"),
-		GitBranch:     os.Getenv("MERCAN_GIT_BRANCH"),
-		GitRef:        os.Getenv("MERCAN_GIT_REF"),
-		SubPath:       os.Getenv("MERCAN_WORKSPACE_SUBPATH"),
+		TaskName:      os.Getenv("ORKA_TASK_NAME"),
+		TaskNamespace: os.Getenv("ORKA_TASK_NAMESPACE"),
+		Prompt:        os.Getenv("ORKA_PROMPT"),
+		Model:         os.Getenv("ORKA_MODEL"),
+		SystemPrompt:  os.Getenv("ORKA_SYSTEM_PROMPT"),
+		GitRepo:       os.Getenv("ORKA_GIT_REPO"),
+		GitBranch:     os.Getenv("ORKA_GIT_BRANCH"),
+		GitRef:        os.Getenv("ORKA_GIT_REF"),
+		SubPath:       os.Getenv("ORKA_WORKSPACE_SUBPATH"),
 		MaxTurns:      defaultMaxTurns,
 	}
 
 	if cfg.Prompt == "" {
-		return nil, fmt.Errorf("MERCAN_PROMPT is required")
+		return nil, fmt.Errorf("ORKA_PROMPT is required")
 	}
 
-	if v := os.Getenv("MERCAN_MAX_TURNS"); v != "" {
+	if v := os.Getenv("ORKA_MAX_TURNS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("invalid MERCAN_MAX_TURNS: %w", err)
+			return nil, fmt.Errorf("invalid ORKA_MAX_TURNS: %w", err)
 		}
 		cfg.MaxTurns = n
 	}
 
-	if v := os.Getenv("MERCAN_ALLOWED_TOOLS"); v != "" {
+	if v := os.Getenv("ORKA_ALLOWED_TOOLS"); v != "" {
 		cfg.AllowedTools = strings.Split(v, ",")
 	}
-	if v := os.Getenv("MERCAN_DISALLOWED_TOOLS"); v != "" {
+	if v := os.Getenv("ORKA_DISALLOWED_TOOLS"); v != "" {
 		cfg.DisallowedTools = strings.Split(v, ",")
 	}
 
-	if v := os.Getenv("MERCAN_TIMEOUT_SECONDS"); v != "" {
+	if v := os.Getenv("ORKA_TIMEOUT_SECONDS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("invalid MERCAN_TIMEOUT_SECONDS: %w", err)
+			return nil, fmt.Errorf("invalid ORKA_TIMEOUT_SECONDS: %w", err)
 		}
 		cfg.TimeoutSeconds = n
 	}

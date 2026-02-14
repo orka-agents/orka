@@ -15,7 +15,7 @@ var (
 	// Task metrics
 	TasksTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "mercan_tasks_total",
+			Name: "orka_tasks_total",
 			Help: "Total number of tasks by type, phase, and namespace",
 		},
 		[]string{"type", "phase", "namespace"},
@@ -23,7 +23,7 @@ var (
 
 	TasksActive = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "mercan_tasks_active",
+			Name: "orka_tasks_active",
 			Help: "Number of currently running tasks",
 		},
 		[]string{"type", "namespace"},
@@ -31,7 +31,7 @@ var (
 
 	TaskDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "mercan_task_duration_seconds",
+			Name:    "orka_task_duration_seconds",
 			Help:    "Task execution duration in seconds",
 			Buckets: prometheus.ExponentialBuckets(1, 2, 12), // 1s to ~1h
 		},
@@ -40,7 +40,7 @@ var (
 
 	TaskQueueDepth = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "mercan_task_queue_depth",
+			Name: "orka_task_queue_depth",
 			Help: "Number of tasks waiting in queue by priority level",
 		},
 		[]string{"priority"},
@@ -48,7 +48,7 @@ var (
 
 	TaskRetries = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "mercan_task_retries_total",
+			Name: "orka_task_retries_total",
 			Help: "Total number of task retry attempts",
 		},
 		[]string{"namespace"},
@@ -57,7 +57,7 @@ var (
 	// Webhook metrics
 	WebhookDeliveries = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "mercan_webhook_deliveries_total",
+			Name: "orka_webhook_deliveries_total",
 			Help: "Total webhook delivery attempts by status",
 		},
 		[]string{"status"},
@@ -66,7 +66,7 @@ var (
 	// API metrics
 	APIRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "mercan_api_requests_total",
+			Name: "orka_api_requests_total",
 			Help: "Total API requests by endpoint, method, and status",
 		},
 		[]string{"endpoint", "method", "status"},
@@ -74,7 +74,7 @@ var (
 
 	APIRequestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "mercan_api_request_duration_seconds",
+			Name:    "orka_api_request_duration_seconds",
 			Help:    "API request latency in seconds",
 			Buckets: prometheus.DefBuckets,
 		},
@@ -84,7 +84,7 @@ var (
 	// Session metrics
 	SessionsTotal = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "mercan_sessions_total",
+			Name: "orka_sessions_total",
 			Help: "Total active sessions by namespace",
 		},
 		[]string{"namespace"},
@@ -92,7 +92,7 @@ var (
 
 	SessionMessages = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "mercan_session_messages_total",
+			Name: "orka_session_messages_total",
 			Help: "Total messages appended to sessions",
 		},
 		[]string{"namespace"},
@@ -100,7 +100,7 @@ var (
 
 	SessionQueueWaiting = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "mercan_session_queue_waiting",
+			Name: "orka_session_queue_waiting",
 			Help: "Tasks waiting for session lock by session",
 		},
 		[]string{"session", "namespace"},
@@ -109,7 +109,7 @@ var (
 	// Tool metrics
 	ToolsDiscovered = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "mercan_tools_discovered",
+			Name: "orka_tools_discovered",
 			Help: "Number of Tool CRDs discovered per namespace",
 		},
 		[]string{"namespace"},
@@ -117,7 +117,7 @@ var (
 
 	ToolCalls = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "mercan_tool_calls_total",
+			Name: "orka_tool_calls_total",
 			Help: "Total tool invocations by tool name and status",
 		},
 		[]string{"tool", "status"},
@@ -125,7 +125,7 @@ var (
 
 	ToolCallDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "mercan_tool_call_duration_seconds",
+			Name:    "orka_tool_call_duration_seconds",
 			Help:    "Tool HTTP call latency in seconds",
 			Buckets: prometheus.DefBuckets,
 		},
@@ -134,7 +134,7 @@ var (
 
 	ToolHealthStatus = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "mercan_tool_health_status",
+			Name: "orka_tool_health_status",
 			Help: "Tool availability (1=available, 0=unavailable)",
 		},
 		[]string{"tool", "namespace"},
@@ -143,7 +143,7 @@ var (
 	// Agent metrics
 	AgentsTotal = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "mercan_agents_total",
+			Name: "orka_agents_total",
 			Help: "Total agents by namespace",
 		},
 		[]string{"namespace"},
@@ -151,7 +151,7 @@ var (
 
 	AgentTasksActive = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "mercan_agent_tasks_active",
+			Name: "orka_agent_tasks_active",
 			Help: "Active tasks per agent",
 		},
 		[]string{"agent", "namespace"},
@@ -159,7 +159,7 @@ var (
 
 	AgentTasksTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "mercan_agent_tasks_total",
+			Name: "orka_agent_tasks_total",
 			Help: "Total tasks per agent",
 		},
 		[]string{"agent", "namespace"},
@@ -168,7 +168,7 @@ var (
 	// Skill metrics
 	SkillsLoaded = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "mercan_skills_loaded_total",
+			Name: "orka_skills_loaded_total",
 			Help: "Skills loaded by namespace and name",
 		},
 		[]string{"skill", "namespace"},

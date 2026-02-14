@@ -1,6 +1,6 @@
 # Complex Workflow Example
 
-This example demonstrates advanced Mercan features inspired by [OpenClaw](https://github.com/openclaw/openclaw) workflow patterns, including:
+This example demonstrates advanced Orka features inspired by [OpenClaw](https://github.com/openclaw/openclaw) workflow patterns, including:
 
 - **Multi-agent coordination** - Coordinator agent that delegates to specialists
 - **Custom tools** - Web search (Tavily) and GitHub API integration
@@ -193,7 +193,7 @@ http:
 
 ## Comparison with OpenClaw
 
-| Feature | OpenClaw | Mercan |
+| Feature | OpenClaw | Orka |
 |---------|----------|--------|
 | Runtime | Node.js CLI/Gateway | Kubernetes-native |
 | Agents | Workspaces + profiles | Agent CRDs |

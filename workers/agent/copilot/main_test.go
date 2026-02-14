@@ -12,7 +12,7 @@ import (
 
 	copilot "github.com/github/copilot-sdk/go"
 
-	"github.com/sozercan/mercan/workers/common"
+	"github.com/sozercan/orka/workers/common"
 )
 
 func TestBuildSessionConfig_Minimal(t *testing.T) {

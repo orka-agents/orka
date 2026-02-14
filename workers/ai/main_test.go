@@ -15,8 +15,8 @@ import (
 	"strings"
 	"testing"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
-	"github.com/sozercan/mercan/internal/llm"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/llm"
 )
 
 const customToolName = "custom_tool"
@@ -255,9 +255,9 @@ func TestLoadPlanContext(t *testing.T) {
 		}))
 		defer server.Close()
 
-		t.Setenv("MERCAN_CONTROLLER_URL", server.URL)
-		t.Setenv("MERCAN_TASK_NAME", "test-task")
-		t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+		t.Setenv("ORKA_CONTROLLER_URL", server.URL)
+		t.Setenv("ORKA_TASK_NAME", "test-task")
+		t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 		result := loadPlanContext()
 		if result == "" {
@@ -277,9 +277,9 @@ func TestLoadPlanContext(t *testing.T) {
 		}))
 		defer server.Close()
 
-		t.Setenv("MERCAN_CONTROLLER_URL", server.URL)
-		t.Setenv("MERCAN_TASK_NAME", "test-task")
-		t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+		t.Setenv("ORKA_CONTROLLER_URL", server.URL)
+		t.Setenv("ORKA_TASK_NAME", "test-task")
+		t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 		result := loadPlanContext()
 		if result != "" {
@@ -288,9 +288,9 @@ func TestLoadPlanContext(t *testing.T) {
 	})
 
 	t.Run("missing env vars", func(t *testing.T) {
-		t.Setenv("MERCAN_CONTROLLER_URL", "")
-		t.Setenv("MERCAN_TASK_NAME", "")
-		t.Setenv("MERCAN_TASK_NAMESPACE", "")
+		t.Setenv("ORKA_CONTROLLER_URL", "")
+		t.Setenv("ORKA_TASK_NAME", "")
+		t.Setenv("ORKA_TASK_NAMESPACE", "")
 
 		result := loadPlanContext()
 		if result != "" {

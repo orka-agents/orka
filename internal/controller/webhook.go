@@ -14,7 +14,7 @@ import (
 	"net/http"
 	"time"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 // WebhookPayload is the payload sent to webhook URLs
@@ -97,9 +97,9 @@ func (w *WebhookNotifier) Notify(ctx context.Context, task *corev1alpha1.Task) e
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Mercan-Controller/1.0")
-	req.Header.Set("X-Mercan-Task", task.Name)
-	req.Header.Set("X-Mercan-Namespace", task.Namespace)
+	req.Header.Set("User-Agent", "Orka-Controller/1.0")
+	req.Header.Set("X-Orka-Task", task.Name)
+	req.Header.Set("X-Orka-Namespace", task.Namespace)
 
 	resp, err := w.client.Do(req)
 	if err != nil {

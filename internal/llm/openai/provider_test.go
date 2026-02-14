@@ -9,7 +9,7 @@ package openai
 import (
 	"testing"
 
-	"github.com/sozercan/mercan/internal/llm"
+	"github.com/sozercan/orka/internal/llm"
 )
 
 func TestNewProvider(t *testing.T) {

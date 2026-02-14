@@ -12,7 +12,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/sozercan/mercan/internal/store"
+	"github.com/sozercan/orka/internal/store"
 )
 
 // SavePlan upserts an autonomous plan state.

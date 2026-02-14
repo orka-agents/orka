@@ -20,9 +20,9 @@ LLM calls delegate_task(agent: "frontend-dev", prompt: "Update UI auth")
   ▼
 Worker creates child Tasks via K8s API with:
   - ownerRef → parent Task
-  - label: mercan.ai/parent-task = <parent>
-  - label: mercan.ai/delegated-agent = <agent>
-  - annotation: mercan.ai/coordination-depth = <parent_depth + 1>
+  - label: orka.ai/parent-task = <parent>
+  - label: orka.ai/delegated-agent = <agent>
+  - annotation: orka.ai/coordination-depth = <parent_depth + 1>
   │
   ▼
 Controller reconciles child Tasks:
@@ -51,7 +51,7 @@ Controller: parent Job succeeded → parent Task → Succeeded
 
 ### Coordination Tools
 
-Located in `internal/tools/`. Coordination tools include `delegate_task`, `wait_for_tasks`, PR tools (`create_pull_request`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`), and agent management tools (`create_agent`, `delete_agent`). All are registered via `RegisterCoordinationTools(k8sClient)` in `internal/tools/registry.go` when `MERCAN_COORDINATION_ENABLED=true`.
+Located in `internal/tools/`. Coordination tools include `delegate_task`, `wait_for_tasks`, PR tools (`create_pull_request`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`), and agent management tools (`create_agent`, `delete_agent`). All are registered via `RegisterCoordinationTools(k8sClient)` in `internal/tools/registry.go` when `ORKA_COORDINATION_ENABLED=true`.
 
 #### `delegate_task` Tool
 
@@ -72,16 +72,16 @@ LLM-visible parameter schema:
 ```
 
 Implementation (`internal/tools/delegate_task.go`):
-1. Reads `MERCAN_TASK_NAME`, `MERCAN_TASK_NAMESPACE`, `MERCAN_COORDINATION_DEPTH` from env
-2. Reads `MERCAN_COORDINATION_ALLOWED_AGENTS` and validates the target agent is allowed
-3. Checks depth + 1 does not exceed `MERCAN_COORDINATION_MAX_DEPTH`
+1. Reads `ORKA_TASK_NAME`, `ORKA_TASK_NAMESPACE`, `ORKA_COORDINATION_DEPTH` from env
+2. Reads `ORKA_COORDINATION_ALLOWED_AGENTS` and validates the target agent is allowed
+3. Checks depth + 1 does not exceed `ORKA_COORDINATION_MAX_DEPTH`
 4. Creates child Task via K8s API with:
    - `GenerateName: {parentName}-child-`
-   - `Labels: mercan.ai/parent-task, mercan.ai/coordinator, mercan.ai/delegated-agent`
-   - `Annotations: mercan.ai/coordination-depth`
+   - `Labels: orka.ai/parent-task, orka.ai/coordinator, orka.ai/delegated-agent`
+   - `Annotations: orka.ai/coordination-depth`
    - `OwnerReferences` pointing to parent Task
    - `Spec.Type: ai`, `Spec.AgentRef.Name: <agent>`, `Spec.Prompt: <prompt>`
-5. If `auto_retry: true`, stores retry config as annotations: `mercan.ai/auto-retry`, `mercan.ai/max-retries`, `mercan.ai/retry-count`, `mercan.ai/original-prompt`
+5. If `auto_retry: true`, stores retry config as annotations: `orka.ai/auto-retry`, `orka.ai/max-retries`, `orka.ai/retry-count`, `orka.ai/original-prompt`
 6. Returns `{"taskName": "<name>", "status": "created"}` to LLM
 
 #### `wait_for_tasks` Tool
@@ -103,7 +103,7 @@ Implementation (`internal/tools/wait_for_tasks.go`):
 2. Poll loop (5s interval):
    - Gets each child Task by name via K8s API
    - Checks if all are in terminal phase (Succeeded/Failed)
-   - **Auto-retry**: If a failed task has `mercan.ai/auto-retry=true` and retry count < max retries, automatically creates a new child task with the error context prepended to the original prompt, and continues polling the retry task
+   - **Auto-retry**: If a failed task has `orka.ai/auto-retry=true` and retry count < max retries, automatically creates a new child task with the error context prepended to the original prompt, and continues polling the retry task
    - If timeout exceeded, returns partial results with timeout flag
    - Respects context cancellation
 3. For each completed child, reads result via the controller's result API
@@ -124,11 +124,11 @@ Located in `internal/controller/task_controller.go`.
 
 #### `handlePending` — Coordination Validation
 
-After agent resolution, before Job creation, the controller validates coordination constraints for child tasks (identified by `mercan.ai/coordination-depth` annotation):
+After agent resolution, before Job creation, the controller validates coordination constraints for child tasks (identified by `orka.ai/coordination-depth` annotation):
 
 ```go
-if depthStr := task.Annotations["mercan.ai/coordination-depth"]; depthStr != "" {
-    parentName := task.Labels["mercan.ai/parent-task"]
+if depthStr := task.Annotations["orka.ai/coordination-depth"]; depthStr != "" {
+    parentName := task.Labels["orka.ai/parent-task"]
     depthInt, _ := strconv.Atoi(depthStr)
 
     // Look up parent task to find its agent's coordination config
@@ -163,7 +163,7 @@ if depthStr := task.Annotations["mercan.ai/coordination-depth"]; depthStr != "" 
     // 3. Enforce maxConcurrentChildren (requeue if at limit)
     var siblings corev1alpha1.TaskList
     r.List(ctx, &siblings, client.InNamespace(task.Namespace),
-        client.MatchingLabels{"mercan.ai/parent-task": parentName})
+        client.MatchingLabels{"orka.ai/parent-task": parentName})
     active := 0
     for _, s := range siblings.Items {
         if s.Status.Phase == corev1alpha1.TaskPhasePending || s.Status.Phase == corev1alpha1.TaskPhaseRunning {
@@ -178,14 +178,14 @@ if depthStr := task.Annotations["mercan.ai/coordination-depth"]; depthStr != "" 
 
 #### `handleRunning` — ChildTaskStatus Population
 
-For coordinator tasks (those without a `mercan.ai/parent-task` label), the controller lists child tasks and populates `status.childTasks[]` with name, agent, phase, and truncated result (max 500 chars):
+For coordinator tasks (those without a `orka.ai/parent-task` label), the controller lists child tasks and populates `status.childTasks[]` with name, agent, phase, and truncated result (max 500 chars):
 
 ```go
-if _, hasChildren := task.Labels["mercan.ai/parent-task"]; !hasChildren {
+if _, hasChildren := task.Labels["orka.ai/parent-task"]; !hasChildren {
     // This task might be a coordinator — check for children
     var children corev1alpha1.TaskList
     if err := r.List(ctx, &children, client.InNamespace(task.Namespace),
-        client.MatchingLabels{"mercan.ai/parent-task": task.Name}); err == nil && len(children.Items) > 0 {
+        client.MatchingLabels{"orka.ai/parent-task": task.Name}); err == nil && len(children.Items) > 0 {
         task.Status.ChildTasks = make([]corev1alpha1.ChildTaskStatus, 0, len(children.Items))
         for _, child := range children.Items {
             cs := corev1alpha1.ChildTaskStatus{
@@ -219,10 +219,10 @@ Located in `internal/controller/job_builder.go`. In `addAIEnvVars`, when an agen
 ```go
 if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
     envVars = append(envVars,
-        corev1.EnvVar{Name: "MERCAN_COORDINATION_ENABLED", Value: "true"},
-        corev1.EnvVar{Name: "MERCAN_COORDINATION_MAX_DEPTH",
+        corev1.EnvVar{Name: "ORKA_COORDINATION_ENABLED", Value: "true"},
+        corev1.EnvVar{Name: "ORKA_COORDINATION_MAX_DEPTH",
             Value: fmt.Sprintf("%d", agent.Spec.Coordination.MaxDepth)},
-        corev1.EnvVar{Name: "MERCAN_COORDINATION_MAX_CHILDREN",
+        corev1.EnvVar{Name: "ORKA_COORDINATION_MAX_CHILDREN",
             Value: fmt.Sprintf("%d", agent.Spec.Coordination.MaxConcurrentChildren)},
     )
 
@@ -231,17 +231,17 @@ if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Ena
         agentNames = append(agentNames, a.Name)
     }
     envVars = append(envVars,
-        corev1.EnvVar{Name: "MERCAN_COORDINATION_ALLOWED_AGENTS",
+        corev1.EnvVar{Name: "ORKA_COORDINATION_ALLOWED_AGENTS",
             Value: strings.Join(agentNames, ",")},
     )
 
     // Current depth (0 for top-level coordinator)
     depth := "0"
-    if d, ok := task.Annotations["mercan.ai/coordination-depth"]; ok {
+    if d, ok := task.Annotations["orka.ai/coordination-depth"]; ok {
         depth = d
     }
     envVars = append(envVars,
-        corev1.EnvVar{Name: "MERCAN_COORDINATION_DEPTH", Value: depth},
+        corev1.EnvVar{Name: "ORKA_COORDINATION_DEPTH", Value: depth},
     )
 }
 ```
@@ -250,20 +250,20 @@ The `delegate_task` and `wait_for_tasks` tools are automatically injected into t
 
 ### AI Worker Wiring
 
-Located in `workers/ai/main.go`. When `MERCAN_COORDINATION_ENABLED=true`:
+Located in `workers/ai/main.go`. When `ORKA_COORDINATION_ENABLED=true`:
 
 - Coordination tools are registered into `DefaultRegistry` via `tools.RegisterCoordinationTools(k8sClient)`
 - `maxIterations` is increased from 10 to 50 for coordinator agents
 
 ## RBAC
 
-The worker ServiceAccount (`mercan-worker`) ClusterRole in `config/rbac/worker_role.yaml` includes:
+The worker ServiceAccount (`orka-worker`) ClusterRole in `config/rbac/worker_role.yaml` includes:
 
 ```yaml
-- apiGroups: ["core.mercan.ai"]
+- apiGroups: ["core.orka.ai"]
   resources: ["tasks"]
   verbs: ["get", "list", "watch", "create"]
-- apiGroups: ["core.mercan.ai"]
+- apiGroups: ["core.orka.ai"]
   resources: ["agents"]
   verbs: ["get", "create", "update", "delete"]
 ```
@@ -272,7 +272,7 @@ The worker ServiceAccount (`mercan-worker`) ClusterRole in `config/rbac/worker_r
 
 ### Coordinator Agent
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: project-coordinator
@@ -304,7 +304,7 @@ spec:
 
 ### Specialist Agents
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: backend-dev
@@ -321,7 +321,7 @@ spec:
   secretRef:
     name: llm-credentials
 ---
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: frontend-dev
@@ -341,7 +341,7 @@ spec:
 
 ### Coordination Task
 ```yaml
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: refactor-auth
@@ -417,10 +417,10 @@ When `auto_retry` is enabled on a delegated task, `wait_for_tasks` automatically
 
 1. Coordinator calls `delegate_task` with `auto_retry: true` (and optional `max_retries`, default 2)
 2. `delegate_task` stores retry config as annotations on the child task:
-   - `mercan.ai/auto-retry: "true"`
-   - `mercan.ai/max-retries: "2"`
-   - `mercan.ai/retry-count: "0"`
-   - `mercan.ai/original-prompt: "<original prompt>"`
+   - `orka.ai/auto-retry: "true"`
+   - `orka.ai/max-retries: "2"`
+   - `orka.ai/retry-count: "0"`
+   - `orka.ai/original-prompt: "<original prompt>"`
 3. If the child task fails, `wait_for_tasks` detects the failure and:
    - Checks `retry-count < max-retries`
    - Creates a new child task with the error message prepended:
@@ -431,7 +431,7 @@ When `auto_retry` is enabled on a delegated task, `wait_for_tasks` automatically
      Please retry the original task, avoiding the previous error:
      <original prompt>
      ```
-   - Sets `mercan.ai/retried-from` annotation on the retry task
+   - Sets `orka.ai/retried-from` annotation on the retry task
    - Increments `retry-count`
    - Continues polling the retry task
 4. The original failed task result includes `failureDetails` with message, retryCount, and maxRetries
@@ -467,7 +467,7 @@ When a task is retried, its result includes:
 
 ## Iterative Code Review Workflows
 
-Mercan supports iterative multi-agent workflows where a coordinator orchestrates coding, review, and feedback loops until code is approved.
+Orka supports iterative multi-agent workflows where a coordinator orchestrates coding, review, and feedback loops until code is approved.
 
 ### Flow
 
@@ -528,7 +528,7 @@ COORDINATOR (AI worker)
 When `prior_task` is set:
 - `PriorTaskRef` is set on the child Task, triggering diff application in the worker
 - Workspace config is copied from the prior task if not explicitly provided
-- Iteration labels are tracked: `mercan.ai/iteration` (incremented) and `mercan.ai/iteration-group` (shared ID)
+- Iteration labels are tracked: `orka.ai/iteration` (incremented) and `orka.ai/iteration-group` (shared ID)
 
 ### Structured Result Format
 
@@ -557,8 +557,8 @@ Workers with git workspaces produce structured results:
 
 | Label | Description |
 |-------|-------------|
-| `mercan.ai/iteration` | Iteration number (1, 2, 3...) |
-| `mercan.ai/iteration-group` | Shared ID grouping all iterations of the same logical task |
+| `orka.ai/iteration` | Iteration number (1, 2, 3...) |
+| `orka.ai/iteration-group` | Shared ID grouping all iterations of the same logical task |
 
 ### Recommended Coordinator System Prompt
 
@@ -581,11 +581,11 @@ You are a coordinator agent. Follow this protocol:
 
 | Variable | Set When | Description |
 |----------|----------|-------------|
-| `MERCAN_PRIOR_TASK` | Task has PriorTaskRef | Name of the prior task |
-| `MERCAN_PRIOR_TASK_NAMESPACE` | Task has PriorTaskRef | Namespace of the prior task |
-| `MERCAN_FORK_REPO` | Workspace has ForkRepo | Fork repository URL |
-| `MERCAN_PR_BASE_BRANCH` | Workspace has PRBaseBranch | PR target branch |
-| `MERCAN_PUSH_BRANCH` | Workspace has PushBranch | Branch to auto-push changes to |
+| `ORKA_PRIOR_TASK` | Task has PriorTaskRef | Name of the prior task |
+| `ORKA_PRIOR_TASK_NAMESPACE` | Task has PriorTaskRef | Namespace of the prior task |
+| `ORKA_FORK_REPO` | Workspace has ForkRepo | Fork repository URL |
+| `ORKA_PR_BASE_BRANCH` | Workspace has PRBaseBranch | PR target branch |
+| `ORKA_PUSH_BRANCH` | Workspace has PushBranch | Branch to auto-push changes to |
 
 ### create_pull_request Tool
 

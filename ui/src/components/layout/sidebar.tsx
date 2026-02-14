@@ -28,7 +28,7 @@ export function Sidebar() {
         {!sidebarCollapsed && (
           <Link to="/" className="flex items-center gap-2 font-semibold text-foreground">
             <span className="text-xl">🪸</span>
-            <span>Mercan</span>
+            <span>Orka</span>
           </Link>
         )}
         <Button

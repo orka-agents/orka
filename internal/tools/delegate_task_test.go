@@ -15,7 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 const (
@@ -90,11 +90,11 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "successful delegation",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":                   parentTaskName,
-				"MERCAN_TASK_NAMESPACE":              "default",
-				"MERCAN_COORDINATION_DEPTH":          "0",
-				"MERCAN_COORDINATION_ALLOWED_AGENTS": "researcher,coder",
-				"MERCAN_COORDINATION_MAX_DEPTH":      "3",
+				"ORKA_TASK_NAME":                   parentTaskName,
+				"ORKA_TASK_NAMESPACE":              "default",
+				"ORKA_COORDINATION_DEPTH":          "0",
+				"ORKA_COORDINATION_ALLOWED_AGENTS": "researcher,coder",
+				"ORKA_COORDINATION_MAX_DEPTH":      "3",
 			},
 			args:        json.RawMessage(`{"agent": "researcher", "prompt": "Research the topic"}`),
 			wantErr:     false,
@@ -104,11 +104,11 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "agent not allowed",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":                   parentTaskName,
-				"MERCAN_TASK_NAMESPACE":              "default",
-				"MERCAN_COORDINATION_DEPTH":          "0",
-				"MERCAN_COORDINATION_ALLOWED_AGENTS": "researcher,coder",
-				"MERCAN_COORDINATION_MAX_DEPTH":      "3",
+				"ORKA_TASK_NAME":                   parentTaskName,
+				"ORKA_TASK_NAMESPACE":              "default",
+				"ORKA_COORDINATION_DEPTH":          "0",
+				"ORKA_COORDINATION_ALLOWED_AGENTS": "researcher,coder",
+				"ORKA_COORDINATION_MAX_DEPTH":      "3",
 			},
 			args:       json.RawMessage(`{"agent": "unauthorized-agent", "prompt": "Do something"}`),
 			wantErr:    true,
@@ -117,11 +117,11 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "depth exceeded",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":                   parentTaskName,
-				"MERCAN_TASK_NAMESPACE":              "default",
-				"MERCAN_COORDINATION_DEPTH":          "3",
-				"MERCAN_COORDINATION_ALLOWED_AGENTS": "researcher",
-				"MERCAN_COORDINATION_MAX_DEPTH":      "3",
+				"ORKA_TASK_NAME":                   parentTaskName,
+				"ORKA_TASK_NAMESPACE":              "default",
+				"ORKA_COORDINATION_DEPTH":          "3",
+				"ORKA_COORDINATION_ALLOWED_AGENTS": "researcher",
+				"ORKA_COORDINATION_MAX_DEPTH":      "3",
 			},
 			args:       json.RawMessage(`{"agent": "researcher", "prompt": "Research the topic"}`),
 			wantErr:    true,
@@ -130,11 +130,11 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "missing agent arg",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":                   parentTaskName,
-				"MERCAN_TASK_NAMESPACE":              "default",
-				"MERCAN_COORDINATION_DEPTH":          "0",
-				"MERCAN_COORDINATION_ALLOWED_AGENTS": "researcher",
-				"MERCAN_COORDINATION_MAX_DEPTH":      "3",
+				"ORKA_TASK_NAME":                   parentTaskName,
+				"ORKA_TASK_NAMESPACE":              "default",
+				"ORKA_COORDINATION_DEPTH":          "0",
+				"ORKA_COORDINATION_ALLOWED_AGENTS": "researcher",
+				"ORKA_COORDINATION_MAX_DEPTH":      "3",
 			},
 			args:       json.RawMessage(`{"prompt": "Research the topic"}`),
 			wantErr:    true,
@@ -143,11 +143,11 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "missing prompt arg",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":                   parentTaskName,
-				"MERCAN_TASK_NAMESPACE":              "default",
-				"MERCAN_COORDINATION_DEPTH":          "0",
-				"MERCAN_COORDINATION_ALLOWED_AGENTS": "researcher",
-				"MERCAN_COORDINATION_MAX_DEPTH":      "3",
+				"ORKA_TASK_NAME":                   parentTaskName,
+				"ORKA_TASK_NAMESPACE":              "default",
+				"ORKA_COORDINATION_DEPTH":          "0",
+				"ORKA_COORDINATION_ALLOWED_AGENTS": "researcher",
+				"ORKA_COORDINATION_MAX_DEPTH":      "3",
 			},
 			args:       json.RawMessage(`{"agent": "researcher"}`),
 			wantErr:    true,
@@ -156,8 +156,8 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "invalid JSON args",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":      parentTaskName,
-				"MERCAN_TASK_NAMESPACE": "default",
+				"ORKA_TASK_NAME":      parentTaskName,
+				"ORKA_TASK_NAMESPACE": "default",
 			},
 			args:       json.RawMessage(`{invalid}`),
 			wantErr:    true,
@@ -166,11 +166,11 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "custom priority",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":                   parentTaskName,
-				"MERCAN_TASK_NAMESPACE":              "default",
-				"MERCAN_COORDINATION_DEPTH":          "0",
-				"MERCAN_COORDINATION_ALLOWED_AGENTS": "researcher",
-				"MERCAN_COORDINATION_MAX_DEPTH":      "3",
+				"ORKA_TASK_NAME":                   parentTaskName,
+				"ORKA_TASK_NAMESPACE":              "default",
+				"ORKA_COORDINATION_DEPTH":          "0",
+				"ORKA_COORDINATION_ALLOWED_AGENTS": "researcher",
+				"ORKA_COORDINATION_MAX_DEPTH":      "3",
 			},
 			args:        json.RawMessage(`{"agent": "researcher", "prompt": "Research", "priority": 800}`),
 			wantErr:     false,
@@ -180,11 +180,11 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "custom namespace",
 			envVars: map[string]string{
-				"MERCAN_TASK_NAME":                   parentTaskName,
-				"MERCAN_TASK_NAMESPACE":              "default",
-				"MERCAN_COORDINATION_DEPTH":          "0",
-				"MERCAN_COORDINATION_ALLOWED_AGENTS": "researcher",
-				"MERCAN_COORDINATION_MAX_DEPTH":      "3",
+				"ORKA_TASK_NAME":                   parentTaskName,
+				"ORKA_TASK_NAMESPACE":              "default",
+				"ORKA_COORDINATION_DEPTH":          "0",
+				"ORKA_COORDINATION_ALLOWED_AGENTS": "researcher",
+				"ORKA_COORDINATION_MAX_DEPTH":      "3",
 			},
 			args:    json.RawMessage(`{"agent": "researcher", "prompt": "Research", "namespace": "other-ns"}`),
 			wantErr: true, // parent task not found in other-ns
@@ -233,11 +233,11 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_COORDINATION_DEPTH", "1")
-	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
-	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "5")
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_COORDINATION_DEPTH", "1")
+	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "researcher")
+	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "5")
 
 	k8sClient := newFakeClient(parentTask(), researcherAgent())
 	tool := NewDelegateTaskTool(k8sClient)
@@ -273,19 +273,19 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 	}
 
 	// Verify labels
-	if childTask.Labels["mercan.ai/parent-task"] != parentTaskName {
-		t.Errorf("label mercan.ai/parent-task = %q, want %q", childTask.Labels["mercan.ai/parent-task"], "parent-task")
+	if childTask.Labels["orka.ai/parent-task"] != parentTaskName {
+		t.Errorf("label orka.ai/parent-task = %q, want %q", childTask.Labels["orka.ai/parent-task"], "parent-task")
 	}
-	if childTask.Labels["mercan.ai/coordinator"] != trueStr {
-		t.Errorf("label mercan.ai/coordinator = %q, want %q", childTask.Labels["mercan.ai/coordinator"], trueStr)
+	if childTask.Labels["orka.ai/coordinator"] != trueStr {
+		t.Errorf("label orka.ai/coordinator = %q, want %q", childTask.Labels["orka.ai/coordinator"], trueStr)
 	}
-	if childTask.Labels["mercan.ai/delegated-agent"] != "researcher" {
-		t.Errorf("label mercan.ai/delegated-agent = %q, want %q", childTask.Labels["mercan.ai/delegated-agent"], "researcher")
+	if childTask.Labels["orka.ai/delegated-agent"] != "researcher" {
+		t.Errorf("label orka.ai/delegated-agent = %q, want %q", childTask.Labels["orka.ai/delegated-agent"], "researcher")
 	}
 
 	// Verify annotations
-	if childTask.Annotations["mercan.ai/coordination-depth"] != "2" {
-		t.Errorf("annotation mercan.ai/coordination-depth = %q, want %q", childTask.Annotations["mercan.ai/coordination-depth"], "2")
+	if childTask.Annotations["orka.ai/coordination-depth"] != "2" {
+		t.Errorf("annotation orka.ai/coordination-depth = %q, want %q", childTask.Annotations["orka.ai/coordination-depth"], "2")
 	}
 
 	// Verify spec
@@ -324,11 +324,11 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
-	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "claude-coder")
-	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
+	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "claude-coder")
+	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
 
 	maxTurns := int32(100)
 	agentTask := &corev1alpha1.Agent{
@@ -415,11 +415,11 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_AgentNotFound(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
-	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "nonexistent-agent")
-	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
+	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "nonexistent-agent")
+	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
 
 	// No agent registered in the fake client
 	k8sClient := newFakeClient(parentTask())
@@ -436,11 +436,11 @@ func TestDelegateTaskTool_Execute_AgentNotFound(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_AgentTypeNoWorkspace(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
-	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "claude-coder")
-	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
+	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "claude-coder")
+	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
 
 	agentWithRuntime := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
@@ -498,11 +498,11 @@ func TestDelegateTaskTool_Execute_AgentTypeNoWorkspace(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_AITypeNoRuntime(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
-	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
-	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
+	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "researcher")
+	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
 
 	k8sClient := newFakeClient(parentTask(), researcherAgent())
 	tool := NewDelegateTaskTool(k8sClient)
@@ -558,8 +558,8 @@ func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
 			Namespace: "default",
 			UID:       "prior-uid",
 			Labels: map[string]string{
-				"mercan.ai/iteration":       "1",
-				"mercan.ai/iteration-group": "group-abc",
+				"orka.ai/iteration":       "1",
+				"orka.ai/iteration-group": "group-abc",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -583,10 +583,10 @@ func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
 	fakeClient := newFakeClient(parent, agent, prior)
 	tool := NewDelegateTaskTool(fakeClient)
 
-	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
-	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
+	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "researcher")
 
 	args, _ := json.Marshal(map[string]any{
 		"agent":      "researcher",
@@ -632,11 +632,11 @@ func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
 	}
 
 	// Verify iteration labels
-	if childTask.Labels["mercan.ai/iteration"] != "2" {
-		t.Errorf("expected iteration=2, got %q", childTask.Labels["mercan.ai/iteration"])
+	if childTask.Labels["orka.ai/iteration"] != "2" {
+		t.Errorf("expected iteration=2, got %q", childTask.Labels["orka.ai/iteration"])
 	}
-	if childTask.Labels["mercan.ai/iteration-group"] != "group-abc" {
-		t.Errorf("expected iteration-group=group-abc, got %q", childTask.Labels["mercan.ai/iteration-group"])
+	if childTask.Labels["orka.ai/iteration-group"] != "group-abc" {
+		t.Errorf("expected iteration-group=group-abc, got %q", childTask.Labels["orka.ai/iteration-group"])
 	}
 
 	// Verify workspace was copied from prior task
@@ -655,10 +655,10 @@ func TestDelegateTaskTool_Execute_FeedbackOnly(t *testing.T) {
 	fakeClient := newFakeClient(parent, agent)
 	tool := NewDelegateTaskTool(fakeClient)
 
-	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
-	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
+	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "researcher")
 
 	args, _ := json.Marshal(map[string]any{
 		"agent":    "researcher",
@@ -690,11 +690,11 @@ func TestDelegateTaskTool_Execute_FeedbackOnly(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_PushBranch(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
-	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "claude-coder")
-	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
+	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "claude-coder")
+	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
 
 	agentWithRuntime := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
@@ -753,11 +753,11 @@ func TestDelegateTaskTool_Execute_PushBranch(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_AutoRetry(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
-	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
-	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
+	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "researcher")
+	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
 
 	k8sClient := newFakeClient(parentTask(), researcherAgent())
 	tool := NewDelegateTaskTool(k8sClient)
@@ -781,26 +781,26 @@ func TestDelegateTaskTool_Execute_AutoRetry(t *testing.T) {
 		t.Fatalf("get child task: %v", err)
 	}
 
-	if childTask.Annotations["mercan.ai/auto-retry"] != trueStr {
-		t.Errorf("expected auto-retry=true, got %q", childTask.Annotations["mercan.ai/auto-retry"])
+	if childTask.Annotations["orka.ai/auto-retry"] != trueStr {
+		t.Errorf("expected auto-retry=true, got %q", childTask.Annotations["orka.ai/auto-retry"])
 	}
-	if childTask.Annotations["mercan.ai/max-retries"] != "3" {
-		t.Errorf("expected max-retries=3, got %q", childTask.Annotations["mercan.ai/max-retries"])
+	if childTask.Annotations["orka.ai/max-retries"] != "3" {
+		t.Errorf("expected max-retries=3, got %q", childTask.Annotations["orka.ai/max-retries"])
 	}
-	if childTask.Annotations["mercan.ai/retry-count"] != "0" {
-		t.Errorf("expected retry-count=0, got %q", childTask.Annotations["mercan.ai/retry-count"])
+	if childTask.Annotations["orka.ai/retry-count"] != "0" {
+		t.Errorf("expected retry-count=0, got %q", childTask.Annotations["orka.ai/retry-count"])
 	}
-	if childTask.Annotations["mercan.ai/original-prompt"] != "Do the work" {
-		t.Errorf("expected original-prompt stored, got %q", childTask.Annotations["mercan.ai/original-prompt"])
+	if childTask.Annotations["orka.ai/original-prompt"] != "Do the work" {
+		t.Errorf("expected original-prompt stored, got %q", childTask.Annotations["orka.ai/original-prompt"])
 	}
 }
 
 func TestDelegateTaskTool_Execute_AutoRetryDefault(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
-	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
-	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
+	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "researcher")
+	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
 
 	k8sClient := newFakeClient(parentTask(), researcherAgent())
 	tool := NewDelegateTaskTool(k8sClient)
@@ -824,17 +824,17 @@ func TestDelegateTaskTool_Execute_AutoRetryDefault(t *testing.T) {
 		t.Fatalf("get child task: %v", err)
 	}
 
-	if childTask.Annotations["mercan.ai/max-retries"] != "2" {
-		t.Errorf("expected default max-retries=2, got %q", childTask.Annotations["mercan.ai/max-retries"])
+	if childTask.Annotations["orka.ai/max-retries"] != "2" {
+		t.Errorf("expected default max-retries=2, got %q", childTask.Annotations["orka.ai/max-retries"])
 	}
 }
 
 func TestDelegateTaskTool_Execute_NoAutoRetry(t *testing.T) {
-	t.Setenv("MERCAN_TASK_NAME", parentTaskName)
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_COORDINATION_DEPTH", "0")
-	t.Setenv("MERCAN_COORDINATION_ALLOWED_AGENTS", "researcher")
-	t.Setenv("MERCAN_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
+	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "researcher")
+	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
 
 	k8sClient := newFakeClient(parentTask(), researcherAgent())
 	tool := NewDelegateTaskTool(k8sClient)
@@ -858,7 +858,7 @@ func TestDelegateTaskTool_Execute_NoAutoRetry(t *testing.T) {
 	}
 
 	// When auto_retry is not set, no retry annotations should be present
-	if _, ok := childTask.Annotations["mercan.ai/auto-retry"]; ok {
+	if _, ok := childTask.Annotations["orka.ai/auto-retry"]; ok {
 		t.Error("expected no auto-retry annotation when auto_retry is false")
 	}
 }

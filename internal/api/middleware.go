@@ -16,8 +16,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/sozercan/mercan/internal/metrics"
-	"github.com/sozercan/mercan/internal/tracing"
+	"github.com/sozercan/orka/internal/metrics"
+	"github.com/sozercan/orka/internal/tracing"
 )
 
 // NewLoggingMiddleware creates a logging middleware
@@ -72,7 +72,7 @@ func NewMetricsMiddleware() fiber.Handler {
 // NewTracingMiddleware creates an OpenTelemetry tracing middleware.
 func NewTracingMiddleware() fiber.Handler {
 	return func(c fiber.Ctx) error {
-		tracer := tracing.Tracer("mercan.api")
+		tracer := tracing.Tracer("orka.api")
 		ctx, span := tracer.Start(c.Context(), fmt.Sprintf("%s %s", c.Method(), c.Route().Path),
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(

@@ -18,7 +18,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/sozercan/mercan/test/utils"
+	"github.com/sozercan/orka/test/utils"
 )
 
 var _ = Describe("Agent Session Continuity", Ordered, func() {
@@ -46,7 +46,7 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 	It("should reference the same session across multiple tasks", func() {
 		By("creating an Agent for session test")
 		agentManifest := fmt.Sprintf(`{
-			"apiVersion": "core.mercan.ai/v1alpha1",
+			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Agent",
 			"metadata": {
 				"name": "%s",
@@ -68,7 +68,7 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 
 		By("creating the first Task with a sessionID")
 		task1Manifest := fmt.Sprintf(`{
-			"apiVersion": "core.mercan.ai/v1alpha1",
+			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Task",
 			"metadata": {
 				"name": "%s",
@@ -99,7 +99,7 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 		By("verifying a Job is created for the first task")
 		verifyJob1Created := func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("mercan.ai/task=%s,mercan.ai/task-type=agent", taskName1),
+				"-l", fmt.Sprintf("orka.ai/task=%s,orka.ai/task-type=agent", taskName1),
 				"-o", "jsonpath={.items[0].metadata.name}",
 				"-n", namespace,
 			)
@@ -112,7 +112,7 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 		By("verifying the first task has session env vars")
 		verifySessionEnvVars := func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("mercan.ai/task=%s", taskName1),
+				"-l", fmt.Sprintf("orka.ai/task=%s", taskName1),
 				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
 				"-n", namespace,
 			)
@@ -129,14 +129,14 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 				envMap[e.Name] = e.Value
 			}
 
-			g.Expect(envMap).To(HaveKey("MERCAN_SESSION_NAME"))
-			g.Expect(envMap["MERCAN_SESSION_NAME"]).To(Equal(sessionID))
+			g.Expect(envMap).To(HaveKey("ORKA_SESSION_NAME"))
+			g.Expect(envMap["ORKA_SESSION_NAME"]).To(Equal(sessionID))
 		}
 		Eventually(verifySessionEnvVars, 30*time.Second, time.Second).Should(Succeed())
 
 		By("creating the second Task with the same sessionID")
 		task2Manifest := fmt.Sprintf(`{
-			"apiVersion": "core.mercan.ai/v1alpha1",
+			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Task",
 			"metadata": {
 				"name": "%s",

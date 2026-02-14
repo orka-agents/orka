@@ -359,9 +359,9 @@ func TestNewFileReadTool(t *testing.T) {
 }
 
 func TestNewFileReadTool_WithEnvVar(t *testing.T) {
-	originalWorkDir := os.Getenv("MERCAN_WORK_DIR")
-	os.Setenv("MERCAN_WORK_DIR", "/custom/workspace")   //nolint:errcheck
-	defer os.Setenv("MERCAN_WORK_DIR", originalWorkDir) //nolint:errcheck
+	originalWorkDir := os.Getenv("ORKA_WORK_DIR")
+	os.Setenv("ORKA_WORK_DIR", "/custom/workspace")   //nolint:errcheck
+	defer os.Setenv("ORKA_WORK_DIR", originalWorkDir) //nolint:errcheck
 
 	tool := NewFileReadTool()
 	if tool.workDir != "/custom/workspace" {

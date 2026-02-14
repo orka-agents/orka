@@ -81,13 +81,13 @@ func (t *UpdatePlanTool) Execute(_ context.Context, args json.RawMessage) (strin
 		return "", fmt.Errorf("plan_document is required")
 	}
 
-	controllerURL := os.Getenv("MERCAN_CONTROLLER_URL")
-	taskName := os.Getenv("MERCAN_TASK_NAME")
-	taskNamespace := os.Getenv("MERCAN_TASK_NAMESPACE")
-	saToken := os.Getenv("MERCAN_SA_TOKEN")
+	controllerURL := os.Getenv("ORKA_CONTROLLER_URL")
+	taskName := os.Getenv("ORKA_TASK_NAME")
+	taskNamespace := os.Getenv("ORKA_TASK_NAMESPACE")
+	saToken := os.Getenv("ORKA_SA_TOKEN")
 
 	if controllerURL == "" || taskName == "" || taskNamespace == "" {
-		return "", fmt.Errorf("MERCAN_CONTROLLER_URL, MERCAN_TASK_NAME, and MERCAN_TASK_NAMESPACE are required")
+		return "", fmt.Errorf("ORKA_CONTROLLER_URL, ORKA_TASK_NAME, and ORKA_TASK_NAMESPACE are required")
 	}
 
 	// Read SA token from file if not in env

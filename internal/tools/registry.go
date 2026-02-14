@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/sozercan/mercan/internal/llm"
+	"github.com/sozercan/orka/internal/llm"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 

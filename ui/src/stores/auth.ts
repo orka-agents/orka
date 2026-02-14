@@ -16,6 +16,6 @@ export const useAuthStore = create<AuthState>()(
       clearToken: () => set({ token: null }),
       isAuthenticated: () => get().token !== null,
     }),
-    { name: 'mercan-auth' }
+    { name: 'orka-auth' }
   )
 )

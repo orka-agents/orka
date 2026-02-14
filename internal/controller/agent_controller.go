@@ -20,7 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 // AgentReconciler reconciles a Agent object
@@ -29,12 +29,12 @@ type AgentReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=agents,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=agents/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=agents/finalizers,verbs=update
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=tasks,verbs=list
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=providers,verbs=get
-// +kubebuilder:rbac:groups=core.mercan.ai,resources=tools,verbs=get
+// +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core.orka.ai,resources=agents/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=core.orka.ai,resources=agents/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=list
+// +kubebuilder:rbac:groups=core.orka.ai,resources=providers,verbs=get
+// +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 

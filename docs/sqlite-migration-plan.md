@@ -26,9 +26,9 @@ Replace ConfigMap-based storage for **task results** and **session transcripts**
 
 | Use Case | ConfigMap Name | Data Key | Labels | Created By |
 |---|---|---|---|---|
-| Task results | `{taskName}-result` | `result` | `mercan.ai/result=true` | Workers (AI, Claude, Copilot) or Controller (container tasks via pod logs) |
-| Task sessions | `session-{sessionName}` | `transcript.jsonl` | `mercan.ai/session=true` | SessionManager |
-| Chat sessions | `chat-session-{sessionID}` | `transcript.jsonl` | `mercan.ai/session=true`, `mercan.ai/session-type=chat` | Chat handler |
+| Task results | `{taskName}-result` | `result` | `orka.ai/result=true` | Workers (AI, Claude, Copilot) or Controller (container tasks via pod logs) |
+| Task sessions | `session-{sessionName}` | `transcript.jsonl` | `orka.ai/session=true` | SessionManager |
+| Chat sessions | `chat-session-{sessionID}` | `transcript.jsonl` | `orka.ai/session=true`, `orka.ai/session-type=chat` | Chat handler |
 
 ### Files That Touch ConfigMaps (Results & Sessions)
 
@@ -43,7 +43,7 @@ Replace ConfigMap-based storage for **task results** and **session transcripts**
 | AI Worker | `workers/ai/main.go` | `writeResult()`, `loadSessionContext()` |
 | Claude Worker | `workers/agent/claude/main.go` | `writeResult()` |
 | Copilot Worker | `workers/agent/copilot/main.go` | `writeResult()` |
-| Job Builder | `internal/controller/job_builder.go` | Env var `MERCAN_RESULT_CONFIGMAP`, session volume mount |
+| Job Builder | `internal/controller/job_builder.go` | Env var `ORKA_RESULT_CONFIGMAP`, session volume mount |
 
 ### Known Issues with ConfigMap Storage
 
@@ -227,7 +227,7 @@ func NewDB(path string) (*sql.DB, error) {
 **Why each pragma matters:**
 - `journal_mode=WAL` — allows concurrent reads while writing; without it, reconciler + API goroutines get `SQLITE_BUSY`
 - `busy_timeout=5000` — wait 5s instead of failing immediately on lock contention
-- `synchronous=NORMAL` — committed transactions survive process crashes (not OS crashes); acceptable for Mercan's throughput
+- `synchronous=NORMAL` — committed transactions survive process crashes (not OS crashes); acceptable for Orka's throughput
 - `foreign_keys=ON` — **not persistent in SQLite**, must be set per connection; required for `ON DELETE CASCADE` on `session_messages`
 
 ### Graceful Shutdown
@@ -304,7 +304,7 @@ GET /internal/v1/sessions/{namespace}/{name}/transcript
 
 `wait_for_tasks` runs inside worker pods and currently reads result ConfigMaps via the K8s API. Post-migration:
 
-- Inject `MERCAN_CONTROLLER_URL` env var into worker pods via `job_builder.go`
+- Inject `ORKA_CONTROLLER_URL` env var into worker pods via `job_builder.go`
 - `wait_for_tasks` calls `GET /api/v1/tasks/{id}/result` (existing public endpoint) instead of reading ConfigMaps
 - The public result endpoint calls `ResultStore.GetResult()` internally
 
@@ -343,7 +343,7 @@ GET /internal/v1/sessions/{namespace}/{name}/transcript
 - Replace `writeResult()` in AI, Claude, Copilot workers with HTTP POST to controller
 - Add retry with exponential backoff (1s, 2s, 4s — 3 attempts max)
 - Exit non-zero on all retries exhausted
-- Add env vars: `MERCAN_RESULT_ENDPOINT`, `MERCAN_CONTROLLER_URL`
+- Add env vars: `ORKA_RESULT_ENDPOINT`, `ORKA_CONTROLLER_URL`
 - Update `wait_for_tasks` tool to use HTTP GET instead of ConfigMap read
 - Remove Kubernetes client ConfigMap creation code from workers
 - General worker: unchanged (controller reads pod logs via `collectResult()`)
@@ -362,8 +362,8 @@ GET /internal/v1/sessions/{namespace}/{name}/transcript
 
 ### Step 6: Update Job Builder
 
-- Remove `MERCAN_RESULT_CONFIGMAP` env var, add `MERCAN_RESULT_ENDPOINT`
-- Add `MERCAN_CONTROLLER_URL` for `wait_for_tasks` coordination
+- Remove `ORKA_RESULT_CONFIGMAP` env var, add `ORKA_RESULT_ENDPOINT`
+- Add `ORKA_CONTROLLER_URL` for `wait_for_tasks` coordination
 - Remove session ConfigMap volume mount
 - Add init container that fetches transcript via `GET /internal/v1/sessions/.../transcript` and writes to shared `emptyDir` at `/session/transcript.jsonl`
 - Shared `emptyDir` volume between init container and main worker container
@@ -373,7 +373,7 @@ GET /internal/v1/sessions/{namespace}/{name}/transcript
 **Kustomize (`config/manager/manager.yaml`):**
 - Add `emptyDir: {}` volume named `store` mounted at `/data`
 - Controller runs with `readOnlyRootFilesystem: true` — the emptyDir provides the writable path
-- Add `--store-backend=sqlite` and `--store-path=/data/mercan.db` args
+- Add `--store-backend=sqlite` and `--store-path=/data/orka.db` args
 - Set `fsGroup: 65532` in pod security context (matches distroless nonroot UID)
 
 **Helm chart:**
@@ -390,15 +390,15 @@ GET /internal/v1/sessions/{namespace}/{name}/transcript
 
 ### Step 9: Observability
 
-- Add `mercan_store_db_size_bytes` gauge metric (updated every 60s via `os.Stat` on DB file) — most important capacity signal
+- Add `orka_store_db_size_bytes` gauge metric (updated every 60s via `os.Stat` on DB file) — most important capacity signal
 - Add `WARN`-level log on controller startup when no PVC is configured: `"store is ephemeral — data will be lost on pod restart; set store.sqlite.persistence.enabled=true for durability"`
 - Add `SELECT 1` health check in readiness probe
 
 ### Step 10: Migration Tool
 
-- Add `mercan migrate` CLI command to `cmd/cli/`
-- Reads existing result ConfigMaps (`mercan.ai/result=true`) and inserts into SQLite
-- Reads existing session ConfigMaps (`mercan.ai/session=true`) and inserts into SQLite
+- Add `orka migrate` CLI command to `cmd/cli/`
+- Reads existing result ConfigMaps (`orka.ai/result=true`) and inserts into SQLite
+- Reads existing session ConfigMaps (`orka.ai/session=true`) and inserts into SQLite
 - Idempotent (`INSERT OR IGNORE`)
 - Only relevant for PVC-backed deployments (ephemeral storage has nothing to persist into)
 - Optionally deletes migrated ConfigMaps (`--cleanup`)
@@ -421,7 +421,7 @@ Test files requiring modification (~15-25 files):
 - Release notes: breaking CRD change (`ResultReference`), ConfigMap storage removed
 - Upgrade runbook: drain pending tasks before upgrading (`kubectl get tasks --field-selector status.phase=Running`), or wait for in-flight tasks to complete
 - Helm NOTES.txt: storage type warning for ephemeral default
-- Backup guide: PVC users can use VolumeSnapshot; `mercan backup` CLI available for manual export
+- Backup guide: PVC users can use VolumeSnapshot; `orka backup` CLI available for manual export
 
 ---
 
@@ -430,7 +430,7 @@ Test files requiring modification (~15-25 files):
 ```go
 // New flags in cmd/main.go
 flag.StringVar(&storeBackend, "store-backend", "sqlite", "Storage backend (sqlite)")
-flag.StringVar(&storePath, "store-path", "/data/mercan.db", "Path to SQLite database file")
+flag.StringVar(&storePath, "store-path", "/data/orka.db", "Path to SQLite database file")
 ```
 
 The `--store-backend` flag defaults to `sqlite` (only implementation). It exists so a future PostgreSQL backend can be added without restructuring flags. Unknown values fail fast at startup.
@@ -440,7 +440,7 @@ The `--store-backend` flag defaults to `sqlite` (only implementation). It exists
 ```yaml
 # values.yaml additions
 store:
-  path: /data/mercan.db
+  path: /data/orka.db
   persistence:
     enabled: false       # default: ephemeral (emptyDir), no PVC
     size: 1Gi            # only when enabled: true
@@ -455,7 +455,7 @@ No `backend` field — there's only one backend. The `path` and `persistence` se
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
 | SQLite corruption on unclean shutdown | Low | High | WAL mode + `PRAGMA synchronous=NORMAL`; graceful shutdown via `mgr.Add()` Runnable; PVC for durability |
-| Performance under high concurrency | Low | Medium | SQLite handles ~100k writes/sec; Mercan is controller-level throughput; WAL allows concurrent reads; `MaxOpenConns(1)` serializes writes |
+| Performance under high concurrency | Low | Medium | SQLite handles ~100k writes/sec; Orka is controller-level throughput; WAL allows concurrent reads; `MaxOpenConns(1)` serializes writes |
 | Data loss on pod restart (ephemeral default) | Medium | Medium | Startup WARN log; Helm NOTES.txt warning; PVC opt-in for production |
 | Worker→controller HTTP failure during rolling update | Medium | Medium | Workers retry with exponential backoff (3 attempts); exit non-zero on failure; controller marks job as failed |
 | Binary size increase (~15-25MB) | Certain | Low | Expected and documented; no runtime impact |
@@ -468,8 +468,8 @@ For existing clusters upgrading from ConfigMap-based storage:
 
 1. **Wait for in-flight tasks to complete**: `kubectl get tasks -A --field-selector status.phase=Running` — ensure no tasks are running
 2. **Upgrade controller + workers simultaneously** (same release has both changes)
-3. **Run migration** (PVC users only): `mercan migrate --store-path /data/mercan.db --cleanup` to move existing ConfigMap data to SQLite
-4. **Verify**: `kubectl get configmaps -l mercan.ai/result=true` should show no results; `kubectl get configmaps -l mercan.ai/session=true` should show no sessions (skills ConfigMaps remain)
+3. **Run migration** (PVC users only): `orka migrate --store-path /data/orka.db --cleanup` to move existing ConfigMap data to SQLite
+4. **Verify**: `kubectl get configmaps -l orka.ai/result=true` should show no results; `kubectl get configmaps -l orka.ai/session=true` should show no sessions (skills ConfigMaps remain)
 
 For ephemeral (emptyDir) users: no migration needed. Old ConfigMap data is simply abandoned.
 
@@ -501,7 +501,7 @@ For ephemeral (emptyDir) users: no migration needed. Old ConfigMap data is simpl
 | Storage default | Ephemeral (`emptyDir`) | Zero dependencies, zero config. PVC opt-in for durability. Startup log warns users. |
 | Worker result delivery | Internal HTTP endpoint on existing API port | Clean API, no shared PVC, reuses existing auth, avoids port conflicts |
 | Session transcript delivery | Init container fetching via HTTP | Zero changes to worker `loadSessionContext()` code |
-| `wait_for_tasks` coordination | HTTP GET to public result endpoint | Workers already have `MERCAN_CONTROLLER_URL`; reuses existing `/api/v1/tasks/{id}/result` |
+| `wait_for_tasks` coordination | HTTP GET to public result endpoint | Workers already have `ORKA_CONTROLLER_URL`; reuses existing `/api/v1/tasks/{id}/result` |
 | Session locking | SQL `UPDATE ... WHERE active_task = ''` | Atomic, fixes current race condition |
 | Skills storage | Keep ConfigMaps | Small, declarative, no size pressure |
 | Connection pooling | `MaxOpenConns(1)` | SQLite single-writer; avoids `SQLITE_BUSY` in `database/sql` pool |

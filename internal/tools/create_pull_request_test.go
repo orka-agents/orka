@@ -20,7 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 const (
@@ -98,7 +98,7 @@ func TestCreatePullRequestTool_MissingTask(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewCreatePullRequestTool(k8sClient)
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(CreatePullRequestArgs{
 		TaskName:   "nonexistent",
@@ -131,7 +131,7 @@ func TestCreatePullRequestTool_NoWorkspace(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewCreatePullRequestTool(k8sClient)
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(CreatePullRequestArgs{
 		TaskName:   "coder-task",
@@ -209,7 +209,7 @@ func TestCreatePullRequestTool_Success(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("MERCAN_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
 	args, _ := json.Marshal(CreatePullRequestArgs{
 		TaskName:   "coder-task",

@@ -1,6 +1,6 @@
-Mercan has been installed.
+Orka has been installed.
 
-Controller: {{ include "mercan.fullname" . }}-controller
+Controller: {{ include "orka.fullname" . }}-controller
 Namespace:  {{ .Release.Namespace }}
 
 {{- if not .Values.store.persistence.enabled }}
@@ -9,12 +9,12 @@ Namespace:  {{ .Release.Namespace }}
    Task results and session data will be LOST on pod restart.
    For production use, enable persistent storage:
 
-     helm upgrade {{ .Release.Name }} mercan \
+     helm upgrade {{ .Release.Name }} orka \
        --set store.persistence.enabled=true
 
 {{- else }}
 
-✅ SQLite store is using persistent storage (PVC: {{ include "mercan.fullname" . }}-store).
+✅ SQLite store is using persistent storage (PVC: {{ include "orka.fullname" . }}-store).
    Data will survive pod restarts.
 
 {{- end }}

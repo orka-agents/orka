@@ -24,8 +24,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/sozercan/mercan/internal/store"
-	"github.com/sozercan/mercan/internal/store/sqlite"
+	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/store/sqlite"
 )
 
 func main() {
@@ -99,7 +99,7 @@ func main() {
 	var hadErrors bool
 
 	// Migrate results
-	resultCMs, err := listConfigMaps(ctx, clientset, namespace, "mercan.ai/result=true")
+	resultCMs, err := listConfigMaps(ctx, clientset, namespace, "orka.ai/result=true")
 	if err != nil {
 		log.Error(err, "Failed to list result ConfigMaps")
 		os.Exit(1)
@@ -139,7 +139,7 @@ func main() {
 	}
 
 	// Migrate sessions
-	sessionCMs, err := listConfigMaps(ctx, clientset, namespace, "mercan.ai/session=true")
+	sessionCMs, err := listConfigMaps(ctx, clientset, namespace, "orka.ai/session=true")
 	if err != nil {
 		log.Error(err, "Failed to list session ConfigMaps")
 		os.Exit(1)
@@ -149,7 +149,7 @@ func main() {
 		cm := &sessionCMs[i]
 		sessionName := extractSessionName(cm.Name)
 		sessionType := "task"
-		if cm.Labels["mercan.ai/session-type"] == "chat" {
+		if cm.Labels["orka.ai/session-type"] == "chat" {
 			sessionType = "chat"
 		}
 

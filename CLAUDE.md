@@ -21,7 +21,7 @@ When you encounter pre-existing bugs, failing tests, or broken CI — **fix them
 
 ## Project Overview
 
-Mercan is a Kubernetes-native task execution platform. A controller manages Jobs and Pods for incoming task requests, supporting container tasks, AI agent tasks with LLM integration, and external agent CLI runtimes (Copilot, Claude Code). See @docs/architecture.md for full architecture details.
+Orka is a Kubernetes-native task execution platform. A controller manages Jobs and Pods for incoming task requests, supporting container tasks, AI agent tasks with LLM integration, and external agent CLI runtimes (Copilot, Claude Code). See @docs/architecture.md for full architecture details.
 
 ## Build & Development Commands
 
@@ -49,7 +49,7 @@ make docker-build-all                 # Controller + all agent workers
 make docker-push-all
 
 # Deploy
-make deploy IMG=<registry>/mercan:tag
+make deploy IMG=<registry>/orka:tag
 ```
 
 ## Architecture
@@ -97,7 +97,7 @@ make deploy IMG=<registry>/mercan:tag
 - Auto-push: When `pushBranch` is set on workspace config, `FinalizeResult` commits and pushes changes to that branch automatically
 - PR creation: `create_pull_request` coordination tool creates GitHub PRs from pushed branches using git credentials from task workspace config
 - PR management: `merge_pull_request` merges PRs after CI checks pass (instant); `auto_merge_pull_request` polls CI and auto-merges when green (blocking with timeout); `review_pull_request` fetches PR diffs for analysis; `post_review_comment` posts reviews with verdicts and line-level comments
-- Self-healing coordination: `delegate_task` supports `auto_retry` and `max_retries` params; `wait_for_tasks` automatically re-creates failed child tasks with error context prepended to original prompt; retry config stored as annotations (`mercan.ai/auto-retry`, `mercan.ai/max-retries`, `mercan.ai/retry-count`)
+- Self-healing coordination: `delegate_task` supports `auto_retry` and `max_retries` params; `wait_for_tasks` automatically re-creates failed child tasks with error context prepended to original prompt; retry config stored as annotations (`orka.ai/auto-retry`, `orka.ai/max-retries`, `orka.ai/retry-count`)
 - Autonomous mode: When `coordination.autonomous: true`, controller loops Jobs instead of completing; plan state persisted in SQLite via `PlanStore`; worker fetches plan via HTTP GET; `update_plan` tool saves progress; termination via goal_complete flag, maxIterations, or Suspend
 
 ### Multi-Agent Coordination
@@ -106,13 +106,13 @@ make deploy IMG=<registry>/mercan:tag
 - **PR workflow tools** (`internal/tools/create_pull_request.go`, `internal/tools/merge_pull_request.go`, `internal/tools/auto_merge_pull_request.go`, `internal/tools/review_pull_request.go`, `internal/tools/post_review_comment.go`): GitHub PR creation, merging (instant and polling), review fetching, and review posting
 - **Agent management tools** (`internal/tools/create_agent.go`, `internal/tools/delete_agent.go`): Dynamic Agent CRD creation and deletion at runtime
 - **Controller enforcement** (`internal/controller/task_controller.go`): Validates `maxDepth`, `allowedAgents`, `maxConcurrentChildren` in `handlePending`; populates `status.childTasks` in `handleRunning`
-- **Job builder** (`internal/controller/job_builder.go`): Injects `MERCAN_COORDINATION_*` env vars and auto-adds coordination tools when `agent.Spec.Coordination.Enabled`
-- **AI worker** (`workers/ai/main.go`): Registers coordination tools via `tools.RegisterCoordinationTools()` when `MERCAN_COORDINATION_ENABLED=true`; increases `maxIterations` to 50
+- **Job builder** (`internal/controller/job_builder.go`): Injects `ORKA_COORDINATION_*` env vars and auto-adds coordination tools when `agent.Spec.Coordination.Enabled`
+- **AI worker** (`workers/ai/main.go`): Registers coordination tools via `tools.RegisterCoordinationTools()` when `ORKA_COORDINATION_ENABLED=true`; increases `maxIterations` to 50
 - **RBAC** (`config/rbac/worker_role.yaml`): Workers have Task `create/get/list/watch` and Agent `get/create/update/delete` for coordination
-- Child tasks use labels (`mercan.ai/parent-task`, `mercan.ai/delegated-agent`) and annotations (`mercan.ai/coordination-depth`) for tracking
+- Child tasks use labels (`orka.ai/parent-task`, `orka.ai/delegated-agent`) and annotations (`orka.ai/coordination-depth`) for tracking
 - Owner references enable cascade deletion of child tasks
-- **Iterative workflows**: `prior_task` param in `delegate_task` sets `PriorTaskRef` on child tasks; job builder injects `MERCAN_PRIOR_TASK`/`MERCAN_PRIOR_TASK_NAMESPACE` env vars; workers apply prior diffs before starting
-- **Auto-push**: `PushBranch` field on `WorkspaceConfig` → `MERCAN_PUSH_BRANCH` env var → `FinalizeResult` commits and pushes to that branch
+- **Iterative workflows**: `prior_task` param in `delegate_task` sets `PriorTaskRef` on child tasks; job builder injects `ORKA_PRIOR_TASK`/`ORKA_PRIOR_TASK_NAMESPACE` env vars; workers apply prior diffs before starting
+- **Auto-push**: `PushBranch` field on `WorkspaceConfig` → `ORKA_PUSH_BRANCH` env var → `FinalizeResult` commits and pushes to that branch
 - **PR creation tool** (`internal/tools/create_pull_request.go`): Reads git secret from child task's workspace config, creates PR via GitHub REST API
 - **PR merge tool** (`internal/tools/merge_pull_request.go`): Verifies CI checks pass, then merges PR via GitHub REST API
 - **PR auto-merge tool** (`internal/tools/auto_merge_pull_request.go`): Polls CI checks every 30s and auto-merges when green; handles force-pushes, external closures, and transient API errors

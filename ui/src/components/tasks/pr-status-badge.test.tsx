@@ -15,9 +15,9 @@ describe('PRStatusBadge', () => {
 
   it('shows PR badge with number and status', () => {
     render(<PRStatusBadge annotations={{
-      'mercan.ai/pr-url': 'https://github.com/org/repo/pull/42',
-      'mercan.ai/pr-number': '42',
-      'mercan.ai/pr-status': 'open',
+      'orka.ai/pr-url': 'https://github.com/org/repo/pull/42',
+      'orka.ai/pr-number': '42',
+      'orka.ai/pr-status': 'open',
     }} />)
     expect(screen.getByText(/PR #42/)).toBeInTheDocument()
     expect(screen.getByText(/open/)).toBeInTheDocument()
@@ -25,9 +25,9 @@ describe('PRStatusBadge', () => {
 
   it('links to PR URL', () => {
     render(<PRStatusBadge annotations={{
-      'mercan.ai/pr-url': 'https://github.com/org/repo/pull/42',
-      'mercan.ai/pr-number': '42',
-      'mercan.ai/pr-status': 'merged',
+      'orka.ai/pr-url': 'https://github.com/org/repo/pull/42',
+      'orka.ai/pr-number': '42',
+      'orka.ai/pr-status': 'merged',
     }} />)
     const link = screen.getByText(/PR #42/).closest('a')
     expect(link).toHaveAttribute('href', 'https://github.com/org/repo/pull/42')

@@ -19,12 +19,12 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/sozercan/mercan/test/utils"
+	"github.com/sozercan/orka/test/utils"
 )
 
 var (
 	// managerImage is the manager image to be built and loaded for testing.
-	managerImage = "example.com/mercan:v0.0.1"
+	managerImage = "example.com/orka:v0.0.1"
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 )
@@ -35,7 +35,7 @@ var (
 // To skip CertManager installation, set: CERT_MANAGER_INSTALL_SKIP=true
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
-	_, _ = fmt.Fprintf(GinkgoWriter, "Starting mercan e2e test suite\n")
+	_, _ = fmt.Fprintf(GinkgoWriter, "Starting orka e2e test suite\n")
 	RunSpecs(t, "e2e suite")
 }
 
@@ -70,7 +70,7 @@ var _ = BeforeSuite(func() {
 
 	By("waiting for CRDs to be established")
 	Eventually(func(g Gomega) {
-		for _, crd := range []string{"tasks.core.mercan.ai", "agents.core.mercan.ai"} {
+		for _, crd := range []string{"tasks.core.orka.ai", "agents.core.orka.ai"} {
 			cmd := exec.Command("kubectl", "wait", "--for=condition=Established",
 				"crd/"+crd, "--timeout=30s")
 			_, err := utils.Run(cmd)

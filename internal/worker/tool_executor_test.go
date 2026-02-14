@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -36,9 +36,9 @@ func TestNewToolExecutor(t *testing.T) {
 }
 
 func TestNewToolExecutor_WithNamespaceEnv(t *testing.T) {
-	originalNamespace := os.Getenv("MERCAN_TASK_NAMESPACE")
-	os.Setenv("MERCAN_TASK_NAMESPACE", "custom-namespace")      //nolint:errcheck
-	defer os.Setenv("MERCAN_TASK_NAMESPACE", originalNamespace) //nolint:errcheck
+	originalNamespace := os.Getenv("ORKA_TASK_NAMESPACE")
+	os.Setenv("ORKA_TASK_NAMESPACE", "custom-namespace")      //nolint:errcheck
+	defer os.Setenv("ORKA_TASK_NAMESPACE", originalNamespace) //nolint:errcheck
 
 	executor := NewToolExecutor()
 	if executor.namespace != "custom-namespace" {

@@ -19,7 +19,7 @@ export function ChatMessageList() {
       <div className="flex flex-1 items-center justify-center">
         <div className="text-center">
           <span className="text-4xl">🪸</span>
-          <h3 className="mt-4 text-lg font-semibold">Mercan Meta Agent</h3>
+          <h3 className="mt-4 text-lg font-semibold">Orka Meta Agent</h3>
           <p className="mt-1 max-w-sm text-sm text-muted-foreground">
             Chat with the orchestrator to create and manage tasks, agents, and tools using natural language.
           </p>

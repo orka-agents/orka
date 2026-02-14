@@ -21,7 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 // CreatePullRequestTool creates a GitHub pull request from a pushed branch.
@@ -114,7 +114,7 @@ func (t *CreatePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 	}
 
 	// Determine namespace from environment
-	ns := os.Getenv("MERCAN_TASK_NAMESPACE")
+	ns := os.Getenv("ORKA_TASK_NAMESPACE")
 	if ns == "" {
 		ns = defaultNamespace
 	}

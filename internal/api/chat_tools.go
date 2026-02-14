@@ -9,7 +9,7 @@ package api
 import (
 	"encoding/json"
 
-	"github.com/sozercan/mercan/internal/llm"
+	"github.com/sozercan/orka/internal/llm"
 )
 
 func mustMarshal(v any) json.RawMessage {

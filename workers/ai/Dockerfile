@@ -29,7 +29,7 @@ WORKDIR /
 COPY --from=builder /workspace/worker /worker
 
 # Create work directory for code execution
-RUN mkdir -p /tmp/mercan-exec && chown nonroot:nonroot /tmp/mercan-exec
+RUN mkdir -p /tmp/orka-exec && chown nonroot:nonroot /tmp/orka-exec
 
 USER 65532:65532
 

@@ -1,4 +1,4 @@
-module github.com/sozercan/mercan
+module github.com/sozercan/orka
 
 go 1.25.3
 

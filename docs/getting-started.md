@@ -16,8 +16,8 @@ For development, you also need:
 ### Using Helm
 
 ```bash
-helm install mercan charts/mercan \
-  --namespace mercan-system \
+helm install orka charts/orka \
+  --namespace orka-system \
   --create-namespace
 ```
 
@@ -28,7 +28,7 @@ helm install mercan charts/mercan \
 make install
 
 # Deploy controller
-make deploy IMG=ghcr.io/sozercan/mercan:latest
+make deploy IMG=ghcr.io/sozercan/orka:latest
 ```
 
 ## Quick Start
@@ -42,7 +42,7 @@ kubectl create secret generic anthropic-secret \
 
 # Create a Provider
 kubectl apply -f - <<EOF
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Provider
 metadata:
   name: anthropic
@@ -59,7 +59,7 @@ EOF
 
 ```yaml
 kubectl apply -f - <<EOF
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: assistant
@@ -77,7 +77,7 @@ EOF
 
 ```yaml
 kubectl apply -f - <<EOF
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: hello-task
@@ -96,7 +96,7 @@ kubectl get task hello-task
 
 # Get the result via the REST API
 curl http://localhost:8080/api/v1/tasks/hello-task/result \
-  -H "Authorization: Bearer $(kubectl create token mercan-client)"
+  -H "Authorization: Bearer $(kubectl create token orka-client)"
 ```
 
 ## Agent Runtimes Quick Start
@@ -122,7 +122,7 @@ kubectl create secret generic claude-credentials \
 
 ```yaml
 kubectl apply -f - <<EOF
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: claude-agent
@@ -145,7 +145,7 @@ EOF
 
 ```yaml
 kubectl apply -f - <<EOF
-apiVersion: core.mercan.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: code-review
@@ -167,7 +167,7 @@ EOF
 kubectl get task code-review
 
 curl http://localhost:8080/api/v1/tasks/code-review/result \
-  -H "Authorization: Bearer $(kubectl create token mercan-client)"
+  -H "Authorization: Bearer $(kubectl create token orka-client)"
 ```
 
 See [Agent Runtimes](agent-runtimes.md) for full configuration reference.
@@ -176,7 +176,7 @@ See [Agent Runtimes](agent-runtimes.md) for full configuration reference.
 
 ```bash
 # Port-forward the controller service
-kubectl port-forward -n mercan-system svc/mercan-controller 8080:8080
+kubectl port-forward -n orka-system svc/orka-controller 8080:8080
 
 # Open in browser
 open http://localhost:8080
@@ -184,23 +184,23 @@ open http://localhost:8080
 
 ## CLI Tool
 
-The `mercan` CLI provides browser-based authentication for the web dashboard.
+The `orka` CLI provides browser-based authentication for the web dashboard.
 
 ```bash
 # Build the CLI
 make build-cli
 
 # Login (extracts token from kubeconfig and opens browser)
-./bin/mercan login
+./bin/orka login
 
 # Login with custom server
-./bin/mercan login --server https://mercan.example.com
+./bin/orka login --server https://orka.example.com
 
 # Login with explicit token
-./bin/mercan login --token <token>
+./bin/orka login --token <token>
 
 # Specify kubeconfig
-./bin/mercan login --kubeconfig ~/.kube/my-config
+./bin/orka login --kubeconfig ~/.kube/my-config
 ```
 
 The CLI supports token extraction from bearer tokens, token files, exec-based auth (GKE, AWS IAM), and OIDC auth providers.

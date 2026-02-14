@@ -19,9 +19,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/sozercan/mercan/internal/controller"
-	"github.com/sozercan/mercan/internal/store"
-	"github.com/sozercan/mercan/internal/uiembed"
+	"github.com/sozercan/orka/internal/controller"
+	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/uiembed"
 )
 
 var log = logf.Log.WithName("api-server")
@@ -58,7 +58,7 @@ type Server struct {
 // NewServer creates a new API server
 func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
 	app := fiber.New(fiber.Config{
-		AppName:      "Mercan API",
+		AppName:      "Orka API",
 		ErrorHandler: customErrorHandler,
 	})
 
@@ -159,7 +159,7 @@ func (s *Server) setupRoutes() {
 	}
 
 	// OpenAI-compatible API (under /v1, separate from /api/v1)
-	// This allows OpenAI-compatible clients to use Mercan as a custom provider.
+	// This allows OpenAI-compatible clients to use Orka as a custom provider.
 	oai := s.app.Group("/v1")
 	oai.Use(NewAuthMiddleware(s.client))
 	oai.Post("/chat/completions", s.openaiHandler.HandleChatCompletions)

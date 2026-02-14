@@ -19,7 +19,7 @@ import (
 	"strings"
 )
 
-// Client is an HTTP client for the Mercan API.
+// Client is an HTTP client for the Orka API.
 type Client struct {
 	BaseURL    string
 	Token      string
@@ -27,7 +27,7 @@ type Client struct {
 	HTTPClient *http.Client
 }
 
-// New creates a new Mercan API client.
+// New creates a new Orka API client.
 func New(baseURL, token string) *Client {
 	return &Client{
 		BaseURL:    baseURL,
@@ -36,7 +36,7 @@ func New(baseURL, token string) *Client {
 	}
 }
 
-// NewWithNamespace creates a new Mercan API client with a default namespace.
+// NewWithNamespace creates a new Orka API client with a default namespace.
 func NewWithNamespace(baseURL, token, namespace string) *Client {
 	return &Client{
 		BaseURL:    baseURL,
@@ -157,7 +157,7 @@ func (c *Client) StreamChat(ctx context.Context, req ChatRequest) (*SSEReader, *
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		_ = resp.Body.Close()
-		return nil, nil, fmt.Errorf("authentication failed (HTTP 401): try 'mercan login' or provide --token")
+		return nil, nil, fmt.Errorf("authentication failed (HTTP 401): try 'orka login' or provide --token")
 	}
 
 	if resp.StatusCode != http.StatusOK {

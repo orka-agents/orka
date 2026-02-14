@@ -13,7 +13,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/sozercan/mercan/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing"
 )
 
 // TracingProvider wraps an LLM Provider with OpenTelemetry tracing.
@@ -29,7 +29,7 @@ func NewTracingProvider(p Provider) Provider {
 func (tp *TracingProvider) Name() string { return tp.inner.Name() }
 
 func (tp *TracingProvider) Complete(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
-	tracer := tracing.Tracer("mercan.llm")
+	tracer := tracing.Tracer("orka.llm")
 	ctx, span := tracer.Start(ctx, "llm.complete",
 		trace.WithAttributes(
 			attribute.String("llm.provider", tp.inner.Name()),

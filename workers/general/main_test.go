@@ -25,7 +25,7 @@ func TestRun_NoCommand(t *testing.T) {
 	defer func() { os.Args = origArgs }()
 
 	os.Args = []string{"worker"}
-	os.Unsetenv("MERCAN_COMMAND") //nolint:errcheck
+	os.Unsetenv("ORKA_COMMAND") //nolint:errcheck
 	err := run()
 	if err == nil {
 		t.Error("run() should return error when no command specified")
@@ -37,8 +37,8 @@ func TestRun_CommandFromEnv(t *testing.T) {
 	defer func() { os.Args = origArgs }()
 
 	os.Args = []string{"worker"}
-	os.Setenv("MERCAN_COMMAND", "echo hello") //nolint:errcheck
-	defer os.Unsetenv("MERCAN_COMMAND")       //nolint:errcheck
+	os.Setenv("ORKA_COMMAND", "echo hello") //nolint:errcheck
+	defer os.Unsetenv("ORKA_COMMAND")       //nolint:errcheck
 
 	err := run()
 	if err != nil {

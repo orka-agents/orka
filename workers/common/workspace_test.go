@@ -15,20 +15,20 @@ import (
 )
 
 func TestPrepareWorkspace_NoOp(t *testing.T) {
-	// When MERCAN_PRIOR_TASK is not set, PrepareWorkspace should be a no-op
-	os.Unsetenv("MERCAN_PRIOR_TASK") //nolint:errcheck
+	// When ORKA_PRIOR_TASK is not set, PrepareWorkspace should be a no-op
+	os.Unsetenv("ORKA_PRIOR_TASK") //nolint:errcheck
 	err := PrepareWorkspace("/tmp/test")
 	if err != nil {
-		t.Errorf("expected no error when MERCAN_PRIOR_TASK not set, got: %v", err)
+		t.Errorf("expected no error when ORKA_PRIOR_TASK not set, got: %v", err)
 	}
 }
 
 func TestPrepareWorkspace_MissingControllerURL(t *testing.T) {
-	t.Setenv("MERCAN_PRIOR_TASK", "task-1")
-	t.Setenv("MERCAN_CONTROLLER_URL", "")
+	t.Setenv("ORKA_PRIOR_TASK", "task-1")
+	t.Setenv("ORKA_CONTROLLER_URL", "")
 	err := PrepareWorkspace("/tmp/test")
 	if err == nil {
-		t.Fatal("expected error when MERCAN_CONTROLLER_URL is empty")
+		t.Fatal("expected error when ORKA_CONTROLLER_URL is empty")
 	}
 }
 
@@ -41,9 +41,9 @@ func TestPrepareWorkspace_NoDiffInResult(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("MERCAN_PRIOR_TASK", "task-1")
-	t.Setenv("MERCAN_PRIOR_TASK_NAMESPACE", "default")
-	t.Setenv("MERCAN_CONTROLLER_URL", server.URL)
+	t.Setenv("ORKA_PRIOR_TASK", "task-1")
+	t.Setenv("ORKA_PRIOR_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_CONTROLLER_URL", server.URL)
 
 	err := PrepareWorkspace("/tmp/test")
 	if err != nil {

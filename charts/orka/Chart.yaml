@@ -1,5 +1,5 @@
 apiVersion: v2
-name: mercan
+name: orka
 description: Kubernetes-native task execution platform with AI agent support
 type: application
 version: 0.1.0
@@ -13,6 +13,6 @@ keywords:
 maintainers:
   - name: Sertac Ozercan
     url: https://github.com/sozercan
-home: https://github.com/sozercan/mercan
+home: https://github.com/sozercan/orka
 sources:
-  - https://github.com/sozercan/mercan
+  - https://github.com/sozercan/orka

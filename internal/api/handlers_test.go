@@ -22,10 +22,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/mercan/api/v1alpha1"
-	"github.com/sozercan/mercan/internal/controller"
-	"github.com/sozercan/mercan/internal/store"
-	"github.com/sozercan/mercan/internal/store/sqlite"
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/controller"
+	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/store/sqlite"
 )
 
 func setupTestHandlers() (*Handlers, *fiber.App) {
@@ -1285,7 +1285,7 @@ func TestGetTaskChildren(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "child-1",
 			Namespace: "default",
-			Labels:    map[string]string{"mercan.ai/parent-task": "parent-task"},
+			Labels:    map[string]string{"orka.ai/parent-task": "parent-task"},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAI,
@@ -1296,7 +1296,7 @@ func TestGetTaskChildren(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "child-2",
 			Namespace: "default",
-			Labels:    map[string]string{"mercan.ai/parent-task": "parent-task"},
+			Labels:    map[string]string{"orka.ai/parent-task": "parent-task"},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAI,
