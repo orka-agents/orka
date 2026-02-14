@@ -199,7 +199,7 @@ func (b *JobBuilder) buildContainer(task *corev1alpha1.Task, agent *corev1alpha1
 			container.Image = b.GeneralWorkerImage
 			container.Command = []string{"/worker"}
 			// Pass the user command as args to the worker binary
-			var workerArgs []string
+			workerArgs := make([]string, 0, len(task.Spec.Command)+len(task.Spec.Args))
 			workerArgs = append(workerArgs, task.Spec.Command...)
 			workerArgs = append(workerArgs, task.Spec.Args...)
 			container.Args = workerArgs
@@ -397,6 +397,21 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 		corev1.EnvVar{Name: "MERCAN_COORDINATION_DEPTH", Value: depth},
 	)
 
+	// Autonomous mode env vars
+	if agent.Spec.Coordination.Autonomous {
+		envVars = append(envVars,
+			corev1.EnvVar{Name: "MERCAN_AUTONOMOUS_MODE", Value: "true"},
+			corev1.EnvVar{Name: "MERCAN_AUTONOMOUS_ITERATION",
+				Value: fmt.Sprintf("%d", task.Status.Iteration)},
+		)
+		if agent.Spec.Coordination.MaxIterations > 0 {
+			envVars = append(envVars,
+				corev1.EnvVar{Name: "MERCAN_AUTONOMOUS_MAX_ITERATIONS",
+					Value: fmt.Sprintf("%d", agent.Spec.Coordination.MaxIterations)},
+			)
+		}
+	}
+
 	return envVars
 }
 
@@ -417,7 +432,7 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 
 	// Auto-inject coordination tools when coordination is enabled
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
-		for _, ct := range []string{"delegate_task", "wait_for_tasks", "create_pull_request", "merge_pull_request", "auto_merge_pull_request", "review_pull_request", "post_review_comment", "create_agent", "delete_agent"} {
+		for _, ct := range []string{"delegate_task", "wait_for_tasks", "create_pull_request", "merge_pull_request", "auto_merge_pull_request", "review_pull_request", "post_review_comment", "create_agent", "delete_agent", "update_plan"} {
 			if !slices.Contains(cfg.tools, ct) {
 				cfg.tools = append(cfg.tools, ct)
 			}

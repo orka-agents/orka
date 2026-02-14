@@ -12,7 +12,33 @@ The controller exposes a REST API for programmatic access. All `/api/v1/*` endpo
 | `/api/v1/tasks/:id` | DELETE | Cancel/delete task |
 | `/api/v1/tasks/:id/logs` | GET | Stream task logs |
 | `/api/v1/tasks/:id/result` | GET | Get task result |
+| `/api/v1/tasks/:id/plan` | GET | Get task plan |
 | `/api/v1/tasks/:id/children` | GET | Get child tasks |
+
+### Get Task Plan
+
+Retrieve the autonomous plan state for a task.
+
+**Endpoint:** `GET /api/v1/tasks/{id}/plan`
+
+**Response (200):**
+```json
+{
+  "TaskName": "build-feature",
+  "Namespace": "default",
+  "Iteration": 3,
+  "Summary": "Completed auth module, working on CRUD endpoints",
+  "ProgressPct": 40,
+  "GoalComplete": false,
+  "PlanDocument": "# Plan\n- [x] Auth\n- [ ] CRUD\n...",
+  "CreatedAt": "2024-01-15T10:00:00Z",
+  "UpdatedAt": "2024-01-15T12:30:00Z"
+}
+```
+
+**Errors:**
+- `404` — No plan found for this task
+- `501` — Plan store not configured
 
 ## Sessions
 
@@ -76,6 +102,37 @@ See [OpenAI Compatibility](openai-compat.md) for details.
 |----------|--------|-------------|
 | `/internal/v1/results/:namespace/:taskName` | POST | Submit task result |
 | `/internal/v1/sessions/:namespace/:name/transcript` | GET | Get session transcript |
+| `/internal/v1/plans/:namespace/:taskName` | POST | Save plan state |
+| `/internal/v1/plans/:namespace/:taskName` | GET | Get plan state |
+
+### Save Plan State
+
+Workers call this to persist autonomous plan state.
+
+**Endpoint:** `POST /internal/v1/plans/{namespace}/{taskName}`
+
+**Request Body:**
+```json
+{
+  "summary": "Completed phase 1",
+  "progress_pct": 25,
+  "goal_complete": false,
+  "plan_document": "# Plan\n..."
+}
+```
+
+**Response:** `204 No Content`
+
+### Get Plan State
+
+Workers call this to load the current plan state at startup.
+
+**Endpoint:** `GET /internal/v1/plans/{namespace}/{taskName}`
+
+**Response (200):** Same as public plan endpoint.
+
+**Errors:**
+- `404` — No plan found
 
 ## Health
 

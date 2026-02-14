@@ -55,11 +55,12 @@ type Handlers struct {
 	enforceNamespaceIsolation bool
 	resultStore               store.ResultStore
 	sessionStore              store.SessionStore
+	planStore                 store.PlanStore
 	healthChecker             store.HealthChecker
 }
 
 // NewHandlers creates a new Handlers instance
-func NewHandlers(c client.Client, sessionManager *controller.SessionManager, watchNamespace string, enforceNS bool, rs store.ResultStore, ss store.SessionStore, clientset kubernetes.Interface, hc store.HealthChecker) *Handlers {
+func NewHandlers(c client.Client, sessionManager *controller.SessionManager, watchNamespace string, enforceNS bool, rs store.ResultStore, ss store.SessionStore, ps store.PlanStore, clientset kubernetes.Interface, hc store.HealthChecker) *Handlers {
 	return &Handlers{
 		client:                    c,
 		clientset:                 clientset,
@@ -68,6 +69,7 @@ func NewHandlers(c client.Client, sessionManager *controller.SessionManager, wat
 		enforceNamespaceIsolation: enforceNS,
 		resultStore:               rs,
 		sessionStore:              ss,
+		planStore:                 ps,
 		healthChecker:             hc,
 	}
 }
@@ -329,6 +331,27 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
 	}
 
+	// Enrich with plan state if available
+	if h.planStore != nil && task.Status.Iteration > 0 {
+		plan, planErr := h.planStore.GetPlan(ctx, task.Namespace, task.Name)
+		if planErr == nil {
+			return c.JSON(fiber.Map{
+				"apiVersion": task.APIVersion,
+				"kind":       task.Kind,
+				"metadata":   task.ObjectMeta,
+				"spec":       task.Spec,
+				"status":     task.Status,
+				"plan": fiber.Map{
+					"summary":      plan.Summary,
+					"progressPct":  plan.ProgressPct,
+					"goalComplete": plan.GoalComplete,
+					"planDocument": plan.PlanDocument,
+					"iteration":    plan.Iteration,
+				},
+			})
+		}
+	}
+
 	return c.JSON(task)
 }
 
@@ -494,6 +517,38 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"result": string(data),
 	})
+}
+
+// GetTaskPlan gets the autonomous plan state for a task
+func (h *Handlers) GetTaskPlan(c fiber.Ctx) error {
+	id := c.Params("id")
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+
+	task := &corev1alpha1.Task{}
+	ctx := c.Context()
+	if err := h.client.Get(ctx, types.NamespacedName{Name: id, Namespace: namespace}, task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "task not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+
+	if h.planStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "plan store not configured")
+	}
+
+	plan, planErr := h.planStore.GetPlan(ctx, task.Namespace, task.Name)
+	if planErr != nil {
+		if errors.Is(planErr, store.ErrNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "no plan found for this task")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get plan: %v", planErr))
+	}
+
+	return c.JSON(plan)
 }
 
 // ListSessions lists sessions

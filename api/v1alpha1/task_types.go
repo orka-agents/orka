@@ -325,6 +325,11 @@ type TaskStatus struct {
 	// +optional
 	Attempts int32 `json:"attempts,omitempty"`
 
+	// Iteration is the current autonomous loop iteration (0-based).
+	// Only used when the task's coordination config has autonomous mode enabled.
+	// +optional
+	Iteration int32 `json:"iteration,omitempty"`
+
 	// JobName is the name of the Kubernetes Job running the task
 	// +optional
 	JobName string `json:"jobName,omitempty"`

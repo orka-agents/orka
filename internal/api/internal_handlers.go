@@ -24,13 +24,15 @@ const maxResultSize = 10 << 20 // 10MB
 type InternalHandlers struct {
 	resultStore  store.ResultStore
 	sessionStore store.SessionStore
+	planStore    store.PlanStore
 }
 
 // NewInternalHandlers creates a new InternalHandlers instance.
-func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore) *InternalHandlers {
+func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.PlanStore) *InternalHandlers {
 	return &InternalHandlers{
 		resultStore:  rs,
 		sessionStore: ss,
+		planStore:    ps,
 	}
 }
 
@@ -118,6 +120,69 @@ func (h *InternalHandlers) GetSessionTranscript(c fiber.Ctx) error {
 	}
 
 	return c.SendString(sb.String())
+}
+
+// SubmitPlan handles POST /internal/v1/plans/{namespace}/{taskName}.
+// Workers call this to persist autonomous plan state.
+func (h *InternalHandlers) SubmitPlan(c fiber.Ctx) error {
+	namespace := c.Params("namespace")
+	taskName := c.Params("taskName")
+
+	if namespace == "" || taskName == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
+	}
+
+	if err := verifyCallerNamespace(c, namespace); err != nil {
+		return err
+	}
+
+	var plan struct {
+		Summary      string `json:"summary"`
+		ProgressPct  int    `json:"progress_pct"`
+		GoalComplete bool   `json:"goal_complete"`
+		PlanDocument string `json:"plan_document"`
+	}
+	if err := c.Bind().JSON(&plan); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+	}
+
+	planState := &store.PlanState{
+		TaskName:     taskName,
+		Namespace:    namespace,
+		Summary:      plan.Summary,
+		ProgressPct:  plan.ProgressPct,
+		GoalComplete: plan.GoalComplete,
+		PlanDocument: plan.PlanDocument,
+	}
+
+	ctx := c.Context()
+	if err := h.planStore.SavePlan(ctx, namespace, taskName, planState); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to save plan: %v", err))
+	}
+
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// GetPlan handles GET /internal/v1/plans/{namespace}/{taskName}.
+// Workers call this to load the current plan state at startup.
+func (h *InternalHandlers) GetPlan(c fiber.Ctx) error {
+	namespace := c.Params("namespace")
+	taskName := c.Params("taskName")
+
+	if namespace == "" || taskName == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
+	}
+
+	ctx := c.Context()
+	plan, err := h.planStore.GetPlan(ctx, namespace, taskName)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "plan not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get plan: %v", err))
+	}
+
+	return c.JSON(plan)
 }
 
 // verifyCallerNamespace checks that the authenticated caller's SA namespace
