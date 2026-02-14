@@ -1226,7 +1226,7 @@ func TestReadLines_Empty(t *testing.T) {
 	r := strings.NewReader("")
 	ch := readLines(r)
 
-	lines := make([]string, 0)
+	lines := make([]string, 0, 1)
 	for line := range ch {
 		lines = append(lines, line)
 	}
