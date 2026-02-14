@@ -78,4 +78,3 @@ func TestTracingProviderStream(t *testing.T) {
 		t.Errorf("chunk.Content = %q, want %q", chunk.Content, "mock")
 	}
 }
-

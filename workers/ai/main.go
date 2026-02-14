@@ -177,7 +177,7 @@ func run() error {
 	}
 
 	// Build messages
-	messages := []llm.Message{}
+	messages := make([]llm.Message, 0, len(sessionContext)+1)
 	messages = append(messages, sessionContext...)
 	messages = append(messages, llm.Message{
 		Role:    "user",

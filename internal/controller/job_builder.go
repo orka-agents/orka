@@ -199,7 +199,7 @@ func (b *JobBuilder) buildContainer(task *corev1alpha1.Task, agent *corev1alpha1
 			container.Image = b.GeneralWorkerImage
 			container.Command = []string{"/worker"}
 			// Pass the user command as args to the worker binary
-			var workerArgs []string
+			workerArgs := make([]string, 0, len(task.Spec.Command)+len(task.Spec.Args))
 			workerArgs = append(workerArgs, task.Spec.Command...)
 			workerArgs = append(workerArgs, task.Spec.Args...)
 			container.Args = workerArgs
