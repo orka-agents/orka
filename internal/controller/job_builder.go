@@ -49,6 +49,9 @@ const (
 
 	// TaskNamespaceEnvVar is the env var for the task namespace
 	TaskNamespaceEnvVar = "MERCAN_TASK_NAMESPACE"
+
+	// defaultSecretKey is the default key name in provider secrets
+	defaultSecretKey = "api-key"
 )
 
 // JobBuilder builds Kubernetes Jobs for Tasks
@@ -444,6 +447,35 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 		envVars = b.addCoordinationEnvVars(envVars, task, agent)
 	}
 
+	// Add fallback provider environment variables
+	if agent != nil && agent.Spec.Model != nil && len(agent.Spec.Model.Fallbacks) > 0 {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "MERCAN_AI_FALLBACK_COUNT",
+			Value: fmt.Sprintf("%d", len(agent.Spec.Model.Fallbacks)),
+		})
+		for i, fb := range agent.Spec.Model.Fallbacks {
+			// Resolve the fallback Provider CRD
+			fbProvider := &corev1alpha1.Provider{}
+			if err := b.Get(context.TODO(), client.ObjectKey{
+				Namespace: task.Namespace,
+				Name:      fb.ProviderRef,
+			}, fbProvider); err != nil {
+				continue // skip unresolvable fallbacks
+			}
+			prefix := fmt.Sprintf("MERCAN_AI_FALLBACK_%d", i)
+			envVars = append(envVars,
+				corev1.EnvVar{Name: prefix + "_PROVIDER", Value: string(fbProvider.Spec.Type)},
+				corev1.EnvVar{Name: prefix + "_MODEL", Value: fb.Model},
+			)
+			if fbProvider.Spec.BaseURL != "" {
+				envVars = append(envVars, corev1.EnvVar{Name: prefix + "_BASE_URL", Value: fbProvider.Spec.BaseURL})
+			}
+			if fbProvider.Spec.Azure != nil {
+				envVars = append(envVars, corev1.EnvVar{Name: prefix + "_AZURE_API_VERSION", Value: fbProvider.Spec.Azure.APIVersion})
+			}
+		}
+	}
+
 	return envVars
 }
 
@@ -454,7 +486,7 @@ func (b *JobBuilder) addSecretVolumes(job *batchv1.Job, task *corev1alpha1.Task,
 		secretName := provider.Spec.SecretRef.Name
 		secretKey := provider.Spec.SecretRef.Key
 		if secretKey == "" {
-			secretKey = "api-key"
+			secretKey = defaultSecretKey
 		}
 
 		// Determine the env var name based on provider type
@@ -478,6 +510,39 @@ func (b *JobBuilder) addSecretVolumes(job *batchv1.Job, task *corev1alpha1.Task,
 				},
 			},
 		)
+	}
+
+	// Add fallback provider secrets
+	if agent != nil && agent.Spec.Model != nil {
+		for i, fb := range agent.Spec.Model.Fallbacks {
+			fbProvider := &corev1alpha1.Provider{}
+			if err := b.Get(context.TODO(), client.ObjectKey{
+				Namespace: task.Namespace,
+				Name:      fb.ProviderRef,
+			}, fbProvider); err != nil {
+				continue
+			}
+			secretName := fbProvider.Spec.SecretRef.Name
+			secretKey := fbProvider.Spec.SecretRef.Key
+			if secretKey == "" {
+				secretKey = defaultSecretKey
+			}
+			envVarName := fmt.Sprintf("MERCAN_AI_FALLBACK_%d_API_KEY", i)
+			job.Spec.Template.Spec.Containers[0].Env = append(
+				job.Spec.Template.Spec.Containers[0].Env,
+				corev1.EnvVar{
+					Name: envVarName,
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: secretName,
+							},
+							Key: secretKey,
+						},
+					},
+				},
+			)
+		}
 	}
 
 	// Add task secret

@@ -85,6 +85,48 @@ spec:
 | `maxConcurrentChildren` | int32 | `0` | Maximum number of concurrent child tasks. `0` means unlimited |
 | `maxDepth` | int32 | `0` | Maximum delegation depth. `0` means unlimited |
 
+### Provider Fallback Chain
+
+You can configure fallback providers that are automatically tried when the primary provider fails (e.g., due to auth errors, provider outages, or rate limiting). Fallbacks are configured on the Agent CRD's `spec.model.fallbacks` field.
+
+```yaml
+apiVersion: mercan.ai/v1alpha1
+kind: Agent
+metadata:
+  name: resilient-agent
+spec:
+  providerRef:
+    name: my-openai
+  model:
+    name: gpt-4o
+    fallbacks:
+      - providerRef: my-anthropic
+        model: claude-sonnet-4-20250514
+      - providerRef: my-azure-openai
+        model: gpt-4o
+```
+
+#### How fallbacks work
+
+1. The primary provider is tried first with automatic retries (exponential backoff on 429/5xx errors).
+2. If the primary provider fails with an auth error (401/403), network error, or exhausts all retries, the first fallback provider is tried.
+3. Each fallback provider also gets automatic retries.
+4. If all providers fail, the last error is returned.
+
+#### Fallback fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `providerRef` | string | Yes | Name of a Provider CRD to fall back to |
+| `model` | string | No | Model to use with this provider. If empty, uses the provider's `defaultModel` |
+
+#### Notes
+
+- Fallbacks are only supported on Agent-based tasks. Agent-less tasks get retries only.
+- Each fallback provider must have its own Provider CRD with a valid secret reference.
+- Rate-limited providers (429 responses) are temporarily cooled down and skipped in subsequent requests.
+- Streaming requests are retried/failed over only on the initial connection — mid-stream failures are not retried.
+
 ### Agent (with Runtime)
 
 Agent configuration for external CLI runtimes (Claude Code CLI or GitHub Copilot CLI).
@@ -276,3 +318,47 @@ monitoring:
 | `mercan_agent_tasks_active` | Gauge | Active tasks per agent |
 | `mercan_agent_tasks_total` | Counter | Total tasks per agent |
 | `mercan_skills_loaded_total` | Counter | Skills loaded |
+
+## OpenTelemetry Tracing
+
+Mercan supports opt-in OpenTelemetry distributed tracing for debugging and performance analysis. Tracing is disabled by default (zero overhead).
+
+### Enabling Tracing
+
+Add the `--enable-tracing` flag to the controller:
+
+```yaml
+args:
+  - --enable-tracing
+env:
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: "jaeger-collector.observability.svc:4317"
+```
+
+| Flag / Environment Variable | Default | Description |
+|------------------------------|---------|-------------|
+| `--enable-tracing` | `false` | Enable OpenTelemetry tracing |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP gRPC collector endpoint |
+
+### Instrumented Components
+
+| Tracer | Span | Attributes |
+|--------|------|------------|
+| `mercan.api` | `GET /api/v1/tasks` | `http.method`, `http.route`, `http.status_code`, `http.request_id` |
+| `mercan.chat` | `chat.request` | `session.id`, `chat.provider`, `chat.model` |
+| `mercan.chat` | `chat.tool_loop.iteration` | `chat.iteration` |
+| `mercan.llm` | `llm.complete` | `llm.provider`, `llm.model`, `llm.input_tokens`, `llm.output_tokens` |
+| `mercan.tools` | `tool.execute` | `tool.name`, `tool.success` |
+| `mercan.controller` | `task.reconcile` | `task.name`, `task.namespace`, `task.type` |
+
+### Example: Jaeger Setup
+
+```bash
+# Deploy Jaeger all-in-one (development only)
+kubectl create namespace observability
+kubectl apply -n observability -f https://raw.githubusercontent.com/jaegertracing/jaeger-operator/main/examples/simplest.yaml
+
+# Configure the controller
+kubectl set env deployment/mercan-controller \
+  OTEL_EXPORTER_OTLP_ENDPOINT=jaeger-collector.observability.svc:4317
+```
