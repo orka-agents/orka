@@ -18,14 +18,14 @@ func TestTruncateMessages_UnderBudget(t *testing.T) {
 		{Role: "user", Content: "hello"},
 		{Role: "assistant", Content: "hi there"},
 	}
-	result := TruncateMessages(msgs, 100000)
+	result := llm.TruncateMessages(msgs, 100000)
 	if len(result) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(result))
 	}
 }
 
 func TestTruncateMessages_EmptyInput(t *testing.T) {
-	result := TruncateMessages(nil, 1000)
+	result := llm.TruncateMessages(nil, 1000)
 	if len(result) != 0 {
 		t.Fatalf("expected 0 messages, got %d", len(result))
 	}
@@ -40,7 +40,7 @@ func TestTruncateMessages_DropsMiddleKeepsFirstAndRecent(t *testing.T) {
 		{Role: "user", Content: "latest question"},      // ~4 tokens
 	}
 	// Budget for ~12 tokens: first(4) + truncation note + last two(8)
-	result := TruncateMessages(msgs, 16)
+	result := llm.TruncateMessages(msgs, 16)
 
 	if result[0].Content != "original request" {
 		t.Errorf("first message should be preserved, got %q", result[0].Content)
@@ -65,7 +65,7 @@ func TestTruncateMessages_ToolCallsKeptAtomic(t *testing.T) {
 		{Role: "user", Content: "now do more"},
 	}
 	// Budget large enough to keep everything
-	result := TruncateMessages(msgs, 100000)
+	result := llm.TruncateMessages(msgs, 100000)
 	if len(result) != 5 {
 		t.Fatalf("expected 5 messages, got %d", len(result))
 	}
@@ -73,7 +73,7 @@ func TestTruncateMessages_ToolCallsKeptAtomic(t *testing.T) {
 	// Budget that forces dropping the tool call block
 	// first msg (~3 tokens) + last two (~5 tokens each) = ~13 tokens
 	// tool call block is ~4 tokens for assistant + ~3 for result = ~7 tokens
-	result = TruncateMessages(msgs, 14)
+	result = llm.TruncateMessages(msgs, 14)
 
 	// Verify tool call and tool result are either both present or both absent
 	hasToolCall := false
@@ -96,7 +96,7 @@ func TestTruncateMessages_BudgetTooSmallForAnythingButFirst(t *testing.T) {
 		{Role: "user", Content: "hello world this is a long message"},
 		{Role: "assistant", Content: "response"},
 	}
-	result := TruncateMessages(msgs, 1)
+	result := llm.TruncateMessages(msgs, 1)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(result))
 	}
@@ -112,8 +112,8 @@ func TestEstimateMessageTokens_IncludesToolCalls(t *testing.T) {
 			{Name: "my_tool", Arguments: json.RawMessage(`{"key":"value"}`)},
 		},
 	}
-	tokens := estimateMessageTokens(m)
-	contentOnly := EstimateTokens("test")
+	tokens := llm.EstimateMessageTokens(m)
+	contentOnly := llm.EstimateTokens("test")
 	if tokens <= contentOnly {
 		t.Error("token count should include tool call content")
 	}

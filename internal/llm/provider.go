@@ -9,6 +9,8 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 )
 
 // Provider is the interface for LLM providers
@@ -123,13 +125,73 @@ func NewProvider(name string, config ProviderConfig) (Provider, error) {
 
 // Error types
 type ProviderError struct {
-	Provider string
-	Message  string
-	Code     string
+	Provider   string
+	Message    string
+	Code       string
+	StatusCode int
 }
 
 func (e *ProviderError) Error() string {
 	return e.Message
+}
+
+func (e *ProviderError) IsRetryable() bool {
+	switch e.StatusCode {
+	case 429, 500, 502, 503, 529:
+		return true
+	default:
+		return false
+	}
+}
+
+func (e *ProviderError) IsProviderDown() bool {
+	switch e.StatusCode {
+	case 401, 403:
+		return true
+	default:
+		return false
+	}
+}
+
+func (e *ProviderError) IsContextTooLong() bool {
+	if e.StatusCode != 400 {
+		return false
+	}
+	msg := strings.ToLower(e.Message)
+	return strings.Contains(msg, "context") || strings.Contains(msg, "token") || strings.Contains(msg, "too long") || strings.Contains(msg, "maximum")
+}
+
+// ShouldRetry reports whether the operation that produced err should be retried.
+func ShouldRetry(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var pe *ProviderError
+	if errors.As(err, &pe) {
+		return pe.IsRetryable()
+	}
+	return true // network errors, unknown errors → retry
+}
+
+// ShouldFallback reports whether a different provider should be tried.
+func ShouldFallback(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var pe *ProviderError
+	if errors.As(err, &pe) {
+		return pe.IsProviderDown()
+	}
+	return true // non-ProviderError (network) → try another provider
+}
+
+// IsContextTooLongErr reports whether err indicates the context/token limit was exceeded.
+func IsContextTooLongErr(err error) bool {
+	var pe *ProviderError
+	if errors.As(err, &pe) {
+		return pe.IsContextTooLong()
+	}
+	return false
 }
 
 var (

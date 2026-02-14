@@ -72,6 +72,48 @@ spec:
     maxDepth: 3
 ```
 
+### Provider Fallback Chain
+
+You can configure fallback providers that are automatically tried when the primary provider fails (e.g., due to auth errors, provider outages, or rate limiting). Fallbacks are configured on the Agent CRD's `spec.model.fallbacks` field.
+
+```yaml
+apiVersion: mercan.ai/v1alpha1
+kind: Agent
+metadata:
+  name: resilient-agent
+spec:
+  providerRef:
+    name: my-openai
+  model:
+    name: gpt-4o
+    fallbacks:
+      - providerRef: my-anthropic
+        model: claude-sonnet-4-20250514
+      - providerRef: my-azure-openai
+        model: gpt-4o
+```
+
+#### How fallbacks work
+
+1. The primary provider is tried first with automatic retries (exponential backoff on 429/5xx errors).
+2. If the primary provider fails with an auth error (401/403), network error, or exhausts all retries, the first fallback provider is tried.
+3. Each fallback provider also gets automatic retries.
+4. If all providers fail, the last error is returned.
+
+#### Fallback fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `providerRef` | string | Yes | Name of a Provider CRD to fall back to |
+| `model` | string | No | Model to use with this provider. If empty, uses the provider's `defaultModel` |
+
+#### Notes
+
+- Fallbacks are only supported on Agent-based tasks. Agent-less tasks get retries only.
+- Each fallback provider must have its own Provider CRD with a valid secret reference.
+- Rate-limited providers (429 responses) are temporarily cooled down and skipped in subsequent requests.
+- Streaming requests are retried/failed over only on the initial connection — mid-stream failures are not retried.
+
 ### Agent (with Runtime)
 
 Agent configuration for external CLI runtimes (Claude Code CLI or GitHub Copilot CLI).
