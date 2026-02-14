@@ -7,65 +7,94 @@ metadata:
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 rules:
-  # Task CRD permissions
+  # Custom Resource permissions
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks"]
+    resources: ["tasks", "tools", "agents", "providers"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/status"]
+    resources: ["tasks/status", "tools/status", "agents/status", "providers/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/finalizers"]
+    resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "providers/finalizers"]
     verbs: ["update"]
-
-  # Tool CRD permissions
-  - apiGroups: ["core.orka.ai"]
-    resources: ["tools"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["core.orka.ai"]
-    resources: ["tools/status"]
-    verbs: ["get", "update", "patch"]
-
-  # Agent CRD permissions
-  - apiGroups: ["core.orka.ai"]
-    resources: ["agents"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["core.orka.ai"]
-    resources: ["agents/status"]
-    verbs: ["get", "update", "patch"]
 
   # Job permissions
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "watch"]
 
-  # ConfigMap permissions (results, sessions)
+  # Core resource permissions
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-
-  # Secret permissions (read-only for API keys)
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch"]
-
-  # Pod permissions (for logs)
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes", "persistentvolumeclaims", "replicationcontrollers"]
+    verbs: ["get", "list", "watch"]
+
+  # Workload resource permissions (read-only, for chat K8s tools)
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+
+  # RBAC permissions (for chat K8s tools)
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+    verbs: ["get", "list", "watch"]
 
   # TokenReview for authentication
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
     verbs: ["create"]
 
-  # Events
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["create", "patch"]
+  # Leader election
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 # Controller ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1

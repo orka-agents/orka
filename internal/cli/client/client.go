@@ -215,11 +215,12 @@ func (c *Client) HealthCheck(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	var resp map[string]string
+	var resp map[string]any
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return false, nil
 	}
-	return resp["status"] == "ok", nil
+	status, _ := resp["status"].(string)
+	return status == "ok", nil
 }
 
 // ReadyCheck calls GET /readyz and returns true if ready.
@@ -228,11 +229,12 @@ func (c *Client) ReadyCheck(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	var resp map[string]string
+	var resp map[string]any
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return false, nil
 	}
-	return resp["status"] == "ok", nil
+	status, _ := resp["status"].(string)
+	return status == "ok", nil
 }
 
 // extractAgentSummary pulls summary fields from the raw agent JSON.
