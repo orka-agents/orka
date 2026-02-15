@@ -113,6 +113,8 @@ func RegisterBuiltinTools() {
 	DefaultRegistry.Register(NewWebSearchTool())
 	DefaultRegistry.Register(NewCodeExecTool())
 	DefaultRegistry.Register(NewFileReadTool())
+	DefaultRegistry.Register(NewWebFetchTool())
+	DefaultRegistry.Register(NewFileWriteTool())
 }
 
 // RegisterCoordinationTools registers coordination tools that require a K8s client

@@ -234,3 +234,73 @@ func TestWebSearchTool_Execute_ContextCancellation(t *testing.T) {
 		t.Error("Execute() expected error for cancelled context")
 	}
 }
+
+func TestParseDDGResults(t *testing.T) {
+	html := `<div class="result">
+		<a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage1&rut=abc">Example Page 1</a>
+		<a class="result__snippet" href="#">This is the first result snippet</a>
+	</div>
+	<div class="result">
+		<a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage2&rut=def"><b>Bold</b> Page 2</a>
+		<a class="result__snippet" href="#">Second result with <b>bold</b></a>
+	</div>`
+
+	results := parseDDGResults(html, 10)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+
+	if results[0].URL != "https://example.com/page1" {
+		t.Errorf("result[0].URL = %q, want %q", results[0].URL, "https://example.com/page1")
+	}
+	if results[0].Title != "Example Page 1" {
+		t.Errorf("result[0].Title = %q, want %q", results[0].Title, "Example Page 1")
+	}
+
+	// Tags should be stripped from title
+	if results[1].Title != "Bold Page 2" {
+		t.Errorf("result[1].Title = %q, want %q", results[1].Title, "Bold Page 2")
+	}
+}
+
+func TestDecodeDDGURL(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{"with uddg param", "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Ftest&rut=abc", "https://example.com/test"},
+		{"direct URL", "https://example.com/direct", "https://example.com/direct"},
+		{"non-http", "javascript:void(0)", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := decodeDDGURL(tt.input)
+			if got != tt.expect {
+				t.Errorf("decodeDDGURL(%q) = %q, want %q", tt.input, got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestStripHTMLTags(t *testing.T) {
+	tests := []struct {
+		input  string
+		expect string
+	}{
+		{"<b>bold</b>", "bold"},
+		{"no tags", "no tags"},
+		{"<a href='#'>link &amp; text</a>", "link & text"},
+		{"<span>a</span> <span>b</span>", "a b"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := stripHTMLTags(tt.input)
+			if got != tt.expect {
+				t.Errorf("stripHTMLTags(%q) = %q, want %q", tt.input, got, tt.expect)
+			}
+		})
+	}
+}
