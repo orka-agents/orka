@@ -71,6 +71,18 @@ cd ui && bun run lint && bun run test  # After editing UI code
 
 Single tests: `go test ./internal/api/ -run TestHandlerName -v`
 
+## Key Gotchas
+
+- Provider secret key defaults to `api-key` — if your K8s Secret uses a different key, set `secretRef.key`
+- Worker filesystem is read-only except `/tmp`, `/home/worker`, and `/workspace` — writes elsewhere will fail
+- `make build` requires UI assets — run `make ui-build` first, or the `ensure-ui-embed` target creates a stub
+- Fallback providers are resolved at Job build time, not worker runtime — provider changes after Job creation don't take effect
+- On context length errors, the AI worker naively truncates messages to ~50% — oldest context is lost first
+- Copilot agent worker auto-approves all permission requests — no tool filtering in autonomous mode
+- OpenAI provider auto-detects API mode: tries Responses API first, falls back to Chat Completions on 404/405
+- Auth tokens are cached for 60s (SHA256 hash) — token revocation has up to 60s propagation delay
+- `code_exec` tool silently caps timeout at 60s — values above 60 fall back to the 30s default
+
 ## Documentation
 
 See @docs/ for detailed documentation:
