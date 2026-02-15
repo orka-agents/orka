@@ -190,21 +190,33 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return "", fmt.Errorf("failed to get parent task: %w", err)
 	}
 
-	// Build model config
+	// Build model config — clear provider to avoid mismatch with providerRef
 	model := &corev1alpha1.ModelConfig{}
 	if a.Model != nil {
-		model.Provider = a.Model.Provider
 		model.Name = a.Model.Name
-	}
-	if model.Provider == "" {
-		model.Provider = os.Getenv("ORKA_AI_PROVIDER")
 	}
 	if model.Name == "" {
 		model.Name = os.Getenv("ORKA_AI_MODEL")
 	}
 
-	// Build provider ref
-	providerRefName := a.ProviderRef
+	// Build provider ref — inherit from parent agent's providerRef for reliability,
+	// since the LLM often guesses wrong provider names (e.g., "anthropic" instead of "default")
+	providerRefName := ""
+	if parentTask.Spec.AgentRef != nil {
+		parentAgent := &corev1alpha1.Agent{}
+		agentNS := parentTask.Spec.AgentRef.Namespace
+		if agentNS == "" {
+			agentNS = ns
+		}
+		if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: parentTask.Spec.AgentRef.Name, Namespace: agentNS}, parentAgent); err == nil {
+			if parentAgent.Spec.ProviderRef != nil {
+				providerRefName = parentAgent.Spec.ProviderRef.Name
+			}
+		}
+	}
+	if providerRefName == "" {
+		providerRefName = a.ProviderRef
+	}
 	if providerRefName == "" {
 		providerRefName = os.Getenv("ORKA_AI_PROVIDER")
 	}

@@ -446,12 +446,28 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 		}
 	}
 
+	// Auto-inject messaging tools for child tasks (tasks delegated by a coordinator)
+	// so they can communicate with sibling tasks via send_message/check_messages
+	_, isChildTask := task.Labels["orka.ai/parent-task"]
+	if isChildTask {
+		for _, ct := range []string{"send_message", "check_messages"} {
+			if !slices.Contains(cfg.tools, ct) {
+				cfg.tools = append(cfg.tools, ct)
+			}
+		}
+	}
+
 	if len(cfg.tools) > 0 {
 		envVars = append(envVars, corev1.EnvVar{Name: "ORKA_AI_TOOLS", Value: strings.Join(cfg.tools, ",")})
 	}
 
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
 		envVars = b.addCoordinationEnvVars(envVars, task, agent)
+	}
+
+	// Enable coordination in worker for child tasks so messaging tools are registered
+	if isChildTask && (agent == nil || agent.Spec.Coordination == nil || !agent.Spec.Coordination.Enabled) {
+		envVars = append(envVars, corev1.EnvVar{Name: "ORKA_COORDINATION_ENABLED", Value: "true"})
 	}
 
 	// Add fallback provider environment variables
