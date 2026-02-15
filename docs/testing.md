@@ -125,3 +125,19 @@ vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
 // Use test utils with QueryClient wrapper
 import { render } from '@/test/test-utils'
 ```
+
+## Testing with Chat
+
+When testing features via the chat endpoint, use **natural prompts** — the kind a human would actually type. Never reference internal concepts like agent names, tool names, or implementation details. Describe what you want done, not how the system should do it. The chat should infer the right agents, tools, delegation patterns, and cancellation logic on its own.
+
+Good examples:
+- "Research the benefits of Kubernetes and write a technical guide based on the findings."
+- "What's the best container orchestration tool? Get me an answer as fast as possible."
+- "Draft an outline for a blog post about containers and turn it into a full post."
+- "Compare microservices vs monoliths from three angles, then synthesize into a recommendation."
+
+Bad examples:
+- "Create a coordinator agent and a researcher agent, then delegate two tasks..."
+- "Use the send_message tool to send a message to task msg-receiver..."
+- "Have three researchers race to answer..." (users don't think in terms of "researchers")
+- "Use the first answer and cancel the others." (the system should infer this automatically)

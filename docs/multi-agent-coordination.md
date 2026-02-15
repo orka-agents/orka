@@ -51,7 +51,7 @@ Controller: parent Job succeeded → parent Task → Succeeded
 
 ### Coordination Tools
 
-Located in `internal/tools/`. Coordination tools include `delegate_task`, `wait_for_tasks`, PR tools (`create_pull_request`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`), and agent management tools (`create_agent`, `delete_agent`). All are registered via `RegisterCoordinationTools(k8sClient)` in `internal/tools/registry.go` when `ORKA_COORDINATION_ENABLED=true`.
+Located in `internal/tools/`. Coordination tools include `delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, PR tools (`create_pull_request`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`), and agent management tools (`create_agent`, `delete_agent`). All are registered via `RegisterCoordinationTools(k8sClient)` in `internal/tools/registry.go` when `ORKA_COORDINATION_ENABLED=true`.
 
 #### `delegate_task` Tool
 
@@ -117,6 +117,81 @@ Implementation (`internal/tools/wait_for_tasks.go`):
      ]
    }
    ```
+
+#### `cancel_task` Tool
+
+LLM-visible parameter schema:
+```json
+{
+  "type": "object",
+  "properties": {
+    "task_name":  {"type": "string", "description": "Name of the child task to cancel"},
+    "namespace":  {"type": "string", "description": "Namespace (defaults to current)"},
+    "reason":     {"type": "string", "description": "Reason for cancellation"}
+  },
+  "required": ["task_name"]
+}
+```
+
+Implementation (`internal/tools/cancel_task.go`):
+1. Reads `ORKA_TASK_NAME`, `ORKA_TASK_NAMESPACE` from env
+2. Validates the target task is a child of the calling task via `orka.ai/parent-task` label
+3. Only cancels tasks in `Pending` or `Running` phase
+4. Sets the task phase to `Cancelled` via status subresource update
+5. Returns confirmation with task name and cancellation reason
+
+#### `send_message` Tool
+
+LLM-visible parameter schema:
+```json
+{
+  "type": "object",
+  "properties": {
+    "to_task": {"type": "string", "description": "Name of the sibling task to message, or \"*\" to broadcast"},
+    "content": {"type": "string", "description": "Message content to send"}
+  },
+  "required": ["to_task", "content"]
+}
+```
+
+Implementation (`internal/tools/send_message.go`):
+1. Reads `ORKA_TASK_NAME`, `ORKA_TASK_NAMESPACE`, `ORKA_PARENT_TASK`, `ORKA_CONTROLLER_URL` from env
+2. Posts message to controller's internal messaging API
+3. Messages are scoped to siblings (same parent task) — agents can only message tasks that share the same coordinator
+4. Use `to_task="*"` to broadcast to all siblings
+
+#### `check_messages` Tool
+
+LLM-visible parameter schema:
+```json
+{
+  "type": "object",
+  "properties": {
+    "mark_read": {"type": "boolean", "description": "Whether to mark messages as read (default: true)"}
+  }
+}
+```
+
+Implementation (`internal/tools/check_messages.go`):
+1. Reads `ORKA_TASK_NAME`, `ORKA_TASK_NAMESPACE`, `ORKA_PARENT_TASK`, `ORKA_CONTROLLER_URL` from env
+2. Fetches unread messages from controller's internal messaging API
+3. Returns all unread messages addressed to this task or broadcast to all siblings (same parent)
+4. Messages are marked as read by default to avoid re-delivery
+
+### Inter-Agent Messaging
+
+Sibling tasks (children of the same coordinator) can exchange messages to coordinate work, share findings, and avoid duplicated effort. Messages flow through the controller's internal API — no direct pod-to-pod communication.
+
+**Architecture:**
+- Messages stored in SQLite via `MessageStore` interface (`internal/store/store.go`)
+- Internal endpoints: `POST /internal/v1/messages/{namespace}` and `GET /internal/v1/messages/{namespace}/{taskName}`
+- Scoped to siblings only: messages filtered by `parent_task` column
+- Broadcast: `to_task="*"` sends to all siblings (sender excluded from own broadcasts)
+- Cleanup: messages are automatically deleted when tasks or parent coordinators are deleted
+
+**Environment Variables:**
+- `ORKA_PARENT_TASK`: Set automatically by the job builder for child tasks (from `orka.ai/parent-task` label)
+- `ORKA_CONTROLLER_URL`, `ORKA_TASK_NAME`, `ORKA_TASK_NAMESPACE`: Already available for all workers
 
 ### Controller Enforcement
 
