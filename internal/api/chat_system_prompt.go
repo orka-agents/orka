@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
+
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -177,6 +179,13 @@ func buildTaskTypesSection(mode PromptMode) string {
   Use for: code changes in a git repo, multi-file refactoring.
   IMPORTANT: When the user specifies an agent (via --agent or agentRef) that has a
   runtime configured, ALWAYS use create_agent_task with that agent name.
+  When the task involves a git repository, ALWAYS include the gitRepo URL in the
+  workspace config so credentials are automatically mounted:
+    create_agent_task(agent: "coder", prompt: "...", gitRepo: "https://github.com/org/repo", timeout: "15m")
+  When creating new agents for coding tasks, check the agent_runtimes in the Runtime line above.
+  Use whichever runtime is available. If both are available, prefer copilot.
+  If no agent runtimes are available, use create_ai_task with workspace config instead.
+  Agent tasks need more time than AI tasks. Set timeout to at least 15m.
   Do NOT use create_container_task or create_ai_task for runtime agents.
 </task_types>
 
@@ -204,6 +213,20 @@ The coordinator agent will then:
 3. Use wait_for_tasks to collect results
 4. Synthesize results and iterate if needed
 5. Specialist agents are auto-cleaned up when the coordinator task is deleted
+
+INTER-AGENT MESSAGING: Child tasks delegated by a coordinator can communicate with
+each other using send_message and check_messages. This is useful when:
+- One task produces results that a sibling task needs before it can start
+- Tasks need to coordinate or exchange intermediate findings
+- A pipeline of tasks where each step builds on the previous
+
+The coordinator should instruct child tasks to use send_message (with to_task="*" to
+broadcast to all siblings) and check_messages in their prompts. For reliable delivery,
+delegate the sender first, wait for it to complete, then delegate the receiver.
+
+CANCEL: The coordinator can use cancel_task to cancel running child tasks. This is
+useful for race patterns (start multiple tasks, keep the first result, cancel the rest)
+or when a child task's result makes other tasks unnecessary.
 
 MANUAL (multi-step): For more control, create agents separately:
 1. Create specialist agents with create_agent
@@ -284,13 +307,26 @@ Example 4: "review this code for security issues"
 → wait_for_task → fetch_task_output → summarize findings
 
 Example 5: "refactor the auth module" (with agent available)
-→ create_agent_task (agent: "coder", prompt: "Refactor the auth module...")
+→ create_agent_task (agent: "coder", prompt: "Refactor the auth module...", gitRepo: "https://github.com/org/repo")
 → wait_for_task → fetch_task_output
 
 Example 6: User specifies --agent my-agent (which has runtime: copilot)
-→ create_agent_task (agent: "my-agent", prompt: "...")
-  (Use create_agent_task because the agent has a runtime)
+→ create_agent_task (agent: "my-agent", prompt: "...", gitRepo: "https://github.com/org/repo")
+  (Use create_agent_task because the agent has a runtime; include gitRepo for credentials)
 → wait_for_task → fetch_task_output
+
+Example 7: "Research X and then write a guide based on findings" (multi-step pipeline)
+→ Use the coordinator pattern. The coordinator should:
+  1. delegate_task to a researcher agent with prompt to research X and use send_message to broadcast findings
+  2. wait_for_tasks for the researcher to complete
+  3. delegate_task to a writer agent with prompt to check_messages for research findings and write the guide
+  4. wait_for_tasks and synthesize the final result
+
+Example 8: "Get me an answer as fast as possible" (race pattern)
+→ Use the coordinator pattern. The coordinator should:
+  1. delegate_task multiple agents with the same prompt in parallel
+  2. wait_for_tasks — as soon as one completes, use cancel_task on the others
+  3. Return the winning result
 </examples>
 `
 }
@@ -348,8 +384,32 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 		providerNames = append(providerNames, providerList.Items[i].Name)
 	}
 
-	providersSection = fmt.Sprintf("Runtime: providers=[%s] | agents=%d | tools=%d | container=yes\n",
-		strings.Join(providerNames, ", "), len(agentList.Items), len(toolList.Items)+3)
+	// Detect available agent runtimes by checking for well-known secrets
+	var availableRuntimes []string
+	var secretList corev1.SecretList
+	if err := b.client.List(ctx, &secretList, client.InNamespace(b.namespace)); err == nil {
+		secretNames := make(map[string]bool, len(secretList.Items))
+		for i := range secretList.Items {
+			secretNames[secretList.Items[i].Name] = true
+		}
+		for _, name := range []string{"github-credentials", "git-credentials", "github-token", "git-token"} {
+			if secretNames[name] {
+				availableRuntimes = append(availableRuntimes, "copilot")
+				break
+			}
+		}
+		if secretNames["anthropic-api-key"] {
+			availableRuntimes = append(availableRuntimes, "claude")
+		}
+	}
+
+	runtimeInfo := "none"
+	if len(availableRuntimes) > 0 {
+		runtimeInfo = strings.Join(availableRuntimes, ", ")
+	}
+
+	providersSection = fmt.Sprintf("Runtime: providers=[%s] | agents=%d | tools=%d | container=yes | agent_runtimes=[%s]\n",
+		strings.Join(providerNames, ", "), len(agentList.Items), len(toolList.Items)+3, runtimeInfo)
 
 	return agentsSection, toolsSection, providersSection, nil
 }

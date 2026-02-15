@@ -614,6 +614,7 @@ spec:
                       - Succeeded
                       - Failed
                       - Scheduled
+                      - Cancelled
                       type: string
                     result:
                       description: Result is the result from the child task (if completed)
@@ -719,6 +720,7 @@ spec:
                 - Succeeded
                 - Failed
                 - Scheduled
+                - Cancelled
                 type: string
               resultRef:
                 description: ResultRef indicates whether a result is available

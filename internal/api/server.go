@@ -36,6 +36,7 @@ type ServerConfig struct {
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
 	PlanStore                 store.PlanStore
+	MessageStore              store.MessageStore
 	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
 }
@@ -53,6 +54,7 @@ type Server struct {
 	ResultStore      store.ResultStore
 	SessionStore     store.SessionStore
 	PlanStore        store.PlanStore
+	MessageStore     store.MessageStore
 }
 
 // NewServer creates a new API server
@@ -70,6 +72,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		ResultStore:    config.ResultStore,
 		SessionStore:   config.SessionStore,
 		PlanStore:      config.PlanStore,
+		MessageStore:   config.MessageStore,
 	}
 
 	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace, config.EnforceNamespaceIsolation, config.ResultStore, config.SessionStore, config.PlanStore, config.Clientset, config.HealthChecker)
@@ -167,7 +170,7 @@ func (s *Server) setupRoutes() {
 
 	// Internal API for worker communication
 	if s.ResultStore != nil && s.SessionStore != nil {
-		s.internalHandlers = NewInternalHandlers(s.ResultStore, s.SessionStore, s.PlanStore)
+		s.internalHandlers = NewInternalHandlers(s.ResultStore, s.SessionStore, s.PlanStore, s.MessageStore)
 		internal := s.app.Group("/internal/v1")
 		internal.Use(NewAuthMiddleware(s.client))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
@@ -175,6 +178,10 @@ func (s *Server) setupRoutes() {
 		if s.PlanStore != nil {
 			internal.Post("/plans/:namespace/:taskName", s.internalHandlers.SubmitPlan)
 			internal.Get("/plans/:namespace/:taskName", s.internalHandlers.GetPlan)
+		}
+		if s.MessageStore != nil {
+			internal.Post("/messages/:namespace", s.internalHandlers.SendMessage)
+			internal.Get("/messages/:namespace/:taskName", s.internalHandlers.GetMessages)
 		}
 	}
 }

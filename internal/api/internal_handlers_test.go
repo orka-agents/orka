@@ -24,7 +24,7 @@ import (
 func setupTestInternalHandlers() (*InternalHandlers, *fiber.App, *sqlite.Store) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	h := NewInternalHandlers(ss, ss, ss)
+	h := NewInternalHandlers(ss, ss, ss, ss)
 	app := fiber.New()
 
 	// Inject a default UserInfo so verifyCallerNamespace passes
@@ -115,5 +115,95 @@ func TestGetPlan(t *testing.T) {
 		resp, err := app.Test(req)
 		require.NoError(t, err)
 		require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	})
+}
+
+func TestSendMessage(t *testing.T) {
+	h, app, _ := setupTestInternalHandlers()
+	app.Post("/internal/v1/messages/:namespace", h.SendMessage)
+
+	t.Run("success", func(t *testing.T) {
+		body := map[string]string{
+			"fromTask":   "worker-a",
+			"toTask":     "worker-b",
+			"parentTask": "coordinator",
+			"content":    "found a bug",
+		}
+		bodyBytes, _ := json.Marshal(body)
+
+		req := httptest.NewRequest(http.MethodPost, "/internal/v1/messages/default", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	})
+
+	t.Run("missing required fields", func(t *testing.T) {
+		body := map[string]string{
+			"fromTask": "worker-a",
+		}
+		bodyBytes, _ := json.Marshal(body)
+
+		req := httptest.NewRequest(http.MethodPost, "/internal/v1/messages/default", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	})
+
+	t.Run("invalid body", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/internal/v1/messages/default", bytes.NewReader([]byte("not json")))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	})
+}
+
+func TestGetMessages(t *testing.T) {
+	h, app, ss := setupTestInternalHandlers()
+	app.Get("/internal/v1/messages/:namespace/:taskName", h.GetMessages)
+
+	// Pre-send a message
+	err := ss.SendMessage(context.Background(), &store.Message{
+		Namespace:  "default",
+		FromTask:   "worker-a",
+		ToTask:     "worker-b",
+		ParentTask: "coordinator",
+		Content:    "hello from a",
+	})
+	require.NoError(t, err)
+
+	t.Run("has messages", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/messages/default/worker-b?parentTask=coordinator&markRead=false", nil)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var messages []store.Message
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&messages))
+		require.Len(t, messages, 1)
+		require.Equal(t, "hello from a", messages[0].Content)
+	})
+
+	t.Run("no messages", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/messages/default/worker-c?parentTask=coordinator", nil)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var messages []store.Message
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&messages))
+		require.Empty(t, messages)
+	})
+
+	t.Run("missing parentTask", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/messages/default/worker-b", nil)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	})
 }

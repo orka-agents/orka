@@ -104,6 +104,8 @@ See [OpenAI Compatibility](openai-compat.md) for details.
 | `/internal/v1/sessions/:namespace/:name/transcript` | GET | Get session transcript |
 | `/internal/v1/plans/:namespace/:taskName` | POST | Save plan state |
 | `/internal/v1/plans/:namespace/:taskName` | GET | Get plan state |
+| `/internal/v1/messages/:namespace` | POST | Send inter-agent message |
+| `/internal/v1/messages/:namespace/:taskName` | GET | Get messages for a task |
 
 ### Save Plan State
 
@@ -133,6 +135,52 @@ Workers call this to load the current plan state at startup.
 
 **Errors:**
 - `404` — No plan found
+
+### Send Message
+
+Workers call this to send messages to sibling tasks (same parent coordinator).
+
+**Endpoint:** `POST /internal/v1/messages/{namespace}`
+
+**Request Body:**
+```json
+{
+  "fromTask": "worker-a",
+  "toTask": "worker-b",
+  "parentTask": "coordinator",
+  "content": "Found a bug in the auth module"
+}
+```
+
+Use `"toTask": "*"` to broadcast to all siblings.
+
+**Response:** `204 No Content`
+
+### Get Messages
+
+Workers call this to check for unread messages.
+
+**Endpoint:** `GET /internal/v1/messages/{namespace}/{taskName}?parentTask={parentTask}&markRead={true|false}`
+
+**Query Parameters:**
+- `parentTask` (required) — Parent coordinator task name (scopes messages to siblings)
+- `markRead` (optional, default: `true`) — Whether to mark returned messages as read
+
+**Response (200):**
+```json
+[
+  {
+    "id": 1,
+    "namespace": "default",
+    "fromTask": "worker-b",
+    "toTask": "worker-a",
+    "parentTask": "coordinator",
+    "content": "Found a bug in the auth module",
+    "read": false,
+    "createdAt": "2026-01-15T10:30:00Z"
+  }
+]
+```
 
 ## Health
 
