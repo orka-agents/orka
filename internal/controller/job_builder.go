@@ -282,6 +282,13 @@ func (b *JobBuilder) buildEnvVars(task *corev1alpha1.Task, agent *corev1alpha1.A
 		)
 	}
 
+	// Add parent task env var for inter-agent messaging
+	if parentTask, ok := task.Labels["orka.ai/parent-task"]; ok {
+		envVars = append(envVars,
+			corev1.EnvVar{Name: "ORKA_PARENT_TASK", Value: parentTask},
+		)
+	}
+
 	// Add AI-specific env vars
 	if task.Spec.Type == corev1alpha1.TaskTypeAI {
 		envVars = b.addAIEnvVars(envVars, task, agent, provider)
@@ -432,7 +439,18 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 
 	// Auto-inject coordination tools when coordination is enabled
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
-		for _, ct := range []string{"delegate_task", "wait_for_tasks", "create_pull_request", "merge_pull_request", "auto_merge_pull_request", "review_pull_request", "post_review_comment", "create_agent", "delete_agent", "update_plan"} {
+		for _, ct := range []string{"delegate_task", "wait_for_tasks", "cancel_task", "send_message", "check_messages", "create_pull_request", "merge_pull_request", "auto_merge_pull_request", "review_pull_request", "post_review_comment", "create_agent", "delete_agent", "update_plan"} {
+			if !slices.Contains(cfg.tools, ct) {
+				cfg.tools = append(cfg.tools, ct)
+			}
+		}
+	}
+
+	// Auto-inject messaging tools for child tasks (tasks delegated by a coordinator)
+	// so they can communicate with sibling tasks via send_message/check_messages
+	_, isChildTask := task.Labels["orka.ai/parent-task"]
+	if isChildTask {
+		for _, ct := range []string{"send_message", "check_messages"} {
 			if !slices.Contains(cfg.tools, ct) {
 				cfg.tools = append(cfg.tools, ct)
 			}
@@ -445,6 +463,11 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
 		envVars = b.addCoordinationEnvVars(envVars, task, agent)
+	}
+
+	// Enable coordination in worker for child tasks so messaging tools are registered
+	if isChildTask && (agent == nil || agent.Spec.Coordination == nil || !agent.Spec.Coordination.Enabled) {
+		envVars = append(envVars, corev1.EnvVar{Name: "ORKA_COORDINATION_ENABLED", Value: "true"})
 	}
 
 	// Add fallback provider environment variables

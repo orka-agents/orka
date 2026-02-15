@@ -94,14 +94,16 @@ func isUnsupportedAPIError(err error) bool {
 		case 404, 405:
 			return true
 		}
-		if apiErr.Code == "unsupported_api" || apiErr.Code == "invalid_url" {
+		if apiErr.Code == "unsupported_api" || apiErr.Code == "invalid_url" ||
+			apiErr.Code == "unsupported_api_for_model" {
 			return true
 		}
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "404") ||
 		strings.Contains(msg, "Not Found") ||
-		strings.Contains(msg, "invalid_url")
+		strings.Contains(msg, "invalid_url") ||
+		strings.Contains(msg, "unsupported_api_for_model")
 }
 
 // -------------------------------------------------------------------------

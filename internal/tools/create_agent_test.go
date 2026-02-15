@@ -297,8 +297,8 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 	if agent.Spec.Model == nil {
 		t.Fatal("agent.Spec.Model is nil")
 	}
-	if agent.Spec.Model.Provider != "anthropic" {
-		t.Errorf("model.provider = %q, want %q", agent.Spec.Model.Provider, "anthropic")
+	if agent.Spec.Model.Provider != "" {
+		t.Errorf("model.provider = %q, want empty (cleared to avoid mismatch with providerRef)", agent.Spec.Model.Provider)
 	}
 	if agent.Spec.Model.Name != "claude-sonnet-4-20250514" {
 		t.Errorf("model.name = %q, want %q", agent.Spec.Model.Name, "claude-sonnet-4-20250514")
@@ -399,8 +399,8 @@ func TestCreateAgentTool_Execute_InheritedModelProvider(t *testing.T) {
 	if agent.Spec.Model == nil {
 		t.Fatal("agent.Spec.Model is nil")
 	}
-	if agent.Spec.Model.Provider != "openai" {
-		t.Errorf("model.provider = %q, want %q (inherited)", agent.Spec.Model.Provider, "openai")
+	if agent.Spec.Model.Provider != "" {
+		t.Errorf("model.provider = %q, want empty (cleared to avoid mismatch with providerRef)", agent.Spec.Model.Provider)
 	}
 	if agent.Spec.Model.Name != "gpt-4o" {
 		t.Errorf("model.name = %q, want %q (inherited)", agent.Spec.Model.Name, "gpt-4o")

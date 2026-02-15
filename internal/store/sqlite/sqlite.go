@@ -116,6 +116,18 @@ func migrate(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_sessions_namespace ON sessions(namespace)`,
 		`CREATE INDEX IF NOT EXISTS idx_results_namespace ON results(namespace)`,
 		`CREATE INDEX IF NOT EXISTS idx_plan_states_namespace ON plan_states(namespace)`,
+		`CREATE TABLE IF NOT EXISTS messages (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			namespace   TEXT NOT NULL,
+			from_task   TEXT NOT NULL,
+			to_task     TEXT NOT NULL,
+			parent_task TEXT NOT NULL,
+			content     TEXT NOT NULL,
+			read        BOOLEAN NOT NULL DEFAULT FALSE,
+			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(namespace, to_task, read)`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(namespace, parent_task)`,
 	}
 
 	for _, stmt := range statements {

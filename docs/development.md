@@ -81,3 +81,40 @@ make deploy IMG=<registry>/orka:tag
 ```bash
 make build-installer IMG=ghcr.io/sozercan/orka:latest
 ```
+
+## Build Gotchas
+
+### UI Embedding
+
+`make build` embeds the React UI into the controller binary via `//go:embed`. The UI must be built first:
+
+```bash
+make ui-build    # Build UI and copy to internal/uiembed/dist/
+make build       # Now the Go build will succeed
+```
+
+If the UI isn't built, the `ensure-ui-embed` Makefile target creates a stub `internal/uiembed/dist/index.html` so the Go build doesn't fail — but the embedded UI won't work.
+
+### CLI Version Injection
+
+`make build-cli` injects Git version info via `-ldflags`:
+
+```bash
+make build-cli   # Produces bin/orka with embedded version
+```
+
+### Metrics Disabled by Default
+
+The controller's `--metrics-bind-address` defaults to `0` (disabled). Set it explicitly to enable Prometheus metrics:
+
+```
+--metrics-bind-address=:8443
+```
+
+### HTTP/2 Disabled by Default
+
+HTTP/2 is disabled for metrics and webhook servers due to CVEs ([GHSA-qppj-fm5r-hxr3](https://github.com/advisories/GHSA-qppj-fm5r-hxr3), [GHSA-4374-p667-p6c8](https://github.com/advisories/GHSA-4374-p667-p6c8)). Use `--enable-http2=true` only if needed.
+
+### Leader Election
+
+Leader election ID is hardcoded as `03b49a10.orka.ai`. Multiple controller deployments in the same cluster will coordinate via this ID.
