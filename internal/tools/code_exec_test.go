@@ -341,3 +341,110 @@ func TestNewCodeExecTool_WithEnvVar(t *testing.T) {
 		t.Errorf("workDir = %v, want %v", tool.workDir, "/custom/work/dir")
 	}
 }
+
+func TestCodeExecTool_DenyPatterns_Bash(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := &CodeExecTool{
+		workDir:      tmpDir,
+		timeout:      30 * time.Second,
+		allowedLangs: map[string]bool{"bash": true, "sh": true},
+		denyPatterns: defaultDenyPatterns,
+	}
+
+	blockedCmds := []struct {
+		name string
+		code string
+	}{
+		{"rm -rf", `rm -rf /`},
+		{"rm -f", `rm -f important.txt`},
+		{"dd if", `dd if=/dev/zero of=/dev/sda`},
+		{"shutdown", `shutdown -h now`},
+		{"reboot", `reboot`},
+		{"mkfs", `mkfs.ext4 /dev/sda1`},
+		{"fork bomb", `:(){ :|:& };:`},
+	}
+
+	for _, tt := range blockedCmds {
+		t.Run(tt.name, func(t *testing.T) {
+			args, _ := json.Marshal(CodeExecArgs{Language: "bash", Code: tt.code})
+			result, err := tool.Execute(context.Background(), args)
+			if err != nil {
+				t.Fatalf("Execute() returned error: %v", err)
+			}
+			var execResult CodeExecResult
+			if err := json.Unmarshal([]byte(result), &execResult); err != nil {
+				t.Fatalf("failed to unmarshal: %v", err)
+			}
+			if execResult.ExitCode != -1 {
+				t.Errorf("expected exit code -1 for blocked command, got %d", execResult.ExitCode)
+			}
+			if execResult.Error == "" {
+				t.Error("expected error message for blocked command")
+			}
+		})
+	}
+}
+
+func TestCodeExecTool_DenyPatterns_AllowsNormal(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := &CodeExecTool{
+		workDir:      tmpDir,
+		timeout:      30 * time.Second,
+		allowedLangs: map[string]bool{"bash": true},
+		denyPatterns: defaultDenyPatterns,
+	}
+
+	safeCmds := []string{
+		"echo hello",
+		"ls -la",
+		"cat /etc/hostname",
+		"rm single_file.txt",
+		"grep -r pattern .",
+	}
+
+	for _, code := range safeCmds {
+		t.Run(code, func(t *testing.T) {
+			args, _ := json.Marshal(CodeExecArgs{Language: "bash", Code: code})
+			result, err := tool.Execute(context.Background(), args)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			var execResult CodeExecResult
+			if err := json.Unmarshal([]byte(result), &execResult); err != nil {
+				t.Fatalf("failed to unmarshal: %v", err)
+			}
+			if execResult.Error != "" && execResult.ExitCode == -1 {
+				t.Errorf("safe command %q was blocked: %s", code, execResult.Error)
+			}
+		})
+	}
+}
+
+func TestCodeExecTool_DenyPatterns_NotAppliedToPython(t *testing.T) {
+	// Skip if python3 is not available
+	if _, err := os.Stat("/usr/bin/python3"); os.IsNotExist(err) {
+		t.Skip("python3 not available")
+	}
+
+	tmpDir := t.TempDir()
+	tool := &CodeExecTool{
+		workDir:      tmpDir,
+		timeout:      30 * time.Second,
+		allowedLangs: map[string]bool{"python": true, "python3": true},
+		denyPatterns: defaultDenyPatterns,
+	}
+
+	// Python code containing "rm -rf" in a string should NOT be blocked
+	args, _ := json.Marshal(CodeExecArgs{Language: "python", Code: `print("rm -rf / is dangerous")`})
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var execResult CodeExecResult
+	if err := json.Unmarshal([]byte(result), &execResult); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if execResult.ExitCode != 0 {
+		t.Errorf("Python code should not be blocked by deny patterns, got exit code %d, error: %s", execResult.ExitCode, execResult.Error)
+	}
+}

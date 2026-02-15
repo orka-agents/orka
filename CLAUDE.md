@@ -65,6 +65,7 @@ make deploy IMG=<registry>/orka:tag
 - **Session Manager**: Manages conversation continuity via SQLite store with serial execution enforcement
 - **Store** (`internal/store/`): Storage interfaces (`ResultStore`, `SessionStore`, `PlanStore`) with SQLite implementation (`internal/store/sqlite/`)
 - **Workers** (`workers/`): AI worker (LLM agent with tools), general worker (container commands), and agent workers (`workers/agent/copilot/`, `workers/agent/claude/`) for external CLI runtimes; workers POST results to controller via HTTP
+  - Built-in tools: `web_search` (with DuckDuckGo fallback), `code_exec` (with deny-pattern safety guards for bash), `file_read`, `web_fetch` (URL content extraction), `file_write`
 - **Tracing** (`internal/tracing/`): Optional OpenTelemetry tracing with OTLP gRPC export, enabled via `--enable-tracing`
 - **Web UI** (`ui/`): React SPA embedded into controller binary via `//go:embed`
 
@@ -231,6 +232,8 @@ go test ./internal/llm/ -run TestTracing -v
 ## Worker Security Context
 
 All worker pods run with: non-root (uid 1000), read-only rootfs, all capabilities dropped, seccomp RuntimeDefault.
+
+The `code_exec` tool applies deny-pattern safety guards to bash/sh commands, blocking destructive operations (rm -rf, dd, mkfs, shutdown, fork bombs). Python and JavaScript are not filtered since they run through interpreters.
 
 ## Documentation
 

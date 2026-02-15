@@ -171,7 +171,7 @@ func buildTaskTypesSection(mode PromptMode) string {
 - ai: Run an LLM-powered task. Use create_ai_task with a providerRef.
   Use for: reasoning, analysis, content generation, code review, summarization,
   answering questions about data. The AI worker has built-in tools (code_exec,
-  web_search, file_read) but runs in a minimal container without CLI tools.
+  web_search, file_read, web_fetch, file_write) but runs in a minimal container without CLI tools.
   Do NOT use for infrastructure commands.
 - agent: Run an external CLI runtime (Copilot, Claude Code). Use create_agent_task.
   Use for: code changes in a git repo, multi-file refactoring.
@@ -322,12 +322,14 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 		return "", "", "", fmt.Errorf("listing tools: %w", err)
 	}
 
-	toolLines := make([]string, 0, len(toolList.Items)+3)
+	toolLines := make([]string, 0, len(toolList.Items)+5)
 	// Built-in tools
 	toolLines = append(toolLines,
 		"web_search - Search the web for information (built-in)",
 		"code_exec - Execute code snippets (built-in)",
 		"file_read - Read file contents (built-in)",
+		"web_fetch - Fetch and extract content from URLs (built-in)",
+		"file_write - Write files to workspace (built-in)",
 	)
 
 	for i := range toolList.Items {
@@ -349,7 +351,7 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	}
 
 	providersSection = fmt.Sprintf("Runtime: providers=[%s] | agents=%d | tools=%d | container=yes\n",
-		strings.Join(providerNames, ", "), len(agentList.Items), len(toolList.Items)+3)
+		strings.Join(providerNames, ", "), len(agentList.Items), len(toolList.Items)+5)
 
 	return agentsSection, toolsSection, providersSection, nil
 }

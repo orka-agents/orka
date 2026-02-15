@@ -265,7 +265,7 @@ func TestDefaultRegistry(t *testing.T) {
 	}
 
 	// Check that built-in tools are registered
-	expectedTools := []string{"web_search", "code_exec", "file_read"}
+	expectedTools := []string{"web_search", "code_exec", "file_read", "web_fetch", "file_write"}
 	for _, name := range expectedTools {
 		if _, ok := DefaultRegistry.Get(name); !ok {
 			t.Errorf("expected built-in tool %q to be registered", name)
