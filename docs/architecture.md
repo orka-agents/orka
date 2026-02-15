@@ -248,3 +248,72 @@ Key behaviors:
 | `github.com/openai/openai-go/v3` | OpenAI API (official SDK) |
 | `github.com/github/copilot-sdk/go` | GitHub Copilot SDK |
 | `modernc.org/sqlite` | Embedded SQLite (pure Go, no CGO) |
+
+## SQLite Store Internals
+
+All persistent data uses SQLite via `modernc.org/sqlite` (pure Go, no CGO dependency).
+
+### Schema
+
+| Table | Primary Key | Purpose |
+|-------|-------------|---------|
+| `results` | `(namespace, task_name)` | Task output data (BLOB) |
+| `sessions` | `(namespace, name)` | Session metadata, `active_task` field for locking, token counters |
+| `session_messages` | `id` (FK → sessions) | Individual messages with role, content, tool_calls (JSON) |
+| `messages` | `id` + `namespace` + `parent_task` | Inter-agent messages, broadcast via `to_task='*'` |
+| `plan_states` | `(namespace, task_name)` | Autonomous loop state: iteration, progress %, goal_complete flag |
+
+### Configuration
+
+- **WAL mode** with single-writer enforcement: `SetMaxOpenConns(1)`, `SetMaxIdleConns(1)`
+- **Per-connection pragmas** (set on every new connection, not persistent):
+  - `busy_timeout=5000` — wait up to 5s for locks
+  - `synchronous=NORMAL` — balance between safety and performance
+  - `foreign_keys=ON` — enforce referential integrity
+- **Namespace scoping**: All queries filter by `namespace` — data isolation is enforced at the SQL level
+
+### Session Locking
+
+Sessions use optimistic locking via an `active_task` column. `AcquireLock` atomically UPDATEs `active_task` only if it's currently empty. Tasks that fail to acquire the lock requeue every 5 seconds. The lock is released on task completion or deletion (via finalizer cleanup). There is no timeout — if the lock holder crashes, the lock persists until the task is deleted.
+
+### Message Broadcast Scoping
+
+Inter-agent broadcast messages (`to_task='*'`) are scoped by `parent_task`:
+
+```sql
+WHERE (to_task = ? OR (to_task = '*' AND parent_task = ?))
+```
+
+This ensures only sibling tasks (same parent coordinator) receive broadcasts. Senders don't receive their own broadcasts.
+
+## LLM Provider Internals
+
+### Retry Strategy
+
+LLM calls use exponential backoff with jitter:
+- **Default**: 3 retries
+- **Backoff**: `baseDelay × 2^attempt`, capped at 30s, with ±10% random jitter
+- **Retryable status codes**: 429, 500, 502, 503, 529
+- **Non-retryable**: 401, 403 (trigger fallback instead), context canceled/deadline exceeded (never retried)
+- **Stream retry**: Peeks at the first chunk to detect errors before consuming the stream
+
+### Provider Cooldown
+
+Failed providers are temporarily cooled down to prevent repeated failures:
+- **Cooldown formula**: `1min × 5^(errorCount-1)`, capped at 1 hour
+- Rate-limited providers (429) are tracked and skipped in subsequent requests
+- Cooldown is per-provider and resets on successful requests
+
+### OpenAI API Auto-Detection
+
+The OpenAI provider automatically detects which API to use:
+1. Tries the **Responses API** first
+2. If the endpoint returns 404/405, switches to **Chat Completions API**
+3. The API mode is stored as an `atomic.Int32` for thread-safe switching
+4. Once detected, the mode persists for the provider's lifetime
+
+### Anthropic Quirks
+
+- The Anthropic SDK appends `v1/messages` to the base URL — strip trailing `/v1` from custom `baseURL` to avoid doubled paths
+- System messages are converted to `tool_result` blocks, not user messages
+- Tool input JSON parsing errors are silently ignored (`_ = json.Unmarshal`)

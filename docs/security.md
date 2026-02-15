@@ -9,6 +9,25 @@ All worker pods run with a hardened security context:
 - All Linux capabilities dropped
 - Seccomp profile: RuntimeDefault
 
+### Writable Paths
+
+Only three paths are writable (mounted as EmptyDir volumes):
+
+| Path | Purpose |
+|------|---------|
+| `/tmp` | Container runtime temporary files |
+| `/home/worker` | CLI config/cache (Claude, Copilot) |
+| `/workspace` | Git clone and working directory |
+
+All other filesystem paths are read-only. Workers that write outside these paths will fail.
+
+### Agent Runtime Security Notes
+
+- **Copilot agent worker**: Auto-approves **all** permission requests from the Copilot SDK without filtering. The agent can execute shell commands, file operations, and network requests in autonomous mode with no safeguards beyond the read-only rootfs
+- **Claude agent worker**: Sets `HOME=/home/worker` unconditionally, bypassing default HOME permissions
+- **Git credentials**: `GIT_TOKEN` and `GITHUB_TOKEN` are set as environment variables, visible to all child processes. If the prompt is user-controlled, the LLM agent could potentially access these via `os.Environ()`
+- **Prior task diffs**: Applied via `git apply --check` (dry-run) then `git apply`, but without verifying patch author or integrity. A compromised prior task could inject arbitrary changes
+
 ## Controller
 
 The controller runs with:
@@ -22,6 +41,7 @@ The controller runs with:
 - All API endpoints require a Kubernetes ServiceAccount bearer token
 - Token validation uses the Kubernetes TokenReview API
 - The `orka` CLI extracts tokens from kubeconfig for browser-based login
+- **Token caching**: Validated tokens are cached for 60 seconds using SHA256 hashes to avoid repeated TokenReview API calls. Token revocation has up to 60s propagation delay. The cache is in-memory only — not persistent across pod restarts
 
 ## Secret Management
 
