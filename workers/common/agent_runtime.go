@@ -91,6 +91,7 @@ func SetupGitCredentials() {
 			token := strings.TrimSpace(string(data))
 			if token != "" {
 				os.Setenv("GIT_TOKEN", token)               //nolint:errcheck
+			os.Setenv("GITHUB_TOKEN", token)             //nolint:errcheck
 				os.Setenv("GIT_ASKPASS", "/bin/echo-token") //nolint:errcheck
 				break
 			}

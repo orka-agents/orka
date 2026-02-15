@@ -439,6 +439,19 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 				break
 			}
 		}
+		// Allow agents dynamically created by the parent task via create_agent tool
+		if !allowed {
+			childAgent := &corev1alpha1.Agent{}
+			agentNS := task.Spec.AgentRef.Namespace
+			if agentNS == "" {
+				agentNS = task.Namespace
+			}
+			if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.AgentRef.Name, Namespace: agentNS}, childAgent); err == nil {
+				if childAgent.Labels["orka.ai/created-by"] == "create_agent" && childAgent.Labels["orka.ai/parent-task"] == parentName {
+					allowed = true
+				}
+			}
+		}
 		if !allowed {
 			result, err := r.failTask(ctx, task, fmt.Sprintf("agent %q not in parent's allowedAgents", task.Spec.AgentRef.Name))
 			return result, err, true
@@ -580,9 +593,13 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			client.MatchingLabels{"orka.ai/parent-task": task.Name}); err == nil && len(children.Items) > 0 {
 			childStatuses := make([]corev1alpha1.ChildTaskStatus, 0, len(children.Items))
 			for _, child := range children.Items {
+				phase := child.Status.Phase
+				if phase == "" {
+					phase = corev1alpha1.TaskPhasePending
+				}
 				cs := corev1alpha1.ChildTaskStatus{
 					Name:  child.Name,
-					Phase: child.Status.Phase,
+					Phase: phase,
 				}
 				if child.Spec.AgentRef != nil {
 					cs.Agent = child.Spec.AgentRef.Name
