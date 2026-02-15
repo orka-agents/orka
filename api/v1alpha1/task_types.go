@@ -25,7 +25,7 @@ const (
 )
 
 // TaskPhase defines the phase of task execution
-// +kubebuilder:validation:Enum=Pending;Running;Succeeded;Failed;Scheduled
+// +kubebuilder:validation:Enum=Pending;Running;Succeeded;Failed;Scheduled;Cancelled
 type TaskPhase string
 
 const (
@@ -34,6 +34,7 @@ const (
 	TaskPhaseSucceeded TaskPhase = "Succeeded"
 	TaskPhaseFailed    TaskPhase = "Failed"
 	TaskPhaseScheduled TaskPhase = "Scheduled"
+	TaskPhaseCancelled TaskPhase = "Cancelled"
 )
 
 // ConcurrencyPolicy describes how the controller will handle concurrent scheduled runs.

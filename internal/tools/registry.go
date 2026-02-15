@@ -121,6 +121,9 @@ func RegisterBuiltinTools() {
 func RegisterCoordinationTools(k8sClient client.Client) {
 	DefaultRegistry.Register(NewDelegateTaskTool(k8sClient))
 	DefaultRegistry.Register(NewWaitForTasksTool(k8sClient))
+	DefaultRegistry.Register(NewCancelTaskTool(k8sClient))
+	DefaultRegistry.Register(NewSendMessageTool())
+	DefaultRegistry.Register(NewCheckMessagesTool())
 	DefaultRegistry.Register(NewCreatePullRequestTool(k8sClient))
 	DefaultRegistry.Register(NewMergePullRequestTool(k8sClient))
 	DefaultRegistry.Register(NewAutoMergePullRequestTool(k8sClient))

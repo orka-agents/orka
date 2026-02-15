@@ -63,6 +63,7 @@ type TaskReconciler struct {
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
 	PlanStore                 store.PlanStore
+	MessageStore              store.MessageStore
 	EnforceNamespaceIsolation bool
 	MaxTasksPerNamespace      int32
 }
@@ -159,7 +160,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.handleScheduled(ctx, task)
 	case corev1alpha1.TaskPhaseRunning:
 		return r.handleRunning(ctx, task)
-	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed:
+	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
 		return r.handleCompleted(ctx, task)
 	}
 
@@ -184,6 +185,17 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			if err := r.PlanStore.DeletePlan(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete plan state", "task", task.Name)
 				// Continue with finalizer removal anyway
+			}
+		}
+
+		// Clean up inter-agent messages
+		if r.MessageStore != nil {
+			if err := r.MessageStore.DeleteTaskMessages(ctx, task.Namespace, task.Name); err != nil {
+				log.Error(err, "failed to delete task messages", "task", task.Name)
+			}
+			// If this is a coordinator, clean up all children's messages
+			if err := r.MessageStore.DeleteParentMessages(ctx, task.Namespace, task.Name); err != nil {
+				log.Error(err, "failed to delete parent messages", "task", task.Name)
 			}
 		}
 
@@ -427,6 +439,19 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 				break
 			}
 		}
+		// Allow agents dynamically created by the parent task via create_agent tool
+		if !allowed {
+			childAgent := &corev1alpha1.Agent{}
+			agentNS := task.Spec.AgentRef.Namespace
+			if agentNS == "" {
+				agentNS = task.Namespace
+			}
+			if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.AgentRef.Name, Namespace: agentNS}, childAgent); err == nil {
+				if childAgent.Labels["orka.ai/created-by"] == "create_agent" && childAgent.Labels["orka.ai/parent-task"] == parentName {
+					allowed = true
+				}
+			}
+		}
 		if !allowed {
 			result, err := r.failTask(ctx, task, fmt.Sprintf("agent %q not in parent's allowedAgents", task.Spec.AgentRef.Name))
 			return result, err, true
@@ -568,9 +593,13 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			client.MatchingLabels{"orka.ai/parent-task": task.Name}); err == nil && len(children.Items) > 0 {
 			childStatuses := make([]corev1alpha1.ChildTaskStatus, 0, len(children.Items))
 			for _, child := range children.Items {
+				phase := child.Status.Phase
+				if phase == "" {
+					phase = corev1alpha1.TaskPhasePending
+				}
 				cs := corev1alpha1.ChildTaskStatus{
 					Name:  child.Name,
-					Phase: child.Status.Phase,
+					Phase: phase,
 				}
 				if child.Spec.AgentRef != nil {
 					cs.Agent = child.Spec.AgentRef.Name
@@ -698,9 +727,13 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 
 	conditionStatus := metav1.ConditionTrue
 	reason := "TaskSucceeded"
-	if phase == corev1alpha1.TaskPhaseFailed {
+	switch phase {
+	case corev1alpha1.TaskPhaseFailed:
 		conditionStatus = metav1.ConditionFalse
 		reason = "TaskFailed"
+	case corev1alpha1.TaskPhaseCancelled:
+		conditionStatus = metav1.ConditionFalse
+		reason = "TaskCancelled"
 	}
 
 	meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
