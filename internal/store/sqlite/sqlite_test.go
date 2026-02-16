@@ -538,6 +538,573 @@ func TestGetSessionIncludesMessages(t *testing.T) {
 	}
 }
 
+func TestUpdateTokenCounts(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	session := &store.SessionRecord{
+		Namespace:   "ns1",
+		Name:        "token-sess",
+		SessionType: "chat",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.CreateSession(ctx, session); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	t.Run("increment tokens", func(t *testing.T) {
+		if err := s.UpdateTokenCounts(ctx, "ns1", "token-sess", 100, 200); err != nil {
+			t.Fatalf("UpdateTokenCounts: %v", err)
+		}
+		got, err := s.GetSession(ctx, "ns1", "token-sess")
+		if err != nil {
+			t.Fatalf("GetSession: %v", err)
+		}
+		if got.InputTokens != 100 || got.OutputTokens != 200 {
+			t.Errorf("tokens = (%d, %d), want (100, 200)", got.InputTokens, got.OutputTokens)
+		}
+	})
+
+	t.Run("accumulate tokens", func(t *testing.T) {
+		if err := s.UpdateTokenCounts(ctx, "ns1", "token-sess", 50, 75); err != nil {
+			t.Fatalf("UpdateTokenCounts: %v", err)
+		}
+		got, err := s.GetSession(ctx, "ns1", "token-sess")
+		if err != nil {
+			t.Fatalf("GetSession: %v", err)
+		}
+		if got.InputTokens != 150 || got.OutputTokens != 275 {
+			t.Errorf("tokens = (%d, %d), want (150, 275)", got.InputTokens, got.OutputTokens)
+		}
+	})
+
+	t.Run("zero increment is no-op", func(t *testing.T) {
+		if err := s.UpdateTokenCounts(ctx, "ns1", "token-sess", 0, 0); err != nil {
+			t.Fatalf("UpdateTokenCounts zero: %v", err)
+		}
+		got, err := s.GetSession(ctx, "ns1", "token-sess")
+		if err != nil {
+			t.Fatalf("GetSession: %v", err)
+		}
+		if got.InputTokens != 150 || got.OutputTokens != 275 {
+			t.Errorf("tokens changed unexpectedly: (%d, %d)", got.InputTokens, got.OutputTokens)
+		}
+	})
+
+	t.Run("nonexistent session is silent no-op", func(t *testing.T) {
+		if err := s.UpdateTokenCounts(ctx, "ns1", "nonexistent", 10, 20); err != nil {
+			t.Errorf("UpdateTokenCounts nonexistent: %v", err)
+		}
+	})
+}
+
+func TestAppendMessagesZeroTimestamp(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "ns1", Name: "zero-ts", SessionType: "task", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// Message with zero timestamp should auto-fill
+	msgs := []store.SessionMessage{
+		{Role: "user", Content: "auto-timestamp"},
+	}
+	if err := s.AppendMessages(ctx, "ns1", "zero-ts", msgs); err != nil {
+		t.Fatalf("AppendMessages: %v", err)
+	}
+
+	got, err := s.LoadTranscript(ctx, "ns1", "zero-ts", 0)
+	if err != nil {
+		t.Fatalf("LoadTranscript: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d messages, want 1", len(got))
+	}
+	if got[0].Timestamp.IsZero() {
+		t.Error("expected non-zero timestamp for auto-filled message")
+	}
+	if got[0].Content != "auto-timestamp" {
+		t.Errorf("content = %q, want %q", got[0].Content, "auto-timestamp")
+	}
+}
+
+func TestAppendMessagesNilFields(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "ns1", Name: "nil-fields", SessionType: "task", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// Message with nil Input, nil ToolCalls, empty Name, empty ToolCallID
+	msgs := []store.SessionMessage{
+		{Role: "user", Content: "bare message", Timestamp: now},
+	}
+	if err := s.AppendMessages(ctx, "ns1", "nil-fields", msgs); err != nil {
+		t.Fatalf("AppendMessages: %v", err)
+	}
+
+	got, err := s.LoadTranscript(ctx, "ns1", "nil-fields", 0)
+	if err != nil {
+		t.Fatalf("LoadTranscript: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d messages, want 1", len(got))
+	}
+	if got[0].Input != nil {
+		t.Errorf("expected nil Input, got %v", got[0].Input)
+	}
+	if got[0].ToolCalls != nil {
+		t.Errorf("expected nil ToolCalls, got %v", got[0].ToolCalls)
+	}
+	if got[0].Name != "" {
+		t.Errorf("expected empty Name, got %q", got[0].Name)
+	}
+	if got[0].ToolCallID != "" {
+		t.Errorf("expected empty ToolCallID, got %q", got[0].ToolCallID)
+	}
+}
+
+func TestNewDBInvalidPath(t *testing.T) {
+	// Opening a DB at an invalid/unwritable path should fail
+	_, err := NewDB("/nonexistent-dir/sub/sub/test.db")
+	if err == nil {
+		t.Fatal("expected error for invalid DB path, got nil")
+	}
+}
+
+func TestAppendMessagesUnmarshalableInput(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "ns1", Name: "bad-input", SessionType: "task", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// Input with a channel value cannot be JSON marshaled
+	msgs := []store.SessionMessage{
+		{Role: "user", Content: "bad", Input: map[string]any{"ch": make(chan int)}, Timestamp: now},
+	}
+	err := s.AppendMessages(ctx, "ns1", "bad-input", msgs)
+	if err == nil {
+		t.Fatal("expected marshal error for channel in Input, got nil")
+	}
+}
+
+func TestAppendMessagesUnmarshalableToolCalls(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "ns1", Name: "bad-tc", SessionType: "task", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// ToolCalls with a func value cannot be JSON marshaled
+	msgs := []store.SessionMessage{
+		{Role: "assistant", Content: "", ToolCalls: func() {}, Timestamp: now},
+	}
+	err := s.AppendMessages(ctx, "ns1", "bad-tc", msgs)
+	if err == nil {
+		t.Fatal("expected marshal error for func in ToolCalls, got nil")
+	}
+}
+
+func TestLoadTranscriptCorruptedInput(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "ns1", Name: "corrupt-input", SessionType: "task", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// Insert a message with invalid JSON in the input column directly via SQL
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO session_messages (namespace, session_name, role, content, input, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		"ns1", "corrupt-input", "user", "test", "{invalid json", now,
+	)
+	if err != nil {
+		t.Fatalf("direct insert: %v", err)
+	}
+
+	_, err = s.LoadTranscript(ctx, "ns1", "corrupt-input", 0)
+	if err == nil {
+		t.Fatal("expected unmarshal error for corrupted input JSON")
+	}
+}
+
+func TestLoadTranscriptCorruptedToolCalls(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "ns1", Name: "corrupt-tc", SessionType: "task", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// Insert a message with invalid JSON in the tool_calls column directly via SQL
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO session_messages (namespace, session_name, role, content, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		"ns1", "corrupt-tc", "assistant", "test", "not-valid-json!", now,
+	)
+	if err != nil {
+		t.Fatalf("direct insert: %v", err)
+	}
+
+	_, err = s.LoadTranscript(ctx, "ns1", "corrupt-tc", 0)
+	if err == nil {
+		t.Fatal("expected unmarshal error for corrupted tool_calls JSON")
+	}
+}
+
+func TestGetSessionWithCorruptedMessages(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "ns1", Name: "corrupt-sess", SessionType: "task", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// Insert a message with invalid JSON so LoadTranscript fails during GetSession
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO session_messages (namespace, session_name, role, content, input, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		"ns1", "corrupt-sess", "user", "test", "{bad json", now,
+	)
+	if err != nil {
+		t.Fatalf("direct insert: %v", err)
+	}
+
+	_, err = s.GetSession(ctx, "ns1", "corrupt-sess")
+	if err == nil {
+		t.Fatal("expected error from GetSession with corrupted messages")
+	}
+}
+
+func TestClosedDBErrors(t *testing.T) {
+	db, err := NewDB(":memory:")
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	s := NewStore(db, ":memory:")
+	db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+
+	// All operations on a closed DB should return errors
+	if _, err := s.GetResult(ctx, "ns", "t"); err == nil {
+		t.Error("expected error from GetResult on closed DB")
+	}
+	if err := s.SaveResult(ctx, "ns", "t", []byte("d")); err == nil {
+		t.Error("expected error from SaveResult on closed DB")
+	}
+	if err := s.DeleteResult(ctx, "ns", "t"); err == nil {
+		t.Error("expected error from DeleteResult on closed DB")
+	}
+	if _, err := s.GetSession(ctx, "ns", "s"); err == nil {
+		t.Error("expected error from GetSession on closed DB")
+	}
+	if _, err := s.ListSessions(ctx, "ns"); err == nil {
+		t.Error("expected error from ListSessions on closed DB")
+	}
+	if err := s.AcquireLock(ctx, "ns", "s", "t"); err == nil {
+		t.Error("expected error from AcquireLock on closed DB")
+	}
+	if _, err := s.IsLocked(ctx, "ns", "s", "t"); err == nil {
+		t.Error("expected error from IsLocked on closed DB")
+	}
+	if err := s.AppendMessages(ctx, "ns", "s", []store.SessionMessage{{Role: "user"}}); err == nil {
+		t.Error("expected error from AppendMessages on closed DB")
+	}
+	if _, err := s.LoadTranscript(ctx, "ns", "s", 0); err == nil {
+		t.Error("expected error from LoadTranscript on closed DB")
+	}
+	if _, err := s.GetPlan(ctx, "ns", "t"); err == nil {
+		t.Error("expected error from GetPlan on closed DB")
+	}
+	if err := s.SavePlan(ctx, "ns", "t", &store.PlanState{}); err == nil {
+		t.Error("expected error from SavePlan on closed DB")
+	}
+	if err := s.HealthCheck(ctx); err == nil {
+		t.Error("expected error from HealthCheck on closed DB")
+	}
+	if _, err := s.GetMessages(ctx, "ns", "t", "p", false); err == nil {
+		t.Error("expected error from GetMessages on closed DB")
+	}
+	if err := s.SendMessage(ctx, &store.Message{Namespace: "ns", FromTask: "a", ToTask: "b", ParentTask: "p", Content: "c"}); err == nil {
+		t.Error("expected error from SendMessage on closed DB")
+	}
+}
+
+func TestUpdateDBSizeMetricEdgeCases(t *testing.T) {
+	t.Run("empty path is no-op", func(t *testing.T) {
+		db, err := NewDB(":memory:")
+		if err != nil {
+			t.Fatalf("NewDB: %v", err)
+		}
+		defer db.Close() //nolint:errcheck
+		s := NewStore(db, "")
+		// Should not panic
+		s.updateDBSizeMetric()
+	})
+
+	t.Run("nonexistent file path is no-op", func(t *testing.T) {
+		db, err := NewDB(":memory:")
+		if err != nil {
+			t.Fatalf("NewDB: %v", err)
+		}
+		defer db.Close() //nolint:errcheck
+		s := NewStore(db, "/tmp/nonexistent-orka-test-file.db")
+		// Should not panic even if file doesn't exist
+		s.updateDBSizeMetric()
+	})
+}
+
+func TestAcquireLockNonexistentSession(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	// AcquireLock on a session that doesn't exist should fail (rows affected = 0)
+	err := s.AcquireLock(ctx, "ns1", "no-such-session", "task-x")
+	if err == nil {
+		t.Fatal("expected error for nonexistent session, got nil")
+	}
+}
+
+func TestDeletePlanNonexistent(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	// Deleting a plan that doesn't exist should be a no-op
+	if err := s.DeletePlan(ctx, "ns1", "never-existed"); err != nil {
+		t.Errorf("DeletePlan nonexistent: %v", err)
+	}
+}
+
+func TestDeleteSessionNonexistent(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	// Deleting a session that doesn't exist should be a no-op
+	if err := s.DeleteSession(ctx, "ns1", "never-existed"); err != nil {
+		t.Errorf("DeleteSession nonexistent: %v", err)
+	}
+}
+
+func TestSessionCancelledField(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	session := &store.SessionRecord{
+		Namespace:   "ns1",
+		Name:        "cancelled-sess",
+		SessionType: "task",
+		Cancelled:   true,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.CreateSession(ctx, session); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	got, err := s.GetSession(ctx, "ns1", "cancelled-sess")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if !got.Cancelled {
+		t.Error("expected Cancelled=true")
+	}
+}
+
+func TestListSessionsMetadata(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	// Create session with active task
+	session := &store.SessionRecord{
+		Namespace:   "ns1",
+		Name:        "meta-sess",
+		SessionType: "chat",
+		ActiveTask:  "",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.CreateSession(ctx, session); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// Acquire lock so active_task is set
+	if err := s.AcquireLock(ctx, "ns1", "meta-sess", "active-task"); err != nil {
+		t.Fatalf("AcquireLock: %v", err)
+	}
+
+	sessions, err := s.ListSessions(ctx, "ns1")
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(sessions))
+	}
+	if sessions[0].ActiveTask != "active-task" {
+		t.Errorf("ActiveTask = %q, want %q", sessions[0].ActiveTask, "active-task")
+	}
+	if sessions[0].SessionType != "chat" {
+		t.Errorf("SessionType = %q, want %q", sessions[0].SessionType, "chat")
+	}
+}
+
+func TestLoadTranscriptEmptySession(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	// Loading transcript for nonexistent session returns empty slice, not error
+	msgs, err := s.LoadTranscript(ctx, "ns1", "nonexistent", 0)
+	if err != nil {
+		t.Fatalf("LoadTranscript: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("got %d messages, want 0", len(msgs))
+	}
+}
+
+func TestNilIfEmpty(t *testing.T) {
+	if got := nilIfEmpty(""); got != nil {
+		t.Errorf("nilIfEmpty(\"\") = %v, want nil", got)
+	}
+	if got := nilIfEmpty("hello"); got == nil || *got != "hello" {
+		t.Errorf("nilIfEmpty(\"hello\") = %v, want pointer to \"hello\"", got)
+	}
+}
+
+func TestContextCancellation(t *testing.T) {
+	s := setupTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	// Operations on cancelled context should return errors
+	if err := s.SaveResult(ctx, "ns1", "task1", []byte("data")); err == nil {
+		t.Error("expected error on cancelled context for SaveResult")
+	}
+
+	if _, err := s.GetResult(ctx, "ns1", "task1"); err == nil {
+		t.Error("expected error on cancelled context for GetResult")
+	}
+
+	if err := s.SavePlan(ctx, "ns1", "task1", &store.PlanState{}); err == nil {
+		t.Error("expected error on cancelled context for SavePlan")
+	}
+
+	if _, err := s.GetPlan(ctx, "ns1", "task1"); err == nil {
+		t.Error("expected error on cancelled context for GetPlan")
+	}
+
+	now := time.Now()
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "ns1", Name: "s", SessionType: "task", CreatedAt: now, UpdatedAt: now,
+	}); err == nil {
+		t.Error("expected error on cancelled context for CreateSession")
+	}
+
+	if _, err := s.GetSession(ctx, "ns1", "s"); err == nil {
+		t.Error("expected error on cancelled context for GetSession")
+	}
+
+	if _, err := s.ListSessions(ctx, "ns1"); err == nil {
+		t.Error("expected error on cancelled context for ListSessions")
+	}
+
+	if err := s.AppendMessages(ctx, "ns1", "s", []store.SessionMessage{{Role: "user", Content: "hi"}}); err == nil {
+		t.Error("expected error on cancelled context for AppendMessages")
+	}
+
+	if _, err := s.LoadTranscript(ctx, "ns1", "s", 0); err == nil {
+		t.Error("expected error on cancelled context for LoadTranscript")
+	}
+
+	if err := s.UpdateTokenCounts(ctx, "ns1", "s", 10, 20); err == nil {
+		t.Error("expected error on cancelled context for UpdateTokenCounts")
+	}
+
+	if _, err := s.IsLocked(ctx, "ns1", "s", "t"); err == nil {
+		t.Error("expected error on cancelled context for IsLocked")
+	}
+
+	if err := s.AcquireLock(ctx, "ns1", "s", "t"); err == nil {
+		t.Error("expected error on cancelled context for AcquireLock")
+	}
+}
+
+func TestSpecialCharacters(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	t.Run("special chars in result keys", func(t *testing.T) {
+		keys := []string{
+			"task/with/slashes",
+			"task with spaces",
+			"task'with\"quotes",
+			"task;with;semicolons",
+			"émojis-🎉-✓",
+		}
+		for _, key := range keys {
+			data := []byte("data-for-" + key)
+			if err := s.SaveResult(ctx, "ns1", key, data); err != nil {
+				t.Fatalf("SaveResult(%q): %v", key, err)
+			}
+			got, err := s.GetResult(ctx, "ns1", key)
+			if err != nil {
+				t.Fatalf("GetResult(%q): %v", key, err)
+			}
+			if string(got) != string(data) {
+				t.Errorf("key %q: got %q, want %q", key, got, data)
+			}
+		}
+	})
+
+	t.Run("special chars in plan", func(t *testing.T) {
+		plan := &store.PlanState{
+			Summary:      "Plan with 'quotes' and \"double quotes\" and\nnewlines",
+			PlanDocument: "# Plan\n\n- Step 1: `code block`\n- Step 2: <html>tags</html>\n- Step 3: ${variable}",
+		}
+		if err := s.SavePlan(ctx, "ns1", "special-plan", plan); err != nil {
+			t.Fatalf("SavePlan: %v", err)
+		}
+		got, err := s.GetPlan(ctx, "ns1", "special-plan")
+		if err != nil {
+			t.Fatalf("GetPlan: %v", err)
+		}
+		if got.Summary != plan.Summary {
+			t.Errorf("Summary mismatch")
+		}
+		if got.PlanDocument != plan.PlanDocument {
+			t.Errorf("PlanDocument mismatch")
+		}
+	})
+}
+
 func TestPlanStore(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
