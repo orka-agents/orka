@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"context"
 	"slices"
 	"testing"
 
@@ -107,4 +108,120 @@ func assertContains(t *testing.T, s []string, val string) {
 		return
 	}
 	t.Errorf("expected args to contain %q, got %v", val, s)
+}
+
+func TestExecuteClaude_NonexistentBinary(t *testing.T) {
+	t.Setenv("CLAUDE_CLI_PATH", "/nonexistent/claude-cli")
+	t.Setenv("ORKA_ALLOW_BASH", "")
+
+	cfg := &common.AgentConfig{
+		Prompt:   "test prompt",
+		MaxTurns: 5,
+	}
+
+	_, err := executeClaude(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error when claude binary doesn't exist")
+	}
+}
+
+func TestExecuteClaude_WithTimeout(t *testing.T) {
+	t.Setenv("CLAUDE_CLI_PATH", "/nonexistent/claude-cli")
+	t.Setenv("ORKA_ALLOW_BASH", "")
+
+	cfg := &common.AgentConfig{
+		Prompt:         "test prompt",
+		MaxTurns:       5,
+		TimeoutSeconds: 1,
+	}
+
+	_, err := executeClaude(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error when claude binary doesn't exist")
+	}
+}
+
+func TestExecuteClaude_CancelledContext(t *testing.T) {
+	t.Setenv("CLAUDE_CLI_PATH", "/nonexistent/claude-cli")
+	t.Setenv("ORKA_ALLOW_BASH", "")
+
+	cfg := &common.AgentConfig{
+		Prompt:   "test prompt",
+		MaxTurns: 5,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	_, err := executeClaude(ctx, cfg)
+	if err == nil {
+		t.Fatal("expected error with cancelled context")
+	}
+}
+
+func TestExecuteClaude_WithSubPath(t *testing.T) {
+	t.Setenv("CLAUDE_CLI_PATH", "/nonexistent/claude-cli")
+	t.Setenv("ORKA_ALLOW_BASH", "")
+
+	cfg := &common.AgentConfig{
+		Prompt:   "test",
+		MaxTurns: 5,
+		SubPath:  "src",
+	}
+
+	_, err := executeClaude(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error when claude binary doesn't exist")
+	}
+}
+
+func TestBuildClaudeArgs_NoTools(t *testing.T) {
+	t.Setenv("ORKA_ALLOW_BASH", "")
+
+	cfg := &common.AgentConfig{
+		Prompt:   "do something",
+		MaxTurns: 10,
+	}
+
+	args := buildClaudeArgs(cfg)
+
+	assertContains(t, args, "--print")
+	assertContains(t, args, "--verbose")
+	assertContains(t, args, "--max-turns")
+	assertContains(t, args, "10")
+
+	// Should not have tool flags
+	if slices.Contains(args, "--allowedTools") {
+		t.Error("should not contain --allowedTools when none specified")
+	}
+	if slices.Contains(args, "--disallowedTools") {
+		t.Error("should not contain --disallowedTools when none specified")
+	}
+	if slices.Contains(args, "--dangerously-skip-permissions") {
+		t.Error("should not contain --dangerously-skip-permissions")
+	}
+}
+
+func TestBuildClaudeArgs_PromptIsLast(t *testing.T) {
+	t.Setenv("ORKA_ALLOW_BASH", "true")
+
+	cfg := &common.AgentConfig{
+		Prompt:          "my prompt text",
+		Model:           "claude-sonnet-4-20250514",
+		SystemPrompt:    "system",
+		MaxTurns:        25,
+		AllowedTools:    []string{"Read"},
+		DisallowedTools: []string{"Bash"},
+	}
+
+	args := buildClaudeArgs(cfg)
+
+	// Prompt uses -p flag, so prompt should be last arg
+	if args[len(args)-1] != "my prompt text" {
+		t.Errorf("prompt should be last arg, got %q", args[len(args)-1])
+	}
+	// -p flag should be second to last
+	if args[len(args)-2] != "-p" {
+		t.Errorf("expected -p flag before prompt, got %q", args[len(args)-2])
+	}
 }
