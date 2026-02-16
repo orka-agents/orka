@@ -76,7 +76,7 @@ func TestCheckMessagesTool_Execute(t *testing.T) {
 			wantMsg:    "No new messages",
 		},
 		{
-			name: "missing env vars",
+			name:    "missing env vars",
 			envVars: map[string]string{},
 			wantErr: true,
 		},

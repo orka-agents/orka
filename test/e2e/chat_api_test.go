@@ -183,7 +183,7 @@ var _ = Describe("Chat and OpenAI-Compatible API", Ordered, func() {
 		oaiBody := fmt.Sprintf(`{
 			"model": "e2e-oai-compat-provider/%s",
 			"messages": [{"role": "user", "content": "What is 1+1? Reply with just the number."}],
-			"max_tokens": 10
+			"max_tokens": 50
 		}`, model)
 
 		req, err := http.NewRequest("POST", apiBaseURL+"/v1/chat/completions",
@@ -270,6 +270,6 @@ var _ = Describe("Chat and OpenAI-Compatible API", Ordered, func() {
 		resp, err = http.DefaultClient.Do(req)
 		Expect(err).NotTo(HaveOccurred())
 		defer resp.Body.Close()
-		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+		Expect(resp.StatusCode).To(Equal(http.StatusNoContent))
 	})
 })

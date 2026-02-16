@@ -165,12 +165,20 @@ func dumpDebugInfo(taskNames ...string) {
 			_, _ = fmt.Fprintf(GinkgoWriter, "\n=== Task %s ===\n%s\n", name, output)
 		}
 
-		// Pod descriptions for task
+		// Pod descriptions and logs for task
 		cmd = exec.Command("kubectl", "get", "pods", "-l", fmt.Sprintf("orka.ai/task=%s", name),
 			"-n", namespace, "-o", "wide")
 		output, err = utils.Run(cmd)
 		if err == nil {
 			_, _ = fmt.Fprintf(GinkgoWriter, "\n=== Pods for task %s ===\n%s\n", name, output)
+		}
+
+		// Worker pod logs
+		cmd = exec.Command("kubectl", "logs", "-l", fmt.Sprintf("orka.ai/task=%s", name),
+			"-n", namespace, "--tail=50")
+		output, err = utils.Run(cmd)
+		if err == nil && output != "" {
+			_, _ = fmt.Fprintf(GinkgoWriter, "\n=== Worker Logs for task %s ===\n%s\n", name, output)
 		}
 	}
 

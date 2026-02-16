@@ -128,7 +128,7 @@ var _ = Describe("Controller Feature Tests", func() {
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the Job has ORKA_SYSTEM_PROMPT env var")
+			By("verifying the Job has ORKA_AI_SYSTEM_PROMPT env var")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "jobs",
 					"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
@@ -136,8 +136,8 @@ var _ = Describe("Controller Feature Tests", func() {
 					"-n", namespace)
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(ContainSubstring("ORKA_SYSTEM_PROMPT"),
-					"Job should have ORKA_SYSTEM_PROMPT env var")
+				g.Expect(output).To(ContainSubstring("ORKA_AI_SYSTEM_PROMPT"),
+					"Job should have ORKA_AI_SYSTEM_PROMPT env var")
 			}, 60*time.Second, 2*time.Second).Should(Succeed())
 		})
 	})
