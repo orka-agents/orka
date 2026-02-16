@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"context"
 	"os"
 	"testing"
 
@@ -217,5 +218,56 @@ func TestExtractResult_EmptyResultContent(t *testing.T) {
 	}
 	if r := extractResult(event); r != "" {
 		t.Errorf("extractResult() = %q, want empty for empty Result.Content", r)
+	}
+}
+
+func TestExecuteCopilot_NoGitHubToken(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("COPILOT_CLI_PATH", "/nonexistent/copilot-cli")
+
+	cfg := &common.AgentConfig{
+		Prompt:         "test",
+		MaxTurns:       5,
+		TimeoutSeconds: 2,
+	}
+
+	ctx := context.Background()
+	_, err := executeCopilot(ctx, cfg)
+	if err == nil {
+		t.Fatal("expected error when copilot client can't start")
+	}
+}
+
+func TestExecuteCopilot_CancelledContext(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "fake-token")
+	t.Setenv("COPILOT_CLI_PATH", "/nonexistent/copilot-cli")
+
+	cfg := &common.AgentConfig{
+		Prompt:   "test prompt",
+		MaxTurns: 5,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	_, err := executeCopilot(ctx, cfg)
+	if err == nil {
+		t.Fatal("expected error with cancelled context")
+	}
+}
+
+func TestExecuteCopilot_WithTimeout(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "fake-token")
+	t.Setenv("COPILOT_CLI_PATH", "/nonexistent/copilot-cli")
+
+	cfg := &common.AgentConfig{
+		Prompt:         "test prompt",
+		MaxTurns:       5,
+		TimeoutSeconds: 1, // 1 second timeout
+	}
+
+	_, err := executeCopilot(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error when CLI doesn't exist")
 	}
 }
