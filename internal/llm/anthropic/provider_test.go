@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/sozercan/orka/internal/llm"
 )
 
@@ -486,9 +488,395 @@ func TestStream_ServerError(t *testing.T) {
 	}
 }
 
-func TestHandleStreamEvent_TextDelta(t *testing.T) {
-	// handleStreamEvent is tested indirectly through Stream, but we can also verify
-	// by checking the buildMessages and buildRequestParams helpers produce valid params.
-	// Direct testing of handleStreamEvent requires constructing SDK event types,
-	// which is complex. The Stream integration tests above cover the behavior.
+// unmarshalStreamEvent is a test helper that unmarshals JSON into a MessageStreamEventUnion.
+func unmarshalStreamEvent(t *testing.T, raw string) anthropic.MessageStreamEventUnion {
+	t.Helper()
+	var event anthropic.MessageStreamEventUnion
+	if err := json.Unmarshal([]byte(raw), &event); err != nil {
+		t.Fatalf("failed to unmarshal stream event: %v", err)
+	}
+	return event
+}
+
+func TestHandleStreamEvent_ContentBlockStart_ToolUse(t *testing.T) {
+	event := unmarshalStreamEvent(t,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tc1","name":"search","input":{}}}`)
+
+	ch := make(chan llm.StreamChunk, 10)
+	var currentToolCall *llm.ToolCall
+	var toolCallArgs []byte
+	hasToolCalls := false
+
+	handleStreamEvent(event, ch, &currentToolCall, &toolCallArgs, &hasToolCalls)
+
+	if currentToolCall == nil {
+		t.Fatal("expected currentToolCall to be set")
+	}
+	if currentToolCall.ID != "tc1" {
+		t.Errorf("tool call ID = %q, want tc1", currentToolCall.ID)
+	}
+	if currentToolCall.Name != "search" {
+		t.Errorf("tool call Name = %q, want search", currentToolCall.Name)
+	}
+	if !hasToolCalls {
+		t.Error("expected hasToolCalls to be true")
+	}
+	if len(ch) != 0 {
+		t.Error("no chunk should be sent on content_block_start")
+	}
+}
+
+func TestHandleStreamEvent_ContentBlockStart_Text(t *testing.T) {
+	event := unmarshalStreamEvent(t,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
+
+	ch := make(chan llm.StreamChunk, 10)
+	var currentToolCall *llm.ToolCall
+	var toolCallArgs []byte
+	hasToolCalls := false
+
+	handleStreamEvent(event, ch, &currentToolCall, &toolCallArgs, &hasToolCalls)
+
+	if currentToolCall != nil {
+		t.Error("expected currentToolCall to be nil for text block")
+	}
+	if hasToolCalls {
+		t.Error("expected hasToolCalls to remain false")
+	}
+}
+
+func TestHandleStreamEvent_ContentBlockDelta_TextDelta(t *testing.T) {
+	event := unmarshalStreamEvent(t,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}`)
+
+	ch := make(chan llm.StreamChunk, 10)
+	var currentToolCall *llm.ToolCall
+	var toolCallArgs []byte
+	hasToolCalls := false
+
+	handleStreamEvent(event, ch, &currentToolCall, &toolCallArgs, &hasToolCalls)
+
+	if len(ch) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(ch))
+	}
+	chunk := <-ch
+	if chunk.Content != "Hello" {
+		t.Errorf("chunk content = %q, want Hello", chunk.Content)
+	}
+}
+
+func TestHandleStreamEvent_ContentBlockDelta_InputJSONDelta(t *testing.T) {
+	event := unmarshalStreamEvent(t,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"q\":"}}`)
+
+	ch := make(chan llm.StreamChunk, 10)
+	tc := &llm.ToolCall{ID: "tc1", Name: "search"}
+	var toolCallArgs []byte
+	hasToolCalls := true
+
+	handleStreamEvent(event, ch, &tc, &toolCallArgs, &hasToolCalls)
+
+	if string(toolCallArgs) != `{"q":` {
+		t.Errorf("toolCallArgs = %q, want %q", string(toolCallArgs), `{"q":`)
+	}
+	if len(ch) != 0 {
+		t.Error("no chunk should be sent on input_json_delta")
+	}
+}
+
+func TestHandleStreamEvent_ContentBlockDelta_InputJSONDelta_NoToolCall(t *testing.T) {
+	event := unmarshalStreamEvent(t,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"data"}}`)
+
+	ch := make(chan llm.StreamChunk, 10)
+	var currentToolCall *llm.ToolCall
+	var toolCallArgs []byte
+	hasToolCalls := false
+
+	handleStreamEvent(event, ch, &currentToolCall, &toolCallArgs, &hasToolCalls)
+
+	if len(toolCallArgs) != 0 {
+		t.Error("toolCallArgs should remain empty when no active tool call")
+	}
+}
+
+func TestHandleStreamEvent_ContentBlockStop_WithToolCall(t *testing.T) {
+	ch := make(chan llm.StreamChunk, 10)
+	tc := &llm.ToolCall{ID: "tc1", Name: "search"}
+	toolCallArgs := []byte(`{"q":"test"}`)
+	hasToolCalls := true
+
+	event := unmarshalStreamEvent(t, `{"type":"content_block_stop","index":0}`)
+	handleStreamEvent(event, ch, &tc, &toolCallArgs, &hasToolCalls)
+
+	if tc != nil {
+		t.Error("expected currentToolCall to be reset to nil")
+	}
+	if len(ch) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(ch))
+	}
+	chunk := <-ch
+	if chunk.ToolCall == nil {
+		t.Fatal("expected ToolCall in chunk")
+	}
+	if chunk.ToolCall.Name != "search" {
+		t.Errorf("ToolCall.Name = %q, want search", chunk.ToolCall.Name)
+	}
+	if string(chunk.ToolCall.Arguments) != `{"q":"test"}` {
+		t.Errorf("ToolCall.Arguments = %s, want {\"q\":\"test\"}", string(chunk.ToolCall.Arguments))
+	}
+}
+
+func TestHandleStreamEvent_ContentBlockStop_WithToolCallNoArgs(t *testing.T) {
+	ch := make(chan llm.StreamChunk, 10)
+	tc := &llm.ToolCall{ID: "tc2", Name: "noop"}
+	var toolCallArgs []byte
+	hasToolCalls := true
+
+	event := unmarshalStreamEvent(t, `{"type":"content_block_stop","index":0}`)
+	handleStreamEvent(event, ch, &tc, &toolCallArgs, &hasToolCalls)
+
+	if len(ch) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(ch))
+	}
+	chunk := <-ch
+	if chunk.ToolCall == nil {
+		t.Fatal("expected ToolCall in chunk")
+	}
+	if string(chunk.ToolCall.Arguments) != "{}" {
+		t.Errorf("ToolCall.Arguments = %s, want {}", string(chunk.ToolCall.Arguments))
+	}
+}
+
+func TestHandleStreamEvent_ContentBlockStop_NoToolCall(t *testing.T) {
+	ch := make(chan llm.StreamChunk, 10)
+	var tc *llm.ToolCall
+	var toolCallArgs []byte
+	hasToolCalls := false
+
+	event := unmarshalStreamEvent(t, `{"type":"content_block_stop","index":0}`)
+	handleStreamEvent(event, ch, &tc, &toolCallArgs, &hasToolCalls)
+
+	if len(ch) != 0 {
+		t.Error("no chunk should be sent when no active tool call")
+	}
+}
+
+func TestHandleStreamEvent_MessageDelta_EndTurn(t *testing.T) {
+	event := unmarshalStreamEvent(t,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":""},"usage":{"output_tokens":10}}`)
+
+	ch := make(chan llm.StreamChunk, 10)
+	var tc *llm.ToolCall
+	var toolCallArgs []byte
+	hasToolCalls := false
+
+	handleStreamEvent(event, ch, &tc, &toolCallArgs, &hasToolCalls)
+
+	if len(ch) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(ch))
+	}
+	chunk := <-ch
+	if !chunk.Done {
+		t.Error("expected Done to be true")
+	}
+	if chunk.StopReason != "end_turn" {
+		t.Errorf("StopReason = %q, want end_turn", chunk.StopReason)
+	}
+}
+
+func TestHandleStreamEvent_MessageDelta_ToolUseInferred(t *testing.T) {
+	// When hasToolCalls is true and stopReason is empty, should infer "tool_use"
+	event := unmarshalStreamEvent(t,
+		`{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":""},"usage":{"output_tokens":10}}`)
+
+	ch := make(chan llm.StreamChunk, 10)
+	var tc *llm.ToolCall
+	var toolCallArgs []byte
+	hasToolCalls := true
+
+	handleStreamEvent(event, ch, &tc, &toolCallArgs, &hasToolCalls)
+
+	if len(ch) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(ch))
+	}
+	chunk := <-ch
+	if !chunk.Done {
+		t.Error("expected Done to be true")
+	}
+	if chunk.StopReason != "tool_use" {
+		t.Errorf("StopReason = %q, want tool_use", chunk.StopReason)
+	}
+}
+
+func TestHandleStreamEvent_MessageStop(t *testing.T) {
+	event := unmarshalStreamEvent(t, `{"type":"message_stop"}`)
+
+	ch := make(chan llm.StreamChunk, 10)
+	var tc *llm.ToolCall
+	var toolCallArgs []byte
+	hasToolCalls := false
+
+	handleStreamEvent(event, ch, &tc, &toolCallArgs, &hasToolCalls)
+
+	// MessageStopEvent is a no-op
+	if len(ch) != 0 {
+		t.Error("no chunk should be sent on message_stop")
+	}
+}
+
+func TestStream_TextContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+
+		events := []string{
+			`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-3","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}`,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}`,
+			`{"type":"content_block_stop","index":0}`,
+			`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":""},"usage":{"output_tokens":5}}`,
+			`{"type":"message_stop"}`,
+		}
+
+		for _, e := range events {
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", strings.Split(e, `"`)[3], e)
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(llm.ProviderConfig{
+		APIKey:  "test-key",
+		BaseURL: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+
+	ch, err := provider.Stream(context.Background(), &llm.CompletionRequest{
+		Model:    "claude-3",
+		Messages: []llm.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+
+	var content strings.Builder
+	var gotDone bool
+	var stopReason string
+	for chunk := range ch {
+		if chunk.Error != nil {
+			t.Fatalf("unexpected error: %v", chunk.Error)
+		}
+		if chunk.Content != "" {
+			content.WriteString(chunk.Content)
+		}
+		if chunk.Done {
+			gotDone = true
+			stopReason = chunk.StopReason
+		}
+	}
+
+	if content.String() != "Hello world" {
+		t.Errorf("content = %q, want 'Hello world'", content.String())
+	}
+	if !gotDone {
+		t.Error("expected Done chunk")
+	}
+	if stopReason != "end_turn" {
+		t.Errorf("stopReason = %q, want end_turn", stopReason)
+	}
+}
+
+func TestStream_ToolUse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+
+		events := []string{
+			`{"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","model":"claude-3","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}`,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Searching"}}`,
+			`{"type":"content_block_stop","index":0}`,
+			`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tc1","name":"search","input":{}}}`,
+			`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"q\":"}}`,
+			`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"test\"}"}}`,
+			`{"type":"content_block_stop","index":1}`,
+			`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":""},"usage":{"output_tokens":15}}`,
+			`{"type":"message_stop"}`,
+		}
+
+		for _, e := range events {
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", strings.Split(e, `"`)[3], e)
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(llm.ProviderConfig{
+		APIKey:  "test-key",
+		BaseURL: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+
+	ch, err := provider.Stream(context.Background(), &llm.CompletionRequest{
+		Model:    "claude-3",
+		Messages: []llm.Message{{Role: "user", Content: "search"}},
+		Tools: []llm.Tool{
+			{Name: "search", Description: "search", Parameters: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+
+	var content strings.Builder
+	var toolCalls []llm.ToolCall
+	var stopReason string
+	for chunk := range ch {
+		if chunk.Error != nil {
+			t.Fatalf("unexpected error: %v", chunk.Error)
+		}
+		if chunk.Content != "" {
+			content.WriteString(chunk.Content)
+		}
+		if chunk.ToolCall != nil {
+			toolCalls = append(toolCalls, *chunk.ToolCall)
+		}
+		if chunk.Done {
+			stopReason = chunk.StopReason
+		}
+	}
+
+	if content.String() != "Searching" {
+		t.Errorf("content = %q, want 'Searching'", content.String())
+	}
+	if len(toolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(toolCalls))
+	}
+	if toolCalls[0].Name != "search" {
+		t.Errorf("tool call name = %q, want search", toolCalls[0].Name)
+	}
+	if string(toolCalls[0].Arguments) != `{"q":"test"}` {
+		t.Errorf("tool call args = %s, want {\"q\":\"test\"}", string(toolCalls[0].Arguments))
+	}
+	if stopReason != "tool_use" {
+		t.Errorf("stopReason = %q, want tool_use", stopReason)
+	}
+}
+
+func TestInitRegistersProvider(t *testing.T) {
+	// The init() function registers the anthropic provider factory.
+	// Exercise the factory via llm.NewProvider.
+	provider, err := llm.NewProvider("anthropic", llm.ProviderConfig{APIKey: "test-key"})
+	if err != nil {
+		t.Fatalf("llm.NewProvider(anthropic) error = %v", err)
+	}
+	if provider.Name() != "anthropic" {
+		t.Errorf("provider.Name() = %q, want anthropic", provider.Name())
+	}
 }

@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	copilot "github.com/github/copilot-sdk/go"
@@ -269,5 +270,60 @@ func TestExecuteCopilot_WithTimeout(t *testing.T) {
 	_, err := executeCopilot(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("expected error when CLI doesn't exist")
+	}
+}
+
+func TestExecuteCopilot_NoCLIPathEnv(t *testing.T) {
+	// Test the branch where COPILOT_CLI_PATH is not set.
+	// The SDK will try the embedded CLI or "copilot" in PATH, which won't exist.
+	t.Setenv("COPILOT_CLI_PATH", "")
+	t.Setenv("GITHUB_TOKEN", "fake-token")
+
+	cfg := &common.AgentConfig{
+		Prompt:         "test",
+		MaxTurns:       5,
+		TimeoutSeconds: 2,
+	}
+
+	_, err := executeCopilot(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error when no CLI is available")
+	}
+}
+
+func TestExecuteCopilot_DefaultTimeoutError(t *testing.T) {
+	// Exercises the default timeout path (TimeoutSeconds == 0)
+	t.Setenv("COPILOT_CLI_PATH", "/nonexistent/copilot-cli")
+	t.Setenv("GITHUB_TOKEN", "fake-token")
+
+	cfg := &common.AgentConfig{
+		Prompt:   "test prompt",
+		MaxTurns: 5,
+		// TimeoutSeconds = 0, should use defaultTimeout
+	}
+
+	_, err := executeCopilot(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error when CLI doesn't exist")
+	}
+	if !strings.Contains(err.Error(), "failed to start copilot client") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestExecuteCopilot_NoGitHubTokenNoCLI(t *testing.T) {
+	// Neither token nor CLI path set
+	t.Setenv("COPILOT_CLI_PATH", "")
+	t.Setenv("GITHUB_TOKEN", "")
+
+	cfg := &common.AgentConfig{
+		Prompt:         "test",
+		MaxTurns:       5,
+		TimeoutSeconds: 2,
+	}
+
+	_, err := executeCopilot(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error when no CLI and no token")
 	}
 }
