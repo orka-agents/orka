@@ -262,3 +262,82 @@ func TestRetryProvider_Name(t *testing.T) {
 		t.Errorf("expected 'myname', got %q", rp.Name())
 	}
 }
+
+func TestRetryProvider_Backoff(t *testing.T) {
+	rp := NewRetryProvider(&retryMockProvider{name: "test"}, 3)
+
+	// Attempt 0: ~1s base
+	d0 := rp.backoff(0)
+	if d0 < 900*time.Millisecond || d0 > 1100*time.Millisecond {
+		t.Errorf("attempt 0 backoff expected ~1s, got %v", d0)
+	}
+
+	// Attempt 1: ~2s
+	d1 := rp.backoff(1)
+	if d1 < 1800*time.Millisecond || d1 > 2200*time.Millisecond {
+		t.Errorf("attempt 1 backoff expected ~2s, got %v", d1)
+	}
+
+	// Attempt 2: ~4s
+	d2 := rp.backoff(2)
+	if d2 < 3600*time.Millisecond || d2 > 4400*time.Millisecond {
+		t.Errorf("attempt 2 backoff expected ~4s, got %v", d2)
+	}
+}
+
+func TestRetryProvider_Backoff_CappedAtMaxDelay(t *testing.T) {
+	rp := NewRetryProvider(&retryMockProvider{name: "test"}, 3)
+	rp.maxDelay = 5 * time.Second
+
+	// High attempt should be capped
+	d := rp.backoff(100)
+	if d > 6*time.Second {
+		t.Errorf("backoff should be capped at maxDelay, got %v", d)
+	}
+}
+
+func TestRetryProvider_Stream_EmptyChannel(t *testing.T) {
+	mock := &retryMockProvider{
+		name:          "test",
+		streamResults: [][]StreamChunk{{}}, // empty stream
+	}
+	rp := NewRetryProvider(mock, 1)
+	ch, err := rp.Stream(context.Background(), &CompletionRequest{})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	chunks := 0
+	for range ch {
+		chunks++
+	}
+	if chunks != 0 {
+		t.Errorf("expected 0 chunks from empty stream, got %d", chunks)
+	}
+}
+
+func TestRetryProvider_Stream_NonRetryableFirstChunk(t *testing.T) {
+	mock := &retryMockProvider{
+		name: "test",
+		streamResults: [][]StreamChunk{
+			{{Error: &ProviderError{StatusCode: 400, Message: "bad request"}, Done: true}},
+		},
+	}
+	rp := NewRetryProvider(mock, 3)
+	rp.baseDelay = time.Millisecond
+	ch, err := rp.Stream(context.Background(), &CompletionRequest{})
+	if err != nil {
+		t.Fatalf("expected no error from Stream(), got %v", err)
+	}
+	var gotError bool
+	for chunk := range ch {
+		if chunk.Error != nil {
+			gotError = true
+		}
+	}
+	if !gotError {
+		t.Error("expected error chunk for non-retryable error")
+	}
+	if mock.streamCallCount != 1 {
+		t.Errorf("expected 1 stream call (no retry for 400), got %d", mock.streamCallCount)
+	}
+}

@@ -149,12 +149,8 @@ build: manifests generate fmt vet ui-build ## Build manager binary.
 build-cli: ## Build orka CLI binary.
 	go build -ldflags "-X main.version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)" -o bin/orka ./cmd/cli/
 
-.PHONY: build-migrate
-build-migrate: ## Build ConfigMap to SQLite migration binary.
-	go build -o bin/orka-migrate ./cmd/migrate/
-
 .PHONY: build-all
-build-all: build build-cli build-migrate ## Build all binaries.
+build-all: build build-cli ## Build all binaries.
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.

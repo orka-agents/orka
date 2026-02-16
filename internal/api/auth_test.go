@@ -7,6 +7,10 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func setupTestApp(c client.Client) *fiber.App {
@@ -198,5 +203,351 @@ func TestConstants(t *testing.T) {
 	}
 	if UserInfoContextKey != "userInfo" {
 		t.Errorf("UserInfoContextKey = %s, want userInfo", UserInfoContextKey)
+	}
+}
+
+func TestGetTokenHash(t *testing.T) {
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{"simple token", "my-token"},
+		{"empty token", ""},
+		{"long token", "eyJhbGciOiJSUzI1NiIsImtpZCI6IjEyMzQ1Njc4OTAifQ.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hash := getTokenHash(tt.token)
+
+			// Verify it produces the correct SHA-256 hex digest
+			expected := sha256.Sum256([]byte(tt.token))
+			want := hex.EncodeToString(expected[:])
+			if hash != want {
+				t.Errorf("getTokenHash(%q) = %s, want %s", tt.token, hash, want)
+			}
+
+			// Verify determinism
+			if hash2 := getTokenHash(tt.token); hash2 != hash {
+				t.Errorf("getTokenHash not deterministic: %s != %s", hash, hash2)
+			}
+		})
+	}
+
+	// Different tokens produce different hashes
+	h1 := getTokenHash("token-a")
+	h2 := getTokenHash("token-b")
+	if h1 == h2 {
+		t.Error("different tokens should produce different hashes")
+	}
+}
+
+func TestValidateToken_Authenticated(t *testing.T) {
+	// Clear cache to avoid interference
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
+					tr.Status.Authenticated = true
+					tr.Status.User = authenticationv1.UserInfo{
+						Username: "system:serviceaccount:test-ns:test-sa",
+						UID:      "uid-123",
+						Groups:   []string{"system:serviceaccounts", "system:serviceaccounts:test-ns"},
+					}
+				}
+				return nil
+			},
+		}).
+		Build()
+
+	userInfo, err := validateToken(context.Background(), fakeClient, "valid-token")
+	if err != nil {
+		t.Fatalf("validateToken returned error: %v", err)
+	}
+	if userInfo.Username != "system:serviceaccount:test-ns:test-sa" {
+		t.Errorf("Username = %s, want system:serviceaccount:test-ns:test-sa", userInfo.Username)
+	}
+	if userInfo.UID != "uid-123" {
+		t.Errorf("UID = %s, want uid-123", userInfo.UID)
+	}
+	if userInfo.Namespace != "test-ns" {
+		t.Errorf("Namespace = %s, want test-ns", userInfo.Namespace)
+	}
+}
+
+func TestValidateToken_CacheHit(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	callCount := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				callCount++
+				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
+					tr.Status.Authenticated = true
+					tr.Status.User = authenticationv1.UserInfo{
+						Username: "system:serviceaccount:ns:sa",
+						UID:      "uid-cached",
+					}
+				}
+				return nil
+			},
+		}).
+		Build()
+
+	// First call should hit the API
+	_, err := validateToken(context.Background(), fakeClient, "cache-token")
+	if err != nil {
+		t.Fatalf("first validateToken failed: %v", err)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected 1 API call, got %d", callCount)
+	}
+
+	// Second call should use cache
+	userInfo, err := validateToken(context.Background(), fakeClient, "cache-token")
+	if err != nil {
+		t.Fatalf("second validateToken failed: %v", err)
+	}
+	if callCount != 1 {
+		t.Errorf("expected cache hit (1 API call total), got %d", callCount)
+	}
+	if userInfo.UID != "uid-cached" {
+		t.Errorf("UID = %s, want uid-cached", userInfo.UID)
+	}
+}
+
+func TestValidateToken_NotAuthenticated(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
+					tr.Status.Authenticated = false
+				}
+				return nil
+			},
+		}).
+		Build()
+
+	_, err := validateToken(context.Background(), fakeClient, "invalid-token")
+	if err == nil {
+		t.Fatal("expected error for unauthenticated token")
+	}
+}
+
+func TestValidateToken_CreateError(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				return errors.New("api server unavailable")
+			},
+		}).
+		Build()
+
+	_, err := validateToken(context.Background(), fakeClient, "err-token")
+	if err == nil {
+		t.Fatal("expected error when Create fails")
+	}
+}
+
+func TestNewAuthMiddleware_ValidToken(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
+					tr.Status.Authenticated = true
+					tr.Status.User = authenticationv1.UserInfo{
+						Username: "system:serviceaccount:ns1:worker",
+						UID:      "uid-valid",
+						Groups:   []string{"system:serviceaccounts"},
+					}
+				}
+				return nil
+			},
+		}).
+		Build()
+
+	var capturedUserInfo *UserInfo
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(fakeClient))
+	app.Get("/test", func(ctx fiber.Ctx) error {
+		capturedUserInfo = GetUserInfo(ctx)
+		return ctx.SendString("OK")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("Authorization", "Bearer valid-test-token")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if capturedUserInfo == nil {
+		t.Fatal("expected UserInfo to be set in context")
+	}
+	if capturedUserInfo.Username != "system:serviceaccount:ns1:worker" {
+		t.Errorf("Username = %s, want system:serviceaccount:ns1:worker", capturedUserInfo.Username)
+	}
+}
+
+func TestNewAuthMiddleware_TokenValidationFails(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				return errors.New("api server error")
+			},
+		}).
+		Build()
+
+	app := setupTestApp(fakeClient)
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("Authorization", "Bearer some-token")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+func TestGetEffectiveNamespace(t *testing.T) {
+	tests := []struct {
+		name     string
+		explicit string
+		userInfo *UserInfo
+		wantNS   string
+	}{
+		{
+			name:     "explicit namespace takes priority",
+			explicit: "my-ns",
+			userInfo: &UserInfo{Namespace: "sa-ns"},
+			wantNS:   "my-ns",
+		},
+		{
+			name:     "falls back to SA namespace",
+			explicit: "",
+			userInfo: &UserInfo{Namespace: "sa-ns"},
+			wantNS:   "sa-ns",
+		},
+		{
+			name:     "falls back to default when no SA namespace",
+			explicit: "",
+			userInfo: &UserInfo{Namespace: ""},
+			wantNS:   "default",
+		},
+		{
+			name:     "falls back to default when no user info",
+			explicit: "",
+			userInfo: nil,
+			wantNS:   "default",
+		},
+		{
+			name:     "explicit empty string uses SA namespace",
+			explicit: "",
+			userInfo: &UserInfo{Namespace: "from-sa"},
+			wantNS:   "from-sa",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := fiber.New()
+			var gotNS string
+			app.Get("/test", func(ctx fiber.Ctx) error {
+				if tt.userInfo != nil {
+					ctx.Locals(UserInfoContextKey, tt.userInfo)
+				}
+				gotNS = GetEffectiveNamespace(ctx, tt.explicit)
+				return ctx.SendString("OK")
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			_, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if gotNS != tt.wantNS {
+				t.Errorf("GetEffectiveNamespace() = %s, want %s", gotNS, tt.wantNS)
+			}
+		})
+	}
+}
+
+func TestParseServiceAccountNamespace(t *testing.T) {
+	tests := []struct {
+		name     string
+		username string
+		want     string
+	}{
+		{"valid SA username", "system:serviceaccount:my-ns:my-sa", "my-ns"},
+		{"non-SA username", "admin", ""},
+		{"partial prefix", "system:serviceaccount:", ""},
+		{"missing name part", "system:serviceaccount:ns", ""},
+		{"empty namespace", "system:serviceaccount::sa", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseServiceAccountNamespace(tt.username)
+			if got != tt.want {
+				t.Errorf("parseServiceAccountNamespace(%q) = %q, want %q", tt.username, got, tt.want)
+			}
+		})
 	}
 }
