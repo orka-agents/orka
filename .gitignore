@@ -41,4 +41,4 @@ ui/coverage/
 
 # Claude CLI binary
 /claude
-cli
+/cli

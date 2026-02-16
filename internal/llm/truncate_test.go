@@ -172,7 +172,7 @@ func TestTruncateMessages(t *testing.T) {
 		msgs := []Message{
 			{Role: "user", Content: "system prompt"},
 			{Role: "assistant", Content: strings.Repeat("a", 100)}, // ~25 tokens
-			{Role: "user", Content: strings.Repeat("b", 100)},     // ~25 tokens
+			{Role: "user", Content: strings.Repeat("b", 100)},      // ~25 tokens
 			{Role: "assistant", Content: strings.Repeat("c", 100)}, // ~25 tokens
 			{Role: "user", Content: "last"},                        // ~1 token
 		}

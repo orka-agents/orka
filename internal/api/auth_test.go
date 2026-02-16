@@ -468,10 +468,10 @@ func TestNewAuthMiddleware_TokenValidationFails(t *testing.T) {
 
 func TestGetEffectiveNamespace(t *testing.T) {
 	tests := []struct {
-		name      string
-		explicit  string
-		userInfo  *UserInfo
-		wantNS    string
+		name     string
+		explicit string
+		userInfo *UserInfo
+		wantNS   string
 	}{
 		{
 			name:     "explicit namespace takes priority",
