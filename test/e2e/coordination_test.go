@@ -69,11 +69,11 @@ var _ = Describe("Multi-Agent Coordination", Ordered, func() {
 				"namespace": "%s"
 			},
 			"spec": {
+				"providerRef": {
+					"name": "%s"
+				},
 				"model": {
-					"name": "%s",
-					"providerRef": {
-						"name": "%s"
-					}
+					"name": "%s"
 				}
 			}
 		}`, workerAgentName, namespace, model, coordProviderName)
@@ -92,11 +92,11 @@ var _ = Describe("Multi-Agent Coordination", Ordered, func() {
 				"namespace": "%s"
 			},
 			"spec": {
+				"providerRef": {
+					"name": "%s"
+				},
 				"model": {
-					"name": "%s",
-					"providerRef": {
-						"name": "%s"
-					}
+					"name": "%s"
 				},
 				"coordination": {
 					"enabled": true,
@@ -124,18 +124,18 @@ var _ = Describe("Multi-Agent Coordination", Ordered, func() {
 			},
 			"spec": {
 				"type": "ai",
-				"prompt": "You are a coordinator. Delegate the following task to the agent named '%s': ask it to compute the factorial of 5 and return just the number. Use the delegate_task tool to delegate, then use wait_for_tasks to get the result. Report the final answer.",
 				"agentRef": {
 					"name": "%s"
 				},
-				"model": {
-					"name": "%s",
+				"ai": {
+					"prompt": "You are a coordinator. Delegate the following task to the agent named '%s': ask it to compute the factorial of 5 and return just the number. Use the delegate_task tool to delegate, then use wait_for_tasks to get the result. Report the final answer.",
+					"model": "%s",
 					"providerRef": {
 						"name": "%s"
 					}
 				}
 			}
-		}`, coordTaskName, namespace, workerAgentName, coordinatorAgentName, model, coordProviderName)
+		}`, coordTaskName, namespace, coordinatorAgentName, workerAgentName, model, coordProviderName)
 
 		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(taskManifest)

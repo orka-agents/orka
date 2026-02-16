@@ -110,9 +110,9 @@ var _ = Describe("Comprehensive Functionality", Ordered, func() {
 			},
 			"spec": {
 				"type": "ai",
-				"prompt": "Use the code_exec tool to run this Python code and tell me the result:\n\nimport json\ndata = {'numbers': [i**2 for i in range(1, 6)], 'sum': sum(i**2 for i in range(1, 6))}\nprint(json.dumps(data))\n\nAfter running it, confirm the sum is correct by explaining the calculation.",
-				"model": {
-					"name": "%s",
+				"ai": {
+					"prompt": "Use the code_exec tool to run this Python code and tell me the result:\n\nimport json\ndata = {'numbers': [i**2 for i in range(1, 6)], 'sum': sum(i**2 for i in range(1, 6))}\nprint(json.dumps(data))\n\nAfter running it, confirm the sum is correct by explaining the calculation.",
+					"model": "%s",
 					"providerRef": {
 						"name": "%s"
 					}

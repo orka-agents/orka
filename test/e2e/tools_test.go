@@ -77,9 +77,9 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 			},
 			"spec": {
 				"type": "ai",
-				"prompt": "Use the web_search tool to search for 'Kubernetes container orchestration'. Summarize what you find in 2-3 sentences.",
-				"model": {
-					"name": "%s",
+				"ai": {
+					"prompt": "Use the web_search tool to search for 'Kubernetes container orchestration'. Summarize what you find in 2-3 sentences.",
+					"model": "%s",
 					"providerRef": {
 						"name": "%s"
 					}
@@ -119,9 +119,9 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 			},
 			"spec": {
 				"type": "ai",
-				"prompt": "First use the code_exec tool to create a file at /tmp/e2e-read-test.txt with the content 'hello from file_read test'. Then use the file_read tool to read /tmp/e2e-read-test.txt and tell me what it contains.",
-				"model": {
-					"name": "%s",
+				"ai": {
+					"prompt": "First use the code_exec tool to create a file at /tmp/e2e-read-test.txt with the content 'hello from file_read test'. Then use the file_read tool to read /tmp/e2e-read-test.txt and tell me what it contains.",
+					"model": "%s",
 					"providerRef": {
 						"name": "%s"
 					}
@@ -203,9 +203,9 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 			},
 			"spec": {
 				"type": "ai",
-				"prompt": "Use the %s tool to echo the message 'hello from custom tool'. Report what the tool returned.",
-				"model": {
-					"name": "%s",
+				"ai": {
+					"prompt": "Use the %s tool to echo the message 'hello from custom tool'. Report what the tool returned.",
+					"model": "%s",
 					"providerRef": {
 						"name": "%s"
 					}
