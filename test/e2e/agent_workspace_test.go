@@ -38,6 +38,10 @@ var _ = Describe("Agent Workspace", Ordered, func() {
 		// Results are stored in SQLite — no ConfigMap cleanup needed
 	})
 
+	AfterEach(func() {
+		dumpDebugInfo(taskName)
+	})
+
 	It("should configure workspace volumes and env vars for git clone", func() {
 		By("creating an Agent with claude runtime for workspace test")
 		agentManifest := fmt.Sprintf(`{

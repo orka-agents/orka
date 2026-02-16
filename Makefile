@@ -2,6 +2,8 @@
 IMG ?= controller:latest
 COPILOT_WORKER_IMG ?= orka-agent-worker-copilot:latest
 CLAUDE_WORKER_IMG ?= orka-agent-worker-claude:latest
+AI_WORKER_IMG ?= orka-ai-worker:latest
+GENERAL_WORKER_IMG ?= orka-general-worker:latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -87,7 +89,7 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
 		*) \
 			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
+			$(KIND) create cluster --name $(KIND_CLUSTER) --config test/e2e/kind-config.yaml ;; \
 	esac
 
 .PHONY: test-e2e
@@ -98,6 +100,19 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+
+.PHONY: test-e2e-setup-only
+test-e2e-setup-only: setup-test-e2e docker-build-all ## Set up Kind cluster and build all images without running tests.
+	@echo "Loading images into Kind cluster '$(KIND_CLUSTER)'..."
+	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER)
+	$(KIND) load docker-image $(COPILOT_WORKER_IMG) --name $(KIND_CLUSTER)
+	$(KIND) load docker-image $(CLAUDE_WORKER_IMG) --name $(KIND_CLUSTER)
+	$(KIND) load docker-image $(AI_WORKER_IMG) --name $(KIND_CLUSTER)
+	$(KIND) load docker-image $(GENERAL_WORKER_IMG) --name $(KIND_CLUSTER)
+
+.PHONY: test-e2e-run-only
+test-e2e-run-only: manifests generate fmt vet ## Run e2e tests without rebuilding images (for fast iteration).
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -183,6 +198,14 @@ bundle-copilot-cli: ## Bundle the Copilot CLI binary for the current platform (f
 docker-build-claude-worker: ## Build docker image for the Claude agent worker.
 	$(CONTAINER_TOOL) build -t ${CLAUDE_WORKER_IMG} -f workers/agent/claude/Dockerfile .
 
+.PHONY: docker-build-ai-worker
+docker-build-ai-worker: ## Build docker image for the AI worker.
+	$(CONTAINER_TOOL) build -t ${AI_WORKER_IMG} -f workers/ai/Dockerfile .
+
+.PHONY: docker-build-general-worker
+docker-build-general-worker: ## Build docker image for the general worker.
+	$(CONTAINER_TOOL) build -t ${GENERAL_WORKER_IMG} -f workers/general/Dockerfile .
+
 .PHONY: docker-push-copilot-worker
 docker-push-copilot-worker: ## Push docker image for the Copilot agent worker.
 	$(CONTAINER_TOOL) push ${COPILOT_WORKER_IMG}
@@ -192,7 +215,7 @@ docker-push-claude-worker: ## Push docker image for the Claude agent worker.
 	$(CONTAINER_TOOL) push ${CLAUDE_WORKER_IMG}
 
 .PHONY: docker-build-all
-docker-build-all: docker-build docker-build-copilot-worker docker-build-claude-worker ## Build all docker images.
+docker-build-all: docker-build docker-build-copilot-worker docker-build-claude-worker docker-build-ai-worker docker-build-general-worker ## Build all docker images.
 
 .PHONY: docker-push-all
 docker-push-all: docker-push docker-push-copilot-worker docker-push-claude-worker ## Push all docker images.
