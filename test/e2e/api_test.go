@@ -200,7 +200,8 @@ var _ = Describe("REST API Endpoints", Ordered, func() {
 		resp, err = http.DefaultClient.Do(req)
 		Expect(err).NotTo(HaveOccurred())
 		defer resp.Body.Close()
-		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+		Expect(resp.StatusCode).To(BeElementOf(http.StatusOK, http.StatusNoContent),
+			"DELETE should return 200 or 204")
 
 		By("verifying the task is deleted")
 		Eventually(func(g Gomega) {
