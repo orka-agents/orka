@@ -499,7 +499,7 @@ func TestCalculateRetryDelay(t *testing.T) {
 	t.Run("first attempt uses initial delay", func(t *testing.T) {
 		task := &corev1alpha1.Task{
 			Spec: corev1alpha1.TaskSpec{RetryPolicy: &corev1alpha1.RetryPolicy{
-				MaxRetries:  3,
+				MaxRetries:   3,
 				InitialDelay: &metav1.Duration{Duration: 5 * time.Second},
 			}},
 			Status: corev1alpha1.TaskStatus{Attempts: 1},
@@ -570,7 +570,7 @@ func TestEnforceHistoryLimits_DefaultLimits(t *testing.T) {
 	// Create 5 succeeded + 3 failed child tasks
 	var objs []client.Object
 	objs = append(objs, parent)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		objs = append(objs, &corev1alpha1.Task{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "child-s" + time.Now().Add(time.Duration(i)*time.Hour).Format("150405"),
@@ -581,7 +581,7 @@ func TestEnforceHistoryLimits_DefaultLimits(t *testing.T) {
 			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
 		})
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		objs = append(objs, &corev1alpha1.Task{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "child-f" + time.Now().Add(time.Duration(i)*time.Hour).Format("150405"),
@@ -636,7 +636,7 @@ func TestEnforceHistoryLimits_CustomLimits(t *testing.T) {
 
 	var objs []client.Object
 	objs = append(objs, parent)
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		objs = append(objs, &corev1alpha1.Task{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "cs-" + time.Now().Add(time.Duration(i)*time.Minute).Format("150405"),
@@ -647,7 +647,7 @@ func TestEnforceHistoryLimits_CustomLimits(t *testing.T) {
 			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
 		})
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		objs = append(objs, &corev1alpha1.Task{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "cf-" + time.Now().Add(time.Duration(i)*time.Minute).Format("150405"),

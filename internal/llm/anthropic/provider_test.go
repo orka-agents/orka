@@ -156,7 +156,7 @@ func TestBuildMessages(t *testing.T) {
 			name: "assistant with tool calls",
 			messages: []llm.Message{
 				{
-					Role: "assistant",
+					Role:    "assistant",
 					Content: "thinking",
 					ToolCalls: []llm.ToolCall{
 						{ID: "tc1", Name: "search", Arguments: json.RawMessage(`{"q":"test"}`)},
