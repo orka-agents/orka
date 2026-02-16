@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -2158,4 +2159,252 @@ func TestHandlers_GetTask_NoPlanStoreNoEnrichment(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
 	_, hasPlan := result["plan"]
 	require.False(t, hasPlan, "response should not contain plan field when planStore is nil")
+}
+
+// --- Tests: GetTaskChildren ---
+
+func TestHandlers_GetTaskChildren_Success(t *testing.T) {
+	parent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "parent-task",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-task",
+			Namespace: "default",
+			Labels:    map[string]string{"orka.ai/parent-task": "parent-task"},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	handlers, app := setupTestHandlersWithObjects(parent, child)
+	app.Get("/tasks/:id/children", handlers.GetTaskChildren)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks/parent-task/children", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result ListResponse
+	json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
+}
+
+func TestHandlers_GetTaskChildren_NoChildren(t *testing.T) {
+	parent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "lonely-task",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	handlers, app := setupTestHandlersWithObjects(parent)
+	app.Get("/tasks/:id/children", handlers.GetTaskChildren)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks/lonely-task/children", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestHandlers_GetTaskChildren_WithNamespace(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	handlers.watchNamespace = "prod"
+	app.Get("/tasks/:id/children", handlers.GetTaskChildren)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks/parent/children?namespace=prod", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// --- Tests: Readyz with health checker ---
+
+type fakeHealthChecker struct {
+	err error
+}
+
+func (f *fakeHealthChecker) HealthCheck(_ context.Context) error {
+	return f.err
+}
+
+func TestHandlers_Readyz_HealthCheckFailure(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	handlers := NewHandlers(fakeClient, nil, "", false, nil, nil, nil, nil, &fakeHealthChecker{err: fmt.Errorf("db down")})
+	app := fiber.New()
+	app.Get("/readyz", handlers.Readyz)
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+
+	var body map[string]any
+	json.NewDecoder(resp.Body).Decode(&body) //nolint:errcheck
+	require.Equal(t, "not ready", body["status"])
+}
+
+func TestHandlers_Readyz_HealthCheckSuccess(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	handlers := NewHandlers(fakeClient, nil, "", false, nil, nil, nil, nil, &fakeHealthChecker{err: nil})
+	app := fiber.New()
+	app.Get("/readyz", handlers.Readyz)
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// --- Tests: GetTaskLogs with clientset ---
+
+func TestHandlers_GetTaskLogs_TaskNotFoundReturns404(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Get("/tasks/:id/logs", handlers.GetTaskLogs)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks/nonexistent/logs", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestHandlers_GetTaskLogs_WithClientsetNoPods(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cs-task",
+			Namespace: "default",
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{JobName: "test-job"},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
+
+	fakeCS := kubefake.NewSimpleClientset() // no pods
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	h := NewHandlers(fakeClient, nil, "", false, ss, ss, nil, fakeCS, nil)
+
+	app := fiber.New()
+	app.Get("/tasks/:id/logs", h.GetTaskLogs)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks/cs-task/logs", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+// --- Tests: DeleteTask with watch namespace ---
+
+func TestHandlers_DeleteTask_WatchNamespaceScoped(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ns-task",
+			Namespace: "prod",
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	handlers, app := setupTestHandlersWithObjects(task)
+	handlers.watchNamespace = "prod"
+	app.Delete("/tasks/:id", handlers.DeleteTask)
+
+	req := httptest.NewRequest(http.MethodDelete, "/tasks/ns-task", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+}
+
+// --- Tests: CreateAgent already exists (conflict) ---
+
+func TestHandlers_CreateAgent_Conflict(t *testing.T) {
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-agent",
+			Namespace: "default",
+		},
+	}
+	handlers, app := setupTestHandlersWithObjects(agent)
+	app.Post("/agents", handlers.CreateAgent)
+
+	body, _ := json.Marshal(map[string]any{
+		"name": "existing-agent",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/agents", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+}
+
+// --- Tests: ListTools & GetTool with CRDs ---
+
+func TestHandlers_GetTool_CRD(t *testing.T) {
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "custom-tool",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "A custom tool",
+		},
+	}
+	handlers, app := setupTestHandlersWithObjects(tool)
+	app.Get("/tools/:name", handlers.GetTool)
+
+	req := httptest.NewRequest(http.MethodGet, "/tools/custom-tool", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// --- Tests: UpdateAgent invalid body ---
+
+func TestHandlers_UpdateAgent_WatchNamespace(t *testing.T) {
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "upd-agent",
+			Namespace: "prod",
+		},
+		Spec: corev1alpha1.AgentSpec{},
+	}
+	handlers, app := setupTestHandlersWithObjects(agent)
+	handlers.watchNamespace = "prod"
+	app.Put("/agents/:name", handlers.UpdateAgent)
+
+	body, _ := json.Marshal(map[string]any{"spec": map[string]any{}})
+	req := httptest.NewRequest(http.MethodPut, "/agents/upd-agent", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// --- Tests: CreateAgent with metadata format ---
+
+func TestHandlers_CreateAgent_MetadataFormat(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/agents", handlers.CreateAgent)
+
+	body, _ := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"name": "meta-agent",
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/agents", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
 }
