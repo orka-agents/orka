@@ -1353,3 +1353,451 @@ func TestFindGitSecret_WrongDataKey(t *testing.T) {
 		t.Errorf("findGitSecret() = %q, want empty (no token/password key)", got)
 	}
 }
+
+// --- Tests: taskStatusResult & taskTimeoutResult ---
+
+func TestTaskStatusResult_WithTimes(t *testing.T) {
+	now := metav1.Now()
+	later := metav1.NewTime(now.Add(5 * time.Second))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "t1"},
+		Status: corev1alpha1.TaskStatus{
+			Phase:          corev1alpha1.TaskPhaseSucceeded,
+			Message:        "completed",
+			StartTime:      &now,
+			CompletionTime: &later,
+		},
+	}
+	e := newTestExecutor()
+	r := e.taskStatusResult(task)
+	if !r.Success {
+		t.Fatalf("expected success")
+	}
+	data := r.Data.(map[string]any)
+	if data["elapsed"] != "5s" {
+		t.Errorf("elapsed = %v, want 5s", data["elapsed"])
+	}
+}
+
+func TestTaskStatusResult_NoTimes(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "t2"},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseFailed,
+			Message: "failed",
+		},
+	}
+	e := newTestExecutor()
+	r := e.taskStatusResult(task)
+	if !r.Success {
+		t.Fatalf("expected success")
+	}
+	data := r.Data.(map[string]any)
+	if _, ok := data["elapsed"]; ok {
+		t.Error("expected no elapsed field when no start time")
+	}
+}
+
+func TestTaskStatusResult_StartTimeOnly(t *testing.T) {
+	now := metav1.Now()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "t3"},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			StartTime: &now,
+		},
+	}
+	e := newTestExecutor()
+	r := e.taskStatusResult(task)
+	if !r.Success {
+		t.Fatalf("expected success")
+	}
+	data := r.Data.(map[string]any)
+	if _, ok := data["elapsed"]; !ok {
+		t.Error("expected elapsed field with start time only")
+	}
+}
+
+func TestTaskTimeoutResult_WithStartTime(t *testing.T) {
+	now := metav1.Now()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "t1"},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			StartTime: &now,
+		},
+	}
+	e := newTestExecutor()
+	r := e.taskTimeoutResult(task)
+	if !r.Success {
+		t.Fatalf("expected success")
+	}
+	data := r.Data.(map[string]any)
+	if _, ok := data["elapsed"]; !ok {
+		t.Error("expected elapsed field")
+	}
+	if !strings.Contains(data["message"].(string), "still running") {
+		t.Errorf("message = %v", data["message"])
+	}
+}
+
+func TestTaskTimeoutResult_NoStartTime(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "t2"},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhasePending,
+		},
+	}
+	e := newTestExecutor()
+	r := e.taskTimeoutResult(task)
+	if !r.Success {
+		t.Fatalf("expected success")
+	}
+	data := r.Data.(map[string]any)
+	if _, ok := data["elapsed"]; ok {
+		t.Error("expected no elapsed field when no start time")
+	}
+}
+
+// --- Tests: executeWaitForTask additional cases ---
+
+func TestExecuteWaitForTask_ContextCancelled(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "running-task",
+			Namespace: "default",
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseRunning,
+		},
+	}
+	e := newTestExecutor(task)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+	r := e.executeWaitForTask(ctx, map[string]any{"name": "running-task", "timeout": float64(1)})
+	// Should return timeout result since context is cancelled
+	if !r.Success {
+		t.Fatalf("expected success (timeout result), got error: %s", r.Error)
+	}
+	data := r.Data.(map[string]any)
+	if !strings.Contains(data["message"].(string), "still running") {
+		t.Errorf("expected timeout message, got: %v", data["message"])
+	}
+}
+
+func TestExecuteWaitForTask_AlreadyFailed(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "failed-task",
+			Namespace: "default",
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseFailed,
+			Message: "OOM killed",
+		},
+	}
+	e := newTestExecutor(task)
+	r := e.executeWaitForTask(context.Background(), map[string]any{"name": "failed-task"})
+	if !r.Success {
+		t.Fatalf("expected success: %s", r.Error)
+	}
+	data := r.Data.(map[string]any)
+	if data["phase"] != "Failed" {
+		t.Errorf("phase = %v, want Failed", data["phase"])
+	}
+}
+
+// --- Tests: handleInitialPrompt ---
+
+func TestHandleInitialPrompt_NoPrompt(t *testing.T) {
+	e := newTestExecutor()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1", Namespace: "default"},
+	}
+	result := e.handleInitialPrompt(context.Background(), agent, "default", map[string]any{})
+	if result != nil {
+		t.Fatalf("expected nil when no initialPrompt, got %+v", result)
+	}
+}
+
+func TestHandleInitialPrompt_TaskLimitReached(t *testing.T) {
+	e := newTestExecutor()
+	e.maxTasks = 0 // limit reached
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a2", Namespace: "default"},
+	}
+	result := e.handleInitialPrompt(context.Background(), agent, "default", map[string]any{"initialPrompt": "do work"})
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !result.Success {
+		t.Fatal("expected success=true")
+	}
+	data := result.Data.(map[string]any)
+	if !strings.Contains(data["message"].(string), "task limit reached") {
+		t.Errorf("message = %v", data["message"])
+	}
+}
+
+func TestHandleInitialPrompt_WithRuntimeAgent(t *testing.T) {
+	e := newTestExecutor()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "rt-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: "copilot",
+			},
+		},
+	}
+	result := e.handleInitialPrompt(context.Background(), agent, "default", map[string]any{"initialPrompt": "do work"})
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !result.Success {
+		t.Fatal("expected success")
+	}
+	data := result.Data.(map[string]any)
+	if data["message"] != "Agent created and task started" {
+		t.Errorf("message = %v", data["message"])
+	}
+}
+
+func TestHandleInitialPrompt_WithProviderRef(t *testing.T) {
+	e := newTestExecutor()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "ai-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			ProviderRef: &corev1alpha1.ProviderReference{Name: "my-provider"},
+		},
+	}
+	result := e.handleInitialPrompt(context.Background(), agent, "default", map[string]any{"initialPrompt": "summarize"})
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !result.Success {
+		t.Fatal("expected success")
+	}
+	data := result.Data.(map[string]any)
+	if data["message"] != "Agent created and task started" {
+		t.Errorf("message = %v", data["message"])
+	}
+}
+
+// --- Tests: executeCreateContainerTask priority ---
+
+func TestExecuteCreateContainerTask_WithPriority(t *testing.T) {
+	e := newTestExecutor()
+	args := map[string]any{
+		"image":    "alpine:latest",
+		"priority": float64(100),
+	}
+	r := e.executeCreateContainerTask(context.Background(), args)
+	if !r.Success {
+		t.Fatalf("expected success: %s", r.Error)
+	}
+}
+
+func TestExecuteCreateContainerTask_NamespaceRestriction(t *testing.T) {
+	e := newTestExecutor()
+	e.enforceNamespaceIsolation = true
+	args := map[string]any{
+		"image":     "alpine",
+		"namespace": "other-ns",
+	}
+	r := e.executeCreateContainerTask(context.Background(), args)
+	if r.Success {
+		t.Fatal("expected failure due to namespace restriction")
+	}
+	if r.ErrorType != "permission_denied" {
+		t.Errorf("ErrorType = %q", r.ErrorType)
+	}
+}
+
+// --- Tests: executeCreateAgentTask with schedule ---
+
+func TestExecuteCreateAgentTask_WithSchedule(t *testing.T) {
+	e := newTestExecutor()
+	args := map[string]any{
+		"prompt":   "run periodically",
+		"agentRef": "my-agent",
+		"schedule": "0 * * * *",
+	}
+	r := e.executeCreateAgentTask(context.Background(), args)
+	if !r.Success {
+		t.Fatalf("expected success: %s", r.Error)
+	}
+	data := r.Data.(map[string]any)
+	if !strings.Contains(data["message"].(string), "Recurring") {
+		t.Errorf("expected recurring message, got %v", data["message"])
+	}
+}
+
+func TestExecuteCreateAgentTask_NamespaceRestriction(t *testing.T) {
+	e := newTestExecutor()
+	e.enforceNamespaceIsolation = true
+	args := map[string]any{
+		"prompt":    "test",
+		"agentRef":  "a",
+		"namespace": "other-ns",
+	}
+	r := e.executeCreateAgentTask(context.Background(), args)
+	if r.Success {
+		t.Fatal("expected failure due to namespace restriction")
+	}
+}
+
+func TestExecuteCreateAgentTask_InvalidTimeout(t *testing.T) {
+	e := newTestExecutor()
+	args := map[string]any{
+		"prompt":   "test",
+		"agentRef": "a",
+		"timeout":  "bad",
+	}
+	r := e.executeCreateAgentTask(context.Background(), args)
+	if r.Success {
+		t.Fatal("expected failure for invalid timeout")
+	}
+	if r.ErrorType != "invalid_arguments" {
+		t.Errorf("ErrorType = %q", r.ErrorType)
+	}
+}
+
+func TestExecuteCreateAgentTask_TaskLimit(t *testing.T) {
+	e := newTestExecutor()
+	e.maxTasks = 0
+	r := e.executeCreateAgentTask(context.Background(), map[string]any{"prompt": "test", "agentRef": "a"})
+	if r.Success {
+		t.Fatal("expected failure due to task limit")
+	}
+	if r.ErrorType != "limit_reached" {
+		t.Errorf("ErrorType = %q", r.ErrorType)
+	}
+}
+
+// --- Tests: marshalResult error path ---
+
+func TestMarshalResult_WithComplexData(t *testing.T) {
+	r := ToolResult{
+		Success: true,
+		Data: map[string]any{
+			"list":   []string{"a", "b"},
+			"nested": map[string]any{"k": "v"},
+		},
+	}
+	s, err := marshalResult(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(s, `"success":true`) {
+		t.Errorf("expected success:true in %s", s)
+	}
+}
+
+// --- Tests: executeDeleteSession with error ---
+
+func TestExecuteDeleteSession_StoreError(t *testing.T) {
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	sm := controller.NewSessionManager(&fakeSessionStore{errOnDel: errors.New("db down")})
+	e := NewToolExecutor(c, sm, "default", "sess-123", "", false, 5, 30*time.Second, &fakeResultStore{})
+
+	r := e.executeDeleteSession(context.Background(), map[string]any{"sessionId": "sess-bad"})
+	if r.Success {
+		t.Fatal("expected failure")
+	}
+}
+
+// --- Tests: executeUpdateAgent with model-only update ---
+
+func TestExecuteUpdateAgent_ModelOnly(t *testing.T) {
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "upd-model",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.AgentSpec{},
+	}
+	e := newTestExecutor(agent)
+	r := e.executeUpdateAgent(context.Background(), map[string]any{
+		"name":  "upd-model",
+		"model": "gpt-4",
+	})
+	if !r.Success {
+		t.Fatalf("expected success: %s", r.Error)
+	}
+}
+
+// --- Tests: Execute dispatch for list/discovery tools ---
+
+func TestExecute_ListAgents(t *testing.T) {
+	e := newTestExecutor()
+	tc := llm.ToolCall{
+		ID:        "1",
+		Name:      "list_agents",
+		Arguments: mustJSON(map[string]any{}),
+	}
+	result, err := e.Execute(context.Background(), tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, `"success":true`) {
+		t.Errorf("expected success, got: %s", result)
+	}
+}
+
+func TestExecute_ListTools(t *testing.T) {
+	e := newTestExecutor()
+	tc := llm.ToolCall{
+		ID:        "1",
+		Name:      "list_tools",
+		Arguments: mustJSON(map[string]any{}),
+	}
+	result, err := e.Execute(context.Background(), tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, `"success":true`) {
+		t.Errorf("expected success, got: %s", result)
+	}
+}
+
+func TestExecute_ListTasks(t *testing.T) {
+	e := newTestExecutor()
+	tc := llm.ToolCall{
+		ID:        "1",
+		Name:      "list_tasks",
+		Arguments: mustJSON(map[string]any{}),
+	}
+	result, err := e.Execute(context.Background(), tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, `"success":true`) {
+		t.Errorf("expected success, got: %s", result)
+	}
+}
+
+// --- Tests: executeListTasks with limit ---
+
+func TestExecuteListTasks_WithLimit(t *testing.T) {
+	tasks := make([]runtime.Object, 5)
+	for i := 0; i < 5; i++ {
+		tasks[i] = &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              fmt.Sprintf("task-%d", i),
+				Namespace:         "default",
+				CreationTimestamp: metav1.Now(),
+			},
+			Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		}
+	}
+	e := newTestExecutor(tasks...)
+	r := e.executeListTasks(context.Background(), map[string]any{"limit": float64(2)})
+	if !r.Success {
+		t.Fatalf("expected success: %s", r.Error)
+	}
+	data := r.Data.([]map[string]any)
+	if len(data) != 2 {
+		t.Errorf("expected 2 tasks (limit), got %d", len(data))
+	}
+}

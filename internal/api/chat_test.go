@@ -1092,4 +1092,84 @@ func TestHandleChat(t *testing.T) {
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&chatResp))
 		assert.Equal(t, "my-session-123", chatResp.SessionID)
 	})
+
+	t.Run("SSE streaming mode", func(t *testing.T) {
+		objs := providerCRD("default", "default", "test-type", "test-model")
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+		ss := newTestSessionStore(t)
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+
+		app := fiber.New()
+		app.Post("/api/v1/chat", ch.HandleChat)
+
+		body, _ := json.Marshal(ChatRequest{Message: "hello"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+
+	t.Run("provider not found returns error", func(t *testing.T) {
+		// No provider CRDs registered, just a bare client
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		ss := newTestSessionStore(t)
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+
+		app := fiber.New()
+		app.Post("/api/v1/chat", ch.HandleChat)
+
+		body, _ := json.Marshal(ChatRequest{Message: "hello"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		// Provider resolution failure may return 400 or 500
+		assert.True(t, resp.StatusCode >= 400, "expected error status code, got %d", resp.StatusCode)
+	})
+}
+
+// --- Tests: loadChatSession with tool calls ---
+
+func TestLoadChatSession_WithToolCalls(t *testing.T) {
+	ss := newTestSessionStore(t)
+	rs := newTestResultStore(t)
+	cfg := DefaultChatConfig()
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
+	ctx := context.Background()
+
+	now := time.Now()
+	err := ss.CreateSession(ctx, &store.SessionRecord{
+		Namespace:   "default",
+		Name:        "tc-session",
+		SessionType: "chat",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	})
+	require.NoError(t, err)
+
+	toolCallsData := []map[string]any{
+		{"id": "call_1", "name": "search", "arguments": `{"q":"test"}`},
+	}
+
+	err = ss.AppendMessages(ctx, "default", "tc-session", []store.SessionMessage{
+		{Role: "user", Content: "use search", Timestamp: now},
+		{Role: "assistant", Content: "", ToolCalls: toolCallsData, Timestamp: now},
+		{Role: "tool", Content: "search results", ToolCallID: "call_1", Name: "search", Timestamp: now},
+	})
+	require.NoError(t, err)
+
+	msgs, err := ch.loadChatSession(ctx, "default", "tc-session")
+	require.NoError(t, err)
+	require.Len(t, msgs, 3)
+	assert.Equal(t, "user", msgs[0].Role)
+	assert.Equal(t, "assistant", msgs[1].Role)
+	assert.Equal(t, "tool", msgs[2].Role)
+	assert.Equal(t, "call_1", msgs[2].ToolCallID)
+	assert.Equal(t, "search", msgs[2].Name)
 }
