@@ -8,6 +8,9 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -19,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -1253,6 +1257,1916 @@ func TestResolveProvider_NamespaceIsolation(t *testing.T) {
 	_, err := r.resolveProvider(context.Background(), task, nil)
 	if err == nil {
 		t.Error("expected error for cross-namespace provider with isolation")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleDeletion
+// ---------------------------------------------------------------------------
+
+func TestHandleDeletion_NoFinalizer(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "del-no-fin",
+			Namespace: "default",
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	// Set deletion timestamp after creation (can't pass it to fake.NewClientBuilder)
+	task.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	result, err := r.handleDeletion(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue, got %v", result.RequeueAfter)
+	}
+}
+
+func TestHandleDeletion_WithResultRef(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "del-result",
+			Namespace:  "default",
+			Finalizers: []string{TaskFinalizer},
+		},
+		Status: corev1alpha1.TaskStatus{
+			ResultRef: &corev1alpha1.ResultReference{Available: true},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	_ = r.ResultStore.SaveResult(context.Background(), "default", "del-result", []byte("data"))
+	// handleDeletion calls r.Update to remove finalizer — this works when DeletionTimestamp
+	// is not set on the local copy (the fake client rejects changes to DeletionTimestamp).
+	_, err := r.handleDeletion(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Result should have been cleaned up
+	_, getErr := r.ResultStore.GetResult(context.Background(), "default", "del-result")
+	if getErr == nil {
+		t.Error("expected result to be deleted")
+	}
+}
+
+func TestHandleDeletion_WithSessionRef(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "del-sess",
+			Namespace:  "default",
+			Finalizers: []string{TaskFinalizer},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{Name: "sess1"},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	_, err := r.handleDeletion(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHandleDeletion_WithJobName(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "job1", Namespace: "default"},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "del-job",
+			Namespace:  "default",
+			Finalizers: []string{TaskFinalizer},
+		},
+		Status: corev1alpha1.TaskStatus{JobName: "job1"},
+	}
+	r := newUnitReconciler(scheme, task, job)
+	_, err := r.handleDeletion(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHandleDeletion_WithMessageStore(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "del-msg",
+			Namespace:  "default",
+			Finalizers: []string{TaskFinalizer},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	r.MessageStore = ss
+	_, err := r.handleDeletion(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleCompleted
+// ---------------------------------------------------------------------------
+
+func TestHandleCompleted_NoWebhook(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp1", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.handleCompleted(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue, got %v", result.RequeueAfter)
+	}
+}
+
+func TestHandleCompleted_WebhookAlreadyDelivered(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp2", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAI,
+			WebhookURL: "http://example.com/hook",
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseSucceeded,
+			WebhookDelivered: true,
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.handleCompleted(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue, got %v", result.RequeueAfter)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleRunning
+// ---------------------------------------------------------------------------
+
+func TestHandleRunning_Timeout(t *testing.T) {
+	scheme := newTestScheme()
+	timeout := metav1.Duration{Duration: 1 * time.Second}
+	startTime := metav1.NewTime(time.Now().Add(-10 * time.Second))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-timeout", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeAI,
+			Timeout: &timeout,
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			StartTime: &startTime,
+			JobName:   "job1",
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	_, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Errorf("expected phase Failed, got %s", task.Status.Phase)
+	}
+}
+
+func TestHandleRunning_JobNotFound(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-nojob", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseRunning,
+			JobName: "missing-job",
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	_, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Errorf("expected phase Failed for missing job, got %s", task.Status.Phase)
+	}
+}
+
+func TestHandleRunning_JobSucceeded(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-job-ok", Namespace: "default"},
+		Status:     batchv1.JobStatus{Succeeded: 1},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-ok", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseRunning,
+			JobName: "run-job-ok",
+		},
+	}
+	r := newUnitReconciler(scheme, task, job)
+	_, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Errorf("expected phase Succeeded, got %s", task.Status.Phase)
+	}
+}
+
+func TestHandleRunning_JobFailed_NoRetry(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-job-fail", Namespace: "default"},
+		Status:     batchv1.JobStatus{Failed: 1},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-fail", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseRunning,
+			JobName: "run-job-fail",
+		},
+	}
+	r := newUnitReconciler(scheme, task, job)
+	_, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Errorf("expected phase Failed, got %s", task.Status.Phase)
+	}
+}
+
+func TestHandleRunning_JobFailed_WithRetry(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-job-retry", Namespace: "default"},
+		Status:     batchv1.JobStatus{Failed: 1},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-retry", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAI,
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:    corev1alpha1.TaskPhaseRunning,
+			JobName:  "run-job-retry",
+			Attempts: 1,
+		},
+	}
+	r := newUnitReconciler(scheme, task, job)
+	_, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Errorf("expected phase Pending for retry, got %s", task.Status.Phase)
+	}
+}
+
+func TestHandleRunning_JobStillRunning(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-job-active", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-active", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseRunning,
+			JobName: "run-job-active",
+		},
+	}
+	r := newUnitReconciler(scheme, task, job)
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Errorf("expected 5s requeue, got %v", result.RequeueAfter)
+	}
+}
+
+func TestHandleRunning_ChildTaskStatuses(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-job-parent", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-task",
+			Namespace: "default",
+			Labels:    map[string]string{"orka.ai/parent-task": "parent-run"},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "child-agent"},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-run", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseRunning,
+			JobName: "run-job-parent",
+		},
+	}
+	r := newUnitReconciler(scheme, task, job, child)
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Errorf("expected 5s requeue, got %v", result.RequeueAfter)
+	}
+	if len(task.Status.ChildTasks) != 1 {
+		t.Errorf("expected 1 child task status, got %d", len(task.Status.ChildTasks))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// createTaskJob
+// ---------------------------------------------------------------------------
+
+func TestCreateTaskJob_ContainerTask(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "create-job",
+			Namespace: "default",
+			UID:       "12345678-abcd-efgh-ijkl-1234567890ab",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   "busybox:latest",
+			Command: []string{"echo", "hello"},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.createTaskJob(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Errorf("expected 5s requeue, got %v", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Errorf("expected phase Running, got %s", task.Status.Phase)
+	}
+	if task.Status.JobName == "" {
+		t.Error("expected JobName to be set")
+	}
+	if task.Status.Attempts != 1 {
+		t.Errorf("expected Attempts=1, got %d", task.Status.Attempts)
+	}
+}
+
+func TestCreateTaskJob_AITaskWithAgent(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "ai-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "create-ai-job",
+			Namespace: "default",
+			UID:       "12345678-abcd-efgh-ijkl-1234567890ab",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "ai-agent"},
+			AI:       &corev1alpha1.AISpec{Prompt: "hello"},
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+	_, err := r.createTaskJob(context.Background(), task, agent, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Errorf("expected phase Running, got %s", task.Status.Phase)
+	}
+}
+
+func TestCreateTaskJob_WithProvider(t *testing.T) {
+	scheme := newTestScheme()
+	provider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "prov1", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type: corev1alpha1.ProviderTypeOpenAI,
+			SecretRef: corev1alpha1.ProviderSecretRef{
+				Name: "prov-secret",
+			},
+		},
+		Status: corev1alpha1.ProviderStatus{Ready: true},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "create-prov-job",
+			Namespace: "default",
+			UID:       "12345678-abcd-efgh-ijkl-1234567890ab",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI: &corev1alpha1.AISpec{
+				Prompt:      "hello",
+				ProviderRef: &corev1alpha1.ProviderReference{Name: "prov1"},
+			},
+		},
+	}
+	r := newUnitReconciler(scheme, task, provider)
+	_, err := r.createTaskJob(context.Background(), task, nil, provider)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Errorf("expected phase Running, got %s", task.Status.Phase)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// completeTask
+// ---------------------------------------------------------------------------
+
+func TestCompleteTask_Succeeded(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-succ", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.completeTask(context.Background(), task, corev1alpha1.TaskPhaseSucceeded, "done")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Errorf("expected 1s requeue, got %v", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Errorf("expected Succeeded, got %s", task.Status.Phase)
+	}
+	if task.Status.CompletionTime == nil {
+		t.Error("expected CompletionTime to be set")
+	}
+}
+
+func TestCompleteTask_Failed(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-fail", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(scheme, task)
+	_, err := r.completeTask(context.Background(), task, corev1alpha1.TaskPhaseFailed, "failed")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Errorf("expected Failed, got %s", task.Status.Phase)
+	}
+}
+
+func TestCompleteTask_Cancelled(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-cancel", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(scheme, task)
+	_, err := r.completeTask(context.Background(), task, corev1alpha1.TaskPhaseCancelled, "cancelled")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseCancelled {
+		t.Errorf("expected Cancelled, got %s", task.Status.Phase)
+	}
+}
+
+func TestCompleteTask_WithSessionRef(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-sess", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			SessionRef: &corev1alpha1.SessionReference{
+				Name:   "sess1",
+				Append: true,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(scheme, task)
+	_, err := r.completeTask(context.Background(), task, corev1alpha1.TaskPhaseSucceeded, "done")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// retryTask
+// ---------------------------------------------------------------------------
+
+func TestRetryTask(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "retry-job", Namespace: "default"},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "retry-t", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAI,
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:    corev1alpha1.TaskPhaseRunning,
+			JobName:  "retry-job",
+			Attempts: 1,
+		},
+	}
+	r := newUnitReconciler(scheme, task, job)
+	result, err := r.retryTask(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Error("expected positive requeue delay")
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Errorf("expected Pending, got %s", task.Status.Phase)
+	}
+	if task.Status.JobName != "" {
+		t.Error("expected JobName to be cleared")
+	}
+}
+
+func TestRetryTask_NoExistingJob(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "retry-nojob", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseRunning,
+			JobName: "nonexistent",
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	_, err := r.retryTask(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Errorf("expected Pending, got %s", task.Status.Phase)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// acquireSessionLock
+// ---------------------------------------------------------------------------
+
+func TestAcquireSessionLock_NoSessionRef(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "lock-none", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err, locked := r.acquireSessionLock(context.Background(), task)
+	if locked {
+		t.Error("expected locked=false when no sessionRef")
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_ = result
+}
+
+func TestAcquireSessionLock_SessionNotExist_CreateTrue(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "lock-create", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			SessionRef: &corev1alpha1.SessionReference{
+				Name:   "new-sess",
+				Create: true,
+			},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	_, err, locked := r.acquireSessionLock(context.Background(), task)
+	if locked {
+		t.Error("expected locked=false after acquiring lock on new session")
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAcquireSessionLock_SessionNotExist_CreateFalse(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "lock-nocreat", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			SessionRef: &corev1alpha1.SessionReference{
+				Name:   "nonexist-sess",
+				Create: false,
+			},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	_, err, locked := r.acquireSessionLock(context.Background(), task)
+	if !locked {
+		t.Error("expected locked=true on error")
+	}
+	if err == nil {
+		t.Error("expected error when session not found and create=false")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// resolveProvider
+// ---------------------------------------------------------------------------
+
+func TestResolveProvider_Found(t *testing.T) {
+	scheme := newTestScheme()
+	provider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "p1", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:      corev1alpha1.ProviderTypeOpenAI,
+			SecretRef: corev1alpha1.ProviderSecretRef{Name: "sec1"},
+		},
+		Status: corev1alpha1.ProviderStatus{Ready: true},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "t-prov", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI: &corev1alpha1.AISpec{
+				ProviderRef: &corev1alpha1.ProviderReference{Name: "p1"},
+			},
+		},
+	}
+	r := newUnitReconciler(scheme, provider, task)
+	got, err := r.resolveProvider(context.Background(), task, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil || got.Name != "p1" {
+		t.Errorf("expected provider p1, got %v", got)
+	}
+}
+
+func TestResolveProvider_NotReady(t *testing.T) {
+	scheme := newTestScheme()
+	provider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "p-notready", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:      corev1alpha1.ProviderTypeOpenAI,
+			SecretRef: corev1alpha1.ProviderSecretRef{Name: "sec1"},
+		},
+		Status: corev1alpha1.ProviderStatus{Ready: false, Message: "not configured"},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "t-prov-nr", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI: &corev1alpha1.AISpec{
+				ProviderRef: &corev1alpha1.ProviderReference{Name: "p-notready"},
+			},
+		},
+	}
+	r := newUnitReconciler(scheme, provider, task)
+	_, err := r.resolveProvider(context.Background(), task, nil)
+	if err == nil {
+		t.Error("expected error for not-ready provider")
+	}
+}
+
+func TestResolveProvider_NotFound(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "t-prov-miss", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI: &corev1alpha1.AISpec{
+				ProviderRef: &corev1alpha1.ProviderReference{Name: "nonexistent"},
+			},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	_, err := r.resolveProvider(context.Background(), task, nil)
+	if err == nil {
+		t.Error("expected error for missing provider")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleScheduled — additional paths
+// ---------------------------------------------------------------------------
+
+func TestHandleScheduled_NotYetTime(t *testing.T) {
+	scheme := newTestScheme()
+	// Use a schedule far in the future
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-future",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now()),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeContainer,
+			Schedule: "0 0 1 1 *", // Jan 1 only
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseScheduled},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.handleScheduled(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Error("expected positive RequeueAfter for future schedule")
+	}
+}
+
+func TestHandleScheduled_WithTimeZone(t *testing.T) {
+	scheme := newTestScheme()
+	tz := "America/New_York"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-tz",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now()),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeContainer,
+			Schedule: "0 0 1 1 *",
+			TimeZone: &tz,
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseScheduled},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.handleScheduled(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Error("expected positive RequeueAfter")
+	}
+}
+
+func TestHandleScheduled_MissedDeadline(t *testing.T) {
+	scheme := newTestScheme()
+	deadline := int64(1)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-missed",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-48 * time.Hour)),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:                    corev1alpha1.TaskTypeContainer,
+			Schedule:                "* * * * *", // every minute
+			StartingDeadlineSeconds: &deadline,
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseScheduled,
+			LastScheduleTime: ptr.To(metav1.NewTime(time.Now().Add(-24 * time.Hour))),
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.handleScheduled(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Error("expected positive RequeueAfter after missed deadline")
+	}
+}
+
+func TestHandleScheduled_ConcurrencyForbid(t *testing.T) {
+	scheme := newTestScheme()
+	// Create a parent task that is due and has an active child
+	activeChild := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "active-child",
+			Namespace: "default",
+			Labels:    map[string]string{"orka.ai/parent-task": "sched-concur"},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-concur",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:              corev1alpha1.TaskTypeContainer,
+			Schedule:          "* * * * *",
+			ConcurrencyPolicy: corev1alpha1.ForbidConcurrent,
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseScheduled,
+			LastScheduleTime: ptr.To(metav1.NewTime(time.Now().Add(-2 * time.Minute))),
+		},
+	}
+	r := newUnitReconciler(scheme, task, activeChild)
+	result, err := r.handleScheduled(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Error("expected positive RequeueAfter when concurrency is forbidden")
+	}
+}
+
+func TestHandleScheduled_CreateChildTask(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-create",
+			Namespace:         "default",
+			UID:               "12345678-abcd-efgh-ijkl-1234567890ab",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeContainer,
+			Image:    "busybox:latest",
+			Schedule: "* * * * *",
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseScheduled,
+			LastScheduleTime: ptr.To(metav1.NewTime(time.Now().Add(-2 * time.Minute))),
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.handleScheduled(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Error("expected positive RequeueAfter after creating child task")
+	}
+	if task.Status.LastScheduleTime == nil {
+		t.Error("expected LastScheduleTime to be updated")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleAutonomousIteration
+// ---------------------------------------------------------------------------
+
+func TestHandleAutonomousIteration_GoalComplete(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Autonomous:    true,
+				MaxIterations: 10,
+			},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "auto-agent"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			Iteration: 2,
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+	// Save plan state indicating goal is complete
+	_ = r.PlanStore.SavePlan(context.Background(), "default", "auto-task", &store.PlanState{
+		GoalComplete: true,
+		Summary:      "All tasks done",
+	})
+	_, err := r.handleAutonomousIteration(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Errorf("expected Succeeded, got %s", task.Status.Phase)
+	}
+}
+
+func TestHandleAutonomousIteration_MaxIterations(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-agent2", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Autonomous:    true,
+				MaxIterations: 3,
+			},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-max", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "auto-agent2"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			Iteration: 2,
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+	_, err := r.handleAutonomousIteration(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Errorf("expected Succeeded at max iterations, got %s", task.Status.Phase)
+	}
+}
+
+func TestHandleAutonomousIteration_Continue(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-agent3", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Autonomous:    true,
+				MaxIterations: 10,
+			},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-job", Namespace: "default"},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-cont", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "auto-agent3"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			Iteration: 1,
+			JobName:   "auto-job",
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	result, err := r.handleAutonomousIteration(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Errorf("expected Pending for next iteration, got %s", task.Status.Phase)
+	}
+	if task.Status.Iteration != 2 {
+		t.Errorf("expected iteration 2, got %d", task.Status.Iteration)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Errorf("expected 5s requeue, got %v", result.RequeueAfter)
+	}
+}
+
+func TestHandleAutonomousIteration_Suspended(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-agent4", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Autonomous:    true,
+				MaxIterations: 10,
+			},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-susp", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "auto-agent4"},
+			Suspend:  ptr.To(true),
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			Iteration: 1,
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+	result, err := r.handleAutonomousIteration(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Errorf("expected 30s requeue for suspended, got %v", result.RequeueAfter)
+	}
+}
+
+func TestHandleAutonomousIteration_AgentNotFound(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-noagent", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "missing-agent"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			Iteration: 0,
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	_, err := r.handleAutonomousIteration(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Errorf("expected Failed, got %s", task.Status.Phase)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile
+// ---------------------------------------------------------------------------
+
+func TestReconcile_NotFound(t *testing.T) {
+	scheme := newTestScheme()
+	r := newUnitReconciler(scheme)
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "nonexistent", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue, got %v", result.RequeueAfter)
+	}
+}
+
+func TestReconcile_AddFinalizer(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "rec-fin", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "rec-fin", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Errorf("expected 1s requeue after adding finalizer, got %v", result.RequeueAfter)
+	}
+}
+
+func TestReconcile_InitializeStatus(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "rec-init",
+			Namespace:  "default",
+			Finalizers: []string{TaskFinalizer},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "rec-init", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Errorf("expected 1s requeue after initializing status, got %v", result.RequeueAfter)
+	}
+}
+
+func TestReconcile_CompletedPhase(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "rec-comp",
+			Namespace:  "default",
+			Finalizers: []string{TaskFinalizer},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "rec-comp", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_ = result
+}
+
+// ---------------------------------------------------------------------------
+// handlePending — namespace task limit
+// ---------------------------------------------------------------------------
+
+func TestHandlePending_NamespaceTaskLimit(t *testing.T) {
+	scheme := newTestScheme()
+	// Create active tasks to hit the limit
+	active1 := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "active1", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	active2 := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "active2", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "pending-limit",
+			Namespace:  "default",
+			Finalizers: []string{TaskFinalizer},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, active1, active2)
+	r.MaxTasksPerNamespace = 2
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 10*time.Second {
+		t.Errorf("expected 10s requeue at limit, got %v", result.RequeueAfter)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// readPodLogs — pods found but no KubeClient causes panic (guarded by caller)
+// The readPodLogs method is called by collectResult which checks KubeClient != nil.
+// We test this indirectly through collectResult to avoid the nil dereference.
+// ---------------------------------------------------------------------------
+
+func TestCollectResult_ContainerTask_NoKubeClient_NoPods(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "t-collect", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status:     corev1alpha1.TaskStatus{JobName: "job-collect"},
+	}
+	r := newUnitReconciler(scheme, task)
+	// KubeClient is nil — collectResult should return nil early
+	err := r.collectResult(context.Background(), task)
+	if err != nil {
+		t.Fatalf("expected nil error when KubeClient is nil, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleCompleted — webhook paths
+// ---------------------------------------------------------------------------
+
+func TestHandleCompleted_WebhookNotConfigured(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-nowh", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.handleCompleted(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue, got %v", result.RequeueAfter)
+	}
+}
+
+func TestHandleCompleted_WebhookFails(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-whfail", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAI,
+			WebhookURL: "http://invalid.nonexistent.local:9999/hook",
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseSucceeded,
+			WebhookDelivered: false,
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	r.WebhookNotifier = NewWebhookNotifier()
+	result, err := r.handleCompleted(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Should requeue for webhook retry
+	if result.RequeueAfter != 30*time.Second {
+		t.Errorf("expected 30s requeue for webhook retry, got %v", result.RequeueAfter)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile — additional phase paths
+// ---------------------------------------------------------------------------
+
+func TestReconcile_ScheduledPhase(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "rec-sched",
+			Namespace:         "default",
+			Finalizers:        []string{TaskFinalizer},
+			CreationTimestamp: metav1.NewTime(time.Now()),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeContainer,
+			Schedule: "0 0 1 1 *",
+			Suspend:  ptr.To(true),
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseScheduled},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "rec-sched", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Error("expected positive requeue for scheduled task")
+	}
+}
+
+func TestReconcile_RunningPhase_JobNotFound(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "rec-run",
+			Namespace:  "default",
+			Finalizers: []string{TaskFinalizer},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseRunning,
+			JobName: "nonexistent-job",
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "rec-run", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestReconcile_FailedPhase(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "rec-fail",
+			Namespace:  "default",
+			Finalizers: []string{TaskFinalizer},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "rec-fail", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_ = result
+}
+
+func TestReconcile_CancelledPhase(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "rec-cancel",
+			Namespace:  "default",
+			Finalizers: []string{TaskFinalizer},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "rec-cancel", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_ = result
+}
+
+// ---------------------------------------------------------------------------
+// handlePending — scheduled task path
+// ---------------------------------------------------------------------------
+
+func TestHandlePending_ScheduledTask(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "pend-sched", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeContainer,
+			Schedule: "*/5 * * * *",
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Error("expected positive requeue for scheduled task")
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseScheduled {
+		t.Errorf("expected Scheduled phase, got %s", task.Status.Phase)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleRunning — autonomous task path
+// ---------------------------------------------------------------------------
+
+func TestHandleRunning_AutonomousTask(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-run-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Autonomous:    true,
+				MaxIterations: 5,
+			},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-run-job", Namespace: "default"},
+		Status:     batchv1.JobStatus{Succeeded: 1},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-run-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "auto-run-agent"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			JobName:   "auto-run-job",
+			Iteration: 0,
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	_, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Should advance to next iteration (Pending)
+	if task.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Errorf("expected Pending for next iteration, got %s", task.Status.Phase)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleRunning — child task with result
+// ---------------------------------------------------------------------------
+
+func TestHandleRunning_ChildTaskWithResult(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-job2", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-with-result",
+			Namespace: "default",
+			Labels:    map[string]string{"orka.ai/parent-task": "parent-result"},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseSucceeded,
+			ResultRef: &corev1alpha1.ResultReference{Available: true},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-result", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseRunning,
+			JobName: "parent-job2",
+		},
+	}
+	r := newUnitReconciler(scheme, task, job, child)
+	// Save child result
+	_ = r.ResultStore.SaveResult(context.Background(), "default", "child-with-result", []byte("child output"))
+	_, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(task.Status.ChildTasks) != 1 {
+		t.Fatalf("expected 1 child status, got %d", len(task.Status.ChildTasks))
+	}
+	if task.Status.ChildTasks[0].Result == "" {
+		t.Error("expected child task result to be populated")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// completeTask — with plan store cleanup
+// ---------------------------------------------------------------------------
+
+func TestCompleteTask_WithPlanStore(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-plan", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(scheme, task)
+	// Save a plan
+	_ = r.PlanStore.SavePlan(context.Background(), "default", "comp-plan", &store.PlanState{
+		Summary: "test plan",
+	})
+	_, err := r.completeTask(context.Background(), task, corev1alpha1.TaskPhaseSucceeded, "done")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Plan should be cleaned up
+	_, planErr := r.PlanStore.GetPlan(context.Background(), "default", "comp-plan")
+	if planErr == nil {
+		t.Error("expected plan to be deleted on completion")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleCompleted — webhook success path
+// ---------------------------------------------------------------------------
+
+func TestHandleCompleted_WebhookSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "comp-whok", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAI,
+			WebhookURL: srv.URL,
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseSucceeded,
+			WebhookDelivered: false,
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	r.WebhookNotifier = NewWebhookNotifier()
+	result, err := r.handleCompleted(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue after successful webhook, got %v", result.RequeueAfter)
+	}
+	if !task.Status.WebhookDelivered {
+		t.Error("expected WebhookDelivered to be true")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// collectResult — result already saved by worker (AI task)
+// ---------------------------------------------------------------------------
+
+func TestCollectResult_ResultSavedByWorker(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "collect-saved", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	r := newUnitReconciler(scheme, task)
+	_ = r.ResultStore.SaveResult(context.Background(), "default", "collect-saved", []byte("worker result"))
+	err := r.collectResult(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.ResultRef == nil || !task.Status.ResultRef.Available {
+		t.Error("expected ResultRef.Available=true when result exists")
+	}
+}
+
+func TestCollectResult_AITask_NoResult(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "collect-ai-none", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	r := newUnitReconciler(scheme, task)
+	err := r.collectResult(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// AI task without result — should return nil (no attempt to read logs)
+}
+
+// ---------------------------------------------------------------------------
+// createTaskJob — job already exists
+// ---------------------------------------------------------------------------
+
+func TestCreateTaskJob_JobAlreadyExists(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "create-exist",
+			Namespace: "default",
+			UID:       "12345678-abcd-efgh-ijkl-1234567890ab",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   "busybox:latest",
+			Command: []string{"echo", "hello"},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	// First call succeeds
+	_, err := r.createTaskJob(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error on first call: %v", err)
+	}
+	jobName := task.Status.JobName
+
+	// Reset task status to simulate second reconcile
+	task.Status.Phase = corev1alpha1.TaskPhasePending
+	task.Status.JobName = ""
+	task.Status.Attempts = 0
+	task.Status.StartTime = nil
+	task.Status.Conditions = nil
+
+	// Second call should handle AlreadyExists
+	_, err = r.createTaskJob(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error on second call (AlreadyExists): %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Errorf("expected phase Running, got %s", task.Status.Phase)
+	}
+	_ = jobName
+}
+
+// ---------------------------------------------------------------------------
+// handlePending — with session ref
+// ---------------------------------------------------------------------------
+
+func TestHandlePending_WithSessionRef(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pend-sess",
+			Namespace: "default",
+			UID:       "12345678-abcd-efgh-ijkl-1234567890ab",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   "busybox:latest",
+			Command: []string{"echo", "hi"},
+			SessionRef: &corev1alpha1.SessionReference{
+				Name:   "pend-session",
+				Create: true,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Errorf("expected 5s requeue, got %v", result.RequeueAfter)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleRunning — child task with empty phase
+// ---------------------------------------------------------------------------
+
+func TestHandleRunning_ChildWithEmptyPhase(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-job3", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-empty-phase",
+			Namespace: "default",
+			Labels:    map[string]string{"orka.ai/parent-task": "parent-empty"},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{Phase: ""},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-empty", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseRunning,
+			JobName: "parent-job3",
+		},
+	}
+	r := newUnitReconciler(scheme, task, job, child)
+	_, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(task.Status.ChildTasks) != 1 {
+		t.Fatalf("expected 1 child, got %d", len(task.Status.ChildTasks))
+	}
+	if task.Status.ChildTasks[0].Phase != corev1alpha1.TaskPhasePending {
+		t.Errorf("expected empty phase to default to Pending, got %s", task.Status.ChildTasks[0].Phase)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleRunning — child task result fetch error
+// ---------------------------------------------------------------------------
+
+func TestHandleRunning_ChildResultFetchError(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-job4", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-err-result",
+			Namespace: "default",
+			Labels:    map[string]string{"orka.ai/parent-task": "parent-err"},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseSucceeded,
+			ResultRef: &corev1alpha1.ResultReference{Available: true},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-err", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseRunning,
+			JobName: "parent-job4",
+		},
+	}
+	r := newUnitReconciler(scheme, task, job, child)
+	// Don't save the child's result — fetch will fail
+	_, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(task.Status.ChildTasks) != 1 {
+		t.Fatalf("expected 1 child, got %d", len(task.Status.ChildTasks))
+	}
+	if task.Status.ChildTasks[0].Result != "(result fetch error)" {
+		t.Errorf("expected error message in result, got %q", task.Status.ChildTasks[0].Result)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleRunning — child task result truncation
+// ---------------------------------------------------------------------------
+
+func TestHandleRunning_ChildResultTruncated(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-job5", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-trunc",
+			Namespace: "default",
+			Labels:    map[string]string{"orka.ai/parent-task": "parent-trunc"},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseSucceeded,
+			ResultRef: &corev1alpha1.ResultReference{Available: true},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-trunc", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseRunning,
+			JobName: "parent-job5",
+		},
+	}
+	r := newUnitReconciler(scheme, task, job, child)
+	// Save a large result > 4096 bytes
+	largeResult := make([]byte, 5000)
+	for i := range largeResult {
+		largeResult[i] = 'x'
+	}
+	_ = r.ResultStore.SaveResult(context.Background(), "default", "child-trunc", largeResult)
+	_, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(task.Status.ChildTasks) != 1 {
+		t.Fatalf("expected 1 child, got %d", len(task.Status.ChildTasks))
+	}
+	if len(task.Status.ChildTasks[0].Result) > 4200 {
+		t.Error("expected result to be truncated")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleRunning — is child task (skip child status aggregation)
+// ---------------------------------------------------------------------------
+
+func TestHandleRunning_IsChildTask(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "child-job", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-self",
+			Namespace: "default",
+			Labels:    map[string]string{"orka.ai/parent-task": "some-parent"},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseRunning,
+			JobName: "child-job",
+		},
+	}
+	r := newUnitReconciler(scheme, task, job)
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Errorf("expected 5s requeue, got %v", result.RequeueAfter)
+	}
+	// Child tasks should not aggregate child statuses
+	if len(task.Status.ChildTasks) != 0 {
+		t.Error("child task should not have child statuses")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleRunning — no timeout (nil fields)
+// ---------------------------------------------------------------------------
+
+func TestHandleRunning_NoTimeoutFields(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "job-notimeout", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "no-timeout", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseRunning,
+			JobName: "job-notimeout",
+		},
+	}
+	r := newUnitReconciler(scheme, task, job)
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Errorf("expected 5s requeue, got %v", result.RequeueAfter)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// resolveProvider — cross-namespace enforcement
+// ---------------------------------------------------------------------------
+
+func TestResolveProvider_CrossNamespaceEnforced(t *testing.T) {
+	scheme := newTestScheme()
+	provider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "cross-prov", Namespace: "other-ns"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:      corev1alpha1.ProviderTypeOpenAI,
+			SecretRef: corev1alpha1.ProviderSecretRef{Name: "sec"},
+		},
+		Status: corev1alpha1.ProviderStatus{Ready: true},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "t-cross", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI: &corev1alpha1.AISpec{
+				ProviderRef: &corev1alpha1.ProviderReference{Name: "cross-prov", Namespace: "other-ns"},
+			},
+		},
+	}
+	r := newUnitReconciler(scheme, provider, task)
+	r.EnforceNamespaceIsolation = true
+	_, err := r.resolveProvider(context.Background(), task, nil)
+	if err == nil {
+		t.Error("expected error for cross-namespace provider with isolation")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// resolveProvider — agent fallback
+// ---------------------------------------------------------------------------
+
+func TestResolveProvider_AgentFallback(t *testing.T) {
+	scheme := newTestScheme()
+	provider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-prov", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:      corev1alpha1.ProviderTypeOpenAI,
+			SecretRef: corev1alpha1.ProviderSecretRef{Name: "sec"},
+		},
+		Status: corev1alpha1.ProviderStatus{Ready: true},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-with-prov", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			ProviderRef: &corev1alpha1.ProviderReference{Name: "agent-prov"},
+			Model:       &corev1alpha1.ModelConfig{Provider: "openai"},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "t-agent-prov", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	r := newUnitReconciler(scheme, provider, task, agent)
+	got, err := r.resolveProvider(context.Background(), task, agent)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil || got.Name != "agent-prov" {
+		t.Errorf("expected agent-prov, got %v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ensureWorkerRBAC — error paths
+// ---------------------------------------------------------------------------
+
+func TestEnsureWorkerRBAC_SAExistsButCRBMissing(t *testing.T) {
+	scheme := newTestScheme()
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: workerServiceAccountName, Namespace: "test-ns2"},
+	}
+	r := newUnitReconciler(scheme, sa)
+	err := r.ensureWorkerRBAC(context.Background(), "test-ns2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// CRB should be created
+	crb := &rbacv1.ClusterRoleBinding{}
+	if err := r.Get(context.Background(), types.NamespacedName{
+		Name: fmt.Sprintf("orka-worker-%s", "test-ns2"),
+	}, crb); err != nil {
+		t.Errorf("expected CRB to be created: %v", err)
 	}
 }
 

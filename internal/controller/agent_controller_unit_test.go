@@ -14,6 +14,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -838,6 +840,172 @@ func TestCheckTTLExpiry(t *testing.T) {
 				t.Errorf("deleted = %v, want %v", deleted, tt.wantDeleted)
 			}
 		})
+	}
+}
+
+// ---------- Reconcile ----------
+
+func TestAgentReconcile_NotFound(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &AgentReconciler{Client: fc, Scheme: scheme}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "missing", Namespace: testNS},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue, got %v", result.RequeueAfter)
+	}
+}
+
+func TestAgentReconcile_ValidAgent(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	agent := baseAgent("reconcile-valid")
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(agent).
+		WithStatusSubresource(agent).Build()
+	r := &AgentReconciler{Client: fc, Scheme: scheme}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "reconcile-valid", Namespace: testNS},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_ = result
+}
+
+func TestAgentReconcile_ValidationFailure(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	agent := baseAgent("reconcile-invalid")
+	agent.Spec.Model = nil
+	agent.Spec.ProviderRef = nil
+	agent.Spec.Runtime = nil
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(agent).
+		WithStatusSubresource(agent).Build()
+	r := &AgentReconciler{Client: fc, Scheme: scheme}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "reconcile-invalid", Namespace: testNS},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_ = result
+	// Re-fetch agent and check status condition
+	updated := &corev1alpha1.Agent{}
+	_ = fc.Get(context.Background(), types.NamespacedName{Name: "reconcile-invalid", Namespace: testNS}, updated)
+	cond := findCondition(updated.Status.Conditions, "Ready")
+	if cond != nil && cond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Ready=False, got %s", cond.Status)
+	}
+}
+
+func TestAgentReconcile_TTLExpired(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	agent := baseAgent("reconcile-ttl")
+	agent.Spec.TTLAfterLastTask = &metav1.Duration{Duration: time.Second}
+	agent.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Hour))
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(agent).
+		WithStatusSubresource(agent).Build()
+	r := &AgentReconciler{Client: fc, Scheme: scheme}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "reconcile-ttl", Namespace: testNS},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_ = result
+	// Agent should have been deleted
+	updated := &corev1alpha1.Agent{}
+	getErr := fc.Get(context.Background(), types.NamespacedName{Name: "reconcile-ttl", Namespace: testNS}, updated)
+	if getErr == nil {
+		t.Error("expected agent to be deleted after TTL expiry")
+	}
+}
+
+func TestAgentReconcile_WithActiveTasks(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	agent := baseAgent("reconcile-active")
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "active-t", Namespace: testNS},
+		Spec: corev1alpha1.TaskSpec{
+			AgentRef: &corev1alpha1.AgentReference{Name: "reconcile-active"},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(agent, task).
+		WithStatusSubresource(agent).Build()
+	r := &AgentReconciler{Client: fc, Scheme: scheme}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "reconcile-active", Namespace: testNS},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	updated := &corev1alpha1.Agent{}
+	_ = fc.Get(context.Background(), types.NamespacedName{Name: "reconcile-active", Namespace: testNS}, updated)
+	if updated.Status.ActiveTasks != 1 {
+		t.Errorf("expected ActiveTasks=1, got %d", updated.Status.ActiveTasks)
+	}
+}
+
+// ---------- updateStatus additional ----------
+
+func TestUpdateStatus_TTLExpiredNoRequeue(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	agent := baseAgent("status-ttl-expired")
+	ttl := metav1.Duration{Duration: time.Second}
+	agent.Spec.TTLAfterLastTask = &ttl
+	lastUsed := metav1.NewTime(time.Now().Add(-time.Hour))
+	agent.Status.LastUsed = &lastUsed
+
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(agent).
+		WithStatusSubresource(agent).Build()
+	r := &AgentReconciler{Client: fc, Scheme: scheme}
+
+	result, err := r.updateStatus(context.Background(), agent, 0, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// TTL already expired, remaining <= 0, no requeue
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for expired TTL, got %v", result.RequeueAfter)
+	}
+}
+
+func TestUpdateStatus_NoTTLNoLastUsed(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	agent := baseAgent("status-nottl")
+
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(agent).
+		WithStatusSubresource(agent).Build()
+	r := &AgentReconciler{Client: fc, Scheme: scheme}
+
+	result, err := r.updateStatus(context.Background(), agent, 0, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue, got %v", result.RequeueAfter)
 	}
 }
 
