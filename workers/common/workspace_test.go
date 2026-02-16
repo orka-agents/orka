@@ -190,8 +190,8 @@ func TestPrepareWorkspace_NamespaceFallback(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("ORKA_PRIOR_TASK", "task-1")
-	t.Setenv("ORKA_PRIOR_TASK_NAMESPACE", "")          // not set
-	t.Setenv("ORKA_TASK_NAMESPACE", "fallback-ns")      // fallback
+	t.Setenv("ORKA_PRIOR_TASK_NAMESPACE", "")      // not set
+	t.Setenv("ORKA_TASK_NAMESPACE", "fallback-ns") // fallback
 	t.Setenv("ORKA_CONTROLLER_URL", server.URL)
 
 	err := PrepareWorkspace("/tmp/test")
