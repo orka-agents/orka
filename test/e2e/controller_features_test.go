@@ -88,11 +88,11 @@ var _ = Describe("Controller Feature Tests", func() {
 					"namespace": "%s"
 				},
 				"spec": {
+					"providerRef": {
+						"name": "e2e-sp-provider"
+					},
 					"model": {
-						"name": "%s",
-						"providerRef": {
-							"name": "e2e-sp-provider"
-						}
+						"name": "%s"
 					},
 					"systemPrompt": {
 						"configMapRef": {
@@ -119,7 +119,7 @@ var _ = Describe("Controller Feature Tests", func() {
 				"spec": {
 					"type": "ai",
 					"agentRef": {"name": "%s"},
-					"input": "What are you?"
+					"prompt": "What are you?"
 				}
 			}`, taskName, namespace, agentName)
 
@@ -186,11 +186,11 @@ var _ = Describe("Controller Feature Tests", func() {
 					"namespace": "%s"
 				},
 				"spec": {
+					"providerRef": {
+						"name": "e2e-bash-provider"
+					},
 					"model": {
-						"name": "%s",
-						"providerRef": {
-							"name": "e2e-bash-provider"
-						}
+						"name": "%s"
 					}
 				}
 			}`, agentName, namespace, model)
@@ -211,7 +211,7 @@ var _ = Describe("Controller Feature Tests", func() {
 				"spec": {
 					"type": "ai",
 					"agentRef": {"name": "%s"},
-					"input": "Say hello",
+					"prompt": "Say hello",
 					"agentRuntime": {
 						"allowBash": true
 					}
@@ -363,11 +363,11 @@ var _ = Describe("Controller Feature Tests", func() {
 					"namespace": "%s"
 				},
 				"spec": {
+					"providerRef": {
+						"name": "e2e-cc-provider"
+					},
 					"model": {
-						"name": "%s",
-						"providerRef": {
-							"name": "e2e-cc-provider"
-						}
+						"name": "%s"
 					},
 					"coordination": {
 						"enabled": true,

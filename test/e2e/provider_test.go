@@ -74,9 +74,9 @@ var _ = Describe("Provider CRD Lifecycle", Ordered, func() {
 			},
 			"spec": {
 				"type": "ai",
-				"prompt": "What is 2+2? Reply with just the number.",
-				"model": {
-					"name": "%s",
+				"ai": {
+					"prompt": "What is 2+2? Reply with just the number.",
+					"model": "%s",
 					"providerRef": {
 						"name": "%s"
 					}
@@ -118,9 +118,9 @@ var _ = Describe("Provider CRD Lifecycle", Ordered, func() {
 			},
 			"spec": {
 				"type": "ai",
-				"prompt": "What is 2+2? Reply with just the number.",
-				"model": {
-					"name": "%s",
+				"ai": {
+					"prompt": "What is 2+2? Reply with just the number.",
+					"model": "%s",
 					"providerRef": {
 						"name": "%s"
 					}
