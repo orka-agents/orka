@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	maxRetries      = 3
+	maxRetries      = 5
 	saTokenPath     = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	saNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 )
@@ -38,7 +38,7 @@ func SubmitResult(result []byte) error {
 	var lastErr error
 	for attempt := range maxRetries {
 		if attempt > 0 {
-			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+			backoff := time.Duration(1<<uint(attempt)) * time.Second
 			time.Sleep(backoff)
 		}
 
