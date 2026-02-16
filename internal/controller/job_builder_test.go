@@ -1991,12 +1991,12 @@ func TestAddAgentWorkspaceEnvVars_AllFields(t *testing.T) {
 	envVars := jb.addAgentWorkspaceEnvVars(nil, task)
 	expectedVars := map[string]string{
 		"ORKA_GIT_REPO":          "https://github.com/org/repo",
-		"ORKA_GIT_BRANCH":       "main",
-		"ORKA_GIT_REF":          "abc123",
+		"ORKA_GIT_BRANCH":        "main",
+		"ORKA_GIT_REF":           "abc123",
 		"ORKA_WORKSPACE_SUBPATH": "src/",
-		"ORKA_FORK_REPO":        "https://github.com/fork/repo",
-		"ORKA_PR_BASE_BRANCH":   "develop",
-		"ORKA_PUSH_BRANCH":      "feature-branch",
+		"ORKA_FORK_REPO":         "https://github.com/fork/repo",
+		"ORKA_PR_BASE_BRANCH":    "develop",
+		"ORKA_PUSH_BRANCH":       "feature-branch",
 	}
 	envMap := make(map[string]string)
 	for _, e := range envVars {
