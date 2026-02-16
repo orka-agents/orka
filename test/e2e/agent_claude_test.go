@@ -42,6 +42,10 @@ var _ = Describe("Agent Claude Runtime", Ordered, func() {
 		// Results are stored in SQLite — no ConfigMap cleanup needed
 	})
 
+	AfterEach(func() {
+		dumpDebugInfo(taskName, "e2e-claude-real-task")
+	})
+
 	It("should create a Job with Claude runtime configuration", func() {
 		By("creating a Secret with ANTHROPIC_API_KEY")
 		secretManifest := fmt.Sprintf(`{
@@ -181,5 +185,78 @@ var _ = Describe("Agent Claude Runtime", Ordered, func() {
 				"Task should transition from Pending")
 		}
 		Eventually(verifyTaskTerminal, 2*time.Minute, time.Second).Should(Succeed())
+	})
+
+	It("should complete a Claude agent task with real API key", func() {
+		skipIfNoKey("E2E_ANTHROPIC_API_KEY")
+
+		const (
+			realTaskName  = "e2e-claude-real-task"
+			realAgentName = "e2e-claude-real-agent"
+		)
+
+		DeferCleanup(func() {
+			cmd := exec.Command("kubectl", "delete", "task", realTaskName, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "agent", realAgentName, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+
+		By("creating an Agent with real Anthropic secret")
+		agentManifest := fmt.Sprintf(`{
+			"apiVersion": "core.orka.ai/v1alpha1",
+			"kind": "Agent",
+			"metadata": {
+				"name": "%s",
+				"namespace": "%s"
+			},
+			"spec": {
+				"runtime": {
+					"type": "claude",
+					"defaultMaxTurns": 3,
+					"defaultAllowBash": false
+				},
+				"secretRef": {
+					"name": "e2e-anthropic-secret"
+				}
+			}
+		}`, realAgentName, namespace)
+
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = stringReader(agentManifest)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create Agent with real key")
+
+		By("creating a Task with simple prompt")
+		taskManifest := fmt.Sprintf(`{
+			"apiVersion": "core.orka.ai/v1alpha1",
+			"kind": "Task",
+			"metadata": {
+				"name": "%s",
+				"namespace": "%s"
+			},
+			"spec": {
+				"type": "agent",
+				"prompt": "What is 2+2? Reply with just the number.",
+				"agentRef": {
+					"name": "%s"
+				},
+				"agentRuntime": {
+					"maxTurns": 3
+				}
+			}
+		}`, realTaskName, namespace, realAgentName)
+
+		cmd = exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = stringReader(taskManifest)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create Task with real key")
+
+		By("waiting for the task to complete (up to 5 minutes)")
+		phase := waitForTaskCompletion(realTaskName, 5*time.Minute)
+		Expect(phase).To(Equal("Succeeded"), "Claude agent task should succeed with real API key")
+
+		By("verifying the result is available")
+		verifyResultAvailable(realTaskName)
 	})
 })

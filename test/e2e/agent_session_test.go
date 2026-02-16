@@ -43,6 +43,10 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 		// Results and sessions are stored in SQLite — no ConfigMap cleanup needed
 	})
 
+	AfterEach(func() {
+		dumpDebugInfo(taskName1, taskName2)
+	})
+
 	It("should reference the same session across multiple tasks", func() {
 		By("creating an Agent for session test")
 		agentManifest := fmt.Sprintf(`{
