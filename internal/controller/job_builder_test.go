@@ -294,7 +294,7 @@ func TestJobBuilder_buildEnvVars(t *testing.T) {
 		},
 	}
 
-	envVars := builder.buildEnvVars(task, nil, nil)
+	envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
 
 	// Check required env vars
 	hasTaskName := false
@@ -363,7 +363,7 @@ func TestJobBuilder_buildEnvVars_AITask(t *testing.T) {
 		},
 	}
 
-	envVars := builder.buildEnvVars(task, nil, nil)
+	envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
 
 	// Check AI-specific env vars
 	hasProvider := false
@@ -428,7 +428,7 @@ func TestJobBuilder_buildEnvVars_WithAgent(t *testing.T) {
 		},
 	}
 
-	envVars := builder.buildEnvVars(task, agent, nil)
+	envVars := builder.buildEnvVars(context.Background(), task, agent, nil)
 
 	// Agent values should be used when task doesn't specify them
 	hasProvider := false
@@ -477,7 +477,7 @@ func TestJobBuilder_buildEnvVars_WithProvider(t *testing.T) {
 		},
 	}
 
-	envVars := builder.buildEnvVars(task, nil, provider)
+	envVars := builder.buildEnvVars(context.Background(), task, nil, provider)
 
 	hasBaseURL := false
 	for _, env := range envVars {
@@ -521,7 +521,7 @@ func TestJobBuilder_buildEnvVars_ProviderCRDTypeOverridesModelProvider(t *testin
 		},
 	}
 
-	envVars := builder.buildEnvVars(task, agent, provider)
+	envVars := builder.buildEnvVars(context.Background(), task, agent, provider)
 
 	for _, env := range envVars {
 		if env.Name == envAIProviderKey {
@@ -544,7 +544,7 @@ func TestJobBuilder_buildContainer_ContainerWithoutImage(t *testing.T) {
 		},
 	}
 
-	container := builder.buildContainer(task, nil, nil)
+	container := builder.buildContainer(context.Background(), task, nil, nil)
 	if container.Image != DefaultGeneralWorkerImage {
 		t.Errorf("Image = %s, want %s", container.Image, DefaultGeneralWorkerImage)
 	}
@@ -601,7 +601,7 @@ func TestJobBuilder_buildEnvVars_WithCoordination(t *testing.T) {
 		},
 	}
 
-	envVars := builder.buildEnvVars(task, agent, nil)
+	envVars := builder.buildEnvVars(context.Background(), task, agent, nil)
 
 	tests := []struct {
 		name  string
@@ -665,7 +665,7 @@ func TestJobBuilder_buildEnvVars_WithCoordination_ChildTask(t *testing.T) {
 		},
 	}
 
-	envVars := builder.buildEnvVars(task, agent, nil)
+	envVars := builder.buildEnvVars(context.Background(), task, agent, nil)
 
 	env, found := findEnvVar(envVars, "ORKA_COORDINATION_DEPTH")
 	if !found {
@@ -697,7 +697,7 @@ func TestJobBuilder_buildEnvVars_NoCoordination(t *testing.T) {
 		},
 	}
 
-	envVars := builder.buildEnvVars(task, agent, nil)
+	envVars := builder.buildEnvVars(context.Background(), task, agent, nil)
 
 	coordinationVars := []string{
 		"ORKA_COORDINATION_ENABLED",
