@@ -99,7 +99,11 @@ var _ = BeforeSuite(func() {
 		_, _ = fmt.Fprintf(GinkgoWriter, "Created e2e-openai-secret\n")
 	}
 	if e2eAnthropicAPIKey != "" {
-		err = createK8sSecret("e2e-anthropic-secret", namespace, map[string]string{"ANTHROPIC_API_KEY": e2eAnthropicAPIKey})
+		anthropicSecretData := map[string]string{"ANTHROPIC_API_KEY": e2eAnthropicAPIKey}
+		if e2eAnthropicBaseURL != "" {
+			anthropicSecretData["ANTHROPIC_BASE_URL"] = e2eAnthropicBaseURL
+		}
+		err = createK8sSecret("e2e-anthropic-secret", namespace, anthropicSecretData)
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to create Anthropic secret")
 		_, _ = fmt.Fprintf(GinkgoWriter, "Created e2e-anthropic-secret\n")
 	}
