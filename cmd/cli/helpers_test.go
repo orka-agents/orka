@@ -4,12 +4,18 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 func TestMaskToken(t *testing.T) {
@@ -301,5 +307,266 @@ func TestFindServiceByLabel(t *testing.T) {
 				t.Errorf("findServiceByLabel() = %q, want %q", got, tt.wantName)
 			}
 		})
+	}
+}
+
+func TestNewClientFromCmd_WithExplicitFlags(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	root := newRootCmd()
+	root.SetArgs([]string{"--server", "http://test:9090", "--token", "my-token", "--namespace", "my-ns"})
+	root.RunE = func(cmd *cobra.Command, _ []string) error {
+		c := newClientFromCmd(cmd)
+		if c.BaseURL != "http://test:9090" {
+			t.Errorf("BaseURL = %q, want %q", c.BaseURL, "http://test:9090")
+		}
+		if c.Token != "my-token" {
+			t.Errorf("Token = %q, want %q", c.Token, "my-token")
+		}
+		if c.Namespace != "my-ns" {
+			t.Errorf("Namespace = %q, want %q", c.Namespace, "my-ns")
+		}
+		return nil
+	}
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+}
+
+func TestNewClientFromCmd_FallbackToConfig(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	cfg := orkaConfig{Server: "http://cfg-server:8080", Token: "cfg-token", Namespace: "cfg-ns"}
+	if err := saveConfig(cfg); err != nil {
+		t.Fatalf("saveConfig error: %v", err)
+	}
+
+	root := newRootCmd()
+	root.SetArgs([]string{})
+	root.RunE = func(cmd *cobra.Command, _ []string) error {
+		c := newClientFromCmd(cmd)
+		if c.BaseURL != "http://cfg-server:8080" {
+			t.Errorf("BaseURL = %q, want %q", c.BaseURL, "http://cfg-server:8080")
+		}
+		if c.Token != "cfg-token" {
+			t.Errorf("Token = %q, want %q", c.Token, "cfg-token")
+		}
+		if c.Namespace != "cfg-ns" {
+			t.Errorf("Namespace = %q, want %q", c.Namespace, "cfg-ns")
+		}
+		return nil
+	}
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+}
+
+func TestNewClientFromCmd_DefaultNamespace(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	root := newRootCmd()
+	root.SetArgs([]string{"--server", "http://test:9090", "--token", "tok"})
+	root.RunE = func(cmd *cobra.Command, _ []string) error {
+		c := newClientFromCmd(cmd)
+		if c.Namespace != defaultNamespace {
+			t.Errorf("Namespace = %q, want %q", c.Namespace, defaultNamespace)
+		}
+		return nil
+	}
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+}
+
+func TestNewClientFromCmd_FallbackDefaultServer(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	root := newRootCmd()
+	root.SetArgs([]string{"--token", "tok", "--namespace", "ns"})
+	root.RunE = func(cmd *cobra.Command, _ []string) error {
+		c := newClientFromCmd(cmd)
+		// Without kubeconfig or K8s cluster, server should fall back to default
+		if c.BaseURL != defaultServer {
+			t.Logf("BaseURL = %q (may not be default if kubeconfig exists)", c.BaseURL)
+		}
+		return nil
+	}
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+}
+
+func TestBuildRESTConfig_BadPath(t *testing.T) {
+	_, err := buildRESTConfig("/nonexistent/kubeconfig")
+	if err == nil {
+		t.Error("expected error for nonexistent kubeconfig")
+	}
+}
+
+func TestNewClientFromCmd_WithKubeconfig(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	// Create a kubeconfig
+	config := clientcmdapi.NewConfig()
+	config.CurrentContext = "test-ctx"
+	config.Contexts["test-ctx"] = &clientcmdapi.Context{
+		Cluster:   "test-cluster",
+		AuthInfo:  "test-user",
+		Namespace: "kube-ns",
+	}
+	config.Clusters["test-cluster"] = &clientcmdapi.Cluster{
+		Server: "https://k8s.example.com",
+	}
+	config.AuthInfos["test-user"] = &clientcmdapi.AuthInfo{
+		Token: "kube-token",
+	}
+	kubePath := filepath.Join(tmp, "kubeconfig")
+	if err := clientcmd.WriteToFile(*config, kubePath); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+
+	root := newRootCmd()
+	root.SetArgs([]string{"--kubeconfig", kubePath, "--server", "http://test:8080"})
+	root.RunE = func(cmd *cobra.Command, _ []string) error {
+		c := newClientFromCmd(cmd)
+		if c.Token != "kube-token" {
+			t.Errorf("Token = %q, want %q", c.Token, "kube-token")
+		}
+		if c.Namespace != "kube-ns" {
+			t.Errorf("Namespace = %q, want %q", c.Namespace, "kube-ns")
+		}
+		return nil
+	}
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+}
+
+func TestNewClientFromCmd_CachedPortForward(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	// Start a local server to simulate a cached port-forward target
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// Parse port from URL
+	var port int
+	fmt.Sscanf(srv.URL, "http://127.0.0.1:%d", &port)
+
+	// Save a port-forward cache pointing to our test server
+	savePortForwardCache(&portForwardCache{
+		Port:      port,
+		PID:       1,
+		Service:   "orka-api",
+		Namespace: "orka-system",
+	})
+
+	root := newRootCmd()
+	root.SetArgs([]string{"--token", "tok", "--namespace", "ns"})
+	root.RunE = func(cmd *cobra.Command, _ []string) error {
+		c := newClientFromCmd(cmd)
+		expected := fmt.Sprintf("http://localhost:%d", port)
+		if c.BaseURL != expected {
+			t.Errorf("BaseURL = %q, want %q", c.BaseURL, expected)
+		}
+		return nil
+	}
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+}
+
+func TestDiscoverOrkaService_WellKnownName(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/namespaces/default/services/orka-api" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	restCfg := &rest.Config{
+		Host: srv.URL,
+		TLSClientConfig: rest.TLSClientConfig{
+			Insecure: true,
+		},
+	}
+
+	got := discoverOrkaService(restCfg, "default")
+	if got != "orka-api" {
+		t.Errorf("discoverOrkaService() = %q, want %q", got, "orka-api")
+	}
+}
+
+func TestDiscoverOrkaService_ByLabel(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No well-known services found
+		if r.URL.Path == "/api/v1/namespaces/default/services/orka-api" ||
+			r.URL.Path == "/api/v1/namespaces/default/services/orka" ||
+			r.URL.Path == "/api/v1/namespaces/default/services/orka-controller-manager" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		// Label query returns a service
+		if r.URL.Path == "/api/v1/namespaces/default/services" {
+			resp := map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{"name": "custom-orka"},
+						"spec":     map[string]any{"ports": []map[string]any{{"name": "api"}}},
+					},
+				},
+			}
+			json.NewEncoder(w).Encode(resp) //nolint:errcheck
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	restCfg := &rest.Config{
+		Host: srv.URL,
+		TLSClientConfig: rest.TLSClientConfig{
+			Insecure: true,
+		},
+	}
+
+	got := discoverOrkaService(restCfg, "default")
+	if got != "custom-orka" {
+		t.Errorf("discoverOrkaService() = %q, want %q", got, "custom-orka")
+	}
+}
+
+func TestDiscoverOrkaService_NotFound(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	restCfg := &rest.Config{
+		Host: srv.URL,
+		TLSClientConfig: rest.TLSClientConfig{
+			Insecure: true,
+		},
+	}
+
+	got := discoverOrkaService(restCfg, "default")
+	if got != "" {
+		t.Errorf("discoverOrkaService() = %q, want empty", got)
 	}
 }

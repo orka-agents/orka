@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sozercan/orka/internal/cli/client"
 )
@@ -477,5 +478,276 @@ func TestHandleEventToolResultVerbose(t *testing.T) {
 	}
 	if !strings.Contains(output, "...") {
 		t.Error("expected truncation marker in verbose output")
+	}
+}
+
+func TestStartSpinner_NonTTY(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, false)
+
+	// Non-TTY: startSpinner should be a no-op
+	tr.startSpinner()
+	defer tr.stop()
+
+	// No goroutine should be running, so this should be safe
+	if tr.stopped {
+		t.Error("tracker should not be stopped yet")
+	}
+}
+
+func TestStartSpinner_TTY(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, true)
+
+	// TTY: startSpinner should start the goroutine
+	tr.startSpinner()
+
+	// Add an agent to trigger rendering
+	args, _ := json.Marshal(map[string]any{"agent": "spinner-test"})
+	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
+
+	// Wait for at least one tick
+	time.Sleep(200 * time.Millisecond)
+
+	tr.stop()
+
+	if !tr.stopped {
+		t.Error("expected tracker to be stopped")
+	}
+}
+
+func TestStartSpinner_NoActiveAgents(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, true)
+
+	tr.startSpinner()
+	// No agents — spinner should not render anything
+	time.Sleep(200 * time.Millisecond)
+	tr.stop()
+}
+
+func TestRenderTTY_ActiveAgent(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, true)
+
+	args, _ := json.Marshal(map[string]any{"agent": "render-test", "name": "t1", "prompt": "do something"})
+	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
+
+	// Render with an active (not done) agent
+	tr.mu.Lock()
+	tr.spinIdx = 0
+	tr.render()
+	tr.mu.Unlock()
+
+	output := buf.String()
+	if !strings.Contains(output, "render-test") {
+		t.Errorf("expected agent name in render output, got %q", output)
+	}
+}
+
+func TestRenderTTY_DoneAgent(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, true)
+
+	args, _ := json.Marshal(map[string]any{"agent": "done-agent"})
+	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
+	tr.agents[0].done = true
+	tr.agents[0].success = true
+
+	tr.mu.Lock()
+	tr.render()
+	tr.mu.Unlock()
+
+	output := buf.String()
+	if !strings.Contains(output, "done-agent") {
+		t.Errorf("expected agent name in render output, got %q", output)
+	}
+}
+
+func TestRenderTTY_FailedAgent(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, true)
+
+	args, _ := json.Marshal(map[string]any{"agent": "fail-agent"})
+	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
+	tr.agents[0].done = true
+	tr.agents[0].success = false
+
+	tr.mu.Lock()
+	tr.render()
+	tr.mu.Unlock()
+
+	output := buf.String()
+	if !strings.Contains(output, "fail-agent") {
+		t.Errorf("expected agent name in render output, got %q", output)
+	}
+}
+
+func TestRenderTTY_VerboseWithPrompt(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityV, true)
+
+	args, _ := json.Marshal(map[string]any{"agent": "v-agent", "prompt": "do something cool"})
+	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
+
+	tr.mu.Lock()
+	tr.render()
+	tr.mu.Unlock()
+
+	output := buf.String()
+	if !strings.Contains(output, "do something cool") {
+		t.Errorf("expected prompt in verbose render output, got %q", output)
+	}
+}
+
+func TestStopTTY_WithAgents(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, true)
+
+	args, _ := json.Marshal(map[string]any{"agent": "stop-test"})
+	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
+
+	tr.stop()
+
+	if !tr.agents[0].done {
+		t.Error("expected agent done after stop")
+	}
+	if !tr.agents[0].success {
+		t.Error("expected agent success after stop")
+	}
+}
+
+func TestRenderFinalVerboseWithResult(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityV, false)
+
+	args, _ := json.Marshal(map[string]any{"agent": "result-agent"})
+	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
+	tr.agents[0].done = true
+	tr.agents[0].success = true
+	tr.agents[0].result = "task completed successfully"
+
+	buf.Reset()
+	tr.renderFinal()
+
+	output := buf.String()
+	if !strings.Contains(output, "task completed successfully") {
+		t.Errorf("expected result in verbose renderFinal, got %q", output)
+	}
+}
+
+func TestHandleEventWaitForTasks(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, false)
+
+	// Add agent
+	addArgs, _ := json.Marshal(map[string]any{"agent": "w", "name": "t1"})
+	tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{
+		Name: "delegate_task",
+		Args: addArgs,
+	}))
+
+	// "wait_for_tasks" result should complete agents
+	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{
+		Name: "wait_for_tasks",
+	}))
+
+	if !tr.agents[0].done {
+		t.Error("expected agent done after wait_for_tasks")
+	}
+}
+
+func TestHandleEventFetchTaskOutput(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, false)
+
+	addArgs, _ := json.Marshal(map[string]any{"agent": "w", "name": "t1"})
+	tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{
+		Name: "delegate_task",
+		Args: addArgs,
+	}))
+
+	fetchArgs, _ := json.Marshal(map[string]any{"name": "t1"})
+	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{
+		Name: toolFetchTaskOutput,
+		Args: fetchArgs,
+	}))
+
+	if !tr.agents[0].done {
+		t.Error("expected agent done after fetch_task_output")
+	}
+}
+
+func TestHandleEventWaitForTask(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, false)
+
+	addArgs, _ := json.Marshal(map[string]any{"agent": "w", "name": "t1"})
+	tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{
+		Name: "delegate_task",
+		Args: addArgs,
+	}))
+
+	// "wait_for_task" as a tool_call
+	checkArgs, _ := json.Marshal(map[string]any{"name": "t1"})
+	tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{
+		Name: toolWaitForTask,
+		Args: checkArgs,
+	}))
+
+	if tr.agents[0].status != "checking…" {
+		t.Errorf("status = %q, want %q", tr.agents[0].status, "checking…")
+	}
+}
+
+func TestCompleteAgentsTTY(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, true)
+
+	args, _ := json.Marshal(map[string]any{"agent": "tty-agent"})
+	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
+
+	buf.Reset()
+	tr.completeAgents(client.SSEEventData{})
+
+	if !tr.agents[0].done {
+		t.Error("expected agent done")
+	}
+	// TTY output should include agent name in renderFinal
+	output := buf.String()
+	if !strings.Contains(output, "tty-agent") {
+		t.Errorf("expected agent name in TTY output, got %q", output)
+	}
+}
+
+func TestUpdateAgentFromProgressNoPhase(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, false)
+
+	args, _ := json.Marshal(map[string]any{"agent": "w", "name": "t1"})
+	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
+
+	// Result without phase — should not change status
+	result, _ := json.Marshal(map[string]any{"name": "t1"})
+	tr.updateAgentFromProgress(client.SSEEventData{Result: result})
+
+	if tr.agents[0].status != "starting" {
+		t.Errorf("status = %q, want %q (should not change without phase)", tr.agents[0].status, "starting")
+	}
+}
+
+func TestUpdateAgentStatusEmptyTaskName(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, false)
+
+	args, _ := json.Marshal(map[string]any{"agent": "w", "name": "t1"})
+	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
+
+	// Empty task name matches any
+	statusArgs, _ := json.Marshal(map[string]any{})
+	tr.updateAgentStatus(client.SSEEventData{Args: statusArgs}, "polling")
+
+	if tr.agents[0].status != "polling" {
+		t.Errorf("status = %q, want %q", tr.agents[0].status, "polling")
 	}
 }
