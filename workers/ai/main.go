@@ -506,11 +506,6 @@ func executeAgentLoop(
 				Name:       tc.Name,
 			})
 		}
-
-		// Check stop reason
-		if resp.StopReason == "end_turn" || resp.StopReason == "stop" {
-			return resp.Content, nil
-		}
 	}
 
 	return "", fmt.Errorf("max iterations reached without completion")

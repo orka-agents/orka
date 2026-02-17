@@ -163,7 +163,12 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		c.Set("Retry-After", "5")
 		return fiber.NewError(fiber.StatusTooManyRequests, "too many concurrent chat requests")
 	}
-	defer func() { <-ch.semaphore }()
+	sseMode := false
+	defer func() {
+		if !sseMode {
+			<-ch.semaphore
+		}
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), ch.config.MaxDuration)
 	defer cancel()
@@ -296,7 +301,9 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	sseTools := tools
 	sseExecutor := executor
 
+	sseMode = true
 	return c.SendStreamWriter(func(w *bufio.Writer) {
+		defer func() { <-ch.semaphore }()
 		sseCtx, sseCancel := context.WithTimeout(context.Background(), ch.config.MaxDuration)
 		defer sseCancel()
 
@@ -491,7 +498,12 @@ func (ch *ChatHandler) runToolLoop(
 				// Execute tool
 				result, execErr := executor.Execute(iterCtx, tc)
 				if execErr != nil {
-					result = fmt.Sprintf(`{"success":false,"error":"%s"}`, execErr.Error())
+					errResult := map[string]any{"success": false, "error": execErr.Error()}
+					if errJSON, jsonErr := json.Marshal(errResult); jsonErr == nil {
+						result = string(errJSON)
+					} else {
+						result = `{"success":false,"error":"tool execution failed"}`
+					}
 				}
 
 				// Emit tool_result SSE event

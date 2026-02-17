@@ -715,7 +715,9 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 			log.Error(err, "failed to append session messages")
 			// Continue anyway
 		}
-		// Release session lock
+	}
+	// Release session lock regardless of Append setting
+	if task.Spec.SessionRef != nil {
 		if err := r.SessionManager.ReleaseLock(ctx, task); err != nil {
 			log.Error(err, "failed to release session lock")
 		}

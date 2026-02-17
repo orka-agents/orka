@@ -381,9 +381,9 @@ func TestToolExecutor_Execute_Timeout(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	// Verify timeout was set
-	if executor.client.Timeout != 5*time.Second {
-		t.Errorf("Timeout = %v, want 5s", executor.client.Timeout)
+	// Verify shared client timeout was NOT mutated (per-request client used instead)
+	if executor.client.Timeout != 0 {
+		t.Errorf("Timeout = %v, want 0 (shared client should not be mutated)", executor.client.Timeout)
 	}
 }
 

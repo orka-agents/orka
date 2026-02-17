@@ -569,7 +569,7 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 	if mode == apiModeResponses {
 		resp, err := p.completeResponses(ctx, req)
 		if err != nil {
-			return nil, toProviderError(err)
+			return nil, err
 		}
 		return resp, nil
 	}
@@ -584,7 +584,7 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 		p.mode.Store(int32(apiModeChatCompletions))
 		return p.completeChatCompletions(ctx, req)
 	}
-	return nil, toProviderError(err)
+	return nil, err
 }
 
 // Stream sends a streaming completion request, auto-detecting Responses vs Chat Completions.

@@ -16,6 +16,19 @@ import (
 
 const testDigits = "0123456789"
 
+// resolvedTempDir returns a temp directory with symlinks resolved,
+// so allowed-path checks work on systems where TempDir is a symlink
+// (e.g. macOS: /var -> /private/var).
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("failed to resolve temp dir: %v", err)
+	}
+	return resolved
+}
+
 func TestFileReadTool_Name(t *testing.T) {
 	tool := NewFileReadTool()
 	if got := tool.Name(); got != "file_read" {
@@ -51,7 +64,7 @@ func TestFileReadTool_Parameters(t *testing.T) {
 }
 
 func TestFileReadTool_Execute_ReadFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	testFile := filepath.Join(tmpDir, "test.txt")
 	testContent := "Hello, World!"
 	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
@@ -81,7 +94,7 @@ func TestFileReadTool_Execute_ReadFile(t *testing.T) {
 }
 
 func TestFileReadTool_Execute_RelativePath(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	testFile := filepath.Join(tmpDir, "test.txt")
 	testContent := "relative path test"
 	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
@@ -111,7 +124,7 @@ func TestFileReadTool_Execute_RelativePath(t *testing.T) {
 }
 
 func TestFileReadTool_Execute_FileNotFound(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := &FileReadTool{
 		workDir:      tmpDir,
 		maxFileSize:  1024 * 1024,
@@ -126,7 +139,7 @@ func TestFileReadTool_Execute_FileNotFound(t *testing.T) {
 }
 
 func TestFileReadTool_Execute_Directory(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := &FileReadTool{
 		workDir:      tmpDir,
 		maxFileSize:  1024 * 1024,
@@ -141,7 +154,7 @@ func TestFileReadTool_Execute_Directory(t *testing.T) {
 }
 
 func TestFileReadTool_Execute_PathTraversal(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := &FileReadTool{
 		workDir:      tmpDir,
 		maxFileSize:  1024 * 1024,
@@ -157,7 +170,7 @@ func TestFileReadTool_Execute_PathTraversal(t *testing.T) {
 }
 
 func TestFileReadTool_Execute_PathTraversalRelative(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	tool := &FileReadTool{
 		workDir:      tmpDir,
 		maxFileSize:  1024 * 1024,
@@ -193,7 +206,7 @@ func TestFileReadTool_Execute_InvalidJSON(t *testing.T) {
 }
 
 func TestFileReadTool_Execute_WithOffset(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	testFile := filepath.Join(tmpDir, "test.txt")
 	testContent := testDigits
 	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
@@ -223,7 +236,7 @@ func TestFileReadTool_Execute_WithOffset(t *testing.T) {
 }
 
 func TestFileReadTool_Execute_WithLimit(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	testFile := filepath.Join(tmpDir, "test.txt")
 	testContent := testDigits
 	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
@@ -256,7 +269,7 @@ func TestFileReadTool_Execute_WithLimit(t *testing.T) {
 }
 
 func TestFileReadTool_Execute_OffsetAndLimit(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	testFile := filepath.Join(tmpDir, "test.txt")
 	testContent := testDigits
 	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
@@ -286,7 +299,7 @@ func TestFileReadTool_Execute_OffsetAndLimit(t *testing.T) {
 }
 
 func TestFileReadTool_Execute_LimitExceedsMax(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	testFile := filepath.Join(tmpDir, "test.txt")
 	testContent := "test content"
 	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
@@ -370,7 +383,7 @@ func TestNewFileReadTool_WithEnvVar(t *testing.T) {
 }
 
 func TestFileReadTool_Execute_Size(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := resolvedTempDir(t)
 	testFile := filepath.Join(tmpDir, "test.txt")
 	testContent := "12345"
 	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
