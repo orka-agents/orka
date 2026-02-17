@@ -204,7 +204,7 @@ type SessionReference struct {
 	// Append indicates whether to append task messages to the session transcript
 	// +kubebuilder:default=true
 	// +optional
-	Append bool `json:"append,omitempty"`
+	Append bool `json:"append"`
 
 	// MaxMessages is the maximum number of messages to load from session
 	// +kubebuilder:validation:Minimum=1

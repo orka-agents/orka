@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -76,6 +77,15 @@ func LoadConfig(defaultMaxTurns int) (*AgentConfig, error) {
 		cfg.TimeoutSeconds = n
 	}
 
+	// Sanitize SubPath to prevent directory traversal
+	if cfg.SubPath != "" {
+		cleaned := filepath.Clean(cfg.SubPath)
+		if filepath.IsAbs(cleaned) || strings.HasPrefix(cleaned, "..") {
+			return nil, fmt.Errorf("ORKA_WORKSPACE_SUBPATH %q contains path traversal", cfg.SubPath)
+		}
+		cfg.SubPath = cleaned
+	}
+
 	return cfg, nil
 }
 
@@ -115,7 +125,12 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 		args = append(args, "--branch", cfg.GitBranch)
 	}
 
-	args = append(args, "--single-branch", "--depth=1", cfg.GitRepo, workspaceDir)
+	args = append(args, "--single-branch")
+	if cfg.GitRef == "" {
+		// Shallow clone only when no specific commit ref is needed
+		args = append(args, "--depth=1")
+	}
+	args = append(args, cfg.GitRepo, workspaceDir)
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Stdout = os.Stdout

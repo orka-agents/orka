@@ -107,6 +107,16 @@ func (t *FileReadTool) Execute(ctx context.Context, args json.RawMessage) (strin
 
 	// Clean the path and check for traversal attacks
 	filePath = filepath.Clean(filePath)
+
+	// Resolve symlinks to prevent bypass
+	resolvedPath, err := filepath.EvalSymlinks(filePath)
+	if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("access denied: cannot resolve path")
+	}
+	if err == nil {
+		filePath = resolvedPath
+	}
+
 	if !t.isPathAllowed(filePath) {
 		return "", fmt.Errorf("access denied: path outside allowed directories")
 	}
@@ -173,8 +183,15 @@ func (t *FileReadTool) Execute(ctx context.Context, args json.RawMessage) (strin
 // isPathAllowed checks if the path is within allowed directories
 func (t *FileReadTool) isPathAllowed(path string) bool {
 	for _, allowedPath := range t.allowedPaths {
-		if strings.HasPrefix(path, allowedPath) {
+		if path == allowedPath || strings.HasPrefix(path, allowedPath+"/") {
 			return true
+		}
+		// Also check with symlinks resolved for consistent comparison
+		resolved, err := filepath.EvalSymlinks(allowedPath)
+		if err == nil && resolved != allowedPath {
+			if path == resolved || strings.HasPrefix(path, resolved+"/") {
+				return true
+			}
 		}
 	}
 	return false

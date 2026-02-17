@@ -164,7 +164,7 @@ func (t *CreatePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 	}
 
 	// Create the pull request via GitHub API
-	prURL, prNumber, err := createGitHubPR(token, owner, repo, args.HeadBranch, args.BaseBranch, args.Title, args.Body, t.apiBaseURL)
+	prURL, prNumber, err := createGitHubPR(ctx, token, owner, repo, args.HeadBranch, args.BaseBranch, args.Title, args.Body, t.apiBaseURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to create pull request: %w", err)
 	}
@@ -210,7 +210,7 @@ func parseGitHubRepo(repoURL string) (string, string, error) {
 
 // createGitHubPR creates a pull request via the GitHub REST API.
 // An optional apiBaseURL can be provided for testing; if empty, uses https://api.github.com.
-func createGitHubPR(token, owner, repo, head, base, title, body string, apiBaseURL ...string) (string, int, error) {
+func createGitHubPR(ctx context.Context, token, owner, repo, head, base, title, body string, apiBaseURL ...string) (string, int, error) {
 	baseURL := githubAPIBaseURL
 	if len(apiBaseURL) > 0 && apiBaseURL[0] != "" {
 		baseURL = apiBaseURL[0]
@@ -225,7 +225,7 @@ func createGitHubPR(token, owner, repo, head, base, title, body string, apiBaseU
 	}
 	payloadBytes, _ := json.Marshal(payload)
 
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payloadBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payloadBytes))
 	if err != nil {
 		return "", 0, err
 	}

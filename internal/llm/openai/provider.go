@@ -237,6 +237,15 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 	go func() {
 		defer close(ch)
 
+		send := func(chunk llm.StreamChunk) bool {
+			select {
+			case ch <- chunk:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+
 		params := responses.ResponseNewParams{
 			Model: req.Model,
 			Input: responses.ResponseNewParamsInputUnion{
@@ -255,6 +264,9 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 		if req.ResponseFormat != nil {
 			params.Text = convertResponsesTextFormat(req.ResponseFormat)
 		}
+		if req.Temperature > 0 {
+			params.Temperature = openai.Float(req.Temperature)
+		}
 
 		stream := p.client.Responses.NewStreaming(ctx, params)
 
@@ -270,7 +282,9 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 			switch evt.Type {
 			case "response.output_text.delta":
 				if evt.Delta != "" {
-					ch <- llm.StreamChunk{Content: evt.Delta}
+					if !send(llm.StreamChunk{Content: evt.Delta}) {
+						return
+					}
 				}
 			case "response.function_call_arguments.delta":
 				fc := active[evt.ItemID]
@@ -295,8 +309,10 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 				if callID == "" {
 					callID = evt.ItemID
 				}
-				ch <- llm.StreamChunk{
+				if !send(llm.StreamChunk{
 					ToolCall: &llm.ToolCall{ID: callID, Name: name, Arguments: json.RawMessage(args)},
+				}) {
+					return
 				}
 			case "response.output_item.added":
 				if evt.Item.Type == eventTypeFunctionCall {
@@ -310,21 +326,21 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 						break
 					}
 				}
-				ch <- llm.StreamChunk{Done: true, StopReason: stopReason}
+				send(llm.StreamChunk{Done: true, StopReason: stopReason})
 				return
 			case "response.failed", "response.incomplete":
-				ch <- llm.StreamChunk{Done: true, StopReason: evt.Type}
+				send(llm.StreamChunk{Done: true, StopReason: evt.Type})
 				return
 			case "error":
-				ch <- llm.StreamChunk{Error: &llm.ProviderError{Provider: "openai", Message: evt.Message}, Done: true}
+				send(llm.StreamChunk{Error: &llm.ProviderError{Provider: "openai", Message: evt.Message}, Done: true})
 				return
 			}
 		}
 		if err := stream.Err(); err != nil {
-			ch <- llm.StreamChunk{Error: toProviderError(err), Done: true}
+			send(llm.StreamChunk{Error: toProviderError(err), Done: true})
 			return
 		}
-		ch <- llm.StreamChunk{Done: true}
+		send(llm.StreamChunk{Done: true})
 	}()
 	return ch
 }
@@ -489,6 +505,15 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 	go func() {
 		defer close(ch)
 
+		send := func(chunk llm.StreamChunk) bool {
+			select {
+			case ch <- chunk:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+
 		params := openai.ChatCompletionNewParams{
 			Model:    req.Model,
 			Messages: convertMessages(req.Messages, req.SystemPrompt),
@@ -502,6 +527,9 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 		if req.ResponseFormat != nil {
 			params.ResponseFormat = convertChatResponseFormat(req.ResponseFormat)
 		}
+		if req.Temperature > 0 {
+			params.Temperature = openai.Float(req.Temperature)
+		}
 
 		stream := p.client.Chat.Completions.NewStreaming(ctx, params)
 		acc := openai.ChatCompletionAccumulator{}
@@ -512,33 +540,37 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 			if len(chunk.Choices) > 0 {
 				delta := chunk.Choices[0].Delta
 				if delta.Content != "" {
-					ch <- llm.StreamChunk{Content: delta.Content}
+					if !send(llm.StreamChunk{Content: delta.Content}) {
+						return
+					}
 				}
 			}
 
 			if acc.AddChunk(chunk) {
 				if tc, ok := acc.JustFinishedToolCall(); ok {
-					ch <- llm.StreamChunk{
+					if !send(llm.StreamChunk{
 						ToolCall: &llm.ToolCall{
 							ID:        tc.ID,
 							Name:      tc.Name,
 							Arguments: json.RawMessage(tc.Arguments),
 						},
+					}) {
+						return
 					}
 				}
 			}
 
 			if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != "" {
-				ch <- llm.StreamChunk{Done: true, StopReason: chunk.Choices[0].FinishReason}
+				send(llm.StreamChunk{Done: true, StopReason: chunk.Choices[0].FinishReason})
 				return
 			}
 		}
 
 		if err := stream.Err(); err != nil {
-			ch <- llm.StreamChunk{Error: toProviderError(err), Done: true}
+			send(llm.StreamChunk{Error: toProviderError(err), Done: true})
 			return
 		}
-		ch <- llm.StreamChunk{Done: true}
+		send(llm.StreamChunk{Done: true})
 	}()
 	return ch
 }
@@ -569,7 +601,7 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 	if mode == apiModeResponses {
 		resp, err := p.completeResponses(ctx, req)
 		if err != nil {
-			return nil, toProviderError(err)
+			return nil, err
 		}
 		return resp, nil
 	}
@@ -584,7 +616,7 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 		p.mode.Store(int32(apiModeChatCompletions))
 		return p.completeChatCompletions(ctx, req)
 	}
-	return nil, toProviderError(err)
+	return nil, err
 }
 
 // Stream sends a streaming completion request, auto-detecting Responses vs Chat Completions.

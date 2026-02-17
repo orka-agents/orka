@@ -89,6 +89,8 @@ func (t *CancelTaskTool) Execute(ctx context.Context, args json.RawMessage) (str
 		return "", fmt.Errorf("task_name is required")
 	}
 
+	parentTaskName := os.Getenv("ORKA_TASK_NAME")
+
 	namespace := a.Namespace
 	if namespace == "" {
 		namespace = os.Getenv("ORKA_TASK_NAMESPACE")
@@ -96,8 +98,6 @@ func (t *CancelTaskTool) Execute(ctx context.Context, args json.RawMessage) (str
 	if namespace == "" {
 		namespace = defaultNamespace
 	}
-
-	parentTaskName := os.Getenv("ORKA_TASK_NAME")
 
 	// Get the target task
 	task := &corev1alpha1.Task{}
@@ -108,7 +108,7 @@ func (t *CancelTaskTool) Execute(ctx context.Context, args json.RawMessage) (str
 		return "", fmt.Errorf("failed to get task %q: %w", a.TaskName, err)
 	}
 
-	// Verify this is a child of the current task
+	// Verify this is a child of the current task (only when running inside a task context)
 	if parentTaskName != "" {
 		parentLabel := task.Labels["orka.ai/parent-task"]
 		if parentLabel != parentTaskName {

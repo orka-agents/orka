@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -58,7 +59,7 @@ func executeClaude(ctx context.Context, cfg *common.AgentConfig) (string, error)
 	// Set working directory
 	dir := workspaceDir
 	if cfg.SubPath != "" {
-		dir = workspaceDir + "/" + cfg.SubPath
+		dir = filepath.Join(workspaceDir, cfg.SubPath)
 	}
 	cmd.Dir = dir
 

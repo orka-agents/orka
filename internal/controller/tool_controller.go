@@ -10,8 +10,10 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -41,6 +43,9 @@ type ToolReconciler struct {
 
 	// HTTPClient is the HTTP client used for health checks. If nil, a default is used.
 	HTTPClient *http.Client
+
+	// SkipSSRFValidation disables SSRF protection for testing. Do NOT set to true in production.
+	SkipSSRFValidation bool
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch;create;update;patch;delete
@@ -88,6 +93,41 @@ func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.To
 	}
 	if _, err := url.ParseRequestURI(tool.Spec.HTTP.URL); err != nil {
 		return fmt.Errorf("invalid http.url %q: %w", tool.Spec.HTTP.URL, err)
+	}
+
+	// Block private/internal network targets (unless in test mode)
+	if !r.SkipSSRFValidation {
+		parsedURL, _ := url.Parse(tool.Spec.HTTP.URL)
+		host := parsedURL.Hostname()
+		blockedHosts := []string{
+			"169.254.169.254",
+			"metadata.google.internal",
+			"kubernetes.default",
+			"kubernetes.default.svc",
+		}
+		if slices.Contains(blockedHosts, host) {
+			return fmt.Errorf("tool URL host %q is not allowed", host)
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+				return fmt.Errorf("tool URL must not target private/loopback addresses")
+			}
+		}
+		// Resolve DNS hostnames and block private/loopback IPs
+		if net.ParseIP(host) == nil {
+			ips, err := net.LookupHost(host)
+			if err == nil {
+				for _, ipStr := range ips {
+					ip := net.ParseIP(ipStr)
+					if ip == nil {
+						continue
+					}
+					if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+						return fmt.Errorf("tool URL resolves to private/loopback IP %s", ipStr)
+					}
+				}
+			}
+		}
 	}
 
 	// Validate description

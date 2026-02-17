@@ -174,13 +174,13 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 	}
 
 	// Get PR details to find the head SHA
-	headSHA, err := getGitHubPRHeadSHA(token, owner, repo, args.PRNumber, baseURL)
+	headSHA, err := getGitHubPRHeadSHA(ctx, token, owner, repo, args.PRNumber, baseURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to get PR head SHA: %w", err)
 	}
 
 	// Check CI status
-	passed, checkDetails, err := checkGitHubCIStatus(token, owner, repo, headSHA, baseURL)
+	passed, checkDetails, err := checkGitHubCIStatus(ctx, token, owner, repo, headSHA, baseURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to check CI status: %w", err)
 	}
@@ -196,7 +196,7 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 	}
 
 	// Merge the PR
-	sha, err := mergeGitHubPR(token, owner, repo, args.PRNumber, args.MergeMethod, args.CommitTitle, args.CommitMessage, baseURL)
+	sha, err := mergeGitHubPR(ctx, token, owner, repo, args.PRNumber, args.MergeMethod, args.CommitTitle, args.CommitMessage, baseURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to merge pull request: %w", err)
 	}
@@ -212,10 +212,10 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 }
 
 // getGitHubPRHeadSHA retrieves the head SHA for a pull request.
-func getGitHubPRHeadSHA(token, owner, repo string, prNumber int, baseURL string) (string, error) {
+func getGitHubPRHeadSHA(ctx context.Context, token, owner, repo string, prNumber int, baseURL string) (string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", baseURL, owner, repo, prNumber)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}
@@ -249,10 +249,10 @@ func getGitHubPRHeadSHA(token, owner, repo string, prNumber int, baseURL string)
 }
 
 // checkGitHubCIStatus checks whether all CI checks have passed for a commit.
-func checkGitHubCIStatus(token, owner, repo, sha, baseURL string) (bool, string, error) {
+func checkGitHubCIStatus(ctx context.Context, token, owner, repo, sha, baseURL string) (bool, string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs", baseURL, owner, repo, sha)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return false, "", err
 	}
@@ -285,6 +285,10 @@ func checkGitHubCIStatus(token, owner, repo, sha, baseURL string) (bool, string,
 		return false, "", fmt.Errorf("failed to parse check runs response: %w", err)
 	}
 
+	if checkResp.TotalCount == 0 {
+		return false, "no CI checks configured", nil
+	}
+
 	var failures []string
 	for _, check := range checkResp.CheckRuns {
 		if check.Status != "completed" || check.Conclusion != "success" {
@@ -300,7 +304,7 @@ func checkGitHubCIStatus(token, owner, repo, sha, baseURL string) (bool, string,
 }
 
 // mergeGitHubPR merges a pull request via the GitHub REST API.
-func mergeGitHubPR(token, owner, repo string, prNumber int, mergeMethod, commitTitle, commitMessage, baseURL string) (string, error) {
+func mergeGitHubPR(ctx context.Context, token, owner, repo string, prNumber int, mergeMethod, commitTitle, commitMessage, baseURL string) (string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", baseURL, owner, repo, prNumber)
 
 	payload := map[string]any{
@@ -314,7 +318,7 @@ func mergeGitHubPR(token, owner, repo string, prNumber int, mergeMethod, commitT
 	}
 	payloadBytes, _ := json.Marshal(payload)
 
-	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(payloadBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(payloadBytes))
 	if err != nil {
 		return "", err
 	}

@@ -213,6 +213,12 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	if h.watchNamespace != "" {
 		namespace = h.watchNamespace
 	}
+	if h.enforceNamespaceIsolation {
+		ui := GetUserInfo(c)
+		if ui != nil && ui.Namespace != "" && namespace != ui.Namespace {
+			return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("namespace %q not allowed", namespace))
+		}
+	}
 
 	// Resolve provider and model from the request model field.
 	// Supports "provider/model" format (e.g., "anthropic/claude-sonnet-4") or plain model name.

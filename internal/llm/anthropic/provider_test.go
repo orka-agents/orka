@@ -179,7 +179,7 @@ func TestBuildMessages(t *testing.T) {
 			messages: []llm.Message{
 				{Role: "system", Content: "you are helpful"},
 			},
-			wantLen: 0,
+			wantLen: 1,
 		},
 		{
 			name: "full conversation",
@@ -502,12 +502,13 @@ func TestHandleStreamEvent_ContentBlockStart_ToolUse(t *testing.T) {
 	event := unmarshalStreamEvent(t,
 		`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tc1","name":"search","input":{}}}`)
 
-	ch := make(chan llm.StreamChunk, 10)
+	var chunks []llm.StreamChunk
+	send := func(chunk llm.StreamChunk) bool { chunks = append(chunks, chunk); return true }
 	var currentToolCall *llm.ToolCall
 	var toolCallArgs []byte
 	hasToolCalls := false
 
-	handleStreamEvent(event, ch, &currentToolCall, &toolCallArgs, &hasToolCalls)
+	handleStreamEvent(event, send, &currentToolCall, &toolCallArgs, &hasToolCalls)
 
 	if currentToolCall == nil {
 		t.Fatal("expected currentToolCall to be set")
@@ -521,7 +522,7 @@ func TestHandleStreamEvent_ContentBlockStart_ToolUse(t *testing.T) {
 	if !hasToolCalls {
 		t.Error("expected hasToolCalls to be true")
 	}
-	if len(ch) != 0 {
+	if len(chunks) != 0 {
 		t.Error("no chunk should be sent on content_block_start")
 	}
 }
@@ -530,12 +531,13 @@ func TestHandleStreamEvent_ContentBlockStart_Text(t *testing.T) {
 	event := unmarshalStreamEvent(t,
 		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
 
-	ch := make(chan llm.StreamChunk, 10)
+	var chunks []llm.StreamChunk
+	send := func(chunk llm.StreamChunk) bool { chunks = append(chunks, chunk); return true }
 	var currentToolCall *llm.ToolCall
 	var toolCallArgs []byte
 	hasToolCalls := false
 
-	handleStreamEvent(event, ch, &currentToolCall, &toolCallArgs, &hasToolCalls)
+	handleStreamEvent(event, send, &currentToolCall, &toolCallArgs, &hasToolCalls)
 
 	if currentToolCall != nil {
 		t.Error("expected currentToolCall to be nil for text block")
@@ -549,17 +551,18 @@ func TestHandleStreamEvent_ContentBlockDelta_TextDelta(t *testing.T) {
 	event := unmarshalStreamEvent(t,
 		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}`)
 
-	ch := make(chan llm.StreamChunk, 10)
+	var chunks []llm.StreamChunk
+	send := func(chunk llm.StreamChunk) bool { chunks = append(chunks, chunk); return true }
 	var currentToolCall *llm.ToolCall
 	var toolCallArgs []byte
 	hasToolCalls := false
 
-	handleStreamEvent(event, ch, &currentToolCall, &toolCallArgs, &hasToolCalls)
+	handleStreamEvent(event, send, &currentToolCall, &toolCallArgs, &hasToolCalls)
 
-	if len(ch) != 1 {
-		t.Fatalf("expected 1 chunk, got %d", len(ch))
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(chunks))
 	}
-	chunk := <-ch
+	chunk := chunks[0]
 	if chunk.Content != "Hello" {
 		t.Errorf("chunk content = %q, want Hello", chunk.Content)
 	}
@@ -569,17 +572,18 @@ func TestHandleStreamEvent_ContentBlockDelta_InputJSONDelta(t *testing.T) {
 	event := unmarshalStreamEvent(t,
 		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"q\":"}}`)
 
-	ch := make(chan llm.StreamChunk, 10)
+	var chunks []llm.StreamChunk
+	send := func(chunk llm.StreamChunk) bool { chunks = append(chunks, chunk); return true }
 	tc := &llm.ToolCall{ID: "tc1", Name: "search"}
 	var toolCallArgs []byte
 	hasToolCalls := true
 
-	handleStreamEvent(event, ch, &tc, &toolCallArgs, &hasToolCalls)
+	handleStreamEvent(event, send, &tc, &toolCallArgs, &hasToolCalls)
 
 	if string(toolCallArgs) != `{"q":` {
 		t.Errorf("toolCallArgs = %q, want %q", string(toolCallArgs), `{"q":`)
 	}
-	if len(ch) != 0 {
+	if len(chunks) != 0 {
 		t.Error("no chunk should be sent on input_json_delta")
 	}
 }
@@ -588,12 +592,13 @@ func TestHandleStreamEvent_ContentBlockDelta_InputJSONDelta_NoToolCall(t *testin
 	event := unmarshalStreamEvent(t,
 		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"data"}}`)
 
-	ch := make(chan llm.StreamChunk, 10)
+	var chunks []llm.StreamChunk
+	send := func(chunk llm.StreamChunk) bool { chunks = append(chunks, chunk); return true }
 	var currentToolCall *llm.ToolCall
 	var toolCallArgs []byte
 	hasToolCalls := false
 
-	handleStreamEvent(event, ch, &currentToolCall, &toolCallArgs, &hasToolCalls)
+	handleStreamEvent(event, send, &currentToolCall, &toolCallArgs, &hasToolCalls)
 
 	if len(toolCallArgs) != 0 {
 		t.Error("toolCallArgs should remain empty when no active tool call")
@@ -601,21 +606,22 @@ func TestHandleStreamEvent_ContentBlockDelta_InputJSONDelta_NoToolCall(t *testin
 }
 
 func TestHandleStreamEvent_ContentBlockStop_WithToolCall(t *testing.T) {
-	ch := make(chan llm.StreamChunk, 10)
+	var chunks []llm.StreamChunk
+	send := func(chunk llm.StreamChunk) bool { chunks = append(chunks, chunk); return true }
 	tc := &llm.ToolCall{ID: "tc1", Name: "search"}
 	toolCallArgs := []byte(`{"q":"test"}`)
 	hasToolCalls := true
 
 	event := unmarshalStreamEvent(t, `{"type":"content_block_stop","index":0}`)
-	handleStreamEvent(event, ch, &tc, &toolCallArgs, &hasToolCalls)
+	handleStreamEvent(event, send, &tc, &toolCallArgs, &hasToolCalls)
 
 	if tc != nil {
 		t.Error("expected currentToolCall to be reset to nil")
 	}
-	if len(ch) != 1 {
-		t.Fatalf("expected 1 chunk, got %d", len(ch))
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(chunks))
 	}
-	chunk := <-ch
+	chunk := chunks[0]
 	if chunk.ToolCall == nil {
 		t.Fatal("expected ToolCall in chunk")
 	}
@@ -628,18 +634,19 @@ func TestHandleStreamEvent_ContentBlockStop_WithToolCall(t *testing.T) {
 }
 
 func TestHandleStreamEvent_ContentBlockStop_WithToolCallNoArgs(t *testing.T) {
-	ch := make(chan llm.StreamChunk, 10)
+	var chunks []llm.StreamChunk
+	send := func(chunk llm.StreamChunk) bool { chunks = append(chunks, chunk); return true }
 	tc := &llm.ToolCall{ID: "tc2", Name: "noop"}
 	var toolCallArgs []byte
 	hasToolCalls := true
 
 	event := unmarshalStreamEvent(t, `{"type":"content_block_stop","index":0}`)
-	handleStreamEvent(event, ch, &tc, &toolCallArgs, &hasToolCalls)
+	handleStreamEvent(event, send, &tc, &toolCallArgs, &hasToolCalls)
 
-	if len(ch) != 1 {
-		t.Fatalf("expected 1 chunk, got %d", len(ch))
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(chunks))
 	}
-	chunk := <-ch
+	chunk := chunks[0]
 	if chunk.ToolCall == nil {
 		t.Fatal("expected ToolCall in chunk")
 	}
@@ -649,15 +656,16 @@ func TestHandleStreamEvent_ContentBlockStop_WithToolCallNoArgs(t *testing.T) {
 }
 
 func TestHandleStreamEvent_ContentBlockStop_NoToolCall(t *testing.T) {
-	ch := make(chan llm.StreamChunk, 10)
+	var chunks []llm.StreamChunk
+	send := func(chunk llm.StreamChunk) bool { chunks = append(chunks, chunk); return true }
 	var tc *llm.ToolCall
 	var toolCallArgs []byte
 	hasToolCalls := false
 
 	event := unmarshalStreamEvent(t, `{"type":"content_block_stop","index":0}`)
-	handleStreamEvent(event, ch, &tc, &toolCallArgs, &hasToolCalls)
+	handleStreamEvent(event, send, &tc, &toolCallArgs, &hasToolCalls)
 
-	if len(ch) != 0 {
+	if len(chunks) != 0 {
 		t.Error("no chunk should be sent when no active tool call")
 	}
 }
@@ -666,17 +674,18 @@ func TestHandleStreamEvent_MessageDelta_EndTurn(t *testing.T) {
 	event := unmarshalStreamEvent(t,
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":""},"usage":{"output_tokens":10}}`)
 
-	ch := make(chan llm.StreamChunk, 10)
+	var chunks []llm.StreamChunk
+	send := func(chunk llm.StreamChunk) bool { chunks = append(chunks, chunk); return true }
 	var tc *llm.ToolCall
 	var toolCallArgs []byte
 	hasToolCalls := false
 
-	handleStreamEvent(event, ch, &tc, &toolCallArgs, &hasToolCalls)
+	handleStreamEvent(event, send, &tc, &toolCallArgs, &hasToolCalls)
 
-	if len(ch) != 1 {
-		t.Fatalf("expected 1 chunk, got %d", len(ch))
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(chunks))
 	}
-	chunk := <-ch
+	chunk := chunks[0]
 	if !chunk.Done {
 		t.Error("expected Done to be true")
 	}
@@ -690,17 +699,18 @@ func TestHandleStreamEvent_MessageDelta_ToolUseInferred(t *testing.T) {
 	event := unmarshalStreamEvent(t,
 		`{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":""},"usage":{"output_tokens":10}}`)
 
-	ch := make(chan llm.StreamChunk, 10)
+	var chunks []llm.StreamChunk
+	send := func(chunk llm.StreamChunk) bool { chunks = append(chunks, chunk); return true }
 	var tc *llm.ToolCall
 	var toolCallArgs []byte
 	hasToolCalls := true
 
-	handleStreamEvent(event, ch, &tc, &toolCallArgs, &hasToolCalls)
+	handleStreamEvent(event, send, &tc, &toolCallArgs, &hasToolCalls)
 
-	if len(ch) != 1 {
-		t.Fatalf("expected 1 chunk, got %d", len(ch))
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(chunks))
 	}
-	chunk := <-ch
+	chunk := chunks[0]
 	if !chunk.Done {
 		t.Error("expected Done to be true")
 	}
@@ -712,15 +722,16 @@ func TestHandleStreamEvent_MessageDelta_ToolUseInferred(t *testing.T) {
 func TestHandleStreamEvent_MessageStop(t *testing.T) {
 	event := unmarshalStreamEvent(t, `{"type":"message_stop"}`)
 
-	ch := make(chan llm.StreamChunk, 10)
+	var chunks []llm.StreamChunk
+	send := func(chunk llm.StreamChunk) bool { chunks = append(chunks, chunk); return true }
 	var tc *llm.ToolCall
 	var toolCallArgs []byte
 	hasToolCalls := false
 
-	handleStreamEvent(event, ch, &tc, &toolCallArgs, &hasToolCalls)
+	handleStreamEvent(event, send, &tc, &toolCallArgs, &hasToolCalls)
 
 	// MessageStopEvent is a no-op
-	if len(ch) != 0 {
+	if len(chunks) != 0 {
 		t.Error("no chunk should be sent on message_stop")
 	}
 }

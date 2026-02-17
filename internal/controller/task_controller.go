@@ -315,12 +315,7 @@ func (r *TaskReconciler) handleScheduledTask(ctx context.Context, task *corev1al
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	sched, err := parser.Parse(task.Spec.Schedule)
 	if err != nil {
-		task.Status.Phase = corev1alpha1.TaskPhaseFailed
-		task.Status.Message = fmt.Sprintf("invalid cron expression: %v", err)
-		if updateErr := r.Status().Update(ctx, task); updateErr != nil {
-			return ctrl.Result{}, updateErr
-		}
-		return ctrl.Result{}, nil
+		return r.failTask(ctx, task, fmt.Sprintf("invalid cron expression: %v", err))
 	}
 
 	now := time.Now()
@@ -757,7 +752,9 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 			log.Error(err, "failed to append session messages")
 			// Continue anyway
 		}
-		// Release session lock
+	}
+	// Release session lock regardless of Append setting
+	if task.Spec.SessionRef != nil {
 		if err := r.SessionManager.ReleaseLock(ctx, task); err != nil {
 			log.Error(err, "failed to release session lock")
 		}
@@ -1328,6 +1325,9 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	}
 
 	// Check max iterations
+	if task.Spec.AgentRef == nil {
+		return r.failTask(ctx, task, "autonomous task requires agentRef")
+	}
 	agent := &corev1alpha1.Agent{}
 	agentNS := task.Namespace
 	if task.Spec.AgentRef.Namespace != "" {

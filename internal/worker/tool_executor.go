@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"strings"
 	"time"
@@ -97,7 +98,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 	for key, val := range params {
 		placeholder := "{{" + key + "}}"
 		if strings.Contains(url, placeholder) {
-			url = strings.ReplaceAll(url, placeholder, fmt.Sprintf("%v", val))
+			url = strings.ReplaceAll(url, placeholder, neturl.PathEscape(fmt.Sprintf("%v", val)))
 			interpolatedKeys[key] = true
 		}
 	}
@@ -139,19 +140,20 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 	}
 
 	// Configure timeout
+	httpClient := e.client
 	if tool.Spec.HTTP.Timeout != nil {
-		e.client.Timeout = tool.Spec.HTTP.Timeout.Duration
+		httpClient = &http.Client{Timeout: tool.Spec.HTTP.Timeout.Duration}
 	}
 
 	// Execute request
-	resp, err := e.client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("tool request failed: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
 	// Read response
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB limit
 	if err != nil {
 		return "", fmt.Errorf("failed to read response: %w", err)
 	}

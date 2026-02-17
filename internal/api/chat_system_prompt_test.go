@@ -452,8 +452,8 @@ func TestBuildDynamicContext(t *testing.T) {
 		if !strings.Contains(providers, "agents=0") {
 			t.Errorf("providers = %q, expected agents=0", providers)
 		}
-		if !strings.Contains(providers, "tools=3") {
-			t.Errorf("providers = %q, expected tools=3 (built-in only)", providers)
+		if !strings.Contains(providers, "tools=5") {
+			t.Errorf("providers = %q, expected tools=5 (built-in only)", providers)
 		}
 	})
 
@@ -494,8 +494,8 @@ func TestBuildDynamicContext(t *testing.T) {
 			t.Errorf("providers = %q, expected agents=1", providers)
 		}
 		// 3 built-in + 1 custom = 4
-		if !strings.Contains(providers, "tools=4") {
-			t.Errorf("providers = %q, expected tools=4", providers)
+		if !strings.Contains(providers, "tools=6") {
+			t.Errorf("providers = %q, expected tools=6", providers)
 		}
 	})
 

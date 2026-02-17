@@ -12,8 +12,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -39,7 +42,8 @@ func main() {
 }
 
 func run() error {
-	ctx := context.Background()
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
 
 	// Get configuration from environment
 	taskName := os.Getenv("ORKA_TASK_NAME")
@@ -379,7 +383,7 @@ func loadPlanContext() string {
 		saToken = strings.TrimSpace(string(data))
 	}
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
 	if err != nil {
 		fmt.Printf("Warning: failed to create plan request: %v\n", err)
 		return ""
@@ -388,7 +392,8 @@ func loadPlanContext() string {
 		req.Header.Set("Authorization", "Bearer "+saToken)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		fmt.Printf("Warning: failed to fetch plan: %v\n", err)
 		return ""
@@ -505,11 +510,6 @@ func executeAgentLoop(
 				ToolCallID: tc.ID,
 				Name:       tc.Name,
 			})
-		}
-
-		// Check stop reason
-		if resp.StopReason == "end_turn" || resp.StopReason == "stop" {
-			return resp.Content, nil
 		}
 	}
 

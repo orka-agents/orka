@@ -381,9 +381,9 @@ func TestToolExecutor_Execute_Timeout(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	// Verify timeout was set
-	if executor.client.Timeout != 5*time.Second {
-		t.Errorf("Timeout = %v, want 5s", executor.client.Timeout)
+	// Verify shared client timeout was NOT mutated (per-request client used instead)
+	if executor.client.Timeout != 0 {
+		t.Errorf("Timeout = %v, want 0 (shared client should not be mutated)", executor.client.Timeout)
 	}
 }
 
@@ -724,5 +724,47 @@ func TestToolExecutor_Execute_URLInterpolation_NoPlaceholders(t *testing.T) {
 	// All params should remain in body
 	if receivedBody["query"] != "test" {
 		t.Errorf("body query = %v, want test", receivedBody["query"])
+	}
+}
+
+func TestToolExecutor_Execute_ResponseSizeLimit(t *testing.T) {
+	// Create a server that returns more than 10MB
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// Write 11MB of data (10MB limit should truncate it)
+		chunk := make([]byte, 1024*1024) // 1MB
+		for range 11 {
+			w.Write(chunk) //nolint:errcheck
+		}
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: corev1alpha1.HTTPExecution{
+				URL: server.URL,
+			},
+		},
+	}
+
+	result, err := executor.Execute(context.Background(), tool, nil)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// Verify response was limited to 10MB
+	if len(result) > 10*1024*1024 {
+		t.Errorf("response size = %d bytes, want <= 10MB", len(result))
+	}
+
+	// Should be exactly 10MB
+	if len(result) != 10*1024*1024 {
+		t.Errorf("response size = %d bytes, want exactly 10MB", len(result))
 	}
 }

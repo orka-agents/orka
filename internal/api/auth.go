@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -37,9 +38,25 @@ type tokenCacheEntry struct {
 }
 
 var (
-	tokenCache sync.Map
-	cacheTTL   = 60 * time.Second
+	tokenCache     sync.Map
+	tokenCacheSize atomic.Int64
+	cacheTTL       = 60 * time.Second
 )
+
+const tokenCacheCleanupInterval = 1000
+
+// cleanupTokenCache removes expired entries from the token cache.
+func cleanupTokenCache() {
+	tokenCache.Range(func(key, value any) bool {
+		if entry, ok := value.(*tokenCacheEntry); ok {
+			if time.Now().After(entry.expiry) {
+				tokenCache.Delete(key)
+				tokenCacheSize.Add(-1)
+			}
+		}
+		return true
+	})
+}
 
 func getTokenHash(token string) string {
 	h := sha256.Sum256([]byte(token))
@@ -150,6 +167,9 @@ func validateToken(ctx context.Context, c client.Client, token string) (*UserInf
 		userInfo: userInfo,
 		expiry:   time.Now().Add(cacheTTL),
 	})
+	if tokenCacheSize.Add(1)%tokenCacheCleanupInterval == 0 {
+		cleanupTokenCache()
+	}
 
 	return userInfo, nil
 }

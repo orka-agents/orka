@@ -80,7 +80,7 @@ func NewJobBuilder(c client.Client) *JobBuilder {
 
 // Build creates a Job for the given Task
 func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (*batchv1.Job, error) {
-	jobName := fmt.Sprintf("%s-job-%s", task.Name, task.UID[:8])
+	jobName := fmt.Sprintf("%s-job-%s-%d", task.Name, task.UID[:8], task.Status.Attempts)
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -127,7 +127,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 
 	// Add secret volumes if needed
 	if task.Spec.SecretRef != nil || (agent != nil && agent.Spec.SecretRef != nil) || provider != nil {
-		b.addSecretVolumes(job, task, agent, provider)
+		b.addSecretVolumes(ctx, job, task, agent, provider)
 	}
 
 	// Add session volume if needed
@@ -305,12 +305,13 @@ func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, 
 
 // aiConfig holds resolved AI configuration from provider, agent, and task.
 type aiConfig struct {
-	providerType string
-	model        string
-	prompt       string
-	systemPrompt string
-	baseURL      string
-	tools        []string
+	providerType    string
+	model           string
+	prompt          string
+	systemPrompt    string
+	baseURL         string
+	azureAPIVersion string
+	tools           []string
 }
 
 // resolveAIConfig merges AI configuration from provider, agent, and task (in priority order).
@@ -322,6 +323,9 @@ func resolveAIConfig(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provide
 		cfg.providerType = string(providerCRD.Spec.Type)
 		cfg.model = providerCRD.Spec.DefaultModel
 		cfg.baseURL = providerCRD.Spec.BaseURL
+		if providerCRD.Spec.Azure != nil {
+			cfg.azureAPIVersion = providerCRD.Spec.Azure.APIVersion
+		}
 	}
 
 	// Get values from agent if present (overrides provider defaults)
@@ -442,6 +446,9 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, envVars []corev1.EnvVar, 
 	if cfg.baseURL != "" {
 		envVars = append(envVars, corev1.EnvVar{Name: "ORKA_AI_BASE_URL", Value: cfg.baseURL})
 	}
+	if cfg.azureAPIVersion != "" {
+		envVars = append(envVars, corev1.EnvVar{Name: "ORKA_AI_AZURE_API_VERSION", Value: cfg.azureAPIVersion})
+	}
 
 	// Auto-inject coordination tools when coordination is enabled
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
@@ -485,7 +492,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, envVars []corev1.EnvVar, 
 		for i, fb := range agent.Spec.Model.Fallbacks {
 			// Resolve the fallback Provider CRD
 			fbProvider := &corev1alpha1.Provider{}
-			if err := b.Get(context.TODO(), client.ObjectKey{
+			if err := b.Get(ctx, client.ObjectKey{
 				Namespace: task.Namespace,
 				Name:      fb.ProviderRef,
 			}, fbProvider); err != nil {
@@ -523,7 +530,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, envVars []corev1.EnvVar, 
 }
 
 // addSecretVolumes adds secret volumes to the Job
-func (b *JobBuilder) addSecretVolumes(job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) {
+func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) {
 	// Add provider secret (mounted as environment variable source)
 	if provider != nil {
 		secretName := provider.Spec.SecretRef.Name
@@ -559,7 +566,7 @@ func (b *JobBuilder) addSecretVolumes(job *batchv1.Job, task *corev1alpha1.Task,
 	if agent != nil && agent.Spec.Model != nil {
 		for i, fb := range agent.Spec.Model.Fallbacks {
 			fbProvider := &corev1alpha1.Provider{}
-			if err := b.Get(context.TODO(), client.ObjectKey{
+			if err := b.Get(ctx, client.ObjectKey{
 				Namespace: task.Namespace,
 				Name:      fb.ProviderRef,
 			}, fbProvider); err != nil {

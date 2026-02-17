@@ -2759,7 +2759,9 @@ func TestHandleCompleted_WebhookSuccess(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task)
-	r.WebhookNotifier = NewWebhookNotifier()
+	notifier := NewWebhookNotifier()
+	notifier.skipURLValidation = true
+	r.WebhookNotifier = notifier
 	result, err := r.handleCompleted(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

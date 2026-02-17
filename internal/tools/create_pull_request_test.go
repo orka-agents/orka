@@ -414,7 +414,7 @@ func TestCreateGitHubPR_APIError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, _, err := createGitHubPR("token", "owner", "repo", "head", "base", "title", "body", server.URL)
+	_, _, err := createGitHubPR(context.Background(), "token", "owner", "repo", "head", "base", "title", "body", server.URL)
 	if err == nil {
 		t.Fatal("expected error for API failure")
 	}

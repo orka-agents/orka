@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -170,27 +169,39 @@ func (t *CodeExecTool) Execute(ctx context.Context, args json.RawMessage) (strin
 
 // executePython executes Python code
 func (t *CodeExecTool) executePython(ctx context.Context, code string) CodeExecResult {
-	// Write code to a temporary file
-	tmpFile := filepath.Join(t.workDir, "script.py")
-	if err := os.WriteFile(tmpFile, []byte(code), 0644); err != nil {
+	tmpFile, err := os.CreateTemp(t.workDir, "script-*.py")
+	if err != nil {
+		return CodeExecResult{Error: fmt.Sprintf("failed to create temp script: %v", err), ExitCode: -1}
+	}
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.Write([]byte(code)); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath) //nolint:errcheck
 		return CodeExecResult{Error: fmt.Sprintf("failed to write script: %v", err), ExitCode: -1}
 	}
-	defer os.Remove(tmpFile) //nolint:errcheck
+	tmpFile.Close()
+	defer os.Remove(tmpPath) //nolint:errcheck
 
-	cmd := exec.CommandContext(ctx, "python3", tmpFile)
+	cmd := exec.CommandContext(ctx, "python3", tmpPath)
 	return t.runCommand(cmd)
 }
 
 // executeNode executes JavaScript code
 func (t *CodeExecTool) executeNode(ctx context.Context, code string) CodeExecResult {
-	// Write code to a temporary file
-	tmpFile := filepath.Join(t.workDir, "script.js")
-	if err := os.WriteFile(tmpFile, []byte(code), 0644); err != nil {
+	tmpFile, err := os.CreateTemp(t.workDir, "script-*.js")
+	if err != nil {
+		return CodeExecResult{Error: fmt.Sprintf("failed to create temp script: %v", err), ExitCode: -1}
+	}
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.Write([]byte(code)); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath) //nolint:errcheck
 		return CodeExecResult{Error: fmt.Sprintf("failed to write script: %v", err), ExitCode: -1}
 	}
-	defer os.Remove(tmpFile) //nolint:errcheck
+	tmpFile.Close()
+	defer os.Remove(tmpPath) //nolint:errcheck
 
-	cmd := exec.CommandContext(ctx, "node", tmpFile)
+	cmd := exec.CommandContext(ctx, "node", tmpPath)
 	return t.runCommand(cmd)
 }
 
@@ -201,14 +212,24 @@ func (t *CodeExecTool) executeBash(ctx context.Context, code string) CodeExecRes
 		return CodeExecResult{Error: msg, ExitCode: -1}
 	}
 
-	// Write code to a temporary file
-	tmpFile := filepath.Join(t.workDir, "script.sh")
-	if err := os.WriteFile(tmpFile, []byte(code), 0755); err != nil {
+	tmpFile, err := os.CreateTemp(t.workDir, "script-*.sh")
+	if err != nil {
+		return CodeExecResult{Error: fmt.Sprintf("failed to create temp script: %v", err), ExitCode: -1}
+	}
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.Write([]byte(code)); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath) //nolint:errcheck
 		return CodeExecResult{Error: fmt.Sprintf("failed to write script: %v", err), ExitCode: -1}
 	}
-	defer os.Remove(tmpFile) //nolint:errcheck
+	tmpFile.Close()
+	if err := os.Chmod(tmpPath, 0755); err != nil {
+		os.Remove(tmpPath) //nolint:errcheck
+		return CodeExecResult{Error: fmt.Sprintf("failed to chmod script: %v", err), ExitCode: -1}
+	}
+	defer os.Remove(tmpPath) //nolint:errcheck
 
-	cmd := exec.CommandContext(ctx, "bash", tmpFile)
+	cmd := exec.CommandContext(ctx, "bash", tmpPath)
 	return t.runCommand(cmd)
 }
 
