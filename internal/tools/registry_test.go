@@ -272,3 +272,49 @@ func TestDefaultRegistry(t *testing.T) {
 		}
 	}
 }
+
+func TestRegisterCoordinationTools(t *testing.T) {
+	// Create a fresh registry to test RegisterCoordinationTools
+	origRegistry := DefaultRegistry
+	DefaultRegistry = NewRegistry()
+	defer func() { DefaultRegistry = origRegistry }()
+
+	k8sClient := newFakeClient()
+	RegisterCoordinationTools(k8sClient)
+
+	expectedTools := []string{
+		"delegate_task",
+		"wait_for_tasks",
+		"cancel_task",
+		"send_message",
+		"check_messages",
+		"create_pull_request",
+		"merge_pull_request",
+		"auto_merge_pull_request",
+		"review_pull_request",
+		"post_review_comment",
+		"create_agent",
+		"delete_agent",
+		"update_plan",
+	}
+	for _, name := range expectedTools {
+		if _, ok := DefaultRegistry.Get(name); !ok {
+			t.Errorf("expected coordination tool %q to be registered", name)
+		}
+	}
+}
+
+func TestRegisterBuiltinTools(t *testing.T) {
+	origRegistry := DefaultRegistry
+	DefaultRegistry = NewRegistry()
+	defer func() { DefaultRegistry = origRegistry }()
+
+	RegisterBuiltinTools()
+
+	expectedTools := []string{"web_search", "code_exec", "file_read"}
+	for _, name := range expectedTools {
+		if _, ok := DefaultRegistry.Get(name); !ok {
+			t.Errorf("expected built-in tool %q to be registered", name)
+		}
+	}
+}

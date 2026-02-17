@@ -2,10 +2,121 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/sozercan/orka/internal/store"
 )
+
+func TestGetMessagesEmpty(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	// No messages exist — should return empty slice, not error
+	msgs, err := s.GetMessages(ctx, "ns1", "nobody", "parent", false)
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("got %d messages, want 0", len(msgs))
+	}
+}
+
+func TestGetMessagesMarkReadEmpty(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	// markRead=true with no messages should not error
+	msgs, err := s.GetMessages(ctx, "ns1", "nobody", "parent", true)
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("got %d messages, want 0", len(msgs))
+	}
+}
+
+func TestDeleteTaskMessagesNonexistent(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	// Deleting messages for a task with no messages should be a no-op
+	if err := s.DeleteTaskMessages(ctx, "ns1", "nonexistent"); err != nil {
+		t.Errorf("DeleteTaskMessages nonexistent: %v", err)
+	}
+}
+
+func TestDeleteParentMessagesNonexistent(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	// Deleting messages for a nonexistent parent should be a no-op
+	if err := s.DeleteParentMessages(ctx, "ns1", "nonexistent-parent"); err != nil {
+		t.Errorf("DeleteParentMessages nonexistent: %v", err)
+	}
+}
+
+func TestGetMessagesNamespaceIsolation(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	msg := &store.Message{
+		Namespace:  "ns-isolated",
+		FromTask:   "sender",
+		ToTask:     "receiver",
+		ParentTask: "parent",
+		Content:    "isolated message",
+	}
+	if err := s.SendMessage(ctx, msg); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	// Different namespace should not see the message
+	msgs, err := s.GetMessages(ctx, "other-ns", "receiver", "parent", false)
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("got %d messages from different namespace, want 0", len(msgs))
+	}
+}
+
+func TestGetMessagesMultipleMarkRead(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	// Send multiple messages
+	for i := range 3 {
+		msg := &store.Message{
+			Namespace:  "ns-multi",
+			FromTask:   "sender",
+			ToTask:     "reader",
+			ParentTask: "parent",
+			Content:    fmt.Sprintf("msg-%d", i),
+		}
+		if err := s.SendMessage(ctx, msg); err != nil {
+			t.Fatalf("SendMessage %d: %v", i, err)
+		}
+	}
+
+	// Read all with markRead=true
+	msgs, err := s.GetMessages(ctx, "ns-multi", "reader", "parent", true)
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("got %d messages, want 3", len(msgs))
+	}
+
+	// All should now be read
+	msgs, err = s.GetMessages(ctx, "ns-multi", "reader", "parent", false)
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("got %d messages after markRead, want 0", len(msgs))
+	}
+}
 
 func TestMessageStore(t *testing.T) {
 	s := setupTestStore(t)

@@ -28,6 +28,31 @@ func TestSendMessageTool_Description(t *testing.T) {
 	}
 }
 
+func TestSendMessageTool_Parameters(t *testing.T) {
+	tool := NewSendMessageTool()
+	params := tool.Parameters()
+	if params == nil {
+		t.Fatal("Parameters() returned nil")
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(params, &schema); err != nil {
+		t.Fatalf("Parameters() returned invalid JSON: %v", err)
+	}
+	if schema["type"] != "object" {
+		t.Error("Parameters schema should have type: object")
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("missing properties")
+	}
+	if _, ok := props["to_task"]; !ok {
+		t.Error("missing to_task property")
+	}
+	if _, ok := props["content"]; !ok {
+		t.Error("missing content property")
+	}
+}
+
 func TestSendMessageTool_Execute(t *testing.T) {
 	tests := []struct {
 		name       string

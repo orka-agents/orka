@@ -539,3 +539,213 @@ func TestMergePullRequestTool_Execute_PRAlreadyMerged(t *testing.T) {
 		t.Errorf("expected error to contain status code 405, got: %s", got)
 	}
 }
+
+func TestMergePullRequestTool_NoWorkspace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
+	tool := NewMergePullRequestTool(k8sClient)
+
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(MergePullRequestArgs{
+		TaskName: "coder-task",
+		PRNumber: 42,
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for task without workspace")
+	}
+	if !strings.Contains(err.Error(), "does not have workspace") {
+		t.Errorf("unexpected error: %s", err.Error())
+	}
+}
+
+func TestMergePullRequestTool_NoGitRepo(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					Branch: "main",
+				},
+			},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
+	tool := NewMergePullRequestTool(k8sClient)
+
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(MergePullRequestArgs{
+		TaskName: "coder-task",
+		PRNumber: 42,
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for empty gitRepo")
+	}
+	if !strings.Contains(err.Error(), "no gitRepo") {
+		t.Errorf("unexpected error: %s", err.Error())
+	}
+}
+
+func TestMergePullRequestTool_NoGitSecretRef(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/sozercan/ayna",
+					Branch:  "main",
+				},
+			},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
+	tool := NewMergePullRequestTool(k8sClient)
+
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(MergePullRequestArgs{
+		TaskName: "coder-task",
+		PRNumber: 42,
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for no gitSecretRef")
+	}
+	if !strings.Contains(err.Error(), "no gitSecretRef") {
+		t.Errorf("unexpected error: %s", err.Error())
+	}
+}
+
+func TestMergePullRequestTool_EmptyToken(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/sozercan/ayna",
+					Branch:       "main",
+					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data:       map[string][]byte{"other-key": []byte("value")},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := NewMergePullRequestTool(k8sClient)
+
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(MergePullRequestArgs{
+		TaskName: "coder-task",
+		PRNumber: 42,
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for empty token")
+	}
+	if !strings.Contains(err.Error(), "does not contain a 'token' or 'password' key") {
+		t.Errorf("unexpected error: %s", err.Error())
+	}
+}
+
+func TestMergePullRequestTool_PasswordKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"number":42}`)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}`)
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/merge"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"sha":"def456","merged":true,"message":"merged"}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/sozercan/ayna",
+					Branch:       "main",
+					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data:       map[string][]byte{"password": []byte("my-password")},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := &MergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
+
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(MergePullRequestArgs{
+		TaskName: "coder-task",
+		PRNumber: 42,
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var mergeResult MergePullRequestResult
+	if err := json.Unmarshal([]byte(result), &mergeResult); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !mergeResult.Merged {
+		t.Error("expected merged=true")
+	}
+}
