@@ -551,10 +551,10 @@ func TestJobBuilder_buildContainer_ContainerWithoutImage(t *testing.T) {
 }
 
 func TestConstants(t *testing.T) {
-	if DefaultAIWorkerImage != "orka-ai-worker:latest" {
+	if DefaultAIWorkerImage != "ghcr.io/sozercan/orka/ai-worker:latest" {
 		t.Errorf("DefaultAIWorkerImage = %s", DefaultAIWorkerImage)
 	}
-	if DefaultGeneralWorkerImage != "orka-general-worker:latest" {
+	if DefaultGeneralWorkerImage != "ghcr.io/sozercan/orka/general-worker:latest" {
 		t.Errorf("DefaultGeneralWorkerImage = %s", DefaultGeneralWorkerImage)
 	}
 	if ResultEndpointEnvVar != "ORKA_RESULT_ENDPOINT" {

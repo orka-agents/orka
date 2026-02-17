@@ -1,9 +1,9 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
-COPILOT_WORKER_IMG ?= orka-agent-worker-copilot:latest
-CLAUDE_WORKER_IMG ?= orka-agent-worker-claude:latest
-AI_WORKER_IMG ?= orka-ai-worker:latest
-GENERAL_WORKER_IMG ?= orka-general-worker:latest
+COPILOT_WORKER_IMG ?= ghcr.io/sozercan/orka/agent-worker-copilot:latest
+CLAUDE_WORKER_IMG ?= ghcr.io/sozercan/orka/agent-worker-claude:latest
+AI_WORKER_IMG ?= ghcr.io/sozercan/orka/ai-worker:latest
+GENERAL_WORKER_IMG ?= ghcr.io/sozercan/orka/general-worker:latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
