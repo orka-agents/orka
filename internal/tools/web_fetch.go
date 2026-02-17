@@ -195,8 +195,8 @@ func (t *WebFetchTool) extractJSON(body []byte) (string, string) {
 var (
 	scriptRe     = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
 	styleRe      = regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
-	tagRe         = regexp.MustCompile(`<[^>]+>`)
-	whitespaceRe  = regexp.MustCompile(`\s+`)
+	tagRe        = regexp.MustCompile(`<[^>]+>`)
+	whitespaceRe = regexp.MustCompile(`\s+`)
 )
 
 // extractText strips HTML tags, scripts, styles, and collapses whitespace

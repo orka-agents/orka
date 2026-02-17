@@ -113,6 +113,21 @@ func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.To
 				return fmt.Errorf("tool URL must not target private/loopback addresses")
 			}
 		}
+		// Resolve DNS hostnames and block private/loopback IPs
+		if net.ParseIP(host) == nil {
+			ips, err := net.LookupHost(host)
+			if err == nil {
+				for _, ipStr := range ips {
+					ip := net.ParseIP(ipStr)
+					if ip == nil {
+						continue
+					}
+					if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+						return fmt.Errorf("tool URL resolves to private/loopback IP %s", ipStr)
+					}
+				}
+			}
+		}
 	}
 
 	// Validate description
