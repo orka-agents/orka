@@ -20,21 +20,28 @@ func newLoginCmd() *cobra.Command {
 			server, _ := cmd.Flags().GetString("server")
 			token, _ := cmd.Flags().GetString("token")
 			ns, _ := cmd.Flags().GetString("namespace")
+			kubeconfigPath, _ := cmd.Flags().GetString("kubeconfig")
 
 			cfg := loadConfig()
 			if server == "" {
 				server = cfg.Server
 			}
+			if ns == "" {
+				ns = cfg.Namespace
+			}
+			if ns == "" {
+				ns = extractKubeContext(kubeconfigPath).namespace
+			}
 			if server == "" {
 				server = defaultServer
 			}
 			if ns == "" {
-				ns = "default"
+				ns = defaultNamespace
 			}
 
 			if token == "" {
 				var err error
-				token, err = createServiceAccountToken(serviceAccount, ns)
+				token, err = createServiceAccountToken(serviceAccount, ns, kubeconfigPath)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error creating token: %v\n", err)
 					fmt.Fprintf(os.Stderr, "You can provide a token directly with --token\n")

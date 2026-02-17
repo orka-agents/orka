@@ -31,7 +31,13 @@ type ToolExecutor struct {
 	secretPath string
 	namespace  string
 	k8sClient  kubernetes.Interface
+	k8sInitErr error
 }
+
+var (
+	inClusterConfigFunc        = rest.InClusterConfig
+	newKubernetesForConfigFunc = kubernetes.NewForConfig
+)
 
 // NewToolExecutor creates a new tool executor
 func NewToolExecutor() *ToolExecutor {
@@ -42,8 +48,12 @@ func NewToolExecutor() *ToolExecutor {
 
 	// Create Kubernetes client for secret access
 	var k8sClient kubernetes.Interface
-	if config, err := rest.InClusterConfig(); err == nil {
-		k8sClient, _ = kubernetes.NewForConfig(config)
+	var k8sInitErr error
+	if config, err := inClusterConfigFunc(); err == nil {
+		k8sClient, err = newKubernetesForConfigFunc(config)
+		if err != nil {
+			k8sInitErr = fmt.Errorf("failed to initialize Kubernetes client: %w", err)
+		}
 	}
 
 	return &ToolExecutor{
@@ -53,6 +63,7 @@ func NewToolExecutor() *ToolExecutor {
 		secretPath: "/secrets/tools",
 		namespace:  namespace,
 		k8sClient:  k8sClient,
+		k8sInitErr: k8sInitErr,
 	}
 }
 
@@ -185,11 +196,17 @@ func (e *ToolExecutor) getSecretKey(ctx context.Context, secretName, key string)
 	// Fall back to Kubernetes API
 	if e.k8sClient != nil {
 		secret, err := e.k8sClient.CoreV1().Secrets(e.namespace).Get(ctx, secretName, metav1.GetOptions{})
-		if err == nil {
-			if data, ok := secret.Data[key]; ok {
-				return strings.TrimSpace(string(data)), nil
-			}
+		if err != nil {
+			return "", fmt.Errorf("failed to get secret %s from Kubernetes API: %w", secretName, err)
 		}
+		if data, ok := secret.Data[key]; ok {
+			return strings.TrimSpace(string(data)), nil
+		}
+		return "", fmt.Errorf("secret %s missing key %s", secretName, key)
+	}
+
+	if e.k8sInitErr != nil {
+		return "", fmt.Errorf("secret %s/%s not found in mounted paths and Kubernetes fallback unavailable: %w", secretName, key, e.k8sInitErr)
 	}
 
 	return "", fmt.Errorf("secret %s/%s not found", secretName, key)

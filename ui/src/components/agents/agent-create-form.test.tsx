@@ -175,6 +175,43 @@ describe('AgentCreateForm', () => {
     })
   })
 
+  it('prevents runtime submit when max turns is invalid', async () => {
+    useStateModeOverride = 'runtime'
+    const user = userEvent.setup()
+    render(<AgentCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-agent'), 'bad-runtime-agent')
+    const maxTurnsInput = screen.getByDisplayValue('50')
+    await user.clear(maxTurnsInput)
+
+    await user.click(screen.getByRole('button', { name: 'Create Agent' }))
+
+    expect(screen.getByText('Max Turns must be an integer between 1 and 1000.')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Please fix form errors before submitting')
+    })
+    expect(toast.success).not.toHaveBeenCalled()
+  })
+
+  it('prevents runtime submit when allowed tools list has empty entries', async () => {
+    useStateModeOverride = 'runtime'
+    const user = userEvent.setup()
+    render(<AgentCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-agent'), 'bad-tools-agent')
+    const toolsInput = screen.getByPlaceholderText('Read,Glob,Grep,Bash,LS')
+    await user.clear(toolsInput)
+    await user.type(toolsInput, 'Read,,Bash')
+
+    await user.click(screen.getByRole('button', { name: 'Create Agent' }))
+
+    expect(screen.getByText('Allowed Tools must not contain empty entries.')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Please fix form errors before submitting')
+    })
+    expect(toast.success).not.toHaveBeenCalled()
+  })
+
   it('cancel button navigates to agents', async () => {
     const user = userEvent.setup()
     render(<AgentCreateForm />)

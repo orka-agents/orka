@@ -60,9 +60,9 @@ Production:
 
 The UI uses ServiceAccount bearer tokens stored in localStorage:
 
-1. **CLI login**: `orka login` extracts the OIDC token from kubeconfig and opens the browser with `#token=<token>`
-2. **Manual login**: Paste a ServiceAccount token on the login page
-3. **Token creation**: `kubectl create token orka-client -n orka-system`
+1. **CLI login**: `orka login` runs `kubectl create token` (unless `--token` is provided) and opens the browser with `#token=<token>`
+2. **Helm default login**: `orka login --service-account orka-client --namespace orka-system`
+3. **Manual login**: Paste a ServiceAccount token on the login page (`kubectl create token orka-client -n orka-system`)
 
 All API requests include `Authorization: Bearer <token>`.
 

@@ -4,12 +4,16 @@ import { useSendMessage, useChatConfig } from '@/hooks/use-chat'
 import { useChatStore } from '@/stores/chat'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { ApiError } from '@/lib/api-client'
 import { Plus } from 'lucide-react'
 
 export function ChatPage() {
   const sendMessage = useSendMessage()
-  const { data: config } = useChatConfig()
+  const { data: config, isError: isConfigError, error: configError } = useChatConfig()
   const { currentSessionId, newSession, messages } = useChatStore()
+  const configErrorMessage = configError instanceof ApiError && configError.status === 401
+    ? 'Unauthorized / token invalid'
+    : 'Failed to load'
 
   return (
     <div className="flex h-full flex-col -m-6">
@@ -25,6 +29,11 @@ export function ChatPage() {
           {config && (
             <Badge variant="outline" className="text-[10px]">
               {config.model}
+            </Badge>
+          )}
+          {isConfigError && (
+            <Badge variant="destructive" className="text-[10px]">
+              {configErrorMessage}
             </Badge>
           )}
         </div>

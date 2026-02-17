@@ -40,7 +40,7 @@ describe('RootLayout', () => {
     // Sidebar renders nav items
     expect(screen.getByText('Dashboard')).toBeInTheDocument()
     // Header renders namespace selector
-    expect(screen.getByText('default')).toBeInTheDocument()
+    expect(screen.getByLabelText('Namespace')).toHaveValue('default')
     // Outlet is the main content area
     expect(screen.getByTestId('outlet')).toBeInTheDocument()
   })

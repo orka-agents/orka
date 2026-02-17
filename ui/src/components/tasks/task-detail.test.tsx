@@ -52,6 +52,16 @@ describe('TaskDetail', () => {
     })
   })
 
+  it('shows fetch error message when task request fails', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () => new HttpResponse('boom', { status: 500 })),
+    )
+    render(<TaskDetail taskId="broken-task" />)
+    await waitFor(() => {
+      expect(screen.getByText('Failed to load task details')).toBeInTheDocument()
+    })
+  })
+
   it('overview tab shows metadata', async () => {
     server.use(
       http.get('/api/v1/tasks/:id', () =>

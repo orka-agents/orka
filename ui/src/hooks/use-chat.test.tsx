@@ -330,7 +330,7 @@ describe('useSendMessage', () => {
     expect(capturedAuth).toBeNull()
   })
 
-  it('skips malformed SSE event data without crashing', async () => {
+  it('reports malformed SSE event data without crashing', async () => {
     fetchSpy.mockImplementation((input, init) => {
       const url = typeof input === 'string' ? input : (input as Request).url
       if (url.endsWith('/chat') && init?.method === 'POST') {
@@ -355,13 +355,18 @@ describe('useSendMessage', () => {
       await result.current('test malformed')
     })
 
-    // The malformed event should be skipped, but the valid one should be processed
+    // The malformed event should be surfaced, but the valid one should still be processed
     const assistantMsg = useChatStore.getState().messages.find((m) => m.role === 'assistant')
     expect(assistantMsg).toBeDefined()
     expect(assistantMsg!.content).toBe('after-malformed')
+
+    const streamErrors = useChatStore
+      .getState()
+      .messages.filter((m) => m.role === 'error' && m.content.includes('Stream event "message" could not be processed'))
+    expect(streamErrors).toHaveLength(1)
   })
 
-  it('skips malformed SSE in trailing buffer', async () => {
+  it('reports malformed SSE in trailing buffer', async () => {
     fetchSpy.mockImplementation((input, init) => {
       const url = typeof input === 'string' ? input : (input as Request).url
       if (url.endsWith('/chat') && init?.method === 'POST') {
@@ -389,7 +394,41 @@ describe('useSendMessage', () => {
     // No assistant message should be added (malformed was skipped)
     const assistantMsg = useChatStore.getState().messages.find((m) => m.role === 'assistant')
     expect(assistantMsg).toBeUndefined()
+    const streamErrors = useChatStore
+      .getState()
+      .messages.filter((m) => m.role === 'error' && m.content.includes('Stream event "message" could not be processed'))
+    expect(streamErrors).toHaveLength(1)
     expect(useChatStore.getState().isStreaming).toBe(false)
+  })
+
+  it('deduplicates repeated malformed SSE errors', async () => {
+    fetchSpy.mockImplementation((input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/chat') && init?.method === 'POST') {
+        const text = 'event: message\ndata: {bad json}\n\nevent: message\ndata: {bad json}\n\n'
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(text))
+            controller.close()
+          },
+        })
+        return Promise.resolve(new Response(stream, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        }))
+      }
+      return originalFetch(input as RequestInfo, init)
+    })
+
+    const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+    await act(async () => {
+      await result.current('test repeated malformed')
+    })
+
+    const streamErrors = useChatStore
+      .getState()
+      .messages.filter((m) => m.role === 'error' && m.content.includes('Stream event "message" could not be processed'))
+    expect(streamErrors).toHaveLength(1)
   })
 
   it('includes sessionId in request body when currentSessionId is set', async () => {

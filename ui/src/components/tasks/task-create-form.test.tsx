@@ -185,6 +185,43 @@ describe('TaskCreateForm', () => {
     })
   })
 
+  it('prevents submit when priority is not a valid integer', async () => {
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-task'), 'invalid-priority-task')
+    await user.type(screen.getByPlaceholderText('alpine:latest'), 'nginx:latest')
+    await user.click(screen.getByText(/Advanced Options/))
+    fireEvent.change(screen.getByPlaceholderText('500'), { target: { value: '1e2' } })
+
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+
+    expect(screen.getByText('Priority must be an integer between 0 and 1000.')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Please fix form errors before submitting')
+    })
+    expect(toast.success).not.toHaveBeenCalled()
+  })
+
+  it('prevents submit when agent max turns is invalid', async () => {
+    useStateTypeOverride = 'agent'
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-task'), 'invalid-maxturns-task')
+    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Do something')
+    await user.click(screen.getByText(/Advanced Options/))
+    fireEvent.change(screen.getByPlaceholderText('10'), { target: { value: '1e2' } })
+
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+
+    expect(screen.getByText('Max Turns must be an integer between 1 and 1000.')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Please fix form errors before submitting')
+    })
+    expect(toast.success).not.toHaveBeenCalled()
+  })
+
   it('submits AI task form and navigates', async () => {
     useStateTypeOverride = 'ai'
     const user = userEvent.setup()

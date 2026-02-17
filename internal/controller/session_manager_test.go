@@ -8,6 +8,9 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -214,6 +217,77 @@ func TestSessionManager_AcquireLock_CreateSession(t *testing.T) {
 	}
 	if session.ActiveTask != testTask {
 		t.Errorf("ActiveTask = %s, want test-task", session.ActiveTask)
+	}
+}
+
+func TestSessionManager_AcquireLock_ConcurrentCreateAvoidsAlreadyExists(t *testing.T) {
+	sm, _ := setupSessionManager()
+	ctx := context.Background()
+
+	tasks := []*corev1alpha1.Task{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "task-a",
+				Namespace: "default",
+			},
+			Spec: corev1alpha1.TaskSpec{
+				SessionRef: &corev1alpha1.SessionReference{
+					Name:   "race-session",
+					Create: true,
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "task-b",
+				Namespace: "default",
+			},
+			Spec: corev1alpha1.TaskSpec{
+				SessionRef: &corev1alpha1.SessionReference{
+					Name:   "race-session",
+					Create: true,
+				},
+			},
+		},
+	}
+
+	start := make(chan struct{})
+	errCh := make(chan error, len(tasks))
+	var wg sync.WaitGroup
+	for _, task := range tasks {
+		task := task
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errCh <- sm.AcquireLock(ctx, task)
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(errCh)
+
+	var successCount, failureCount int
+	for err := range errCh {
+		if err == nil {
+			successCount++
+			continue
+		}
+		failureCount++
+		if errors.Is(err, store.ErrAlreadyExists) || strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			t.Fatalf("AcquireLock() should not fail with create-race duplicate error: %v", err)
+		}
+	}
+
+	if successCount != 1 || failureCount != 1 {
+		t.Fatalf("expected one success and one lock failure, got success=%d failure=%d", successCount, failureCount)
+	}
+
+	session, err := sm.GetSession(ctx, "default", "race-session")
+	require.NoError(t, err)
+	if session.ActiveTask == "" {
+		t.Fatal("session should remain locked by one task")
 	}
 }
 

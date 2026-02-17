@@ -49,6 +49,16 @@ describe('KanbanBoard', () => {
     expect(screen.getByText('No failed tasks')).toBeInTheDocument()
   })
 
+  it('shows explicit error state when board request fails', async () => {
+    server.use(
+      http.get('/api/v1/tasks', () => new HttpResponse('failed', { status: 500 })),
+    )
+    render(<KanbanBoard />)
+    await waitFor(() => {
+      expect(screen.getByText('Failed to load board')).toBeInTheDocument()
+    })
+  })
+
   it('populated board shows tasks in correct columns', async () => {
     server.use(
       http.get('/api/v1/tasks', () =>

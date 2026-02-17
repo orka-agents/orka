@@ -61,13 +61,18 @@ func newRootCmd() *cobra.Command {
 }
 
 // createServiceAccountToken generates a token for the given ServiceAccount using kubectl.
-func createServiceAccountToken(serviceAccount, namespace string) (string, error) {
+func createServiceAccountToken(serviceAccount, namespace, kubeconfigPath string) (string, error) {
 	kubectlPath, err := exec.LookPath("kubectl")
 	if err != nil {
 		return "", fmt.Errorf("kubectl not found in PATH: %w", err)
 	}
 
-	cmd := exec.Command(kubectlPath, "create", "token", serviceAccount, "-n", namespace, "--duration=24h")
+	args := []string{"create", "token", serviceAccount, "-n", namespace, "--duration=24h"}
+	if kubeconfigPath != "" {
+		args = append([]string{"--kubeconfig", kubeconfigPath}, args...)
+	}
+
+	cmd := exec.Command(kubectlPath, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {

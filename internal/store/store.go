@@ -8,6 +8,9 @@ import (
 // ErrNotFound is returned when a requested resource does not exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrAlreadyExists is returned when attempting to create a resource that already exists.
+var ErrAlreadyExists = errors.New("already exists")
+
 // HealthChecker can verify its underlying storage is reachable.
 type HealthChecker interface {
 	HealthCheck(ctx context.Context) error

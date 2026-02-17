@@ -27,9 +27,21 @@ describe('Header', () => {
     useAuthStore.setState({ token: 'test-token' })
   })
 
-  it('renders namespace selector', () => {
+  it('renders namespace input with current namespace', () => {
     render(<Header />)
-    expect(screen.getByText('default')).toBeInTheDocument()
+    expect(screen.getByLabelText('Namespace')).toHaveValue('default')
+  })
+
+  it('allows setting a custom namespace', async () => {
+    const user = userEvent.setup()
+    render(<Header />)
+    const namespaceInput = screen.getByLabelText('Namespace')
+
+    await user.clear(namespaceInput)
+    await user.type(namespaceInput, 'team-blue')
+    await user.tab()
+
+    expect(useUIStore.getState().namespace).toBe('team-blue')
   })
 
   it('renders theme toggle button', () => {

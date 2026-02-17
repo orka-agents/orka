@@ -1,5 +1,11 @@
 # Configuration
 
+## Critical Defaults (Read First)
+
+- **`--controller-url` defaults to empty**: set this to a controller-reachable URL (for example `http://orka-api.orka-system.svc:8080`). Without it, workers cannot reliably post results or fetch session/task data.
+- **Metrics are disabled by default in the controller binary**: `--metrics-bind-address=0` disables the metrics endpoint. (`monitoring.enabled` only controls ServiceMonitor creation, not controller metrics binding.)
+- **Helm storage is ephemeral by default**: `store.persistence.enabled=false` uses `emptyDir` for `/data/orka.db`, so task/session history is lost when the controller Pod is recreated or rescheduled.
+
 ## Custom Resources
 
 ### Task
@@ -260,7 +266,8 @@ Key configuration values for the Helm chart:
 | `service.type` | `ClusterIP` | Service type |
 | `crds.install` | `true` | Install CRDs |
 | `crds.keep` | `true` | Keep CRDs on uninstall |
-| `monitoring.enabled` | `false` | Enable Prometheus ServiceMonitor |
+| `monitoring.enabled` | `false` | Enable Prometheus ServiceMonitor (does not enable controller metrics by itself) |
+| `store.persistence.enabled` | `false` | Persist SQLite to PVC (`false` uses `emptyDir`, data is ephemeral) |
 | `client.create` | `true` | Create client ServiceAccount for API access |
 | `client.name` | `orka-client` | Client ServiceAccount name |
 
@@ -290,7 +297,7 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 | `--chat-max-tasks-per-turn` | `5` | Max tasks created per chat turn |
 | `--chat-max-session-size` | `512000` | Soft limit for session size before truncation (bytes) |
 | `--leader-elect` | `false` | Enable leader election |
-| `--metrics-bind-address` | `0` | Metrics endpoint address |
+| `--metrics-bind-address` | `0` | Metrics endpoint address (`0` disables metrics) |
 | `--health-probe-bind-address` | `:8081` | Health probe address |
 | `--metrics-secure` | `true` | Serve metrics via HTTPS |
 | `--enable-http2` | `false` | Enable HTTP/2 for metrics and webhook servers |

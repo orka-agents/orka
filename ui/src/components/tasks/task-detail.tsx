@@ -13,6 +13,7 @@ import { StructuredLogViewer } from './structured-log-viewer'
 import { TaskExecutionPanel } from './task-execution-panel'
 import { useTask, useDeleteTask } from '@/hooks/use-tasks'
 import { useNavigate } from '@tanstack/react-router'
+import { ApiError } from '@/lib/api-client'
 
 function timeAgo(ts?: string): string {
   if (!ts) return '-'
@@ -24,7 +25,7 @@ function timeAgo(ts?: string): string {
 }
 
 export function TaskDetail({ taskId }: { taskId: string }) {
-  const { data: task, isLoading } = useTask(taskId)
+  const { data: task, isLoading, error } = useTask(taskId)
   const deleteTask = useDeleteTask()
   const navigate = useNavigate()
 
@@ -35,6 +36,16 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         <Skeleton className="h-64 w-full" />
       </div>
     )
+  }
+
+  if (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return <div className="text-muted-foreground">Task not found</div>
+    }
+    if (error instanceof ApiError && error.status === 401) {
+      return <div className="text-muted-foreground">Unauthorized / token invalid</div>
+    }
+    return <div className="text-muted-foreground">Failed to load task details</div>
   }
 
   if (!task) {

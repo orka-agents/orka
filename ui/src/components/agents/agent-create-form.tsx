@@ -10,6 +10,11 @@ import { useSecretNames } from '@/hooks/use-secrets'
 import { useUIStore } from '@/stores/ui'
 import { toast } from 'sonner'
 
+type ValidationErrors = {
+  maxTurns?: string
+  allowedTools?: string
+}
+
 export function AgentCreateForm() {
   const navigate = useNavigate()
   const createAgent = useCreateAgent()
@@ -32,9 +37,11 @@ export function AgentCreateForm() {
   const [maxTurns, setMaxTurns] = useState('50')
   const [allowBash, setAllowBash] = useState(true)
   const [allowedTools, setAllowedTools] = useState('Read,Glob,Grep,Bash,LS')
+  const [validationErrors, setValidationErrors] = useState<ValidationErrors>({})
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    const errors: ValidationErrors = {}
 
     const spec: Record<string, unknown> = {}
 
@@ -49,12 +56,43 @@ export function AgentCreateForm() {
         spec.systemPrompt = { inline: systemPrompt }
       }
     } else {
+      const trimmedMaxTurns = maxTurns.trim()
+      if (!trimmedMaxTurns || !/^\d+$/.test(trimmedMaxTurns)) {
+        errors.maxTurns = 'Max Turns must be an integer between 1 and 1000.'
+      }
+      const parsedMaxTurns = Number.parseInt(trimmedMaxTurns, 10)
+      if (!Number.isFinite(parsedMaxTurns) || parsedMaxTurns < 1 || parsedMaxTurns > 1000) {
+        errors.maxTurns = 'Max Turns must be an integer between 1 and 1000.'
+      }
+
+      let parsedAllowedTools: string[] | undefined
+      const trimmedTools = allowedTools.trim()
+      if (trimmedTools) {
+        const tools = trimmedTools.split(',').map((t) => t.trim())
+        if (tools.some((tool) => tool.length === 0)) {
+          errors.allowedTools = 'Allowed Tools must not contain empty entries.'
+        } else {
+          const invalidTool = tools.find((tool) => !/^[A-Za-z][A-Za-z0-9_-]*$/.test(tool))
+          if (invalidTool) {
+            errors.allowedTools = `Invalid tool name "${invalidTool}".`
+          } else {
+            parsedAllowedTools = Array.from(new Set(tools))
+          }
+        }
+      }
+
       spec.runtime = {
         type: runtimeType,
-        defaultMaxTurns: parseInt(maxTurns),
+        defaultMaxTurns: parsedMaxTurns,
         defaultAllowBash: allowBash,
-        ...(allowedTools.trim() ? { defaultAllowedTools: allowedTools.split(',').map(t => t.trim()).filter(Boolean) } : {}),
+        ...(parsedAllowedTools ? { defaultAllowedTools: parsedAllowedTools } : {}),
       }
+    }
+
+    setValidationErrors(errors)
+    if (Object.keys(errors).length > 0) {
+      toast.error('Please fix form errors before submitting')
+      return
     }
 
     if (secretRef && secretRef !== '__none__') {
@@ -89,7 +127,15 @@ export function AgentCreateForm() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">Mode</label>
-                <Select value={mode} onValueChange={(v) => setMode(v as 'ai' | 'runtime')}>
+                <Select
+                  value={mode}
+                  onValueChange={(v) => {
+                    setMode(v as 'ai' | 'runtime')
+                    if (v !== 'runtime' && (validationErrors.maxTurns || validationErrors.allowedTools)) {
+                      setValidationErrors((prev) => ({ ...prev, maxTurns: undefined, allowedTools: undefined }))
+                    }
+                  }}
+                >
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="ai">AI (LLM Provider)</SelectItem>
@@ -154,12 +200,38 @@ export function AgentCreateForm() {
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-medium">Max Turns</label>
-                    <Input type="number" min="1" max="1000" value={maxTurns} onChange={(e) => setMaxTurns(e.target.value)} />
+                    <Input
+                      type="number"
+                      min="1"
+                      max="1000"
+                      value={maxTurns}
+                      onChange={(e) => {
+                        setMaxTurns(e.target.value)
+                        if (validationErrors.maxTurns) {
+                          setValidationErrors((prev) => ({ ...prev, maxTurns: undefined }))
+                        }
+                      }}
+                    />
+                    {validationErrors.maxTurns && (
+                      <p className="text-xs text-destructive">{validationErrors.maxTurns}</p>
+                    )}
                   </div>
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Allowed Tools</label>
-                  <Input value={allowedTools} onChange={(e) => setAllowedTools(e.target.value)} placeholder="Read,Glob,Grep,Bash,LS" />
+                  <Input
+                    value={allowedTools}
+                    onChange={(e) => {
+                      setAllowedTools(e.target.value)
+                      if (validationErrors.allowedTools) {
+                        setValidationErrors((prev) => ({ ...prev, allowedTools: undefined }))
+                      }
+                    }}
+                    placeholder="Read,Glob,Grep,Bash,LS"
+                  />
+                  {validationErrors.allowedTools && (
+                    <p className="text-xs text-destructive">{validationErrors.allowedTools}</p>
+                  )}
                   <p className="text-xs text-muted-foreground">Comma-separated list of tool names</p>
                 </div>
                 <div className="flex items-center gap-2">

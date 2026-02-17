@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/sozercan/orka/internal/store"
+	sqlitedriver "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // CreateSession inserts a new session record.
@@ -20,6 +22,15 @@ func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord)
 		session.MessageCount, session.InputTokens, session.OutputTokens, session.Cancelled,
 		session.CreatedAt, session.UpdatedAt,
 	)
+	if err != nil {
+		var sqliteErr *sqlitedriver.Error
+		if errors.As(err, &sqliteErr) {
+			switch sqliteErr.Code() {
+			case sqlite3.SQLITE_CONSTRAINT, sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY, sqlite3.SQLITE_CONSTRAINT_UNIQUE:
+				return store.ErrAlreadyExists
+			}
+		}
+	}
 	return err
 }
 

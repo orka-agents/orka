@@ -70,6 +70,14 @@ func (m *chatMockProvider) Name() string {
 	return "mock-provider"
 }
 
+type appendMessagesFailSessionStore struct {
+	store.SessionStore
+}
+
+func (s *appendMessagesFailSessionStore) AppendMessages(_ context.Context, _, _ string, _ []store.SessionMessage) error {
+	return errors.New("append failed")
+}
+
 func newTestScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -855,8 +863,9 @@ func TestRunToolLoop(t *testing.T) {
 		}
 
 		var sseEvents []string
-		emitSSE := func(event, data string) {
+		emitSSE := func(event, data string) error {
 			sseEvents = append(sseEvents, fmt.Sprintf("%s:%s", event, data))
+			return nil
 		}
 
 		messages := []llm.Message{{Role: "user", Content: "do it"}}
@@ -886,6 +895,86 @@ func TestRunToolLoop(t *testing.T) {
 		assert.True(t, hasToolCall, "should have tool_call SSE event")
 		assert.True(t, hasToolResult, "should have tool_result SSE event")
 		assert.True(t, hasMessage, "should have message SSE event")
+	})
+
+	t.Run("returns error when SSE emitter fails", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		ss := newTestSessionStore(t)
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+
+		provider := &chatMockProvider{
+			responses: []*llm.CompletionResponse{
+				{Content: "final response", InputTokens: 1, OutputTokens: 1},
+			},
+		}
+
+		emitErr := errors.New("write failed")
+		emitSSE := func(_, _ string) error {
+			return emitErr
+		}
+
+		messages := []llm.Message{{Role: "user", Content: "hello"}}
+		_, _, _, err := ch.runToolLoop(
+			context.Background(), provider, messages, "system prompt",
+			nil, NewToolExecutor(fakeClient, nil, "default", "emit-fail", "", false, 5, 60*time.Second, rs),
+			"emit-fail", "default", "test-model", 0.7, 4096, 0, emitSSE,
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to emit message SSE event")
+	})
+
+	t.Run("returns error when tool_call SSE payload cannot be marshaled", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		ss := newTestSessionStore(t)
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+
+		provider := &chatMockProvider{
+			responses: []*llm.CompletionResponse{
+				{
+					ToolCalls: []llm.ToolCall{
+						{ID: "tc1", Name: "list_tasks", Arguments: json.RawMessage(`{bad`)},
+					},
+				},
+			},
+		}
+
+		emitSSE := func(_, _ string) error {
+			return nil
+		}
+
+		messages := []llm.Message{{Role: "user", Content: "do it"}}
+		_, _, _, err := ch.runToolLoop(
+			context.Background(), provider, messages, "system prompt",
+			CoreTools(), NewToolExecutor(fakeClient, nil, "default", "marshal-fail", "", false, 5, 60*time.Second, rs),
+			"marshal-fail", "default", "test-model", 0.7, 4096, 0, emitSSE,
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to marshal tool_call SSE event")
+	})
+
+	t.Run("returns error when saving chat session fails", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		baseStore := newTestSessionStore(t)
+		ss := &appendMessagesFailSessionStore{SessionStore: baseStore}
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+
+		provider := &chatMockProvider{
+			responses: []*llm.CompletionResponse{
+				{Content: "final response", InputTokens: 1, OutputTokens: 1},
+			},
+		}
+
+		messages := []llm.Message{{Role: "user", Content: "hello"}}
+		_, _, _, err := ch.runToolLoop(
+			context.Background(), provider, messages, "system prompt",
+			nil, NewToolExecutor(fakeClient, nil, "default", "save-fail", "", false, 5, 60*time.Second, rs),
+			"save-fail", "default", "test-model", 0.7, 4096, 0, nil,
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to save chat session")
 	})
 }
 
@@ -1011,6 +1100,31 @@ func TestHandleChat(t *testing.T) {
 		resp, err := app.Test(req)
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var chatResp ChatResponse
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&chatResp))
+		assert.NotEmpty(t, chatResp.SessionID)
+		assert.NotEmpty(t, chatResp.Message)
+	})
+
+	t.Run("JSON mode handles mixed Accept header values", func(t *testing.T) {
+		objs := providerCRD("default", "default", "test-type", "test-model")
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+		ss := newTestSessionStore(t)
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+
+		app := fiber.New()
+		app.Post("/api/v1/chat", ch.HandleChat)
+
+		body, _ := json.Marshal(ChatRequest{Message: "hello"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream, application/json; q=0.9")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Contains(t, resp.Header.Get("Content-Type"), "application/json")
 
 		var chatResp ChatResponse
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&chatResp))

@@ -1,13 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
+const { mockUseChatConfig, mockSendMessage } = vi.hoisted(() => ({
+  mockUseChatConfig: vi.fn(),
+  mockSendMessage: vi.fn(),
+}))
+
 vi.mock('zustand/middleware', async () => {
   const actual = await vi.importActual('zustand/middleware')
   return { ...actual, persist: (fn: any) => fn }
 })
 
 vi.mock('@/hooks/use-chat', () => ({
-  useSendMessage: () => vi.fn(),
-  useChatConfig: () => ({ data: { model: 'claude-sonnet-4-20250514', enabled: true } }),
+  useSendMessage: () => mockSendMessage,
+  useChatConfig: () => mockUseChatConfig(),
 }))
 
 import { render, screen } from '@/test/test-utils'
@@ -18,6 +23,9 @@ import { useChatStore } from '@/stores/chat'
 import type { ChatMessage } from '@/schemas/chat'
 
 beforeEach(() => {
+  mockSendMessage.mockReset()
+  mockUseChatConfig.mockReset()
+  mockUseChatConfig.mockReturnValue({ data: { model: 'claude-sonnet-4-20250514', enabled: true } })
   useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
   useAuthStore.setState({ token: 'test-token' })
   useChatStore.setState({ messages: [], currentSessionId: null, isStreaming: false })
@@ -48,5 +56,11 @@ describe('ChatPage', () => {
     useChatStore.setState({ currentSessionId: 'session-abc-123' })
     render(<ChatPage />)
     expect(screen.getByText('session-abc-123')).toBeInTheDocument()
+  })
+
+  it('shows config error badge when chat config fails to load', () => {
+    mockUseChatConfig.mockReturnValue({ data: undefined, isError: true, error: new Error('boom') })
+    render(<ChatPage />)
+    expect(screen.getByText('Failed to load')).toBeInTheDocument()
   })
 })

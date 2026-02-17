@@ -52,20 +52,27 @@ func (m *SessionManager) AcquireLock(ctx context.Context, task *corev1alpha1.Tas
 		return nil
 	}
 
-	// Check if session exists
-	_, err := m.store.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name)
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			return err
-		}
-		// Session doesn't exist
-		if task.Spec.SessionRef.Create {
-			return m.createSession(ctx, task)
-		}
-		return fmt.Errorf("session %s not found and create=false", task.Spec.SessionRef.Name)
+	sessionName := task.Spec.SessionRef.Name
+	err := m.store.AcquireLock(ctx, task.Namespace, sessionName, task.Name)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return err
 	}
 
-	return m.store.AcquireLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name)
+	if !task.Spec.SessionRef.Create {
+		return fmt.Errorf("session %s not found and create=false", sessionName)
+	}
+
+	if err := m.createSession(ctx, task); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			// Lost a concurrent create race; attempt normal lock acquisition.
+			return m.store.AcquireLock(ctx, task.Namespace, sessionName, task.Name)
+		}
+		return err
+	}
+	return nil
 }
 
 // ReleaseLock releases the session lock for a task.

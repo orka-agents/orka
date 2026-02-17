@@ -11,6 +11,11 @@ import { useAgentList } from '@/hooks/use-agents'
 import { useUIStore } from '@/stores/ui'
 import { toast } from 'sonner'
 
+type ValidationErrors = {
+  priority?: string
+  maxTurns?: string
+}
+
 export function TaskCreateForm() {
   const navigate = useNavigate()
   const createTask = useCreateTask()
@@ -39,6 +44,7 @@ export function TaskCreateForm() {
   const [gitSecretRef, setGitSecretRef] = useState('')
   const [maxTurns, setMaxTurns] = useState('')
   const [allowBash, setAllowBash] = useState(false)
+  const [validationErrors, setValidationErrors] = useState<ValidationErrors>({})
 
   const selectedAgent = useMemo(
     () => (agentsData?.items ?? []).find((a) => a.metadata.name === agentRef),
@@ -47,11 +53,44 @@ export function TaskCreateForm() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    const errors: ValidationErrors = {}
+    const parseIntegerField = (
+      value: string,
+      field: keyof ValidationErrors,
+      min: number,
+      max: number,
+      label: string,
+    ) => {
+      const trimmed = value.trim()
+      if (!trimmed) return undefined
+      if (!/^\d+$/.test(trimmed)) {
+        errors[field] = `${label} must be an integer between ${min} and ${max}.`
+        return undefined
+      }
+      const parsed = Number.parseInt(trimmed, 10)
+      if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+        errors[field] = `${label} must be an integer between ${min} and ${max}.`
+        return undefined
+      }
+      return parsed
+    }
+
+    const parsedPriority = parseIntegerField(priority, 'priority', 0, 1000, 'Priority')
+    const parsedMaxTurns = type === 'agent'
+      ? parseIntegerField(maxTurns, 'maxTurns', 1, 1000, 'Max Turns')
+      : undefined
+
+    setValidationErrors(errors)
+    if (Object.keys(errors).length > 0) {
+      toast.error('Please fix form errors before submitting')
+      return
+    }
+
     const body: Record<string, unknown> = { name, namespace, type }
 
     if (type === 'container') {
       body.image = image
-      if (command) body.command = command.split(' ')
+      if (command) body.command = command.split(/\s+/).filter(Boolean)
     } else if (type === 'ai') {
       body.ai = { provider, model, prompt }
     } else if (type === 'agent') {
@@ -59,7 +98,7 @@ export function TaskCreateForm() {
       body.prompt = prompt
     }
 
-    if (priority) body.priority = parseInt(priority)
+    if (parsedPriority !== undefined) body.priority = parsedPriority
     if (timeout) body.timeout = timeout
 
     if (type === 'agent') {
@@ -71,7 +110,7 @@ export function TaskCreateForm() {
       if (Object.keys(workspace).length > 0) {
         body.agentRuntime = { ...(body.agentRuntime as Record<string, unknown> || {}), workspace }
       }
-      if (maxTurns) body.agentRuntime = { ...(body.agentRuntime as Record<string, unknown> || {}), maxTurns: parseInt(maxTurns) }
+      if (parsedMaxTurns !== undefined) body.agentRuntime = { ...(body.agentRuntime as Record<string, unknown> || {}), maxTurns: parsedMaxTurns }
       if (allowBash) body.agentRuntime = { ...(body.agentRuntime as Record<string, unknown> || {}), allowBash }
     }
 
@@ -103,7 +142,15 @@ export function TaskCreateForm() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">Type</label>
-                <Select value={type} onValueChange={setType}>
+                <Select
+                  value={type}
+                  onValueChange={(nextType) => {
+                    setType(nextType)
+                    if (nextType !== 'agent' && validationErrors.maxTurns) {
+                      setValidationErrors((prev) => ({ ...prev, maxTurns: undefined }))
+                    }
+                  }}
+                >
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="container">Container</SelectItem>
@@ -226,9 +273,17 @@ export function TaskCreateForm() {
                       min={0}
                       max={1000}
                       value={priority}
-                      onChange={(e) => setPriority(e.target.value)}
+                      onChange={(e) => {
+                        setPriority(e.target.value)
+                        if (validationErrors.priority) {
+                          setValidationErrors((prev) => ({ ...prev, priority: undefined }))
+                        }
+                      }}
                       placeholder="500"
                     />
+                    {validationErrors.priority && (
+                      <p className="text-xs text-destructive">{validationErrors.priority}</p>
+                    )}
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-medium">Timeout</label>
@@ -296,9 +351,17 @@ export function TaskCreateForm() {
                           type="number"
                           min={1}
                           value={maxTurns}
-                          onChange={(e) => setMaxTurns(e.target.value)}
+                          onChange={(e) => {
+                            setMaxTurns(e.target.value)
+                            if (validationErrors.maxTurns) {
+                              setValidationErrors((prev) => ({ ...prev, maxTurns: undefined }))
+                            }
+                          }}
                           placeholder="10"
                         />
+                        {validationErrors.maxTurns && (
+                          <p className="text-xs text-destructive">{validationErrors.maxTurns}</p>
+                        )}
                       </div>
                       <div className="space-y-2">
                         <label className="text-sm font-medium">Allow Bash</label>

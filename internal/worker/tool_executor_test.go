@@ -9,17 +9,21 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 )
 
 func TestNewToolExecutor(t *testing.T) {
@@ -43,6 +47,30 @@ func TestNewToolExecutor_WithNamespaceEnv(t *testing.T) {
 	executor := NewToolExecutor()
 	if executor.namespace != "custom-namespace" {
 		t.Errorf("namespace = %s, want custom-namespace", executor.namespace)
+	}
+}
+
+func TestNewToolExecutor_K8sClientInitFailure(t *testing.T) {
+	originalInClusterConfigFunc := inClusterConfigFunc
+	originalNewKubernetesForConfigFunc := newKubernetesForConfigFunc
+	t.Cleanup(func() {
+		inClusterConfigFunc = originalInClusterConfigFunc
+		newKubernetesForConfigFunc = originalNewKubernetesForConfigFunc
+	})
+
+	inClusterConfigFunc = func() (*rest.Config, error) {
+		return &rest.Config{Host: "https://example.invalid"}, nil
+	}
+	newKubernetesForConfigFunc = func(*rest.Config) (*kubernetes.Clientset, error) {
+		return nil, errors.New("client init failed")
+	}
+
+	executor := NewToolExecutor()
+	if executor.k8sInitErr == nil {
+		t.Fatal("k8sInitErr should be set when Kubernetes client initialization fails")
+	}
+	if !strings.Contains(executor.k8sInitErr.Error(), "client init failed") {
+		t.Fatalf("k8sInitErr = %v, want wrapped init failure", executor.k8sInitErr)
 	}
 }
 
@@ -476,6 +504,25 @@ func TestToolExecutor_getSecretKey_NotFound(t *testing.T) {
 	_, err := executor.getSecretKey(context.Background(), "nonexistent-secret", "key")
 	if err == nil {
 		t.Error("getSecretKey() expected error for nonexistent secret")
+	}
+}
+
+func TestToolExecutor_getSecretKey_K8sFallbackUnavailable(t *testing.T) {
+	executor := &ToolExecutor{
+		secretPath: "/nonexistent",
+		namespace:  "default",
+		k8sInitErr: errors.New("k8s init failed"),
+	}
+
+	_, err := executor.getSecretKey(context.Background(), "nonexistent-secret", "key")
+	if err == nil {
+		t.Fatal("getSecretKey() expected error when Kubernetes fallback initialization failed")
+	}
+	if !strings.Contains(err.Error(), "Kubernetes fallback unavailable") {
+		t.Fatalf("error = %v, want Kubernetes fallback unavailable message", err)
+	}
+	if !strings.Contains(err.Error(), "k8s init failed") {
+		t.Fatalf("error = %v, want wrapped initialization failure", err)
 	}
 }
 

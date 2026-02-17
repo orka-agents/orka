@@ -96,7 +96,7 @@ kubectl get task hello-task
 
 # Get the result via the REST API
 curl http://localhost:8080/api/v1/tasks/hello-task/result \
-  -H "Authorization: Bearer $(kubectl create token orka-client)"
+  -H "Authorization: Bearer $(kubectl create token orka-client -n orka-system)"
 ```
 
 ## Agent Runtimes Quick Start
@@ -167,7 +167,7 @@ EOF
 kubectl get task code-review
 
 curl http://localhost:8080/api/v1/tasks/code-review/result \
-  -H "Authorization: Bearer $(kubectl create token orka-client)"
+  -H "Authorization: Bearer $(kubectl create token orka-client -n orka-system)"
 ```
 
 See [Agent Runtimes](agent-runtimes.md) for full configuration reference.
@@ -190,8 +190,8 @@ The `orka` CLI provides browser-based authentication for the web dashboard.
 # Build the CLI
 make build-cli
 
-# Login (extracts token from kubeconfig and opens browser)
-./bin/orka login
+# Login with Helm defaults (orka-client in orka-system)
+./bin/orka login --service-account orka-client --namespace orka-system
 
 # Login with custom server
 ./bin/orka login --server https://orka.example.com
@@ -199,11 +199,17 @@ make build-cli
 # Login with explicit token
 ./bin/orka login --token <token>
 
-# Specify kubeconfig
-./bin/orka login --kubeconfig ~/.kube/my-config
+# Specify kubeconfig for token creation/context lookup
+./bin/orka login --kubeconfig ~/.kube/my-config --service-account orka-client --namespace orka-system
 ```
 
-The CLI supports token extraction from bearer tokens, token files, exec-based auth (GKE, AWS IAM), and OIDC auth providers.
+`orka login` uses `kubectl create token` unless `--token` is provided. Defaults are:
+
+- ServiceAccount: `default` (override with `--service-account`)
+- Namespace: `--namespace`, then saved CLI config namespace (if set), then kubeconfig current-context namespace, then `default`
+- Server URL: `--server`, then `orka config set-server`, then `http://localhost:8080`
+
+When provided, `--kubeconfig` is passed to `kubectl create token`.
 
 ## Next Steps
 

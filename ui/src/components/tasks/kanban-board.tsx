@@ -1,6 +1,7 @@
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useTaskList } from '@/hooks/use-tasks'
+import { ApiError } from '@/lib/api-client'
 import { KanbanCard } from './kanban-card'
 import type { Task, TaskPhase } from '@/schemas/task'
 
@@ -25,9 +26,26 @@ function groupByPhase(tasks: Task[]): Record<string, Task[]> {
 }
 
 export function KanbanBoard() {
-  const { data, isLoading } = useTaskList('100', 5000)
+  const { data, isLoading, isError, error } = useTaskList('100', 5000)
   const tasks = data?.items ?? []
   const grouped = groupByPhase(tasks)
+
+  if (isError) {
+    const message = error instanceof ApiError && error.status === 401
+      ? 'Unauthorized / token invalid'
+      : 'Failed to load board'
+    return (
+      <div className="space-y-4">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Board</h1>
+          <p className="text-muted-foreground">Kanban view of task execution</p>
+        </div>
+        <div className="rounded-md border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive" role="alert">
+          {message}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-4">

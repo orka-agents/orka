@@ -15,6 +15,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -269,7 +271,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 
 	// Check Accept header for response format
 	accept := c.Get("Accept")
-	if accept == "application/json" {
+	if acceptsJSON(accept) {
 		// JSON mode: run tool loop, collect all content, return JSON
 		content, usage, toolCalls, err := ch.runToolLoop(ctx, provider, messages, systemPrompt, tools, executor, sessionID, namespace, model, temperature, maxTokens, persistedCount, nil)
 		if err != nil {
@@ -307,29 +309,52 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		sseCtx, sseCancel := context.WithTimeout(context.Background(), ch.config.MaxDuration)
 		defer sseCancel()
 
-		emitSSE := func(event, data string) {
-			_ = writeSSE(w, event, data)
+		emitSSE := func(event, data string) error {
+			if err := writeSSE(w, event, data); err != nil {
+				chatLog.Error(err, "failed to write SSE event", "event", event, "sessionId", sessionID)
+				return err
+			}
+			return nil
 		}
 
 		// Emit status event
-		statusData, _ := json.Marshal(map[string]string{
+		statusData, err := json.Marshal(map[string]string{
 			"sessionId": sessionID,
 			"provider":  sseProvider.Name(),
 			"model":     model,
 		})
-		emitSSE("status", string(statusData))
+		if err != nil {
+			chatLog.Error(err, "failed to marshal status SSE payload", "sessionId", sessionID)
+			return
+		}
+		if err := emitSSE("status", string(statusData)); err != nil {
+			return
+		}
 
 		content, usage, _, err := ch.runToolLoop(sseCtx, sseProvider, sseMessages, sseSystemPrompt, sseTools, sseExecutor, sessionID, namespace, model, temperature, maxTokens, persistedCount, emitSSE)
 		if err != nil {
-			errData, _ := json.Marshal(map[string]string{"error": err.Error()})
-			emitSSE("error", string(errData))
+			chatLog.Error(err, "chat tool loop failed", "sessionId", sessionID)
+			errData, marshalErr := json.Marshal(map[string]string{"error": err.Error()})
+			if marshalErr != nil {
+				chatLog.Error(marshalErr, "failed to marshal error SSE payload", "sessionId", sessionID)
+				return
+			}
+			if emitErr := emitSSE("error", string(errData)); emitErr != nil {
+				return
+			}
 		}
 
 		_ = content // content already emitted via SSE
 
 		// Emit done event
-		doneData, _ := json.Marshal(map[string]any{"usage": usage})
-		emitSSE("done", string(doneData))
+		doneData, err := json.Marshal(map[string]any{"usage": usage})
+		if err != nil {
+			chatLog.Error(err, "failed to marshal done SSE payload", "sessionId", sessionID)
+			return
+		}
+		if err := emitSSE("done", string(doneData)); err != nil {
+			return
+		}
 	})
 }
 
@@ -345,7 +370,7 @@ func (ch *ChatHandler) runToolLoop(
 	temperature float64,
 	maxTokens int,
 	persistedCount int,
-	emitSSE func(event, data string),
+	emitSSE func(event, data string) error,
 ) (string, ChatUsage, []ToolCallInfo, error) {
 	var usage ChatUsage
 	var allToolCalls []ToolCallInfo
@@ -395,15 +420,34 @@ func (ch *ChatHandler) runToolLoop(
 			usage.OutputTokens += resp.OutputTokens
 
 			if emitSSE != nil && resp.Content != "" {
-				msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
-				emitSSE("message", string(msgData))
+				msgData, err := json.Marshal(map[string]string{"content": resp.Content})
+				if err != nil {
+					usage.Duration = time.Since(start).Round(time.Millisecond).String()
+					iterSpan.RecordError(err)
+					iterSpan.SetStatus(codes.Error, err.Error())
+					iterSpan.End()
+					return "", usage, allToolCalls, fmt.Errorf("failed to marshal message SSE event: %w", err)
+				}
+				if err := emitSSE("message", string(msgData)); err != nil {
+					usage.Duration = time.Since(start).Round(time.Millisecond).String()
+					iterSpan.RecordError(err)
+					iterSpan.SetStatus(codes.Error, err.Error())
+					iterSpan.End()
+					return "", usage, allToolCalls, fmt.Errorf("failed to emit message SSE event: %w", err)
+				}
 			}
 
 			// Save session
 			finalMessages := append(messages, llm.Message{Role: "assistant", Content: resp.Content})
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
 			usage.TasksCreated = executor.tasksCreated
-			_ = ch.saveChatSession(iterCtx, namespace, sessionID, finalMessages, persistedCount, usage)
+			if err := ch.saveChatSession(iterCtx, namespace, sessionID, finalMessages, persistedCount, usage); err != nil {
+				chatLog.Error(err, "failed to save chat session", "sessionId", sessionID, "namespace", namespace)
+				iterSpan.RecordError(err)
+				iterSpan.SetStatus(codes.Error, err.Error())
+				iterSpan.End()
+				return "", usage, allToolCalls, fmt.Errorf("failed to save chat session: %w", err)
+			}
 			if err := ch.sessionStore.UpdateTokenCounts(iterCtx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
 				chatLog.Error(err, "failed to update token counts")
 			}
@@ -479,12 +523,25 @@ func (ch *ChatHandler) runToolLoop(
 			for _, tc := range resp.ToolCalls {
 				// Emit tool_call SSE event
 				if emitSSE != nil {
-					tcData, _ := json.Marshal(map[string]any{
+					tcData, err := json.Marshal(map[string]any{
 						"id":   tc.ID,
 						"name": tc.Name,
 						"args": tc.Arguments,
 					})
-					emitSSE("tool_call", string(tcData))
+					if err != nil {
+						usage.Duration = time.Since(start).Round(time.Millisecond).String()
+						iterSpan.RecordError(err)
+						iterSpan.SetStatus(codes.Error, err.Error())
+						iterSpan.End()
+						return "", usage, allToolCalls, fmt.Errorf("failed to marshal tool_call SSE event: %w", err)
+					}
+					if err := emitSSE("tool_call", string(tcData)); err != nil {
+						usage.Duration = time.Since(start).Round(time.Millisecond).String()
+						iterSpan.RecordError(err)
+						iterSpan.SetStatus(codes.Error, err.Error())
+						iterSpan.End()
+						return "", usage, allToolCalls, fmt.Errorf("failed to emit tool_call SSE event: %w", err)
+					}
 				}
 
 				// Check repetition (defer warning until after all tool results)
@@ -508,12 +565,29 @@ func (ch *ChatHandler) runToolLoop(
 
 				// Emit tool_result SSE event
 				if emitSSE != nil {
-					trData, _ := json.Marshal(map[string]any{
+					resultPayload := any(result)
+					if json.Valid([]byte(result)) {
+						resultPayload = json.RawMessage(result)
+					}
+					trData, err := json.Marshal(map[string]any{
 						"id":     tc.ID,
 						"name":   tc.Name,
-						"result": json.RawMessage(result),
+						"result": resultPayload,
 					})
-					emitSSE("tool_result", string(trData))
+					if err != nil {
+						usage.Duration = time.Since(start).Round(time.Millisecond).String()
+						iterSpan.RecordError(err)
+						iterSpan.SetStatus(codes.Error, err.Error())
+						iterSpan.End()
+						return "", usage, allToolCalls, fmt.Errorf("failed to marshal tool_result SSE event: %w", err)
+					}
+					if err := emitSSE("tool_result", string(trData)); err != nil {
+						usage.Duration = time.Since(start).Round(time.Millisecond).String()
+						iterSpan.RecordError(err)
+						iterSpan.SetStatus(codes.Error, err.Error())
+						iterSpan.End()
+						return "", usage, allToolCalls, fmt.Errorf("failed to emit tool_result SSE event: %w", err)
+					}
 				}
 
 				// Append tool result message
@@ -553,15 +627,34 @@ func (ch *ChatHandler) runToolLoop(
 
 		// This is the final response
 		if emitSSE != nil && resp.Content != "" {
-			msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
-			emitSSE("message", string(msgData))
+			msgData, err := json.Marshal(map[string]string{"content": resp.Content})
+			if err != nil {
+				usage.Duration = time.Since(start).Round(time.Millisecond).String()
+				iterSpan.RecordError(err)
+				iterSpan.SetStatus(codes.Error, err.Error())
+				iterSpan.End()
+				return "", usage, allToolCalls, fmt.Errorf("failed to marshal message SSE event: %w", err)
+			}
+			if err := emitSSE("message", string(msgData)); err != nil {
+				usage.Duration = time.Since(start).Round(time.Millisecond).String()
+				iterSpan.RecordError(err)
+				iterSpan.SetStatus(codes.Error, err.Error())
+				iterSpan.End()
+				return "", usage, allToolCalls, fmt.Errorf("failed to emit message SSE event: %w", err)
+			}
 		}
 
 		// Save session
 		finalMessages := append(messages, llm.Message{Role: "assistant", Content: resp.Content})
 		usage.Duration = time.Since(start).Round(time.Millisecond).String()
 		usage.TasksCreated = executor.tasksCreated
-		_ = ch.saveChatSession(iterCtx, namespace, sessionID, finalMessages, persistedCount, usage)
+		if err := ch.saveChatSession(iterCtx, namespace, sessionID, finalMessages, persistedCount, usage); err != nil {
+			chatLog.Error(err, "failed to save chat session", "sessionId", sessionID, "namespace", namespace)
+			iterSpan.RecordError(err)
+			iterSpan.SetStatus(codes.Error, err.Error())
+			iterSpan.End()
+			return "", usage, allToolCalls, fmt.Errorf("failed to save chat session: %w", err)
+		}
 		if err := ch.sessionStore.UpdateTokenCounts(iterCtx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
 			chatLog.Error(err, "failed to update token counts")
 		}
@@ -574,6 +667,19 @@ func (ch *ChatHandler) runToolLoop(
 		iterSpan.End()
 		return resp.Content, usage, allToolCalls, nil
 	}
+}
+
+func acceptsJSON(acceptHeader string) bool {
+	for _, part := range strings.Split(acceptHeader, ",") {
+		mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(part))
+		if err != nil {
+			continue
+		}
+		if mediaType == "application/json" {
+			return true
+		}
+	}
+	return false
 }
 
 // loadChatSession loads chat session messages from the session store.

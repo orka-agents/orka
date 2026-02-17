@@ -123,6 +123,22 @@ export function useSendMessage() {
         const reader = response.body.getReader()
         const decoder = new TextDecoder()
         let buffer = ''
+        const reportedSSEErrors = new Set<string>()
+
+        const reportSSEError = (event: string, err: unknown) => {
+          const detail = err instanceof Error ? err.message : 'Unknown stream processing error'
+          const key = `${event}:${detail}`
+          if (reportedSSEErrors.has(key) || reportedSSEErrors.size >= 3) {
+            return
+          }
+          reportedSSEErrors.add(key)
+          addMessage({
+            id: generateMessageId(),
+            role: 'error',
+            content: `Stream event "${event}" could not be processed: ${detail}`,
+            timestamp: new Date().toISOString(),
+          })
+        }
 
         while (true) {
           const { done, value } = await reader.read()
@@ -141,8 +157,8 @@ export function useSendMessage() {
           for (const { event, data } of events) {
             try {
               handleSSEEvent(event, data)
-            } catch {
-              // Skip malformed events
+            } catch (err) {
+              reportSSEError(event, err)
             }
           }
         }
@@ -153,8 +169,8 @@ export function useSendMessage() {
           for (const { event, data } of events) {
             try {
               handleSSEEvent(event, data)
-            } catch {
-              // Skip malformed events
+            } catch (err) {
+              reportSSEError(event, err)
             }
           }
         }
