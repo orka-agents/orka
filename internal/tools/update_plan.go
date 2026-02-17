@@ -68,7 +68,7 @@ type updatePlanArgs struct {
 }
 
 // Execute saves the plan state via the controller's internal API.
-func (t *UpdatePlanTool) Execute(_ context.Context, args json.RawMessage) (string, error) {
+func (t *UpdatePlanTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a updatePlanArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
@@ -105,7 +105,7 @@ func (t *UpdatePlanTool) Execute(_ context.Context, args json.RawMessage) (strin
 	}
 
 	url := fmt.Sprintf("%s/internal/v1/plans/%s/%s", controllerURL, taskNamespace, taskName)
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}

@@ -690,6 +690,12 @@ func (ch *ChatHandler) HandleCancelChat(c fiber.Ctx) error {
 	if ch.watchNamespace != "" {
 		namespace = ch.watchNamespace
 	}
+	if ch.enforceNamespaceIsolation {
+		ui := GetUserInfo(c)
+		if ui != nil && ui.Namespace != "" && namespace != ui.Namespace {
+			return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("namespace %q not allowed", namespace))
+		}
+	}
 
 	ctx := c.Context()
 	_, err := ch.sessionStore.GetSession(ctx, namespace, sessionID)

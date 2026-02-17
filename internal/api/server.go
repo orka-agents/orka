@@ -10,6 +10,8 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"os"
+	"strings"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
@@ -97,8 +99,12 @@ func (s *Server) setupMiddleware() {
 	s.app.Use(NewTracingMiddleware())
 
 	// CORS middleware
+	allowedOrigins := os.Getenv("ORKA_CORS_ALLOWED_ORIGINS")
+	if allowedOrigins == "" {
+		allowedOrigins = "*"
+	}
 	s.app.Use(cors.New(cors.Config{
-		AllowOrigins: []string{"*"},
+		AllowOrigins: strings.Split(allowedOrigins, ","),
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
 		AllowHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization"},
 	}))
