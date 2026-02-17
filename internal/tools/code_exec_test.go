@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -446,5 +447,147 @@ func TestCodeExecTool_DenyPatterns_NotAppliedToPython(t *testing.T) {
 	}
 	if execResult.ExitCode != 0 {
 		t.Errorf("Python code should not be blocked by deny patterns, got exit code %d, error: %s", execResult.ExitCode, execResult.Error)
+	}
+}
+
+func TestCodeExecTool_Execute_Node(t *testing.T) {
+	// Test node execution directly via executeNode
+	tmpDir := t.TempDir()
+	tool := &CodeExecTool{
+		workDir:      tmpDir,
+		timeout:      30 * time.Second,
+		allowedLangs: map[string]bool{"javascript": true, "node": true},
+	}
+
+	// Test via Execute with "node" language alias
+	args := json.RawMessage(`{"language": "node", "code": "console.log('node-test')"}`)
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var execResult CodeExecResult
+	if err := json.Unmarshal([]byte(result), &execResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+
+	if execResult.Output != "node-test\n" {
+		t.Errorf("Execute() output = %q, want %q", execResult.Output, "node-test\n")
+	}
+}
+
+func TestCodeExecTool_Execute_Python3Alias(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := &CodeExecTool{
+		workDir:      tmpDir,
+		timeout:      30 * time.Second,
+		allowedLangs: map[string]bool{"python": true, "python3": true},
+	}
+
+	args := json.RawMessage(`{"language": "python3", "code": "print('py3')"}`)
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var execResult CodeExecResult
+	if err := json.Unmarshal([]byte(result), &execResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+
+	if execResult.Output != "py3\n" {
+		t.Errorf("Execute() output = %q, want %q", execResult.Output, "py3\n")
+	}
+}
+
+func TestCodeExecTool_Execute_ShAlias(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := &CodeExecTool{
+		workDir:      tmpDir,
+		timeout:      30 * time.Second,
+		allowedLangs: map[string]bool{"bash": true, "sh": true},
+	}
+
+	args := json.RawMessage(`{"language": "sh", "code": "echo sh-test"}`)
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var execResult CodeExecResult
+	if err := json.Unmarshal([]byte(result), &execResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+
+	if execResult.Output != "sh-test\n" {
+		t.Errorf("Execute() output = %q, want %q", execResult.Output, "sh-test\n")
+	}
+}
+
+func TestCodeExecTool_Execute_MixedCase(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := &CodeExecTool{
+		workDir:      tmpDir,
+		timeout:      30 * time.Second,
+		allowedLangs: map[string]bool{"bash": true},
+	}
+
+	args := json.RawMessage(`{"language": "BASH", "code": "echo upper"}`)
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var execResult CodeExecResult
+	if err := json.Unmarshal([]byte(result), &execResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if execResult.Output != "upper\n" {
+		t.Errorf("Execute() output = %q, want %q", execResult.Output, "upper\n")
+	}
+}
+
+func TestCodeExecTool_RunCommand_NonExecError(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := &CodeExecTool{
+		workDir: tmpDir,
+		timeout: 30 * time.Second,
+	}
+
+	// Command that doesn't exist — produces a non-ExitError
+	cmd := exec.CommandContext(context.Background(), "nonexistent-binary-xyz")
+	result := tool.runCommand(cmd)
+	if result.ExitCode != -1 {
+		t.Errorf("expected exit code -1, got %d", result.ExitCode)
+	}
+	if result.Error == "" {
+		t.Error("expected non-empty error message")
+	}
+}
+
+func TestCodeExecTool_Execute_StdoutAndStderr(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := &CodeExecTool{
+		workDir:      tmpDir,
+		timeout:      30 * time.Second,
+		allowedLangs: map[string]bool{"bash": true},
+	}
+
+	args := json.RawMessage(`{"language": "bash", "code": "echo stdout; echo stderr >&2"}`)
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var execResult CodeExecResult
+	if err := json.Unmarshal([]byte(result), &execResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+
+	if execResult.Output != "stdout\n" {
+		t.Errorf("Execute() output = %q, want %q", execResult.Output, "stdout\n")
+	}
+	if execResult.Error != "stderr\n" {
+		t.Errorf("Execute() error = %q, want %q", execResult.Error, "stderr\n")
 	}
 }

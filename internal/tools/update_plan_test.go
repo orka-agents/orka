@@ -8,6 +8,10 @@ package tools
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -53,50 +57,261 @@ func TestUpdatePlanTool_Parameters(t *testing.T) {
 	}
 }
 
-func TestUpdatePlanTool_Execute_MissingEnvVars(t *testing.T) {
+func TestUpdatePlanTool_Execute(t *testing.T) {
 	tool := NewUpdatePlanTool()
-	args := json.RawMessage(`{
-		"summary": "test",
-		"progress_pct": 50,
-		"goal_complete": false,
-		"plan_document": "# Test Plan"
-	}`)
 
-	// Without ORKA_CONTROLLER_URL set, should fail
-	t.Setenv("ORKA_CONTROLLER_URL", "")
-	t.Setenv("ORKA_TASK_NAME", "")
-	t.Setenv("ORKA_TASK_NAMESPACE", "")
+	tests := []struct {
+		name       string
+		args       string
+		envURL     string
+		envTask    string
+		envNS      string
+		envToken   string
+		serverCode int
+		wantErr    string
+		wantResult string
+		skipServer bool
+	}{
+		{
+			name:    "invalid JSON args",
+			args:    `{invalid}`,
+			wantErr: "invalid arguments",
+		},
+		{
+			name:    "empty summary",
+			args:    `{"summary":"","plan_document":"# Plan"}`,
+			wantErr: "summary is required",
+		},
+		{
+			name:    "empty plan_document",
+			args:    `{"summary":"test","plan_document":""}`,
+			wantErr: "plan_document is required",
+		},
+		{
+			name:       "missing all env vars",
+			args:       `{"summary":"test","plan_document":"# Plan"}`,
+			envURL:     "",
+			envTask:    "",
+			envNS:      "",
+			wantErr:    "ORKA_CONTROLLER_URL, ORKA_TASK_NAME, and ORKA_TASK_NAMESPACE are required",
+			skipServer: true,
+		},
+		{
+			name:       "missing ORKA_TASK_NAME",
+			args:       `{"summary":"test","plan_document":"# Plan"}`,
+			envURL:     "http://localhost",
+			envTask:    "",
+			envNS:      "default",
+			wantErr:    "ORKA_CONTROLLER_URL, ORKA_TASK_NAME, and ORKA_TASK_NAMESPACE are required",
+			skipServer: true,
+		},
+		{
+			name:       "missing ORKA_TASK_NAMESPACE",
+			args:       `{"summary":"test","plan_document":"# Plan"}`,
+			envURL:     "http://localhost",
+			envTask:    "my-task",
+			envNS:      "",
+			wantErr:    "ORKA_CONTROLLER_URL, ORKA_TASK_NAME, and ORKA_TASK_NAMESPACE are required",
+			skipServer: true,
+		},
+		{
+			name:       "successful update with 204",
+			args:       `{"summary":"phase 1 done","progress_pct":50,"goal_complete":false,"plan_document":"# Plan\n## Done"}`,
+			envTask:    "my-task",
+			envNS:      "default",
+			serverCode: http.StatusNoContent,
+			wantResult: "Plan updated: phase 1 done (progress: 50%)",
+		},
+		{
+			name:       "successful update with 200",
+			args:       `{"summary":"all done","progress_pct":100,"goal_complete":true,"plan_document":"# Complete"}`,
+			envTask:    "my-task",
+			envNS:      "default",
+			serverCode: http.StatusOK,
+			wantResult: "Plan updated: all done (progress: 100%, goal marked as COMPLETE)",
+		},
+		{
+			name:       "server error 500",
+			args:       `{"summary":"test","progress_pct":10,"plan_document":"# Plan"}`,
+			envTask:    "my-task",
+			envNS:      "default",
+			serverCode: http.StatusInternalServerError,
+			wantErr:    "failed to save plan: HTTP 500",
+		},
+		{
+			name:       "server error 403",
+			args:       `{"summary":"test","progress_pct":0,"plan_document":"# Plan"}`,
+			envTask:    "my-task",
+			envNS:      "default",
+			serverCode: http.StatusForbidden,
+			wantErr:    "failed to save plan: HTTP 403",
+		},
+		{
+			name:       "with SA token from env",
+			args:       `{"summary":"with token","progress_pct":25,"plan_document":"# Plan"}`,
+			envTask:    "task1",
+			envNS:      "ns1",
+			envToken:   "my-sa-token",
+			serverCode: http.StatusNoContent,
+			wantResult: "Plan updated: with token (progress: 25%)",
+		},
+		{
+			name:       "zero progress not complete",
+			args:       `{"summary":"starting","progress_pct":0,"goal_complete":false,"plan_document":"# Initial"}`,
+			envTask:    "t",
+			envNS:      "n",
+			serverCode: http.StatusNoContent,
+			wantResult: "Plan updated: starting (progress: 0%)",
+		},
+		{
+			name:       "goal complete at partial progress",
+			args:       `{"summary":"blocked","progress_pct":60,"goal_complete":true,"plan_document":"# Blocked"}`,
+			envTask:    "t",
+			envNS:      "n",
+			serverCode: http.StatusOK,
+			wantResult: "Plan updated: blocked (progress: 60%, goal marked as COMPLETE)",
+		},
+	}
 
-	_, err := tool.Execute(t.Context(), args)
-	if err == nil {
-		t.Error("Execute should fail without env vars")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var serverURL string
+			if !tc.skipServer && tc.wantErr != "invalid arguments" && tc.wantErr != "summary is required" && tc.wantErr != "plan_document is required" {
+				var receivedAuth string
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					receivedAuth = r.Header.Get("Authorization")
+					if r.Method != http.MethodPost {
+						t.Errorf("expected POST, got %s", r.Method)
+					}
+					expectedPath := fmt.Sprintf("/internal/v1/plans/%s/%s", tc.envNS, tc.envTask)
+					if r.URL.Path != expectedPath {
+						t.Errorf("path = %q, want %q", r.URL.Path, expectedPath)
+					}
+					if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+						t.Errorf("Content-Type = %q, want application/json", ct)
+					}
+					w.WriteHeader(tc.serverCode)
+				}))
+				defer srv.Close()
+				serverURL = srv.URL
+
+				// Verify auth header after execution
+				if tc.envToken != "" {
+					defer func() {
+						wantAuth := "Bearer " + tc.envToken
+						if receivedAuth != wantAuth {
+							t.Errorf("Authorization = %q, want %q", receivedAuth, wantAuth)
+						}
+					}()
+				}
+			}
+
+			if serverURL != "" {
+				t.Setenv("ORKA_CONTROLLER_URL", serverURL)
+			} else if tc.envURL != "" {
+				t.Setenv("ORKA_CONTROLLER_URL", tc.envURL)
+			} else {
+				t.Setenv("ORKA_CONTROLLER_URL", "")
+			}
+			t.Setenv("ORKA_TASK_NAME", tc.envTask)
+			t.Setenv("ORKA_TASK_NAMESPACE", tc.envNS)
+			t.Setenv("ORKA_SA_TOKEN", tc.envToken)
+
+			result, err := tool.Execute(t.Context(), json.RawMessage(tc.args))
+
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error = %q, want containing %q", err.Error(), tc.wantErr)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result != tc.wantResult {
+				t.Errorf("result = %q, want %q", result, tc.wantResult)
+			}
+		})
 	}
 }
 
-func TestUpdatePlanTool_Execute_InvalidArgs(t *testing.T) {
+func TestUpdatePlanTool_Execute_ConnectionRefused(t *testing.T) {
 	tool := NewUpdatePlanTool()
+	t.Setenv("ORKA_CONTROLLER_URL", "http://127.0.0.1:1")
+	t.Setenv("ORKA_TASK_NAME", "task")
+	t.Setenv("ORKA_TASK_NAMESPACE", "ns")
+	t.Setenv("ORKA_SA_TOKEN", "")
 
-	t.Run("empty summary", func(t *testing.T) {
-		args := json.RawMessage(`{"summary": "", "plan_document": "# Plan"}`)
-		_, err := tool.Execute(t.Context(), args)
-		if err == nil {
-			t.Error("should fail with empty summary")
-		}
-	})
+	args := json.RawMessage(`{"summary":"test","plan_document":"# Plan"}`)
+	_, err := tool.Execute(t.Context(), args)
+	if err == nil {
+		t.Fatal("expected error for connection refused")
+	}
+	if !strings.Contains(err.Error(), "failed to save plan") {
+		t.Errorf("error = %q, want containing 'failed to save plan'", err.Error())
+	}
+}
 
-	t.Run("empty plan_document", func(t *testing.T) {
-		args := json.RawMessage(`{"summary": "test", "plan_document": ""}`)
-		_, err := tool.Execute(t.Context(), args)
-		if err == nil {
-			t.Error("should fail with empty plan_document")
-		}
-	})
+func TestUpdatePlanTool_Execute_NoAuthHeaderWhenNoToken(t *testing.T) {
+	var receivedAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
 
-	t.Run("invalid JSON", func(t *testing.T) {
-		args := json.RawMessage(`{invalid}`)
-		_, err := tool.Execute(t.Context(), args)
-		if err == nil {
-			t.Error("should fail with invalid JSON")
+	tool := NewUpdatePlanTool()
+	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
+	t.Setenv("ORKA_TASK_NAME", "task")
+	t.Setenv("ORKA_TASK_NAMESPACE", "ns")
+	t.Setenv("ORKA_SA_TOKEN", "")
+
+	args := json.RawMessage(`{"summary":"test","plan_document":"# Plan"}`)
+	_, err := tool.Execute(t.Context(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if receivedAuth != "" {
+		t.Errorf("expected no Authorization header, got %q", receivedAuth)
+	}
+}
+
+func TestUpdatePlanTool_Execute_RequestBodyValid(t *testing.T) {
+	var received updatePlanArgs
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("failed to decode body: %v", err)
 		}
-	})
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	tool := NewUpdatePlanTool()
+	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
+	t.Setenv("ORKA_TASK_NAME", "task")
+	t.Setenv("ORKA_TASK_NAMESPACE", "ns")
+	t.Setenv("ORKA_SA_TOKEN", "")
+
+	args := json.RawMessage(`{"summary":"my summary","progress_pct":75,"goal_complete":true,"plan_document":"# My Plan"}`)
+	_, err := tool.Execute(t.Context(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if received.Summary != "my summary" {
+		t.Errorf("body summary = %q, want %q", received.Summary, "my summary")
+	}
+	if received.ProgressPct != 75 {
+		t.Errorf("body progress_pct = %d, want 75", received.ProgressPct)
+	}
+	if !received.GoalComplete {
+		t.Error("body goal_complete = false, want true")
+	}
+	if received.PlanDocument != "# My Plan" {
+		t.Errorf("body plan_document = %q, want %q", received.PlanDocument, "# My Plan")
+	}
 }

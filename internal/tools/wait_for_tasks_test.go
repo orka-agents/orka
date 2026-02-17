@@ -685,3 +685,149 @@ func TestWaitForTasksTool_Execute_NoAutoRetryOnSuccess(t *testing.T) {
 		t.Errorf("expected Phase=Succeeded, got %q", r.Phase)
 	}
 }
+
+func TestWaitForTasksTool_Execute_FetchResultNon200(t *testing.T) {
+	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
+
+	// Server returns 500 for result fetch
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal error"))
+	}))
+	defer srv.Close()
+	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-err", Namespace: "test-ns"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "agent-err"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseSucceeded,
+			ResultRef: &corev1alpha1.ResultReference{Available: true},
+		},
+	}
+
+	scheme := newTestScheme()
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(task).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+
+	tool := NewWaitForTasksTool(fakeClient)
+	args, _ := json.Marshal(WaitForTasksArgs{Tasks: []string{"task-err"}, Timeout: "1s"})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	var waitResult WaitForTasksResult
+	_ = json.Unmarshal([]byte(result), &waitResult)
+
+	if len(waitResult.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(waitResult.Results))
+	}
+	if !strings.Contains(waitResult.Results[0].Result, "error reading result") {
+		t.Errorf("expected error reading result, got %q", waitResult.Results[0].Result)
+	}
+}
+
+func TestWaitForTasksTool_Execute_FetchResultInvalidJSON(t *testing.T) {
+	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
+
+	// Server returns 200 but invalid JSON
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("not-valid-json"))
+	}))
+	defer srv.Close()
+	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-bad-json", Namespace: "test-ns"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "agent-x"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseSucceeded,
+			ResultRef: &corev1alpha1.ResultReference{Available: true},
+		},
+	}
+
+	scheme := newTestScheme()
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(task).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+
+	tool := NewWaitForTasksTool(fakeClient)
+	args, _ := json.Marshal(WaitForTasksArgs{Tasks: []string{"task-bad-json"}, Timeout: "1s"})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	var waitResult WaitForTasksResult
+	_ = json.Unmarshal([]byte(result), &waitResult)
+
+	if len(waitResult.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(waitResult.Results))
+	}
+	if !strings.Contains(waitResult.Results[0].Result, "error reading result") {
+		t.Errorf("expected error reading result, got %q", waitResult.Results[0].Result)
+	}
+}
+
+func TestWaitForTasksTool_Execute_FallbackToMessage(t *testing.T) {
+	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
+
+	// Task with no ResultRef but with a status message
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-msg", Namespace: "test-ns"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "agent-m"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseSucceeded,
+			Message: "completed with warnings",
+		},
+	}
+
+	scheme := newTestScheme()
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(task).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+
+	tool := NewWaitForTasksTool(fakeClient)
+	args, _ := json.Marshal(WaitForTasksArgs{Tasks: []string{"task-msg"}, Timeout: "1s"})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	var waitResult WaitForTasksResult
+	_ = json.Unmarshal([]byte(result), &waitResult)
+
+	if len(waitResult.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(waitResult.Results))
+	}
+	if waitResult.Results[0].Result != "completed with warnings" {
+		t.Errorf("expected message fallback, got %q", waitResult.Results[0].Result)
+	}
+}

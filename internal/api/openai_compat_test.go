@@ -7,8 +7,11 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/llm"
 
 	// Register LLM providers for integration tests
 	_ "github.com/sozercan/orka/internal/llm/anthropic"
@@ -412,6 +416,513 @@ func TestHandleChatCompletions_NonStreamingResponse(t *testing.T) {
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == 400 {
 		t.Errorf("did not expect 400; provider resolution should have succeeded. body: %s", string(respBody))
+	}
+}
+
+// --- Tests: writeStreamChunk & writeStreamDone ---
+
+func TestWriteStreamChunk(t *testing.T) {
+	var buf bytes.Buffer
+	w := bufio.NewWriter(&buf)
+
+	chunk := OAIResponse{
+		ID:      "chatcmpl-123",
+		Object:  "chat.completion.chunk",
+		Created: 1234567890,
+		Model:   "gpt-4",
+		Choices: []OAIChoice{{
+			Index: 0,
+			Delta: &OAIMessage{Role: "assistant", Content: "hello"},
+		}},
+	}
+	writeStreamChunk(w, chunk)
+
+	got := buf.String()
+	if !strings.HasPrefix(got, "data: ") {
+		t.Errorf("expected SSE data prefix, got: %q", got)
+	}
+	if !strings.Contains(got, "chatcmpl-123") {
+		t.Errorf("expected completion ID in output, got: %q", got)
+	}
+	if !strings.HasSuffix(got, "\n\n") {
+		t.Errorf("expected double newline suffix, got: %q", got)
+	}
+}
+
+func TestWriteStreamDone(t *testing.T) {
+	var buf bytes.Buffer
+	w := bufio.NewWriter(&buf)
+
+	writeStreamDone(w)
+
+	got := buf.String()
+	if got != "data: [DONE]\n\n" {
+		t.Errorf("writeStreamDone() = %q, want %q", got, "data: [DONE]\n\n")
+	}
+}
+
+// --- Tests: handleNonStreamingCompletion ---
+
+type oaiMockProvider struct {
+	name      string
+	resp      *llm.CompletionResponse
+	err       error
+	streamCh  chan llm.StreamChunk
+	streamErr error
+}
+
+func (m *oaiMockProvider) Complete(_ context.Context, _ *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.resp, nil
+}
+
+func (m *oaiMockProvider) Stream(_ context.Context, _ *llm.CompletionRequest) (<-chan llm.StreamChunk, error) {
+	if m.streamErr != nil {
+		return nil, m.streamErr
+	}
+	return m.streamCh, nil
+}
+
+func (m *oaiMockProvider) Name() string {
+	if m.name != "" {
+		return m.name
+	}
+	return "mock"
+}
+
+func TestHandleNonStreamingCompletion_Success(t *testing.T) {
+	mock := &oaiMockProvider{
+		resp: &llm.CompletionResponse{
+			Content:      "Hello!",
+			StopReason:   "end_turn",
+			InputTokens:  10,
+			OutputTokens: 5,
+		},
+	}
+
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleNonStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4", Messages: []llm.Message{{Role: "user", Content: "hi"}}},
+			"chatcmpl-123", "gpt-4", 1234567890,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var oaiResp OAIResponse
+	json.NewDecoder(resp.Body).Decode(&oaiResp) //nolint:errcheck
+	if oaiResp.ID != "chatcmpl-123" {
+		t.Errorf("ID = %q, want chatcmpl-123", oaiResp.ID)
+	}
+	if oaiResp.Object != "chat.completion" {
+		t.Errorf("Object = %q", oaiResp.Object)
+	}
+	if len(oaiResp.Choices) != 1 {
+		t.Fatalf("expected 1 choice, got %d", len(oaiResp.Choices))
+	}
+	if oaiResp.Choices[0].Message == nil || extractContent(oaiResp.Choices[0].Message.Content) != "Hello!" {
+		t.Errorf("unexpected message content")
+	}
+	if oaiResp.Usage == nil || oaiResp.Usage.TotalTokens != 15 {
+		t.Errorf("usage = %+v", oaiResp.Usage)
+	}
+}
+
+func TestHandleNonStreamingCompletion_WithToolCalls(t *testing.T) {
+	mock := &oaiMockProvider{
+		resp: &llm.CompletionResponse{
+			Content:    "",
+			StopReason: "end_turn",
+			ToolCalls: []llm.ToolCall{
+				{ID: "call_1", Name: "get_weather", Arguments: json.RawMessage(`{"location":"NYC"}`)},
+			},
+		},
+	}
+
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleNonStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4"},
+			"chatcmpl-tc", "gpt-4", 1234567890,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var oaiResp OAIResponse
+	json.NewDecoder(resp.Body).Decode(&oaiResp) //nolint:errcheck
+	if len(oaiResp.Choices) != 1 {
+		t.Fatalf("expected 1 choice, got %d", len(oaiResp.Choices))
+	}
+	if *oaiResp.Choices[0].FinishReason != "tool_calls" {
+		t.Errorf("finish_reason = %q, want tool_calls", *oaiResp.Choices[0].FinishReason)
+	}
+	if len(oaiResp.Choices[0].Message.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(oaiResp.Choices[0].Message.ToolCalls))
+	}
+	if oaiResp.Choices[0].Message.ToolCalls[0].Function.Name != "get_weather" {
+		t.Errorf("tool call name = %q", oaiResp.Choices[0].Message.ToolCalls[0].Function.Name)
+	}
+}
+
+func TestHandleNonStreamingCompletion_Error(t *testing.T) {
+	mock := &oaiMockProvider{
+		err: fmt.Errorf("API rate limited"),
+	}
+
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleNonStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4"},
+			"chatcmpl-err", "gpt-4", 1234567890,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 500 {
+		t.Errorf("expected 500, got %d", resp.StatusCode)
+	}
+
+	var oaiErr OAIError
+	json.NewDecoder(resp.Body).Decode(&oaiErr) //nolint:errcheck
+	if oaiErr.Error.Type != "server_error" {
+		t.Errorf("error type = %q, want server_error", oaiErr.Error.Type)
+	}
+}
+
+// --- Tests: handleStreamingCompletion ---
+
+func TestHandleStreamingCompletion_StreamSuccess(t *testing.T) {
+	ch := make(chan llm.StreamChunk, 3)
+	ch <- llm.StreamChunk{Content: "Hello"}
+	ch <- llm.StreamChunk{Content: " world"}
+	ch <- llm.StreamChunk{Done: true, StopReason: "end_turn"}
+	close(ch)
+
+	mock := &oaiMockProvider{streamCh: ch}
+
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4", Messages: []llm.Message{{Role: "user", Content: "hi"}}},
+			"chatcmpl-stream", "gpt-4", 1234567890, nil,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "Hello") {
+		t.Errorf("expected Hello in stream, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "[DONE]") {
+		t.Errorf("expected [DONE] in stream, got: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingCompletion_FallbackToComplete(t *testing.T) {
+	mock := &oaiMockProvider{
+		streamErr: fmt.Errorf("streaming not supported"),
+		resp: &llm.CompletionResponse{
+			Content:    "Fallback response",
+			StopReason: "end_turn",
+		},
+	}
+
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4", Messages: []llm.Message{{Role: "user", Content: "hi"}}},
+			"chatcmpl-fallback", "gpt-4", 1234567890, nil,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "Fallback response") {
+		t.Errorf("expected fallback content, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "[DONE]") {
+		t.Errorf("expected [DONE], got: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingCompletion_BothFail(t *testing.T) {
+	mock := &oaiMockProvider{
+		streamErr: fmt.Errorf("stream fail"),
+		err:       fmt.Errorf("complete also fails"),
+	}
+
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4"},
+			"chatcmpl-bothfail", "gpt-4", 1234567890, nil,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "Error:") {
+		t.Errorf("expected error chunk, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "[DONE]") {
+		t.Errorf("expected [DONE], got: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingCompletion_WithToolCalls(t *testing.T) {
+	ch := make(chan llm.StreamChunk, 2)
+	ch <- llm.StreamChunk{
+		ToolCall: &llm.ToolCall{ID: "call_1", Name: "search", Arguments: json.RawMessage(`{"q":"test"}`)},
+	}
+	ch <- llm.StreamChunk{Done: true, StopReason: "tool_use"}
+	close(ch)
+
+	mock := &oaiMockProvider{streamCh: ch}
+
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4"},
+			"chatcmpl-tc", "gpt-4", 1234567890, nil,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "search") {
+		t.Errorf("expected tool call in stream, got: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingCompletion_WithUsage(t *testing.T) {
+	mock := &oaiMockProvider{
+		streamErr: fmt.Errorf("stream not supported"),
+		resp: &llm.CompletionResponse{
+			Content:      "response",
+			StopReason:   "end_turn",
+			InputTokens:  10,
+			OutputTokens: 5,
+		},
+	}
+
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4"},
+			"chatcmpl-usage", "gpt-4", 1234567890,
+			&StreamOptions{IncludeUsage: true},
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "prompt_tokens") {
+		t.Errorf("expected usage in stream, got: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingCompletion_FallbackWithToolCalls(t *testing.T) {
+	mock := &oaiMockProvider{
+		streamErr: fmt.Errorf("stream not supported"),
+		resp: &llm.CompletionResponse{
+			Content:    "",
+			StopReason: "tool_use",
+			ToolCalls: []llm.ToolCall{
+				{ID: "call_1", Name: "search", Arguments: json.RawMessage(`{"q":"test"}`)},
+			},
+		},
+	}
+
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4"},
+			"chatcmpl-fbtc", "gpt-4", 1234567890, nil,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "search") {
+		t.Errorf("expected tool call in fallback stream, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "tool_calls") {
+		t.Errorf("expected tool_calls finish reason, got: %s", bodyStr)
+	}
+}
+
+// --- Tests: extractContent edge cases ---
+
+func TestExtractContent_NonStringNonArray(t *testing.T) {
+	// Test the default branch (non-string, non-array) with a number
+	got := extractContent(42)
+	if got != "42" {
+		t.Errorf("extractContent(42) = %q, want %q", got, "42")
+	}
+}
+
+func TestExtractContent_JSONStringViaDefault(t *testing.T) {
+	// A boolean should go through the default path
+	got := extractContent(true)
+	if got != "true" {
+		t.Errorf("extractContent(true) = %q, want %q", got, "true")
+	}
+}
+
+// --- Tests: resolveProviderFromModel edge cases ---
+
+func TestResolveProviderFromModel_SecretMissingKey(t *testing.T) {
+	provider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeOpenAI,
+			DefaultModel: "gpt-4",
+			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "secret1", Key: "missing-key"},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "secret1", Namespace: "default"},
+		Data:       map[string][]byte{"other-key": []byte("val")},
+	}
+	handler, _ := setupTestOpenAIHandler(provider, secret)
+	_, _, err := handler.resolveProviderFromModel(context.Background(), "gpt-4", "default")
+	if err == nil {
+		t.Fatal("expected error for missing secret key")
+	}
+	if !strings.Contains(err.Error(), "missing-key") {
+		t.Errorf("error = %v", err)
+	}
+}
+
+func TestResolveProviderFromModel_NoModel(t *testing.T) {
+	provider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:      corev1alpha1.ProviderTypeOpenAI,
+			SecretRef: corev1alpha1.ProviderSecretRef{Name: "secret1"},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "secret1", Namespace: "default"},
+		Data:       map[string][]byte{"api-key": []byte("val")},
+	}
+	handler, _ := setupTestOpenAIHandler(provider, secret)
+	handler.config.Model = "" // no default
+	_, _, err := handler.resolveProviderFromModel(context.Background(), "", "default")
+	if err == nil {
+		t.Fatal("expected error for no model")
+	}
+	if !strings.Contains(err.Error(), "no model") {
+		t.Errorf("error = %v", err)
+	}
+}
+
+func TestHandleChatCompletions_MaxTokensTooSmall(t *testing.T) {
+	provider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeOpenAI,
+			DefaultModel: "gpt-4",
+			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "secret1"},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "secret1", Namespace: "default"},
+		Data:       map[string][]byte{"api-key": []byte("key")},
+	}
+
+	handler, app := setupTestOpenAIHandler(provider, secret)
+	app.Post("/v1/chat/completions", handler.HandleChatCompletions)
+
+	body := `{"model":"gpt-4","messages":[{"role":"user","content":"hello"}],"max_tokens":5}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+
+	var oaiErr OAIError
+	json.NewDecoder(resp.Body).Decode(&oaiErr) //nolint:errcheck
+	if oaiErr.Error.Param == nil || *oaiErr.Error.Param != "max_tokens" {
+		t.Errorf("expected param max_tokens, got %v", oaiErr.Error.Param)
 	}
 }
 

@@ -32,6 +32,34 @@ func TestCancelTaskTool_Description(t *testing.T) {
 	}
 }
 
+func TestCancelTaskTool_Parameters(t *testing.T) {
+	tool := NewCancelTaskTool(newFakeClient())
+	params := tool.Parameters()
+	if params == nil {
+		t.Fatal("Parameters() returned nil")
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(params, &schema); err != nil {
+		t.Fatalf("Parameters() returned invalid JSON: %v", err)
+	}
+	if schema["type"] != "object" {
+		t.Error("Parameters schema should have type: object")
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("missing properties")
+	}
+	if _, ok := props["task_name"]; !ok {
+		t.Error("missing task_name property")
+	}
+	if _, ok := props["namespace"]; !ok {
+		t.Error("missing namespace property")
+	}
+	if _, ok := props["reason"]; !ok {
+		t.Error("missing reason property")
+	}
+}
+
 func TestCancelTaskTool_Execute(t *testing.T) {
 	tests := []struct {
 		name       string

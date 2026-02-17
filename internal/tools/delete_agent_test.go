@@ -34,6 +34,75 @@ func TestDeleteAgentTool_Name(t *testing.T) {
 	}
 }
 
+func TestDeleteAgentTool_Description(t *testing.T) {
+	tool := NewDeleteAgentTool(newFakeClient())
+	desc := tool.Description()
+	if desc == "" {
+		t.Error("Description() returned empty string")
+	}
+	if !strings.Contains(desc, "Delete") {
+		t.Errorf("unexpected description: %s", desc)
+	}
+}
+
+func TestDeleteAgentTool_Parameters(t *testing.T) {
+	tool := NewDeleteAgentTool(newFakeClient())
+	params := tool.Parameters()
+	if params == nil {
+		t.Fatal("Parameters() returned nil")
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(params, &schema); err != nil {
+		t.Fatalf("Parameters() returned invalid JSON: %v", err)
+	}
+	if schema["type"] != "object" {
+		t.Error("Parameters schema should have type: object")
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("missing properties")
+	}
+	if _, ok := props["name"]; !ok {
+		t.Error("missing name property")
+	}
+	if _, ok := props["namespace"]; !ok {
+		t.Error("missing namespace property")
+	}
+}
+
+func TestDeleteAgentTool_Execute_DefaultNamespace(t *testing.T) {
+	// Test that without env var and without explicit namespace, default namespace is used
+	t.Setenv("ORKA_TASK_NAMESPACE", "")
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-agent",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.AgentSpec{},
+	}
+	tool := NewDeleteAgentTool(newFakeClient(agent))
+	argsJSON, _ := json.Marshal(DeleteAgentArgs{Name: "test-agent"})
+	result, err := tool.Execute(context.Background(), argsJSON)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var res DeleteAgentResult
+	if err := json.Unmarshal([]byte(result), &res); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if res.Status != "deleted" {
+		t.Errorf("expected status 'deleted', got %q", res.Status)
+	}
+}
+
+func TestDeleteAgentTool_Execute_InvalidJSON(t *testing.T) {
+	tool := NewDeleteAgentTool(newFakeClient())
+	_, err := tool.Execute(context.Background(), json.RawMessage(`{invalid}`))
+	if err == nil {
+		t.Error("expected error for invalid JSON")
+	}
+}
+
 func TestDeleteAgentTool_Execute(t *testing.T) {
 	tests := []struct {
 		name      string
