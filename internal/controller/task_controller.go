@@ -228,6 +228,9 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		// Remove finalizer
 		controllerutil.RemoveFinalizer(task, TaskFinalizer)
 		if err := r.Update(ctx, task); err != nil {
+			if apierrors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
 			log.Error(err, "failed to remove finalizer")
 			return ctrl.Result{}, err
 		}
@@ -999,8 +1002,10 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	// Not yet time
 	if now.Before(scheduledTime) {
 		nextSchedule := metav1.NewTime(scheduledTime)
-		task.Status.NextScheduleTime = &nextSchedule
-		_ = r.Status().Update(ctx, task)
+		if task.Status.NextScheduleTime == nil || !task.Status.NextScheduleTime.Equal(&nextSchedule) {
+			task.Status.NextScheduleTime = &nextSchedule
+			_ = r.Status().Update(ctx, task)
+		}
 		return ctrl.Result{RequeueAfter: time.Until(scheduledTime)}, nil
 	}
 

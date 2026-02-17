@@ -1,5 +1,7 @@
 # Build the Go worker binary
-FROM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+
+ARG TARGETARCH
 
 WORKDIR /workspace
 
@@ -12,11 +14,11 @@ COPY . .
 
 # Bundle the Copilot CLI binary (downloads and embeds the platform-specific CLI)
 RUN go run github.com/github/copilot-sdk/go/cmd/bundler \
-    --platform linux/${TARGETARCH:-amd64} \
+    --platform linux/${TARGETARCH} \
     --output workers/agent/copilot/
 
 # Build the worker (embedded CLI is included via go:embed from the bundled artifacts)
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o worker ./workers/agent/copilot
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -a -o worker ./workers/agent/copilot
 
 # Runtime stage — minimal base (bundled CLI is a standalone native binary)
 FROM debian:bookworm-slim
