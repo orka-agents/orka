@@ -61,7 +61,7 @@ spec:
     - configMapRef:
         name: skill-researcher
   session:
-    persistence: sqlite    # sqlite or none
+    persistence: configmap # configmap, pvc, or none
     ttl: 24h
     maxMessages: 50
   coordination:
@@ -82,8 +82,8 @@ spec:
 | `autonomous` | bool | `false` | Enables autonomous loop mode. When true, the controller re-creates Jobs in a loop instead of marking the task as Succeeded |
 | `maxIterations` | int32 | `0` | Limits the number of autonomous loop iterations. Only used when `autonomous` is true. `0` means unlimited |
 | `allowedAgents` | list | `[]` | List of agent names this agent is allowed to delegate to |
-| `maxConcurrentChildren` | int32 | `0` | Maximum number of concurrent child tasks. `0` means unlimited |
-| `maxDepth` | int32 | `0` | Maximum delegation depth. `0` means unlimited |
+| `maxConcurrentChildren` | int32 | `5` | Maximum number of concurrent child tasks |
+| `maxDepth` | int32 | `3` | Maximum delegation depth |
 
 **Auto-injected coordination tools** (when `enabled: true`):
 
@@ -94,7 +94,7 @@ spec:
 You can configure fallback providers that are automatically tried when the primary provider fails (e.g., due to auth errors, provider outages, or rate limiting). Fallbacks are configured on the Agent CRD's `spec.model.fallbacks` field.
 
 ```yaml
-apiVersion: orka.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: resilient-agent

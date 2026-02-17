@@ -3,12 +3,12 @@
 ## Prerequisites
 
 - Docker 17.03+
-- kubectl v1.11.3+
-- Access to a Kubernetes v1.11.3+ cluster
+- kubectl (version compatible with your cluster)
+- Access to a Kubernetes cluster
 - An LLM API key (Anthropic, OpenAI, or Azure OpenAI)
 
 For development, you also need:
-- Go 1.25+
+- Go 1.25.3+
 - Bun (for UI build)
 
 ## Installation
