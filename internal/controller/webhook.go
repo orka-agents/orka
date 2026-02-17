@@ -11,11 +11,56 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"slices"
 	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
+
+// isAllowedWebhookURL validates that the webhook URL does not target internal/private networks.
+func isAllowedWebhookURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid webhook URL: %w", err)
+	}
+
+	// Only allow http and https schemes
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("webhook URL scheme %q not allowed, must be http or https", u.Scheme)
+	}
+
+	host := u.Hostname()
+
+	// Block well-known metadata endpoints and internal hostnames
+	blockedHosts := []string{
+		"169.254.169.254",
+		"metadata.google.internal",
+		"kubernetes.default",
+		"kubernetes.default.svc",
+	}
+	if slices.Contains(blockedHosts, host) {
+		return fmt.Errorf("webhook URL host %q is not allowed", host)
+	}
+
+	// Resolve and block private/loopback IPs
+	ips, err := net.LookupHost(host)
+	if err == nil {
+		for _, ipStr := range ips {
+			ip := net.ParseIP(ipStr)
+			if ip == nil {
+				continue
+			}
+			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+				return fmt.Errorf("webhook URL resolves to private/loopback IP %s", ipStr)
+			}
+		}
+	}
+
+	return nil
+}
 
 // WebhookPayload is the payload sent to webhook URLs
 type WebhookPayload struct {
@@ -37,8 +82,9 @@ type ResultRefPayload struct {
 
 // WebhookNotifier sends webhook notifications for task completion
 type WebhookNotifier struct {
-	client  *http.Client
-	timeout time.Duration
+	client            *http.Client
+	timeout           time.Duration
+	skipURLValidation bool // For testing only
 }
 
 // NewWebhookNotifier creates a new WebhookNotifier
@@ -55,6 +101,12 @@ func NewWebhookNotifier() *WebhookNotifier {
 func (w *WebhookNotifier) Notify(ctx context.Context, task *corev1alpha1.Task) error {
 	if task.Spec.WebhookURL == "" {
 		return nil
+	}
+
+	if !w.skipURLValidation {
+		if err := isAllowedWebhookURL(task.Spec.WebhookURL); err != nil {
+			return fmt.Errorf("webhook URL validation failed: %w", err)
+		}
 	}
 
 	payload := WebhookPayload{

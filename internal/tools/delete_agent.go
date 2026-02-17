@@ -98,6 +98,15 @@ func (t *DeleteAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return "", fmt.Errorf("failed to get agent %s/%s: %w", namespace, a.Name, err)
 	}
 
+	// Verify ownership - only allow deleting agents created by the current task
+	currentTask := os.Getenv("ORKA_TASK_NAME")
+	if currentTask != "" {
+		ownerLabel := agent.Labels["orka.ai/created-by"]
+		if ownerLabel != "" && ownerLabel != currentTask {
+			return "", fmt.Errorf("cannot delete agent %s/%s: not owned by current task (owner: %q, current: %q)", namespace, a.Name, ownerLabel, currentTask)
+		}
+	}
+
 	// Delete the agent
 	if err := t.k8sClient.Delete(ctx, &agent); err != nil {
 		return "", fmt.Errorf("failed to delete agent %s/%s: %w", namespace, a.Name, err)

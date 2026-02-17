@@ -152,7 +152,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 	defer resp.Body.Close() //nolint:errcheck
 
 	// Read response
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB limit
 	if err != nil {
 		return "", fmt.Errorf("failed to read response: %w", err)
 	}

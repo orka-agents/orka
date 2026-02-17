@@ -71,8 +71,9 @@ var _ = Describe("Tool Controller", func() {
 
 		It("should set Available condition to true and status.available to true", func() {
 			controllerReconciler := &ToolReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				SkipSSRFValidation: true,
+				Client:             k8sClient,
+				Scheme:             k8sClient.Scheme(),
 			}
 
 			result, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -133,8 +134,9 @@ var _ = Describe("Tool Controller", func() {
 
 		It("should set Available condition to false", func() {
 			controllerReconciler := &ToolReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				SkipSSRFValidation: true,
+				Client:             k8sClient,
+				Scheme:             k8sClient.Scheme(),
 				HTTPClient: &http.Client{
 					Timeout: 1 * time.Second,
 				},
@@ -201,8 +203,9 @@ var _ = Describe("Tool Controller", func() {
 
 		It("should set Available condition to false with secret error", func() {
 			controllerReconciler := &ToolReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				SkipSSRFValidation: true,
+				Client:             k8sClient,
+				Scheme:             k8sClient.Scheme(),
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -281,8 +284,9 @@ var _ = Describe("Tool Controller", func() {
 
 		It("should set Available condition to false with key-not-found error", func() {
 			controllerReconciler := &ToolReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				SkipSSRFValidation: true,
+				Client:             k8sClient,
+				Scheme:             k8sClient.Scheme(),
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -336,8 +340,9 @@ var _ = Describe("Tool Controller", func() {
 
 		It("should set Available condition to false with URL validation error", func() {
 			controllerReconciler := &ToolReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				SkipSSRFValidation: true,
+				Client:             k8sClient,
+				Scheme:             k8sClient.Scheme(),
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -392,8 +397,9 @@ var _ = Describe("Tool Controller", func() {
 
 		It("should set Available condition to false with authBodyKey error", func() {
 			controllerReconciler := &ToolReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				SkipSSRFValidation: true,
+				Client:             k8sClient,
+				Scheme:             k8sClient.Scheme(),
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -417,8 +423,9 @@ var _ = Describe("Tool Controller", func() {
 
 		It("should not return an error", func() {
 			controllerReconciler := &ToolReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				SkipSSRFValidation: true,
+				Client:             k8sClient,
+				Scheme:             k8sClient.Scheme(),
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{

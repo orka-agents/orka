@@ -139,6 +139,15 @@ func TestCancelTaskTool_Execute(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "cannot cancel when ORKA_TASK_NAME not set",
+			args: CancelTaskArgs{
+				TaskName:  "child-task",
+				Namespace: "default",
+			},
+			envVars: map[string]string{},
+			wantErr: true,
+		},
+		{
 			name: "missing task name",
 			args: CancelTaskArgs{
 				Namespace: "default",

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -74,6 +75,15 @@ func LoadConfig(defaultMaxTurns int) (*AgentConfig, error) {
 			return nil, fmt.Errorf("invalid ORKA_TIMEOUT_SECONDS: %w", err)
 		}
 		cfg.TimeoutSeconds = n
+	}
+
+	// Sanitize SubPath to prevent directory traversal
+	if cfg.SubPath != "" {
+		cleaned := filepath.Clean(cfg.SubPath)
+		if filepath.IsAbs(cleaned) || strings.HasPrefix(cleaned, "..") {
+			return nil, fmt.Errorf("ORKA_WORKSPACE_SUBPATH %q contains path traversal", cfg.SubPath)
+		}
+		cfg.SubPath = cleaned
 	}
 
 	return cfg, nil
