@@ -41,6 +41,10 @@ var _ = Describe("Agent Task", Ordered, func() {
 		// Results are stored in SQLite — no ConfigMap cleanup needed
 	})
 
+	AfterEach(func() {
+		dumpDebugInfo(taskName)
+	})
+
 	It("should create a Job and complete for an agent-type task", func() {
 		By("creating an Agent CRD with claude runtime")
 		agentManifest := fmt.Sprintf(`{

@@ -389,8 +389,8 @@ The controller accepts flags to configure agent worker images:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--copilot-worker-image` | `orka-agent-worker-copilot:latest` | Container image for Copilot agent workers |
-| `--claude-worker-image` | `orka-agent-worker-claude:latest` | Container image for Claude agent workers |
+| `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Container image for Copilot agent workers |
+| `--claude-worker-image` | `ghcr.io/sozercan/orka/agent-worker-claude:latest` | Container image for Claude agent workers |
 
 Example:
 

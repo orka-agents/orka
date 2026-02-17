@@ -18,14 +18,14 @@ import (
 )
 
 const (
-	maxRetries      = 3
+	maxRetries      = 5
 	saTokenPath     = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	saNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 )
 
 // SubmitResult sends the task result to the controller via HTTP POST.
 // It reads ORKA_RESULT_ENDPOINT or constructs the URL from ORKA_CONTROLLER_URL.
-// Retries with exponential backoff (1s, 2s, 4s) on failure.
+// Retries up to 5 times with exponential backoff (2s, 4s, 8s, 16s) on failure.
 func SubmitResult(result []byte) error {
 	endpoint, err := resultEndpoint()
 	if err != nil {
@@ -38,7 +38,7 @@ func SubmitResult(result []byte) error {
 	var lastErr error
 	for attempt := range maxRetries {
 		if attempt > 0 {
-			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+			backoff := time.Duration(1<<uint(attempt)) * time.Second
 			time.Sleep(backoff)
 		}
 

@@ -10,9 +10,13 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,9 +28,24 @@ import (
 
 var (
 	// managerImage is the manager image to be built and loaded for testing.
-	managerImage = "example.com/orka:v0.0.1"
+	managerImage = "ghcr.io/sozercan/orka:latest"
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
+
+	// Worker images to build and load for e2e testing.
+	aiWorkerImage      = "ghcr.io/sozercan/orka/ai-worker:latest"
+	generalWorkerImage = "ghcr.io/sozercan/orka/general-worker:latest"
+	copilotWorkerImage = "ghcr.io/sozercan/orka/agent-worker-copilot:latest"
+	claudeWorkerImage  = "ghcr.io/sozercan/orka/agent-worker-claude:latest"
+
+	// E2E environment configuration (loaded from .env or environment)
+	e2eOpenAIAPIKey      string
+	e2eOpenAIBaseURL     string
+	e2eOpenAIModel       string
+	e2eAnthropicAPIKey   string
+	e2eAnthropicBaseURL  string
+	e2eAnthropicModel    string
+	e2eGitHubToken       string
 )
 
 // TestE2E runs the e2e test suite to validate the solution in an isolated environment.
@@ -40,18 +59,35 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	By("building the manager image")
-	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
+	By("building all Docker images")
+	cmd := exec.Command("make", "docker-build-all",
+		fmt.Sprintf("IMG=%s", managerImage),
+		fmt.Sprintf("AI_WORKER_IMG=%s", aiWorkerImage),
+		fmt.Sprintf("GENERAL_WORKER_IMG=%s", generalWorkerImage),
+		fmt.Sprintf("COPILOT_WORKER_IMG=%s", copilotWorkerImage),
+		fmt.Sprintf("CLAUDE_WORKER_IMG=%s", claudeWorkerImage),
+	)
 	_, err := utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager image")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build Docker images")
 
-	// TODO(user): If you want to change the e2e test vendor from Kind,
-	// ensure the image is built and available, then remove the following block.
-	By("loading the manager image on Kind")
-	err = utils.LoadImageToKindClusterWithName(managerImage)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
+	By("loading all images into Kind cluster")
+	for _, img := range []string{managerImage, aiWorkerImage, generalWorkerImage, copilotWorkerImage, claudeWorkerImage} {
+		err = utils.LoadImageToKindClusterWithName(img)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to load image %s into Kind", img))
+	}
 
 	setupCertManager()
+
+	By("loading e2e environment configuration")
+	projectDir, _ := utils.GetProjectDir()
+	loadEnvFile(filepath.Join(projectDir, "test", "e2e", ".env"))
+	e2eOpenAIAPIKey = os.Getenv("E2E_OPENAI_API_KEY")
+	e2eOpenAIBaseURL = os.Getenv("E2E_OPENAI_BASE_URL")
+	e2eOpenAIModel = os.Getenv("E2E_OPENAI_MODEL")
+	e2eAnthropicAPIKey = os.Getenv("E2E_ANTHROPIC_API_KEY")
+	e2eAnthropicBaseURL = os.Getenv("E2E_ANTHROPIC_BASE_URL")
+	e2eAnthropicModel = os.Getenv("E2E_ANTHROPIC_MODEL")
+	e2eGitHubToken = os.Getenv("E2E_GITHUB_TOKEN")
 
 	By("creating manager namespace")
 	cmd = exec.Command("kubectl", "create", "ns", namespace)
@@ -62,6 +98,27 @@ var _ = BeforeSuite(func() {
 		"pod-security.kubernetes.io/enforce=restricted")
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
+
+	By("creating e2e K8s secrets from environment variables")
+	if e2eOpenAIAPIKey != "" {
+		err = createK8sSecret("e2e-openai-secret", namespace, map[string]string{"api-key": e2eOpenAIAPIKey})
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to create OpenAI secret")
+		_, _ = fmt.Fprintf(GinkgoWriter, "Created e2e-openai-secret\n")
+	}
+	if e2eAnthropicAPIKey != "" {
+		anthropicSecretData := map[string]string{"ANTHROPIC_API_KEY": e2eAnthropicAPIKey}
+		if e2eAnthropicBaseURL != "" {
+			anthropicSecretData["ANTHROPIC_BASE_URL"] = e2eAnthropicBaseURL
+		}
+		err = createK8sSecret("e2e-anthropic-secret", namespace, anthropicSecretData)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to create Anthropic secret")
+		_, _ = fmt.Fprintf(GinkgoWriter, "Created e2e-anthropic-secret\n")
+	}
+	if e2eGitHubToken != "" {
+		err = createK8sSecret("e2e-github-secret", namespace, map[string]string{"GITHUB_TOKEN": e2eGitHubToken})
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to create GitHub secret")
+		_, _ = fmt.Fprintf(GinkgoWriter, "Created e2e-github-secret\n")
+	}
 
 	By("installing CRDs")
 	cmd = exec.Command("make", "install")
@@ -98,6 +155,12 @@ var _ = AfterSuite(func() {
 	cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace, "--ignore-not-found")
 	_, _ = utils.Run(cmd)
 
+	By("cleaning up e2e secrets")
+	for _, s := range []string{"e2e-openai-secret", "e2e-anthropic-secret", "e2e-github-secret"} {
+		cmd = exec.Command("kubectl", "delete", "secret", s, "-n", namespace, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+	}
+
 	By("undeploying the controller-manager")
 	cmd = exec.Command("make", "undeploy")
 	_, _ = utils.Run(cmd)
@@ -112,6 +175,56 @@ var _ = AfterSuite(func() {
 
 	teardownCertManager()
 })
+
+// loadEnvFile reads a .env file and sets environment variables that are not already set.
+func loadEnvFile(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "No .env file at %s (using environment directly)\n", path)
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		if os.Getenv(key) == "" {
+			os.Setenv(key, val)
+		}
+	}
+}
+
+// createK8sSecret creates a Kubernetes Secret with the given key-value data.
+func createK8sSecret(name, ns string, data map[string]string) error {
+	secret := map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata": map[string]string{
+			"name":      name,
+			"namespace": ns,
+		},
+		"type":       "Opaque",
+		"stringData": data,
+	}
+	manifest, err := json.Marshal(secret)
+	if err != nil {
+		return fmt.Errorf("failed to marshal secret: %w", err)
+	}
+
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(string(manifest))
+	_, err = utils.Run(cmd)
+	return err
+}
 
 // setupCertManager installs CertManager if needed for webhook tests.
 // Skips installation if CERT_MANAGER_INSTALL_SKIP=true or if already present.

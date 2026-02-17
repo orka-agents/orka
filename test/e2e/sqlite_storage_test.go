@@ -39,6 +39,10 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 		_, _ = utils.Run(cmd)
 	})
 
+	AfterEach(func() {
+		dumpDebugInfo(containerTaskName, agentTaskName)
+	})
+
 	// Test 1: Verify the controller is running with SQLite storage configured
 	It("should have SQLite store configured on the controller", func() {
 		By("checking that the controller pod has --store-backend and --store-path args")
