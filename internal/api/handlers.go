@@ -36,6 +36,8 @@ var builtinToolsList = []fiber.Map{
 	{"name": "web_search", "builtin": true, "description": "Search the web"},
 	{"name": "code_exec", "builtin": true, "description": "Execute code in sandbox"},
 	{"name": "file_read", "builtin": true, "description": "Read files from workspace"},
+	{"name": "web_fetch", "builtin": true, "description": "Fetch and extract content from URLs"},
+	{"name": "file_write", "builtin": true, "description": "Write files to workspace"},
 }
 
 // builtinToolsMap indexes built-in tools by name for single-tool lookup.

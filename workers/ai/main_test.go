@@ -7,7 +7,9 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -322,4 +324,255 @@ func TestAutonomousSystemPromptSuffix(t *testing.T) {
 			t.Errorf("should not contain 'of 0' for unlimited, got: %s", result)
 		}
 	})
+}
+
+func TestRun_MissingProvider(t *testing.T) {
+	t.Setenv("ORKA_AI_PROVIDER", "")
+	t.Setenv("ORKA_AI_MODEL", "test-model")
+	t.Setenv("ORKA_AI_PROMPT", "hello")
+
+	err := run()
+	if err == nil {
+		t.Fatal("expected error for missing ORKA_AI_PROVIDER")
+	}
+	if !strings.Contains(err.Error(), "ORKA_AI_PROVIDER is required") {
+		t.Errorf("error = %q, want mention of ORKA_AI_PROVIDER", err)
+	}
+}
+
+func TestRun_MissingModel(t *testing.T) {
+	t.Setenv("ORKA_AI_PROVIDER", "openai")
+	t.Setenv("ORKA_AI_MODEL", "")
+	t.Setenv("ORKA_AI_PROMPT", "hello")
+
+	err := run()
+	if err == nil {
+		t.Fatal("expected error for missing ORKA_AI_MODEL")
+	}
+	if !strings.Contains(err.Error(), "ORKA_AI_MODEL is required") {
+		t.Errorf("error = %q, want mention of ORKA_AI_MODEL", err)
+	}
+}
+
+func TestRun_MissingPrompt(t *testing.T) {
+	t.Setenv("ORKA_AI_PROVIDER", "openai")
+	t.Setenv("ORKA_AI_MODEL", "gpt-4")
+	t.Setenv("ORKA_AI_PROMPT", "")
+
+	err := run()
+	if err == nil {
+		t.Fatal("expected error for missing ORKA_AI_PROMPT")
+	}
+	if !strings.Contains(err.Error(), "ORKA_AI_PROMPT is required") {
+		t.Errorf("error = %q, want mention of ORKA_AI_PROMPT", err)
+	}
+}
+
+func TestRun_MissingAPIKey(t *testing.T) {
+	t.Setenv("ORKA_AI_PROVIDER", "openai")
+	t.Setenv("ORKA_AI_MODEL", "gpt-4")
+	t.Setenv("ORKA_AI_PROMPT", "hello")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	err := run()
+	if err == nil {
+		t.Fatal("expected error for missing API key")
+	}
+	if !strings.Contains(err.Error(), "API key") {
+		t.Errorf("error = %q, want mention of API key", err)
+	}
+}
+
+func TestCreateK8sClient_OutsideCluster(t *testing.T) {
+	// Outside a k8s cluster, createK8sClient should fail
+	_, err := createK8sClient()
+	if err == nil {
+		t.Fatal("expected error when not running in cluster")
+	}
+	if !strings.Contains(err.Error(), "in-cluster") {
+		t.Errorf("error = %q, want mention of in-cluster config", err)
+	}
+}
+
+func TestLoadCustomTools_NilClient(t *testing.T) {
+	// With nil client and no tool names, should return empty map
+	tools := loadCustomTools(context.Background(), nil, "default", nil)
+	if len(tools) != 0 {
+		t.Errorf("expected empty map, got %d tools", len(tools))
+	}
+}
+
+func TestLoadCustomTools_BuiltinToolSkipped(t *testing.T) {
+	// Built-in tools should be skipped (no k8s lookup needed)
+	tools := loadCustomTools(context.Background(), nil, "default", []string{"web_search"})
+	if len(tools) != 0 {
+		t.Errorf("expected empty map for built-in tools, got %d tools", len(tools))
+	}
+}
+
+func TestExecuteAgentLoop_NoToolCalls(t *testing.T) {
+	// Mock provider that returns a response with no tool calls
+	provider := &mockProvider{
+		response: &llm.CompletionResponse{
+			Content:    "Task completed successfully",
+			StopReason: "end_turn",
+		},
+	}
+
+	messages := []llm.Message{
+		{Role: "user", Content: "hello"},
+	}
+
+	result, err := executeAgentLoop(
+		context.Background(), provider, messages, "", "test-model",
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "Task completed successfully" {
+		t.Errorf("result = %q, want 'Task completed successfully'", result)
+	}
+}
+
+func TestExecuteAgentLoop_CompletionError(t *testing.T) {
+	provider := &mockProvider{
+		err: fmt.Errorf("provider error"),
+	}
+
+	messages := []llm.Message{
+		{Role: "user", Content: "hello"},
+	}
+
+	_, err := executeAgentLoop(
+		context.Background(), provider, messages, "", "test-model",
+		nil, nil, nil, nil,
+	)
+	if err == nil {
+		t.Fatal("expected error from provider failure")
+	}
+	if !strings.Contains(err.Error(), "completion failed") {
+		t.Errorf("error = %q, want mention of completion failed", err)
+	}
+}
+
+func TestWriteResult_NoEndpoint(t *testing.T) {
+	t.Setenv("ORKA_RESULT_ENDPOINT", "")
+	t.Setenv("ORKA_CONTROLLER_URL", "")
+
+	err := writeResult("test result")
+	if err == nil {
+		t.Fatal("expected error without result endpoint")
+	}
+}
+
+func TestWriteResult_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	t.Setenv("ORKA_RESULT_ENDPOINT", server.URL)
+
+	err := writeResult("test result")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadSessionContext_WithTempFile(t *testing.T) {
+	// Create a temp transcript file
+	dir := t.TempDir()
+	transcriptDir := filepath.Join(dir, "session")
+	os.MkdirAll(transcriptDir, 0o755) //nolint:errcheck
+
+	content := `{"role":"user","content":"Hello"}
+{"role":"assistant","content":"Hi there"}
+{"role":"tool","content":"tool result"}
+`
+	transcriptPath := filepath.Join(transcriptDir, "transcript.jsonl")
+	os.WriteFile(transcriptPath, []byte(content), 0o644) //nolint:errcheck
+
+	// loadSessionContext reads from /session/transcript.jsonl which won't
+	// exist in tests. The existing test already covers the nil return.
+	// Here we verify the function handles missing file gracefully.
+	messages := loadSessionContext()
+	if messages != nil {
+		t.Errorf("expected nil (file doesn't exist at fixed path), got %d messages", len(messages))
+	}
+}
+
+func TestLoadPlanContext_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	t.Setenv("ORKA_CONTROLLER_URL", server.URL)
+	t.Setenv("ORKA_TASK_NAME", "test-task")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	result := loadPlanContext()
+	if result != "" {
+		t.Errorf("expected empty result for server error, got: %s", result)
+	}
+}
+
+func TestLoadPlanContext_EmptyPlanDocument(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Summary":      "Phase 1",
+			"ProgressPct":  50,
+			"GoalComplete": false,
+			"PlanDocument": "",
+			"Iteration":    1,
+		})
+	}))
+	defer server.Close()
+
+	t.Setenv("ORKA_CONTROLLER_URL", server.URL)
+	t.Setenv("ORKA_TASK_NAME", "test-task")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	result := loadPlanContext()
+	if result != "" {
+		t.Errorf("expected empty result for empty PlanDocument, got: %s", result)
+	}
+}
+
+func TestLoadPlanContext_MalformedJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("{not json}")) //nolint:errcheck
+	}))
+	defer server.Close()
+
+	t.Setenv("ORKA_CONTROLLER_URL", server.URL)
+	t.Setenv("ORKA_TASK_NAME", "test-task")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	result := loadPlanContext()
+	if result != "" {
+		t.Errorf("expected empty result for malformed JSON, got: %s", result)
+	}
+}
+
+// mockProvider implements llm.Provider for testing.
+type mockProvider struct {
+	response *llm.CompletionResponse
+	err      error
+}
+
+func (m *mockProvider) Complete(_ context.Context, _ *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	return m.response, m.err
+}
+
+func (m *mockProvider) Stream(_ context.Context, _ *llm.CompletionRequest) (<-chan llm.StreamChunk, error) {
+	return nil, fmt.Errorf("stream not implemented")
+}
+
+func (m *mockProvider) Name() string {
+	return "mock"
 }

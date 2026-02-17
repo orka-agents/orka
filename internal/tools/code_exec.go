@@ -14,15 +14,35 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
+
+// denyPattern pairs a compiled regex with a human-readable description
+type denyPattern struct {
+	re   *regexp.Regexp
+	desc string
+}
+
+// defaultDenyPatterns blocks dangerous shell commands in bash/sh execution
+var defaultDenyPatterns = []denyPattern{
+	{regexp.MustCompile(`\brm\s+-[rf]{1,2}\b`), "destructive rm command"},
+	{regexp.MustCompile(`\bdel\s+/[fq]\b`), "destructive del command"},
+	{regexp.MustCompile(`\brmdir\s+/s\b`), "destructive rmdir command"},
+	{regexp.MustCompile(`\b(format|mkfs|diskpart)\b`), "disk format command"},
+	{regexp.MustCompile(`\bdd\s+if=`), "raw disk write (dd)"},
+	{regexp.MustCompile(`>\s*/dev/sd[a-z]\b`), "write to block device"},
+	{regexp.MustCompile(`\b(shutdown|reboot|poweroff)\b`), "system shutdown/reboot"},
+	{regexp.MustCompile(`:\(\)\s*\{.*\};\s*:`), "fork bomb"},
+}
 
 // CodeExecTool implements code execution functionality
 type CodeExecTool struct {
 	workDir      string
 	timeout      time.Duration
 	allowedLangs map[string]bool
+	denyPatterns []denyPattern
 }
 
 // CodeExecArgs are the arguments for the code execution tool
@@ -57,6 +77,7 @@ func NewCodeExecTool() *CodeExecTool {
 			"bash":       true,
 			"sh":         true,
 		},
+		denyPatterns: defaultDenyPatterns,
 	}
 }
 
@@ -175,6 +196,11 @@ func (t *CodeExecTool) executeNode(ctx context.Context, code string) CodeExecRes
 
 // executeBash executes Bash code
 func (t *CodeExecTool) executeBash(ctx context.Context, code string) CodeExecResult {
+	// Check deny patterns for shell commands
+	if msg := t.checkDenyPatterns(code); msg != "" {
+		return CodeExecResult{Error: msg, ExitCode: -1}
+	}
+
 	// Write code to a temporary file
 	tmpFile := filepath.Join(t.workDir, "script.sh")
 	if err := os.WriteFile(tmpFile, []byte(code), 0755); err != nil {
@@ -184,6 +210,16 @@ func (t *CodeExecTool) executeBash(ctx context.Context, code string) CodeExecRes
 
 	cmd := exec.CommandContext(ctx, "bash", tmpFile)
 	return t.runCommand(cmd)
+}
+
+// checkDenyPatterns scans code against deny patterns and returns an error message if matched
+func (t *CodeExecTool) checkDenyPatterns(code string) string {
+	for _, p := range t.denyPatterns {
+		if p.re.MatchString(code) {
+			return fmt.Sprintf("command blocked by safety guard: %s", p.desc)
+		}
+	}
+	return ""
 }
 
 // runCommand executes a command and captures output

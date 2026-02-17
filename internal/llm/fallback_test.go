@@ -167,6 +167,227 @@ func TestFallbackProvider_ContextCancelled(t *testing.T) {
 	}
 }
 
+func TestFallbackProvider_Stream_PrimarySucceeds(t *testing.T) {
+	primary := &retryMockProvider{
+		name: "primary",
+		streamResults: [][]StreamChunk{
+			{{Content: "chunk1"}, {Content: "chunk2"}, {Done: true}},
+		},
+	}
+	fb := &retryMockProvider{name: "fb"}
+
+	fp := NewFallbackProvider(primary, []FallbackEntry{
+		{Provider: fb},
+	})
+
+	ch, err := fp.Stream(context.Background(), &CompletionRequest{})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	var content string
+	for chunk := range ch {
+		content += chunk.Content
+	}
+	if content != "chunk1chunk2" {
+		t.Errorf("expected 'chunk1chunk2', got %q", content)
+	}
+	if fb.streamCallCount != 0 {
+		t.Error("fallback should not have been called")
+	}
+}
+
+func TestFallbackProvider_Stream_PrimaryEmpty_ClosedChannel(t *testing.T) {
+	primary := &retryMockProvider{
+		name:          "primary",
+		streamResults: [][]StreamChunk{{}}, // empty stream
+	}
+	fb := &retryMockProvider{name: "fb"}
+
+	fp := NewFallbackProvider(primary, []FallbackEntry{
+		{Provider: fb},
+	})
+
+	ch, err := fp.Stream(context.Background(), &CompletionRequest{})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	chunks := 0
+	for range ch {
+		chunks++
+	}
+	if chunks != 0 {
+		t.Errorf("expected 0 chunks from empty stream, got %d", chunks)
+	}
+}
+
+func TestFallbackProvider_Stream_AllFail(t *testing.T) {
+	primary := &retryMockProvider{
+		name: "primary",
+		streamResults: [][]StreamChunk{
+			{{Error: &ProviderError{StatusCode: 401, Message: "unauthorized"}, Done: true}},
+		},
+	}
+	fb := &retryMockProvider{
+		name: "fb",
+		streamResults: [][]StreamChunk{
+			{{Error: &ProviderError{StatusCode: 403, Message: "forbidden"}, Done: true}},
+		},
+	}
+
+	fp := NewFallbackProvider(primary, []FallbackEntry{
+		{Provider: fb},
+	})
+
+	ch, err := fp.Stream(context.Background(), &CompletionRequest{})
+	if err != nil {
+		t.Fatalf("expected no error from Stream(), got %v", err)
+	}
+
+	var gotError bool
+	for chunk := range ch {
+		if chunk.Error != nil {
+			gotError = true
+		}
+	}
+	if !gotError {
+		t.Error("expected error chunk when all providers fail")
+	}
+}
+
+func TestFallbackProvider_Stream_WithCooldown(t *testing.T) {
+	primary := &retryMockProvider{name: "primary"}
+	fb := &retryMockProvider{
+		name: "fb",
+		streamResults: [][]StreamChunk{
+			{{Content: "from fb"}, {Done: true}},
+		},
+	}
+
+	tracker := NewCooldownTracker()
+	tracker.MarkCooldown("primary")
+
+	fp := NewFallbackProvider(primary, []FallbackEntry{
+		{Provider: fb},
+	})
+	fp.SetCooldownTracker(tracker)
+
+	ch, err := fp.Stream(context.Background(), &CompletionRequest{})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	var content string
+	for chunk := range ch {
+		content += chunk.Content
+	}
+	if content != "from fb" {
+		t.Errorf("expected 'from fb', got %q", content)
+	}
+	if primary.streamCallCount != 0 {
+		t.Error("primary should have been skipped due to cooldown")
+	}
+}
+
+func TestFallbackProvider_Stream_429MarksCooldown(t *testing.T) {
+	primary := &retryMockProvider{
+		name: "primary",
+		streamResults: [][]StreamChunk{
+			{{Error: &ProviderError{StatusCode: 429, Message: "rate limited"}, Done: true}},
+		},
+	}
+	fb := &retryMockProvider{
+		name: "fb",
+		streamResults: [][]StreamChunk{
+			{{Content: "ok"}, {Done: true}},
+		},
+	}
+
+	tracker := NewCooldownTracker()
+	fp := NewFallbackProvider(primary, []FallbackEntry{
+		{Provider: fb},
+	})
+	fp.SetCooldownTracker(tracker)
+
+	ch, err := fp.Stream(context.Background(), &CompletionRequest{})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	for range ch {
+	}
+
+	if !tracker.IsCoolingDown("primary") {
+		t.Error("primary should be in cooldown after 429")
+	}
+}
+
+func TestFallbackProvider_Stream_ModelOverride(t *testing.T) {
+	primary := &retryMockProvider{
+		name: "primary",
+		streamResults: [][]StreamChunk{
+			{{Error: &ProviderError{StatusCode: 401, Message: "unauthorized"}, Done: true}},
+		},
+	}
+	fb := &retryMockProvider{
+		name: "fb",
+		streamResults: [][]StreamChunk{
+			{{Content: "ok"}, {Done: true}},
+		},
+	}
+
+	fp := NewFallbackProvider(primary, []FallbackEntry{
+		{Provider: fb, Model: "override-model"},
+	})
+
+	ch, err := fp.Stream(context.Background(), &CompletionRequest{Model: "original"})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	for range ch {
+	}
+	if fb.streamCallCount != 1 {
+		t.Error("fallback should have been called")
+	}
+}
+
+func TestFallbackProvider_Stream_AllCooledDown_UsesShortestCooldown(t *testing.T) {
+	primary := &retryMockProvider{
+		name: "primary",
+		streamResults: [][]StreamChunk{
+			{{Content: "from primary"}, {Done: true}},
+		},
+	}
+	fb := &retryMockProvider{
+		name: "fb",
+		streamResults: [][]StreamChunk{
+			{{Content: "from fb"}, {Done: true}},
+		},
+	}
+
+	tracker := NewCooldownTracker()
+	tracker.MarkCooldown("primary")
+	tracker.MarkCooldown("primary") // longer cooldown
+	tracker.MarkCooldown("fb")      // shorter cooldown
+
+	fp := NewFallbackProvider(primary, []FallbackEntry{
+		{Provider: fb},
+	})
+	fp.SetCooldownTracker(tracker)
+
+	ch, err := fp.Stream(context.Background(), &CompletionRequest{})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	for range ch {
+	}
+	if fb.streamCallCount != 1 {
+		t.Errorf("expected fb to be called (shortest cooldown), fb calls: %d", fb.streamCallCount)
+	}
+}
+
 func TestFallbackProvider_Stream_FallbackOnFirstChunkError(t *testing.T) {
 	primary := &retryMockProvider{
 		name: "primary",
