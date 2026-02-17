@@ -23,21 +23,23 @@ import (
 
 var _ = Describe("Tools and Configuration", Ordered, func() {
 	const (
-		searchTaskName   = "e2e-tool-search"
-		fileReadTaskName = "e2e-tool-fileread"
-		customToolName   = "e2e-custom-echo"
-		customToolTask   = "e2e-custom-tool-task"
-		filterAgentName  = "e2e-filter-agent"
-		filterTaskName   = "e2e-filter-task"
-		priorTask1Name   = "e2e-prior-task-1"
-		priorTask2Name   = "e2e-prior-task-2"
-		priorAgentName   = "e2e-prior-agent"
-		toolProviderName = "e2e-tool-provider"
+		searchTaskName    = "e2e-tool-search"
+		fileReadTaskName  = "e2e-tool-fileread"
+		customToolName    = "e2e-custom-echo"
+		customToolTask    = "e2e-custom-tool-task"
+		filterAgentName   = "e2e-filter-agent"
+		filterTaskName    = "e2e-filter-task"
+		priorTask1Name    = "e2e-prior-task-1"
+		priorTask2Name    = "e2e-prior-task-2"
+		priorAgentName    = "e2e-prior-agent"
+		toolProviderName  = "e2e-tool-provider"
+		webFetchTaskName  = "e2e-tool-webfetch"
+		fileWriteTaskName = "e2e-tool-filewrite"
 	)
 
 	AfterAll(func() {
 		By("cleaning up tools test resources")
-		for _, name := range []string{searchTaskName, fileReadTaskName, customToolTask, filterTaskName, priorTask1Name, priorTask2Name} {
+		for _, name := range []string{searchTaskName, fileReadTaskName, customToolTask, filterTaskName, priorTask1Name, priorTask2Name, webFetchTaskName, fileWriteTaskName} {
 			cmd := exec.Command("kubectl", "delete", "task", name, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 		}
@@ -52,7 +54,7 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 	})
 
 	AfterEach(func() {
-		dumpDebugInfo(searchTaskName, fileReadTaskName, customToolTask, filterTaskName, priorTask1Name, priorTask2Name)
+		dumpDebugInfo(searchTaskName, fileReadTaskName, customToolTask, filterTaskName, priorTask1Name, priorTask2Name, webFetchTaskName, fileWriteTaskName)
 	})
 
 	// Test: AI task using web_search tool
@@ -484,5 +486,89 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 			g.Expect(envMap).To(HaveKey("ORKA_PRIOR_TASK_NAMESPACE"))
 			g.Expect(envMap["ORKA_PRIOR_TASK_NAMESPACE"]).To(Equal(namespace))
 		}, 2*time.Minute, time.Second).Should(Succeed())
+	})
+
+	// Test: AI task using web_fetch tool
+	It("should execute an AI task that uses the web_fetch tool", func() {
+		skipIfNoKey("E2E_OPENAI_API_KEY")
+
+		model := e2eOpenAIModel
+		if model == "" {
+			model = "gpt-4o-mini"
+		}
+
+		By("creating an AI task that uses web_fetch")
+		taskManifest := fmt.Sprintf(`{
+			"apiVersion": "core.orka.ai/v1alpha1",
+			"kind": "Task",
+			"metadata": {
+				"name": "%s",
+				"namespace": "%s"
+			},
+			"spec": {
+				"type": "ai",
+				"ai": {
+					"prompt": "Use the web_fetch tool to fetch https://httpbin.org/get and summarize the response.",
+					"model": "%s",
+					"providerRef": {
+						"name": "%s"
+					}
+				}
+			}
+		}`, webFetchTaskName, namespace, model, toolProviderName)
+
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = stringReader(taskManifest)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("waiting for task to complete")
+		phase := waitForTaskCompletion(webFetchTaskName, 5*time.Minute)
+		Expect(phase).To(Equal("Succeeded"), "Web fetch AI task should succeed")
+
+		By("verifying result is stored")
+		verifyResultAvailable(webFetchTaskName)
+	})
+
+	// Test: AI task using file_write tool
+	It("should execute an AI task that uses the file_write tool", func() {
+		skipIfNoKey("E2E_OPENAI_API_KEY")
+
+		model := e2eOpenAIModel
+		if model == "" {
+			model = "gpt-4o-mini"
+		}
+
+		By("creating an AI task that uses file_write")
+		taskManifest := fmt.Sprintf(`{
+			"apiVersion": "core.orka.ai/v1alpha1",
+			"kind": "Task",
+			"metadata": {
+				"name": "%s",
+				"namespace": "%s"
+			},
+			"spec": {
+				"type": "ai",
+				"ai": {
+					"prompt": "Use the file_write tool to write 'e2e test' to /tmp/e2e-write-test.txt, then file_read it and tell me the contents.",
+					"model": "%s",
+					"providerRef": {
+						"name": "%s"
+					}
+				}
+			}
+		}`, fileWriteTaskName, namespace, model, toolProviderName)
+
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = stringReader(taskManifest)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("waiting for task to complete")
+		phase := waitForTaskCompletion(fileWriteTaskName, 5*time.Minute)
+		Expect(phase).To(Equal("Succeeded"), "File write AI task should succeed")
+
+		By("verifying result is stored")
+		verifyResultAvailable(fileWriteTaskName)
 	})
 })
