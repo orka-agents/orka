@@ -166,19 +166,19 @@ func (t *ReviewPullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 
 	// Fetch PR details
-	prTitle, prBody, prAuthor, baseBranch, headBranch, err := fetchPRDetails(httpClient, baseURL, token, owner, repo, args.PRNumber)
+	prTitle, prBody, prAuthor, baseBranch, headBranch, err := fetchPRDetails(ctx, httpClient, baseURL, token, owner, repo, args.PRNumber)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch PR details: %w", err)
 	}
 
 	// Fetch PR diff
-	diff, err := fetchPRDiff(httpClient, baseURL, token, owner, repo, args.PRNumber)
+	diff, err := fetchPRDiff(ctx, httpClient, baseURL, token, owner, repo, args.PRNumber)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch PR diff: %w", err)
 	}
 
 	// Fetch PR files
-	files, err := fetchPRFiles(httpClient, baseURL, token, owner, repo, args.PRNumber)
+	files, err := fetchPRFiles(ctx, httpClient, baseURL, token, owner, repo, args.PRNumber)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch PR files: %w", err)
 	}
@@ -198,10 +198,10 @@ func (t *ReviewPullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 }
 
 // fetchPRDetails fetches PR metadata from the GitHub API.
-func fetchPRDetails(httpClient *http.Client, baseURL, token, owner, repo string, prNumber int) (title, body, author, baseBranch, headBranch string, err error) {
+func fetchPRDetails(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, prNumber int) (title, body, author, baseBranch, headBranch string, err error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", baseURL, owner, repo, prNumber)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", "", "", "", "", err
 	}
@@ -242,10 +242,10 @@ func fetchPRDetails(httpClient *http.Client, baseURL, token, owner, repo string,
 }
 
 // fetchPRDiff fetches the unified diff of a PR.
-func fetchPRDiff(httpClient *http.Client, baseURL, token, owner, repo string, prNumber int) (string, error) {
+func fetchPRDiff(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, prNumber int) (string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", baseURL, owner, repo, prNumber)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}
@@ -269,10 +269,10 @@ func fetchPRDiff(httpClient *http.Client, baseURL, token, owner, repo string, pr
 }
 
 // fetchPRFiles fetches the list of changed files in a PR.
-func fetchPRFiles(httpClient *http.Client, baseURL, token, owner, repo string, prNumber int) ([]FileChange, error) {
+func fetchPRFiles(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, prNumber int) ([]FileChange, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files", baseURL, owner, repo, prNumber)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}

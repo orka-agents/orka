@@ -125,7 +125,12 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 		args = append(args, "--branch", cfg.GitBranch)
 	}
 
-	args = append(args, "--single-branch", "--depth=1", cfg.GitRepo, workspaceDir)
+	args = append(args, "--single-branch")
+	if cfg.GitRef == "" {
+		// Shallow clone only when no specific commit ref is needed
+		args = append(args, "--depth=1")
+	}
+	args = append(args, cfg.GitRepo, workspaceDir)
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Stdout = os.Stdout

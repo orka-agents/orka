@@ -629,7 +629,7 @@ func TestGetGitHubPRDetails(t *testing.T) {
 	}))
 	defer server.Close()
 
-	headSHA, state, merged, err := getGitHubPRDetails("test-token", "sozercan", "ayna", 42, server.URL)
+	headSHA, state, merged, err := getGitHubPRDetails(context.Background(), "test-token", "sozercan", "ayna", 42, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -651,7 +651,7 @@ func TestGetGitHubPRDetails_APIError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, _, _, err := getGitHubPRDetails("test-token", "sozercan", "ayna", 42, server.URL)
+	_, _, _, err := getGitHubPRDetails(context.Background(), "test-token", "sozercan", "ayna", 42, server.URL)
 	if err == nil {
 		t.Fatal("expected error for 500 response")
 	}
@@ -671,7 +671,7 @@ func TestCheckCIStatusDetailed_AllPassed(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed("test-token", "sozercan", "ayna", "abc123", server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", "abc123", server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -693,7 +693,7 @@ func TestCheckCIStatusDetailed_SomePending(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed("test-token", "sozercan", "ayna", "abc123", server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", "abc123", server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -718,7 +718,7 @@ func TestCheckCIStatusDetailed_SomeFailed(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed("test-token", "sozercan", "ayna", "abc123", server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", "abc123", server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -780,7 +780,7 @@ func TestAutoMergePullRequestTool_ForcePushNewSHA(t *testing.T) {
 	}))
 	defer server.Close()
 
-	sha1, state1, merged1, err := getGitHubPRDetails("test-token", "sozercan", "ayna", 42, server.URL)
+	sha1, state1, merged1, err := getGitHubPRDetails(context.Background(), "test-token", "sozercan", "ayna", 42, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -794,7 +794,7 @@ func TestAutoMergePullRequestTool_ForcePushNewSHA(t *testing.T) {
 		t.Error("expected merged to be false")
 	}
 
-	sha2, _, _, err := getGitHubPRDetails("test-token", "sozercan", "ayna", 42, server.URL)
+	sha2, _, _, err := getGitHubPRDetails(context.Background(), "test-token", "sozercan", "ayna", 42, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -824,7 +824,7 @@ func TestAutoMergePullRequestTool_Transient5xx(t *testing.T) {
 	defer server.Close()
 
 	// First call: should return transient error
-	_, _, _, err := getGitHubPRDetails("test-token", "sozercan", "ayna", 42, server.URL)
+	_, _, _, err := getGitHubPRDetails(context.Background(), "test-token", "sozercan", "ayna", 42, server.URL)
 	if err == nil {
 		t.Fatal("expected error on first call")
 	}
@@ -833,7 +833,7 @@ func TestAutoMergePullRequestTool_Transient5xx(t *testing.T) {
 	}
 
 	// Second call: should succeed
-	sha, state, merged, err := getGitHubPRDetails("test-token", "sozercan", "ayna", 42, server.URL)
+	sha, state, merged, err := getGitHubPRDetails(context.Background(), "test-token", "sozercan", "ayna", 42, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error on retry: %v", err)
 	}

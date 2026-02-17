@@ -207,7 +207,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 
 			// Fetch result if available via HTTP GET to controller
 			if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
-				resultStr, fetchErr := fetchTaskResult(taskName)
+				resultStr, fetchErr := fetchTaskResult(ctx, taskName)
 				if fetchErr == nil {
 					// Parse structured result and strip diff to avoid context bloat
 					sr := common.ParseStructuredResult(resultStr)
@@ -333,7 +333,7 @@ func getRetryInfo(task *corev1alpha1.Task) (retryCount, maxRetries int) {
 const saTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
 // fetchTaskResult fetches a task result from the controller via HTTP GET.
-func fetchTaskResult(taskName string) (string, error) {
+func fetchTaskResult(ctx context.Context, taskName string) (string, error) {
 	controllerURL := os.Getenv("ORKA_CONTROLLER_URL")
 	if controllerURL == "" {
 		return "", fmt.Errorf("ORKA_CONTROLLER_URL is not set")
@@ -342,7 +342,7 @@ func fetchTaskResult(taskName string) (string, error) {
 	controllerURL = strings.TrimRight(controllerURL, "/")
 	url := fmt.Sprintf("%s/api/v1/tasks/%s/result", controllerURL, taskName)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}

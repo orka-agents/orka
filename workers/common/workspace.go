@@ -133,11 +133,6 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 		fmt.Fprintf(os.Stderr, "warning: git diff failed in %s, returning plain text result\n", workDir)
 		return []byte(agentOutput), nil
 	}
-	// Also include unstaged changes
-	unstaged, _ := execGit(workDir, "diff", "--binary", "--full-index")
-	if unstaged != "" {
-		diff += unstaged
-	}
 
 	var files []string
 	stat, err := execGit(workDir, "diff", "--cached", "--stat")

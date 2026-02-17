@@ -229,7 +229,7 @@ func (t *AutoMergePullRequestTool) Execute(ctx context.Context, argsJSON json.Ra
 			}
 		}
 
-		result, done, err := pc.pollOnce()
+		result, done, err := pc.pollOnce(ctx)
 		if err != nil {
 			return "", err
 		}
@@ -250,8 +250,8 @@ type pollContext struct {
 
 // pollOnce performs a single poll iteration. It returns a result and done=true
 // if the poll loop should stop, or done=false if polling should continue.
-func (pc *pollContext) pollOnce() (*AutoMergePullRequestResult, bool, error) {
-	headSHA, state, merged, err := getGitHubPRDetails(pc.token, pc.owner, pc.repo, pc.prNumber, pc.baseURL)
+func (pc *pollContext) pollOnce(ctx context.Context) (*AutoMergePullRequestResult, bool, error) {
+	headSHA, state, merged, err := getGitHubPRDetails(ctx, pc.token, pc.owner, pc.repo, pc.prNumber, pc.baseURL)
 	if err != nil {
 		if isTransientHTTPError(err) {
 			pc.logger.Info("transient GitHub API error, will retry", "error", err)
@@ -273,7 +273,7 @@ func (pc *pollContext) pollOnce() (*AutoMergePullRequestResult, bool, error) {
 		}, true, nil
 	}
 
-	ciResult, err := checkCIStatusDetailed(pc.token, pc.owner, pc.repo, headSHA, pc.baseURL)
+	ciResult, err := checkCIStatusDetailed(ctx, pc.token, pc.owner, pc.repo, headSHA, pc.baseURL)
 	if err != nil {
 		if isTransientHTTPError(err) {
 			pc.logger.Info("transient GitHub API error, will retry", "error", err)
@@ -291,7 +291,7 @@ func (pc *pollContext) pollOnce() (*AutoMergePullRequestResult, bool, error) {
 	}
 
 	if ciResult.Passed {
-		sha, err := mergeGitHubPR(pc.token, pc.owner, pc.repo, pc.prNumber, pc.mergeMethod, pc.commitTitle, pc.commitMessage, pc.baseURL)
+		sha, err := mergeGitHubPR(ctx, pc.token, pc.owner, pc.repo, pc.prNumber, pc.mergeMethod, pc.commitTitle, pc.commitMessage, pc.baseURL)
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to merge pull request: %w", err)
 		}
@@ -312,10 +312,10 @@ func marshalResult(r AutoMergePullRequestResult) string {
 }
 
 // getGitHubPRDetails retrieves the head SHA, state, and merged status for a pull request.
-func getGitHubPRDetails(token, owner, repo string, prNumber int, baseURL string) (headSHA, state string, merged bool, err error) {
+func getGitHubPRDetails(ctx context.Context, token, owner, repo string, prNumber int, baseURL string) (headSHA, state string, merged bool, err error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", baseURL, owner, repo, prNumber)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", "", false, err
 	}
@@ -354,10 +354,10 @@ func getGitHubPRDetails(token, owner, repo string, prNumber int, baseURL string)
 }
 
 // checkCIStatusDetailed checks CI status and categorizes checks into passed, failed, or pending.
-func checkCIStatusDetailed(token, owner, repo, sha, baseURL string) (CICheckResult, error) {
+func checkCIStatusDetailed(ctx context.Context, token, owner, repo, sha, baseURL string) (CICheckResult, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs", baseURL, owner, repo, sha)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return CICheckResult{}, err
 	}

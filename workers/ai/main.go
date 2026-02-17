@@ -383,7 +383,7 @@ func loadPlanContext() string {
 		saToken = strings.TrimSpace(string(data))
 	}
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
 	if err != nil {
 		fmt.Printf("Warning: failed to create plan request: %v\n", err)
 		return ""

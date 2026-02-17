@@ -84,8 +84,22 @@ func (s *Store) DeleteSession(ctx context.Context, namespace, name string) error
 }
 
 // AcquireLock atomically sets the active_task for a session.
-// Returns an error if the session is already locked by another task.
+// Returns store.ErrNotFound if the session does not exist, or an error if already locked.
 func (s *Store) AcquireLock(ctx context.Context, namespace, name, taskName string) error {
+	// Check if session exists
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sessions WHERE namespace = ? AND name = ?`,
+		namespace, name,
+	).Scan(&count)
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return store.ErrNotFound
+	}
+
+	// Try to acquire lock
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE sessions SET active_task = ? WHERE namespace = ? AND name = ? AND active_task = ''`,
 		taskName, namespace, name,

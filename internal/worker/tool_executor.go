@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"strings"
 	"time"
@@ -97,7 +98,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 	for key, val := range params {
 		placeholder := "{{" + key + "}}"
 		if strings.Contains(url, placeholder) {
-			url = strings.ReplaceAll(url, placeholder, fmt.Sprintf("%v", val))
+			url = strings.ReplaceAll(url, placeholder, neturl.PathEscape(fmt.Sprintf("%v", val)))
 			interpolatedKeys[key] = true
 		}
 	}

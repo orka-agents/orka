@@ -123,6 +123,8 @@ func buildMessages(msgs []llm.Message) []anthropic.MessageParam {
 			messages = append(messages, anthropic.NewUserMessage(
 				anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false),
 			))
+		case "system":
+			messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)))
 		}
 	}
 	return messages
@@ -187,15 +189,15 @@ func buildRequestParams(req *llm.CompletionRequest, messages []anthropic.Message
 	return params
 }
 
-// handleStreamEvent processes a single stream event and sends chunks to the channel.
-// Returns true if the event was a tool_use start.
+// handleStreamEvent processes a single stream event and sends chunks via send.
+// Returns false if the context was cancelled and the caller should stop.
 func handleStreamEvent(
 	event anthropic.MessageStreamEventUnion,
-	ch chan<- llm.StreamChunk,
+	send func(llm.StreamChunk) bool,
 	currentToolCall **llm.ToolCall,
 	toolCallArgs *[]byte,
 	hasToolCalls *bool,
-) {
+) bool {
 	switch e := event.AsAny().(type) {
 	case anthropic.ContentBlockStartEvent:
 		cb := e.ContentBlock
@@ -210,7 +212,9 @@ func handleStreamEvent(
 	case anthropic.ContentBlockDeltaEvent:
 		switch delta := e.Delta.AsAny().(type) {
 		case anthropic.TextDelta:
-			ch <- llm.StreamChunk{Content: delta.Text}
+			if !send(llm.StreamChunk{Content: delta.Text}) {
+				return false
+			}
 		case anthropic.InputJSONDelta:
 			if *currentToolCall != nil {
 				*toolCallArgs = append(*toolCallArgs, []byte(delta.PartialJSON)...)
@@ -223,7 +227,9 @@ func handleStreamEvent(
 			} else {
 				(*currentToolCall).Arguments = json.RawMessage("{}")
 			}
-			ch <- llm.StreamChunk{ToolCall: *currentToolCall}
+			if !send(llm.StreamChunk{ToolCall: *currentToolCall}) {
+				return false
+			}
 			*currentToolCall = nil
 			*toolCallArgs = nil
 		}
@@ -232,10 +238,13 @@ func handleStreamEvent(
 		if *hasToolCalls && stopReason == "" {
 			stopReason = "tool_use"
 		}
-		ch <- llm.StreamChunk{Done: true, StopReason: stopReason}
+		if !send(llm.StreamChunk{Done: true, StopReason: stopReason}) {
+			return false
+		}
 	case anthropic.MessageStopEvent:
 		// Final stop if not already sent via MessageDeltaEvent
 	}
+	return true
 }
 
 // Stream sends a streaming completion request
@@ -244,6 +253,15 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 
 	go func() {
 		defer close(ch)
+
+		send := func(chunk llm.StreamChunk) bool {
+			select {
+			case ch <- chunk:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
 
 		messages := buildMessages(req.Messages)
 		params := buildRequestParams(req, messages)
@@ -254,11 +272,13 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 		hasToolCalls := false
 
 		for stream.Next() {
-			handleStreamEvent(stream.Current(), ch, &currentToolCall, &toolCallArgs, &hasToolCalls)
+			if !handleStreamEvent(stream.Current(), send, &currentToolCall, &toolCallArgs, &hasToolCalls) {
+				return
+			}
 		}
 
 		if err := stream.Err(); err != nil {
-			ch <- llm.StreamChunk{Error: toProviderError(err), Done: true}
+			send(llm.StreamChunk{Error: toProviderError(err), Done: true})
 		}
 	}()
 
