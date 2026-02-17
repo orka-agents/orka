@@ -12,6 +12,8 @@ The controller exposes a REST API for programmatic access. All `/api/v1/*` endpo
 | `/api/v1/tasks/:id` | DELETE | Cancel/delete task |
 | `/api/v1/tasks/:id/logs` | GET | Stream task logs |
 | `/api/v1/tasks/:id/result` | GET | Get task result |
+| `/api/v1/tasks/:id/artifacts` | GET | List task artifacts |
+| `/api/v1/tasks/:id/artifacts/:filename` | GET | Download a task artifact |
 | `/api/v1/tasks/:id/plan` | GET | Get task plan |
 | `/api/v1/tasks/:id/children` | GET | Get child tasks |
 
@@ -101,6 +103,7 @@ See [OpenAI Compatibility](openai-compat.md) for details.
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/internal/v1/results/:namespace/:taskName` | POST | Submit task result |
+| `/internal/v1/artifacts/:namespace/:taskName/:filename` | POST | Upload task artifact |
 | `/internal/v1/sessions/:namespace/:name/transcript` | GET | Get session transcript |
 | `/internal/v1/plans/:namespace/:taskName` | POST | Save plan state |
 | `/internal/v1/plans/:namespace/:taskName` | GET | Get plan state |
@@ -207,6 +210,15 @@ curl -X POST http://localhost:8080/api/v1/tasks \
 curl http://localhost:8080/api/v1/tasks/my-task/result \
   -H "Authorization: Bearer $(kubectl create token orka-client)"
 
+# List task artifacts
+curl http://localhost:8080/api/v1/tasks/my-task/artifacts \
+  -H "Authorization: Bearer $(kubectl create token orka-client)"
+
+# Download an artifact
+curl -L http://localhost:8080/api/v1/tasks/my-task/artifacts/output.json \
+  -H "Authorization: Bearer $(kubectl create token orka-client)" \
+  -o output.json
+
 # Chat with SSE streaming
 curl -N http://localhost:8080/api/v1/chat \
   -H "Authorization: Bearer $(kubectl create token orka-client)" \
@@ -226,6 +238,8 @@ These tools are available to AI worker agents:
 | `web_search` | Search the web via configurable API (Tavily, etc.) | `query` (required), `limit` (default 5) |
 | `code_exec` | Execute code in a sandboxed environment | `language` (python/javascript/bash), `code`, `timeout` (max 60s) |
 | `file_read` | Read files from the workspace | `path`, `offset`, `limit` (max 1MB) |
+| `web_fetch` | Fetch and extract URL content | `url` (required), `max_chars` (default 50000), `raw` |
+| `file_write` | Create or modify files in the workspace | `path`, `content` (required), `mode` (`write`/`append`), `create_dirs` |
 
 ### Coordination Tools
 

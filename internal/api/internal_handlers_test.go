@@ -26,7 +26,7 @@ import (
 func setupTestInternalHandlers() (*InternalHandlers, *fiber.App, *sqlite.Store) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	h := NewInternalHandlers(ss, ss, ss, ss)
+	h := NewInternalHandlers(ss, ss, ss, ss, ss)
 	app := fiber.New()
 
 	// Inject a default UserInfo so verifyCallerNamespace passes
@@ -210,7 +210,7 @@ func TestGetMessages(t *testing.T) {
 	})
 
 	t.Run("messaging not enabled", func(t *testing.T) {
-		hNoMsg := NewInternalHandlers(ss, ss, ss, nil)
+		hNoMsg := NewInternalHandlers(ss, ss, ss, nil, nil)
 		app2 := fiber.New()
 		app2.Use(func(c fiber.Ctx) error {
 			c.Locals(UserInfoContextKey, &UserInfo{Username: "system:serviceaccount:default:worker"})
@@ -501,7 +501,7 @@ func TestSendMessageAdditional(t *testing.T) {
 	_, _, ss := setupTestInternalHandlers()
 
 	t.Run("messaging not enabled", func(t *testing.T) {
-		hNoMsg := NewInternalHandlers(ss, ss, ss, nil)
+		hNoMsg := NewInternalHandlers(ss, ss, ss, nil, nil)
 		app := fiber.New()
 		app.Use(func(c fiber.Ctx) error {
 			c.Locals(UserInfoContextKey, &UserInfo{Username: "system:serviceaccount:default:worker"})
@@ -522,7 +522,7 @@ func TestSendMessageAdditional(t *testing.T) {
 	})
 
 	t.Run("missing namespace", func(t *testing.T) {
-		h := NewInternalHandlers(ss, ss, ss, ss)
+		h := NewInternalHandlers(ss, ss, ss, ss, ss)
 		app := fiber.New()
 		app.Use(func(c fiber.Ctx) error {
 			c.Locals(UserInfoContextKey, &UserInfo{Username: "system:serviceaccount:default:worker"})
@@ -544,7 +544,7 @@ func TestSendMessageAdditional(t *testing.T) {
 	})
 
 	t.Run("cross-namespace denied", func(t *testing.T) {
-		h := NewInternalHandlers(ss, ss, ss, ss)
+		h := NewInternalHandlers(ss, ss, ss, ss, ss)
 		app := fiber.New()
 		app.Use(func(c fiber.Ctx) error {
 			c.Locals(UserInfoContextKey, &UserInfo{

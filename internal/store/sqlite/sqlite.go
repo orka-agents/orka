@@ -128,6 +128,17 @@ func migrate(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(namespace, to_task, read)`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(namespace, parent_task)`,
+		`CREATE TABLE IF NOT EXISTS artifacts (
+			namespace    TEXT NOT NULL,
+			task_name    TEXT NOT NULL,
+			filename     TEXT NOT NULL,
+			content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+			size         INTEGER NOT NULL,
+			data         BLOB NOT NULL,
+			created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (namespace, task_name, filename)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(namespace, task_name)`,
 	}
 
 	for _, stmt := range statements {

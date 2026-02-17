@@ -22,19 +22,21 @@ const maxResultSize = 10 << 20 // 10MB
 
 // InternalHandlers contains handlers for internal worker endpoints.
 type InternalHandlers struct {
-	resultStore  store.ResultStore
-	sessionStore store.SessionStore
-	planStore    store.PlanStore
-	messageStore store.MessageStore
+	resultStore   store.ResultStore
+	sessionStore  store.SessionStore
+	planStore     store.PlanStore
+	messageStore  store.MessageStore
+	artifactStore store.ArtifactStore
 }
 
 // NewInternalHandlers creates a new InternalHandlers instance.
-func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.PlanStore, ms store.MessageStore) *InternalHandlers {
+func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.PlanStore, ms store.MessageStore, as store.ArtifactStore) *InternalHandlers {
 	return &InternalHandlers{
-		resultStore:  rs,
-		sessionStore: ss,
-		planStore:    ps,
-		messageStore: ms,
+		resultStore:   rs,
+		sessionStore:  ss,
+		planStore:     ps,
+		messageStore:  ms,
+		artifactStore: as,
 	}
 }
 
@@ -89,6 +91,46 @@ func (h *InternalHandlers) SubmitResult(c fiber.Ctx) error {
 	}
 
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// UploadArtifact handles POST /internal/v1/artifacts/{namespace}/{taskName}/{filename}.
+// Workers call this to upload artifact files.
+func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
+	namespace := c.Params("namespace")
+	taskName := c.Params("taskName")
+	filename := c.Params("filename")
+
+	if namespace == "" || taskName == "" || filename == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "namespace, taskName, and filename are required")
+	}
+
+	if err := verifyCallerNamespace(c, namespace); err != nil {
+		return err
+	}
+
+	if h.artifactStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "artifact storage not enabled")
+	}
+
+	data := c.Body()
+	if len(data) == 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "empty request body")
+	}
+	if len(data) > maxResultSize {
+		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "artifact exceeds 10MB limit")
+	}
+
+	contentType := string(c.Request().Header.ContentType())
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	ctx := c.Context()
+	if err := h.artifactStore.SaveArtifact(ctx, namespace, taskName, filename, contentType, data); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to save artifact: %v", err))
+	}
+
+	return c.SendStatus(fiber.StatusCreated)
 }
 
 // GetSessionTranscript handles GET /internal/v1/sessions/{namespace}/{name}/transcript.

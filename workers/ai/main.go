@@ -208,6 +208,12 @@ func run() error {
 		return fmt.Errorf("failed to write result: %w", err)
 	}
 
+	// Upload any artifacts the agent wrote
+	if err := common.UploadArtifacts(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", err)
+		// Don't fail the task if artifact upload fails
+	}
+
 	fmt.Printf("Task %s/%s completed successfully\n", taskNamespace, taskName)
 	return nil
 }

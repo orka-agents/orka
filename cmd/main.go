@@ -275,6 +275,7 @@ func main() {
 		SessionStore:              sqliteStore,
 		PlanStore:                 sqliteStore,
 		MessageStore:              sqliteStore,
+		ArtifactStore:             sqliteStore,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 		MaxTasksPerNamespace:      int32(maxTasksPerNamespace), //nolint:gosec // validated non-negative by flag default
 	}).SetupWithManager(mgr); err != nil {
@@ -325,6 +326,7 @@ func main() {
 		SessionStore:              sqliteStore,
 		PlanStore:                 sqliteStore,
 		MessageStore:              sqliteStore,
+		ArtifactStore:             sqliteStore,
 		HealthChecker:             sqliteStore,
 		Clientset:                 kubeClient,
 		Chat: api.ChatConfig{
