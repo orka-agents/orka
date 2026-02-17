@@ -54,10 +54,10 @@ var _ = Describe("Anthropic Provider AI Tasks", Ordered, func() {
 		By("verifying the Provider is created and ready")
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "provider", providerName,
-				"-n", namespace, "-o", "jsonpath={.metadata.name}")
+				"-n", namespace, "-o", "jsonpath={.status.ready}")
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(Equal(providerName))
+			g.Expect(output).To(Equal("true"), "Provider should be ready")
 		}, 30*time.Second, time.Second).Should(Succeed())
 
 		By("creating an AI task with an Anthropic model")

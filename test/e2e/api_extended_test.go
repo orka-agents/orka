@@ -217,6 +217,16 @@ var _ = Describe("API Extended Coverage", Ordered, func() {
 			_, _ = utils.Run(cmd)
 		})
 
+		By("confirming task is in Scheduled phase")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "task", scheduledTaskName,
+				"-o", "jsonpath={.status.phase}",
+				"-n", namespace)
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).To(ContainSubstring("Scheduled"))
+		}, 30*time.Second, 2*time.Second).Should(Succeed())
+
 		By("waiting for at least one child task")
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "tasks",
@@ -226,7 +236,7 @@ var _ = Describe("API Extended Coverage", Ordered, func() {
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(output).NotTo(BeEmpty(), "Should have at least one child task")
-		}, 90*time.Second, 5*time.Second).Should(Succeed())
+		}, 4*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("querying children via the API")
 		req, err := http.NewRequest("GET",

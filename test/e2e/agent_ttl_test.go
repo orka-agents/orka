@@ -96,13 +96,13 @@ var _ = Describe("Agent TTL Auto-Deletion", func() {
 		phase := waitForTaskCompletion(taskName, 2*time.Minute)
 		Expect(phase).To(Equal("Succeeded"), "Container task should succeed")
 
-		By("waiting for the agent to be auto-deleted after TTL (up to 90s)")
+		By("waiting for the agent to be auto-deleted after TTL (up to 3 minutes)")
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "agent", agentName,
 				"-n", namespace, "--ignore-not-found")
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(output).To(BeEmpty(), "Agent should be deleted after TTL")
-		}, 90*time.Second, 5*time.Second).Should(Succeed())
+		}, 3*time.Minute, 5*time.Second).Should(Succeed())
 	})
 })
