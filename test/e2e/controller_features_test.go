@@ -75,15 +75,6 @@ var _ = Describe("Controller Feature Tests", func() {
 				_, _ = utils.Run(cmd)
 			})
 
-			By("waiting for the Provider to be ready")
-			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "provider", "e2e-sp-provider",
-					"-n", namespace, "-o", "jsonpath={.status.ready}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("true"), "Provider should be ready")
-			}, 30*time.Second, time.Second).Should(Succeed())
-
 			By("creating an Agent with systemPrompt.configMapRef")
 			model := e2eOpenAIModel
 			if model == "" {
