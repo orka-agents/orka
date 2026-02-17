@@ -5,7 +5,6 @@
 *.so
 *.dylib
 bin/*
-Dockerfile.cross
 
 # Test binary, built with `go test -c`
 *.test
@@ -42,3 +41,6 @@ ui/coverage/
 # Claude CLI binary
 /claude
 /cli
+
+# E2E test environment variables
+test/e2e/.env

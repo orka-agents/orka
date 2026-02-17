@@ -16,9 +16,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
@@ -269,12 +272,18 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 		return ctrl.Result{}, err
 	}
 
-	// Schedule requeue for TTL check if agent has TTL and is idle
-	if agent.Spec.TTLAfterLastTask != nil && activeTasks == 0 && agent.Status.LastUsed != nil {
-		ttl := agent.Spec.TTLAfterLastTask.Duration
-		elapsed := time.Since(agent.Status.LastUsed.Time)
-		if remaining := ttl - elapsed; remaining > 0 {
-			return ctrl.Result{RequeueAfter: remaining}, nil
+	// Schedule requeue for TTL check if agent has TTL
+	if agent.Spec.TTLAfterLastTask != nil {
+		if activeTasks == 0 && agent.Status.LastUsed != nil {
+			ttl := agent.Spec.TTLAfterLastTask.Duration
+			elapsed := time.Since(agent.Status.LastUsed.Time)
+			if remaining := ttl - elapsed; remaining > 0 {
+				return ctrl.Result{RequeueAfter: remaining}, nil
+			}
+		} else if activeTasks > 0 {
+			// Tasks still running; requeue to re-check after they finish.
+			// The Task watch will also trigger reconciliation on completion.
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 	}
 
@@ -315,6 +324,21 @@ func (r *AgentReconciler) checkTTLExpiry(ctx context.Context, agent *corev1alpha
 func (r *AgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Agent{}).
+		// Watch Tasks so that when a task completes, the referenced agent
+		// gets reconciled for TTL checking.
+		Watches(&corev1alpha1.Task{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []reconcile.Request {
+				task, ok := obj.(*corev1alpha1.Task)
+				if !ok || task.Spec.AgentRef == nil {
+					return nil
+				}
+				return []reconcile.Request{{
+					NamespacedName: types.NamespacedName{
+						Name:      task.Spec.AgentRef.Name,
+						Namespace: task.Namespace,
+					},
+				}}
+			})).
 		Named("agent").
 		Complete(r)
 }

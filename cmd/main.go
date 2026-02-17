@@ -66,6 +66,7 @@ func main() {
 	var watchNamespace string
 	var copilotWorkerImage string
 	var claudeWorkerImage string
+	var generalWorkerImage string
 	var chatEnabled bool
 	var chatProvider string
 	var chatModel string
@@ -109,6 +110,8 @@ func main() {
 		controller.DefaultClaudeWorkerImage, "Container image for Claude agent worker.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
+	flag.StringVar(&generalWorkerImage, "general-worker-image",
+		controller.DefaultGeneralWorkerImage, "Container image for general worker.")
 	flag.BoolVar(&chatEnabled, "chat-enabled", true, "Enable the chat endpoint.")
 	flag.StringVar(&chatProvider, "chat-provider", "", "Default Provider CRD name for chat.")
 	flag.StringVar(&chatModel, "chat-model", "", "Default model for chat.")
@@ -258,6 +261,7 @@ func main() {
 	jobBuilder.CopilotWorkerImage = copilotWorkerImage
 	jobBuilder.ClaudeWorkerImage = claudeWorkerImage
 	jobBuilder.AIWorkerImage = aiWorkerImage
+	jobBuilder.GeneralWorkerImage = generalWorkerImage
 	jobBuilder.ControllerURL = controllerURL
 	// Setup Task controller with helper components
 	if err := (&controller.TaskReconciler{

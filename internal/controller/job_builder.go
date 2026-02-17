@@ -18,22 +18,23 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 const (
 	// DefaultAIWorkerImage is the default image for AI tasks
-	DefaultAIWorkerImage = "orka-ai-worker:latest"
+	DefaultAIWorkerImage = "ghcr.io/sozercan/orka/ai-worker:latest"
 
 	// DefaultGeneralWorkerImage is the default image for container tasks
-	DefaultGeneralWorkerImage = "orka-general-worker:latest"
+	DefaultGeneralWorkerImage = "ghcr.io/sozercan/orka/general-worker:latest"
 
 	// DefaultCopilotWorkerImage is the default image for Copilot agent tasks
-	DefaultCopilotWorkerImage = "orka-agent-worker-copilot:latest"
+	DefaultCopilotWorkerImage = "ghcr.io/sozercan/orka/agent-worker-copilot:latest"
 
 	// DefaultClaudeWorkerImage is the default image for Claude agent tasks
-	DefaultClaudeWorkerImage = "orka-agent-worker-claude:latest"
+	DefaultClaudeWorkerImage = "ghcr.io/sozercan/orka/agent-worker-claude:latest"
 
 	// DefaultInitImage is the default image for init containers
 	DefaultInitImage = "busybox:1.37"
@@ -104,7 +105,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 					ServiceAccountName: "orka-worker",
 					SecurityContext:    b.buildPodSecurityContext(),
 					Containers: []corev1.Container{
-						b.buildContainer(task, agent, provider),
+						b.buildContainer(ctx, task, agent, provider),
 					},
 				},
 			},
@@ -170,13 +171,13 @@ func (b *JobBuilder) buildContainerSecurityContext() *corev1.SecurityContext {
 }
 
 // buildContainer builds the main container for the Job
-func (b *JobBuilder) buildContainer(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) corev1.Container {
+func (b *JobBuilder) buildContainer(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) corev1.Container {
 	container := corev1.Container{
 		Name:            "worker",
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: b.buildContainerSecurityContext(),
 		Resources:       b.buildResources(task, agent),
-		Env:             b.buildEnvVars(task, agent, provider),
+		Env:             b.buildEnvVars(ctx, task, agent, provider),
 		VolumeMounts:    []corev1.VolumeMount{},
 	}
 
@@ -245,7 +246,7 @@ func (b *JobBuilder) buildResources(task *corev1alpha1.Task, agent *corev1alpha1
 }
 
 // buildEnvVars builds the environment variables for the container
-func (b *JobBuilder) buildEnvVars(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) []corev1.EnvVar {
+func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) []corev1.EnvVar {
 	envVars := []corev1.EnvVar{
 		{
 			Name:  TaskNameEnvVar,
@@ -291,12 +292,12 @@ func (b *JobBuilder) buildEnvVars(task *corev1alpha1.Task, agent *corev1alpha1.A
 
 	// Add AI-specific env vars
 	if task.Spec.Type == corev1alpha1.TaskTypeAI {
-		envVars = b.addAIEnvVars(envVars, task, agent, provider)
+		envVars = b.addAIEnvVars(ctx, envVars, task, agent, provider)
 	}
 
 	// Add agent-specific env vars
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
-		envVars = b.addAgentEnvVars(envVars, task, agent)
+		envVars = b.addAgentEnvVars(ctx, envVars, task, agent)
 	}
 
 	return envVars
@@ -423,8 +424,13 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 }
 
 // addAIEnvVars adds AI-specific environment variables
-func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, providerCRD *corev1alpha1.Provider) []corev1.EnvVar {
+func (b *JobBuilder) addAIEnvVars(ctx context.Context, envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, providerCRD *corev1alpha1.Provider) []corev1.EnvVar {
 	cfg := resolveAIConfig(task, agent, providerCRD)
+
+	// Resolve system prompt from ConfigMapRef if not already set inline
+	if cfg.systemPrompt == "" && agent != nil && agent.Spec.SystemPrompt != nil && agent.Spec.SystemPrompt.ConfigMapRef != nil {
+		cfg.systemPrompt = b.resolveConfigMapValue(ctx, agent.Namespace, agent.Spec.SystemPrompt.ConfigMapRef)
+	}
 
 	envVars = append(envVars,
 		corev1.EnvVar{Name: "ORKA_AI_PROVIDER", Value: cfg.providerType},
@@ -497,6 +503,20 @@ func (b *JobBuilder) addAIEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Ta
 				envVars = append(envVars, corev1.EnvVar{Name: prefix + "_AZURE_API_VERSION", Value: fbProvider.Spec.Azure.APIVersion})
 			}
 		}
+	}
+
+	// AllowBash: task override > agent default > false (also applicable for AI tasks with agentRef)
+	allowBash := false
+	if agent != nil && agent.Spec.Runtime != nil {
+		allowBash = agent.Spec.Runtime.DefaultAllowBash
+	}
+	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowBash != nil {
+		allowBash = *task.Spec.AgentRuntime.AllowBash
+	}
+	if allowBash {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "ORKA_ALLOW_BASH", Value: "true",
+		})
 	}
 
 	return envVars
@@ -694,7 +714,7 @@ func (b *JobBuilder) getAgentWorkerImage(agent *corev1alpha1.Agent) string {
 }
 
 // addAgentEnvVars adds agent-runtime-specific environment variables
-func (b *JobBuilder) addAgentEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent) []corev1.EnvVar {
+func (b *JobBuilder) addAgentEnvVars(ctx context.Context, envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent) []corev1.EnvVar {
 	// Prompt (required)
 	prompt := task.Spec.Prompt
 	if prompt == "" && task.Spec.AI != nil {
@@ -702,7 +722,7 @@ func (b *JobBuilder) addAgentEnvVars(envVars []corev1.EnvVar, task *corev1alpha1
 	}
 	envVars = append(envVars, corev1.EnvVar{Name: "ORKA_PROMPT", Value: prompt})
 
-	envVars = b.addAgentModelEnvVars(envVars, agent)
+	envVars = b.addAgentModelEnvVars(ctx, envVars, agent)
 	envVars = b.addAgentToolsEnvVars(envVars, task, agent)
 	envVars = b.addAgentWorkspaceEnvVars(envVars, task)
 
@@ -718,7 +738,7 @@ func (b *JobBuilder) addAgentEnvVars(envVars []corev1.EnvVar, task *corev1alpha1
 }
 
 // addAgentModelEnvVars adds model and system prompt env vars from the Agent.
-func (b *JobBuilder) addAgentModelEnvVars(envVars []corev1.EnvVar, agent *corev1alpha1.Agent) []corev1.EnvVar {
+func (b *JobBuilder) addAgentModelEnvVars(ctx context.Context, envVars []corev1.EnvVar, agent *corev1alpha1.Agent) []corev1.EnvVar {
 	if agent == nil {
 		return envVars
 	}
@@ -727,12 +747,31 @@ func (b *JobBuilder) addAgentModelEnvVars(envVars []corev1.EnvVar, agent *corev1
 			Name: "ORKA_MODEL", Value: agent.Spec.Model.Name,
 		})
 	}
-	if agent.Spec.SystemPrompt != nil && agent.Spec.SystemPrompt.Inline != "" {
-		envVars = append(envVars, corev1.EnvVar{
-			Name: "ORKA_SYSTEM_PROMPT", Value: agent.Spec.SystemPrompt.Inline,
-		})
+	if agent.Spec.SystemPrompt != nil {
+		var systemPrompt string
+		if agent.Spec.SystemPrompt.Inline != "" {
+			systemPrompt = agent.Spec.SystemPrompt.Inline
+		} else if agent.Spec.SystemPrompt.ConfigMapRef != nil {
+			systemPrompt = b.resolveConfigMapValue(ctx, agent.Namespace, agent.Spec.SystemPrompt.ConfigMapRef)
+		}
+		if systemPrompt != "" {
+			envVars = append(envVars, corev1.EnvVar{
+				Name: "ORKA_SYSTEM_PROMPT", Value: systemPrompt,
+			})
+		}
 	}
 	return envVars
+}
+
+// resolveConfigMapValue reads a value from a ConfigMap key.
+func (b *JobBuilder) resolveConfigMapValue(ctx context.Context, namespace string, ref *corev1alpha1.ConfigMapKeySelector) string {
+	cm := &corev1.ConfigMap{}
+	if err := b.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: namespace}, cm); err != nil {
+		log.FromContext(ctx).Error(err, "failed to resolve ConfigMap for system prompt",
+			"configMap", ref.Name, "namespace", namespace, "key", ref.Key)
+		return ""
+	}
+	return cm.Data[ref.Key]
 }
 
 // addAgentToolsEnvVars adds max turns, allowed/disallowed tools, and bash permission env vars.
