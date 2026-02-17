@@ -58,6 +58,17 @@ Retrieve the autonomous plan state for a task.
 | `/api/v1/agents/:name` | PUT | Update an agent |
 | `/api/v1/agents/:name` | DELETE | Delete an agent |
 
+## Skills
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/skills` | POST | Create a skill |
+| `/api/v1/skills` | GET | List skills |
+| `/api/v1/skills/:name` | GET | Get skill details |
+| `/api/v1/skills/:name/content` | GET | Get raw `spec.content.inline` markdown |
+| `/api/v1/skills/:name` | PUT | Update a skill |
+| `/api/v1/skills/:name` | DELETE | Delete a skill |
+
 ## Tools
 
 | Endpoint | Method | Description |

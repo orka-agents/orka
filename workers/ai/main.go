@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -152,6 +153,11 @@ func run() error {
 
 	// Load session context if available
 	sessionContext := loadSessionContext()
+
+	// Load skills from mounted volume and prepend to system prompt
+	if skillContent := loadSkillsFromVolume(); skillContent != "" {
+		systemPrompt = skillContent + "\n\n" + systemPrompt
+	}
 
 	// Autonomous mode: fetch plan state and augment system prompt
 	if os.Getenv("ORKA_AUTONOMOUS_MODE") == trueStr {
@@ -519,4 +525,54 @@ func executeAgentLoop(
 // writeResult submits the result to the controller via HTTP POST.
 func writeResult(result string) error {
 	return common.SubmitResult([]byte(result))
+}
+
+// loadSkillsFromVolume reads skill content from the mounted volume at /workspace/.skills/.
+func loadSkillsFromVolume() string {
+	skillsDir := os.Getenv("ORKA_SKILLS_DIR")
+	if skillsDir == "" {
+		skillsDir = "/workspace/.skills"
+	}
+	// Preferred path: job builder writes a deterministic merged prompt.
+	promptPath := filepath.Join(skillsDir, "PROMPT.md")
+	if data, err := os.ReadFile(promptPath); err == nil {
+		content := strings.TrimSpace(string(data))
+		if content != "" {
+			fmt.Printf("Loaded skills prompt from %s\n", promptPath)
+			return content
+		}
+	}
+
+	// Backward-compatible fallback: load <skill>/SKILL.md files.
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil {
+		return ""
+	}
+
+	var sb strings.Builder
+	loaded := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		skillPath := filepath.Join(skillsDir, entry.Name(), "SKILL.md")
+		data, readErr := os.ReadFile(skillPath)
+		if readErr != nil {
+			continue
+		}
+		content := strings.TrimSpace(string(data))
+		if content == "" {
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n\n")
+		}
+		sb.WriteString(content)
+		loaded++
+	}
+
+	if loaded > 0 {
+		fmt.Printf("Loaded %d skill file(s) from %s\n", loaded, skillsDir)
+	}
+	return sb.String()
 }

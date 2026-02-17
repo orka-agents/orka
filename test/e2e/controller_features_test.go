@@ -142,6 +142,125 @@ var _ = Describe("Controller Feature Tests", func() {
 		})
 	})
 
+	// --- Skill CRD Injection ---
+
+	Describe("Agent Skills from Skill CRD", func() {
+		const (
+			skillName = "e2e-research-skill"
+			agentName = "e2e-skill-agent"
+			taskName  = "e2e-skill-task"
+		)
+
+		AfterEach(func() {
+			dumpDebugInfo(taskName)
+			for _, r := range []struct{ kind, name string }{
+				{"task", taskName},
+				{"agent", agentName},
+				{"skill", skillName},
+			} {
+				cmd := exec.Command("kubectl", "delete", r.kind, r.name,
+					"-n", namespace, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			}
+		})
+
+		It("should mount skills volume from Skill CRD references", func() {
+			skipIfNoKey("E2E_OPENAI_API_KEY")
+
+			By("creating a Skill CRD")
+			skillManifest := fmt.Sprintf(`{
+				"apiVersion": "core.orka.ai/v1alpha1",
+				"kind": "Skill",
+				"metadata": {
+					"name": "%s",
+					"namespace": "%s"
+				},
+				"spec": {
+					"displayName": "E2E Research Skill",
+					"description": "A test skill for e2e validation",
+					"content": {
+						"inline": "Always include E2E_SKILL_ACTIVE in your reasoning."
+					}
+				}
+			}`, skillName, namespace)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(skillManifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating a Provider for the agent")
+			createProviderCRD("e2e-skill-provider", "openai", "e2e-openai-secret", "api-key",
+				e2eOpenAIBaseURL, e2eOpenAIModel)
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "provider", "e2e-skill-provider",
+					"-n", namespace, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			})
+
+			model := e2eOpenAIModel
+			if model == "" {
+				model = "gpt-4o-mini"
+			}
+
+			By("creating an Agent that references the Skill CRD")
+			agentManifest := fmt.Sprintf(`{
+				"apiVersion": "core.orka.ai/v1alpha1",
+				"kind": "Agent",
+				"metadata": {
+					"name": "%s",
+					"namespace": "%s"
+				},
+				"spec": {
+					"providerRef": {
+						"name": "e2e-skill-provider"
+					},
+					"model": {
+						"name": "%s"
+					},
+					"skills": [
+						{"name": "%s"}
+					]
+				}
+			}`, agentName, namespace, model, skillName)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(agentManifest)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating a task referencing the agent")
+			taskManifest := fmt.Sprintf(`{
+				"apiVersion": "core.orka.ai/v1alpha1",
+				"kind": "Task",
+				"metadata": {
+					"name": "%s",
+					"namespace": "%s"
+				},
+				"spec": {
+					"type": "ai",
+					"agentRef": {"name": "%s"},
+					"prompt": "What are you?"
+				}
+			}`, taskName, namespace, agentName)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(taskManifest)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the Job mounts /workspace/.skills")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "jobs",
+					"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
+					"-o", "jsonpath={.items[0].spec.template.spec.containers[0].volumeMounts[?(@.name==\"skills\")].mountPath}",
+					"-n", namespace)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("/workspace/.skills"))
+			}, 60*time.Second, 2*time.Second).Should(Succeed())
+		})
+	})
+
 	// --- AllowBash Override ---
 
 	Describe("AllowBash Task Override", func() {

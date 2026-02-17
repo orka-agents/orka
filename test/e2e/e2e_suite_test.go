@@ -39,13 +39,13 @@ var (
 	claudeWorkerImage  = "ghcr.io/sozercan/orka/agent-worker-claude:latest"
 
 	// E2E environment configuration (loaded from .env or environment)
-	e2eOpenAIAPIKey      string
-	e2eOpenAIBaseURL     string
-	e2eOpenAIModel       string
-	e2eAnthropicAPIKey   string
-	e2eAnthropicBaseURL  string
-	e2eAnthropicModel    string
-	e2eGitHubToken       string
+	e2eOpenAIAPIKey     string
+	e2eOpenAIBaseURL    string
+	e2eOpenAIModel      string
+	e2eAnthropicAPIKey  string
+	e2eAnthropicBaseURL string
+	e2eAnthropicModel   string
+	e2eGitHubToken      string
 )
 
 // TestE2E runs the e2e test suite to validate the solution in an isolated environment.
@@ -127,7 +127,13 @@ var _ = BeforeSuite(func() {
 
 	By("waiting for CRDs to be established")
 	Eventually(func(g Gomega) {
-		for _, crd := range []string{"tasks.core.orka.ai", "agents.core.orka.ai"} {
+		for _, crd := range []string{
+			"tasks.core.orka.ai",
+			"agents.core.orka.ai",
+			"tools.core.orka.ai",
+			"providers.core.orka.ai",
+			"skills.core.orka.ai",
+		} {
 			cmd := exec.Command("kubectl", "wait", "--for=condition=Established",
 				"crd/"+crd, "--timeout=30s")
 			_, err := utils.Run(cmd)

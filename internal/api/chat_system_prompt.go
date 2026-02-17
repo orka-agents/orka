@@ -61,12 +61,12 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 		m = mode[0]
 	}
 
-	agentsSection, toolsSection, providersSection, err := b.buildDynamicContext(ctx)
+	agentsSection, toolsSection, providersSection, skillsSection, err := b.buildDynamicContext(ctx)
 	if err != nil {
 		return "", fmt.Errorf("building dynamic context: %w", err)
 	}
 
-	hash := b.computeHash(agentsSection, toolsSection, providersSection)
+	hash := b.computeHash(agentsSection, toolsSection, providersSection, skillsSection)
 	if hash == b.cachedHash && userSystemPrompt == "" && b.cachedPrompt != "" {
 		return b.cachedPrompt, nil
 	}
@@ -92,6 +92,12 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 	sb.WriteString("</available_tools>\n")
 	sb.WriteString(providersSection)
 	sb.WriteString("\n")
+
+	if skillsSection != "" {
+		sb.WriteString("<available_skills>\n")
+		sb.WriteString(skillsSection)
+		sb.WriteString("</available_skills>\n\n")
+	}
 
 	sb.WriteString(buildRulesSection())
 	sb.WriteString(buildExamplesSection(m))
@@ -332,11 +338,11 @@ Example 8: "Get me an answer as fast as possible" (race pattern)
 }
 
 // buildDynamicContext fetches agents, tools, and providers from the cluster and formats them.
-func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSection, toolsSection, providersSection string, err error) {
+func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSection, toolsSection, providersSection, skillsSection string, err error) {
 	// Fetch agents
 	var agentList corev1alpha1.AgentList
 	if err := b.client.List(ctx, &agentList, client.InNamespace(b.namespace)); err != nil {
-		return "", "", "", fmt.Errorf("listing agents: %w", err)
+		return "", "", "", "", fmt.Errorf("listing agents: %w", err)
 	}
 
 	agentLines := make([]string, 0, len(agentList.Items))
@@ -355,7 +361,7 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	// Fetch custom tools
 	var toolList corev1alpha1.ToolList
 	if err := b.client.List(ctx, &toolList, client.InNamespace(b.namespace)); err != nil {
-		return "", "", "", fmt.Errorf("listing tools: %w", err)
+		return "", "", "", "", fmt.Errorf("listing tools: %w", err)
 	}
 
 	toolLines := make([]string, 0, len(toolList.Items)+5)
@@ -378,7 +384,7 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	// Fetch providers
 	var providerList corev1alpha1.ProviderList
 	if err := b.client.List(ctx, &providerList, client.InNamespace(b.namespace)); err != nil {
-		return "", "", "", fmt.Errorf("listing providers: %w", err)
+		return "", "", "", "", fmt.Errorf("listing providers: %w", err)
 	}
 
 	providerNames := make([]string, 0, len(providerList.Items))
@@ -413,7 +419,26 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	providersSection = fmt.Sprintf("Runtime: providers=[%s] | agents=%d | tools=%d | container=yes | agent_runtimes=[%s]\n",
 		strings.Join(providerNames, ", "), len(agentList.Items), len(toolList.Items)+5, runtimeInfo)
 
-	return agentsSection, toolsSection, providersSection, nil
+	// Fetch skills
+	var skillList corev1alpha1.SkillList
+	if err := b.client.List(ctx, &skillList, client.InNamespace(b.namespace)); err == nil && len(skillList.Items) > 0 {
+		skillLines := make([]string, 0, len(skillList.Items))
+		for i := range skillList.Items {
+			skill := &skillList.Items[i]
+			name := skill.Name
+			if skill.Spec.DisplayName != "" {
+				name = skill.Spec.DisplayName
+			}
+			if skill.Spec.Description == "" {
+				skillLines = append(skillLines, fmt.Sprintf("%s - %s", skill.Name, name))
+				continue
+			}
+			skillLines = append(skillLines, fmt.Sprintf("%s - %s: %s", skill.Name, name, skill.Spec.Description))
+		}
+		skillsSection = strings.Join(skillLines, "\n") + "\n"
+	}
+
+	return agentsSection, toolsSection, providersSection, skillsSection, nil
 }
 
 // formatAgent produces a single-line summary for an agent.
@@ -452,10 +477,11 @@ func formatAgent(agent *corev1alpha1.Agent) string {
 }
 
 // computeHash returns a truncated SHA-256 hash of the dynamic sections.
-func (b *SystemPromptBuilder) computeHash(agents, tools, providers string) string {
+func (b *SystemPromptBuilder) computeHash(agents, tools, providers, skills string) string {
 	h := sha256.New()
 	h.Write([]byte(agents))
 	h.Write([]byte(tools))
 	h.Write([]byte(providers))
+	h.Write([]byte(skills))
 	return fmt.Sprintf("%x", h.Sum(nil))[:16]
 }

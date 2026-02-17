@@ -2,7 +2,7 @@
 
 ## Overview
 
-Replace ConfigMap-based storage for **task results** and **session transcripts** with an in-process embedded SQLite database (via `modernc.org/sqlite`). Skills remain as ConfigMaps (small, declarative, read-only). ConfigMap storage backend is **not** being kept — SQLite is the sole implementation.
+Replace ConfigMap-based storage for **task results** and **session transcripts** with an in-process embedded SQLite database (via `modernc.org/sqlite`). Skill definitions are now first-class `Skill` CRDs (small, declarative, read-only prompt assets). ConfigMap storage backend is **not** being kept — SQLite is the sole implementation for results/sessions.
 
 ### Goals
 
@@ -14,7 +14,7 @@ Replace ConfigMap-based storage for **task results** and **session transcripts**
 
 ### Non-Goals
 
-- Replacing ConfigMaps for skills (they stay as-is)
+- Re-architecting skills storage (handled separately via the Skill CRD)
 - Adding external database support (PostgreSQL, etc.) — future work behind the `Store` interface
 - Distributed/multi-replica controllers (SQLite is single-writer; HA requires a different backend)
 
@@ -385,7 +385,7 @@ GET /internal/v1/sessions/{namespace}/{name}/transcript
 ### Step 8: Update RBAC
 
 - Remove ConfigMap `create/update/patch` from `config/rbac/worker_role.yaml`
-- Workers retain ConfigMap `get/list/watch` (still needed for skills, secrets)
+- Workers retain ConfigMap `get/list/watch` (still needed for mounted runtime data and secrets)
 - Workers retain Task `create/get/list/watch` (coordination)
 
 ### Step 9: Observability
@@ -469,7 +469,7 @@ For existing clusters upgrading from ConfigMap-based storage:
 1. **Wait for in-flight tasks to complete**: `kubectl get tasks -A --field-selector status.phase=Running` — ensure no tasks are running
 2. **Upgrade controller + workers simultaneously** (same release has both changes)
 3. **Run migration** (PVC users only): `orka migrate --store-path /data/orka.db --cleanup` to move existing ConfigMap data to SQLite
-4. **Verify**: `kubectl get configmaps -l orka.ai/result=true` should show no results; `kubectl get configmaps -l orka.ai/session=true` should show no sessions (skills ConfigMaps remain)
+4. **Verify**: `kubectl get configmaps -l orka.ai/result=true` should show no results; `kubectl get configmaps -l orka.ai/session=true` should show no sessions
 
 For ephemeral (emptyDir) users: no migration needed. Old ConfigMap data is simply abandoned.
 

@@ -6,6 +6,7 @@ resources:
 - bases/core.orka.ai_tools.yaml
 - bases/core.orka.ai_agents.yaml
 - bases/core.orka.ai_providers.yaml
+- bases/core.orka.ai_skills.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

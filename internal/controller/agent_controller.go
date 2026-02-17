@@ -165,16 +165,16 @@ func (r *AgentReconciler) validateTools(ctx context.Context, agent *corev1alpha1
 	return nil
 }
 
-// validateSkills validates that referenced skill ConfigMaps exist.
+// validateSkills validates that referenced Skill CRDs exist.
 func (r *AgentReconciler) validateSkills(ctx context.Context, agent *corev1alpha1.Agent) error {
 	for _, skillRef := range agent.Spec.Skills {
-		cm := &corev1.ConfigMap{}
-		key := client.ObjectKey{Name: skillRef.ConfigMapRef.Name, Namespace: agent.Namespace}
-		if err := r.Get(ctx, key, cm); err != nil {
+		skill := &corev1alpha1.Skill{}
+		key := client.ObjectKey{Name: skillRef.Name, Namespace: agent.Namespace}
+		if err := r.Get(ctx, key, skill); err != nil {
 			if errors.IsNotFound(err) {
-				return fmt.Errorf("referenced skill ConfigMap %q not found", skillRef.ConfigMapRef.Name)
+				return fmt.Errorf("referenced Skill %q not found", skillRef.Name)
 			}
-			return fmt.Errorf("failed to get skill ConfigMap %q: %w", skillRef.ConfigMapRef.Name, err)
+			return fmt.Errorf("failed to get Skill %q: %w", skillRef.Name, err)
 		}
 	}
 	return nil

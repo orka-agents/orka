@@ -389,23 +389,23 @@ func TestComputeHash(t *testing.T) {
 	b := NewSystemPromptBuilder(c, "default")
 
 	t.Run("consistent for same inputs", func(t *testing.T) {
-		h1 := b.computeHash("agents", "tools", "providers")
-		h2 := b.computeHash("agents", "tools", "providers")
+		h1 := b.computeHash("agents", "tools", "providers", "skills")
+		h2 := b.computeHash("agents", "tools", "providers", "skills")
 		if h1 != h2 {
 			t.Errorf("hash mismatch: %q != %q", h1, h2)
 		}
 	})
 
 	t.Run("different for different inputs", func(t *testing.T) {
-		h1 := b.computeHash("agents1", "tools", "providers")
-		h2 := b.computeHash("agents2", "tools", "providers")
+		h1 := b.computeHash("agents1", "tools", "providers", "skills")
+		h2 := b.computeHash("agents2", "tools", "providers", "skills")
 		if h1 == h2 {
 			t.Error("expected different hashes for different inputs")
 		}
 	})
 
 	t.Run("returns 16-char hex string", func(t *testing.T) {
-		h := b.computeHash("a", "b", "c")
+		h := b.computeHash("a", "b", "c", "d")
 		if len(h) != 16 {
 			t.Errorf("hash length = %d, want 16", len(h))
 		}
@@ -417,7 +417,7 @@ func TestComputeHash(t *testing.T) {
 	})
 
 	t.Run("empty inputs produce valid hash", func(t *testing.T) {
-		h := b.computeHash("", "", "")
+		h := b.computeHash("", "", "", "")
 		if len(h) != 16 {
 			t.Errorf("hash length = %d, want 16", len(h))
 		}
@@ -433,7 +433,7 @@ func TestBuildDynamicContext(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).Build()
 		b := NewSystemPromptBuilder(c, "default")
 
-		agents, tools, providers, err := b.buildDynamicContext(context.Background())
+		agents, tools, providers, skills, err := b.buildDynamicContext(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -455,6 +455,9 @@ func TestBuildDynamicContext(t *testing.T) {
 		if !strings.Contains(providers, "tools=5") {
 			t.Errorf("providers = %q, expected tools=5 (built-in only)", providers)
 		}
+		if skills != "" {
+			t.Errorf("skills = %q, expected empty", skills)
+		}
 	})
 
 	t.Run("with agents and tools", func(t *testing.T) {
@@ -471,13 +474,21 @@ func TestBuildDynamicContext(t *testing.T) {
 		provider := &corev1alpha1.Provider{
 			ObjectMeta: metav1.ObjectMeta{Name: "openai", Namespace: "default"},
 		}
+		skill := &corev1alpha1.Skill{
+			ObjectMeta: metav1.ObjectMeta{Name: "researcher-skill", Namespace: "default"},
+			Spec: corev1alpha1.SkillSpec{
+				DisplayName: "Research Skill",
+				Description: "Research workflow guidance",
+				Content:     corev1alpha1.SkillContent{Inline: "Use reliable sources."},
+			},
+		}
 
 		c := fake.NewClientBuilder().WithScheme(scheme).
-			WithObjects(agent, tool, provider).
+			WithObjects(agent, tool, provider, skill).
 			Build()
 		b := NewSystemPromptBuilder(c, "default")
 
-		agents, tools, providers, err := b.buildDynamicContext(context.Background())
+		agents, tools, providers, skills, err := b.buildDynamicContext(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -497,6 +508,9 @@ func TestBuildDynamicContext(t *testing.T) {
 		if !strings.Contains(providers, "tools=6") {
 			t.Errorf("providers = %q, expected tools=6", providers)
 		}
+		if !strings.Contains(skills, "researcher-skill - Research Skill: Research workflow guidance") {
+			t.Errorf("skills = %q, missing skill summary", skills)
+		}
 	})
 
 	t.Run("copilot runtime detected from github-credentials secret", func(t *testing.T) {
@@ -506,7 +520,7 @@ func TestBuildDynamicContext(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 		b := NewSystemPromptBuilder(c, "default")
 
-		_, _, providers, err := b.buildDynamicContext(context.Background())
+		_, _, providers, _, err := b.buildDynamicContext(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -522,7 +536,7 @@ func TestBuildDynamicContext(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 		b := NewSystemPromptBuilder(c, "default")
 
-		_, _, providers, err := b.buildDynamicContext(context.Background())
+		_, _, providers, _, err := b.buildDynamicContext(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -535,7 +549,7 @@ func TestBuildDynamicContext(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).Build()
 		b := NewSystemPromptBuilder(c, "default")
 
-		_, _, providers, err := b.buildDynamicContext(context.Background())
+		_, _, providers, _, err := b.buildDynamicContext(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -551,7 +565,7 @@ func TestBuildDynamicContext(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build()
 		b := NewSystemPromptBuilder(c, "default")
 
-		agents, _, _, err := b.buildDynamicContext(context.Background())
+		agents, _, _, _, err := b.buildDynamicContext(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -652,6 +666,39 @@ func TestBuildSystemPrompt(t *testing.T) {
 		}
 		if p1 != p2 {
 			t.Error("expected cached prompt to be identical")
+		}
+	})
+
+	t.Run("skill changes invalidate cache", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(scheme).Build()
+		b := NewSystemPromptBuilder(c, "default")
+
+		p1, err := b.BuildSystemPrompt(context.Background(), "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		skill := &corev1alpha1.Skill{
+			ObjectMeta: metav1.ObjectMeta{Name: "cache-skill", Namespace: "default"},
+			Spec: corev1alpha1.SkillSpec{
+				DisplayName: "Cache Skill",
+				Description: "Cache invalidation test skill",
+				Content:     corev1alpha1.SkillContent{Inline: "Use this skill."},
+			},
+		}
+		if err := c.Create(context.Background(), skill); err != nil {
+			t.Fatalf("create skill: %v", err)
+		}
+
+		p2, err := b.BuildSystemPrompt(context.Background(), "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p1 == p2 {
+			t.Error("prompt should change after adding a skill")
+		}
+		if !strings.Contains(p2, "<available_skills>") {
+			t.Error("prompt should include <available_skills> section after adding a skill")
 		}
 	})
 

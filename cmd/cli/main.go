@@ -56,6 +56,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newAgentCmd())
 	cmd.AddCommand(newTaskCmd())
 	cmd.AddCommand(newStatusCmd())
+	cmd.AddCommand(newSkillCmd())
 
 	return cmd
 }
