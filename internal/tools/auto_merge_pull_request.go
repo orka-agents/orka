@@ -393,6 +393,10 @@ func checkCIStatusDetailed(token, owner, repo, sha, baseURL string) (CICheckResu
 		return CICheckResult{}, fmt.Errorf("failed to parse check runs response: %w", err)
 	}
 
+	if checkResp.TotalCount == 0 {
+		return CICheckResult{}, fmt.Errorf("no CI checks configured for this PR")
+	}
+
 	var failed, pending []string
 	for _, check := range checkResp.CheckRuns {
 		if check.Status != "completed" {

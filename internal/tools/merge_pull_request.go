@@ -285,6 +285,10 @@ func checkGitHubCIStatus(token, owner, repo, sha, baseURL string) (bool, string,
 		return false, "", fmt.Errorf("failed to parse check runs response: %w", err)
 	}
 
+	if checkResp.TotalCount == 0 {
+		return false, "no CI checks configured", nil
+	}
+
 	var failures []string
 	for _, check := range checkResp.CheckRuns {
 		if check.Status != "completed" || check.Conclusion != "success" {

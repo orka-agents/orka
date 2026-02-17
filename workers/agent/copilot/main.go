@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -35,7 +36,7 @@ func main() {
 func buildSessionConfig(cfg *common.AgentConfig) *copilot.SessionConfig {
 	dir := workspaceDir
 	if cfg.SubPath != "" {
-		dir = workspaceDir + "/" + cfg.SubPath
+		dir = filepath.Join(workspaceDir, cfg.SubPath)
 	}
 
 	sessionCfg := &copilot.SessionConfig{

@@ -57,8 +57,9 @@ func TestWebhookNotifier_Notify_Success(t *testing.T) {
 	defer server.Close()
 
 	notifier := &WebhookNotifier{
-		client:  server.Client(),
-		timeout: 30 * time.Second,
+		client:            server.Client(),
+		timeout:           30 * time.Second,
+		skipURLValidation: true,
 	}
 
 	startTime := metav1.Now()
@@ -139,8 +140,9 @@ func TestWebhookNotifier_Notify_HTTPError(t *testing.T) {
 	defer server.Close()
 
 	notifier := &WebhookNotifier{
-		client:  server.Client(),
-		timeout: 30 * time.Second,
+		client:            server.Client(),
+		timeout:           30 * time.Second,
+		skipURLValidation: true,
 	}
 
 	task := &corev1alpha1.Task{
@@ -182,8 +184,9 @@ func TestWebhookNotifier_Notify_Non2xxStatus(t *testing.T) {
 			defer server.Close()
 
 			notifier := &WebhookNotifier{
-				client:  server.Client(),
-				timeout: 30 * time.Second,
+				client:            server.Client(),
+				timeout:           30 * time.Second,
+				skipURLValidation: true,
 			}
 
 			task := &corev1alpha1.Task{
@@ -222,8 +225,9 @@ func TestWebhookNotifier_Notify_2xxStatuses(t *testing.T) {
 			defer server.Close()
 
 			notifier := &WebhookNotifier{
-				client:  server.Client(),
-				timeout: 30 * time.Second,
+				client:            server.Client(),
+				timeout:           30 * time.Second,
+				skipURLValidation: true,
 			}
 
 			task := &corev1alpha1.Task{
@@ -287,8 +291,9 @@ func TestWebhookNotifier_Notify_ContextCancellation(t *testing.T) {
 	defer server.Close()
 
 	notifier := &WebhookNotifier{
-		client:  server.Client(),
-		timeout: 30 * time.Second,
+		client:            server.Client(),
+		timeout:           30 * time.Second,
+		skipURLValidation: true,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -319,8 +324,9 @@ func TestWebhookNotifier_Notify_NoResultRef(t *testing.T) {
 	defer server.Close()
 
 	notifier := &WebhookNotifier{
-		client:  server.Client(),
-		timeout: 30 * time.Second,
+		client:            server.Client(),
+		timeout:           30 * time.Second,
+		skipURLValidation: true,
 	}
 
 	task := &corev1alpha1.Task{
@@ -357,8 +363,9 @@ func TestWebhookNotifier_Notify_NoStartOrCompletionTime(t *testing.T) {
 	defer server.Close()
 
 	notifier := &WebhookNotifier{
-		client:  server.Client(),
-		timeout: 30 * time.Second,
+		client:            server.Client(),
+		timeout:           30 * time.Second,
+		skipURLValidation: true,
 	}
 
 	task := &corev1alpha1.Task{

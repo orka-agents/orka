@@ -89,6 +89,11 @@ func (t *CancelTaskTool) Execute(ctx context.Context, args json.RawMessage) (str
 		return "", fmt.Errorf("task_name is required")
 	}
 
+	parentTaskName := os.Getenv("ORKA_TASK_NAME")
+	if parentTaskName == "" {
+		return "", fmt.Errorf("cannot cancel tasks: ORKA_TASK_NAME not set")
+	}
+
 	namespace := a.Namespace
 	if namespace == "" {
 		namespace = os.Getenv("ORKA_TASK_NAMESPACE")
@@ -96,8 +101,6 @@ func (t *CancelTaskTool) Execute(ctx context.Context, args json.RawMessage) (str
 	if namespace == "" {
 		namespace = defaultNamespace
 	}
-
-	parentTaskName := os.Getenv("ORKA_TASK_NAME")
 
 	// Get the target task
 	task := &corev1alpha1.Task{}
@@ -109,11 +112,9 @@ func (t *CancelTaskTool) Execute(ctx context.Context, args json.RawMessage) (str
 	}
 
 	// Verify this is a child of the current task
-	if parentTaskName != "" {
-		parentLabel := task.Labels["orka.ai/parent-task"]
-		if parentLabel != parentTaskName {
-			return "", fmt.Errorf("task %q is not a child of the current task %q", a.TaskName, parentTaskName)
-		}
+	parentLabel := task.Labels["orka.ai/parent-task"]
+	if parentLabel != parentTaskName {
+		return "", fmt.Errorf("task %q is not a child of the current task %q", a.TaskName, parentTaskName)
 	}
 
 	// Can only cancel Pending or Running tasks
