@@ -48,13 +48,13 @@ controller:
 workers:
   ai:
     image:
-      repository: ghcr.io/sozercan/orka-ai-worker
+      repository: ghcr.io/sozercan/orka/ai-worker
       tag: latest
       pullPolicy: IfNotPresent
 
   general:
     image:
-      repository: ghcr.io/sozercan/orka-general-worker
+      repository: ghcr.io/sozercan/orka/general-worker
       tag: latest
       pullPolicy: IfNotPresent
 

@@ -151,7 +151,82 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 			model = "gpt-4o-mini"
 		}
 
-		By("creating a custom Tool CRD that calls an echo endpoint")
+		By("deploying an in-cluster echo receiver for the custom tool")
+		echoReceiverName := "e2e-echo-receiver"
+		echoSvcName := "e2e-echo-svc"
+		echoPort := 9090
+		receiverManifest := fmt.Sprintf(`{
+			"apiVersion": "v1",
+			"kind": "Pod",
+			"metadata": {
+				"name": "%s",
+				"namespace": "%s",
+				"labels": {"app": "%s"}
+			},
+			"spec": {
+				"containers": [{
+					"name": "echo",
+					"image": "python:3-alpine",
+					"command": ["python3", "-c"],
+					"args": ["import http.server, json\nclass H(http.server.BaseHTTPRequestHandler):\n  def do_POST(self):\n    length = int(self.headers.get('Content-Length', 0))\n    body = self.rfile.read(length)\n    self.send_response(200)\n    self.send_header('Content-Type','application/json')\n    self.end_headers()\n    self.wfile.write(json.dumps({'echo': body.decode()}).encode())\nhttp.server.HTTPServer(('', %d), H).serve_forever()"],
+					"ports": [{"containerPort": %d}],
+					"securityContext": {
+						"readOnlyRootFilesystem": true,
+						"allowPrivilegeEscalation": false,
+						"capabilities": {"drop": ["ALL"]},
+						"runAsNonRoot": true,
+						"runAsUser": 1000,
+						"seccompProfile": {"type": "RuntimeDefault"}
+					}
+				}],
+				"securityContext": {
+					"runAsNonRoot": true,
+					"seccompProfile": {"type": "RuntimeDefault"}
+				}
+			}
+		}`, echoReceiverName, namespace, echoReceiverName, echoPort, echoPort)
+
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = stringReader(receiverManifest)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create echo receiver pod")
+
+		svcManifest := fmt.Sprintf(`{
+			"apiVersion": "v1",
+			"kind": "Service",
+			"metadata": {
+				"name": "%s",
+				"namespace": "%s"
+			},
+			"spec": {
+				"selector": {"app": "%s"},
+				"ports": [{"port": %d, "targetPort": %d}]
+			}
+		}`, echoSvcName, namespace, echoReceiverName, echoPort, echoPort)
+
+		cmd = exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = stringReader(svcManifest)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create echo service")
+
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "pod", echoReceiverName,
+				"-n", namespace, "-o", "jsonpath={.status.phase}")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).To(Equal("Running"))
+		}, 2*time.Minute, time.Second).Should(Succeed())
+
+		DeferCleanup(func() {
+			cmd := exec.Command("kubectl", "delete", "pod", echoReceiverName, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "service", echoSvcName, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+
+		echoURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", echoSvcName, namespace, echoPort)
+
+		By("creating a custom Tool CRD that calls the in-cluster echo endpoint")
 		toolManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Tool",
@@ -172,16 +247,16 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 					"required": ["message"]
 				},
 				"http": {
-					"url": "https://httpbin.org/post",
+					"url": "%s",
 					"method": "POST",
 					"timeout": "10s"
 				}
 			}
-		}`, customToolName, namespace)
+		}`, customToolName, namespace, echoURL)
 
-		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(toolManifest)
-		_, err := utils.Run(cmd)
+		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create custom Tool CRD")
 
 		By("verifying the Tool CRD is created")

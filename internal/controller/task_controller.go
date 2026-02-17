@@ -663,6 +663,48 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "job failed")
 	}
 
+	// Check for pods stuck in Pending/ContainerCreating with unrecoverable errors
+	// (e.g., missing secrets, missing configmaps, image pull errors)
+	var podList corev1.PodList
+	if err := r.List(ctx, &podList, client.InNamespace(task.Namespace),
+		client.MatchingLabels{"orka.ai/task": task.Name}); err == nil {
+		for i := range podList.Items {
+			pod := &podList.Items[i]
+			if pod.Status.Phase != corev1.PodPending {
+				continue
+			}
+			// Check waiting container statuses for unrecoverable errors
+			for _, cs := range pod.Status.ContainerStatuses {
+				if cs.State.Waiting != nil {
+					reason := cs.State.Waiting.Reason
+					if reason == "CreateContainerConfigError" || reason == "ErrImageNeverPull" {
+						msg := fmt.Sprintf("pod stuck: %s - %s", reason, cs.State.Waiting.Message)
+						log.Info("failing task due to unrecoverable pod error", "reason", reason)
+						return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
+					}
+				}
+			}
+			// Check pod conditions for unschedulable
+			for _, cond := range pod.Status.Conditions {
+				if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse && cond.Reason == "Unschedulable" {
+					msg := fmt.Sprintf("pod unschedulable: %s", cond.Message)
+					log.Info("failing task due to unschedulable pod", "message", cond.Message)
+					return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
+				}
+			}
+			// Check events for volume mount failures (pod stays in ContainerCreating)
+			if task.Status.StartTime != nil && time.Since(task.Status.StartTime.Time) > 2*time.Minute {
+				for _, cs := range pod.Status.ContainerStatuses {
+					if cs.State.Waiting != nil && cs.State.Waiting.Reason == "ContainerCreating" {
+						msg := "pod stuck in ContainerCreating for over 2 minutes (possible missing secret/volume)"
+						log.Info("failing task due to extended ContainerCreating state")
+						return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
+					}
+				}
+			}
+		}
+	}
+
 	// Job still running, requeue
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
@@ -750,6 +792,17 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 	if err := r.Status().Update(ctx, task); err != nil {
 		log.Error(err, "failed to update completion status")
 		return ctrl.Result{}, err
+	}
+
+	// Update the Agent's LastUsed timestamp so TTL tracking works
+	if task.Spec.AgentRef != nil {
+		agent := &corev1alpha1.Agent{}
+		if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.AgentRef.Name, Namespace: task.Namespace}, agent); err == nil {
+			agent.Status.LastUsed = &now
+			if err := r.Status().Update(ctx, agent); err != nil {
+				log.Error(err, "failed to update agent LastUsed")
+			}
+		}
 	}
 
 	return ctrl.Result{RequeueAfter: time.Second}, nil

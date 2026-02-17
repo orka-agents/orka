@@ -67,6 +67,10 @@ spec:
           - --store-backend=sqlite
           - --store-path=/data/orka.db
           - --controller-url=http://orka-api.orka-system.svc:8080
+          - --ai-worker-image=ghcr.io/sozercan/orka/ai-worker:latest
+          - --copilot-worker-image=ghcr.io/sozercan/orka/agent-worker-copilot:latest
+          - --claude-worker-image=ghcr.io/sozercan/orka/agent-worker-claude:latest
+          - --general-worker-image=ghcr.io/sozercan/orka/general-worker:latest
         image: controller:latest
         name: manager
         ports: []

@@ -18,22 +18,23 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 const (
 	// DefaultAIWorkerImage is the default image for AI tasks
-	DefaultAIWorkerImage = "orka-ai-worker:latest"
+	DefaultAIWorkerImage = "ghcr.io/sozercan/orka/ai-worker:latest"
 
 	// DefaultGeneralWorkerImage is the default image for container tasks
-	DefaultGeneralWorkerImage = "orka-general-worker:latest"
+	DefaultGeneralWorkerImage = "ghcr.io/sozercan/orka/general-worker:latest"
 
 	// DefaultCopilotWorkerImage is the default image for Copilot agent tasks
-	DefaultCopilotWorkerImage = "orka-agent-worker-copilot:latest"
+	DefaultCopilotWorkerImage = "ghcr.io/sozercan/orka/agent-worker-copilot:latest"
 
 	// DefaultClaudeWorkerImage is the default image for Claude agent tasks
-	DefaultClaudeWorkerImage = "orka-agent-worker-claude:latest"
+	DefaultClaudeWorkerImage = "ghcr.io/sozercan/orka/agent-worker-claude:latest"
 
 	// DefaultInitImage is the default image for init containers
 	DefaultInitImage = "busybox:1.37"
@@ -766,6 +767,8 @@ func (b *JobBuilder) addAgentModelEnvVars(ctx context.Context, envVars []corev1.
 func (b *JobBuilder) resolveConfigMapValue(ctx context.Context, namespace string, ref *corev1alpha1.ConfigMapKeySelector) string {
 	cm := &corev1.ConfigMap{}
 	if err := b.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: namespace}, cm); err != nil {
+		log.FromContext(ctx).Error(err, "failed to resolve ConfigMap for system prompt",
+			"configMap", ref.Name, "namespace", namespace, "key", ref.Key)
 		return ""
 	}
 	return cm.Data[ref.Key]
