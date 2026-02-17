@@ -51,15 +51,6 @@ var _ = Describe("Anthropic Provider AI Tasks", Ordered, func() {
 		By("creating an Anthropic Provider CRD pointing to the proxy")
 		createProviderCRD(providerName, "anthropic", "e2e-anthropic-secret", "ANTHROPIC_API_KEY", e2eAnthropicBaseURL, model)
 
-		By("verifying the Provider is created and ready")
-		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "provider", providerName,
-				"-n", namespace, "-o", "jsonpath={.status.ready}")
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(Equal("true"), "Provider should be ready")
-		}, 30*time.Second, time.Second).Should(Succeed())
-
 		By("creating an AI task with an Anthropic model")
 		taskManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",

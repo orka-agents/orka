@@ -102,7 +102,7 @@ func getJobContainerImage(taskName string) string {
 	return image
 }
 
-// createProviderCRD creates a Provider CRD with the given configuration.
+// createProviderCRD creates a Provider CRD with the given configuration and waits for it to be ready.
 func createProviderCRD(name, providerType, secretName, secretKey, baseURL, model string) {
 	By(fmt.Sprintf("creating Provider CRD: %s (type: %s)", name, providerType))
 
@@ -135,6 +135,15 @@ func createProviderCRD(name, providerType, secretName, secretKey, baseURL, model
 	cmd.Stdin = stringReader(manifest)
 	_, err := utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred(), "Failed to create Provider %s", name)
+
+	// Wait for provider to become ready before returning
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "provider", name,
+			"-n", namespace, "-o", "jsonpath={.status.ready}")
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(output).To(Equal("true"), "Provider %s should be ready", name)
+	}, 30*time.Second, time.Second).Should(Succeed())
 }
 
 // dumpDebugInfo collects and prints debug information on test failure.
