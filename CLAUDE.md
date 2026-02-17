@@ -36,6 +36,8 @@ make deploy IMG=<registry>/orka:tag
 
 UI: `cd ui && bun install && bun run dev` (dev server on :5173). See @docs/development.md for full commands.
 
+Built-in AI worker tools: `web_search` (with DuckDuckGo fallback), `code_exec` (with deny-pattern safety guards for bash), `file_read`, `web_fetch` (URL content extraction), `file_write`.
+
 ## Auto-Generated Files — Do NOT Edit
 
 - `config/crd/bases/*.yaml` — regenerate with `make manifests`
@@ -82,6 +84,8 @@ Single tests: `go test ./internal/api/ -run TestHandlerName -v`
 - OpenAI provider auto-detects API mode: tries Responses API first, falls back to Chat Completions on 404/405
 - Auth tokens are cached for 60s (SHA256 hash) — token revocation has up to 60s propagation delay
 - `code_exec` tool silently caps timeout at 60s — values above 60 fall back to the 30s default
+
+The `code_exec` tool applies deny-pattern safety guards to bash/sh commands, blocking destructive operations (rm -rf, dd, mkfs, shutdown, fork bombs). Python and JavaScript are not filtered since they run through interpreters.
 
 ## Documentation
 

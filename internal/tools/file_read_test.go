@@ -411,3 +411,105 @@ func TestFileReadTool_Execute_Size(t *testing.T) {
 		t.Errorf("Size = %d, want 5", readResult.Size)
 	}
 }
+
+func TestFileReadTool_Execute_LargeFileTruncated(t *testing.T) {
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "large.txt")
+	// Create a file larger than maxFileSize
+	bigContent := make([]byte, 100)
+	for i := range bigContent {
+		bigContent[i] = 'A'
+	}
+	if err := os.WriteFile(testFile, bigContent, 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	tool := &FileReadTool{
+		workDir:      tmpDir,
+		maxFileSize:  50, // only read 50 bytes
+		allowedPaths: []string{tmpDir},
+	}
+
+	args := json.RawMessage(`{"path": "` + testFile + `"}`)
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var readResult FileReadResult
+	if err := json.Unmarshal([]byte(result), &readResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+
+	if len(readResult.Content) != 50 {
+		t.Errorf("Content length = %d, want 50", len(readResult.Content))
+	}
+	if !readResult.Truncated {
+		t.Error("expected Truncated=true for large file")
+	}
+	if readResult.Size != 100 {
+		t.Errorf("Size = %d, want 100", readResult.Size)
+	}
+}
+
+func TestFileReadTool_Execute_OffsetBeyondEnd(t *testing.T) {
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "small.txt")
+	if err := os.WriteFile(testFile, []byte("hello"), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	tool := &FileReadTool{
+		workDir:      tmpDir,
+		maxFileSize:  1024 * 1024,
+		allowedPaths: []string{tmpDir},
+	}
+
+	args := json.RawMessage(`{"path": "` + testFile + `", "offset": 1000}`)
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var readResult FileReadResult
+	if err := json.Unmarshal([]byte(result), &readResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+
+	if readResult.Content != "" {
+		t.Errorf("Content = %q, want empty for offset beyond end", readResult.Content)
+	}
+}
+
+func TestFileReadTool_Execute_Symlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	realFile := filepath.Join(tmpDir, "real.txt")
+	if err := os.WriteFile(realFile, []byte("real content"), 0644); err != nil {
+		t.Fatalf("failed to create file: %v", err)
+	}
+	symlinkFile := filepath.Join(tmpDir, "link.txt")
+	if err := os.Symlink(realFile, symlinkFile); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+
+	tool := &FileReadTool{
+		workDir:      tmpDir,
+		maxFileSize:  1024 * 1024,
+		allowedPaths: []string{tmpDir},
+	}
+
+	args := json.RawMessage(`{"path": "` + symlinkFile + `"}`)
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var readResult FileReadResult
+	if err := json.Unmarshal([]byte(result), &readResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+
+	if readResult.Content != "real content" {
+		t.Errorf("Content = %q, want %q", readResult.Content, "real content")
+	}
+}

@@ -131,7 +131,7 @@ var _ = Describe("Negative/Error Cases", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Task creation should be accepted")
 
-		By("verifying the task reaches a terminal state")
+		By("verifying the task fails")
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "task", badSecretTask,
 				"-o", "jsonpath={.status.phase}",
@@ -139,9 +139,8 @@ var _ = Describe("Negative/Error Cases", Ordered, func() {
 			)
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			// The task may fail or the Job pod may fail — either way it should reach a terminal state
-			g.Expect(output).To(BeElementOf("Running", "Failed"),
-				"Task with non-existent secret should eventually fail or have a running (but failing) Job")
-		}, 3*time.Minute, 2*time.Second).Should(Succeed())
+			g.Expect(output).To(Equal("Failed"),
+				"Task with non-existent secret should fail")
+		}, 5*time.Minute, 2*time.Second).Should(Succeed())
 	})
 })

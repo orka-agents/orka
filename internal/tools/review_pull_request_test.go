@@ -24,6 +24,8 @@ import (
 )
 
 const testPRPath = "/repos/sozercan/ayna/pulls/42"
+const testDiffAccept = "application/vnd.github.v3.diff"
+const testFetched = "fetched"
 
 func TestReviewPullRequestTool_Metadata(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -137,7 +139,7 @@ func TestReviewPullRequestTool_Success(t *testing.T) {
 		path := r.URL.Path
 
 		switch {
-		case path == testPRPath && accept == "application/vnd.github.v3.diff":
+		case path == testPRPath && accept == testDiffAccept:
 			// PR diff endpoint
 			w.Header().Set("Content-Type", "text/plain")
 			_, _ = fmt.Fprint(w, "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1,3 +1,4 @@\n package main\n+// new comment\n")
@@ -238,7 +240,7 @@ func TestReviewPullRequestTool_Success(t *testing.T) {
 	if reviewResult.Diff == "" {
 		t.Error("diff should not be empty")
 	}
-	if reviewResult.Status != "fetched" {
+	if reviewResult.Status != testFetched {
 		t.Errorf("unexpected status: %s", reviewResult.Status)
 	}
 	if len(reviewResult.Files) != 1 {
@@ -405,7 +407,7 @@ func TestReviewPullRequestTool_Execute_EmptyDiff(t *testing.T) {
 		path := r.URL.Path
 
 		switch {
-		case path == testPRPath && accept == "application/vnd.github.v3.diff":
+		case path == testPRPath && accept == testDiffAccept:
 			w.Header().Set("Content-Type", "text/plain")
 			_, _ = fmt.Fprint(w, "")
 
@@ -484,10 +486,203 @@ func TestReviewPullRequestTool_Execute_EmptyDiff(t *testing.T) {
 	if len(reviewResult.Files) != 0 {
 		t.Errorf("expected 0 files, got %d", len(reviewResult.Files))
 	}
-	if reviewResult.Status != "fetched" {
+	if reviewResult.Status != testFetched {
 		t.Errorf("unexpected status: %s", reviewResult.Status)
 	}
 	if reviewResult.PRTitle != "empty PR" {
 		t.Errorf("unexpected PR title: %s", reviewResult.PRTitle)
+	}
+}
+
+func TestReviewPullRequestTool_NoWorkspace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
+	tool := NewReviewPullRequestTool(k8sClient)
+
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(ReviewPullRequestArgs{TaskName: "coder-task", PRNumber: 42})
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for task without workspace")
+	}
+	if !strings.Contains(err.Error(), "does not have workspace") {
+		t.Errorf("unexpected error: %s", err.Error())
+	}
+}
+
+func TestReviewPullRequestTool_NoGitRepo(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					Branch: "main",
+				},
+			},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
+	tool := NewReviewPullRequestTool(k8sClient)
+
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(ReviewPullRequestArgs{TaskName: "coder-task", PRNumber: 42})
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for empty gitRepo")
+	}
+	if !strings.Contains(err.Error(), "no gitRepo") {
+		t.Errorf("unexpected error: %s", err.Error())
+	}
+}
+
+func TestReviewPullRequestTool_NoGitSecretRef(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/sozercan/ayna",
+					Branch:  "main",
+				},
+			},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
+	tool := NewReviewPullRequestTool(k8sClient)
+
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(ReviewPullRequestArgs{TaskName: "coder-task", PRNumber: 42})
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for no gitSecretRef")
+	}
+	if !strings.Contains(err.Error(), "no gitSecretRef") {
+		t.Errorf("unexpected error: %s", err.Error())
+	}
+}
+
+func TestReviewPullRequestTool_EmptyToken(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/sozercan/ayna",
+					Branch:       "main",
+					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data:       map[string][]byte{"other-key": []byte("value")},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := NewReviewPullRequestTool(k8sClient)
+
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(ReviewPullRequestArgs{TaskName: "coder-task", PRNumber: 42})
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for empty token")
+	}
+	if !strings.Contains(err.Error(), "does not contain a 'token' or 'password' key") {
+		t.Errorf("unexpected error: %s", err.Error())
+	}
+}
+
+func TestReviewPullRequestTool_PasswordKeyFallback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accept := r.Header.Get("Accept")
+		path := r.URL.Path
+
+		switch {
+		case path == testPRPath && accept == testDiffAccept:
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = fmt.Fprint(w, "diff --git a/x b/x\n")
+		case path == testPRPath:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"title":"t","body":"b","user":{"login":"u"},"base":{"ref":"main"},"head":{"ref":"dev"}}`)
+		case strings.HasSuffix(path, "/files"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `[]`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/sozercan/ayna",
+					Branch:       "main",
+					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data:       map[string][]byte{"password": []byte("my-password")},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := &ReviewPullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
+
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(ReviewPullRequestArgs{TaskName: "coder-task", PRNumber: 42})
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var reviewResult ReviewPullRequestResult
+	if err := json.Unmarshal([]byte(result), &reviewResult); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if reviewResult.Status != testFetched {
+		t.Errorf("unexpected status: %s", reviewResult.Status)
 	}
 }
