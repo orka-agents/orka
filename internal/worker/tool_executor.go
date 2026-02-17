@@ -139,12 +139,13 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 	}
 
 	// Configure timeout
+	httpClient := e.client
 	if tool.Spec.HTTP.Timeout != nil {
-		e.client.Timeout = tool.Spec.HTTP.Timeout.Duration
+		httpClient = &http.Client{Timeout: tool.Spec.HTTP.Timeout.Duration}
 	}
 
 	// Execute request
-	resp, err := e.client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("tool request failed: %w", err)
 	}
