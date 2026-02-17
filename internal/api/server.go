@@ -103,8 +103,12 @@ func (s *Server) setupMiddleware() {
 	if allowedOrigins == "" {
 		allowedOrigins = "*"
 	}
+	origins := strings.Split(allowedOrigins, ",")
+	for i, o := range origins {
+		origins[i] = strings.TrimSpace(o)
+	}
 	s.app.Use(cors.New(cors.Config{
-		AllowOrigins: strings.Split(allowedOrigins, ","),
+		AllowOrigins: origins,
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
 		AllowHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization"},
 	}))

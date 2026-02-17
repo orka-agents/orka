@@ -167,13 +167,25 @@ func TestCancelTaskTool_Execute(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "cannot cancel when ORKA_TASK_NAME not set",
+			name: "cancel without ORKA_TASK_NAME skips parent check",
 			args: CancelTaskArgs{
-				TaskName:  "child-task",
+				TaskName:  "child-task-no-parent",
 				Namespace: "default",
 			},
-			envVars: map[string]string{},
-			wantErr: true,
+			childTask: &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "child-task-no-parent",
+					Namespace: "default",
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAI,
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase: corev1alpha1.TaskPhaseRunning,
+				},
+			},
+			envVars:    map[string]string{},
+			wantStatus: "cancelled",
 		},
 		{
 			name: "missing task name",
