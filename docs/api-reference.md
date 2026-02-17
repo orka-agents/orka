@@ -226,6 +226,8 @@ These tools are available to AI worker agents:
 | `web_search` | Search the web via configurable API (Tavily, etc.) | `query` (required), `limit` (default 5) |
 | `code_exec` | Execute code in a sandboxed environment | `language` (python/javascript/bash), `code`, `timeout` (max 60s) |
 | `file_read` | Read files from the workspace | `path`, `offset`, `limit` (max 1MB) |
+| `web_fetch` | Fetch and extract URL content | `url` (required), `max_chars` (default 50000), `raw` |
+| `file_write` | Write or append files in workspace paths | `path` (required), `content` (required), `mode` (`write`/`append`), `create_dirs` |
 
 ### Coordination Tools
 

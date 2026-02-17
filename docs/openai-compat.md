@@ -51,6 +51,28 @@ stringData:
   api-key: sk-ant-...
 ```
 
+### Azure OpenAI provider example
+
+If you use Azure OpenAI, configure a Provider with `type: azure-openai`:
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Provider
+metadata:
+  name: azure-openai
+  namespace: default
+spec:
+  type: azure-openai
+  secretRef:
+    name: azure-openai-secret
+    key: api-key
+  baseURL: https://<resource>.openai.azure.com
+  defaultModel: gpt-4o-deployment
+  azure:
+    deploymentName: gpt-4o-deployment
+    apiVersion: "2024-02-15-preview"
+```
+
 3. **ServiceAccount token** for authentication:
 
 ```bash
