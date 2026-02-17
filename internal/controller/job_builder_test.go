@@ -1658,3 +1658,515 @@ func TestJobBuilder_Build_PriorTaskRef_DefaultNamespace(t *testing.T) {
 	}
 	t.Error("expected ORKA_PRIOR_TASK_NAMESPACE to default to task namespace 'my-ns'")
 }
+
+// ---------------------------------------------------------------------------
+// addSecretVolumes
+// ---------------------------------------------------------------------------
+
+func TestAddSecretVolumes_ProviderOpenAI(t *testing.T) {
+	jb := setupJobBuilder()
+	provider := &corev1alpha1.Provider{
+		Spec: corev1alpha1.ProviderSpec{
+			Type: corev1alpha1.ProviderTypeOpenAI,
+			SecretRef: corev1alpha1.ProviderSecretRef{
+				Name: "openai-secret",
+				Key:  "my-key",
+			},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "uid-1234-5678"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	job, _ := jb.Build(context.Background(), task, nil, nil)
+	jb.addSecretVolumes(job, task, nil, provider)
+	found := false
+	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
+		if env.Name == "OPENAI_API_KEY" && env.ValueFrom != nil &&
+			env.ValueFrom.SecretKeyRef.Key == "my-key" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected OPENAI_API_KEY env var from secret")
+	}
+}
+
+func TestAddSecretVolumes_ProviderAnthropic(t *testing.T) {
+	jb := setupJobBuilder()
+	provider := &corev1alpha1.Provider{
+		Spec: corev1alpha1.ProviderSpec{
+			Type: corev1alpha1.ProviderTypeAnthropic,
+			SecretRef: corev1alpha1.ProviderSecretRef{
+				Name: "anthropic-secret",
+			},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "uid-1234-5678"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	job, _ := jb.Build(context.Background(), task, nil, nil)
+	jb.addSecretVolumes(job, task, nil, provider)
+	found := false
+	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
+		if env.Name == "ANTHROPIC_API_KEY" && env.ValueFrom != nil &&
+			env.ValueFrom.SecretKeyRef.Key == defaultSecretKey {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected ANTHROPIC_API_KEY env var with default key")
+	}
+}
+
+func TestAddSecretVolumes_TaskSecret(t *testing.T) {
+	jb := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "uid-1234-5678"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:      corev1alpha1.TaskTypeAI,
+			SecretRef: &corev1alpha1.SecretReference{Name: "task-secret"},
+		},
+	}
+	job, _ := jb.Build(context.Background(), task, nil, nil)
+	jb.addSecretVolumes(job, task, nil, nil)
+	found := false
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name == "task-secrets" && v.Secret != nil && v.Secret.SecretName == "task-secret" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected task-secrets volume")
+	}
+}
+
+func TestAddSecretVolumes_AgentSecret(t *testing.T) {
+	jb := setupJobBuilder()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-sec", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			SecretRef: &corev1.LocalObjectReference{Name: "agent-secret"},
+			Model:     &corev1alpha1.ModelConfig{Provider: "openai"},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "uid-1234-5678"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	job, _ := jb.Build(context.Background(), task, nil, nil)
+	jb.addSecretVolumes(job, task, agent, nil)
+	foundVol := false
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name == "agent-secrets" && v.Secret != nil && v.Secret.SecretName == "agent-secret" {
+			foundVol = true
+		}
+	}
+	if !foundVol {
+		t.Error("expected agent-secrets volume")
+	}
+	foundEnvFrom := false
+	for _, ef := range job.Spec.Template.Spec.Containers[0].EnvFrom {
+		if ef.SecretRef != nil && ef.SecretRef.Name == "agent-secret" {
+			foundEnvFrom = true
+		}
+	}
+	if !foundEnvFrom {
+		t.Error("expected agent-secret envFrom")
+	}
+}
+
+func TestAddSecretVolumes_FallbackProvider(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	fbProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "fb-prov", Namespace: defaultNS},
+		Spec: corev1alpha1.ProviderSpec{
+			Type: corev1alpha1.ProviderTypeOpenAI,
+			SecretRef: corev1alpha1.ProviderSecretRef{
+				Name: "fb-secret",
+				Key:  "api-key",
+			},
+		},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fbProvider).Build()
+	jb := NewJobBuilder(fc)
+	jb.ControllerURL = "http://orka-controller.orka-system.svc:8080"
+
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "fb-agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Provider: "openai",
+				Fallbacks: []corev1alpha1.ModelFallback{
+					{ProviderRef: "fb-prov", Model: "gpt-3.5"},
+				},
+			},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "uid-1234-5678"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	job, _ := jb.Build(context.Background(), task, nil, nil)
+	jb.addSecretVolumes(job, task, agent, nil)
+	found := false
+	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
+		if env.Name == "ORKA_AI_FALLBACK_0_API_KEY" && env.ValueFrom != nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected fallback API key env var")
+	}
+}
+
+func TestAddSecretVolumes_ProviderAzureOpenAI(t *testing.T) {
+	jb := setupJobBuilder()
+	provider := &corev1alpha1.Provider{
+		Spec: corev1alpha1.ProviderSpec{
+			Type: corev1alpha1.ProviderTypeAzureOpenAI,
+			SecretRef: corev1alpha1.ProviderSecretRef{
+				Name: "azure-secret",
+			},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "uid-1234-5678"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	job, _ := jb.Build(context.Background(), task, nil, nil)
+	jb.addSecretVolumes(job, task, nil, provider)
+	found := false
+	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
+		if env.Name == "OPENAI_API_KEY" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected OPENAI_API_KEY for Azure OpenAI provider")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// addAIEnvVars — fallback providers
+// ---------------------------------------------------------------------------
+
+func TestAddAIEnvVars_FallbackProviders(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	fbProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "fb-prov2", Namespace: defaultNS},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:    corev1alpha1.ProviderTypeOpenAI,
+			BaseURL: "https://custom.api.com",
+			SecretRef: corev1alpha1.ProviderSecretRef{
+				Name: "fb-secret2",
+			},
+		},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fbProvider).Build()
+	jb := NewJobBuilder(fc)
+	jb.ControllerURL = "http://orka-controller.orka-system.svc:8080"
+
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "fb-agent2", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Provider: "openai",
+				Fallbacks: []corev1alpha1.ModelFallback{
+					{ProviderRef: "fb-prov2", Model: "gpt-3.5"},
+				},
+			},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI:   &corev1alpha1.AISpec{Prompt: "test"},
+		},
+	}
+	envVars := jb.addAIEnvVars(nil, task, agent, nil)
+	envMap := make(map[string]string)
+	for _, e := range envVars {
+		envMap[e.Name] = e.Value
+	}
+	if envMap["ORKA_AI_FALLBACK_COUNT"] != "1" {
+		t.Errorf("expected fallback count 1, got %s", envMap["ORKA_AI_FALLBACK_COUNT"])
+	}
+	if envMap["ORKA_AI_FALLBACK_0_PROVIDER"] != string(corev1alpha1.ProviderTypeOpenAI) {
+		t.Errorf("expected fallback provider openai, got %s", envMap["ORKA_AI_FALLBACK_0_PROVIDER"])
+	}
+	if envMap["ORKA_AI_FALLBACK_0_BASE_URL"] != "https://custom.api.com" {
+		t.Errorf("expected fallback base URL, got %s", envMap["ORKA_AI_FALLBACK_0_BASE_URL"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// getAgentWorkerImage
+// ---------------------------------------------------------------------------
+
+func TestGetAgentWorkerImage(t *testing.T) {
+	jb := setupJobBuilder()
+
+	tests := []struct {
+		name     string
+		agent    *corev1alpha1.Agent
+		expected string
+	}{
+		{
+			name:     "nil agent",
+			agent:    nil,
+			expected: DefaultClaudeWorkerImage,
+		},
+		{
+			name:     "nil runtime",
+			agent:    &corev1alpha1.Agent{},
+			expected: DefaultClaudeWorkerImage,
+		},
+		{
+			name: "copilot runtime",
+			agent: &corev1alpha1.Agent{
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+				},
+			},
+			expected: DefaultCopilotWorkerImage,
+		},
+		{
+			name: "claude runtime",
+			agent: &corev1alpha1.Agent{
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+				},
+			},
+			expected: DefaultClaudeWorkerImage,
+		},
+		{
+			name: "unknown runtime type",
+			agent: &corev1alpha1.Agent{
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: "unknown"},
+				},
+			},
+			expected: DefaultClaudeWorkerImage,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := jb.getAgentWorkerImage(tc.agent)
+			if got != tc.expected {
+				t.Errorf("expected %s, got %s", tc.expected, got)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// addAgentWorkspaceEnvVars
+// ---------------------------------------------------------------------------
+
+func TestAddAgentWorkspaceEnvVars_AllFields(t *testing.T) {
+	jb := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/org/repo",
+					Branch:       "main",
+					Ref:          "abc123",
+					SubPath:      "src/",
+					ForkRepo:     "https://github.com/fork/repo",
+					PRBaseBranch: "develop",
+					PushBranch:   "feature-branch",
+				},
+			},
+		},
+	}
+	envVars := jb.addAgentWorkspaceEnvVars(nil, task)
+	expectedVars := map[string]string{
+		"ORKA_GIT_REPO":          "https://github.com/org/repo",
+		"ORKA_GIT_BRANCH":        "main",
+		"ORKA_GIT_REF":           "abc123",
+		"ORKA_WORKSPACE_SUBPATH": "src/",
+		"ORKA_FORK_REPO":         "https://github.com/fork/repo",
+		"ORKA_PR_BASE_BRANCH":    "develop",
+		"ORKA_PUSH_BRANCH":       "feature-branch",
+	}
+	envMap := make(map[string]string)
+	for _, e := range envVars {
+		envMap[e.Name] = e.Value
+	}
+	for k, v := range expectedVars {
+		if envMap[k] != v {
+			t.Errorf("expected %s=%s, got %s", k, v, envMap[k])
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// findGitSecret
+// ---------------------------------------------------------------------------
+
+func TestFindGitSecret_NoSecrets(t *testing.T) {
+	jb := setupJobBuilder()
+	result := jb.findGitSecret(context.Background(), defaultNS)
+	if result != "" {
+		t.Errorf("expected empty string, got %s", result)
+	}
+}
+
+func TestFindGitSecret_TokenSecret(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-credentials", Namespace: defaultNS},
+		Data:       map[string][]byte{"token": []byte("my-token")},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	jb := NewJobBuilder(fc)
+	result := jb.findGitSecret(context.Background(), defaultNS)
+	if result != "github-credentials" {
+		t.Errorf("expected github-credentials, got %s", result)
+	}
+}
+
+func TestFindGitSecret_PasswordSecret(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-credentials", Namespace: defaultNS},
+		Data:       map[string][]byte{"password": []byte("my-pass")},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	jb := NewJobBuilder(fc)
+	result := jb.findGitSecret(context.Background(), defaultNS)
+	if result != "git-credentials" {
+		t.Errorf("expected git-credentials, got %s", result)
+	}
+}
+
+func TestFindGitSecret_SecretWithoutTokenOrPassword(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-credentials", Namespace: defaultNS},
+		Data:       map[string][]byte{"other-key": []byte("value")},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	jb := NewJobBuilder(fc)
+	result := jb.findGitSecret(context.Background(), defaultNS)
+	if result != "" {
+		t.Errorf("expected empty string for secret without token/password, got %s", result)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// addAIEnvVars — fallback providers and child task coordination
+// ---------------------------------------------------------------------------
+
+func TestAddAIEnvVars_ChildTaskMessaging(t *testing.T) {
+	jb := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: defaultNS,
+			Labels:    map[string]string{"orka.ai/parent-task": "parent"},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI:   &corev1alpha1.AISpec{Prompt: "test"},
+		},
+	}
+	envVars := jb.addAIEnvVars(nil, task, nil, nil)
+	envMap := make(map[string]string)
+	for _, e := range envVars {
+		envMap[e.Name] = e.Value
+	}
+	// Child task should get messaging tools auto-injected
+	tools := envMap["ORKA_AI_TOOLS"]
+	if !strings.Contains(tools, "send_message") || !strings.Contains(tools, "check_messages") {
+		t.Errorf("expected messaging tools for child task, got %s", tools)
+	}
+	// Also ORKA_COORDINATION_ENABLED should be set
+	if envMap["ORKA_COORDINATION_ENABLED"] != "true" {
+		t.Error("expected ORKA_COORDINATION_ENABLED=true for child task without coordination agent")
+	}
+}
+
+func TestAddAIEnvVars_CoordinationEnabled(t *testing.T) {
+	jb := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI:   &corev1alpha1.AISpec{Prompt: "test"},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "coord-agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled: true,
+			},
+		},
+	}
+	envVars := jb.addAIEnvVars(nil, task, agent, nil)
+	envMap := make(map[string]string)
+	for _, e := range envVars {
+		envMap[e.Name] = e.Value
+	}
+	tools := envMap["ORKA_AI_TOOLS"]
+	if !strings.Contains(tools, "delegate_task") {
+		t.Errorf("expected coordination tools, got %s", tools)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// addAgentVolumes — git secret auto-detection
+// ---------------------------------------------------------------------------
+
+func TestAddAgentVolumes_GitSecretAutoDetect(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-credentials", Namespace: defaultNS},
+		Data:       map[string][]byte{"token": []byte("tok")},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	jb := NewJobBuilder(fc)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "uid-1234-5678"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAgent,
+			Prompt: "do it",
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/org/repo",
+				},
+			},
+		},
+	}
+	job, _ := jb.Build(context.Background(), task, nil, nil)
+	// Build already calls addAgentVolumes; check for git-credentials volume
+	found := false
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name == "git-credentials" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected git-credentials volume to be auto-detected")
+	}
+}
