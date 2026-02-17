@@ -157,3 +157,26 @@ func TestCheckMessagesTool_Execute(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckMessagesTool_Parameters(t *testing.T) {
+	tool := NewCheckMessagesTool()
+	params := tool.Parameters()
+	if params == nil {
+		t.Fatal("Parameters() returned nil")
+	}
+
+	var schema map[string]any
+	if err := json.Unmarshal(params, &schema); err != nil {
+		t.Fatalf("Parameters() returned invalid JSON: %v", err)
+	}
+	if schema["type"] != "object" {
+		t.Error("schema type should be object")
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("schema missing properties")
+	}
+	if _, ok := props["mark_read"]; !ok {
+		t.Error("schema missing mark_read property")
+	}
+}

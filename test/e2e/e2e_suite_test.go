@@ -11,6 +11,7 @@ package e2e
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -27,15 +28,15 @@ import (
 
 var (
 	// managerImage is the manager image to be built and loaded for testing.
-	managerImage = "example.com/orka:v0.0.1"
+	managerImage = "ghcr.io/sozercan/orka:latest"
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 
 	// Worker images to build and load for e2e testing.
-	aiWorkerImage      = "orka-ai-worker:latest"
-	generalWorkerImage = "orka-general-worker:latest"
-	copilotWorkerImage = "orka-agent-worker-copilot:latest"
-	claudeWorkerImage  = "orka-agent-worker-claude:latest"
+	aiWorkerImage      = "ghcr.io/sozercan/orka/ai-worker:latest"
+	generalWorkerImage = "ghcr.io/sozercan/orka/general-worker:latest"
+	copilotWorkerImage = "ghcr.io/sozercan/orka/agent-worker-copilot:latest"
+	claudeWorkerImage  = "ghcr.io/sozercan/orka/agent-worker-claude:latest"
 
 	// E2E environment configuration (loaded from .env or environment)
 	e2eOpenAIAPIKey      string
@@ -59,7 +60,13 @@ func TestE2E(t *testing.T) {
 
 var _ = BeforeSuite(func() {
 	By("building all Docker images")
-	cmd := exec.Command("make", "docker-build-all", fmt.Sprintf("IMG=%s", managerImage))
+	cmd := exec.Command("make", "docker-build-all",
+		fmt.Sprintf("IMG=%s", managerImage),
+		fmt.Sprintf("AI_WORKER_IMG=%s", aiWorkerImage),
+		fmt.Sprintf("GENERAL_WORKER_IMG=%s", generalWorkerImage),
+		fmt.Sprintf("COPILOT_WORKER_IMG=%s", copilotWorkerImage),
+		fmt.Sprintf("CLAUDE_WORKER_IMG=%s", claudeWorkerImage),
+	)
 	_, err := utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build Docker images")
 
@@ -198,20 +205,24 @@ func loadEnvFile(path string) {
 
 // createK8sSecret creates a Kubernetes Secret with the given key-value data.
 func createK8sSecret(name, ns string, data map[string]string) error {
-	manifest := fmt.Sprintf(`{"apiVersion":"v1","kind":"Secret","metadata":{"name":"%s","namespace":"%s"},"type":"Opaque","stringData":{`, name, ns)
-	i := 0
-	for k, v := range data {
-		if i > 0 {
-			manifest += ","
-		}
-		manifest += fmt.Sprintf(`"%s":"%s"`, k, v)
-		i++
+	secret := map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata": map[string]string{
+			"name":      name,
+			"namespace": ns,
+		},
+		"type":       "Opaque",
+		"stringData": data,
 	}
-	manifest += "}}"
+	manifest, err := json.Marshal(secret)
+	if err != nil {
+		return fmt.Errorf("failed to marshal secret: %w", err)
+	}
 
 	cmd := exec.Command("kubectl", "apply", "-f", "-")
-	cmd.Stdin = strings.NewReader(manifest)
-	_, err := utils.Run(cmd)
+	cmd.Stdin = strings.NewReader(string(manifest))
+	_, err = utils.Run(cmd)
 	return err
 }
 

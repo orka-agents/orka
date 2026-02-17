@@ -40,7 +40,7 @@ ui/coverage/
 
 # Claude CLI binary
 /claude
-cli
+/cli
 
 # E2E test environment variables
 test/e2e/.env

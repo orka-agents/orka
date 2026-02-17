@@ -76,7 +76,7 @@ var _ = Describe("Multi-Agent Coordination", Ordered, func() {
 					"name": "%s"
 				}
 			}
-		}`, workerAgentName, namespace, model, coordProviderName)
+		}`, workerAgentName, namespace, coordProviderName, model)
 
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(workerManifest)
@@ -107,7 +107,7 @@ var _ = Describe("Multi-Agent Coordination", Ordered, func() {
 					]
 				}
 			}
-		}`, coordinatorAgentName, namespace, model, coordProviderName, workerAgentName)
+		}`, coordinatorAgentName, namespace, coordProviderName, model, workerAgentName)
 
 		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(coordManifest)

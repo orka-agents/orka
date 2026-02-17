@@ -255,8 +255,8 @@ Key configuration values for the Helm chart:
 | `controller.metricsPort` | `8081` | Metrics endpoint port |
 | `controller.healthPort` | `8082` | Health probe port |
 | `controller.logLevel` | `info` | Log level (debug/info/warn/error) |
-| `workers.ai.image.repository` | `ghcr.io/sozercan/orka-ai-worker` | AI worker image |
-| `workers.general.image.repository` | `ghcr.io/sozercan/orka-general-worker` | General worker image |
+| `workers.ai.image.repository` | `ghcr.io/sozercan/orka/ai-worker` | AI worker image |
+| `workers.general.image.repository` | `ghcr.io/sozercan/orka/general-worker` | General worker image |
 | `service.type` | `ClusterIP` | Service type |
 | `crds.install` | `true` | Install CRDs |
 | `crds.keep` | `true` | Keep CRDs on uninstall |
@@ -275,9 +275,9 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
 | `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
 | `--controller-url` | `""` | Base URL workers use to reach the controller API (e.g., `http://orka-api.orka-system.svc:8080`). Required for worker result callbacks and session transcript fetching |
-| `--ai-worker-image` | `orka-ai-worker:latest` | AI worker container image |
-| `--copilot-worker-image` | `orka-agent-worker-copilot:latest` | Copilot agent worker image |
-| `--claude-worker-image` | `orka-agent-worker-claude:latest` | Claude agent worker image |
+| `--ai-worker-image` | `ghcr.io/sozercan/orka/ai-worker:latest` | AI worker container image |
+| `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Copilot agent worker image |
+| `--claude-worker-image` | `ghcr.io/sozercan/orka/agent-worker-claude:latest` | Claude agent worker image |
 | `--store-backend` | `sqlite` | Storage backend (sqlite) |
 | `--store-path` | `/data/orka.db` | Path to SQLite database file |
 | `--chat-enabled` | `true` | Enable the chat endpoint |

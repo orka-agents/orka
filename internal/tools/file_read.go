@@ -186,6 +186,13 @@ func (t *FileReadTool) isPathAllowed(path string) bool {
 		if path == allowedPath || strings.HasPrefix(path, allowedPath+"/") {
 			return true
 		}
+		// Also check with symlinks resolved for consistent comparison
+		resolved, err := filepath.EvalSymlinks(allowedPath)
+		if err == nil && resolved != allowedPath {
+			if path == resolved || strings.HasPrefix(path, resolved+"/") {
+				return true
+			}
+		}
 	}
 	return false
 }

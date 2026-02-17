@@ -251,3 +251,174 @@ func TestCreatePullRequestTool_Success(t *testing.T) {
 		t.Error("parameters should not be empty")
 	}
 }
+
+func TestCreatePullRequestTool_InvalidArgs(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tool := NewCreatePullRequestTool(k8sClient)
+
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	// Missing required fields
+	args := json.RawMessage(`{"task_name": "t"}`)
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for missing required fields")
+	}
+	if !strings.Contains(err.Error(), "required") {
+		t.Errorf("unexpected error: %s", err.Error())
+	}
+}
+
+func TestCreatePullRequestTool_InvalidJSON(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tool := NewCreatePullRequestTool(k8sClient)
+
+	_, err := tool.Execute(context.Background(), json.RawMessage(`{invalid}`))
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestCreatePullRequestTool_NoGitRepo(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					Branch: "main",
+				},
+			},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
+	tool := NewCreatePullRequestTool(k8sClient)
+
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(CreatePullRequestArgs{
+		TaskName:   "coder-task",
+		HeadBranch: "feature/x",
+		BaseBranch: testBranch,
+		Title:      "Test PR",
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for no gitRepo")
+	}
+	if !strings.Contains(err.Error(), "no gitRepo") {
+		t.Errorf("unexpected error: %s", err.Error())
+	}
+}
+
+func TestCreatePullRequestTool_NoGitSecretRef(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/sozercan/ayna",
+					Branch:  testBranch,
+				},
+			},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
+	tool := NewCreatePullRequestTool(k8sClient)
+
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(CreatePullRequestArgs{
+		TaskName:   "coder-task",
+		HeadBranch: "feature/x",
+		BaseBranch: testBranch,
+		Title:      "Test PR",
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for no gitSecretRef")
+	}
+	if !strings.Contains(err.Error(), "no gitSecretRef") {
+		t.Errorf("unexpected error: %s", err.Error())
+	}
+}
+
+func TestCreatePullRequestTool_EmptyToken(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/sozercan/ayna",
+					Branch:       testBranch,
+					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data:       map[string][]byte{"other-key": []byte("value")},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := NewCreatePullRequestTool(k8sClient)
+
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(CreatePullRequestArgs{
+		TaskName:   "coder-task",
+		HeadBranch: "feature/x",
+		BaseBranch: testBranch,
+		Title:      "Test PR",
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for empty token")
+	}
+	if !strings.Contains(err.Error(), "does not contain a 'token' or 'password' key") {
+		t.Errorf("unexpected error: %s", err.Error())
+	}
+}
+
+func TestCreateGitHubPR_APIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = fmt.Fprintf(w, `{"message":"Validation Failed"}`)
+	}))
+	defer server.Close()
+
+	_, _, err := createGitHubPR(context.Background(), "token", "owner", "repo", "head", "base", "title", "body", server.URL)
+	if err == nil {
+		t.Fatal("expected error for API failure")
+	}
+	if !strings.Contains(err.Error(), "422") {
+		t.Errorf("unexpected error: %s", err.Error())
+	}
+}
