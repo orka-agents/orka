@@ -1,0 +1,221 @@
+{
+  "name": "orka-vscode",
+  "displayName": "Orka",
+  "publisher": "orka",
+  "version": "0.1.0",
+  "description": "Orka - Kubernetes-native task execution platform",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:orkaAgents",
+    "onView:orkaTasks",
+    "onView:orkaTools",
+    "onCommand:orka.connect"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "orka",
+          "title": "Orka",
+          "icon": "resources/orka.svg"
+        }
+      ]
+    },
+    "views": {
+      "orka": [
+        {
+          "id": "orkaAgents",
+          "name": "Agents"
+        },
+        {
+          "id": "orkaTasks",
+          "name": "Tasks"
+        },
+        {
+          "id": "orkaTools",
+          "name": "Tools"
+        },
+        {
+          "id": "orkaSessions",
+          "name": "Sessions"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "orka.connect",
+        "title": "Orka: Connect"
+      },
+      {
+        "command": "orka.disconnect",
+        "title": "Orka: Disconnect"
+      },
+      {
+        "command": "orka.refreshAgents",
+        "title": "Orka: Refresh Agents",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "orka.refreshTasks",
+        "title": "Orka: Refresh Tasks",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "orka.refreshTools",
+        "title": "Orka: Refresh Tools",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "orka.createTask",
+        "title": "Orka: Create Task",
+        "icon": "$(add)"
+      },
+      {
+        "command": "orka.cancelTask",
+        "title": "Orka: Cancel Task"
+      },
+      {
+        "command": "orka.deleteTask",
+        "title": "Orka: Delete Task"
+      },
+      {
+        "command": "orka.createAgent",
+        "title": "Orka: Create Agent",
+        "icon": "$(add)"
+      },
+      {
+        "command": "orka.deleteAgent",
+        "title": "Orka: Delete Agent"
+      },
+      {
+        "command": "orka.openChat",
+        "title": "Orka: Open Chat"
+      },
+      {
+        "command": "orka.openDashboard",
+        "title": "Orka: Open Dashboard"
+      },
+      {
+        "command": "orka.viewTaskDetail",
+        "title": "Orka: View Task Detail"
+      },
+      {
+        "command": "orka.runWithOrka",
+        "title": "Orka: Run with Orka Agent"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "orka.refreshAgents",
+          "when": "view == orkaAgents",
+          "group": "navigation"
+        },
+        {
+          "command": "orka.createAgent",
+          "when": "view == orkaAgents",
+          "group": "navigation"
+        },
+        {
+          "command": "orka.refreshTasks",
+          "when": "view == orkaTasks",
+          "group": "navigation"
+        },
+        {
+          "command": "orka.createTask",
+          "when": "view == orkaTasks",
+          "group": "navigation"
+        },
+        {
+          "command": "orka.refreshTools",
+          "when": "view == orkaTools",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "orka.deleteAgent",
+          "when": "view == orkaAgents",
+          "group": "inline"
+        },
+        {
+          "command": "orka.cancelTask",
+          "when": "view == orkaTasks",
+          "group": "inline"
+        },
+        {
+          "command": "orka.deleteTask",
+          "when": "view == orkaTasks"
+        },
+        {
+          "command": "orka.viewTaskDetail",
+          "when": "view == orkaTasks"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "orka.runWithOrka",
+          "group": "orka"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Orka",
+      "properties": {
+        "orka.apiEndpoint": {
+          "type": "string",
+          "default": "http://localhost:8080",
+          "description": "Orka API endpoint URL"
+        },
+        "orka.authToken": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer token for authentication"
+        },
+        "orka.namespace": {
+          "type": "string",
+          "default": "default",
+          "description": "Kubernetes namespace"
+        },
+        "orka.autoConnect": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically connect on startup"
+        },
+        "orka.refreshInterval": {
+          "type": "number",
+          "default": 5000,
+          "description": "Polling interval in milliseconds"
+        },
+        "orka.useKubeconfig": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use kubeconfig for auto-detection"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node",
+    "watch": "npm run compile -- --watch",
+    "lint": "eslint src --ext ts",
+    "package": "npm run compile -- --minify",
+    "test": "node --import tsx --test src/test/**/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "esbuild": "^0.19.0",
+    "eslint": "^8.50.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.3.0"
+  }
+}
