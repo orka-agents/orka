@@ -101,6 +101,7 @@ See @docs/ for detailed documentation:
 - @docs/security.md — Security model, worker hardening, multi-tenancy
 - @docs/agent-runtimes.md — Claude Code CLI and Copilot CLI runtime configuration
 - @docs/openai-compat.md — OpenAI-compatible API proxy
+- @docs/anthropic-compat.md — Anthropic-compatible API proxy
 - @docs/cicd-integration.md — CI/CD integration patterns
 - @docs/getting-started.md — Installation and quick start
 - @docs/ui.md — Web dashboard architecture

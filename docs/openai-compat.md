@@ -1,15 +1,17 @@
 # OpenAI-Compatible API
 
-Orka exposes an **OpenAI-compatible API** at `/v1/chat/completions` and `/v1/models`, allowing any OpenAI-compatible client to use Orka as a provider. This includes tools like [Continue](https://continue.dev/), [Cursor](https://cursor.sh/), and others.
+Orka exposes an **OpenAI-compatible API** at `/openai/v1/chat/completions` and `/openai/v1/models`, allowing any OpenAI-compatible client to use Orka as a provider. This includes tools like [Continue](https://continue.dev/), [Cursor](https://cursor.sh/), and others.
 
 Orka acts as a **proxy** to whichever LLM provider is configured in your cluster (Anthropic, OpenAI, Azure OpenAI, etc.), with credentials managed securely via Kubernetes Secrets and Provider CRDs.
+
+> **Breaking change:** These endpoints moved from `/v1/` to `/openai/v1/` — update your client configurations accordingly. See also [Anthropic Compatibility](anthropic-compat.md) for the Anthropic-native proxy.
 
 ## Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/v1/chat/completions` | Chat completions (streaming & non-streaming) |
-| `GET` | `/v1/models` | List available models from configured providers |
+| `POST` | `/openai/v1/chat/completions` | Chat completions (streaming & non-streaming) |
+| `GET` | `/openai/v1/models` | List available models from configured providers |
 
 Both endpoints require authentication via `Authorization: Bearer <token>` using a Kubernetes ServiceAccount token.
 
@@ -101,7 +103,7 @@ Configure Continue to use Orka as an OpenAI-compatible provider. Add to your Con
       "title": "Claude Sonnet 4 (via Orka)",
       "provider": "openai",
       "model": "anthropic/claude-sonnet-4-20250514",
-      "apiBase": "https://orka.example.com/v1",
+      "apiBase": "https://orka.example.com/openai/v1",
       "apiKey": "YOUR_ORKA_TOKEN"
     }
   ]
@@ -121,20 +123,7 @@ export ORKA_TOKEN=$(kubectl create token orka-client)
 ### Non-streaming
 
 ```bash
-curl -X POST https://orka.example.com/v1/chat/completions \
-  -H "Authorization: Bearer $ORKA_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "anthropic/claude-sonnet-4-20250514",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 1024
-  }'
-```
-
-### Streaming
-
-```bash
-curl -X POST https://orka.example.com/v1/chat/completions \
+curl -X POST https://orka.example.com/openai/v1/chat/completions \
   -H "Authorization: Bearer $ORKA_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -148,7 +137,7 @@ curl -X POST https://orka.example.com/v1/chat/completions \
 ### List models
 
 ```bash
-curl https://orka.example.com/v1/models \
+curl https://orka.example.com/openai/v1/models \
   -H "Authorization: Bearer $ORKA_TOKEN"
 ```
 
@@ -174,7 +163,7 @@ curl https://orka.example.com/v1/models \
 ```
 ┌──────────────┐     ┌─────────────────────────┐     ┌──────────────────┐
 │  Continue    │────▶│  Orka API Server       │────▶│  Anthropic API   │
-│  (or any     │     │  /v1/chat/completions    │     │  OpenAI API      │
+│  (or any     │     │  /openai/v1/chat/completions│     │  OpenAI API      │
 │   OAI client)│◀────│                          │◀────│  Azure OpenAI    │
 └──────────────┘     │  Provider resolution:    │     └──────────────────┘
                      │  - Provider CRD lookup   │

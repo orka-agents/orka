@@ -91,10 +91,19 @@ See [Interactive Chat](chat.md) for full chat documentation.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/v1/chat/completions` | POST | Chat completions (streaming & non-streaming) |
-| `/v1/models` | GET | List available models |
+| `/openai/v1/chat/completions` | POST | Chat completions (streaming & non-streaming) |
+| `/openai/v1/models` | GET | List available models |
 
 See [OpenAI Compatibility](openai-compat.md) for details.
+
+## Anthropic-Compatible API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/anthropic/v1/messages` | POST | Create a message (streaming & non-streaming) |
+| `/anthropic/v1/models` | GET | List available models |
+
+See [Anthropic Compatibility](anthropic-compat.md) for details.
 
 ## Internal API (Worker Communication)
 

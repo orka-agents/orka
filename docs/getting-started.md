@@ -210,5 +210,7 @@ The CLI supports token extraction from bearer tokens, token files, exec-based au
 - [Agent Runtimes](agent-runtimes.md) — Claude Code CLI and Copilot CLI configuration
 - [Interactive Chat](chat.md) — Chat endpoint with tool execution
 - [Multi-Agent Coordination](multi-agent-coordination.md) — Coordinator agents and delegation
+- [OpenAI Compatibility](openai-compat.md) — Use any OpenAI-compatible client via `/openai/v1/`
+- [Anthropic Compatibility](anthropic-compat.md) — Use Anthropic clients (Claude Code, etc.) via `/anthropic/v1/`
 - [API Reference](api-reference.md) — REST API endpoints
 - [Configuration](configuration.md) — Helm values, controller flags, and metrics
