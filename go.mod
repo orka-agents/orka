@@ -6,7 +6,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.22.1
 	github.com/charmbracelet/glamour v0.10.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
-	github.com/github/copilot-sdk/go v0.1.24-preview.0.0.20260212195839-f1d8cc19dc84
+	github.com/github/copilot-sdk/go v0.1.25
 	github.com/go-logr/logr v1.4.3
 	github.com/gofiber/fiber/v3 v3.0.0
 	github.com/onsi/ginkgo/v2 v2.28.1
