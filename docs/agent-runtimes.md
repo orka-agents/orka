@@ -194,6 +194,12 @@ spec:
       #   name: git-credentials
       # subPath: subdirectory within repo to use as workspace root
       # subPath: "services/api"
+      # forkRepo: writable fork URL used as git remote for pushes
+      # forkRepo: "https://github.com/my-org/my-project.git"
+      # prBaseBranch: upstream branch to target when creating PRs
+      # prBaseBranch: "main"
+      # pushBranch: branch name to push changes to after task completion
+      # pushBranch: "feature/my-change"
 
     # maxTurns: override Agent's defaultMaxTurns (range: 1-1000)
     maxTurns: 100
@@ -294,6 +300,20 @@ agentRuntime:
   workspace:
     gitRepo: "https://github.com/example/repo.git"
     ref: "v1.2.3"
+```
+
+### Push Changes to a Branch
+
+Use `pushBranch` to have the worker commit and push changes automatically at the end of the task.
+For fork-based workflows, also set `forkRepo` and `prBaseBranch`.
+
+```yaml
+agentRuntime:
+  workspace:
+    gitRepo: "https://github.com/upstream/repo.git"
+    forkRepo: "https://github.com/my-user/repo.git"
+    prBaseBranch: "main"
+    pushBranch: "feature/my-change"
 ```
 
 ## Session Continuity

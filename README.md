@@ -41,7 +41,8 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 - 🖥️ **Web Dashboard** — Built-in React UI embedded in the controller binary — zero extra deployments
 - 📦 **Declarative CRDs** — Task, Agent, Tool, and Provider custom resources for GitOps workflows
 - ⏰ **Scheduled Tasks** — Cron-based recurring execution with concurrency policies
-- 🔌 **REST & OpenAI-Compatible API** — Full CRUD + `/v1/chat/completions` endpoint for Continue, Cursor, and any OpenAI-compatible client
+- 🔌 **REST & OpenAI-Compatible API** — Full CRUD + `/openai/v1/chat/completions` endpoint for Continue, Cursor, and any OpenAI-compatible client
+- 🔮 **Anthropic-Compatible API** — `/anthropic/v1/messages` endpoint for Claude Code and other Anthropic-native clients
 - 📊 **Observability** — Prometheus metrics, structured logging, health probes
 - 🔒 **Hardened by Default** — Non-root containers, read-only rootfs, ServiceAccount token auth
 
@@ -86,7 +87,7 @@ kubectl port-forward -n orka-system svc/orka-controller 8080:8080
 open http://localhost:8080
 ```
 
-The built-in orchestrator creates agents, runs tasks, monitors progress, and returns results — all from natural language. See the [OpenAI Compatibility](docs/openai-compat.md) docs for full setup with Continue, Cursor, or other OpenAI-compatible clients.
+The built-in orchestrator creates agents, runs tasks, monitors progress, and returns results — all from natural language. See the [OpenAI Compatibility](docs/openai-compat.md) and [Anthropic Compatibility](docs/anthropic-compat.md) docs for proxy setup with your preferred client.
 
 ## Documentation
 
@@ -100,6 +101,7 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Multi-Agent Coordination](docs/multi-agent-coordination.md) | Coordinator agents and task delegation                |
 | [API Reference](docs/api-reference.md)                       | REST API endpoints and usage examples                 |
 | [OpenAI Compatibility](docs/openai-compat.md)                | OpenAI-compatible chat completions API                |
+| [Anthropic Compatibility](docs/anthropic-compat.md)          | Anthropic-compatible Messages API                     |
 | [Web Dashboard](docs/ui.md)                                  | Frontend architecture and pages                       |
 | [Security](docs/security.md)                                 | Security model and hardening                          |
 | [Development](docs/development.md)                           | Building, testing, and contributing                   |

@@ -435,6 +435,123 @@ func TestNewAuthMiddleware_ValidToken(t *testing.T) {
 	}
 }
 
+func TestNewAuthMiddleware_XAPIKeyOnly(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
+					tr.Status.Authenticated = true
+					tr.Status.User = authenticationv1.UserInfo{
+						Username: "system:serviceaccount:ns1:worker",
+						UID:      "uid-xapi",
+						Groups:   []string{"system:serviceaccounts"},
+					}
+				}
+				return nil
+			},
+		}).
+		Build()
+
+	app := setupTestApp(fakeClient)
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("x-api-key", "xapi-test-token")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+func TestNewAuthMiddleware_BothHeadersPrefersAuthorization(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
+					// Return different UIDs based on token to verify which was used
+					switch tr.Spec.Token {
+					case "bearer-token":
+						tr.Status.Authenticated = true
+						tr.Status.User = authenticationv1.UserInfo{
+							Username: "system:serviceaccount:ns1:bearer-sa",
+							UID:      "uid-bearer",
+						}
+					case "xapi-token":
+						tr.Status.Authenticated = true
+						tr.Status.User = authenticationv1.UserInfo{
+							Username: "system:serviceaccount:ns1:xapi-sa",
+							UID:      "uid-xapi",
+						}
+					}
+				}
+				return nil
+			},
+		}).
+		Build()
+
+	var capturedUserInfo *UserInfo
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(fakeClient))
+	app.Get("/test", func(ctx fiber.Ctx) error {
+		capturedUserInfo = GetUserInfo(ctx)
+		return ctx.SendString("OK")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("Authorization", "Bearer bearer-token")
+	req.Header.Set("x-api-key", "xapi-token")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if capturedUserInfo == nil {
+		t.Fatal("expected UserInfo to be set in context")
+	}
+	if capturedUserInfo.UID != "uid-bearer" {
+		t.Errorf("UID = %s, want uid-bearer (Authorization header should take priority)", capturedUserInfo.UID)
+	}
+}
+
+func TestNewAuthMiddleware_NeitherHeader(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	app := setupTestApp(fakeClient)
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+}
+
 func TestNewAuthMiddleware_TokenValidationFails(t *testing.T) {
 	tokenCache.Range(func(key, _ any) bool {
 		tokenCache.Delete(key)

@@ -5,7 +5,7 @@ Orka has comprehensive test coverage across all packages, including unit tests, 
 ## Running Tests
 
 ```bash
-# Run all Go unit tests (uses envtest for K8s API + etcd)
+# Run test pipeline (manifests, generate, fmt, vet, then Go tests)
 make test
 
 # Run Go tests with coverage report
@@ -58,6 +58,25 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/agent_claude_test.go` | Claude runtime |
 | `test/e2e/agent_workspace_test.go` | Workspace/git clone |
 | `test/e2e/agent_session_test.go` | Session continuity |
+| `test/e2e/autonomous_mode_test.go` | Autonomous iterations, max-iteration stop, Plan API, suspend behavior |
+| `test/e2e/coordination_advanced_test.go` | `cancel_task`, inter-task messaging, auto-retry, dynamic agent create/delete |
+| `test/e2e/pr_workflow_test.go` | PR tool workflow (`create_pull_request`, review/comment/merge) and workspace PR env wiring |
+| `test/e2e/api_coverage_test.go` | Sessions, agent update API, single-tool API, auth validation, secrets API, chat delete, non-autonomous plan 404 |
+| `test/e2e/chat_advanced_test.go` | JSON chat mode, `agentRef` chat routing, management tools via chat |
+| `test/e2e/security_enforcement_test.go` | Non-root execution, read-only filesystem, deny-pattern enforcement, kube-system chat block |
+| `test/e2e/agent_advanced_test.go` | Skills ConfigMap wiring, agent resource propagation, session maxMessages behavior |
+| `test/e2e/workspace_advanced_test.go` | Advanced workspace settings (`gitSecretRef`, `subPath`, `ref`, fork/PR env vars, session init container) |
+| `test/e2e/provider_advanced_test.go` | Provider rate-limit config coverage |
+| `test/e2e/tools_test.go` | Built-in tools (including `web_fetch`, `file_write`) and custom Tool CRD |
+| `test/e2e/scheduled_task_test.go` | Cron scheduling, suspend, `concurrencyPolicy: Forbid`, history-limit cleanup |
+| `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
+
+### E2E Key Requirements
+
+- `E2E_OPENAI_API_KEY`: required for LLM-backed tests (AI chat/tasks, coordination, PR workflow orchestration)
+- `E2E_ANTHROPIC_API_KEY`: required for Anthropic-specific e2e cases
+- `E2E_GITHUB_TOKEN`: required for GitHub/Copilot and PR workflow tests
+- Structural e2e tests (job/env/volume assertions) run without external model keys
 
 ### Frontend Tests
 

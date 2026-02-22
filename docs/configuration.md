@@ -58,10 +58,9 @@ spec:
     - name: web-search
     - name: github-search
   skills:
-    - configMapRef:
-        name: skill-researcher
+    - name: skill-researcher
   session:
-    persistence: sqlite    # sqlite or none
+    persistence: configmap # configmap, pvc, or none
     ttl: 24h
     maxMessages: 50
   coordination:
@@ -82,8 +81,8 @@ spec:
 | `autonomous` | bool | `false` | Enables autonomous loop mode. When true, the controller re-creates Jobs in a loop instead of marking the task as Succeeded |
 | `maxIterations` | int32 | `0` | Limits the number of autonomous loop iterations. Only used when `autonomous` is true. `0` means unlimited |
 | `allowedAgents` | list | `[]` | List of agent names this agent is allowed to delegate to |
-| `maxConcurrentChildren` | int32 | `0` | Maximum number of concurrent child tasks. `0` means unlimited |
-| `maxDepth` | int32 | `0` | Maximum delegation depth. `0` means unlimited |
+| `maxConcurrentChildren` | int32 | `5` | Maximum number of concurrent child tasks |
+| `maxDepth` | int32 | `3` | Maximum delegation depth |
 
 **Auto-injected coordination tools** (when `enabled: true`):
 
@@ -94,7 +93,7 @@ spec:
 You can configure fallback providers that are automatically tried when the primary provider fails (e.g., due to auth errors, provider outages, or rate limiting). Fallbacks are configured on the Agent CRD's `spec.model.fallbacks` field.
 
 ```yaml
-apiVersion: orka.ai/v1alpha1
+apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: resilient-agent
@@ -186,6 +185,35 @@ spec:
       - Bash
       - Glob
       - Grep
+```
+
+### Skill
+
+Reusable skill definitions (Agent Skills standard) that are referenced by Agents and AI Tasks.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Skill
+metadata:
+  name: skill-researcher
+  labels:
+    orka.ai/category: "research"
+spec:
+  displayName: "Research Methodology"
+  description: "Structured research workflow and source validation guidance"
+  version: "1.0.0"
+  tags: ["research", "analysis"]
+  content:
+    inline: |
+      # Research Skill
+      Use primary sources and cite references.
+    files:
+      templates/checklist.md: |
+        - [ ] Validate source credibility
+        - [ ] Cross-check key claims
+status:
+  phase: Ready
+  contentHash: sha256:...
 ```
 
 ### Tool

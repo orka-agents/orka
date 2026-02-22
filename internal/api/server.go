@@ -53,6 +53,7 @@ type Server struct {
 	handlers         *Handlers
 	chatHandler      *ChatHandler
 	openaiHandler    *OpenAICompatHandler
+	anthropicHandler *AnthropicCompatHandler
 	internalHandlers *InternalHandlers
 	ResultStore      store.ResultStore
 	SessionStore     store.SessionStore
@@ -84,6 +85,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace, config.EnforceNamespaceIsolation, config.ResultStore, config.SessionStore, config.PlanStore, config.Clientset, config.HealthChecker, config.ArtifactStore)
 	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore)
 	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat)
+	server.anthropicHandler = NewAnthropicCompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat)
 	server.setupMiddleware()
 	server.setupRoutes()
 	server.setupStaticFiles()
@@ -164,6 +166,14 @@ func (s *Server) setupRoutes() {
 	api.Put("/agents/:name", s.handlers.UpdateAgent)
 	api.Delete("/agents/:name", s.handlers.DeleteAgent)
 
+	// Skills endpoints
+	api.Post("/skills", s.handlers.CreateSkill)
+	api.Get("/skills", s.handlers.ListSkills)
+	api.Get("/skills/:name", s.handlers.GetSkill)
+	api.Get("/skills/:name/content", s.handlers.GetSkillContent)
+	api.Put("/skills/:name", s.handlers.UpdateSkill)
+	api.Delete("/skills/:name", s.handlers.DeleteSkill)
+
 	// Auth validation endpoint
 	api.Get("/auth/validate", s.handleAuthValidate)
 
@@ -177,12 +187,18 @@ func (s *Server) setupRoutes() {
 		api.Delete("/chat/:sessionId", s.chatHandler.HandleCancelChat)
 	}
 
-	// OpenAI-compatible API (under /v1, separate from /api/v1)
+	// OpenAI-compatible API (under /openai/v1, separate from /api/v1)
 	// This allows OpenAI-compatible clients to use Orka as a custom provider.
-	oai := s.app.Group("/v1")
+	oai := s.app.Group("/openai/v1")
 	oai.Use(NewAuthMiddleware(s.client))
 	oai.Post("/chat/completions", s.openaiHandler.HandleChatCompletions)
 	oai.Get("/models", s.openaiHandler.HandleListModels)
+
+	// Anthropic-compatible API
+	anthropic := s.app.Group("/anthropic/v1")
+	anthropic.Use(NewAuthMiddleware(s.client))
+	anthropic.Post("/messages", s.anthropicHandler.HandleMessages)
+	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 
 	// Internal API for worker communication
 	if s.ResultStore != nil && s.SessionStore != nil {

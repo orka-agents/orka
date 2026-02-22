@@ -6,16 +6,16 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.22.1
 	github.com/charmbracelet/glamour v0.10.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
-	github.com/github/copilot-sdk/go v0.1.24-preview.0.0.20260212195839-f1d8cc19dc84
+	github.com/github/copilot-sdk/go v0.1.25
 	github.com/go-logr/logr v1.4.3
 	github.com/gofiber/fiber/v3 v3.0.0
 	github.com/onsi/ginkgo/v2 v2.28.1
-	github.com/onsi/gomega v1.39.0
+	github.com/onsi/gomega v1.39.1
 	github.com/openai/openai-go/v3 v3.21.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/robfig/cron/v3 v3.0.1
-	github.com/spf13/cobra v1.10.0
+	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.36.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.34.0

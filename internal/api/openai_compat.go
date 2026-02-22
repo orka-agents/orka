@@ -31,7 +31,7 @@ const (
 	finishReasonToolCalls = "tool_calls"
 )
 
-// OpenAICompatHandler implements OpenAI-compatible /v1/chat/completions and /v1/models endpoints.
+// OpenAICompatHandler implements OpenAI-compatible /openai/v1/chat/completions and /openai/v1/models endpoints.
 // This allows OpenAI-compatible clients to use Orka as a custom provider.
 type OpenAICompatHandler struct {
 	client                    client.Client
@@ -153,7 +153,7 @@ type OAIUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// OAIModel is the model object for /v1/models.
+// OAIModel is the model object for /openai/v1/models.
 type OAIModel struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`
@@ -161,7 +161,7 @@ type OAIModel struct {
 	OwnedBy string `json:"owned_by"`
 }
 
-// OAIModelList is the response for GET /v1/models.
+// OAIModelList is the response for GET /openai/v1/models.
 type OAIModelList struct {
 	Object string     `json:"object"`
 	Data   []OAIModel `json:"data"`
@@ -180,7 +180,7 @@ type OAIErrorDetail struct {
 	Code    *string `json:"code"`
 }
 
-// HandleChatCompletions handles POST /v1/chat/completions.
+// HandleChatCompletions handles POST /openai/v1/chat/completions.
 func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	var req OAIRequest
 	if err := c.Bind().JSON(&req); err != nil {
@@ -588,7 +588,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 	})
 }
 
-// HandleListModels handles GET /v1/models.
+// HandleListModels handles GET /openai/v1/models.
 func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 	ctx := c.Context()
 

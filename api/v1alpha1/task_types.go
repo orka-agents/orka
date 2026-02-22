@@ -281,7 +281,7 @@ type AISpec struct {
 	// +optional
 	MaxTokens *int32 `json:"maxTokens,omitempty"`
 
-	// Skills references ConfigMaps containing skill definitions
+	// Skills references Skill CRDs to inject into the agent's system prompt
 	// +optional
 	Skills []SkillReference `json:"skills,omitempty"`
 
@@ -290,22 +290,11 @@ type AISpec struct {
 	Tools []string `json:"tools,omitempty"`
 }
 
-// SkillReference references a ConfigMap containing a skill definition
+// SkillReference references a Skill CRD by name
 type SkillReference struct {
-	// ConfigMapRef references the ConfigMap containing the skill
-	ConfigMapRef ConfigMapReference `json:"configMapRef"`
-}
-
-// ConfigMapReference references a ConfigMap
-type ConfigMapReference struct {
-	// Name is the name of the ConfigMap
+	// Name references a Skill CR by name
 	// +kubebuilder:validation:Required
 	Name string `json:"name"`
-
-	// Key is the key within the ConfigMap (defaults to "skill.md")
-	// +kubebuilder:default="skill.md"
-	// +optional
-	Key string `json:"key,omitempty"`
 }
 
 // TaskStatus defines the observed state of Task

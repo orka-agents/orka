@@ -898,6 +898,206 @@ func (h *Handlers) DeleteAgent(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
+// CreateSkillRequest is the request body for creating a skill
+type CreateSkillRequest struct {
+	Name      string                 `json:"name"`
+	Namespace string                 `json:"namespace"`
+	Metadata  MetadataRequest        `json:"metadata"`
+	Spec      corev1alpha1.SkillSpec `json:"spec"`
+}
+
+// UpdateSkillRequest is the request body for updating a skill
+type UpdateSkillRequest struct {
+	Spec corev1alpha1.SkillSpec `json:"spec"`
+}
+
+// ListSkills lists available skills
+func (h *Handlers) ListSkills(c fiber.Ctx) error {
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	limit := c.Query("limit", "100")
+	continueToken := c.Query("continue", "")
+
+	opts := &client.ListOptions{Namespace: namespace}
+
+	pagination, err := ParsePagination(limit, continueToken)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	opts.Limit = pagination.Limit
+	opts.Continue = pagination.Continue
+
+	skillList := &corev1alpha1.SkillList{}
+	ctx := c.Context()
+	if err := h.client.List(ctx, skillList, opts); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list skills: %v", err))
+	}
+
+	skills := make([]fiber.Map, 0, len(skillList.Items))
+	for _, skill := range skillList.Items {
+		skills = append(skills, fiber.Map{
+			"name":        skill.Name,
+			"namespace":   skill.Namespace,
+			"displayName": skill.Spec.DisplayName,
+			"description": skill.Spec.Description,
+			"version":     skill.Spec.Version,
+			"author":      skill.Spec.Author,
+			"tags":        skill.Spec.Tags,
+			"phase":       skill.Status.Phase,
+		})
+	}
+
+	response := ListResponse{
+		Items: skills,
+		Metadata: ListMeta{
+			Continue:           skillList.Continue,
+			RemainingItemCount: skillList.RemainingItemCount,
+		},
+	}
+
+	return c.JSON(response)
+}
+
+// GetSkill gets a skill by name
+func (h *Handlers) GetSkill(c fiber.Ctx) error {
+	name := c.Params("name")
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+
+	skill := &corev1alpha1.Skill{}
+	ctx := c.Context()
+	if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, skill); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "skill not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get skill: %v", err))
+	}
+
+	return c.JSON(skill)
+}
+
+// GetSkillContent gets the raw content of a skill
+func (h *Handlers) GetSkillContent(c fiber.Ctx) error {
+	name := c.Params("name")
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+
+	skill := &corev1alpha1.Skill{}
+	ctx := c.Context()
+	if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, skill); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "skill not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get skill: %v", err))
+	}
+
+	c.Set("Content-Type", "text/markdown")
+	return c.SendString(skill.Spec.Content.Inline)
+}
+
+// CreateSkill creates a new skill
+func (h *Handlers) CreateSkill(c fiber.Ctx) error {
+	var req CreateSkillRequest
+	if err := c.Bind().JSON(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+
+	name := req.Name
+	if name == "" {
+		name = req.Metadata.Name
+	}
+	if name == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "name is required")
+	}
+
+	explicitNS := req.Namespace
+	if explicitNS == "" {
+		explicitNS = req.Metadata.Namespace
+	}
+	namespace, err := h.resolveNamespace(c, explicitNS)
+	if err != nil {
+		return err
+	}
+
+	skill := &corev1alpha1.Skill{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: req.Spec,
+	}
+
+	ctx := c.Context()
+	if err := h.client.Create(ctx, skill); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return fiber.NewError(fiber.StatusConflict, "skill already exists")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create skill: %v", err))
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(skill)
+}
+
+// UpdateSkill updates an existing skill
+func (h *Handlers) UpdateSkill(c fiber.Ctx) error {
+	name := c.Params("name")
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+
+	skill := &corev1alpha1.Skill{}
+	ctx := c.Context()
+	if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, skill); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "skill not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get skill: %v", err))
+	}
+
+	var req UpdateSkillRequest
+	if err := c.Bind().JSON(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+
+	skill.Spec = req.Spec
+	if err := h.client.Update(ctx, skill); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update skill: %v", err))
+	}
+
+	return c.JSON(skill)
+}
+
+// DeleteSkill deletes a skill
+func (h *Handlers) DeleteSkill(c fiber.Ctx) error {
+	name := c.Params("name")
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+
+	skill := &corev1alpha1.Skill{}
+	ctx := c.Context()
+	if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, skill); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "skill not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get skill: %v", err))
+	}
+
+	if err := h.client.Delete(ctx, skill); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to delete skill: %v", err))
+	}
+
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
 // SecretNameResponse is a minimal representation of a Secret for dropdown lists
 type SecretNameResponse struct {
 	Name      string `json:"name"`

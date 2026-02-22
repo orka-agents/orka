@@ -25,6 +25,9 @@ const (
 	// AuthHeader is the header name for authorization
 	AuthHeader = "Authorization"
 
+	// XAPIKeyHeader is the header name for the Anthropic-style API key
+	XAPIKeyHeader = "x-api-key"
+
 	// BearerPrefix is the prefix for bearer tokens
 	BearerPrefix = "Bearer "
 
@@ -89,23 +92,24 @@ func parseServiceAccountNamespace(username string) string {
 // NewAuthMiddleware creates a new authentication middleware
 func NewAuthMiddleware(c client.Client) fiber.Handler {
 	return func(ctx fiber.Ctx) error {
-		// Get the authorization header
+		// Extract token from Authorization header or x-api-key fallback
+		var token string
 		authHeader := ctx.Get(AuthHeader)
-		if authHeader == "" {
+		if authHeader != "" {
+			// Check for bearer token
+			if !strings.HasPrefix(authHeader, BearerPrefix) {
+				log.Info("authentication failed: invalid authorization header format", "ip", ctx.IP())
+				return fiber.NewError(fiber.StatusUnauthorized, "invalid authorization header format")
+			}
+			token = strings.TrimPrefix(authHeader, BearerPrefix)
+		}
+		if token == "" {
+			// Fallback to x-api-key header (Anthropic convention)
+			token = ctx.Get(XAPIKeyHeader)
+		}
+		if token == "" {
 			log.Info("authentication failed: missing authorization header", "ip", ctx.IP())
 			return fiber.NewError(fiber.StatusUnauthorized, "missing authorization header")
-		}
-
-		// Check for bearer token
-		if !strings.HasPrefix(authHeader, BearerPrefix) {
-			log.Info("authentication failed: invalid authorization header format", "ip", ctx.IP())
-			return fiber.NewError(fiber.StatusUnauthorized, "invalid authorization header format")
-		}
-
-		token := strings.TrimPrefix(authHeader, BearerPrefix)
-		if token == "" {
-			log.Info("authentication failed: empty bearer token", "ip", ctx.IP())
-			return fiber.NewError(fiber.StatusUnauthorized, "empty bearer token")
 		}
 
 		// Validate the token using TokenReview

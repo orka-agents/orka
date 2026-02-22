@@ -36,8 +36,7 @@ spec:
     - name: github-get-repo
     - name: github-get-readme
   skills:
-    - configMapRef:
-        name: skill-researcher
+    - name: skill-researcher
   session:
     persistence: configmap
     maxMessages: 30
@@ -72,8 +71,7 @@ spec:
     - name: github-search-repos
     - name: github-get-readme
   skills:
-    - configMapRef:
-        name: skill-architect
+    - name: skill-architect
   session:
     persistence: configmap
     maxMessages: 50
@@ -105,8 +103,7 @@ spec:
   tools:
     - name: github-list-issues
   skills:
-    - configMapRef:
-        name: skill-code-review
+    - name: skill-code-review
   session:
     persistence: configmap
     maxMessages: 30
@@ -144,8 +141,7 @@ spec:
     - name: tavily-search
     - name: github-search-repos
   skills:
-    - configMapRef:
-        name: skill-coordinator
+    - name: skill-coordinator
   session:
     persistence: configmap
     maxMessages: 100

@@ -9,11 +9,15 @@ package controller
 import (
 	"context"
 	"fmt"
+	"path"
+	"reflect"
 	"slices"
+	"sort"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -21,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/metrics"
 )
 
 const (
@@ -123,6 +128,11 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 	// Add agent-specific volumes (workspace, home)
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
 		b.addAgentVolumes(ctx, job, task)
+	}
+
+	// Add skill volumes — read Skill CRs, create ConfigMap, mount at /workspace/.skills/
+	if err := b.addSkillVolumes(ctx, job, task, agent); err != nil {
+		return nil, fmt.Errorf("failed to add skill volumes: %w", err)
 	}
 
 	// Add secret volumes if needed
@@ -973,4 +983,139 @@ func (b *JobBuilder) findGitSecret(ctx context.Context, namespace string) string
 		}
 	}
 	return ""
+}
+
+// addSkillVolumes reads Skill CRs referenced by the agent and task, creates a ConfigMap
+// with concatenated skill content, and mounts it at /workspace/.skills/.
+func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	logger := log.FromContext(ctx)
+
+	// Collect skill references: agent-level first, then task-level
+	var skillRefs []corev1alpha1.SkillReference
+	if agent != nil {
+		skillRefs = append(skillRefs, agent.Spec.Skills...)
+	}
+	if task.Spec.AI != nil {
+		skillRefs = append(skillRefs, task.Spec.AI.Skills...)
+	}
+
+	// Deduplicate skill references by resolved name
+	seen := make(map[string]bool)
+	deduped := make([]corev1alpha1.SkillReference, 0, len(skillRefs))
+	for _, ref := range skillRefs {
+		name := ref.Name
+		if name != "" && !seen[name] {
+			seen[name] = true
+			deduped = append(deduped, ref)
+		}
+	}
+	skillRefs = deduped
+
+	if len(skillRefs) == 0 {
+		return nil
+	}
+
+	// Read Skill CRs and build ConfigMap data.
+	// "PROMPT.md" is the only file injected into the model system prompt.
+	cmData := make(map[string]string)
+	items := make([]corev1.KeyToPath, 0, len(skillRefs)+1)
+	promptParts := make([]string, 0, len(skillRefs))
+
+	for idx, ref := range skillRefs {
+		skill := &corev1alpha1.Skill{}
+		skillName := ref.Name
+		if err := b.Get(ctx, client.ObjectKey{Name: skillName, Namespace: task.Namespace}, skill); err != nil {
+			return fmt.Errorf("failed to get Skill %q: %w", skillName, err)
+		}
+
+		metrics.SkillsLoaded.WithLabelValues(skill.Name, task.Namespace).Inc()
+
+		promptParts = append(promptParts, strings.TrimSpace(skill.Spec.Content.Inline))
+
+		inlineKey := fmt.Sprintf("skill-%d-inline", idx)
+		cmData[inlineKey] = skill.Spec.Content.Inline
+		items = append(items, corev1.KeyToPath{
+			Key:  inlineKey,
+			Path: path.Join(skillName, "SKILL.md"),
+		})
+
+		filePaths := make([]string, 0, len(skill.Spec.Content.Files))
+		for filePath := range skill.Spec.Content.Files {
+			filePaths = append(filePaths, filePath)
+		}
+		sort.Strings(filePaths)
+		for i, filePath := range filePaths {
+			fileKey := fmt.Sprintf("skill-%d-file-%d", idx, i)
+			cmData[fileKey] = skill.Spec.Content.Files[filePath]
+			items = append(items, corev1.KeyToPath{
+				Key:  fileKey,
+				Path: path.Join(skillName, filePath),
+			})
+		}
+	}
+
+	prompt := strings.TrimSpace(strings.Join(promptParts, "\n\n"))
+	if prompt == "" {
+		return nil
+	}
+	cmData["system-prompt"] = prompt
+	items = append(items, corev1.KeyToPath{Key: "system-prompt", Path: "PROMPT.md"})
+
+	// Create a ConfigMap for skill content owned by the Job
+	skillCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      job.Name + "-skills",
+			Namespace: job.Namespace,
+			Labels: map[string]string{
+				"orka.ai/task":    task.Name,
+				"orka.ai/purpose": "skills",
+				"orka.ai/managed": "true",
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(task, corev1alpha1.GroupVersion.WithKind("Task")),
+			},
+		},
+		Data: cmData,
+	}
+
+	if err := b.Create(ctx, skillCM); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("failed to create skill ConfigMap: %w", err)
+		}
+		existing := &corev1.ConfigMap{}
+		if getErr := b.Get(ctx, client.ObjectKey{Name: skillCM.Name, Namespace: skillCM.Namespace}, existing); getErr != nil {
+			return fmt.Errorf("failed to get existing skill ConfigMap: %w", getErr)
+		}
+		if !reflect.DeepEqual(existing.Data, cmData) {
+			existing.Data = cmData
+			if updateErr := b.Update(ctx, existing); updateErr != nil {
+				return fmt.Errorf("failed to update existing skill ConfigMap: %w", updateErr)
+			}
+		}
+	} else {
+		logger.Info("Created skill ConfigMap", "configmap", skillCM.Name, "skills", len(skillRefs))
+	}
+
+	// Mount the ConfigMap into the worker pod
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: "skills",
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: skillCM.Name,
+				},
+				Items: items,
+			},
+		},
+	})
+	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
+		job.Spec.Template.Spec.Containers[0].VolumeMounts,
+		corev1.VolumeMount{
+			Name:      "skills",
+			MountPath: "/workspace/.skills",
+			ReadOnly:  true,
+		},
+	)
+
+	return nil
 }

@@ -200,9 +200,9 @@ Orka supports extensible AI capabilities through a three-layer system:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Layer 1: Skills (ConfigMaps)                                   │
-│  - Prompt injection only, zero execution overhead               │
-│  - Teaching/guidance for built-in tools                         │
+│  Layer 1: Skills (Skill CRDs)                                   │
+│  - Agent Skills standard content (`spec.content.inline`)         │
+│  - Mounted at /workspace/.skills and injected into prompts       │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 2: Built-in Tools (in worker image)                      │
 │  - web_search, file_read, code_exec, delegate_task, wait_for_tasks│

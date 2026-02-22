@@ -25,11 +25,13 @@ var _ = Describe("Scheduled Tasks", Ordered, func() {
 	const (
 		cronTaskName    = "e2e-cron-task"
 		suspendTaskName = "e2e-cron-suspend"
+		forbidTaskName  = "e2e-cron-forbid"
+		historyTaskName = "e2e-cron-history"
 	)
 
 	AfterAll(func() {
 		By("cleaning up scheduled task test resources")
-		for _, name := range []string{cronTaskName, suspendTaskName} {
+		for _, name := range []string{cronTaskName, suspendTaskName, forbidTaskName, historyTaskName} {
 			cmd := exec.Command("kubectl", "delete", "task", name, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 		}
@@ -40,7 +42,7 @@ var _ = Describe("Scheduled Tasks", Ordered, func() {
 	})
 
 	AfterEach(func() {
-		dumpDebugInfo(cronTaskName, suspendTaskName)
+		dumpDebugInfo(cronTaskName, suspendTaskName, forbidTaskName, historyTaskName)
 	})
 
 	It("should create child tasks on a cron schedule", func() {
@@ -166,5 +168,115 @@ var _ = Describe("Scheduled Tasks", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(strings.TrimSpace(output)).To(BeEmpty(),
 			"No child tasks should be created while suspended")
+	})
+
+	It("should enforce concurrencyPolicy Forbid", func() {
+		By("creating a scheduled task with concurrencyPolicy Forbid and a slow command")
+		taskManifest := fmt.Sprintf(`{
+			"apiVersion": "core.orka.ai/v1alpha1",
+			"kind": "Task",
+			"metadata": {
+				"name": "%s",
+				"namespace": "%s"
+			},
+			"spec": {
+				"type": "container",
+				"image": "busybox:latest",
+				"command": ["sleep"],
+				"args": ["90"],
+				"schedule": "* * * * *",
+				"concurrencyPolicy": "Forbid"
+			}
+		}`, forbidTaskName, namespace)
+
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = stringReader(taskManifest)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create Forbid scheduled task")
+
+		By("waiting for the first child task to be created and running")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "tasks",
+				"-l", fmt.Sprintf("orka.ai/parent-task=%s,orka.ai/scheduled-run=true", forbidTaskName),
+				"-o", "jsonpath={.items[*].status.phase}",
+				"-n", namespace,
+			)
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(output)).To(ContainSubstring("Running"),
+				"First child task should be Running")
+		}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("waiting past another minute trigger and verifying no second child is created")
+		Consistently(func() int {
+			cmd := exec.Command("kubectl", "get", "tasks",
+				"-l", fmt.Sprintf("orka.ai/parent-task=%s,orka.ai/scheduled-run=true", forbidTaskName),
+				"-o", "jsonpath={.items[*].metadata.name}",
+				"-n", namespace,
+			)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			return len(strings.Fields(strings.TrimSpace(output)))
+		}, 70*time.Second, 5*time.Second).Should(Equal(1),
+			"Only one child task should exist when concurrencyPolicy is Forbid and the first is still running")
+	})
+
+	It("should respect successfulRunsHistoryLimit", func() {
+		By("creating a scheduled task with successfulRunsHistoryLimit 1")
+		taskManifest := fmt.Sprintf(`{
+			"apiVersion": "core.orka.ai/v1alpha1",
+			"kind": "Task",
+			"metadata": {
+				"name": "%s",
+				"namespace": "%s"
+			},
+			"spec": {
+				"type": "container",
+				"image": "busybox:latest",
+				"command": ["echo"],
+				"args": ["history-test"],
+				"schedule": "* * * * *",
+				"successfulRunsHistoryLimit": 1
+			}
+		}`, historyTaskName, namespace)
+
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = stringReader(taskManifest)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create history-limit scheduled task")
+
+		By("waiting for at least two child tasks to be created")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "tasks",
+				"-l", fmt.Sprintf("orka.ai/parent-task=%s,orka.ai/scheduled-run=true", historyTaskName),
+				"-o", "jsonpath={.items[*].metadata.name}",
+				"-n", namespace,
+			)
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			names := strings.Fields(strings.TrimSpace(output))
+			g.Expect(len(names)).To(BeNumerically(">=", 2),
+				"Should have created at least two child tasks before enforcing history limit")
+		}, 4*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("verifying only 1 completed child task remains")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "tasks",
+				"-l", fmt.Sprintf("orka.ai/parent-task=%s,orka.ai/scheduled-run=true", historyTaskName),
+				"-o", "jsonpath={.items[*].status.phase}",
+				"-n", namespace,
+			)
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			phases := strings.Fields(strings.TrimSpace(output))
+			completedCount := 0
+			for _, p := range phases {
+				if p == "Succeeded" {
+					completedCount++
+				}
+			}
+			g.Expect(completedCount).To(Equal(1),
+				"Exactly 1 completed child should remain due to successfulRunsHistoryLimit=1")
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
 	})
 })

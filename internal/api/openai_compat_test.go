@@ -46,10 +46,10 @@ func setupTestOpenAIHandler(objs ...runtime.Object) (*OpenAICompatHandler, *fibe
 
 func TestHandleChatCompletions_MissingMessages(t *testing.T) {
 	handler, app := setupTestOpenAIHandler()
-	app.Post("/v1/chat/completions", handler.HandleChatCompletions)
+	app.Post("/openai/v1/chat/completions", handler.HandleChatCompletions)
 
 	body := `{"model":"test-model","messages":[]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := app.Test(req)
@@ -70,10 +70,10 @@ func TestHandleChatCompletions_MissingMessages(t *testing.T) {
 
 func TestHandleChatCompletions_NGreaterThanOne(t *testing.T) {
 	handler, app := setupTestOpenAIHandler()
-	app.Post("/v1/chat/completions", handler.HandleChatCompletions)
+	app.Post("/openai/v1/chat/completions", handler.HandleChatCompletions)
 
 	body := `{"model":"test-model","messages":[{"role":"user","content":"hello"}],"n":2}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := app.Test(req)
@@ -97,9 +97,9 @@ func TestHandleChatCompletions_NGreaterThanOne(t *testing.T) {
 
 func TestHandleChatCompletions_InvalidBody(t *testing.T) {
 	handler, app := setupTestOpenAIHandler()
-	app.Post("/v1/chat/completions", handler.HandleChatCompletions)
+	app.Post("/openai/v1/chat/completions", handler.HandleChatCompletions)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("not json"))
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", strings.NewReader("not json"))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := app.Test(req)
@@ -114,10 +114,10 @@ func TestHandleChatCompletions_InvalidBody(t *testing.T) {
 
 func TestHandleChatCompletions_NoProvider(t *testing.T) {
 	handler, app := setupTestOpenAIHandler()
-	app.Post("/v1/chat/completions", handler.HandleChatCompletions)
+	app.Post("/openai/v1/chat/completions", handler.HandleChatCompletions)
 
 	body := `{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := app.Test(req)
@@ -138,9 +138,9 @@ func TestHandleChatCompletions_NoProvider(t *testing.T) {
 
 func TestHandleListModels_Empty(t *testing.T) {
 	handler, app := setupTestOpenAIHandler()
-	app.Get("/v1/models", handler.HandleListModels)
+	app.Get("/openai/v1/models", handler.HandleListModels)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -176,9 +176,9 @@ func TestHandleListModels_WithProviders(t *testing.T) {
 	}
 
 	handler, app := setupTestOpenAIHandler(provider)
-	app.Get("/v1/models", handler.HandleListModels)
+	app.Get("/openai/v1/models", handler.HandleListModels)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -392,7 +392,7 @@ func TestHandleChatCompletions_NonStreamingResponse(t *testing.T) {
 	}
 
 	handler, app := setupTestOpenAIHandler(provider, secret)
-	app.Post("/v1/chat/completions", handler.HandleChatCompletions)
+	app.Post("/openai/v1/chat/completions", handler.HandleChatCompletions)
 
 	reqBody := OAIRequest{
 		Model: "gpt-4",
@@ -402,7 +402,7 @@ func TestHandleChatCompletions_NonStreamingResponse(t *testing.T) {
 	}
 	body, _ := json.Marshal(reqBody)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := app.Test(req)
@@ -905,10 +905,10 @@ func TestHandleChatCompletions_MaxTokensTooSmall(t *testing.T) {
 	}
 
 	handler, app := setupTestOpenAIHandler(provider, secret)
-	app.Post("/v1/chat/completions", handler.HandleChatCompletions)
+	app.Post("/openai/v1/chat/completions", handler.HandleChatCompletions)
 
 	body := `{"model":"gpt-4","messages":[{"role":"user","content":"hello"}],"max_tokens":5}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := app.Test(req)
@@ -963,7 +963,7 @@ func TestHandleChatCompletions_ProviderSlashModel(t *testing.T) {
 	}
 
 	handler, app := setupTestOpenAIHandler(provider, secret)
-	app.Post("/v1/chat/completions", handler.HandleChatCompletions)
+	app.Post("/openai/v1/chat/completions", handler.HandleChatCompletions)
 
 	// Use "provider/model" format
 	reqBody := OAIRequest{
@@ -974,7 +974,7 @@ func TestHandleChatCompletions_ProviderSlashModel(t *testing.T) {
 	}
 	body, _ := json.Marshal(reqBody)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := app.Test(req)
