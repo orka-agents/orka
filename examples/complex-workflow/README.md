@@ -171,9 +171,7 @@ Skills are injected into the agent's system prompt:
 
 ```yaml
 skills:
-  - configMapRef:
-      name: skill-researcher
-      key: skill.md  # default
+  - name: skill-researcher
 ```
 
 ### 4. Tool Integration
@@ -198,7 +196,7 @@ http:
 | Runtime | Node.js CLI/Gateway | Kubernetes-native |
 | Agents | Workspaces + profiles | Agent CRDs |
 | Tools | Plugin system | Tool CRDs |
-| Skills | AgentSkills | ConfigMap skills |
+| Skills | AgentSkills | Skill CRDs |
 | Sessions | SQLite/local | ConfigMaps |
 | Coordination | Lobster workflows | Agent delegation |
 | Channels | WhatsApp, Telegram, etc. | REST API |

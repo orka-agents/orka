@@ -3,6 +3,7 @@
 *.exe~
 *.dll
 *.so
+.DS_Store
 *.dylib
 bin/*
 
@@ -44,3 +45,5 @@ ui/coverage/
 
 # E2E test environment variables
 test/e2e/.env
+
+.plans/

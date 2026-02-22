@@ -142,10 +142,10 @@ var _ = Describe("Chat and OpenAI-Compatible API", Ordered, func() {
 		Expect(events).To(ContainElement("done"), "Should receive a 'done' event")
 	})
 
-	// --- OpenAI-Compatible: /v1/models ---
+	// --- OpenAI-Compatible: /openai/v1/models ---
 
-	It("should list models via GET /v1/models", func() {
-		req, err := http.NewRequest("GET", apiBaseURL+"/v1/models", nil)
+	It("should list models via GET /openai/v1/models", func() {
+		req, err := http.NewRequest("GET", apiBaseURL+"/openai/openai/v1/models", nil)
 		Expect(err).NotTo(HaveOccurred())
 		req.Header.Set("Authorization", "Bearer "+token)
 
@@ -161,9 +161,9 @@ var _ = Describe("Chat and OpenAI-Compatible API", Ordered, func() {
 		Expect(bodyStr).To(ContainSubstring("object"))
 	})
 
-	// --- OpenAI-Compatible: /v1/chat/completions ---
+	// --- OpenAI-Compatible: /openai/v1/chat/completions ---
 
-	It("should proxy chat completions via POST /v1/chat/completions", func() {
+	It("should proxy chat completions via POST /openai/v1/chat/completions", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
 
 		By("ensuring an OpenAI provider exists")
@@ -186,7 +186,7 @@ var _ = Describe("Chat and OpenAI-Compatible API", Ordered, func() {
 			"max_tokens": 50
 		}`, model)
 
-		req, err := http.NewRequest("POST", apiBaseURL+"/v1/chat/completions",
+		req, err := http.NewRequest("POST", apiBaseURL+"/openai/openai/v1/chat/completions",
 			strings.NewReader(oaiBody))
 		Expect(err).NotTo(HaveOccurred())
 		req.Header.Set("Authorization", "Bearer "+token)

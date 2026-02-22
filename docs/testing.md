@@ -5,7 +5,7 @@ Orka has comprehensive test coverage across all packages, including unit tests, 
 ## Running Tests
 
 ```bash
-# Run all Go unit tests (uses envtest for K8s API + etcd)
+# Run test pipeline (manifests, generate, fmt, vet, then Go tests)
 make test
 
 # Run Go tests with coverage report

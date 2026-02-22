@@ -426,10 +426,10 @@ func TestFinishStream_NonTTYNoContent(t *testing.T) {
 
 func sseServer(events []string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/chat/config":
+		switch r.URL.Path {
+		case "/api/v1/chat/config":
 			json.NewEncoder(w).Encode(client.ChatConfigResponse{Enabled: true, Provider: "test", Model: "gpt-test"}) //nolint:errcheck
-		case r.URL.Path == "/api/v1/chat":
+		case "/api/v1/chat":
 			w.Header().Set("Content-Type", "text/event-stream")
 			flusher, ok := w.(http.Flusher)
 			for _, e := range events {
