@@ -73,7 +73,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
 
       - name: Generate SBOM
-        uses: anchore/sbom-action@e11c554f704a0b820cbf8c51673f6945e0731532 # v0
+        uses: anchore/sbom-action@28d71544de8eaf1b958d335707167c5f783590ad # v0
         with:
           image: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}
           format: spdx-json
