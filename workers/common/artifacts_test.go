@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package common
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -170,7 +171,12 @@ func TestUploadArtifacts_URLEscapesFilename(t *testing.T) {
 
 func TestUploadArtifacts_ReturnsErrorWhenTotalSizeExceeded(t *testing.T) {
 	prepareArtifactsDir(t)
-	createSparseArtifactFile(t, "too-large.bin", maxTotalSize+1)
+	// Create multiple files each under maxFileSize but totalling over maxTotalSize
+	fileSize := int64(maxFileSize - 1)
+	numFiles := (maxTotalSize / fileSize) + 2
+	for i := int64(0); i < numFiles; i++ {
+		createSparseArtifactFile(t, fmt.Sprintf("file-%d.bin", i), fileSize)
+	}
 
 	t.Setenv("ORKA_CONTROLLER_URL", "http://controller.example")
 	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")

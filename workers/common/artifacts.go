@@ -41,17 +41,24 @@ func UploadArtifacts() error {
 		return nil
 	}
 
-	// Compute total size
+	// Compute total size, excluding symlinks and oversized files
 	var totalSize int64
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
-		info, err := e.Info()
+		filePath := filepath.Join(artifactsDir, e.Name())
+		fi, err := os.Lstat(filePath)
 		if err != nil {
 			continue
 		}
-		totalSize += info.Size()
+		if fi.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if fi.Size() > maxFileSize {
+			continue
+		}
+		totalSize += fi.Size()
 	}
 	if totalSize > maxTotalSize {
 		return fmt.Errorf("total artifact size %d bytes exceeds limit of %d bytes", totalSize, maxTotalSize)
@@ -78,6 +85,17 @@ func UploadArtifacts() error {
 			continue
 		}
 		filePath := filepath.Join(artifactsDir, filename)
+
+		// Reject symlinks to prevent exfiltration of sensitive files
+		fi, err := os.Lstat(filePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "artifact: failed to stat %s: %v\n", filename, err)
+			continue
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			fmt.Fprintf(os.Stderr, "artifact: skipping symlink %s\n", filename)
+			continue
+		}
 
 		data, err := os.ReadFile(filePath)
 		if err != nil {

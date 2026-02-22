@@ -104,6 +104,19 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace, taskName, and filename are required")
 	}
 
+	// Server-side filename validation (defense-in-depth)
+	if len(filename) > 255 {
+		return fiber.NewError(fiber.StatusBadRequest, "filename exceeds 255 character limit")
+	}
+	for _, r := range filename {
+		if r < 0x20 || r == 0x7f {
+			return fiber.NewError(fiber.StatusBadRequest, "filename contains invalid characters")
+		}
+	}
+	if filename == "." || filename == ".." {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid filename")
+	}
+
 	if err := verifyCallerNamespace(c, namespace); err != nil {
 		return err
 	}
