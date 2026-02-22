@@ -489,13 +489,14 @@ func TestNewAuthMiddleware_BothHeadersPrefersAuthorization(t *testing.T) {
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
 					// Return different UIDs based on token to verify which was used
-					if tr.Spec.Token == "bearer-token" {
+					switch tr.Spec.Token {
+					case "bearer-token":
 						tr.Status.Authenticated = true
 						tr.Status.User = authenticationv1.UserInfo{
 							Username: "system:serviceaccount:ns1:bearer-sa",
 							UID:      "uid-bearer",
 						}
-					} else if tr.Spec.Token == "xapi-token" {
+					case "xapi-token":
 						tr.Status.Authenticated = true
 						tr.Status.User = authenticationv1.UserInfo{
 							Username: "system:serviceaccount:ns1:xapi-sa",

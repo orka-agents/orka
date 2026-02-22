@@ -506,6 +506,142 @@ func (c *Client) DeleteAgent(ctx context.Context, name string, opts GetOptions) 
 	return nil
 }
 
+// SkillSummary is a lightweight representation of a skill for list display.
+type SkillSummary struct {
+	Name        string   `json:"name"`
+	DisplayName string   `json:"displayName,omitempty"`
+	Description string   `json:"description"`
+	Version     string   `json:"version,omitempty"`
+	Author      string   `json:"author,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Phase       string   `json:"phase,omitempty"`
+}
+
+// SkillDetail is the full skill object returned by the API.
+type SkillDetail map[string]any
+
+// skillListResponse matches the API ListResponse shape.
+type skillListResponse struct {
+	Items    []SkillSummary `json:"items"`
+	Metadata struct {
+		Continue           string `json:"continue,omitempty"`
+		RemainingItemCount *int64 `json:"remainingItemCount,omitempty"`
+	} `json:"metadata"`
+}
+
+// ListSkills returns all skills from the API.
+func (c *Client) ListSkills(ctx context.Context, opts ListOptions) ([]SkillSummary, error) {
+	u, err := url.Parse(c.BaseURL + "/api/v1/skills")
+	if err != nil {
+		return nil, fmt.Errorf("invalid base URL: %w", err)
+	}
+	q := u.Query()
+	if opts.Namespace != "" {
+		q.Set("namespace", opts.Namespace)
+	}
+	u.RawQuery = q.Encode()
+
+	body, err := c.doGet(ctx, u.String())
+	if err != nil {
+		return nil, err
+	}
+
+	var resp skillListResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return resp.Items, nil
+}
+
+// GetSkill returns full details for a single skill.
+func (c *Client) GetSkill(ctx context.Context, name string, opts GetOptions) (*SkillDetail, error) {
+	u, err := url.Parse(c.BaseURL + "/api/v1/skills/" + url.PathEscape(name))
+	if err != nil {
+		return nil, fmt.Errorf("invalid base URL: %w", err)
+	}
+	q := u.Query()
+	if opts.Namespace != "" {
+		q.Set("namespace", opts.Namespace)
+	}
+	u.RawQuery = q.Encode()
+
+	body, err := c.doGet(ctx, u.String())
+	if err != nil {
+		return nil, err
+	}
+
+	var detail SkillDetail
+	if err := json.Unmarshal(body, &detail); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &detail, nil
+}
+
+// DeleteSkill deletes a skill by name.
+func (c *Client) DeleteSkill(ctx context.Context, name string, opts GetOptions) error {
+	u, err := url.Parse(c.BaseURL + "/api/v1/skills/" + url.PathEscape(name))
+	if err != nil {
+		return fmt.Errorf("invalid base URL: %w", err)
+	}
+	q := u.Query()
+	if opts.Namespace != "" {
+		q.Set("namespace", opts.Namespace)
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u.String(), nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// CreateSkill creates a new skill via the API.
+func (c *Client) CreateSkill(ctx context.Context, body []byte) (*SkillDetail, error) {
+	u := c.BaseURL + "/api/v1/skills"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var detail SkillDetail
+	if err := json.Unmarshal(respBody, &detail); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &detail, nil
+}
+
 // GetTaskLogs gets logs for a task.
 func (c *Client) GetTaskLogs(ctx context.Context, name string, opts GetOptions) (*TaskLogsResponse, error) {
 	u, err := url.Parse(c.BaseURL + "/api/v1/tasks/" + url.PathEscape(name) + "/logs")

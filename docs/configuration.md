@@ -58,8 +58,7 @@ spec:
     - name: web-search
     - name: github-search
   skills:
-    - configMapRef:
-        name: skill-researcher
+    - name: skill-researcher
   session:
     persistence: configmap # configmap, pvc, or none
     ttl: 24h
@@ -186,6 +185,35 @@ spec:
       - Bash
       - Glob
       - Grep
+```
+
+### Skill
+
+Reusable skill definitions (Agent Skills standard) that are referenced by Agents and AI Tasks.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Skill
+metadata:
+  name: skill-researcher
+  labels:
+    orka.ai/category: "research"
+spec:
+  displayName: "Research Methodology"
+  description: "Structured research workflow and source validation guidance"
+  version: "1.0.0"
+  tags: ["research", "analysis"]
+  content:
+    inline: |
+      # Research Skill
+      Use primary sources and cite references.
+    files:
+      templates/checklist.md: |
+        - [ ] Validate source credibility
+        - [ ] Cross-check key claims
+status:
+  phase: Ready
+  contentHash: sha256:...
 ```
 
 ### Tool

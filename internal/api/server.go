@@ -160,6 +160,14 @@ func (s *Server) setupRoutes() {
 	api.Put("/agents/:name", s.handlers.UpdateAgent)
 	api.Delete("/agents/:name", s.handlers.DeleteAgent)
 
+	// Skills endpoints
+	api.Post("/skills", s.handlers.CreateSkill)
+	api.Get("/skills", s.handlers.ListSkills)
+	api.Get("/skills/:name", s.handlers.GetSkill)
+	api.Get("/skills/:name/content", s.handlers.GetSkillContent)
+	api.Put("/skills/:name", s.handlers.UpdateSkill)
+	api.Delete("/skills/:name", s.handlers.DeleteSkill)
+
 	// Auth validation endpoint
 	api.Get("/auth/validate", s.handleAuthValidate)
 

@@ -102,6 +102,7 @@ rules:
   resources:
   - agents
   - providers
+  - skills
   - tasks
   - tools
   verbs:
@@ -117,6 +118,7 @@ rules:
   resources:
   - agents/finalizers
   - providers/finalizers
+  - skills/finalizers
   - tasks/finalizers
   - tools/finalizers
   verbs:
@@ -126,6 +128,7 @@ rules:
   resources:
   - agents/status
   - providers/status
+  - skills/status
   - tasks/status
   - tools/status
   verbs:

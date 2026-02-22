@@ -323,9 +323,12 @@ func TestValidateTools(t *testing.T) {
 // ---------- validateSkills ----------
 
 func TestValidateSkills(t *testing.T) {
-	skillCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: "skill-cm", Namespace: testNS},
-		Data:       map[string]string{"skill.yaml": "content"},
+	skillCR := &corev1alpha1.Skill{
+		ObjectMeta: metav1.ObjectMeta{Name: "skill-cr", Namespace: testNS},
+		Spec: corev1alpha1.SkillSpec{
+			Description: "test skill",
+			Content:     corev1alpha1.SkillContent{Inline: "test content"},
+		},
 	}
 
 	tests := []struct {
@@ -340,22 +343,22 @@ func TestValidateSkills(t *testing.T) {
 			agent: baseAgent("no-skills"),
 		},
 		{
-			name: "skill configmap exists",
+			name: "skill CR exists",
 			agent: func() *corev1alpha1.Agent {
 				a := baseAgent("with-skill")
 				a.Spec.Skills = []corev1alpha1.SkillReference{
-					{ConfigMapRef: corev1alpha1.ConfigMapReference{Name: "skill-cm"}},
+					{Name: "skill-cr"},
 				}
 				return a
 			}(),
-			objs: []runtime.Object{skillCM},
+			objs: []runtime.Object{skillCR},
 		},
 		{
-			name: "skill configmap not found",
+			name: "skill CR not found",
 			agent: func() *corev1alpha1.Agent {
 				a := baseAgent("missing-skill")
 				a.Spec.Skills = []corev1alpha1.SkillReference{
-					{ConfigMapRef: corev1alpha1.ConfigMapReference{Name: "nonexistent"}},
+					{Name: "nonexistent"},
 				}
 				return a
 			}(),

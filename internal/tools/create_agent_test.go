@@ -329,8 +329,8 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 	if len(agent.Spec.Skills) != 1 {
 		t.Fatalf("expected 1 skill, got %d", len(agent.Spec.Skills))
 	}
-	if agent.Spec.Skills[0].ConfigMapRef.Name != "go-coding" {
-		t.Errorf("skills[0].configMapRef.name = %q, want %q", agent.Spec.Skills[0].ConfigMapRef.Name, "go-coding")
+	if agent.Spec.Skills[0].Name != "go-coding" {
+		t.Errorf("skills[0].name = %q, want %q", agent.Spec.Skills[0].Name, "go-coding")
 	}
 
 	// Verify coordination

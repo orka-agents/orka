@@ -1781,7 +1781,7 @@ func TestExecute_ListTasks(t *testing.T) {
 
 func TestExecuteListTasks_WithLimit(t *testing.T) {
 	tasks := make([]runtime.Object, 5)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		tasks[i] = &corev1alpha1.Task{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              fmt.Sprintf("task-%d", i),

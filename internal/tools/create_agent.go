@@ -234,7 +234,7 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	skillRefs := make([]corev1alpha1.SkillReference, 0, len(a.Skills))
 	for _, name := range a.Skills {
 		skillRefs = append(skillRefs, corev1alpha1.SkillReference{
-			ConfigMapRef: corev1alpha1.ConfigMapReference{Name: name},
+			Name: name,
 		})
 	}
 

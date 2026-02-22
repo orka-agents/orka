@@ -159,6 +159,47 @@ func TestLoadSessionContext_MalformedJSON(t *testing.T) {
 	}
 }
 
+func TestLoadSkillsFromVolume_PromptFile(t *testing.T) {
+	skillsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(skillsDir, "PROMPT.md"), []byte("Primary skill prompt"), 0o644); err != nil {
+		t.Fatalf("write prompt file: %v", err)
+	}
+
+	original := os.Getenv("ORKA_SKILLS_DIR")
+	os.Setenv("ORKA_SKILLS_DIR", skillsDir)      //nolint:errcheck
+	defer os.Setenv("ORKA_SKILLS_DIR", original) //nolint:errcheck
+
+	got := loadSkillsFromVolume()
+	if got != "Primary skill prompt" {
+		t.Fatalf("loadSkillsFromVolume() = %q, want %q", got, "Primary skill prompt")
+	}
+}
+
+func TestLoadSkillsFromVolume_FallbackSkillFiles(t *testing.T) {
+	skillsDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(skillsDir, "skill-a"), 0o755); err != nil {
+		t.Fatalf("mkdir skill-a: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(skillsDir, "skill-b"), 0o755); err != nil {
+		t.Fatalf("mkdir skill-b: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillsDir, "skill-a", "SKILL.md"), []byte("Skill A"), 0o644); err != nil {
+		t.Fatalf("write skill-a: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillsDir, "skill-b", "SKILL.md"), []byte("Skill B"), 0o644); err != nil {
+		t.Fatalf("write skill-b: %v", err)
+	}
+
+	original := os.Getenv("ORKA_SKILLS_DIR")
+	os.Setenv("ORKA_SKILLS_DIR", skillsDir)      //nolint:errcheck
+	defer os.Setenv("ORKA_SKILLS_DIR", original) //nolint:errcheck
+
+	got := loadSkillsFromVolume()
+	if got != "Skill A\n\nSkill B" {
+		t.Fatalf("loadSkillsFromVolume() = %q, want %q", got, "Skill A\\n\\nSkill B")
+	}
+}
+
 func TestBuildLLMTools_BuiltinTools(t *testing.T) {
 	// Test with built-in tool
 	enabledTools := []string{"web_search"}
