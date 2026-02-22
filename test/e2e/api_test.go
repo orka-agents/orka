@@ -213,6 +213,79 @@ var _ = Describe("REST API Endpoints", Ordered, func() {
 		}, 30*time.Second, time.Second).Should(Succeed())
 	})
 
+	It("should upload, list, and download task artifacts via API", func() {
+		By("getting a service account token for auth")
+		token, err := serviceAccountToken()
+		Expect(err).NotTo(HaveOccurred())
+
+		taskName := fmt.Sprintf("e2e-api-artifact-task-%d", time.Now().UnixNano())
+		const artifactName = "output.txt"
+		const artifactContent = "artifact-content-from-e2e"
+
+		DeferCleanup(func() {
+			cmd := exec.Command("kubectl", "delete", "task", taskName, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+
+		By("creating a task via POST /api/v1/tasks")
+		taskBody := fmt.Sprintf(`{"name":"%s","type":"container","image":"busybox:latest","command":["echo"],"args":["artifact-source"]}`,
+			taskName)
+		req, err := http.NewRequest("POST", apiBaseURL+"/api/v1/tasks", strings.NewReader(taskBody))
+		Expect(err).NotTo(HaveOccurred())
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		defer resp.Body.Close()
+		Expect(resp.StatusCode).To(Equal(http.StatusCreated))
+
+		By("waiting for task completion")
+		phase := waitForTaskCompletion(taskName, 3*time.Minute)
+		Expect(phase).To(Equal("Succeeded"))
+
+		By("uploading an artifact via POST /internal/v1/artifacts/{namespace}/{taskName}/{filename}")
+		uploadURL := fmt.Sprintf("%s/internal/v1/artifacts/%s/%s/%s", apiBaseURL, namespace, taskName, artifactName)
+		req, err = http.NewRequest("POST", uploadURL, strings.NewReader(artifactContent))
+		Expect(err).NotTo(HaveOccurred())
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "text/plain")
+
+		resp, err = http.DefaultClient.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		defer resp.Body.Close()
+		Expect(resp.StatusCode).To(Equal(http.StatusCreated))
+
+		By("listing artifacts via GET /api/v1/tasks/{id}/artifacts")
+		req, err = http.NewRequest("GET", apiBaseURL+"/api/v1/tasks/"+taskName+"/artifacts", nil)
+		Expect(err).NotTo(HaveOccurred())
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err = http.DefaultClient.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		defer resp.Body.Close()
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+		listBody, err := io.ReadAll(resp.Body)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(listBody)).To(ContainSubstring(artifactName))
+
+		By("downloading artifact via GET /api/v1/tasks/{id}/artifacts/{filename}")
+		req, err = http.NewRequest("GET", apiBaseURL+"/api/v1/tasks/"+taskName+"/artifacts/"+artifactName, nil)
+		Expect(err).NotTo(HaveOccurred())
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err = http.DefaultClient.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		defer resp.Body.Close()
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+		Expect(resp.Header.Get("Content-Type")).To(ContainSubstring("text/plain"))
+
+		downloadBody, err := io.ReadAll(resp.Body)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(downloadBody)).To(Equal(artifactContent))
+	})
+
 	It("should stream task logs via GET /api/v1/tasks/{id}/logs", func() {
 		By("creating a container task that produces output")
 		const logTaskName = "e2e-api-log-task"

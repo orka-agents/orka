@@ -59,10 +59,11 @@ type Handlers struct {
 	sessionStore              store.SessionStore
 	planStore                 store.PlanStore
 	healthChecker             store.HealthChecker
+	artifactStore             store.ArtifactStore
 }
 
 // NewHandlers creates a new Handlers instance
-func NewHandlers(c client.Client, sessionManager *controller.SessionManager, watchNamespace string, enforceNS bool, rs store.ResultStore, ss store.SessionStore, ps store.PlanStore, clientset kubernetes.Interface, hc store.HealthChecker) *Handlers {
+func NewHandlers(c client.Client, sessionManager *controller.SessionManager, watchNamespace string, enforceNS bool, rs store.ResultStore, ss store.SessionStore, ps store.PlanStore, clientset kubernetes.Interface, hc store.HealthChecker, as store.ArtifactStore) *Handlers {
 	return &Handlers{
 		client:                    c,
 		clientset:                 clientset,
@@ -73,6 +74,7 @@ func NewHandlers(c client.Client, sessionManager *controller.SessionManager, wat
 		sessionStore:              ss,
 		planStore:                 ps,
 		healthChecker:             hc,
+		artifactStore:             as,
 	}
 }
 
@@ -1174,6 +1176,81 @@ func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
 		Items:    taskList.Items,
 		Metadata: ListMeta{},
 	})
+}
+
+// ListTaskArtifacts lists artifacts for a task
+func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
+	id := c.Params("id")
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+
+	task := &corev1alpha1.Task{}
+	ctx := c.Context()
+	if err := h.client.Get(ctx, types.NamespacedName{Name: id, Namespace: namespace}, task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "task not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+
+	if h.artifactStore == nil {
+		return c.JSON(fiber.Map{"artifacts": []any{}})
+	}
+
+	artifacts, err := h.artifactStore.ListArtifacts(ctx, namespace, id)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list artifacts: %v", err))
+	}
+
+	if artifacts == nil {
+		artifacts = []store.ArtifactMetadata{}
+	}
+
+	return c.JSON(fiber.Map{"artifacts": artifacts})
+}
+
+// DownloadTaskArtifact downloads a specific artifact file
+func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
+	id := c.Params("id")
+	filename := c.Params("filename")
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+
+	task := &corev1alpha1.Task{}
+	ctx := c.Context()
+	if err := h.client.Get(ctx, types.NamespacedName{Name: id, Namespace: namespace}, task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "task not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+
+	if h.artifactStore == nil {
+		return fiber.NewError(fiber.StatusNotFound, "artifact store not configured")
+	}
+
+	data, contentType, err := h.artifactStore.GetArtifact(ctx, namespace, id, filename)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "artifact not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get artifact: %v", err))
+	}
+
+	// Sanitize filename for Content-Disposition header
+	safeFilename := strings.Map(func(r rune) rune {
+		if r == '"' || r == '\\' || r == '\r' || r == '\n' {
+			return '_'
+		}
+		return r
+	}, filename)
+	c.Set("Content-Type", contentType)
+	c.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, safeFilename))
+	return c.Send(data)
 }
 
 // handleAuthValidate returns success if the request passes auth middleware

@@ -99,6 +99,23 @@ curl http://localhost:8080/api/v1/tasks/hello-task/result \
   -H "Authorization: Bearer $(kubectl create token orka-client)"
 ```
 
+### 5. Retrieve Artifacts
+
+After a task completes, you can list and download generated artifacts:
+
+```bash
+# API: list and download artifacts
+curl http://localhost:8080/api/v1/tasks/hello-task/artifacts \
+  -H "Authorization: Bearer $(kubectl create token orka-client)"
+curl -L http://localhost:8080/api/v1/tasks/hello-task/artifacts/output.json \
+  -H "Authorization: Bearer $(kubectl create token orka-client)" \
+  -o output.json
+
+# CLI
+orka task artifacts <task-name>
+orka task download <task-name> [filename] -o <path>
+```
+
 ## Agent Runtimes Quick Start
 
 Agent runtimes let you run tasks via Claude Code CLI or GitHub Copilot CLI with full autonomous coding capabilities.

@@ -40,6 +40,14 @@ type SessionMessage struct {
 	Timestamp  time.Time      `json:"ts"`
 }
 
+// ArtifactMetadata describes a stored artifact file.
+type ArtifactMetadata struct {
+	Filename    string `json:"filename"`
+	ContentType string `json:"contentType"`
+	Size        int64  `json:"size"`
+	CreatedAt   string `json:"createdAt"`
+}
+
 // PlanState represents the autonomous plan state for a coordinator task.
 type PlanState struct {
 	TaskName     string

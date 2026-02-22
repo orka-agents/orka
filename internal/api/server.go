@@ -39,6 +39,7 @@ type ServerConfig struct {
 	SessionStore              store.SessionStore
 	PlanStore                 store.PlanStore
 	MessageStore              store.MessageStore
+	ArtifactStore             store.ArtifactStore
 	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
 }
@@ -58,12 +59,14 @@ type Server struct {
 	SessionStore     store.SessionStore
 	PlanStore        store.PlanStore
 	MessageStore     store.MessageStore
+	ArtifactStore    store.ArtifactStore
 }
 
 // NewServer creates a new API server
 func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
 	app := fiber.New(fiber.Config{
 		AppName:      "Orka API",
+		BodyLimit:    15 << 20, // 15MB — allows artifact uploads up to 10MB + overhead
 		ErrorHandler: customErrorHandler,
 	})
 
@@ -76,9 +79,10 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		SessionStore:   config.SessionStore,
 		PlanStore:      config.PlanStore,
 		MessageStore:   config.MessageStore,
+		ArtifactStore:  config.ArtifactStore,
 	}
 
-	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace, config.EnforceNamespaceIsolation, config.ResultStore, config.SessionStore, config.PlanStore, config.Clientset, config.HealthChecker)
+	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace, config.EnforceNamespaceIsolation, config.ResultStore, config.SessionStore, config.PlanStore, config.Clientset, config.HealthChecker, config.ArtifactStore)
 	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore)
 	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat)
 	server.anthropicHandler = NewAnthropicCompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat)
@@ -143,6 +147,8 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks/:id/result", s.handlers.GetTaskResult)
 	api.Get("/tasks/:id/plan", s.handlers.GetTaskPlan)
 	api.Get("/tasks/:id/children", s.handlers.GetTaskChildren)
+	api.Get("/tasks/:id/artifacts", s.handlers.ListTaskArtifacts)
+	api.Get("/tasks/:id/artifacts/:filename", s.handlers.DownloadTaskArtifact)
 
 	// Session endpoints
 	api.Get("/sessions", s.handlers.ListSessions)
@@ -196,7 +202,7 @@ func (s *Server) setupRoutes() {
 
 	// Internal API for worker communication
 	if s.ResultStore != nil && s.SessionStore != nil {
-		s.internalHandlers = NewInternalHandlers(s.ResultStore, s.SessionStore, s.PlanStore, s.MessageStore)
+		s.internalHandlers = NewInternalHandlers(s.ResultStore, s.SessionStore, s.PlanStore, s.MessageStore, s.ArtifactStore)
 		internal := s.app.Group("/internal/v1")
 		internal.Use(NewAuthMiddleware(s.client))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
@@ -208,6 +214,9 @@ func (s *Server) setupRoutes() {
 		if s.MessageStore != nil {
 			internal.Post("/messages/:namespace", s.internalHandlers.SendMessage)
 			internal.Get("/messages/:namespace/:taskName", s.internalHandlers.GetMessages)
+		}
+		if s.ArtifactStore != nil {
+			internal.Post("/artifacts/:namespace/:taskName/:filename", s.internalHandlers.UploadArtifact)
 		}
 	}
 }

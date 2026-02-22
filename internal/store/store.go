@@ -47,6 +47,14 @@ type PlanStore interface {
 	DeletePlan(ctx context.Context, namespace, taskName string) error
 }
 
+// ArtifactStore handles task artifact persistence.
+type ArtifactStore interface {
+	SaveArtifact(ctx context.Context, namespace, taskName, filename, contentType string, data []byte) error
+	GetArtifact(ctx context.Context, namespace, taskName, filename string) ([]byte, string, error)
+	ListArtifacts(ctx context.Context, namespace, taskName string) ([]ArtifactMetadata, error)
+	DeleteArtifacts(ctx context.Context, namespace, taskName string) error
+}
+
 // Message represents an inter-agent message.
 type Message struct {
 	ID         int64  `json:"id"`

@@ -745,6 +745,85 @@ func (c *Client) GetTaskResult(ctx context.Context, name string, opts GetOptions
 	return &result, nil
 }
 
+// ArtifactMetadata describes a stored artifact.
+type ArtifactMetadata struct {
+	Filename    string `json:"filename"`
+	ContentType string `json:"contentType"`
+	Size        int64  `json:"size"`
+	CreatedAt   string `json:"createdAt"`
+}
+
+// ListArtifacts returns artifacts for a task.
+func (c *Client) ListArtifacts(ctx context.Context, taskName string, opts GetOptions) ([]ArtifactMetadata, error) {
+	u, err := url.Parse(c.BaseURL + "/api/v1/tasks/" + url.PathEscape(taskName) + "/artifacts")
+	if err != nil {
+		return nil, fmt.Errorf("invalid base URL: %w", err)
+	}
+	q := u.Query()
+	if opts.Namespace != "" {
+		q.Set("namespace", opts.Namespace)
+	}
+	u.RawQuery = q.Encode()
+
+	body, err := c.doGet(ctx, u.String())
+	if err != nil {
+		return nil, err
+	}
+
+	var resp struct {
+		Artifacts []ArtifactMetadata `json:"artifacts"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	if resp.Artifacts == nil {
+		return []ArtifactMetadata{}, nil
+	}
+	return resp.Artifacts, nil
+}
+
+// DownloadArtifact downloads a specific artifact and returns the raw bytes and content type.
+func (c *Client) DownloadArtifact(ctx context.Context, taskName, filename string, opts GetOptions) ([]byte, string, error) {
+	u, err := url.Parse(c.BaseURL + "/api/v1/tasks/" + url.PathEscape(taskName) + "/artifacts/" + url.PathEscape(filename))
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid base URL: %w", err)
+	}
+	q := u.Query()
+	if opts.Namespace != "" {
+		q.Set("namespace", opts.Namespace)
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create request: %w", err)
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, "", fmt.Errorf("artifact %q not found for task %q", filename, taskName)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, "", fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read response: %w", err)
+	}
+	contentType := resp.Header.Get("Content-Type")
+	return body, contentType, nil
+}
+
 // extractTaskSummary pulls summary fields from the raw task JSON.
 func extractTaskSummary(item TaskDetail) TaskSummary {
 	s := TaskSummary{

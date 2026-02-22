@@ -64,6 +64,7 @@ type TaskReconciler struct {
 	SessionStore              store.SessionStore
 	PlanStore                 store.PlanStore
 	MessageStore              store.MessageStore
+	ArtifactStore             store.ArtifactStore
 	EnforceNamespaceIsolation bool
 	MaxTasksPerNamespace      int32
 }
@@ -177,6 +178,13 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete result from store", "task", task.Name)
 				// Continue with finalizer removal anyway
+			}
+		}
+
+		// Clean up artifacts
+		if r.ArtifactStore != nil {
+			if err := r.ArtifactStore.DeleteArtifacts(ctx, task.Namespace, task.Name); err != nil {
+				log.Error(err, "failed to delete artifacts", "task", task.Name)
 			}
 		}
 
