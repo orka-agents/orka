@@ -169,12 +169,13 @@ func (r *AgentReconciler) validateTools(ctx context.Context, agent *corev1alpha1
 func (r *AgentReconciler) validateSkills(ctx context.Context, agent *corev1alpha1.Agent) error {
 	for _, skillRef := range agent.Spec.Skills {
 		skill := &corev1alpha1.Skill{}
-		key := client.ObjectKey{Name: skillRef.Name, Namespace: agent.Namespace}
+		skillName := skillRef.Name
+		key := client.ObjectKey{Name: skillName, Namespace: agent.Namespace}
 		if err := r.Get(ctx, key, skill); err != nil {
 			if errors.IsNotFound(err) {
-				return fmt.Errorf("referenced Skill %q not found", skillRef.Name)
+				return fmt.Errorf("referenced Skill %q not found", skillName)
 			}
-			return fmt.Errorf("failed to get Skill %q: %w", skillRef.Name, err)
+			return fmt.Errorf("failed to get Skill %q: %w", skillName, err)
 		}
 	}
 	return nil

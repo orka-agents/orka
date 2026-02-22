@@ -2235,7 +2235,7 @@ func TestJobBuilderBuildAddsSkillVolumeAndConfigMap(t *testing.T) {
 
 	cm := &corev1.ConfigMap{}
 	if err := fc.Get(context.Background(), types.NamespacedName{
-		Name:      skillsVolume.ConfigMap.LocalObjectReference.Name,
+		Name:      skillsVolume.ConfigMap.Name,
 		Namespace: defaultNS,
 	}, cm); err != nil {
 		t.Fatalf("expected skill ConfigMap to exist: %v", err)
@@ -2278,5 +2278,80 @@ func TestJobBuilderBuildFailsWhenSkillMissing(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to get Skill") {
 		t.Fatalf("error = %v, expected missing skill message", err)
+	}
+}
+
+func TestJobBuilderBuildDeduplicatesSkills(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+
+	skill := &corev1alpha1.Skill{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-skill", Namespace: defaultNS},
+		Spec: corev1alpha1.SkillSpec{
+			Description: "Shared skill",
+			Content: corev1alpha1.SkillContent{
+				Inline: "Shared skill content.",
+			},
+		},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(skill).Build()
+	jb := NewJobBuilder(fc)
+	jb.ControllerURL = "http://orka-controller.orka-system.svc:8080"
+
+	// Same skill referenced by both agent and task
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "dedup-agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Skills: []corev1alpha1.SkillReference{{Name: "shared-skill"}},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "dedup-task", Namespace: defaultNS, UID: "uid-dedup"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI: &corev1alpha1.AISpec{
+				Provider: "openai",
+				Model:    "gpt-4o-mini",
+				Prompt:   "hello",
+				Skills:   []corev1alpha1.SkillReference{{Name: "shared-skill"}},
+			},
+		},
+	}
+
+	job, err := jb.Build(context.Background(), task, agent, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	// Find the skills ConfigMap and verify content appears only once
+	var skillsVolume *corev1.Volume
+	for i := range job.Spec.Template.Spec.Volumes {
+		if job.Spec.Template.Spec.Volumes[i].Name == "skills" {
+			skillsVolume = &job.Spec.Template.Spec.Volumes[i]
+			break
+		}
+	}
+	if skillsVolume == nil || skillsVolume.ConfigMap == nil {
+		t.Fatal("skills volume should reference a ConfigMap")
+	}
+
+	cm := &corev1.ConfigMap{}
+	if err := fc.Get(context.Background(), types.NamespacedName{
+		Name:      skillsVolume.ConfigMap.Name,
+		Namespace: defaultNS,
+	}, cm); err != nil {
+		t.Fatalf("expected skill ConfigMap to exist: %v", err)
+	}
+
+	// Should have exactly 1 inline entry (skill-0-inline), not 2
+	inlineCount := 0
+	for key := range cm.Data {
+		if strings.HasPrefix(key, "skill-") && strings.HasSuffix(key, "-inline") {
+			inlineCount++
+		}
+	}
+	if inlineCount != 1 {
+		t.Fatalf("expected 1 inline skill entry (deduplicated), got %d", inlineCount)
 	}
 }

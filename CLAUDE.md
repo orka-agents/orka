@@ -20,7 +20,7 @@ When you encounter pre-existing bugs, failing tests, or broken CI — **fix them
 
 ## Project Overview
 
-Orka is a Kubernetes-native task execution platform. A controller manages Jobs and Pods for incoming task requests, supporting container tasks, AI agent tasks with LLM integration, and external agent CLI runtimes (Copilot, Claude Code). CRDs: Task, Agent, Tool, Provider. See @docs/architecture.md for full details.
+Orka is a Kubernetes-native task execution platform. A controller manages Jobs and Pods for incoming task requests, supporting container tasks, AI agent tasks with LLM integration, and external agent CLI runtimes (Copilot, Claude Code). CRDs: Task, Agent, Tool, Provider, Skill. See @docs/architecture.md for full details.
 
 ## Build & Development Commands
 

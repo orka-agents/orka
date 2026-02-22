@@ -8,13 +8,16 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
@@ -721,4 +724,30 @@ func TestBuildSystemPrompt(t *testing.T) {
 			t.Error("missing custom instructions in prompt")
 		}
 	})
+}
+
+func TestBuildDynamicContextSkillListError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*corev1alpha1.SkillList); ok {
+					return fmt.Errorf("simulated API server error")
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).
+		Build()
+	b := NewSystemPromptBuilder(c, "default")
+
+	_, _, _, _, err := b.buildDynamicContext(context.Background())
+	if err == nil {
+		t.Fatal("expected error when skill listing fails")
+	}
+	if !strings.Contains(err.Error(), "listing skills") {
+		t.Errorf("error = %q, expected 'listing skills' message", err.Error())
+	}
 }

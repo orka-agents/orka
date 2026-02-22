@@ -421,7 +421,10 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 
 	// Fetch skills
 	var skillList corev1alpha1.SkillList
-	if err := b.client.List(ctx, &skillList, client.InNamespace(b.namespace)); err == nil && len(skillList.Items) > 0 {
+	if err := b.client.List(ctx, &skillList, client.InNamespace(b.namespace)); err != nil {
+		return "", "", "", "", fmt.Errorf("listing skills: %w", err)
+	}
+	if len(skillList.Items) > 0 {
 		skillLines := make([]string, 0, len(skillList.Items))
 		for i := range skillList.Items {
 			skill := &skillList.Items[i]

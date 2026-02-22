@@ -999,6 +999,18 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 		skillRefs = append(skillRefs, task.Spec.AI.Skills...)
 	}
 
+	// Deduplicate skill references by resolved name
+	seen := make(map[string]bool)
+	deduped := make([]corev1alpha1.SkillReference, 0, len(skillRefs))
+	for _, ref := range skillRefs {
+		name := ref.Name
+		if name != "" && !seen[name] {
+			seen[name] = true
+			deduped = append(deduped, ref)
+		}
+	}
+	skillRefs = deduped
+
 	if len(skillRefs) == 0 {
 		return nil
 	}
@@ -1011,8 +1023,9 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 
 	for idx, ref := range skillRefs {
 		skill := &corev1alpha1.Skill{}
-		if err := b.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: task.Namespace}, skill); err != nil {
-			return fmt.Errorf("failed to get Skill %q: %w", ref.Name, err)
+		skillName := ref.Name
+		if err := b.Get(ctx, client.ObjectKey{Name: skillName, Namespace: task.Namespace}, skill); err != nil {
+			return fmt.Errorf("failed to get Skill %q: %w", skillName, err)
 		}
 
 		metrics.SkillsLoaded.WithLabelValues(skill.Name, task.Namespace).Inc()
@@ -1023,7 +1036,7 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 		cmData[inlineKey] = skill.Spec.Content.Inline
 		items = append(items, corev1.KeyToPath{
 			Key:  inlineKey,
-			Path: path.Join(ref.Name, "SKILL.md"),
+			Path: path.Join(skillName, "SKILL.md"),
 		})
 
 		filePaths := make([]string, 0, len(skill.Spec.Content.Files))
@@ -1036,7 +1049,7 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 			cmData[fileKey] = skill.Spec.Content.Files[filePath]
 			items = append(items, corev1.KeyToPath{
 				Key:  fileKey,
-				Path: path.Join(ref.Name, filePath),
+				Path: path.Join(skillName, filePath),
 			})
 		}
 	}
