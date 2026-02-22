@@ -2,11 +2,11 @@
 
 ## Prerequisites
 
-- Go 1.25+
+- Go 1.25.3+
 - Bun (for UI build)
 - Docker 17.03+
-- kubectl v1.11.3+
-- Access to a Kubernetes v1.11.3+ cluster
+- kubectl (version compatible with your cluster)
+- Access to a Kubernetes cluster
 
 ## Build Commands
 
@@ -28,7 +28,7 @@ make run
 ## Testing
 
 ```bash
-# Run all Go unit tests (uses envtest for K8s API + etcd)
+# Run test pipeline (manifests, generate, fmt, vet, then Go tests)
 make test
 
 # Lint
@@ -59,6 +59,8 @@ make ui-test-coverage   # Run UI tests with coverage
 make docker-build                  # Controller image
 make docker-build-claude-worker    # Claude agent worker
 make docker-build-copilot-worker   # Copilot agent worker
+make docker-build-ai-worker        # AI worker
+make docker-build-general-worker   # General worker
 make docker-build-all              # All images
 
 # Push images

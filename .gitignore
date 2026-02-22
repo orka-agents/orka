@@ -44,3 +44,5 @@ ui/coverage/
 
 # E2E test environment variables
 test/e2e/.env
+
+.plans/

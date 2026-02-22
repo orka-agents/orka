@@ -395,8 +395,8 @@ func TestServer_SetupRoutes_OpenAI(t *testing.T) {
 		method string
 		path   string
 	}{
-		{http.MethodPost, "/v1/chat/completions"},
-		{http.MethodGet, "/v1/models"},
+		{http.MethodPost, "/openai/v1/chat/completions"},
+		{http.MethodGet, "/openai/v1/models"},
 	}
 
 	for _, ep := range endpoints {
