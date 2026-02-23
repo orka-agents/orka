@@ -48,6 +48,15 @@ Built-in AI worker tools: `web_search` (with DuckDuckGo fallback), `code_exec` (
 
 Do NOT delete `// +kubebuilder:scaffold:*` comments — the CLI injects code at these markers.
 
+## Workflow Principles
+
+- **Research before changing** — Read the relevant code deeply before proposing changes. Understand caching layers, existing abstractions, and conventions already in place. The most expensive mistake is code that works in isolation but breaks the surrounding system.
+- **Follow existing patterns** — When building something new, find and reference existing similar code in the codebase (e.g., a new API endpoint should mirror existing endpoints, a new reconciler should follow existing reconciler patterns). Don't design from scratch when a pattern already exists.
+- **Protect existing interfaces** — Don't change existing function signatures, public APIs, or CRD schemas unless explicitly asked. Callers should adapt, not libraries.
+- **Scope discipline** — Implement exactly what's asked, nothing more. Don't add nice-to-haves, optional features, or "improvements" that weren't requested. When in doubt, leave it out.
+- **Continuous verification** — Run `make lint-fix` and `make test` after each logical phase of work, not just at the end. Catch problems early.
+- **Revert over patch** — When an approach goes in the wrong direction, `git checkout` and restart with a narrower scope rather than trying to incrementally fix a bad approach.
+
 ## Code Style & Conventions
 
 ### Go
