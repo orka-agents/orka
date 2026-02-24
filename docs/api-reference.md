@@ -261,9 +261,9 @@ These tools are available to AI worker agents:
 | `web_fetch` | Fetch and extract URL content | `url` (required), `max_chars` (default 50000), `raw` |
 | `file_write` | Write or append files in workspace paths | `path` (required), `content` (required), `mode` (`write`/`append`), `create_dirs` |
 
-### Coordination Tools
+### Coordination Tools (Chat-Only)
 
-These tools are registered when `ORKA_COORDINATION_ENABLED=true`:
+These tools are available **only in the chat interface** (not via `GET /api/v1/tools`). They are registered when `ORKA_COORDINATION_ENABLED=true`:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|

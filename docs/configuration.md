@@ -18,10 +18,10 @@ spec:
   prompt: "Analyze the latest Kubernetes security best practices"
   sessionRef:
     name: my-session
-    create: true
+    create: false  # default: false
     append: true
     maxMessages: 50
-  priority: 750
+  priority: 500
   timeout: 5m
   retryPolicy:
     maxRetries: 3
@@ -32,6 +32,7 @@ spec:
   schedule: "0 */6 * * *"      # Cron expression
   timeZone: "America/New_York" # IANA timezone
   concurrencyPolicy: Forbid    # Allow or Forbid concurrent runs
+  startingDeadlineSeconds: 100  # Deadline for starting missed scheduled runs (default: 100)
   suspend: false
   successfulRunsHistoryLimit: 3
   failedRunsHistoryLimit: 1
@@ -50,7 +51,7 @@ spec:
   providerRef:
     name: anthropic-prod
   model:
-    temperature: 0.3
+    temperature: 0.7
     maxTokens: 4096
   systemPrompt:
     inline: "You are a research specialist..."
@@ -306,6 +307,7 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 | `--ai-worker-image` | `ghcr.io/sozercan/orka/ai-worker:latest` | AI worker container image |
 | `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Copilot agent worker image |
 | `--claude-worker-image` | `ghcr.io/sozercan/orka/agent-worker-claude:latest` | Claude agent worker image |
+| `--general-worker-image` | `ghcr.io/sozercan/orka/general-worker:latest` | General worker container image |
 | `--store-backend` | `sqlite` | Storage backend (sqlite) |
 | `--store-path` | `/data/orka.db` | Path to SQLite database file |
 | `--chat-enabled` | `true` | Enable the chat endpoint |
