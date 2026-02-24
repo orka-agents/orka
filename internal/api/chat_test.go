@@ -32,6 +32,7 @@ import (
 	"github.com/sozercan/orka/internal/llm"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
+	chattools "github.com/sozercan/orka/internal/tools"
 )
 
 // chatMockProvider implements llm.Provider for testing.
@@ -93,7 +94,8 @@ func newTestResultStore(t *testing.T) store.ResultStore {
 
 func newTestChatHandler(t *testing.T, c client.Client, ss store.SessionStore, rs store.ResultStore, cfg ChatConfig) *ChatHandler {
 	t.Helper()
-	return NewChatHandler(c, nil, cfg, "", false, ss, rs)
+	resolver := NewProviderResolver(c, cfg)
+	return NewChatHandler(c, nil, cfg, "", false, ss, rs, resolver)
 }
 
 // providerCRD creates a Provider CRD + matching Secret for tests.
@@ -411,7 +413,7 @@ func TestLookupProvider(t *testing.T) {
 		rs := newTestResultStore(t)
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
-		p, err := ch.lookupProvider(context.Background(), "test-provider", "default")
+		p, err := ch.resolver.LookupProvider(context.Background(), "test-provider", "default")
 		require.NoError(t, err)
 		assert.Equal(t, "test-provider", p.Name)
 		assert.Equal(t, corev1alpha1.ProviderType("openai"), p.Spec.Type)
@@ -423,7 +425,7 @@ func TestLookupProvider(t *testing.T) {
 		rs := newTestResultStore(t)
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
-		_, err := ch.lookupProvider(context.Background(), "missing", "default")
+		_, err := ch.resolver.LookupProvider(context.Background(), "missing", "default")
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "not found")
 	})
@@ -451,7 +453,7 @@ func TestResolveAPIKey(t *testing.T) {
 			},
 		}
 
-		key, err := ch.resolveAPIKey(context.Background(), providerObj)
+		key, err := ch.resolver.ResolveAPIKey(context.Background(), providerObj)
 		require.NoError(t, err)
 		assert.Equal(t, "sk-test-123", key)
 	})
@@ -473,7 +475,7 @@ func TestResolveAPIKey(t *testing.T) {
 			},
 		}
 
-		key, err := ch.resolveAPIKey(context.Background(), providerObj)
+		key, err := ch.resolver.ResolveAPIKey(context.Background(), providerObj)
 		require.NoError(t, err)
 		assert.Equal(t, "default-key-val", key)
 	})
@@ -491,7 +493,7 @@ func TestResolveAPIKey(t *testing.T) {
 			},
 		}
 
-		_, err := ch.resolveAPIKey(context.Background(), providerObj)
+		_, err := ch.resolver.ResolveAPIKey(context.Background(), providerObj)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to get provider secret")
 	})
@@ -513,7 +515,7 @@ func TestResolveAPIKey(t *testing.T) {
 			},
 		}
 
-		_, err := ch.resolveAPIKey(context.Background(), providerObj)
+		_, err := ch.resolver.ResolveAPIKey(context.Background(), providerObj)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "has no key")
 	})
@@ -536,10 +538,10 @@ func TestResolveProvider(t *testing.T) {
 		rs := newTestResultStore(t)
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
-		provider, model, err := ch.resolveProvider(context.Background(), ChatRequest{
-			Provider: "my-provider",
-			Message:  "test",
-		}, "default")
+		provider, model, err := ch.resolver.Resolve(context.Background(), ResolveOpts{
+			ProviderName: "my-provider",
+			Namespace:    "default",
+		})
 		require.NoError(t, err)
 		assert.NotNil(t, provider)
 		assert.Equal(t, "test-model", model)
@@ -554,9 +556,9 @@ func TestResolveProvider(t *testing.T) {
 		cfg.Provider = "config-provider"
 		ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
 
-		provider, model, err := ch.resolveProvider(context.Background(), ChatRequest{
-			Message: "test",
-		}, "default")
+		provider, model, err := ch.resolver.Resolve(context.Background(), ResolveOpts{
+			Namespace: "default",
+		})
 		require.NoError(t, err)
 		assert.NotNil(t, provider)
 		assert.Equal(t, "config-model", model)
@@ -569,11 +571,11 @@ func TestResolveProvider(t *testing.T) {
 		rs := newTestResultStore(t)
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
-		_, model, err := ch.resolveProvider(context.Background(), ChatRequest{
-			Provider: "override-provider",
-			Model:    "custom-model",
-			Message:  "test",
-		}, "default")
+		_, model, err := ch.resolver.Resolve(context.Background(), ResolveOpts{
+			ProviderName: "override-provider",
+			Model:        "custom-model",
+			Namespace:    "default",
+		})
 		require.NoError(t, err)
 		assert.Equal(t, "custom-model", model)
 	})
@@ -585,9 +587,9 @@ func TestResolveProvider(t *testing.T) {
 		rs := newTestResultStore(t)
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
-		provider, model, err := ch.resolveProvider(context.Background(), ChatRequest{
-			Message: "test",
-		}, "default")
+		provider, model, err := ch.resolver.Resolve(context.Background(), ResolveOpts{
+			Namespace: "default",
+		})
 		require.NoError(t, err)
 		assert.NotNil(t, provider)
 		assert.Equal(t, "default-model", model)
@@ -599,11 +601,11 @@ func TestResolveProvider(t *testing.T) {
 		rs := newTestResultStore(t)
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
-		_, _, err := ch.resolveProvider(context.Background(), ChatRequest{
-			Message: "test",
-		}, "default")
+		_, _, err := ch.resolver.Resolve(context.Background(), ResolveOpts{
+			Namespace: "default",
+		})
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "no provider configured")
+		assert.Contains(t, err.Error(), "no provider")
 	})
 
 	t.Run("resolves from agent ref", func(t *testing.T) {
@@ -621,10 +623,10 @@ func TestResolveProvider(t *testing.T) {
 		rs := newTestResultStore(t)
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
-		provider, model, err := ch.resolveProvider(context.Background(), ChatRequest{
-			AgentRef: "my-agent",
-			Message:  "test",
-		}, "default")
+		provider, model, err := ch.resolver.Resolve(context.Background(), ResolveOpts{
+			AgentRef:  "my-agent",
+			Namespace: "default",
+		})
 		require.NoError(t, err)
 		assert.NotNil(t, provider)
 		assert.Equal(t, "agent-specific-model", model)
@@ -749,9 +751,10 @@ func TestRunToolLoop(t *testing.T) {
 		}
 
 		messages := []llm.Message{{Role: "user", Content: "list tasks"}}
+		exec := NewToolExecutor(fakeClient, nil, "default", "test-sess2", "", false, 5, 60*time.Second, rs)
 		content, usage, toolCalls, err := ch.runToolLoop(
 			context.Background(), provider, messages, "system prompt",
-			CoreTools(), NewToolExecutor(fakeClient, nil, "default", "test-sess2", "", false, 5, 60*time.Second, rs),
+			exec.registry.ToLLMTools(chattools.ChatToolNames()), exec,
 			"test-sess2", "default", "test-model", 0.7, 4096, 0, nil,
 		)
 		require.NoError(t, err)
@@ -807,9 +810,10 @@ func TestRunToolLoop(t *testing.T) {
 		}
 
 		messages := []llm.Message{{Role: "user", Content: "do things"}}
+		exec2 := NewToolExecutor(fakeClient, nil, "default", "max-iter-sess", "", false, 5, 60*time.Second, rs)
 		content, usage, _, err := ch.runToolLoop(
 			context.Background(), provider, messages, "system prompt",
-			CoreTools(), NewToolExecutor(fakeClient, nil, "default", "max-iter-sess", "", false, 5, 60*time.Second, rs),
+			exec2.registry.ToLLMTools(chattools.ChatToolNames()), exec2,
 			"max-iter-sess", "default", "test-model", 0.7, 4096, 0, nil,
 		)
 		require.NoError(t, err)
@@ -860,9 +864,10 @@ func TestRunToolLoop(t *testing.T) {
 		}
 
 		messages := []llm.Message{{Role: "user", Content: "do it"}}
+		exec3 := NewToolExecutor(fakeClient, nil, "default", "sse-sess", "", false, 5, 60*time.Second, rs)
 		content, _, _, err := ch.runToolLoop(
 			context.Background(), provider, messages, "system prompt",
-			CoreTools(), NewToolExecutor(fakeClient, nil, "default", "sse-sess", "", false, 5, 60*time.Second, rs),
+			exec3.registry.ToLLMTools(chattools.ChatToolNames()), exec3,
 			"sse-sess", "default", "test-model", 0.7, 4096, 0, emitSSE,
 		)
 		require.NoError(t, err)
@@ -961,7 +966,7 @@ func TestHandleChat(t *testing.T) {
 		ss := newTestSessionStore(t)
 		rs := newTestResultStore(t)
 		cfg := DefaultChatConfig()
-		ch := NewChatHandler(fakeClient, nil, cfg, "restricted-ns", false, ss, rs)
+		ch := NewChatHandler(fakeClient, nil, cfg, "restricted-ns", false, ss, rs, NewProviderResolver(fakeClient, cfg))
 
 		app := fiber.New()
 		app.Post("/api/v1/chat", ch.HandleChat)

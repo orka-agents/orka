@@ -482,7 +482,7 @@ func TestExecuteCreateAITask_Success(t *testing.T) {
 	args := map[string]any{
 		"prompt": "summarize this",
 	}
-	r := e.executeCreateAITask(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_ai_task", args)
 	if !r.Success {
 		t.Fatalf("expected success, got error: %s", r.Error)
 	}
@@ -501,7 +501,7 @@ func TestExecuteCreateAITask_WithSchedule(t *testing.T) {
 		"prompt":   "do something",
 		"schedule": "*/5 * * * *",
 	}
-	r := e.executeCreateAITask(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_ai_task", args)
 	if !r.Success {
 		t.Fatalf("expected success, got error: %s", r.Error)
 	}
@@ -517,7 +517,7 @@ func TestExecuteCreateAITask_InvalidTimeout(t *testing.T) {
 		"prompt":  "test",
 		"timeout": "not-a-duration",
 	}
-	r := e.executeCreateAITask(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_ai_task", args)
 	if r.Success {
 		t.Fatal("expected failure for invalid timeout")
 	}
@@ -529,7 +529,7 @@ func TestExecuteCreateAITask_InvalidTimeout(t *testing.T) {
 func TestExecuteCreateAITask_TaskLimit(t *testing.T) {
 	e := newTestExecutor()
 	e.maxTasks = 0
-	r := e.executeCreateAITask(context.Background(), map[string]any{"prompt": "test"})
+	r := e.executeTool(context.Background(), "create_ai_task", map[string]any{"prompt": "test"})
 	if r.Success {
 		t.Fatal("expected failure due to task limit")
 	}
@@ -548,7 +548,7 @@ func TestExecuteCreateAITask_WithOptionalFields(t *testing.T) {
 		"priority":    float64(10),
 		"sessionRef":  "my-session",
 	}
-	r := e.executeCreateAITask(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_ai_task", args)
 	if !r.Success {
 		t.Fatalf("expected success, got error: %s", r.Error)
 	}
@@ -563,7 +563,7 @@ func TestExecuteCreateContainerTask_Success(t *testing.T) {
 		"command": []any{"echo", "hello"},
 		"args":    []any{"world"},
 	}
-	r := e.executeCreateContainerTask(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_container_task", args)
 	if !r.Success {
 		t.Fatalf("expected success, got error: %s", r.Error)
 	}
@@ -576,7 +576,7 @@ func TestExecuteCreateContainerTask_Success(t *testing.T) {
 func TestExecuteCreateContainerTask_TaskLimit(t *testing.T) {
 	e := newTestExecutor()
 	e.maxTasks = 0
-	r := e.executeCreateContainerTask(context.Background(), map[string]any{"image": "alpine"})
+	r := e.executeTool(context.Background(), "create_container_task", map[string]any{"image": "alpine"})
 	if r.Success {
 		t.Fatal("expected failure")
 	}
@@ -588,7 +588,7 @@ func TestExecuteCreateContainerTask_WithSchedule(t *testing.T) {
 		"image":    "alpine",
 		"schedule": "0 * * * *",
 	}
-	r := e.executeCreateContainerTask(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_container_task", args)
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -604,7 +604,7 @@ func TestExecuteCreateContainerTask_InvalidTimeout(t *testing.T) {
 		"image":   "alpine",
 		"timeout": "bad",
 	}
-	r := e.executeCreateContainerTask(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_container_task", args)
 	if r.Success {
 		t.Fatal("expected failure for invalid timeout")
 	}
@@ -618,7 +618,7 @@ func TestExecuteCreateAgentTask_Success(t *testing.T) {
 		"prompt":   "do work",
 		"agentRef": "my-agent",
 	}
-	r := e.executeCreateAgentTask(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_agent_task", args)
 	if !r.Success {
 		t.Fatalf("expected success, got error: %s", r.Error)
 	}
@@ -626,7 +626,7 @@ func TestExecuteCreateAgentTask_Success(t *testing.T) {
 
 func TestExecuteCreateAgentTask_MissingPrompt(t *testing.T) {
 	e := newTestExecutor()
-	r := e.executeCreateAgentTask(context.Background(), map[string]any{"agentRef": "a"})
+	r := e.executeTool(context.Background(), "create_agent_task", map[string]any{"agentRef": "a"})
 	if r.Success {
 		t.Fatal("expected failure")
 	}
@@ -634,7 +634,7 @@ func TestExecuteCreateAgentTask_MissingPrompt(t *testing.T) {
 
 func TestExecuteCreateAgentTask_MissingAgentRef(t *testing.T) {
 	e := newTestExecutor()
-	r := e.executeCreateAgentTask(context.Background(), map[string]any{"prompt": "test"})
+	r := e.executeTool(context.Background(), "create_agent_task", map[string]any{"prompt": "test"})
 	if r.Success {
 		t.Fatal("expected failure")
 	}
@@ -663,7 +663,7 @@ func TestExecuteCreateAgentTask_WithWorkspace(t *testing.T) {
 		},
 		"maxTurns": float64(10),
 	}
-	r := e.executeCreateAgentTask(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_agent_task", args)
 	if !r.Success {
 		t.Fatalf("expected success, got error: %s", r.Error)
 	}
@@ -679,7 +679,7 @@ func TestExecuteCreateAgentTask_WithExplicitGitSecret(t *testing.T) {
 			"gitSecretRef": "my-secret",
 		},
 	}
-	r := e.executeCreateAgentTask(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_agent_task", args)
 	if !r.Success {
 		t.Fatalf("expected success, got error: %s", r.Error)
 	}
@@ -699,7 +699,7 @@ func TestExecuteCheckTaskProgress_Success(t *testing.T) {
 		},
 	}
 	e := newTestExecutor(task)
-	r := e.executeCheckTaskProgress(context.Background(), map[string]any{"name": "my-task"})
+	r := e.executeTool(context.Background(), "check_task_progress", map[string]any{"name": "my-task"})
 	if !r.Success {
 		t.Fatalf("expected success, got error: %s", r.Error)
 	}
@@ -711,7 +711,7 @@ func TestExecuteCheckTaskProgress_Success(t *testing.T) {
 
 func TestExecuteCheckTaskProgress_NotFound(t *testing.T) {
 	e := newTestExecutor()
-	r := e.executeCheckTaskProgress(context.Background(), map[string]any{"name": "nonexistent"})
+	r := e.executeTool(context.Background(), "check_task_progress", map[string]any{"name": "nonexistent"})
 	if r.Success {
 		t.Fatal("expected failure")
 	}
@@ -736,7 +736,7 @@ func TestExecuteCheckTaskProgress_WithConditions(t *testing.T) {
 		},
 	}
 	e := newTestExecutor(task)
-	r := e.executeCheckTaskProgress(context.Background(), map[string]any{"name": "cond-task"})
+	r := e.executeTool(context.Background(), "check_task_progress", map[string]any{"name": "cond-task"})
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -762,7 +762,7 @@ func TestExecuteFetchTaskOutput_NoResult(t *testing.T) {
 		},
 	}
 	e := newTestExecutor(task)
-	r := e.executeFetchTaskOutput(context.Background(), map[string]any{"name": "no-result"})
+	r := e.executeTool(context.Background(), "fetch_task_output", map[string]any{"name": "no-result"})
 	if r.Success {
 		t.Fatal("expected failure - no result available")
 	}
@@ -791,7 +791,7 @@ func TestExecuteFetchTaskOutput_Success(t *testing.T) {
 	sm := controller.NewSessionManager(&fakeSessionStore{})
 	e := NewToolExecutor(c, sm, "default", "sess-123", "", false, 5, 30*time.Second, rs)
 
-	r := e.executeFetchTaskOutput(context.Background(), map[string]any{"name": "done-task"})
+	r := e.executeTool(context.Background(), "fetch_task_output", map[string]any{"name": "done-task"})
 	if !r.Success {
 		t.Fatalf("expected success, got error: %s", r.Error)
 	}
@@ -820,7 +820,7 @@ func TestExecuteFetchTaskOutput_StoreNotFound(t *testing.T) {
 	sm := controller.NewSessionManager(&fakeSessionStore{})
 	e := NewToolExecutor(c, sm, "default", "sess-123", "", false, 5, 30*time.Second, rs)
 
-	r := e.executeFetchTaskOutput(context.Background(), map[string]any{"name": "store-miss"})
+	r := e.executeTool(context.Background(), "fetch_task_output", map[string]any{"name": "store-miss"})
 	if r.Success {
 		t.Fatal("expected failure")
 	}
@@ -848,7 +848,7 @@ func TestExecuteFetchTaskOutput_StoreError(t *testing.T) {
 	sm := controller.NewSessionManager(&fakeSessionStore{})
 	e := NewToolExecutor(c, sm, "default", "sess-123", "", false, 5, 30*time.Second, rs)
 
-	r := e.executeFetchTaskOutput(context.Background(), map[string]any{"name": "store-err"})
+	r := e.executeTool(context.Background(), "fetch_task_output", map[string]any{"name": "store-err"})
 	if r.Success {
 		t.Fatal("expected failure")
 	}
@@ -871,7 +871,7 @@ func TestExecuteWaitForTask_AlreadyComplete(t *testing.T) {
 		},
 	}
 	e := newTestExecutor(task)
-	r := e.executeWaitForTask(context.Background(), map[string]any{"name": "done", "timeout": float64(1)})
+	r := e.executeTool(context.Background(), "wait_for_task", map[string]any{"name": "done", "timeout": float64(1)})
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -879,7 +879,7 @@ func TestExecuteWaitForTask_AlreadyComplete(t *testing.T) {
 
 func TestExecuteWaitForTask_NotFound(t *testing.T) {
 	e := newTestExecutor()
-	r := e.executeWaitForTask(context.Background(), map[string]any{"name": "missing"})
+	r := e.executeTool(context.Background(), "wait_for_task", map[string]any{"name": "missing"})
 	if r.Success {
 		t.Fatal("expected failure")
 	}
@@ -895,7 +895,7 @@ func TestExecuteCancelTask_Success(t *testing.T) {
 		},
 	}
 	e := newTestExecutor(task)
-	r := e.executeCancelTask(context.Background(), map[string]any{"name": "cancel-me"})
+	r := e.executeTool(context.Background(), "cancel_task", map[string]any{"name": "cancel-me"})
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -907,7 +907,7 @@ func TestExecuteCancelTask_Success(t *testing.T) {
 
 func TestExecuteCancelTask_NotFound(t *testing.T) {
 	e := newTestExecutor()
-	r := e.executeCancelTask(context.Background(), map[string]any{"name": "nope"})
+	r := e.executeTool(context.Background(), "cancel_task", map[string]any{"name": "nope"})
 	if r.Success {
 		t.Fatal("expected failure")
 	}
@@ -917,7 +917,7 @@ func TestExecuteCancelTask_NotFound(t *testing.T) {
 
 func TestExecuteListAgents_Empty(t *testing.T) {
 	e := newTestExecutor()
-	r := e.executeListAgents(context.Background(), map[string]any{})
+	r := e.executeTool(context.Background(), "list_agents", map[string]any{})
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -946,19 +946,20 @@ func TestExecuteListAgents_WithAgents(t *testing.T) {
 		},
 	}
 	e := newTestExecutor(agent)
-	r := e.executeListAgents(context.Background(), map[string]any{})
+	r := e.executeTool(context.Background(), "list_agents", map[string]any{})
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
-	agents := r.Data.([]map[string]any)
-	if len(agents) != 1 {
-		t.Fatalf("expected 1 agent, got %d", len(agents))
+	agentsRaw := r.Data.([]any)
+	if len(agentsRaw) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agentsRaw))
 	}
-	if agents[0]["name"] != "test-agent" {
-		t.Errorf("name = %v", agents[0]["name"])
+	agents := agentsRaw[0].(map[string]any)
+	if agents["name"] != "test-agent" {
+		t.Errorf("name = %v", agents["name"])
 	}
-	if agents[0]["description"] != "A test agent" {
-		t.Errorf("description = %v", agents[0]["description"])
+	if agents["description"] != "A test agent" {
+		t.Errorf("description = %v", agents["description"])
 	}
 }
 
@@ -966,7 +967,7 @@ func TestExecuteListAgents_WithAgents(t *testing.T) {
 
 func TestExecuteListTools_Empty(t *testing.T) {
 	e := newTestExecutor()
-	r := e.executeListTools(context.Background(), map[string]any{})
+	r := e.executeTool(context.Background(), "list_tools", map[string]any{})
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -983,13 +984,13 @@ func TestExecuteListTools_WithTools(t *testing.T) {
 		},
 	}
 	e := newTestExecutor(tool)
-	r := e.executeListTools(context.Background(), map[string]any{})
+	r := e.executeTool(context.Background(), "list_tools", map[string]any{})
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
-	tools := r.Data.([]map[string]any)
-	if len(tools) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(tools))
+	toolsData := r.Data.([]any)
+	if len(toolsData) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(toolsData))
 	}
 }
 
@@ -997,7 +998,7 @@ func TestExecuteListTools_WithTools(t *testing.T) {
 
 func TestExecuteListTasks_Empty(t *testing.T) {
 	e := newTestExecutor()
-	r := e.executeListTasks(context.Background(), map[string]any{})
+	r := e.executeTool(context.Background(), "list_tasks", map[string]any{})
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -1020,21 +1021,21 @@ func TestExecuteListTasks_WithFilter(t *testing.T) {
 	e := newTestExecutor(task)
 
 	// Filter matching
-	r := e.executeListTasks(context.Background(), map[string]any{"status": "Succeeded"})
+	r := e.executeTool(context.Background(), "list_tasks", map[string]any{"status": "Succeeded"})
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
-	tasks := r.Data.([]map[string]any)
+	tasks := r.Data.([]any)
 	if len(tasks) != 1 {
 		t.Errorf("expected 1 task, got %d", len(tasks))
 	}
 
 	// Filter non-matching
-	r2 := e.executeListTasks(context.Background(), map[string]any{"status": "Failed"})
+	r2 := e.executeTool(context.Background(), "list_tasks", map[string]any{"status": "Failed"})
 	if !r2.Success {
 		t.Fatalf("expected success: %s", r2.Error)
 	}
-	tasks2 := r2.Data.([]map[string]any)
+	tasks2 := r2.Data.([]any)
 	if len(tasks2) != 0 {
 		t.Errorf("expected 0 tasks, got %d", len(tasks2))
 	}
@@ -1047,7 +1048,7 @@ func TestExecuteCreateAgent_Success(t *testing.T) {
 	args := map[string]any{
 		"name": "new-agent",
 	}
-	r := e.executeCreateAgent(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_agent", args)
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -1073,7 +1074,7 @@ func TestExecuteCreateAgent_WithModel(t *testing.T) {
 				"name":  "agent-" + tt.name,
 				"model": tt.model,
 			}
-			r := e.executeCreateAgent(context.Background(), args)
+			r := e.executeTool(context.Background(), "create_agent", args)
 			if !r.Success {
 				t.Fatalf("expected success: %s", r.Error)
 			}
@@ -1088,7 +1089,7 @@ func TestExecuteCreateAgent_WithSystemPromptAndTools(t *testing.T) {
 		"systemPrompt": "You are helpful",
 		"tools":        []any{"tool1", "tool2"},
 	}
-	r := e.executeCreateAgent(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_agent", args)
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -1102,7 +1103,7 @@ func TestExecuteCreateAgent_WithRuntime(t *testing.T) {
 			"type": "copilot",
 		},
 	}
-	r := e.executeCreateAgent(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_agent", args)
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -1121,7 +1122,7 @@ func TestExecuteCreateAgent_WithCoordination(t *testing.T) {
 			},
 		},
 	}
-	r := e.executeCreateAgent(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_agent", args)
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -1134,7 +1135,7 @@ func TestExecuteCreateAgent_NamespaceRestriction(t *testing.T) {
 		"name":      "bad-ns",
 		"namespace": "other-ns",
 	}
-	r := e.executeCreateAgent(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_agent", args)
 	if r.Success {
 		t.Fatal("expected failure due to namespace restriction")
 	}
@@ -1149,7 +1150,7 @@ func TestExecuteCreateAgent_WithInitialPrompt(t *testing.T) {
 		"name":          "init-agent",
 		"initialPrompt": "do initial work",
 	}
-	r := e.executeCreateAgent(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_agent", args)
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -1176,7 +1177,7 @@ func TestExecuteUpdateAgent_Success(t *testing.T) {
 		"systemPrompt": "Be concise",
 		"tools":        []any{"search"},
 	}
-	r := e.executeUpdateAgent(context.Background(), args)
+	r := e.executeTool(context.Background(), "update_agent", args)
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -1184,7 +1185,7 @@ func TestExecuteUpdateAgent_Success(t *testing.T) {
 
 func TestExecuteUpdateAgent_NotFound(t *testing.T) {
 	e := newTestExecutor()
-	r := e.executeUpdateAgent(context.Background(), map[string]any{"name": "missing"})
+	r := e.executeTool(context.Background(), "update_agent", map[string]any{"name": "missing"})
 	if r.Success {
 		t.Fatal("expected failure")
 	}
@@ -1200,7 +1201,7 @@ func TestExecuteDeleteAgent_Success(t *testing.T) {
 		},
 	}
 	e := newTestExecutor(agent)
-	r := e.executeDeleteAgent(context.Background(), map[string]any{"name": "del-agent"})
+	r := e.executeTool(context.Background(), "delete_agent", map[string]any{"name": "del-agent"})
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -1208,7 +1209,7 @@ func TestExecuteDeleteAgent_Success(t *testing.T) {
 
 func TestExecuteDeleteAgent_NotFound(t *testing.T) {
 	e := newTestExecutor()
-	r := e.executeDeleteAgent(context.Background(), map[string]any{"name": "missing"})
+	r := e.executeTool(context.Background(), "delete_agent", map[string]any{"name": "missing"})
 	if r.Success {
 		t.Fatal("expected failure")
 	}
@@ -1224,7 +1225,7 @@ func TestExecuteCreateTool_Success(t *testing.T) {
 		"url":         "https://example.com/api",
 		"method":      "GET",
 	}
-	r := e.executeCreateTool(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_tool", args)
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -1237,7 +1238,7 @@ func TestExecuteCreateTool_DefaultMethod(t *testing.T) {
 		"description": "does more stuff",
 		"url":         "https://example.com/api",
 	}
-	r := e.executeCreateTool(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_tool", args)
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -1252,7 +1253,7 @@ func TestExecuteCreateTool_NamespaceRestriction(t *testing.T) {
 		"url":         "http://x",
 		"namespace":   "other",
 	}
-	r := e.executeCreateTool(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_tool", args)
 	if r.Success {
 		t.Fatal("expected failure")
 	}
@@ -1268,7 +1269,7 @@ func TestExecuteDeleteTool_Success(t *testing.T) {
 		},
 	}
 	e := newTestExecutor(tool)
-	r := e.executeDeleteTool(context.Background(), map[string]any{"name": "del-tool"})
+	r := e.executeTool(context.Background(), "delete_tool", map[string]any{"name": "del-tool"})
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -1276,7 +1277,7 @@ func TestExecuteDeleteTool_Success(t *testing.T) {
 
 func TestExecuteDeleteTool_NotFound(t *testing.T) {
 	e := newTestExecutor()
-	r := e.executeDeleteTool(context.Background(), map[string]any{"name": "missing"})
+	r := e.executeTool(context.Background(), "delete_tool", map[string]any{"name": "missing"})
 	if r.Success {
 		t.Fatal("expected failure")
 	}
@@ -1286,7 +1287,7 @@ func TestExecuteDeleteTool_NotFound(t *testing.T) {
 
 func TestExecuteDeleteSession_Success(t *testing.T) {
 	e := newTestExecutor()
-	r := e.executeDeleteSession(context.Background(), map[string]any{"sessionId": "sess-abc"})
+	r := e.executeTool(context.Background(), "delete_session", map[string]any{"sessionId": "sess-abc"})
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -1360,7 +1361,7 @@ func TestTaskStatusResult_WithTimes(t *testing.T) {
 	now := metav1.Now()
 	later := metav1.NewTime(now.Add(5 * time.Second))
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "t1"},
+		ObjectMeta: metav1.ObjectMeta{Name: "t1", Namespace: "default"},
 		Status: corev1alpha1.TaskStatus{
 			Phase:          corev1alpha1.TaskPhaseSucceeded,
 			Message:        "completed",
@@ -1368,8 +1369,8 @@ func TestTaskStatusResult_WithTimes(t *testing.T) {
 			CompletionTime: &later,
 		},
 	}
-	e := newTestExecutor()
-	r := e.taskStatusResult(task)
+	e := newTestExecutor(task)
+	r := e.executeTool(context.Background(), "wait_for_task", map[string]any{"name": "t1", "timeout": float64(1)})
 	if !r.Success {
 		t.Fatalf("expected success")
 	}
@@ -1381,14 +1382,14 @@ func TestTaskStatusResult_WithTimes(t *testing.T) {
 
 func TestTaskStatusResult_NoTimes(t *testing.T) {
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "t2"},
+		ObjectMeta: metav1.ObjectMeta{Name: "t2", Namespace: "default"},
 		Status: corev1alpha1.TaskStatus{
 			Phase:   corev1alpha1.TaskPhaseFailed,
 			Message: "failed",
 		},
 	}
-	e := newTestExecutor()
-	r := e.taskStatusResult(task)
+	e := newTestExecutor(task)
+	r := e.executeTool(context.Background(), "wait_for_task", map[string]any{"name": "t2", "timeout": float64(1)})
 	if !r.Success {
 		t.Fatalf("expected success")
 	}
@@ -1401,14 +1402,14 @@ func TestTaskStatusResult_NoTimes(t *testing.T) {
 func TestTaskStatusResult_StartTimeOnly(t *testing.T) {
 	now := metav1.Now()
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "t3"},
+		ObjectMeta: metav1.ObjectMeta{Name: "t3", Namespace: "default"},
 		Status: corev1alpha1.TaskStatus{
-			Phase:     corev1alpha1.TaskPhaseRunning,
+			Phase:     corev1alpha1.TaskPhaseSucceeded,
 			StartTime: &now,
 		},
 	}
-	e := newTestExecutor()
-	r := e.taskStatusResult(task)
+	e := newTestExecutor(task)
+	r := e.executeTool(context.Background(), "wait_for_task", map[string]any{"name": "t3", "timeout": float64(1)})
 	if !r.Success {
 		t.Fatalf("expected success")
 	}
@@ -1421,14 +1422,16 @@ func TestTaskStatusResult_StartTimeOnly(t *testing.T) {
 func TestTaskTimeoutResult_WithStartTime(t *testing.T) {
 	now := metav1.Now()
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "t1"},
+		ObjectMeta: metav1.ObjectMeta{Name: "t1", Namespace: "default"},
 		Status: corev1alpha1.TaskStatus{
 			Phase:     corev1alpha1.TaskPhaseRunning,
 			StartTime: &now,
 		},
 	}
-	e := newTestExecutor()
-	r := e.taskTimeoutResult(task)
+	e := newTestExecutor(task)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := e.executeTool(ctx, "wait_for_task", map[string]any{"name": "t1", "timeout": float64(1)})
 	if !r.Success {
 		t.Fatalf("expected success")
 	}
@@ -1443,13 +1446,15 @@ func TestTaskTimeoutResult_WithStartTime(t *testing.T) {
 
 func TestTaskTimeoutResult_NoStartTime(t *testing.T) {
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "t2"},
+		ObjectMeta: metav1.ObjectMeta{Name: "t2", Namespace: "default"},
 		Status: corev1alpha1.TaskStatus{
 			Phase: corev1alpha1.TaskPhasePending,
 		},
 	}
-	e := newTestExecutor()
-	r := e.taskTimeoutResult(task)
+	e := newTestExecutor(task)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := e.executeTool(ctx, "wait_for_task", map[string]any{"name": "t2", "timeout": float64(1)})
 	if !r.Success {
 		t.Fatalf("expected success")
 	}
@@ -1474,7 +1479,7 @@ func TestExecuteWaitForTask_ContextCancelled(t *testing.T) {
 	e := newTestExecutor(task)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
-	r := e.executeWaitForTask(ctx, map[string]any{"name": "running-task", "timeout": float64(1)})
+	r := e.executeTool(ctx, "wait_for_task", map[string]any{"name": "running-task", "timeout": float64(1)})
 	// Should return timeout result since context is cancelled
 	if !r.Success {
 		t.Fatalf("expected success (timeout result), got error: %s", r.Error)
@@ -1497,7 +1502,7 @@ func TestExecuteWaitForTask_AlreadyFailed(t *testing.T) {
 		},
 	}
 	e := newTestExecutor(task)
-	r := e.executeWaitForTask(context.Background(), map[string]any{"name": "failed-task"})
+	r := e.executeTool(context.Background(), "wait_for_task", map[string]any{"name": "failed-task"})
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -1511,29 +1516,24 @@ func TestExecuteWaitForTask_AlreadyFailed(t *testing.T) {
 
 func TestHandleInitialPrompt_NoPrompt(t *testing.T) {
 	e := newTestExecutor()
-	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "a1", Namespace: "default"},
+	r := e.executeTool(context.Background(), "create_agent", map[string]any{"name": "a1"})
+	if !r.Success {
+		t.Fatalf("expected success, got error: %s", r.Error)
 	}
-	result := e.handleInitialPrompt(context.Background(), agent, "default", map[string]any{})
-	if result != nil {
-		t.Fatalf("expected nil when no initialPrompt, got %+v", result)
+	data := r.Data.(map[string]any)
+	if data["message"] != "Agent created" {
+		t.Errorf("message = %v, want 'Agent created'", data["message"])
 	}
 }
 
 func TestHandleInitialPrompt_TaskLimitReached(t *testing.T) {
 	e := newTestExecutor()
 	e.maxTasks = 0 // limit reached
-	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "a2", Namespace: "default"},
-	}
-	result := e.handleInitialPrompt(context.Background(), agent, "default", map[string]any{"initialPrompt": "do work"})
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
-	if !result.Success {
+	r := e.executeTool(context.Background(), "create_agent", map[string]any{"name": "a2", "initialPrompt": "do work"})
+	if !r.Success {
 		t.Fatal("expected success=true")
 	}
-	data := result.Data.(map[string]any)
+	data := r.Data.(map[string]any)
 	if !strings.Contains(data["message"].(string), "task limit reached") {
 		t.Errorf("message = %v", data["message"])
 	}
@@ -1541,22 +1541,15 @@ func TestHandleInitialPrompt_TaskLimitReached(t *testing.T) {
 
 func TestHandleInitialPrompt_WithRuntimeAgent(t *testing.T) {
 	e := newTestExecutor()
-	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "rt-agent", Namespace: "default"},
-		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{
-				Type: "copilot",
-			},
-		},
+	r := e.executeTool(context.Background(), "create_agent", map[string]any{
+		"name":          "rt-agent",
+		"runtime":       map[string]any{"type": "copilot"},
+		"initialPrompt": "do work",
+	})
+	if !r.Success {
+		t.Fatalf("expected success, got error: %s", r.Error)
 	}
-	result := e.handleInitialPrompt(context.Background(), agent, "default", map[string]any{"initialPrompt": "do work"})
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
-	if !result.Success {
-		t.Fatal("expected success")
-	}
-	data := result.Data.(map[string]any)
+	data := r.Data.(map[string]any)
 	if data["message"] != "Agent created and task started" {
 		t.Errorf("message = %v", data["message"])
 	}
@@ -1564,20 +1557,15 @@ func TestHandleInitialPrompt_WithRuntimeAgent(t *testing.T) {
 
 func TestHandleInitialPrompt_WithProviderRef(t *testing.T) {
 	e := newTestExecutor()
-	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "ai-agent", Namespace: "default"},
-		Spec: corev1alpha1.AgentSpec{
-			ProviderRef: &corev1alpha1.ProviderReference{Name: "my-provider"},
-		},
+	r := e.executeTool(context.Background(), "create_agent", map[string]any{
+		"name":          "ai-agent",
+		"providerRef":   "my-provider",
+		"initialPrompt": "summarize",
+	})
+	if !r.Success {
+		t.Fatalf("expected success, got error: %s", r.Error)
 	}
-	result := e.handleInitialPrompt(context.Background(), agent, "default", map[string]any{"initialPrompt": "summarize"})
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
-	if !result.Success {
-		t.Fatal("expected success")
-	}
-	data := result.Data.(map[string]any)
+	data := r.Data.(map[string]any)
 	if data["message"] != "Agent created and task started" {
 		t.Errorf("message = %v", data["message"])
 	}
@@ -1591,7 +1579,7 @@ func TestExecuteCreateContainerTask_WithPriority(t *testing.T) {
 		"image":    "alpine:latest",
 		"priority": float64(100),
 	}
-	r := e.executeCreateContainerTask(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_container_task", args)
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -1604,7 +1592,7 @@ func TestExecuteCreateContainerTask_NamespaceRestriction(t *testing.T) {
 		"image":     "alpine",
 		"namespace": "other-ns",
 	}
-	r := e.executeCreateContainerTask(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_container_task", args)
 	if r.Success {
 		t.Fatal("expected failure due to namespace restriction")
 	}
@@ -1622,7 +1610,7 @@ func TestExecuteCreateAgentTask_WithSchedule(t *testing.T) {
 		"agentRef": "my-agent",
 		"schedule": "0 * * * *",
 	}
-	r := e.executeCreateAgentTask(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_agent_task", args)
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
@@ -1640,7 +1628,7 @@ func TestExecuteCreateAgentTask_NamespaceRestriction(t *testing.T) {
 		"agentRef":  "a",
 		"namespace": "other-ns",
 	}
-	r := e.executeCreateAgentTask(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_agent_task", args)
 	if r.Success {
 		t.Fatal("expected failure due to namespace restriction")
 	}
@@ -1653,7 +1641,7 @@ func TestExecuteCreateAgentTask_InvalidTimeout(t *testing.T) {
 		"agentRef": "a",
 		"timeout":  "bad",
 	}
-	r := e.executeCreateAgentTask(context.Background(), args)
+	r := e.executeTool(context.Background(), "create_agent_task", args)
 	if r.Success {
 		t.Fatal("expected failure for invalid timeout")
 	}
@@ -1665,7 +1653,7 @@ func TestExecuteCreateAgentTask_InvalidTimeout(t *testing.T) {
 func TestExecuteCreateAgentTask_TaskLimit(t *testing.T) {
 	e := newTestExecutor()
 	e.maxTasks = 0
-	r := e.executeCreateAgentTask(context.Background(), map[string]any{"prompt": "test", "agentRef": "a"})
+	r := e.executeTool(context.Background(), "create_agent_task", map[string]any{"prompt": "test", "agentRef": "a"})
 	if r.Success {
 		t.Fatal("expected failure due to task limit")
 	}
@@ -1701,7 +1689,7 @@ func TestExecuteDeleteSession_StoreError(t *testing.T) {
 	sm := controller.NewSessionManager(&fakeSessionStore{errOnDel: errors.New("db down")})
 	e := NewToolExecutor(c, sm, "default", "sess-123", "", false, 5, 30*time.Second, &fakeResultStore{})
 
-	r := e.executeDeleteSession(context.Background(), map[string]any{"sessionId": "sess-bad"})
+	r := e.executeTool(context.Background(), "delete_session", map[string]any{"sessionId": "sess-bad"})
 	if r.Success {
 		t.Fatal("expected failure")
 	}
@@ -1718,7 +1706,7 @@ func TestExecuteUpdateAgent_ModelOnly(t *testing.T) {
 		Spec: corev1alpha1.AgentSpec{},
 	}
 	e := newTestExecutor(agent)
-	r := e.executeUpdateAgent(context.Background(), map[string]any{
+	r := e.executeTool(context.Background(), "update_agent", map[string]any{
 		"name":  "upd-model",
 		"model": "gpt-4",
 	})
@@ -1792,11 +1780,11 @@ func TestExecuteListTasks_WithLimit(t *testing.T) {
 		}
 	}
 	e := newTestExecutor(tasks...)
-	r := e.executeListTasks(context.Background(), map[string]any{"limit": float64(2)})
+	r := e.executeTool(context.Background(), "list_tasks", map[string]any{"limit": float64(2)})
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
-	data := r.Data.([]map[string]any)
+	data := r.Data.([]any)
 	if len(data) != 2 {
 		t.Errorf("expected 2 tasks (limit), got %d", len(data))
 	}
