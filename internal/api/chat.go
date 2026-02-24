@@ -147,6 +147,24 @@ var blockedNamespaces = map[string]bool{
 	"kube-public": true,
 }
 
+// chatParams holds the prepared parameters for a chat request.
+type chatParams struct {
+	ctx            context.Context
+	cancel         context.CancelFunc
+	provider       llm.Provider
+	model          string
+	messages       []llm.Message
+	tools          []llm.Tool
+	executor       *ToolExecutor
+	sessionID      string
+	namespace      string
+	span           trace.Span
+	systemPrompt   string
+	temperature    float64
+	maxTokens      int
+	persistedCount int
+}
+
 // HandleChat handles POST /api/v1/chat.
 func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	var req ChatRequest
@@ -172,17 +190,38 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		}
 	}()
 
+	params, err := ch.buildChatParams(c, req)
+	if err != nil {
+		return err
+	}
+	defer params.cancel()
+	defer params.span.End()
+
+	// Route to JSON or SSE based on Accept header
+	accept := c.Get("Accept")
+	if accept == "application/json" {
+		return ch.handleChatJSON(c, params)
+	}
+
+	sseMode = true
+	return ch.handleChatSSE(c, params)
+}
+
+// buildChatParams resolves the namespace, provider, session, system prompt,
+// tools, and executor needed for a chat turn.
+func (ch *ChatHandler) buildChatParams(c fiber.Ctx, req ChatRequest) (*chatParams, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), ch.config.MaxDuration)
-	defer cancel()
 
 	// Resolve namespace from request or token
 	namespace, err := ResolveNamespace(c, req.Namespace, ch.watchNamespace, ch.enforceNamespaceIsolation)
 	if err != nil {
-		return err
+		cancel()
+		return nil, err
 	}
 
 	if blockedNamespaces[namespace] {
-		return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("namespace %q is not allowed for chat", namespace))
+		cancel()
+		return nil, fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("namespace %q is not allowed for chat", namespace))
 	}
 
 	// Resolve or create session ID
@@ -200,7 +239,8 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	})
 	if err != nil {
 		chatLog.Error(err, "failed to resolve provider")
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("failed to resolve provider: %v", err))
+		cancel()
+		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("failed to resolve provider: %v", err))
 	}
 
 	// Wrap provider with retry and fallback
@@ -218,14 +258,15 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 			attribute.String("chat.model", model),
 		),
 	)
-	defer span.End()
 
 	// Build system prompt
 	promptBuilder := NewSystemPromptBuilder(ch.client, namespace)
 	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt, PromptModeFull)
 	if err != nil {
 		chatLog.Error(err, "failed to build system prompt")
-		return fiber.NewError(fiber.StatusInternalServerError, "failed to build system prompt")
+		span.End()
+		cancel()
+		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to build system prompt")
 	}
 
 	// Load session history
@@ -269,43 +310,53 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		maxTokens = int(*req.MaxTokens)
 	}
 
-	// Check Accept header for response format
-	accept := c.Get("Accept")
-	if accept == "application/json" {
-		// JSON mode: run tool loop, collect all content, return JSON
-		content, usage, toolCalls, err := ch.runToolLoop(ctx, provider, messages, systemPrompt, tools, executor, sessionID, namespace, model, temperature, maxTokens, persistedCount, nil)
-		if err != nil {
-			chatLog.Error(err, "tool loop error")
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("chat error: %v", err))
-		}
+	return &chatParams{
+		ctx:            ctx,
+		cancel:         cancel,
+		provider:       provider,
+		model:          model,
+		messages:       messages,
+		tools:          tools,
+		executor:       executor,
+		sessionID:      sessionID,
+		namespace:      namespace,
+		span:           span,
+		systemPrompt:   systemPrompt,
+		temperature:    temperature,
+		maxTokens:      maxTokens,
+		persistedCount: persistedCount,
+	}, nil
+}
 
-		return c.JSON(ChatResponse{
-			SessionID: sessionID,
-			Message:   content,
-			ToolCalls: toolCalls,
-			Usage:     usage,
-		})
+// handleChatJSON runs the tool loop and returns the result as a JSON response.
+func (ch *ChatHandler) handleChatJSON(c fiber.Ctx, p *chatParams) error {
+	content, usage, toolCalls, err := ch.runToolLoop(p.ctx, p.provider, p.messages, p.systemPrompt, p.tools, p.executor, p.sessionID, p.namespace, p.model, p.temperature, p.maxTokens, p.persistedCount, nil)
+	if err != nil {
+		chatLog.Error(err, "tool loop error")
+		p.span.RecordError(err)
+		p.span.SetStatus(codes.Error, err.Error())
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("chat error: %v", err))
 	}
 
-	// SSE mode
+	return c.JSON(ChatResponse{
+		SessionID: p.sessionID,
+		Message:   content,
+		ToolCalls: toolCalls,
+		Usage:     usage,
+	})
+}
+
+// handleChatSSE runs the tool loop inside a streaming response, emitting SSE events.
+func (ch *ChatHandler) handleChatSSE(c fiber.Ctx, p *chatParams) error {
 	c.Set("Content-Type", "text/event-stream")
 	c.Set("Cache-Control", "no-cache")
 	c.Set("Connection", "keep-alive")
 	c.Set("X-Accel-Buffering", "no")
 
-	// Capture values for the streaming closure (ctx from outer scope is cancelled
-	// when HandleChat returns, so we create a new context inside the callback)
-	sseProvider := provider
-	sseMessages := messages
-	sseSystemPrompt := systemPrompt
-	sseTools := tools
-	sseExecutor := executor
-
-	sseMode = true
 	return c.SendStreamWriter(func(w *bufio.Writer) {
 		defer func() { <-ch.semaphore }()
+		// Create a new context for the SSE closure (the outer ctx is cancelled
+		// when HandleChat returns)
 		sseCtx, sseCancel := context.WithTimeout(context.Background(), ch.config.MaxDuration)
 		defer sseCancel()
 
@@ -315,13 +366,13 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 
 		// Emit status event
 		statusData, _ := json.Marshal(map[string]string{
-			"sessionId": sessionID,
-			"provider":  sseProvider.Name(),
-			"model":     model,
+			"sessionId": p.sessionID,
+			"provider":  p.provider.Name(),
+			"model":     p.model,
 		})
 		emitSSE("status", string(statusData))
 
-		content, usage, _, err := ch.runToolLoop(sseCtx, sseProvider, sseMessages, sseSystemPrompt, sseTools, sseExecutor, sessionID, namespace, model, temperature, maxTokens, persistedCount, emitSSE)
+		content, usage, _, err := ch.runToolLoop(sseCtx, p.provider, p.messages, p.systemPrompt, p.tools, p.executor, p.sessionID, p.namespace, p.model, p.temperature, p.maxTokens, p.persistedCount, emitSSE)
 		if err != nil {
 			errData, _ := json.Marshal(map[string]string{"error": err.Error()})
 			emitSSE("error", string(errData))
