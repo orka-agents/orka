@@ -147,24 +147,6 @@ var blockedNamespaces = map[string]bool{
 	"kube-public": true,
 }
 
-// chatParams holds the prepared parameters for a chat request.
-type chatParams struct {
-	ctx            context.Context
-	cancel         context.CancelFunc
-	provider       llm.Provider
-	model          string
-	messages       []llm.Message
-	tools          []llm.Tool
-	executor       *ToolExecutor
-	sessionID      string
-	namespace      string
-	span           trace.Span
-	systemPrompt   string
-	temperature    float64
-	maxTokens      int
-	persistedCount int
-}
-
 // HandleChat handles POST /api/v1/chat.
 func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	var req ChatRequest
@@ -190,38 +172,19 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		}
 	}()
 
-	params, err := ch.buildChatParams(c, req)
-	if err != nil {
-		return err
-	}
-	defer params.cancel()
-	defer params.span.End()
-
-	// Route to JSON or SSE based on Accept header
-	accept := c.Get("Accept")
-	if accept == "application/json" {
-		return ch.handleChatJSON(c, params)
-	}
-
-	sseMode = true
-	return ch.handleChatSSE(c, params)
-}
-
-// buildChatParams resolves the namespace, provider, session, system prompt,
-// tools, and executor needed for a chat turn.
-func (ch *ChatHandler) buildChatParams(c fiber.Ctx, req ChatRequest) (*chatParams, error) {
+	// Use context.Background() because Fiber/fasthttp recycles the request context
+	// after the handler returns; c.Context() would be invalid for this long-running operation.
 	ctx, cancel := context.WithTimeout(context.Background(), ch.config.MaxDuration)
+	defer cancel()
 
 	// Resolve namespace from request or token
 	namespace, err := ResolveNamespace(c, req.Namespace, ch.watchNamespace, ch.enforceNamespaceIsolation)
 	if err != nil {
-		cancel()
-		return nil, err
+		return err
 	}
 
 	if blockedNamespaces[namespace] {
-		cancel()
-		return nil, fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("namespace %q is not allowed for chat", namespace))
+		return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("namespace %q is not allowed for chat", namespace))
 	}
 
 	// Resolve or create session ID
@@ -239,8 +202,7 @@ func (ch *ChatHandler) buildChatParams(c fiber.Ctx, req ChatRequest) (*chatParam
 	})
 	if err != nil {
 		chatLog.Error(err, "failed to resolve provider")
-		cancel()
-		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("failed to resolve provider: %v", err))
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("failed to resolve provider: %v", err))
 	}
 
 	// Wrap provider with retry and fallback
@@ -258,15 +220,14 @@ func (ch *ChatHandler) buildChatParams(c fiber.Ctx, req ChatRequest) (*chatParam
 			attribute.String("chat.model", model),
 		),
 	)
+	defer span.End()
 
 	// Build system prompt
 	promptBuilder := NewSystemPromptBuilder(ch.client, namespace)
 	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt, PromptModeFull)
 	if err != nil {
 		chatLog.Error(err, "failed to build system prompt")
-		span.End()
-		cancel()
-		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to build system prompt")
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to build system prompt")
 	}
 
 	// Load session history
@@ -310,53 +271,45 @@ func (ch *ChatHandler) buildChatParams(c fiber.Ctx, req ChatRequest) (*chatParam
 		maxTokens = int(*req.MaxTokens)
 	}
 
-	return &chatParams{
-		ctx:            ctx,
-		cancel:         cancel,
-		provider:       provider,
-		model:          model,
-		messages:       messages,
-		tools:          tools,
-		executor:       executor,
-		sessionID:      sessionID,
-		namespace:      namespace,
-		span:           span,
-		systemPrompt:   systemPrompt,
-		temperature:    temperature,
-		maxTokens:      maxTokens,
-		persistedCount: persistedCount,
-	}, nil
-}
+	// Check Accept header for response format
+	accept := c.Get("Accept")
+	if accept == "application/json" {
+		// JSON mode: run tool loop, collect all content, return JSON
+		content, usage, toolCalls, err := ch.runToolLoop(ctx, provider, messages, systemPrompt, tools, executor, sessionID, namespace, model, temperature, maxTokens, persistedCount, nil)
+		if err != nil {
+			chatLog.Error(err, "tool loop error")
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("chat error: %v", err))
+		}
 
-// handleChatJSON runs the tool loop and returns the result as a JSON response.
-func (ch *ChatHandler) handleChatJSON(c fiber.Ctx, p *chatParams) error {
-	content, usage, toolCalls, err := ch.runToolLoop(p.ctx, p.provider, p.messages, p.systemPrompt, p.tools, p.executor, p.sessionID, p.namespace, p.model, p.temperature, p.maxTokens, p.persistedCount, nil)
-	if err != nil {
-		chatLog.Error(err, "tool loop error")
-		p.span.RecordError(err)
-		p.span.SetStatus(codes.Error, err.Error())
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("chat error: %v", err))
+		return c.JSON(ChatResponse{
+			SessionID: sessionID,
+			Message:   content,
+			ToolCalls: toolCalls,
+			Usage:     usage,
+		})
 	}
 
-	return c.JSON(ChatResponse{
-		SessionID: p.sessionID,
-		Message:   content,
-		ToolCalls: toolCalls,
-		Usage:     usage,
-	})
-}
-
-// handleChatSSE runs the tool loop inside a streaming response, emitting SSE events.
-func (ch *ChatHandler) handleChatSSE(c fiber.Ctx, p *chatParams) error {
+	// SSE mode
 	c.Set("Content-Type", "text/event-stream")
 	c.Set("Cache-Control", "no-cache")
 	c.Set("Connection", "keep-alive")
 	c.Set("X-Accel-Buffering", "no")
 
+	// Capture values for the streaming closure (ctx from outer scope is cancelled
+	// when HandleChat returns, so we create a new context inside the callback)
+	sseProvider := provider
+	sseMessages := messages
+	sseSystemPrompt := systemPrompt
+	sseTools := tools
+	sseExecutor := executor
+
+	sseMode = true
 	return c.SendStreamWriter(func(w *bufio.Writer) {
 		defer func() { <-ch.semaphore }()
-		// Create a new context for the SSE closure (the outer ctx is cancelled
-		// when HandleChat returns)
+		// Use context.Background() because SendStreamWriter outlives the handler;
+		// Fiber's request context is recycled once the handler returns.
 		sseCtx, sseCancel := context.WithTimeout(context.Background(), ch.config.MaxDuration)
 		defer sseCancel()
 
@@ -366,13 +319,13 @@ func (ch *ChatHandler) handleChatSSE(c fiber.Ctx, p *chatParams) error {
 
 		// Emit status event
 		statusData, _ := json.Marshal(map[string]string{
-			"sessionId": p.sessionID,
-			"provider":  p.provider.Name(),
-			"model":     p.model,
+			"sessionId": sessionID,
+			"provider":  sseProvider.Name(),
+			"model":     model,
 		})
 		emitSSE("status", string(statusData))
 
-		content, usage, _, err := ch.runToolLoop(sseCtx, p.provider, p.messages, p.systemPrompt, p.tools, p.executor, p.sessionID, p.namespace, p.model, p.temperature, p.maxTokens, p.persistedCount, emitSSE)
+		content, usage, _, err := ch.runToolLoop(sseCtx, sseProvider, sseMessages, sseSystemPrompt, sseTools, sseExecutor, sessionID, namespace, model, temperature, maxTokens, persistedCount, emitSSE)
 		if err != nil {
 			errData, _ := json.Marshal(map[string]string{"error": err.Error()})
 			emitSSE("error", string(errData))
@@ -406,15 +359,11 @@ func (ch *ChatHandler) runToolLoop(
 	start := time.Now()
 
 	for iteration := 0; ; iteration++ {
-		// Start a span for this iteration
 		iterTracer := tracing.Tracer("orka.chat")
 		iterCtx, iterSpan := iterTracer.Start(ctx, "chat.tool_loop.iteration",
-			trace.WithAttributes(
-				attribute.Int("chat.iteration", iteration),
-			),
+			trace.WithAttributes(attribute.Int("chat.iteration", iteration)),
 		)
 
-		// Check context cancellation
 		select {
 		case <-iterCtx.Done():
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
@@ -423,53 +372,12 @@ func (ch *ChatHandler) runToolLoop(
 		default:
 		}
 
-		// Check iteration limit
-		if iteration >= ch.config.MaxIterations {
-			// Inject graceful termination message and do one final call
-			messages = append(messages, llm.Message{
-				Role:    "user",
-				Content: "[System: You have reached the maximum number of iterations. Please provide a final summary of what you accomplished.]",
-			})
-
-			resp, err := provider.Complete(iterCtx, &llm.CompletionRequest{
-				Model:        model,
-				SystemPrompt: systemPrompt,
-				Messages:     messages,
-				MaxTokens:    maxTokens,
-				Temperature:  temperature,
-			})
-			if err != nil {
-				usage.Duration = time.Since(start).Round(time.Millisecond).String()
-				iterSpan.End()
-				return "Reached iteration limit.", usage, allToolCalls, nil
-			}
-			usage.LLMCalls++
-			usage.InputTokens += resp.InputTokens
-			usage.OutputTokens += resp.OutputTokens
-
-			if emitSSE != nil && resp.Content != "" {
-				msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
-				emitSSE("message", string(msgData))
-			}
-
-			// Save session
-			finalMessages := append(messages, llm.Message{Role: "assistant", Content: resp.Content})
-			usage.Duration = time.Since(start).Round(time.Millisecond).String()
-			usage.TasksCreated = executor.tasksCreated
-			_ = ch.saveChatSession(iterCtx, namespace, sessionID, finalMessages, persistedCount, usage)
-			if err := ch.sessionStore.UpdateTokenCounts(iterCtx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
-				chatLog.Error(err, "failed to update token counts")
-			}
-			iterSpan.SetAttributes(
-				attribute.Int("chat.llm_calls", usage.LLMCalls),
-				attribute.Int("chat.input_tokens", usage.InputTokens),
-				attribute.Int("chat.output_tokens", usage.OutputTokens),
-			)
+		if content, hit := ch.handleIterationLimit(iterCtx, iteration, provider, messages, systemPrompt, model, namespace, sessionID, maxTokens, persistedCount, temperature, emitSSE, executor, &usage, start); hit {
+			setUsageSpanAttributes(iterSpan, usage)
 			iterSpan.End()
-			return resp.Content, usage, allToolCalls, nil
+			return content, usage, allToolCalls, nil
 		}
 
-		// Inject progress assertion every 5 iterations
 		if iteration > 0 && iteration%5 == 0 {
 			messages = append(messages, llm.Message{
 				Role:    "user",
@@ -477,37 +385,12 @@ func (ch *ChatHandler) runToolLoop(
 			})
 		}
 
-		// Truncate conversation if it exceeds the session size budget
 		if ch.config.MaxSessionSize > 0 {
-			tokenBudget := ch.config.MaxSessionSize / 4 // bytes to approximate tokens
-			messages = llm.TruncateMessages(messages, tokenBudget)
+			messages = llm.TruncateMessages(messages, ch.config.MaxSessionSize/4)
 		}
 
-		// Call LLM
-		resp, err := provider.Complete(iterCtx, &llm.CompletionRequest{
-			Model:        model,
-			SystemPrompt: systemPrompt,
-			Messages:     messages,
-			Tools:        tools,
-			MaxTokens:    maxTokens,
-			Temperature:  temperature,
-		})
-		if err != nil && llm.IsContextTooLongErr(err) {
-			// Halve the messages and retry once
-			tokenEstimate := 0
-			for _, m := range messages {
-				tokenEstimate += len(m.Content) / 4
-			}
-			messages = llm.TruncateMessages(messages, tokenEstimate/2)
-			resp, err = provider.Complete(ctx, &llm.CompletionRequest{
-				Model:        model,
-				SystemPrompt: systemPrompt,
-				Messages:     messages,
-				Tools:        tools,
-				MaxTokens:    maxTokens,
-				Temperature:  temperature,
-			})
-		}
+		resp, updatedMsgs, err := ch.callLLMWithRetry(iterCtx, provider, messages, systemPrompt, model, tools, maxTokens, temperature)
+		messages = updatedMsgs
 		if err != nil {
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
 			iterSpan.RecordError(err)
@@ -519,114 +402,233 @@ func (ch *ChatHandler) runToolLoop(
 		usage.InputTokens += resp.InputTokens
 		usage.OutputTokens += resp.OutputTokens
 
-		// If response has tool calls, execute them
-		if len(resp.ToolCalls) > 0 {
-			// Append assistant message with tool calls
-			messages = append(messages, llm.Message{
-				Role:      "assistant",
-				Content:   resp.Content,
-				ToolCalls: resp.ToolCalls,
-			})
-
-			var repetitionWarning string
-			for _, tc := range resp.ToolCalls {
-				// Emit tool_call SSE event
-				if emitSSE != nil {
-					tcData, _ := json.Marshal(map[string]any{
-						"id":   tc.ID,
-						"name": tc.Name,
-						"args": tc.Arguments,
-					})
-					emitSSE("tool_call", string(tcData))
-				}
-
-				// Check repetition (defer warning until after all tool results)
-				argsHash := hashArgs(tc.Name, tc.Arguments)
-				repetitionTracker[argsHash]++
-				if repetitionTracker[argsHash] >= 3 {
-					repetitionWarning = fmt.Sprintf("[System: Warning — you have called %s with the same arguments %d times. Try a different approach.]", tc.Name, repetitionTracker[argsHash])
-					iteration += 5
-				}
-
-				// Execute tool
-				result, execErr := executor.Execute(iterCtx, tc)
-				if execErr != nil {
-					errResult := map[string]any{"success": false, "error": execErr.Error()}
-					if errJSON, jsonErr := json.Marshal(errResult); jsonErr == nil {
-						result = string(errJSON)
-					} else {
-						result = `{"success":false,"error":"tool execution failed"}`
-					}
-				}
-
-				// Emit tool_result SSE event
-				if emitSSE != nil {
-					trData, _ := json.Marshal(map[string]any{
-						"id":     tc.ID,
-						"name":   tc.Name,
-						"result": json.RawMessage(result),
-					})
-					emitSSE("tool_result", string(trData))
-				}
-
-				// Append tool result message
-				messages = append(messages, llm.Message{
-					Role:       "tool",
-					ToolCallID: tc.ID,
-					Name:       tc.Name,
-					Content:    result,
-				})
-
-				// Track for response
-				var argsAny any
-				_ = json.Unmarshal(tc.Arguments, &argsAny)
-				var resultAny any
-				_ = json.Unmarshal([]byte(result), &resultAny)
-				allToolCalls = append(allToolCalls, ToolCallInfo{
-					Name:   tc.Name,
-					Args:   argsAny,
-					Result: resultAny,
-				})
-
-				usage.ToolCalls++
-			}
-
-			// Append repetition warning after all tool results
-			if repetitionWarning != "" {
-				messages = append(messages, llm.Message{
-					Role:    "user",
-					Content: repetitionWarning,
-				})
-			}
-
-			// Continue loop for next LLM call
+		if len(resp.ToolCalls) == 0 {
+			content := ch.handleFinalResponse(iterCtx, resp.Content, messages, namespace, sessionID, persistedCount, emitSSE, executor, &usage, start)
+			setUsageSpanAttributes(iterSpan, usage)
 			iterSpan.End()
-			continue
+			return content, usage, allToolCalls, nil
 		}
 
-		// This is the final response
-		if emitSSE != nil && resp.Content != "" {
-			msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
-			emitSSE("message", string(msgData))
-		}
-
-		// Save session
-		finalMessages := append(messages, llm.Message{Role: "assistant", Content: resp.Content})
-		usage.Duration = time.Since(start).Round(time.Millisecond).String()
-		usage.TasksCreated = executor.tasksCreated
-		_ = ch.saveChatSession(iterCtx, namespace, sessionID, finalMessages, persistedCount, usage)
-		if err := ch.sessionStore.UpdateTokenCounts(iterCtx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
-			chatLog.Error(err, "failed to update token counts")
-		}
-
-		iterSpan.SetAttributes(
-			attribute.Int("chat.llm_calls", usage.LLMCalls),
-			attribute.Int("chat.input_tokens", usage.InputTokens),
-			attribute.Int("chat.output_tokens", usage.OutputTokens),
-		)
+		var newToolCalls []ToolCallInfo
+		var iterBump int
+		messages, newToolCalls, iterBump = ch.executeToolCalls(iterCtx, resp, executor, emitSSE, messages, repetitionTracker)
+		allToolCalls = append(allToolCalls, newToolCalls...)
+		usage.ToolCalls += len(newToolCalls)
+		iteration += iterBump
 		iterSpan.End()
-		return resp.Content, usage, allToolCalls, nil
 	}
+}
+
+// handleIterationLimit checks if the iteration limit is reached and if so,
+// injects a termination prompt, makes a final LLM call, emits SSE, and saves the session.
+func (ch *ChatHandler) handleIterationLimit(
+	ctx context.Context,
+	iteration int,
+	provider llm.Provider,
+	messages []llm.Message,
+	systemPrompt, model, namespace, sessionID string,
+	maxTokens, persistedCount int,
+	temperature float64,
+	emitSSE func(event, data string),
+	executor *ToolExecutor,
+	usage *ChatUsage,
+	start time.Time,
+) (string, bool) {
+	if iteration < ch.config.MaxIterations {
+		return "", false
+	}
+
+	messages = append(messages, llm.Message{
+		Role:    "user",
+		Content: "[System: You have reached the maximum number of iterations. Please provide a final summary of what you accomplished.]",
+	})
+
+	resp, err := provider.Complete(ctx, &llm.CompletionRequest{
+		Model:        model,
+		SystemPrompt: systemPrompt,
+		Messages:     messages,
+		MaxTokens:    maxTokens,
+		Temperature:  temperature,
+	})
+	if err != nil {
+		usage.Duration = time.Since(start).Round(time.Millisecond).String()
+		return "Reached iteration limit.", true
+	}
+	usage.LLMCalls++
+	usage.InputTokens += resp.InputTokens
+	usage.OutputTokens += resp.OutputTokens
+
+	if emitSSE != nil && resp.Content != "" {
+		msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
+		emitSSE("message", string(msgData))
+	}
+
+	finalMessages := append(messages, llm.Message{Role: "assistant", Content: resp.Content})
+	usage.Duration = time.Since(start).Round(time.Millisecond).String()
+	usage.TasksCreated = executor.tasksCreated
+	_ = ch.saveChatSession(ctx, namespace, sessionID, finalMessages, persistedCount, *usage)
+	if err := ch.sessionStore.UpdateTokenCounts(ctx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
+		chatLog.Error(err, "failed to update token counts")
+	}
+
+	return resp.Content, true
+}
+
+// callLLMWithRetry calls the LLM provider and retries once with truncated messages
+// if the context is too long.
+func (ch *ChatHandler) callLLMWithRetry(
+	ctx context.Context,
+	provider llm.Provider,
+	messages []llm.Message,
+	systemPrompt, model string,
+	tools []llm.Tool,
+	maxTokens int,
+	temperature float64,
+) (*llm.CompletionResponse, []llm.Message, error) {
+	resp, err := provider.Complete(ctx, &llm.CompletionRequest{
+		Model:        model,
+		SystemPrompt: systemPrompt,
+		Messages:     messages,
+		Tools:        tools,
+		MaxTokens:    maxTokens,
+		Temperature:  temperature,
+	})
+	if err != nil && llm.IsContextTooLongErr(err) {
+		tokenEstimate := 0
+		for _, m := range messages {
+			tokenEstimate += len(m.Content) / 4
+		}
+		messages = llm.TruncateMessages(messages, tokenEstimate/2)
+		resp, err = provider.Complete(ctx, &llm.CompletionRequest{
+			Model:        model,
+			SystemPrompt: systemPrompt,
+			Messages:     messages,
+			Tools:        tools,
+			MaxTokens:    maxTokens,
+			Temperature:  temperature,
+		})
+	}
+	return resp, messages, err
+}
+
+// executeToolCalls iterates over tool calls from the LLM response, emits SSE events,
+// executes each tool, tracks repetitions, and appends results to messages.
+func (ch *ChatHandler) executeToolCalls(
+	ctx context.Context,
+	resp *llm.CompletionResponse,
+	executor *ToolExecutor,
+	emitSSE func(event, data string),
+	messages []llm.Message,
+	repetitionTracker map[string]int,
+) ([]llm.Message, []ToolCallInfo, int) {
+	messages = append(messages, llm.Message{
+		Role:      "assistant",
+		Content:   resp.Content,
+		ToolCalls: resp.ToolCalls,
+	})
+
+	var toolCalls []ToolCallInfo
+	var iterationBump int
+	var repetitionWarning string
+
+	for _, tc := range resp.ToolCalls {
+		if emitSSE != nil {
+			tcData, _ := json.Marshal(map[string]any{
+				"id":   tc.ID,
+				"name": tc.Name,
+				"args": tc.Arguments,
+			})
+			emitSSE("tool_call", string(tcData))
+		}
+
+		argsHash := hashArgs(tc.Name, tc.Arguments)
+		repetitionTracker[argsHash]++
+		if repetitionTracker[argsHash] >= 3 {
+			repetitionWarning = fmt.Sprintf("[System: Warning — you have called %s with the same arguments %d times. Try a different approach.]", tc.Name, repetitionTracker[argsHash])
+			iterationBump += 5
+		}
+
+		result, execErr := executor.Execute(ctx, tc)
+		if execErr != nil {
+			errResult := map[string]any{"success": false, "error": execErr.Error()}
+			if errJSON, jsonErr := json.Marshal(errResult); jsonErr == nil {
+				result = string(errJSON)
+			} else {
+				result = `{"success":false,"error":"tool execution failed"}`
+			}
+		}
+
+		if emitSSE != nil {
+			trData, _ := json.Marshal(map[string]any{
+				"id":     tc.ID,
+				"name":   tc.Name,
+				"result": json.RawMessage(result),
+			})
+			emitSSE("tool_result", string(trData))
+		}
+
+		messages = append(messages, llm.Message{
+			Role:       "tool",
+			ToolCallID: tc.ID,
+			Name:       tc.Name,
+			Content:    result,
+		})
+
+		var argsAny any
+		_ = json.Unmarshal(tc.Arguments, &argsAny)
+		var resultAny any
+		_ = json.Unmarshal([]byte(result), &resultAny)
+		toolCalls = append(toolCalls, ToolCallInfo{
+			Name:   tc.Name,
+			Args:   argsAny,
+			Result: resultAny,
+		})
+	}
+
+	if repetitionWarning != "" {
+		messages = append(messages, llm.Message{
+			Role:    "user",
+			Content: repetitionWarning,
+		})
+	}
+
+	return messages, toolCalls, iterationBump
+}
+
+// handleFinalResponse emits the final SSE message and saves the chat session.
+func (ch *ChatHandler) handleFinalResponse(
+	ctx context.Context,
+	content string,
+	messages []llm.Message,
+	namespace, sessionID string,
+	persistedCount int,
+	emitSSE func(event, data string),
+	executor *ToolExecutor,
+	usage *ChatUsage,
+	start time.Time,
+) string {
+	if emitSSE != nil && content != "" {
+		msgData, _ := json.Marshal(map[string]string{"content": content})
+		emitSSE("message", string(msgData))
+	}
+
+	finalMessages := append(messages, llm.Message{Role: "assistant", Content: content})
+	usage.Duration = time.Since(start).Round(time.Millisecond).String()
+	usage.TasksCreated = executor.tasksCreated
+	_ = ch.saveChatSession(ctx, namespace, sessionID, finalMessages, persistedCount, *usage)
+	if err := ch.sessionStore.UpdateTokenCounts(ctx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
+		chatLog.Error(err, "failed to update token counts")
+	}
+
+	return content
+}
+
+func setUsageSpanAttributes(span trace.Span, usage ChatUsage) {
+	span.SetAttributes(
+		attribute.Int("chat.llm_calls", usage.LLMCalls),
+		attribute.Int("chat.input_tokens", usage.InputTokens),
+		attribute.Int("chat.output_tokens", usage.OutputTokens),
+	)
 }
 
 // loadChatSession loads chat session messages from the session store.
