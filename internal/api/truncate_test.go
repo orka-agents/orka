@@ -8,6 +8,7 @@ package api
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/sozercan/orka/internal/llm"
@@ -33,20 +34,24 @@ func TestTruncateMessages_EmptyInput(t *testing.T) {
 
 func TestTruncateMessages_DropsMiddleKeepsFirstAndRecent(t *testing.T) {
 	msgs := []llm.Message{
-		{Role: "user", Content: "original request"},     // ~4 tokens
-		{Role: "assistant", Content: "first response"},  // ~4 tokens — will be dropped
-		{Role: "user", Content: "second question"},      // ~4 tokens — will be dropped
-		{Role: "assistant", Content: "second response"}, // ~4 tokens
-		{Role: "user", Content: "latest question"},      // ~4 tokens
+		{Role: "user", Content: "original request"},                               // ~4 tokens
+		{Role: "assistant", Content: strings.Repeat("a", 100)},                   // ~25 tokens — will be dropped
+		{Role: "user", Content: strings.Repeat("b", 100)},                        // ~25 tokens — will be dropped
+		{Role: "assistant", Content: strings.Repeat("c", 100)},                   // ~25 tokens
+		{Role: "user", Content: "latest question"},                               // ~4 tokens
 	}
-	// Budget for ~12 tokens: first(4) + truncation note + last two(8)
-	result := llm.TruncateMessages(msgs, 16)
+	// Budget: enough for first + note + last two, but not all messages
+	// Total ~83 tokens. Budget 60 forces truncation but leaves room for note + recent blocks.
+	result := llm.TruncateMessages(msgs, 60)
 
 	if result[0].Content != "original request" {
 		t.Errorf("first message should be preserved, got %q", result[0].Content)
 	}
 	if result[1].Role != "system" { //nolint:goconst // test string, not worth a constant
 		t.Errorf("second message should be truncation note, got role %q", result[1].Role)
+	}
+	if !strings.Contains(result[1].Content, "truncated") {
+		t.Errorf("truncation note should contain 'truncated', got %q", result[1].Content)
 	}
 	last := result[len(result)-1]
 	if last.Content != "latest question" {
@@ -88,6 +93,18 @@ func TestTruncateMessages_ToolCallsKeptAtomic(t *testing.T) {
 	}
 	if hasToolCall != hasToolResult {
 		t.Error("tool call and tool result should be kept or dropped together")
+	}
+
+	// Verify truncation note content when truncation occurred
+	for _, m := range result {
+		if m.Role == "system" {
+			if !strings.Contains(m.Content, "truncated") {
+				t.Errorf("truncation note should contain 'truncated', got %q", m.Content)
+			}
+			if !strings.Contains(m.Content, "list_tasks") {
+				t.Errorf("truncation note should contain 'list_tasks', got %q", m.Content)
+			}
+		}
 	}
 }
 

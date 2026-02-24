@@ -6,6 +6,13 @@ MIT License - see LICENSE file for details.
 
 package llm
 
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+)
+
 // EstimateTokens returns an approximate token count (~4 chars per token).
 func EstimateTokens(text string) int {
 	return (len(text) + 3) / 4
@@ -94,9 +101,26 @@ func TruncateMessages(messages []Message, tokenBudget int) []Message {
 	// Count how many blocks we dropped
 	droppedBlocks := len(blocks) - len(kept)
 	if droppedBlocks > 0 {
+		noteContent := extractDroppedSummary(blocks[:droppedBlocks])
+		noteTokens := EstimateTokens(noteContent)
+
+		// If the note doesn't fit, drop more kept blocks to make room
+		for noteTokens > remaining && len(kept) > 0 {
+			remaining += kept[0].tokens
+			droppedBlocks++
+			kept = kept[1:]
+			noteContent = extractDroppedSummary(blocks[:droppedBlocks])
+			noteTokens = EstimateTokens(noteContent)
+		}
+
+		// If the note still doesn't fit (very tight budget), use a minimal note
+		if noteTokens > remaining {
+			noteContent = "[Earlier messages truncated.]"
+		}
+
 		note := Message{
 			Role:    "system",
-			Content: "[Earlier messages truncated. Use list_tasks to check what has already been done.]",
+			Content: noteContent,
 		}
 		result := []Message{first, note}
 		for _, b := range kept {
@@ -110,4 +134,113 @@ func TruncateMessages(messages []Message, tokenBudget int) []Message {
 		result = append(result, b.messages...)
 	}
 	return result
+}
+
+// maxContextPerTool is the maximum number of context items (files, URLs, queries) shown per tool.
+const maxContextPerTool = 5
+
+// maxValueLen is the maximum character length for an individual extracted value.
+const maxValueLen = 80
+
+// truncateValue caps a string at maxValueLen, appending "…" if truncated.
+func truncateValue(s string) string {
+	if len(s) <= maxValueLen {
+		return s
+	}
+	return s[:maxValueLen] + "…"
+}
+
+// extractDroppedSummary builds an enriched truncation note from dropped blocks,
+// including tool names, file paths, URLs, and search queries.
+func extractDroppedSummary(dropped []messageBlock) string {
+	type toolInfo struct {
+		count int
+		files map[string]bool
+		urls  map[string]bool
+		queries map[string]bool
+	}
+
+	tools := make(map[string]*toolInfo)
+	totalExchanges := len(dropped)
+
+	for _, block := range dropped {
+		for _, msg := range block.messages {
+			if msg.Role != "assistant" {
+				continue
+			}
+			for _, tc := range msg.ToolCalls {
+				info, ok := tools[tc.Name]
+				if !ok {
+					info = &toolInfo{
+						files:   make(map[string]bool),
+						urls:    make(map[string]bool),
+						queries: make(map[string]bool),
+					}
+					tools[tc.Name] = info
+				}
+				info.count++
+
+				var args map[string]any
+				if err := json.Unmarshal(tc.Arguments, &args); err != nil {
+					continue
+				}
+				for _, key := range []string{"path", "file", "filename", "file_path"} {
+					if v, ok := args[key].(string); ok && v != "" {
+						info.files[v] = true
+					}
+				}
+				if v, ok := args["url"].(string); ok && v != "" {
+					info.urls[v] = true
+				}
+				if v, ok := args["query"].(string); ok && v != "" {
+					info.queries[v] = true
+				}
+			}
+		}
+	}
+
+	if len(tools) == 0 {
+		totalMsgs := 0
+		for _, b := range dropped {
+			totalMsgs += len(b.messages)
+		}
+		return fmt.Sprintf("[Earlier conversation truncated (%d messages dropped). Use list_tasks to check completed work.]", totalMsgs)
+	}
+
+	// Build sorted tool summaries
+	toolNames := make([]string, 0, len(tools))
+	for name := range tools {
+		toolNames = append(toolNames, name)
+	}
+	sort.Strings(toolNames)
+
+	var parts []string
+	for _, name := range toolNames {
+		info := tools[name]
+		// Collect context items
+		var context []string
+		for f := range info.files {
+			context = append(context, truncateValue(f))
+		}
+		for u := range info.urls {
+			context = append(context, truncateValue(u))
+		}
+		for q := range info.queries {
+			context = append(context, truncateValue(q))
+		}
+		sort.Strings(context)
+
+		if len(context) > 0 {
+			if len(context) > maxContextPerTool {
+				overflow := len(context) - maxContextPerTool
+				context = append(context[:maxContextPerTool], fmt.Sprintf("…+%d more", overflow))
+			}
+			parts = append(parts, fmt.Sprintf("%s(%s)", name, strings.Join(context, ", ")))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s(%dx)", name, info.count))
+		}
+	}
+
+	return fmt.Sprintf("[Earlier conversation truncated (%d tool-call exchanges dropped).\nTools used: %s.\nUse list_tasks to check completed work.]",
+		totalExchanges, strings.Join(parts, ", "))
 }
