@@ -82,10 +82,22 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		ArtifactStore:  config.ArtifactStore,
 	}
 
-	server.handlers = NewHandlers(c, sessionManager, config.WatchNamespace, config.EnforceNamespaceIsolation, config.ResultStore, config.SessionStore, config.PlanStore, config.Clientset, config.HealthChecker, config.ArtifactStore)
-	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore)
-	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat)
-	server.anthropicHandler = NewAnthropicCompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat)
+	server.handlers = NewHandlers(HandlersConfig{
+		Client:                    c,
+		SessionManager:            sessionManager,
+		WatchNamespace:            config.WatchNamespace,
+		EnforceNamespaceIsolation: config.EnforceNamespaceIsolation,
+		ResultStore:               config.ResultStore,
+		SessionStore:              config.SessionStore,
+		PlanStore:                 config.PlanStore,
+		KubeClient:                config.Clientset,
+		HealthChecker:             config.HealthChecker,
+		ArtifactStore:             config.ArtifactStore,
+	})
+	resolver := NewProviderResolver(c, config.Chat)
+	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver)
+	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver)
+	server.anthropicHandler = NewAnthropicCompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver)
 	server.setupMiddleware()
 	server.setupRoutes()
 	server.setupStaticFiles()
@@ -244,7 +256,25 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
-// customErrorHandler handles errors returned by handlers
+// customErrorHandler handles errors returned by handlers and produces a
+// consistent JSON envelope for all main API endpoints.
+//
+// Error response format contract:
+//
+//   - Main API (/api/...): {"error": {"code": <HTTP status>, "message": "..."}}
+//     Handlers return fiber.NewError(code, msg) which is caught here.
+//
+//   - OpenAI-compatible proxy (/v1/...): follows the OpenAI error spec:
+//     {"error": {"message": "...", "type": "...", "param": ..., "code": ...}}
+//     These endpoints format errors directly and do NOT use this handler.
+//
+//   - Anthropic-compatible proxy (/anthropic/...): follows the Anthropic error spec:
+//     {"type": "error", "error": {"type": "...", "message": "..."}}
+//     These endpoints format errors directly and do NOT use this handler.
+//
+//   - Chat tool results (internal): {"success": false, "error": "...", "errorType": "...", "suggestion": "..."}
+//     This is an internal format between the tool executor and the chat loop,
+//     embedded in LLM messages. It is NOT a user-facing API error response.
 func customErrorHandler(c fiber.Ctx, err error) error {
 	code := fiber.StatusInternalServerError
 	message := "Internal Server Error"
