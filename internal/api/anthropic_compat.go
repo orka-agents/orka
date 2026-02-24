@@ -274,25 +274,25 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		compReq.Temperature = *req.Temperature
 	}
 
-	// Only inject Orka tools and run the server-side agentic loop when explicitly opted in.
-	// Without this header the endpoint behaves as a transparent proxy (like OpenAI compat).
-	orkaToolsEnabled := c.Get("X-Orka-Tools") == "enabled"
+	// Inject Orka tools and run the server-side agentic loop by default.
+	// Set X-Orka-Tools: disabled to use as a transparent proxy instead.
+	orkaToolsDisabled := c.Get("X-Orka-Tools") == "disabled"
 
-	if orkaToolsEnabled {
-		h.injectOrkaTools(ctx, compReq, namespace)
+	if !orkaToolsDisabled {
+		injectOrkaTools(ctx, h.client, compReq, namespace)
 	}
 
 	if req.Stream {
-		if orkaToolsEnabled {
+		if !orkaToolsDisabled {
 			return h.handleStreamingMessages(c, provider, compReq, model, 0)
 		}
 		return h.handleStreamingProxy(c, provider, compReq, model)
 	}
 
 	var resp *llm.CompletionResponse
-	if orkaToolsEnabled {
+	if !orkaToolsDisabled {
 		// Run the agentic tool loop (executes tools server-side until final text response)
-		resp, err = h.runNonStreamingToolLoop(ctx, provider, compReq, model)
+		resp, err = runNonStreamingToolLoop(ctx, provider, compReq, model, h.config)
 		if err != nil {
 			anthropicLog.Error(err, "tool loop failed")
 			return anthropicError(c, 500, "api_error", "completion failed: "+err.Error())

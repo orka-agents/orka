@@ -304,10 +304,24 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	completionID := fmt.Sprintf("chatcmpl-%s", generateChatID())
 	now := time.Now().Unix()
 
+	// Inject Orka tools and run the server-side agentic loop by default.
+	// Set X-Orka-Tools: disabled to use as a transparent proxy instead.
+	orkaToolsDisabled := c.Get("X-Orka-Tools") == "disabled"
+
+	if !orkaToolsDisabled {
+		injectOrkaTools(ctx, h.client, compReq, namespace)
+	}
+
 	if req.Stream {
+		if !orkaToolsDisabled {
+			return h.handleStreamingToolLoop(c, ctx, provider, compReq, completionID, model, now, req.StreamOptions)
+		}
 		return h.handleStreamingCompletion(c, ctx, provider, compReq, completionID, model, now, req.StreamOptions)
 	}
 
+	if !orkaToolsDisabled {
+		return h.handleNonStreamingToolLoop(c, ctx, provider, compReq, completionID, model, now)
+	}
 	return h.handleNonStreamingCompletion(c, ctx, provider, compReq, completionID, model, now)
 }
 
@@ -328,6 +342,114 @@ func (h *OpenAICompatHandler) handleNonStreamingCompletion(
 			Type:    "server_error",
 		}})
 	}
+
+	return h.formatOAIResponse(c, resp, completionID, model, created)
+}
+
+// handleNonStreamingToolLoop runs the agentic tool loop and returns the final result in OpenAI format.
+func (h *OpenAICompatHandler) handleNonStreamingToolLoop(
+	c fiber.Ctx,
+	ctx context.Context,
+	provider llm.Provider,
+	req *llm.CompletionRequest,
+	completionID, model string,
+	created int64,
+) error {
+	resp, err := runNonStreamingToolLoop(ctx, provider, req, model, h.config)
+	if err != nil {
+		oaiLog.Error(err, "tool loop failed")
+		return c.Status(500).JSON(OAIError{Error: OAIErrorDetail{
+			Message: "completion failed: " + err.Error(),
+			Type:    "server_error",
+		}})
+	}
+
+	return h.formatOAIResponse(c, resp, completionID, model, created)
+}
+
+// handleStreamingToolLoop runs the agentic tool loop with streaming for the final response.
+// Intermediate tool calls are executed server-side; only the final text is streamed to the client.
+func (h *OpenAICompatHandler) handleStreamingToolLoop(
+	c fiber.Ctx,
+	ctx context.Context,
+	provider llm.Provider,
+	req *llm.CompletionRequest,
+	completionID, model string,
+	created int64,
+	streamOpts *StreamOptions,
+) error {
+	// Run the non-streaming tool loop to execute all tools server-side
+	resp, err := runNonStreamingToolLoop(ctx, provider, req, model, h.config)
+	if err != nil {
+		oaiLog.Error(err, "tool loop failed")
+		return c.Status(500).JSON(OAIError{Error: OAIErrorDetail{
+			Message: "completion failed: " + err.Error(),
+			Type:    "server_error",
+		}})
+	}
+
+	// Stream the final response content as SSE chunks
+	c.Set("Content-Type", "text/event-stream")
+	c.Set("Cache-Control", "no-cache")
+	c.Set("Connection", "keep-alive")
+	c.Set("X-Accel-Buffering", "no")
+
+	return c.SendStreamWriter(func(w *bufio.Writer) {
+		// Send role chunk
+		roleChunk := OAIResponse{
+			ID:      completionID,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   model,
+			Choices: []OAIChoice{{
+				Index: 0,
+				Delta: &OAIMessage{Role: "assistant"},
+			}},
+		}
+		writeStreamChunk(w, roleChunk)
+
+		// Send content chunk
+		if resp.Content != "" {
+			contentChunk := OAIResponse{
+				ID:      completionID,
+				Object:  "chat.completion.chunk",
+				Created: created,
+				Model:   model,
+				Choices: []OAIChoice{{
+					Index: 0,
+					Delta: &OAIMessage{Content: resp.Content},
+				}},
+			}
+			writeStreamChunk(w, contentChunk)
+		}
+
+		// Send finish chunk
+		finishReason := mapFinishReason(resp.StopReason)
+		finishChunk := OAIResponse{
+			ID:      completionID,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   model,
+			Choices: []OAIChoice{{
+				Index:        0,
+				Delta:        &OAIMessage{},
+				FinishReason: &finishReason,
+			}},
+		}
+		if streamOpts != nil && streamOpts.IncludeUsage {
+			finishChunk.Usage = &OAIUsage{
+				PromptTokens:     resp.InputTokens,
+				CompletionTokens: resp.OutputTokens,
+				TotalTokens:      resp.InputTokens + resp.OutputTokens,
+			}
+		}
+		writeStreamChunk(w, finishChunk)
+		writeStreamDone(w)
+	})
+}
+
+// formatOAIResponse formats a CompletionResponse into OpenAI API format.
+func (h *OpenAICompatHandler) formatOAIResponse(c fiber.Ctx, resp *llm.CompletionResponse, completionID, model string, created int64) error {
 
 	finishReason := mapFinishReason(resp.StopReason)
 

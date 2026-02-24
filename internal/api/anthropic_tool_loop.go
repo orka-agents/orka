@@ -23,13 +23,13 @@ var builtinProxyTools = []string{"web_search", "code_exec", "file_read", "file_w
 
 // injectOrkaTools appends Orka's built-in tools and namespace Tool CRDs to the completion request.
 // Client-provided tools (if any) are preserved.
-func (h *AnthropicCompatHandler) injectOrkaTools(ctx context.Context, req *llm.CompletionRequest, namespace string) {
+func injectOrkaTools(ctx context.Context, k8sClient client.Client, req *llm.CompletionRequest, namespace string) {
 	builtinTools := tools.DefaultRegistry.ToLLMTools(builtinProxyTools)
 	req.Tools = append(req.Tools, builtinTools...)
 
 	// Load Tool CRDs from namespace for custom HTTP tools
 	var toolList corev1alpha1.ToolList
-	if err := h.client.List(ctx, &toolList, client.InNamespace(namespace)); err == nil {
+	if err := k8sClient.List(ctx, &toolList, client.InNamespace(namespace)); err == nil {
 		for _, t := range toolList.Items {
 			if t.Spec.Parameters != nil {
 				req.Tools = append(req.Tools, llm.Tool{
@@ -58,11 +58,12 @@ func executeToolCall(ctx context.Context, tc llm.ToolCall, timeout time.Duration
 // runNonStreamingToolLoop runs the agentic tool loop using non-streaming Complete() calls.
 // It loops until the LLM produces a response with no tool calls, or limits are reached.
 // Returns the final CompletionResponse and all intermediate content blocks.
-func (h *AnthropicCompatHandler) runNonStreamingToolLoop(
+func runNonStreamingToolLoop(
 	ctx context.Context,
 	provider llm.Provider,
 	req *llm.CompletionRequest,
 	model string,
+	config ChatConfig,
 ) (*llm.CompletionResponse, error) {
 	repetitionTracker := make(map[string]int)
 	messages := make([]llm.Message, len(req.Messages))
@@ -80,7 +81,7 @@ func (h *AnthropicCompatHandler) runNonStreamingToolLoop(
 		}
 
 		// Check iteration limit — do one final call without tools
-		if iteration >= h.config.MaxIterations {
+		if iteration >= config.MaxIterations {
 			messages = append(messages, llm.Message{
 				Role:    "user",
 				Content: "[System: You have reached the maximum number of iterations. Please provide a final summary of what you accomplished.]",
@@ -110,8 +111,8 @@ func (h *AnthropicCompatHandler) runNonStreamingToolLoop(
 		}
 
 		// Truncate conversation if it exceeds the session size budget
-		if h.config.MaxSessionSize > 0 {
-			tokenBudget := h.config.MaxSessionSize / 4
+		if config.MaxSessionSize > 0 {
+			tokenBudget := config.MaxSessionSize / 4
 			messages = llm.TruncateMessages(messages, tokenBudget)
 		}
 
@@ -167,7 +168,7 @@ func (h *AnthropicCompatHandler) runNonStreamingToolLoop(
 				iteration += 5
 			}
 
-			result := executeToolCall(ctx, tc, h.config.ToolTimeout)
+			result := executeToolCall(ctx, tc, config.ToolTimeout)
 
 			messages = append(messages, llm.Message{
 				Role:       "tool",
