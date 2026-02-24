@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 )
 
 // DeleteAgentTool implements agent cleanup for dynamically created agents
@@ -101,7 +102,7 @@ func (t *DeleteAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	// Verify ownership - only allow deleting agents created by the current task
 	currentTask := os.Getenv("ORKA_TASK_NAME")
 	if currentTask != "" {
-		ownerLabel := agent.Labels["orka.ai/created-by"]
+		ownerLabel := agent.Labels[labels.LabelCreatedBy]
 		if ownerLabel != "" && ownerLabel != currentTask {
 			return "", fmt.Errorf("cannot delete agent %s/%s: not owned by current task (owner: %q, current: %q)", namespace, a.Name, ownerLabel, currentTask)
 		}

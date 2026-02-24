@@ -154,9 +154,9 @@ func truncateValue(s string) string {
 // including tool names, file paths, URLs, and search queries.
 func extractDroppedSummary(dropped []messageBlock) string {
 	type toolInfo struct {
-		count int
-		files map[string]bool
-		urls  map[string]bool
+		count   int
+		files   map[string]bool
+		urls    map[string]bool
 		queries map[string]bool
 	}
 

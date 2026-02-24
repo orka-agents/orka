@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/workers/common"
 )
 
@@ -339,7 +340,7 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 			Name:      "child-task-1",
 			Namespace: "default",
 			Labels: map[string]string{
-				"orka.ai/iteration": "2",
+				labels.LabelIteration: "2",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -419,14 +420,14 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 			Name:      taskFailRetry,
 			Namespace: "test-ns",
 			Annotations: map[string]string{
-				"orka.ai/auto-retry":      "true",
-				"orka.ai/max-retries":     "2",
-				"orka.ai/retry-count":     "0",
-				"orka.ai/original-prompt": "Implement the feature",
+				labels.AnnotationAutoRetry:      "true",
+				labels.AnnotationMaxRetries:     "2",
+				labels.AnnotationRetryCount:     "0",
+				labels.AnnotationOriginalPrompt: "Implement the feature",
 			},
 			Labels: map[string]string{
-				"orka.ai/parent-task":     "parent",
-				"orka.ai/delegated-agent": "coder",
+				labels.LabelParentTask:     "parent",
+				labels.LabelDelegatedAgent: "coder",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -521,11 +522,11 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 		t.Fatal("retry task not created")
 	}
 
-	if retryTask.Annotations["orka.ai/retry-count"] != "1" {
-		t.Errorf("retry task retry-count = %q, want 1", retryTask.Annotations["orka.ai/retry-count"])
+	if retryTask.Annotations[labels.AnnotationRetryCount] != "1" {
+		t.Errorf("retry task retry-count = %q, want 1", retryTask.Annotations[labels.AnnotationRetryCount])
 	}
-	if retryTask.Annotations["orka.ai/retried-from"] != taskFailRetry {
-		t.Errorf("retry task retried-from = %q, want task-fail-retry", retryTask.Annotations["orka.ai/retried-from"])
+	if retryTask.Annotations[labels.AnnotationRetriedFrom] != taskFailRetry {
+		t.Errorf("retry task retried-from = %q, want task-fail-retry", retryTask.Annotations[labels.AnnotationRetriedFrom])
 	}
 	if !strings.Contains(retryTask.Spec.Prompt, "PREVIOUS ATTEMPT FAILED") {
 		t.Error("retry task prompt should contain error context")
@@ -547,10 +548,10 @@ func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
 			Name:      "task-exhausted",
 			Namespace: "test-ns",
 			Annotations: map[string]string{
-				"orka.ai/auto-retry":      "true",
-				"orka.ai/max-retries":     "2",
-				"orka.ai/retry-count":     "2",
-				"orka.ai/original-prompt": "Do something",
+				labels.AnnotationAutoRetry:      "true",
+				labels.AnnotationMaxRetries:     "2",
+				labels.AnnotationRetryCount:     "2",
+				labels.AnnotationOriginalPrompt: "Do something",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -634,9 +635,9 @@ func TestWaitForTasksTool_Execute_NoAutoRetryOnSuccess(t *testing.T) {
 			Name:      "task-success",
 			Namespace: "test-ns",
 			Annotations: map[string]string{
-				"orka.ai/auto-retry":  "true",
-				"orka.ai/max-retries": "2",
-				"orka.ai/retry-count": "0",
+				labels.AnnotationAutoRetry:  "true",
+				labels.AnnotationMaxRetries: "2",
+				labels.AnnotationRetryCount: "0",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{

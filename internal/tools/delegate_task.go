@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 )
 
 // DelegateTaskTool implements multi-agent task delegation
@@ -291,12 +292,12 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 			GenerateName: dc.parentName + "-child-",
 			Namespace:    dc.namespace,
 			Labels: map[string]string{
-				"orka.ai/parent-task":     dc.parentName,
-				"orka.ai/coordinator":     trueStr,
-				"orka.ai/delegated-agent": dc.args.Agent,
+				labels.LabelParentTask:     dc.parentName,
+				labels.LabelCoordinator:    trueStr,
+				labels.LabelDelegatedAgent: dc.args.Agent,
 			},
 			Annotations: map[string]string{
-				"orka.ai/coordination-depth": strconv.Itoa(dc.currentDepth + 1),
+				labels.AnnotationCoordinationDepth: strconv.Itoa(dc.currentDepth + 1),
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -311,14 +312,14 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 
 	// Store auto-retry config as annotations
 	if dc.args.AutoRetry {
-		childTask.Annotations["orka.ai/auto-retry"] = trueStr
+		childTask.Annotations[labels.AnnotationAutoRetry] = trueStr
 		maxRetries := 2
 		if dc.args.MaxRetries != nil && *dc.args.MaxRetries >= 0 {
 			maxRetries = *dc.args.MaxRetries
 		}
-		childTask.Annotations["orka.ai/max-retries"] = strconv.Itoa(maxRetries)
-		childTask.Annotations["orka.ai/retry-count"] = "0"
-		childTask.Annotations["orka.ai/original-prompt"] = dc.args.Prompt
+		childTask.Annotations[labels.AnnotationMaxRetries] = strconv.Itoa(maxRetries)
+		childTask.Annotations[labels.AnnotationRetryCount] = "0"
+		childTask.Annotations[labels.AnnotationOriginalPrompt] = dc.args.Prompt
 	}
 
 	// Set agent runtime config for agent-type tasks
@@ -427,18 +428,18 @@ func (t *DelegateTaskTool) applyPriorTaskConfig(ctx context.Context, childTask *
 
 		// Increment iteration count
 		iteration := 1
-		if iterStr, ok := priorTask.Labels["orka.ai/iteration"]; ok {
+		if iterStr, ok := priorTask.Labels[labels.LabelIteration]; ok {
 			if iter, err := strconv.Atoi(iterStr); err == nil {
 				iteration = iter + 1
 			}
 		}
-		childTask.Labels["orka.ai/iteration"] = strconv.Itoa(iteration)
+		childTask.Labels[labels.LabelIteration] = strconv.Itoa(iteration)
 
 		// Copy or generate iteration group
-		if group, ok := priorTask.Labels["orka.ai/iteration-group"]; ok {
-			childTask.Labels["orka.ai/iteration-group"] = group
+		if group, ok := priorTask.Labels[labels.LabelIterationGroup]; ok {
+			childTask.Labels[labels.LabelIterationGroup] = group
 		} else {
-			childTask.Labels["orka.ai/iteration-group"] = string(priorTask.UID)
+			childTask.Labels[labels.LabelIterationGroup] = string(priorTask.UID)
 		}
 	}
 }

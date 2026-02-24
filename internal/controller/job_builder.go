@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/metrics"
 )
 
@@ -92,8 +93,8 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 			Name:      jobName,
 			Namespace: task.Namespace,
 			Labels: map[string]string{
-				"orka.ai/task":      task.Name,
-				"orka.ai/task-type": string(task.Spec.Type),
+				labels.LabelTask:     task.Name,
+				labels.LabelTaskType: string(task.Spec.Type),
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -101,8 +102,8 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						"orka.ai/task":      task.Name,
-						"orka.ai/task-type": string(task.Spec.Type),
+						labels.LabelTask:     task.Name,
+						labels.LabelTaskType: string(task.Spec.Type),
 					},
 				},
 				Spec: corev1.PodSpec{
@@ -294,7 +295,7 @@ func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, 
 	}
 
 	// Add parent task env var for inter-agent messaging
-	if parentTask, ok := task.Labels["orka.ai/parent-task"]; ok {
+	if parentTask, ok := task.Labels[labels.LabelParentTask]; ok {
 		envVars = append(envVars,
 			corev1.EnvVar{Name: "ORKA_PARENT_TASK", Value: parentTask},
 		)
@@ -412,7 +413,7 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 
 	// Current depth (0 for top-level coordinator)
 	depth := "0"
-	if d, ok := task.Annotations["orka.ai/coordination-depth"]; ok {
+	if d, ok := task.Annotations[labels.AnnotationCoordinationDepth]; ok {
 		depth = d
 	}
 	envVars = append(envVars,
@@ -471,7 +472,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, envVars []corev1.EnvVar, 
 
 	// Auto-inject messaging tools for child tasks (tasks delegated by a coordinator)
 	// so they can communicate with sibling tasks via send_message/check_messages
-	_, isChildTask := task.Labels["orka.ai/parent-task"]
+	_, isChildTask := task.Labels[labels.LabelParentTask]
 	if isChildTask {
 		for _, ct := range []string{"send_message", "check_messages"} {
 			if !slices.Contains(cfg.tools, ct) {
@@ -1067,9 +1068,9 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 			Name:      job.Name + "-skills",
 			Namespace: job.Namespace,
 			Labels: map[string]string{
-				"orka.ai/task":    task.Name,
-				"orka.ai/purpose": "skills",
-				"orka.ai/managed": "true",
+				labels.LabelTask:    task.Name,
+				labels.LabelPurpose: "skills",
+				labels.LabelManaged: "true",
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(task, corev1alpha1.GroupVersion.WithKind("Task")),

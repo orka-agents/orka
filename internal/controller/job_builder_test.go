@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 )
 
 const (
@@ -640,7 +641,7 @@ func TestJobBuilder_buildEnvVars_WithCoordination_ChildTask(t *testing.T) {
 			Name:      "child-task",
 			Namespace: defaultNS,
 			Annotations: map[string]string{
-				"orka.ai/coordination-depth": "2",
+				labels.AnnotationCoordinationDepth: "2",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -1540,11 +1541,11 @@ func TestJobBuilder_Build_AgentTask_Labels(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	if job.Labels["orka.ai/task-type"] != "agent" {
-		t.Errorf("Job label orka.ai/task-type = %s, want agent", job.Labels["orka.ai/task-type"])
+	if job.Labels[labels.LabelTaskType] != "agent" {
+		t.Errorf("Job label orka.ai/task-type = %s, want agent", job.Labels[labels.LabelTaskType])
 	}
-	if job.Spec.Template.Labels["orka.ai/task-type"] != "agent" {
-		t.Errorf("Pod label orka.ai/task-type = %s, want agent", job.Spec.Template.Labels["orka.ai/task-type"])
+	if job.Spec.Template.Labels[labels.LabelTaskType] != "agent" {
+		t.Errorf("Pod label orka.ai/task-type = %s, want agent", job.Spec.Template.Labels[labels.LabelTaskType])
 	}
 }
 
@@ -2079,7 +2080,7 @@ func TestAddAIEnvVars_ChildTaskMessaging(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
 			Namespace: defaultNS,
-			Labels:    map[string]string{"orka.ai/parent-task": "parent"},
+			Labels:    map[string]string{labels.LabelParentTask: "parent"},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAI,

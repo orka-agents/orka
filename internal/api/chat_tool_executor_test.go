@@ -24,6 +24,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/controller"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/llm"
 	"github.com/sozercan/orka/internal/store"
 )
@@ -338,12 +339,12 @@ func TestGenerateTaskName(t *testing.T) {
 
 func TestTaskLabels(t *testing.T) {
 	e := newTestExecutor()
-	labels := e.taskLabels()
-	if labels["orka.ai/created-by"] != "orchestrator" {
-		t.Errorf("created-by label = %q", labels["orka.ai/created-by"])
+	taskLabels := e.taskLabels()
+	if taskLabels[labels.LabelCreatedBy] != "orchestrator" {
+		t.Errorf("created-by label = %q", taskLabels[labels.LabelCreatedBy])
 	}
-	if labels["orka.ai/chat-session"] != "sess-12345678" {
-		t.Errorf("chat-session label = %q", labels["orka.ai/chat-session"])
+	if taskLabels[labels.LabelChatSession] != "sess-12345678" {
+		t.Errorf("chat-session label = %q", taskLabels[labels.LabelChatSession])
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 )
 
 func TestCancelTaskTool_Name(t *testing.T) {
@@ -81,7 +82,7 @@ func TestCancelTaskTool_Execute(t *testing.T) {
 					Name:      "child-task-1",
 					Namespace: "default",
 					Labels: map[string]string{
-						"orka.ai/parent-task": parentTaskName,
+						labels.LabelParentTask: parentTaskName,
 					},
 				},
 				Spec: corev1alpha1.TaskSpec{
@@ -105,7 +106,7 @@ func TestCancelTaskTool_Execute(t *testing.T) {
 					Name:      "child-task-2",
 					Namespace: "default",
 					Labels: map[string]string{
-						"orka.ai/parent-task": parentTaskName,
+						labels.LabelParentTask: parentTaskName,
 					},
 				},
 				Spec: corev1alpha1.TaskSpec{
@@ -129,7 +130,7 @@ func TestCancelTaskTool_Execute(t *testing.T) {
 					Name:      "child-task-3",
 					Namespace: "default",
 					Labels: map[string]string{
-						"orka.ai/parent-task": parentTaskName,
+						labels.LabelParentTask: parentTaskName,
 					},
 				},
 				Spec: corev1alpha1.TaskSpec{
@@ -153,7 +154,7 @@ func TestCancelTaskTool_Execute(t *testing.T) {
 					Name:      "other-child",
 					Namespace: "default",
 					Labels: map[string]string{
-						"orka.ai/parent-task": "other-parent",
+						labels.LabelParentTask: "other-parent",
 					},
 				},
 				Spec: corev1alpha1.TaskSpec{

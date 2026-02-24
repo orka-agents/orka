@@ -33,6 +33,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tracing"
 	"go.opentelemetry.io/otel/attribute"
@@ -41,9 +42,6 @@ import (
 )
 
 const (
-	// TaskFinalizer is the finalizer for Task cleanup
-	TaskFinalizer = "orka.ai/cleanup"
-
 	// ConditionTypeComplete indicates the task has completed
 	ConditionTypeComplete = "Complete"
 
@@ -130,8 +128,8 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	// Add finalizer if not present
-	if !controllerutil.ContainsFinalizer(task, TaskFinalizer) {
-		controllerutil.AddFinalizer(task, TaskFinalizer)
+	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
+		controllerutil.AddFinalizer(task, labels.TaskFinalizer)
 		if err := r.Update(ctx, task); err != nil {
 			log.Error(err, "failed to add finalizer")
 			span.RecordError(err)
@@ -172,7 +170,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) { //nolint:unparam // Result is always nil but kept for interface consistency
 	log := logf.FromContext(ctx)
 
-	if controllerutil.ContainsFinalizer(task, TaskFinalizer) {
+	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
 		// Clean up result data from store
 		if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
 			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
@@ -234,7 +232,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		}
 
 		// Remove finalizer
-		controllerutil.RemoveFinalizer(task, TaskFinalizer)
+		controllerutil.RemoveFinalizer(task, labels.TaskFinalizer)
 		if err := r.Update(ctx, task); err != nil {
 			if apierrors.IsNotFound(err) {
 				return ctrl.Result{}, nil
@@ -394,13 +392,13 @@ func (r *TaskReconciler) resolveAgent(ctx context.Context, task *corev1alpha1.Ta
 // validateCoordinationConstraints validates depth, allowed agents, and concurrency for child tasks.
 // Returns (result, err, done) where done=true means the caller should return the result/err.
 func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error, bool) {
-	depthStr, ok := task.Annotations["orka.ai/coordination-depth"]
+	depthStr, ok := task.Annotations[labels.AnnotationCoordinationDepth]
 	if !ok {
 		return ctrl.Result{}, nil, false
 	}
 
 	log := logf.FromContext(ctx)
-	parentName := task.Labels["orka.ai/parent-task"]
+	parentName := task.Labels[labels.LabelParentTask]
 	depthInt, _ := strconv.Atoi(depthStr)
 
 	// Look up parent task to find its agent's coordination config
@@ -453,7 +451,7 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 				agentNS = task.Namespace
 			}
 			if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.AgentRef.Name, Namespace: agentNS}, childAgent); err == nil {
-				if childAgent.Labels["orka.ai/created-by"] == "create_agent" && childAgent.Labels["orka.ai/parent-task"] == parentName {
+				if childAgent.Labels[labels.LabelCreatedBy] == "create_agent" && childAgent.Labels[labels.LabelParentTask] == parentName {
 					allowed = true
 				}
 			}
@@ -468,7 +466,7 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 	if coord.MaxConcurrentChildren > 0 {
 		var siblings corev1alpha1.TaskList
 		if err := r.List(ctx, &siblings, client.InNamespace(task.Namespace),
-			client.MatchingLabels{"orka.ai/parent-task": parentName}); err != nil {
+			client.MatchingLabels{labels.LabelParentTask: parentName}); err != nil {
 			log.Error(err, "failed to list sibling tasks")
 			return ctrl.Result{}, err, true
 		}
@@ -593,10 +591,10 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	}
 
 	// Populate ChildTaskStatus for coordinator tasks
-	if _, isChild := task.Labels["orka.ai/parent-task"]; !isChild {
+	if _, isChild := task.Labels[labels.LabelParentTask]; !isChild {
 		var children corev1alpha1.TaskList
 		if err := r.List(ctx, &children, client.InNamespace(task.Namespace),
-			client.MatchingLabels{"orka.ai/parent-task": task.Name}); err == nil && len(children.Items) > 0 {
+			client.MatchingLabels{labels.LabelParentTask: task.Name}); err == nil && len(children.Items) > 0 {
 			childStatuses := make([]corev1alpha1.ChildTaskStatus, 0, len(children.Items))
 			for _, child := range children.Items {
 				phase := child.Status.Phase
@@ -670,7 +668,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	// (e.g., missing secrets, missing configmaps, image pull errors)
 	var podList corev1.PodList
 	if err := r.List(ctx, &podList, client.InNamespace(task.Namespace),
-		client.MatchingLabels{"orka.ai/task": task.Name}); err == nil {
+		client.MatchingLabels{labels.LabelTask: task.Name}); err == nil {
 		for i := range podList.Items {
 			pod := &podList.Items[i]
 			if pod.Status.Phase != corev1.PodPending {
@@ -1087,7 +1085,7 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	if task.Spec.ConcurrencyPolicy == corev1alpha1.ForbidConcurrent || task.Spec.ConcurrencyPolicy == "" {
 		var childList corev1alpha1.TaskList
 		if err := r.List(ctx, &childList, client.InNamespace(task.Namespace), client.MatchingLabels{
-			"orka.ai/parent-task": task.Name,
+			labels.LabelParentTask: task.Name,
 		}); err != nil {
 			return ctrl.Result{}, fmt.Errorf("listing child tasks: %w", err)
 		}
@@ -1111,8 +1109,8 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 			Name:      childName,
 			Namespace: task.Namespace,
 			Labels: map[string]string{
-				"orka.ai/parent-task":   task.Name,
-				"orka.ai/scheduled-run": "true",
+				labels.LabelParentTask:   task.Name,
+				labels.LabelScheduledRun: "true",
 			},
 		},
 		Spec: *task.Spec.DeepCopy(),
@@ -1165,7 +1163,7 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1alpha1.Task) error {
 	var childList corev1alpha1.TaskList
 	if err := r.List(ctx, &childList, client.InNamespace(task.Namespace), client.MatchingLabels{
-		"orka.ai/parent-task": task.Name,
+		labels.LabelParentTask: task.Name,
 	}); err != nil {
 		return fmt.Errorf("listing child tasks: %w", err)
 	}

@@ -26,6 +26,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/controller"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
 )
@@ -1287,7 +1288,7 @@ func TestGetTaskChildren(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "child-1",
 			Namespace: "default",
-			Labels:    map[string]string{"orka.ai/parent-task": "parent-task"},
+			Labels:    map[string]string{labels.LabelParentTask: "parent-task"},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAI,
@@ -1298,7 +1299,7 @@ func TestGetTaskChildren(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "child-2",
 			Namespace: "default",
-			Labels:    map[string]string{"orka.ai/parent-task": "parent-task"},
+			Labels:    map[string]string{labels.LabelParentTask: "parent-task"},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAI,
@@ -2175,7 +2176,7 @@ func TestHandlers_GetTaskChildren_Success(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "child-task",
 			Namespace: "default",
-			Labels:    map[string]string{"orka.ai/parent-task": "parent-task"},
+			Labels:    map[string]string{labels.LabelParentTask: "parent-task"},
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 	}
