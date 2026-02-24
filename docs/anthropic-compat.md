@@ -139,11 +139,19 @@ curl https://orka.example.com/anthropic/v1/models \
 
 ## Server-Side Tool Execution
 
-The Anthropic proxy includes a built-in agent loop that executes tools server-side. When the LLM returns `tool_use` content blocks, the proxy intercepts them, executes the tools, feeds results back to the LLM, and repeats until a final text response is produced. Clients (e.g., Claude Code) never need to execute tools locally — they only receive the final response with progress updates streamed in real-time.
+By default, the Anthropic endpoint acts as a **transparent proxy** — it forwards requests to the LLM and returns responses without intercepting tool calls. The client manages its own tool execution loop, just like the [OpenAI-compatible endpoint](openai-compat.md).
+
+To opt into server-side tool execution, set the **`X-Orka-Tools: enabled`** header on your request:
+
+```
+X-Orka-Tools: enabled
+```
+
+When this header is present, the proxy activates a built-in agent loop that executes tools server-side. When the LLM returns `tool_use` content blocks, the proxy intercepts them, executes the tools, feeds results back to the LLM, and repeats until a final text response is produced. Clients (e.g., Claude Code) never need to execute tools locally — they only receive the final response with progress updates streamed in real-time.
 
 ### Available Tools
 
-The proxy automatically injects these built-in tools into every request:
+When `X-Orka-Tools: enabled` is set, the proxy automatically injects these built-in tools into the request:
 
 | Tool | Description |
 |------|-------------|
@@ -159,7 +167,7 @@ Client-provided tools in the request are preserved and merged with the injected 
 
 ### How It Works
 
-1. Client sends a `POST /anthropic/v1/messages` request
+1. Client sends a `POST /anthropic/v1/messages` request with `X-Orka-Tools: enabled`
 2. Proxy injects Orka tools into the request and forwards to the LLM
 3. If the LLM returns `tool_use` blocks:
    - Proxy executes each tool server-side
@@ -202,18 +210,23 @@ If the LLM calls the same tool with identical arguments 3 or more times, the pro
 - **LLM errors**: If the LLM returns a context-too-long error, the proxy truncates the conversation to ~50% and retries once. Other LLM errors terminate the loop and return an Anthropic error response
 - **Timeout**: If the overall request timeout is reached, the proxy returns whatever progress has been made
 
-### Example: Claude Code with Server-Side Tools
+### Example: curl with Server-Side Tools
 
-Configure Claude Code to use Orka as a custom provider:
-
-```json
-{
-  "apiUrl": "https://orka.example.com/anthropic/v1",
-  "apiKey": "<orka-service-account-token>"
-}
+```bash
+curl -X POST https://orka.example.com/anthropic/v1/messages \
+  -H "x-api-key: $ORKA_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "X-Orka-Tools: enabled" \
+  -d '{
+    "model": "anthropic/claude-sonnet-4-20250514",
+    "max_tokens": 4096,
+    "messages": [{"role": "user", "content": "Search the web for Kubernetes 1.32 release highlights and summarize them."}],
+    "stream": true
+  }'
 ```
 
-Claude Code sends requests normally. The proxy handles all tool execution server-side — Claude Code only sees the final text responses with streamed progress.
+Without the `X-Orka-Tools: enabled` header, this request would be proxied transparently and the LLM would not have access to Orka's built-in tools.
 
 ## Architecture
 
@@ -230,4 +243,4 @@ Claude Code sends requests normally. The proxy handles all tool execution server
                      └──────────────────────────────┘
 ```
 
-Orka transparently proxies requests to the backend LLM provider. For simple requests, the client manages its own tool execution loop. When server-side tool execution is active, Orka intercepts tool calls, executes them, and returns only the final response — see [Server-Side Tool Execution](#server-side-tool-execution) above.
+Orka transparently proxies requests to the backend LLM provider. By default, the client manages its own tool execution loop. When the `X-Orka-Tools: enabled` header is set, Orka intercepts tool calls, executes them server-side, and returns only the final response — see [Server-Side Tool Execution](#server-side-tool-execution) above.

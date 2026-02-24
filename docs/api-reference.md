@@ -116,7 +116,7 @@ See [OpenAI Compatibility](openai-compat.md) for details.
 | `/anthropic/v1/messages` | POST | Create a message (streaming & non-streaming) |
 | `/anthropic/v1/models` | GET | List available models |
 
-See [Anthropic Compatibility](anthropic-compat.md) for details.
+The `/anthropic/v1/messages` endpoint supports an optional **`X-Orka-Tools: enabled`** request header. When set, Orka injects built-in tools and runs an autonomous tool-execution loop server-side instead of acting as a transparent proxy. See [Anthropic Compatibility](anthropic-compat.md) for details.
 
 ## Internal API (Worker Communication)
 
