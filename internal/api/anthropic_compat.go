@@ -15,8 +15,6 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -33,15 +31,17 @@ type AnthropicCompatHandler struct {
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	config                    ChatConfig
+	resolver                  *ProviderResolver
 }
 
 // NewAnthropicCompatHandler creates an Anthropic-compatible API handler.
-func NewAnthropicCompatHandler(c client.Client, watchNamespace string, enforceNamespaceIsolation bool, config ChatConfig) *AnthropicCompatHandler {
+func NewAnthropicCompatHandler(c client.Client, watchNamespace string, enforceNamespaceIsolation bool, config ChatConfig, resolver *ProviderResolver) *AnthropicCompatHandler {
 	return &AnthropicCompatHandler{
 		client:                    c,
 		watchNamespace:            watchNamespace,
 		enforceNamespaceIsolation: enforceNamespaceIsolation,
 		config:                    config,
+		resolver:                  resolver,
 	}
 }
 
@@ -240,7 +240,11 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		}
 	}
 
-	provider, model, err := h.resolveProviderFromModel(ctx, req.Model, namespace)
+	provider, model, err := h.resolver.Resolve(ctx, ResolveOpts{
+		ModelStr:     req.Model,
+		Namespace:    namespace,
+		RequireModel: true,
+	})
 	if err != nil {
 		anthropicLog.Error(err, "failed to resolve provider", "model", req.Model)
 		return anthropicError(c, 400, "invalid_request_error", "failed to resolve provider: "+err.Error())
@@ -270,18 +274,36 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		compReq.Temperature = *req.Temperature
 	}
 
-	// Inject Orka's built-in tools and namespace Tool CRDs for server-side execution
-	h.injectOrkaTools(ctx, compReq, namespace)
+	// Only inject Orka tools and run the server-side agentic loop when explicitly opted in.
+	// Without this header the endpoint behaves as a transparent proxy (like OpenAI compat).
+	orkaToolsEnabled := c.Get("X-Orka-Tools") == "enabled"
 
-	if req.Stream {
-		return h.handleStreamingMessages(c, provider, compReq, model, 0)
+	if orkaToolsEnabled {
+		h.injectOrkaTools(ctx, compReq, namespace)
 	}
 
-	// Run the agentic tool loop (executes tools server-side until final text response)
-	resp, err := h.runNonStreamingToolLoop(ctx, provider, compReq, model)
-	if err != nil {
-		anthropicLog.Error(err, "tool loop failed")
-		return anthropicError(c, 500, "api_error", "completion failed: "+err.Error())
+	if req.Stream {
+		if orkaToolsEnabled {
+			return h.handleStreamingMessages(c, provider, compReq, model, 0)
+		}
+		return h.handleStreamingProxy(c, provider, compReq, model)
+	}
+
+	var resp *llm.CompletionResponse
+	if orkaToolsEnabled {
+		// Run the agentic tool loop (executes tools server-side until final text response)
+		resp, err = h.runNonStreamingToolLoop(ctx, provider, compReq, model)
+		if err != nil {
+			anthropicLog.Error(err, "tool loop failed")
+			return anthropicError(c, 500, "api_error", "completion failed: "+err.Error())
+		}
+	} else {
+		// Transparent proxy: single LLM call, return response directly
+		resp, err = provider.Complete(ctx, compReq)
+		if err != nil {
+			anthropicLog.Error(err, "completion failed")
+			return anthropicError(c, 500, "api_error", "completion failed: "+err.Error())
+		}
 	}
 
 	user := ""
@@ -352,84 +374,6 @@ func (h *AnthropicCompatHandler) HandleListModels(c fiber.Ctx) error {
 		Object: "list",
 		Data:   models,
 	})
-}
-
-// resolveProviderFromModel resolves the LLM provider from the model string.
-// Supports "provider-name/model-name" format or plain "model-name" (uses default provider).
-func (h *AnthropicCompatHandler) resolveProviderFromModel(ctx context.Context, modelStr, namespace string) (llm.Provider, string, error) {
-	var providerName, model string
-
-	if idx := strings.Index(modelStr, "/"); idx > 0 {
-		providerName = modelStr[:idx]
-		model = modelStr[idx+1:]
-	} else {
-		model = modelStr
-	}
-
-	var providerCRD *corev1alpha1.Provider
-
-	if providerName != "" {
-		p := &corev1alpha1.Provider{}
-		if err := h.client.Get(ctx, types.NamespacedName{Name: providerName, Namespace: namespace}, p); err == nil {
-			providerCRD = p
-		}
-	}
-
-	if providerCRD == nil && h.config.Provider != "" {
-		p := &corev1alpha1.Provider{}
-		if err := h.client.Get(ctx, types.NamespacedName{Name: h.config.Provider, Namespace: namespace}, p); err == nil {
-			providerCRD = p
-		}
-	}
-
-	if providerCRD == nil {
-		p := &corev1alpha1.Provider{}
-		if err := h.client.Get(ctx, types.NamespacedName{Name: "default", Namespace: namespace}, p); err != nil {
-			return nil, "", fmt.Errorf("no provider %q found and no 'default' Provider CRD exists", providerName)
-		}
-		providerCRD = p
-	}
-
-	secretName := providerCRD.Spec.SecretRef.Name
-	secretKey := providerCRD.Spec.SecretRef.Key
-	if secretKey == "" {
-		secretKey = "api-key"
-	}
-
-	secret := &corev1.Secret{}
-	if err := h.client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: providerCRD.Namespace}, secret); err != nil {
-		return nil, "", fmt.Errorf("failed to get provider secret %q: %w", secretName, err)
-	}
-	apiKeyBytes, ok := secret.Data[secretKey]
-	if !ok {
-		return nil, "", fmt.Errorf("secret %q has no key %q", secretName, secretKey)
-	}
-
-	if model == "" {
-		model = providerCRD.Spec.DefaultModel
-	}
-	if model == "" {
-		model = h.config.Model
-	}
-	if model == "" {
-		return nil, "", fmt.Errorf("no model specified and no default model configured")
-	}
-
-	providerConfig := llm.ProviderConfig{
-		APIKey:       string(apiKeyBytes),
-		BaseURL:      providerCRD.Spec.BaseURL,
-		ProviderType: string(providerCRD.Spec.Type),
-	}
-	if providerCRD.Spec.Azure != nil {
-		providerConfig.AzureAPIVersion = providerCRD.Spec.Azure.APIVersion
-	}
-
-	p, err := llm.NewProvider(string(providerCRD.Spec.Type), providerConfig)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to create LLM provider: %w", err)
-	}
-
-	return p, model, nil
 }
 
 // convertAnthropicMessages converts Anthropic messages to internal llm.Message format.

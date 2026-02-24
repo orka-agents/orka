@@ -62,19 +62,33 @@ type Handlers struct {
 	artifactStore             store.ArtifactStore
 }
 
+// HandlersConfig holds configuration for creating Handlers.
+type HandlersConfig struct {
+	Client                    client.Client
+	SessionManager            *controller.SessionManager
+	WatchNamespace            string
+	EnforceNamespaceIsolation bool
+	ResultStore               store.ResultStore
+	SessionStore              store.SessionStore
+	PlanStore                 store.PlanStore
+	KubeClient                kubernetes.Interface
+	HealthChecker             store.HealthChecker
+	ArtifactStore             store.ArtifactStore
+}
+
 // NewHandlers creates a new Handlers instance
-func NewHandlers(c client.Client, sessionManager *controller.SessionManager, watchNamespace string, enforceNS bool, rs store.ResultStore, ss store.SessionStore, ps store.PlanStore, clientset kubernetes.Interface, hc store.HealthChecker, as store.ArtifactStore) *Handlers {
+func NewHandlers(cfg HandlersConfig) *Handlers {
 	return &Handlers{
-		client:                    c,
-		clientset:                 clientset,
-		sessionManager:            sessionManager,
-		watchNamespace:            watchNamespace,
-		enforceNamespaceIsolation: enforceNS,
-		resultStore:               rs,
-		sessionStore:              ss,
-		planStore:                 ps,
-		healthChecker:             hc,
-		artifactStore:             as,
+		client:                    cfg.Client,
+		clientset:                 cfg.KubeClient,
+		sessionManager:            cfg.SessionManager,
+		watchNamespace:            cfg.WatchNamespace,
+		enforceNamespaceIsolation: cfg.EnforceNamespaceIsolation,
+		resultStore:               cfg.ResultStore,
+		sessionStore:              cfg.SessionStore,
+		planStore:                 cfg.PlanStore,
+		healthChecker:             cfg.HealthChecker,
+		artifactStore:             cfg.ArtifactStore,
 	}
 }
 

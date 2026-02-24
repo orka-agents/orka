@@ -15,8 +15,6 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -38,15 +36,17 @@ type OpenAICompatHandler struct {
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	config                    ChatConfig
+	resolver                  *ProviderResolver
 }
 
 // NewOpenAICompatHandler creates an OpenAI-compatible API handler.
-func NewOpenAICompatHandler(c client.Client, watchNamespace string, enforceNS bool, config ChatConfig) *OpenAICompatHandler {
+func NewOpenAICompatHandler(c client.Client, watchNamespace string, enforceNS bool, config ChatConfig, resolver *ProviderResolver) *OpenAICompatHandler {
 	return &OpenAICompatHandler{
 		client:                    c,
 		watchNamespace:            watchNamespace,
 		enforceNamespaceIsolation: enforceNS,
 		config:                    config,
+		resolver:                  resolver,
 	}
 }
 
@@ -222,7 +222,11 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 
 	// Resolve provider and model from the request model field.
 	// Supports "provider/model" format (e.g., "anthropic/claude-sonnet-4") or plain model name.
-	provider, model, err := h.resolveProviderFromModel(ctx, req.Model, namespace)
+	provider, model, err := h.resolver.Resolve(ctx, ResolveOpts{
+		ModelStr:     req.Model,
+		Namespace:    namespace,
+		RequireModel: true,
+	})
 	if err != nil {
 		oaiLog.Error(err, "failed to resolve provider", "model", req.Model)
 		return c.Status(400).JSON(OAIError{Error: OAIErrorDetail{
@@ -644,89 +648,6 @@ func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 		Object: "list",
 		Data:   models,
 	})
-}
-
-// resolveProviderFromModel resolves the LLM provider from the model string.
-// Supports "provider-name/model-name" format or plain "model-name" (uses default provider).
-func (h *OpenAICompatHandler) resolveProviderFromModel(ctx context.Context, modelStr, namespace string) (llm.Provider, string, error) {
-	var providerName, model string
-
-	// Check for "provider/model" format
-	if idx := strings.Index(modelStr, "/"); idx > 0 {
-		providerName = modelStr[:idx]
-		model = modelStr[idx+1:]
-	} else {
-		model = modelStr
-	}
-
-	// Try to resolve provider CRD
-	var providerCRD *corev1alpha1.Provider
-
-	if providerName != "" {
-		p := &corev1alpha1.Provider{}
-		if err := h.client.Get(ctx, types.NamespacedName{Name: providerName, Namespace: namespace}, p); err == nil {
-			providerCRD = p
-		}
-	}
-
-	// Fall back to config provider, then "default"
-	if providerCRD == nil && h.config.Provider != "" {
-		p := &corev1alpha1.Provider{}
-		if err := h.client.Get(ctx, types.NamespacedName{Name: h.config.Provider, Namespace: namespace}, p); err == nil {
-			providerCRD = p
-		}
-	}
-
-	if providerCRD == nil {
-		p := &corev1alpha1.Provider{}
-		if err := h.client.Get(ctx, types.NamespacedName{Name: "default", Namespace: namespace}, p); err != nil {
-			return nil, "", fmt.Errorf("no provider %q found and no 'default' Provider CRD exists", providerName)
-		}
-		providerCRD = p
-	}
-
-	// Resolve API key from secret
-	secretName := providerCRD.Spec.SecretRef.Name
-	secretKey := providerCRD.Spec.SecretRef.Key
-	if secretKey == "" {
-		secretKey = "api-key"
-	}
-
-	secret := &corev1.Secret{}
-	if err := h.client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: providerCRD.Namespace}, secret); err != nil {
-		return nil, "", fmt.Errorf("failed to get provider secret %q: %w", secretName, err)
-	}
-	apiKeyBytes, ok := secret.Data[secretKey]
-	if !ok {
-		return nil, "", fmt.Errorf("secret %q has no key %q", secretName, secretKey)
-	}
-
-	// Use provider's default model if none specified
-	if model == "" {
-		model = providerCRD.Spec.DefaultModel
-	}
-	if model == "" {
-		model = h.config.Model
-	}
-	if model == "" {
-		return nil, "", fmt.Errorf("no model specified and no default model configured")
-	}
-
-	providerConfig := llm.ProviderConfig{
-		APIKey:       string(apiKeyBytes),
-		BaseURL:      providerCRD.Spec.BaseURL,
-		ProviderType: string(providerCRD.Spec.Type),
-	}
-	if providerCRD.Spec.Azure != nil {
-		providerConfig.AzureAPIVersion = providerCRD.Spec.Azure.APIVersion
-	}
-
-	provider, err := llm.NewProvider(string(providerCRD.Spec.Type), providerConfig)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to create LLM provider: %w", err)
-	}
-
-	return provider, model, nil
 }
 
 // convertOAIMessages converts OpenAI messages to internal llm.Message format.

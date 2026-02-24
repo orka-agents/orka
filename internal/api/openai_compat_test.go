@@ -38,7 +38,9 @@ func setupTestOpenAIHandler(objs ...runtime.Object) (*OpenAICompatHandler, *fibe
 	_ = corev1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
-	handler := NewOpenAICompatHandler(fakeClient, "default", false, DefaultChatConfig())
+	config := DefaultChatConfig()
+	resolver := NewProviderResolver(fakeClient, config)
+	handler := NewOpenAICompatHandler(fakeClient, "default", false, config, resolver)
 
 	app := fiber.New()
 	return handler, app
@@ -858,7 +860,7 @@ func TestResolveProviderFromModel_SecretMissingKey(t *testing.T) {
 		Data:       map[string][]byte{"other-key": []byte("val")},
 	}
 	handler, _ := setupTestOpenAIHandler(provider, secret)
-	_, _, err := handler.resolveProviderFromModel(context.Background(), "gpt-4", "default")
+	_, _, err := handler.resolver.Resolve(context.Background(), ResolveOpts{ModelStr: "gpt-4", Namespace: "default", RequireModel: true})
 	if err == nil {
 		t.Fatal("expected error for missing secret key")
 	}
@@ -881,7 +883,7 @@ func TestResolveProviderFromModel_NoModel(t *testing.T) {
 	}
 	handler, _ := setupTestOpenAIHandler(provider, secret)
 	handler.config.Model = "" // no default
-	_, _, err := handler.resolveProviderFromModel(context.Background(), "", "default")
+	_, _, err := handler.resolver.Resolve(context.Background(), ResolveOpts{ModelStr: "", Namespace: "default", RequireModel: true})
 	if err == nil {
 		t.Fatal("expected error for no model")
 	}

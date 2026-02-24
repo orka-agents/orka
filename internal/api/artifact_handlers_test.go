@@ -39,7 +39,7 @@ func setupTestHandlersWithArtifactStore(objs ...runtime.Object) (*Handlers, *fib
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	handlers := NewHandlers(fakeClient, nil, "", false, ss, ss, nil, nil, nil, ss)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss, ArtifactStore: ss})
 
 	app := fiber.New()
 	return handlers, app, ss
@@ -302,7 +302,7 @@ func TestDownloadTaskArtifactStoreNotConfigured(t *testing.T) {
 
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	h := NewHandlers(fakeClient, nil, "", false, ss, ss, nil, nil, nil, nil) // nil artifact store
+	h := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss}) // nil artifact store
 
 	app := fiber.New()
 	app.Get("/api/v1/tasks/:id/artifacts/:filename", h.DownloadTaskArtifact)
