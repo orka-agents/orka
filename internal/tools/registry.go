@@ -236,6 +236,11 @@ func RegisterChatTools(r *Registry) {
 	r.Register(&DeleteSessionTool{})
 }
 
+// RegisterChatToolsDefault registers chat tools into DefaultRegistry for use by the proxy.
+func RegisterChatToolsDefault() {
+	RegisterChatTools(DefaultRegistry)
+}
+
 // ChatToolNames returns the names of all chat tools in registration order.
 func ChatToolNames() []string {
 	return []string{
@@ -260,4 +265,5 @@ func ChatToolNames() []string {
 
 func init() {
 	RegisterBuiltinTools()
+	RegisterChatToolsDefault()
 }

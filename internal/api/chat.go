@@ -55,11 +55,11 @@ type ChatConfig struct {
 func DefaultChatConfig() ChatConfig {
 	return ChatConfig{
 		Enabled:         true,
-		MaxIterations:   20,
-		MaxDuration:     5 * time.Minute,
+		MaxIterations:   100,
+		MaxDuration:     60 * time.Minute,
 		ToolTimeout:     60 * time.Second,
 		MaxConcurrent:   10,
-		MaxTasksPerTurn: 5,
+		MaxTasksPerTurn: 10,
 		MaxSessionSize:  500 * 1024,
 	}
 }

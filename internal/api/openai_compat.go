@@ -20,6 +20,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/llm"
+	orkatools "github.com/sozercan/orka/internal/tools"
 )
 
 var oaiLog = logf.Log.WithName("openai-compat")
@@ -309,7 +310,11 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	orkaToolsDisabled := c.Get("X-Orka-Tools") == "disabled"
 
 	if !orkaToolsDisabled {
-		injectOrkaTools(ctx, h.client, compReq, namespace)
+		// Clear client tools and inject only builtin tools (no coordinator tools —
+		// the OpenAI path doesn't have a ToolContext for task management)
+		compReq.Tools = nil
+		builtinTools := orkatools.DefaultRegistry.ToLLMTools(builtinProxyTools)
+		compReq.Tools = append(compReq.Tools, builtinTools...)
 	}
 
 	if req.Stream {
@@ -355,7 +360,7 @@ func (h *OpenAICompatHandler) handleNonStreamingToolLoop(
 	completionID, model string,
 	created int64,
 ) error {
-	resp, err := runNonStreamingToolLoop(ctx, provider, req, model, h.config)
+	resp, err := runNonStreamingToolLoop(ctx, provider, req, model, h.config, nil)
 	if err != nil {
 		oaiLog.Error(err, "tool loop failed")
 		return c.Status(500).JSON(OAIError{Error: OAIErrorDetail{
@@ -379,7 +384,7 @@ func (h *OpenAICompatHandler) handleStreamingToolLoop(
 	streamOpts *StreamOptions,
 ) error {
 	// Run the non-streaming tool loop to execute all tools server-side
-	resp, err := runNonStreamingToolLoop(ctx, provider, req, model, h.config)
+	resp, err := runNonStreamingToolLoop(ctx, provider, req, model, h.config, nil)
 	if err != nil {
 		oaiLog.Error(err, "tool loop failed")
 		return c.Status(500).JSON(OAIError{Error: OAIErrorDetail{

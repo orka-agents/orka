@@ -139,13 +139,13 @@ func TestProviderResolver_Resolve(t *testing.T) {
 	defaultSecret := makeSecret("default-secret", ns, "api-key", "sk-default")
 
 	tests := []struct {
-		name        string
-		objects     []runtime.Object
-		config      ChatConfig
-		opts        ResolveOpts
-		wantModel   string
-		wantErr     string
-		wantPType   string // provider Name()
+		name      string
+		objects   []runtime.Object
+		config    ChatConfig
+		opts      ResolveOpts
+		wantModel string
+		wantErr   string
+		wantPType string // provider Name()
 	}{
 		{
 			name:    "explicit provider name",
@@ -362,7 +362,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 			wantPType: "openai",
 		},
 		{
-			name:    "opts.Model overrides agent model",
+			name: "opts.Model overrides agent model",
 			objects: []runtime.Object{
 				openaiProvider, openaiSecret,
 				makeAgent("override-agent", ns,
@@ -370,7 +370,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 					&corev1alpha1.ModelConfig{Name: "agent-model"},
 				),
 			},
-			config:  DefaultChatConfig(),
+			config: DefaultChatConfig(),
 			opts: ResolveOpts{
 				AgentRef:  "override-agent",
 				Model:     "explicit-model",
@@ -380,7 +380,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 			wantPType: "openai",
 		},
 		{
-			name:    "config model used as last resort",
+			name: "config model used as last resort",
 			objects: []runtime.Object{
 				makeProvider("openai", ns, corev1alpha1.ProviderTypeOpenAI, "openai-secret", ""),
 				openaiSecret,

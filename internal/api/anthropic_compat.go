@@ -15,11 +15,15 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/tools"
 )
 
 var anthropicLog = logf.Log.WithName("anthropic-compat")
@@ -32,16 +36,18 @@ type AnthropicCompatHandler struct {
 	enforceNamespaceIsolation bool
 	config                    ChatConfig
 	resolver                  *ProviderResolver
+	resultStore               store.ResultStore
 }
 
 // NewAnthropicCompatHandler creates an Anthropic-compatible API handler.
-func NewAnthropicCompatHandler(c client.Client, watchNamespace string, enforceNamespaceIsolation bool, config ChatConfig, resolver *ProviderResolver) *AnthropicCompatHandler {
+func NewAnthropicCompatHandler(c client.Client, watchNamespace string, enforceNamespaceIsolation bool, config ChatConfig, resolver *ProviderResolver, rs store.ResultStore) *AnthropicCompatHandler {
 	return &AnthropicCompatHandler{
 		client:                    c,
 		watchNamespace:            watchNamespace,
 		enforceNamespaceIsolation: enforceNamespaceIsolation,
 		config:                    config,
 		resolver:                  resolver,
+		resultStore:               rs,
 	}
 }
 
@@ -255,7 +261,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		return anthropicError(c, 400, "invalid_request_error", "failed to convert messages: "+err.Error())
 	}
 
-	tools := convertAnthropicTools(req.Tools)
+	convertedTools := convertAnthropicTools(req.Tools)
 
 	systemPrompt, err := parseAnthropicSystem(req.System)
 	if err != nil {
@@ -267,7 +273,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		Messages:      messages,
 		SystemPrompt:  systemPrompt,
 		MaxTokens:     req.MaxTokens,
-		Tools:         tools,
+		Tools:         convertedTools,
 		StopSequences: req.StopSequences,
 	}
 	if req.Temperature != nil {
@@ -279,12 +285,46 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 	orkaToolsDisabled := c.Get("X-Orka-Tools") == "disabled"
 
 	if !orkaToolsDisabled {
+		// Replace client-provided tools with Orka's tools — the server-side tool loop
+		// executes tools itself, so client tools (e.g. Claude Code's Bash, Task) must
+		// not be visible to the LLM or it will call them and get "tool not found" errors.
+		compReq.Tools = nil
 		injectOrkaTools(ctx, h.client, compReq, namespace)
+
+		// Inject coordinator instructions so the LLM knows how to use task management tools
+		compReq.SystemPrompt = coordinatorSystemPrompt(namespace) + "\n\n" + compReq.SystemPrompt
+
+		// Strip tool_use and tool_result from client message history to avoid
+		// the LLM seeing stale references to tools it no longer has (e.g. Bash, Task)
+		compReq.Messages = stripClientToolMessages(compReq.Messages)
+	}
+
+	// Build ToolContext for coordinator tools (create_agent_task, wait_for_task, etc.)
+	var proxyToolCtx *tools.ToolContext
+	if !orkaToolsDisabled {
+		tasksCreated := 0
+		proxyToolCtx = &tools.ToolContext{
+			Client:                    h.client,
+			Namespace:                 namespace,
+			WatchNamespace:            h.watchNamespace,
+			EnforceNamespaceIsolation: h.enforceNamespaceIsolation,
+			ResultStore:               h.resultStore,
+			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", uuid.New().String()[:8]) },
+			TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": "anthropic-proxy"} },
+			CheckTaskLimit: func() *tools.ChatToolError {
+				if tasksCreated >= 20 {
+					return &tools.ChatToolError{Type: "limit_reached", Message: "task creation limit reached (max 20)", Suggestion: "Wait for existing tasks to complete"}
+				}
+				return nil
+			},
+			IncrementTasks: func() { tasksCreated++ },
+			FindGitSecret:  h.findGitSecret,
+		}
 	}
 
 	if req.Stream {
 		if !orkaToolsDisabled {
-			return h.handleStreamingMessages(c, provider, compReq, model, 0)
+			return h.handleStreamingMessages(c, provider, compReq, model, 0, proxyToolCtx)
 		}
 		return h.handleStreamingProxy(c, provider, compReq, model)
 	}
@@ -292,7 +332,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 	var resp *llm.CompletionResponse
 	if !orkaToolsDisabled {
 		// Run the agentic tool loop (executes tools server-side until final text response)
-		resp, err = runNonStreamingToolLoop(ctx, provider, compReq, model, h.config)
+		resp, err = runNonStreamingToolLoop(ctx, provider, compReq, model, h.config, proxyToolCtx)
 		if err != nil {
 			anthropicLog.Error(err, "tool loop failed")
 			return anthropicError(c, 500, "api_error", "completion failed: "+err.Error())
@@ -542,4 +582,46 @@ func anthropicError(c fiber.Ctx, status int, errType, message string) error {
 			Message: message,
 		},
 	})
+}
+
+// findGitSecret looks for a git credentials secret in the given namespace.
+func (h *AnthropicCompatHandler) findGitSecret(ctx context.Context, namespace string) string {
+	for _, name := range []string{"github-credentials", "git-credentials", "github-token", "git-token"} {
+		secret := &corev1.Secret{}
+		if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err == nil {
+			if _, hasToken := secret.Data["token"]; hasToken {
+				return name
+			}
+			if _, hasPassword := secret.Data["password"]; hasPassword {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// stripClientToolMessages removes tool_use and tool_result messages from client history
+// so the LLM doesn't see stale references to tools it no longer has access to.
+func stripClientToolMessages(messages []llm.Message) []llm.Message {
+	var filtered []llm.Message
+	for _, m := range messages {
+		// Skip tool result messages (from client tool execution)
+		if m.Role == "tool" {
+			continue
+		}
+		// For assistant messages, strip tool calls but keep text content
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			if m.Content == "" {
+				continue
+			}
+			m = llm.Message{Role: m.Role, Content: m.Content}
+		}
+		// Prevent consecutive same-role messages (merge into previous)
+		if len(filtered) > 0 && filtered[len(filtered)-1].Role == m.Role {
+			filtered[len(filtered)-1].Content += "\n" + m.Content
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+	return filtered
 }

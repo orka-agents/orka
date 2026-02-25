@@ -104,8 +104,12 @@ spec:
         volumeMounts:
           - name: store
             mountPath: /data
+          - name: tmp
+            mountPath: /tmp
       volumes:
         - name: store
+          emptyDir: {}
+        - name: tmp
           emptyDir: {}
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10

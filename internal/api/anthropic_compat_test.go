@@ -38,7 +38,7 @@ func setupTestAnthropicHandler(objs ...runtime.Object) (*AnthropicCompatHandler,
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	config := DefaultChatConfig()
 	resolver := NewProviderResolver(fakeClient, config)
-	handler := NewAnthropicCompatHandler(fakeClient, "default", false, config, resolver)
+	handler := NewAnthropicCompatHandler(fakeClient, "default", false, config, resolver, nil)
 
 	app := fiber.New()
 	return handler, app
@@ -1017,7 +1017,7 @@ func TestRunNonStreamingToolLoop_NoToolCalls(t *testing.T) {
 		Messages: []llm.Message{{Role: "user", Content: "Hi"}},
 	}
 
-	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second})
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1048,7 +1048,7 @@ func TestRunNonStreamingToolLoop_SingleToolCall(t *testing.T) {
 		Messages: []llm.Message{{Role: "user", Content: "Read test.txt"}},
 	}
 
-	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second})
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1080,7 +1080,7 @@ func TestRunNonStreamingToolLoop_MultiStepToolLoop(t *testing.T) {
 		Messages: []llm.Message{{Role: "user", Content: "Search and read"}},
 	}
 
-	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second})
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1100,7 +1100,7 @@ func TestRunNonStreamingToolLoop_IterationLimit(t *testing.T) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	_ = NewAnthropicCompatHandler(fakeClient, "default", false, config, NewProviderResolver(fakeClient, config))
+	_ = NewAnthropicCompatHandler(fakeClient, "default", false, config, NewProviderResolver(fakeClient, config), nil)
 
 	mock := &mockAnthropicProvider{
 		responses: []*llm.CompletionResponse{
@@ -1117,7 +1117,7 @@ func TestRunNonStreamingToolLoop_IterationLimit(t *testing.T) {
 		Messages: []llm.Message{{Role: "user", Content: "Do many things"}},
 	}
 
-	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second})
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1140,7 +1140,7 @@ func TestRunNonStreamingToolLoop_LLMError(t *testing.T) {
 		Messages: []llm.Message{{Role: "user", Content: "Hi"}},
 	}
 
-	_, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second})
+	_, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second}, nil)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1165,7 +1165,7 @@ func TestRunNonStreamingToolLoop_ToolExecutionError(t *testing.T) {
 		Messages: []llm.Message{{Role: "user", Content: "Use a bad tool"}},
 	}
 
-	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second})
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1184,7 +1184,7 @@ func TestExecuteToolCall_UnknownTool(t *testing.T) {
 		ID:        "tc_1",
 		Name:      "nonexistent_tool",
 		Arguments: json.RawMessage(`{}`),
-	}, 10*time.Second)
+	}, 10*time.Second, nil)
 
 	var parsed map[string]any
 	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
@@ -1208,7 +1208,7 @@ func TestExecuteToolCall_Timeout(t *testing.T) {
 		ID:        "tc_1",
 		Name:      "nonexistent_timeout_tool",
 		Arguments: json.RawMessage(`{}`),
-	}, 1*time.Millisecond)
+	}, 1*time.Millisecond, nil)
 
 	var parsed map[string]any
 	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
