@@ -310,6 +310,7 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 
 		blockIndex := 0
 		inTextBlock := false
+		hasToolCalls := false
 
 		for chunk := range streamCh {
 			if chunk.Error != nil {
@@ -334,6 +335,7 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 			}
 
 			if chunk.ToolCall != nil {
+				hasToolCalls = true
 				if inTextBlock {
 					_ = writeContentBlockStop(w, blockIndex)
 					blockIndex++
@@ -355,6 +357,7 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 			if chunk.Done {
 				if inTextBlock {
 					_ = writeContentBlockStop(w, blockIndex)
+					inTextBlock = false
 				}
 				break
 			}
@@ -364,7 +367,12 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 			_ = writeContentBlockStop(w, blockIndex)
 		}
 
-		_ = writeMessageDelta(w, "end_turn", 0)
+		// Use the correct stop reason — "tool_use" if tool calls were emitted
+		stopReason := "end_turn"
+		if hasToolCalls {
+			stopReason = "tool_use"
+		}
+		_ = writeMessageDelta(w, stopReason, 0)
 		_ = writeMessageStop(w)
 	})
 }
