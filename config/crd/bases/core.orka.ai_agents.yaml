@@ -247,9 +247,9 @@ spec:
                   When set, this Agent is for type: agent tasks only (mutually exclusive with providerRef).
                 properties:
                   defaultAllowBash:
-                    default: true
-                    description: DefaultAllowBash controls whether bash is allowed
-                      by default for tasks using this Agent
+                    description: |-
+                      DefaultAllowBash controls whether bash is allowed by default for tasks using this Agent.
+                      Defaults to true if not specified.
                     type: boolean
                   defaultAllowedTools:
                     description: DefaultAllowedTools lists the default tools allowed

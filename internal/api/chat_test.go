@@ -209,7 +209,7 @@ func TestHandleChatConfig(t *testing.T) {
 	assert.Equal(t, true, body["enabled"])
 	assert.Equal(t, "test-provider", body["provider"])
 	assert.Equal(t, "test-model", body["model"])
-	assert.Equal(t, float64(20), body["maxIterations"])
+	assert.Equal(t, float64(100), body["maxIterations"])
 
 	// availableTools should be a non-empty list
 	tools, ok := body["availableTools"].([]any)

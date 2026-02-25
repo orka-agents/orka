@@ -161,11 +161,12 @@ func TestWorkspaceConfigDefaults(t *testing.T) {
 
 func TestAgentCLIRuntimeFields(t *testing.T) {
 	maxTurns := int32(50)
+	allowBash := true
 	runtime := AgentCLIRuntime{
 		Type:                AgentRuntimeCopilot,
 		DefaultMaxTurns:     &maxTurns,
 		DefaultAllowedTools: []string{"bash", "edit"},
-		DefaultAllowBash:    true,
+		DefaultAllowBash:    &allowBash,
 	}
 
 	if runtime.Type != AgentRuntimeCopilot {
@@ -177,18 +178,19 @@ func TestAgentCLIRuntimeFields(t *testing.T) {
 	if len(runtime.DefaultAllowedTools) != 2 {
 		t.Errorf("DefaultAllowedTools len = %d, want 2", len(runtime.DefaultAllowedTools))
 	}
-	if !runtime.DefaultAllowBash {
+	if runtime.DefaultAllowBash == nil || !*runtime.DefaultAllowBash {
 		t.Error("DefaultAllowBash should be true")
 	}
 }
 
 func TestAgentCLIRuntimeOnAgentSpec(t *testing.T) {
 	maxTurns := int32(25)
+	allowBash := false
 	agent := AgentSpec{
 		Runtime: &AgentCLIRuntime{
 			Type:             AgentRuntimeClaude,
 			DefaultMaxTurns:  &maxTurns,
-			DefaultAllowBash: false,
+			DefaultAllowBash: &allowBash,
 		},
 	}
 
@@ -201,7 +203,7 @@ func TestAgentCLIRuntimeOnAgentSpec(t *testing.T) {
 	if *agent.Runtime.DefaultMaxTurns != 25 {
 		t.Errorf("Runtime.DefaultMaxTurns = %d, want 25", *agent.Runtime.DefaultMaxTurns)
 	}
-	if agent.Runtime.DefaultAllowBash {
+	if agent.Runtime.DefaultAllowBash == nil || *agent.Runtime.DefaultAllowBash {
 		t.Error("Runtime.DefaultAllowBash should be false")
 	}
 }
