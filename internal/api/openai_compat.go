@@ -15,12 +15,15 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/llm"
-	orkatools "github.com/sozercan/orka/internal/tools"
+	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/tools"
 )
 
 var oaiLog = logf.Log.WithName("openai-compat")
@@ -38,16 +41,18 @@ type OpenAICompatHandler struct {
 	enforceNamespaceIsolation bool
 	config                    ChatConfig
 	resolver                  *ProviderResolver
+	resultStore               store.ResultStore
 }
 
 // NewOpenAICompatHandler creates an OpenAI-compatible API handler.
-func NewOpenAICompatHandler(c client.Client, watchNamespace string, enforceNS bool, config ChatConfig, resolver *ProviderResolver) *OpenAICompatHandler {
+func NewOpenAICompatHandler(c client.Client, watchNamespace string, enforceNS bool, config ChatConfig, resolver *ProviderResolver, rs store.ResultStore) *OpenAICompatHandler {
 	return &OpenAICompatHandler{
 		client:                    c,
 		watchNamespace:            watchNamespace,
 		enforceNamespaceIsolation: enforceNS,
 		config:                    config,
 		resolver:                  resolver,
+		resultStore:               rs,
 	}
 }
 
@@ -240,14 +245,14 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	messages, systemPrompt := convertOAIMessages(req.Messages)
 
 	// Convert OpenAI tools to internal format
-	tools := convertOAITools(req.Tools)
+	convertedTools := convertOAITools(req.Tools)
 
 	// Build completion request
 	compReq := &llm.CompletionRequest{
 		Model:        model,
 		Messages:     messages,
 		SystemPrompt: systemPrompt,
-		Tools:        tools,
+		Tools:        convertedTools,
 	}
 
 	if req.Temperature != nil {
@@ -310,22 +315,49 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	orkaToolsDisabled := c.Get("X-Orka-Tools") == "disabled"
 
 	if !orkaToolsDisabled {
-		// Clear client tools and inject only builtin tools (no coordinator tools —
-		// the OpenAI path doesn't have a ToolContext for task management)
+		// Replace client tools with Orka's tools (builtin + coordinator)
 		compReq.Tools = nil
-		builtinTools := orkatools.DefaultRegistry.ToLLMTools(builtinProxyTools)
-		compReq.Tools = append(compReq.Tools, builtinTools...)
+		injectOrkaTools(ctx, h.client, compReq, namespace)
+
+		// Inject coordinator system prompt
+		compReq.SystemPrompt = coordinatorSystemPrompt(namespace) + "\n\n" + compReq.SystemPrompt
+
+		// Strip client tool messages from history
+		compReq.Messages = stripClientToolMessages(compReq.Messages)
+	}
+
+	// Build ToolContext for coordinator tools
+	var proxyToolCtx *tools.ToolContext
+	if !orkaToolsDisabled {
+		tasksCreated := 0
+		proxyToolCtx = &tools.ToolContext{
+			Client:                    h.client,
+			Namespace:                 namespace,
+			WatchNamespace:            h.watchNamespace,
+			EnforceNamespaceIsolation: h.enforceNamespaceIsolation,
+			ResultStore:               h.resultStore,
+			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", generateChatID()) },
+			TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": "openai-proxy"} },
+			CheckTaskLimit: func() *tools.ChatToolError {
+				if tasksCreated >= 20 {
+					return &tools.ChatToolError{Type: "limit_reached", Message: "task creation limit reached (max 20)", Suggestion: "Wait for existing tasks to complete"}
+				}
+				return nil
+			},
+			IncrementTasks: func() { tasksCreated++ },
+			FindGitSecret:  h.findGitSecret,
+		}
 	}
 
 	if req.Stream {
 		if !orkaToolsDisabled {
-			return h.handleStreamingToolLoop(c, ctx, provider, compReq, completionID, model, now, req.StreamOptions)
+			return h.handleStreamingToolLoop(c, ctx, provider, compReq, completionID, model, now, req.StreamOptions, proxyToolCtx)
 		}
 		return h.handleStreamingCompletion(c, ctx, provider, compReq, completionID, model, now, req.StreamOptions)
 	}
 
 	if !orkaToolsDisabled {
-		return h.handleNonStreamingToolLoop(c, ctx, provider, compReq, completionID, model, now)
+		return h.handleNonStreamingToolLoop(c, ctx, provider, compReq, completionID, model, now, proxyToolCtx)
 	}
 	return h.handleNonStreamingCompletion(c, ctx, provider, compReq, completionID, model, now)
 }
@@ -359,8 +391,9 @@ func (h *OpenAICompatHandler) handleNonStreamingToolLoop(
 	req *llm.CompletionRequest,
 	completionID, model string,
 	created int64,
+	toolCtx *tools.ToolContext,
 ) error {
-	resp, err := runNonStreamingToolLoop(ctx, provider, req, model, h.config, nil)
+	resp, err := runNonStreamingToolLoop(ctx, provider, req, model, h.config, toolCtx)
 	if err != nil {
 		oaiLog.Error(err, "tool loop failed")
 		return c.Status(500).JSON(OAIError{Error: OAIErrorDetail{
@@ -382,9 +415,10 @@ func (h *OpenAICompatHandler) handleStreamingToolLoop(
 	completionID, model string,
 	created int64,
 	streamOpts *StreamOptions,
+	toolCtx *tools.ToolContext,
 ) error {
 	// Run the non-streaming tool loop to execute all tools server-side
-	resp, err := runNonStreamingToolLoop(ctx, provider, req, model, h.config, nil)
+	resp, err := runNonStreamingToolLoop(ctx, provider, req, model, h.config, toolCtx)
 	if err != nil {
 		oaiLog.Error(err, "tool loop failed")
 		return c.Status(500).JSON(OAIError{Error: OAIErrorDetail{
@@ -901,4 +935,20 @@ func writeStreamChunk(w *bufio.Writer, chunk OAIResponse) {
 func writeStreamDone(w *bufio.Writer) {
 	_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
 	_ = w.Flush()
+}
+
+// findGitSecret looks for a git credentials secret in the given namespace.
+func (h *OpenAICompatHandler) findGitSecret(ctx context.Context, namespace string) string {
+	for _, name := range []string{"github-credentials", "git-credentials", "github-token", "git-token"} {
+		secret := &corev1.Secret{}
+		if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err == nil {
+			if _, hasToken := secret.Data["token"]; hasToken {
+				return name
+			}
+			if _, hasPassword := secret.Data["password"]; hasPassword {
+				return name
+			}
+		}
+	}
+	return ""
 }
