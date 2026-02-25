@@ -32,16 +32,6 @@ export function useCreateAgent() {
   })
 }
 
-export function useUpdateAgent() {
-  const queryClient = useQueryClient()
-  const namespace = useUIStore((s) => s.namespace)
-  return useMutation({
-    mutationFn: ({ name, spec }: { name: string; spec: Record<string, unknown> }) =>
-      api.put<Agent>(`/agents/${name}`, { spec }, { namespace }),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['agents'] }) },
-  })
-}
-
 export function useDeleteAgent() {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)

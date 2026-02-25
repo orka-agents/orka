@@ -105,7 +105,7 @@ func TestProviderError_Error(t *testing.T) {
 		},
 		{
 			name:    "with provider and code",
-			err:     &ProviderError{Provider: "openai", Message: "rate limited", Code: "429"},
+			err:     &ProviderError{Provider: "openai", Message: "rate limited"},
 			wantMsg: "rate limited",
 		},
 		{
@@ -141,10 +141,8 @@ func TestProviderError_Error(t *testing.T) {
 
 func TestProviderConfig(t *testing.T) {
 	config := ProviderConfig{
-		APIKey:     "test-api-key",
-		BaseURL:    "https://api.example.com",
-		MaxRetries: 3,
-		Timeout:    30,
+		APIKey:  "test-api-key",
+		BaseURL: "https://api.example.com",
 	}
 
 	if config.APIKey != "test-api-key" {
@@ -152,12 +150,6 @@ func TestProviderConfig(t *testing.T) {
 	}
 	if config.BaseURL != "https://api.example.com" {
 		t.Errorf("BaseURL = %v, want %v", config.BaseURL, "https://api.example.com")
-	}
-	if config.MaxRetries != 3 {
-		t.Errorf("MaxRetries = %v, want %v", config.MaxRetries, 3)
-	}
-	if config.Timeout != 30 {
-		t.Errorf("Timeout = %v, want %v", config.Timeout, 30)
 	}
 }
 

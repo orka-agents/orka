@@ -467,7 +467,7 @@ func TestExecuteAgentLoop_NoToolCalls(t *testing.T) {
 
 	result, err := executeAgentLoop(
 		context.Background(), provider, messages, "", "test-model",
-		nil, nil, nil, nil,
+		nil, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -488,7 +488,7 @@ func TestExecuteAgentLoop_CompletionError(t *testing.T) {
 
 	_, err := executeAgentLoop(
 		context.Background(), provider, messages, "", "test-model",
-		nil, nil, nil, nil,
+		nil, nil, nil,
 	)
 	if err == nil {
 		t.Fatal("expected error from provider failure")

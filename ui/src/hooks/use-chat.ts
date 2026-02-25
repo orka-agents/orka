@@ -23,16 +23,6 @@ export function useChatConfig() {
   })
 }
 
-export function useDeleteChatSession() {
-  const namespace = useUIStore((s) => s.namespace)
-  return useCallback(
-    async (sessionId: string) => {
-      await api.delete<void>(`/chat/${sessionId}`, { namespace })
-    },
-    [namespace],
-  )
-}
-
 function parseSSELines(text: string): Array<{ event: string; data: string }> {
   const events: Array<{ event: string; data: string }> = []
   let currentEvent = ''

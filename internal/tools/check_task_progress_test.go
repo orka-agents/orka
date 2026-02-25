@@ -128,10 +128,10 @@ func TestCheckTaskProgressTool_Execute(t *testing.T) {
 						Conditions: []metav1.Condition{
 							{
 								Type:               "Ready",
-								Status:              metav1.ConditionTrue,
-								Reason:              "TaskCompleted",
-								Message:             "Task completed successfully",
-								LastTransitionTime:  metav1.Now(),
+								Status:             metav1.ConditionTrue,
+								Reason:             "TaskCompleted",
+								Message:            "Task completed successfully",
+								LastTransitionTime: metav1.Now(),
 							},
 						},
 					},

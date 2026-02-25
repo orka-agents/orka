@@ -26,9 +26,6 @@ func TestNewWebhookNotifier(t *testing.T) {
 	if notifier.client == nil {
 		t.Error("client is nil")
 	}
-	if notifier.timeout != 30*time.Second {
-		t.Errorf("timeout = %v, want 30s", notifier.timeout)
-	}
 }
 
 func TestWebhookNotifier_Notify_NoURL(t *testing.T) {
@@ -58,7 +55,6 @@ func TestWebhookNotifier_Notify_Success(t *testing.T) {
 
 	notifier := &WebhookNotifier{
 		client:            server.Client(),
-		timeout:           30 * time.Second,
 		skipURLValidation: true,
 	}
 
@@ -141,7 +137,6 @@ func TestWebhookNotifier_Notify_HTTPError(t *testing.T) {
 
 	notifier := &WebhookNotifier{
 		client:            server.Client(),
-		timeout:           30 * time.Second,
 		skipURLValidation: true,
 	}
 
@@ -185,7 +180,6 @@ func TestWebhookNotifier_Notify_Non2xxStatus(t *testing.T) {
 
 			notifier := &WebhookNotifier{
 				client:            server.Client(),
-				timeout:           30 * time.Second,
 				skipURLValidation: true,
 			}
 
@@ -226,7 +220,6 @@ func TestWebhookNotifier_Notify_2xxStatuses(t *testing.T) {
 
 			notifier := &WebhookNotifier{
 				client:            server.Client(),
-				timeout:           30 * time.Second,
 				skipURLValidation: true,
 			}
 
@@ -292,7 +285,6 @@ func TestWebhookNotifier_Notify_ContextCancellation(t *testing.T) {
 
 	notifier := &WebhookNotifier{
 		client:            server.Client(),
-		timeout:           30 * time.Second,
 		skipURLValidation: true,
 	}
 
@@ -325,7 +317,6 @@ func TestWebhookNotifier_Notify_NoResultRef(t *testing.T) {
 
 	notifier := &WebhookNotifier{
 		client:            server.Client(),
-		timeout:           30 * time.Second,
 		skipURLValidation: true,
 	}
 
@@ -364,7 +355,6 @@ func TestWebhookNotifier_Notify_NoStartOrCompletionTime(t *testing.T) {
 
 	notifier := &WebhookNotifier{
 		client:            server.Client(),
-		timeout:           30 * time.Second,
 		skipURLValidation: true,
 	}
 

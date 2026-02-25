@@ -47,7 +47,6 @@ func init() {
 // back to Chat Completions if not.
 type Provider struct {
 	client openai.Client
-	config llm.ProviderConfig
 	mode   atomic.Int32 // apiMode
 }
 
@@ -76,7 +75,6 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 
 	return &Provider{
 		client: client,
-		config: config,
 	}, nil
 }
 

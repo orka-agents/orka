@@ -7,10 +7,12 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,7 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/controller"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
@@ -733,8 +734,7 @@ func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *sqlite.Store
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionManager: sm, SessionStore: ss, ResultStore: ss})
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
 	return handlers, app, ss
@@ -820,8 +820,7 @@ func TestHandlers_ListSessions_WatchNamespace(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionManager: sm, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
 	app.Get("/sessions", handlers.ListSessions)
@@ -897,8 +896,7 @@ func TestHandlers_GetSession_WatchNamespace(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionManager: sm, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
 
 	ctx := context.Background()
 	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
@@ -970,8 +968,7 @@ func TestHandlers_DeleteSession_WatchNamespace(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionManager: sm, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
 
 	ctx := context.Background()
 	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
@@ -1203,6 +1200,19 @@ func TestHandlers_DeleteTask_WatchNamespace(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNoContent)
 	}
+}
+
+// readLines is a test helper that reads lines from a reader into a channel.
+func readLines(r io.Reader) <-chan string {
+	ch := make(chan string)
+	go func() {
+		defer close(ch)
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			ch <- scanner.Text()
+		}
+	}()
+	return ch
 }
 
 // --- readLines tests ---
@@ -2025,8 +2035,7 @@ func TestHandlers_DeleteSession_NamespaceForbidden(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionManager: sm, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
 	app.Delete("/sessions/:id", handlers.DeleteSession)

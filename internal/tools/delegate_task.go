@@ -166,14 +166,13 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 
 // delegationContext holds validated delegation parameters.
 type delegationContext struct {
-	args            DelegateTaskArgs
-	parentName      string
-	parentNamespace string
-	currentDepth    int
-	namespace       string
-	parentTask      *corev1alpha1.Task
-	targetAgent     *corev1alpha1.Agent
-	priority        *int32
+	args         DelegateTaskArgs
+	parentName   string
+	currentDepth int
+	namespace    string
+	parentTask   *corev1alpha1.Task
+	targetAgent  *corev1alpha1.Agent
+	priority     *int32
 }
 
 // parseDelegateArgs parses and validates the delegation arguments and environment.
@@ -268,14 +267,13 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 	}
 
 	return &delegationContext{
-		args:            delegateArgs,
-		parentName:      parentName,
-		parentNamespace: parentNamespace,
-		currentDepth:    currentDepth,
-		namespace:       ns,
-		parentTask:      parentTask,
-		targetAgent:     targetAgent,
-		priority:        priority,
+		args:         delegateArgs,
+		parentName:   parentName,
+		currentDepth: currentDepth,
+		namespace:    ns,
+		parentTask:   parentTask,
+		targetAgent:  targetAgent,
+		priority:     priority,
 	}, nil
 }
 

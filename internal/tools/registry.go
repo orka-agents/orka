@@ -22,7 +22,6 @@ type ToolContext struct {
 	Namespace                 string
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
-	SessionID                 string
 	// ResultStore for fetching task outputs (store.ResultStore)
 	ResultStore interface {
 		GetResult(ctx context.Context, namespace, taskName string) ([]byte, error)
@@ -91,11 +90,6 @@ func ChatToolErrorResult(errType, message, suggestion string) (string, error) {
 		ErrorType:  errType,
 		Suggestion: suggestion,
 	})
-}
-
-// ClassifyChatK8sError returns a ChatToolResult JSON string for a K8s API error.
-func ClassifyChatK8sError(err error) (string, error) {
-	return ChatToolErrorResult("internal_error", err.Error(), "")
 }
 
 const githubAPIBaseURL = "https://api.github.com"

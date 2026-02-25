@@ -174,7 +174,7 @@ func TestUploadArtifacts_ReturnsErrorWhenTotalSizeExceeded(t *testing.T) {
 	// Create multiple files each under maxFileSize but totalling over maxTotalSize
 	fileSize := int64(maxFileSize - 1)
 	numFiles := (maxTotalSize / fileSize) + 2
-	for i := int64(0); i < numFiles; i++ {
+	for i := range numFiles {
 		createSparseArtifactFile(t, fmt.Sprintf("file-%d.bin", i), fileSize)
 	}
 

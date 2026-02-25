@@ -76,12 +76,6 @@ describe('useChatStore', () => {
     expect(useChatStore.getState().isStreaming).toBe(false)
   })
 
-  it('clearMessages empties messages array', () => {
-    useChatStore.getState().addMessage(makeMessage({ role: 'user', content: 'hi' }))
-    useChatStore.getState().clearMessages()
-    expect(useChatStore.getState().messages).toEqual([])
-  })
-
   it('newSession clears messages and sessionId', () => {
     useChatStore.getState().addMessage(makeMessage({ role: 'user', content: 'hi' }))
     useChatStore.getState().setSessionId('sess-1')

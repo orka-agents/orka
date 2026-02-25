@@ -27,7 +27,6 @@ func init() {
 // Provider implements the llm.Provider interface for Anthropic
 type Provider struct {
 	client *anthropic.Client
-	config llm.ProviderConfig
 }
 
 // NewProvider creates a new Anthropic provider
@@ -52,7 +51,6 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 
 	return &Provider{
 		client: &client,
-		config: config,
 	}, nil
 }
 

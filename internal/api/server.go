@@ -84,7 +84,6 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 
 	server.handlers = NewHandlers(HandlersConfig{
 		Client:                    c,
-		SessionManager:            sessionManager,
 		WatchNamespace:            config.WatchNamespace,
 		EnforceNamespaceIsolation: config.EnforceNamespaceIsolation,
 		ResultStore:               config.ResultStore,

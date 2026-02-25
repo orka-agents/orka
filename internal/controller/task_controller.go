@@ -59,7 +59,6 @@ type TaskReconciler struct {
 	Recorder                  record.EventRecorder
 	KubeClient                kubernetes.Interface
 	ResultStore               store.ResultStore
-	SessionStore              store.SessionStore
 	PlanStore                 store.PlanStore
 	MessageStore              store.MessageStore
 	ArtifactStore             store.ArtifactStore

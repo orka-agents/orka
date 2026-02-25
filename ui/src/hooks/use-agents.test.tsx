@@ -11,7 +11,6 @@ import {
   useAgentList,
   useAgent,
   useCreateAgent,
-  useUpdateAgent,
   useDeleteAgent,
 } from './use-agents'
 
@@ -54,17 +53,6 @@ describe('useCreateAgent', () => {
     })
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
     expect(result.current.data).toMatchObject({ metadata: { name: 'new-agent' } })
-  })
-})
-
-describe('useUpdateAgent', () => {
-  it('updates an agent via mutation', async () => {
-    const { result } = renderHook(() => useUpdateAgent(), { wrapper: createWrapper() })
-    act(() => {
-      result.current.mutate({ name: 'my-agent', spec: { model: 'gpt-4' } })
-    })
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-    expect(result.current.data).toMatchObject({ metadata: { name: 'updated' } })
   })
 })
 

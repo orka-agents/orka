@@ -52,12 +52,6 @@ workers:
       tag: latest
       pullPolicy: IfNotPresent
 
-  general:
-    image:
-      repository: ghcr.io/sozercan/orka/general-worker
-      tag: latest
-      pullPolicy: IfNotPresent
-
   # Default resources for workers
   resources:
     limits:
@@ -133,14 +127,6 @@ store:
     size: 1Gi            # only when enabled: true
     storageClass: ""     # use cluster default
     accessMode: ReadWriteOnce
-
-# Prometheus ServiceMonitor
-monitoring:
-  enabled: false
-  # Prometheus namespace (for ServiceMonitor)
-  namespace: ""
-  # Scrape interval
-  interval: 30s
 
 # Client ServiceAccount for API access
 client:
