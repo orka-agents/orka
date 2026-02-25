@@ -9,14 +9,11 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -26,10 +23,11 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/controller"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/llm"
 	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/tools"
 	"github.com/sozercan/orka/internal/tracing"
 )
 
@@ -49,10 +47,13 @@ type ToolExecutor struct {
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	resultStore               store.ResultStore
+	registry                  *tools.Registry
 }
 
 // NewToolExecutor creates a new ToolExecutor.
 func NewToolExecutor(c client.Client, sm *controller.SessionManager, namespace, sessionID, watchNamespace string, enforceNS bool, maxTasks int, toolTimeout time.Duration, rs store.ResultStore) *ToolExecutor {
+	reg := tools.NewRegistry()
+	tools.RegisterChatTools(reg)
 	return &ToolExecutor{
 		client:                    c,
 		sessionManager:            sm,
@@ -63,6 +64,7 @@ func NewToolExecutor(c client.Client, sm *controller.SessionManager, namespace, 
 		watchNamespace:            watchNamespace,
 		enforceNamespaceIsolation: enforceNS,
 		resultStore:               rs,
+		registry:                  reg,
 	}
 }
 
@@ -97,50 +99,63 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	toolCtx, cancel := context.WithTimeout(ctx, e.toolTimeout)
 	defer cancel()
 
-	var result ToolResult
-	switch toolCall.Name {
-	case "create_ai_task":
-		result = e.executeCreateAITask(toolCtx, args)
-	case "create_container_task":
-		result = e.executeCreateContainerTask(toolCtx, args)
-	case "create_agent_task":
-		result = e.executeCreateAgentTask(toolCtx, args)
-	case "check_task_progress":
-		result = e.executeCheckTaskProgress(toolCtx, args)
-	case "fetch_task_output":
-		result = e.executeFetchTaskOutput(toolCtx, args)
-	case "wait_for_task":
-		result = e.executeWaitForTask(toolCtx, args)
-	case "cancel_task":
-		result = e.executeCancelTask(toolCtx, args)
-	case "list_agents":
-		result = e.executeListAgents(toolCtx, args)
-	case "list_tools":
-		result = e.executeListTools(toolCtx, args)
-	case "list_tasks":
-		result = e.executeListTasks(toolCtx, args)
-	case "create_agent":
-		result = e.executeCreateAgent(toolCtx, args)
-	case "update_agent":
-		result = e.executeUpdateAgent(toolCtx, args)
-	case "delete_agent":
-		result = e.executeDeleteAgent(toolCtx, args)
-	case "create_tool":
-		result = e.executeCreateTool(toolCtx, args)
-	case "delete_tool":
-		result = e.executeDeleteTool(toolCtx, args)
-	case "delete_session":
-		result = e.executeDeleteSession(toolCtx, args)
-	default:
-		result = toolError("unknown_tool", fmt.Sprintf("unknown tool: %s", toolCall.Name), "Use one of the available tools")
+	// Set up ToolContext for registry-based tools
+	tc := &tools.ToolContext{
+		Client:                    e.client,
+		Namespace:                 e.namespace,
+		WatchNamespace:            e.watchNamespace,
+		EnforceNamespaceIsolation: e.enforceNamespaceIsolation,
+		SessionID:                 e.sessionID,
+		ResultStore:               e.resultStore,
+		SessionDeleter:            e.sessionManager,
+		GenerateTaskName:          e.generateTaskName,
+		TaskLabels:                e.taskLabels,
+		CheckTaskLimit: func() *tools.ChatToolError {
+			if e.tasksCreated >= e.maxTasks {
+				return &tools.ChatToolError{
+					Type:       "limit_reached",
+					Message:    fmt.Sprintf("task creation limit reached (max %d per turn)", e.maxTasks),
+					Suggestion: "Wait for existing tasks to complete before creating new ones",
+				}
+			}
+			return nil
+		},
+		IncrementTasks: func() { e.tasksCreated++ },
+		FindGitSecret:  e.findGitSecret,
+	}
+	toolCtx = tools.WithToolContext(toolCtx, tc)
+
+	// Marshal args to JSON for the Tool interface
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		result := toolError("internal_error", fmt.Sprintf("failed to marshal arguments: %v", err), "")
+		return marshalResult(result)
 	}
 
-	if result.Success {
-		span.SetAttributes(attribute.Bool("tool.success", true))
-	} else {
-		span.SetStatus(codes.Error, result.Error)
+	// Execute via registry
+	resultStr, err := e.registry.Execute(toolCtx, toolCall.Name, argsJSON)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		result := toolError("unknown_tool", fmt.Sprintf("unknown tool: %s", toolCall.Name), "Use one of the available tools")
+		return marshalResult(result)
 	}
 
+	// The registry tools return JSON-marshaled ChatToolResult strings.
+	// Parse them back into ToolResult for consistent span attributes.
+	var tr ToolResult
+	if jsonErr := json.Unmarshal([]byte(resultStr), &tr); jsonErr == nil {
+		if tr.Success {
+			span.SetAttributes(attribute.Bool("tool.success", true))
+		} else {
+			span.SetStatus(codes.Error, tr.Error)
+		}
+		return resultStr, nil
+	}
+
+	// Fallback: wrap raw string as success
+	span.SetAttributes(attribute.Bool("tool.success", true))
+	result := ToolResult{Success: true, Data: resultStr}
 	return marshalResult(result)
 }
 
@@ -157,8 +172,8 @@ func (e *ToolExecutor) generateTaskName() string {
 
 func (e *ToolExecutor) taskLabels() map[string]string {
 	return map[string]string{
-		"orka.ai/created-by":   "orchestrator",
-		"orka.ai/chat-session": e.sessionID,
+		labels.LabelCreatedBy:   "orchestrator",
+		labels.LabelChatSession: e.sessionID,
 	}
 }
 
@@ -182,935 +197,52 @@ func (e *ToolExecutor) checkNamespaceScope(namespace string) *ToolResult {
 	return nil
 }
 
-func (e *ToolExecutor) executeCreateAITask(ctx context.Context, args map[string]any) ToolResult {
-	if limit := e.checkTaskLimit(); limit != nil {
-		return *limit
-	}
-
-	prompt := getStringArg(args, "prompt")
-	if prompt == "" {
-		return toolError("invalid_arguments", "prompt is required", "Provide a prompt for the AI task")
-	}
-
-	namespace := getStringArgDefault(args, "namespace", e.namespace)
-	if ns := e.checkNamespaceScope(namespace); ns != nil {
-		return *ns
-	}
-
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      e.generateTaskName(),
-			Namespace: namespace,
-			Labels:    e.taskLabels(),
-		},
-		Spec: corev1alpha1.TaskSpec{
-			Type:   corev1alpha1.TaskTypeAI,
-			Prompt: prompt,
-		},
-	}
-
-	if agentRef := getStringArg(args, "agentRef"); agentRef != "" {
-		task.Spec.AgentRef = &corev1alpha1.AgentReference{Name: agentRef}
-	}
-
-	// Set provider reference (defaults to "default")
-	providerName := getStringArgDefault(args, "providerRef", "default")
-	if task.Spec.AI == nil {
-		task.Spec.AI = &corev1alpha1.AISpec{}
-	}
-	task.Spec.AI.ProviderRef = &corev1alpha1.ProviderReference{Name: providerName}
-
-	if timeoutStr := getStringArg(args, "timeout"); timeoutStr != "" {
-		d, err := time.ParseDuration(timeoutStr)
-		if err != nil {
-			return toolError("invalid_arguments", fmt.Sprintf("invalid timeout: %v", err), "Use Go duration format (e.g., 30s, 5m)")
-		}
-		task.Spec.Timeout = &metav1.Duration{Duration: d}
-	}
-
-	if priority, ok := args["priority"]; ok {
-		p := int32(getIntArg(args, "priority", int(priority.(float64))))
-		task.Spec.Priority = &p
-	}
-
-	if sessionRef := getStringArg(args, "sessionRef"); sessionRef != "" {
-		task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: sessionRef}
-	}
-
-	if schedule := getStringArg(args, "schedule"); schedule != "" {
-		task.Spec.Schedule = schedule
-	}
-
-	if err := e.client.Create(ctx, task); err != nil {
-		return classifyK8sError(err)
-	}
-
-	msg := taskCreatedMsg
-	if task.Spec.Schedule != "" {
-		msg = fmt.Sprintf("Recurring task scheduled (schedule: %s)", task.Spec.Schedule)
-	}
-
-	e.tasksCreated++
-	return ToolResult{
-		Success: true,
-		Data: map[string]any{
-			"name":      task.Name,
-			"namespace": task.Namespace,
-			"phase":     "Pending",
-			"message":   msg,
-		},
-	}
-}
-
-func (e *ToolExecutor) executeCreateContainerTask(ctx context.Context, args map[string]any) ToolResult {
-	if limit := e.checkTaskLimit(); limit != nil {
-		return *limit
-	}
-
-	image := getStringArg(args, "image")
-
-	namespace := getStringArgDefault(args, "namespace", e.namespace)
-	if ns := e.checkNamespaceScope(namespace); ns != nil {
-		return *ns
-	}
-
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      e.generateTaskName(),
-			Namespace: namespace,
-			Labels:    e.taskLabels(),
-		},
-		Spec: corev1alpha1.TaskSpec{
-			Type:    corev1alpha1.TaskTypeContainer,
-			Image:   image,
-			Command: getStringSliceArg(args, "command"),
-			Args:    getStringSliceArg(args, "args"),
-		},
-	}
-
-	if timeoutStr := getStringArg(args, "timeout"); timeoutStr != "" {
-		d, err := time.ParseDuration(timeoutStr)
-		if err != nil {
-			return toolError("invalid_arguments", fmt.Sprintf("invalid timeout: %v", err), "Use Go duration format (e.g., 30s, 5m)")
-		}
-		task.Spec.Timeout = &metav1.Duration{Duration: d}
-	}
-
-	if _, ok := args["priority"]; ok {
-		p := int32(getIntArg(args, "priority", 500))
-		task.Spec.Priority = &p
-	}
-
-	if schedule := getStringArg(args, "schedule"); schedule != "" {
-		task.Spec.Schedule = schedule
-	}
-
-	if err := e.client.Create(ctx, task); err != nil {
-		return classifyK8sError(err)
-	}
-
-	msg := taskCreatedMsg
-	if task.Spec.Schedule != "" {
-		msg = fmt.Sprintf("Recurring task scheduled (schedule: %s)", task.Spec.Schedule)
-	}
-
-	e.tasksCreated++
-	return ToolResult{
-		Success: true,
-		Data: map[string]any{
-			"name":      task.Name,
-			"namespace": task.Namespace,
-			"phase":     "Pending",
-			"message":   msg,
-		},
-	}
-}
-
-func (e *ToolExecutor) executeCreateAgentTask(ctx context.Context, args map[string]any) ToolResult {
-	if limit := e.checkTaskLimit(); limit != nil {
-		return *limit
-	}
-
-	prompt := getStringArg(args, "prompt")
-	if prompt == "" {
-		return toolError("invalid_arguments", "prompt is required", "Provide a prompt for the agent task")
-	}
-
-	agentRef := getStringArg(args, "agentRef")
-	if agentRef == "" {
-		return toolError("invalid_arguments", "agentRef is required", "Provide an agent reference for the agent task")
-	}
-
-	namespace := getStringArgDefault(args, "namespace", e.namespace)
-	if ns := e.checkNamespaceScope(namespace); ns != nil {
-		return *ns
-	}
-
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      e.generateTaskName(),
-			Namespace: namespace,
-			Labels:    e.taskLabels(),
-		},
-		Spec: corev1alpha1.TaskSpec{
-			Type:   corev1alpha1.TaskTypeAgent,
-			Prompt: prompt,
-			AgentRef: &corev1alpha1.AgentReference{
-				Name: agentRef,
-			},
-		},
-	}
-
-	if timeoutStr := getStringArg(args, "timeout"); timeoutStr != "" {
-		d, err := time.ParseDuration(timeoutStr)
-		if err != nil {
-			return toolError("invalid_arguments", fmt.Sprintf("invalid timeout: %v", err), "Use Go duration format (e.g., 30s, 5m)")
-		}
-		task.Spec.Timeout = &metav1.Duration{Duration: d}
-	}
-
-	// Agent runtime overrides
-	var agentRuntime *corev1alpha1.AgentRuntimeSpec
-
-	if maxTurns, ok := args["maxTurns"]; ok {
-		if agentRuntime == nil {
-			agentRuntime = &corev1alpha1.AgentRuntimeSpec{}
-		}
-		mt := int32(maxTurns.(float64))
-		agentRuntime.MaxTurns = &mt
-	}
-
-	if ws, ok := args["workspace"]; ok {
-		if wsMap, ok := ws.(map[string]any); ok {
-			if agentRuntime == nil {
-				agentRuntime = &corev1alpha1.AgentRuntimeSpec{}
-			}
-			wsCfg := &corev1alpha1.WorkspaceConfig{}
-			if gitRepo := getStringArg(wsMap, "gitRepo"); gitRepo != "" {
-				wsCfg.GitRepo = gitRepo
-			}
-			if branch := getStringArg(wsMap, "branch"); branch != "" {
-				wsCfg.Branch = branch
-			}
-			if subPath := getStringArg(wsMap, "subPath"); subPath != "" {
-				wsCfg.SubPath = subPath
-			}
-			if pushBranch := getStringArg(wsMap, "pushBranch"); pushBranch != "" {
-				wsCfg.PushBranch = pushBranch
-			}
-			if gitSecretRef := getStringArg(wsMap, "gitSecretRef"); gitSecretRef != "" {
-				wsCfg.GitSecretRef = &corev1.LocalObjectReference{Name: gitSecretRef}
-			} else if wsCfg.GitRepo != "" {
-				// Auto-detect git credentials secret
-				if secretName := e.findGitSecret(ctx, task.Namespace); secretName != "" {
-					wsCfg.GitSecretRef = &corev1.LocalObjectReference{Name: secretName}
-				}
-			}
-			agentRuntime.Workspace = wsCfg
-		}
-	}
-
-	task.Spec.AgentRuntime = agentRuntime
-
-	if schedule := getStringArg(args, "schedule"); schedule != "" {
-		task.Spec.Schedule = schedule
-	}
-
-	if err := e.client.Create(ctx, task); err != nil {
-		return classifyK8sError(err)
-	}
-
-	msg := taskCreatedMsg
-	if task.Spec.Schedule != "" {
-		msg = fmt.Sprintf("Recurring task scheduled (schedule: %s)", task.Spec.Schedule)
-	}
-
-	e.tasksCreated++
-	return ToolResult{
-		Success: true,
-		Data: map[string]any{
-			"name":      task.Name,
-			"namespace": task.Namespace,
-			"phase":     "Pending",
-			"message":   msg,
-		},
-	}
-}
-
-// ---- Query tools ----
-
-func (e *ToolExecutor) executeCheckTaskProgress(ctx context.Context, args map[string]any) ToolResult {
-	name := getStringArg(args, "name")
-	if name == "" {
-		return toolError("invalid_arguments", "name is required", "Provide the task name")
-	}
-	namespace := getStringArgDefault(args, "namespace", e.namespace)
-
-	task := &corev1alpha1.Task{}
-	if err := e.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, task); err != nil {
-		return classifyK8sError(err)
-	}
-
-	data := map[string]any{
-		"name":      task.Name,
-		"namespace": task.Namespace,
-		"phase":     string(task.Status.Phase),
-		"message":   task.Status.Message,
-	}
-
-	if task.Status.StartTime != nil {
-		duration := time.Since(task.Status.StartTime.Time)
-		data["duration"] = duration.Round(time.Second).String()
-	}
-
-	if len(task.Status.Conditions) > 0 {
-		conditions := make([]map[string]string, 0, len(task.Status.Conditions))
-		for _, c := range task.Status.Conditions {
-			conditions = append(conditions, map[string]string{
-				"type":    c.Type,
-				"status":  string(c.Status),
-				"reason":  c.Reason,
-				"message": c.Message,
-			})
-		}
-		data["conditions"] = conditions
-	}
-
-	return ToolResult{Success: true, Data: data}
-}
-
-func (e *ToolExecutor) executeFetchTaskOutput(ctx context.Context, args map[string]any) ToolResult {
-	name := getStringArg(args, "name")
-	if name == "" {
-		return toolError("invalid_arguments", "name is required", "Provide the task name")
-	}
-	namespace := getStringArgDefault(args, "namespace", e.namespace)
-
-	task := &corev1alpha1.Task{}
-	if err := e.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, task); err != nil {
-		return classifyK8sError(err)
-	}
-
-	if task.Status.ResultRef == nil || !task.Status.ResultRef.Available {
-		return toolError("not_found", "task has no result yet", "Wait for the task to complete, then try again")
-	}
-
-	data, err := e.resultStore.GetResult(ctx, namespace, name)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return toolError("not_found", "result not found in store", "The result may have been deleted")
-		}
-		return toolError("internal_error", fmt.Sprintf("failed to get result: %v", err), "")
-	}
-
-	result := string(data)
-	const maxLen = 2048
-	if len(result) > maxLen {
-		result = result[:maxLen] + fmt.Sprintf(" [truncated, full output: %d chars]", len(data))
-	}
-
-	return ToolResult{
-		Success: true,
-		Data: map[string]any{
-			"name":   task.Name,
-			"phase":  string(task.Status.Phase),
-			"output": result,
-		},
-	}
-}
-
-func (e *ToolExecutor) executeWaitForTask(ctx context.Context, args map[string]any) ToolResult {
-	name := getStringArg(args, "name")
-	if name == "" {
-		return toolError("invalid_arguments", "name is required", "Provide the task name")
-	}
-	namespace := getStringArgDefault(args, "namespace", e.namespace)
-	timeout := min(getIntArg(args, "timeout", 30), 60)
-
-	// Check current status first
-	task := &corev1alpha1.Task{}
-	if err := e.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, task); err != nil {
-		return classifyK8sError(err)
-	}
-
-	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded || task.Status.Phase == corev1alpha1.TaskPhaseFailed {
-		return e.taskStatusResult(task)
-	}
-
-	// Poll every 2 seconds until timeout
-	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return e.taskTimeoutResult(task)
-		case <-ticker.C:
-			if time.Now().After(deadline) {
-				// Re-fetch latest status before returning
-				_ = e.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, task)
-				return e.taskTimeoutResult(task)
-			}
-
-			if err := e.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, task); err != nil {
-				return classifyK8sError(err)
-			}
-
-			if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded || task.Status.Phase == corev1alpha1.TaskPhaseFailed {
-				return e.taskStatusResult(task)
-			}
-		}
-	}
-}
-
-func (e *ToolExecutor) taskStatusResult(task *corev1alpha1.Task) ToolResult {
-	data := map[string]any{
-		"name":    task.Name,
-		"phase":   string(task.Status.Phase),
-		"message": task.Status.Message,
-	}
-	if task.Status.StartTime != nil {
-		elapsed := time.Since(task.Status.StartTime.Time)
-		if task.Status.CompletionTime != nil {
-			elapsed = task.Status.CompletionTime.Sub(task.Status.StartTime.Time)
-		}
-		data["elapsed"] = elapsed.Round(time.Second).String()
-	}
-	return ToolResult{Success: true, Data: data}
-}
-
-func (e *ToolExecutor) taskTimeoutResult(task *corev1alpha1.Task) ToolResult {
-	data := map[string]any{
-		"name":    task.Name,
-		"phase":   string(task.Status.Phase),
-		"message": "Task is still running. Call wait_for_task again to continue waiting, or do other work in the meantime.",
-	}
-	if task.Status.StartTime != nil {
-		data["elapsed"] = time.Since(task.Status.StartTime.Time).Round(time.Second).String()
-	}
-	return ToolResult{Success: true, Data: data}
-}
-
-func (e *ToolExecutor) executeCancelTask(ctx context.Context, args map[string]any) ToolResult {
-	name := getStringArg(args, "name")
-	if name == "" {
-		return toolError("invalid_arguments", "name is required", "Provide the task name")
-	}
-	namespace := getStringArgDefault(args, "namespace", e.namespace)
-
-	task := &corev1alpha1.Task{}
-	if err := e.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, task); err != nil {
-		return classifyK8sError(err)
-	}
-
-	if err := e.client.Delete(ctx, task); err != nil {
-		return classifyK8sError(err)
-	}
-
-	return ToolResult{
-		Success: true,
-		Data: map[string]any{
-			"name":    task.Name,
-			"message": "Task cancelled and deleted",
-		},
-	}
-}
-
-// ---- Discovery tools ----
-
-func (e *ToolExecutor) executeListAgents(ctx context.Context, args map[string]any) ToolResult {
-	namespace := getStringArgDefault(args, "namespace", e.namespace)
-
-	agentList := &corev1alpha1.AgentList{}
-	if err := e.client.List(ctx, agentList, client.InNamespace(namespace)); err != nil {
-		return classifyK8sError(err)
-	}
-
-	agents := make([]map[string]any, 0, len(agentList.Items))
-	for _, agent := range agentList.Items {
-		info := map[string]any{
-			"name": agent.Name,
-		}
-
-		if agent.Spec.Model != nil {
-			info["model"] = fmt.Sprintf("%s/%s", agent.Spec.Model.Provider, agent.Spec.Model.Name)
-		}
-
-		if len(agent.Spec.Tools) > 0 {
-			toolNames := make([]string, 0, len(agent.Spec.Tools))
-			for _, t := range agent.Spec.Tools {
-				toolNames = append(toolNames, t.Name)
-			}
-			info["tools"] = toolNames
-		}
-
-		if agent.Spec.Runtime != nil {
-			info["runtime"] = string(agent.Spec.Runtime.Type)
-		}
-
-		if desc, ok := agent.Annotations["description"]; ok {
-			info["description"] = desc
-		}
-
-		agents = append(agents, info)
-	}
-
-	return ToolResult{Success: true, Data: agents}
-}
-
-func (e *ToolExecutor) executeListTools(ctx context.Context, args map[string]any) ToolResult {
-	namespace := getStringArgDefault(args, "namespace", e.namespace)
-
-	toolList := &corev1alpha1.ToolList{}
-	if err := e.client.List(ctx, toolList, client.InNamespace(namespace)); err != nil {
-		return classifyK8sError(err)
-	}
-
-	tools := make([]map[string]any, 0, len(toolList.Items))
-	for _, tool := range toolList.Items {
-		tools = append(tools, map[string]any{
-			"name":        tool.Name,
-			"description": tool.Spec.Description,
-			"builtin":     false,
-		})
-	}
-
-	return ToolResult{Success: true, Data: tools}
-}
-
-func (e *ToolExecutor) executeListTasks(ctx context.Context, args map[string]any) ToolResult {
-	namespace := getStringArgDefault(args, "namespace", e.namespace)
-	statusFilter := getStringArg(args, "status")
-	limit := getIntArg(args, "limit", 20)
-
-	taskList := &corev1alpha1.TaskList{}
-	if err := e.client.List(ctx, taskList, client.InNamespace(namespace)); err != nil {
-		return classifyK8sError(err)
-	}
-
-	tasks := make([]map[string]any, 0)
-	for _, task := range taskList.Items {
-		if statusFilter != "" && !strings.EqualFold(string(task.Status.Phase), statusFilter) {
-			continue
-		}
-
-		age := time.Since(task.CreationTimestamp.Time).Round(time.Second).String()
-
-		tasks = append(tasks, map[string]any{
-			"name":  task.Name,
-			"phase": string(task.Status.Phase),
-			"type":  string(task.Spec.Type),
-			"age":   age,
-		})
-
-		if len(tasks) >= limit {
-			break
-		}
-	}
-
-	return ToolResult{Success: true, Data: tasks}
-}
-
-// ---- Management tools ----
-
-func (e *ToolExecutor) executeCreateAgent(ctx context.Context, args map[string]any) ToolResult {
-	name := getStringArg(args, "name")
-	if name == "" {
-		return toolError("invalid_arguments", "name is required", "Provide a name for the agent")
-	}
-
-	namespace := getStringArgDefault(args, "namespace", e.namespace)
-	if ns := e.checkNamespaceScope(namespace); ns != nil {
-		return *ns
-	}
-
-	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"orka.ai/created-by": "chat",
-			},
-		},
-		Spec: corev1alpha1.AgentSpec{
-			TTLAfterLastTask: &metav1.Duration{Duration: time.Hour},
-		},
-	}
-
-	// Model configuration
-	if modelObj, ok := args["model"]; ok {
-		switch m := modelObj.(type) {
-		case map[string]any:
-			agent.Spec.Model = &corev1alpha1.ModelConfig{
-				Name:     getStringArg(m, "name"),
-				Provider: getStringArg(m, "provider"),
-			}
-			if temp, ok := m["temperature"]; ok {
-				if t, ok := temp.(float64); ok {
-					agent.Spec.Model.Temperature = &t
-				}
-			}
-		case string:
-			// Support "provider/model" format
-			parts := strings.SplitN(m, "/", 2)
-			if len(parts) == 2 {
-				agent.Spec.Model = &corev1alpha1.ModelConfig{
-					Provider: parts[0],
-					Name:     parts[1],
-				}
-			} else {
-				agent.Spec.Model = &corev1alpha1.ModelConfig{
-					Name: m,
-				}
-			}
-		}
-	}
-
-	// Set providerRef (defaults to "default")
-	providerRefName := getStringArgDefault(args, "providerRef", "default")
-	agent.Spec.ProviderRef = &corev1alpha1.ProviderReference{Name: providerRefName}
-
-	// Clear model.provider when providerRef is set to avoid type mismatch
-	// (e.g., model.provider="openai" vs providerRef resolving to "azure-openai")
-	if agent.Spec.Model != nil && agent.Spec.Model.Provider != "" {
-		agent.Spec.Model.Provider = ""
-	}
-
-	if systemPrompt := getStringArg(args, "systemPrompt"); systemPrompt != "" {
-		agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{
-			Inline: systemPrompt,
-		}
-	}
-
-	if toolNames := getStringSliceArg(args, "tools"); len(toolNames) > 0 {
-		for _, t := range toolNames {
-			agent.Spec.Tools = append(agent.Spec.Tools, corev1alpha1.ToolReference{Name: t})
-		}
-	}
-
-	if rt, ok := args["runtime"]; ok {
-		if rtMap, ok := rt.(map[string]any); ok {
-			runtimeType := getStringArg(rtMap, "type")
-			if runtimeType != "" {
-				agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
-					Type: corev1alpha1.AgentRuntimeType(runtimeType),
-				}
-				// Runtime agents don't use providerRef — clear it to avoid mutual exclusion error
-				agent.Spec.ProviderRef = nil
-				agent.Spec.Model = nil
-			}
-		}
-	}
-
-	if coord, ok := args["coordination"]; ok {
-		if coordMap, ok := coord.(map[string]any); ok {
-			coordCfg := &corev1alpha1.CoordinationConfig{}
-			if enabled, ok := coordMap["enabled"].(bool); ok {
-				coordCfg.Enabled = enabled
-			}
-			if maxCC, ok := coordMap["maxConcurrentChildren"].(float64); ok {
-				coordCfg.MaxConcurrentChildren = int32(maxCC)
-			}
-			if maxD, ok := coordMap["maxDepth"].(float64); ok {
-				coordCfg.MaxDepth = int32(maxD)
-			}
-			if allowed, ok := coordMap["allowedAgents"].([]any); ok {
-				for _, a := range allowed {
-					if aMap, ok := a.(map[string]any); ok {
-						aa := corev1alpha1.AllowedAgent{
-							Name:      getStringArg(aMap, "name"),
-							Namespace: getStringArg(aMap, "namespace"),
-						}
-						if aa.Name != "" {
-							coordCfg.AllowedAgents = append(coordCfg.AllowedAgents, aa)
-						}
-					}
-				}
-			}
-			agent.Spec.Coordination = coordCfg
-		}
-	}
-
-	if err := e.client.Create(ctx, agent); err != nil {
-		return classifyK8sError(err)
-	}
-
-	// After agent creation succeeds, check for initialPrompt
-	if result := e.handleInitialPrompt(ctx, agent, namespace, args); result != nil {
-		return *result
-	}
-
-	return ToolResult{
-		Success: true,
-		Data: map[string]any{
-			"name":      agent.Name,
-			"namespace": agent.Namespace,
-			"message":   "Agent created",
-		},
-	}
-}
-
-// handleInitialPrompt creates a Task for the agent if an initialPrompt argument is provided.
-func (e *ToolExecutor) handleInitialPrompt(ctx context.Context, agent *corev1alpha1.Agent, namespace string, args map[string]any) *ToolResult {
-	initialPrompt := getStringArg(args, "initialPrompt")
-	if initialPrompt == "" {
-		return nil
-	}
-
-	// Check task limit
-	if limit := e.checkTaskLimit(); limit != nil {
-		result := ToolResult{
-			Success: true,
-			Data: map[string]any{
-				"name":      agent.Name,
-				"namespace": agent.Namespace,
-				"message":   "Agent created, but task creation skipped: task limit reached",
-			},
-		}
-		return &result
-	}
-
-	// Determine task type based on agent config
-	taskType := corev1alpha1.TaskTypeAI
-	if agent.Spec.Runtime != nil {
-		taskType = corev1alpha1.TaskTypeAgent
-	}
-
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      e.generateTaskName(),
-			Namespace: namespace,
-			Labels:    e.taskLabels(),
-		},
-		Spec: corev1alpha1.TaskSpec{
-			Type:   taskType,
-			Prompt: initialPrompt,
-			AgentRef: &corev1alpha1.AgentReference{
-				Name: agent.Name,
-			},
-		},
-	}
-
-	// Set provider reference from agent
-	if agent.Spec.ProviderRef != nil && taskType == corev1alpha1.TaskTypeAI {
-		if task.Spec.AI == nil {
-			task.Spec.AI = &corev1alpha1.AISpec{}
-		}
-		task.Spec.AI.ProviderRef = agent.Spec.ProviderRef
-	}
-
-	if err := e.client.Create(ctx, task); err != nil {
-		result := ToolResult{
-			Success: true,
-			Data: map[string]any{
-				"agentName":      agent.Name,
-				"agentNamespace": agent.Namespace,
-				"message":        fmt.Sprintf("Agent created, but task creation failed: %v", err),
-			},
-		}
-		return &result
-	}
-
-	e.tasksCreated++
-	result := ToolResult{
-		Success: true,
-		Data: map[string]any{
-			"agentName":      agent.Name,
-			"agentNamespace": agent.Namespace,
-			"taskName":       task.Name,
-			"taskNamespace":  task.Namespace,
-			"message":        "Agent created and task started",
-		},
-	}
-	return &result
-}
-
-func (e *ToolExecutor) executeUpdateAgent(ctx context.Context, args map[string]any) ToolResult {
-	name := getStringArg(args, "name")
-	if name == "" {
-		return toolError("invalid_arguments", "name is required", "Provide the agent name")
-	}
-
-	namespace := getStringArgDefault(args, "namespace", e.namespace)
-
-	agent := &corev1alpha1.Agent{}
-	if err := e.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, agent); err != nil {
-		return classifyK8sError(err)
-	}
-
-	// Update specified fields
-	if modelProvider := getStringArg(args, "model"); modelProvider != "" {
-		parts := strings.SplitN(modelProvider, "/", 2)
-		if agent.Spec.Model == nil {
-			agent.Spec.Model = &corev1alpha1.ModelConfig{}
-		}
-		if len(parts) == 2 {
-			agent.Spec.Model.Provider = parts[0]
-			agent.Spec.Model.Name = parts[1]
-		} else {
-			agent.Spec.Model.Name = modelProvider
-		}
-	}
-
-	if systemPrompt := getStringArg(args, "systemPrompt"); systemPrompt != "" {
-		agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{
-			Inline: systemPrompt,
-		}
-	}
-
-	if toolNames := getStringSliceArg(args, "tools"); len(toolNames) > 0 {
-		agent.Spec.Tools = nil
-		for _, t := range toolNames {
-			agent.Spec.Tools = append(agent.Spec.Tools, corev1alpha1.ToolReference{Name: t})
-		}
-	}
-
-	// Re-fetch before update to avoid conflicts
-	latest := &corev1alpha1.Agent{}
-	if err := e.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, latest); err != nil {
-		return classifyK8sError(err)
-	}
-	agent.ResourceVersion = latest.ResourceVersion
-
-	if err := e.client.Update(ctx, agent); err != nil {
-		return classifyK8sError(err)
-	}
-
-	return ToolResult{
-		Success: true,
-		Data: map[string]any{
-			"name":    agent.Name,
-			"message": "Agent updated",
-		},
-	}
-}
-
-func (e *ToolExecutor) executeDeleteAgent(ctx context.Context, args map[string]any) ToolResult {
-	name := getStringArg(args, "name")
-	if name == "" {
-		return toolError("invalid_arguments", "name is required", "Provide the agent name")
-	}
-
-	namespace := getStringArgDefault(args, "namespace", e.namespace)
-
-	agent := &corev1alpha1.Agent{}
-	if err := e.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, agent); err != nil {
-		return classifyK8sError(err)
-	}
-
-	if err := e.client.Delete(ctx, agent); err != nil {
-		return classifyK8sError(err)
-	}
-
-	return ToolResult{
-		Success: true,
-		Data: map[string]any{
-			"name":    agent.Name,
-			"message": "Agent deleted",
-		},
-	}
-}
-
-func (e *ToolExecutor) executeCreateTool(ctx context.Context, args map[string]any) ToolResult {
-	name := getStringArg(args, "name")
-	if name == "" {
-		return toolError("invalid_arguments", "name is required", "Provide a name for the tool")
-	}
-
-	description := getStringArg(args, "description")
-	if description == "" {
-		return toolError("invalid_arguments", "description is required", "Provide a description for the tool")
-	}
-
-	url := getStringArg(args, "url")
-	if url == "" {
-		return toolError("invalid_arguments", "url is required", "Provide the HTTP endpoint URL")
-	}
-
-	namespace := getStringArgDefault(args, "namespace", e.namespace)
-	if ns := e.checkNamespaceScope(namespace); ns != nil {
-		return *ns
-	}
-
-	method := getStringArgDefault(args, "method", "POST")
-
-	tool := &corev1alpha1.Tool{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
-		Spec: corev1alpha1.ToolSpec{
-			Description: description,
-			HTTP: corev1alpha1.HTTPExecution{
-				URL:    url,
-				Method: method,
-			},
-		},
-	}
-
-	if err := e.client.Create(ctx, tool); err != nil {
-		return classifyK8sError(err)
-	}
-
-	return ToolResult{
-		Success: true,
-		Data: map[string]any{
-			"name":      tool.Name,
-			"namespace": tool.Namespace,
-			"message":   "Tool created",
-		},
-	}
-}
-
-func (e *ToolExecutor) executeDeleteTool(ctx context.Context, args map[string]any) ToolResult {
-	name := getStringArg(args, "name")
-	if name == "" {
-		return toolError("invalid_arguments", "name is required", "Provide the tool name")
-	}
-
-	namespace := getStringArgDefault(args, "namespace", e.namespace)
-
-	tool := &corev1alpha1.Tool{}
-	if err := e.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, tool); err != nil {
-		return classifyK8sError(err)
-	}
-
-	if err := e.client.Delete(ctx, tool); err != nil {
-		return classifyK8sError(err)
-	}
-
-	return ToolResult{
-		Success: true,
-		Data: map[string]any{
-			"name":    tool.Name,
-			"message": "Tool deleted",
-		},
-	}
-}
-
-func (e *ToolExecutor) executeDeleteSession(ctx context.Context, args map[string]any) ToolResult {
-	sessionID := getStringArg(args, "sessionId")
-	if sessionID == "" {
-		return toolError("invalid_arguments", "sessionId is required", "Provide the session ID")
-	}
-
-	namespace := getStringArgDefault(args, "namespace", e.namespace)
-
-	if err := e.sessionManager.DeleteSession(ctx, namespace, sessionID); err != nil {
-		return classifyK8sError(err)
-	}
-
-	return ToolResult{
-		Success: true,
-		Data: map[string]any{
-			"sessionId": sessionID,
-			"message":   "Session deleted",
-		},
-	}
-}
-
 // ---- Error handling helpers ----
+
+// executeTool is a convenience method that executes a tool by name with map args.
+// It sets up the ToolContext and dispatches through the registry.
+func (e *ToolExecutor) executeTool(ctx context.Context, name string, args map[string]any) ToolResult {
+	tc := &tools.ToolContext{
+		Client:                    e.client,
+		Namespace:                 e.namespace,
+		WatchNamespace:            e.watchNamespace,
+		EnforceNamespaceIsolation: e.enforceNamespaceIsolation,
+		SessionID:                 e.sessionID,
+		ResultStore:               e.resultStore,
+		SessionDeleter:            e.sessionManager,
+		GenerateTaskName:          e.generateTaskName,
+		TaskLabels:                e.taskLabels,
+		CheckTaskLimit: func() *tools.ChatToolError {
+			if e.tasksCreated >= e.maxTasks {
+				return &tools.ChatToolError{
+					Type:       "limit_reached",
+					Message:    fmt.Sprintf("task creation limit reached (max %d per turn)", e.maxTasks),
+					Suggestion: "Wait for existing tasks to complete before creating new ones",
+				}
+			}
+			return nil
+		},
+		IncrementTasks: func() { e.tasksCreated++ },
+		FindGitSecret:  e.findGitSecret,
+	}
+	ctx = tools.WithToolContext(ctx, tc)
+
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		return toolError("internal_error", fmt.Sprintf("failed to marshal arguments: %v", err), "")
+	}
+
+	resultStr, err := e.registry.Execute(ctx, name, argsJSON)
+	if err != nil {
+		return toolError("unknown_tool", err.Error(), "Use one of the available tools")
+	}
+
+	var tr ToolResult
+	if jsonErr := json.Unmarshal([]byte(resultStr), &tr); jsonErr == nil {
+		return tr
+	}
+	return ToolResult{Success: true, Data: resultStr}
+}
 
 func toolError(errType, message, suggestion string) ToolResult {
 	return ToolResult{

@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 )
 
 const (
@@ -275,19 +276,19 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 	}
 
 	// Verify labels
-	if childTask.Labels["orka.ai/parent-task"] != parentTaskName {
-		t.Errorf("label orka.ai/parent-task = %q, want %q", childTask.Labels["orka.ai/parent-task"], "parent-task")
+	if childTask.Labels[labels.LabelParentTask] != parentTaskName {
+		t.Errorf("label orka.ai/parent-task = %q, want %q", childTask.Labels[labels.LabelParentTask], "parent-task")
 	}
-	if childTask.Labels["orka.ai/coordinator"] != trueStr {
-		t.Errorf("label orka.ai/coordinator = %q, want %q", childTask.Labels["orka.ai/coordinator"], trueStr)
+	if childTask.Labels[labels.LabelCoordinator] != trueStr {
+		t.Errorf("label orka.ai/coordinator = %q, want %q", childTask.Labels[labels.LabelCoordinator], trueStr)
 	}
-	if childTask.Labels["orka.ai/delegated-agent"] != "researcher" {
-		t.Errorf("label orka.ai/delegated-agent = %q, want %q", childTask.Labels["orka.ai/delegated-agent"], "researcher")
+	if childTask.Labels[labels.LabelDelegatedAgent] != "researcher" {
+		t.Errorf("label orka.ai/delegated-agent = %q, want %q", childTask.Labels[labels.LabelDelegatedAgent], "researcher")
 	}
 
 	// Verify annotations
-	if childTask.Annotations["orka.ai/coordination-depth"] != "2" {
-		t.Errorf("annotation orka.ai/coordination-depth = %q, want %q", childTask.Annotations["orka.ai/coordination-depth"], "2")
+	if childTask.Annotations[labels.AnnotationCoordinationDepth] != "2" {
+		t.Errorf("annotation orka.ai/coordination-depth = %q, want %q", childTask.Annotations[labels.AnnotationCoordinationDepth], "2")
 	}
 
 	// Verify spec
@@ -560,8 +561,8 @@ func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
 			Namespace: "default",
 			UID:       "prior-uid",
 			Labels: map[string]string{
-				"orka.ai/iteration":       "1",
-				"orka.ai/iteration-group": "group-abc",
+				labels.LabelIteration:      "1",
+				labels.LabelIterationGroup: "group-abc",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -634,11 +635,11 @@ func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
 	}
 
 	// Verify iteration labels
-	if childTask.Labels["orka.ai/iteration"] != "2" {
-		t.Errorf("expected iteration=2, got %q", childTask.Labels["orka.ai/iteration"])
+	if childTask.Labels[labels.LabelIteration] != "2" {
+		t.Errorf("expected iteration=2, got %q", childTask.Labels[labels.LabelIteration])
 	}
-	if childTask.Labels["orka.ai/iteration-group"] != "group-abc" {
-		t.Errorf("expected iteration-group=group-abc, got %q", childTask.Labels["orka.ai/iteration-group"])
+	if childTask.Labels[labels.LabelIterationGroup] != "group-abc" {
+		t.Errorf("expected iteration-group=group-abc, got %q", childTask.Labels[labels.LabelIterationGroup])
 	}
 
 	// Verify workspace was copied from prior task
@@ -783,17 +784,17 @@ func TestDelegateTaskTool_Execute_AutoRetry(t *testing.T) {
 		t.Fatalf("get child task: %v", err)
 	}
 
-	if childTask.Annotations["orka.ai/auto-retry"] != trueStr {
-		t.Errorf("expected auto-retry=true, got %q", childTask.Annotations["orka.ai/auto-retry"])
+	if childTask.Annotations[labels.AnnotationAutoRetry] != trueStr {
+		t.Errorf("expected auto-retry=true, got %q", childTask.Annotations[labels.AnnotationAutoRetry])
 	}
-	if childTask.Annotations["orka.ai/max-retries"] != "3" {
-		t.Errorf("expected max-retries=3, got %q", childTask.Annotations["orka.ai/max-retries"])
+	if childTask.Annotations[labels.AnnotationMaxRetries] != "3" {
+		t.Errorf("expected max-retries=3, got %q", childTask.Annotations[labels.AnnotationMaxRetries])
 	}
-	if childTask.Annotations["orka.ai/retry-count"] != "0" {
-		t.Errorf("expected retry-count=0, got %q", childTask.Annotations["orka.ai/retry-count"])
+	if childTask.Annotations[labels.AnnotationRetryCount] != "0" {
+		t.Errorf("expected retry-count=0, got %q", childTask.Annotations[labels.AnnotationRetryCount])
 	}
-	if childTask.Annotations["orka.ai/original-prompt"] != "Do the work" {
-		t.Errorf("expected original-prompt stored, got %q", childTask.Annotations["orka.ai/original-prompt"])
+	if childTask.Annotations[labels.AnnotationOriginalPrompt] != "Do the work" {
+		t.Errorf("expected original-prompt stored, got %q", childTask.Annotations[labels.AnnotationOriginalPrompt])
 	}
 }
 
@@ -826,8 +827,8 @@ func TestDelegateTaskTool_Execute_AutoRetryDefault(t *testing.T) {
 		t.Fatalf("get child task: %v", err)
 	}
 
-	if childTask.Annotations["orka.ai/max-retries"] != "2" {
-		t.Errorf("expected default max-retries=2, got %q", childTask.Annotations["orka.ai/max-retries"])
+	if childTask.Annotations[labels.AnnotationMaxRetries] != "2" {
+		t.Errorf("expected default max-retries=2, got %q", childTask.Annotations[labels.AnnotationMaxRetries])
 	}
 }
 
@@ -860,7 +861,7 @@ func TestDelegateTaskTool_Execute_NoAutoRetry(t *testing.T) {
 	}
 
 	// When auto_retry is not set, no retry annotations should be present
-	if _, ok := childTask.Annotations["orka.ai/auto-retry"]; ok {
+	if _, ok := childTask.Annotations[labels.AnnotationAutoRetry]; ok {
 		t.Error("expected no auto-retry annotation when auto_retry is false")
 	}
 }

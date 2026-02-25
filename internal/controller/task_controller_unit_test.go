@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
 )
@@ -579,7 +580,7 @@ func TestEnforceHistoryLimits_DefaultLimits(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "child-s" + time.Now().Add(time.Duration(i)*time.Hour).Format("150405"),
 				Namespace:         "default",
-				Labels:            map[string]string{"orka.ai/parent-task": "parent"},
+				Labels:            map[string]string{labels.LabelParentTask: "parent"},
 				CreationTimestamp: metav1.NewTime(time.Now().Add(time.Duration(i) * time.Hour)),
 			},
 			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
@@ -590,7 +591,7 @@ func TestEnforceHistoryLimits_DefaultLimits(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "child-f" + time.Now().Add(time.Duration(i)*time.Hour).Format("150405"),
 				Namespace:         "default",
-				Labels:            map[string]string{"orka.ai/parent-task": "parent"},
+				Labels:            map[string]string{labels.LabelParentTask: "parent"},
 				CreationTimestamp: metav1.NewTime(time.Now().Add(time.Duration(i) * time.Hour)),
 			},
 			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed},
@@ -607,7 +608,7 @@ func TestEnforceHistoryLimits_DefaultLimits(t *testing.T) {
 	// Should have deleted 2 succeeded and 2 failed
 	var remaining corev1alpha1.TaskList
 	_ = r.List(context.Background(), &remaining, client.InNamespace("default"),
-		client.MatchingLabels{"orka.ai/parent-task": "parent"})
+		client.MatchingLabels{labels.LabelParentTask: "parent"})
 
 	succeeded, failed := 0, 0
 	for _, task := range remaining.Items {
@@ -645,7 +646,7 @@ func TestEnforceHistoryLimits_CustomLimits(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "cs-" + time.Now().Add(time.Duration(i)*time.Minute).Format("150405"),
 				Namespace:         "default",
-				Labels:            map[string]string{"orka.ai/parent-task": "parent"},
+				Labels:            map[string]string{labels.LabelParentTask: "parent"},
 				CreationTimestamp: metav1.NewTime(time.Now().Add(time.Duration(i) * time.Minute)),
 			},
 			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
@@ -656,7 +657,7 @@ func TestEnforceHistoryLimits_CustomLimits(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "cf-" + time.Now().Add(time.Duration(i)*time.Minute).Format("150405"),
 				Namespace:         "default",
-				Labels:            map[string]string{"orka.ai/parent-task": "parent"},
+				Labels:            map[string]string{labels.LabelParentTask: "parent"},
 				CreationTimestamp: metav1.NewTime(time.Now().Add(time.Duration(i) * time.Minute)),
 			},
 			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed},
@@ -670,7 +671,7 @@ func TestEnforceHistoryLimits_CustomLimits(t *testing.T) {
 
 	var remaining corev1alpha1.TaskList
 	_ = r.List(context.Background(), &remaining, client.InNamespace("default"),
-		client.MatchingLabels{"orka.ai/parent-task": "parent"})
+		client.MatchingLabels{labels.LabelParentTask: "parent"})
 
 	succeeded, failed := 0, 0
 	for _, task := range remaining.Items {
@@ -736,10 +737,10 @@ func TestValidateCoordinationConstraints_CoordinationDisabled(t *testing.T) {
 			Name:      "child",
 			Namespace: "default",
 			Annotations: map[string]string{
-				"orka.ai/coordination-depth": "1",
+				labels.AnnotationCoordinationDepth: "1",
 			},
 			Labels: map[string]string{
-				"orka.ai/parent-task": "parent",
+				labels.LabelParentTask: "parent",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
@@ -775,10 +776,10 @@ func TestValidateCoordinationConstraints_MaxDepthExceeded(t *testing.T) {
 			Name:      "child",
 			Namespace: "default",
 			Annotations: map[string]string{
-				"orka.ai/coordination-depth": "3",
+				labels.AnnotationCoordinationDepth: "3",
 			},
 			Labels: map[string]string{
-				"orka.ai/parent-task": "parent",
+				labels.LabelParentTask: "parent",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
@@ -814,10 +815,10 @@ func TestValidateCoordinationConstraints_AllowedAgentPass(t *testing.T) {
 			Name:      "child",
 			Namespace: "default",
 			Annotations: map[string]string{
-				"orka.ai/coordination-depth": "1",
+				labels.AnnotationCoordinationDepth: "1",
 			},
 			Labels: map[string]string{
-				"orka.ai/parent-task": "parent",
+				labels.LabelParentTask: "parent",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -856,10 +857,10 @@ func TestValidateCoordinationConstraints_AgentNotAllowed(t *testing.T) {
 			Name:      "child",
 			Namespace: "default",
 			Annotations: map[string]string{
-				"orka.ai/coordination-depth": "1",
+				labels.AnnotationCoordinationDepth: "1",
 			},
 			Labels: map[string]string{
-				"orka.ai/parent-task": "parent",
+				labels.LabelParentTask: "parent",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -899,8 +900,8 @@ func TestValidateCoordinationConstraints_DynamicallyCreatedAgent(t *testing.T) {
 			Name:      "dynamic-agent",
 			Namespace: "default",
 			Labels: map[string]string{
-				"orka.ai/created-by":  "create_agent",
-				"orka.ai/parent-task": "parent",
+				labels.LabelCreatedBy:  "create_agent",
+				labels.LabelParentTask: "parent",
 			},
 		},
 	}
@@ -909,10 +910,10 @@ func TestValidateCoordinationConstraints_DynamicallyCreatedAgent(t *testing.T) {
 			Name:      "child",
 			Namespace: "default",
 			Annotations: map[string]string{
-				"orka.ai/coordination-depth": "1",
+				labels.AnnotationCoordinationDepth: "1",
 			},
 			Labels: map[string]string{
-				"orka.ai/parent-task": "parent",
+				labels.LabelParentTask: "parent",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -951,7 +952,7 @@ func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sibling",
 			Namespace: "default",
-			Labels:    map[string]string{"orka.ai/parent-task": "parent"},
+			Labels:    map[string]string{labels.LabelParentTask: "parent"},
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
@@ -960,10 +961,10 @@ func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
 			Name:      "child",
 			Namespace: "default",
 			Annotations: map[string]string{
-				"orka.ai/coordination-depth": "1",
+				labels.AnnotationCoordinationDepth: "1",
 			},
 			Labels: map[string]string{
-				"orka.ai/parent-task": "parent",
+				labels.LabelParentTask: "parent",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
@@ -1290,7 +1291,7 @@ func TestHandleDeletion_WithResultRef(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-result",
 			Namespace:  "default",
-			Finalizers: []string{TaskFinalizer},
+			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Status: corev1alpha1.TaskStatus{
 			ResultRef: &corev1alpha1.ResultReference{Available: true},
@@ -1317,7 +1318,7 @@ func TestHandleDeletion_WithSessionRef(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-sess",
 			Namespace:  "default",
-			Finalizers: []string{TaskFinalizer},
+			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			SessionRef: &corev1alpha1.SessionReference{Name: "sess1"},
@@ -1339,7 +1340,7 @@ func TestHandleDeletion_WithJobName(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-job",
 			Namespace:  "default",
-			Finalizers: []string{TaskFinalizer},
+			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Status: corev1alpha1.TaskStatus{JobName: "job1"},
 	}
@@ -1356,7 +1357,7 @@ func TestHandleDeletion_WithMessageStore(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-msg",
 			Namespace:  "default",
-			Finalizers: []string{TaskFinalizer},
+			Finalizers: []string{labels.TaskFinalizer},
 		},
 	}
 	r := newUnitReconciler(scheme, task)
@@ -1573,7 +1574,7 @@ func TestHandleRunning_ChildTaskStatuses(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "child-task",
 			Namespace: "default",
-			Labels:    map[string]string{"orka.ai/parent-task": "parent-run"},
+			Labels:    map[string]string{labels.LabelParentTask: "parent-run"},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAI,
@@ -2076,7 +2077,7 @@ func TestHandleScheduled_ConcurrencyForbid(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "active-child",
 			Namespace: "default",
-			Labels:    map[string]string{"orka.ai/parent-task": "sched-concur"},
+			Labels:    map[string]string{labels.LabelParentTask: "sched-concur"},
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
@@ -2356,7 +2357,7 @@ func TestReconcile_InitializeStatus(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "rec-init",
 			Namespace:  "default",
-			Finalizers: []string{TaskFinalizer},
+			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 	}
@@ -2378,7 +2379,7 @@ func TestReconcile_CompletedPhase(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "rec-comp",
 			Namespace:  "default",
-			Finalizers: []string{TaskFinalizer},
+			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
@@ -2414,7 +2415,7 @@ func TestHandlePending_NamespaceTaskLimit(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "pending-limit",
 			Namespace:  "default",
-			Finalizers: []string{TaskFinalizer},
+			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
@@ -2507,7 +2508,7 @@ func TestReconcile_ScheduledPhase(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "rec-sched",
 			Namespace:         "default",
-			Finalizers:        []string{TaskFinalizer},
+			Finalizers:        []string{labels.TaskFinalizer},
 			CreationTimestamp: metav1.NewTime(time.Now()),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -2535,7 +2536,7 @@ func TestReconcile_RunningPhase_JobNotFound(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "rec-run",
 			Namespace:  "default",
-			Finalizers: []string{TaskFinalizer},
+			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 		Status: corev1alpha1.TaskStatus{
@@ -2558,7 +2559,7 @@ func TestReconcile_FailedPhase(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "rec-fail",
 			Namespace:  "default",
-			Finalizers: []string{TaskFinalizer},
+			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed},
@@ -2579,7 +2580,7 @@ func TestReconcile_CancelledPhase(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "rec-cancel",
 			Namespace:  "default",
-			Finalizers: []string{TaskFinalizer},
+			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled},
@@ -2678,7 +2679,7 @@ func TestHandleRunning_ChildTaskWithResult(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "child-with-result",
 			Namespace: "default",
-			Labels:    map[string]string{"orka.ai/parent-task": "parent-result"},
+			Labels:    map[string]string{labels.LabelParentTask: "parent-result"},
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 		Status: corev1alpha1.TaskStatus{
@@ -2900,7 +2901,7 @@ func TestHandleRunning_ChildWithEmptyPhase(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "child-empty-phase",
 			Namespace: "default",
-			Labels:    map[string]string{"orka.ai/parent-task": "parent-empty"},
+			Labels:    map[string]string{labels.LabelParentTask: "parent-empty"},
 		},
 		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 		Status: corev1alpha1.TaskStatus{Phase: ""},
@@ -2940,7 +2941,7 @@ func TestHandleRunning_ChildResultFetchError(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "child-err-result",
 			Namespace: "default",
-			Labels:    map[string]string{"orka.ai/parent-task": "parent-err"},
+			Labels:    map[string]string{labels.LabelParentTask: "parent-err"},
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 		Status: corev1alpha1.TaskStatus{
@@ -2984,7 +2985,7 @@ func TestHandleRunning_ChildResultTruncated(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "child-trunc",
 			Namespace: "default",
-			Labels:    map[string]string{"orka.ai/parent-task": "parent-trunc"},
+			Labels:    map[string]string{labels.LabelParentTask: "parent-trunc"},
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 		Status: corev1alpha1.TaskStatus{
@@ -3033,7 +3034,7 @@ func TestHandleRunning_IsChildTask(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "child-self",
 			Namespace: "default",
-			Labels:    map[string]string{"orka.ai/parent-task": "some-parent"},
+			Labels:    map[string]string{labels.LabelParentTask: "some-parent"},
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 		Status: corev1alpha1.TaskStatus{

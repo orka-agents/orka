@@ -139,11 +139,19 @@ curl https://orka.example.com/anthropic/v1/models \
 
 ## Server-Side Tool Execution
 
-The Anthropic proxy includes a built-in agent loop that executes tools server-side. When the LLM returns `tool_use` content blocks, the proxy intercepts them, executes the tools, feeds results back to the LLM, and repeats until a final text response is produced. Clients (e.g., Claude Code) never need to execute tools locally — they only receive the final response with progress updates streamed in real-time.
+By default, the Anthropic endpoint enables **server-side tool execution** — it injects Orka's built-in tools into the request and runs an autonomous tool loop. When the LLM returns `tool_use` content blocks, the proxy intercepts them, executes the tools, feeds results back to the LLM, and repeats until a final text response is produced. Clients never need to execute tools locally.
+
+To disable this and use the endpoint as a **transparent proxy**, set the `X-Orka-Tools: disabled` header:
+
+```
+X-Orka-Tools: disabled
+```
+
+When this header is set, requests are forwarded to the LLM and responses are returned without intercepting tool calls. The client manages its own tool execution loop.
 
 ### Available Tools
 
-The proxy automatically injects these built-in tools into every request:
+By default (without the `X-Orka-Tools: disabled` header), the proxy automatically injects these built-in tools into the request:
 
 | Tool | Description |
 |------|-------------|
@@ -159,7 +167,7 @@ Client-provided tools in the request are preserved and merged with the injected 
 
 ### How It Works
 
-1. Client sends a `POST /anthropic/v1/messages` request
+1. Client sends a `POST /anthropic/v1/messages` request (tools are injected automatically)
 2. Proxy injects Orka tools into the request and forwards to the LLM
 3. If the LLM returns `tool_use` blocks:
    - Proxy executes each tool server-side
@@ -202,18 +210,24 @@ If the LLM calls the same tool with identical arguments 3 or more times, the pro
 - **LLM errors**: If the LLM returns a context-too-long error, the proxy truncates the conversation to ~50% and retries once. Other LLM errors terminate the loop and return an Anthropic error response
 - **Timeout**: If the overall request timeout is reached, the proxy returns whatever progress has been made
 
-### Example: Claude Code with Server-Side Tools
+### Example: curl with Server-Side Tools
 
-Configure Claude Code to use Orka as a custom provider:
+Server-side tool execution is enabled by default — no special header needed:
 
-```json
-{
-  "apiUrl": "https://orka.example.com/anthropic/v1",
-  "apiKey": "<orka-service-account-token>"
-}
+```bash
+curl -X POST https://orka.example.com/anthropic/v1/messages \
+  -H "x-api-key: $ORKA_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "anthropic/claude-sonnet-4-20250514",
+    "max_tokens": 4096,
+    "messages": [{"role": "user", "content": "Search the web for Kubernetes 1.32 release highlights and summarize them."}],
+    "stream": true
+  }'
 ```
 
-Claude Code sends requests normally. The proxy handles all tool execution server-side — Claude Code only sees the final text responses with streamed progress.
+To use as a transparent proxy instead (client manages tools), add `X-Orka-Tools: disabled`.
 
 ## Architecture
 
@@ -230,4 +244,4 @@ Claude Code sends requests normally. The proxy handles all tool execution server
                      └──────────────────────────────┘
 ```
 
-Orka transparently proxies requests to the backend LLM provider. For simple requests, the client manages its own tool execution loop. When server-side tool execution is active, Orka intercepts tool calls, executes them, and returns only the final response — see [Server-Side Tool Execution](#server-side-tool-execution) above.
+Orka injects built-in tools and runs server-side tool execution by default. Set `X-Orka-Tools: disabled` to use as a transparent proxy where the client manages its own tool execution loop — see [Server-Side Tool Execution](#server-side-tool-execution) above.

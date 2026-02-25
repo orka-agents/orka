@@ -26,6 +26,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/controller"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 )
 
@@ -62,19 +63,33 @@ type Handlers struct {
 	artifactStore             store.ArtifactStore
 }
 
+// HandlersConfig holds configuration for creating Handlers.
+type HandlersConfig struct {
+	Client                    client.Client
+	SessionManager            *controller.SessionManager
+	WatchNamespace            string
+	EnforceNamespaceIsolation bool
+	ResultStore               store.ResultStore
+	SessionStore              store.SessionStore
+	PlanStore                 store.PlanStore
+	KubeClient                kubernetes.Interface
+	HealthChecker             store.HealthChecker
+	ArtifactStore             store.ArtifactStore
+}
+
 // NewHandlers creates a new Handlers instance
-func NewHandlers(c client.Client, sessionManager *controller.SessionManager, watchNamespace string, enforceNS bool, rs store.ResultStore, ss store.SessionStore, ps store.PlanStore, clientset kubernetes.Interface, hc store.HealthChecker, as store.ArtifactStore) *Handlers {
+func NewHandlers(cfg HandlersConfig) *Handlers {
 	return &Handlers{
-		client:                    c,
-		clientset:                 clientset,
-		sessionManager:            sessionManager,
-		watchNamespace:            watchNamespace,
-		enforceNamespaceIsolation: enforceNS,
-		resultStore:               rs,
-		sessionStore:              ss,
-		planStore:                 ps,
-		healthChecker:             hc,
-		artifactStore:             as,
+		client:                    cfg.Client,
+		clientset:                 cfg.KubeClient,
+		sessionManager:            cfg.SessionManager,
+		watchNamespace:            cfg.WatchNamespace,
+		enforceNamespaceIsolation: cfg.EnforceNamespaceIsolation,
+		resultStore:               cfg.ResultStore,
+		sessionStore:              cfg.SessionStore,
+		planStore:                 cfg.PlanStore,
+		healthChecker:             cfg.HealthChecker,
+		artifactStore:             cfg.ArtifactStore,
 	}
 }
 
@@ -346,28 +361,33 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
 	}
 
-	// Enrich with plan state if available
+	// Build consistent response shape with optional plan data
+	type planResponse struct {
+		Summary      string `json:"summary"`
+		ProgressPct  int    `json:"progressPct"`
+		GoalComplete bool   `json:"goalComplete"`
+		PlanDocument string `json:"planDocument,omitempty"`
+		Iteration    int    `json:"iteration"`
+	}
+	type taskResponse struct {
+		corev1alpha1.Task `json:",inline"`
+		Plan              *planResponse `json:"plan,omitempty"`
+	}
+
+	resp := taskResponse{Task: *task}
 	if h.planStore != nil && task.Status.Iteration > 0 {
-		plan, planErr := h.planStore.GetPlan(ctx, task.Namespace, task.Name)
-		if planErr == nil {
-			return c.JSON(fiber.Map{
-				"apiVersion": task.APIVersion,
-				"kind":       task.Kind,
-				"metadata":   task.ObjectMeta,
-				"spec":       task.Spec,
-				"status":     task.Status,
-				"plan": fiber.Map{
-					"summary":      plan.Summary,
-					"progressPct":  plan.ProgressPct,
-					"goalComplete": plan.GoalComplete,
-					"planDocument": plan.PlanDocument,
-					"iteration":    plan.Iteration,
-				},
-			})
+		if plan, planErr := h.planStore.GetPlan(ctx, task.Namespace, task.Name); planErr == nil {
+			resp.Plan = &planResponse{
+				Summary:      plan.Summary,
+				ProgressPct:  plan.ProgressPct,
+				GoalComplete: plan.GoalComplete,
+				PlanDocument: plan.PlanDocument,
+				Iteration:    plan.Iteration,
+			}
 		}
 	}
 
-	return c.JSON(task)
+	return c.JSON(resp)
 }
 
 // DeleteTask deletes a task
@@ -1167,7 +1187,7 @@ func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
 	var taskList corev1alpha1.TaskList
 	if err := h.client.List(c.Context(), &taskList,
 		client.InNamespace(namespace),
-		client.MatchingLabels{"orka.ai/parent-task": taskName},
+		client.MatchingLabels{labels.LabelParentTask: taskName},
 	); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list child tasks: %v", err))
 	}

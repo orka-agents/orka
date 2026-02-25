@@ -16,6 +16,7 @@ import (
 	apitypes "k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 )
 
 const createAgentToolName = "create_agent"
@@ -357,14 +358,14 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 	}
 
 	// Verify labels
-	if agent.Labels["orka.ai/parent-task"] != parentTaskName {
-		t.Errorf("label orka.ai/parent-task = %q, want %q", agent.Labels["orka.ai/parent-task"], parentTaskName)
+	if agent.Labels[labels.LabelParentTask] != parentTaskName {
+		t.Errorf("label orka.ai/parent-task = %q, want %q", agent.Labels[labels.LabelParentTask], parentTaskName)
 	}
-	if agent.Labels["orka.ai/created-by"] != createAgentToolName {
-		t.Errorf("label orka.ai/created-by = %q, want %q", agent.Labels["orka.ai/created-by"], createAgentToolName)
+	if agent.Labels[labels.LabelCreatedBy] != createAgentToolName {
+		t.Errorf("label orka.ai/created-by = %q, want %q", agent.Labels[labels.LabelCreatedBy], createAgentToolName)
 	}
-	if agent.Labels["orka.ai/agent-role"] != "coder" {
-		t.Errorf("label orka.ai/agent-role = %q, want %q", agent.Labels["orka.ai/agent-role"], "coder")
+	if agent.Labels[labels.LabelAgentRole] != "coder" {
+		t.Errorf("label orka.ai/agent-role = %q, want %q", agent.Labels[labels.LabelAgentRole], "coder")
 	}
 }
 

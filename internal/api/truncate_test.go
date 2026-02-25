@@ -34,11 +34,11 @@ func TestTruncateMessages_EmptyInput(t *testing.T) {
 
 func TestTruncateMessages_DropsMiddleKeepsFirstAndRecent(t *testing.T) {
 	msgs := []llm.Message{
-		{Role: "user", Content: "original request"},                               // ~4 tokens
-		{Role: "assistant", Content: strings.Repeat("a", 100)},                   // ~25 tokens — will be dropped
-		{Role: "user", Content: strings.Repeat("b", 100)},                        // ~25 tokens — will be dropped
-		{Role: "assistant", Content: strings.Repeat("c", 100)},                   // ~25 tokens
-		{Role: "user", Content: "latest question"},                               // ~4 tokens
+		{Role: "user", Content: "original request"},            // ~4 tokens
+		{Role: "assistant", Content: strings.Repeat("a", 100)}, // ~25 tokens — will be dropped
+		{Role: "user", Content: strings.Repeat("b", 100)},      // ~25 tokens — will be dropped
+		{Role: "assistant", Content: strings.Repeat("c", 100)}, // ~25 tokens
+		{Role: "user", Content: "latest question"},             // ~4 tokens
 	}
 	// Budget: enough for first + note + last two, but not all messages
 	// Total ~83 tokens. Budget 60 forces truncation but leaves room for note + recent blocks.

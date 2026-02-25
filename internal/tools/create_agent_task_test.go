@@ -1,0 +1,274 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+)
+
+func TestCreateAgentTaskTool_Name(t *testing.T) {
+	tool := &CreateAgentTaskTool{}
+	if got := tool.Name(); got != "create_agent_task" {
+		t.Errorf("Name() = %v, want %v", got, "create_agent_task")
+	}
+}
+
+func TestCreateAgentTaskTool_Description(t *testing.T) {
+	tool := &CreateAgentTaskTool{}
+	if got := tool.Description(); got == "" {
+		t.Error("Description() returned empty string")
+	}
+}
+
+func TestCreateAgentTaskTool_Parameters(t *testing.T) {
+	tool := &CreateAgentTaskTool{}
+	params := tool.Parameters()
+	if params == nil {
+		t.Fatal("Parameters() returned nil")
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(params, &schema); err != nil {
+		t.Fatalf("Parameters() returned invalid JSON: %v", err)
+	}
+	if schema["type"] != typeObject {
+		t.Error("Parameters schema should have type: object")
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("missing properties")
+	}
+	for _, key := range []string{"name", "prompt", "agentRef", "namespace", "timeout", "maxTurns", "workspace", "schedule"} {
+		if _, ok := props[key]; !ok {
+			t.Errorf("missing %s property", key)
+		}
+	}
+}
+
+func TestCreateAgentTaskTool_Execute(t *testing.T) {
+	taskCounter := 0
+	newToolCtx := func(fc client.Client) context.Context {
+		taskCounter = 0
+		tc := &ToolContext{
+			Client:    fc,
+			Namespace: "default",
+			GenerateTaskName: func() string {
+				taskCounter++
+				return "agent-task-1"
+			},
+			TaskLabels: func() map[string]string {
+				return map[string]string{"orka.ai/managed": "true"}
+			},
+			CheckTaskLimit: func() *ChatToolError { return nil },
+			IncrementTasks: func() { taskCounter++ },
+		}
+		return WithToolContext(context.Background(), tc)
+	}
+
+	tests := []struct {
+		name        string
+		args        json.RawMessage
+		objects     []client.Object
+		checkResult func(t *testing.T, result string)
+	}{
+		{
+			name: "happy path",
+			args: json.RawMessage(`{"name":"my-agent-task","prompt":"Fix the bug","agentRef":"copilot-agent"}`),
+			checkResult: func(t *testing.T, result string) {
+				var r ChatToolResult
+				if err := json.Unmarshal([]byte(result), &r); err != nil {
+					t.Fatalf("failed to parse result: %v", err)
+				}
+				if !r.Success {
+					t.Errorf("expected success, got error: %s", r.Error)
+				}
+				data := r.Data.(map[string]any)
+				if data["name"] != "agent-task-1" {
+					t.Errorf("name = %v, want agent-task-1", data["name"])
+				}
+				if data["namespace"] != "default" {
+					t.Errorf("namespace = %v, want default", data["namespace"])
+				}
+				if data["phase"] != "Pending" {
+					t.Errorf("phase = %v, want Pending", data["phase"])
+				}
+			},
+		},
+		{
+			name: "with workspace and maxTurns",
+			args: json.RawMessage(`{
+				"name":"ws-task",
+				"prompt":"Refactor module",
+				"agentRef":"claude-agent",
+				"maxTurns": 10,
+				"workspace": {
+					"gitRepo": "https://github.com/example/repo",
+					"branch": "main",
+					"pushBranch": "feature/refactor",
+					"subPath": "src"
+				}
+			}`),
+			checkResult: func(t *testing.T, result string) {
+				var r ChatToolResult
+				if err := json.Unmarshal([]byte(result), &r); err != nil {
+					t.Fatalf("failed to parse result: %v", err)
+				}
+				if !r.Success {
+					t.Errorf("expected success, got error: %s", r.Error)
+				}
+			},
+		},
+		{
+			name: "with schedule",
+			args: json.RawMessage(`{"name":"sched-task","prompt":"Run nightly","agentRef":"agent","schedule":"0 0 * * *"}`),
+			checkResult: func(t *testing.T, result string) {
+				var r ChatToolResult
+				if err := json.Unmarshal([]byte(result), &r); err != nil {
+					t.Fatalf("failed to parse result: %v", err)
+				}
+				if !r.Success {
+					t.Errorf("expected success, got error: %s", r.Error)
+				}
+				data := r.Data.(map[string]any)
+				msg := data["message"].(string)
+				if msg == "Task created" {
+					t.Error("expected scheduled message, got one-time message")
+				}
+			},
+		},
+		{
+			name: "missing prompt",
+			args: json.RawMessage(`{"name":"t","agentRef":"a"}`),
+			checkResult: func(t *testing.T, result string) {
+				var r ChatToolResult
+				if err := json.Unmarshal([]byte(result), &r); err != nil {
+					t.Fatalf("failed to parse result: %v", err)
+				}
+				if r.Success {
+					t.Error("expected failure for missing prompt")
+				}
+				if r.ErrorType != "invalid_arguments" {
+					t.Errorf("errorType = %v, want invalid_arguments", r.ErrorType)
+				}
+			},
+		},
+		{
+			name: "missing agentRef",
+			args: json.RawMessage(`{"name":"t","prompt":"do it"}`),
+			checkResult: func(t *testing.T, result string) {
+				var r ChatToolResult
+				if err := json.Unmarshal([]byte(result), &r); err != nil {
+					t.Fatalf("failed to parse result: %v", err)
+				}
+				if r.Success {
+					t.Error("expected failure for missing agentRef")
+				}
+				if r.ErrorType != "invalid_arguments" {
+					t.Errorf("errorType = %v, want invalid_arguments", r.ErrorType)
+				}
+			},
+		},
+		{
+			name: "invalid JSON args",
+			args: json.RawMessage(`{bad`),
+			checkResult: func(t *testing.T, result string) {
+				var r ChatToolResult
+				if err := json.Unmarshal([]byte(result), &r); err != nil {
+					t.Fatalf("failed to parse result: %v", err)
+				}
+				if r.Success {
+					t.Error("expected failure for invalid JSON")
+				}
+				if r.ErrorType != "invalid_arguments" {
+					t.Errorf("errorType = %v, want invalid_arguments", r.ErrorType)
+				}
+			},
+		},
+		{
+			name: "invalid timeout",
+			args: json.RawMessage(`{"name":"t","prompt":"p","agentRef":"a","timeout":"bad"}`),
+			checkResult: func(t *testing.T, result string) {
+				var r ChatToolResult
+				if err := json.Unmarshal([]byte(result), &r); err != nil {
+					t.Fatalf("failed to parse result: %v", err)
+				}
+				if r.Success {
+					t.Error("expected failure for invalid timeout")
+				}
+				if r.ErrorType != "invalid_arguments" {
+					t.Errorf("errorType = %v, want invalid_arguments", r.ErrorType)
+				}
+			},
+		},
+		{
+			name: "k8s already exists error",
+			args: json.RawMessage(`{"name":"existing","prompt":"do it","agentRef":"a"}`),
+			objects: []client.Object{
+				&corev1alpha1.Task{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "agent-task-1",
+						Namespace: "default",
+					},
+					Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+				},
+			},
+			checkResult: func(t *testing.T, result string) {
+				var r ChatToolResult
+				if err := json.Unmarshal([]byte(result), &r); err != nil {
+					t.Fatalf("failed to parse result: %v", err)
+				}
+				if r.Success {
+					t.Error("expected failure for already exists")
+				}
+				if r.ErrorType != "already_exists" {
+					t.Errorf("errorType = %v, want already_exists", r.ErrorType)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := newFakeClient(tt.objects...)
+			ctx := newToolCtx(fc)
+			tool := &CreateAgentTaskTool{}
+
+			result, err := tool.Execute(ctx, tt.args)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if tt.checkResult != nil {
+				tt.checkResult(t, result)
+			}
+		})
+	}
+}
+
+func TestCreateAgentTaskTool_Execute_MissingContext(t *testing.T) {
+	tool := &CreateAgentTaskTool{}
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"name":"t","prompt":"p","agentRef":"a"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var r ChatToolResult
+	if err := json.Unmarshal([]byte(result), &r); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if r.Success {
+		t.Error("expected failure for missing context")
+	}
+	if r.ErrorType != "internal_error" {
+		t.Errorf("errorType = %v, want internal_error", r.ErrorType)
+	}
+}

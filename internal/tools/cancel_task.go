@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 )
 
 // CancelTaskTool implements task cancellation for coordination workflows
@@ -110,7 +111,7 @@ func (t *CancelTaskTool) Execute(ctx context.Context, args json.RawMessage) (str
 
 	// Verify this is a child of the current task (only when running inside a task context)
 	if parentTaskName != "" {
-		parentLabel := task.Labels["orka.ai/parent-task"]
+		parentLabel := task.Labels[labels.LabelParentTask]
 		if parentLabel != parentTaskName {
 			return "", fmt.Errorf("task %q is not a child of the current task %q", a.TaskName, parentTaskName)
 		}

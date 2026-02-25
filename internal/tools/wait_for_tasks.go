@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/workers/common"
 )
 
@@ -196,7 +197,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 
 				// Not retried — add failure details
 				retryCount, maxRetries := getRetryInfo(&task)
-				if task.Annotations["orka.ai/auto-retry"] == trueStr {
+				if task.Annotations[labels.AnnotationAutoRetry] == trueStr {
 					results[taskName].FailureDetails = &FailureDetails{
 						Message:    task.Status.Message,
 						RetryCount: retryCount,
@@ -227,7 +228,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			}
 
 			// Add iteration label if present
-			if iterStr, ok := task.Labels["orka.ai/iteration"]; ok {
+			if iterStr, ok := task.Labels[labels.LabelIteration]; ok {
 				results[taskName].Iteration = iterStr
 			}
 		}
@@ -276,7 +277,7 @@ var _ Tool = (*WaitForTasksTool)(nil)
 // tryAutoRetry checks if a failed task should be auto-retried and creates a new child task if so.
 // Returns the new task name and true if a retry was created, or empty string and false otherwise.
 func (t *WaitForTasksTool) tryAutoRetry(ctx context.Context, failedTask *corev1alpha1.Task, _ string) (string, bool) {
-	if failedTask.Annotations["orka.ai/auto-retry"] != trueStr {
+	if failedTask.Annotations[labels.AnnotationAutoRetry] != trueStr {
 		return "", false
 	}
 
@@ -286,7 +287,7 @@ func (t *WaitForTasksTool) tryAutoRetry(ctx context.Context, failedTask *corev1a
 	}
 
 	// Get the original prompt (stored at delegation time)
-	originalPrompt := failedTask.Annotations["orka.ai/original-prompt"]
+	originalPrompt := failedTask.Annotations[labels.AnnotationOriginalPrompt]
 	if originalPrompt == "" {
 		originalPrompt = failedTask.Spec.Prompt
 	}
@@ -308,8 +309,8 @@ func (t *WaitForTasksTool) tryAutoRetry(ctx context.Context, failedTask *corev1a
 		retryCount+1, maxRetries, errorMsg, originalPrompt)
 
 	// Update retry annotations
-	retryTask.Annotations["orka.ai/retry-count"] = strconv.Itoa(retryCount + 1)
-	retryTask.Annotations["orka.ai/retried-from"] = failedTask.Name
+	retryTask.Annotations[labels.AnnotationRetryCount] = strconv.Itoa(retryCount + 1)
+	retryTask.Annotations[labels.AnnotationRetriedFrom] = failedTask.Name
 
 	if err := t.k8sClient.Create(ctx, retryTask); err != nil {
 		return "", false
@@ -320,11 +321,11 @@ func (t *WaitForTasksTool) tryAutoRetry(ctx context.Context, failedTask *corev1a
 
 // getRetryInfo extracts retry count and max retries from task annotations.
 func getRetryInfo(task *corev1alpha1.Task) (retryCount, maxRetries int) {
-	if countStr, ok := task.Annotations["orka.ai/retry-count"]; ok {
+	if countStr, ok := task.Annotations[labels.AnnotationRetryCount]; ok {
 		retryCount, _ = strconv.Atoi(countStr)
 	}
 	maxRetries = 2 // default
-	if maxStr, ok := task.Annotations["orka.ai/max-retries"]; ok {
+	if maxStr, ok := task.Annotations[labels.AnnotationMaxRetries]; ok {
 		maxRetries, _ = strconv.Atoi(maxStr)
 	}
 	return

@@ -29,3 +29,19 @@ func newFakeClient(objs ...client.Object) client.Client {
 		WithStatusSubresource(&corev1alpha1.Task{}).
 		Build()
 }
+
+func newFakeClientWithAgents(agents []*corev1alpha1.Agent) client.Client {
+	objs := make([]client.Object, len(agents))
+	for i, a := range agents {
+		objs[i] = a
+	}
+	return newFakeClient(objs...)
+}
+
+func newFakeClientWithTools(tools []*corev1alpha1.Tool) client.Client {
+	objs := make([]client.Object, len(tools))
+	for i, t := range tools {
+		objs[i] = t
+	}
+	return newFakeClient(objs...)
+}

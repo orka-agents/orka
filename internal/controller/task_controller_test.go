@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store/sqlite"
 )
 
@@ -54,8 +55,8 @@ func cleanupTask(ctx context.Context, nn types.NamespacedName) {
 	task := &corev1alpha1.Task{}
 	if err := k8sClient.Get(ctx, nn, task); err == nil {
 		// Remove finalizer first so delete can proceed
-		if controllerutil.ContainsFinalizer(task, TaskFinalizer) {
-			controllerutil.RemoveFinalizer(task, TaskFinalizer)
+		if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
+			controllerutil.RemoveFinalizer(task, labels.TaskFinalizer)
 			_ = k8sClient.Update(ctx, task)
 		}
 		_ = k8sClient.Delete(ctx, task)
@@ -129,7 +130,7 @@ var _ = Describe("Task Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       taskName,
 					Namespace:  ns,
-					Finalizers: []string{TaskFinalizer},
+					Finalizers: []string{labels.TaskFinalizer},
 				},
 				Spec: corev1alpha1.TaskSpec{
 					Type:    corev1alpha1.TaskTypeContainer,
@@ -197,7 +198,7 @@ var _ = Describe("Task Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       taskName,
 					Namespace:  ns,
-					Finalizers: []string{TaskFinalizer},
+					Finalizers: []string{labels.TaskFinalizer},
 				},
 				Spec: corev1alpha1.TaskSpec{
 					Type:    corev1alpha1.TaskTypeContainer,
@@ -237,7 +238,7 @@ var _ = Describe("Task Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       taskName,
 					Namespace:  ns,
-					Finalizers: []string{TaskFinalizer},
+					Finalizers: []string{labels.TaskFinalizer},
 				},
 				Spec: corev1alpha1.TaskSpec{
 					Type:    corev1alpha1.TaskTypeContainer,
@@ -456,7 +457,7 @@ var _ = Describe("Task Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       taskName,
 					Namespace:  ns,
-					Finalizers: []string{TaskFinalizer},
+					Finalizers: []string{labels.TaskFinalizer},
 				},
 				Spec: corev1alpha1.TaskSpec{
 					Type:    corev1alpha1.TaskTypeContainer,
@@ -494,7 +495,7 @@ var _ = Describe("Task Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       taskName,
 					Namespace:  ns,
-					Finalizers: []string{TaskFinalizer},
+					Finalizers: []string{labels.TaskFinalizer},
 				},
 				Spec: corev1alpha1.TaskSpec{
 					Type:    corev1alpha1.TaskTypeContainer,
@@ -573,7 +574,7 @@ var _ = Describe("Task Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       taskName,
 					Namespace:  ns,
-					Finalizers: []string{TaskFinalizer},
+					Finalizers: []string{labels.TaskFinalizer},
 				},
 				Spec: corev1alpha1.TaskSpec{
 					Type:    corev1alpha1.TaskTypeContainer,
@@ -605,7 +606,7 @@ var _ = Describe("Task Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       taskName,
 					Namespace:  ns,
-					Finalizers: []string{TaskFinalizer},
+					Finalizers: []string{labels.TaskFinalizer},
 				},
 				Spec: corev1alpha1.TaskSpec{
 					Type:    corev1alpha1.TaskTypeContainer,
@@ -642,7 +643,7 @@ var _ = Describe("Task Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       taskName,
 					Namespace:  ns,
-					Finalizers: []string{TaskFinalizer},
+					Finalizers: []string{labels.TaskFinalizer},
 				},
 				Spec: corev1alpha1.TaskSpec{
 					Type:    corev1alpha1.TaskTypeContainer,
@@ -723,7 +724,7 @@ var _ = Describe("Task Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       taskName,
 					Namespace:  ns,
-					Finalizers: []string{TaskFinalizer},
+					Finalizers: []string{labels.TaskFinalizer},
 				},
 				Spec: corev1alpha1.TaskSpec{
 					Type:    corev1alpha1.TaskTypeContainer,
@@ -1202,7 +1203,7 @@ var _ = Describe("Task Controller", func() {
 			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
-			Expect(controllerutil.ContainsFinalizer(task, TaskFinalizer)).To(BeTrue())
+			Expect(controllerutil.ContainsFinalizer(task, labels.TaskFinalizer)).To(BeTrue())
 		})
 
 		It("should initialize status to Pending on second reconcile", func() {
@@ -1370,7 +1371,7 @@ var _ = Describe("Task Controller", func() {
 			var childList corev1alpha1.TaskList
 			Expect(k8sClient.List(ctx, &childList,
 				client.InNamespace(defaultNS),
-				client.MatchingLabels{"orka.ai/parent-task": taskName},
+				client.MatchingLabels{labels.LabelParentTask: taskName},
 			)).To(Succeed())
 			Expect(childList.Items).NotTo(BeEmpty())
 
@@ -1378,7 +1379,7 @@ var _ = Describe("Task Controller", func() {
 			child := &childList.Items[0]
 			Expect(child.Spec.Schedule).To(BeEmpty(), "child should not have schedule")
 			Expect(child.Spec.Image).To(Equal("alpine:latest"))
-			Expect(child.Labels["orka.ai/scheduled-run"]).To(Equal("true"))
+			Expect(child.Labels[labels.LabelScheduledRun]).To(Equal("true"))
 
 			// Clean up child
 			for i := range childList.Items {
@@ -1414,8 +1415,8 @@ var _ = Describe("Task Controller", func() {
 					Name:      taskName + "-active-child",
 					Namespace: defaultNS,
 					Labels: map[string]string{
-						"orka.ai/parent-task":   taskName,
-						"orka.ai/scheduled-run": "true",
+						labels.LabelParentTask:   taskName,
+						labels.LabelScheduledRun: "true",
 					},
 				},
 				Spec: corev1alpha1.TaskSpec{
@@ -1452,7 +1453,7 @@ var _ = Describe("Task Controller", func() {
 			var childList corev1alpha1.TaskList
 			Expect(k8sClient.List(ctx, &childList,
 				client.InNamespace(defaultNS),
-				client.MatchingLabels{"orka.ai/parent-task": taskName},
+				client.MatchingLabels{labels.LabelParentTask: taskName},
 			)).To(Succeed())
 			Expect(childList.Items).To(HaveLen(1), "should only have the original active child")
 		})
@@ -1503,7 +1504,7 @@ var _ = Describe("Task Controller", func() {
 			var childList corev1alpha1.TaskList
 			Expect(k8sClient.List(ctx, &childList,
 				client.InNamespace(defaultNS),
-				client.MatchingLabels{"orka.ai/parent-task": taskName},
+				client.MatchingLabels{labels.LabelParentTask: taskName},
 			)).To(Succeed())
 			Expect(childList.Items).To(BeEmpty())
 		})
@@ -1557,10 +1558,10 @@ var _ = Describe("Task Controller", func() {
 					Name:      childName,
 					Namespace: ns,
 					Labels: map[string]string{
-						"orka.ai/parent-task": "coord-parent-task-depth",
+						labels.LabelParentTask: "coord-parent-task-depth",
 					},
 					Annotations: map[string]string{
-						"orka.ai/coordination-depth": "2",
+						labels.AnnotationCoordinationDepth: "2",
 					},
 				},
 				Spec: corev1alpha1.TaskSpec{
@@ -1646,10 +1647,10 @@ var _ = Describe("Task Controller", func() {
 					Name:      childName,
 					Namespace: ns,
 					Labels: map[string]string{
-						"orka.ai/parent-task": "coord-parent-task-allow",
+						labels.LabelParentTask: "coord-parent-task-allow",
 					},
 					Annotations: map[string]string{
-						"orka.ai/coordination-depth": "1",
+						labels.AnnotationCoordinationDepth: "1",
 					},
 				},
 				Spec: corev1alpha1.TaskSpec{
@@ -1722,10 +1723,10 @@ var _ = Describe("Task Controller", func() {
 					Name:      siblingName,
 					Namespace: ns,
 					Labels: map[string]string{
-						"orka.ai/parent-task": parentTaskName,
+						labels.LabelParentTask: parentTaskName,
 					},
 					Annotations: map[string]string{
-						"orka.ai/coordination-depth": "1",
+						labels.AnnotationCoordinationDepth: "1",
 					},
 				},
 				Spec: corev1alpha1.TaskSpec{
@@ -1749,10 +1750,10 @@ var _ = Describe("Task Controller", func() {
 					Name:      childName,
 					Namespace: ns,
 					Labels: map[string]string{
-						"orka.ai/parent-task": parentTaskName,
+						labels.LabelParentTask: parentTaskName,
 					},
 					Annotations: map[string]string{
-						"orka.ai/coordination-depth": "1",
+						labels.AnnotationCoordinationDepth: "1",
 					},
 				},
 				Spec: corev1alpha1.TaskSpec{
@@ -1841,10 +1842,10 @@ var _ = Describe("Task Controller", func() {
 					Name:      childName,
 					Namespace: ns,
 					Labels: map[string]string{
-						"orka.ai/parent-task": "coord-parent-task-valid",
+						labels.LabelParentTask: "coord-parent-task-valid",
 					},
 					Annotations: map[string]string{
-						"orka.ai/coordination-depth": "1",
+						labels.AnnotationCoordinationDepth: "1",
 					},
 				},
 				Spec: corev1alpha1.TaskSpec{
@@ -1892,7 +1893,7 @@ var _ = Describe("Task Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       taskName,
 					Namespace:  ns,
-					Finalizers: []string{TaskFinalizer},
+					Finalizers: []string{labels.TaskFinalizer},
 				},
 				Spec: corev1alpha1.TaskSpec{
 					Type:    corev1alpha1.TaskTypeContainer,

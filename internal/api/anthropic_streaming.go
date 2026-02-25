@@ -274,6 +274,109 @@ func (h *AnthropicCompatHandler) handleStreamingMessages(
 	})
 }
 
+// handleStreamingProxy is the transparent-proxy streaming path.
+// It streams the LLM response directly to the client without executing tools server-side.
+func (h *AnthropicCompatHandler) handleStreamingProxy(
+	c fiber.Ctx,
+	provider llm.Provider,
+	req *llm.CompletionRequest,
+	model string,
+) error {
+	c.Set("Content-Type", "text/event-stream")
+	c.Set("Cache-Control", "no-cache")
+	c.Set("Connection", "keep-alive")
+	c.Set("X-Accel-Buffering", "no")
+
+	capturedProvider := provider
+	capturedReq := req
+
+	return c.SendStreamWriter(func(w *bufio.Writer) {
+		msgID := "msg_" + uuid.New().String()
+
+		streamCtx, streamCancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+		defer streamCancel()
+
+		if err := writeMessageStart(w, msgID, model, 0); err != nil {
+			anthropicLog.Error(err, "failed to write message_start")
+			return
+		}
+
+		streamCh, err := capturedProvider.Stream(streamCtx, capturedReq)
+		if err != nil {
+			// Fallback to non-streaming Complete
+			h.handleStreamingFallback(w, streamCtx, capturedProvider, capturedReq, msgID, model)
+			return
+		}
+
+		blockIndex := 0
+		inTextBlock := false
+		hasToolCalls := false
+
+		for chunk := range streamCh {
+			if chunk.Error != nil {
+				anthropicLog.Error(chunk.Error, "stream chunk error")
+				break
+			}
+
+			if chunk.Content != "" {
+				if !inTextBlock {
+					if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{
+						Type: "text", Text: "",
+					}); err != nil {
+						break
+					}
+					inTextBlock = true
+				}
+				if err := writeContentBlockDelta(w, blockIndex, AnthropicDelta{
+					Type: "text_delta", Text: chunk.Content,
+				}); err != nil {
+					break
+				}
+			}
+
+			if chunk.ToolCall != nil {
+				hasToolCalls = true
+				if inTextBlock {
+					_ = writeContentBlockStop(w, blockIndex)
+					blockIndex++
+					inTextBlock = false
+				}
+
+				tc := chunk.ToolCall
+				if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{
+					Type: "tool_use", ID: tc.ID, Name: tc.Name, Input: json.RawMessage(""),
+				}); err == nil {
+					_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{
+						Type: "input_json_delta", PartialJSON: string(tc.Arguments),
+					})
+					_ = writeContentBlockStop(w, blockIndex)
+					blockIndex++
+				}
+			}
+
+			if chunk.Done {
+				if inTextBlock {
+					_ = writeContentBlockStop(w, blockIndex)
+					inTextBlock = false
+				}
+				break
+			}
+		}
+
+		if inTextBlock {
+			_ = writeContentBlockStop(w, blockIndex)
+		}
+
+		// Use the correct stop reason — "tool_use" if tool calls were emitted
+		stopReason := "end_turn"
+		if hasToolCalls {
+			stopReason = "tool_use"
+		}
+		_ = writeMessageDelta(w, stopReason, 0)
+		_ = writeMessageStop(w)
+	})
+}
+
 // estimateTokens provides a rough token count estimate from text length.
 func estimateTokens(text string) int {
 	return len(text) / 4

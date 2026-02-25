@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -31,6 +30,7 @@ import (
 	"github.com/sozercan/orka/internal/controller"
 	"github.com/sozercan/orka/internal/llm"
 	"github.com/sozercan/orka/internal/store"
+	chattools "github.com/sozercan/orka/internal/tools"
 	"github.com/sozercan/orka/internal/tracing"
 )
 
@@ -122,10 +122,11 @@ type ChatHandler struct {
 	sessionStore              store.SessionStore
 	resultStore               store.ResultStore
 	cooldownTracker           *llm.CooldownTracker
+	resolver                  *ProviderResolver
 }
 
 // NewChatHandler creates a new ChatHandler.
-func NewChatHandler(c client.Client, sm *controller.SessionManager, config ChatConfig, watchNamespace string, enforceNS bool, ss store.SessionStore, rs store.ResultStore) *ChatHandler {
+func NewChatHandler(c client.Client, sm *controller.SessionManager, config ChatConfig, watchNamespace string, enforceNS bool, ss store.SessionStore, rs store.ResultStore, resolver *ProviderResolver) *ChatHandler {
 	return &ChatHandler{
 		client:                    c,
 		sessionManager:            sm,
@@ -136,6 +137,7 @@ func NewChatHandler(c client.Client, sm *controller.SessionManager, config ChatC
 		sessionStore:              ss,
 		resultStore:               rs,
 		cooldownTracker:           llm.NewCooldownTracker(),
+		resolver:                  resolver,
 	}
 }
 
@@ -170,19 +172,15 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		}
 	}()
 
+	// Use context.Background() because Fiber/fasthttp recycles the request context
+	// after the handler returns; c.Context() would be invalid for this long-running operation.
 	ctx, cancel := context.WithTimeout(context.Background(), ch.config.MaxDuration)
 	defer cancel()
 
 	// Resolve namespace from request or token
-	namespace := GetEffectiveNamespace(c, req.Namespace)
-	if ch.watchNamespace != "" && namespace != ch.watchNamespace {
-		return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("namespace %q not allowed, restricted to %q", namespace, ch.watchNamespace))
-	}
-	if ch.enforceNamespaceIsolation {
-		ui := GetUserInfo(c)
-		if ui != nil && ui.Namespace != "" && namespace != ui.Namespace {
-			return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("namespace %q not allowed, restricted to %q", namespace, ui.Namespace))
-		}
+	namespace, err := ResolveNamespace(c, req.Namespace, ch.watchNamespace, ch.enforceNamespaceIsolation)
+	if err != nil {
+		return err
 	}
 
 	if blockedNamespaces[namespace] {
@@ -196,11 +194,19 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	}
 
 	// Resolve LLM provider
-	provider, model, err := ch.resolveProvider(ctx, req, namespace)
+	provider, model, err := ch.resolver.Resolve(ctx, ResolveOpts{
+		ProviderName: req.Provider,
+		Model:        req.Model,
+		AgentRef:     req.AgentRef,
+		Namespace:    namespace,
+	})
 	if err != nil {
 		chatLog.Error(err, "failed to resolve provider")
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("failed to resolve provider: %v", err))
 	}
+
+	// Wrap provider with retry and fallback
+	provider = ch.wrapWithRetryAndFallback(ctx, provider, req, namespace)
 
 	// Wrap provider with tracing
 	provider = llm.NewTracingProvider(provider)
@@ -249,13 +255,11 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		Content: userContent,
 	})
 
-	// Build tools — always include management tools so the LLM can
-	// handle agent/tool/session operations regardless of phrasing.
-	tools := CoreTools()
-	tools = append(tools, ManagementTools()...)
-
-	// Create tool executor
+	// Create tool executor (also creates the chat registry)
 	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout, ch.resultStore)
+
+	// Build tools from the chat registry
+	tools := executor.registry.ToLLMTools(chattools.ChatToolNames())
 
 	// Build completion request parameters
 	var temperature float64
@@ -304,6 +308,8 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	sseMode = true
 	return c.SendStreamWriter(func(w *bufio.Writer) {
 		defer func() { <-ch.semaphore }()
+		// Use context.Background() because SendStreamWriter outlives the handler;
+		// Fiber's request context is recycled once the handler returns.
 		sseCtx, sseCancel := context.WithTimeout(context.Background(), ch.config.MaxDuration)
 		defer sseCancel()
 
@@ -353,15 +359,11 @@ func (ch *ChatHandler) runToolLoop(
 	start := time.Now()
 
 	for iteration := 0; ; iteration++ {
-		// Start a span for this iteration
 		iterTracer := tracing.Tracer("orka.chat")
 		iterCtx, iterSpan := iterTracer.Start(ctx, "chat.tool_loop.iteration",
-			trace.WithAttributes(
-				attribute.Int("chat.iteration", iteration),
-			),
+			trace.WithAttributes(attribute.Int("chat.iteration", iteration)),
 		)
 
-		// Check context cancellation
 		select {
 		case <-iterCtx.Done():
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
@@ -370,53 +372,12 @@ func (ch *ChatHandler) runToolLoop(
 		default:
 		}
 
-		// Check iteration limit
-		if iteration >= ch.config.MaxIterations {
-			// Inject graceful termination message and do one final call
-			messages = append(messages, llm.Message{
-				Role:    "user",
-				Content: "[System: You have reached the maximum number of iterations. Please provide a final summary of what you accomplished.]",
-			})
-
-			resp, err := provider.Complete(iterCtx, &llm.CompletionRequest{
-				Model:        model,
-				SystemPrompt: systemPrompt,
-				Messages:     messages,
-				MaxTokens:    maxTokens,
-				Temperature:  temperature,
-			})
-			if err != nil {
-				usage.Duration = time.Since(start).Round(time.Millisecond).String()
-				iterSpan.End()
-				return "Reached iteration limit.", usage, allToolCalls, nil
-			}
-			usage.LLMCalls++
-			usage.InputTokens += resp.InputTokens
-			usage.OutputTokens += resp.OutputTokens
-
-			if emitSSE != nil && resp.Content != "" {
-				msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
-				emitSSE("message", string(msgData))
-			}
-
-			// Save session
-			finalMessages := append(messages, llm.Message{Role: "assistant", Content: resp.Content})
-			usage.Duration = time.Since(start).Round(time.Millisecond).String()
-			usage.TasksCreated = executor.tasksCreated
-			_ = ch.saveChatSession(iterCtx, namespace, sessionID, finalMessages, persistedCount, usage)
-			if err := ch.sessionStore.UpdateTokenCounts(iterCtx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
-				chatLog.Error(err, "failed to update token counts")
-			}
-			iterSpan.SetAttributes(
-				attribute.Int("chat.llm_calls", usage.LLMCalls),
-				attribute.Int("chat.input_tokens", usage.InputTokens),
-				attribute.Int("chat.output_tokens", usage.OutputTokens),
-			)
+		if content, hit := ch.handleIterationLimit(iterCtx, iteration, provider, messages, systemPrompt, model, namespace, sessionID, maxTokens, persistedCount, temperature, emitSSE, executor, &usage, start); hit {
+			setUsageSpanAttributes(iterSpan, usage)
 			iterSpan.End()
-			return resp.Content, usage, allToolCalls, nil
+			return content, usage, allToolCalls, nil
 		}
 
-		// Inject progress assertion every 5 iterations
 		if iteration > 0 && iteration%5 == 0 {
 			messages = append(messages, llm.Message{
 				Role:    "user",
@@ -424,37 +385,12 @@ func (ch *ChatHandler) runToolLoop(
 			})
 		}
 
-		// Truncate conversation if it exceeds the session size budget
 		if ch.config.MaxSessionSize > 0 {
-			tokenBudget := ch.config.MaxSessionSize / 4 // bytes to approximate tokens
-			messages = llm.TruncateMessages(messages, tokenBudget)
+			messages = llm.TruncateMessages(messages, ch.config.MaxSessionSize/4)
 		}
 
-		// Call LLM
-		resp, err := provider.Complete(iterCtx, &llm.CompletionRequest{
-			Model:        model,
-			SystemPrompt: systemPrompt,
-			Messages:     messages,
-			Tools:        tools,
-			MaxTokens:    maxTokens,
-			Temperature:  temperature,
-		})
-		if err != nil && llm.IsContextTooLongErr(err) {
-			// Halve the messages and retry once
-			tokenEstimate := 0
-			for _, m := range messages {
-				tokenEstimate += len(m.Content) / 4
-			}
-			messages = llm.TruncateMessages(messages, tokenEstimate/2)
-			resp, err = provider.Complete(ctx, &llm.CompletionRequest{
-				Model:        model,
-				SystemPrompt: systemPrompt,
-				Messages:     messages,
-				Tools:        tools,
-				MaxTokens:    maxTokens,
-				Temperature:  temperature,
-			})
-		}
+		resp, updatedMsgs, err := ch.callLLMWithRetry(iterCtx, provider, messages, systemPrompt, model, tools, maxTokens, temperature)
+		messages = updatedMsgs
 		if err != nil {
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
 			iterSpan.RecordError(err)
@@ -466,114 +402,233 @@ func (ch *ChatHandler) runToolLoop(
 		usage.InputTokens += resp.InputTokens
 		usage.OutputTokens += resp.OutputTokens
 
-		// If response has tool calls, execute them
-		if len(resp.ToolCalls) > 0 {
-			// Append assistant message with tool calls
-			messages = append(messages, llm.Message{
-				Role:      "assistant",
-				Content:   resp.Content,
-				ToolCalls: resp.ToolCalls,
-			})
-
-			var repetitionWarning string
-			for _, tc := range resp.ToolCalls {
-				// Emit tool_call SSE event
-				if emitSSE != nil {
-					tcData, _ := json.Marshal(map[string]any{
-						"id":   tc.ID,
-						"name": tc.Name,
-						"args": tc.Arguments,
-					})
-					emitSSE("tool_call", string(tcData))
-				}
-
-				// Check repetition (defer warning until after all tool results)
-				argsHash := hashArgs(tc.Name, tc.Arguments)
-				repetitionTracker[argsHash]++
-				if repetitionTracker[argsHash] >= 3 {
-					repetitionWarning = fmt.Sprintf("[System: Warning — you have called %s with the same arguments %d times. Try a different approach.]", tc.Name, repetitionTracker[argsHash])
-					iteration += 5
-				}
-
-				// Execute tool
-				result, execErr := executor.Execute(iterCtx, tc)
-				if execErr != nil {
-					errResult := map[string]any{"success": false, "error": execErr.Error()}
-					if errJSON, jsonErr := json.Marshal(errResult); jsonErr == nil {
-						result = string(errJSON)
-					} else {
-						result = `{"success":false,"error":"tool execution failed"}`
-					}
-				}
-
-				// Emit tool_result SSE event
-				if emitSSE != nil {
-					trData, _ := json.Marshal(map[string]any{
-						"id":     tc.ID,
-						"name":   tc.Name,
-						"result": json.RawMessage(result),
-					})
-					emitSSE("tool_result", string(trData))
-				}
-
-				// Append tool result message
-				messages = append(messages, llm.Message{
-					Role:       "tool",
-					ToolCallID: tc.ID,
-					Name:       tc.Name,
-					Content:    result,
-				})
-
-				// Track for response
-				var argsAny any
-				_ = json.Unmarshal(tc.Arguments, &argsAny)
-				var resultAny any
-				_ = json.Unmarshal([]byte(result), &resultAny)
-				allToolCalls = append(allToolCalls, ToolCallInfo{
-					Name:   tc.Name,
-					Args:   argsAny,
-					Result: resultAny,
-				})
-
-				usage.ToolCalls++
-			}
-
-			// Append repetition warning after all tool results
-			if repetitionWarning != "" {
-				messages = append(messages, llm.Message{
-					Role:    "user",
-					Content: repetitionWarning,
-				})
-			}
-
-			// Continue loop for next LLM call
+		if len(resp.ToolCalls) == 0 {
+			content := ch.handleFinalResponse(iterCtx, resp.Content, messages, namespace, sessionID, persistedCount, emitSSE, executor, &usage, start)
+			setUsageSpanAttributes(iterSpan, usage)
 			iterSpan.End()
-			continue
+			return content, usage, allToolCalls, nil
 		}
 
-		// This is the final response
-		if emitSSE != nil && resp.Content != "" {
-			msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
-			emitSSE("message", string(msgData))
-		}
-
-		// Save session
-		finalMessages := append(messages, llm.Message{Role: "assistant", Content: resp.Content})
-		usage.Duration = time.Since(start).Round(time.Millisecond).String()
-		usage.TasksCreated = executor.tasksCreated
-		_ = ch.saveChatSession(iterCtx, namespace, sessionID, finalMessages, persistedCount, usage)
-		if err := ch.sessionStore.UpdateTokenCounts(iterCtx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
-			chatLog.Error(err, "failed to update token counts")
-		}
-
-		iterSpan.SetAttributes(
-			attribute.Int("chat.llm_calls", usage.LLMCalls),
-			attribute.Int("chat.input_tokens", usage.InputTokens),
-			attribute.Int("chat.output_tokens", usage.OutputTokens),
-		)
+		var newToolCalls []ToolCallInfo
+		var iterBump int
+		messages, newToolCalls, iterBump = ch.executeToolCalls(iterCtx, resp, executor, emitSSE, messages, repetitionTracker)
+		allToolCalls = append(allToolCalls, newToolCalls...)
+		usage.ToolCalls += len(newToolCalls)
+		iteration += iterBump
 		iterSpan.End()
-		return resp.Content, usage, allToolCalls, nil
 	}
+}
+
+// handleIterationLimit checks if the iteration limit is reached and if so,
+// injects a termination prompt, makes a final LLM call, emits SSE, and saves the session.
+func (ch *ChatHandler) handleIterationLimit(
+	ctx context.Context,
+	iteration int,
+	provider llm.Provider,
+	messages []llm.Message,
+	systemPrompt, model, namespace, sessionID string,
+	maxTokens, persistedCount int,
+	temperature float64,
+	emitSSE func(event, data string),
+	executor *ToolExecutor,
+	usage *ChatUsage,
+	start time.Time,
+) (string, bool) {
+	if iteration < ch.config.MaxIterations {
+		return "", false
+	}
+
+	messages = append(messages, llm.Message{
+		Role:    "user",
+		Content: "[System: You have reached the maximum number of iterations. Please provide a final summary of what you accomplished.]",
+	})
+
+	resp, err := provider.Complete(ctx, &llm.CompletionRequest{
+		Model:        model,
+		SystemPrompt: systemPrompt,
+		Messages:     messages,
+		MaxTokens:    maxTokens,
+		Temperature:  temperature,
+	})
+	if err != nil {
+		usage.Duration = time.Since(start).Round(time.Millisecond).String()
+		return "Reached iteration limit.", true
+	}
+	usage.LLMCalls++
+	usage.InputTokens += resp.InputTokens
+	usage.OutputTokens += resp.OutputTokens
+
+	if emitSSE != nil && resp.Content != "" {
+		msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
+		emitSSE("message", string(msgData))
+	}
+
+	finalMessages := append(messages, llm.Message{Role: "assistant", Content: resp.Content})
+	usage.Duration = time.Since(start).Round(time.Millisecond).String()
+	usage.TasksCreated = executor.tasksCreated
+	_ = ch.saveChatSession(ctx, namespace, sessionID, finalMessages, persistedCount, *usage)
+	if err := ch.sessionStore.UpdateTokenCounts(ctx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
+		chatLog.Error(err, "failed to update token counts")
+	}
+
+	return resp.Content, true
+}
+
+// callLLMWithRetry calls the LLM provider and retries once with truncated messages
+// if the context is too long.
+func (ch *ChatHandler) callLLMWithRetry(
+	ctx context.Context,
+	provider llm.Provider,
+	messages []llm.Message,
+	systemPrompt, model string,
+	tools []llm.Tool,
+	maxTokens int,
+	temperature float64,
+) (*llm.CompletionResponse, []llm.Message, error) {
+	resp, err := provider.Complete(ctx, &llm.CompletionRequest{
+		Model:        model,
+		SystemPrompt: systemPrompt,
+		Messages:     messages,
+		Tools:        tools,
+		MaxTokens:    maxTokens,
+		Temperature:  temperature,
+	})
+	if err != nil && llm.IsContextTooLongErr(err) {
+		tokenEstimate := 0
+		for _, m := range messages {
+			tokenEstimate += len(m.Content) / 4
+		}
+		messages = llm.TruncateMessages(messages, tokenEstimate/2)
+		resp, err = provider.Complete(ctx, &llm.CompletionRequest{
+			Model:        model,
+			SystemPrompt: systemPrompt,
+			Messages:     messages,
+			Tools:        tools,
+			MaxTokens:    maxTokens,
+			Temperature:  temperature,
+		})
+	}
+	return resp, messages, err
+}
+
+// executeToolCalls iterates over tool calls from the LLM response, emits SSE events,
+// executes each tool, tracks repetitions, and appends results to messages.
+func (ch *ChatHandler) executeToolCalls(
+	ctx context.Context,
+	resp *llm.CompletionResponse,
+	executor *ToolExecutor,
+	emitSSE func(event, data string),
+	messages []llm.Message,
+	repetitionTracker map[string]int,
+) ([]llm.Message, []ToolCallInfo, int) {
+	messages = append(messages, llm.Message{
+		Role:      "assistant",
+		Content:   resp.Content,
+		ToolCalls: resp.ToolCalls,
+	})
+
+	var toolCalls []ToolCallInfo
+	var iterationBump int
+	var repetitionWarning string
+
+	for _, tc := range resp.ToolCalls {
+		if emitSSE != nil {
+			tcData, _ := json.Marshal(map[string]any{
+				"id":   tc.ID,
+				"name": tc.Name,
+				"args": tc.Arguments,
+			})
+			emitSSE("tool_call", string(tcData))
+		}
+
+		argsHash := hashArgs(tc.Name, tc.Arguments)
+		repetitionTracker[argsHash]++
+		if repetitionTracker[argsHash] >= 3 {
+			repetitionWarning = fmt.Sprintf("[System: Warning — you have called %s with the same arguments %d times. Try a different approach.]", tc.Name, repetitionTracker[argsHash])
+			iterationBump += 5
+		}
+
+		result, execErr := executor.Execute(ctx, tc)
+		if execErr != nil {
+			errResult := map[string]any{"success": false, "error": execErr.Error()}
+			if errJSON, jsonErr := json.Marshal(errResult); jsonErr == nil {
+				result = string(errJSON)
+			} else {
+				result = `{"success":false,"error":"tool execution failed"}`
+			}
+		}
+
+		if emitSSE != nil {
+			trData, _ := json.Marshal(map[string]any{
+				"id":     tc.ID,
+				"name":   tc.Name,
+				"result": json.RawMessage(result),
+			})
+			emitSSE("tool_result", string(trData))
+		}
+
+		messages = append(messages, llm.Message{
+			Role:       "tool",
+			ToolCallID: tc.ID,
+			Name:       tc.Name,
+			Content:    result,
+		})
+
+		var argsAny any
+		_ = json.Unmarshal(tc.Arguments, &argsAny)
+		var resultAny any
+		_ = json.Unmarshal([]byte(result), &resultAny)
+		toolCalls = append(toolCalls, ToolCallInfo{
+			Name:   tc.Name,
+			Args:   argsAny,
+			Result: resultAny,
+		})
+	}
+
+	if repetitionWarning != "" {
+		messages = append(messages, llm.Message{
+			Role:    "user",
+			Content: repetitionWarning,
+		})
+	}
+
+	return messages, toolCalls, iterationBump
+}
+
+// handleFinalResponse emits the final SSE message and saves the chat session.
+func (ch *ChatHandler) handleFinalResponse(
+	ctx context.Context,
+	content string,
+	messages []llm.Message,
+	namespace, sessionID string,
+	persistedCount int,
+	emitSSE func(event, data string),
+	executor *ToolExecutor,
+	usage *ChatUsage,
+	start time.Time,
+) string {
+	if emitSSE != nil && content != "" {
+		msgData, _ := json.Marshal(map[string]string{"content": content})
+		emitSSE("message", string(msgData))
+	}
+
+	finalMessages := append(messages, llm.Message{Role: "assistant", Content: content})
+	usage.Duration = time.Since(start).Round(time.Millisecond).String()
+	usage.TasksCreated = executor.tasksCreated
+	_ = ch.saveChatSession(ctx, namespace, sessionID, finalMessages, persistedCount, *usage)
+	if err := ch.sessionStore.UpdateTokenCounts(ctx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
+		chatLog.Error(err, "failed to update token counts")
+	}
+
+	return content
+}
+
+func setUsageSpanAttributes(span trace.Span, usage ChatUsage) {
+	span.SetAttributes(
+		attribute.Int("chat.llm_calls", usage.LLMCalls),
+		attribute.Int("chat.input_tokens", usage.InputTokens),
+		attribute.Int("chat.output_tokens", usage.OutputTokens),
+	)
 }
 
 // loadChatSession loads chat session messages from the session store.
@@ -660,12 +715,7 @@ func (ch *ChatHandler) saveChatSession(ctx context.Context, namespace, sessionID
 
 // HandleChatConfig handles GET /api/v1/chat/config.
 func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
-	tools := CoreTools()
-	tools = append(tools, ManagementTools()...)
-	toolNames := make([]string, 0, len(tools))
-	for _, t := range tools {
-		toolNames = append(toolNames, t.Name)
-	}
+	toolNames := chattools.ChatToolNames()
 
 	return c.JSON(fiber.Map{
 		"enabled":         ch.config.Enabled,
@@ -714,101 +764,6 @@ func (ch *ChatHandler) HandleCancelChat(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// resolveProvider resolves the LLM provider from the request, agent, or config.
-func (ch *ChatHandler) resolveProvider(ctx context.Context, req ChatRequest, namespace string) (llm.Provider, string, error) {
-	var providerType corev1alpha1.ProviderType
-	var baseURL string
-	var model string
-	var providerCRD *corev1alpha1.Provider
-
-	if req.AgentRef != "" {
-		// Look up Agent CRD
-		agent := &corev1alpha1.Agent{}
-		if err := ch.client.Get(ctx, types.NamespacedName{Name: req.AgentRef, Namespace: namespace}, agent); err != nil {
-			return nil, "", fmt.Errorf("agent %q not found: %w", req.AgentRef, err)
-		}
-
-		// Get model from agent
-		if agent.Spec.Model != nil {
-			if agent.Spec.Model.Name != "" {
-				model = agent.Spec.Model.Name
-			}
-		}
-
-		// Get provider from agent
-		if agent.Spec.ProviderRef != nil {
-			p, err := ch.lookupProvider(ctx, agent.Spec.ProviderRef.Name, namespace)
-			if err != nil {
-				return nil, "", err
-			}
-			providerCRD = p
-		}
-	}
-
-	if providerCRD == nil && req.Provider != "" {
-		p, err := ch.lookupProvider(ctx, req.Provider, namespace)
-		if err != nil {
-			return nil, "", err
-		}
-		providerCRD = p
-	}
-
-	if providerCRD == nil && ch.config.Provider != "" {
-		p, err := ch.lookupProvider(ctx, ch.config.Provider, namespace)
-		if err != nil {
-			return nil, "", err
-		}
-		providerCRD = p
-	}
-
-	if providerCRD == nil {
-		p, err := ch.lookupProvider(ctx, "default", namespace)
-		if err != nil {
-			return nil, "", fmt.Errorf("no provider configured and no 'default' Provider CRD found: %w", err)
-		}
-		providerCRD = p
-	}
-
-	providerType = providerCRD.Spec.Type
-	baseURL = providerCRD.Spec.BaseURL
-
-	// Resolve API key from secret
-	apiKey, err := ch.resolveAPIKey(ctx, providerCRD)
-	if err != nil {
-		return nil, "", err
-	}
-
-	// Model resolution priority: req.Model > agent model > provider default > config model
-	if req.Model != "" {
-		model = req.Model
-	}
-	if model == "" {
-		model = providerCRD.Spec.DefaultModel
-	}
-	if model == "" {
-		model = ch.config.Model
-	}
-
-	providerConfig := llm.ProviderConfig{
-		APIKey:       apiKey,
-		BaseURL:      baseURL,
-		ProviderType: string(providerType),
-	}
-	if providerCRD.Spec.Azure != nil {
-		providerConfig.AzureAPIVersion = providerCRD.Spec.Azure.APIVersion
-	}
-
-	provider, err := llm.NewProvider(string(providerType), providerConfig)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to create LLM provider: %w", err)
-	}
-
-	// Wrap primary with retry and add fallbacks if configured
-	resultProvider := ch.wrapWithRetryAndFallback(ctx, provider, req, namespace)
-
-	return resultProvider, model, nil
-}
-
 // wrapWithRetryAndFallback wraps a provider with retry logic and adds fallback
 // providers if the agent has them configured.
 func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, provider llm.Provider, req ChatRequest, namespace string) llm.Provider {
@@ -828,12 +783,12 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, provider ll
 
 	fallbacks := make([]llm.FallbackEntry, 0, len(agent.Spec.Model.Fallbacks))
 	for _, fb := range agent.Spec.Model.Fallbacks {
-		fbProviderCRD, err := ch.lookupProvider(ctx, fb.ProviderRef, namespace)
+		fbProviderCRD, err := ch.resolver.LookupProvider(ctx, fb.ProviderRef, namespace)
 		if err != nil {
 			continue
 		}
 
-		fbAPIKey, err := ch.resolveAPIKey(ctx, fbProviderCRD)
+		fbAPIKey, err := ch.resolver.ResolveAPIKey(ctx, fbProviderCRD)
 		if err != nil {
 			continue
 		}
@@ -865,33 +820,6 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, provider ll
 	}
 
 	return resultProvider
-}
-
-// lookupProvider fetches a Provider CRD by name and namespace.
-func (ch *ChatHandler) lookupProvider(ctx context.Context, name, namespace string) (*corev1alpha1.Provider, error) {
-	p := &corev1alpha1.Provider{}
-	if err := ch.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, p); err != nil {
-		return nil, fmt.Errorf("provider %q not found in namespace %q: %w", name, namespace, err)
-	}
-	return p, nil
-}
-
-// resolveAPIKey extracts the API key from a Provider CRD's secret reference.
-func (ch *ChatHandler) resolveAPIKey(ctx context.Context, providerCRD *corev1alpha1.Provider) (string, error) {
-	secretName := providerCRD.Spec.SecretRef.Name
-	secretKey := providerCRD.Spec.SecretRef.Key
-	if secretKey == "" {
-		secretKey = "api-key"
-	}
-	secret := &corev1.Secret{}
-	if err := ch.client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: providerCRD.Namespace}, secret); err != nil {
-		return "", fmt.Errorf("failed to get provider secret %q: %w", secretName, err)
-	}
-	apiKeyBytes, ok := secret.Data[secretKey]
-	if !ok {
-		return "", fmt.Errorf("secret %q has no key %q", secretName, secretKey)
-	}
-	return string(apiKeyBytes), nil
 }
 
 // generateChatID returns 8 random hex characters.

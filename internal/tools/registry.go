@@ -16,6 +16,88 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// ToolContext provides dependencies for tools that need K8s client access or other services.
+type ToolContext struct {
+	Client                    client.Client
+	Namespace                 string
+	WatchNamespace            string
+	EnforceNamespaceIsolation bool
+	SessionID                 string
+	// ResultStore for fetching task outputs (store.ResultStore)
+	ResultStore interface {
+		GetResult(ctx context.Context, namespace, taskName string) ([]byte, error)
+	}
+	// SessionDeleter for deleting sessions (controller.SessionManager)
+	SessionDeleter interface {
+		DeleteSession(ctx context.Context, namespace, sessionID string) error
+	}
+	// Task creation helpers provided by the chat executor
+	GenerateTaskName func() string
+	TaskLabels       func() map[string]string
+	CheckTaskLimit   func() *ChatToolError
+	IncrementTasks   func()
+	FindGitSecret    func(ctx context.Context, namespace string) string
+}
+
+type toolContextKey struct{}
+
+// WithToolContext adds a ToolContext to a context.
+func WithToolContext(ctx context.Context, tc *ToolContext) context.Context {
+	return context.WithValue(ctx, toolContextKey{}, tc)
+}
+
+// GetToolContext extracts a ToolContext from a context.
+func GetToolContext(ctx context.Context) *ToolContext {
+	tc, _ := ctx.Value(toolContextKey{}).(*ToolContext)
+	return tc
+}
+
+// ChatToolError represents a structured error from a chat tool.
+type ChatToolError struct {
+	Type       string `json:"errorType"`
+	Message    string `json:"error"`
+	Suggestion string `json:"suggestion"`
+}
+
+func (e *ChatToolError) Error() string { return e.Message }
+
+// ChatToolResult represents the result of a chat tool execution.
+type ChatToolResult struct {
+	Success    bool   `json:"success"`
+	Data       any    `json:"data,omitempty"`
+	Error      string `json:"error,omitempty"`
+	ErrorType  string `json:"errorType,omitempty"`
+	Suggestion string `json:"suggestion,omitempty"`
+}
+
+// MarshalChatResult marshals a ChatToolResult to a JSON string.
+func MarshalChatResult(r ChatToolResult) (string, error) {
+	b, err := json.Marshal(r)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal chat tool result: %w", err)
+	}
+	return string(b), nil
+}
+
+// ChatToolSuccess returns a successful ChatToolResult JSON string.
+func ChatToolSuccess(data any) (string, error) {
+	return MarshalChatResult(ChatToolResult{Success: true, Data: data})
+}
+
+// ChatToolErrorResult returns a failed ChatToolResult JSON string.
+func ChatToolErrorResult(errType, message, suggestion string) (string, error) {
+	return MarshalChatResult(ChatToolResult{
+		Error:      message,
+		ErrorType:  errType,
+		Suggestion: suggestion,
+	})
+}
+
+// ClassifyChatK8sError returns a ChatToolResult JSON string for a K8s API error.
+func ClassifyChatK8sError(err error) (string, error) {
+	return ChatToolErrorResult("internal_error", err.Error(), "")
+}
+
 const githubAPIBaseURL = "https://api.github.com"
 
 const defaultNamespace = "default"
@@ -132,6 +214,48 @@ func RegisterCoordinationTools(k8sClient client.Client) {
 	DefaultRegistry.Register(NewCreateAgentTool(k8sClient))
 	DefaultRegistry.Register(NewDeleteAgentTool(k8sClient))
 	DefaultRegistry.Register(NewUpdatePlanTool())
+}
+
+// RegisterChatTools registers the chat/management tools into the given registry.
+func RegisterChatTools(r *Registry) {
+	r.Register(&CreateAITaskTool{})
+	r.Register(&CreateContainerTaskTool{})
+	r.Register(&CreateAgentTaskTool{})
+	r.Register(&CheckTaskProgressTool{})
+	r.Register(&FetchTaskOutputTool{})
+	r.Register(&WaitForTaskTool{})
+	r.Register(&ChatCancelTaskTool{})
+	r.Register(&ListAgentsTool{})
+	r.Register(&ListToolsTool{})
+	r.Register(&ListTasksTool{})
+	r.Register(&ChatCreateAgentTool{})
+	r.Register(&UpdateAgentTool{})
+	r.Register(&ChatDeleteAgentTool{})
+	r.Register(&CreateToolCRDTool{})
+	r.Register(&DeleteToolTool{})
+	r.Register(&DeleteSessionTool{})
+}
+
+// ChatToolNames returns the names of all chat tools in registration order.
+func ChatToolNames() []string {
+	return []string{
+		"create_ai_task",
+		"create_container_task",
+		"create_agent_task",
+		"check_task_progress",
+		"fetch_task_output",
+		"wait_for_task",
+		"cancel_task",
+		"list_agents",
+		"list_tools",
+		"list_tasks",
+		"create_agent",
+		"update_agent",
+		"delete_agent",
+		"create_tool",
+		"delete_tool",
+		"delete_session",
+	}
 }
 
 func init() {

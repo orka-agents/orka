@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 )
 
 // CreateAgentTool implements dynamic Agent CRD creation
@@ -243,9 +244,9 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 			Name:      agentName,
 			Namespace: ns,
 			Labels: map[string]string{
-				"orka.ai/parent-task": parentName,
-				"orka.ai/created-by":  "create_agent",
-				"orka.ai/agent-role":  a.Role,
+				labels.LabelParentTask: parentName,
+				labels.LabelCreatedBy:  "create_agent",
+				labels.LabelAgentRole:  a.Role,
 			},
 		},
 		Spec: corev1alpha1.AgentSpec{

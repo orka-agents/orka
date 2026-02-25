@@ -26,6 +26,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/controller"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
 )
@@ -38,7 +39,7 @@ func setupTestHandlers() (*Handlers, *fiber.App) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	handlers := NewHandlers(fakeClient, nil, "", false, ss, ss, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
 	return handlers, app
@@ -52,7 +53,7 @@ func setupTestHandlersWithObjects(objs ...runtime.Object) (*Handlers, *fiber.App
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	handlers := NewHandlers(fakeClient, nil, "", false, ss, ss, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
 	return handlers, app
@@ -186,7 +187,7 @@ func TestHandlers_CreateTask_NamespaceScoped(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	handlers := NewHandlers(fakeClient, nil, "allowed-ns", false, nil, nil, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "allowed-ns"})
 
 	app := fiber.New()
 	app.Post("/tasks", handlers.CreateTask)
@@ -715,7 +716,7 @@ func TestNewHandlers(t *testing.T) {
 	scheme := runtime.NewScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	handlers := NewHandlers(fakeClient, nil, "test-ns", false, nil, nil, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "test-ns"})
 	if handlers == nil {
 		t.Fatal("NewHandlers returned nil")
 	}
@@ -733,7 +734,7 @@ func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *sqlite.Store
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(fakeClient, sm, "", false, ss, ss, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionManager: sm, SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
 	return handlers, app, ss
@@ -820,7 +821,7 @@ func TestHandlers_ListSessions_WatchNamespace(t *testing.T) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(fakeClient, sm, "watched-ns", false, ss, ss, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionManager: sm, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
 	app.Get("/sessions", handlers.ListSessions)
@@ -897,7 +898,7 @@ func TestHandlers_GetSession_WatchNamespace(t *testing.T) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(fakeClient, sm, "watched-ns", false, ss, ss, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionManager: sm, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
 
 	ctx := context.Background()
 	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
@@ -970,7 +971,7 @@ func TestHandlers_DeleteSession_WatchNamespace(t *testing.T) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(fakeClient, sm, "watched-ns", false, ss, ss, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionManager: sm, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
 
 	ctx := context.Background()
 	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
@@ -1028,7 +1029,7 @@ func TestHandlers_GetTaskLogs_WatchNamespace(t *testing.T) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
-	handlers := NewHandlers(fakeClient, nil, "watched-ns", false, nil, nil, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "watched-ns"})
 
 	app := fiber.New()
 	app.Get("/tasks/:id/logs", handlers.GetTaskLogs)
@@ -1155,7 +1156,7 @@ func TestHandlers_GetTaskResult_WatchNamespace(t *testing.T) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	ss.SaveResult(context.Background(), "watched-ns", "test-task", []byte("task result content")) //nolint:errcheck
-	handlers := NewHandlers(fakeClient, nil, "watched-ns", false, ss, ss, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
 	app.Get("/tasks/:id/result", handlers.GetTaskResult)
@@ -1188,7 +1189,7 @@ func TestHandlers_DeleteTask_WatchNamespace(t *testing.T) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
-	handlers := NewHandlers(fakeClient, nil, "watched-ns", false, nil, nil, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "watched-ns"})
 
 	app := fiber.New()
 	app.Delete("/tasks/:id", handlers.DeleteTask)
@@ -1287,7 +1288,7 @@ func TestGetTaskChildren(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "child-1",
 			Namespace: "default",
-			Labels:    map[string]string{"orka.ai/parent-task": "parent-task"},
+			Labels:    map[string]string{labels.LabelParentTask: "parent-task"},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAI,
@@ -1298,7 +1299,7 @@ func TestGetTaskChildren(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "child-2",
 			Namespace: "default",
-			Labels:    map[string]string{"orka.ai/parent-task": "parent-task"},
+			Labels:    map[string]string{labels.LabelParentTask: "parent-task"},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAI,
@@ -1389,7 +1390,7 @@ func TestGetTaskPlan(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	handlers := NewHandlers(fakeClient, nil, "", false, ss, ss, ss, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss, PlanStore: ss})
 
 	app := fiber.New()
 	app.Get("/api/v1/tasks/:id/plan", handlers.GetTaskPlan)
@@ -1435,7 +1436,7 @@ func TestGetTaskPlan(t *testing.T) {
 		fakeClient2 := fake.NewClientBuilder().WithScheme(scheme2).WithRuntimeObjects(taskNoPlan).Build()
 		db2, _ := sqlite.NewDB(":memory:")
 		ss2 := sqlite.NewStore(db2, ":memory:")
-		handlers2 := NewHandlers(fakeClient2, nil, "", false, ss2, ss2, ss2, nil, nil, nil)
+		handlers2 := NewHandlers(HandlersConfig{Client: fakeClient2, SessionStore: ss2, ResultStore: ss2, PlanStore: ss2})
 
 		app2 := fiber.New()
 		app2.Get("/api/v1/tasks/:id/plan", handlers2.GetTaskPlan)
@@ -1455,7 +1456,7 @@ func TestResolveNamespace_IsolationEnforced(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	handlers := NewHandlers(fakeClient, nil, "", true, ss, ss, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, EnforceNamespaceIsolation: true, SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
 	app.Get("/test", func(c fiber.Ctx) error {
@@ -1485,7 +1486,7 @@ func TestResolveNamespace_IsolationAllowsSameNamespace(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	handlers := NewHandlers(fakeClient, nil, "", true, ss, ss, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, EnforceNamespaceIsolation: true, SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
 	app.Get("/test", func(c fiber.Ctx) error {
@@ -1515,7 +1516,7 @@ func TestResolveNamespace_WatchNamespaceMismatch(t *testing.T) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	// Set watchNamespace to "production"
-	handlers := NewHandlers(fakeClient, nil, "production", false, ss, ss, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "production", SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
 	app.Get("/test", func(c fiber.Ctx) error {
@@ -1644,7 +1645,7 @@ func TestHandlers_CreateAgent_NamespaceForbidden(t *testing.T) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	handlers := NewHandlers(fakeClient, nil, "allowed-ns", false, nil, nil, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "allowed-ns"})
 
 	app := fiber.New()
 	app.Post("/agents", handlers.CreateAgent)
@@ -1968,7 +1969,7 @@ func TestHandlers_GetTaskLogs_NamespaceForbidden(t *testing.T) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	handlers := NewHandlers(fakeClient, nil, "allowed-ns", false, nil, nil, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "allowed-ns"})
 
 	app := fiber.New()
 	app.Get("/tasks/:id/logs", handlers.GetTaskLogs)
@@ -2025,7 +2026,7 @@ func TestHandlers_DeleteSession_NamespaceForbidden(t *testing.T) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	sm := controller.NewSessionManager(ss)
-	handlers := NewHandlers(fakeClient, sm, "watched-ns", false, ss, ss, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionManager: sm, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
 	app.Delete("/sessions/:id", handlers.DeleteSession)
@@ -2064,7 +2065,7 @@ func TestHandlers_GetTaskPlan_NoPlanStore(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
 	// planStore is nil
-	handlers := NewHandlers(fakeClient, nil, "", false, nil, nil, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient})
 
 	app := fiber.New()
 	app.Get("/tasks/:id/plan", handlers.GetTaskPlan)
@@ -2097,7 +2098,7 @@ func TestHandlers_GetTask_WithPlanEnrichment(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).WithStatusSubresource(task).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	handlers := NewHandlers(fakeClient, nil, "", false, ss, ss, ss, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss, PlanStore: ss})
 
 	require.NoError(t, ss.SavePlan(context.Background(), "default", "enriched-task", &store.PlanState{
 		TaskName:     "enriched-task",
@@ -2145,7 +2146,7 @@ func TestHandlers_GetTask_NoPlanStoreNoEnrichment(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).WithStatusSubresource(task).Build()
 	// planStore is nil
-	handlers := NewHandlers(fakeClient, nil, "", false, nil, nil, nil, nil, nil, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient})
 
 	app := fiber.New()
 	app.Get("/tasks/:id", handlers.GetTask)
@@ -2175,7 +2176,7 @@ func TestHandlers_GetTaskChildren_Success(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "child-task",
 			Namespace: "default",
-			Labels:    map[string]string{"orka.ai/parent-task": "parent-task"},
+			Labels:    map[string]string{labels.LabelParentTask: "parent-task"},
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 	}
@@ -2235,7 +2236,7 @@ func TestHandlers_Readyz_HealthCheckFailure(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	handlers := NewHandlers(fakeClient, nil, "", false, nil, nil, nil, nil, &fakeHealthChecker{err: fmt.Errorf("db down")}, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, HealthChecker: &fakeHealthChecker{err: fmt.Errorf("db down")}})
 	app := fiber.New()
 	app.Get("/readyz", handlers.Readyz)
 
@@ -2255,7 +2256,7 @@ func TestHandlers_Readyz_HealthCheckSuccess(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	handlers := NewHandlers(fakeClient, nil, "", false, nil, nil, nil, nil, &fakeHealthChecker{err: nil}, nil)
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, HealthChecker: &fakeHealthChecker{err: nil}})
 	app := fiber.New()
 	app.Get("/readyz", handlers.Readyz)
 
@@ -2295,7 +2296,7 @@ func TestHandlers_GetTaskLogs_WithClientsetNoPods(t *testing.T) {
 	fakeCS := kubefake.NewSimpleClientset() // no pods
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	h := NewHandlers(fakeClient, nil, "", false, ss, ss, nil, fakeCS, nil, nil)
+	h := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss, KubeClient: fakeCS})
 
 	app := fiber.New()
 	app.Get("/tasks/:id/logs", h.GetTaskLogs)

@@ -36,7 +36,9 @@ func setupTestAnthropicHandler(objs ...runtime.Object) (*AnthropicCompatHandler,
 	_ = corev1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
-	handler := NewAnthropicCompatHandler(fakeClient, "default", false, DefaultChatConfig())
+	config := DefaultChatConfig()
+	resolver := NewProviderResolver(fakeClient, config)
+	handler := NewAnthropicCompatHandler(fakeClient, "default", false, config, resolver)
 
 	app := fiber.New()
 	return handler, app
@@ -925,7 +927,7 @@ func (m *mockAnthropicProvider) Name() string {
 func TestInjectOrkaTools_BuiltinTools(t *testing.T) {
 	handler, _ := setupTestAnthropicHandler()
 	req := &llm.CompletionRequest{}
-	handler.injectOrkaTools(context.Background(), req, "default")
+	injectOrkaTools(context.Background(), handler.client, req, "default")
 
 	if len(req.Tools) < len(builtinProxyTools) {
 		t.Fatalf("expected at least %d tools, got %d", len(builtinProxyTools), len(req.Tools))
@@ -951,7 +953,7 @@ func TestInjectOrkaTools_PreservesClientTools(t *testing.T) {
 	}
 	req := &llm.CompletionRequest{Tools: []llm.Tool{clientTool}}
 
-	handler.injectOrkaTools(context.Background(), req, "default")
+	injectOrkaTools(context.Background(), handler.client, req, "default")
 
 	// Client tool should still be first
 	if req.Tools[0].Name != "my_custom_tool" {
@@ -985,7 +987,7 @@ func TestInjectOrkaTools_WithToolCRDs(t *testing.T) {
 
 	handler, _ := setupTestAnthropicHandler(toolCRD)
 	req := &llm.CompletionRequest{}
-	handler.injectOrkaTools(context.Background(), req, "default")
+	injectOrkaTools(context.Background(), handler.client, req, "default")
 
 	names := map[string]bool{}
 	for _, tool := range req.Tools {
@@ -1004,7 +1006,7 @@ func TestInjectOrkaTools_WithToolCRDs(t *testing.T) {
 // --- Tests: runNonStreamingToolLoop ---
 
 func TestRunNonStreamingToolLoop_NoToolCalls(t *testing.T) {
-	handler, _ := setupTestAnthropicHandler()
+	_, _ = setupTestAnthropicHandler()
 	mock := &mockAnthropicProvider{
 		responses: []*llm.CompletionResponse{
 			{Content: "Hello!", StopReason: "end_turn"},
@@ -1015,7 +1017,7 @@ func TestRunNonStreamingToolLoop_NoToolCalls(t *testing.T) {
 		Messages: []llm.Message{{Role: "user", Content: "Hi"}},
 	}
 
-	resp, err := handler.runNonStreamingToolLoop(context.Background(), mock, req, "test-model")
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1028,7 +1030,7 @@ func TestRunNonStreamingToolLoop_NoToolCalls(t *testing.T) {
 }
 
 func TestRunNonStreamingToolLoop_SingleToolCall(t *testing.T) {
-	handler, _ := setupTestAnthropicHandler()
+	_, _ = setupTestAnthropicHandler()
 	mock := &mockAnthropicProvider{
 		responses: []*llm.CompletionResponse{
 			{
@@ -1046,7 +1048,7 @@ func TestRunNonStreamingToolLoop_SingleToolCall(t *testing.T) {
 		Messages: []llm.Message{{Role: "user", Content: "Read test.txt"}},
 	}
 
-	resp, err := handler.runNonStreamingToolLoop(context.Background(), mock, req, "test-model")
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1059,7 +1061,7 @@ func TestRunNonStreamingToolLoop_SingleToolCall(t *testing.T) {
 }
 
 func TestRunNonStreamingToolLoop_MultiStepToolLoop(t *testing.T) {
-	handler, _ := setupTestAnthropicHandler()
+	_, _ = setupTestAnthropicHandler()
 	mock := &mockAnthropicProvider{
 		responses: []*llm.CompletionResponse{
 			{
@@ -1078,7 +1080,7 @@ func TestRunNonStreamingToolLoop_MultiStepToolLoop(t *testing.T) {
 		Messages: []llm.Message{{Role: "user", Content: "Search and read"}},
 	}
 
-	resp, err := handler.runNonStreamingToolLoop(context.Background(), mock, req, "test-model")
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1098,7 +1100,7 @@ func TestRunNonStreamingToolLoop_IterationLimit(t *testing.T) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	handler := NewAnthropicCompatHandler(fakeClient, "default", false, config)
+	_ = NewAnthropicCompatHandler(fakeClient, "default", false, config, NewProviderResolver(fakeClient, config))
 
 	mock := &mockAnthropicProvider{
 		responses: []*llm.CompletionResponse{
@@ -1115,7 +1117,7 @@ func TestRunNonStreamingToolLoop_IterationLimit(t *testing.T) {
 		Messages: []llm.Message{{Role: "user", Content: "Do many things"}},
 	}
 
-	resp, err := handler.runNonStreamingToolLoop(context.Background(), mock, req, "test-model")
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1128,7 +1130,7 @@ func TestRunNonStreamingToolLoop_IterationLimit(t *testing.T) {
 }
 
 func TestRunNonStreamingToolLoop_LLMError(t *testing.T) {
-	handler, _ := setupTestAnthropicHandler()
+	_, _ = setupTestAnthropicHandler()
 	mock := &mockAnthropicProvider{
 		responses: []*llm.CompletionResponse{nil},
 		errors:    []error{fmt.Errorf("provider unavailable")},
@@ -1138,7 +1140,7 @@ func TestRunNonStreamingToolLoop_LLMError(t *testing.T) {
 		Messages: []llm.Message{{Role: "user", Content: "Hi"}},
 	}
 
-	_, err := handler.runNonStreamingToolLoop(context.Background(), mock, req, "test-model")
+	_, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1148,7 +1150,7 @@ func TestRunNonStreamingToolLoop_LLMError(t *testing.T) {
 }
 
 func TestRunNonStreamingToolLoop_ToolExecutionError(t *testing.T) {
-	handler, _ := setupTestAnthropicHandler()
+	_, _ = setupTestAnthropicHandler()
 	mock := &mockAnthropicProvider{
 		responses: []*llm.CompletionResponse{
 			{
@@ -1163,7 +1165,7 @@ func TestRunNonStreamingToolLoop_ToolExecutionError(t *testing.T) {
 		Messages: []llm.Message{{Role: "user", Content: "Use a bad tool"}},
 	}
 
-	resp, err := handler.runNonStreamingToolLoop(context.Background(), mock, req, "test-model")
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
