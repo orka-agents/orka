@@ -45,7 +45,6 @@ func newReconciler() *TaskReconciler {
 		WebhookNotifier: NewWebhookNotifier(),
 		Recorder:        record.NewFakeRecorder(100),
 		ResultStore:     ss,
-		SessionStore:    ss,
 		PlanStore:       ss,
 	}
 }

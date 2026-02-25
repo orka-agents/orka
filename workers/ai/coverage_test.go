@@ -367,7 +367,7 @@ func TestExecuteAgentLoop_WithToolCalls(t *testing.T) {
 
 	result, err := executeAgentLoop(
 		context.Background(), provider, messages, "system", "model",
-		[]llm.Tool{{Name: "web_search"}}, []string{"web_search"}, nil, worker.NewToolExecutor(),
+		[]llm.Tool{{Name: "web_search"}}, nil, worker.NewToolExecutor(),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -398,7 +398,7 @@ func TestExecuteAgentLoop_MaxIterationsReached(t *testing.T) {
 
 	_, err := executeAgentLoop(
 		context.Background(), provider, messages, "", "model",
-		[]llm.Tool{{Name: "web_search"}}, []string{"web_search"}, nil, worker.NewToolExecutor(),
+		[]llm.Tool{{Name: "web_search"}}, nil, worker.NewToolExecutor(),
 	)
 	if err == nil {
 		t.Fatal("expected error for max iterations")
@@ -430,7 +430,7 @@ func TestExecuteAgentLoop_ContextTooLongRetry(t *testing.T) {
 
 	result, err := executeAgentLoop(
 		context.Background(), provider, messages, "", "model",
-		nil, nil, nil, nil,
+		nil, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -453,7 +453,7 @@ func TestExecuteAgentLoop_ContextTooLongRetryStillFails(t *testing.T) {
 
 	_, err := executeAgentLoop(
 		context.Background(), provider, messages, "", "model",
-		nil, nil, nil, nil,
+		nil, nil, nil,
 	)
 	if err == nil {
 		t.Fatal("expected error when retry also fails")
@@ -477,7 +477,7 @@ func TestExecuteAgentLoop_CoordinationEnabled(t *testing.T) {
 	result, err := executeAgentLoop(
 		context.Background(), provider,
 		[]llm.Message{{Role: "user", Content: "hello"}},
-		"", "model", nil, nil, nil, nil,
+		"", "model", nil, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -501,7 +501,7 @@ func TestExecuteAgentLoop_AutonomousMode(t *testing.T) {
 	result, err := executeAgentLoop(
 		context.Background(), provider,
 		[]llm.Message{{Role: "user", Content: "plan"}},
-		"", "model", nil, nil, nil, nil,
+		"", "model", nil, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -529,7 +529,7 @@ func TestExecuteAgentLoop_StopReasonStop(t *testing.T) {
 		context.Background(), provider,
 		[]llm.Message{{Role: "user", Content: "search"}},
 		"", "model",
-		[]llm.Tool{{Name: "web_search"}}, []string{"web_search"}, nil, worker.NewToolExecutor(),
+		[]llm.Tool{{Name: "web_search"}}, nil, worker.NewToolExecutor(),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -581,7 +581,7 @@ func TestExecuteAgentLoop_CustomToolExecution(t *testing.T) {
 		context.Background(), provider,
 		[]llm.Message{{Role: "user", Content: "use custom tool"}},
 		"", "model",
-		[]llm.Tool{{Name: "my-http-tool"}}, []string{"my-http-tool"},
+		[]llm.Tool{{Name: "my-http-tool"}},
 		customTools, worker.NewToolExecutor(),
 	)
 	if err != nil {
@@ -614,7 +614,7 @@ func TestExecuteAgentLoop_ToolExecutionError(t *testing.T) {
 		context.Background(), provider,
 		[]llm.Message{{Role: "user", Content: "test"}},
 		"", "model",
-		[]llm.Tool{{Name: "nonexistent_tool"}}, []string{"nonexistent_tool"},
+		[]llm.Tool{{Name: "nonexistent_tool"}},
 		nil, worker.NewToolExecutor(),
 	)
 	if err != nil {

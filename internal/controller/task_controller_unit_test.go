@@ -62,7 +62,6 @@ func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskRecon
 		SessionManager: NewSessionManager(ss),
 		Recorder:       record.NewFakeRecorder(100),
 		ResultStore:    ss,
-		SessionStore:   ss,
 		PlanStore:      ss,
 	}
 }

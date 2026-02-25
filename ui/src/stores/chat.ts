@@ -10,7 +10,6 @@ interface ChatState {
   updateLastAssistantMessage: (content: string) => void
   setSessionId: (id: string) => void
   setStreaming: (streaming: boolean) => void
-  clearMessages: () => void
   newSession: () => void
   setUsageOnLastAssistant: (usage: ChatUsage) => void
 }
@@ -42,7 +41,6 @@ export const useChatStore = create<ChatState>()((set) => ({
 
   setSessionId: (id) => set({ currentSessionId: id }),
   setStreaming: (streaming) => set({ isStreaming: streaming }),
-  clearMessages: () => set({ messages: [] }),
   newSession: () => set({ messages: [], currentSessionId: null }),
 
   setUsageOnLastAssistant: (usage) =>

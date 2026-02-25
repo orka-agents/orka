@@ -25,7 +25,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/controller"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 )
@@ -53,7 +52,6 @@ var builtinToolsMap = func() map[string]fiber.Map {
 type Handlers struct {
 	client                    client.Client
 	clientset                 kubernetes.Interface
-	sessionManager            *controller.SessionManager
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	resultStore               store.ResultStore
@@ -66,7 +64,6 @@ type Handlers struct {
 // HandlersConfig holds configuration for creating Handlers.
 type HandlersConfig struct {
 	Client                    client.Client
-	SessionManager            *controller.SessionManager
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
 	ResultStore               store.ResultStore
@@ -82,7 +79,6 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 	return &Handlers{
 		client:                    cfg.Client,
 		clientset:                 cfg.KubeClient,
-		sessionManager:            cfg.SessionManager,
 		watchNamespace:            cfg.WatchNamespace,
 		enforceNamespaceIsolation: cfg.EnforceNamespaceIsolation,
 		resultStore:               cfg.ResultStore,
@@ -1276,17 +1272,4 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 // handleAuthValidate returns success if the request passes auth middleware
 func (s *Server) handleAuthValidate(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"authenticated": true})
-}
-
-// Helper to read lines from a reader
-func readLines(r io.Reader) <-chan string {
-	ch := make(chan string)
-	go func() {
-		defer close(ch)
-		scanner := bufio.NewScanner(r)
-		for scanner.Scan() {
-			ch <- scanner.Text()
-		}
-	}()
-	return ch
 }

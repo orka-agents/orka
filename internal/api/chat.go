@@ -51,18 +51,7 @@ type ChatConfig struct {
 	MaxSessionSize  int // bytes
 }
 
-// DefaultChatConfig returns a ChatConfig with default values.
-func DefaultChatConfig() ChatConfig {
-	return ChatConfig{
-		Enabled:         true,
-		MaxIterations:   100,
-		MaxDuration:     60 * time.Minute,
-		ToolTimeout:     60 * time.Second,
-		MaxConcurrent:   10,
-		MaxTasksPerTurn: 10,
-		MaxSessionSize:  500 * 1024,
-	}
-}
+
 
 // ChatRequest is the request body for POST /api/v1/chat.
 type ChatRequest struct {

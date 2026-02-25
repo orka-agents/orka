@@ -203,7 +203,7 @@ func run() error {
 	// Execute the agent loop
 	result, err := executeAgentLoop(
 		ctx, llmProvider, messages, systemPrompt, model,
-		llmTools, enabledTools, customTools, toolExecutor,
+		llmTools, customTools, toolExecutor,
 	)
 	if err != nil {
 		return fmt.Errorf("agent execution failed: %w", err)
@@ -449,7 +449,6 @@ func executeAgentLoop(
 	systemPrompt string,
 	model string,
 	llmTools []llm.Tool,
-	_ []string,
 	customTools map[string]*corev1alpha1.Tool,
 	toolExecutor *worker.ToolExecutor,
 ) (string, error) {

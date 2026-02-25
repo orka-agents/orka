@@ -112,15 +112,14 @@ func doPost(endpoint string, data []byte, saToken string) error {
 // Workers can use this to include diffs, verdicts, and metadata alongside
 // the human-readable summary. Plain-text results remain backward compatible.
 type StructuredResult struct {
-	Version    int               `json:"version"`
-	Summary    string            `json:"summary"`
-	BaseSHA    string            `json:"baseSHA,omitempty"`
-	Diff       string            `json:"diff,omitempty"`
-	Verdict    string            `json:"verdict,omitempty"`
-	Feedback   string            `json:"feedback,omitempty"`
-	Files      []string          `json:"files,omitempty"`
-	PushBranch string            `json:"pushBranch,omitempty"`
-	Metadata   map[string]string `json:"metadata,omitempty"`
+	Version    int      `json:"version"`
+	Summary    string   `json:"summary"`
+	BaseSHA    string   `json:"baseSHA,omitempty"`
+	Diff       string   `json:"diff,omitempty"`
+	Verdict    string   `json:"verdict,omitempty"`
+	Feedback   string   `json:"feedback,omitempty"`
+	Files      []string `json:"files,omitempty"`
+	PushBranch string   `json:"pushBranch,omitempty"`
 }
 
 // FormatStructuredResult serializes a StructuredResult to JSON bytes.

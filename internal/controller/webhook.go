@@ -83,7 +83,6 @@ type ResultRefPayload struct {
 // WebhookNotifier sends webhook notifications for task completion
 type WebhookNotifier struct {
 	client            *http.Client
-	timeout           time.Duration
 	skipURLValidation bool // For testing only
 }
 
@@ -93,7 +92,6 @@ func NewWebhookNotifier() *WebhookNotifier {
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		timeout: 30 * time.Second,
 	}
 }
 

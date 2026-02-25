@@ -97,8 +97,6 @@ type StreamChunk struct {
 type ProviderConfig struct {
 	APIKey          string
 	BaseURL         string // Optional override for API URL
-	MaxRetries      int
-	Timeout         int    // Timeout in seconds
 	ProviderType    string // e.g. "openai", "azure-openai"
 	AzureAPIVersion string // Azure OpenAI API version (e.g. "2024-02-15-preview")
 }
@@ -127,7 +125,6 @@ func NewProvider(name string, config ProviderConfig) (Provider, error) {
 type ProviderError struct {
 	Provider   string
 	Message    string
-	Code       string
 	StatusCode int
 }
 

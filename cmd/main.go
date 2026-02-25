@@ -272,7 +272,6 @@ func main() {
 		WebhookNotifier:           webhookNotifier,
 		KubeClient:                kubeClient,
 		ResultStore:               sqliteStore,
-		SessionStore:              sqliteStore,
 		PlanStore:                 sqliteStore,
 		MessageStore:              sqliteStore,
 		ArtifactStore:             sqliteStore,

@@ -9,7 +9,7 @@ vi.mock('zustand/middleware', () => ({
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { useChatStore } from '@/stores/chat'
-import { useChatConfig, useDeleteChatSession, useSendMessage } from './use-chat'
+import { useChatConfig, useSendMessage } from './use-chat'
 
 function createWrapper() {
   const queryClient = new QueryClient({
@@ -52,16 +52,6 @@ describe('useChatConfig', () => {
       enabled: true,
       provider: 'anthropic',
       model: 'claude-sonnet-4-20250514',
-    })
-  })
-})
-
-describe('useDeleteChatSession', () => {
-  it('returns a function that deletes a chat session', async () => {
-    const { result } = renderHook(() => useDeleteChatSession(), { wrapper: createWrapper() })
-    // Should not throw — MSW returns 204
-    await act(async () => {
-      await result.current('sess-123')
     })
   })
 })

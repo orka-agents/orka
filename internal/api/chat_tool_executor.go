@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -105,7 +104,6 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		Namespace:                 e.namespace,
 		WatchNamespace:            e.watchNamespace,
 		EnforceNamespaceIsolation: e.enforceNamespaceIsolation,
-		SessionID:                 e.sessionID,
 		ResultStore:               e.resultStore,
 		SessionDeleter:            e.sessionManager,
 		GenerateTaskName:          e.generateTaskName,
@@ -177,72 +175,7 @@ func (e *ToolExecutor) taskLabels() map[string]string {
 	}
 }
 
-func (e *ToolExecutor) checkTaskLimit() *ToolResult {
-	if e.tasksCreated >= e.maxTasks {
-		r := toolError("limit_reached", fmt.Sprintf("task creation limit reached (max %d per turn)", e.maxTasks), "Wait for existing tasks to complete before creating new ones")
-		return &r
-	}
-	return nil
-}
-
-func (e *ToolExecutor) checkNamespaceScope(namespace string) *ToolResult {
-	if e.watchNamespace != "" && namespace != e.watchNamespace {
-		r := toolError("permission_denied", fmt.Sprintf("cannot create resources in namespace %q, restricted to %q", namespace, e.watchNamespace), "Use the allowed namespace")
-		return &r
-	}
-	if e.enforceNamespaceIsolation && namespace != e.namespace {
-		r := toolError("permission_denied", fmt.Sprintf("cannot create resources in namespace %q, restricted to %q", namespace, e.namespace), "Use your namespace")
-		return &r
-	}
-	return nil
-}
-
 // ---- Error handling helpers ----
-
-// executeTool is a convenience method that executes a tool by name with map args.
-// It sets up the ToolContext and dispatches through the registry.
-func (e *ToolExecutor) executeTool(ctx context.Context, name string, args map[string]any) ToolResult {
-	tc := &tools.ToolContext{
-		Client:                    e.client,
-		Namespace:                 e.namespace,
-		WatchNamespace:            e.watchNamespace,
-		EnforceNamespaceIsolation: e.enforceNamespaceIsolation,
-		SessionID:                 e.sessionID,
-		ResultStore:               e.resultStore,
-		SessionDeleter:            e.sessionManager,
-		GenerateTaskName:          e.generateTaskName,
-		TaskLabels:                e.taskLabels,
-		CheckTaskLimit: func() *tools.ChatToolError {
-			if e.tasksCreated >= e.maxTasks {
-				return &tools.ChatToolError{
-					Type:       "limit_reached",
-					Message:    fmt.Sprintf("task creation limit reached (max %d per turn)", e.maxTasks),
-					Suggestion: "Wait for existing tasks to complete before creating new ones",
-				}
-			}
-			return nil
-		},
-		IncrementTasks: func() { e.tasksCreated++ },
-		FindGitSecret:  e.findGitSecret,
-	}
-	ctx = tools.WithToolContext(ctx, tc)
-
-	argsJSON, err := json.Marshal(args)
-	if err != nil {
-		return toolError("internal_error", fmt.Sprintf("failed to marshal arguments: %v", err), "")
-	}
-
-	resultStr, err := e.registry.Execute(ctx, name, argsJSON)
-	if err != nil {
-		return toolError("unknown_tool", err.Error(), "Use one of the available tools")
-	}
-
-	var tr ToolResult
-	if jsonErr := json.Unmarshal([]byte(resultStr), &tr); jsonErr == nil {
-		return tr
-	}
-	return ToolResult{Success: true, Data: resultStr}
-}
 
 func toolError(errType, message, suggestion string) ToolResult {
 	return ToolResult{
@@ -253,84 +186,12 @@ func toolError(errType, message, suggestion string) ToolResult {
 	}
 }
 
-func classifyK8sError(err error) ToolResult {
-	if apierrors.IsNotFound(err) {
-		return toolError("not_found", err.Error(), "Check the resource name and namespace")
-	}
-	if apierrors.IsAlreadyExists(err) {
-		return toolError("already_exists", err.Error(), "Use a different name or delete the existing resource first")
-	}
-	if apierrors.IsForbidden(err) {
-		return toolError("permission_denied", err.Error(), "Check RBAC permissions")
-	}
-	return toolError("internal_error", err.Error(), "")
-}
-
 func marshalResult(result ToolResult) (string, error) {
 	b, err := json.Marshal(result)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal tool result: %w", err)
 	}
 	return string(b), nil
-}
-
-// ---- Argument extraction helpers ----
-
-func getStringArg(args map[string]any, key string) string {
-	v, ok := args[key]
-	if !ok {
-		return ""
-	}
-	s, ok := v.(string)
-	if !ok {
-		return fmt.Sprintf("%v", v)
-	}
-	return s
-}
-
-func getStringArgDefault(args map[string]any, key, defaultVal string) string {
-	v := getStringArg(args, key)
-	if v == "" {
-		return defaultVal
-	}
-	return v
-}
-
-func getIntArg(args map[string]any, key string, defaultVal int) int {
-	v, ok := args[key]
-	if !ok {
-		return defaultVal
-	}
-	switch n := v.(type) {
-	case float64:
-		return int(n)
-	case int:
-		return n
-	case int64:
-		return int(n)
-	default:
-		return defaultVal
-	}
-}
-
-func getStringSliceArg(args map[string]any, key string) []string {
-	v, ok := args[key]
-	if !ok {
-		return nil
-	}
-	arr, ok := v.([]any)
-	if !ok {
-		return nil
-	}
-	result := make([]string, 0, len(arr))
-	for _, item := range arr {
-		if s, ok := item.(string); ok {
-			result = append(result, s)
-		} else {
-			result = append(result, fmt.Sprintf("%v", item))
-		}
-	}
-	return result
 }
 
 // findGitSecret looks for a git credentials secret in the namespace.
