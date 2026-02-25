@@ -343,7 +343,7 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             "claude",
 				DefaultMaxTurns:  &maxTurns,
-				DefaultAllowBash: true,
+				DefaultAllowBash: boolPtr(true),
 			},
 		},
 	}
@@ -1008,3 +1008,5 @@ func TestDelegateTaskTool_Execute_GitRepoAutoDetectSecret(t *testing.T) {
 		t.Errorf("gitSecretRef = %q, want %q", childTask.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "github-credentials")
 	}
 }
+
+func boolPtr(b bool) *bool { return &b }

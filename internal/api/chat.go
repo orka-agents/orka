@@ -51,6 +51,8 @@ type ChatConfig struct {
 	MaxSessionSize  int // bytes
 }
 
+
+
 // ChatRequest is the request body for POST /api/v1/chat.
 type ChatRequest struct {
 	Message      string   `json:"message"`

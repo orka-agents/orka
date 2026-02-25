@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/tools"
 )
 
 // handleStreamingMessages handles an Anthropic Messages API request with streaming and tool execution.
@@ -27,6 +28,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages(
 	req *llm.CompletionRequest,
 	model string,
 	inputTokens int,
+	toolCtx *tools.ToolContext,
 ) error {
 	c.Set("Content-Type", "text/event-stream")
 	c.Set("Cache-Control", "no-cache")
@@ -124,25 +126,17 @@ func (h *AnthropicCompatHandler) handleStreamingMessages(
 					}
 				}
 
-				// Emit tool calls
-				for _, tc := range resp.ToolCalls {
-					if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{
-						Type: "tool_use", ID: tc.ID, Name: tc.Name, Input: json.RawMessage(""),
-					}); err == nil {
-						_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{
-							Type: "input_json_delta", PartialJSON: string(tc.Arguments),
-						})
-						_ = writeContentBlockStop(w, blockIndex)
-						blockIndex++
-					}
-				}
+				// Capture tool calls for server-side execution (don't emit tool_use blocks
+				// to the client — the client must not see them or it will try to execute locally)
 				toolCalls = resp.ToolCalls
 			} else {
 				// Consume stream chunks
 				inTextBlock := false
+				streamError := false
 				for chunk := range streamCh {
 					if chunk.Error != nil {
 						anthropicLog.Error(chunk.Error, "stream chunk error in tool loop")
+						streamError = true
 						break
 					}
 
@@ -164,7 +158,8 @@ func (h *AnthropicCompatHandler) handleStreamingMessages(
 						textContent += chunk.Content
 					}
 
-					// Handle tool calls
+					// Handle tool calls — capture for server-side execution but don't
+					// emit tool_use blocks to the client stream
 					if chunk.ToolCall != nil {
 						if inTextBlock {
 							_ = writeContentBlockStop(w, blockIndex)
@@ -172,17 +167,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages(
 							inTextBlock = false
 						}
 
-						tc := chunk.ToolCall
-						if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{
-							Type: "tool_use", ID: tc.ID, Name: tc.Name, Input: json.RawMessage(""),
-						}); err == nil {
-							_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{
-								Type: "input_json_delta", PartialJSON: string(tc.Arguments),
-							})
-							_ = writeContentBlockStop(w, blockIndex)
-							blockIndex++
-						}
-						toolCalls = append(toolCalls, *tc)
+						toolCalls = append(toolCalls, *chunk.ToolCall)
 					}
 
 					if chunk.Done {
@@ -201,6 +186,27 @@ func (h *AnthropicCompatHandler) handleStreamingMessages(
 					_ = writeContentBlockStop(w, blockIndex)
 					blockIndex++
 				}
+
+				// If stream errored with no content, fall back to Complete
+				if streamError && textContent == "" && len(toolCalls) == 0 {
+					resp, completeErr := capturedProvider.Complete(streamCtx, compReq)
+					if completeErr != nil {
+						anthropicLog.Error(completeErr, "fallback completion also failed")
+						_ = writeMessageDelta(w, "end_turn", totalOutputTokens)
+						_ = writeMessageStop(w)
+						return
+					}
+					totalOutputTokens += resp.OutputTokens
+					if resp.Content != "" {
+						textContent = resp.Content
+						if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{Type: "text", Text: ""}); err == nil {
+							_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{Type: "text_delta", Text: resp.Content})
+							_ = writeContentBlockStop(w, blockIndex)
+							blockIndex++
+						}
+					}
+					toolCalls = resp.ToolCalls
+				}
 			}
 
 			// No tool calls → final response, close the stream
@@ -211,9 +217,14 @@ func (h *AnthropicCompatHandler) handleStreamingMessages(
 				return
 			}
 
+			toolNames := make([]string, len(toolCalls))
+			for i, tc := range toolCalls {
+				toolNames[i] = tc.Name
+			}
 			anthropicLog.Info("streaming tool loop iteration",
 				"iteration", iteration,
 				"tool_calls", len(toolCalls),
+				"tools", toolNames,
 			)
 
 			// Append assistant message with tool calls
@@ -234,7 +245,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages(
 					iteration += 5
 				}
 
-				result := executeToolCall(streamCtx, tc, h.config.ToolTimeout)
+				result := executeToolCall(streamCtx, tc, h.config.ToolTimeout, toolCtx)
 
 				// Emit tool result as a text content block so the user sees what happened
 				resultPreview := result
@@ -265,6 +276,58 @@ func (h *AnthropicCompatHandler) handleStreamingMessages(
 					Role:    "user",
 					Content: repetitionWarning,
 				})
+			}
+
+			// Auto-poll: if all tool calls were wait_for_task/check_task_progress
+			// and all returned "still running", skip the LLM call and re-execute
+			// directly. This prevents the LLM from randomly ending the loop.
+			if repetitionWarning == "" && isAllWaitingPolls(toolCalls, messages) {
+				for {
+					select {
+					case <-streamCtx.Done():
+						_ = writeMessageDelta(w, "end_turn", totalOutputTokens)
+						_ = writeMessageStop(w)
+						return
+					default:
+					}
+
+					// Emit progress
+					if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{Type: "text", Text: ""}); err == nil {
+						_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{
+							Type: "text_delta", Text: "[⏳ Auto-polling tasks...]",
+						})
+						_ = writeContentBlockStop(w, blockIndex)
+						blockIndex++
+					}
+
+					// Re-execute the same wait/check calls
+					allStillRunning := true
+					// Remove the old tool results from messages (last len(toolCalls) messages)
+					messages = messages[:len(messages)-len(toolCalls)]
+					for _, tc := range toolCalls {
+						result := executeToolCall(streamCtx, tc, h.config.ToolTimeout, toolCtx)
+						messages = append(messages, llm.Message{
+							Role:       "tool",
+							ToolCallID: tc.ID,
+							Name:       tc.Name,
+							Content:    result,
+						})
+						if !isTaskStillRunning(result) {
+							allStillRunning = false
+						}
+					}
+
+					if !allStillRunning {
+						// Task finished — break out to let the LLM process the result
+						anthropicLog.Info("auto-poll: task state changed, resuming LLM loop")
+						break
+					}
+
+					iteration++
+					if iteration >= h.config.MaxIterations {
+						break
+					}
+				}
 			}
 		}
 
@@ -538,4 +601,57 @@ func writeContentBlockStop(w *bufio.Writer, index int) error {
 		Type:  "content_block_stop",
 		Index: index,
 	})
+}
+
+// isAllWaitingPolls returns true if every tool call in the last iteration was
+// wait_for_task and every result indicates the task is still running.
+// Only wait_for_task is allowed (it has a built-in 2s polling interval).
+// check_task_progress is excluded because it returns instantly and would cause a tight loop.
+func isAllWaitingPolls(toolCalls []llm.ToolCall, messages []llm.Message) bool {
+	if len(toolCalls) == 0 {
+		return false
+	}
+	for _, tc := range toolCalls {
+		if tc.Name != "wait_for_task" {
+			return false
+		}
+	}
+	// Check the last N messages (tool results) for running phase
+	for i := len(messages) - len(toolCalls); i < len(messages); i++ {
+		if i < 0 || i >= len(messages) {
+			return false
+		}
+		m := messages[i]
+		if m.Role != "tool" {
+			return false
+		}
+		if !isTaskStillRunning(m.Content) {
+			return false
+		}
+	}
+	return true
+}
+
+// isTaskStillRunning parses a tool result JSON and checks if the task is in a non-terminal phase.
+func isTaskStillRunning(result string) bool {
+	var parsed struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Phase string `json:"phase"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
+		return false
+	}
+	if !parsed.Success {
+		return false
+	}
+	// Terminal phases — auto-poll should stop
+	switch parsed.Data.Phase {
+	case "Succeeded", "Failed", "Cancelled":
+		return false
+	default:
+		// Running, Pending, Scheduled — still active
+		return true
+	}
 }

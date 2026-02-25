@@ -523,10 +523,10 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, envVars []corev1.EnvVar, 
 		}
 	}
 
-	// AllowBash: task override > agent default > false (also applicable for AI tasks with agentRef)
-	allowBash := false
-	if agent != nil && agent.Spec.Runtime != nil {
-		allowBash = agent.Spec.Runtime.DefaultAllowBash
+	// AllowBash: task override > agent default > true
+	allowBash := true
+	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultAllowBash != nil {
+		allowBash = *agent.Spec.Runtime.DefaultAllowBash
 	}
 	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowBash != nil {
 		allowBash = *task.Spec.AgentRuntime.AllowBash
@@ -571,6 +571,18 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 				},
 			},
 		)
+
+		// Set base URL so agent CLIs route through the provider's upstream
+		if provider.Spec.BaseURL != "" {
+			baseURLEnvVar := "ANTHROPIC_BASE_URL"
+			if provider.Spec.Type == corev1alpha1.ProviderTypeOpenAI || provider.Spec.Type == corev1alpha1.ProviderTypeAzureOpenAI {
+				baseURLEnvVar = "OPENAI_BASE_URL"
+			}
+			job.Spec.Template.Spec.Containers[0].Env = append(
+				job.Spec.Template.Spec.Containers[0].Env,
+				corev1.EnvVar{Name: baseURLEnvVar, Value: provider.Spec.BaseURL},
+			)
+		}
 	}
 
 	// Add fallback provider secrets
@@ -756,15 +768,31 @@ func (b *JobBuilder) addAgentEnvVars(ctx context.Context, envVars []corev1.EnvVa
 }
 
 // addAgentModelEnvVars adds model and system prompt env vars from the Agent.
+// If the agent doesn't specify a model, it falls back to the default provider's defaultModel.
 func (b *JobBuilder) addAgentModelEnvVars(ctx context.Context, envVars []corev1.EnvVar, agent *corev1alpha1.Agent) []corev1.EnvVar {
 	if agent == nil {
 		return envVars
 	}
+
+	model := ""
 	if agent.Spec.Model != nil && agent.Spec.Model.Name != "" {
+		model = agent.Spec.Model.Name
+	}
+
+	// Fall back to the default provider's model if the agent doesn't specify one
+	if model == "" {
+		defaultProvider := &corev1alpha1.Provider{}
+		if err := b.Get(ctx, client.ObjectKey{Namespace: agent.Namespace, Name: "default"}, defaultProvider); err == nil {
+			model = defaultProvider.Spec.DefaultModel
+		}
+	}
+
+	if model != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "ORKA_MODEL", Value: agent.Spec.Model.Name,
+			Name: "ORKA_MODEL", Value: model,
 		})
 	}
+
 	if agent.Spec.SystemPrompt != nil {
 		var systemPrompt string
 		if agent.Spec.SystemPrompt.Inline != "" {
@@ -832,10 +860,10 @@ func (b *JobBuilder) addAgentToolsEnvVars(
 		})
 	}
 
-	// AllowBash: task override > agent default > false
-	allowBash := false
-	if agent != nil && agent.Spec.Runtime != nil {
-		allowBash = agent.Spec.Runtime.DefaultAllowBash
+	// AllowBash: task override > agent default > true
+	allowBash := true
+	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultAllowBash != nil {
+		allowBash = *agent.Spec.Runtime.DefaultAllowBash
 	}
 	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowBash != nil {
 		allowBash = *task.Spec.AgentRuntime.AllowBash

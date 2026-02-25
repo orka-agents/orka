@@ -84,10 +84,10 @@ type AgentCLIRuntime struct {
 	// +optional
 	DefaultAllowedTools []string `json:"defaultAllowedTools,omitempty"`
 
-	// DefaultAllowBash controls whether bash is allowed by default for tasks using this Agent
-	// +kubebuilder:default=true
+	// DefaultAllowBash controls whether bash is allowed by default for tasks using this Agent.
+	// Defaults to true if not specified.
 	// +optional
-	DefaultAllowBash bool `json:"defaultAllowBash,omitempty"`
+	DefaultAllowBash *bool `json:"defaultAllowBash,omitempty"`
 }
 
 // ModelFallback defines a fallback provider configuration
