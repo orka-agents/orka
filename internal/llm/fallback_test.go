@@ -5,6 +5,8 @@ import (
 	"testing"
 )
 
+const testFallbackContent = "from fb"
+
 func TestFallbackProvider_PrimarySucceeds(t *testing.T) {
 	primary := &retryMockProvider{
 		name: "primary",
@@ -67,7 +69,7 @@ func TestFallbackProvider_PrimaryFails503_FallbackSucceeds(t *testing.T) {
 	fb := &retryMockProvider{
 		name: "fallback1",
 		completeResults: []completeResult{
-			{&CompletionResponse{Content: "from fb"}, nil},
+			{&CompletionResponse{Content: testFallbackContent}, nil},
 		},
 	}
 
@@ -79,7 +81,7 @@ func TestFallbackProvider_PrimaryFails503_FallbackSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
-	if resp.Content != "from fb" {
+	if resp.Content != testFallbackContent {
 		t.Errorf("expected 'from fb', got %q", resp.Content)
 	}
 }
@@ -261,7 +263,7 @@ func TestFallbackProvider_Stream_WithCooldown(t *testing.T) {
 	fb := &retryMockProvider{
 		name: "fb",
 		streamResults: [][]StreamChunk{
-			{{Content: "from fb"}, {Done: true}},
+			{{Content: testFallbackContent}, {Done: true}},
 		},
 	}
 
@@ -282,7 +284,7 @@ func TestFallbackProvider_Stream_WithCooldown(t *testing.T) {
 	for chunk := range ch {
 		content += chunk.Content
 	}
-	if content != "from fb" {
+	if content != testFallbackContent {
 		t.Errorf("expected 'from fb', got %q", content)
 	}
 	if primary.streamCallCount != 0 {
@@ -362,7 +364,7 @@ func TestFallbackProvider_Stream_AllCooledDown_UsesShortestCooldown(t *testing.T
 	fb := &retryMockProvider{
 		name: "fb",
 		streamResults: [][]StreamChunk{
-			{{Content: "from fb"}, {Done: true}},
+			{{Content: testFallbackContent}, {Done: true}},
 		},
 	}
 
@@ -435,7 +437,7 @@ func TestFallbackProvider_WithCooldown_SkipsCooledProvider(t *testing.T) {
 	fb := &retryMockProvider{
 		name: "fb",
 		completeResults: []completeResult{
-			{&CompletionResponse{Content: "from fb"}, nil},
+			{&CompletionResponse{Content: testFallbackContent}, nil},
 		},
 	}
 
@@ -451,7 +453,7 @@ func TestFallbackProvider_WithCooldown_SkipsCooledProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
-	if resp.Content != "from fb" {
+	if resp.Content != testFallbackContent {
 		t.Errorf("expected 'from fb', got %q", resp.Content)
 	}
 	if primary.callCount != 0 {

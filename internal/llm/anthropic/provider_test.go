@@ -19,6 +19,12 @@ import (
 	"github.com/sozercan/orka/internal/llm"
 )
 
+const (
+	testProviderAnthropic = "anthropic"
+	testToolNameSearch    = "search"
+	testStopReasonToolUse = "tool_use"
+)
+
 func TestNewProvider(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -77,7 +83,7 @@ func TestProvider_Name(t *testing.T) {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
 
-	if name := provider.Name(); name != "anthropic" {
+	if name := provider.Name(); name != testProviderAnthropic {
 		t.Errorf("Name() = %v, want anthropic", name)
 	}
 }
@@ -156,7 +162,7 @@ func TestBuildMessages(t *testing.T) {
 					Role:    "assistant",
 					Content: "thinking",
 					ToolCalls: []llm.ToolCall{
-						{ID: "tc1", Name: "search", Arguments: json.RawMessage(`{"q":"test"}`)},
+						{ID: "tc1", Name: testToolNameSearch, Arguments: json.RawMessage(`{"q":"test"}`)},
 					},
 				},
 			},
@@ -181,7 +187,7 @@ func TestBuildMessages(t *testing.T) {
 			messages: []llm.Message{
 				{Role: "user", Content: "search for X"},
 				{Role: "assistant", ToolCalls: []llm.ToolCall{
-					{ID: "tc1", Name: "search", Arguments: json.RawMessage(`{"q":"X"}`)},
+					{ID: "tc1", Name: testToolNameSearch, Arguments: json.RawMessage(`{"q":"X"}`)},
 				}},
 				{Role: "tool", Content: "found X", ToolCallID: "tc1"},
 				{Role: "assistant", Content: "I found X"},
@@ -210,7 +216,7 @@ func TestBuildToolParams(t *testing.T) {
 	t.Run("single tool", func(t *testing.T) {
 		tools := []llm.Tool{
 			{
-				Name:        "search",
+				Name:        testToolNameSearch,
 				Description: "Search the web",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}`),
 			},
@@ -222,7 +228,7 @@ func TestBuildToolParams(t *testing.T) {
 		if result[0].OfTool == nil {
 			t.Fatal("expected OfTool to be set")
 		}
-		if result[0].OfTool.Name != "search" {
+		if result[0].OfTool.Name != testToolNameSearch {
 			t.Errorf("expected tool name 'search', got %q", result[0].OfTool.Name)
 		}
 	})
@@ -301,7 +307,7 @@ func TestBuildRequestParams(t *testing.T) {
 			Model:    "claude-3",
 			Messages: []llm.Message{{Role: "user", Content: "hi"}},
 			Tools: []llm.Tool{
-				{Name: "search", Description: "desc", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)},
+				{Name: testToolNameSearch, Description: "desc", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)},
 			},
 		}
 		msgs := buildMessages(req.Messages)
@@ -316,7 +322,7 @@ func TestToProviderError(t *testing.T) {
 	t.Run("generic error", func(t *testing.T) {
 		err := fmt.Errorf("something went wrong")
 		pe := toProviderError(err)
-		if pe.Provider != "anthropic" {
+		if pe.Provider != testProviderAnthropic {
 			t.Errorf("expected provider 'anthropic', got %q", pe.Provider)
 		}
 		if pe.Message != "something went wrong" {
@@ -332,7 +338,7 @@ func TestComplete_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, `{"type":"error","error":{"type":"api_error","message":"internal server error"}}`)
+		fmt.Fprint(w, `{"type":"error","error":{"type":"api_error","message":"internal server error"}}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -355,7 +361,7 @@ func TestComplete_ServerError(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *llm.ProviderError, got %T", err)
 	}
-	if pe.Provider != "anthropic" {
+	if pe.Provider != testProviderAnthropic {
 		t.Errorf("expected provider 'anthropic', got %q", pe.Provider)
 	}
 }
@@ -363,6 +369,7 @@ func TestComplete_ServerError(t *testing.T) {
 func TestComplete_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		//nolint:errcheck // test helper
 		fmt.Fprint(w, `{
 			"id": "msg_123",
 			"type": "message",
@@ -404,6 +411,7 @@ func TestComplete_Success(t *testing.T) {
 func TestComplete_WithToolUse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		//nolint:errcheck // test helper
 		fmt.Fprint(w, `{
 			"id": "msg_456",
 			"type": "message",
@@ -431,7 +439,7 @@ func TestComplete_WithToolUse(t *testing.T) {
 		Model:    "claude-3-sonnet-20240229",
 		Messages: []llm.Message{{Role: "user", Content: "search for test"}},
 		Tools: []llm.Tool{
-			{Name: "search", Description: "search", Parameters: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`)},
+			{Name: testToolNameSearch, Description: testToolNameSearch, Parameters: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`)},
 		},
 	})
 	if err != nil {
@@ -443,7 +451,7 @@ func TestComplete_WithToolUse(t *testing.T) {
 	if len(resp.ToolCalls) != 1 {
 		t.Fatalf("expected 1 tool call, got %d", len(resp.ToolCalls))
 	}
-	if resp.ToolCalls[0].Name != "search" {
+	if resp.ToolCalls[0].Name != testToolNameSearch {
 		t.Errorf("expected tool call name 'search', got %q", resp.ToolCalls[0].Name)
 	}
 }
@@ -452,7 +460,7 @@ func TestStream_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
-		fmt.Fprint(w, `{"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}`)
+		fmt.Fprint(w, `{"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -511,7 +519,7 @@ func TestHandleStreamEvent_ContentBlockStart_ToolUse(t *testing.T) {
 	if currentToolCall.ID != "tc1" {
 		t.Errorf("tool call ID = %q, want tc1", currentToolCall.ID)
 	}
-	if currentToolCall.Name != "search" {
+	if currentToolCall.Name != testToolNameSearch {
 		t.Errorf("tool call Name = %q, want search", currentToolCall.Name)
 	}
 	if !hasToolCalls {
@@ -569,7 +577,7 @@ func TestHandleStreamEvent_ContentBlockDelta_InputJSONDelta(t *testing.T) {
 
 	var chunks []llm.StreamChunk
 	send := func(chunk llm.StreamChunk) bool { chunks = append(chunks, chunk); return true }
-	tc := &llm.ToolCall{ID: "tc1", Name: "search"}
+	tc := &llm.ToolCall{ID: "tc1", Name: testToolNameSearch}
 	var toolCallArgs []byte
 	hasToolCalls := true
 
@@ -603,7 +611,7 @@ func TestHandleStreamEvent_ContentBlockDelta_InputJSONDelta_NoToolCall(t *testin
 func TestHandleStreamEvent_ContentBlockStop_WithToolCall(t *testing.T) {
 	var chunks []llm.StreamChunk
 	send := func(chunk llm.StreamChunk) bool { chunks = append(chunks, chunk); return true }
-	tc := &llm.ToolCall{ID: "tc1", Name: "search"}
+	tc := &llm.ToolCall{ID: "tc1", Name: testToolNameSearch}
 	toolCallArgs := []byte(`{"q":"test"}`)
 	hasToolCalls := true
 
@@ -620,7 +628,7 @@ func TestHandleStreamEvent_ContentBlockStop_WithToolCall(t *testing.T) {
 	if chunk.ToolCall == nil {
 		t.Fatal("expected ToolCall in chunk")
 	}
-	if chunk.ToolCall.Name != "search" {
+	if chunk.ToolCall.Name != testToolNameSearch {
 		t.Errorf("ToolCall.Name = %q, want search", chunk.ToolCall.Name)
 	}
 	if string(chunk.ToolCall.Arguments) != `{"q":"test"}` {
@@ -709,7 +717,7 @@ func TestHandleStreamEvent_MessageDelta_ToolUseInferred(t *testing.T) {
 	if !chunk.Done {
 		t.Error("expected Done to be true")
 	}
-	if chunk.StopReason != "tool_use" {
+	if chunk.StopReason != testStopReasonToolUse {
 		t.Errorf("StopReason = %q, want tool_use", chunk.StopReason)
 	}
 }
@@ -747,7 +755,7 @@ func TestStream_TextContent(t *testing.T) {
 		}
 
 		for _, e := range events {
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", strings.Split(e, `"`)[3], e)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", strings.Split(e, `"`)[3], e) //nolint:errcheck
 			flusher.Flush()
 		}
 	}))
@@ -815,7 +823,7 @@ func TestStream_ToolUse(t *testing.T) {
 		}
 
 		for _, e := range events {
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", strings.Split(e, `"`)[3], e)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", strings.Split(e, `"`)[3], e) //nolint:errcheck
 			flusher.Flush()
 		}
 	}))
@@ -833,7 +841,7 @@ func TestStream_ToolUse(t *testing.T) {
 		Model:    "claude-3",
 		Messages: []llm.Message{{Role: "user", Content: "search"}},
 		Tools: []llm.Tool{
-			{Name: "search", Description: "search", Parameters: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`)},
+			{Name: testToolNameSearch, Description: testToolNameSearch, Parameters: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`)},
 		},
 	})
 	if err != nil {
@@ -864,13 +872,13 @@ func TestStream_ToolUse(t *testing.T) {
 	if len(toolCalls) != 1 {
 		t.Fatalf("expected 1 tool call, got %d", len(toolCalls))
 	}
-	if toolCalls[0].Name != "search" {
+	if toolCalls[0].Name != testToolNameSearch {
 		t.Errorf("tool call name = %q, want search", toolCalls[0].Name)
 	}
 	if string(toolCalls[0].Arguments) != `{"q":"test"}` {
 		t.Errorf("tool call args = %s, want {\"q\":\"test\"}", string(toolCalls[0].Arguments))
 	}
-	if stopReason != "tool_use" {
+	if stopReason != testStopReasonToolUse {
 		t.Errorf("stopReason = %q, want tool_use", stopReason)
 	}
 }
@@ -878,11 +886,11 @@ func TestStream_ToolUse(t *testing.T) {
 func TestInitRegistersProvider(t *testing.T) {
 	// The init() function registers the anthropic provider factory.
 	// Exercise the factory via llm.NewProvider.
-	provider, err := llm.NewProvider("anthropic", llm.ProviderConfig{APIKey: "test-key"})
+	provider, err := llm.NewProvider(testProviderAnthropic, llm.ProviderConfig{APIKey: "test-key"})
 	if err != nil {
 		t.Fatalf("llm.NewProvider(anthropic) error = %v", err)
 	}
-	if provider.Name() != "anthropic" {
+	if provider.Name() != testProviderAnthropic {
 		t.Errorf("provider.Name() = %q, want anthropic", provider.Name())
 	}
 }

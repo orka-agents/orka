@@ -17,6 +17,14 @@ import (
 	"github.com/sozercan/orka/internal/llm"
 )
 
+const (
+	testProviderOpenAI      = "openai"
+	testToolNameSearch      = "search"
+	testResponsesPath       = "/responses"
+	testStopReasonStop      = "stop"
+	testStopReasonToolCalls = "tool_calls"
+)
+
 func TestNewProvider(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -67,7 +75,7 @@ func TestProvider_Name(t *testing.T) {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
 
-	if name := provider.Name(); name != "openai" {
+	if name := provider.Name(); name != testProviderOpenAI {
 		t.Errorf("Name() = %v, want openai", name)
 	}
 }
@@ -152,7 +160,7 @@ func TestConvertInputItems(t *testing.T) {
 				Role:    "assistant",
 				Content: "thinking",
 				ToolCalls: []llm.ToolCall{
-					{ID: "tc1", Name: "search", Arguments: json.RawMessage(`{"q":"test"}`)},
+					{ID: "tc1", Name: testToolNameSearch, Arguments: json.RawMessage(`{"q":"test"}`)},
 				},
 			}},
 			2, // function_call + assistant content message
@@ -162,7 +170,7 @@ func TestConvertInputItems(t *testing.T) {
 			[]llm.Message{{
 				Role: "assistant",
 				ToolCalls: []llm.ToolCall{
-					{ID: "tc1", Name: "search", Arguments: json.RawMessage(`{"q":"test"}`)},
+					{ID: "tc1", Name: testToolNameSearch, Arguments: json.RawMessage(`{"q":"test"}`)},
 				},
 			}},
 			1, // just function_call
@@ -216,7 +224,7 @@ func TestConvertResponsesTools(t *testing.T) {
 		if result[0].OfFunction == nil {
 			t.Fatal("expected OfFunction to be set")
 		}
-		if result[0].OfFunction.Name != "search" {
+		if result[0].OfFunction.Name != testToolNameSearch {
 			t.Errorf("expected name 'search', got %q", result[0].OfFunction.Name)
 		}
 	})
@@ -259,7 +267,7 @@ func TestConvertMessages(t *testing.T) {
 			[]llm.Message{{
 				Role: "assistant",
 				ToolCalls: []llm.ToolCall{
-					{ID: "tc1", Name: "search", Arguments: json.RawMessage(`{"q":"test"}`)},
+					{ID: "tc1", Name: testToolNameSearch, Arguments: json.RawMessage(`{"q":"test"}`)},
 				},
 			}},
 			"",
@@ -318,7 +326,7 @@ func TestToProviderError(t *testing.T) {
 	t.Run("generic error", func(t *testing.T) {
 		err := fmt.Errorf("something wrong")
 		pe := toProviderError(err)
-		if pe.Provider != "openai" {
+		if pe.Provider != testProviderOpenAI {
 			t.Errorf("expected provider 'openai', got %q", pe.Provider)
 		}
 		if pe.Message != "something wrong" {
@@ -363,11 +371,12 @@ func TestComplete_ChatCompletions_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// Return 404 for Responses API probe, then handle Chat Completions
-		if r.URL.Path == "/responses" {
+		if r.URL.Path == testResponsesPath {
 			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprint(w, `{"error":{"message":"Not Found","type":"invalid_request_error","code":"invalid_url"}}`)
+			fmt.Fprint(w, `{"error":{"message":"Not Found","type":"invalid_request_error","code":"invalid_url"}}`) //nolint:errcheck
 			return
 		}
+		//nolint:errcheck // test helper
 		fmt.Fprint(w, `{
 			"id": "chatcmpl-123",
 			"object": "chat.completion",
@@ -412,7 +421,7 @@ func TestComplete_ChatCompletions_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, `{"error":{"message":"server error","type":"server_error"}}`)
+		fmt.Fprint(w, `{"error":{"message":"server error","type":"server_error"}}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -439,6 +448,7 @@ func TestComplete_ChatCompletions_ServerError(t *testing.T) {
 func TestComplete_ChatCompletions_WithToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		//nolint:errcheck // test helper
 		fmt.Fprint(w, `{
 			"id": "chatcmpl-456",
 			"object": "chat.completion",
@@ -475,7 +485,7 @@ func TestComplete_ChatCompletions_WithToolCalls(t *testing.T) {
 		Model:    "gpt-4",
 		Messages: []llm.Message{{Role: "user", Content: "search for test"}},
 		Tools: []llm.Tool{
-			{Name: "search", Description: "search", Parameters: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`)},
+			{Name: testToolNameSearch, Description: testToolNameSearch, Parameters: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`)},
 		},
 	})
 	if err != nil {
@@ -484,7 +494,7 @@ func TestComplete_ChatCompletions_WithToolCalls(t *testing.T) {
 	if len(resp.ToolCalls) != 1 {
 		t.Fatalf("expected 1 tool call, got %d", len(resp.ToolCalls))
 	}
-	if resp.ToolCalls[0].Name != "search" {
+	if resp.ToolCalls[0].Name != testToolNameSearch {
 		t.Errorf("expected tool call name 'search', got %q", resp.ToolCalls[0].Name)
 	}
 }
@@ -494,11 +504,12 @@ func TestComplete_AutoDetect_FallbackToChatCompletions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/responses" {
+		if r.URL.Path == testResponsesPath {
 			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprint(w, `{"error":{"message":"Not Found","type":"invalid_request_error","code":"invalid_url"}}`)
+			fmt.Fprint(w, `{"error":{"message":"Not Found","type":"invalid_request_error","code":"invalid_url"}}`) //nolint:errcheck
 			return
 		}
+		//nolint:errcheck // test helper
 		fmt.Fprint(w, `{
 			"id": "chatcmpl-789",
 			"object": "chat.completion",
@@ -586,13 +597,13 @@ func TestStream_ChatCompletions(t *testing.T) {
 func boolPtr(b bool) *bool { return &b }
 
 // responsesJSON returns a valid Responses API JSON body.
-func responsesJSON(text, model, status string, inputTokens, outputTokens int) string {
+func responsesJSON(text string, inputTokens, outputTokens int) string {
 	return fmt.Sprintf(`{
 		"id": "resp_test",
 		"object": "response",
 		"created_at": 1700000000,
-		"status": %q,
-		"model": %q,
+		"status": "completed",
+		"model": "gpt-4",
 		"output": [
 			{
 				"id": "msg_1",
@@ -603,7 +614,7 @@ func responsesJSON(text, model, status string, inputTokens, outputTokens int) st
 			}
 		],
 		"usage": {"input_tokens": %d, "output_tokens": %d, "total_tokens": %d}
-	}`, status, model, text, inputTokens, outputTokens, inputTokens+outputTokens)
+	}`, text, inputTokens, outputTokens, inputTokens+outputTokens)
 }
 
 func TestConvertResponsesTextFormat(t *testing.T) {
@@ -685,7 +696,7 @@ func TestConvertChatResponseFormat(t *testing.T) {
 func TestComplete_ResponsesAPI_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, responsesJSON("Hello from Responses!", "gpt-4", "completed", 10, 5))
+		fmt.Fprint(w, responsesJSON("Hello from Responses!", 10, 5))
 	}))
 	defer server.Close()
 
@@ -705,7 +716,7 @@ func TestComplete_ResponsesAPI_Success(t *testing.T) {
 	if resp.Content != "Hello from Responses!" {
 		t.Errorf("expected 'Hello from Responses!', got %q", resp.Content)
 	}
-	if resp.StopReason != "stop" {
+	if resp.StopReason != testStopReasonStop {
 		t.Errorf("expected stop reason 'stop', got %q", resp.StopReason)
 	}
 	if resp.InputTokens != 10 {
@@ -749,7 +760,7 @@ func TestComplete_ResponsesAPI_WithToolCalls(t *testing.T) {
 	resp, err := provider.Complete(context.Background(), &llm.CompletionRequest{
 		Model:    "gpt-4",
 		Messages: []llm.Message{{Role: "user", Content: "search"}},
-		Tools:    []llm.Tool{{Name: "search", Description: "search", Parameters: json.RawMessage(`{"type":"object"}`)}},
+		Tools:    []llm.Tool{{Name: testToolNameSearch, Description: testToolNameSearch, Parameters: json.RawMessage(`{"type":"object"}`)}},
 	})
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
@@ -757,13 +768,13 @@ func TestComplete_ResponsesAPI_WithToolCalls(t *testing.T) {
 	if len(resp.ToolCalls) != 1 {
 		t.Fatalf("expected 1 tool call, got %d", len(resp.ToolCalls))
 	}
-	if resp.ToolCalls[0].Name != "search" {
+	if resp.ToolCalls[0].Name != testToolNameSearch {
 		t.Errorf("expected tool name 'search', got %q", resp.ToolCalls[0].Name)
 	}
 	if resp.ToolCalls[0].ID != "call_1" {
 		t.Errorf("expected tool call ID 'call_1', got %q", resp.ToolCalls[0].ID)
 	}
-	if resp.StopReason != "tool_calls" {
+	if resp.StopReason != testStopReasonToolCalls {
 		t.Errorf("expected stop reason 'tool_calls', got %q", resp.StopReason)
 	}
 }
@@ -773,7 +784,7 @@ func TestComplete_ResponsesAPI_WithAllOptions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&receivedBody)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, responsesJSON("ok", "gpt-4", "completed", 1, 1))
+		fmt.Fprint(w, responsesJSON("ok", 1, 1))
 	}))
 	defer server.Close()
 
@@ -815,7 +826,7 @@ func TestComplete_ResponsesAPI_WithAllOptions(t *testing.T) {
 func TestComplete_AutoDetect_ResponsesSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, responsesJSON("Responses works!", "gpt-4", "completed", 5, 3))
+		fmt.Fprint(w, responsesJSON("Responses works!", 5, 3))
 	}))
 	defer server.Close()
 
@@ -1006,7 +1017,7 @@ func TestStream_ResponsesAPI_WithToolCalls(t *testing.T) {
 	ch, err := provider.Stream(context.Background(), &llm.CompletionRequest{
 		Model:    "gpt-4",
 		Messages: []llm.Message{{Role: "user", Content: "search"}},
-		Tools:    []llm.Tool{{Name: "search", Description: "search", Parameters: json.RawMessage(`{"type":"object"}`)}},
+		Tools:    []llm.Tool{{Name: testToolNameSearch, Description: testToolNameSearch, Parameters: json.RawMessage(`{"type":"object"}`)}},
 	})
 	if err != nil {
 		t.Fatalf("Stream() error = %v", err)
@@ -1020,7 +1031,7 @@ func TestStream_ResponsesAPI_WithToolCalls(t *testing.T) {
 		}
 		if chunk.ToolCall != nil {
 			gotToolCall = true
-			if chunk.ToolCall.Name != "search" {
+			if chunk.ToolCall.Name != testToolNameSearch {
 				t.Errorf("expected tool name 'search', got %q", chunk.ToolCall.Name)
 			}
 		}
@@ -1031,7 +1042,7 @@ func TestStream_ResponsesAPI_WithToolCalls(t *testing.T) {
 	if !gotToolCall {
 		t.Error("expected tool call chunk")
 	}
-	if stopReason != "tool_calls" {
+	if stopReason != testStopReasonToolCalls {
 		t.Errorf("expected stop reason 'tool_calls', got %q", stopReason)
 	}
 }
@@ -1039,7 +1050,7 @@ func TestStream_ResponsesAPI_WithToolCalls(t *testing.T) {
 func TestStream_ResponsesAPI_WithAllOptions(t *testing.T) {
 	var receivedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/responses" {
+		if r.URL.Path == testResponsesPath {
 			_ = json.NewDecoder(r.Body).Decode(&receivedBody)
 			w.Header().Set("Content-Type", "text/event-stream")
 			flusher, _ := w.(http.Flusher)
@@ -1157,7 +1168,7 @@ func TestStream_ResponsesAPI_Error(t *testing.T) {
 
 func TestStream_AutoDetect_FallbackToChatCompletions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/responses" {
+		if r.URL.Path == testResponsesPath {
 			// Check if this is the streaming request (has stream in body) or probe
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
@@ -1208,11 +1219,11 @@ func TestStream_AutoDetect_ResponsesSuccess(t *testing.T) {
 	requestCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
-		if r.URL.Path == "/responses" {
+		if r.URL.Path == testResponsesPath {
 			if requestCount == 1 {
 				// First call is probe (non-streaming)
 				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprint(w, responsesJSON("probe", "gpt-4", "completed", 1, 1))
+				fmt.Fprint(w, responsesJSON("probe", 1, 1))
 				return
 			}
 			// Second call is the actual streaming request
@@ -1305,7 +1316,7 @@ func TestStream_ChatCompletions_WithToolCalls(t *testing.T) {
 	ch, err := provider.Stream(context.Background(), &llm.CompletionRequest{
 		Model:     "gpt-4",
 		Messages:  []llm.Message{{Role: "user", Content: "search"}},
-		Tools:     []llm.Tool{{Name: "search", Description: "search", Parameters: json.RawMessage(`{"type":"object"}`)}},
+		Tools:     []llm.Tool{{Name: testToolNameSearch, Description: testToolNameSearch, Parameters: json.RawMessage(`{"type":"object"}`)}},
 		MaxTokens: 100,
 		ResponseFormat: &llm.ResponseFormat{
 			Type: "json_object",
@@ -1323,7 +1334,7 @@ func TestStream_ChatCompletions_WithToolCalls(t *testing.T) {
 		}
 		if chunk.ToolCall != nil {
 			gotToolCall = true
-			if chunk.ToolCall.Name != "search" {
+			if chunk.ToolCall.Name != testToolNameSearch {
 				t.Errorf("expected tool name 'search', got %q", chunk.ToolCall.Name)
 			}
 		}
@@ -1334,7 +1345,7 @@ func TestStream_ChatCompletions_WithToolCalls(t *testing.T) {
 	if !gotToolCall {
 		t.Error("expected tool call chunk")
 	}
-	if stopReason != "tool_calls" {
+	if stopReason != testStopReasonToolCalls {
 		t.Errorf("expected stop reason 'tool_calls', got %q", stopReason)
 	}
 }
