@@ -401,3 +401,29 @@ kubectl apply -n observability -f https://raw.githubusercontent.com/jaegertracin
 kubectl set env deployment/orka-controller \
   OTEL_EXPORTER_OTLP_ENDPOINT=jaeger-collector.observability.svc:4317
 ```
+
+## Context Engineering Best Practices
+
+Research on LLM agent context files ([arxiv 2602.11988](https://arxiv.org/abs/2602.11988)) shows that verbose context hurts more than it helps: LLM-generated context files reduce task success rates by 0.5–2% while increasing inference costs by 20–23%. Even developer-written files yield only marginal improvements (~4%) with similar cost increases. The guidelines below translate these findings into practical advice for Orka's `systemPrompt`, `Skill`, and `Agent` configuration.
+
+### Writing Effective System Prompts
+
+Keep Agent `systemPrompt` content **minimal and requirement-focused**:
+
+- **Include only**: tooling commands (build/test/lint invocations), non-discoverable gotchas (e.g., "provider secret key defaults to `api-key`"), and hard constraints the agent cannot infer from source code.
+- **Avoid codebase overviews** — agents discover project structure efficiently on their own through file listing and search tools. Overviews add tokens without improving navigation speed.
+- **Don't duplicate** information already present in `docs/`, `README`, or inline code comments. Redundant instructions increase reasoning token usage (14–22% more) without improving outcomes.
+
+### Writing Effective Skills
+
+Skills are prepended to the system prompt on **every LLM call** for every task that uses the parent Agent. Each Skill directly increases per-request token cost.
+
+- Keep Skill `content` concise and **action-oriented** — write instructions ("run `make lint-fix` after changes"), not descriptions ("this project uses a Makefile-based build system").
+- Split large Skills so Agents only reference the ones they need. A research Agent doesn't need a coding-standards Skill.
+- Regularly audit Skill content and remove instructions the agent follows by default.
+
+### Monitoring Recommendations
+
+- Track `orka_task_duration_seconds` and LLM token metrics — more instructions ≠ better outcomes.
+- A/B test agent performance with and without specific `systemPrompt` or `Skill` content to validate that each addition provides measurable benefit.
+- Well-documented repositories benefit least from additional context; focus context engineering effort on repos with limited existing documentation.

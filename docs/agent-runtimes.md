@@ -420,6 +420,14 @@ orka-controller \
   --claude-worker-image=ghcr.io/sozercan/orka/agent-worker-claude:v1.0.0
 ```
 
+## Optimizing Agent Performance
+
+Research on LLM agent context ([arxiv 2602.11988](https://arxiv.org/abs/2602.11988)) shows that verbose instructions increase token costs without proportional quality gains. Apply these guidelines to Agent and Task configuration:
+
+- **Minimal tool allowlists**: Only grant tools the task actually needs. A read-only analysis task should use `allowedTools: [Read, Glob, Grep]` — don't include `Write`, `Edit`, or `Bash` if the task doesn't require them. Fewer tools means less prompt overhead and a smaller attack surface.
+- **Appropriate `maxTurns`**: Set lower values (10–30) for focused tasks like single-file edits, and higher values (50–100+) for complex multi-file refactors. Overly generous limits waste compute on unnecessary iterations if the agent gets stuck.
+- **Concise system prompts**: Include only tooling commands, hard requirements, and non-discoverable gotchas. Codebase overviews and redundant documentation increase reasoning tokens by 14–22% without improving outcomes. See [Context Engineering Best Practices](configuration.md#context-engineering-best-practices) for detailed guidance.
+
 ## Examples
 
 Complete sample manifests are available in [`config/samples/`](../config/samples/):
