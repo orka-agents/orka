@@ -32,7 +32,7 @@ func TestFS_ContainsIndexHTML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(index.html) error = %v", err)
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck
 
 	info, err := f.Stat()
 	if err != nil {

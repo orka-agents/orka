@@ -65,7 +65,7 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 			name: "success with all args",
 			envVars: map[string]string{
 				"ORKA_TASK_NAME":      parentTaskName,
-				"ORKA_TASK_NAMESPACE": "default",
+				"ORKA_TASK_NAMESPACE": defaultNamespace,
 			},
 			args: json.RawMessage(`{
 				"role": "coder",
@@ -89,7 +89,7 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 			name: "success with minimal args inherited model/provider",
 			envVars: map[string]string{
 				"ORKA_TASK_NAME":      parentTaskName,
-				"ORKA_TASK_NAMESPACE": "default",
+				"ORKA_TASK_NAMESPACE": defaultNamespace,
 				"ORKA_AI_PROVIDER":    "openai",
 				"ORKA_AI_MODEL":       "gpt-4o",
 			},
@@ -102,7 +102,7 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 			name: "error when role is empty",
 			envVars: map[string]string{
 				"ORKA_TASK_NAME":      parentTaskName,
-				"ORKA_TASK_NAMESPACE": "default",
+				"ORKA_TASK_NAMESPACE": defaultNamespace,
 			},
 			args:       json.RawMessage(`{"role": "", "systemPrompt": "prompt"}`),
 			wantErr:    true,
@@ -112,7 +112,7 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 			name: "error when systemPrompt is empty",
 			envVars: map[string]string{
 				"ORKA_TASK_NAME":      parentTaskName,
-				"ORKA_TASK_NAMESPACE": "default",
+				"ORKA_TASK_NAMESPACE": defaultNamespace,
 			},
 			args:       json.RawMessage(`{"role": "coder", "systemPrompt": ""}`),
 			wantErr:    true,
@@ -122,7 +122,7 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 			name: "invalid JSON args",
 			envVars: map[string]string{
 				"ORKA_TASK_NAME":      parentTaskName,
-				"ORKA_TASK_NAMESPACE": "default",
+				"ORKA_TASK_NAMESPACE": defaultNamespace,
 			},
 			args:       json.RawMessage(`{invalid}`),
 			wantErr:    true,
@@ -174,7 +174,7 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 
 func TestCreateAgentTool_Execute_OwnerReference(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
 
 	k8sClient := newFakeClient(parentTask())
 	tool := NewCreateAgentTool(k8sClient)
@@ -222,7 +222,7 @@ func TestCreateAgentTool_Execute_OwnerReference(t *testing.T) {
 
 func TestCreateAgentTool_Execute_AutoNaming(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
 
 	k8sClient := newFakeClient(parentTask())
 	tool := NewCreateAgentTool(k8sClient)
@@ -256,7 +256,7 @@ func TestCreateAgentTool_Execute_AutoNaming(t *testing.T) {
 
 func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
 
 	k8sClient := newFakeClient(parentTask())
 	tool := NewCreateAgentTool(k8sClient)
@@ -319,8 +319,8 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 	if len(agent.Spec.Tools) != 2 {
 		t.Fatalf("expected 2 tools, got %d", len(agent.Spec.Tools))
 	}
-	if agent.Spec.Tools[0].Name != "web_search" {
-		t.Errorf("tools[0].name = %q, want %q", agent.Spec.Tools[0].Name, "web_search")
+	if agent.Spec.Tools[0].Name != webSearchToolName {
+		t.Errorf("tools[0].name = %q, want %q", agent.Spec.Tools[0].Name, webSearchToolName)
 	}
 	if agent.Spec.Tools[1].Name != "code_exec" {
 		t.Errorf("tools[1].name = %q, want %q", agent.Spec.Tools[1].Name, "code_exec")
@@ -371,7 +371,7 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 
 func TestCreateAgentTool_Execute_InheritedModelProvider(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
 	t.Setenv("ORKA_AI_PROVIDER", "openai")
 	t.Setenv("ORKA_AI_MODEL", "gpt-4o")
 
@@ -415,13 +415,13 @@ func TestCreateAgentTool_Execute_InheritedModelProvider(t *testing.T) {
 
 func TestCreateAgentTool_Execute_DefaultNamespace(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	// No ORKA_TASK_NAMESPACE set — should default to "default"
+	// No ORKA_TASK_NAMESPACE set — should default to defaultNamespace
 
-	// Create parent task in "default" namespace
+	// Create parent task in defaultNamespace namespace
 	parent := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      parentTaskName,
-			Namespace: "default",
+			Namespace: defaultNamespace,
 			UID:       apitypes.UID("parent-uid-1234"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -443,7 +443,7 @@ func TestCreateAgentTool_Execute_DefaultNamespace(t *testing.T) {
 		t.Fatalf("failed to unmarshal result: %v", err)
 	}
 
-	if agentResult.Namespace != "default" {
-		t.Errorf("namespace = %q, want %q", agentResult.Namespace, "default")
+	if agentResult.Namespace != defaultNamespace {
+		t.Errorf("namespace = %q, want %q", agentResult.Namespace, defaultNamespace)
 	}
 }

@@ -29,7 +29,7 @@ func testAgent() *corev1alpha1.Agent {
 
 func TestDeleteAgentTool_Name(t *testing.T) {
 	tool := NewDeleteAgentTool(newFakeClient())
-	if tool.Name() != "delete_agent" {
+	if tool.Name() != deleteAgentToolName {
 		t.Errorf("expected name 'delete_agent', got '%s'", tool.Name())
 	}
 }
@@ -55,7 +55,7 @@ func TestDeleteAgentTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != "object" {
+	if schema["type"] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 	props, ok := schema["properties"].(map[string]any)

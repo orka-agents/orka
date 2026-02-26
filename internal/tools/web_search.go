@@ -203,7 +203,7 @@ func parseDDGResults(html string, limit int) []WebSearchResult {
 	linkMatches := ddgLinkRe.FindAllStringSubmatch(html, -1)
 	snippetMatches := ddgSnippetRe.FindAllStringSubmatch(html, -1)
 
-	var results []WebSearchResult
+	results := make([]WebSearchResult, 0, len(linkMatches))
 	for i, m := range linkMatches {
 		if len(results) >= limit {
 			break

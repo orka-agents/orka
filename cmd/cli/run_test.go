@@ -16,6 +16,11 @@ import (
 	"github.com/sozercan/orka/internal/cli/client"
 )
 
+const (
+	chatConfigPath = "/api/v1/chat/config"
+	chatAPIPath    = "/api/v1/chat"
+)
+
 // ---------------------------------------------------------------------------
 // renderMarkdown
 // ---------------------------------------------------------------------------
@@ -30,7 +35,7 @@ func TestRenderMarkdownBasic(t *testing.T) {
 	}
 }
 
-func TestRenderMarkdownEmpty(t *testing.T) {
+func TestRenderMarkdownEmpty(t *testing.T) { //nolint:unparam
 	out := renderMarkdown("")
 	// Empty input should still produce some output (or empty)
 	_ = out
@@ -68,11 +73,11 @@ func TestHandleToolCallEvent_DelegateTask(t *testing.T) {
 
 	handleToolCallEvent(data, VerbosityDefault)
 
-	w.Close()
+	w.Close() //nolint:errcheck
 	os.Stderr = old
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	buf.ReadFrom(r) //nolint:errcheck
 	if !strings.Contains(buf.String(), "Delegating to code-reviewer") {
 		t.Errorf("expected delegation message, got %q", buf.String())
 	}
@@ -91,17 +96,17 @@ func TestHandleToolCallEvent_CreateAgentTask(t *testing.T) {
 
 	handleToolCallEvent(data, VerbosityDefault)
 
-	w.Close()
+	w.Close() //nolint:errcheck
 	os.Stderr = old
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	buf.ReadFrom(r) //nolint:errcheck
 	if !strings.Contains(buf.String(), "Delegating to planner") {
 		t.Errorf("expected delegation message, got %q", buf.String())
 	}
 }
 
-func TestHandleToolCallEvent_CheckTaskProgress(t *testing.T) {
+func TestHandleToolCallEvent_CheckTaskProgress(t *testing.T) { //nolint:unparam
 	data := client.SSEEventData{Name: "check_task_progress"}
 
 	old := os.Stderr
@@ -110,7 +115,7 @@ func TestHandleToolCallEvent_CheckTaskProgress(t *testing.T) {
 
 	handleToolCallEvent(data, VerbosityDefault)
 
-	w.Close()
+	w.Close() //nolint:errcheck
 	os.Stderr = old
 	// Should not panic — suppressed
 }
@@ -124,11 +129,11 @@ func TestHandleToolCallEvent_FetchTaskOutput(t *testing.T) {
 
 	handleToolCallEvent(data, VerbosityV)
 
-	w.Close()
+	w.Close() //nolint:errcheck
 	os.Stderr = old
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	buf.ReadFrom(r) //nolint:errcheck
 	if !strings.Contains(buf.String(), "Fetching result") {
 		t.Errorf("expected 'Fetching result' at verbosity V, got %q", buf.String())
 	}
@@ -143,11 +148,11 @@ func TestHandleToolCallEvent_FetchTaskOutputDefault(t *testing.T) {
 
 	handleToolCallEvent(data, VerbosityDefault)
 
-	w.Close()
+	w.Close() //nolint:errcheck
 	os.Stderr = old
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	buf.ReadFrom(r) //nolint:errcheck
 	// At default verbosity, fetch_task_output should not print
 	if strings.Contains(buf.String(), "Fetching result") {
 		t.Errorf("should not show fetching result at default verbosity")
@@ -163,11 +168,11 @@ func TestHandleToolCallEvent_DefaultTool(t *testing.T) {
 
 	handleToolCallEvent(data, VerbosityDefault)
 
-	w.Close()
+	w.Close() //nolint:errcheck
 	os.Stderr = old
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	buf.ReadFrom(r) //nolint:errcheck
 	if !strings.Contains(buf.String(), "some_other_tool") {
 		t.Errorf("expected tool name in output, got %q", buf.String())
 	}
@@ -182,11 +187,11 @@ func TestHandleToolCallEvent_DefaultToolVV(t *testing.T) {
 
 	handleToolCallEvent(data, VerbosityVV)
 
-	w.Close()
+	w.Close() //nolint:errcheck
 	os.Stderr = old
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	buf.ReadFrom(r) //nolint:errcheck
 	// At VV, default tool name printing is suppressed (verbosity < VerbosityVV is false)
 	if strings.Contains(buf.String(), "⚙") {
 		t.Errorf("should not show ⚙ at VV verbosity for default tool")
@@ -206,11 +211,11 @@ func TestHandleToolCallEvent_DelegateVV(t *testing.T) {
 
 	handleToolCallEvent(data, VerbosityVV)
 
-	w.Close()
+	w.Close() //nolint:errcheck
 	os.Stderr = old
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	buf.ReadFrom(r) //nolint:errcheck
 	// At VV, delegation message is suppressed (verbosity < VerbosityVV is false)
 	if strings.Contains(buf.String(), "Delegating") {
 		t.Errorf("should not show delegation at VV verbosity")
@@ -238,11 +243,11 @@ func TestHandleToolResultEvent_CheckTaskProgress(t *testing.T) {
 
 	handleToolResultEvent(data, VerbosityDefault)
 
-	w.Close()
+	w.Close() //nolint:errcheck
 	os.Stderr = old
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	buf.ReadFrom(r) //nolint:errcheck
 	out := buf.String()
 	if !strings.Contains(out, "my-task") {
 		t.Errorf("expected task name, got %q", out)
@@ -267,11 +272,11 @@ func TestHandleToolResultEvent_CheckTaskProgressNoName(t *testing.T) {
 
 	handleToolResultEvent(data, VerbosityDefault)
 
-	w.Close()
+	w.Close() //nolint:errcheck
 	os.Stderr = old
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	buf.ReadFrom(r) //nolint:errcheck
 	if !strings.Contains(buf.String(), "task") {
 		t.Errorf("expected default 'task' name, got %q", buf.String())
 	}
@@ -290,11 +295,11 @@ func TestHandleToolResultEvent_CheckTaskProgressVV(t *testing.T) {
 
 	handleToolResultEvent(data, VerbosityVV)
 
-	w.Close()
+	w.Close() //nolint:errcheck
 	os.Stderr = old
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	buf.ReadFrom(r) //nolint:errcheck
 	// VV suppresses the ↻ output
 	if strings.Contains(buf.String(), "↻") {
 		t.Error("should not show ↻ at VV verbosity")
@@ -310,11 +315,11 @@ func TestHandleToolResultEvent_FetchTaskOutput(t *testing.T) {
 
 	handleToolResultEvent(data, VerbosityV)
 
-	w.Close()
+	w.Close() //nolint:errcheck
 	os.Stderr = old
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	buf.ReadFrom(r) //nolint:errcheck
 	if !strings.Contains(buf.String(), "Result received") {
 		t.Errorf("expected 'Result received' at V, got %q", buf.String())
 	}
@@ -329,11 +334,11 @@ func TestHandleToolResultEvent_FetchTaskOutputDefault(t *testing.T) {
 
 	handleToolResultEvent(data, VerbosityDefault)
 
-	w.Close()
+	w.Close() //nolint:errcheck
 	os.Stderr = old
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	buf.ReadFrom(r) //nolint:errcheck
 	if strings.Contains(buf.String(), "Result received") {
 		t.Error("should not show at default verbosity")
 	}
@@ -348,11 +353,11 @@ func TestHandleToolResultEvent_DefaultToolV(t *testing.T) {
 
 	handleToolResultEvent(data, VerbosityV)
 
-	w.Close()
+	w.Close() //nolint:errcheck
 	os.Stderr = old
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	buf.ReadFrom(r) //nolint:errcheck
 	if !strings.Contains(buf.String(), "custom_tool") {
 		t.Errorf("expected tool name at V, got %q", buf.String())
 	}
@@ -367,11 +372,11 @@ func TestHandleToolResultEvent_DefaultToolDefault(t *testing.T) {
 
 	handleToolResultEvent(data, VerbosityDefault)
 
-	w.Close()
+	w.Close() //nolint:errcheck
 	os.Stderr = old
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	buf.ReadFrom(r) //nolint:errcheck
 	// Default verbosity should not show ✓ for non-special tools
 	if strings.Contains(buf.String(), "✓") {
 		t.Error("should not show at default verbosity")
@@ -427,13 +432,14 @@ func TestFinishStream_NonTTYNoContent(t *testing.T) {
 func sseServer(events []string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/chat/config":
-			json.NewEncoder(w).Encode(client.ChatConfigResponse{Enabled: true, Provider: "test", Model: "gpt-test"}) //nolint:errcheck
-		case "/api/v1/chat":
+		case chatConfigPath:
+			json.NewEncoder(w).Encode( //nolint:errcheck
+				client.ChatConfigResponse{Enabled: true, Provider: "test", Model: "gpt-test"})
+		case chatAPIPath:
 			w.Header().Set("Content-Type", "text/event-stream")
 			flusher, ok := w.(http.Flusher)
 			for _, e := range events {
-				fmt.Fprint(w, e)
+				fmt.Fprint(w, e) //nolint:errcheck
 				if ok {
 					flusher.Flush()
 				}
@@ -546,7 +552,7 @@ func TestStreamChat_MessageThenToolCall(t *testing.T) {
 func TestStreamChat_ServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, "internal error")
+		fmt.Fprint(w, "internal error") //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -676,12 +682,13 @@ func TestNewRunCmd_OneShotViaCobra(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/chat/config":
-			json.NewEncoder(w).Encode(client.ChatConfigResponse{Enabled: true, Provider: "openai", Model: "gpt-4"}) //nolint:errcheck
-		case "/api/v1/chat":
+		case chatConfigPath:
+			json.NewEncoder(w).Encode( //nolint:errcheck
+				client.ChatConfigResponse{Enabled: true, Provider: "openai", Model: "gpt-4"})
+		case chatAPIPath:
 			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprintf(w, "event: message\ndata: %s\n\n", msgData)
-			fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData)
+			fmt.Fprintf(w, "event: message\ndata: %s\n\n", msgData) //nolint:errcheck
+			fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData)   //nolint:errcheck
 		}
 	}))
 	defer srv.Close()
@@ -703,11 +710,12 @@ func TestNewRunCmd_OneShotWithModel(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/chat/config":
-			json.NewEncoder(w).Encode(client.ChatConfigResponse{Enabled: true, Provider: "openai", Model: "gpt-4"}) //nolint:errcheck
-		case "/api/v1/chat":
+		case chatConfigPath:
+			json.NewEncoder(w).Encode( //nolint:errcheck
+				client.ChatConfigResponse{Enabled: true, Provider: "openai", Model: "gpt-4"})
+		case chatAPIPath:
 			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData)
+			fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData) //nolint:errcheck
 		}
 	}))
 	defer srv.Close()
@@ -720,7 +728,7 @@ func TestNewRunCmd_OneShotWithModel(t *testing.T) {
 	}
 }
 
-func TestNewRunCmd_OneShotWithAgent(t *testing.T) {
+func TestNewRunCmd_OneShotWithAgent(t *testing.T) { //nolint:dupl
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
@@ -728,11 +736,11 @@ func TestNewRunCmd_OneShotWithAgent(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/chat/config":
+		case chatConfigPath:
 			json.NewEncoder(w).Encode(client.ChatConfigResponse{Enabled: true}) //nolint:errcheck
-		case "/api/v1/chat":
+		case chatAPIPath:
 			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData)
+			fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData) //nolint:errcheck
 		}
 	}))
 	defer srv.Close()
@@ -779,7 +787,7 @@ func TestNewRunCmd_ServerUnreachable(t *testing.T) {
 	}
 }
 
-func TestNewRunCmd_ProviderOnly(t *testing.T) {
+func TestNewRunCmd_ProviderOnly(t *testing.T) { //nolint:dupl
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
@@ -787,12 +795,12 @@ func TestNewRunCmd_ProviderOnly(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/chat/config":
+		case chatConfigPath:
 			// No provider or model set
 			json.NewEncoder(w).Encode(client.ChatConfigResponse{Enabled: true}) //nolint:errcheck
-		case "/api/v1/chat":
+		case chatAPIPath:
 			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData)
+			fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData) //nolint:errcheck
 		}
 	}))
 	defer srv.Close()
@@ -813,11 +821,11 @@ func TestNewRunCmd_ModelOnly(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/chat/config":
+		case chatConfigPath:
 			json.NewEncoder(w).Encode(client.ChatConfigResponse{Enabled: true, Model: "base-model"}) //nolint:errcheck
-		case "/api/v1/chat":
+		case chatAPIPath:
 			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData)
+			fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData) //nolint:errcheck
 		}
 	}))
 	defer srv.Close()
@@ -838,11 +846,11 @@ func TestNewRunCmd_NoProviderNoModel(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/chat/config":
+		case chatConfigPath:
 			json.NewEncoder(w).Encode(client.ChatConfigResponse{Enabled: true}) //nolint:errcheck
-		case "/api/v1/chat":
+		case chatAPIPath:
 			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData)
+			fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData) //nolint:errcheck
 		}
 	}))
 	defer srv.Close()
@@ -864,7 +872,7 @@ func TestRunREPL_QuitCommand(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData)
+		fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData) //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -877,8 +885,8 @@ func TestRunREPL_QuitCommand(t *testing.T) {
 	defer func() { os.Stdin = oldStdin }()
 
 	go func() {
-		fmt.Fprintln(w, "/quit")
-		w.Close()
+		fmt.Fprintln(w, "/quit") //nolint:errcheck
+		w.Close()                //nolint:errcheck
 	}()
 
 	err := runREPL(c, "test-session", "", "", "", VerbosityDefault, false, false)
@@ -896,8 +904,8 @@ func TestRunREPL_ExitCommand(t *testing.T) {
 	defer func() { os.Stdin = oldStdin }()
 
 	go func() {
-		fmt.Fprintln(w, "/exit")
-		w.Close()
+		fmt.Fprintln(w, "/exit") //nolint:errcheck
+		w.Close()                //nolint:errcheck
 	}()
 
 	err := runREPL(c, "s1", "", "", "", VerbosityDefault, false, false)
@@ -915,9 +923,9 @@ func TestRunREPL_HelpCommand(t *testing.T) {
 	defer func() { os.Stdin = oldStdin }()
 
 	go func() {
-		fmt.Fprintln(w, "/help")
-		fmt.Fprintln(w, "/quit")
-		w.Close()
+		fmt.Fprintln(w, "/help") //nolint:errcheck
+		fmt.Fprintln(w, "/quit") //nolint:errcheck
+		w.Close()                //nolint:errcheck
 	}()
 
 	err := runREPL(c, "s1", "", "", "", VerbosityDefault, false, false)
@@ -935,9 +943,9 @@ func TestRunREPL_SessionCommand(t *testing.T) {
 	defer func() { os.Stdin = oldStdin }()
 
 	go func() {
-		fmt.Fprintln(w, "/session")
-		fmt.Fprintln(w, "/quit")
-		w.Close()
+		fmt.Fprintln(w, "/session") //nolint:errcheck
+		fmt.Fprintln(w, "/quit")    //nolint:errcheck
+		w.Close()                   //nolint:errcheck
 	}()
 
 	err := runREPL(c, "s1", "", "", "", VerbosityDefault, false, false)
@@ -955,9 +963,9 @@ func TestRunREPL_ClearCommand(t *testing.T) {
 	defer func() { os.Stdin = oldStdin }()
 
 	go func() {
-		fmt.Fprintln(w, "/clear")
-		fmt.Fprintln(w, "/quit")
-		w.Close()
+		fmt.Fprintln(w, "/clear") //nolint:errcheck
+		fmt.Fprintln(w, "/quit")  //nolint:errcheck
+		w.Close()                 //nolint:errcheck
 	}()
 
 	err := runREPL(c, "s1", "", "", "", VerbosityDefault, false, false)
@@ -975,9 +983,9 @@ func TestRunREPL_UnknownCommand(t *testing.T) {
 	defer func() { os.Stdin = oldStdin }()
 
 	go func() {
-		fmt.Fprintln(w, "/unknown")
-		fmt.Fprintln(w, "/quit")
-		w.Close()
+		fmt.Fprintln(w, "/unknown") //nolint:errcheck
+		fmt.Fprintln(w, "/quit")    //nolint:errcheck
+		w.Close()                   //nolint:errcheck
 	}()
 
 	err := runREPL(c, "s1", "", "", "", VerbosityDefault, false, false)
@@ -995,10 +1003,10 @@ func TestRunREPL_EmptyLine(t *testing.T) {
 	defer func() { os.Stdin = oldStdin }()
 
 	go func() {
-		fmt.Fprintln(w, "")
-		fmt.Fprintln(w, "  ")
-		fmt.Fprintln(w, "/quit")
-		w.Close()
+		fmt.Fprintln(w, "")      //nolint:errcheck
+		fmt.Fprintln(w, "  ")    //nolint:errcheck
+		fmt.Fprintln(w, "/quit") //nolint:errcheck
+		w.Close()                //nolint:errcheck
 	}()
 
 	err := runREPL(c, "s1", "", "", "", VerbosityDefault, false, false)
@@ -1012,7 +1020,7 @@ func TestRunREPL_ChatMessage(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData)
+		fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData) //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -1024,9 +1032,9 @@ func TestRunREPL_ChatMessage(t *testing.T) {
 	defer func() { os.Stdin = oldStdin }()
 
 	go func() {
-		fmt.Fprintln(w, "hello world")
-		fmt.Fprintln(w, "/quit")
-		w.Close()
+		fmt.Fprintln(w, "hello world") //nolint:errcheck
+		fmt.Fprintln(w, "/quit")       //nolint:errcheck
+		w.Close()                      //nolint:errcheck
 	}()
 
 	err := runREPL(c, "s1", "", "", "", VerbosityDefault, false, false)
@@ -1040,7 +1048,7 @@ func TestRunREPL_ChatError(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, "event: error\ndata: %s\n\n", errData)
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", errData) //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -1052,9 +1060,9 @@ func TestRunREPL_ChatError(t *testing.T) {
 	defer func() { os.Stdin = oldStdin }()
 
 	go func() {
-		fmt.Fprintln(w, "hello")
-		fmt.Fprintln(w, "/quit")
-		w.Close()
+		fmt.Fprintln(w, "hello") //nolint:errcheck
+		fmt.Fprintln(w, "/quit") //nolint:errcheck
+		w.Close()                //nolint:errcheck
 	}()
 
 	err := runREPL(c, "s1", "", "", "", VerbosityDefault, false, false)
@@ -1072,7 +1080,7 @@ func TestRunREPL_EOF(t *testing.T) {
 	defer func() { os.Stdin = oldStdin }()
 
 	// Close immediately — EOF
-	w.Close()
+	w.Close() //nolint:errcheck
 
 	err := runREPL(c, "s1", "", "", "", VerbosityDefault, false, false)
 	if err != nil {

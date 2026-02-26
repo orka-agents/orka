@@ -17,6 +17,12 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
+const (
+	phasePending         = "Pending"
+	msgTaskCreated       = "Task created"
+	errTypeAlreadyExists = "already_exists"
+)
+
 func TestCreateAgentTaskTool_Name(t *testing.T) {
 	tool := &CreateAgentTaskTool{}
 	if got := tool.Name(); got != "create_agent_task" {
@@ -61,7 +67,7 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 		taskCounter = 0
 		tc := &ToolContext{
 			Client:    fc,
-			Namespace: "default",
+			Namespace: defaultNamespace,
 			GenerateTaskName: func() string {
 				taskCounter++
 				return "agent-task-1"
@@ -96,10 +102,10 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 				if data["name"] != "agent-task-1" {
 					t.Errorf("name = %v, want agent-task-1", data["name"])
 				}
-				if data["namespace"] != "default" {
+				if data["namespace"] != defaultNamespace {
 					t.Errorf("namespace = %v, want default", data["namespace"])
 				}
-				if data["phase"] != "Pending" {
+				if data["phase"] != phasePending {
 					t.Errorf("phase = %v, want Pending", data["phase"])
 				}
 			},
@@ -141,7 +147,7 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 				}
 				data := r.Data.(map[string]any)
 				msg := data["message"].(string)
-				if msg == "Task created" {
+				if msg == msgTaskCreated {
 					t.Error("expected scheduled message, got one-time message")
 				}
 			},
@@ -157,7 +163,7 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 				if r.Success {
 					t.Error("expected failure for missing prompt")
 				}
-				if r.ErrorType != "invalid_arguments" {
+				if r.ErrorType != errTypeInvalidArgs {
 					t.Errorf("errorType = %v, want invalid_arguments", r.ErrorType)
 				}
 			},
@@ -173,7 +179,7 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 				if r.Success {
 					t.Error("expected failure for missing agentRef")
 				}
-				if r.ErrorType != "invalid_arguments" {
+				if r.ErrorType != errTypeInvalidArgs {
 					t.Errorf("errorType = %v, want invalid_arguments", r.ErrorType)
 				}
 			},
@@ -189,7 +195,7 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 				if r.Success {
 					t.Error("expected failure for invalid JSON")
 				}
-				if r.ErrorType != "invalid_arguments" {
+				if r.ErrorType != errTypeInvalidArgs {
 					t.Errorf("errorType = %v, want invalid_arguments", r.ErrorType)
 				}
 			},
@@ -205,7 +211,7 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 				if r.Success {
 					t.Error("expected failure for invalid timeout")
 				}
-				if r.ErrorType != "invalid_arguments" {
+				if r.ErrorType != errTypeInvalidArgs {
 					t.Errorf("errorType = %v, want invalid_arguments", r.ErrorType)
 				}
 			},
@@ -217,7 +223,7 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 				&corev1alpha1.Task{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "agent-task-1",
-						Namespace: "default",
+						Namespace: defaultNamespace,
 					},
 					Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
 				},
@@ -230,7 +236,7 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 				if r.Success {
 					t.Error("expected failure for already exists")
 				}
-				if r.ErrorType != "already_exists" {
+				if r.ErrorType != errTypeAlreadyExists {
 					t.Errorf("errorType = %v, want already_exists", r.ErrorType)
 				}
 			},
@@ -268,7 +274,7 @@ func TestCreateAgentTaskTool_Execute_MissingContext(t *testing.T) {
 	if r.Success {
 		t.Error("expected failure for missing context")
 	}
-	if r.ErrorType != "internal_error" {
+	if r.ErrorType != errTypeInternalError {
 		t.Errorf("errorType = %v, want internal_error", r.ErrorType)
 	}
 }

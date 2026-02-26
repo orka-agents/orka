@@ -29,6 +29,8 @@ import (
 	"github.com/sozercan/orka/internal/store"
 )
 
+const queryTrue = "true"
+
 // Handlers contains all API handlers
 //
 // builtinToolsList defines the built-in tools returned by list/get endpoints.
@@ -466,7 +468,7 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	}
 
 	podName := pods.Items[0].Name
-	follow := c.Query("follow") == "true"
+	follow := c.Query("follow") == queryTrue
 
 	if follow {
 		streamCtx, streamCancel := context.WithCancel(context.Background())

@@ -175,11 +175,11 @@ func (t *CodeExecTool) executePython(ctx context.Context, code string) CodeExecR
 	}
 	tmpPath := tmpFile.Name()
 	if _, err := tmpFile.Write([]byte(code)); err != nil {
-		tmpFile.Close()
+		tmpFile.Close()    //nolint:errcheck
 		os.Remove(tmpPath) //nolint:errcheck
 		return CodeExecResult{Error: fmt.Sprintf("failed to write script: %v", err), ExitCode: -1}
 	}
-	tmpFile.Close()
+	tmpFile.Close()          //nolint:errcheck
 	defer os.Remove(tmpPath) //nolint:errcheck
 
 	cmd := exec.CommandContext(ctx, "python3", tmpPath)
@@ -194,11 +194,11 @@ func (t *CodeExecTool) executeNode(ctx context.Context, code string) CodeExecRes
 	}
 	tmpPath := tmpFile.Name()
 	if _, err := tmpFile.Write([]byte(code)); err != nil {
-		tmpFile.Close()
+		tmpFile.Close()    //nolint:errcheck
 		os.Remove(tmpPath) //nolint:errcheck
 		return CodeExecResult{Error: fmt.Sprintf("failed to write script: %v", err), ExitCode: -1}
 	}
-	tmpFile.Close()
+	tmpFile.Close()          //nolint:errcheck
 	defer os.Remove(tmpPath) //nolint:errcheck
 
 	cmd := exec.CommandContext(ctx, "node", tmpPath)
@@ -218,11 +218,11 @@ func (t *CodeExecTool) executeBash(ctx context.Context, code string) CodeExecRes
 	}
 	tmpPath := tmpFile.Name()
 	if _, err := tmpFile.Write([]byte(code)); err != nil {
-		tmpFile.Close()
+		tmpFile.Close()    //nolint:errcheck
 		os.Remove(tmpPath) //nolint:errcheck
 		return CodeExecResult{Error: fmt.Sprintf("failed to write script: %v", err), ExitCode: -1}
 	}
-	tmpFile.Close()
+	tmpFile.Close() //nolint:errcheck
 	if err := os.Chmod(tmpPath, 0755); err != nil {
 		os.Remove(tmpPath) //nolint:errcheck
 		return CodeExecResult{Error: fmt.Sprintf("failed to chmod script: %v", err), ExitCode: -1}

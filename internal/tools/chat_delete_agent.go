@@ -19,7 +19,7 @@ import (
 // ChatDeleteAgentTool deletes an Agent CRD (chat version).
 type ChatDeleteAgentTool struct{}
 
-func (t *ChatDeleteAgentTool) Name() string { return "delete_agent" }
+func (t *ChatDeleteAgentTool) Name() string { return deleteAgentToolName }
 
 func (t *ChatDeleteAgentTool) Description() string {
 	return "Delete an agent."

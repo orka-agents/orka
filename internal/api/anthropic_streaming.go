@@ -22,7 +22,7 @@ import (
 // handleStreamingMessages handles an Anthropic Messages API request with streaming and tool execution.
 // It runs an agentic tool loop: stream LLM response → execute tools → stream results → repeat.
 // The full Anthropic SSE envelope (message_start → ... → message_stop) spans all iterations.
-func (h *AnthropicCompatHandler) handleStreamingMessages(
+func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 	c fiber.Ctx,
 	provider llm.Provider,
 	req *llm.CompletionRequest,
@@ -65,7 +65,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages(
 					_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{Type: "text_delta", Text: "Request timed out during tool execution."})
 					_ = writeContentBlockStop(w, blockIndex)
 				}
-				_ = writeMessageDelta(w, "end_turn", totalOutputTokens)
+				_ = writeMessageDelta(w, oaiStopReasonEndTurn, totalOutputTokens)
 				_ = writeMessageStop(w)
 				return
 			default:
@@ -109,7 +109,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages(
 						_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{Type: "text_delta", Text: "Error: " + completeErr.Error()})
 						_ = writeContentBlockStop(w, blockIndex)
 					}
-					_ = writeMessageDelta(w, "end_turn", totalOutputTokens)
+					_ = writeMessageDelta(w, oaiStopReasonEndTurn, totalOutputTokens)
 					_ = writeMessageStop(w)
 					return
 				}
@@ -192,7 +192,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages(
 					resp, completeErr := capturedProvider.Complete(streamCtx, compReq)
 					if completeErr != nil {
 						anthropicLog.Error(completeErr, "fallback completion also failed")
-						_ = writeMessageDelta(w, "end_turn", totalOutputTokens)
+						_ = writeMessageDelta(w, oaiStopReasonEndTurn, totalOutputTokens)
 						_ = writeMessageStop(w)
 						return
 					}
@@ -211,7 +211,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages(
 
 			// No tool calls → final response, close the stream
 			if len(toolCalls) == 0 {
-				stopReason := "end_turn"
+				stopReason := oaiStopReasonEndTurn
 				_ = writeMessageDelta(w, stopReason, totalOutputTokens)
 				_ = writeMessageStop(w)
 				return
@@ -285,7 +285,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages(
 				for {
 					select {
 					case <-streamCtx.Done():
-						_ = writeMessageDelta(w, "end_turn", totalOutputTokens)
+						_ = writeMessageDelta(w, oaiStopReasonEndTurn, totalOutputTokens)
 						_ = writeMessageStop(w)
 						return
 					default:
@@ -332,7 +332,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages(
 		}
 
 		// Reached iteration limit — emit final message and close
-		_ = writeMessageDelta(w, "end_turn", totalOutputTokens)
+		_ = writeMessageDelta(w, oaiStopReasonEndTurn, totalOutputTokens)
 		_ = writeMessageStop(w)
 	})
 }
@@ -367,7 +367,7 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 		streamCh, err := capturedProvider.Stream(streamCtx, capturedReq)
 		if err != nil {
 			// Fallback to non-streaming Complete
-			h.handleStreamingFallback(w, streamCtx, capturedProvider, capturedReq, msgID, model)
+			h.handleStreamingFallback(w, streamCtx, capturedProvider, capturedReq)
 			return
 		}
 
@@ -431,7 +431,7 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 		}
 
 		// Use the correct stop reason — "tool_use" if tool calls were emitted
-		stopReason := "end_turn"
+		stopReason := oaiStopReasonEndTurn
 		if hasToolCalls {
 			stopReason = "tool_use"
 		}
@@ -451,7 +451,6 @@ func (h *AnthropicCompatHandler) handleStreamingFallback(
 	ctx context.Context,
 	provider llm.Provider,
 	req *llm.CompletionRequest,
-	msgID, model string,
 ) {
 	resp, err := provider.Complete(ctx, req)
 	if err != nil {
@@ -460,7 +459,7 @@ func (h *AnthropicCompatHandler) handleStreamingFallback(
 		_ = writeContentBlockStart(w, 0, AnthropicContentBlock{Type: "text", Text: ""})
 		_ = writeContentBlockDelta(w, 0, AnthropicDelta{Type: "text_delta", Text: "Error: " + err.Error()})
 		_ = writeContentBlockStop(w, 0)
-		stopReason := "end_turn"
+		stopReason := oaiStopReasonEndTurn
 		_ = writeMessageDelta(w, stopReason, 0)
 		_ = writeMessageStop(w)
 		return
@@ -518,9 +517,9 @@ func (h *AnthropicCompatHandler) handleStreamingFallback(
 
 	stopReason := resp.StopReason
 	if stopReason == "" {
-		stopReason = "end_turn"
+		stopReason = oaiStopReasonEndTurn
 	}
-	if len(resp.ToolCalls) > 0 && stopReason == "end_turn" {
+	if len(resp.ToolCalls) > 0 && stopReason == oaiStopReasonEndTurn {
 		stopReason = "tool_use"
 	}
 

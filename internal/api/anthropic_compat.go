@@ -174,7 +174,7 @@ func parseAnthropicContent(raw json.RawMessage) ([]AnthropicContentBlock, error)
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return []AnthropicContentBlock{
-			{Type: "text", Text: s},
+			{Type: oaiContentTypeText, Text: s},
 		}, nil
 	}
 
@@ -206,7 +206,7 @@ func parseAnthropicSystem(raw json.RawMessage) (string, error) {
 
 	var parts []string
 	for _, b := range blocks {
-		if b.Type == "text" && b.Text != "" {
+		if b.Type == oaiContentTypeText && b.Text != "" {
 			parts = append(parts, b.Text)
 		}
 	}
@@ -444,7 +444,7 @@ func convertAnthropicMessages(msgs []AnthropicMessage) ([]llm.Message, error) {
 							if json.Unmarshal(b.Content, &innerBlocks) == nil {
 								var parts []string
 								for _, ib := range innerBlocks {
-									if ib.Type == "text" {
+									if ib.Type == oaiContentTypeText {
 										parts = append(parts, ib.Text)
 									}
 								}
@@ -475,7 +475,7 @@ func convertAnthropicMessages(msgs []AnthropicMessage) ([]llm.Message, error) {
 				switch b.Type {
 				case "text":
 					textParts = append(textParts, b.Text)
-				case "tool_use":
+				case oaiStopReasonToolUse:
 					msg.ToolCalls = append(msg.ToolCalls, llm.ToolCall{
 						ID:        b.ID,
 						Name:      b.Name,
@@ -492,7 +492,7 @@ func convertAnthropicMessages(msgs []AnthropicMessage) ([]llm.Message, error) {
 			// Pass through unknown roles
 			var textParts []string
 			for _, b := range blocks {
-				if b.Type == "text" {
+				if b.Type == oaiContentTypeText {
 					textParts = append(textParts, b.Text)
 				}
 			}
@@ -507,13 +507,13 @@ func convertAnthropicMessages(msgs []AnthropicMessage) ([]llm.Message, error) {
 }
 
 // convertAnthropicTools converts Anthropic tool definitions to internal llm.Tool format.
-func convertAnthropicTools(tools []AnthropicTool) []llm.Tool {
-	if len(tools) == 0 {
+func convertAnthropicTools(inputTools []AnthropicTool) []llm.Tool {
+	if len(inputTools) == 0 {
 		return nil
 	}
 
-	result := make([]llm.Tool, 0, len(tools))
-	for _, t := range tools {
+	result := make([]llm.Tool, 0, len(inputTools))
+	for _, t := range inputTools {
 		result = append(result, llm.Tool{
 			Name:        t.Name,
 			Description: t.Description,
@@ -527,16 +527,16 @@ func convertAnthropicTools(tools []AnthropicTool) []llm.Tool {
 func convertToAnthropicResponse(resp *llm.CompletionResponse, model string) AnthropicResponse {
 	id := "msg_" + uuid.New().String()
 
-	var content []AnthropicContentBlock
+	content := make([]AnthropicContentBlock, 0, len(resp.ToolCalls)+1)
 	if resp.Content != "" {
 		content = append(content, AnthropicContentBlock{
-			Type: "text",
+			Type: oaiContentTypeText,
 			Text: resp.Content,
 		})
 	}
 	for _, tc := range resp.ToolCalls {
 		content = append(content, AnthropicContentBlock{
-			Type:  "tool_use",
+			Type:  oaiStopReasonToolUse,
 			ID:    tc.ID,
 			Name:  tc.Name,
 			Input: tc.Arguments,
@@ -562,14 +562,14 @@ func convertToAnthropicResponse(resp *llm.CompletionResponse, model string) Anth
 // mapAnthropicStopReason maps internal stop reasons to Anthropic stop_reason values.
 func mapAnthropicStopReason(reason string) string {
 	switch strings.ToLower(reason) {
-	case "stop", "end_turn", "":
-		return "end_turn"
-	case "tool_calls", "tool_use":
-		return "tool_use"
+	case "stop", oaiStopReasonEndTurn, "":
+		return oaiStopReasonEndTurn
+	case "tool_calls", oaiStopReasonToolUse:
+		return oaiStopReasonToolUse
 	case "max_tokens", "length":
 		return "max_tokens"
 	default:
-		return "end_turn"
+		return oaiStopReasonEndTurn
 	}
 }
 
@@ -603,7 +603,7 @@ func (h *AnthropicCompatHandler) findGitSecret(ctx context.Context, namespace st
 // stripClientToolMessages removes tool_use and tool_result messages from client history
 // so the LLM doesn't see stale references to tools it no longer has access to.
 func stripClientToolMessages(messages []llm.Message) []llm.Message {
-	var filtered []llm.Message
+	filtered := make([]llm.Message, 0, len(messages))
 	for _, m := range messages {
 		// Skip tool result messages (from client tool execution)
 		if m.Role == "tool" {

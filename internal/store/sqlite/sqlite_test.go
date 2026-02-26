@@ -10,6 +10,8 @@ import (
 	"github.com/sozercan/orka/internal/store"
 )
 
+const contentHello = "hello"
+
 const (
 	roleUser      = "user"
 	roleAssistant = "assistant"
@@ -289,7 +291,7 @@ func TestSessionMessages(t *testing.T) {
 
 	t.Run("append and load messages", func(t *testing.T) {
 		messages := []store.SessionMessage{
-			{Role: roleUser, Content: "hello", Timestamp: now},
+			{Role: roleUser, Content: contentHello, Timestamp: now},
 			{Role: roleAssistant, Content: "hi there", Timestamp: now},
 		}
 		if err := s.AppendMessages(ctx, "ns1", "msg-session", messages); err != nil {
@@ -303,7 +305,7 @@ func TestSessionMessages(t *testing.T) {
 		if len(got) != 2 {
 			t.Fatalf("got %d messages, want 2", len(got))
 		}
-		if got[0].Role != roleUser || got[0].Content != "hello" {
+		if got[0].Role != roleUser || got[0].Content != contentHello {
 			t.Errorf("message 0: got %+v", got[0])
 		}
 		if got[1].Role != roleAssistant || got[1].Content != "hi there" {
@@ -346,8 +348,8 @@ func TestSessionMessages(t *testing.T) {
 			t.Fatalf("got %d messages, want 2", len(got))
 		}
 		// Should be first 2 messages (ordered by id)
-		if got[0].Content != "hello" {
-			t.Errorf("first message: got %q, want %q", got[0].Content, "hello")
+		if got[0].Content != contentHello {
+			t.Errorf("first message: got %q, want %q", got[0].Content, contentHello)
 		}
 	})
 
@@ -994,7 +996,7 @@ func TestNilIfEmpty(t *testing.T) {
 	if got := nilIfEmpty(""); got != nil {
 		t.Errorf("nilIfEmpty(\"\") = %v, want nil", got)
 	}
-	if got := nilIfEmpty("hello"); got == nil || *got != "hello" {
+	if got := nilIfEmpty(contentHello); got == nil || *got != contentHello {
 		t.Errorf("nilIfEmpty(\"hello\") = %v, want pointer to \"hello\"", got)
 	}
 }

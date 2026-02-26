@@ -43,9 +43,11 @@ func NewDeleteAgentTool(k8sClient client.Client) *DeleteAgentTool {
 	}
 }
 
+const deleteAgentToolName = "delete_agent"
+
 // Name returns the tool name
 func (t *DeleteAgentTool) Name() string {
-	return "delete_agent"
+	return deleteAgentToolName
 }
 
 // Description returns the tool description
@@ -87,7 +89,7 @@ func (t *DeleteAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		namespace = os.Getenv("ORKA_TASK_NAMESPACE")
 	}
 	if namespace == "" {
-		namespace = "default"
+		namespace = defaultNamespace
 	}
 
 	// Get the agent to ensure it exists

@@ -14,10 +14,15 @@ import (
 	"testing"
 )
 
+const (
+	testCheckMessagesName = "check_messages"
+	queryValFalse         = "false"
+)
+
 func TestCheckMessagesTool_Name(t *testing.T) {
 	tool := NewCheckMessagesTool()
-	if got := tool.Name(); got != "check_messages" {
-		t.Errorf("Name() = %v, want %v", got, "check_messages")
+	if got := tool.Name(); got != testCheckMessagesName {
+		t.Errorf("Name() = %v, want %v", got, testCheckMessagesName)
 	}
 }
 
@@ -118,7 +123,7 @@ func TestCheckMessagesTool_Execute(t *testing.T) {
 					}
 					// Verify markRead query param
 					if tt.args != nil && tt.args.MarkRead != nil && !*tt.args.MarkRead {
-						if r.URL.Query().Get("markRead") != "false" {
+						if r.URL.Query().Get("markRead") != queryValFalse {
 							t.Errorf("expected markRead=false, got %s", r.URL.Query().Get("markRead"))
 						}
 					}
@@ -169,7 +174,7 @@ func TestCheckMessagesTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != "object" {
+	if schema["type"] != typeObject {
 		t.Error("schema type should be object")
 	}
 	props, ok := schema["properties"].(map[string]any)

@@ -11,6 +11,8 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
+const testCurrentCtxName = "ctx"
+
 // ---------------------------------------------------------------------------
 // newRootCmd
 // ---------------------------------------------------------------------------
@@ -201,7 +203,7 @@ func TestExtractToken_WithDirectToken(t *testing.T) {
 	dir := t.TempDir()
 
 	config := clientcmdapi.NewConfig()
-	config.CurrentContext = "ctx"
+	config.CurrentContext = testCurrentCtxName
 	config.Contexts["ctx"] = &clientcmdapi.Context{
 		Cluster:  "c",
 		AuthInfo: "u",
@@ -229,7 +231,7 @@ func TestExtractToken_WithTokenFile(t *testing.T) {
 	}
 
 	config := clientcmdapi.NewConfig()
-	config.CurrentContext = "ctx"
+	config.CurrentContext = testCurrentCtxName
 	config.Contexts["ctx"] = &clientcmdapi.Context{
 		Cluster:  "c",
 		AuthInfo: "u",
@@ -252,7 +254,7 @@ func TestExtractToken_NoToken(t *testing.T) {
 	dir := t.TempDir()
 
 	config := clientcmdapi.NewConfig()
-	config.CurrentContext = "ctx"
+	config.CurrentContext = testCurrentCtxName
 	config.Contexts["ctx"] = &clientcmdapi.Context{
 		Cluster:  "c",
 		AuthInfo: "u",
@@ -285,7 +287,7 @@ func TestExtractToken_MissingUser(t *testing.T) {
 	dir := t.TempDir()
 
 	config := clientcmdapi.NewConfig()
-	config.CurrentContext = "ctx"
+	config.CurrentContext = testCurrentCtxName
 	config.Contexts["ctx"] = &clientcmdapi.Context{
 		Cluster:  "c",
 		AuthInfo: "nonexistent-user",
@@ -304,7 +306,7 @@ func TestExtractToken_BadTokenFile(t *testing.T) {
 	dir := t.TempDir()
 
 	config := clientcmdapi.NewConfig()
-	config.CurrentContext = "ctx"
+	config.CurrentContext = testCurrentCtxName
 	config.Contexts["ctx"] = &clientcmdapi.Context{
 		Cluster:  "c",
 		AuthInfo: "u",
@@ -345,7 +347,7 @@ func TestExtractToken_MissingContext(t *testing.T) {
 // openBrowser
 // ---------------------------------------------------------------------------
 
-func TestOpenBrowser_DoesNotPanic(t *testing.T) {
+func TestOpenBrowser_DoesNotPanic(t *testing.T) { //nolint:unparam
 	// We can't really test browser opening, but ensure it doesn't panic
 	err := openBrowser("http://example.com")
 	// May succeed or fail depending on platform — just check no panic

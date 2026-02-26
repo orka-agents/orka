@@ -18,6 +18,11 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
+const (
+	errTypeInvalidArgs   = "invalid_arguments"
+	errTypeInternalError = "internal_error"
+)
+
 func TestCheckTaskProgressTool_Name(t *testing.T) {
 	tool := &CheckTaskProgressTool{}
 	if got := tool.Name(); got != "check_task_progress" {
@@ -202,7 +207,7 @@ func TestCheckTaskProgressTool_Execute(t *testing.T) {
 				if r.Success {
 					t.Error("expected failure for missing name")
 				}
-				if r.ErrorType != "invalid_arguments" {
+				if r.ErrorType != errTypeInvalidArgs {
 					t.Errorf("errorType = %v, want invalid_arguments", r.ErrorType)
 				}
 			},
@@ -218,7 +223,7 @@ func TestCheckTaskProgressTool_Execute(t *testing.T) {
 				if r.Success {
 					t.Error("expected failure for invalid JSON")
 				}
-				if r.ErrorType != "invalid_arguments" {
+				if r.ErrorType != errTypeInvalidArgs {
 					t.Errorf("errorType = %v, want invalid_arguments", r.ErrorType)
 				}
 			},
@@ -272,7 +277,7 @@ func TestCheckTaskProgressTool_Execute_MissingContext(t *testing.T) {
 	if r.Success {
 		t.Error("expected failure for missing context")
 	}
-	if r.ErrorType != "internal_error" {
+	if r.ErrorType != errTypeInternalError {
 		t.Errorf("errorType = %v, want internal_error", r.ErrorType)
 	}
 }

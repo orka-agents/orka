@@ -84,10 +84,10 @@ func TestTruncateMessages_ToolCallsKeptAtomic(t *testing.T) {
 	hasToolCall := false
 	hasToolResult := false
 	for _, m := range result {
-		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+		if m.Role == testRoleAssistant && len(m.ToolCalls) > 0 {
 			hasToolCall = true
 		}
-		if m.Role == "tool" {
+		if m.Role == testRoleTool {
 			hasToolResult = true
 		}
 	}

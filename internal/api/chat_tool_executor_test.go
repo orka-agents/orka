@@ -30,12 +30,17 @@ import (
 	"github.com/sozercan/orka/internal/tools"
 )
 
+const (
+	testAgentCreatedMsg = "Agent created and task started"
+	testLimitReached    = "limit_reached"
+)
+
 // --- test helpers ---
 
 // checkTaskLimit is a test helper for checking task limit logic.
 func (e *ToolExecutor) checkTaskLimit() *ToolResult {
 	if e.tasksCreated >= e.maxTasks {
-		r := toolError("limit_reached", fmt.Sprintf("task creation limit reached (max %d per turn)", e.maxTasks), "Wait for existing tasks to complete before creating new ones")
+		r := toolError(testLimitReached, fmt.Sprintf("task creation limit reached (max %d per turn)", e.maxTasks), "Wait for existing tasks to complete before creating new ones")
 		return &r
 	}
 	return nil
@@ -68,7 +73,7 @@ func (e *ToolExecutor) executeTool(ctx context.Context, name string, args map[st
 		CheckTaskLimit: func() *tools.ChatToolError {
 			if e.tasksCreated >= e.maxTasks {
 				return &tools.ChatToolError{
-					Type:       "limit_reached",
+					Type:       testLimitReached,
 					Message:    fmt.Sprintf("task creation limit reached (max %d per turn)", e.maxTasks),
 					Suggestion: "Wait for existing tasks to complete before creating new ones",
 				}
@@ -499,7 +504,7 @@ func TestCheckTaskLimit(t *testing.T) {
 	if r == nil {
 		t.Fatal("expected non-nil when at limit")
 	}
-	if r.ErrorType != "limit_reached" {
+	if r.ErrorType != testLimitReached {
 		t.Errorf("ErrorType = %q, want limit_reached", r.ErrorType)
 	}
 }
@@ -671,7 +676,7 @@ func TestExecuteCreateAITask_TaskLimit(t *testing.T) {
 	if r.Success {
 		t.Fatal("expected failure due to task limit")
 	}
-	if r.ErrorType != "limit_reached" {
+	if r.ErrorType != testLimitReached {
 		t.Errorf("ErrorType = %q", r.ErrorType)
 	}
 }
@@ -1293,7 +1298,7 @@ func TestExecuteCreateAgent_WithInitialPrompt(t *testing.T) {
 		t.Fatalf("expected success: %s", r.Error)
 	}
 	data := r.Data.(map[string]any)
-	if data["message"] != "Agent created and task started" {
+	if data["message"] != testAgentCreatedMsg {
 		t.Errorf("message = %v", data["message"])
 	}
 }
@@ -1688,7 +1693,7 @@ func TestHandleInitialPrompt_WithRuntimeAgent(t *testing.T) {
 		t.Fatalf("expected success, got error: %s", r.Error)
 	}
 	data := r.Data.(map[string]any)
-	if data["message"] != "Agent created and task started" {
+	if data["message"] != testAgentCreatedMsg {
 		t.Errorf("message = %v", data["message"])
 	}
 }
@@ -1704,7 +1709,7 @@ func TestHandleInitialPrompt_WithProviderRef(t *testing.T) {
 		t.Fatalf("expected success, got error: %s", r.Error)
 	}
 	data := r.Data.(map[string]any)
-	if data["message"] != "Agent created and task started" {
+	if data["message"] != testAgentCreatedMsg {
 		t.Errorf("message = %v", data["message"])
 	}
 }
@@ -1795,7 +1800,7 @@ func TestExecuteCreateAgentTask_TaskLimit(t *testing.T) {
 	if r.Success {
 		t.Fatal("expected failure due to task limit")
 	}
-	if r.ErrorType != "limit_reached" {
+	if r.ErrorType != testLimitReached {
 		t.Errorf("ErrorType = %q", r.ErrorType)
 	}
 }
