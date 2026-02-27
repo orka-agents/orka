@@ -14,13 +14,9 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 **NEVER commit compiled binaries to the repository.** Build artifacts belong in `bin/` (which is gitignored) or CI release pipelines — not in version control.
 
-## CRITICAL: Fix Pre-existing Issues
-
-When you encounter pre-existing bugs, failing tests, or broken CI — **fix them**. Do not skip or ignore issues just because they existed before your change. Leave the codebase better than you found it.
-
 ## Project Overview
 
-Orka is a Kubernetes-native task execution platform. A controller manages Jobs and Pods for incoming task requests, supporting container tasks, AI agent tasks with LLM integration, and external agent CLI runtimes (Copilot, Claude Code). CRDs: Task, Agent, Tool, Provider, Skill. See @docs/architecture.md for full details.
+Orka is a Kubernetes-native task execution platform that manages Jobs and Pods for container tasks and AI agent tasks.
 
 ## Build & Development Commands
 
@@ -50,27 +46,14 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments — the CLI injects code at 
 
 ## Workflow Principles
 
-- **Research before changing** — Read the relevant code deeply before proposing changes. Understand caching layers, existing abstractions, and conventions already in place. The most expensive mistake is code that works in isolation but breaks the surrounding system.
-- **Follow existing patterns** — When building something new, find and reference existing similar code in the codebase (e.g., a new API endpoint should mirror existing endpoints, a new reconciler should follow existing reconciler patterns). Don't design from scratch when a pattern already exists.
-- **Protect existing interfaces** — Don't change existing function signatures, public APIs, or CRD schemas unless explicitly asked. Callers should adapt, not libraries.
 - **Scope discipline** — Implement exactly what's asked, nothing more. Don't add nice-to-haves, optional features, or "improvements" that weren't requested. When in doubt, leave it out.
 - **Continuous verification** — Run `make lint-fix` and `make test` after each logical phase of work, not just at the end. Catch problems early.
-- **Revert over patch** — When an approach goes in the wrong direction, `git checkout` and restart with a narrower scope rather than trying to incrementally fix a bad approach.
 
 ## Code Style & Conventions
 
 ### Go
 - Structured logging: `log := log.FromContext(ctx); log.Info("msg", "key", val)`
-- Idempotent reconciliation — re-fetch before updates (`r.Get` before `r.Update`)
-- Owner references for garbage collection (`SetControllerReference`)
-- RBAC markers above reconciler methods, then `make manifests`
-- Table-driven tests; `fake.NewClientBuilder()` for K8s; `httptest.NewServer` for HTTP
 - LLM tool args for nested objects arrive as `map[string]any`, not strings — always type-switch
-
-### TypeScript (UI)
-- React 19 + TanStack Router + TanStack Query + Zustand + shadcn/ui + Tailwind CSS 4
-- Zod schemas matching Go API types (`ui/src/schemas/`)
-- See @docs/ui.md for details
 
 ## Verification
 
@@ -84,33 +67,7 @@ Single tests: `go test ./internal/api/ -run TestHandlerName -v`
 
 ## Key Gotchas
 
-- Provider secret key defaults to `api-key` — if your K8s Secret uses a different key, set `secretRef.key`
 - Worker filesystem is read-only except `/tmp`, `/home/worker`, and `/workspace` — writes elsewhere will fail
 - `make build` requires UI assets — run `make ui-build` first, or the `ensure-ui-embed` target creates a stub
-- Fallback providers are resolved at Job build time, not worker runtime — provider changes after Job creation don't take effect
 - On context length errors, the AI worker truncates messages using a token-budget approach — keeps the first message (system prompt) and newest messages, dropping middle messages atomically. The truncation note includes structured metadata (tool names, file paths, URLs) extracted from dropped blocks so the LLM retains context about prior work
-- Copilot agent worker auto-approves all permission requests — no tool filtering in autonomous mode
-- OpenAI provider auto-detects API mode: tries Responses API first, falls back to Chat Completions on 404/405
-- Auth tokens are cached for 60s (SHA256 hash) — token revocation has up to 60s propagation delay
 - `code_exec` tool silently caps timeout at 60s — values above 60 fall back to the 30s default
-
-The `code_exec` tool applies deny-pattern safety guards to bash/sh commands, blocking destructive operations (rm -rf, dd, mkfs, shutdown, fork bombs). Python and JavaScript are not filtered since they run through interpreters.
-
-## Documentation
-
-See @docs/ for detailed documentation:
-- @docs/architecture.md — System design, components, key patterns, project structure
-- @docs/multi-agent-coordination.md — Coordination tools, delegation, controller enforcement, PR workflows
-- @docs/autonomous-tasks.md — Autonomous task execution and planning loops
-- @docs/api-reference.md — REST API endpoints (public and internal)
-- @docs/chat.md — Chat endpoint, tools, SSE streaming
-- @docs/configuration.md — CRD configuration reference
-- @docs/development.md — Build, test, and development setup
-- @docs/testing.md — Test structure, patterns, and chat testing guidelines
-- @docs/security.md — Security model, worker hardening, multi-tenancy
-- @docs/agent-runtimes.md — Claude Code CLI and Copilot CLI runtime configuration
-- @docs/openai-compat.md — OpenAI-compatible API proxy
-- @docs/anthropic-compat.md — Anthropic-compatible API proxy
-- @docs/cicd-integration.md — CI/CD integration patterns
-- @docs/getting-started.md — Installation and quick start
-- @docs/ui.md — Web dashboard architecture
