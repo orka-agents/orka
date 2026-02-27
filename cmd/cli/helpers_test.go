@@ -18,6 +18,11 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
+const (
+	serviceCheckPath = "/api/v1/namespaces/default/services/orka-api"
+	testCtxName      = "test-ctx"
+)
+
 func TestMaskToken(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -218,7 +223,7 @@ func TestClearPortForwardCache(t *testing.T) {
 func TestCheckServiceExists(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/namespaces/default/services/orka-api":
+		case serviceCheckPath:
 			w.WriteHeader(http.StatusOK)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -417,8 +422,8 @@ func TestNewClientFromCmd_WithKubeconfig(t *testing.T) {
 
 	// Create a kubeconfig
 	config := clientcmdapi.NewConfig()
-	config.CurrentContext = "test-ctx"
-	config.Contexts["test-ctx"] = &clientcmdapi.Context{
+	config.CurrentContext = testCtxName
+	config.Contexts[testCtxName] = &clientcmdapi.Context{
 		Cluster:   "test-cluster",
 		AuthInfo:  "test-user",
 		Namespace: "kube-ns",
@@ -464,7 +469,7 @@ func TestNewClientFromCmd_CachedPortForward(t *testing.T) {
 
 	// Parse port from URL
 	var port int
-	fmt.Sscanf(srv.URL, "http://127.0.0.1:%d", &port)
+	fmt.Sscanf(srv.URL, "http://127.0.0.1:%d", &port) //nolint:errcheck
 
 	// Save a port-forward cache pointing to our test server
 	savePortForwardCache(&portForwardCache{
@@ -492,7 +497,7 @@ func TestNewClientFromCmd_CachedPortForward(t *testing.T) {
 
 func TestDiscoverOrkaService_WellKnownName(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/namespaces/default/services/orka-api" {
+		if r.URL.Path == serviceCheckPath {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -516,7 +521,7 @@ func TestDiscoverOrkaService_WellKnownName(t *testing.T) {
 func TestDiscoverOrkaService_ByLabel(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// No well-known services found
-		if r.URL.Path == "/api/v1/namespaces/default/services/orka-api" ||
+		if r.URL.Path == serviceCheckPath ||
 			r.URL.Path == "/api/v1/namespaces/default/services/orka" ||
 			r.URL.Path == "/api/v1/namespaces/default/services/orka-controller-manager" {
 			w.WriteHeader(http.StatusNotFound)

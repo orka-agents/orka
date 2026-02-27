@@ -9,6 +9,8 @@ import (
 	"testing"
 )
 
+const agentsAPIPath = "/api/v1/agents"
+
 func TestNewAgentCmd(t *testing.T) {
 	cmd := newAgentCmd()
 
@@ -64,7 +66,7 @@ func TestNewAgentListCmdStructure(t *testing.T) {
 func agentAPIServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents":
+		case r.Method == http.MethodGet && r.URL.Path == agentsAPIPath:
 			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 				"items": []map[string]any{
 					{

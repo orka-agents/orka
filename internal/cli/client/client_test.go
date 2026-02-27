@@ -17,24 +17,12 @@ import (
 	"testing"
 )
 
+const (
+	testAgentName = "agent1"
+	testModelName = "gpt-4"
+)
+
 // helper to create a test server that records requests and returns a fixed response.
-func newTestServer(t *testing.T, statusCode int, body any) (*httptest.Server, *http.Request) {
-	t.Helper()
-	var captured *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// capture request body before it's consumed
-		bodyBytes, _ := io.ReadAll(r.Body)
-		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		captured = r.Clone(r.Context())
-		captured.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		w.WriteHeader(statusCode)
-		if body != nil {
-			json.NewEncoder(w).Encode(body) //nolint:errcheck
-		}
-	}))
-	t.Cleanup(srv.Close)
-	return srv, captured
-}
 
 func TestNew(t *testing.T) {
 	c := New("http://localhost:8080", "tok123")
@@ -500,9 +488,9 @@ func TestListAgents(t *testing.T) {
 			resp: agentListResponse{
 				Items: []AgentDetail{
 					{
-						"metadata": map[string]any{"name": "agent1"},
+						"metadata": map[string]any{"name": testAgentName},
 						"spec": map[string]any{
-							"model":   map[string]any{"name": "gpt-4"},
+							"model":   map[string]any{"name": testModelName},
 							"runtime": map[string]any{"type": "container"},
 						},
 						"status": map[string]any{"activeTasks": float64(3)},
@@ -536,10 +524,10 @@ func TestListAgents(t *testing.T) {
 					t.Fatalf("len(agents) = %d, want %d", len(agents), tt.wantLen)
 				}
 				if tt.wantLen > 0 {
-					if agents[0].Name != "agent1" {
+					if agents[0].Name != testAgentName {
 						t.Errorf("name = %q, want agent1", agents[0].Name)
 					}
-					if agents[0].Model != "gpt-4" {
+					if agents[0].Model != testModelName {
 						t.Errorf("model = %q, want gpt-4", agents[0].Model)
 					}
 					if agents[0].Runtime != "container" {
@@ -565,10 +553,10 @@ func TestGetAgent(t *testing.T) {
 	}{
 		{
 			name:   "success",
-			agent:  "agent1",
+			agent:  testAgentName,
 			opts:   GetOptions{Namespace: "ns1"},
 			status: http.StatusOK,
-			resp:   AgentDetail{"metadata": map[string]any{"name": "agent1"}},
+			resp:   AgentDetail{"metadata": map[string]any{"name": testAgentName}},
 		},
 		{
 			name:    "not found",
@@ -615,7 +603,7 @@ func TestDeleteAgent(t *testing.T) {
 	}{
 		{
 			name:   "success",
-			agent:  "agent1",
+			agent:  testAgentName,
 			opts:   GetOptions{Namespace: "ns1"},
 			status: http.StatusOK,
 		},
@@ -705,7 +693,7 @@ func TestStreamChat(t *testing.T) {
 				t.Fatal("expected non-nil reader")
 			}
 			if resp != nil {
-				resp.Body.Close()
+				resp.Body.Close() //nolint:errcheck
 			}
 			if capturedContentType != "application/json" {
 				t.Errorf("content-type = %q, want application/json", capturedContentType)
@@ -731,7 +719,7 @@ func TestStreamChat_NamespaceFromClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	if reader != nil && resp != nil {
-		resp.Body.Close()
+		resp.Body.Close() //nolint:errcheck
 	}
 
 	var req ChatRequest
@@ -754,7 +742,7 @@ func TestGetChatConfig(t *testing.T) {
 			resp: ChatConfigResponse{
 				Enabled:        true,
 				Provider:       "openai",
-				Model:          "gpt-4",
+				Model:          testModelName,
 				AvailableTools: []string{"code_exec", "web_search"},
 			},
 		},
@@ -782,7 +770,7 @@ func TestGetChatConfig(t *testing.T) {
 				if !cfg.Enabled {
 					t.Error("expected enabled=true")
 				}
-				if cfg.Model != "gpt-4" {
+				if cfg.Model != testModelName {
 					t.Errorf("model = %q, want gpt-4", cfg.Model)
 				}
 			}
@@ -966,19 +954,19 @@ func TestExtractTaskSummary(t *testing.T) {
 
 func TestExtractAgentSummary(t *testing.T) {
 	item := AgentDetail{
-		"metadata": map[string]any{"name": "agent1"},
+		"metadata": map[string]any{"name": testAgentName},
 		"spec": map[string]any{
-			"model":   map[string]any{"name": "gpt-4"},
+			"model":   map[string]any{"name": testModelName},
 			"runtime": map[string]any{"type": "container"},
 		},
 		"status": map[string]any{"activeTasks": float64(2)},
 	}
 
 	s := extractAgentSummary(item)
-	if s.Name != "agent1" {
+	if s.Name != testAgentName {
 		t.Errorf("name = %q, want agent1", s.Name)
 	}
-	if s.Model != "gpt-4" {
+	if s.Model != testModelName {
 		t.Errorf("model = %q, want gpt-4", s.Model)
 	}
 	if s.Runtime != "container" {
@@ -990,9 +978,9 @@ func TestExtractAgentSummary(t *testing.T) {
 }
 
 func TestExtractAgentSummary_MissingFields(t *testing.T) {
-	item := AgentDetail{"metadata": map[string]any{"name": "agent1"}}
+	item := AgentDetail{"metadata": map[string]any{"name": testAgentName}}
 	s := extractAgentSummary(item)
-	if s.Name != "agent1" {
+	if s.Name != testAgentName {
 		t.Errorf("name = %q, want agent1", s.Name)
 	}
 	if s.Model != "" {

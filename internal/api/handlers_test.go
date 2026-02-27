@@ -32,6 +32,8 @@ import (
 	"github.com/sozercan/orka/internal/store/sqlite"
 )
 
+const testWatchNamespace = "prod"
+
 func setupTestHandlers() (*Handlers, *fiber.App) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -1875,7 +1877,7 @@ func TestStreamPodLogs_WithFakeClientset(t *testing.T) {
 	// it returns a stream even without real logs, but we verify the function is callable.
 	stream, err := StreamPodLogs(ctx, clientset, "default", "test-pod", "worker")
 	if err == nil && stream != nil {
-		defer stream.Close()
+		defer stream.Close() //nolint:errcheck
 	}
 	// The fake clientset may or may not error — we just verify the function doesn't panic
 	// and correctly calls the K8s API.
@@ -2220,7 +2222,7 @@ func TestHandlers_GetTaskChildren_NoChildren(t *testing.T) {
 
 func TestHandlers_GetTaskChildren_WithNamespace(t *testing.T) {
 	handlers, app := setupTestHandlers()
-	handlers.watchNamespace = "prod"
+	handlers.watchNamespace = testWatchNamespace
 	app.Get("/tasks/:id/children", handlers.GetTaskChildren)
 
 	req := httptest.NewRequest(http.MethodGet, "/tasks/parent/children?namespace=prod", nil)
@@ -2302,7 +2304,7 @@ func TestHandlers_GetTaskLogs_WithClientsetNoPods(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
 
-	fakeCS := kubefake.NewSimpleClientset() // no pods
+	fakeCS := kubefake.NewSimpleClientset() //nolint:staticcheck // no pods
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	h := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss, KubeClient: fakeCS})
@@ -2322,12 +2324,12 @@ func TestHandlers_DeleteTask_WatchNamespaceScoped(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "ns-task",
-			Namespace: "prod",
+			Namespace: testWatchNamespace,
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 	}
 	handlers, app := setupTestHandlersWithObjects(task)
-	handlers.watchNamespace = "prod"
+	handlers.watchNamespace = testWatchNamespace
 	app.Delete("/tasks/:id", handlers.DeleteTask)
 
 	req := httptest.NewRequest(http.MethodDelete, "/tasks/ns-task", nil)
@@ -2385,12 +2387,12 @@ func TestHandlers_UpdateAgent_WatchNamespace(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "upd-agent",
-			Namespace: "prod",
+			Namespace: testWatchNamespace,
 		},
 		Spec: corev1alpha1.AgentSpec{},
 	}
 	handlers, app := setupTestHandlersWithObjects(agent)
-	handlers.watchNamespace = "prod"
+	handlers.watchNamespace = testWatchNamespace
 	app.Put("/agents/:name", handlers.UpdateAgent)
 
 	body, _ := json.Marshal(map[string]any{"spec": map[string]any{}})

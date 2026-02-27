@@ -572,7 +572,7 @@ func TestEnforceHistoryLimits_DefaultLimits(t *testing.T) {
 	}
 
 	// Create 5 succeeded + 3 failed child tasks
-	var objs []client.Object
+	objs := make([]client.Object, 0, 10) //nolint:prealloc
 	objs = append(objs, parent)
 	for i := range 5 {
 		objs = append(objs, &corev1alpha1.Task{
@@ -638,7 +638,7 @@ func TestEnforceHistoryLimits_CustomLimits(t *testing.T) {
 		},
 	}
 
-	var objs []client.Object
+	objs := make([]client.Object, 0, 10) //nolint:prealloc
 	objs = append(objs, parent)
 	for i := range 4 {
 		objs = append(objs, &corev1alpha1.Task{

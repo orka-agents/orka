@@ -16,8 +16,8 @@ import (
 
 func TestSendMessageTool_Name(t *testing.T) {
 	tool := NewSendMessageTool()
-	if got := tool.Name(); got != "send_message" {
-		t.Errorf("Name() = %v, want %v", got, "send_message")
+	if got := tool.Name(); got != sendMessageToolName {
+		t.Errorf("Name() = %v, want %v", got, sendMessageToolName)
 	}
 }
 
@@ -38,7 +38,7 @@ func TestSendMessageTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != "object" {
+	if schema["type"] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 	props, ok := schema["properties"].(map[string]any)

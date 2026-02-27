@@ -28,6 +28,8 @@ import (
 	"github.com/sozercan/orka/internal/worker"
 )
 
+const testSessionDir = "/session"
+
 // sequenceProvider returns different responses on successive calls.
 type sequenceProvider struct {
 	responses []*llm.CompletionResponse
@@ -542,7 +544,7 @@ func TestExecuteAgentLoop_CustomToolExecution(t *testing.T) {
 	// Set up a mock HTTP server for the custom tool
 	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"result": "custom tool output"}`)
+		fmt.Fprint(w, `{"result": "custom tool output"}`) //nolint:errcheck
 	}))
 	defer toolServer.Close()
 
@@ -630,14 +632,14 @@ func TestExecuteAgentLoop_ToolExecutionError(t *testing.T) {
 func TestLoadSessionContext_CreatedFile(t *testing.T) {
 	// The function reads from /session/transcript.jsonl (hardcoded path).
 	// If we can create it, test full parsing; otherwise verify graceful handling.
-	sessionDir := "/session"
+	sessionDir := testSessionDir
 	transcriptPath := filepath.Join(sessionDir, "transcript.jsonl")
 
 	// Try to create the directory (may fail without root)
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		t.Skip("cannot create /session directory, skipping file-based test")
 	}
-	defer os.RemoveAll(sessionDir)
+	defer os.RemoveAll(sessionDir) //nolint:errcheck
 
 	content := `{"role":"user","content":"Hello"}
 {"role":"assistant","content":"Hi there"}
@@ -648,7 +650,7 @@ not valid json
 	if err := os.WriteFile(transcriptPath, []byte(content), 0o644); err != nil {
 		t.Skip("cannot write transcript file, skipping")
 	}
-	defer os.Remove(transcriptPath)
+	defer os.Remove(transcriptPath) //nolint:errcheck
 
 	messages := loadSessionContext()
 	if len(messages) != 3 {
@@ -663,18 +665,18 @@ not valid json
 }
 
 func TestLoadSessionContext_EmptyFile(t *testing.T) {
-	sessionDir := "/session"
+	sessionDir := testSessionDir
 	transcriptPath := filepath.Join(sessionDir, "transcript.jsonl")
 
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		t.Skip("cannot create /session directory")
 	}
-	defer os.RemoveAll(sessionDir)
+	defer os.RemoveAll(sessionDir) //nolint:errcheck
 
 	if err := os.WriteFile(transcriptPath, []byte(""), 0o644); err != nil {
 		t.Skip("cannot write transcript file")
 	}
-	defer os.Remove(transcriptPath)
+	defer os.Remove(transcriptPath) //nolint:errcheck
 
 	messages := loadSessionContext()
 	if len(messages) != 0 {
@@ -683,18 +685,18 @@ func TestLoadSessionContext_EmptyFile(t *testing.T) {
 }
 
 func TestLoadSessionContext_OnlyInvalidJSON(t *testing.T) {
-	sessionDir := "/session"
+	sessionDir := testSessionDir
 	transcriptPath := filepath.Join(sessionDir, "transcript.jsonl")
 
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		t.Skip("cannot create /session directory")
 	}
-	defer os.RemoveAll(sessionDir)
+	defer os.RemoveAll(sessionDir) //nolint:errcheck
 
 	if err := os.WriteFile(transcriptPath, []byte("bad json\nalso bad\n"), 0o644); err != nil {
 		t.Skip("cannot write transcript file")
 	}
-	defer os.Remove(transcriptPath)
+	defer os.Remove(transcriptPath) //nolint:errcheck
 
 	messages := loadSessionContext()
 	if len(messages) != 0 {
@@ -728,8 +730,8 @@ func TestLoadPlanContext_WithAuthHeader(t *testing.T) {
 	tokenPath := filepath.Join(saDir, "token")
 	if err := os.MkdirAll(saDir, 0o755); err == nil {
 		if err := os.WriteFile(tokenPath, []byte("test-sa-token"), 0o644); err == nil {
-			defer os.Remove(tokenPath)
-			defer os.RemoveAll("/var/run/secrets/kubernetes.io")
+			defer os.Remove(tokenPath)                           //nolint:errcheck
+			defer os.RemoveAll("/var/run/secrets/kubernetes.io") //nolint:errcheck
 		}
 	}
 

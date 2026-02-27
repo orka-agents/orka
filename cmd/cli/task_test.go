@@ -124,7 +124,7 @@ func TestNewTaskLogsCmdFlags(t *testing.T) {
 
 	flag := cmd.Flags().Lookup("follow")
 	if flag == nil {
-		t.Error("missing flag 'follow'")
+		t.Fatal("missing flag 'follow'")
 	}
 	if flag.Shorthand != "f" {
 		t.Errorf("follow shorthand = %q, want %q", flag.Shorthand, "f")
@@ -147,14 +147,20 @@ func taskAPIServer() *httptest.Server {
 			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 				"items": []map[string]any{
 					{
-						"metadata": map[string]any{"name": "t1", "namespace": "default", "creationTimestamp": time.Now().Add(-5 * time.Minute).Format(time.RFC3339)},
-						"spec":     map[string]any{"type": "ai"},
-						"status":   map[string]any{"phase": "Succeeded"},
+						"metadata": map[string]any{
+							"name": "t1", "namespace": "default",
+							"creationTimestamp": time.Now().Add(-5 * time.Minute).Format(time.RFC3339),
+						},
+						"spec":   map[string]any{"type": "ai"},
+						"status": map[string]any{"phase": "Succeeded"},
 					},
 					{
-						"metadata": map[string]any{"name": "t2", "namespace": "default", "creationTimestamp": time.Now().Add(-2 * time.Hour).Format(time.RFC3339)},
-						"spec":     map[string]any{"type": "container"},
-						"status":   map[string]any{"phase": "Running"},
+						"metadata": map[string]any{
+							"name": "t2", "namespace": "default",
+							"creationTimestamp": time.Now().Add(-2 * time.Hour).Format(time.RFC3339),
+						},
+						"spec":   map[string]any{"type": "container"},
+						"status": map[string]any{"phase": "Running"},
 					},
 				},
 			})
@@ -175,7 +181,7 @@ func taskAPIServer() *httptest.Server {
 			w.WriteHeader(http.StatusOK)
 		default:
 			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprintf(w, "not found: %s %s", r.Method, r.URL.Path)
+			fmt.Fprintf(w, "not found: %s %s", r.Method, r.URL.Path) //nolint:errcheck
 		}
 	}))
 }
@@ -371,7 +377,7 @@ func TestNewTaskLogsCmd_Follow(t *testing.T) {
 		if r.URL.Path == "/api/v1/tasks/my-task/logs" && r.URL.Query().Get("follow") == "true" {
 			w.Header().Set("Content-Type", "text/event-stream")
 			flusher, ok := w.(http.Flusher)
-			fmt.Fprint(w, "event: log\ndata: {\"line\":\"log line 1\"}\n\n")
+			fmt.Fprint(w, "event: log\ndata: {\"line\":\"log line 1\"}\n\n") //nolint:errcheck
 			if ok {
 				flusher.Flush()
 			}
@@ -396,7 +402,7 @@ func TestNewTaskLogsCmd_NotFound(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		fmt.Fprint(w, "not found")
+		fmt.Fprint(w, "not found") //nolint:errcheck
 	}))
 	defer srv.Close()
 

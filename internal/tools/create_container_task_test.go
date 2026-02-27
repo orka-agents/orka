@@ -159,7 +159,7 @@ func TestCreateContainerTaskTool_Execute(t *testing.T) {
 				if r.Success {
 					t.Error("expected failure for invalid JSON")
 				}
-				if r.ErrorType != "invalid_arguments" {
+				if r.ErrorType != errTypeInvalidArgs {
 					t.Errorf("errorType = %v, want invalid_arguments", r.ErrorType)
 				}
 			},
@@ -175,7 +175,7 @@ func TestCreateContainerTaskTool_Execute(t *testing.T) {
 				if r.Success {
 					t.Error("expected failure for invalid timeout")
 				}
-				if r.ErrorType != "invalid_arguments" {
+				if r.ErrorType != errTypeInvalidArgs {
 					t.Errorf("errorType = %v, want invalid_arguments", r.ErrorType)
 				}
 			},

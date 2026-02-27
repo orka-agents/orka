@@ -23,6 +23,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
+const testNamespace = "test-ns"
+
 func setupTestApp(c client.Client) *fiber.App {
 	app := fiber.New()
 	app.Use(NewAuthMiddleware(c))
@@ -279,7 +281,7 @@ func TestValidateToken_Authenticated(t *testing.T) {
 	if userInfo.UID != "uid-123" {
 		t.Errorf("UID = %s, want uid-123", userInfo.UID)
 	}
-	if userInfo.Namespace != "test-ns" {
+	if userInfo.Namespace != testNamespace {
 		t.Errorf("Namespace = %s, want test-ns", userInfo.Namespace)
 	}
 }

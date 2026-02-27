@@ -21,6 +21,11 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
+const (
+	reasonValidationSucceeded = "ValidationSucceeded"
+	reasonValidationFailed    = "ValidationFailed"
+)
+
 // ProviderReconciler reconciles a Provider object
 type ProviderReconciler struct {
 	client.Client
@@ -124,11 +129,11 @@ func (r *ProviderReconciler) updateStatus(ctx context.Context, provider *corev1a
 
 	if ready {
 		condition.Status = metav1.ConditionTrue
-		condition.Reason = "ValidationSucceeded"
+		condition.Reason = reasonValidationSucceeded
 		condition.Message = message
 	} else {
 		condition.Status = metav1.ConditionFalse
-		condition.Reason = "ValidationFailed"
+		condition.Reason = reasonValidationFailed
 		condition.Message = message
 	}
 
