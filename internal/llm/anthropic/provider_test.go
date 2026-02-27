@@ -369,8 +369,7 @@ func TestComplete_ServerError(t *testing.T) {
 func TestComplete_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		//nolint:errcheck // test helper
-		fmt.Fprint(w, `{
+		_, _ = fmt.Fprint(w, `{
 			"id": "msg_123",
 			"type": "message",
 			"role": "assistant",
@@ -378,7 +377,7 @@ func TestComplete_Success(t *testing.T) {
 			"content": [{"type": "text", "text": "Hello there!"}],
 			"stop_reason": "end_turn",
 			"usage": {"input_tokens": 10, "output_tokens": 5}
-		}`)
+		}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -411,8 +410,7 @@ func TestComplete_Success(t *testing.T) {
 func TestComplete_WithToolUse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		//nolint:errcheck // test helper
-		fmt.Fprint(w, `{
+		_, _ = fmt.Fprint(w, `{
 			"id": "msg_456",
 			"type": "message",
 			"role": "assistant",
@@ -423,7 +421,7 @@ func TestComplete_WithToolUse(t *testing.T) {
 			],
 			"stop_reason": "tool_use",
 			"usage": {"input_tokens": 20, "output_tokens": 15}
-		}`)
+		}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -698,7 +696,7 @@ func TestHandleStreamEvent_MessageDelta_EndTurn(t *testing.T) {
 }
 
 func TestHandleStreamEvent_MessageDelta_ToolUseInferred(t *testing.T) {
-	// When hasToolCalls is true and stopReason is empty, should infer "tool_use"
+	// When hasToolCalls is true and stopReason is empty, should infer testStopReasonToolUse
 	event := unmarshalStreamEvent(t,
 		`{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":""},"usage":{"output_tokens":10}}`)
 
@@ -839,7 +837,7 @@ func TestStream_ToolUse(t *testing.T) {
 
 	ch, err := provider.Stream(context.Background(), &llm.CompletionRequest{
 		Model:    "claude-3",
-		Messages: []llm.Message{{Role: "user", Content: "search"}},
+		Messages: []llm.Message{{Role: "user", Content: testToolNameSearch}},
 		Tools: []llm.Tool{
 			{Name: testToolNameSearch, Description: testToolNameSearch, Parameters: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`)},
 		},

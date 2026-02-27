@@ -12,8 +12,8 @@ import (
 func TestSendMessageTool(t *testing.T) {
 	tool := NewSendMessageTool()
 
-	if tool.Name() != "send_message" {
-		t.Errorf("Name() = %q, want %q", tool.Name(), "send_message")
+	if tool.Name() != sendMessageToolName {
+		t.Errorf("Name() = %q, want %q", tool.Name(), sendMessageToolName)
 	}
 
 	t.Run("missing env vars returns error", func(t *testing.T) {

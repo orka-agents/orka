@@ -18,6 +18,8 @@ import (
 	"time"
 )
 
+const extractorRaw = "raw"
+
 // WebFetchTool implements URL content fetching and extraction
 type WebFetchTool struct {
 	client *http.Client
@@ -146,14 +148,14 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	case strings.Contains(contentType, "text/html"):
 		if fetchArgs.Raw {
 			content = string(body)
-			extractor = "raw"
+			extractor = extractorRaw
 		} else {
 			content = extractText(body)
 			extractor = "html_text"
 		}
 	default:
 		content = string(body)
-		extractor = "raw"
+		extractor = extractorRaw
 	}
 
 	truncated := false
@@ -183,11 +185,11 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (strin
 func (t *WebFetchTool) extractJSON(body []byte) (string, string) {
 	var parsed any
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return string(body), "raw"
+		return string(body), extractorRaw
 	}
 	pretty, err := json.MarshalIndent(parsed, "", "  ")
 	if err != nil {
-		return string(body), "raw"
+		return string(body), extractorRaw
 	}
 	return string(pretty), "json"
 }

@@ -17,6 +17,8 @@ import (
 	"testing"
 )
 
+const executorResultDone = "done"
+
 func TestLoadConfig_RequiredFields(t *testing.T) {
 	t.Setenv("ORKA_PROMPT", "")
 	t.Setenv("ORKA_TASK_NAME", "t1")
@@ -276,7 +278,7 @@ func TestRunAgent_ConfigError(t *testing.T) {
 	t.Setenv("ORKA_GIT_REPO", "")
 
 	executor := func(_ context.Context, _ *AgentConfig) (string, error) {
-		return "done", nil
+		return executorResultDone, nil
 	}
 
 	err := RunAgent("test", "/tmp/ws", 50, executor)
@@ -365,7 +367,7 @@ func TestRunAgent_GitCloneFailure(t *testing.T) {
 	t.Setenv("ORKA_PRIOR_TASK", "")
 
 	executor := func(_ context.Context, _ *AgentConfig) (string, error) {
-		return "done", nil
+		return executorResultDone, nil
 	}
 
 	err := RunAgent("test-agent", t.TempDir(), 50, executor)

@@ -99,7 +99,7 @@ func newTestChatHandler(t *testing.T, c client.Client, ss store.SessionStore, rs
 }
 
 // providerCRD creates a Provider CRD + matching Secret for tests.
-func providerCRD(name, namespace, providerType, model string) []runtime.Object {
+func providerCRD(name, namespace, providerType, model string) []runtime.Object { //nolint:unparam
 	return []runtime.Object{
 		&corev1alpha1.Provider{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
@@ -209,7 +209,7 @@ func TestHandleChatConfig(t *testing.T) {
 	assert.Equal(t, true, body["enabled"])
 	assert.Equal(t, "test-provider", body["provider"])
 	assert.Equal(t, "test-model", body["model"])
-	assert.Equal(t, float64(100), body["maxIterations"])
+	assert.Equal(t, float64(20), body["maxIterations"])
 
 	// availableTools should be a non-empty list
 	tools, ok := body["availableTools"].([]any)

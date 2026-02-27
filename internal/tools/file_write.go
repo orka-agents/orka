@@ -15,6 +15,11 @@ import (
 	"strings"
 )
 
+const (
+	modeWrite  = "write"
+	modeAppend = "append"
+)
+
 // FileWriteTool implements file writing functionality
 type FileWriteTool struct {
 	workDir      string
@@ -106,9 +111,9 @@ func (t *FileWriteTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	}
 
 	if writeArgs.Mode == "" {
-		writeArgs.Mode = "write"
+		writeArgs.Mode = modeWrite
 	}
-	if writeArgs.Mode != "write" && writeArgs.Mode != "append" {
+	if writeArgs.Mode != modeWrite && writeArgs.Mode != modeAppend {
 		return "", fmt.Errorf("mode must be 'write' or 'append'")
 	}
 
@@ -158,7 +163,7 @@ func (t *FileWriteTool) Execute(ctx context.Context, args json.RawMessage) (stri
 
 	// Write or append
 	var err error
-	if writeArgs.Mode == "append" {
+	if writeArgs.Mode == modeAppend {
 		f, openErr := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if openErr != nil {
 			return "", fmt.Errorf("failed to open file: %w", openErr)

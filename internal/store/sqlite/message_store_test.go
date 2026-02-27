@@ -118,7 +118,7 @@ func TestGetMessagesMultipleMarkRead(t *testing.T) {
 	}
 }
 
-func TestMessageStore(t *testing.T) {
+func TestMessageStore(t *testing.T) { //nolint:gocyclo
 	s := setupTestStore(t)
 	ctx := context.Background()
 

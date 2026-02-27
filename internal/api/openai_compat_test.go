@@ -323,7 +323,7 @@ func TestMapFinishReason(t *testing.T) {
 		{"", "stop"},
 		{"tool_use", "tool_calls"},
 		{"tool_calls", "tool_calls"},
-		{"max_tokens", "length"},
+		{oaiParamMaxTokens, "length"},
 		{"length", "length"},
 		{"content_filter", "content_filter"},
 		{"unknown", "stop"},
@@ -923,7 +923,7 @@ func TestHandleChatCompletions_MaxTokensTooSmall(t *testing.T) {
 
 	var oaiErr OAIError
 	json.NewDecoder(resp.Body).Decode(&oaiErr) //nolint:errcheck
-	if oaiErr.Error.Param == nil || *oaiErr.Error.Param != "max_tokens" {
+	if oaiErr.Error.Param == nil || *oaiErr.Error.Param != oaiParamMaxTokens {
 		t.Errorf("expected param max_tokens, got %v", oaiErr.Error.Param)
 	}
 }

@@ -26,6 +26,15 @@ import (
 	"github.com/sozercan/orka/internal/tools"
 )
 
+const (
+	oaiParamMaxTokens    = "max_tokens"
+	oaiRoleSystem        = "system"
+	oaiContentTypeText   = "text"
+	oaiStopReasonEndTurn = "end_turn"
+	oaiStopReasonToolUse = "tool_use"
+	oaiStopReasonLength  = "length"
+)
+
 var oaiLog = logf.Log.WithName("openai-compat")
 
 const (
@@ -267,8 +276,8 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	}
 	if maxTokens > 0 {
 		if maxTokens < 16 {
-			oaiLog.Info("max_tokens too small", "max_tokens", maxTokens)
-			param := "max_tokens"
+			oaiLog.Info("max_tokens too small", oaiParamMaxTokens, maxTokens)
+			param := oaiParamMaxTokens
 			return c.Status(400).JSON(OAIError{Error: OAIErrorDetail{
 				Message: fmt.Sprintf("max_tokens must be at least 16, got %d", maxTokens),
 				Type:    "invalid_request_error",
@@ -818,7 +827,7 @@ func convertOAIMessages(msgs []OAIMessage) ([]llm.Message, string) {
 	messages := make([]llm.Message, 0, len(msgs))
 
 	for _, m := range msgs {
-		if m.Role == "system" {
+		if m.Role == oaiRoleSystem {
 			systemPrompt = extractContent(m.Content)
 			continue
 		}
@@ -863,7 +872,7 @@ func extractContent(content any) string {
 		var parts []string
 		for _, part := range v {
 			if m, ok := part.(map[string]any); ok {
-				if t, ok := m["type"].(string); ok && t == "text" {
+				if t, ok := m["type"].(string); ok && t == oaiContentTypeText {
 					if text, ok := m["text"].(string); ok {
 						parts = append(parts, text)
 					}
@@ -886,13 +895,13 @@ func extractContent(content any) string {
 }
 
 // convertOAITools converts OpenAI tool definitions to internal llm.Tool format.
-func convertOAITools(tools []OAITool) []llm.Tool {
-	if len(tools) == 0 {
+func convertOAITools(inputTools []OAITool) []llm.Tool {
+	if len(inputTools) == 0 {
 		return nil
 	}
 
-	result := make([]llm.Tool, 0, len(tools))
-	for _, t := range tools {
+	result := make([]llm.Tool, 0, len(inputTools))
+	for _, t := range inputTools {
 		if t.Type != "function" {
 			continue
 		}
@@ -908,12 +917,12 @@ func convertOAITools(tools []OAITool) []llm.Tool {
 // mapFinishReason maps internal stop reasons to OpenAI finish_reason values.
 func mapFinishReason(reason string) string {
 	switch strings.ToLower(reason) {
-	case "end_turn", finishReasonStop, "":
+	case oaiStopReasonEndTurn, finishReasonStop, "":
 		return finishReasonStop
-	case "tool_use", finishReasonToolCalls:
+	case oaiStopReasonToolUse, finishReasonToolCalls:
 		return finishReasonToolCalls
-	case "max_tokens", "length":
-		return "length"
+	case oaiParamMaxTokens, oaiStopReasonLength:
+		return oaiStopReasonLength
 	case "content_filter":
 		return "content_filter"
 	default:

@@ -19,10 +19,12 @@ import (
 	"github.com/sozercan/orka/internal/labels"
 )
 
+const testCancelTaskName = "cancel_task"
+
 func TestCancelTaskTool_Name(t *testing.T) {
 	tool := NewCancelTaskTool(newFakeClient())
-	if got := tool.Name(); got != "cancel_task" {
-		t.Errorf("Name() = %v, want %v", got, "cancel_task")
+	if got := tool.Name(); got != testCancelTaskName {
+		t.Errorf("Name() = %v, want %v", got, testCancelTaskName)
 	}
 }
 
@@ -43,7 +45,7 @@ func TestCancelTaskTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != "object" {
+	if schema["type"] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 	props, ok := schema["properties"].(map[string]any)

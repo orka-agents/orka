@@ -20,6 +20,8 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
+const testConditionReady = "Ready"
+
 func newProviderScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(s)
@@ -351,13 +353,13 @@ func TestProviderUpdateStatus(t *testing.T) {
 				t.Fatal("expected at least one condition")
 			}
 			cond := got.Status.Conditions[0]
-			if cond.Type != "Ready" {
+			if cond.Type != testConditionReady {
 				t.Errorf("condition type = %q, want Ready", cond.Type)
 			}
-			if tt.ready && cond.Reason != "ValidationSucceeded" {
+			if tt.ready && cond.Reason != reasonValidationSucceeded {
 				t.Errorf("condition reason = %q, want ValidationSucceeded", cond.Reason)
 			}
-			if !tt.ready && cond.Reason != "ValidationFailed" {
+			if !tt.ready && cond.Reason != reasonValidationFailed {
 				t.Errorf("condition reason = %q, want ValidationFailed", cond.Reason)
 			}
 		})

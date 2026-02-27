@@ -13,6 +13,11 @@ import (
 	"github.com/sozercan/orka/internal/cli/client"
 )
 
+const (
+	statusStarting = "starting"
+	statusChecking = "checking…"
+)
+
 func TestNewTracker(t *testing.T) {
 	var buf bytes.Buffer
 	tr := newTracker(&buf, VerbosityDefault, false)
@@ -81,8 +86,8 @@ func TestAddAgent(t *testing.T) {
 	if agent.done {
 		t.Error("expected agent not done")
 	}
-	if agent.status != "starting" {
-		t.Errorf("status = %q, want %q", agent.status, "starting")
+	if agent.status != statusStarting {
+		t.Errorf("status = %q, want %q", agent.status, statusStarting)
 	}
 
 	// Non-TTY should write a static line
@@ -168,10 +173,10 @@ func TestUpdateAgentStatus(t *testing.T) {
 	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
 
 	statusArgs, _ := json.Marshal(map[string]any{"name": "task-1"})
-	tr.updateAgentStatus(client.SSEEventData{Args: statusArgs}, "checking…")
+	tr.updateAgentStatus(client.SSEEventData{Args: statusArgs}, statusChecking)
 
-	if tr.agents[0].status != "checking…" {
-		t.Errorf("status = %q, want %q", tr.agents[0].status, "checking…")
+	if tr.agents[0].status != statusChecking {
+		t.Errorf("status = %q, want %q", tr.agents[0].status, statusChecking)
 	}
 }
 
@@ -184,10 +189,10 @@ func TestUpdateAgentStatusNoMatch(t *testing.T) {
 
 	// Different task name
 	statusArgs, _ := json.Marshal(map[string]any{"name": "task-2"})
-	tr.updateAgentStatus(client.SSEEventData{Args: statusArgs}, "checking…")
+	tr.updateAgentStatus(client.SSEEventData{Args: statusArgs}, statusChecking)
 
-	if tr.agents[0].status != "starting" {
-		t.Errorf("status should remain %q, got %q", "starting", tr.agents[0].status)
+	if tr.agents[0].status != statusStarting {
+		t.Errorf("status should remain %q, got %q", statusStarting, tr.agents[0].status)
 	}
 }
 
@@ -292,8 +297,8 @@ func TestHandleEventToolCallCheckProgress(t *testing.T) {
 		Args: checkArgs,
 	}))
 
-	if tr.agents[0].status != "checking…" {
-		t.Errorf("status = %q, want %q", tr.agents[0].status, "checking…")
+	if tr.agents[0].status != statusChecking {
+		t.Errorf("status = %q, want %q", tr.agents[0].status, statusChecking)
 	}
 }
 
@@ -406,7 +411,7 @@ func TestIsTTYCheckWithDevNull(t *testing.T) {
 	if err != nil {
 		t.Skip("cannot open /dev/null")
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck
 
 	// /dev/null is not a char device on all platforms, but should not panic
 	_ = isTTYCheck(f)
@@ -516,7 +521,7 @@ func TestStartSpinner_TTY(t *testing.T) {
 	}
 }
 
-func TestStartSpinner_NoActiveAgents(t *testing.T) {
+func TestStartSpinner_NoActiveAgents(t *testing.T) { //nolint:unparam
 	var buf bytes.Buffer
 	tr := newTracker(&buf, VerbosityDefault, true)
 
@@ -695,8 +700,8 @@ func TestHandleEventWaitForTask(t *testing.T) {
 		Args: checkArgs,
 	}))
 
-	if tr.agents[0].status != "checking…" {
-		t.Errorf("status = %q, want %q", tr.agents[0].status, "checking…")
+	if tr.agents[0].status != statusChecking {
+		t.Errorf("status = %q, want %q", tr.agents[0].status, statusChecking)
 	}
 }
 
@@ -731,8 +736,8 @@ func TestUpdateAgentFromProgressNoPhase(t *testing.T) {
 	result, _ := json.Marshal(map[string]any{"name": "t1"})
 	tr.updateAgentFromProgress(client.SSEEventData{Result: result})
 
-	if tr.agents[0].status != "starting" {
-		t.Errorf("status = %q, want %q (should not change without phase)", tr.agents[0].status, "starting")
+	if tr.agents[0].status != statusStarting {
+		t.Errorf("status = %q, want %q (should not change without phase)", tr.agents[0].status, statusStarting)
 	}
 }
 

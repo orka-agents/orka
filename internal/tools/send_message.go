@@ -32,9 +32,11 @@ func NewSendMessageTool() *SendMessageTool {
 	return &SendMessageTool{}
 }
 
+const sendMessageToolName = "send_message"
+
 // Name returns the tool name
 func (t *SendMessageTool) Name() string {
-	return "send_message"
+	return sendMessageToolName
 }
 
 // Description returns the tool description

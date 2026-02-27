@@ -51,8 +51,6 @@ type ChatConfig struct {
 	MaxSessionSize  int // bytes
 }
 
-
-
 // ChatRequest is the request body for POST /api/v1/chat.
 type ChatRequest struct {
 	Message      string   `json:"message"`
@@ -516,7 +514,7 @@ func (ch *ChatHandler) executeToolCalls(
 		ToolCalls: resp.ToolCalls,
 	})
 
-	var toolCalls []ToolCallInfo
+	toolCalls := make([]ToolCallInfo, 0, len(resp.ToolCalls))
 	var iterationBump int
 	var repetitionWarning string
 

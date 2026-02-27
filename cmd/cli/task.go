@@ -54,7 +54,7 @@ func newTaskCreateCmd() *cobra.Command {
 				taskType = "ai"
 			}
 			if provider == "" {
-				provider = "default"
+				provider = defaultNamespace
 			}
 
 			b := make([]byte, 4)

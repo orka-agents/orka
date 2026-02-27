@@ -698,7 +698,7 @@ func TestUpdateStatus(t *testing.T) {
 		if cond.Status != metav1.ConditionTrue {
 			t.Errorf("Ready status = %s, want True", cond.Status)
 		}
-		if cond.Reason != "ValidationSucceeded" {
+		if cond.Reason != reasonValidationSucceeded {
 			t.Errorf("Reason = %s, want ValidationSucceeded", cond.Reason)
 		}
 	})
@@ -720,7 +720,7 @@ func TestUpdateStatus(t *testing.T) {
 		if cond.Status != metav1.ConditionFalse {
 			t.Errorf("Ready status = %s, want False", cond.Status)
 		}
-		if cond.Reason != "ValidationFailed" {
+		if cond.Reason != reasonValidationFailed {
 			t.Errorf("Reason = %s, want ValidationFailed", cond.Reason)
 		}
 		if cond.Message != "bad config" {

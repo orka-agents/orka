@@ -439,7 +439,8 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 }
 
 // addAIEnvVars adds AI-specific environment variables
-func (b *JobBuilder) addAIEnvVars(ctx context.Context, envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, providerCRD *corev1alpha1.Provider) []corev1.EnvVar {
+func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
+	envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, providerCRD *corev1alpha1.Provider) []corev1.EnvVar {
 	cfg := resolveAIConfig(task, agent, providerCRD)
 
 	// Resolve system prompt from ConfigMapRef if not already set inline

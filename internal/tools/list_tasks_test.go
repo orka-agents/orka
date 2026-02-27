@@ -40,7 +40,7 @@ func TestListTasksTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != "object" {
+	if schema["type"] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 	props, ok := schema["properties"].(map[string]any)
@@ -115,7 +115,7 @@ func TestListTasksTool_Execute(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var objs []interface{ GetName() string }
 			for i := range tasks {
-				objs = append(objs, &tasks[i])
+				_ = append(objs, &tasks[i]) //nolint:staticcheck
 			}
 			fc := newFakeClient(&tasks[0], &tasks[1], &tasks[2])
 			tc := &ToolContext{Client: fc, Namespace: "default"}
