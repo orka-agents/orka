@@ -259,11 +259,11 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 
 	if validationErr != nil {
 		condition.Status = metav1.ConditionFalse
-		condition.Reason = "ValidationFailed"
+		condition.Reason = reasonValidationFailed
 		condition.Message = validationErr.Error()
 	} else {
 		condition.Status = metav1.ConditionTrue
-		condition.Reason = "ValidationSucceeded"
+		condition.Reason = reasonValidationSucceeded
 		condition.Message = "Agent configuration is valid"
 	}
 

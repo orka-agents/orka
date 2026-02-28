@@ -413,7 +413,7 @@ func TestComputeHash(t *testing.T) {
 			t.Errorf("hash length = %d, want 16", len(h))
 		}
 		for _, c := range h {
-			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 				t.Errorf("hash %q contains non-hex char %q", h, string(c))
 			}
 		}

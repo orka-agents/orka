@@ -27,8 +27,8 @@ func TestNewLoginCmd_ServiceAccountFlag(t *testing.T) {
 	if flag == nil {
 		t.Fatal("missing flag 'service-account'")
 	}
-	if flag.DefValue != "default" {
-		t.Errorf("service-account default = %q, want %q", flag.DefValue, "default")
+	if flag.DefValue != defaultNamespace {
+		t.Errorf("service-account default = %q, want %q", flag.DefValue, defaultNamespace)
 	}
 }
 

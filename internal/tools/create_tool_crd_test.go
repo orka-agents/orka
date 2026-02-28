@@ -41,7 +41,7 @@ func TestCreateToolCRDTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != "object" {
+	if schema["type"] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 	props, ok := schema["properties"].(map[string]any)
@@ -86,7 +86,7 @@ func TestCreateToolCRDTool_Execute(t *testing.T) {
 				"url":         "http://example.com",
 			},
 			wantErr: true,
-			errType: "invalid_arguments",
+			errType: errTypeInvalidArgs,
 		},
 		{
 			name: "missing description",
@@ -95,7 +95,7 @@ func TestCreateToolCRDTool_Execute(t *testing.T) {
 				"url":  "http://example.com",
 			},
 			wantErr: true,
-			errType: "invalid_arguments",
+			errType: errTypeInvalidArgs,
 		},
 		{
 			name: "missing url",
@@ -104,7 +104,7 @@ func TestCreateToolCRDTool_Execute(t *testing.T) {
 				"description": "A test tool",
 			},
 			wantErr: true,
-			errType: "invalid_arguments",
+			errType: errTypeInvalidArgs,
 		},
 	}
 
@@ -326,7 +326,7 @@ func TestCreateToolCRDTool_Execute_InvalidJSON(t *testing.T) {
 	if res.Success {
 		t.Error("expected failure for invalid JSON")
 	}
-	if res.ErrorType != "invalid_arguments" {
+	if res.ErrorType != errTypeInvalidArgs {
 		t.Errorf("expected errorType 'invalid_arguments', got %q", res.ErrorType)
 	}
 }

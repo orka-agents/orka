@@ -12,6 +12,11 @@ import (
 	"github.com/sozercan/orka/internal/cli/client"
 )
 
+const (
+	statusError  = "error"
+	tasksAPIPath = "/api/v1/tasks"
+)
+
 func TestNewStatusCmd_Structure(t *testing.T) {
 	cmd := newStatusCmd()
 
@@ -29,16 +34,16 @@ func statusServer(healthy, ready bool, tasks []client.TaskSummary, agents []clie
 		case "/healthz":
 			status := "ok"
 			if !healthy {
-				status = "error"
+				status = statusError
 			}
 			json.NewEncoder(w).Encode(map[string]any{"status": status}) //nolint:errcheck
 		case "/readyz":
 			status := "ok"
 			if !ready {
-				status = "error"
+				status = statusError
 			}
 			json.NewEncoder(w).Encode(map[string]any{"status": status}) //nolint:errcheck
-		case "/api/v1/tasks":
+		case tasksAPIPath:
 			// Build items list from summaries (simplified)
 			items := make([]map[string]any, len(tasks))
 			for i, t := range tasks {
@@ -128,12 +133,12 @@ func TestNewStatusCmd_TaskErrors(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{"status": "ok"}) //nolint:errcheck
 		case "/readyz":
 			json.NewEncoder(w).Encode(map[string]any{"status": "ok"}) //nolint:errcheck
-		case "/api/v1/tasks":
+		case tasksAPIPath:
 			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprint(w, "task error")
+			fmt.Fprint(w, "task error") //nolint:errcheck
 		case "/api/v1/agents":
 			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprint(w, "agent error")
+			fmt.Fprint(w, "agent error") //nolint:errcheck
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

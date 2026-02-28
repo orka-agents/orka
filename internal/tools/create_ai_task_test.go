@@ -61,7 +61,7 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 		taskCounter = 0
 		tc := &ToolContext{
 			Client:    fc,
-			Namespace: "default",
+			Namespace: defaultNamespace,
 			GenerateTaskName: func() string {
 				taskCounter++
 				return "ai-task-1"
@@ -102,7 +102,7 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 				if data["name"] != "ai-task-1" {
 					t.Errorf("name = %v, want ai-task-1", data["name"])
 				}
-				if data["namespace"] != "default" {
+				if data["namespace"] != defaultNamespace {
 					t.Errorf("namespace = %v, want default", data["namespace"])
 				}
 				if data["phase"] != "Pending" {
@@ -139,7 +139,7 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 				if r.Success {
 					t.Error("expected failure for missing prompt")
 				}
-				if r.ErrorType != "invalid_arguments" {
+				if r.ErrorType != errTypeInvalidArgs {
 					t.Errorf("errorType = %v, want invalid_arguments", r.ErrorType)
 				}
 			},
@@ -156,7 +156,7 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 				if r.Success {
 					t.Error("expected failure for invalid JSON")
 				}
-				if r.ErrorType != "invalid_arguments" {
+				if r.ErrorType != errTypeInvalidArgs {
 					t.Errorf("errorType = %v, want invalid_arguments", r.ErrorType)
 				}
 			},
@@ -172,7 +172,7 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 				if r.Success {
 					t.Error("expected failure for invalid timeout")
 				}
-				if r.ErrorType != "invalid_arguments" {
+				if r.ErrorType != errTypeInvalidArgs {
 					t.Errorf("errorType = %v, want invalid_arguments", r.ErrorType)
 				}
 			},
@@ -184,7 +184,7 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 				&corev1alpha1.Task{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "ai-task-1",
-						Namespace: "default",
+						Namespace: defaultNamespace,
 					},
 					Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 				},
@@ -197,7 +197,7 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 				if r.Success {
 					t.Error("expected failure for already exists")
 				}
-				if r.ErrorType != "already_exists" {
+				if r.ErrorType != errTypeAlreadyExists {
 					t.Errorf("errorType = %v, want already_exists", r.ErrorType)
 				}
 			},

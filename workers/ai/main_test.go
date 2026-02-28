@@ -21,6 +21,8 @@ import (
 	"github.com/sozercan/orka/internal/llm"
 )
 
+const roleUser = "user"
+
 const customToolName = "custom_tool"
 
 func TestGetAPIKey_EnvVar(t *testing.T) {
@@ -145,7 +147,7 @@ func TestLoadSessionContext_MalformedJSON(t *testing.T) {
 			Content string `json:"content"`
 		}
 		if err := json.Unmarshal([]byte(line), &msg); err == nil {
-			if msg.Role == "user" || msg.Role == "assistant" {
+			if msg.Role == roleUser || msg.Role == "assistant" {
 				messages = append(messages, llm.Message{
 					Role:    msg.Role,
 					Content: msg.Content,

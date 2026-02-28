@@ -30,6 +30,16 @@ import (
 	_ "github.com/sozercan/orka/internal/llm/openai"
 )
 
+const (
+	testHelloContent    = "Hello!"
+	testToolNameSearch  = "search"
+	testRoleUser        = "user"
+	testRoleTool        = "tool"
+	testRoleAssistant   = "assistant"
+	testInvalidReqError = "invalid_request_error"
+	testToolUseID       = "tu_1"
+)
+
 func setupTestAnthropicHandler(objs ...runtime.Object) (*AnthropicCompatHandler, *fiber.App) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -101,7 +111,7 @@ func TestParseAnthropicContent(t *testing.T) {
 				if blocks[0].Text != tt.wantFirst {
 					t.Errorf("expected first block text %q, got %q", tt.wantFirst, blocks[0].Text)
 				}
-				if blocks[0].Type != "text" {
+				if blocks[0].Type != oaiContentTypeText {
 					t.Errorf("expected first block type 'text', got %q", blocks[0].Type)
 				}
 			}
@@ -118,10 +128,10 @@ func TestParseAnthropicContent_ArrayDetails(t *testing.T) {
 	if len(blocks) != 2 {
 		t.Fatalf("expected 2 blocks, got %d", len(blocks))
 	}
-	if blocks[0].Type != "text" || blocks[0].Text != "hello" {
+	if blocks[0].Type != oaiContentTypeText || blocks[0].Text != "hello" {
 		t.Errorf("block 0: type=%q text=%q", blocks[0].Type, blocks[0].Text)
 	}
-	if blocks[1].Type != "tool_use" || blocks[1].ID != "tu_1" || blocks[1].Name != "search" {
+	if blocks[1].Type != oaiStopReasonToolUse || blocks[1].ID != testToolUseID || blocks[1].Name != testToolNameSearch {
 		t.Errorf("block 1: type=%q id=%q name=%q", blocks[1].Type, blocks[1].ID, blocks[1].Name)
 	}
 }
@@ -193,7 +203,7 @@ func TestParseAnthropicSystem(t *testing.T) {
 
 // --- Tests: convertAnthropicMessages ---
 
-func TestConvertAnthropicMessages(t *testing.T) {
+func TestConvertAnthropicMessages(t *testing.T) { //nolint:gocyclo
 	tests := []struct {
 		name     string
 		messages []AnthropicMessage
@@ -207,10 +217,10 @@ func TestConvertAnthropicMessages(t *testing.T) {
 			},
 			wantLen: 1,
 			check: func(t *testing.T, msgs []llm.Message) {
-				if msgs[0].Role != "user" {
+				if msgs[0].Role != testRoleUser {
 					t.Errorf("role = %q, want user", msgs[0].Role)
 				}
-				if msgs[0].Content != "Hello!" {
+				if msgs[0].Content != testHelloContent {
 					t.Errorf("content = %q, want Hello!", msgs[0].Content)
 				}
 			},
@@ -222,10 +232,10 @@ func TestConvertAnthropicMessages(t *testing.T) {
 			},
 			wantLen: 1,
 			check: func(t *testing.T, msgs []llm.Message) {
-				if msgs[0].Role != "tool" {
+				if msgs[0].Role != testRoleTool {
 					t.Errorf("role = %q, want tool", msgs[0].Role)
 				}
-				if msgs[0].ToolCallID != "tu_1" {
+				if msgs[0].ToolCallID != testToolUseID {
 					t.Errorf("tool_call_id = %q, want tu_1", msgs[0].ToolCallID)
 				}
 				if msgs[0].Content != "result text" {
@@ -240,7 +250,7 @@ func TestConvertAnthropicMessages(t *testing.T) {
 			},
 			wantLen: 1,
 			check: func(t *testing.T, msgs []llm.Message) {
-				if msgs[0].Role != "tool" {
+				if msgs[0].Role != testRoleTool {
 					t.Errorf("role = %q, want tool", msgs[0].Role)
 				}
 				if msgs[0].Content != "line1\nline2" {
@@ -255,7 +265,7 @@ func TestConvertAnthropicMessages(t *testing.T) {
 			},
 			wantLen: 1,
 			check: func(t *testing.T, msgs []llm.Message) {
-				if msgs[0].Role != "assistant" {
+				if msgs[0].Role != testRoleAssistant {
 					t.Errorf("role = %q, want assistant", msgs[0].Role)
 				}
 				if msgs[0].Content != "I can help." {
@@ -270,16 +280,16 @@ func TestConvertAnthropicMessages(t *testing.T) {
 			},
 			wantLen: 1,
 			check: func(t *testing.T, msgs []llm.Message) {
-				if msgs[0].Role != "assistant" {
+				if msgs[0].Role != testRoleAssistant {
 					t.Errorf("role = %q, want assistant", msgs[0].Role)
 				}
 				if len(msgs[0].ToolCalls) != 1 {
 					t.Fatalf("expected 1 tool call, got %d", len(msgs[0].ToolCalls))
 				}
-				if msgs[0].ToolCalls[0].ID != "tu_1" {
+				if msgs[0].ToolCalls[0].ID != testToolUseID {
 					t.Errorf("tool call ID = %q, want tu_1", msgs[0].ToolCalls[0].ID)
 				}
-				if msgs[0].ToolCalls[0].Name != "search" {
+				if msgs[0].ToolCalls[0].Name != testToolNameSearch {
 					t.Errorf("tool call name = %q, want search", msgs[0].ToolCalls[0].Name)
 				}
 			},
@@ -297,7 +307,7 @@ func TestConvertAnthropicMessages(t *testing.T) {
 				if len(msgs[0].ToolCalls) != 1 {
 					t.Fatalf("expected 1 tool call, got %d", len(msgs[0].ToolCalls))
 				}
-				if msgs[0].ToolCalls[0].Name != "search" {
+				if msgs[0].ToolCalls[0].Name != testToolNameSearch {
 					t.Errorf("tool call name = %q", msgs[0].ToolCalls[0].Name)
 				}
 			},
@@ -311,13 +321,13 @@ func TestConvertAnthropicMessages(t *testing.T) {
 			},
 			wantLen: 3,
 			check: func(t *testing.T, msgs []llm.Message) {
-				if msgs[0].Role != "user" || msgs[0].Content != "Hello" {
+				if msgs[0].Role != testRoleUser || msgs[0].Content != "Hello" {
 					t.Errorf("msg 0: role=%q content=%q", msgs[0].Role, msgs[0].Content)
 				}
-				if msgs[1].Role != "assistant" || msgs[1].Content != "Hi there!" {
+				if msgs[1].Role != testRoleAssistant || msgs[1].Content != "Hi there!" {
 					t.Errorf("msg 1: role=%q content=%q", msgs[1].Role, msgs[1].Content)
 				}
-				if msgs[2].Role != "user" || msgs[2].Content != "How are you?" {
+				if msgs[2].Role != testRoleUser || msgs[2].Content != "How are you?" {
 					t.Errorf("msg 2: role=%q content=%q", msgs[2].Role, msgs[2].Content)
 				}
 			},
@@ -332,10 +342,10 @@ func TestConvertAnthropicMessages(t *testing.T) {
 				// tool_result messages come first, then text
 				toolMsg := msgs[0]
 				textMsg := msgs[1]
-				if toolMsg.Role != "tool" || toolMsg.ToolCallID != "tu_1" {
+				if toolMsg.Role != testRoleTool || toolMsg.ToolCallID != "tu_1" {
 					t.Errorf("tool msg: role=%q id=%q", toolMsg.Role, toolMsg.ToolCallID)
 				}
-				if textMsg.Role != "user" || textMsg.Content != "Here is context." {
+				if textMsg.Role != testRoleUser || textMsg.Content != "Here is context." {
 					t.Errorf("text msg: role=%q content=%q", textMsg.Role, textMsg.Content)
 				}
 			},
@@ -430,7 +440,7 @@ func TestConvertAnthropicTools_FieldMapping(t *testing.T) {
 	if len(result) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(result))
 	}
-	if result[0].Name != "search" {
+	if result[0].Name != testToolNameSearch {
 		t.Errorf("name = %q, want search", result[0].Name)
 	}
 	if result[0].Description != "Search the web" {
@@ -457,7 +467,7 @@ func TestConvertToAnthropicResponse(t *testing.T) {
 		{
 			name: "text-only response",
 			resp: &llm.CompletionResponse{
-				Content:      "Hello!",
+				Content:      testHelloContent,
 				StopReason:   "stop",
 				InputTokens:  10,
 				OutputTokens: 5,
@@ -468,10 +478,10 @@ func TestConvertToAnthropicResponse(t *testing.T) {
 			wantInputTokens:  10,
 			wantOutputTokens: 5,
 			checkContent: func(t *testing.T, content []AnthropicContentBlock) {
-				if content[0].Type != "text" {
+				if content[0].Type != oaiContentTypeText {
 					t.Errorf("type = %q, want text", content[0].Type)
 				}
-				if content[0].Text != "Hello!" {
+				if content[0].Text != testHelloContent {
 					t.Errorf("text = %q, want Hello!", content[0].Text)
 				}
 			},
@@ -481,20 +491,20 @@ func TestConvertToAnthropicResponse(t *testing.T) {
 			resp: &llm.CompletionResponse{
 				StopReason: "tool_calls",
 				ToolCalls: []llm.ToolCall{
-					{ID: "tu_1", Name: "search", Arguments: json.RawMessage(`{"q":"test"}`)},
+					{ID: testToolUseID, Name: "search", Arguments: json.RawMessage(`{"q":"test"}`)},
 				},
 			},
 			model:          "claude-sonnet-4-20250514",
 			wantContentLen: 1,
-			wantStopReason: "tool_use",
+			wantStopReason: oaiStopReasonToolUse,
 			checkContent: func(t *testing.T, content []AnthropicContentBlock) {
-				if content[0].Type != "tool_use" {
+				if content[0].Type != oaiStopReasonToolUse {
 					t.Errorf("type = %q, want tool_use", content[0].Type)
 				}
-				if content[0].ID != "tu_1" {
+				if content[0].ID != testToolUseID {
 					t.Errorf("id = %q, want tu_1", content[0].ID)
 				}
-				if content[0].Name != "search" {
+				if content[0].Name != testToolNameSearch {
 					t.Errorf("name = %q, want search", content[0].Name)
 				}
 			},
@@ -503,19 +513,19 @@ func TestConvertToAnthropicResponse(t *testing.T) {
 			name: "mixed text and tool calls",
 			resp: &llm.CompletionResponse{
 				Content:    "Let me search.",
-				StopReason: "tool_use",
+				StopReason: oaiStopReasonToolUse,
 				ToolCalls: []llm.ToolCall{
-					{ID: "tu_1", Name: "search", Arguments: json.RawMessage(`{"q":"test"}`)},
+					{ID: testToolUseID, Name: "search", Arguments: json.RawMessage(`{"q":"test"}`)},
 				},
 			},
 			model:          "claude-sonnet-4-20250514",
 			wantContentLen: 2,
-			wantStopReason: "tool_use",
+			wantStopReason: oaiStopReasonToolUse,
 			checkContent: func(t *testing.T, content []AnthropicContentBlock) {
-				if content[0].Type != "text" || content[0].Text != "Let me search." {
+				if content[0].Type != oaiContentTypeText || content[0].Text != "Let me search." {
 					t.Errorf("block 0: type=%q text=%q", content[0].Type, content[0].Text)
 				}
-				if content[1].Type != "tool_use" || content[1].Name != "search" {
+				if content[1].Type != oaiStopReasonToolUse || content[1].Name != testToolNameSearch {
 					t.Errorf("block 1: type=%q name=%q", content[1].Type, content[1].Name)
 				}
 			},
@@ -548,7 +558,7 @@ func TestConvertToAnthropicResponse(t *testing.T) {
 			if result.Type != "message" {
 				t.Errorf("type = %q, want message", result.Type)
 			}
-			if result.Role != "assistant" {
+			if result.Role != testRoleAssistant {
 				t.Errorf("role = %q, want assistant", result.Role)
 			}
 			if result.Model != tt.model {
@@ -589,13 +599,13 @@ func TestMapAnthropicStopReason(t *testing.T) {
 		{"stop", "end_turn"},
 		{"end_turn", "end_turn"},
 		{"", "end_turn"},
-		{"tool_calls", "tool_use"},
-		{"tool_use", "tool_use"},
+		{"tool_calls", oaiStopReasonToolUse},
+		{oaiStopReasonToolUse, oaiStopReasonToolUse},
 		{"max_tokens", "max_tokens"},
 		{"length", "max_tokens"},
 		{"unknown_reason", "end_turn"},
-		{"STOP", "end_turn"},       // case insensitive
-		{"Tool_Calls", "tool_use"}, // case insensitive
+		{"STOP", "end_turn"},                 // case insensitive
+		{"Tool_Calls", oaiStopReasonToolUse}, // case insensitive
 		{"MAX_TOKENS", "max_tokens"},
 	}
 
@@ -622,7 +632,7 @@ func TestAnthropicError(t *testing.T) {
 		{
 			name:       "400 invalid request",
 			status:     400,
-			errType:    "invalid_request_error",
+			errType:    testInvalidReqError,
 			message:    "model is required",
 			wantStatus: 400,
 		},
@@ -696,7 +706,7 @@ func TestHandleMessages_MissingModel(t *testing.T) {
 
 	var errResp AnthropicError
 	json.NewDecoder(resp.Body).Decode(&errResp) //nolint:errcheck
-	if errResp.Error.Type != "invalid_request_error" {
+	if errResp.Error.Type != testInvalidReqError {
 		t.Errorf("error type = %q", errResp.Error.Type)
 	}
 	if !strings.Contains(errResp.Error.Message, "model") {
@@ -1009,7 +1019,7 @@ func TestRunNonStreamingToolLoop_NoToolCalls(t *testing.T) {
 	_, _ = setupTestAnthropicHandler()
 	mock := &mockAnthropicProvider{
 		responses: []*llm.CompletionResponse{
-			{Content: "Hello!", StopReason: "end_turn"},
+			{Content: testHelloContent, StopReason: "end_turn"},
 		},
 	}
 	req := &llm.CompletionRequest{
@@ -1021,7 +1031,7 @@ func TestRunNonStreamingToolLoop_NoToolCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if resp.Content != "Hello!" {
+	if resp.Content != testHelloContent {
 		t.Errorf("content = %q, want Hello!", resp.Content)
 	}
 	if mock.callIdx != 1 {
@@ -1035,7 +1045,7 @@ func TestRunNonStreamingToolLoop_SingleToolCall(t *testing.T) {
 		responses: []*llm.CompletionResponse{
 			{
 				Content:    "Let me read the file.",
-				StopReason: "tool_use",
+				StopReason: oaiStopReasonToolUse,
 				ToolCalls: []llm.ToolCall{
 					{ID: "tc_1", Name: "file_read", Arguments: json.RawMessage(`{"path":"test.txt"}`)},
 				},
@@ -1065,11 +1075,11 @@ func TestRunNonStreamingToolLoop_MultiStepToolLoop(t *testing.T) {
 	mock := &mockAnthropicProvider{
 		responses: []*llm.CompletionResponse{
 			{
-				StopReason: "tool_use",
+				StopReason: oaiStopReasonToolUse,
 				ToolCalls:  []llm.ToolCall{{ID: "tc_1", Name: "web_search", Arguments: json.RawMessage(`{"query":"test"}`)}},
 			},
 			{
-				StopReason: "tool_use",
+				StopReason: oaiStopReasonToolUse,
 				ToolCalls:  []llm.ToolCall{{ID: "tc_2", Name: "file_read", Arguments: json.RawMessage(`{"path":"result.txt"}`)}},
 			},
 			{Content: "Here is the final answer.", StopReason: "end_turn"},
@@ -1105,9 +1115,9 @@ func TestRunNonStreamingToolLoop_IterationLimit(t *testing.T) {
 	mock := &mockAnthropicProvider{
 		responses: []*llm.CompletionResponse{
 			// Iteration 0: tool call
-			{StopReason: "tool_use", ToolCalls: []llm.ToolCall{{ID: "tc_1", Name: "web_search", Arguments: json.RawMessage(`{"query":"a"}`)}}},
+			{StopReason: oaiStopReasonToolUse, ToolCalls: []llm.ToolCall{{ID: "tc_1", Name: "web_search", Arguments: json.RawMessage(`{"query":"a"}`)}}},
 			// Iteration 1: tool call
-			{StopReason: "tool_use", ToolCalls: []llm.ToolCall{{ID: "tc_2", Name: "web_search", Arguments: json.RawMessage(`{"query":"b"}`)}}},
+			{StopReason: oaiStopReasonToolUse, ToolCalls: []llm.ToolCall{{ID: "tc_2", Name: "web_search", Arguments: json.RawMessage(`{"query":"b"}`)}}},
 			// Iteration 2: hits limit, summary call
 			{Content: "Summary of work done.", StopReason: "end_turn"},
 		},
@@ -1154,7 +1164,7 @@ func TestRunNonStreamingToolLoop_ToolExecutionError(t *testing.T) {
 	mock := &mockAnthropicProvider{
 		responses: []*llm.CompletionResponse{
 			{
-				StopReason: "tool_use",
+				StopReason: oaiStopReasonToolUse,
 				ToolCalls:  []llm.ToolCall{{ID: "tc_1", Name: "nonexistent_tool", Arguments: json.RawMessage(`{}`)}},
 			},
 			{Content: "I encountered an error but here is my response.", StopReason: "end_turn"},

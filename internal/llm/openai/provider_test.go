@@ -183,7 +183,7 @@ func TestConvertInputItems(t *testing.T) {
 		{
 			"full conversation",
 			[]llm.Message{
-				{Role: "user", Content: "search"},
+				{Role: "user", Content: testToolNameSearch},
 				{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "tc1", Name: "fn", Arguments: json.RawMessage(`{}`)}}},
 				{Role: "tool", Content: "data", ToolCallID: "tc1"},
 				{Role: "assistant", Content: "done"},
@@ -212,7 +212,7 @@ func TestConvertResponsesTools(t *testing.T) {
 	t.Run("single tool", func(t *testing.T) {
 		tools := []llm.Tool{
 			{
-				Name:        "search",
+				Name:        testToolNameSearch,
 				Description: "Search the web",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`),
 			},
@@ -310,7 +310,7 @@ func TestConvertChatTools(t *testing.T) {
 	t.Run("single tool", func(t *testing.T) {
 		tools := []llm.Tool{
 			{
-				Name:        "search",
+				Name:        testToolNameSearch,
 				Description: "Search",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`),
 			},
@@ -376,7 +376,8 @@ func TestComplete_ChatCompletions_Success(t *testing.T) {
 			fmt.Fprint(w, `{"error":{"message":"Not Found","type":"invalid_request_error","code":"invalid_url"}}`) //nolint:errcheck
 			return
 		}
-		//nolint:errcheck // test helper
+
+		//nolint:errcheck // multiline test response
 		fmt.Fprint(w, `{
 			"id": "chatcmpl-123",
 			"object": "chat.completion",
@@ -387,7 +388,7 @@ func TestComplete_ChatCompletions_Success(t *testing.T) {
 				"finish_reason": "stop"
 			}],
 			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-		}`)
+		}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -448,7 +449,8 @@ func TestComplete_ChatCompletions_ServerError(t *testing.T) {
 func TestComplete_ChatCompletions_WithToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		//nolint:errcheck // test helper
+
+		//nolint:errcheck // multiline test response
 		fmt.Fprint(w, `{
 			"id": "chatcmpl-456",
 			"object": "chat.completion",
@@ -467,7 +469,7 @@ func TestComplete_ChatCompletions_WithToolCalls(t *testing.T) {
 				"finish_reason": "tool_calls"
 			}],
 			"usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30}
-		}`)
+		}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -509,7 +511,8 @@ func TestComplete_AutoDetect_FallbackToChatCompletions(t *testing.T) {
 			fmt.Fprint(w, `{"error":{"message":"Not Found","type":"invalid_request_error","code":"invalid_url"}}`) //nolint:errcheck
 			return
 		}
-		//nolint:errcheck // test helper
+
+		//nolint:errcheck // multiline test response
 		fmt.Fprint(w, `{
 			"id": "chatcmpl-789",
 			"object": "chat.completion",
@@ -520,7 +523,7 @@ func TestComplete_AutoDetect_FallbackToChatCompletions(t *testing.T) {
 				"finish_reason": "stop"
 			}],
 			"usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}
-		}`)
+		}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -553,13 +556,13 @@ func TestStream_ChatCompletions(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		flusher, _ := w.(http.Flusher)
-		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there\"},\"finish_reason\":null}]}\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there\"},\"finish_reason\":null}]}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n") //nolint:errcheck
 		flusher.Flush()
 	}))
 	defer server.Close()
@@ -696,7 +699,7 @@ func TestConvertChatResponseFormat(t *testing.T) {
 func TestComplete_ResponsesAPI_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, responsesJSON("Hello from Responses!", 10, 5))
+		fmt.Fprint(w, responsesJSON("Hello from Responses!", 10, 5)) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -730,6 +733,8 @@ func TestComplete_ResponsesAPI_Success(t *testing.T) {
 func TestComplete_ResponsesAPI_WithToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+
+		//nolint:errcheck // multiline test response
 		fmt.Fprint(w, `{
 			"id": "resp_tc",
 			"object": "response",
@@ -747,7 +752,7 @@ func TestComplete_ResponsesAPI_WithToolCalls(t *testing.T) {
 				}
 			],
 			"usage": {"input_tokens": 20, "output_tokens": 10, "total_tokens": 30}
-		}`)
+		}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -759,7 +764,7 @@ func TestComplete_ResponsesAPI_WithToolCalls(t *testing.T) {
 
 	resp, err := provider.Complete(context.Background(), &llm.CompletionRequest{
 		Model:    "gpt-4",
-		Messages: []llm.Message{{Role: "user", Content: "search"}},
+		Messages: []llm.Message{{Role: "user", Content: testToolNameSearch}},
 		Tools:    []llm.Tool{{Name: testToolNameSearch, Description: testToolNameSearch, Parameters: json.RawMessage(`{"type":"object"}`)}},
 	})
 	if err != nil {
@@ -784,7 +789,7 @@ func TestComplete_ResponsesAPI_WithAllOptions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&receivedBody)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, responsesJSON("ok", 1, 1))
+		fmt.Fprint(w, responsesJSON("ok", 1, 1)) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -826,7 +831,7 @@ func TestComplete_ResponsesAPI_WithAllOptions(t *testing.T) {
 func TestComplete_AutoDetect_ResponsesSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, responsesJSON("Responses works!", 5, 3))
+		fmt.Fprint(w, responsesJSON("Responses works!", 5, 3)) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -854,7 +859,7 @@ func TestComplete_AutoDetect_NonRecoverableError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
-		fmt.Fprint(w, `{"error":{"message":"rate limited","type":"rate_limit_error","code":"rate_limit_exceeded"}}`)
+		fmt.Fprint(w, `{"error":{"message":"rate limited","type":"rate_limit_error","code":"rate_limit_exceeded"}}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -876,7 +881,7 @@ func TestComplete_ResponsesAPI_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, `{"error":{"message":"server error","type":"server_error"}}`)
+		fmt.Fprint(w, `{"error":{"message":"server error","type":"server_error"}}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -898,6 +903,8 @@ func TestComplete_ResponsesAPI_ServerError(t *testing.T) {
 func TestComplete_ChatCompletions_WithResponseFormat(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+
+		//nolint:errcheck // multiline test response
 		fmt.Fprint(w, `{
 			"id": "chatcmpl-rf",
 			"object": "chat.completion",
@@ -908,7 +915,7 @@ func TestComplete_ChatCompletions_WithResponseFormat(t *testing.T) {
 				"finish_reason": "stop"
 			}],
 			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-		}`)
+		}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -945,13 +952,13 @@ func TestStream_ResponsesAPI(t *testing.T) {
 		w.Header().Set("Cache-Control", "no-cache")
 		flusher, _ := w.(http.Flusher)
 
-		fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\",\"item_id\":\"item_1\",\"output_index\":0,\"content_index\":0}\n\n")
+		fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\",\"item_id\":\"item_1\",\"output_index\":0,\"content_index\":0}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" World\",\"item_id\":\"item_1\",\"output_index\":0,\"content_index\":0}\n\n")
+		fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" World\",\"item_id\":\"item_1\",\"output_index\":0,\"content_index\":0}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"model\":\"gpt-4\",\"output\":[{\"type\":\"message\"}],\"usage\":{\"input_tokens\":5,\"output_tokens\":3,\"total_tokens\":8}}}\n\n")
+		fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"model\":\"gpt-4\",\"output\":[{\"type\":\"message\"}],\"usage\":{\"input_tokens\":5,\"output_tokens\":3,\"total_tokens\":8}}}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n") //nolint:errcheck
 		flusher.Flush()
 	}))
 	defer server.Close()
@@ -995,15 +1002,15 @@ func TestStream_ResponsesAPI_WithToolCalls(t *testing.T) {
 		w.Header().Set("Cache-Control", "no-cache")
 		flusher, _ := w.(http.Flusher)
 
-		fmt.Fprint(w, "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_item\",\"type\":\"function_call\",\"call_id\":\"call_123\",\"name\":\"search\"}}\n\n")
+		fmt.Fprint(w, "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_item\",\"type\":\"function_call\",\"call_id\":\"call_123\",\"name\":\"search\"}}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_item\",\"output_index\":0,\"delta\":\"{\\\"q\\\":\"}\n\n")
+		fmt.Fprint(w, "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_item\",\"output_index\":0,\"delta\":\"{\\\"q\\\":\"}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_item\",\"output_index\":0,\"arguments\":\"{\\\"q\\\":\\\"test\\\"}\",\"name\":\"search\"}\n\n")
+		fmt.Fprint(w, "event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_item\",\"output_index\":0,\"arguments\":\"{\\\"q\\\":\\\"test\\\"}\",\"name\":\"search\"}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tc\",\"status\":\"completed\",\"model\":\"gpt-4\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_123\",\"name\":\"search\",\"arguments\":\"{\\\"q\\\":\\\"test\\\"}\"}],\"usage\":{\"input_tokens\":5,\"output_tokens\":3,\"total_tokens\":8}}}\n\n")
+		fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tc\",\"status\":\"completed\",\"model\":\"gpt-4\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_123\",\"name\":\"search\",\"arguments\":\"{\\\"q\\\":\\\"test\\\"}\"}],\"usage\":{\"input_tokens\":5,\"output_tokens\":3,\"total_tokens\":8}}}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n") //nolint:errcheck
 		flusher.Flush()
 	}))
 	defer server.Close()
@@ -1016,7 +1023,7 @@ func TestStream_ResponsesAPI_WithToolCalls(t *testing.T) {
 
 	ch, err := provider.Stream(context.Background(), &llm.CompletionRequest{
 		Model:    "gpt-4",
-		Messages: []llm.Message{{Role: "user", Content: "search"}},
+		Messages: []llm.Message{{Role: "user", Content: testToolNameSearch}},
 		Tools:    []llm.Tool{{Name: testToolNameSearch, Description: testToolNameSearch, Parameters: json.RawMessage(`{"type":"object"}`)}},
 	})
 	if err != nil {
@@ -1054,11 +1061,11 @@ func TestStream_ResponsesAPI_WithAllOptions(t *testing.T) {
 			_ = json.NewDecoder(r.Body).Decode(&receivedBody)
 			w.Header().Set("Content-Type", "text/event-stream")
 			flusher, _ := w.(http.Flusher)
-			fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\",\"item_id\":\"i1\",\"output_index\":0,\"content_index\":0}\n\n")
+			fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\",\"item_id\":\"i1\",\"output_index\":0,\"content_index\":0}\n\n") //nolint:errcheck
 			flusher.Flush()
-			fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"model\":\"gpt-4\",\"output\":[{\"type\":\"message\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+			fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"model\":\"gpt-4\",\"output\":[{\"type\":\"message\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n") //nolint:errcheck
 			flusher.Flush()
-			fmt.Fprint(w, "data: [DONE]\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n") //nolint:errcheck
 			flusher.Flush()
 			return
 		}
@@ -1098,9 +1105,9 @@ func TestStream_ResponsesAPI_Failed(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, _ := w.(http.Flusher)
-		fmt.Fprint(w, "event: response.failed\ndata: {\"type\":\"response.failed\"}\n\n")
+		fmt.Fprint(w, "event: response.failed\ndata: {\"type\":\"response.failed\"}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n") //nolint:errcheck
 		flusher.Flush()
 	}))
 	defer server.Close()
@@ -1134,9 +1141,9 @@ func TestStream_ResponsesAPI_Error(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, _ := w.(http.Flusher)
-		fmt.Fprint(w, "event: error\ndata: {\"type\":\"error\",\"message\":\"something went wrong\"}\n\n")
+		fmt.Fprint(w, "event: error\ndata: {\"type\":\"error\",\"message\":\"something went wrong\"}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n") //nolint:errcheck
 		flusher.Flush()
 	}))
 	defer server.Close()
@@ -1172,17 +1179,17 @@ func TestStream_AutoDetect_FallbackToChatCompletions(t *testing.T) {
 			// Check if this is the streaming request (has stream in body) or probe
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprint(w, `{"error":{"message":"Not Found","type":"invalid_request_error","code":"invalid_url"}}`)
+			fmt.Fprint(w, `{"error":{"message":"Not Found","type":"invalid_request_error","code":"invalid_url"}}`) //nolint:errcheck
 			return
 		}
 		// Chat completions streaming
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, _ := w.(http.Flusher)
-		fmt.Fprint(w, "data: {\"id\":\"cc-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Fallback\"},\"finish_reason\":null}]}\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"cc-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Fallback\"},\"finish_reason\":null}]}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "data: {\"id\":\"cc-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"cc-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n") //nolint:errcheck
 		flusher.Flush()
 	}))
 	defer server.Close()
@@ -1223,17 +1230,17 @@ func TestStream_AutoDetect_ResponsesSuccess(t *testing.T) {
 			if requestCount == 1 {
 				// First call is probe (non-streaming)
 				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprint(w, responsesJSON("probe", 1, 1))
+				fmt.Fprint(w, responsesJSON("probe", 1, 1)) //nolint:errcheck
 				return
 			}
 			// Second call is the actual streaming request
 			w.Header().Set("Content-Type", "text/event-stream")
 			flusher, _ := w.(http.Flusher)
-			fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Streamed\",\"item_id\":\"i1\",\"output_index\":0,\"content_index\":0}\n\n")
+			fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Streamed\",\"item_id\":\"i1\",\"output_index\":0,\"content_index\":0}\n\n") //nolint:errcheck
 			flusher.Flush()
-			fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"model\":\"gpt-4\",\"output\":[{\"type\":\"message\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+			fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"model\":\"gpt-4\",\"output\":[{\"type\":\"message\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n") //nolint:errcheck
 			flusher.Flush()
-			fmt.Fprint(w, "data: [DONE]\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n") //nolint:errcheck
 			flusher.Flush()
 			return
 		}
@@ -1272,7 +1279,7 @@ func TestStream_AutoDetect_NonRecoverableError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
-		fmt.Fprint(w, `{"error":{"message":"rate limited","type":"rate_limit_error"}}`)
+		fmt.Fprint(w, `{"error":{"message":"rate limited","type":"rate_limit_error"}}`) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -1296,13 +1303,13 @@ func TestStream_ChatCompletions_WithToolCalls(t *testing.T) {
 		w.Header().Set("Cache-Control", "no-cache")
 		flusher, _ := w.(http.Flusher)
 		// Tool call delta chunks
-		fmt.Fprint(w, "data: {\"id\":\"cc-tc\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"cc-tc\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "data: {\"id\":\"cc-tc\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"q\\\":\\\"test\\\"}\"}}]},\"finish_reason\":null}]}\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"cc-tc\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"q\\\":\\\"test\\\"}\"}}]},\"finish_reason\":null}]}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "data: {\"id\":\"cc-tc\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"cc-tc\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n") //nolint:errcheck
 		flusher.Flush()
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n") //nolint:errcheck
 		flusher.Flush()
 	}))
 	defer server.Close()
@@ -1315,8 +1322,8 @@ func TestStream_ChatCompletions_WithToolCalls(t *testing.T) {
 
 	ch, err := provider.Stream(context.Background(), &llm.CompletionRequest{
 		Model:     "gpt-4",
-		Messages:  []llm.Message{{Role: "user", Content: "search"}},
-		Tools:     []llm.Tool{{Name: testToolNameSearch, Description: testToolNameSearch, Parameters: json.RawMessage(`{"type":"object"}`)}},
+		Messages:  []llm.Message{{Role: "user", Content: testToolNameSearch}},
+		Tools:     []llm.Tool{{Name: testToolNameSearch, Description: testToolNameSearch, Parameters: json.RawMessage(`{"type":"object"}`)}}, //nolint:errcheck
 		MaxTokens: 100,
 		ResponseFormat: &llm.ResponseFormat{
 			Type: "json_object",
@@ -1354,7 +1361,7 @@ func TestStream_ChatCompletions_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, `{"error":{"message":"server error","type":"server_error"}}`)
+		fmt.Fprint(w, `{"error":{"message":"server error","type":"server_error"}}`) //nolint:errcheck
 	}))
 	defer server.Close()
 

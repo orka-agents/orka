@@ -29,7 +29,7 @@ func newScheme() *runtime.Scheme {
 	return s
 }
 
-func makeProvider(name, ns string, ptype corev1alpha1.ProviderType, secretName, defaultModel string) *corev1alpha1.Provider {
+func makeProvider(name, ns string, ptype corev1alpha1.ProviderType, secretName, defaultModel string) *corev1alpha1.Provider { //nolint:unparam
 	return &corev1alpha1.Provider{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: corev1alpha1.ProviderSpec{
@@ -40,7 +40,7 @@ func makeProvider(name, ns string, ptype corev1alpha1.ProviderType, secretName, 
 	}
 }
 
-func makeSecret(name, ns, key, value string) *corev1.Secret {
+func makeSecret(name, ns, key, value string) *corev1.Secret { //nolint:unparam
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Data:       map[string][]byte{key: []byte(value)},

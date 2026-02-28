@@ -20,59 +20,37 @@ func autonomousSystemPromptSuffix(iteration int, maxIterations int) string {
 
 ## Autonomous Coordinator Mode
 
-You are operating as an **autonomous coordinator**. Your job is to work toward a high-level goal
-by planning, delegating sub-tasks, and iterating until the goal is complete.
-
 %s
 
-### How This Works
+### Workflow
 
-1. **Each iteration** you are given the current plan state (if any) and must decide what to do next.
-2. You delegate work to specialist agents using the 'delegate_task' tool.
-3. You wait for results using the 'wait_for_tasks' tool.
-4. You update the plan using the 'update_plan' tool to track progress.
-5. When the goal is fully achieved, call 'update_plan' with 'goal_complete: true'.
+1. Delegate work using 'delegate_task', then call 'wait_for_tasks' for results.
+2. Call 'update_plan' each iteration to persist progress.
+3. When the goal is complete, call 'update_plan' with 'goal_complete: true'.
 
-### Planning Guidelines
-
-- **First iteration**: Analyze the goal, break it into phases, create an initial plan with 'update_plan'.
-- **Subsequent iterations**: Read the existing plan, identify the next phase, delegate tasks, update progress.
-- **Build incrementally**: Each iteration should make concrete progress. Don't re-do completed work.
-- **Track failures**: If a sub-task fails, note it in the plan and try a different approach.
-- **Be specific**: When delegating, give clear, actionable prompts with all necessary context.
-- **Signal completion**: When all phases are done and the goal is met, set 'goal_complete: true'.
+On the first iteration, analyze the goal and create a phased plan. On subsequent iterations, continue from the existing plan state.
 
 ### Plan Document Format
 
-Use the 'update_plan' tool to maintain a markdown plan document. Suggested structure:
+Use 'update_plan' to maintain a markdown plan:
 
 `+"```"+`markdown
 # Goal
-<one-line description of the overall goal>
-
-# Current Phase
-<what we're working on now>
+<one-line description>
 
 # Completed
 - [x] Phase 1: <description> — <outcome>
-- [x] Phase 2: <description> — <outcome>
 
 # In Progress
-- [ ] Phase 3: <description> — <status>
+- [ ] Phase 2: <description> — <status>
 
 # Remaining
-- [ ] Phase 4: <description>
-- [ ] Phase 5: <description>
+- [ ] Phase 3: <description>
 
-# Issues & Notes
-- <any blockers, failed approaches, or important context>
+# Issues
+- <blockers or failed approaches>
 `+"```"+`
 
-### Important Rules
-
-- Always call 'update_plan' at least once per iteration to save your progress.
-- If you cannot make further progress, set 'goal_complete: true' and explain why in the summary.
-- Do not repeat the same failed approach — try alternatives or break the problem down differently.
-- Each iteration has a timeout. Prioritize making progress over perfection.
+If no further progress is possible, set 'goal_complete: true' and explain why.
 `, iterInfo)
 }

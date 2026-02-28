@@ -50,7 +50,7 @@ func TestDeleteSessionTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != "object" {
+	if schema["type"] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 	props, ok := schema["properties"].(map[string]any)
@@ -88,7 +88,7 @@ func TestDeleteSessionTool_Execute(t *testing.T) {
 			args:    map[string]any{},
 			deleter: &mockSessionDeleter{},
 			wantErr: true,
-			errType: "invalid_arguments",
+			errType: errTypeInvalidArgs,
 		},
 		{
 			name:       "session manager not configured",
@@ -197,7 +197,7 @@ func TestDeleteSessionTool_Execute_InvalidJSON(t *testing.T) {
 	if res.Success {
 		t.Error("expected failure for invalid JSON")
 	}
-	if res.ErrorType != "invalid_arguments" {
+	if res.ErrorType != errTypeInvalidArgs {
 		t.Errorf("expected errorType 'invalid_arguments', got %q", res.ErrorType)
 	}
 }

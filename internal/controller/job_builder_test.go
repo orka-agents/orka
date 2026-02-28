@@ -24,6 +24,12 @@ import (
 )
 
 const (
+	testControllerURL  = "http://orka-controller.orka-system.svc:8080"
+	testGitCredentials = "git-credentials"
+	testOpenAIAPIKey   = "OPENAI_API_KEY"
+)
+
+const (
 	testTask         = "test-task"
 	defaultNS        = "default"
 	envAIProviderKey = "ORKA_AI_PROVIDER"
@@ -35,7 +41,7 @@ func setupJobBuilder() *JobBuilder {
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	b := NewJobBuilder(fakeClient)
-	b.ControllerURL = "http://orka-controller.orka-system.svc:8080"
+	b.ControllerURL = testControllerURL
 	return b
 }
 
@@ -927,7 +933,7 @@ func TestJobBuilder_Build_AgentTask_EnvVars(t *testing.T) {
 		{TaskNameEnvVar, "agent-task"},
 		{TaskNamespaceEnvVar, "test-ns"},
 		{ResultEndpointEnvVar, "http://orka-controller.orka-system.svc:8080/internal/v1/results/test-ns/agent-task"},
-		{ControllerURLEnvVar, "http://orka-controller.orka-system.svc:8080"},
+		{ControllerURLEnvVar, testControllerURL},
 		{"ORKA_PROMPT", "Refactor the code"},
 		{"ORKA_MODEL", "claude-sonnet-4-20250514"},
 		{"ORKA_SYSTEM_PROMPT", "You are a coding assistant"},
@@ -1346,11 +1352,11 @@ func TestJobBuilder_Build_AgentTask_GitSecretVolume(t *testing.T) {
 	mounts := job.Spec.Template.Spec.Containers[0].VolumeMounts
 
 	// git-credentials volume
-	if !hasVolume(volumes, "git-credentials") {
+	if !hasVolume(volumes, testGitCredentials) {
 		t.Fatal("Missing git-credentials volume")
 	}
 	for _, v := range volumes {
-		if v.Name == "git-credentials" {
+		if v.Name == testGitCredentials {
 			if v.Secret == nil {
 				t.Error("git-credentials should be a Secret volume")
 			} else if v.Secret.SecretName != "my-git-creds" {
@@ -1360,11 +1366,11 @@ func TestJobBuilder_Build_AgentTask_GitSecretVolume(t *testing.T) {
 	}
 
 	// git-credentials mount
-	if !hasVolumeMount(mounts, "git-credentials") {
+	if !hasVolumeMount(mounts, testGitCredentials) {
 		t.Fatal("Missing git-credentials volume mount")
 	}
 	for _, m := range mounts {
-		if m.Name == "git-credentials" {
+		if m.Name == testGitCredentials {
 			if m.MountPath != "/secrets/git" {
 				t.Errorf("git-credentials mountPath = %s, want /secrets/git", m.MountPath)
 			}
@@ -1400,7 +1406,7 @@ func TestJobBuilder_Build_AgentTask_NoGitSecretVolume_WhenNotSpecified(t *testin
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	if hasVolume(job.Spec.Template.Spec.Volumes, "git-credentials") {
+	if hasVolume(job.Spec.Template.Spec.Volumes, testGitCredentials) {
 		t.Error("git-credentials volume should not exist when GitSecretRef is not specified")
 	}
 }
@@ -1691,7 +1697,7 @@ func TestAddSecretVolumes_ProviderOpenAI(t *testing.T) {
 	jb.addSecretVolumes(context.Background(), job, task, nil, provider)
 	found := false
 	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
-		if env.Name == "OPENAI_API_KEY" && env.ValueFrom != nil &&
+		if env.Name == testOpenAIAPIKey && env.ValueFrom != nil &&
 			env.ValueFrom.SecretKeyRef.Key == "my-key" {
 			found = true
 		}
@@ -1802,7 +1808,7 @@ func TestAddSecretVolumes_FallbackProvider(t *testing.T) {
 	}
 	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fbProvider).Build()
 	jb := NewJobBuilder(fc)
-	jb.ControllerURL = "http://orka-controller.orka-system.svc:8080"
+	jb.ControllerURL = testControllerURL
 
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "fb-agent", Namespace: defaultNS},
@@ -1850,7 +1856,7 @@ func TestAddSecretVolumes_ProviderAzureOpenAI(t *testing.T) {
 	jb.addSecretVolumes(context.Background(), job, task, nil, provider)
 	found := false
 	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
-		if env.Name == "OPENAI_API_KEY" {
+		if env.Name == testOpenAIAPIKey {
 			found = true
 		}
 	}
@@ -1879,7 +1885,7 @@ func TestAddAIEnvVars_FallbackProviders(t *testing.T) {
 	}
 	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fbProvider).Build()
 	jb := NewJobBuilder(fc)
-	jb.ControllerURL = "http://orka-controller.orka-system.svc:8080"
+	jb.ControllerURL = testControllerURL
 
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "fb-agent2", Namespace: defaultNS},
@@ -2051,13 +2057,13 @@ func TestFindGitSecret_PasswordSecret(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 	_ = corev1alpha1.AddToScheme(scheme)
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-credentials", Namespace: defaultNS},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredentials, Namespace: defaultNS},
 		Data:       map[string][]byte{"password": []byte("my-pass")},
 	}
 	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 	jb := NewJobBuilder(fc)
 	result := jb.findGitSecret(context.Background(), defaultNS)
-	if result != "git-credentials" {
+	if result != testGitCredentials {
 		t.Errorf("expected git-credentials, got %s", result)
 	}
 }
@@ -2171,7 +2177,7 @@ func TestAddAgentVolumes_GitSecretAutoDetect(t *testing.T) {
 	// Build already calls addAgentVolumes; check for git-credentials volume
 	found := false
 	for _, v := range job.Spec.Template.Spec.Volumes {
-		if v.Name == "git-credentials" {
+		if v.Name == testGitCredentials {
 			found = true
 		}
 	}
@@ -2199,7 +2205,7 @@ func TestJobBuilderBuildAddsSkillVolumeAndConfigMap(t *testing.T) {
 	}
 	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(skill).Build()
 	jb := NewJobBuilder(fc)
-	jb.ControllerURL = "http://orka-controller.orka-system.svc:8080"
+	jb.ControllerURL = testControllerURL
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "skill-task", Namespace: defaultNS, UID: "uid-1234-5678"},
@@ -2306,7 +2312,7 @@ func TestJobBuilderBuildDeduplicatesSkills(t *testing.T) {
 	}
 	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(skill).Build()
 	jb := NewJobBuilder(fc)
-	jb.ControllerURL = "http://orka-controller.orka-system.svc:8080"
+	jb.ControllerURL = testControllerURL
 
 	// Same skill referenced by both agent and task
 	agent := &corev1alpha1.Agent{
