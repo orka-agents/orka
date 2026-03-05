@@ -406,8 +406,8 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 	if childTask.Spec.AgentRuntime.Workspace.GitRepo != "https://github.com/myorg/myrepo.git" {
 		t.Errorf("workspace.gitRepo = %q, want %q", childTask.Spec.AgentRuntime.Workspace.GitRepo, "https://github.com/myorg/myrepo.git")
 	}
-	if childTask.Spec.AgentRuntime.Workspace.Branch != "main" {
-		t.Errorf("workspace.branch = %q, want %q", childTask.Spec.AgentRuntime.Workspace.Branch, "main")
+	if childTask.Spec.AgentRuntime.Workspace.Branch != testBranch {
+		t.Errorf("workspace.branch = %q, want %q", childTask.Spec.AgentRuntime.Workspace.Branch, testBranch)
 	}
 	if childTask.Spec.AgentRuntime.MaxTurns == nil || *childTask.Spec.AgentRuntime.MaxTurns != 50 {
 		t.Errorf("agentRuntime.maxTurns = %v, want 50", childTask.Spec.AgentRuntime.MaxTurns)

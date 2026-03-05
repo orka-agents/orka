@@ -27,6 +27,8 @@ import (
 
 const prStateOpen = "open"
 
+const prStateClosed = "closed"
+
 func TestAutoMergePullRequestTool_Metadata(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -492,7 +494,7 @@ func TestAutoMergePullRequestTool_PRClosedExternally(t *testing.T) {
 	if res.Merged {
 		t.Error("expected merged to be false")
 	}
-	if res.Outcome != "closed" {
+	if res.Outcome != prStateClosed {
 		t.Errorf("unexpected outcome: %s", res.Outcome)
 	}
 	if mergeCalled.Load() {
