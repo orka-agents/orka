@@ -155,7 +155,14 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 		checkoutCmd.Stdout = os.Stdout
 		checkoutCmd.Stderr = os.Stderr
 		if err := checkoutCmd.Run(); err != nil {
-			return fmt.Errorf("git checkout ref failed: %w", err)
+			// Ref may not exist as a local branch; fall back to FETCH_HEAD
+			fallbackCmd := exec.CommandContext(ctx, "git", "checkout", "FETCH_HEAD")
+			fallbackCmd.Dir = workspaceDir
+			fallbackCmd.Stdout = os.Stdout
+			fallbackCmd.Stderr = os.Stderr
+			if fbErr := fallbackCmd.Run(); fbErr != nil {
+				return fmt.Errorf("git checkout ref failed: %w", err)
+			}
 		}
 	}
 

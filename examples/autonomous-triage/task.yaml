@@ -1,0 +1,20 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: triage-kubeairunway
+spec:
+  type: ai
+  agentRef:
+    name: triage-coordinator
+  prompt: |
+    Scan the kubeairunway repository for open issues and pull requests.
+    For unassigned issues, pick the most impactful one and delegate a coder agent to implement it.
+    For open PRs, delegate a reviewer agent to review them.
+    Track your progress in the plan document.
+  agentRuntime:
+    workspace:
+      gitRepo: "https://github.com/kaito-project/kubeairunway"
+      branch: main
+      gitSecretRef:
+        name: github-credentials
+  timeout: 2h
