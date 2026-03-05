@@ -871,13 +871,17 @@ func (r *TaskReconciler) calculateRetryDelay(task *corev1alpha1.Task) time.Durat
 	}
 
 	// Calculate delay with exponential backoff
+	maxDelay := 5 * time.Minute
 	delay := initialDelay
 	for i := int32(1); i < task.Status.Attempts; i++ {
 		delay = time.Duration(float64(delay) * multiplier)
+		// Guard against overflow (negative) and cap early
+		if delay <= 0 || delay > maxDelay {
+			delay = maxDelay
+			break
+		}
 	}
 
-	// Cap at 5 minutes
-	maxDelay := 5 * time.Minute
 	if delay > maxDelay {
 		delay = maxDelay
 	}
