@@ -586,7 +586,7 @@ func anthropicError(c fiber.Ctx, status int, errType, message string) error {
 
 // findGitSecret looks for a git credentials secret in the given namespace.
 func (h *AnthropicCompatHandler) findGitSecret(ctx context.Context, namespace string) string {
-	for _, name := range []string{"github-credentials", "git-credentials", "github-token", "git-token"} {
+	for _, name := range []string{"copilot-token", "github-credentials", "git-credentials", "github-token", "git-token"} {
 		secret := &corev1.Secret{}
 		if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err == nil {
 			if _, hasToken := secret.Data["token"]; hasToken {

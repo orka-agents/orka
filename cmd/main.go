@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -115,8 +116,8 @@ func main() {
 	flag.BoolVar(&chatEnabled, "chat-enabled", true, "Enable the chat endpoint.")
 	flag.StringVar(&chatProvider, "chat-provider", "", "Default Provider CRD name for chat.")
 	flag.StringVar(&chatModel, "chat-model", "", "Default model for chat.")
-	flag.IntVar(&chatMaxIterations, "chat-max-iterations", 20, "Max tool execution loops per chat request.")
-	flag.DurationVar(&chatMaxDuration, "chat-max-duration", 5*time.Minute, "Max wall-clock time per chat request.")
+	flag.IntVar(&chatMaxIterations, "chat-max-iterations", 50, "Max tool execution loops per chat request.")
+	flag.DurationVar(&chatMaxDuration, "chat-max-duration", 30*time.Minute, "Max wall-clock time per chat request.")
 	flag.DurationVar(&chatToolTimeout, "chat-tool-timeout", 60*time.Second, "Max time for a single tool execution.")
 	flag.IntVar(&chatMaxConcurrent, "chat-max-concurrent", 10, "Max concurrent chat sessions.")
 	flag.IntVar(&chatMaxTasksPerTurn, "chat-max-tasks-per-turn", 5, "Max tasks created per chat turn.")
@@ -262,7 +263,21 @@ func main() {
 	jobBuilder.ClaudeWorkerImage = claudeWorkerImage
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
+	setupLog.Info("worker images configured", "ai", aiWorkerImage, "copilot", copilotWorkerImage)
 	jobBuilder.ControllerURL = controllerURL
+	// Auto-discover controller URL from in-cluster service if not explicitly set
+	if jobBuilder.ControllerURL == "" {
+		ns := os.Getenv("POD_NAMESPACE")
+		if ns == "" {
+			if data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+				ns = strings.TrimSpace(string(data))
+			}
+		}
+		if ns != "" {
+			jobBuilder.ControllerURL = fmt.Sprintf("http://orka.%s.svc:%d", ns, apiPort)
+			setupLog.Info("auto-discovered controller URL", "url", jobBuilder.ControllerURL)
+		}
+	}
 	// Setup Task controller with helper components
 	if err := (&controller.TaskReconciler{
 		Client:                    mgr.GetClient(),

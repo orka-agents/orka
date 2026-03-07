@@ -55,12 +55,13 @@ type DelegateTaskArgs struct {
 	// Used with prior_task for iterative code review workflows. Optional.
 	Feedback string `json:"feedback,omitempty"`
 
-	// AutoRetry enables automatic re-creation of this child task if it fails.
-	// When enabled, wait_for_tasks will automatically re-delegate failed tasks
-	// with the error context as feedback. Optional.
+	// AutoRetry marks this task for structured failure reporting.
+	// When enabled, wait_for_tasks includes retry metadata (attempt count,
+	// max retries, error message) in the failure result so the coordinator
+	// can make informed retry decisions. Does NOT automatically re-create tasks.
 	AutoRetry bool `json:"auto_retry,omitempty"`
 
-	// MaxRetries is the maximum number of auto-retry attempts (default: 2).
+	// MaxRetries is the maximum retry budget for coordinator reference (default: 2).
 	// Only used when auto_retry is true.
 	MaxRetries *int `json:"max_retries,omitempty"`
 }
@@ -153,11 +154,11 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 			},
 			"auto_retry": {
 				"type": "boolean",
-				"description": "Enable automatic re-creation of this task if it fails. wait_for_tasks will re-delegate with error context."
+				"description": "Include structured retry metadata in failure reports. The coordinator decides whether to retry — wait_for_tasks does not auto-retry."
 			},
 			"max_retries": {
 				"type": "integer",
-				"description": "Maximum number of auto-retry attempts (default: 2). Only used when auto_retry is true."
+				"description": "Maximum retry budget for coordinator reference (default: 2). Only used when auto_retry is true."
 			}
 		},
 		"required": ["agent", "prompt"]
@@ -391,13 +392,16 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTas
 // It checks well-known names first, then looks for secrets with a "token" key.
 func (t *DelegateTaskTool) findGitSecret(ctx context.Context, namespace string) string {
 	// Check well-known secret names
-	for _, name := range []string{"github-credentials", "git-credentials", "github-token", "git-token"} {
+	for _, name := range []string{"copilot-token", "github-credentials", "git-credentials", "github-token", "git-token"} {
 		secret := &corev1.Secret{}
 		if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err == nil {
 			if _, hasToken := secret.Data["token"]; hasToken {
 				return name
 			}
 			if _, hasPassword := secret.Data["password"]; hasPassword {
+				return name
+			}
+			if _, hasGHToken := secret.Data["GITHUB_TOKEN"]; hasGHToken {
 				return name
 			}
 		}

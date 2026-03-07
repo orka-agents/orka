@@ -155,7 +155,11 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			}
 
 			phase := task.Status.Phase
-			results[taskName].Phase = string(phase)
+
+			// Don't overwrite a task already marked as Retried
+			if results[taskName].Phase != "Retried" {
+				results[taskName].Phase = string(phase)
+			}
 
 			if task.Spec.AgentRef != nil {
 				results[taskName].Agent = task.Spec.AgentRef.Name
@@ -166,38 +170,12 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 				continue
 			}
 
-			// Handle auto-retry for failed tasks
+			// Handle failed tasks — report failure details but do NOT auto-retry.
+			// Retry logic is handled by the coordinator LLM which can make informed
+			// decisions about whether and how to retry.
 			if phase == corev1alpha1.TaskPhaseFailed {
-				retryTaskName, retried := t.tryAutoRetry(ctx, &task, ns)
-				if retried {
-					// Track the retry — replace this task with the new one
-					results[taskName].Retried = true
-					results[taskName].RetryTaskName = retryTaskName
-					results[taskName].Phase = "Retried"
-					results[taskName].Result = fmt.Sprintf("auto-retried as %s", retryTaskName)
-
-					// Add failure details
-					retryCount, maxRetries := getRetryInfo(&task)
-					results[taskName].FailureDetails = &FailureDetails{
-						Message:    task.Status.Message,
-						RetryCount: retryCount,
-						MaxRetries: maxRetries,
-					}
-
-					// Start tracking the retry task
-					waitArgs.Tasks = append(waitArgs.Tasks, retryTaskName)
-					results[retryTaskName] = &TaskResultInfo{
-						Task:  retryTaskName,
-						Agent: results[taskName].Agent,
-						Phase: "Pending",
-					}
-					allTerminal = false
-					continue
-				}
-
-				// Not retried — add failure details
-				retryCount, maxRetries := getRetryInfo(&task)
 				if task.Annotations[labels.AnnotationAutoRetry] == trueStr {
+					retryCount, maxRetries := getRetryInfo(&task)
 					results[taskName].FailureDetails = &FailureDetails{
 						Message:    task.Status.Message,
 						RetryCount: retryCount,
@@ -273,51 +251,6 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 
 // Ensure WaitForTasksTool implements Tool
 var _ Tool = (*WaitForTasksTool)(nil)
-
-// tryAutoRetry checks if a failed task should be auto-retried and creates a new child task if so.
-// Returns the new task name and true if a retry was created, or empty string and false otherwise.
-func (t *WaitForTasksTool) tryAutoRetry(ctx context.Context, failedTask *corev1alpha1.Task, _ string) (string, bool) {
-	if failedTask.Annotations[labels.AnnotationAutoRetry] != trueStr {
-		return "", false
-	}
-
-	retryCount, maxRetries := getRetryInfo(failedTask)
-	if retryCount >= maxRetries {
-		return "", false
-	}
-
-	// Get the original prompt (stored at delegation time)
-	originalPrompt := failedTask.Annotations[labels.AnnotationOriginalPrompt]
-	if originalPrompt == "" {
-		originalPrompt = failedTask.Spec.Prompt
-	}
-
-	// Build error context
-	errorMsg := failedTask.Status.Message
-	if errorMsg == "" {
-		errorMsg = "task failed with no message"
-	}
-
-	// Create retry task with error feedback prepended
-	retryTask := failedTask.DeepCopy()
-	retryTask.Name = ""
-	retryTask.GenerateName = failedTask.Name + "-retry-"
-	retryTask.ResourceVersion = ""
-	retryTask.UID = ""
-	retryTask.Status = corev1alpha1.TaskStatus{}
-	retryTask.Spec.Prompt = fmt.Sprintf("PREVIOUS ATTEMPT FAILED (attempt %d of %d):\n%s\n\nPlease retry the original task, avoiding the previous error:\n%s",
-		retryCount+1, maxRetries, errorMsg, originalPrompt)
-
-	// Update retry annotations
-	retryTask.Annotations[labels.AnnotationRetryCount] = strconv.Itoa(retryCount + 1)
-	retryTask.Annotations[labels.AnnotationRetriedFrom] = failedTask.Name
-
-	if err := t.k8sClient.Create(ctx, retryTask); err != nil {
-		return "", false
-	}
-
-	return retryTask.Name, true
-}
 
 // getRetryInfo extracts retry count and max retries from task annotations.
 func getRetryInfo(task *corev1alpha1.Task) (retryCount, maxRetries int) {

@@ -1001,13 +1001,16 @@ func joinStrings(s []string) string {
 
 // findGitSecret looks for a git credentials secret in the namespace.
 func (b *JobBuilder) findGitSecret(ctx context.Context, namespace string) string {
-	for _, name := range []string{"github-credentials", "git-credentials", "github-token", "git-token"} {
+	for _, name := range []string{"copilot-token", "github-credentials", "git-credentials", "github-token", "git-token"} {
 		secret := &corev1.Secret{}
 		if err := b.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, secret); err == nil {
 			if _, ok := secret.Data["token"]; ok {
 				return name
 			}
 			if _, ok := secret.Data["password"]; ok {
+				return name
+			}
+			if _, ok := secret.Data["GITHUB_TOKEN"]; ok {
 				return name
 			}
 		}

@@ -133,7 +133,13 @@ func executeCopilot(ctx context.Context, cfg *common.AgentConfig) (string, error
 	}
 
 	// Extract result text from the response event
-	return extractResult(response), nil
+	result := extractResult(response)
+	if result == "" {
+		fmt.Fprintf(os.Stderr, "warning: copilot session returned empty result\n")
+	} else {
+		fmt.Printf("Copilot session completed (result length=%d)\n", len(result))
+	}
+	return result, nil
 }
 
 // extractResult extracts the text content from a session event response.

@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -269,7 +270,17 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 
 	meta.SetStatusCondition(&agent.Status.Conditions, condition)
 
-	if err := r.Status().Update(ctx, agent); err != nil {
+	activeCount := activeTasks // capture for closure
+	lastUsed := agent.Status.LastUsed
+	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		if err := r.Get(ctx, types.NamespacedName{Name: agent.Name, Namespace: agent.Namespace}, agent); err != nil {
+			return err
+		}
+		agent.Status.ActiveTasks = activeCount
+		agent.Status.LastUsed = lastUsed
+		meta.SetStatusCondition(&agent.Status.Conditions, condition)
+		return r.Status().Update(ctx, agent)
+	}); err != nil {
 		return ctrl.Result{}, err
 	}
 

@@ -12,10 +12,12 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // ChatCreateAgentTool creates an Agent CRD from the chat context.
@@ -158,45 +160,14 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		}
 	}
 
-	if rt, ok := a["runtime"]; ok {
-		if rtMap, ok := rt.(map[string]any); ok {
-			runtimeType := chatGetStringArg(rtMap, "type")
-			if runtimeType != "" {
-				agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
-					Type: corev1alpha1.AgentRuntimeType(runtimeType),
-				}
-				agent.Spec.ProviderRef = nil
-				agent.Spec.Model = nil
-			}
-		}
-	}
+	parseRuntimeConfig(a, agent)
+	parseCoordinationConfig(a, agent)
 
-	if coord, ok := a["coordination"]; ok {
-		if coordMap, ok := coord.(map[string]any); ok {
-			coordCfg := &corev1alpha1.CoordinationConfig{}
-			if enabled, ok := coordMap["enabled"].(bool); ok {
-				coordCfg.Enabled = enabled
-			}
-			if maxCC, ok := coordMap["maxConcurrentChildren"].(float64); ok {
-				coordCfg.MaxConcurrentChildren = int32(maxCC)
-			}
-			if maxD, ok := coordMap["maxDepth"].(float64); ok {
-				coordCfg.MaxDepth = int32(maxD)
-			}
-			if allowed, ok := coordMap["allowedAgents"].([]any); ok {
-				for _, item := range allowed {
-					if aMap, ok := item.(map[string]any); ok {
-						aa := corev1alpha1.AllowedAgent{
-							Name:      chatGetStringArg(aMap, "name"),
-							Namespace: chatGetStringArg(aMap, "namespace"),
-						}
-						if aa.Name != "" {
-							coordCfg.AllowedAgents = append(coordCfg.AllowedAgents, aa)
-						}
-					}
-				}
-			}
-			agent.Spec.Coordination = coordCfg
+	// Auto-detect secretRef for runtime agents if not explicitly set
+	if agent.Spec.Runtime != nil && agent.Spec.SecretRef == nil {
+		secretName := detectRuntimeSecret(ctx, tc.Client, namespace, agent.Spec.Runtime.Type)
+		if secretName != "" {
+			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: secretName}
 		}
 	}
 
@@ -268,4 +239,85 @@ func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolC
 		"taskNamespace":  task.Namespace,
 		"message":        "Agent created and task started",
 	})
+}
+
+// detectRuntimeSecret finds a well-known secret for the given runtime type.
+func detectRuntimeSecret(ctx context.Context, c client.Client, namespace string, runtimeType corev1alpha1.AgentRuntimeType) string {
+	var candidates []string
+	switch runtimeType {
+	case corev1alpha1.AgentRuntimeCopilot:
+		candidates = []string{"copilot-token", "github-credentials", "github-token", "git-credentials", "git-token"}
+	case corev1alpha1.AgentRuntimeClaude:
+		candidates = []string{"claude-api-key", "anthropic-api-key", "anthropic-credentials"}
+	default:
+		return ""
+	}
+	for _, name := range candidates {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, secret); err == nil {
+			return name
+		}
+	}
+	return ""
+}
+
+// parseRuntimeConfig extracts runtime configuration from chat args into the agent spec.
+func parseRuntimeConfig(a map[string]any, agent *corev1alpha1.Agent) {
+	rt, ok := a["runtime"]
+	if !ok {
+		return
+	}
+	rtMap, ok := rt.(map[string]any)
+	if !ok {
+		return
+	}
+	runtimeType := chatGetStringArg(rtMap, "type")
+	if runtimeType == "" {
+		return
+	}
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		Type: corev1alpha1.AgentRuntimeType(runtimeType),
+	}
+	agent.Spec.ProviderRef = nil
+}
+
+// parseCoordinationConfig extracts coordination configuration from chat args into the agent spec.
+func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) {
+	coord, ok := a["coordination"]
+	if !ok {
+		return
+	}
+	coordMap, ok := coord.(map[string]any)
+	if !ok {
+		return
+	}
+	coordCfg := &corev1alpha1.CoordinationConfig{}
+	if enabled, ok := coordMap["enabled"].(bool); ok {
+		coordCfg.Enabled = enabled
+	}
+	if maxCC, ok := coordMap["maxConcurrentChildren"].(float64); ok {
+		coordCfg.MaxConcurrentChildren = int32(maxCC)
+	}
+	if maxD, ok := coordMap["maxDepth"].(float64); ok {
+		coordCfg.MaxDepth = int32(maxD)
+	}
+	if allowed, ok := coordMap["allowedAgents"].([]any); ok {
+		for _, item := range allowed {
+			aMap, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			aa := corev1alpha1.AllowedAgent{
+				Name:      chatGetStringArg(aMap, "name"),
+				Namespace: chatGetStringArg(aMap, "namespace"),
+			}
+			if aa.Name != "" {
+				coordCfg.AllowedAgents = append(coordCfg.AllowedAgents, aa)
+			}
+		}
+	}
+	agent.Spec.Coordination = coordCfg
+	if coordCfg.Enabled {
+		agent.Spec.Runtime = nil
+	}
 }
