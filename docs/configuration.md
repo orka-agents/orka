@@ -87,7 +87,7 @@ spec:
 
 **Auto-injected coordination tools** (when `enabled: true`):
 
-`delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, `create_pull_request`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `create_agent`, `delete_agent`, `update_plan`
+`delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, `create_pull_request`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`, `create_agent`, `delete_agent`, `update_plan`
 
 ### Provider Fallback Chain
 
@@ -203,6 +203,7 @@ spec:
   displayName: "Research Methodology"
   description: "Structured research workflow and source validation guidance"
   version: "1.0.0"
+  author: "platform-team"
   tags: ["research", "analysis"]
   content:
     inline: |
@@ -212,6 +213,11 @@ spec:
       templates/checklist.md: |
         - [ ] Validate source credibility
         - [ ] Cross-check key claims
+  # source tracks where a skill was imported from (for updates)
+  # source:
+  #   github: "anthropics/skills"
+  #   skillName: "researcher"
+  #   context7: false
 status:
   phase: Ready
   contentHash: sha256:...

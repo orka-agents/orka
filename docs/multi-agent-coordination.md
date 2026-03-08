@@ -51,7 +51,7 @@ Controller: parent Job succeeded → parent Task → Succeeded
 
 ### Coordination Tools
 
-Located in `internal/tools/`. Coordination tools include `delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, PR tools (`create_pull_request`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`), and agent management tools (`create_agent`, `delete_agent`). All are registered via `RegisterCoordinationTools(k8sClient)` in `internal/tools/registry.go` when `ORKA_COORDINATION_ENABLED=true`.
+Located in `internal/tools/`. Coordination tools include `delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, PR tools (`create_pull_request`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`), issue tools (`list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`), agent management tools (`create_agent`, `delete_agent`), and `update_plan` (autonomous mode). All are registered via `RegisterCoordinationTools(k8sClient)` in `internal/tools/registry.go` when `ORKA_COORDINATION_ENABLED=true`.
 
 #### `delegate_task` Tool
 
@@ -64,8 +64,21 @@ LLM-visible parameter schema:
     "prompt":      {"type": "string", "description": "The task prompt for the agent"},
     "namespace":   {"type": "string", "description": "Namespace (defaults to current)"},
     "priority":    {"type": "integer", "description": "Priority 0-1000 (defaults to parent priority)"},
-    "auto_retry":  {"type": "boolean", "description": "Enable automatic re-creation if task fails"},
-    "max_retries": {"type": "integer", "description": "Max auto-retry attempts (default: 2)"}
+    "workspace":   {"type": "object", "description": "Git workspace configuration for agent runtime tasks",
+      "properties": {
+        "gitRepo":      {"type": "string", "description": "Git repository URL"},
+        "branch":       {"type": "string", "description": "Git branch name"},
+        "ref":          {"type": "string", "description": "Git ref (commit SHA or tag)"},
+        "gitSecretRef": {"type": "string", "description": "Name of the Kubernetes Secret containing git credentials (must have a 'token' key)"},
+        "pushBranch":   {"type": "string", "description": "Remote branch name to push changes to after the agent completes"}
+      }
+    },
+    "maxTurns":    {"type": "integer", "description": "Maximum number of turns for the agent"},
+    "allowBash":   {"type": "boolean", "description": "Whether to allow bash execution in the agent"},
+    "prior_task":  {"type": "string", "description": "Name of a previously completed task whose diff should be applied to the workspace before this task starts. Used for iterative workflows."},
+    "feedback":    {"type": "string", "description": "Review feedback to prepend to the task prompt. Used with prior_task for iterative code review workflows."},
+    "auto_retry":  {"type": "boolean", "description": "Include structured retry metadata in failure reports. The coordinator decides whether to retry — wait_for_tasks does not auto-retry."},
+    "max_retries": {"type": "integer", "description": "Maximum retry budget for coordinator reference (default: 2). Only used when auto_retry is true."}
   },
   "required": ["agent", "prompt"]
 }
@@ -786,6 +799,63 @@ Possible `outcome` values:
 - `"closed"` — PR was closed externally during polling
 - `"already_merged"` — PR was already merged when checked
 - `"timeout"` — Timeout exceeded while CI checks were still pending
+
+### list_issues Tool
+
+Lists open GitHub issues in a repository. By default only returns unassigned issues. Returns issue number, title, body (truncated to 500 chars), labels, and author.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_name` | string | no | Name of a task whose workspace config has the repo and git credentials |
+| `repo_url` | string | no | Direct GitHub repository URL (e.g. `https://github.com/owner/repo`). Falls back to `ORKA_GIT_REPO` env var |
+| `unassigned_only` | boolean | no | If true, only return issues with no assignee (default: `true`) |
+| `per_page` | integer | no | Number of results per page (default: 30, max: 100) |
+| `page` | integer | no | Page number for pagination (default: 1) |
+
+At least one of `task_name` or `repo_url` must be provided (or `ORKA_GIT_REPO` env var set).
+
+### list_pull_requests Tool
+
+Lists open pull requests in a GitHub repository. Returns PR numbers, titles, authors, branches, labels, and URLs.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_name` | string | no | Name of a task whose workspace config has the repo and git credentials |
+| `repo_url` | string | no | GitHub repository URL. Falls back to `ORKA_GIT_REPO` env var |
+| `per_page` | integer | no | Number of results per page (default: 30, max: 100) |
+| `page` | integer | no | Page number for pagination (default: 1) |
+
+### get_issue Tool
+
+Fetches full details of a specific GitHub issue by number, including title, body, labels, assignees, state, and the first page of comments.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_name` | string | no | Name of a task whose workspace config has the repo and git credentials |
+| `repo_url` | string | no | Direct GitHub repository URL. Falls back to `ORKA_GIT_REPO` env var |
+| `issue_number` | integer | yes | GitHub issue number to fetch |
+
+### comment_on_issue Tool
+
+Posts a comment on a GitHub issue. Use for status updates, progress reports, or agent activity notes.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_name` | string | no | Name of a task whose workspace config has the repo and git credentials |
+| `repo_url` | string | no | Direct GitHub repository URL. Falls back to `ORKA_GIT_REPO` env var |
+| `issue_number` | integer | yes | GitHub issue number to comment on |
+| `body` | string | yes | Comment text (Markdown supported) |
+
+### update_plan Tool
+
+Updates the autonomous execution plan state. Must be called at least once per iteration in autonomous mode.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `summary` | string | yes | Brief human-readable summary of current progress (1-2 sentences) |
+| `progress_pct` | integer | no | Estimated progress percentage (0-100) |
+| `goal_complete` | boolean | no | Set to `true` when the overall goal has been fully achieved |
+| `plan_document` | string | yes | Full markdown plan document. Replaces the previous plan document entirely |
 
 ### Recommended Coordinator System Prompt
 
