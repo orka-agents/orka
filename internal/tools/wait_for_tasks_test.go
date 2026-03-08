@@ -471,7 +471,8 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 
-	// The original task should be marked as retried
+	// With auto-retry disabled in wait_for_tasks, the task should stay Failed
+	// (retry logic is now handled by the coordinator LLM)
 	var originalResult *TaskResultInfo
 	for i := range waitResult.Results {
 		if waitResult.Results[i].Task == taskFailRetry {
@@ -483,14 +484,8 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 		t.Fatal("original task not found in results")
 	}
 
-	if !originalResult.Retried {
-		t.Error("expected Retried=true")
-	}
-	if originalResult.RetryTaskName == "" {
-		t.Error("expected non-empty RetryTaskName")
-	}
-	if originalResult.Phase != "Retried" {
-		t.Errorf("expected Phase=Retried, got %q", originalResult.Phase)
+	if originalResult.Phase != "Failed" {
+		t.Errorf("expected Phase=Failed, got %q", originalResult.Phase)
 	}
 	if originalResult.FailureDetails == nil {
 		t.Fatal("expected FailureDetails to be set")
@@ -505,37 +500,13 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 		t.Errorf("expected maxRetries=2, got %d", originalResult.FailureDetails.MaxRetries)
 	}
 
-	// Verify the retry task was created
+	// Verify no retry task was created (auto-retry is disabled)
 	taskList := &corev1alpha1.TaskList{}
 	if err := fakeClient.List(context.Background(), taskList); err != nil {
 		t.Fatalf("list tasks: %v", err)
 	}
-
-	var retryTask *corev1alpha1.Task
-	for i := range taskList.Items {
-		if taskList.Items[i].Name != taskFailRetry {
-			retryTask = &taskList.Items[i]
-			break
-		}
-	}
-	if retryTask == nil {
-		t.Fatal("retry task not created")
-	}
-
-	if retryTask.Annotations[labels.AnnotationRetryCount] != "1" {
-		t.Errorf("retry task retry-count = %q, want 1", retryTask.Annotations[labels.AnnotationRetryCount])
-	}
-	if retryTask.Annotations[labels.AnnotationRetriedFrom] != taskFailRetry {
-		t.Errorf("retry task retried-from = %q, want task-fail-retry", retryTask.Annotations[labels.AnnotationRetriedFrom])
-	}
-	if !strings.Contains(retryTask.Spec.Prompt, "PREVIOUS ATTEMPT FAILED") {
-		t.Error("retry task prompt should contain error context")
-	}
-	if !strings.Contains(retryTask.Spec.Prompt, "out of memory") {
-		t.Error("retry task prompt should contain original error message")
-	}
-	if !strings.Contains(retryTask.Spec.Prompt, "Implement the feature") {
-		t.Error("retry task prompt should contain original prompt")
+	if len(taskList.Items) != 1 {
+		t.Errorf("expected 1 task (original only), got %d", len(taskList.Items))
 	}
 }
 

@@ -15,6 +15,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -28,6 +30,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/controller"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/llm"
 	"github.com/sozercan/orka/internal/store"
 	chattools "github.com/sozercan/orka/internal/tools"
@@ -237,6 +240,27 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 			}
 		}
 	}
+
+	// Auto-route to dev-coordinator for issue/PR workflows.
+	// Chat just creates the coordinator — the coordinator creates its own specialist agents.
+	if req.AgentRef == "" && looksLikeIssueWorkflow(req.Message) {
+		userContent = fmt.Sprintf("[System: This is an issue workflow. "+
+			"You MUST create a dev-coordinator agent using create_agent with initialPrompt (one-shot pattern). "+
+			"Set coordination.enabled=true, providerRef=\"copilot\", model.name=\"gpt-5.4\", maxDepth=3, maxConcurrentChildren=5. "+
+			"CRITICAL: The dev-coordinator must NOT have a runtime — it must be a plain AI agent with providerRef. "+
+			"The coordinator system prompt must instruct it to: "+
+			"1) Use create_agent to create any specialist agents it needs (coder as copilot runtime, reviewers as copilot runtime with different models like claude-opus-4.6, gpt-5.4, gemini-3-pro). "+
+			"Set allowedAgents to include the agents it creates. "+
+			"2) Follow this adaptive workflow: "+
+			"Phase 1 — ANALYZE: Read the issue and determine what phases are needed. "+
+			"Phase 2 — PLAN & DESIGN: If needed, delegate design/planning to a coder agent, then review with multiple reviewer agents in parallel. "+
+			"Phase 3 — CODE: Delegate implementation to the coder agent with a pushBranch. Create a PR. "+
+			"Phase 4 — REVIEW: Delegate parallel read-only reviews to reviewer agents. Reviewers must NOT set a branch in workspace — they use review_pull_request via GitHub API. Iterate until all approve. "+
+			"Phase 5 — CI: Delegate CI monitoring to the coder agent — poll GitHub Actions via curl + $GITHUB_TOKEN, fix failures, iterate until green. "+
+			"Phase 6 — APPROVE: Post final approval after CI is green. "+
+			"Use initialPrompt to pass the user's request so the coordinator starts immediately. "+
+			"Include the gitRepo URL in the initialPrompt.]\n\n%s", req.Message)
+	}
 	messages = append(messages, llm.Message{
 		Role:    "user",
 		Content: userContent,
@@ -390,6 +414,21 @@ func (ch *ChatHandler) runToolLoop(
 		usage.OutputTokens += resp.OutputTokens
 
 		if len(resp.ToolCalls) == 0 {
+			// Check if any tasks created in this session are still running.
+			// If so, re-prompt the LLM to keep waiting instead of ending the session.
+			if executor.tasksCreated > 0 && ch.hasRunningTasks(iterCtx, namespace, sessionID) {
+				if emitSSE != nil && resp.Content != "" {
+					msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
+					emitSSE("message", string(msgData))
+				}
+				messages = append(messages,
+					llm.Message{Role: "assistant", Content: resp.Content},
+					llm.Message{Role: "user", Content: "[System: You have tasks still running. Do NOT stop. Call wait_for_task again for each running task until it reaches Succeeded or Failed, then call fetch_task_output to get the result.]"},
+				)
+				// Don't increment iteration here — the for loop's post-statement handles it
+				iterSpan.End()
+				continue
+			}
 			content := ch.handleFinalResponse(iterCtx, resp.Content, messages, namespace, sessionID, persistedCount, emitSSE, executor, &usage, start)
 			setUsageSpanAttributes(iterSpan, usage)
 			iterSpan.End()
@@ -831,4 +870,47 @@ func writeSSE(w *bufio.Writer, event, data string) error {
 		return err
 	}
 	return w.Flush()
+}
+
+// hasRunningTasks checks if any tasks created by this chat session are still running.
+func (ch *ChatHandler) hasRunningTasks(ctx context.Context, namespace, sessionID string) bool {
+	var taskList corev1alpha1.TaskList
+	if err := ch.client.List(ctx, &taskList,
+		client.InNamespace(namespace),
+		client.MatchingLabels{labels.LabelChatSession: sessionID},
+	); err != nil {
+		return false
+	}
+	for i := range taskList.Items {
+		phase := taskList.Items[i].Status.Phase
+		if phase == corev1alpha1.TaskPhasePending || phase == corev1alpha1.TaskPhaseRunning {
+			return true
+		}
+	}
+	return false
+}
+
+// looksLikeIssueWorkflow checks if the user message contains patterns suggesting
+// a GitHub issue implementation workflow (fix, implement, create PR).
+// Uses word-boundary matching to avoid false positives from substrings.
+func looksLikeIssueWorkflow(message string) bool {
+	lower := strings.ToLower(message)
+	// Must mention a GitHub issue
+	hasIssue := strings.Contains(lower, "/issues/") ||
+		strings.Contains(lower, "issue #") ||
+		strings.Contains(lower, "issue#")
+	if !hasIssue {
+		return false
+	}
+	// Must suggest implementation work — use multi-word phrases or word boundaries
+	// to avoid false positives (e.g., "pr" in "problem", "fix" in "prefix")
+	actionPhrases := []string{"pick up", "work on", "pull request", "create a pr", "open a pr", "make a pr"}
+	for _, phrase := range actionPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	// Single-word actions need word boundary checks
+	actionWordsPattern := regexp.MustCompile(`\b(fix|implement|resolve|address)\b`)
+	return actionWordsPattern.MatchString(lower)
 }

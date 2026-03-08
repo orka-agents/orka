@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -96,6 +97,19 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list
 // +kubebuilder:rbac:groups=metrics.k8s.io,resources=pods;nodes,verbs=get;list
 
+// updateStatusWithRetry updates the task status with retry on conflict.
+// It re-fetches the task on conflict, applies the mutate function, and retries.
+func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1alpha1.Task, mutate func(*corev1alpha1.Task)) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		// On retry, re-fetch the latest version
+		if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, task); err != nil {
+			return err
+		}
+		mutate(task)
+		return r.Status().Update(ctx, task)
+	})
+}
+
 // Reconcile handles the reconciliation loop for Task resources
 func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -129,7 +143,13 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// Add finalizer if not present
 	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
 		controllerutil.AddFinalizer(task, labels.TaskFinalizer)
-		if err := r.Update(ctx, task); err != nil {
+		if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+			if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, task); err != nil {
+				return err
+			}
+			controllerutil.AddFinalizer(task, labels.TaskFinalizer)
+			return r.Update(ctx, task)
+		}); err != nil {
 			log.Error(err, "failed to add finalizer")
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -140,8 +160,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	// Initialize status if empty
 	if task.Status.Phase == "" {
-		task.Status.Phase = corev1alpha1.TaskPhasePending
-		if err := r.Status().Update(ctx, task); err != nil {
+		if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+			t.Status.Phase = corev1alpha1.TaskPhasePending
+		}); err != nil {
 			log.Error(err, "failed to update initial status")
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -560,15 +581,21 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		))
 	}
 
-	meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
-		Type:               ConditionTypeJobCreated,
-		Status:             metav1.ConditionTrue,
-		LastTransitionTime: now,
-		Reason:             "JobCreated",
-		Message:            fmt.Sprintf("Job %s created", job.Name),
-	})
-
-	if err := r.Status().Update(ctx, task); err != nil {
+	attempts := task.Status.Attempts
+	jobName := task.Status.JobName
+	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		t.Status.Phase = corev1alpha1.TaskPhaseRunning
+		t.Status.StartTime = &now
+		t.Status.Attempts = attempts
+		t.Status.JobName = jobName
+		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeJobCreated,
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: now,
+			Reason:             "JobCreated",
+			Message:            fmt.Sprintf("Job %s created", job.Name),
+		})
+	}); err != nil {
 		log.Error(err, "failed to update status")
 		return ctrl.Result{}, err
 	}
@@ -783,15 +810,20 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 		reason = "TaskCancelled"
 	}
 
-	meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
-		Type:               ConditionTypeComplete,
-		Status:             conditionStatus,
-		LastTransitionTime: now,
-		Reason:             reason,
-		Message:            message,
-	})
-
-	if err := r.Status().Update(ctx, task); err != nil {
+	resultRef := task.Status.ResultRef
+	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		t.Status.Phase = phase
+		t.Status.CompletionTime = &now
+		t.Status.Message = message
+		t.Status.ResultRef = resultRef
+		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeComplete,
+			Status:             conditionStatus,
+			LastTransitionTime: now,
+			Reason:             reason,
+			Message:            message,
+		})
+	}); err != nil {
 		log.Error(err, "failed to update completion status")
 		return ctrl.Result{}, err
 	}
@@ -848,9 +880,10 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 	delay := r.calculateRetryDelay(task)
 
 	// Reset to pending for retry
-	task.Status.Phase = corev1alpha1.TaskPhasePending
-	task.Status.JobName = ""
-	if err := r.Status().Update(ctx, task); err != nil {
+	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		t.Status.Phase = corev1alpha1.TaskPhasePending
+		t.Status.JobName = ""
+	}); err != nil {
 		log.Error(err, "failed to update status for retry")
 		return ctrl.Result{}, err
 	}

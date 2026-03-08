@@ -95,6 +95,7 @@ func SetupGitCredentials() {
 	tokenPaths := []string{
 		"/secrets/git/token",
 		"/secrets/git/password",
+		"/secrets/git/GITHUB_TOKEN",
 	}
 	for _, path := range tokenPaths {
 		if data, err := os.ReadFile(path); err == nil {
@@ -222,6 +223,9 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	}
 
 	// Build structured result with diff if workspace has changes
+	if result == "" {
+		fmt.Fprintf(os.Stderr, "warning: %s executor returned empty result\n", name)
+	}
 	resultDir := ""
 	if cfg.GitRepo != "" {
 		resultDir = workspaceDir

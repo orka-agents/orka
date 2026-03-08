@@ -143,6 +143,12 @@ like "I'll create that task" or "Let me run that" — you MUST include the tool
 call in the SAME response. If you need to create a task AND fetch its result,
 call create_*_task, then wait_for_task, then fetch_task_output all in sequence
 without stopping to narrate between steps. Act first, summarize after.
+
+LONG-RUNNING TASKS: Agent tasks (Copilot, Claude Code) typically run for 5-20 minutes.
+You MUST keep calling wait_for_task in a loop until the task reaches a terminal state
+(Succeeded or Failed). Do NOT give up after a few polls — keep waiting. If wait_for_task
+returns "still running", immediately call wait_for_task again. Only stop when the task
+has completed or failed. After completion, call fetch_task_output to get the result.
 </behavior>
 
 `
@@ -286,6 +292,14 @@ func buildRulesSection() string {
 10. When the user specifies an agent (agentRef) that has a "runtime" listed in the
    available_agents section, ALWAYS use create_agent_task — never create_container_task
    or create_ai_task. Runtime agents have their own CLI environment with full tool access.
+11. For multi-step workflows involving coding + review + PR creation:
+    - If a "dev-coordinator" agent exists, ALWAYS use it (create_agent_task with agent="dev-coordinator").
+      It handles the full workflow: code → PR → multi-model review → iterate → approve.
+    - Otherwise, use the coordinator pattern: create a coordinator agent that delegates to
+      specialist agents (coder, reviewer) sequentially.
+    - Do NOT bundle all steps into a single agent task prompt.
+12. Agent tasks run for 5-20 minutes. NEVER stop polling wait_for_task while a task
+    is still running. Keep calling wait_for_task until the task reaches Succeeded or Failed.
 </rules>
 
 `
@@ -400,7 +414,7 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 		for i := range secretList.Items {
 			secretNames[secretList.Items[i].Name] = true
 		}
-		for _, name := range []string{"github-credentials", "git-credentials", "github-token", "git-token"} {
+		for _, name := range []string{"copilot-token", "github-credentials", "git-credentials", "github-token", "git-token"} {
 			if secretNames[name] {
 				availableRuntimes = append(availableRuntimes, "copilot")
 				break
