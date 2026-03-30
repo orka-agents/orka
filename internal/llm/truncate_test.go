@@ -466,7 +466,7 @@ func TestExtractDroppedSummary(t *testing.T) {
 	t.Run("context items capped per tool", func(t *testing.T) {
 		// Create a tool with more files than maxContextPerTool (5)
 		args := make([]ToolCall, 8)
-		var blockMsgs []Message
+		blockMsgs := make([]Message, 0, len(args)*2)
 		for i := range 8 {
 			args[i] = ToolCall{
 				ID:        fmt.Sprintf("c%d", i),

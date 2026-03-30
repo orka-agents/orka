@@ -128,7 +128,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 
 	// Add agent-specific volumes (workspace, home)
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
-		b.addAgentVolumes(ctx, job, task)
+		b.addAgentVolumes(job, task)
 	}
 
 	// Add skill volumes — read Skill CRs, create ConfigMap, mount at /workspace/.skills/
@@ -926,7 +926,7 @@ func (b *JobBuilder) addAgentWorkspaceEnvVars(
 }
 
 // addAgentVolumes adds agent-specific volumes to the Job (workspace, home)
-func (b *JobBuilder) addAgentVolumes(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task) {
+func (b *JobBuilder) addAgentVolumes(job *batchv1.Job, task *corev1alpha1.Task) {
 	// /workspace emptyDir for git clone target
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 		Name: "workspace",
