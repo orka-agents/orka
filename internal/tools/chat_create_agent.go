@@ -17,7 +17,6 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // ChatCreateAgentTool creates an Agent CRD from the chat context.
@@ -51,6 +50,7 @@ func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
 				"properties": map[string]any{
 					"type":            map[string]any{"type": "string", "description": "Runtime type: copilot or claude"},
 					"defaultMaxTurns": map[string]any{"type": "integer", "description": "Default max agent loop iterations"},
+					"secretRef":       map[string]any{"type": "string", "description": "Secret name containing runtime credentials. Explicit only; no automatic discovery is performed."},
 				},
 			},
 			"initialPrompt": map[string]any{
@@ -163,14 +163,6 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	parseRuntimeConfig(a, agent)
 	parseCoordinationConfig(a, agent)
 
-	// Auto-detect secretRef for runtime agents if not explicitly set
-	if agent.Spec.Runtime != nil && agent.Spec.SecretRef == nil {
-		secretName := detectRuntimeSecret(ctx, tc.Client, namespace, agent.Spec.Runtime.Type)
-		if secretName != "" {
-			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: secretName}
-		}
-	}
-
 	if err := tc.Client.Create(ctx, agent); err != nil {
 		return classifyChatK8sErr(err)
 	}
@@ -241,26 +233,6 @@ func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolC
 	})
 }
 
-// detectRuntimeSecret finds a well-known secret for the given runtime type.
-func detectRuntimeSecret(ctx context.Context, c client.Client, namespace string, runtimeType corev1alpha1.AgentRuntimeType) string {
-	var candidates []string
-	switch runtimeType {
-	case corev1alpha1.AgentRuntimeCopilot:
-		candidates = []string{"copilot-token", "github-credentials", "github-token", "git-credentials", "git-token"}
-	case corev1alpha1.AgentRuntimeClaude:
-		candidates = []string{"claude-api-key", "anthropic-api-key", "anthropic-credentials"}
-	default:
-		return ""
-	}
-	for _, name := range candidates {
-		secret := &corev1.Secret{}
-		if err := c.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, secret); err == nil {
-			return name
-		}
-	}
-	return ""
-}
-
 // parseRuntimeConfig extracts runtime configuration from chat args into the agent spec.
 func parseRuntimeConfig(a map[string]any, agent *corev1alpha1.Agent) {
 	rt, ok := a["runtime"]
@@ -277,6 +249,9 @@ func parseRuntimeConfig(a map[string]any, agent *corev1alpha1.Agent) {
 	}
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
 		Type: corev1alpha1.AgentRuntimeType(runtimeType),
+	}
+	if secretRef := chatGetStringArg(rtMap, "secretRef"); secretRef != "" {
+		agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: secretRef}
 	}
 	agent.Spec.ProviderRef = nil
 }
@@ -319,5 +294,6 @@ func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) {
 	agent.Spec.Coordination = coordCfg
 	if coordCfg.Enabled {
 		agent.Spec.Runtime = nil
+		agent.Spec.SecretRef = nil
 	}
 }

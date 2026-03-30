@@ -20,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	apitypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -81,7 +82,6 @@ func (e *ToolExecutor) executeTool(ctx context.Context, name string, args map[st
 			return nil
 		},
 		IncrementTasks: func() { e.tasksCreated++ },
-		FindGitSecret:  e.findGitSecret,
 	}
 	ctx = tools.WithToolContext(ctx, tc)
 
@@ -784,7 +784,6 @@ func TestExecuteCreateAgentTask_MissingAgentRef(t *testing.T) {
 }
 
 func TestExecuteCreateAgentTask_WithWorkspace(t *testing.T) {
-	// Seed a git secret
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "github-credentials",
@@ -810,6 +809,17 @@ func TestExecuteCreateAgentTask_WithWorkspace(t *testing.T) {
 	if !r.Success {
 		t.Fatalf("expected success, got error: %s", r.Error)
 	}
+	data := r.Data.(map[string]any)
+	task := &corev1alpha1.Task{}
+	if err := e.client.Get(context.Background(), apitypes.NamespacedName{Name: data["name"].(string), Namespace: "default"}, task); err != nil {
+		t.Fatalf("failed to get created task: %v", err)
+	}
+	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+		t.Fatal("expected workspace to be set")
+	}
+	if task.Spec.AgentRuntime.Workspace.GitSecretRef != nil {
+		t.Fatalf("expected gitSecretRef to remain nil when omitted, got %v", task.Spec.AgentRuntime.Workspace.GitSecretRef)
+	}
 }
 
 func TestExecuteCreateAgentTask_WithExplicitGitSecret(t *testing.T) {
@@ -825,6 +835,17 @@ func TestExecuteCreateAgentTask_WithExplicitGitSecret(t *testing.T) {
 	r := e.executeTool(context.Background(), "create_agent_task", args)
 	if !r.Success {
 		t.Fatalf("expected success, got error: %s", r.Error)
+	}
+	data := r.Data.(map[string]any)
+	task := &corev1alpha1.Task{}
+	if err := e.client.Get(context.Background(), apitypes.NamespacedName{Name: data["name"].(string), Namespace: "default"}, task); err != nil {
+		t.Fatalf("failed to get created task: %v", err)
+	}
+	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil || task.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
+		t.Fatal("expected explicit gitSecretRef to be preserved")
+	}
+	if task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "my-secret" {
+		t.Errorf("gitSecretRef = %q, want %q", task.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "my-secret")
 	}
 }
 
@@ -1437,64 +1458,6 @@ func TestExecuteDeleteSession_Success(t *testing.T) {
 	data := r.Data.(map[string]any)
 	if data["sessionId"] != "sess-abc" {
 		t.Errorf("sessionId = %v", data["sessionId"])
-	}
-}
-
-// --- Tests: findGitSecret ---
-
-func TestFindGitSecret_Found(t *testing.T) {
-	tests := []struct {
-		name       string
-		secretName string
-		dataKey    string
-	}{
-		{"github-credentials with token", "github-credentials", "token"},
-		{"git-credentials with password", "git-credentials", "password"},
-		{"github-token with token", "github-token", "token"},
-		{"git-token with token", "git-token", "token"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      tt.secretName,
-					Namespace: "default",
-				},
-				Data: map[string][]byte{
-					tt.dataKey: []byte("secret-value"),
-				},
-			}
-			e := newTestExecutor(secret)
-			got := e.findGitSecret(context.Background(), "default")
-			if got != tt.secretName {
-				t.Errorf("findGitSecret() = %q, want %q", got, tt.secretName)
-			}
-		})
-	}
-}
-
-func TestFindGitSecret_NotFound(t *testing.T) {
-	e := newTestExecutor()
-	got := e.findGitSecret(context.Background(), "default")
-	if got != "" {
-		t.Errorf("findGitSecret() = %q, want empty", got)
-	}
-}
-
-func TestFindGitSecret_WrongDataKey(t *testing.T) {
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "github-credentials",
-			Namespace: "default",
-		},
-		Data: map[string][]byte{
-			"username": []byte("user"),
-		},
-	}
-	e := newTestExecutor(secret)
-	got := e.findGitSecret(context.Background(), "default")
-	if got != "" {
-		t.Errorf("findGitSecret() = %q, want empty (no token/password key)", got)
 	}
 }
 

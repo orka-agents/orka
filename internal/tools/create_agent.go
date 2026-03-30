@@ -48,7 +48,8 @@ type ModelArgs struct {
 
 // RuntimeArgs specifies agent CLI runtime configuration
 type RuntimeArgs struct {
-	Type string `json:"type"`
+	Type      string `json:"type"`
+	SecretRef string `json:"secretRef,omitempty"`
 }
 
 // CoordinationArgs specifies coordination configuration
@@ -167,6 +168,10 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 					"type": {
 						"type": "string",
 						"description": "Runtime type: copilot or claude"
+					},
+					"secretRef": {
+						"type": "string",
+						"description": "Secret name containing runtime credentials. Explicit only; no automatic discovery is performed."
 					}
 				}
 			}
@@ -300,10 +305,8 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		}
 		// Runtime agents don't use providerRef
 		agent.Spec.ProviderRef = nil
-		// Auto-detect secretRef for runtime agents
-		secretName := detectRuntimeSecret(ctx, t.k8sClient, ns, agent.Spec.Runtime.Type)
-		if secretName != "" {
-			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: secretName}
+		if a.Runtime.SecretRef != "" {
+			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: a.Runtime.SecretRef}
 		}
 	}
 
