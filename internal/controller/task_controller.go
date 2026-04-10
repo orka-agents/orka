@@ -892,11 +892,28 @@ func (r *TaskReconciler) shouldRetry(task *corev1alpha1.Task) bool {
 func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	// Delete the old Job
-	if task.Status.JobName != "" {
+	// Calculate backoff delay
+	delay := r.calculateRetryDelay(task)
+	oldJobName := task.Status.JobName
+
+	// Reset to pending for retry before deleting the old Job so a transient
+	// NotFound from asynchronous Job deletion does not fail the task.
+	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		t.Status.Phase = corev1alpha1.TaskPhasePending
+		t.Status.JobName = ""
+		t.Status.Message = ""
+		t.Status.CompletionTime = nil
+		t.Status.ResultRef = nil
+	}); err != nil {
+		log.Error(err, "failed to update status for retry")
+		return ctrl.Result{}, err
+	}
+
+	// Delete the old Job after clearing the running status.
+	if oldJobName != "" {
 		job := &batchv1.Job{}
 		err := r.Get(ctx, types.NamespacedName{
-			Name:      task.Status.JobName,
+			Name:      oldJobName,
 			Namespace: task.Namespace,
 		}, job)
 		if err == nil {
@@ -907,18 +924,6 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 				log.Error(err, "failed to delete old Job for retry")
 			}
 		}
-	}
-
-	// Calculate backoff delay
-	delay := r.calculateRetryDelay(task)
-
-	// Reset to pending for retry
-	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
-		t.Status.Phase = corev1alpha1.TaskPhasePending
-		t.Status.JobName = ""
-	}); err != nil {
-		log.Error(err, "failed to update status for retry")
-		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{RequeueAfter: delay}, nil
