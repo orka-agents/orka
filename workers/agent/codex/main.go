@@ -9,6 +9,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -26,6 +27,10 @@ const (
 	defaultCodexPath = "codex"
 )
 
+var errCodexRequiresBash = errors.New(
+	"codex runtime requires allowBash=true because the Codex CLI cannot disable shell execution",
+)
+
 func main() {
 	if err := common.RunAgent("codex", workspaceDir, defaultMaxTurns, executeCodex); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -35,6 +40,10 @@ func main() {
 
 // executeCodex invokes the Codex CLI and returns its final response.
 func executeCodex(ctx context.Context, cfg *common.AgentConfig) (string, error) {
+	if !allowBashEnabled() {
+		return "", errCodexRequiresBash
+	}
+
 	outputFile, err := os.CreateTemp("", "codex-last-message-*")
 	if err != nil {
 		return "", fmt.Errorf("create output temp file: %w", err)
@@ -66,6 +75,7 @@ func executeCodex(ctx context.Context, cfg *common.AgentConfig) (string, error) 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = io.MultiWriter(&stdout, os.Stdout)
 	cmd.Stderr = io.MultiWriter(&stderr, os.Stderr)
+	cmd.Stdin = strings.NewReader(cfg.Prompt)
 
 	dir := workspaceDir
 	if cfg.SubPath != "" {
@@ -114,16 +124,12 @@ func buildCodexArgs(cfg *common.AgentConfig, outputPath, instructionsPath string
 	if baseURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")); baseURL != "" {
 		args = append(args, "--config", "openai_base_url="+baseURL)
 	}
-	if os.Getenv("ORKA_ALLOW_BASH") == "true" {
-		args = append(args, "--config", "sandbox_workspace_write.network_access=true")
-	} else {
-		args = append(args, "--config", "sandbox_workspace_write.network_access=false")
-	}
+	args = append(args, "--config", "sandbox_workspace_write.network_access=true")
 	if webSearchSetting, ok := codexWebSearchSetting(cfg); ok {
 		args = append(args, "--config", "web_search="+webSearchSetting)
 	}
 
-	args = append(args, cfg.Prompt)
+	args = append(args, "-")
 	return args
 }
 
@@ -138,7 +144,7 @@ func buildCodexInstructions(cfg *common.AgentConfig) string {
 	if cfg.MaxTurns > 0 {
 		guidance = append(guidance, fmt.Sprintf("Try to complete this task within %d turns.", cfg.MaxTurns))
 	}
-	if os.Getenv("ORKA_ALLOW_BASH") != "true" {
+	if !allowBashEnabled() {
 		guidance = append(guidance, "Do not use shell commands unless absolutely necessary. Prefer built-in file inspection and editing tools.")
 	}
 
@@ -216,6 +222,10 @@ func codexPath() string {
 		return p
 	}
 	return defaultCodexPath
+}
+
+func allowBashEnabled() bool {
+	return os.Getenv("ORKA_ALLOW_BASH") == "true"
 }
 
 func codexWebSearchSetting(cfg *common.AgentConfig) (string, bool) {

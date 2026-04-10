@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,7 +19,7 @@ import (
 )
 
 func TestBuildCodexArgs_Minimal(t *testing.T) {
-	t.Setenv("ORKA_ALLOW_BASH", "")
+	t.Setenv("ORKA_ALLOW_BASH", "true")
 	t.Setenv("OPENAI_BASE_URL", "")
 
 	cfg := &common.AgentConfig{
@@ -36,10 +37,10 @@ func TestBuildCodexArgs_Minimal(t *testing.T) {
 	assertContains(t, args, "workspace-write")
 	assertContains(t, args, "--config")
 	assertContains(t, args, "approval_policy=never")
-	assertContains(t, args, "sandbox_workspace_write.network_access=false")
+	assertContains(t, args, "sandbox_workspace_write.network_access=true")
 
-	if args[len(args)-1] != "hello world" {
-		t.Errorf("prompt should be last arg, got %q", args[len(args)-1])
+	if args[len(args)-1] != "-" {
+		t.Errorf("prompt sentinel should be last arg, got %q", args[len(args)-1])
 	}
 }
 
@@ -67,7 +68,7 @@ func TestBuildCodexArgs_Full(t *testing.T) {
 }
 
 func TestBuildCodexArgs_WebSearchDisabled(t *testing.T) {
-	t.Setenv("ORKA_ALLOW_BASH", "")
+	t.Setenv("ORKA_ALLOW_BASH", "true")
 
 	cfg := &common.AgentConfig{
 		Prompt:       "test",
@@ -135,7 +136,7 @@ func TestBuildCodexEnv_UsesOpenAIAPIKeyWhenCodexUnset(t *testing.T) {
 
 func TestExecuteCodex_NonexistentBinary(t *testing.T) {
 	t.Setenv("CODEX_CLI_PATH", "/nonexistent/codex-cli")
-	t.Setenv("ORKA_ALLOW_BASH", "")
+	t.Setenv("ORKA_ALLOW_BASH", "true")
 
 	cfg := &common.AgentConfig{
 		Prompt:   "test prompt",
@@ -145,6 +146,20 @@ func TestExecuteCodex_NonexistentBinary(t *testing.T) {
 	_, err := executeCodex(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("expected error when codex binary doesn't exist")
+	}
+}
+
+func TestExecuteCodex_RejectsBashDisabledConfig(t *testing.T) {
+	t.Setenv("ORKA_ALLOW_BASH", "")
+
+	cfg := &common.AgentConfig{
+		Prompt:   "test prompt",
+		MaxTurns: 5,
+	}
+
+	_, err := executeCodex(context.Background(), cfg)
+	if !errors.Is(err, errCodexRequiresBash) {
+		t.Fatalf("executeCodex() error = %v, want %v", err, errCodexRequiresBash)
 	}
 }
 
@@ -164,7 +179,7 @@ printf 'ignored-stdout'
 `)
 
 	t.Setenv("CODEX_CLI_PATH", scriptPath)
-	t.Setenv("ORKA_ALLOW_BASH", "")
+	t.Setenv("ORKA_ALLOW_BASH", "true")
 
 	cfg := &common.AgentConfig{
 		Prompt:   "test prompt",
@@ -186,7 +201,7 @@ printf 'stdout-result'
 `)
 
 	t.Setenv("CODEX_CLI_PATH", scriptPath)
-	t.Setenv("ORKA_ALLOW_BASH", "")
+	t.Setenv("ORKA_ALLOW_BASH", "true")
 
 	cfg := &common.AgentConfig{
 		Prompt:   "test prompt",
@@ -199,6 +214,43 @@ printf 'stdout-result'
 	}
 	if result != "stdout-result" {
 		t.Fatalf("executeCodex() = %q, want %q", result, "stdout-result")
+	}
+}
+
+func TestExecuteCodex_SendsPromptViaStdin(t *testing.T) {
+	scriptPath := writeCodexStub(t, `#!/bin/sh
+OUTPUT=""
+LAST_ARG=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then
+    OUTPUT="$2"
+    shift 2
+    continue
+  fi
+  LAST_ARG="$1"
+  shift
+done
+INPUT="$(cat)"
+printf 'arg=%s\nstdin=%s\n' "$LAST_ARG" "$INPUT" > "$OUTPUT"
+`)
+
+	t.Setenv("CODEX_CLI_PATH", scriptPath)
+	t.Setenv("ORKA_ALLOW_BASH", "true")
+
+	cfg := &common.AgentConfig{
+		Prompt:   "--help",
+		MaxTurns: 5,
+	}
+
+	result, err := executeCodex(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("executeCodex() error = %v", err)
+	}
+	if !strings.Contains(result, "arg=-") {
+		t.Fatalf("executeCodex() = %q, want prompt sentinel", result)
+	}
+	if !strings.Contains(result, "stdin=--help") {
+		t.Fatalf("executeCodex() = %q, want stdin prompt", result)
 	}
 }
 

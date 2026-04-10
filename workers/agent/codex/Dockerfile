@@ -18,22 +18,15 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o worker .
 # Runtime stage — Node.js required for Codex CLI
 FROM node:22-slim
 
-ARG TARGETARCH
-
 # Install git (needed for workspace cloning)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Codex CLI globally with the matching platform package
-RUN arch="${TARGETARCH:-$(dpkg --print-architecture)}" \
-    && case "$arch" in \
-        amd64) codex_pkg='@openai/codex-linux-x64' ;; \
-        arm64) codex_pkg='@openai/codex-linux-arm64' ;; \
-        *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
-      esac \
-    && npm install -g @openai/codex "$codex_pkg" \
+# Install the published Codex CLI package. It resolves the correct optional
+# platform dependency for the target linux architecture during install.
+RUN npm install -g @openai/codex \
     && npm cache clean --force
 
 # Create a simple token-echo script for git auth
