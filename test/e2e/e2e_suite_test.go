@@ -26,8 +26,6 @@ import (
 	"github.com/sozercan/orka/test/utils"
 )
 
-const controllerManagerDeploymentName = "orka-controller-manager"
-
 var (
 	// managerImage is the manager image to be built and loaded for testing.
 	managerImage = "ghcr.io/sozercan/orka:latest"
@@ -149,13 +147,13 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 
 	By("waiting for controller-manager to be ready")
-	cmd = exec.Command("kubectl", "rollout", "status", "deployment/"+controllerManagerDeploymentName,
-		"-n", namespace, "--timeout=5m")
-	_, err = utils.Run(cmd)
-	if err != nil {
-		dumpControllerManagerDiagnostics()
-	}
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed waiting for the controller-manager rollout")
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
+			"-n", namespace, "-o", "jsonpath={.items[0].status.phase}")
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(output).To(Equal("Running"))
+	}, 2*time.Minute, time.Second).Should(Succeed())
 })
 
 var _ = AfterSuite(func() {
@@ -208,25 +206,6 @@ func loadEnvFile(path string) {
 		if os.Getenv(key) == "" {
 			os.Setenv(key, val)
 		}
-	}
-}
-
-func dumpControllerManagerDiagnostics() {
-	By("dumping controller-manager diagnostics")
-
-	for _, args := range [][]string{
-		{"get", "pods", "-l", "control-plane=controller-manager", "-n", namespace, "-o", "wide"},
-		{"describe", "pods", "-l", "control-plane=controller-manager", "-n", namespace},
-		{"get", "events", "-n", namespace, "--sort-by=.lastTimestamp"},
-		{"get", "deployment", controllerManagerDeploymentName, "-n", namespace, "-o", "yaml"},
-	} {
-		cmd := exec.Command("kubectl", args...)
-		output, err := utils.Run(cmd)
-		if err != nil {
-			_, _ = fmt.Fprintf(GinkgoWriter, "diagnostic command failed: kubectl %s\n%v\n", strings.Join(args, " "), err)
-			continue
-		}
-		_, _ = fmt.Fprintf(GinkgoWriter, "diagnostic output: kubectl %s\n%s\n", strings.Join(args, " "), output)
 	}
 }
 
