@@ -59,6 +59,7 @@ make ui-test-coverage   # Run UI tests with coverage
 make docker-build                  # Controller image
 make docker-build-claude-worker    # Claude agent worker
 make docker-build-copilot-worker   # Copilot agent worker
+make docker-build-codex-worker     # Codex agent worker
 make docker-build-ai-worker        # AI worker
 make docker-build-general-worker   # General worker
 make docker-build-all              # All images
@@ -67,6 +68,7 @@ make docker-build-all              # All images
 make docker-push
 make docker-push-claude-worker
 make docker-push-copilot-worker
+make docker-push-codex-worker
 make docker-push-all
 ```
 

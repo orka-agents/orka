@@ -45,6 +45,7 @@ func TestAgentRuntimeTypeConstants(t *testing.T) {
 	}{
 		{"copilot", AgentRuntimeCopilot, "copilot"},
 		{"claude", AgentRuntimeClaude, "claude"},
+		{"codex", AgentRuntimeCodex, "codex"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -279,6 +280,7 @@ func TestAgentRuntimeTypeAssignment(t *testing.T) {
 	}{
 		{"copilot runtime", AgentRuntimeCopilot},
 		{"claude runtime", AgentRuntimeClaude},
+		{"codex runtime", AgentRuntimeCodex},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

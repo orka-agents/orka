@@ -45,6 +45,7 @@ Tests use **Ginkgo + Gomega** (BDD style) for controller/integration tests and s
 | `workers/general/` | `main_test.go` | General worker functions |
 | `workers/agent/copilot/` | `main_test.go` | Copilot agent worker |
 | `workers/agent/claude/` | `main_test.go` | Claude agent worker |
+| `workers/agent/codex/` | `main_test.go` | Codex agent worker |
 
 ### E2E Tests
 

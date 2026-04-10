@@ -56,6 +56,9 @@ func TestNewJobBuilder(t *testing.T) {
 	if builder.GeneralWorkerImage != DefaultGeneralWorkerImage {
 		t.Errorf("GeneralWorkerImage = %s, want %s", builder.GeneralWorkerImage, DefaultGeneralWorkerImage)
 	}
+	if builder.CodexWorkerImage != DefaultCodexWorkerImage {
+		t.Errorf("CodexWorkerImage = %s, want %s", builder.CodexWorkerImage, DefaultCodexWorkerImage)
+	}
 }
 
 func TestJobBuilder_Build_ContainerTask(t *testing.T) {
@@ -819,6 +822,38 @@ func TestJobBuilder_Build_AgentTask_ClaudeRuntime(t *testing.T) {
 	container := job.Spec.Template.Spec.Containers[0]
 	if container.Image != DefaultClaudeWorkerImage {
 		t.Errorf("Image = %s, want %s", container.Image, DefaultClaudeWorkerImage)
+	}
+}
+
+func TestJobBuilder_Build_AgentTask_CodexRuntime(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "agent-task",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAgent,
+			Prompt: "Fix the bug",
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: corev1alpha1.AgentRuntimeCodex,
+			},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, agent, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	container := job.Spec.Template.Spec.Containers[0]
+	if container.Image != DefaultCodexWorkerImage {
+		t.Errorf("Image = %s, want %s", container.Image, DefaultCodexWorkerImage)
 	}
 }
 
@@ -1960,6 +1995,15 @@ func TestGetAgentWorkerImage(t *testing.T) {
 				},
 			},
 			expected: DefaultClaudeWorkerImage,
+		},
+		{
+			name: "codex runtime",
+			agent: &corev1alpha1.Agent{
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+				},
+			},
+			expected: DefaultCodexWorkerImage,
 		},
 		{
 			name: "unknown runtime type",

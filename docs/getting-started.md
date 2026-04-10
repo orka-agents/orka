@@ -118,7 +118,7 @@ orka task download <task-name> [filename] -o <path>
 
 ## Agent Runtimes Quick Start
 
-Agent runtimes let you run tasks via Claude Code CLI or GitHub Copilot CLI with full autonomous coding capabilities.
+Agent runtimes let you run tasks via Codex CLI, Claude Code CLI, or GitHub Copilot CLI with full autonomous coding capabilities.
 
 ### 1. Create Credentials
 
@@ -133,6 +133,10 @@ kubectl create secret generic claude-credentials \
   --from-literal=ANTHROPIC_FOUNDRY_API_KEY=your-key \
   --from-literal=ANTHROPIC_FOUNDRY_RESOURCE=your-resource \
   --from-literal=ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-5
+
+# For Codex CLI
+kubectl create secret generic codex-api-key \
+  --from-literal=OPENAI_API_KEY=sk-proj-your-key
 ```
 
 ### 2. Create an Agent with Runtime
@@ -224,7 +228,7 @@ The CLI supports token extraction from bearer tokens, token files, exec-based au
 
 ## Next Steps
 
-- [Agent Runtimes](agent-runtimes.md) — Claude Code CLI and Copilot CLI configuration
+- [Agent Runtimes](agent-runtimes.md) — Codex CLI, Claude Code CLI, and Copilot CLI configuration
 - [Interactive Chat](chat.md) — Chat endpoint with tool execution
 - [Multi-Agent Coordination](multi-agent-coordination.md) — Coordinator agents and delegation
 - [OpenAI Compatibility](openai-compat.md) — Use any OpenAI-compatible client via `/openai/v1/`

@@ -35,7 +35,7 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 ## Features
 
 - 🤖 **AI Agents** — Anthropic, OpenAI, or Azure OpenAI with tools, skills, and session persistence
-- 🛠️ **Agent Runtimes** — Delegate to Claude Code CLI or GitHub Copilot CLI for full autonomous coding
+- 🛠️ **Agent Runtimes** — Delegate to Codex CLI, Claude Code CLI, or GitHub Copilot CLI for full autonomous coding
 - 🔀 **Multi-Agent Coordination** — Coordinators delegate to specialists with depth and concurrency controls
 - 💬 **Interactive Chat** — Agentic orchestrator with SSE streaming that creates and manages agents and tasks for you
 - 🖥️ **Web Dashboard** — Built-in React UI embedded in the controller binary — zero extra deployments
@@ -96,7 +96,7 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Getting Started](docs/getting-started.md)                   | Installation, quick start, CLI setup                  |
 | [Architecture](docs/architecture.md)                         | System design, components, and data flow              |
 | [Configuration](docs/configuration.md)                       | CRD reference, Helm values, controller flags, metrics |
-| [Agent Runtimes](docs/agent-runtimes.md)                     | Claude Code CLI and Copilot CLI runtimes              |
+| [Agent Runtimes](docs/agent-runtimes.md)                     | Codex CLI, Claude Code CLI, and Copilot CLI runtimes  |
 | [Interactive Chat](docs/chat.md)                             | Chat endpoint, tools, and SSE streaming               |
 | [Multi-Agent Coordination](docs/multi-agent-coordination.md) | Coordinator agents and task delegation                |
 | [API Reference](docs/api-reference.md)                       | REST API endpoints and usage examples                 |

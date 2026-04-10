@@ -52,6 +52,24 @@ workers:
       tag: latest
       pullPolicy: IfNotPresent
 
+  copilot:
+    image:
+      repository: ghcr.io/sozercan/orka/agent-worker-copilot
+      tag: latest
+      pullPolicy: IfNotPresent
+
+  claude:
+    image:
+      repository: ghcr.io/sozercan/orka/agent-worker-claude
+      tag: latest
+      pullPolicy: IfNotPresent
+
+  codex:
+    image:
+      repository: ghcr.io/sozercan/orka/agent-worker-codex
+      tag: latest
+      pullPolicy: IfNotPresent
+
   # Default resources for workers
   resources:
     limits:

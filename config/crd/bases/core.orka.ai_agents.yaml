@@ -270,6 +270,7 @@ spec:
                     enum:
                     - copilot
                     - claude
+                    - codex
                     type: string
                 required:
                 - type

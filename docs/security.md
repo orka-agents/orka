@@ -16,7 +16,7 @@ Only three paths are writable (mounted as EmptyDir volumes):
 | Path | Purpose |
 |------|---------|
 | `/tmp` | Container runtime temporary files |
-| `/home/worker` | CLI config/cache (Claude, Copilot) |
+| `/home/worker` | CLI config/cache (Claude, Copilot, Codex) |
 | `/workspace` | Git clone and working directory |
 
 All other filesystem paths are read-only. Workers that write outside these paths will fail.

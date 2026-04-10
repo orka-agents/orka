@@ -42,6 +42,9 @@ const (
 	// DefaultClaudeWorkerImage is the default image for Claude agent tasks
 	DefaultClaudeWorkerImage = "ghcr.io/sozercan/orka/agent-worker-claude:latest"
 
+	// DefaultCodexWorkerImage is the default image for Codex agent tasks
+	DefaultCodexWorkerImage = "ghcr.io/sozercan/orka/agent-worker-codex:latest"
+
 	// DefaultInitImage is the default image for init containers
 	DefaultInitImage = "busybox:1.37"
 
@@ -68,6 +71,7 @@ type JobBuilder struct {
 	GeneralWorkerImage string
 	CopilotWorkerImage string
 	ClaudeWorkerImage  string
+	CodexWorkerImage   string
 	InitImage          string
 	ControllerURL      string // e.g. http://orka-controller.orka-system.svc:8080
 }
@@ -80,6 +84,7 @@ func NewJobBuilder(c client.Client) *JobBuilder {
 		GeneralWorkerImage: DefaultGeneralWorkerImage,
 		CopilotWorkerImage: DefaultCopilotWorkerImage,
 		ClaudeWorkerImage:  DefaultClaudeWorkerImage,
+		CodexWorkerImage:   DefaultCodexWorkerImage,
 		InitImage:          DefaultInitImage,
 	}
 }
@@ -739,6 +744,8 @@ func (b *JobBuilder) getAgentWorkerImage(agent *corev1alpha1.Agent) string {
 		return b.CopilotWorkerImage
 	case corev1alpha1.AgentRuntimeClaude:
 		return b.ClaudeWorkerImage
+	case corev1alpha1.AgentRuntimeCodex:
+		return b.CodexWorkerImage
 	default:
 		return b.ClaudeWorkerImage
 	}
