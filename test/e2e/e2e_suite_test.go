@@ -26,6 +26,8 @@ import (
 	"github.com/sozercan/orka/test/utils"
 )
 
+const controllerManagerDeploymentName = "orka-controller-manager"
+
 var (
 	// managerImage is the manager image to be built and loaded for testing.
 	managerImage = "ghcr.io/sozercan/orka:latest"
@@ -147,7 +149,7 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 
 	By("waiting for controller-manager to be ready")
-	cmd = exec.Command("kubectl", "rollout", "status", "deployment/controller-manager",
+	cmd = exec.Command("kubectl", "rollout", "status", "deployment/"+controllerManagerDeploymentName,
 		"-n", namespace, "--timeout=5m")
 	_, err = utils.Run(cmd)
 	if err != nil {
@@ -216,7 +218,7 @@ func dumpControllerManagerDiagnostics() {
 		{"get", "pods", "-l", "control-plane=controller-manager", "-n", namespace, "-o", "wide"},
 		{"describe", "pods", "-l", "control-plane=controller-manager", "-n", namespace},
 		{"get", "events", "-n", namespace, "--sort-by=.lastTimestamp"},
-		{"get", "deployment", "controller-manager", "-n", namespace, "-o", "yaml"},
+		{"get", "deployment", controllerManagerDeploymentName, "-n", namespace, "-o", "yaml"},
 	} {
 		cmd := exec.Command("kubectl", args...)
 		output, err := utils.Run(cmd)

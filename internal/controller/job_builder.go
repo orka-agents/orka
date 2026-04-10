@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"path"
 	"reflect"
 	"slices"
@@ -292,12 +293,7 @@ func copyNodeSelector(in map[string]string) map[string]string {
 		return nil
 	}
 
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-
-	return out
+	return maps.Clone(in)
 }
 
 func copyTolerations(in []corev1.Toleration) []corev1.Toleration {

@@ -30,9 +30,14 @@ const (
 )
 
 const (
-	testTask         = "test-task"
-	defaultNS        = "default"
-	envAIProviderKey = "ORKA_AI_PROVIDER"
+	testTask               = "test-task"
+	defaultNS              = "default"
+	envAIProviderKey       = "ORKA_AI_PROVIDER"
+	testNodeLabelKey       = "sandbox-runtime"
+	testNodeValueKata      = "kata"
+	testNodeValueGVisor    = "gvisor"
+	testRuntimeClassKata   = "kata-qemu"
+	testRuntimeClassGVisor = "gvisor"
 )
 
 func setupJobBuilder() *JobBuilder {
@@ -213,15 +218,15 @@ func TestJobBuilder_Build_AppliesAgentExecutionDefaults(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		Spec: corev1alpha1.AgentSpec{
 			Execution: &corev1alpha1.ExecutionSpec{
-				RuntimeClassName: "kata-qemu",
+				RuntimeClassName: testRuntimeClassKata,
 				NodeSelector: map[string]string{
-					"sandbox-runtime": "kata",
+					testNodeLabelKey: testNodeValueKata,
 				},
 				Tolerations: []corev1.Toleration{
 					{
-						Key:      "sandbox-runtime",
+						Key:      testNodeLabelKey,
 						Operator: corev1.TolerationOpEqual,
-						Value:    "kata",
+						Value:    testNodeValueKata,
 						Effect:   corev1.TaintEffectNoSchedule,
 					},
 				},
@@ -232,9 +237,9 @@ func TestJobBuilder_Build_AppliesAgentExecutionDefaults(t *testing.T) {
 								{
 									MatchExpressions: []corev1.NodeSelectorRequirement{
 										{
-											Key:      "sandbox-runtime",
+											Key:      testNodeLabelKey,
 											Operator: corev1.NodeSelectorOpIn,
-											Values:   []string{"kata"},
+											Values:   []string{testNodeValueKata},
 										},
 									},
 								},
@@ -252,24 +257,24 @@ func TestJobBuilder_Build_AppliesAgentExecutionDefaults(t *testing.T) {
 	}
 
 	podSpec := job.Spec.Template.Spec
-	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != "kata-qemu" {
-		t.Fatalf("RuntimeClassName = %v, want kata-qemu", podSpec.RuntimeClassName)
+	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != testRuntimeClassKata {
+		t.Fatalf("RuntimeClassName = %v, want %s", podSpec.RuntimeClassName, testRuntimeClassKata)
 	}
-	if got := podSpec.NodeSelector["sandbox-runtime"]; got != "kata" {
-		t.Errorf("NodeSelector[sandbox-runtime] = %q, want %q", got, "kata")
+	if got := podSpec.NodeSelector[testNodeLabelKey]; got != testNodeValueKata {
+		t.Errorf("NodeSelector[%s] = %q, want %q", testNodeLabelKey, got, testNodeValueKata)
 	}
 	if len(podSpec.Tolerations) != 1 {
 		t.Fatalf("Tolerations len = %d, want 1", len(podSpec.Tolerations))
 	}
-	if podSpec.Tolerations[0].Value != "kata" {
-		t.Errorf("Tolerations[0].Value = %q, want %q", podSpec.Tolerations[0].Value, "kata")
+	if podSpec.Tolerations[0].Value != testNodeValueKata {
+		t.Errorf("Tolerations[0].Value = %q, want %q", podSpec.Tolerations[0].Value, testNodeValueKata)
 	}
 	if podSpec.Affinity == nil || podSpec.Affinity.NodeAffinity == nil {
 		t.Fatal("Affinity.NodeAffinity should not be nil")
 	}
 
-	podSpec.NodeSelector["sandbox-runtime"] = "modified"
-	if agent.Spec.Execution.NodeSelector["sandbox-runtime"] != "kata" {
+	podSpec.NodeSelector[testNodeLabelKey] = "modified"
+	if agent.Spec.Execution.NodeSelector[testNodeLabelKey] != testNodeValueKata {
 		t.Error("Build should copy agent execution nodeSelector instead of aliasing it")
 	}
 }
@@ -285,15 +290,15 @@ func TestJobBuilder_Build_TaskExecutionOverridesAgentExecution(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeContainer,
 			Execution: &corev1alpha1.ExecutionSpec{
-				RuntimeClassName: "gvisor",
+				RuntimeClassName: testRuntimeClassGVisor,
 				NodeSelector: map[string]string{
-					"sandbox-runtime": "gvisor",
+					testNodeLabelKey: testNodeValueGVisor,
 				},
 				Tolerations: []corev1.Toleration{
 					{
-						Key:      "sandbox-runtime",
+						Key:      testNodeLabelKey,
 						Operator: corev1.TolerationOpEqual,
-						Value:    "gvisor",
+						Value:    testNodeValueGVisor,
 						Effect:   corev1.TaintEffectNoSchedule,
 					},
 				},
@@ -315,16 +320,16 @@ func TestJobBuilder_Build_TaskExecutionOverridesAgentExecution(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		Spec: corev1alpha1.AgentSpec{
 			Execution: &corev1alpha1.ExecutionSpec{
-				RuntimeClassName: "kata-qemu",
+				RuntimeClassName: testRuntimeClassKata,
 				NodeSelector: map[string]string{
-					"sandbox-runtime": "kata",
-					"dedicated":       "true",
+					testNodeLabelKey: "kata",
+					"dedicated":      "true",
 				},
 				Tolerations: []corev1.Toleration{
 					{
-						Key:      "sandbox-runtime",
+						Key:      testNodeLabelKey,
 						Operator: corev1.TolerationOpEqual,
-						Value:    "kata",
+						Value:    testNodeValueKata,
 						Effect:   corev1.TaintEffectNoSchedule,
 					},
 					{
@@ -346,20 +351,20 @@ func TestJobBuilder_Build_TaskExecutionOverridesAgentExecution(t *testing.T) {
 	}
 
 	podSpec := job.Spec.Template.Spec
-	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != "gvisor" {
-		t.Fatalf("RuntimeClassName = %v, want gvisor", podSpec.RuntimeClassName)
+	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != testRuntimeClassGVisor {
+		t.Fatalf("RuntimeClassName = %v, want %s", podSpec.RuntimeClassName, testRuntimeClassGVisor)
 	}
 	if len(podSpec.NodeSelector) != 1 {
 		t.Fatalf("NodeSelector len = %d, want 1", len(podSpec.NodeSelector))
 	}
-	if got := podSpec.NodeSelector["sandbox-runtime"]; got != "gvisor" {
-		t.Errorf("NodeSelector[sandbox-runtime] = %q, want %q", got, "gvisor")
+	if got := podSpec.NodeSelector[testNodeLabelKey]; got != testNodeValueGVisor {
+		t.Errorf("NodeSelector[%s] = %q, want %q", testNodeLabelKey, got, testNodeValueGVisor)
 	}
 	if len(podSpec.Tolerations) != 1 {
 		t.Fatalf("Tolerations len = %d, want 1", len(podSpec.Tolerations))
 	}
-	if podSpec.Tolerations[0].Value != "gvisor" {
-		t.Errorf("Tolerations[0].Value = %q, want %q", podSpec.Tolerations[0].Value, "gvisor")
+	if podSpec.Tolerations[0].Value != testNodeValueGVisor {
+		t.Errorf("Tolerations[0].Value = %q, want %q", podSpec.Tolerations[0].Value, testNodeValueGVisor)
 	}
 	if podSpec.Affinity == nil || podSpec.Affinity.PodAntiAffinity == nil {
 		t.Fatal("Affinity.PodAntiAffinity should not be nil")

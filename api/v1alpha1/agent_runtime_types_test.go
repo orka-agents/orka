@@ -12,6 +12,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+const (
+	testExecutionRuntimeClassGVisor = "gvisor"
+	testExecutionRuntimeClassKata   = "kata-qemu"
+	testExecutionNodeLabelKey       = "sandbox-runtime"
+)
+
 func TestTaskTypeAgentConstant(t *testing.T) {
 	if TaskTypeAgent != "agent" {
 		t.Errorf("TaskTypeAgent = %q, want %q", TaskTypeAgent, "agent")
@@ -292,15 +298,15 @@ func TestAgentRuntimeTypeAssignment(t *testing.T) {
 
 func TestExecutionSpecFields(t *testing.T) {
 	spec := ExecutionSpec{
-		RuntimeClassName: "gvisor",
+		RuntimeClassName: testExecutionRuntimeClassGVisor,
 		NodeSelector: map[string]string{
-			"sandbox-runtime": "gvisor",
+			testExecutionNodeLabelKey: testExecutionRuntimeClassGVisor,
 		},
 		Tolerations: []corev1.Toleration{
 			{
-				Key:      "sandbox-runtime",
+				Key:      testExecutionNodeLabelKey,
 				Operator: corev1.TolerationOpEqual,
-				Value:    "gvisor",
+				Value:    testExecutionRuntimeClassGVisor,
 				Effect:   corev1.TaintEffectNoSchedule,
 			},
 		},
@@ -309,11 +315,11 @@ func TestExecutionSpecFields(t *testing.T) {
 		},
 	}
 
-	if spec.RuntimeClassName != "gvisor" {
-		t.Errorf("RuntimeClassName = %q, want %q", spec.RuntimeClassName, "gvisor")
+	if spec.RuntimeClassName != testExecutionRuntimeClassGVisor {
+		t.Errorf("RuntimeClassName = %q, want %q", spec.RuntimeClassName, testExecutionRuntimeClassGVisor)
 	}
-	if got := spec.NodeSelector["sandbox-runtime"]; got != "gvisor" {
-		t.Errorf("NodeSelector[sandbox-runtime] = %q, want %q", got, "gvisor")
+	if got := spec.NodeSelector[testExecutionNodeLabelKey]; got != testExecutionRuntimeClassGVisor {
+		t.Errorf("NodeSelector[%s] = %q, want %q", testExecutionNodeLabelKey, got, testExecutionRuntimeClassGVisor)
 	}
 	if len(spec.Tolerations) != 1 {
 		t.Fatalf("Tolerations len = %d, want 1", len(spec.Tolerations))
@@ -329,26 +335,26 @@ func TestExecutionSpecFields(t *testing.T) {
 func TestExecutionSpecOnAgentAndTaskSpec(t *testing.T) {
 	agent := AgentSpec{
 		Execution: &ExecutionSpec{
-			RuntimeClassName: "kata-qemu",
+			RuntimeClassName: testExecutionRuntimeClassKata,
 		},
 	}
 	task := TaskSpec{
 		Type: TaskTypeAgent,
 		Execution: &ExecutionSpec{
-			RuntimeClassName: "gvisor",
+			RuntimeClassName: testExecutionRuntimeClassGVisor,
 		},
 	}
 
 	if agent.Execution == nil {
 		t.Fatal("Agent.Execution should not be nil")
 	}
-	if agent.Execution.RuntimeClassName != "kata-qemu" {
-		t.Errorf("Agent.Execution.RuntimeClassName = %q, want %q", agent.Execution.RuntimeClassName, "kata-qemu")
+	if agent.Execution.RuntimeClassName != testExecutionRuntimeClassKata {
+		t.Errorf("Agent.Execution.RuntimeClassName = %q, want %q", agent.Execution.RuntimeClassName, testExecutionRuntimeClassKata)
 	}
 	if task.Execution == nil {
 		t.Fatal("Task.Execution should not be nil")
 	}
-	if task.Execution.RuntimeClassName != "gvisor" {
-		t.Errorf("Task.Execution.RuntimeClassName = %q, want %q", task.Execution.RuntimeClassName, "gvisor")
+	if task.Execution.RuntimeClassName != testExecutionRuntimeClassGVisor {
+		t.Errorf("Task.Execution.RuntimeClassName = %q, want %q", task.Execution.RuntimeClassName, testExecutionRuntimeClassGVisor)
 	}
 }
