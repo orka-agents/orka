@@ -1426,7 +1426,7 @@ func TestHandleCompleted_EnforcesScheduledTaskHistoryLimit(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "sched-child-old",
 			Namespace:         "default",
-			Labels:            map[string]string{labels.LabelParentTask: "sched-parent", labels.LabelScheduledRun: "true"},
+			Labels:            map[string]string{labels.LabelParentTask: "sched-parent", labels.LabelScheduledRun: scheduledRunLabelValue},
 			CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Minute)),
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
@@ -1435,7 +1435,7 @@ func TestHandleCompleted_EnforcesScheduledTaskHistoryLimit(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "sched-child-current",
 			Namespace:         "default",
-			Labels:            map[string]string{labels.LabelParentTask: "sched-parent", labels.LabelScheduledRun: "true"},
+			Labels:            map[string]string{labels.LabelParentTask: "sched-parent", labels.LabelScheduledRun: scheduledRunLabelValue},
 			CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Minute)),
 		},
 		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},

@@ -48,6 +48,8 @@ const (
 
 	// ConditionTypeJobCreated indicates a Job has been created
 	ConditionTypeJobCreated = "JobCreated"
+
+	scheduledRunLabelValue = "true"
 )
 
 // TaskReconciler reconciles a Task object
@@ -762,7 +764,7 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 }
 
 func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, task *corev1alpha1.Task) error {
-	if task.Labels[labels.LabelScheduledRun] != "true" {
+	if task.Labels[labels.LabelScheduledRun] != scheduledRunLabelValue {
 		return nil
 	}
 
@@ -1175,7 +1177,7 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 			Namespace: task.Namespace,
 			Labels: map[string]string{
 				labels.LabelParentTask:   task.Name,
-				labels.LabelScheduledRun: "true",
+				labels.LabelScheduledRun: scheduledRunLabelValue,
 			},
 		},
 		Spec: *task.Spec.DeepCopy(),
