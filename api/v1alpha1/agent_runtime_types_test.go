@@ -289,3 +289,66 @@ func TestAgentRuntimeTypeAssignment(t *testing.T) {
 		})
 	}
 }
+
+func TestExecutionSpecFields(t *testing.T) {
+	spec := ExecutionSpec{
+		RuntimeClassName: "gvisor",
+		NodeSelector: map[string]string{
+			"sandbox-runtime": "gvisor",
+		},
+		Tolerations: []corev1.Toleration{
+			{
+				Key:      "sandbox-runtime",
+				Operator: corev1.TolerationOpEqual,
+				Value:    "gvisor",
+				Effect:   corev1.TaintEffectNoSchedule,
+			},
+		},
+		Affinity: &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{},
+		},
+	}
+
+	if spec.RuntimeClassName != "gvisor" {
+		t.Errorf("RuntimeClassName = %q, want %q", spec.RuntimeClassName, "gvisor")
+	}
+	if got := spec.NodeSelector["sandbox-runtime"]; got != "gvisor" {
+		t.Errorf("NodeSelector[sandbox-runtime] = %q, want %q", got, "gvisor")
+	}
+	if len(spec.Tolerations) != 1 {
+		t.Fatalf("Tolerations len = %d, want 1", len(spec.Tolerations))
+	}
+	if spec.Tolerations[0].Effect != corev1.TaintEffectNoSchedule {
+		t.Errorf("Tolerations[0].Effect = %q, want %q", spec.Tolerations[0].Effect, corev1.TaintEffectNoSchedule)
+	}
+	if spec.Affinity == nil || spec.Affinity.NodeAffinity == nil {
+		t.Fatal("Affinity.NodeAffinity should not be nil")
+	}
+}
+
+func TestExecutionSpecOnAgentAndTaskSpec(t *testing.T) {
+	agent := AgentSpec{
+		Execution: &ExecutionSpec{
+			RuntimeClassName: "kata-qemu",
+		},
+	}
+	task := TaskSpec{
+		Type: TaskTypeAgent,
+		Execution: &ExecutionSpec{
+			RuntimeClassName: "gvisor",
+		},
+	}
+
+	if agent.Execution == nil {
+		t.Fatal("Agent.Execution should not be nil")
+	}
+	if agent.Execution.RuntimeClassName != "kata-qemu" {
+		t.Errorf("Agent.Execution.RuntimeClassName = %q, want %q", agent.Execution.RuntimeClassName, "kata-qemu")
+	}
+	if task.Execution == nil {
+		t.Fatal("Task.Execution should not be nil")
+	}
+	if task.Execution.RuntimeClassName != "gvisor" {
+		t.Errorf("Task.Execution.RuntimeClassName = %q, want %q", task.Execution.RuntimeClassName, "gvisor")
+	}
+}

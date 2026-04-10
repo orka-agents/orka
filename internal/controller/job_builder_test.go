@@ -198,6 +198,177 @@ func TestJobBuilder_Build_WithSession(t *testing.T) {
 	}
 }
 
+func TestJobBuilder_Build_AppliesAgentExecutionDefaults(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeContainer,
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Execution: &corev1alpha1.ExecutionSpec{
+				RuntimeClassName: "kata-qemu",
+				NodeSelector: map[string]string{
+					"sandbox-runtime": "kata",
+				},
+				Tolerations: []corev1.Toleration{
+					{
+						Key:      "sandbox-runtime",
+						Operator: corev1.TolerationOpEqual,
+						Value:    "kata",
+						Effect:   corev1.TaintEffectNoSchedule,
+					},
+				},
+				Affinity: &corev1.Affinity{
+					NodeAffinity: &corev1.NodeAffinity{
+						RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+							NodeSelectorTerms: []corev1.NodeSelectorTerm{
+								{
+									MatchExpressions: []corev1.NodeSelectorRequirement{
+										{
+											Key:      "sandbox-runtime",
+											Operator: corev1.NodeSelectorOpIn,
+											Values:   []string{"kata"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, agent, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	podSpec := job.Spec.Template.Spec
+	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != "kata-qemu" {
+		t.Fatalf("RuntimeClassName = %v, want kata-qemu", podSpec.RuntimeClassName)
+	}
+	if got := podSpec.NodeSelector["sandbox-runtime"]; got != "kata" {
+		t.Errorf("NodeSelector[sandbox-runtime] = %q, want %q", got, "kata")
+	}
+	if len(podSpec.Tolerations) != 1 {
+		t.Fatalf("Tolerations len = %d, want 1", len(podSpec.Tolerations))
+	}
+	if podSpec.Tolerations[0].Value != "kata" {
+		t.Errorf("Tolerations[0].Value = %q, want %q", podSpec.Tolerations[0].Value, "kata")
+	}
+	if podSpec.Affinity == nil || podSpec.Affinity.NodeAffinity == nil {
+		t.Fatal("Affinity.NodeAffinity should not be nil")
+	}
+
+	podSpec.NodeSelector["sandbox-runtime"] = "modified"
+	if agent.Spec.Execution.NodeSelector["sandbox-runtime"] != "kata" {
+		t.Error("Build should copy agent execution nodeSelector instead of aliasing it")
+	}
+}
+
+func TestJobBuilder_Build_TaskExecutionOverridesAgentExecution(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeContainer,
+			Execution: &corev1alpha1.ExecutionSpec{
+				RuntimeClassName: "gvisor",
+				NodeSelector: map[string]string{
+					"sandbox-runtime": "gvisor",
+				},
+				Tolerations: []corev1.Toleration{
+					{
+						Key:      "sandbox-runtime",
+						Operator: corev1.TolerationOpEqual,
+						Value:    "gvisor",
+						Effect:   corev1.TaintEffectNoSchedule,
+					},
+				},
+				Affinity: &corev1.Affinity{
+					PodAntiAffinity: &corev1.PodAntiAffinity{
+						PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{
+							{
+								Weight: 1,
+								PodAffinityTerm: corev1.PodAffinityTerm{
+									TopologyKey: "kubernetes.io/hostname",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Execution: &corev1alpha1.ExecutionSpec{
+				RuntimeClassName: "kata-qemu",
+				NodeSelector: map[string]string{
+					"sandbox-runtime": "kata",
+					"dedicated":       "true",
+				},
+				Tolerations: []corev1.Toleration{
+					{
+						Key:      "sandbox-runtime",
+						Operator: corev1.TolerationOpEqual,
+						Value:    "kata",
+						Effect:   corev1.TaintEffectNoSchedule,
+					},
+					{
+						Key:      "dedicated",
+						Operator: corev1.TolerationOpExists,
+						Effect:   corev1.TaintEffectNoSchedule,
+					},
+				},
+				Affinity: &corev1.Affinity{
+					NodeAffinity: &corev1.NodeAffinity{},
+				},
+			},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, agent, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	podSpec := job.Spec.Template.Spec
+	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != "gvisor" {
+		t.Fatalf("RuntimeClassName = %v, want gvisor", podSpec.RuntimeClassName)
+	}
+	if len(podSpec.NodeSelector) != 1 {
+		t.Fatalf("NodeSelector len = %d, want 1", len(podSpec.NodeSelector))
+	}
+	if got := podSpec.NodeSelector["sandbox-runtime"]; got != "gvisor" {
+		t.Errorf("NodeSelector[sandbox-runtime] = %q, want %q", got, "gvisor")
+	}
+	if len(podSpec.Tolerations) != 1 {
+		t.Fatalf("Tolerations len = %d, want 1", len(podSpec.Tolerations))
+	}
+	if podSpec.Tolerations[0].Value != "gvisor" {
+		t.Errorf("Tolerations[0].Value = %q, want %q", podSpec.Tolerations[0].Value, "gvisor")
+	}
+	if podSpec.Affinity == nil || podSpec.Affinity.PodAntiAffinity == nil {
+		t.Fatal("Affinity.PodAntiAffinity should not be nil")
+	}
+	if podSpec.Affinity.NodeAffinity != nil {
+		t.Error("Task affinity should replace agent affinity instead of merging with it")
+	}
+}
+
 func TestJobBuilder_buildPodSecurityContext(t *testing.T) {
 	builder := setupJobBuilder()
 	psc := builder.buildPodSecurityContext()

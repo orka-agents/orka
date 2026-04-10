@@ -16,6 +16,10 @@ spec:
   agentRef:
     name: my-agent
   prompt: "Analyze the latest Kubernetes security best practices"
+  execution:
+    runtimeClassName: gvisor
+    nodeSelector:
+      sandbox-runtime: gvisor
   sessionRef:
     name: my-session
     create: false  # default: false
@@ -50,6 +54,10 @@ metadata:
 spec:
   providerRef:
     name: anthropic-prod
+  execution:
+    runtimeClassName: kata-qemu
+    nodeSelector:
+      sandbox-runtime: kata
   model:
     temperature: 0.7
     maxTokens: 4096
@@ -88,6 +96,44 @@ spec:
 **Auto-injected coordination tools** (when `enabled: true`):
 
 `delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, `create_pull_request`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`, `create_agent`, `delete_agent`, `update_plan`
+
+### Execution
+
+Tasks and Agents both support `spec.execution` for worker pod runtime selection and placement.
+
+```yaml
+execution:
+  runtimeClassName: gvisor
+  nodeSelector:
+    sandbox-runtime: gvisor
+  tolerations:
+    - key: sandbox-runtime
+      operator: Equal
+      value: gvisor
+      effect: NoSchedule
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: sandbox-runtime
+                operator: In
+                values: ["gvisor"]
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `runtimeClassName` | string | Selects a Kubernetes `RuntimeClass` such as `gvisor` or `kata-qemu` |
+| `nodeSelector` | map[string]string | Restricts worker pods to nodes with matching labels |
+| `tolerations` | list | Allows worker pods onto tainted runtime-specific node pools |
+| `affinity` | object | Adds Kubernetes affinity or anti-affinity rules for worker pods |
+
+Resolution order:
+
+- `Agent.spec.execution` provides defaults for tasks that reference the Agent
+- `Task.spec.execution` overrides Agent defaults
+- `runtimeClassName` is a scalar override
+- `nodeSelector`, `tolerations`, and `affinity` replace Agent defaults when they are set on the Task
 
 ### Provider Fallback Chain
 

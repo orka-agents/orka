@@ -32,3 +32,13 @@ spec:
       - Bash
       - Glob
       - Grep
+  # execution sets default runtime isolation and placement for worker pods
+  # execution:
+  #   runtimeClassName: gvisor
+  #   nodeSelector:
+  #     sandbox-runtime: gvisor
+  #   tolerations:
+  #     - key: sandbox-runtime
+  #       operator: Equal
+  #       value: gvisor
+  #       effect: NoSchedule
