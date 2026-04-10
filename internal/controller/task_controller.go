@@ -48,6 +48,8 @@ const (
 
 	// ConditionTypeJobCreated indicates a Job has been created
 	ConditionTypeJobCreated = "JobCreated"
+
+	scheduledRunLabelValue = "true"
 )
 
 // TaskReconciler reconciles a Task object
@@ -754,7 +756,36 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 		}
 	}
 
+	if err := r.enforceParentScheduledTaskHistory(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	return ctrl.Result{}, nil
+}
+
+func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, task *corev1alpha1.Task) error {
+	if task.Labels[labels.LabelScheduledRun] != scheduledRunLabelValue {
+		return nil
+	}
+
+	parentName := task.Labels[labels.LabelParentTask]
+	if parentName == "" {
+		return nil
+	}
+
+	parent := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKey{Name: parentName, Namespace: task.Namespace}, parent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("getting parent scheduled task %q: %w", parentName, err)
+	}
+
+	if err := r.enforceHistoryLimits(ctx, parent); err != nil {
+		return fmt.Errorf("enforcing history limits for parent task %q: %w", parentName, err)
+	}
+
+	return nil
 }
 
 // completeTask marks a task as completed
@@ -1146,7 +1177,7 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 			Namespace: task.Namespace,
 			Labels: map[string]string{
 				labels.LabelParentTask:   task.Name,
-				labels.LabelScheduledRun: "true",
+				labels.LabelScheduledRun: scheduledRunLabelValue,
 			},
 		},
 		Spec: *task.Spec.DeepCopy(),
