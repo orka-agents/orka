@@ -14,7 +14,6 @@ import (
 	"os"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -171,7 +170,7 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 					},
 					"secretRef": {
 						"type": "string",
-						"description": "Secret name containing runtime credentials. Explicit only; no automatic discovery is performed."
+						"description": "Optional secret name containing runtime credentials. Omit to auto-discover the standard secret for this runtime."
 					}
 				}
 			}
@@ -305,9 +304,11 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		}
 		// Runtime agents don't use providerRef
 		agent.Spec.ProviderRef = nil
-		if a.Runtime.SecretRef != "" {
-			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: a.Runtime.SecretRef}
+		secretRef, err := resolveRuntimeSecretRef(ctx, t.k8sClient, ns, agent.Spec.Runtime.Type, a.Runtime.SecretRef)
+		if err != nil {
+			return "", err
 		}
+		agent.Spec.SecretRef = secretRef
 	}
 
 	// Set owner reference to parent task for auto-cleanup

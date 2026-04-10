@@ -12,8 +12,8 @@ import (
 	"fmt"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
@@ -50,7 +50,7 @@ func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
 				"properties": map[string]any{
 					"type":            map[string]any{"type": "string", "description": "Runtime type: copilot or claude"},
 					"defaultMaxTurns": map[string]any{"type": "integer", "description": "Default max agent loop iterations"},
-					"secretRef":       map[string]any{"type": "string", "description": "Secret name containing runtime credentials. Explicit only; no automatic discovery is performed."},
+					"secretRef":       map[string]any{"type": "string", "description": "Optional secret name containing runtime credentials. Omit to auto-discover the standard secret for this runtime."},
 				},
 			},
 			"initialPrompt": map[string]any{
@@ -160,7 +160,9 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		}
 	}
 
-	parseRuntimeConfig(a, agent)
+	if errResult, ok := parseRuntimeConfig(ctx, tc.Client, namespace, a, agent); !ok {
+		return errResult, nil
+	}
 	parseCoordinationConfig(a, agent)
 
 	if err := tc.Client.Create(ctx, agent); err != nil {
@@ -234,26 +236,43 @@ func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolC
 }
 
 // parseRuntimeConfig extracts runtime configuration from chat args into the agent spec.
-func parseRuntimeConfig(a map[string]any, agent *corev1alpha1.Agent) {
+func parseRuntimeConfig(ctx context.Context, k8sClient client.Reader, namespace string, a map[string]any, agent *corev1alpha1.Agent) (string, bool) {
+	if coord, ok := a["coordination"].(map[string]any); ok {
+		if enabled, ok := coord["enabled"].(bool); ok && enabled {
+			return "", true
+		}
+	}
 	rt, ok := a["runtime"]
 	if !ok {
-		return
+		return "", true
 	}
 	rtMap, ok := rt.(map[string]any)
 	if !ok {
-		return
+		return "", true
 	}
 	runtimeType := chatGetStringArg(rtMap, "type")
 	if runtimeType == "" {
-		return
+		return "", true
 	}
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
 		Type: corev1alpha1.AgentRuntimeType(runtimeType),
 	}
-	if secretRef := chatGetStringArg(rtMap, "secretRef"); secretRef != "" {
-		agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: secretRef}
+	secretRef, err := resolveRuntimeSecretRef(ctx, k8sClient, namespace, agent.Spec.Runtime.Type, chatGetRuntimeSecretRefArg(a))
+	if err != nil {
+		result, _ := ChatToolErrorResult("invalid_arguments", err.Error(), "Create one of the supported runtime credential secrets or choose an AI agent without runtime")
+		return result, false
 	}
+	agent.Spec.SecretRef = secretRef
 	agent.Spec.ProviderRef = nil
+	return "", true
+}
+
+func chatGetRuntimeSecretRefArg(a map[string]any) string {
+	rt, ok := a["runtime"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return chatGetStringArg(rt, "secretRef")
 }
 
 // parseCoordinationConfig extracts coordination configuration from chat args into the agent spec.

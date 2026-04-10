@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
 
@@ -417,7 +418,10 @@ func TestCreateAgentTool_Execute_PreservesExplicitRuntimeSecretRef(t *testing.T)
 	t.Setenv("ORKA_TASK_NAME", parentTaskName)
 	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
 
-	k8sClient := newFakeClient(parentTask())
+	k8sClient := newFakeClient(
+		parentTask(),
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "claude-credentials", Namespace: defaultNamespace}},
+	)
 	tool := NewCreateAgentTool(k8sClient)
 
 	args := json.RawMessage(`{
@@ -425,7 +429,7 @@ func TestCreateAgentTool_Execute_PreservesExplicitRuntimeSecretRef(t *testing.T)
 		"systemPrompt": "You write code",
 		"runtime": {
 			"type": "claude",
-			"secretRef": "runtime-creds"
+			"secretRef": "claude-credentials"
 		}
 	}`)
 
@@ -456,16 +460,19 @@ func TestCreateAgentTool_Execute_PreservesExplicitRuntimeSecretRef(t *testing.T)
 	if agent.Spec.SecretRef == nil {
 		t.Fatal("agent.Spec.SecretRef is nil")
 	}
-	if agent.Spec.SecretRef.Name != "runtime-creds" {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "runtime-creds")
+	if agent.Spec.SecretRef.Name != "claude-credentials" {
+		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "claude-credentials")
 	}
 }
 
-func TestCreateAgentTool_Execute_LeavesRuntimeSecretRefNilWhenOmitted(t *testing.T) {
+func TestCreateAgentTool_Execute_AutoDiscoversRuntimeSecretRefWhenOmitted(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", parentTaskName)
 	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
 
-	k8sClient := newFakeClient(parentTask())
+	k8sClient := newFakeClient(
+		parentTask(),
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "claude-api-key", Namespace: defaultNamespace}},
+	)
 	tool := NewCreateAgentTool(k8sClient)
 
 	args := json.RawMessage(`{
@@ -500,8 +507,39 @@ func TestCreateAgentTool_Execute_LeavesRuntimeSecretRefNilWhenOmitted(t *testing
 	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType("claude") {
 		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, "claude")
 	}
-	if agent.Spec.SecretRef != nil {
-		t.Errorf("secretRef = %v, want nil when omitted", agent.Spec.SecretRef)
+	if agent.Spec.SecretRef == nil {
+		t.Fatal("agent.Spec.SecretRef is nil")
+	}
+	if agent.Spec.SecretRef.Name != "claude-api-key" {
+		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "claude-api-key")
+	}
+}
+
+func TestCreateAgentTool_Execute_RejectsUnsupportedRuntimeSecretRef(t *testing.T) {
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
+
+	k8sClient := newFakeClient(
+		parentTask(),
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "runtime-creds", Namespace: defaultNamespace}},
+	)
+	tool := NewCreateAgentTool(k8sClient)
+
+	args := json.RawMessage(`{
+		"role": "coder",
+		"systemPrompt": "You write code",
+		"runtime": {
+			"type": "claude",
+			"secretRef": "runtime-creds"
+		}
+	}`)
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("error = %v, want it to mention not allowed", err)
 	}
 }
 

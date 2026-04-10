@@ -817,8 +817,11 @@ func TestExecuteCreateAgentTask_WithWorkspace(t *testing.T) {
 	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
 		t.Fatal("expected workspace to be set")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef != nil {
-		t.Fatalf("expected gitSecretRef to remain nil when omitted, got %v", task.Spec.AgentRuntime.Workspace.GitSecretRef)
+	if task.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
+		t.Fatal("expected gitSecretRef to be auto-discovered")
+	}
+	if task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "github-credentials" {
+		t.Fatalf("gitSecretRef = %q, want %q", task.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "github-credentials")
 	}
 }
 
@@ -1260,7 +1263,12 @@ func TestExecuteCreateAgent_WithSystemPromptAndTools(t *testing.T) {
 }
 
 func TestExecuteCreateAgent_WithRuntime(t *testing.T) {
-	e := newTestExecutor()
+	e := newTestExecutor(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "copilot-token",
+			Namespace: "default",
+		},
+	})
 	args := map[string]any{
 		"name": "runtime-agent",
 		"runtime": map[string]any{
@@ -1646,7 +1654,12 @@ func TestHandleInitialPrompt_TaskLimitReached(t *testing.T) {
 }
 
 func TestHandleInitialPrompt_WithRuntimeAgent(t *testing.T) {
-	e := newTestExecutor()
+	e := newTestExecutor(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "copilot-token",
+			Namespace: "default",
+		},
+	})
 	r := e.executeTool(context.Background(), "create_agent", map[string]any{
 		"name":          "rt-agent",
 		"runtime":       map[string]any{"type": "copilot"},

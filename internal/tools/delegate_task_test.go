@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
 
@@ -750,6 +751,63 @@ func TestDelegateTaskTool_Execute_PushBranch(t *testing.T) {
 	}
 	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != "git-credentials" {
 		t.Errorf("gitSecretRef = %v, want git-credentials", ws.GitSecretRef)
+	}
+}
+
+func TestDelegateTaskTool_Execute_AutoDiscoversGitSecretRef(t *testing.T) {
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
+	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "copilot-coder")
+	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
+
+	agentWithRuntime := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "copilot-coder",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime:   &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+			SecretRef: &corev1.LocalObjectReference{Name: "custom-copilot-secret"},
+		},
+	}
+
+	k8sClient := newFakeClient(parentTask(), agentWithRuntime)
+	tool := NewDelegateTaskTool(k8sClient)
+
+	args := json.RawMessage(`{
+		"agent": "copilot-coder",
+		"prompt": "Implement feature",
+		"workspace": {
+			"gitRepo": "https://github.com/sozercan/ayna",
+			"branch": "main",
+			"pushBranch": "feature/auto-secret"
+		}
+	}`)
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var delegateResult DelegateTaskResult
+	_ = json.Unmarshal([]byte(result), &delegateResult)
+
+	childTask := &corev1alpha1.Task{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
+		Name: delegateResult.TaskName, Namespace: "default",
+	}, childTask); err != nil {
+		t.Fatalf("failed to get child task: %v", err)
+	}
+
+	if childTask.Spec.AgentRuntime == nil || childTask.Spec.AgentRuntime.Workspace == nil {
+		t.Fatal("expected workspace to be set")
+	}
+	if childTask.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
+		t.Fatal("expected gitSecretRef to be auto-populated")
+	}
+	if childTask.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "custom-copilot-secret" {
+		t.Errorf("gitSecretRef = %q, want %q", childTask.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "custom-copilot-secret")
 	}
 }
 

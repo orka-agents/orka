@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -128,7 +127,7 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 					},
 					"gitSecretRef": {
 						"type": "string",
-						"description": "Name of the Kubernetes Secret containing git credentials. Explicit only; no automatic discovery is performed."
+						"description": "Optional git credential Secret name. Omit to auto-discover git credentials or reuse the Copilot agent secret when available."
 					},
 					"pushBranch": {
 						"type": "string",
@@ -279,7 +278,7 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 }
 
 // buildDelegatedTask creates the child Task object from a validated delegation context.
-func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegationContext) *corev1alpha1.Task {
+func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegationContext) (*corev1alpha1.Task, error) {
 	// Auto-detect task type based on agent configuration
 	taskType := corev1alpha1.TaskTypeAI
 	if dc.targetAgent.Spec.Runtime != nil {
@@ -323,7 +322,9 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 
 	// Set agent runtime config for agent-type tasks
 	if taskType == corev1alpha1.TaskTypeAgent {
-		t.applyAgentRuntimeConfig(childTask, dc)
+		if err := t.applyAgentRuntimeConfig(ctx, childTask, dc); err != nil {
+			return nil, err
+		}
 	}
 
 	// Prepend feedback to prompt if provided
@@ -352,11 +353,11 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 		}
 	}
 
-	return childTask
+	return childTask, nil
 }
 
 // applyAgentRuntimeConfig sets agent runtime configuration on the child task.
-func (t *DelegateTaskTool) applyAgentRuntimeConfig(childTask *corev1alpha1.Task, dc *delegationContext) {
+func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTask *corev1alpha1.Task, dc *delegationContext) error {
 	childTask.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
 
 	if dc.args.Workspace != nil {
@@ -366,11 +367,11 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(childTask *corev1alpha1.Task,
 			Ref:        dc.args.Workspace.Ref,
 			PushBranch: dc.args.Workspace.PushBranch,
 		}
-		if dc.args.Workspace.GitSecretRef != "" {
-			childTask.Spec.AgentRuntime.Workspace.GitSecretRef = &corev1.LocalObjectReference{
-				Name: dc.args.Workspace.GitSecretRef,
-			}
+		secretRef, err := resolveWorkspaceGitSecretRef(ctx, t.k8sClient, dc.namespace, dc.targetAgent, dc.args.Workspace.GitSecretRef)
+		if err != nil {
+			return err
 		}
+		childTask.Spec.AgentRuntime.Workspace.GitSecretRef = secretRef
 	}
 
 	if dc.args.MaxTurns != nil {
@@ -379,6 +380,7 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(childTask *corev1alpha1.Task,
 	if dc.args.AllowBash != nil {
 		childTask.Spec.AgentRuntime.AllowBash = dc.args.AllowBash
 	}
+	return nil
 }
 
 // applyPriorTaskConfig sets prior task reference and copies workspace config from the prior task.
@@ -425,7 +427,10 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		return "", err
 	}
 
-	childTask := t.buildDelegatedTask(ctx, dc)
+	childTask, err := t.buildDelegatedTask(ctx, dc)
+	if err != nil {
+		return "", err
+	}
 
 	if err := t.k8sClient.Create(ctx, childTask); err != nil {
 		return "", fmt.Errorf("failed to create child task: %w", err)
