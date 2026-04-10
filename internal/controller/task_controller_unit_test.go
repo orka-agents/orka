@@ -456,12 +456,12 @@ func TestShouldRetry(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "attempts == maxRetries",
+			name: "attempts == maxRetries allows final retry",
 			task: &corev1alpha1.Task{
 				Spec:   corev1alpha1.TaskSpec{RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3}},
 				Status: corev1alpha1.TaskStatus{Attempts: 3},
 			},
-			expect: false,
+			expect: true,
 		},
 		{
 			name: "attempts > maxRetries",

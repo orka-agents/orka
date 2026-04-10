@@ -89,13 +89,13 @@ var _ = Describe("Agent Advanced Features", func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create Agent with skills")
 
-		By("verifying the Agent becomes ready with the referenced Skill")
+		By("verifying the Agent Ready condition becomes true with the referenced Skill")
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "agent", agentName,
-				"-n", namespace, "-o", "jsonpath={.status.ready}")
+				"-n", namespace, "-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(Equal("true"))
+			g.Expect(output).To(Equal("True"))
 		}, 30*time.Second, time.Second).Should(Succeed())
 
 		By("creating an agent task referencing the agent")
