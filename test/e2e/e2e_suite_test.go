@@ -156,6 +156,14 @@ var _ = BeforeSuite(func() {
 	}, 30*time.Second, time.Second).Should(Succeed())
 	_, _ = fmt.Fprintf(GinkgoWriter, "Resolved controller-manager deployment: %s\n", controllerManagerDeployment)
 
+	By("patching the controller-manager deployment to use kind-loaded images")
+	cmd = exec.Command(
+		"kubectl", "patch", "deployment", controllerManagerDeployment, "-n", namespace, "--type=strategic",
+		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent"}]}}}}`,
+	)
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to patch controller-manager imagePullPolicy")
+
 	By("waiting for controller-manager to be ready")
 	cmd = exec.Command("kubectl", "rollout", "status", "deployment/"+controllerManagerDeployment,
 		"-n", namespace, "--timeout=5m")
