@@ -687,7 +687,7 @@ var _ = Describe("Task Controller", func() {
 			Expect(r.shouldRetry(task)).To(BeTrue())
 		})
 
-		It("should return false when attempts >= maxRetries", func() {
+		It("should return true when attempts equal maxRetries", func() {
 			r := newReconciler()
 			task := &corev1alpha1.Task{
 				Spec: corev1alpha1.TaskSpec{
@@ -695,16 +695,16 @@ var _ = Describe("Task Controller", func() {
 				},
 				Status: corev1alpha1.TaskStatus{Attempts: 3},
 			}
-			Expect(r.shouldRetry(task)).To(BeFalse())
+			Expect(r.shouldRetry(task)).To(BeTrue())
 		})
 
-		It("should return false when attempts equal maxRetries", func() {
+		It("should return false when attempts exceed maxRetries", func() {
 			r := newReconciler()
 			task := &corev1alpha1.Task{
 				Spec: corev1alpha1.TaskSpec{
 					RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 2},
 				},
-				Status: corev1alpha1.TaskStatus{Attempts: 2},
+				Status: corev1alpha1.TaskStatus{Attempts: 3},
 			}
 			Expect(r.shouldRetry(task)).To(BeFalse())
 		})

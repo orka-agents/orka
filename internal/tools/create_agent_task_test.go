@@ -11,7 +11,9 @@ import (
 	"encoding/json"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apitypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -61,26 +63,25 @@ func TestCreateAgentTaskTool_Parameters(t *testing.T) {
 	}
 }
 
-func TestCreateAgentTaskTool_Execute(t *testing.T) {
+func newCreateAgentTaskToolCtx(fc client.Client) context.Context {
 	taskCounter := 0
-	newToolCtx := func(fc client.Client) context.Context {
-		taskCounter = 0
-		tc := &ToolContext{
-			Client:    fc,
-			Namespace: defaultNamespace,
-			GenerateTaskName: func() string {
-				taskCounter++
-				return "agent-task-1"
-			},
-			TaskLabels: func() map[string]string {
-				return map[string]string{"orka.ai/managed": "true"}
-			},
-			CheckTaskLimit: func() *ChatToolError { return nil },
-			IncrementTasks: func() { taskCounter++ },
-		}
-		return WithToolContext(context.Background(), tc)
+	tc := &ToolContext{
+		Client:    fc,
+		Namespace: defaultNamespace,
+		GenerateTaskName: func() string {
+			taskCounter++
+			return "agent-task-1"
+		},
+		TaskLabels: func() map[string]string {
+			return map[string]string{"orka.ai/managed": "true"}
+		},
+		CheckTaskLimit: func() *ChatToolError { return nil },
+		IncrementTasks: func() { taskCounter++ },
 	}
+	return WithToolContext(context.Background(), tc)
+}
 
+func TestCreateAgentTaskTool_Execute(t *testing.T) {
 	tests := []struct {
 		name        string
 		args        json.RawMessage
@@ -246,7 +247,7 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fc := newFakeClient(tt.objects...)
-			ctx := newToolCtx(fc)
+			ctx := newCreateAgentTaskToolCtx(fc)
 			tool := &CreateAgentTaskTool{}
 
 			result, err := tool.Execute(ctx, tt.args)
@@ -258,6 +259,133 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 				tt.checkResult(t, result)
 			}
 		})
+	}
+}
+
+func TestCreateAgentTaskTool_Execute_PreservesExplicitGitSecretRef(t *testing.T) {
+	fc := newFakeClient(
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "my-secret", Namespace: defaultNamespace}},
+	)
+	ctx := newCreateAgentTaskToolCtx(fc)
+	tool := &CreateAgentTaskTool{}
+
+	result, err := tool.Execute(ctx, json.RawMessage(`{
+		"prompt":"Refactor repo",
+		"agentRef":"claude-agent",
+		"workspace":{
+			"gitRepo":"https://github.com/example/repo",
+			"gitSecretRef":"my-secret"
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var r ChatToolResult
+	if err := json.Unmarshal([]byte(result), &r); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !r.Success {
+		t.Fatalf("expected success, got error: %s", r.Error)
+	}
+
+	task := &corev1alpha1.Task{}
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: "agent-task-1", Namespace: defaultNamespace}, task); err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+		t.Fatal("expected workspace to be set")
+	}
+	if task.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
+		t.Fatal("expected gitSecretRef to be preserved")
+	}
+	if task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "my-secret" {
+		t.Errorf("gitSecretRef = %q, want %q", task.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "my-secret")
+	}
+}
+
+func TestCreateAgentTaskTool_Execute_AutoDiscoversGitSecretRefWhenOmitted(t *testing.T) {
+	fc := newFakeClient(
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-credentials", Namespace: defaultNamespace}},
+	)
+	ctx := newCreateAgentTaskToolCtx(fc)
+	tool := &CreateAgentTaskTool{}
+
+	result, err := tool.Execute(ctx, json.RawMessage(`{
+		"prompt":"Refactor repo",
+		"agentRef":"claude-agent",
+		"workspace":{
+			"gitRepo":"https://github.com/example/repo"
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var r ChatToolResult
+	if err := json.Unmarshal([]byte(result), &r); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !r.Success {
+		t.Fatalf("expected success, got error: %s", r.Error)
+	}
+
+	task := &corev1alpha1.Task{}
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: "agent-task-1", Namespace: defaultNamespace}, task); err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+		t.Fatal("expected workspace to be set")
+	}
+	if task.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
+		t.Fatal("expected gitSecretRef to be auto-discovered")
+	}
+	if task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "git-credentials" {
+		t.Fatalf("gitSecretRef = %q, want %q", task.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "git-credentials")
+	}
+}
+
+func TestCreateAgentTaskTool_Execute_UsesCopilotAgentSecretForGitCredentials(t *testing.T) {
+	fc := newFakeClient(
+		&corev1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: "copilot-agent", Namespace: defaultNamespace},
+			Spec: corev1alpha1.AgentSpec{
+				Runtime:   &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+				SecretRef: &corev1.LocalObjectReference{Name: "custom-copilot-secret"},
+			},
+		},
+	)
+	ctx := newCreateAgentTaskToolCtx(fc)
+	tool := &CreateAgentTaskTool{}
+
+	result, err := tool.Execute(ctx, json.RawMessage(`{
+		"prompt":"Refactor repo",
+		"agentRef":"copilot-agent",
+		"workspace":{
+			"gitRepo":"https://github.com/example/repo"
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var r ChatToolResult
+	if err := json.Unmarshal([]byte(result), &r); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !r.Success {
+		t.Fatalf("expected success, got error: %s", r.Error)
+	}
+
+	task := &corev1alpha1.Task{}
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: "agent-task-1", Namespace: defaultNamespace}, task); err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil || task.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
+		t.Fatal("expected gitSecretRef to be populated from the copilot agent")
+	}
+	if task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "custom-copilot-secret" {
+		t.Fatalf("gitSecretRef = %q, want %q", task.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "custom-copilot-secret")
 	}
 }
 

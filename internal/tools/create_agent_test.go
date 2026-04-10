@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
 
@@ -410,6 +411,135 @@ func TestCreateAgentTool_Execute_InheritedModelProvider(t *testing.T) {
 	// Verify provider ref was inherited
 	if agent.Spec.ProviderRef == nil || agent.Spec.ProviderRef.Name != "openai" {
 		t.Errorf("providerRef = %v, want openai (inherited)", agent.Spec.ProviderRef)
+	}
+}
+
+func TestCreateAgentTool_Execute_PreservesExplicitRuntimeSecretRef(t *testing.T) {
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
+
+	k8sClient := newFakeClient(
+		parentTask(),
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "claude-credentials", Namespace: defaultNamespace}},
+	)
+	tool := NewCreateAgentTool(k8sClient)
+
+	args := json.RawMessage(`{
+		"role": "coder",
+		"systemPrompt": "You write code",
+		"runtime": {
+			"type": "claude",
+			"secretRef": "claude-credentials"
+		}
+	}`)
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var agentResult CreateAgentResult
+	if err := json.Unmarshal([]byte(result), &agentResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+
+	agent := &corev1alpha1.Agent{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
+		Name:      agentResult.AgentName,
+		Namespace: agentResult.Namespace,
+	}, agent); err != nil {
+		t.Fatalf("failed to get agent: %v", err)
+	}
+
+	if agent.Spec.Runtime == nil {
+		t.Fatal("agent.Spec.Runtime is nil")
+	}
+	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType("claude") {
+		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, "claude")
+	}
+	if agent.Spec.SecretRef == nil {
+		t.Fatal("agent.Spec.SecretRef is nil")
+	}
+	if agent.Spec.SecretRef.Name != "claude-credentials" {
+		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "claude-credentials")
+	}
+}
+
+func TestCreateAgentTool_Execute_AutoDiscoversRuntimeSecretRefWhenOmitted(t *testing.T) {
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
+
+	k8sClient := newFakeClient(
+		parentTask(),
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "claude-api-key", Namespace: defaultNamespace}},
+	)
+	tool := NewCreateAgentTool(k8sClient)
+
+	args := json.RawMessage(`{
+		"role": "coder",
+		"systemPrompt": "You write code",
+		"runtime": {
+			"type": "claude"
+		}
+	}`)
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var agentResult CreateAgentResult
+	if err := json.Unmarshal([]byte(result), &agentResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+
+	agent := &corev1alpha1.Agent{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
+		Name:      agentResult.AgentName,
+		Namespace: agentResult.Namespace,
+	}, agent); err != nil {
+		t.Fatalf("failed to get agent: %v", err)
+	}
+
+	if agent.Spec.Runtime == nil {
+		t.Fatal("agent.Spec.Runtime is nil")
+	}
+	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType("claude") {
+		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, "claude")
+	}
+	if agent.Spec.SecretRef == nil {
+		t.Fatal("agent.Spec.SecretRef is nil")
+	}
+	if agent.Spec.SecretRef.Name != "claude-api-key" {
+		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "claude-api-key")
+	}
+}
+
+func TestCreateAgentTool_Execute_RejectsUnsupportedRuntimeSecretRef(t *testing.T) {
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
+
+	k8sClient := newFakeClient(
+		parentTask(),
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "runtime-creds", Namespace: defaultNamespace}},
+	)
+	tool := NewCreateAgentTool(k8sClient)
+
+	args := json.RawMessage(`{
+		"role": "coder",
+		"systemPrompt": "You write code",
+		"runtime": {
+			"type": "claude",
+			"secretRef": "runtime-creds"
+		}
+	}`)
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("error = %v, want it to mention not allowed", err)
 	}
 }
 

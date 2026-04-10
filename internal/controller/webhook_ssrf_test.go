@@ -15,11 +15,13 @@ func TestIsAllowedWebhookURL_ValidURLs(t *testing.T) {
 		"https://example.com/webhook",
 		"http://public.example.org/notify",
 		"https://api.example.com:8080/hook",
+		"http://receiver.default.svc.cluster.local/webhook",
+		"http://receiver.default.svc/webhook",
 	}
 
 	for _, url := range validURLs {
 		t.Run(url, func(t *testing.T) {
-			err := isAllowedWebhookURL(url)
+			err := isAllowedWebhookURL(url, "default")
 			if err != nil {
 				t.Errorf("isAllowedWebhookURL(%q) returned error: %v", url, err)
 			}
@@ -36,6 +38,7 @@ func TestIsAllowedWebhookURL_BlockedURLs(t *testing.T) {
 		{"google metadata", "http://metadata.google.internal/computeMetadata/v1/"},
 		{"kubernetes default", "https://kubernetes.default/api"},
 		{"kubernetes default svc", "https://kubernetes.default.svc/api"},
+		{"kubernetes default svc fqdn", "https://kubernetes.default.svc.cluster.local/api"},
 		{"localhost", "http://localhost:8080/webhook"},
 		{"127.0.0.1", "http://127.0.0.1/webhook"},
 		{"loopback IPv6", "http://[::1]/webhook"},
@@ -48,7 +51,7 @@ func TestIsAllowedWebhookURL_BlockedURLs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := isAllowedWebhookURL(tt.url)
+			err := isAllowedWebhookURL(tt.url, "default")
 			if err == nil {
 				t.Errorf("isAllowedWebhookURL(%q) should have returned error but didn't", tt.url)
 			}
@@ -65,10 +68,17 @@ func TestIsAllowedWebhookURL_InvalidURLs(t *testing.T) {
 
 	for _, url := range invalidURLs {
 		t.Run(url, func(t *testing.T) {
-			err := isAllowedWebhookURL(url)
+			err := isAllowedWebhookURL(url, "default")
 			if err == nil {
 				t.Errorf("isAllowedWebhookURL(%q) should have returned error for invalid URL", url)
 			}
 		})
+	}
+}
+
+func TestIsAllowedWebhookURL_BlocksOtherNamespaceServices(t *testing.T) {
+	url := "http://receiver.other.svc.cluster.local/webhook"
+	if err := isAllowedWebhookURL(url, "default"); err == nil {
+		t.Fatalf("isAllowedWebhookURL(%q) should reject services outside the task namespace", url)
 	}
 }

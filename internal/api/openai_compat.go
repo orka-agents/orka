@@ -15,8 +15,6 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -354,7 +352,6 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 				return nil
 			},
 			IncrementTasks: func() { tasksCreated++ },
-			FindGitSecret:  h.findGitSecret,
 		}
 	}
 
@@ -944,20 +941,4 @@ func writeStreamChunk(w *bufio.Writer, chunk OAIResponse) {
 func writeStreamDone(w *bufio.Writer) {
 	_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
 	_ = w.Flush()
-}
-
-// findGitSecret looks for a git credentials secret in the given namespace.
-func (h *OpenAICompatHandler) findGitSecret(ctx context.Context, namespace string) string {
-	for _, name := range []string{"copilot-token", "github-credentials", "git-credentials", "github-token", "git-token"} {
-		secret := &corev1.Secret{}
-		if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err == nil {
-			if _, hasToken := secret.Data["token"]; hasToken {
-				return name
-			}
-			if _, hasPassword := secret.Data["password"]; hasPassword {
-				return name
-			}
-		}
-	}
-	return ""
 }

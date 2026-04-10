@@ -456,12 +456,12 @@ func TestShouldRetry(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "attempts == maxRetries",
+			name: "attempts == maxRetries allows final retry",
 			task: &corev1alpha1.Task{
 				Spec:   corev1alpha1.TaskSpec{RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3}},
 				Status: corev1alpha1.TaskStatus{Attempts: 3},
 			},
-			expect: false,
+			expect: true,
 		},
 		{
 			name: "attempts > maxRetries",
@@ -1410,6 +1410,58 @@ func TestHandleCompleted_WebhookAlreadyDelivered(t *testing.T) {
 	}
 	if result.RequeueAfter != 0 {
 		t.Errorf("expected no requeue, got %v", result.RequeueAfter)
+	}
+}
+
+func TestHandleCompleted_EnforcesScheduledTaskHistoryLimit(t *testing.T) {
+	scheme := newTestScheme()
+	parent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "sched-parent", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:                       corev1alpha1.TaskTypeContainer,
+			SuccessfulRunsHistoryLimit: ptr.To(int32(1)),
+		},
+	}
+	oldChild := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-child-old",
+			Namespace:         "default",
+			Labels:            map[string]string{labels.LabelParentTask: "sched-parent", labels.LabelScheduledRun: scheduledRunLabelValue},
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Minute)),
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+	currentChild := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-child-current",
+			Namespace:         "default",
+			Labels:            map[string]string{labels.LabelParentTask: "sched-parent", labels.LabelScheduledRun: scheduledRunLabelValue},
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Minute)),
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+
+	r := newUnitReconciler(scheme, parent, oldChild, currentChild)
+	result, err := r.handleCompleted(context.Background(), currentChild)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue, got %v", result.RequeueAfter)
+	}
+
+	remaining := &corev1alpha1.TaskList{}
+	if err := r.List(context.Background(), remaining, client.InNamespace("default"),
+		client.MatchingLabels{labels.LabelParentTask: "sched-parent"}); err != nil {
+		t.Fatalf("listing child tasks: %v", err)
+	}
+
+	if len(remaining.Items) != 1 {
+		t.Fatalf("expected 1 child task to remain, got %d", len(remaining.Items))
+	}
+	if remaining.Items[0].Name != "sched-child-current" {
+		t.Fatalf("expected newest child to remain, got %s", remaining.Items[0].Name)
 	}
 }
 

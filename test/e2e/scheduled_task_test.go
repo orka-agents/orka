@@ -245,7 +245,9 @@ var _ = Describe("Scheduled Tasks", Ordered, func() {
 		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create history-limit scheduled task")
 
-		By("waiting for at least two child tasks to be created")
+		var firstChildName string
+
+		By("waiting for the first child task to be created")
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "tasks",
 				"-l", fmt.Sprintf("orka.ai/parent-task=%s,orka.ai/scheduled-run=true", historyTaskName),
@@ -255,28 +257,23 @@ var _ = Describe("Scheduled Tasks", Ordered, func() {
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
 			names := strings.Fields(strings.TrimSpace(output))
-			g.Expect(len(names)).To(BeNumerically(">=", 2),
-				"Should have created at least two child tasks before enforcing history limit")
+			g.Expect(names).NotTo(BeEmpty(), "Should create an initial child task")
+			firstChildName = names[0]
 		}, 4*time.Minute, 5*time.Second).Should(Succeed())
 
-		By("verifying only 1 completed child task remains")
+		By("waiting for the retained child task to roll over to a newer scheduled run")
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "tasks",
 				"-l", fmt.Sprintf("orka.ai/parent-task=%s,orka.ai/scheduled-run=true", historyTaskName),
-				"-o", "jsonpath={.items[*].status.phase}",
+				"-o", "jsonpath={.items[*].metadata.name}",
 				"-n", namespace,
 			)
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			phases := strings.Fields(strings.TrimSpace(output))
-			completedCount := 0
-			for _, p := range phases {
-				if p == "Succeeded" {
-					completedCount++
-				}
-			}
-			g.Expect(completedCount).To(Equal(1),
-				"Exactly 1 completed child should remain due to successfulRunsHistoryLimit=1")
-		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+			names := strings.Fields(strings.TrimSpace(output))
+			g.Expect(names).To(HaveLen(1), "History limit should keep only one child task")
+			g.Expect(names[0]).NotTo(Equal(firstChildName),
+				"The retained child task should rotate after a later scheduled run")
+		}, 4*time.Minute, 5*time.Second).Should(Succeed())
 	})
 })

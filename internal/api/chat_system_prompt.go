@@ -15,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	chattools "github.com/sozercan/orka/internal/tools"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -414,13 +415,10 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 		for i := range secretList.Items {
 			secretNames[secretList.Items[i].Name] = true
 		}
-		for _, name := range []string{"copilot-token", "github-credentials", "git-credentials", "github-token", "git-token"} {
-			if secretNames[name] {
-				availableRuntimes = append(availableRuntimes, "copilot")
-				break
-			}
+		if chattools.FirstPresentSecretName(secretNames, chattools.RuntimeSecretCandidates(corev1alpha1.AgentRuntimeCopilot)) != "" {
+			availableRuntimes = append(availableRuntimes, "copilot")
 		}
-		if secretNames["anthropic-api-key"] {
+		if chattools.FirstPresentSecretName(secretNames, chattools.RuntimeSecretCandidates(corev1alpha1.AgentRuntimeClaude)) != "" {
 			availableRuntimes = append(availableRuntimes, "claude")
 		}
 	}

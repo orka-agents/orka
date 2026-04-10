@@ -15,7 +15,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
@@ -755,6 +754,63 @@ func TestDelegateTaskTool_Execute_PushBranch(t *testing.T) {
 	}
 }
 
+func TestDelegateTaskTool_Execute_AutoDiscoversGitSecretRef(t *testing.T) {
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
+	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "copilot-coder")
+	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
+
+	agentWithRuntime := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "copilot-coder",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime:   &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+			SecretRef: &corev1.LocalObjectReference{Name: "custom-copilot-secret"},
+		},
+	}
+
+	k8sClient := newFakeClient(parentTask(), agentWithRuntime)
+	tool := NewDelegateTaskTool(k8sClient)
+
+	args := json.RawMessage(`{
+		"agent": "copilot-coder",
+		"prompt": "Implement feature",
+		"workspace": {
+			"gitRepo": "https://github.com/sozercan/ayna",
+			"branch": "main",
+			"pushBranch": "feature/auto-secret"
+		}
+	}`)
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var delegateResult DelegateTaskResult
+	_ = json.Unmarshal([]byte(result), &delegateResult)
+
+	childTask := &corev1alpha1.Task{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
+		Name: delegateResult.TaskName, Namespace: "default",
+	}, childTask); err != nil {
+		t.Fatalf("failed to get child task: %v", err)
+	}
+
+	if childTask.Spec.AgentRuntime == nil || childTask.Spec.AgentRuntime.Workspace == nil {
+		t.Fatal("expected workspace to be set")
+	}
+	if childTask.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
+		t.Fatal("expected gitSecretRef to be auto-populated")
+	}
+	if childTask.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "custom-copilot-secret" {
+		t.Errorf("gitSecretRef = %q, want %q", childTask.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "custom-copilot-secret")
+	}
+}
+
 func TestDelegateTaskTool_Execute_AutoRetry(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", parentTaskName)
 	t.Setenv("ORKA_TASK_NAMESPACE", "default")
@@ -863,149 +919,6 @@ func TestDelegateTaskTool_Execute_NoAutoRetry(t *testing.T) {
 	// When auto_retry is not set, no retry annotations should be present
 	if _, ok := childTask.Annotations[labels.AnnotationAutoRetry]; ok {
 		t.Error("expected no auto-retry annotation when auto_retry is false")
-	}
-}
-
-func TestDelegateTaskTool_FindGitSecret(t *testing.T) {
-	tests := []struct {
-		name       string
-		secrets    []*corev1.Secret
-		wantSecret string
-	}{
-		{
-			name: "finds github-credentials with token",
-			secrets: []*corev1.Secret{
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "github-credentials", Namespace: "default"},
-					Data:       map[string][]byte{"token": []byte("tok")},
-				},
-			},
-			wantSecret: "github-credentials",
-		},
-		{
-			name: "finds git-credentials with password",
-			secrets: []*corev1.Secret{
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "git-credentials", Namespace: "default"},
-					Data:       map[string][]byte{"password": []byte("pwd")},
-				},
-			},
-			wantSecret: "git-credentials",
-		},
-		{
-			name: "finds github-token",
-			secrets: []*corev1.Secret{
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "default"},
-					Data:       map[string][]byte{"token": []byte("tok")},
-				},
-			},
-			wantSecret: "github-token",
-		},
-		{
-			name: "finds git-token",
-			secrets: []*corev1.Secret{
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "git-token", Namespace: "default"},
-					Data:       map[string][]byte{"token": []byte("tok")},
-				},
-			},
-			wantSecret: "git-token",
-		},
-		{
-			name:       "no secrets found",
-			secrets:    nil,
-			wantSecret: "",
-		},
-		{
-			name: "secret exists but no token/password key",
-			secrets: []*corev1.Secret{
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "github-credentials", Namespace: "default"},
-					Data:       map[string][]byte{"api-key": []byte("key")},
-				},
-			},
-			wantSecret: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var objs []client.Object
-			for _, s := range tt.secrets {
-				objs = append(objs, s)
-			}
-			fc := newFakeClient(objs...)
-			tool := NewDelegateTaskTool(fc)
-			got := tool.findGitSecret(context.Background(), "default")
-			if got != tt.wantSecret {
-				t.Errorf("findGitSecret() = %q, want %q", got, tt.wantSecret)
-			}
-		})
-	}
-}
-
-func TestDelegateTaskTool_Execute_GitRepoAutoDetectSecret(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
-	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "claude-coder")
-	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
-
-	agentWithRuntime := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "claude-coder",
-			Namespace: "default",
-		},
-		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{
-				Type: "claude",
-			},
-		},
-	}
-
-	// Create a git-credentials secret with token
-	gitSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "github-credentials", Namespace: "default"},
-		Data:       map[string][]byte{"token": []byte("my-token")},
-	}
-
-	k8sClient := newFakeClient(parentTask(), agentWithRuntime, gitSecret)
-	tool := NewDelegateTaskTool(k8sClient)
-
-	args := json.RawMessage(`{
-		"agent": "claude-coder",
-		"prompt": "Fix bugs",
-		"workspace": {
-			"gitRepo": "https://github.com/myorg/myrepo.git",
-			"branch": "main"
-		}
-	}`)
-
-	result, err := tool.Execute(context.Background(), args)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-
-	var delegateResult DelegateTaskResult
-	_ = json.Unmarshal([]byte(result), &delegateResult)
-
-	// Fetch the child task
-	childTask := &corev1alpha1.Task{}
-	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
-		Name: delegateResult.TaskName, Namespace: "default",
-	}, childTask); err != nil {
-		t.Fatalf("failed to get child task: %v", err)
-	}
-
-	if childTask.Spec.AgentRuntime == nil || childTask.Spec.AgentRuntime.Workspace == nil {
-		t.Fatal("expected workspace to be set")
-	}
-	if childTask.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
-		t.Fatal("expected gitSecretRef to be auto-detected")
-	}
-	if childTask.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "github-credentials" {
-		t.Errorf("gitSecretRef = %q, want %q", childTask.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "github-credentials")
 	}
 }
 
