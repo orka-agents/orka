@@ -15,13 +15,14 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 // isAllowedWebhookURL validates that the webhook URL does not target internal/private networks.
-func isAllowedWebhookURL(rawURL string) error {
+func isAllowedWebhookURL(rawURL, namespace string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid webhook URL: %w", err)
@@ -40,9 +41,17 @@ func isAllowedWebhookURL(rawURL string) error {
 		"metadata.google.internal",
 		"kubernetes.default",
 		"kubernetes.default.svc",
+		"kubernetes.default.svc.cluster.local",
 	}
 	if slices.Contains(blockedHosts, host) {
 		return fmt.Errorf("webhook URL host %q is not allowed", host)
+	}
+
+	if isClusterServiceHost(host) {
+		if isAllowedInClusterServiceHost(host, namespace) {
+			return nil
+		}
+		return fmt.Errorf("webhook URL host %q is outside the task namespace", host)
 	}
 
 	// Resolve and block private/loopback IPs
@@ -60,6 +69,19 @@ func isAllowedWebhookURL(rawURL string) error {
 	}
 
 	return nil
+}
+
+func isAllowedInClusterServiceHost(host, namespace string) bool {
+	if namespace == "" {
+		return false
+	}
+
+	return strings.HasSuffix(host, "."+namespace+".svc") ||
+		strings.HasSuffix(host, "."+namespace+".svc.cluster.local")
+}
+
+func isClusterServiceHost(host string) bool {
+	return strings.HasSuffix(host, ".svc") || strings.HasSuffix(host, ".svc.cluster.local")
 }
 
 // WebhookPayload is the payload sent to webhook URLs
@@ -102,7 +124,7 @@ func (w *WebhookNotifier) Notify(ctx context.Context, task *corev1alpha1.Task) e
 	}
 
 	if !w.skipURLValidation {
-		if err := isAllowedWebhookURL(task.Spec.WebhookURL); err != nil {
+		if err := isAllowedWebhookURL(task.Spec.WebhookURL, task.Namespace); err != nil {
 			return fmt.Errorf("webhook URL validation failed: %w", err)
 		}
 	}

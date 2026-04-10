@@ -26,40 +26,44 @@ var _ = Describe("Agent Advanced Features", func() {
 
 	AfterEach(func() {
 		// Clean up all resources with the prefix
-		for _, kind := range []string{"task", "agent", "provider", "configmap"} {
+		for _, kind := range []string{"task", "agent", "provider", "skill", "configmap"} {
 			cmd := exec.Command("kubectl", "delete", kind, "-l", "e2e-group=agent-adv",
 				"-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 		}
 	})
 
-	It("should mount skill content from a ConfigMap into the agent Job", func() {
-		configMapName := prefix + "skill-cm"
+	It("should mount skill content from a Skill CRD into the agent Job", func() {
+		skillName := prefix + "skill"
 		agentName := prefix + "skill-agent"
 		taskName := prefix + "skill-task"
 
 		defer dumpDebugInfo(taskName)
 
-		By("creating a ConfigMap with skill text")
-		cmManifest := fmt.Sprintf(`{
-			"apiVersion": "v1",
-			"kind": "ConfigMap",
+		By("creating a Skill CRD with inline content")
+		skillManifest := fmt.Sprintf(`{
+			"apiVersion": "core.orka.ai/v1alpha1",
+			"kind": "Skill",
 			"metadata": {
 				"name": "%s",
 				"namespace": "%s",
 				"labels": {"e2e-group": "agent-adv"}
 			},
-			"data": {
-				"skill.txt": "You are an expert Go developer specializing in Kubernetes controllers."
+			"spec": {
+				"displayName": "E2E Agent Advanced Skill",
+				"description": "A test skill for agent advanced features",
+				"content": {
+					"inline": "You are an expert Go developer specializing in Kubernetes controllers."
+				}
 			}
-		}`, configMapName, namespace)
+		}`, skillName, namespace)
 
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
-		cmd.Stdin = stringReader(cmManifest)
+		cmd.Stdin = stringReader(skillManifest)
 		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create ConfigMap")
+		Expect(err).NotTo(HaveOccurred(), "Failed to create Skill")
 
-		By("creating an Agent with skills referencing the ConfigMap")
+		By("creating an Agent with skills referencing the Skill CRD")
 		agentManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Agent",
@@ -75,20 +79,17 @@ var _ = Describe("Agent Advanced Features", func() {
 					"defaultAllowBash": false
 				},
 				"skills": [{
-					"configMapRef": {
-						"name": "%s",
-						"key": "skill.txt"
-					}
+					"name": "%s"
 				}]
 			}
-		}`, agentName, namespace, configMapName)
+		}`, agentName, namespace, skillName)
 
 		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(agentManifest)
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create Agent with skills")
 
-		By("verifying the Agent becomes ready with the referenced skill ConfigMap")
+		By("verifying the Agent becomes ready with the referenced Skill")
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "agent", agentName,
 				"-n", namespace, "-o", "jsonpath={.status.ready}")
