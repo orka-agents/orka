@@ -516,9 +516,9 @@ func TestBuildDynamicContext(t *testing.T) {
 		}
 	})
 
-	t.Run("copilot runtime detected from github-credentials secret", func(t *testing.T) {
+	t.Run("copilot runtime detected from copilot-token secret", func(t *testing.T) {
 		secret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "github-credentials", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "copilot-token", Namespace: "default"},
 		}
 		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 		b := NewSystemPromptBuilder(c, "default")
@@ -532,9 +532,9 @@ func TestBuildDynamicContext(t *testing.T) {
 		}
 	})
 
-	t.Run("claude runtime detected from anthropic-api-key secret", func(t *testing.T) {
+	t.Run("claude runtime detected from claude-credentials secret", func(t *testing.T) {
 		secret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "anthropic-api-key", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "claude-credentials", Namespace: "default"},
 		}
 		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 		b := NewSystemPromptBuilder(c, "default")

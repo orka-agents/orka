@@ -146,8 +146,26 @@ var _ = BeforeSuite(func() {
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 
+	By("resolving the controller-manager deployment name")
+	var controllerManagerDeployment string
+	Eventually(func(g Gomega) {
+		name, err := controllerManagerDeploymentName()
+		g.Expect(err).NotTo(HaveOccurred(), "Failed to resolve the controller-manager deployment")
+		g.Expect(name).NotTo(BeEmpty(), "controller-manager deployment name was empty")
+		controllerManagerDeployment = name
+	}, 30*time.Second, time.Second).Should(Succeed())
+	_, _ = fmt.Fprintf(GinkgoWriter, "Resolved controller-manager deployment: %s\n", controllerManagerDeployment)
+
+	By("patching the controller-manager deployment to use kind-loaded images")
+	cmd = exec.Command(
+		"kubectl", "patch", "deployment", controllerManagerDeployment, "-n", namespace, "--type=strategic",
+		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent"}]}}}}`,
+	)
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to patch controller-manager imagePullPolicy")
+
 	By("waiting for controller-manager to be ready")
-	cmd = exec.Command("kubectl", "rollout", "status", "deployment/controller-manager",
+	cmd = exec.Command("kubectl", "rollout", "status", "deployment/"+controllerManagerDeployment,
 		"-n", namespace, "--timeout=5m")
 	_, err = utils.Run(cmd)
 	if err != nil {
@@ -216,7 +234,7 @@ func dumpControllerManagerDiagnostics() {
 		{"get", "pods", "-l", "control-plane=controller-manager", "-n", namespace, "-o", "wide"},
 		{"describe", "pods", "-l", "control-plane=controller-manager", "-n", namespace},
 		{"get", "events", "-n", namespace, "--sort-by=.lastTimestamp"},
-		{"get", "deployment", "controller-manager", "-n", namespace, "-o", "yaml"},
+		{"get", "deployments", "-l", "control-plane=controller-manager", "-n", namespace, "-o", "yaml"},
 	} {
 		cmd := exec.Command("kubectl", args...)
 		output, err := utils.Run(cmd)
@@ -226,6 +244,22 @@ func dumpControllerManagerDiagnostics() {
 		}
 		_, _ = fmt.Fprintf(GinkgoWriter, "diagnostic output: kubectl %s\n%s\n", strings.Join(args, " "), output)
 	}
+}
+
+func controllerManagerDeploymentName() (string, error) {
+	cmd := exec.Command("kubectl", "get", "deployments", "-l", "control-plane=controller-manager",
+		"-n", namespace, "-o", "jsonpath={.items[0].metadata.name}")
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return "", err
+	}
+
+	name := strings.TrimSpace(output)
+	if name == "" {
+		return "", fmt.Errorf("no controller-manager deployment found")
+	}
+
+	return name, nil
 }
 
 // createK8sSecret creates a Kubernetes Secret with the given key-value data.

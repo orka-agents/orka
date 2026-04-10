@@ -35,7 +35,6 @@ type ToolContext struct {
 	TaskLabels       func() map[string]string
 	CheckTaskLimit   func() *ChatToolError
 	IncrementTasks   func()
-	FindGitSecret    func(ctx context.Context, namespace string) string
 }
 
 type toolContextKey struct{}

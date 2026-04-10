@@ -12,12 +12,11 @@ import (
 	"fmt"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // ChatCreateAgentTool creates an Agent CRD from the chat context.
@@ -51,6 +50,7 @@ func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
 				"properties": map[string]any{
 					"type":            map[string]any{"type": "string", "description": "Runtime type: copilot or claude"},
 					"defaultMaxTurns": map[string]any{"type": "integer", "description": "Default max agent loop iterations"},
+					"secretRef":       map[string]any{"type": "string", "description": "Optional secret name containing runtime credentials. Omit to auto-discover the standard secret for this runtime."},
 				},
 			},
 			"initialPrompt": map[string]any{
@@ -160,16 +160,10 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		}
 	}
 
-	parseRuntimeConfig(a, agent)
-	parseCoordinationConfig(a, agent)
-
-	// Auto-detect secretRef for runtime agents if not explicitly set
-	if agent.Spec.Runtime != nil && agent.Spec.SecretRef == nil {
-		secretName := detectRuntimeSecret(ctx, tc.Client, namespace, agent.Spec.Runtime.Type)
-		if secretName != "" {
-			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: secretName}
-		}
+	if errResult, ok := parseRuntimeConfig(ctx, tc.Client, namespace, a, agent); !ok {
+		return errResult, nil
 	}
+	parseCoordinationConfig(a, agent)
 
 	if err := tc.Client.Create(ctx, agent); err != nil {
 		return classifyChatK8sErr(err)
@@ -241,44 +235,44 @@ func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolC
 	})
 }
 
-// detectRuntimeSecret finds a well-known secret for the given runtime type.
-func detectRuntimeSecret(ctx context.Context, c client.Client, namespace string, runtimeType corev1alpha1.AgentRuntimeType) string {
-	var candidates []string
-	switch runtimeType {
-	case corev1alpha1.AgentRuntimeCopilot:
-		candidates = []string{"copilot-token", "github-credentials", "github-token", "git-credentials", "git-token"}
-	case corev1alpha1.AgentRuntimeClaude:
-		candidates = []string{"claude-api-key", "anthropic-api-key", "anthropic-credentials"}
-	default:
-		return ""
-	}
-	for _, name := range candidates {
-		secret := &corev1.Secret{}
-		if err := c.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, secret); err == nil {
-			return name
+// parseRuntimeConfig extracts runtime configuration from chat args into the agent spec.
+func parseRuntimeConfig(ctx context.Context, k8sClient client.Reader, namespace string, a map[string]any, agent *corev1alpha1.Agent) (string, bool) {
+	if coord, ok := a["coordination"].(map[string]any); ok {
+		if enabled, ok := coord["enabled"].(bool); ok && enabled {
+			return "", true
 		}
 	}
-	return ""
-}
-
-// parseRuntimeConfig extracts runtime configuration from chat args into the agent spec.
-func parseRuntimeConfig(a map[string]any, agent *corev1alpha1.Agent) {
 	rt, ok := a["runtime"]
 	if !ok {
-		return
+		return "", true
 	}
 	rtMap, ok := rt.(map[string]any)
 	if !ok {
-		return
+		return "", true
 	}
 	runtimeType := chatGetStringArg(rtMap, "type")
 	if runtimeType == "" {
-		return
+		return "", true
 	}
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
 		Type: corev1alpha1.AgentRuntimeType(runtimeType),
 	}
+	secretRef, err := resolveRuntimeSecretRef(ctx, k8sClient, namespace, agent.Spec.Runtime.Type, chatGetRuntimeSecretRefArg(a))
+	if err != nil {
+		result, _ := ChatToolErrorResult("invalid_arguments", err.Error(), "Create one of the supported runtime credential secrets or choose an AI agent without runtime")
+		return result, false
+	}
+	agent.Spec.SecretRef = secretRef
 	agent.Spec.ProviderRef = nil
+	return "", true
+}
+
+func chatGetRuntimeSecretRefArg(a map[string]any) string {
+	rt, ok := a["runtime"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return chatGetStringArg(rt, "secretRef")
 }
 
 // parseCoordinationConfig extracts coordination configuration from chat args into the agent spec.
@@ -319,5 +313,6 @@ func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) {
 	agent.Spec.Coordination = coordCfg
 	if coordCfg.Enabled {
 		agent.Spec.Runtime = nil
+		agent.Spec.SecretRef = nil
 	}
 }

@@ -113,10 +113,6 @@ func TestListTasksTool_Execute(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var objs []interface{ GetName() string }
-			for i := range tasks {
-				_ = append(objs, &tasks[i]) //nolint:staticcheck
-			}
 			fc := newFakeClient(&tasks[0], &tasks[1], &tasks[2])
 			tc := &ToolContext{Client: fc, Namespace: "default"}
 			ctx := WithToolContext(context.Background(), tc)
