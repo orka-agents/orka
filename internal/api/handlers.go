@@ -168,6 +168,7 @@ type CreateTaskRequest struct {
 	AgentRef          *corev1alpha1.AgentReference   `json:"agentRef,omitempty"`
 	Prompt            string                         `json:"prompt,omitempty"`
 	AgentRuntime      *corev1alpha1.AgentRuntimeSpec `json:"agentRuntime,omitempty"`
+	Execution         *corev1alpha1.ExecutionSpec    `json:"execution,omitempty"`
 	Schedule          string                         `json:"schedule,omitempty"`
 	TimeZone          *string                        `json:"timeZone,omitempty"`
 	ConcurrencyPolicy string                         `json:"concurrencyPolicy,omitempty"`
@@ -272,6 +273,9 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 			Schedule:     req.Schedule,
 			Suspend:      req.Suspend,
 		},
+	}
+	if req.Execution != nil {
+		task.Spec.Execution = req.Execution.DeepCopy()
 	}
 
 	// Parse timeout if provided
