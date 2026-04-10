@@ -219,6 +219,9 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 		if submitErr := SubmitResult(resultBytes); submitErr != nil {
 			fmt.Fprintf(os.Stderr, "failed to submit error result: %v\n", submitErr)
 		}
+		if artifactErr := UploadArtifacts(); artifactErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", artifactErr)
+		}
 		return fmt.Errorf("%s execution failed: %w", name, err)
 	}
 
@@ -236,6 +239,9 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	}
 	if err := SubmitResult(resultBytes); err != nil {
 		return fmt.Errorf("failed to submit result: %w", err)
+	}
+	if err := UploadArtifacts(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", err)
 	}
 
 	fmt.Printf("Task %s/%s completed successfully\n", cfg.TaskNamespace, cfg.TaskName)

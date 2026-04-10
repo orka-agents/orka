@@ -1,0 +1,484 @@
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/sozercan/orka/internal/store"
+)
+
+func parseOffsetCursor(cursor string) (int, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	offset, err := strconv.Atoi(cursor)
+	if err != nil || offset < 0 {
+		return 0, fmt.Errorf("invalid cursor")
+	}
+	return offset, nil
+}
+
+func nextOffsetCursor(offset, count, limit int) string {
+	if limit <= 0 || count < limit {
+		return ""
+	}
+	return strconv.Itoa(offset + count)
+}
+
+// CreateScanRun inserts a new scan run.
+func (s *Store) CreateScanRun(ctx context.Context, run *store.ScanRun) error {
+	now := time.Now()
+	if run.StartedAt.IsZero() {
+		run.StartedAt = now
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO security_scan_runs
+		 (id, namespace, repository_scan, task_name, mode, phase, base_commit, head_commit, commit_count, summary, error_message, started_at, completed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		run.ID, run.Namespace, run.RepositoryScan, run.TaskName, run.Mode, run.Phase,
+		run.BaseCommit, run.HeadCommit, run.CommitCount, run.Summary, run.ErrorMessage, run.StartedAt, run.CompletedAt,
+	)
+	return err
+}
+
+// UpdateScanRun updates a scan run.
+func (s *Store) UpdateScanRun(ctx context.Context, run *store.ScanRun) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE security_scan_runs
+		 SET task_name = ?, mode = ?, phase = ?, base_commit = ?, head_commit = ?, commit_count = ?,
+		     summary = ?, error_message = ?, started_at = ?, completed_at = ?
+		 WHERE namespace = ? AND id = ?`,
+		run.TaskName, run.Mode, run.Phase, run.BaseCommit, run.HeadCommit, run.CommitCount,
+		run.Summary, run.ErrorMessage, run.StartedAt, run.CompletedAt, run.Namespace, run.ID,
+	)
+	return err
+}
+
+// GetScanRun fetches a scan run by ID.
+func (s *Store) GetScanRun(ctx context.Context, namespace, id string) (*store.ScanRun, error) {
+	var run store.ScanRun
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, namespace, repository_scan, task_name, mode, phase, started_at, completed_at,
+		        base_commit, head_commit, commit_count, summary, error_message
+		 FROM security_scan_runs WHERE namespace = ? AND id = ?`,
+		namespace, id,
+	).Scan(
+		&run.ID, &run.Namespace, &run.RepositoryScan, &run.TaskName, &run.Mode, &run.Phase,
+		&run.StartedAt, &run.CompletedAt, &run.BaseCommit, &run.HeadCommit, &run.CommitCount, &run.Summary, &run.ErrorMessage,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &run, nil
+}
+
+// ListScanRuns lists scan runs for a repository scan ordered newest first.
+func (s *Store) ListScanRuns(ctx context.Context, namespace, repositoryScan string, limit int, cursor string) ([]store.ScanRun, string, error) {
+	offset, err := parseOffsetCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, namespace, repository_scan, task_name, mode, phase, started_at, completed_at,
+		        base_commit, head_commit, commit_count, summary, error_message
+		 FROM security_scan_runs
+		 WHERE namespace = ? AND repository_scan = ?
+		 ORDER BY started_at DESC, id DESC
+		 LIMIT ? OFFSET ?`,
+		namespace, repositoryScan, limit, offset,
+	)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var runs []store.ScanRun
+	for rows.Next() {
+		var run store.ScanRun
+		if err := rows.Scan(
+			&run.ID, &run.Namespace, &run.RepositoryScan, &run.TaskName, &run.Mode, &run.Phase,
+			&run.StartedAt, &run.CompletedAt, &run.BaseCommit, &run.HeadCommit, &run.CommitCount, &run.Summary, &run.ErrorMessage,
+		); err != nil {
+			return nil, "", err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+
+	return runs, nextOffsetCursor(offset, len(runs), limit), nil
+}
+
+// GetLatestThreatModel returns the most recent threat model version.
+func (s *Store) GetLatestThreatModel(ctx context.Context, namespace, repositoryScan string) (*store.ThreatModel, error) {
+	var model store.ThreatModel
+	err := s.db.QueryRowContext(ctx,
+		`SELECT namespace, repository_scan, version, content, source, generated_by_scan, created_at, updated_at
+		 FROM security_threat_models
+		 WHERE namespace = ? AND repository_scan = ?
+		 ORDER BY version DESC
+		 LIMIT 1`,
+		namespace, repositoryScan,
+	).Scan(
+		&model.Namespace, &model.RepositoryScan, &model.Version, &model.Content, &model.Source,
+		&model.GeneratedByScan, &model.CreatedAt, &model.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &model, nil
+}
+
+// SaveThreatModel stores a new threat model version. When Version is zero, the next version is assigned automatically.
+func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if model.Version == 0 {
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(version), 0) + 1 FROM security_threat_models WHERE namespace = ? AND repository_scan = ?`,
+			model.Namespace, model.RepositoryScan,
+		).Scan(&model.Version); err != nil {
+			return err
+		}
+	}
+
+	now := time.Now()
+	if model.CreatedAt.IsZero() {
+		model.CreatedAt = now
+	}
+	model.UpdatedAt = now
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR REPLACE INTO security_threat_models
+		 (namespace, repository_scan, version, content, source, generated_by_scan, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		model.Namespace, model.RepositoryScan, model.Version, model.Content, model.Source,
+		model.GeneratedByScan, model.CreatedAt, model.UpdatedAt,
+	); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func marshalEvidence(evidence []store.FindingEvidenceRef) (string, error) {
+	if len(evidence) == 0 {
+		return "[]", nil
+	}
+	data, err := json.Marshal(evidence)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func unmarshalEvidence(payload string) ([]store.FindingEvidenceRef, error) {
+	if strings.TrimSpace(payload) == "" {
+		return nil, nil
+	}
+	var evidence []store.FindingEvidenceRef
+	if err := json.Unmarshal([]byte(payload), &evidence); err != nil {
+		return nil, err
+	}
+	return evidence, nil
+}
+
+// UpsertFinding inserts or updates a finding keyed by repository fingerprint.
+func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error {
+	if finding.ID == "" {
+		finding.ID = finding.Fingerprint
+	}
+
+	evidenceJSON, err := marshalEvidence(finding.Evidence)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	if finding.CreatedAt.IsZero() {
+		finding.CreatedAt = now
+	}
+	finding.UpdatedAt = now
+
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO security_findings
+		 (id, namespace, repository_scan, scan_run_id, fingerprint, title, summary, severity, confidence, validation_status, state,
+		  file_path, line, commit_sha, root_cause, remediation, suggested_action, evidence_json, validation_json, patch_proposal_id,
+		  pr_number, pr_url, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(namespace, repository_scan, fingerprint) DO UPDATE SET
+		   scan_run_id = excluded.scan_run_id,
+		   title = excluded.title,
+		   summary = excluded.summary,
+		   severity = excluded.severity,
+		   confidence = excluded.confidence,
+		   validation_status = excluded.validation_status,
+		   state = excluded.state,
+		   file_path = excluded.file_path,
+		   line = excluded.line,
+		   commit_sha = excluded.commit_sha,
+		   root_cause = excluded.root_cause,
+		   remediation = excluded.remediation,
+		   suggested_action = excluded.suggested_action,
+		   evidence_json = excluded.evidence_json,
+		   validation_json = excluded.validation_json,
+		   patch_proposal_id = excluded.patch_proposal_id,
+		   pr_number = excluded.pr_number,
+		   pr_url = excluded.pr_url,
+		   updated_at = excluded.updated_at`,
+		finding.ID, finding.Namespace, finding.RepositoryScan, finding.ScanRunID, finding.Fingerprint, finding.Title, finding.Summary,
+		finding.Severity, finding.Confidence, finding.ValidationStatus, finding.State, finding.FilePath, finding.Line, finding.CommitSHA,
+		finding.RootCause, finding.Remediation, finding.SuggestedAction, evidenceJSON, finding.ValidationJSON, finding.PatchProposalID,
+		finding.PRNumber, finding.PRURL, finding.CreatedAt, finding.UpdatedAt,
+	)
+	return err
+}
+
+func scanFinding(scanner interface {
+	Scan(dest ...any) error
+}) (*store.Finding, error) {
+	var (
+		finding      store.Finding
+		evidenceJSON string
+	)
+	err := scanner.Scan(
+		&finding.ID, &finding.Namespace, &finding.RepositoryScan, &finding.ScanRunID, &finding.Fingerprint,
+		&finding.Title, &finding.Summary, &finding.Severity, &finding.Confidence, &finding.ValidationStatus,
+		&finding.State, &finding.FilePath, &finding.Line, &finding.CommitSHA, &finding.RootCause,
+		&finding.Remediation, &finding.SuggestedAction, &evidenceJSON, &finding.ValidationJSON, &finding.PatchProposalID,
+		&finding.PRNumber, &finding.PRURL, &finding.CreatedAt, &finding.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	finding.Evidence, err = unmarshalEvidence(evidenceJSON)
+	if err != nil {
+		return nil, err
+	}
+	return &finding, nil
+}
+
+// GetFinding returns a finding by ID.
+func (s *Store) GetFinding(ctx context.Context, namespace, id string) (*store.Finding, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, namespace, repository_scan, scan_run_id, fingerprint, title, summary, severity, confidence,
+		        validation_status, state, file_path, line, commit_sha, root_cause, remediation, suggested_action,
+		        evidence_json, validation_json, patch_proposal_id, pr_number, pr_url, created_at, updated_at
+		 FROM security_findings
+		 WHERE namespace = ? AND id = ?`,
+		namespace, id,
+	)
+	finding, err := scanFinding(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return finding, nil
+}
+
+// ListFindings lists findings for a repository scan with optional filtering.
+func (s *Store) ListFindings(ctx context.Context, filter store.FindingFilter) ([]store.Finding, string, error) {
+	offset, err := parseOffsetCursor(filter.Cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	if filter.Limit <= 0 {
+		filter.Limit = 50
+	}
+
+	query := strings.Builder{}
+	query.WriteString(`SELECT id, namespace, repository_scan, scan_run_id, fingerprint, title, summary, severity, confidence,
+		validation_status, state, file_path, line, commit_sha, root_cause, remediation, suggested_action,
+		evidence_json, validation_json, patch_proposal_id, pr_number, pr_url, created_at, updated_at
+		FROM security_findings WHERE namespace = ?`)
+	args := []any{filter.Namespace}
+
+	if filter.RepositoryScan != "" {
+		query.WriteString(` AND repository_scan = ?`)
+		args = append(args, filter.RepositoryScan)
+	}
+	if filter.Severity != "" {
+		query.WriteString(` AND severity = ?`)
+		args = append(args, filter.Severity)
+	}
+	if filter.ValidationStatus != "" {
+		query.WriteString(` AND validation_status = ?`)
+		args = append(args, filter.ValidationStatus)
+	}
+	if filter.State != "" {
+		query.WriteString(` AND state = ?`)
+		args = append(args, filter.State)
+	}
+
+	if filter.Recommended {
+		query.WriteString(` ORDER BY
+			CASE severity
+				WHEN 'critical' THEN 4
+				WHEN 'high' THEN 3
+				WHEN 'medium' THEN 2
+				WHEN 'low' THEN 1
+				ELSE 0
+			END DESC,
+			CASE validation_status
+				WHEN 'validated' THEN 3
+				WHEN 'unvalidated' THEN 2
+				WHEN 'skipped' THEN 1
+				ELSE 0
+			END DESC,
+			CASE confidence
+				WHEN 'high' THEN 3
+				WHEN 'medium' THEN 2
+				WHEN 'low' THEN 1
+				ELSE 0
+			END DESC,
+			updated_at DESC, id DESC`)
+	} else {
+		query.WriteString(` ORDER BY updated_at DESC, id DESC`)
+	}
+
+	query.WriteString(` LIMIT ? OFFSET ?`)
+	args = append(args, filter.Limit, offset)
+
+	rows, err := s.db.QueryContext(ctx, query.String(), args...)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var findings []store.Finding
+	for rows.Next() {
+		finding, err := scanFinding(rows)
+		if err != nil {
+			return nil, "", err
+		}
+		findings = append(findings, *finding)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+
+	return findings, nextOffsetCursor(offset, len(findings), filter.Limit), nil
+}
+
+// GetFindingCounts returns current open finding counts by severity.
+func (s *Store) GetFindingCounts(ctx context.Context, namespace, repositoryScan string) (store.FindingCounts, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN severity = 'critical' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN severity = 'high' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN severity = 'medium' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN severity = 'low' THEN 1 ELSE 0 END), 0)
+		FROM security_findings
+		WHERE namespace = ? AND repository_scan = ? AND state IN ('open', 'patch_pending', 'patch_ready', 'pr_open')`,
+		namespace, repositoryScan,
+	)
+	var counts store.FindingCounts
+	if err := row.Scan(&counts.Total, &counts.Critical, &counts.High, &counts.Medium, &counts.Low); err != nil {
+		return store.FindingCounts{}, err
+	}
+	return counts, nil
+}
+
+// UpdateFindingState updates the user-visible finding state.
+func (s *Store) UpdateFindingState(ctx context.Context, namespace, id, state string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE security_findings SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE namespace = ? AND id = ?`,
+		state, namespace, id,
+	)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// CreatePatchProposal inserts a new patch proposal.
+func (s *Store) CreatePatchProposal(ctx context.Context, proposal *store.PatchProposal) error {
+	now := time.Now()
+	if proposal.CreatedAt.IsZero() {
+		proposal.CreatedAt = now
+	}
+	proposal.UpdatedAt = now
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO security_patch_proposals
+		 (id, namespace, repository_scan, finding_id, task_name, branch, diff_artifact, summary_artifact, status, pr_number, pr_url, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		proposal.ID, proposal.Namespace, proposal.RepositoryScan, proposal.FindingID, proposal.TaskName, proposal.Branch,
+		proposal.DiffArtifact, proposal.SummaryArtifact, proposal.Status, proposal.PRNumber, proposal.PRURL, proposal.CreatedAt, proposal.UpdatedAt,
+	)
+	return err
+}
+
+// UpdatePatchProposal updates an existing patch proposal.
+func (s *Store) UpdatePatchProposal(ctx context.Context, proposal *store.PatchProposal) error {
+	proposal.UpdatedAt = time.Now()
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE security_patch_proposals
+		 SET task_name = ?, branch = ?, diff_artifact = ?, summary_artifact = ?, status = ?, pr_number = ?, pr_url = ?, updated_at = ?
+		 WHERE namespace = ? AND id = ?`,
+		proposal.TaskName, proposal.Branch, proposal.DiffArtifact, proposal.SummaryArtifact, proposal.Status, proposal.PRNumber,
+		proposal.PRURL, proposal.UpdatedAt, proposal.Namespace, proposal.ID,
+	)
+	return err
+}
+
+// ListPatchProposals lists patch proposals for a finding, newest first.
+func (s *Store) ListPatchProposals(ctx context.Context, namespace, findingID string) ([]store.PatchProposal, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, namespace, repository_scan, finding_id, task_name, branch, diff_artifact, summary_artifact,
+		        status, pr_number, pr_url, created_at, updated_at
+		 FROM security_patch_proposals
+		 WHERE namespace = ? AND finding_id = ?
+		 ORDER BY created_at DESC, id DESC`,
+		namespace, findingID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var proposals []store.PatchProposal
+	for rows.Next() {
+		var proposal store.PatchProposal
+		if err := rows.Scan(
+			&proposal.ID, &proposal.Namespace, &proposal.RepositoryScan, &proposal.FindingID, &proposal.TaskName, &proposal.Branch,
+			&proposal.DiffArtifact, &proposal.SummaryArtifact, &proposal.Status, &proposal.PRNumber, &proposal.PRURL,
+			&proposal.CreatedAt, &proposal.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		proposals = append(proposals, proposal)
+	}
+	return proposals, rows.Err()
+}

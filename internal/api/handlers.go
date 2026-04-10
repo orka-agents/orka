@@ -61,6 +61,7 @@ type Handlers struct {
 	planStore                 store.PlanStore
 	healthChecker             store.HealthChecker
 	artifactStore             store.ArtifactStore
+	securityStore             store.SecurityStore
 }
 
 // HandlersConfig holds configuration for creating Handlers.
@@ -74,6 +75,7 @@ type HandlersConfig struct {
 	KubeClient                kubernetes.Interface
 	HealthChecker             store.HealthChecker
 	ArtifactStore             store.ArtifactStore
+	SecurityStore             store.SecurityStore
 }
 
 // NewHandlers creates a new Handlers instance
@@ -88,6 +90,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		planStore:                 cfg.PlanStore,
 		healthChecker:             cfg.HealthChecker,
 		artifactStore:             cfg.ArtifactStore,
+		securityStore:             cfg.SecurityStore,
 	}
 }
 

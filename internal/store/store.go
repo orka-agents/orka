@@ -55,6 +55,27 @@ type ArtifactStore interface {
 	DeleteArtifacts(ctx context.Context, namespace, taskName string) error
 }
 
+// SecurityStore handles repository security scanning persistence.
+type SecurityStore interface {
+	CreateScanRun(ctx context.Context, run *ScanRun) error
+	UpdateScanRun(ctx context.Context, run *ScanRun) error
+	GetScanRun(ctx context.Context, namespace, id string) (*ScanRun, error)
+	ListScanRuns(ctx context.Context, namespace, repositoryScan string, limit int, cursor string) ([]ScanRun, string, error)
+
+	GetLatestThreatModel(ctx context.Context, namespace, repositoryScan string) (*ThreatModel, error)
+	SaveThreatModel(ctx context.Context, model *ThreatModel) error
+
+	UpsertFinding(ctx context.Context, finding *Finding) error
+	GetFinding(ctx context.Context, namespace, id string) (*Finding, error)
+	ListFindings(ctx context.Context, filter FindingFilter) ([]Finding, string, error)
+	GetFindingCounts(ctx context.Context, namespace, repositoryScan string) (FindingCounts, error)
+	UpdateFindingState(ctx context.Context, namespace, id, state string) error
+
+	CreatePatchProposal(ctx context.Context, proposal *PatchProposal) error
+	UpdatePatchProposal(ctx context.Context, proposal *PatchProposal) error
+	ListPatchProposals(ctx context.Context, namespace, findingID string) ([]PatchProposal, error)
+}
+
 // Message represents an inter-agent message.
 type Message struct {
 	ID         int64  `json:"id"`

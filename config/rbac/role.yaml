@@ -102,6 +102,7 @@ rules:
   resources:
   - agents
   - providers
+  - repositoryscans
   - skills
   - tasks
   - tools
@@ -118,6 +119,7 @@ rules:
   resources:
   - agents/finalizers
   - providers/finalizers
+  - repositoryscans/finalizers
   - skills/finalizers
   - tasks/finalizers
   - tools/finalizers
@@ -128,6 +130,7 @@ rules:
   resources:
   - agents/status
   - providers/status
+  - repositoryscans/status
   - skills/status
   - tasks/status
   - tools/status
