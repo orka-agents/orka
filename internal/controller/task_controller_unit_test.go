@@ -1463,6 +1463,36 @@ func TestHandleRunning_JobNotFound(t *testing.T) {
 	}
 }
 
+func TestHandleRunning_JobNotFoundWithRetryPolicy(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-nojob-retry", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAI,
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 2},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:    corev1alpha1.TaskPhaseRunning,
+			JobName:  "missing-job",
+			Attempts: 1,
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("expected positive requeue after scheduling retry, got %v", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Errorf("expected phase Pending after scheduling retry, got %s", task.Status.Phase)
+	}
+	if task.Status.JobName != "" {
+		t.Errorf("expected JobName to be cleared for retry, got %q", task.Status.JobName)
+	}
+}
+
 func TestHandleRunning_JobSucceeded(t *testing.T) {
 	scheme := newTestScheme()
 	job := &batchv1.Job{
@@ -2549,6 +2579,46 @@ func TestReconcile_RunningPhase_JobNotFound(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestReconcile_RunningPhase_JobNotFoundWithRetryPolicy(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "rec-run-retry",
+			Namespace:  "default",
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAI,
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 2},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:    corev1alpha1.TaskPhaseRunning,
+			JobName:  "nonexistent-job",
+			Attempts: 1,
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "rec-run-retry", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("expected positive requeue after scheduling retry, got %v", result.RequeueAfter)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "rec-run-retry", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("failed to fetch updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Fatalf("expected phase Pending after retry scheduling, got %s", updated.Status.Phase)
+	}
+	if updated.Status.JobName != "" {
+		t.Fatalf("expected JobName to be cleared after retry scheduling, got %q", updated.Status.JobName)
 	}
 }
 

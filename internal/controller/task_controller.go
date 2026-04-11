@@ -664,6 +664,10 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		Namespace: task.Namespace,
 	}, job); err != nil {
 		if apierrors.IsNotFound(err) {
+			if r.shouldRetry(task) {
+				log.Info("job not found while task still has retry budget, scheduling retry", "attempt", task.Status.Attempts)
+				return r.retryTask(ctx, task)
+			}
 			log.Info("Job not found, task may have been cleaned up")
 			return r.failTask(ctx, task, "job not found")
 		}

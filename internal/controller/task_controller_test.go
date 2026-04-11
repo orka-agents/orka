@@ -481,6 +481,47 @@ var _ = Describe("Task Controller", func() {
 			Expect(task.Status.Message).To(Equal("job not found"))
 		})
 
+		It("should retry task when Job is not found but retry policy is configured", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-running-job-missing-retry"
+			ns := defaultNS
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       taskName,
+					Namespace:  ns,
+					Finalizers: []string{labels.TaskFinalizer},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"echo"},
+					RetryPolicy: &corev1alpha1.RetryPolicy{
+						MaxRetries: 2,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			now := metav1.Now()
+			task.Status.Phase = corev1alpha1.TaskPhaseRunning
+			task.Status.JobName = "nonexistent-job"
+			task.Status.StartTime = &now
+			task.Status.Attempts = 1
+			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
+
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
+			Expect(task.Status.JobName).To(BeEmpty())
+		})
+
 		It("should fail task on timeout", func() {
 			ctx := context.Background()
 			r := newReconciler()
