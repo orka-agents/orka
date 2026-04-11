@@ -9,11 +9,12 @@ Use the bundled script for the normal local cluster flow instead of rebuilding t
 
 ## Workflow
 
-1. Confirm the `copilot-proxy` repository path. Default to `/Users/sozercan/projects/copilot-proxy` when it exists.
-2. Prefer the active `kubectl` context. If it starts with `kind-`, derive the cluster name from it. Otherwise require `--cluster`.
+1. Confirm the `copilot-proxy` repository path. Prefer `--repo` when the user gives one. Otherwise let the script auto-discover from `COPILOT_PROXY_REPO`, the current repo, or a sibling `../copilot-proxy` checkout; if discovery fails, ask the user for `--repo`.
+2. Prefer the active `kubectl` context. If it targets a kind cluster, derive the cluster name from it. Otherwise require `--cluster`; when `--context` is omitted, the script uses `kind-<cluster>`.
 3. Run the script:
    - Default: `scripts/deploy_copilot_proxy_kind.sh`
    - Explicit repo or namespace: `scripts/deploy_copilot_proxy_kind.sh --repo /path/to/copilot-proxy --namespace default`
+   - Environment override: `COPILOT_PROXY_REPO=/path/to/copilot-proxy scripts/deploy_copilot_proxy_kind.sh`
    - Safe preview: `scripts/deploy_copilot_proxy_kind.sh --dry-run`
 4. Let the script:
    - build a local `copilot-proxy:kind` image

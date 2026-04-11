@@ -10,7 +10,7 @@ Use the bundled script for the standard local deploy path instead of retyping th
 ## Workflow
 
 1. Ensure the working directory is an Orka repository checkout with `Makefile`, `config/manager/kustomization.yaml`, and the `workers/` tree.
-2. Prefer the active `kubectl` context. If it starts with `kind-`, derive the cluster name from it. If not, pass `--cluster` explicitly.
+2. Prefer the active `kubectl` context. If it targets a kind cluster, derive the cluster name from it. If not, pass `--cluster` explicitly; when `--context` is omitted, the script uses `kind-<cluster>`.
 3. Run the script:
    - Default: `scripts/deploy_orka_kind.sh`
    - Explicit repo or cluster: `scripts/deploy_orka_kind.sh --repo /path/to/repo --cluster codex`

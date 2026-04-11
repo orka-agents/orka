@@ -8,6 +8,12 @@ Usage: deploy_copilot_proxy_kind.sh [--repo PATH] [--context NAME] [--cluster NA
 Build the local copilot-proxy image, load it into a kind cluster, patch the
 Kubernetes manifest to use that image, apply it, wait for rollout, and print
 the current login state from the pod logs.
+
+When --cluster is provided without --context, the script uses the standard
+kind context name: kind-<cluster>.
+
+When --repo is omitted, the script tries COPILOT_PROXY_REPO, the current git
+repository, and a sibling ../copilot-proxy checkout before failing.
 EOF
 }
 
@@ -19,6 +25,13 @@ require_cmd() {
   fi
 }
 
+context_cluster_for() {
+  local context="$1"
+
+  kubectl config view -o jsonpath='{range .contexts[*]}{.name}{"\t"}{.context.cluster}{"\n"}{end}' \
+    | awk -F'\t' -v context="$context" '$1 == context { print $2; exit }'
+}
+
 run_cmd() {
   printf '+'
   printf ' %q' "$@"
@@ -27,6 +40,37 @@ run_cmd() {
     return 0
   fi
   "$@"
+}
+
+is_copilot_proxy_repo() {
+  local candidate="${1:-}"
+  [[ -n "$candidate" ]] || return 1
+  [[ -f "$candidate/Dockerfile" && -f "$candidate/k8s/copilot-proxy.yaml" ]]
+}
+
+discover_repo_root() {
+  local git_root=""
+  local candidate=""
+  local -a candidates=()
+
+  if [[ -n "${COPILOT_PROXY_REPO:-}" ]]; then
+    candidates+=("$COPILOT_PROXY_REPO")
+  fi
+
+  if git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    candidates+=("$git_root" "$git_root/../copilot-proxy")
+  fi
+
+  candidates+=("$(pwd)" "$(pwd)/../copilot-proxy")
+
+  for candidate in "${candidates[@]}"; do
+    if is_copilot_proxy_repo "$candidate"; then
+      repo_root="$(cd "$candidate" && pwd)"
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 print_login_status() {
@@ -62,7 +106,6 @@ print_login_status() {
   echo "$logs"
 }
 
-default_repo="/Users/sozercan/projects/copilot-proxy"
 repo_root=""
 context_name=""
 cluster_name=""
@@ -123,12 +166,10 @@ for cmd in docker git kind kubectl sed mktemp; do
 done
 
 if [[ -z "$repo_root" ]]; then
-  if [[ -d "$default_repo" ]]; then
-    repo_root="$default_repo"
-  elif git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-    repo_root="$git_root"
-  else
-    repo_root="$(pwd)"
+  if ! discover_repo_root; then
+    echo "Unable to locate a copilot-proxy repository automatically." >&2
+    echo "Pass --repo PATH or set COPILOT_PROXY_REPO to a checkout containing Dockerfile and k8s/copilot-proxy.yaml." >&2
+    exit 1
   fi
 fi
 repo_root="$(cd "$repo_root" && pwd)"
@@ -147,16 +188,35 @@ if [[ ! -f "$manifest_path" ]]; then
 fi
 
 if [[ -z "$context_name" ]]; then
-  context_name="$(kubectl config current-context)"
+  if [[ -n "$cluster_name" ]]; then
+    context_name="kind-$cluster_name"
+  else
+    context_name="$(kubectl config current-context)"
+  fi
+fi
+
+context_cluster="$(context_cluster_for "$context_name")"
+if [[ -z "$context_cluster" ]]; then
+  echo "kubectl context '$context_name' not found" >&2
+  exit 1
+fi
+
+if [[ "$context_cluster" == kind-* ]]; then
+  context_kind_cluster="${context_cluster#kind-}"
+else
+  context_kind_cluster=""
 fi
 
 if [[ -z "$cluster_name" ]]; then
-  if [[ "$context_name" == kind-* ]]; then
-    cluster_name="${context_name#kind-}"
+  if [[ -n "$context_kind_cluster" ]]; then
+    cluster_name="$context_kind_cluster"
   else
-    echo "Current context '$context_name' is not a kind context. Pass --cluster explicitly." >&2
+    echo "Context '$context_name' targets '$context_cluster', not a kind cluster. Pass --cluster explicitly." >&2
     exit 1
   fi
+elif [[ -z "$context_kind_cluster" || "$context_kind_cluster" != "$cluster_name" ]]; then
+  echo "Context '$context_name' targets '$context_cluster', which does not match kind cluster '$cluster_name'." >&2
+  exit 1
 fi
 
 if ! kind get clusters | grep -Fxq "$cluster_name"; then

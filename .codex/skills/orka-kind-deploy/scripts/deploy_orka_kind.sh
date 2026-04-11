@@ -7,6 +7,9 @@ Usage: deploy_orka_kind.sh [--repo PATH] [--cluster NAME] [--context NAME] [--co
 
 Rebuild all Orka images, load them into a local kind cluster, install CRDs,
 deploy the controller, and wait for the rollout to finish.
+
+When --cluster is provided without --context, the script uses the standard
+kind context name: kind-<cluster>.
 EOF
 }
 
@@ -16,6 +19,13 @@ require_cmd() {
     echo "Missing required command: $cmd" >&2
     exit 1
   fi
+}
+
+context_cluster_for() {
+  local context="$1"
+
+  kubectl config view -o jsonpath='{range .contexts[*]}{.name}{"\t"}{.context.cluster}{"\n"}{end}' \
+    | awk -F'\t' -v context="$context" '$1 == context { print $2; exit }'
 }
 
 repo_root=""
@@ -79,16 +89,35 @@ if [[ ! -f "$kustomization_file" ]]; then
 fi
 
 if [[ -z "$context_name" ]]; then
-  context_name="$(kubectl config current-context)"
+  if [[ -n "$cluster_name" ]]; then
+    context_name="kind-$cluster_name"
+  else
+    context_name="$(kubectl config current-context)"
+  fi
+fi
+
+context_cluster="$(context_cluster_for "$context_name")"
+if [[ -z "$context_cluster" ]]; then
+  echo "kubectl context '$context_name' not found" >&2
+  exit 1
+fi
+
+if [[ "$context_cluster" == kind-* ]]; then
+  context_kind_cluster="${context_cluster#kind-}"
+else
+  context_kind_cluster=""
 fi
 
 if [[ -z "$cluster_name" ]]; then
-  if [[ "$context_name" == kind-* ]]; then
-    cluster_name="${context_name#kind-}"
+  if [[ -n "$context_kind_cluster" ]]; then
+    cluster_name="$context_kind_cluster"
   else
-    echo "Current context '$context_name' is not a kind context. Pass --cluster explicitly." >&2
+    echo "Context '$context_name' targets '$context_cluster', not a kind cluster. Pass --cluster explicitly." >&2
     exit 1
   fi
+elif [[ -z "$context_kind_cluster" || "$context_kind_cluster" != "$cluster_name" ]]; then
+  echo "Context '$context_name' targets '$context_cluster', which does not match kind cluster '$cluster_name'." >&2
+  exit 1
 fi
 
 if ! kind get clusters | grep -Fxq "$cluster_name"; then
