@@ -306,6 +306,57 @@ func startServicePortForward(serviceNamespace, serviceName string, localPort, re
 	return baseURL, cancel, cmd, nil
 }
 
+func serviceProxyPath(serviceNamespace, serviceName string, servicePort int, endpointPath string) string {
+	endpointPath = "/" + strings.TrimLeft(endpointPath, "/")
+	return fmt.Sprintf(
+		"/api/v1/namespaces/%s/services/http:%s:%d/proxy%s",
+		serviceNamespace,
+		serviceName,
+		servicePort,
+		endpointPath,
+	)
+}
+
+func discoverProxyModelViaServiceProxy(serviceNamespace, serviceName string, servicePort int) string {
+	var modelID string
+	Eventually(func(g Gomega) {
+		model, err := fetchProxyModelViaServiceProxy(serviceNamespace, serviceName, servicePort)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(model).NotTo(BeEmpty(), "proxy service should return at least one model")
+		modelID = model
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+	return modelID
+}
+
+func fetchProxyModelViaServiceProxy(serviceNamespace, serviceName string, servicePort int) (string, error) {
+	cmd := exec.Command(
+		"kubectl",
+		"get",
+		"--raw",
+		serviceProxyPath(serviceNamespace, serviceName, servicePort, "/v1/models"),
+	)
+	body, err := utils.Run(cmd)
+	if err != nil {
+		return "", err
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return "", err
+	}
+
+	if model := firstModelFromPayload(payload); model != "" {
+		return model, nil
+	}
+
+	return "", fmt.Errorf(
+		"no models returned from service proxy for %s/%s:%d",
+		serviceNamespace,
+		serviceName,
+		servicePort,
+	)
+}
+
 func liveCopilotProxyServiceNamespace() string {
 	if ns := strings.TrimSpace(firstSetEnv("E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE")); ns != "" {
 		return ns

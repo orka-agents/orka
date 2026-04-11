@@ -34,13 +34,10 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 	)
 
 	var (
-		apiBaseURL            string
-		proxyDiscoveryBaseURL string
-		cancelControllerPF    context.CancelFunc
-		controllerPFCmd       *exec.Cmd
-		cancelProxyPF         context.CancelFunc
-		proxyPFCmd            *exec.Cmd
-		token                 string
+		apiBaseURL         string
+		cancelControllerPF context.CancelFunc
+		controllerPFCmd    *exec.Cmd
+		token              string
 	)
 
 	BeforeAll(func() {
@@ -53,15 +50,6 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		apiBaseURL, cancelControllerPF, controllerPFCmd, err = startControllerAPIPortForward(18086)
 		Expect(err).NotTo(HaveOccurred())
 
-		By("setting up port-forward to the live copilot-proxy service")
-		proxyDiscoveryBaseURL, cancelProxyPF, proxyPFCmd, err = startServicePortForward(
-			liveCopilotProxyServiceNamespace(),
-			liveCopilotProxyServiceName(),
-			18085,
-			liveCopilotProxyServicePort(),
-		)
-		Expect(err).NotTo(HaveOccurred())
-
 		By("getting a service account token")
 		token, err = serviceAccountToken()
 		Expect(err).NotTo(HaveOccurred())
@@ -69,7 +57,6 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 	})
 
 	AfterAll(func() {
-		stopPortForward(cancelProxyPF, proxyPFCmd)
 		stopPortForward(cancelControllerPF, controllerPFCmd)
 	})
 
@@ -78,8 +65,12 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 	})
 
 	It("should run a tiny AI task through the live copilot proxy and return the exact output", func() {
-		By("discovering a live model from the proxy")
-		model := discoverProxyModel(proxyDiscoveryBaseURL)
+		By("discovering a live model from the proxy service")
+		model := discoverProxyModelViaServiceProxy(
+			liveCopilotProxyServiceNamespace(),
+			liveCopilotProxyServiceName(),
+			liveCopilotProxyServicePort(),
+		)
 		Expect(model).NotTo(BeEmpty())
 
 		By("creating a dummy secret for provider validation")

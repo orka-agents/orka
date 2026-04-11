@@ -112,6 +112,34 @@ wait_for_http() {
   die "${description} never became available at ${url}"
 }
 
+wait_for_kube_service_proxy() {
+  local namespace_arg="$1"
+  local service_name="$2"
+  local service_port="$3"
+  local endpoint_path="$4"
+  local description="$5"
+  local output_file="${6:-}"
+  local proxy_path
+  local attempt
+
+  proxy_path="/api/v1/namespaces/${namespace_arg}/services/http:${service_name}:${service_port}/proxy${endpoint_path}"
+
+  for attempt in $(seq 1 60); do
+    if [[ -n "${output_file}" ]]; then
+      if kubectl get --raw "${proxy_path}" >"${output_file}" 2>/dev/null; then
+        return 0
+      fi
+    else
+      if kubectl get --raw "${proxy_path}" >/dev/null 2>&1; then
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+
+  die "${description} never became available via Kubernetes service proxy at ${proxy_path}"
+}
+
 wait_for_proxy_deployment() {
   log "Waiting for copilot-proxy rollout"
   kubectl rollout status deployment/"${copilot_proxy_service}" -n "${copilot_proxy_namespace}" --timeout=5m
@@ -210,12 +238,22 @@ YAML
 
   wait_for_proxy_deployment
 
-  log "Starting proxy port-forward"
-  proxy_pf_pid="$(start_port_forward "${copilot_proxy_namespace}" "svc/${copilot_proxy_service}" "${copilot_proxy_local_port}" "${copilot_proxy_service_port}" "${work_dir}/copilot-proxy-port-forward.log")"
-  wait_for_http "http://127.0.0.1:${copilot_proxy_local_port}/readyz" "copilot-proxy /readyz"
+  log "Waiting for copilot-proxy /readyz via Kubernetes service proxy"
+  wait_for_kube_service_proxy \
+    "${copilot_proxy_namespace}" \
+    "${copilot_proxy_service}" \
+    "${copilot_proxy_service_port}" \
+    "/readyz" \
+    "copilot-proxy /readyz"
 
   log "Validating copilot-proxy live models"
-  curl -fsS "http://127.0.0.1:${copilot_proxy_local_port}/v1/models" -o "${work_dir}/copilot-proxy-models.json"
+  wait_for_kube_service_proxy \
+    "${copilot_proxy_namespace}" \
+    "${copilot_proxy_service}" \
+    "${copilot_proxy_service_port}" \
+    "/v1/models" \
+    "copilot-proxy /v1/models" \
+    "${work_dir}/copilot-proxy-models.json"
   jq -e '.data | length > 0' "${work_dir}/copilot-proxy-models.json" >/dev/null
 
   log "Running focused live copilot-proxy Go e2e spec"
