@@ -15,6 +15,8 @@ func TestIsAllowedWebhookURL_ValidURLs(t *testing.T) {
 		"https://example.com/webhook",
 		"http://public.example.org/notify",
 		"https://api.example.com:8080/hook",
+		"http://receiver.default.svc.cluster.local/webhook",
+		"http://receiver.default.svc:8080/webhook",
 	}
 
 	for _, url := range validURLs {
@@ -36,6 +38,7 @@ func TestIsAllowedWebhookURL_BlockedURLs(t *testing.T) {
 		{"google metadata", "http://metadata.google.internal/computeMetadata/v1/"},
 		{"kubernetes default", "https://kubernetes.default/api"},
 		{"kubernetes default svc", "https://kubernetes.default.svc/api"},
+		{"kubernetes default svc cluster local", "https://kubernetes.default.svc.cluster.local/api"},
 		{"localhost", "http://localhost:8080/webhook"},
 		{"127.0.0.1", "http://127.0.0.1/webhook"},
 		{"loopback IPv6", "http://[::1]/webhook"},

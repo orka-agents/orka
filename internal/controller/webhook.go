@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -32,7 +33,7 @@ func isAllowedWebhookURL(rawURL string) error {
 		return fmt.Errorf("webhook URL scheme %q not allowed, must be http or https", u.Scheme)
 	}
 
-	host := u.Hostname()
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
 
 	// Block well-known metadata endpoints and internal hostnames
 	blockedHosts := []string{
@@ -40,9 +41,16 @@ func isAllowedWebhookURL(rawURL string) error {
 		"metadata.google.internal",
 		"kubernetes.default",
 		"kubernetes.default.svc",
+		"kubernetes.default.svc.cluster.local",
 	}
 	if slices.Contains(blockedHosts, host) {
 		return fmt.Errorf("webhook URL host %q is not allowed", host)
+	}
+
+	// Allow in-cluster Service DNS names. These are a valid webhook target in Kubernetes
+	// and are more precise than broadly allowing all private-address destinations.
+	if strings.HasSuffix(host, ".svc") || strings.HasSuffix(host, ".svc.cluster.local") {
+		return nil
 	}
 
 	// Resolve and block private/loopback IPs
