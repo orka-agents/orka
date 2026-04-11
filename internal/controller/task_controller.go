@@ -852,7 +852,10 @@ func (r *TaskReconciler) shouldRetry(task *corev1alpha1.Task) bool {
 	if task.Spec.RetryPolicy == nil {
 		return false
 	}
-	return task.Status.Attempts < task.Spec.RetryPolicy.MaxRetries
+	// Attempts counts the current execution. MaxRetries is the number of additional
+	// executions allowed after a failure, so we retry while current attempts are
+	// less than or equal to the configured retry budget.
+	return task.Status.Attempts <= task.Spec.RetryPolicy.MaxRetries
 }
 
 // retryTask creates a new Job for a retry attempt
