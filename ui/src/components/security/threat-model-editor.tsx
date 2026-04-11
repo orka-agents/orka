@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { toast } from 'sonner'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -10,12 +10,13 @@ export function ThreatModelEditor({ repositoryName }: { repositoryName: string }
   const { data, isLoading, error } = useThreatModel(repositoryName)
   const updateThreatModel = useUpdateThreatModel(repositoryName)
   const [content, setContent] = useState('')
+  const [initialized, setInitialized] = useState(false)
 
-  useEffect(() => {
-    if (data?.content !== undefined) {
-      setContent(data.content)
-    }
-  }, [data?.content])
+  const currentContent = data?.content
+  if (currentContent !== undefined && !initialized) {
+    setContent(currentContent)
+    setInitialized(true)
+  }
 
   const notFound = error instanceof ApiError && error.status === 404
 
