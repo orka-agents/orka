@@ -286,6 +286,8 @@ agentRuntime:
 
 > **Note**: For the Copilot runtime, `GITHUB_TOKEN` from the Agent's `secretRef` can authenticate both the CLI and git clone operations. For the Claude and Codex runtimes, a separate `gitSecretRef` is usually needed because their API keys do not authenticate git operations.
 
+> **Codex caveat**: The current Codex runtime implementation requires `defaultAllowBash: true` (or task-level `allowBash: true`). If bash is disabled, the worker fails fast instead of launching Codex, because the current Codex CLI does not expose a reliable shell-disable mode.
+
 ### SubPath
 
 Restrict the agent's workspace to a subdirectory of the cloned repository:
@@ -394,6 +396,8 @@ Writable directories are provided via `emptyDir` volumes:
 | Bash | Allowed | High |
 
 All tools are allowed by default for autonomous operation. To restrict high-risk tools, set `defaultAllowBash: false` on the Agent or `allowBash: false` on individual Tasks.
+
+For Codex specifically, bash-disabled tasks are not currently supported. Use `defaultAllowBash: true` for Codex Agents until the upstream CLI exposes a reliable shell-disable mode.
 
 ### Secrets
 

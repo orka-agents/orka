@@ -162,6 +162,8 @@ spec:
 EOF
 ```
 
+For Codex Agents, keep `defaultAllowBash: true` for now. The current Codex runtime implementation fails fast when bash is disabled because the upstream Codex CLI does not yet expose a reliable shell-disable mode.
+
 ### 3. Run an Agent Task
 
 ```yaml
