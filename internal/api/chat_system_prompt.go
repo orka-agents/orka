@@ -145,7 +145,7 @@ call in the SAME response. If you need to create a task AND fetch its result,
 call create_*_task, then wait_for_task, then fetch_task_output all in sequence
 without stopping to narrate between steps. Act first, summarize after.
 
-LONG-RUNNING TASKS: Agent tasks (Copilot, Claude Code) typically run for 5-20 minutes.
+LONG-RUNNING TASKS: Agent tasks (Copilot, Claude Code, Codex) typically run for 5-20 minutes.
 You MUST keep calling wait_for_task in a loop until the task reaches a terminal state
 (Succeeded or Failed). Do NOT give up after a few polls — keep waiting. If wait_for_task
 returns "still running", immediately call wait_for_task again. Only stop when the task
@@ -188,7 +188,7 @@ func buildTaskTypesSection(mode PromptMode) string {
   answering questions about data. The AI worker has built-in tools (code_exec,
   web_search, file_read, web_fetch, file_write) but runs in a minimal container without CLI tools.
   Do NOT use for infrastructure commands.
-- agent: Run an external CLI runtime (Copilot, Claude Code). Use create_agent_task.
+- agent: Run an external CLI runtime (Copilot, Claude Code, Codex). Use create_agent_task.
   Use for: code changes in a git repo, multi-file refactoring.
   IMPORTANT: When the user specifies an agent (via --agent or agentRef) that has a
   runtime configured, ALWAYS use create_agent_task with that agent name.
@@ -196,7 +196,7 @@ func buildTaskTypesSection(mode PromptMode) string {
   workspace config so credentials are automatically mounted:
     create_agent_task(agent: "coder", prompt: "...", gitRepo: "https://github.com/org/repo", timeout: "15m")
   When creating new agents for coding tasks, check the agent_runtimes in the Runtime line above.
-  Use whichever runtime is available. If both are available, prefer copilot.
+  Use whichever runtime is available. If multiple runtimes are available, prefer codex, then copilot.
   If no agent runtimes are available, use create_ai_task with workspace config instead.
   Agent tasks need more time than AI tasks. Set timeout to at least 15m.
   Do NOT use create_container_task or create_ai_task for runtime agents.
@@ -414,6 +414,9 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 		secretNames := make(map[string]bool, len(secretList.Items))
 		for i := range secretList.Items {
 			secretNames[secretList.Items[i].Name] = true
+		}
+		if chattools.FirstPresentSecretName(secretNames, chattools.RuntimeSecretCandidates(corev1alpha1.AgentRuntimeCodex)) != "" {
+			availableRuntimes = append(availableRuntimes, "codex")
 		}
 		if chattools.FirstPresentSecretName(secretNames, chattools.RuntimeSecretCandidates(corev1alpha1.AgentRuntimeCopilot)) != "" {
 			availableRuntimes = append(availableRuntimes, "copilot")

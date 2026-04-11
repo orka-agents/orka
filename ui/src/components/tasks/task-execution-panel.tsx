@@ -12,10 +12,10 @@ function stepIndex(phase?: string): number {
 }
 
 function ElapsedTime({ startTime, completionTime }: { startTime?: string; completionTime?: string }) {
-  const [elapsed, setElapsed] = useState('')
+  const [elapsed, setElapsed] = useState(() => startTime ? '' : '-')
 
   useEffect(() => {
-    if (!startTime) { setElapsed('-'); return }
+    if (!startTime) return
     const start = new Date(startTime).getTime()
 
     function update() {

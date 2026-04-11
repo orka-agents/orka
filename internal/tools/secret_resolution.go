@@ -23,6 +23,7 @@ import (
 var (
 	copilotRuntimeSecretCandidates = []string{"copilot-token"}
 	claudeRuntimeSecretCandidates  = []string{"claude-credentials", "claude-api-key"}
+	codexRuntimeSecretCandidates   = []string{"codex-credentials", "codex-api-key", "openai-api-key"}
 	gitCredentialSecretCandidates  = []string{"git-credentials", "github-credentials", "copilot-token", "github-token", "git-token"}
 )
 
@@ -33,6 +34,8 @@ func RuntimeSecretCandidates(runtimeType corev1alpha1.AgentRuntimeType) []string
 		return append([]string(nil), copilotRuntimeSecretCandidates...)
 	case corev1alpha1.AgentRuntimeClaude:
 		return append([]string(nil), claudeRuntimeSecretCandidates...)
+	case corev1alpha1.AgentRuntimeCodex:
+		return append([]string(nil), codexRuntimeSecretCandidates...)
 	default:
 		return nil
 	}

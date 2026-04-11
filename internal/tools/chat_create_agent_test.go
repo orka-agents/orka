@@ -89,6 +89,43 @@ func TestParseRuntimeConfig_AutoDiscoversSecretRef(t *testing.T) {
 	}
 }
 
+func TestParseRuntimeConfig_AutoDiscoversCodexSecretRef(t *testing.T) {
+	fc := newFakeClient(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "codex-api-key",
+			Namespace: defaultNamespace,
+		},
+	})
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			ProviderRef: &corev1alpha1.ProviderReference{Name: "openai"},
+		},
+	}
+
+	args := map[string]any{
+		"runtime": map[string]any{
+			"type": "codex",
+		},
+	}
+
+	if errResult, ok := parseRuntimeConfig(context.Background(), fc, defaultNamespace, args, agent); !ok {
+		t.Fatalf("parseRuntimeConfig returned error: %s", errResult)
+	}
+
+	if agent.Spec.Runtime == nil {
+		t.Fatal("agent.Spec.Runtime is nil")
+	}
+	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType("codex") {
+		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, "codex")
+	}
+	if agent.Spec.SecretRef == nil {
+		t.Fatal("agent.Spec.SecretRef is nil")
+	}
+	if agent.Spec.SecretRef.Name != "codex-api-key" {
+		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "codex-api-key")
+	}
+}
+
 func TestParseRuntimeConfig_RejectsUnsupportedSecretRef(t *testing.T) {
 	fc := newFakeClient(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{

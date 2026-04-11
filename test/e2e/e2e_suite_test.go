@@ -37,6 +37,7 @@ var (
 	generalWorkerImage = "ghcr.io/sozercan/orka/general-worker:latest"
 	copilotWorkerImage = "ghcr.io/sozercan/orka/agent-worker-copilot:latest"
 	claudeWorkerImage  = "ghcr.io/sozercan/orka/agent-worker-claude:latest"
+	codexWorkerImage   = "ghcr.io/sozercan/orka/agent-worker-codex:latest"
 
 	// E2E environment configuration (loaded from .env or environment)
 	e2eOpenAIAPIKey     string
@@ -66,12 +67,20 @@ var _ = BeforeSuite(func() {
 		fmt.Sprintf("GENERAL_WORKER_IMG=%s", generalWorkerImage),
 		fmt.Sprintf("COPILOT_WORKER_IMG=%s", copilotWorkerImage),
 		fmt.Sprintf("CLAUDE_WORKER_IMG=%s", claudeWorkerImage),
+		fmt.Sprintf("CODEX_WORKER_IMG=%s", codexWorkerImage),
 	)
 	_, err := utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build Docker images")
 
 	By("loading all images into Kind cluster")
-	for _, img := range []string{managerImage, aiWorkerImage, generalWorkerImage, copilotWorkerImage, claudeWorkerImage} {
+	for _, img := range []string{
+		managerImage,
+		aiWorkerImage,
+		generalWorkerImage,
+		copilotWorkerImage,
+		claudeWorkerImage,
+		codexWorkerImage,
+	} {
 		err = utils.LoadImageToKindClusterWithName(img)
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to load image %s into Kind", img))
 	}

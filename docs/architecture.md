@@ -66,6 +66,7 @@ Orka uses five CRDs:
 | **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in tools (`web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`) and coordination tools (13 auto-injected when `coordination.enabled`, plus 4 opt-in GitHub triage tools via `spec.tools[]`) |
 | **Copilot Agent Worker** (`workers/agent/copilot/`) | Runs tasks via GitHub Copilot CLI using the Go SDK |
 | **Claude Agent Worker** (`workers/agent/claude/`) | Runs tasks via Claude Code CLI |
+| **Codex Agent Worker** (`workers/agent/codex/`) | Runs tasks via OpenAI Codex CLI |
 
 ## Design Decisions
 
@@ -110,7 +111,8 @@ orka/
 │   ├── general/            # General worker (container commands)
 │   └── agent/
 │       ├── copilot/        # Copilot CLI agent worker
-│       └── claude/         # Claude Code CLI agent worker
+│       ├── claude/         # Claude Code CLI agent worker
+│       └── codex/          # Codex CLI agent worker
 ├── ui/                     # React SPA (Vite + TanStack Router + shadcn/ui)
 ├── config/                 # Kustomize manifests (CRDs, RBAC, samples)
 ├── charts/orka/          # Helm chart

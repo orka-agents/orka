@@ -42,27 +42,9 @@ var _ = Describe("API Extended Coverage", Ordered, func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
 
 		By("setting up port-forward to controller API")
-		ctx, cancel := context.WithCancel(context.Background())
-		cancelPF = cancel
-
-		cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
-			"-o", "jsonpath={.items[0].metadata.name}", "-n", namespace)
-		podName, err := utils.Run(cmd)
+		var err error
+		apiBaseURL, cancelPF, portForwardCmd, err = startControllerAPIPortForward(18082)
 		Expect(err).NotTo(HaveOccurred())
-
-		portForwardCmd = exec.CommandContext(ctx, "kubectl", "port-forward",
-			strings.TrimSpace(podName), "18082:8080", "-n", namespace)
-		err = portForwardCmd.Start()
-		Expect(err).NotTo(HaveOccurred())
-
-		apiBaseURL = "http://localhost:18082"
-
-		Eventually(func(g Gomega) {
-			resp, err := http.Get(apiBaseURL + "/healthz")
-			g.Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
-			g.Expect(resp.StatusCode).To(Equal(http.StatusOK))
-		}, 30*time.Second, time.Second).Should(Succeed())
 
 		By("getting a service account token")
 		token, err = serviceAccountToken()
@@ -70,12 +52,7 @@ var _ = Describe("API Extended Coverage", Ordered, func() {
 	})
 
 	AfterAll(func() {
-		if cancelPF != nil {
-			cancelPF()
-		}
-		if portForwardCmd != nil && portForwardCmd.Process != nil {
-			_ = portForwardCmd.Wait()
-		}
+		stopPortForward(cancelPF, portForwardCmd)
 		cmd := exec.Command("kubectl", "delete", "task", taskName, "-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "delete", "provider", providerName, "-n", namespace, "--ignore-not-found")

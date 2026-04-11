@@ -1,0 +1,4 @@
+interface:
+  display_name: "Copilot Proxy Deploy"
+  short_description: "Deploy copilot-proxy to kind"
+  default_prompt: "Use $copilot-proxy-kind-deploy to build copilot-proxy, load it into the current kind cluster, and roll it out with the Kubernetes manifest."

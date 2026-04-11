@@ -20,9 +20,9 @@ beforeEach(() => {
 })
 
 describe('ChatMessageList', () => {
-  it('empty state shows welcome text with fish emoji', () => {
+  it('empty state shows welcome text with orca emoji', () => {
     render(<ChatMessageList />)
-    expect(screen.getByText('🪸')).toBeInTheDocument()
+    expect(screen.getByText('🐋')).toBeInTheDocument()
     expect(screen.getByText('Orka Meta Agent')).toBeInTheDocument()
   })
 

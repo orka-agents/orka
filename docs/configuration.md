@@ -16,6 +16,10 @@ spec:
   agentRef:
     name: my-agent
   prompt: "Analyze the latest Kubernetes security best practices"
+  execution:
+    runtimeClassName: gvisor
+    nodeSelector:
+      sandbox-runtime: gvisor
   sessionRef:
     name: my-session
     create: false  # default: false
@@ -50,6 +54,10 @@ metadata:
 spec:
   providerRef:
     name: anthropic-prod
+  execution:
+    runtimeClassName: kata-qemu
+    nodeSelector:
+      sandbox-runtime: kata
   model:
     temperature: 0.7
     maxTokens: 4096
@@ -92,6 +100,44 @@ spec:
 **Opt-in coordination tools** (require explicit `spec.tools[]` entries on the Agent):
 
 `list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`
+
+### Execution
+
+Tasks and Agents both support `spec.execution` for worker pod runtime selection and placement.
+
+```yaml
+execution:
+  runtimeClassName: gvisor
+  nodeSelector:
+    sandbox-runtime: gvisor
+  tolerations:
+    - key: sandbox-runtime
+      operator: Equal
+      value: gvisor
+      effect: NoSchedule
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: sandbox-runtime
+                operator: In
+                values: ["gvisor"]
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `runtimeClassName` | string | Selects a Kubernetes `RuntimeClass` such as `gvisor` or `kata-qemu` |
+| `nodeSelector` | map[string]string | Restricts worker pods to nodes with matching labels |
+| `tolerations` | list | Allows worker pods onto tainted runtime-specific node pools |
+| `affinity` | object | Adds Kubernetes affinity or anti-affinity rules for worker pods |
+
+Resolution order:
+
+- `Agent.spec.execution` provides defaults for tasks that reference the Agent
+- `Task.spec.execution` overrides Agent defaults
+- `runtimeClassName` is a scalar override
+- `nodeSelector`, `tolerations`, and `affinity` replace Agent defaults when they are set on the Task
 
 ### Provider Fallback Chain
 
@@ -137,7 +183,7 @@ spec:
 
 ### Agent (with Runtime)
 
-Agent configuration for external CLI runtimes (Claude Code CLI or GitHub Copilot CLI).
+Agent configuration for external CLI runtimes (Claude Code CLI, GitHub Copilot CLI, or Codex CLI).
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -152,7 +198,7 @@ spec:
   systemPrompt:
     inline: "You are a senior software engineer."
   runtime:
-    type: claude         # or "copilot"
+    type: claude         # or "copilot" / "codex"
     defaultMaxTurns: 50
     defaultAllowBash: true
     defaultAllowedTools:
@@ -352,6 +398,7 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 | `--ai-worker-image` | `ghcr.io/sozercan/orka/ai-worker:latest` | AI worker container image |
 | `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Copilot agent worker image |
 | `--claude-worker-image` | `ghcr.io/sozercan/orka/agent-worker-claude:latest` | Claude agent worker image |
+| `--codex-worker-image` | `ghcr.io/sozercan/orka/agent-worker-codex:latest` | Codex agent worker image |
 | `--general-worker-image` | `ghcr.io/sozercan/orka/general-worker:latest` | General worker container image |
 | `--store-backend` | `sqlite` | Storage backend (sqlite) |
 | `--store-path` | `/data/orka.db` | Path to SQLite database file |

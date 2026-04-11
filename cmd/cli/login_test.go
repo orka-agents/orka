@@ -36,6 +36,11 @@ func TestNewLoginCmd_WithTokenFlag(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
+	// Stub out the browser opener so we never launch a real browser.
+	orig := openBrowserFunc
+	openBrowserFunc = func(string) error { return nil }
+	t.Cleanup(func() { openBrowserFunc = orig })
+
 	cmd := newLoginCmd()
 
 	// Create a root command to provide persistent flags
@@ -43,11 +48,9 @@ func TestNewLoginCmd_WithTokenFlag(t *testing.T) {
 	root.AddCommand(cmd)
 
 	// With --token provided, it should try to construct URL and open browser.
-	// The openBrowser will fail in test, but the command should return nil.
 	root.SetArgs([]string{"login", "--server", "http://test-server:8080", "--token", "test-token-123"})
 
 	err := root.Execute()
-	// openBrowser may fail, but the cmd returns nil on browser error
 	if err != nil {
 		t.Fatalf("Execute() error: %v", err)
 	}
@@ -76,6 +79,11 @@ func TestNewLoginCmd_DefaultServerFromConfig(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
+	// Stub out the browser opener so we never launch a real browser.
+	orig := openBrowserFunc
+	openBrowserFunc = func(string) error { return nil }
+	t.Cleanup(func() { openBrowserFunc = orig })
+
 	// Save a config with server
 	cfg := orkaConfig{Server: "http://configured-server:9090"}
 	if err := saveConfig(cfg); err != nil {
@@ -88,7 +96,6 @@ func TestNewLoginCmd_DefaultServerFromConfig(t *testing.T) {
 
 	root.SetArgs([]string{"login", "--token", "my-token"})
 
-	// Should use configured server. openBrowser may fail but command returns nil.
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
 	}

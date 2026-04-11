@@ -6,11 +6,21 @@ metadata:
     app.kubernetes.io/name: orka
     app.kubernetes.io/managed-by: kustomize
 spec:
-  # type: agent delegates work to an external CLI runtime (e.g., Claude Code CLI)
+  # type: agent delegates work to an external CLI runtime (e.g., Claude Code CLI or Codex CLI)
   type: agent
   # agentRef references an Agent CRD that defines runtime type and credentials
   agentRef:
     name: claude-agent
+  # execution optionally overrides runtime isolation and placement for this task
+  # execution:
+  #   runtimeClassName: gvisor
+  #   nodeSelector:
+  #     sandbox-runtime: gvisor
+  #   tolerations:
+  #     - key: sandbox-runtime
+  #       operator: Equal
+  #       value: gvisor
+  #       effect: NoSchedule
   # prompt is the instruction sent to the agent CLI
   prompt: "Refactor the main.go file to use structured logging"
   # agentRuntime allows task-level overrides of the Agent's runtime defaults

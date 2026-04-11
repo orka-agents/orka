@@ -70,6 +70,7 @@ spec:
           - --ai-worker-image=ghcr.io/sozercan/orka/ai-worker:latest
           - --copilot-worker-image=ghcr.io/sozercan/orka/agent-worker-copilot:latest
           - --claude-worker-image=ghcr.io/sozercan/orka/agent-worker-claude:latest
+          - --codex-worker-image=ghcr.io/sozercan/orka/agent-worker-codex:latest
           - --general-worker-image=ghcr.io/sozercan/orka/general-worker:latest
         image: controller:latest
         name: manager

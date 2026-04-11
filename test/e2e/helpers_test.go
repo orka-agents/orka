@@ -10,7 +10,9 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"time"
@@ -20,6 +22,8 @@ import (
 
 	"github.com/sozercan/orka/test/utils"
 )
+
+const controllerAPIService = "orka-api"
 
 // skipIfNoKey skips the current test if the given environment variable is not set or empty.
 func skipIfNoKey(envVar string) {
@@ -144,6 +148,42 @@ func createProviderCRD(name, providerType, secretName, secretKey, baseURL, model
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(output).To(Equal("true"), "Provider %s should be ready", name)
 	}, 30*time.Second, time.Second).Should(Succeed())
+}
+
+func startControllerAPIPortForward(localPort int) (string, context.CancelFunc, *exec.Cmd, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", localPort)
+
+	cmd := exec.CommandContext(ctx, "kubectl", "port-forward",
+		"-n", namespace,
+		"svc/"+controllerAPIService,
+		fmt.Sprintf("%d:8080", localPort),
+	)
+	cmd.Stdout = GinkgoWriter
+	cmd.Stderr = GinkgoWriter
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return "", nil, nil, err
+	}
+
+	Eventually(func(g Gomega) {
+		resp, err := http.Get(baseURL + "/healthz")
+		g.Expect(err).NotTo(HaveOccurred())
+		defer resp.Body.Close()
+		g.Expect(resp.StatusCode).To(Equal(http.StatusOK))
+	}, 60*time.Second, time.Second).Should(Succeed())
+
+	return baseURL, cancel, cmd, nil
+}
+
+func stopPortForward(cancel context.CancelFunc, cmd *exec.Cmd) {
+	if cancel != nil {
+		cancel()
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Wait()
+	}
 }
 
 // dumpDebugInfo collects and prints debug information on test failure.
