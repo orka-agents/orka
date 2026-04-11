@@ -27,15 +27,33 @@ const (
 	defaultMaxTurns = 50
 	workspaceDir    = "/workspace"
 	defaultTimeout  = 20 * time.Minute
+
+	toolNameBash       = "bash"
+	toolNameCreateFile = "create_file"
+	toolNameShell      = "shell"
+
+	findingsSchemaExample = `{"version":1,"repository":{"repo_url":"...","branch":"...","head_sha":"...",` +
+		`"base_sha":"..."},"scan":{"mode":"initial|incremental|manual","commit_count":0,` +
+		`"summary":"..."},"findings":[]}`
+	validationSchemaExample = `{"version":1,"finding_id":"fnd_...","status":"validated|failed|skipped",` +
+		`"summary":"...","validation_steps":["..."],"reproduction":"...","attack_path_analysis":"...",` +
+		`"likelihood":"...","impact":"...","assumptions":["..."],"controls":["..."],` +
+		`"blindspots":["..."],"evidence":[]}`
 )
 
 var (
 	toolCallPattern           = regexp.MustCompile(`(?s)<tool_call>(.*?)</tool_call>`)
 	toolNamePattern           = regexp.MustCompile(`<tool_name>([^<]+)</tool_name>`)
-	artifactCreateFilePattern = regexp.MustCompile(`(?s)<(?:path|file_path)>([^<]+)</(?:path|file_path)>.*?<content>(.*?)</content>`)
-	shellCommandPattern       = regexp.MustCompile(`(?s)<command>(.*?)</command>`)
-	artifactHeredocStart      = regexp.MustCompile(`cat > ([^\n]+?\.orka-artifacts/([A-Za-z0-9._-]+)) << '?([A-Za-z0-9_]+)'?\n`)
-	requiredArtifactsPattern  = regexp.MustCompile(`(?m)^REQUIRED_SECURITY_ARTIFACTS:\s*(.+?)\s*$`)
+	artifactCreateFilePattern = regexp.MustCompile(
+		`(?s)<(?:path|file_path)>([^<]+)</(?:path|file_path)>` +
+			`.*?<content>(.*?)</content>`,
+	)
+	shellCommandPattern  = regexp.MustCompile(`(?s)<command>(.*?)</command>`)
+	artifactHeredocStart = regexp.MustCompile(
+		`cat > ([^\n]+?\.orka-artifacts/([A-Za-z0-9._-]+))` +
+			` << '?([A-Za-z0-9_]+)'?\n`,
+	)
+	requiredArtifactsPattern = regexp.MustCompile(`(?m)^REQUIRED_SECURITY_ARTIFACTS:\s*(.+?)\s*$`)
 )
 
 func main() {
@@ -185,7 +203,12 @@ func extractResult(event *copilot.SessionEvent) string {
 	return ""
 }
 
-func materializeRequiredSecurityArtifacts(ctx context.Context, session *copilot.Session, cfg *common.AgentConfig, result string) (string, error) {
+func materializeRequiredSecurityArtifacts(
+	ctx context.Context,
+	session *copilot.Session,
+	cfg *common.AgentConfig,
+	result string,
+) (string, error) {
 	required := requiredSecurityArtifacts(cfg)
 	if len(required) == 0 {
 		return result, nil
@@ -199,7 +222,11 @@ func materializeRequiredSecurityArtifacts(ctx context.Context, session *copilot.
 		return result, nil
 	}
 	if recovered, recoverErr := recoverArtifactsFromDirectResult(missing, result); recoverErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to recover artifacts from direct result: %v\n", recoverErr)
+		fmt.Fprintf(
+			os.Stderr,
+			"warning: failed to recover artifacts from direct result: %v\n",
+			recoverErr,
+		)
 	} else if recovered > 0 {
 		fmt.Printf("Recovered %d security artifacts from direct result\n", recovered)
 		missing, err = common.MissingArtifacts(required)
@@ -211,7 +238,11 @@ func materializeRequiredSecurityArtifacts(ctx context.Context, session *copilot.
 		}
 	}
 	if recovered, recoverErr := recoverArtifactsFromTranscript(result); recoverErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to recover artifacts from transcript: %v\n", recoverErr)
+		fmt.Fprintf(
+			os.Stderr,
+			"warning: failed to recover artifacts from transcript: %v\n",
+			recoverErr,
+		)
 	} else if recovered > 0 {
 		fmt.Printf("Recovered %d security artifacts from transcript\n", recovered)
 		missing, err = common.MissingArtifacts(required)
@@ -223,7 +254,11 @@ func materializeRequiredSecurityArtifacts(ctx context.Context, session *copilot.
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "warning: missing required security artifacts after initial session: %s\n", strings.Join(missing, ", "))
+	fmt.Fprintf(
+		os.Stderr,
+		"warning: missing required security artifacts after initial session: %s\n",
+		strings.Join(missing, ", "),
+	)
 
 	response, err := session.SendAndWait(ctx, copilot.MessageOptions{
 		Prompt: securityArtifactsFollowUpPrompt(cfg, missing),
@@ -235,7 +270,8 @@ func materializeRequiredSecurityArtifacts(ctx context.Context, session *copilot.
 	if followUp := strings.TrimSpace(extractResult(response)); followUp != "" {
 		var directRecovered int
 		var transcriptRecovered int
-		result, missing, directRecovered, transcriptRecovered, err = recoverArtifactsAfterFollowUp(required, missing, result, followUp)
+		result, missing, directRecovered, transcriptRecovered, err =
+			recoverArtifactsAfterFollowUp(required, missing, result, followUp)
 		if err != nil {
 			return result, err
 		}
@@ -257,7 +293,10 @@ func materializeRequiredSecurityArtifacts(ctx context.Context, session *copilot.
 	}
 
 	if len(missing) > 0 {
-		return result, fmt.Errorf("required security artifacts still missing after follow-up: %s", strings.Join(missing, ", "))
+		return result, fmt.Errorf(
+			"required security artifacts still missing after follow-up: %s",
+			strings.Join(missing, ", "),
+		)
 	}
 
 	fmt.Printf("Required security artifacts materialized after follow-up\n")
@@ -326,7 +365,8 @@ func requiredSecurityArtifacts(cfg *common.AgentConfig) []string {
 		}
 		return required
 	}
-	if strings.Contains(cfg.Prompt, security.ArtifactThreatModel) && strings.Contains(cfg.Prompt, security.ArtifactFindings) {
+	if strings.Contains(cfg.Prompt, security.ArtifactThreatModel) &&
+		strings.Contains(cfg.Prompt, security.ArtifactFindings) {
 		return []string{security.ArtifactThreatModel, security.ArtifactFindings}
 	}
 	return nil
@@ -352,12 +392,16 @@ func securityArtifactsFollowUpPrompt(cfg *common.AgentConfig, missing []string) 
 			prompt.WriteString("security-threat-model.md must be non-empty markdown grounded in the repository.\n")
 		case security.ArtifactFindings:
 			prompt.WriteString("security-findings.json must be valid JSON with this shape:\n")
-			prompt.WriteString(`{"version":1,"repository":{"repo_url":"...","branch":"...","head_sha":"...","base_sha":"..."},"scan":{"mode":"initial|incremental|manual","commit_count":0,"summary":"..."},"findings":[]}` + "\n")
-			prompt.WriteString("Each finding object must use these keys: fingerprint, title, summary, severity, confidence, validation_status, file_path, line, commit_sha, root_cause, remediation, suggested_action, evidence.\n")
+			prompt.WriteString(findingsSchemaExample + "\n")
+			prompt.WriteString(
+				"Each finding object must use these keys: fingerprint, title, summary, " +
+					"severity, confidence, validation_status, file_path, line, commit_sha, " +
+					"root_cause, remediation, suggested_action, evidence.\n",
+			)
 			prompt.WriteString("If there are zero findings, write valid JSON with version=1 and an empty findings array.\n")
 		case security.ArtifactValidation:
 			prompt.WriteString("security-validation.json must be valid JSON with this shape:\n")
-			prompt.WriteString(`{"version":1,"finding_id":"fnd_...","status":"validated|failed|skipped","summary":"...","validation_steps":["..."],"reproduction":"...","attack_path_analysis":"...","likelihood":"...","impact":"...","assumptions":["..."],"controls":["..."],"blindspots":["..."],"evidence":[]}` + "\n")
+			prompt.WriteString(validationSchemaExample + "\n")
 		}
 	}
 	prompt.WriteString("After the files are written, reply with only: SECURITY_ARTIFACTS_WRITTEN\n")
@@ -431,16 +475,21 @@ func recoveredArtifactCandidates(result string) []artifactCandidate {
 		nameMatch := toolNamePattern.FindStringSubmatch(block)
 		if len(nameMatch) >= 2 {
 			switch strings.TrimSpace(nameMatch[1]) {
-			case "create_file":
+			case toolNameCreateFile:
 				match := artifactCreateFilePattern.FindStringSubmatch(block)
 				if len(match) < 3 {
 					continue
 				}
-				if candidate, ok := newArtifactCandidate(match[1], []byte(match[2]), "create_file", order); ok {
+				if candidate, ok := newArtifactCandidate(
+					match[1],
+					[]byte(match[2]),
+					toolNameCreateFile,
+					order,
+				); ok {
 					selectArtifactCandidate(selected, candidate)
 					order++
 				}
-			case "shell", "bash":
+			case toolNameShell, toolNameBash:
 				match := shellCommandPattern.FindStringSubmatch(block)
 				if len(match) < 2 {
 					continue
@@ -455,16 +504,21 @@ func recoveredArtifactCandidates(result string) []artifactCandidate {
 
 		if call, ok := parseJSONToolCall(block); ok {
 			switch strings.TrimSpace(call.Name) {
-			case "create_file":
+			case toolNameCreateFile:
 				fullPath := strings.TrimSpace(call.Arguments.Path)
 				if fullPath == "" {
 					fullPath = strings.TrimSpace(call.Arguments.FilePath)
 				}
-				if candidate, ok := newArtifactCandidate(fullPath, []byte(call.Arguments.Content), "create_file", order); ok {
+				if candidate, ok := newArtifactCandidate(
+					fullPath,
+					[]byte(call.Arguments.Content),
+					toolNameCreateFile,
+					order,
+				); ok {
 					selectArtifactCandidate(selected, candidate)
 					order++
 				}
-			case "shell", "bash":
+			case toolNameShell, toolNameBash:
 				for _, candidate := range artifactCandidatesFromShellCommand(call.Arguments.Command, order) {
 					selectArtifactCandidate(selected, candidate)
 					order++
@@ -524,8 +578,8 @@ func artifactCandidatesFromShellCommand(command string, baseOrder int) []artifac
 	return candidates
 }
 
-func newArtifactCandidate(path string, data []byte, source string, order int) (artifactCandidate, bool) {
-	filename, ok := artifactFilenameForPath(path)
+func newArtifactCandidate(artifactPath string, data []byte, source string, order int) (artifactCandidate, bool) {
+	filename, ok := artifactFilenameForPath(artifactPath)
 	if !ok {
 		return artifactCandidate{}, false
 	}
@@ -591,9 +645,9 @@ func preferArtifactCandidate(current, next artifactCandidate) bool {
 
 func artifactCandidateSourcePriority(source string) int {
 	switch source {
-	case "shell", "bash":
+	case toolNameShell, toolNameBash:
 		return 2
-	case "create_file":
+	case toolNameCreateFile:
 		return 1
 	default:
 		return 0

@@ -210,7 +210,7 @@ func TestIngestScanTaskFailsSucceededTaskWithoutRequiredArtifacts(t *testing.T) 
 	if err != nil {
 		t.Fatalf("GetScanRun() error = %v", err)
 	}
-	if run.Phase != "failed" {
+	if run.Phase != scanRunPhaseFailed {
 		t.Fatalf("run.Phase = %q, want failed", run.Phase)
 	}
 	if !strings.Contains(run.ErrorMessage, security.ArtifactThreatModel) {
@@ -290,7 +290,7 @@ func TestIngestScanTaskPersistsThreatModelWhenRequiredArtifactsExist(t *testing.
 	if err != nil {
 		t.Fatalf("GetScanRun() error = %v", err)
 	}
-	if run.Phase != "succeeded" {
+	if run.Phase != scanRunPhaseSucceeded {
 		t.Fatalf("run.Phase = %q, want succeeded", run.Phase)
 	}
 	if run.HeadCommit != "abc123" {
@@ -355,7 +355,7 @@ func TestIngestScanTaskPersistsThreatModelWhenFindingsAreInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetScanRun() error = %v", err)
 	}
-	if run.Phase != "failed" {
+	if run.Phase != scanRunPhaseFailed {
 		t.Fatalf("run.Phase = %q, want failed", run.Phase)
 	}
 	if !strings.Contains(run.ErrorMessage, "invalid JSON") {
@@ -522,7 +522,7 @@ func TestIngestValidationTaskUpdatesFindingValidationDetails(t *testing.T) {
 		Severity:         "high",
 		Confidence:       "high",
 		ValidationStatus: "unvalidated",
-		State:            "open",
+		State:            findingStateOpen,
 	}
 	if err := store.UpsertFinding(ctx, finding); err != nil {
 		t.Fatalf("UpsertFinding() error = %v", err)
@@ -531,7 +531,7 @@ func TestIngestValidationTaskUpdatesFindingValidationDetails(t *testing.T) {
 	validation := security.ValidationArtifact{
 		Version:            1,
 		FindingID:          finding.ID,
-		Status:             "validated",
+		Status:             findingValidationStatusValidated,
 		Summary:            "Confirmed injection path",
 		ValidationSteps:    []string{"Trace input to shell execution", "Confirm shell metacharacters are preserved"},
 		AttackPathAnalysis: "Attacker controls package names which reach shell execution.",
@@ -573,7 +573,7 @@ func TestIngestValidationTaskUpdatesFindingValidationDetails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetFinding() error = %v", err)
 	}
-	if updated.ValidationStatus != "validated" {
+	if updated.ValidationStatus != findingValidationStatusValidated {
 		t.Fatalf("ValidationStatus = %q, want validated", updated.ValidationStatus)
 	}
 	if !strings.Contains(updated.ValidationJSON, "Confirmed injection path") {
@@ -677,7 +677,7 @@ func TestProgressLatestScanRunUsesNewestOwnedScanWhenStatusIsStale(t *testing.T)
 		RepositoryScan: "kaset",
 		TaskName:       newTask.Name,
 		Mode:           "manual",
-		Phase:          "pending",
+		Phase:          scanRunPhasePending,
 		StartedAt:      newTask.CreationTimestamp.Time,
 	}); err != nil {
 		t.Fatalf("CreateScanRun() error = %v", err)
@@ -710,7 +710,7 @@ func TestProgressLatestScanRunUsesNewestOwnedScanWhenStatusIsStale(t *testing.T)
 	if err != nil {
 		t.Fatalf("GetScanRun() error = %v", err)
 	}
-	if run.Phase != "running" {
+	if run.Phase != scanRunPhaseRunning {
 		t.Fatalf("run.Phase = %q, want running", run.Phase)
 	}
 }

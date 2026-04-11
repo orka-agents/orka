@@ -165,8 +165,8 @@ func (e *FindingsArtifactEvidenceRefs) UnmarshalJSON(data []byte) error {
 
 // ParseRepositoryURL extracts owner and repo name from GitHub URLs.
 func ParseRepositoryURL(repoURL string) (owner string, repository string) {
-	if strings.HasPrefix(repoURL, "git@") {
-		parts := strings.SplitN(strings.TrimPrefix(repoURL, "git@"), ":", 2)
+	if trimmed, ok := strings.CutPrefix(repoURL, "git@"); ok {
+		parts := strings.SplitN(trimmed, ":", 2)
 		if len(parts) == 2 {
 			repoPath := strings.TrimSuffix(parts[1], ".git")
 			segments := strings.Split(strings.Trim(repoPath, "/"), "/")
@@ -374,7 +374,7 @@ func ArtifactWorkspacePath(subPath string) string {
 	}
 
 	depth := 0
-	for _, segment := range strings.Split(cleaned, "/") {
+	for segment := range strings.SplitSeq(cleaned, "/") {
 		if segment == "" || segment == "." {
 			continue
 		}

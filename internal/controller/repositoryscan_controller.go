@@ -42,6 +42,20 @@ const (
 	repositoryScanPhaseError     = "Error"
 	repositoryScanPhaseSuspended = "Suspended"
 
+	scanRunPhasePending   = "pending"
+	scanRunPhaseRunning   = "running"
+	scanRunPhaseSucceeded = "succeeded"
+	scanRunPhaseFailed    = "failed"
+
+	findingStateOpen                 = "open"
+	findingValidationStatusPending   = "pending"
+	findingValidationStatusValidated = "validated"
+	findingValidationStatusFailed    = "failed"
+
+	scanSummaryRunning             = "scan is running"
+	scanSummaryThreatModelPending  = "Threat model generated; independent discovery agents pending"
+	scanSummaryThreatModelComplete = "Threat model generated successfully"
+
 	// Kubernetes rejects condition messages longer than 32 KiB. Scan summaries can
 	// exceed that, so keep the full summary in storage and only publish a capped
 	// status message on the CRD.
@@ -78,6 +92,14 @@ func repositoryScanConditionMessage(message, fallback string) string {
 	}
 	message = strings.TrimRight(message, " \t\r\n")
 	return message + repositoryScanConditionMessageSuffix
+}
+
+func titleCaseMode(mode string) string {
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		return "Scan"
+	}
+	return strings.ToUpper(mode[:1]) + mode[1:]
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositoryscans,verbs=get;list;watch;create;update;patch;delete
@@ -255,11 +277,11 @@ func latestOwnedScanPipelineRunID(tasks []corev1alpha1.Task) string {
 			latest = task
 			continue
 		}
-		if task.CreationTimestamp.Time.After(latest.CreationTimestamp.Time) {
+		if task.CreationTimestamp.After(latest.CreationTimestamp.Time) {
 			latest = task
 			continue
 		}
-		if task.CreationTimestamp.Time.Equal(latest.CreationTimestamp.Time) && task.Name > latest.Name {
+		if task.CreationTimestamp.Equal(&latest.CreationTimestamp) && task.Name > latest.Name {
 			latest = task
 		}
 	}
@@ -350,7 +372,7 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 			RepositoryScan: scan.Name,
 			TaskName:       taskName,
 			Mode:           mode,
-			Phase:          "pending",
+			Phase:          scanRunPhasePending,
 			BaseCommit:     baseCommit,
 			HeadCommit:     headCommit,
 			StartedAt:      time.Now(),
@@ -367,7 +389,7 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 			Type:               "Ready",
 			Status:             metav1.ConditionFalse,
 			Reason:             "Scanning",
-			Message:            fmt.Sprintf("%s scan is running", strings.Title(mode)),
+			Message:            fmt.Sprintf("%s scan is running", titleCaseMode(mode)),
 			LastTransitionTime: metav1.Now(),
 			ObservedGeneration: s.Generation,
 		})
@@ -487,7 +509,7 @@ func (r *RepositoryScanReconciler) progressLatestScanRun(ctx context.Context, sc
 	if run.Summary == "" || strings.Contains(run.Summary, "discovery pending") {
 		run.Summary = "Threat model generated; independent discovery agents started"
 	}
-	run.Phase = "running"
+	run.Phase = scanRunPhaseRunning
 	run.CompletedAt = nil
 	run.ErrorMessage = ""
 	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
@@ -511,7 +533,7 @@ func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *c
 	}
 
 	slices.SortFunc(tasks.Items, func(a, b corev1alpha1.Task) int {
-		return a.CreationTimestamp.Time.Compare(b.CreationTimestamp.Time)
+		return a.CreationTimestamp.Compare(b.CreationTimestamp.Time)
 	})
 
 	latestScanRunID := latestOwnedScanPipelineRunID(tasks.Items)
@@ -570,11 +592,11 @@ func latestTerminalScanTask(tasks []corev1alpha1.Task) *corev1alpha1.Task {
 			latest = task
 			continue
 		}
-		if task.CreationTimestamp.Time.After(latest.CreationTimestamp.Time) {
+		if task.CreationTimestamp.After(latest.CreationTimestamp.Time) {
 			latest = task
 			continue
 		}
-		if task.CreationTimestamp.Time.Equal(latest.CreationTimestamp.Time) && task.Name > latest.Name {
+		if task.CreationTimestamp.Equal(&latest.CreationTimestamp) && task.Name > latest.Name {
 			latest = task
 		}
 	}
@@ -583,15 +605,15 @@ func latestTerminalScanTask(tasks []corev1alpha1.Task) *corev1alpha1.Task {
 
 func taskPhaseToSecurityPhase(phase corev1alpha1.TaskPhase) string {
 	if phase == corev1alpha1.TaskPhaseSucceeded {
-		return "succeeded"
+		return scanRunPhaseSucceeded
 	}
 	if phase == corev1alpha1.TaskPhaseFailed {
-		return "failed"
+		return scanRunPhaseFailed
 	}
 	if phase == corev1alpha1.TaskPhaseRunning {
-		return "running"
+		return scanRunPhaseRunning
 	}
-	return "pending"
+	return scanRunPhasePending
 }
 
 type scanTaskArtifacts struct {
@@ -809,7 +831,7 @@ func (r *RepositoryScanReconciler) getOrCreateScanRun(ctx context.Context, scan 
 }
 
 func conciseTaskMessage(message, fallback string) string {
-	for _, line := range strings.Split(message, "\n") {
+	for line := range strings.SplitSeq(message, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -844,13 +866,130 @@ func pipelineTaskDisplayName(task *corev1alpha1.Task) string {
 	return stage
 }
 
-func (r *RepositoryScanReconciler) refreshScanRunStatus(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, scanID string, updateStatus bool) error {
+type scanRunProgress struct {
+	hasActive           bool
+	hasThreatModelReady bool
+	hasDiscovery        bool
+	discoveryCount      int
+	discoverySucceeded  int
+	failedStages        []string
+	latestCompletion    *time.Time
+}
+
+func (r *RepositoryScanReconciler) collectScanRunProgress(
+	ctx context.Context,
+	tasks []corev1alpha1.Task,
+	run *store.ScanRun,
+) scanRunProgress {
+	progress := scanRunProgress{}
+	for i := range tasks {
+		task := &tasks[i]
+		stage := taskSecurityStage(task)
+		if !isScanPipelineStage(stage) {
+			continue
+		}
+		if isActiveTaskPhase(task.Status.Phase) {
+			progress.hasActive = true
+		}
+		if task.Status.CompletionTime != nil {
+			completed := task.Status.CompletionTime.Time
+			if progress.latestCompletion == nil || completed.After(*progress.latestCompletion) {
+				progress.latestCompletion = &completed
+			}
+		}
+		switch stage {
+		case security.StageThreatModel:
+			if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+				progress.hasThreatModelReady = true
+			}
+			if task.Status.Phase == corev1alpha1.TaskPhaseFailed {
+				progress.failedStages = append(progress.failedStages, pipelineTaskDisplayName(task))
+				if run.ErrorMessage == "" {
+					run.ErrorMessage = r.pipelineTaskSummary(ctx, task, "threat model stage failed")
+				}
+			}
+		case security.StageDiscovery, security.StageCombined:
+			progress.hasDiscovery = true
+			progress.discoveryCount++
+			if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+				progress.discoverySucceeded++
+			}
+			if task.Status.Phase == corev1alpha1.TaskPhaseFailed {
+				progress.failedStages = append(progress.failedStages, pipelineTaskDisplayName(task))
+				if run.ErrorMessage == "" {
+					run.ErrorMessage = r.pipelineTaskSummary(ctx, task, "discovery stage failed")
+				}
+			}
+		}
+	}
+	return progress
+}
+
+func applyScanRunProgress(run *store.ScanRun, progress scanRunProgress) {
+	if progress.hasActive {
+		run.Phase = scanRunPhaseRunning
+		run.CompletedAt = nil
+		if run.Summary == "" {
+			if progress.hasThreatModelReady && !progress.hasDiscovery {
+				run.Summary = scanSummaryThreatModelPending
+			} else {
+				run.Summary = scanSummaryRunning
+			}
+		}
+		return
+	}
+
+	if run.ErrorMessage != "" || len(progress.failedStages) > 0 {
+		run.Phase = scanRunPhaseFailed
+		if progress.latestCompletion != nil {
+			run.CompletedAt = progress.latestCompletion
+		}
+		if run.ErrorMessage == "" {
+			run.ErrorMessage = fmt.Sprintf(
+				"scan failed in stages: %s",
+				strings.Join(progress.failedStages, ", "),
+			)
+		}
+		run.Summary = run.ErrorMessage
+		return
+	}
+
+	if progress.hasThreatModelReady && !progress.hasDiscovery {
+		run.Phase = scanRunPhaseRunning
+		run.CompletedAt = nil
+		run.Summary = scanSummaryThreatModelPending
+		return
+	}
+
+	run.Phase = scanRunPhaseSucceeded
+	run.ErrorMessage = ""
+	if progress.latestCompletion != nil {
+		run.CompletedAt = progress.latestCompletion
+	}
+	if progress.discoveryCount > 0 {
+		run.Summary = fmt.Sprintf(
+			"Threat model generated and %d/%d discovery scopes completed successfully",
+			progress.discoverySucceeded,
+			progress.discoveryCount,
+		)
+		return
+	}
+	run.Summary = scanSummaryThreatModelComplete
+}
+
+func (r *RepositoryScanReconciler) refreshScanRunStatus(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	run *store.ScanRun,
+	scanID string,
+	updateStatus bool,
+) error {
 	if r.Client == nil {
 		if run.ErrorMessage != "" {
-			run.Phase = "failed"
+			run.Phase = scanRunPhaseFailed
 			run.Summary = run.ErrorMessage
 		} else if run.Phase == "" {
-			run.Phase = "running"
+			run.Phase = scanRunPhaseRunning
 		}
 		if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
 			return err
@@ -869,89 +1008,7 @@ func (r *RepositoryScanReconciler) refreshScanRunStatus(ctx context.Context, sca
 		return err
 	}
 
-	hasActive := false
-	hasThreatModelSuccess := false
-	hasDiscovery := false
-	discoveryCount := 0
-	discoverySucceeded := 0
-	failedStages := []string{}
-	var latestCompletion *time.Time
-	for i := range tasks.Items {
-		task := &tasks.Items[i]
-		stage := taskSecurityStage(task)
-		if !isScanPipelineStage(stage) {
-			continue
-		}
-		if isActiveTaskPhase(task.Status.Phase) {
-			hasActive = true
-		}
-		if task.Status.CompletionTime != nil {
-			completed := task.Status.CompletionTime.Time
-			if latestCompletion == nil || completed.After(*latestCompletion) {
-				latestCompletion = &completed
-			}
-		}
-		switch stage {
-		case security.StageThreatModel:
-			if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
-				hasThreatModelSuccess = true
-			}
-			if task.Status.Phase == corev1alpha1.TaskPhaseFailed {
-				failedStages = append(failedStages, pipelineTaskDisplayName(task))
-				if run.ErrorMessage == "" {
-					run.ErrorMessage = r.pipelineTaskSummary(ctx, task, "threat model stage failed")
-				}
-			}
-		case security.StageDiscovery, security.StageCombined:
-			hasDiscovery = true
-			discoveryCount++
-			if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
-				discoverySucceeded++
-			}
-			if task.Status.Phase == corev1alpha1.TaskPhaseFailed {
-				failedStages = append(failedStages, pipelineTaskDisplayName(task))
-				if run.ErrorMessage == "" {
-					run.ErrorMessage = r.pipelineTaskSummary(ctx, task, "discovery stage failed")
-				}
-			}
-		}
-	}
-
-	if hasActive {
-		run.Phase = "running"
-		run.CompletedAt = nil
-		if run.Summary == "" {
-			if hasThreatModelSuccess && !hasDiscovery {
-				run.Summary = "Threat model generated; independent discovery agents pending"
-			} else {
-				run.Summary = "scan is running"
-			}
-		}
-	} else if run.ErrorMessage != "" || len(failedStages) > 0 {
-		run.Phase = "failed"
-		if latestCompletion != nil {
-			run.CompletedAt = latestCompletion
-		}
-		if run.ErrorMessage == "" {
-			run.ErrorMessage = fmt.Sprintf("scan failed in stages: %s", strings.Join(failedStages, ", "))
-		}
-		run.Summary = run.ErrorMessage
-	} else if hasThreatModelSuccess && !hasDiscovery {
-		run.Phase = "running"
-		run.CompletedAt = nil
-		run.Summary = "Threat model generated; independent discovery agents pending"
-	} else {
-		run.Phase = "succeeded"
-		run.ErrorMessage = ""
-		if latestCompletion != nil {
-			run.CompletedAt = latestCompletion
-		}
-		if discoveryCount > 0 {
-			run.Summary = fmt.Sprintf("Threat model generated and %d/%d discovery scopes completed successfully", discoverySucceeded, discoveryCount)
-		} else {
-			run.Summary = "Threat model generated successfully"
-		}
-	}
+	applyScanRunProgress(run, r.collectScanRunProgress(ctx, tasks.Items, run))
 
 	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
 		return err
@@ -984,17 +1041,17 @@ func (r *RepositoryScanReconciler) refreshScanRunStatus(ctx context.Context, sca
 		}
 
 		switch run.Phase {
-		case "running", "pending":
+		case scanRunPhaseRunning, scanRunPhasePending:
 			s.Status.Phase = repositoryScanPhaseScanning
 			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
 				Type:               "Ready",
 				Status:             metav1.ConditionFalse,
 				Reason:             "Scanning",
-				Message:            repositoryScanConditionMessage(run.Summary, "scan is running"),
+				Message:            repositoryScanConditionMessage(run.Summary, scanSummaryRunning),
 				LastTransitionTime: metav1.Now(),
 				ObservedGeneration: s.Generation,
 			})
-		case "succeeded":
+		case scanRunPhaseSucceeded:
 			s.Status.Phase = repositoryScanPhaseReady
 			s.Status.LastProcessedCommit = run.HeadCommit
 			if run.CompletedAt != nil {
@@ -1106,7 +1163,7 @@ func (r *RepositoryScanReconciler) createValidationTask(ctx context.Context, sca
 		return err
 	}
 
-	finding.ValidationStatus = "pending"
+	finding.ValidationStatus = findingValidationStatusPending
 	return r.SecurityStore.UpsertFinding(ctx, finding)
 }
 
@@ -1134,7 +1191,8 @@ func (r *RepositoryScanReconciler) enqueueAutoValidationTasks(ctx context.Contex
 		if finding == nil || !r.shouldAutoValidateFinding(scan, finding, created) {
 			continue
 		}
-		if finding.ValidationStatus == "validated" || finding.ValidationStatus == "pending" {
+		if finding.ValidationStatus == findingValidationStatusValidated ||
+			finding.ValidationStatus == findingValidationStatusPending {
 			continue
 		}
 		active, err := r.hasActiveValidationTask(ctx, scan, finding.ID)
@@ -1169,7 +1227,7 @@ func (r *RepositoryScanReconciler) ingestThreatModelTask(ctx context.Context, sc
 			if err := r.persistThreatModelIfChanged(ctx, scan, run.ID, run.StartedAt, threatModel); err != nil {
 				return err
 			}
-			run.Summary = "Threat model generated; independent discovery agents pending"
+			run.Summary = scanSummaryThreatModelPending
 		}
 	} else {
 		run.ErrorMessage = r.pipelineTaskSummary(ctx, task, "threat model stage failed")
@@ -1207,7 +1265,7 @@ func (r *RepositoryScanReconciler) ingestDiscoveryTask(ctx context.Context, scan
 			for _, item := range findingsArtifact.Findings {
 				finding := security.ToFinding(scan.Namespace, scan.Name, run.ID, task.Name, item)
 				if existing, err := r.SecurityStore.GetFinding(ctx, scan.Namespace, finding.ID); err == nil {
-					if existing.State != "" && existing.State != "open" {
+					if existing.State != "" && existing.State != findingStateOpen {
 						finding.State = existing.State
 					}
 					if existing.PatchProposalID != "" {
@@ -1216,7 +1274,8 @@ func (r *RepositoryScanReconciler) ingestDiscoveryTask(ctx context.Context, scan
 					finding.PRNumber = existing.PRNumber
 					finding.PRURL = existing.PRURL
 					finding.CreatedAt = existing.CreatedAt
-					if existing.ValidationStatus == "validated" || existing.ValidationStatus == "pending" {
+					if existing.ValidationStatus == findingValidationStatusValidated ||
+						existing.ValidationStatus == findingValidationStatusPending {
 						finding.ValidationStatus = existing.ValidationStatus
 					}
 					if len(existing.Evidence) > 0 {
@@ -1296,7 +1355,7 @@ func (r *RepositoryScanReconciler) ingestCombinedScanTask(ctx context.Context, s
 		for _, item := range scanArtifacts.findings.Findings {
 			finding := security.ToFinding(scan.Namespace, scan.Name, run.ID, task.Name, item)
 			if existing, err := r.SecurityStore.GetFinding(ctx, scan.Namespace, finding.ID); err == nil {
-				if existing.State != "" && existing.State != "open" {
+				if existing.State != "" && existing.State != findingStateOpen {
 					finding.State = existing.State
 				}
 				finding.PatchProposalID = existing.PatchProposalID
@@ -1411,12 +1470,15 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 			return err
 		}
 		if validationProblem != "" {
-			finding.ValidationStatus = "failed"
-			finding.ValidationJSON = fmt.Sprintf("{\"status\":\"failed\",\"summary\":%q}", validationProblem)
+			finding.ValidationStatus = findingValidationStatusFailed
+			finding.ValidationJSON = fmt.Sprintf(
+				"{\"status\":\"failed\",\"summary\":%q}",
+				validationProblem,
+			)
 		} else if artifacts != nil {
 			status := strings.TrimSpace(artifacts.artifact.Status)
 			if status == "" {
-				status = "validated"
+				status = findingValidationStatusValidated
 			}
 			finding.ValidationStatus = status
 			finding.ValidationJSON = artifacts.rawJSON
@@ -1442,8 +1504,11 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 			}
 		}
 	} else {
-		finding.ValidationStatus = "failed"
-		finding.ValidationJSON = fmt.Sprintf("{\"status\":\"failed\",\"summary\":%q}", r.pipelineTaskSummary(ctx, task, "validation task failed"))
+		finding.ValidationStatus = findingValidationStatusFailed
+		finding.ValidationJSON = fmt.Sprintf(
+			"{\"status\":\"failed\",\"summary\":%q}",
+			r.pipelineTaskSummary(ctx, task, "validation task failed"),
+		)
 	}
 
 	return r.SecurityStore.UpsertFinding(ctx, finding)
@@ -1502,7 +1567,7 @@ func (r *RepositoryScanReconciler) ingestPatchTask(ctx context.Context, scan *co
 	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
 		finding.State = "patch_ready"
 	} else {
-		finding.State = "open"
+		finding.State = findingStateOpen
 	}
 	return r.SecurityStore.UpsertFinding(ctx, finding)
 }

@@ -19,7 +19,16 @@ import (
 	"github.com/sozercan/orka/workers/common"
 )
 
-const testArtifactsDir = "/tmp/artifacts/"
+const (
+	testArtifactsDir        = "/tmp/artifacts/"
+	testDetailedThreatModel = "# Threat Model\n\nDetailed content"
+	testFindingsJSONManual1 = `{"version":1,"repository":{"repo_url":"https://github.com/example/repo",` +
+		`"branch":"main","head_sha":"abc","base_sha":"def"},"scan":{"mode":"manual",` +
+		`"commit_count":1,"summary":"ok"},"findings":[]}`
+	testFindingsJSONManual0 = `{"version":1,"repository":{"repo_url":"https://github.com/example/repo",` +
+		`"branch":"main","head_sha":"abc","base_sha":"def"},"scan":{"mode":"manual",` +
+		`"commit_count":0,"summary":"ok"},"findings":[]}`
+)
 
 func TestBuildSessionConfig_Minimal(t *testing.T) {
 	cfg := &common.AgentConfig{
@@ -283,7 +292,10 @@ func TestRecoverArtifactsFromDirectResultWritesThreatModel(t *testing.T) {
 		_ = os.RemoveAll(testArtifactsDir)
 	})
 
-	recovered, err := recoverArtifactsFromDirectResult([]string{security.ArtifactThreatModel}, "# Threat Model\n\nDetailed content")
+	recovered, err := recoverArtifactsFromDirectResult(
+		[]string{security.ArtifactThreatModel},
+		testDetailedThreatModel,
+	)
 	if err != nil {
 		t.Fatalf("recoverArtifactsFromDirectResult() error = %v", err)
 	}
@@ -305,10 +317,16 @@ func TestRecoverArtifactsFromDirectResultRejectsThreatModelToolTranscript(t *tes
 		_ = os.RemoveAll(testArtifactsDir)
 	})
 
-	result := `<tool_call><tool_name>shell</tool_name><parameters><command>cat > /workspace/.orka-artifacts/security-threat-model.md <<'EOF'
+	result := `
+<tool_call>
+<tool_name>shell</tool_name>
+<parameters>
+<command>cat > /workspace/.orka-artifacts/security-threat-model.md <<'EOF'
 # Threat Model
 EOF
-</command></parameters></tool_call>`
+</command>
+</parameters>
+</tool_call>`
 	recovered, err := recoverArtifactsFromDirectResult([]string{security.ArtifactThreatModel}, result)
 	if err != nil {
 		t.Fatalf("recoverArtifactsFromDirectResult() error = %v", err)
@@ -329,7 +347,8 @@ func TestRecoverArtifactsAfterFollowUpWritesThreatModelFromPlainText(t *testing.
 	initial := "Initial analysis summary"
 	followUp := "# Threat Model\n\nRecovered from the follow-up response."
 
-	result, updatedMissing, directRecovered, transcriptRecovered, err := recoverArtifactsAfterFollowUp(required, missing, initial, followUp)
+	result, updatedMissing, directRecovered, transcriptRecovered, err :=
+		recoverArtifactsAfterFollowUp(required, missing, initial, followUp)
 	if err != nil {
 		t.Fatalf("recoverArtifactsAfterFollowUp() error = %v", err)
 	}
@@ -424,11 +443,11 @@ func TestRecoverArtifactsFromTranscriptPrefersValidShellArtifact(t *testing.T) {
 </parameters>
 </tool_call>
 
-<tool_call>
-<tool_name>shell</tool_name>
-<parameters>
-<command>cat > /workspace/.orka-artifacts/security-findings.json << 'EOF'
-{"version":1,"repository":{"repo_url":"https://github.com/example/repo","branch":"main","head_sha":"abc","base_sha":"def"},"scan":{"mode":"manual","commit_count":1,"summary":"ok"},"findings":[]}
+	<tool_call>
+	<tool_name>shell</tool_name>
+	<parameters>
+	<command>cat > /workspace/.orka-artifacts/security-findings.json << 'EOF'
+` + testFindingsJSONManual1 + `
 EOF
 </command>
 </parameters>
@@ -446,17 +465,25 @@ EOF
 	if err != nil {
 		t.Fatalf("ReadFile(findings) error = %v", err)
 	}
-	want := `{"version":1,"repository":{"repo_url":"https://github.com/example/repo","branch":"main","head_sha":"abc","base_sha":"def"},"scan":{"mode":"manual","commit_count":1,"summary":"ok"},"findings":[]}`
-	if string(findings) != want {
-		t.Fatalf("findings contents = %q, want %q", string(findings), want)
+	if string(findings) != testFindingsJSONManual1 {
+		t.Fatalf(
+			"findings contents = %q, want %q",
+			string(findings),
+			testFindingsJSONManual1,
+		)
 	}
 }
 
 func TestRecoverArtifactsFromTranscriptSupportsJSONToolCallShell(t *testing.T) {
 	cleanupRecoveredArtifacts(t)
 
+	escapedFindings := strings.ReplaceAll(testFindingsJSONManual0, `"`, `\"`)
 	transcript := `<tool_call>
-{"name":"shell","arguments":{"command":"mkdir -p /workspace/.orka-artifacts && cat > /workspace/.orka-artifacts/security-findings.json << 'ENDOFJSON'\n{\"version\":1,\"repository\":{\"repo_url\":\"https://github.com/example/repo\",\"branch\":\"main\",\"head_sha\":\"abc\",\"base_sha\":\"def\"},\"scan\":{\"mode\":\"manual\",\"commit_count\":0,\"summary\":\"ok\"},\"findings\":[]}\nENDOFJSON\npython3 -m json.tool /workspace/.orka-artifacts/security-findings.json > /dev/null && echo VALID"}}
+{"name":"shell","arguments":{"command":"mkdir -p /workspace/.orka-artifacts && ` +
+		`cat > /workspace/.orka-artifacts/security-findings.json << 'ENDOFJSON'\n` +
+		escapedFindings +
+		`\nENDOFJSON\npython3 -m json.tool ` +
+		`/workspace/.orka-artifacts/security-findings.json > /dev/null && echo VALID"}}
 </tool_call>`
 
 	recovered, err := recoverArtifactsFromTranscript(transcript)
@@ -471,9 +498,12 @@ func TestRecoverArtifactsFromTranscriptSupportsJSONToolCallShell(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(findings) error = %v", err)
 	}
-	want := `{"version":1,"repository":{"repo_url":"https://github.com/example/repo","branch":"main","head_sha":"abc","base_sha":"def"},"scan":{"mode":"manual","commit_count":0,"summary":"ok"},"findings":[]}`
-	if string(findings) != want {
-		t.Fatalf("findings contents = %q, want %q", string(findings), want)
+	if string(findings) != testFindingsJSONManual0 {
+		t.Fatalf(
+			"findings contents = %q, want %q",
+			string(findings),
+			testFindingsJSONManual0,
+		)
 	}
 }
 
@@ -482,7 +512,7 @@ func TestRecoverArtifactsFromTranscriptFallsBackToRawShellHeredoc(t *testing.T) 
 
 	result := `The file is now written:
 cat > /workspace/.orka-artifacts/security-findings.json << 'EOF'
-{"version":1,"repository":{"repo_url":"https://github.com/example/repo","branch":"main","head_sha":"abc","base_sha":"def"},"scan":{"mode":"manual","commit_count":0,"summary":"ok"},"findings":[]}
+	` + testFindingsJSONManual0 + `
 EOF
 SECURITY_ARTIFACTS_WRITTEN`
 

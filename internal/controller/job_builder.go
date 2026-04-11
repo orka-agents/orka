@@ -94,10 +94,7 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 		uidPrefix = uidPrefix[:8]
 	}
 	suffix := fmt.Sprintf("-job-%s-%d", uidPrefix, task.Status.Attempts)
-	maxPrefixLength := maxJobNameLength - len(suffix)
-	if maxPrefixLength < 1 {
-		maxPrefixLength = 1
-	}
+	maxPrefixLength := max(1, maxJobNameLength-len(suffix))
 
 	prefix := task.Name
 	if len(prefix) > maxPrefixLength {

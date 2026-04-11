@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -187,12 +188,12 @@ func TestFallbackProvider_Stream_PrimarySucceeds(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	var content string
+	var content strings.Builder
 	for chunk := range ch {
-		content += chunk.Content
+		content.WriteString(chunk.Content)
 	}
-	if content != "chunk1chunk2" {
-		t.Errorf("expected 'chunk1chunk2', got %q", content)
+	if content.String() != "chunk1chunk2" {
+		t.Errorf("expected 'chunk1chunk2', got %q", content.String())
 	}
 	if fb.streamCallCount != 0 {
 		t.Error("fallback should not have been called")
@@ -280,12 +281,12 @@ func TestFallbackProvider_Stream_WithCooldown(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	var content string
+	var content strings.Builder
 	for chunk := range ch {
-		content += chunk.Content
+		content.WriteString(chunk.Content)
 	}
-	if content != testFallbackContent {
-		t.Errorf("expected 'from fb', got %q", content)
+	if content.String() != testFallbackContent {
+		t.Errorf("expected 'from fb', got %q", content.String())
 	}
 	if primary.streamCallCount != 0 {
 		t.Error("primary should have been skipped due to cooldown")
@@ -413,12 +414,12 @@ func TestFallbackProvider_Stream_FallbackOnFirstChunkError(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	var content string
+	var content strings.Builder
 	for chunk := range ch {
-		content += chunk.Content
+		content.WriteString(chunk.Content)
 	}
-	if content != "hello" {
-		t.Errorf("expected 'hello', got %q", content)
+	if content.String() != "hello" {
+		t.Errorf("expected 'hello', got %q", content.String())
 	}
 }
 

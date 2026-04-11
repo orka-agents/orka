@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sozercan/orka/internal/llm"
@@ -585,15 +586,15 @@ func TestStream_ChatCompletions(t *testing.T) {
 		t.Fatalf("Stream() error = %v", err)
 	}
 
-	var content string
+	var content strings.Builder
 	for chunk := range ch {
 		if chunk.Error != nil {
 			t.Fatalf("unexpected error: %v", chunk.Error)
 		}
-		content += chunk.Content
+		content.WriteString(chunk.Content)
 	}
-	if content != "Hi there" {
-		t.Errorf("expected 'Hi there', got %q", content)
+	if content.String() != "Hi there" {
+		t.Errorf("expected 'Hi there', got %q", content.String())
 	}
 }
 
@@ -977,19 +978,19 @@ func TestStream_ResponsesAPI(t *testing.T) {
 		t.Fatalf("Stream() error = %v", err)
 	}
 
-	var content string
+	var content strings.Builder
 	var gotDone bool
 	for chunk := range ch {
 		if chunk.Error != nil {
 			t.Fatalf("unexpected error: %v", chunk.Error)
 		}
-		content += chunk.Content
+		content.WriteString(chunk.Content)
 		if chunk.Done {
 			gotDone = true
 		}
 	}
-	if content != "Hello World" {
-		t.Errorf("expected 'Hello World', got %q", content)
+	if content.String() != "Hello World" {
+		t.Errorf("expected 'Hello World', got %q", content.String())
 	}
 	if !gotDone {
 		t.Error("expected done chunk")
@@ -1207,15 +1208,15 @@ func TestStream_AutoDetect_FallbackToChatCompletions(t *testing.T) {
 		t.Fatalf("Stream() error = %v", err)
 	}
 
-	var content string
+	var content strings.Builder
 	for chunk := range ch {
 		if chunk.Error != nil {
 			t.Fatalf("unexpected error: %v", chunk.Error)
 		}
-		content += chunk.Content
+		content.WriteString(chunk.Content)
 	}
-	if content != "Fallback" {
-		t.Errorf("expected 'Fallback', got %q", content)
+	if content.String() != "Fallback" {
+		t.Errorf("expected 'Fallback', got %q", content.String())
 	}
 	if apiMode(provider.mode.Load()) != apiModeChatCompletions {
 		t.Error("expected mode apiModeChatCompletions after fallback")
@@ -1260,15 +1261,15 @@ func TestStream_AutoDetect_ResponsesSuccess(t *testing.T) {
 		t.Fatalf("Stream() error = %v", err)
 	}
 
-	var content string
+	var content strings.Builder
 	for chunk := range ch {
 		if chunk.Error != nil {
 			t.Fatalf("unexpected error: %v", chunk.Error)
 		}
-		content += chunk.Content
+		content.WriteString(chunk.Content)
 	}
-	if content != "Streamed" {
-		t.Errorf("expected 'Streamed', got %q", content)
+	if content.String() != "Streamed" {
+		t.Errorf("expected 'Streamed', got %q", content.String())
 	}
 	if apiMode(provider.mode.Load()) != apiModeResponses {
 		t.Error("expected mode apiModeResponses after successful probe")

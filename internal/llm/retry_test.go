@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -184,15 +185,15 @@ func TestRetryProvider_Stream_PeekRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	var content string
+	var content strings.Builder
 	for chunk := range ch {
 		if chunk.Error != nil {
 			t.Fatalf("unexpected error chunk: %v", chunk.Error)
 		}
-		content += chunk.Content
+		content.WriteString(chunk.Content)
 	}
-	if content != "hello world" {
-		t.Errorf("expected 'hello world', got %q", content)
+	if content.String() != "hello world" {
+		t.Errorf("expected 'hello world', got %q", content.String())
 	}
 	if mock.streamCallCount != 2 {
 		t.Errorf("expected 2 stream calls, got %d", mock.streamCallCount)
