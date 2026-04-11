@@ -37,6 +37,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		apiBaseURL         string
 		cancelControllerPF context.CancelFunc
 		controllerPFCmd    *exec.Cmd
+		discoveredModel    string
 		token              string
 	)
 
@@ -62,15 +63,42 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 
 	AfterEach(func() {
 		dumpDebugInfo(liveProxyTaskName)
+		dumpLiveCopilotProxyDebugInfo(liveProxyProviderName)
 	})
 
-	It("should run a tiny AI task through the live copilot proxy and return the exact output", func() {
-		By("discovering a live model from the proxy service")
-		model := discoverProxyModelViaServiceProxy(
+	It("should expose a ready proxy service and a non-empty OpenAI model catalog", func() {
+		By("verifying the proxy reports ready status")
+		ready := waitForProxyReadyViaServiceProxy(
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
 			liveCopilotProxyServicePort(),
 		)
+		Expect(ready.Status).To(Equal("ready"))
+		Expect(ready.Error).To(BeEmpty())
+
+		By("verifying the proxy exposes OpenAI-compatible models")
+		catalog, err := fetchProxyModelCatalogViaServiceProxy(
+			liveCopilotProxyServiceNamespace(),
+			liveCopilotProxyServiceName(),
+			liveCopilotProxyServicePort(),
+		)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(catalog.DataModelIDs).NotTo(BeEmpty(), "proxy should expose models via the OpenAI data field")
+		Expect(catalog.AllModelIDs).NotTo(BeEmpty(), "proxy should expose at least one model")
+		discoveredModel = catalog.FirstModelID
+		Expect(discoveredModel).To(BeElementOf(catalog.DataModelIDs))
+	})
+
+	It("should run a tiny AI task through the live copilot proxy and return the exact output", func() {
+		By("discovering a live model from the proxy service")
+		model := discoveredModel
+		if model == "" {
+			model = discoverProxyModelViaServiceProxy(
+				liveCopilotProxyServiceNamespace(),
+				liveCopilotProxyServiceName(),
+				liveCopilotProxyServicePort(),
+			)
+		}
 		Expect(model).NotTo(BeEmpty())
 
 		By("creating a dummy secret for provider validation")
@@ -89,6 +117,19 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 			_, _ = utils.Run(cmd)
 		})
 		createProviderCRD(liveProxyProviderName, "openai", liveProxySecretName, "api-key", e2eLiveCopilotProxyBaseURL, model)
+
+		By("verifying the Provider status details")
+		provider := fetchProviderSnapshot(liveProxyProviderName)
+		Expect(provider.Spec.Type).To(Equal("openai"))
+		Expect(provider.Spec.BaseURL).To(Equal(e2eLiveCopilotProxyBaseURL))
+		Expect(provider.Spec.DefaultModel).To(Equal(model))
+		Expect(provider.Status.Ready).To(BeTrue())
+		Expect(provider.Status.Message).To(Equal("Provider configuration is valid"))
+		Expect(provider.Status.LastValidated).NotTo(BeEmpty())
+		readyCondition := findStatusCondition(provider.Status.Conditions, "Ready")
+		Expect(readyCondition).NotTo(BeNil())
+		Expect(readyCondition.Status).To(Equal("True"))
+		Expect(readyCondition.Reason).To(Equal("ValidationSucceeded"))
 
 		By("creating a tiny AI task that asks for an exact response")
 		DeferCleanup(func() {
@@ -120,12 +161,30 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create live copilot proxy AI task")
 
+		By("verifying Orka created a worker Job for the task")
+		verifyJobCreatedForTask(liveProxyTaskName, 30*time.Second)
+
 		By("waiting for the AI task to complete")
 		phase := waitForTaskCompletion(liveProxyTaskName, 5*time.Minute)
 		Expect(phase).To(Equal("Succeeded"), "Live copilot proxy AI task should succeed")
 
 		By("verifying the result is available")
 		verifyResultAvailable(liveProxyTaskName)
+
+		By("verifying the final task status details")
+		task := fetchTaskSnapshot(liveProxyTaskName)
+		Expect(task.Status.Phase).To(Equal("Succeeded"))
+		Expect(task.Status.JobName).NotTo(BeEmpty())
+		Expect(task.Status.Attempts).To(Equal(int32(1)))
+		Expect(task.Status.Message).To(Equal("task completed successfully"))
+		Expect(task.Status.StartTime).NotTo(BeEmpty())
+		Expect(task.Status.CompletionTime).NotTo(BeEmpty())
+		Expect(task.Status.ResultRef).NotTo(BeNil())
+		Expect(task.Status.ResultRef.Available).To(BeTrue())
+		completeCondition := findStatusCondition(task.Status.Conditions, "Complete")
+		Expect(completeCondition).NotTo(BeNil())
+		Expect(completeCondition.Status).To(Equal("True"))
+		Expect(completeCondition.Reason).To(Equal("TaskSucceeded"))
 
 		By("fetching the task result through the controller API")
 		result := fetchTaskResult(apiBaseURL, token, liveProxyTaskName)

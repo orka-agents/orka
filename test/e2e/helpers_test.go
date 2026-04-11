@@ -29,6 +29,54 @@ import (
 
 const controllerAPIService = "orka-api"
 
+type statusConditionSnapshot struct {
+	Type    string `json:"type"`
+	Status  string `json:"status"`
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
+}
+
+type providerSnapshot struct {
+	Spec struct {
+		Type         string `json:"type"`
+		BaseURL      string `json:"baseURL"`
+		DefaultModel string `json:"defaultModel"`
+	} `json:"spec"`
+	Status struct {
+		Ready         bool                      `json:"ready"`
+		Message       string                    `json:"message"`
+		LastValidated string                    `json:"lastValidated"`
+		Conditions    []statusConditionSnapshot `json:"conditions"`
+	} `json:"status"`
+}
+
+type taskSnapshot struct {
+	Status struct {
+		Phase          string `json:"phase"`
+		StartTime      string `json:"startTime"`
+		CompletionTime string `json:"completionTime"`
+		Attempts       int32  `json:"attempts"`
+		JobName        string `json:"jobName"`
+		Message        string `json:"message"`
+		ResultRef      *struct {
+			Available bool `json:"available"`
+		} `json:"resultRef"`
+		Conditions []statusConditionSnapshot `json:"conditions"`
+	} `json:"status"`
+}
+
+type proxyReadyResponse struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+type proxyModelCatalog struct {
+	FirstModelID  string
+	DataModelIDs  []string
+	ExtraModelIDs []string
+	AllModelIDs   []string
+}
+
 // skipIfNoKey skips the current test if the given environment variable is not set or empty.
 func skipIfNoKey(envVar string) {
 	if os.Getenv(envVar) == "" {
@@ -180,17 +228,17 @@ func fetchProxyModel(baseURL string) (string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("unexpected status from %s: %s (%s)", modelsURL, resp.Status, strings.TrimSpace(string(body)))
+		body, _ := readResponseBody(resp)
+		return "", fmt.Errorf("unexpected status from %s: %s (%s)", modelsURL, resp.Status, strings.TrimSpace(body))
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readResponseBody(resp)
 	if err != nil {
 		return "", err
 	}
 
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
 		return "", err
 	}
 
@@ -207,6 +255,14 @@ func copilotProxyModelsURL(baseURL string) string {
 		return baseURL + "/models"
 	}
 	return baseURL + "/v1/models"
+}
+
+func readResponseBody(resp *http.Response) (string, error) {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
 }
 
 func firstModelFromPayload(payload map[string]any) string {
@@ -231,6 +287,55 @@ func firstModelFromPayload(payload map[string]any) string {
 	}
 
 	return ""
+}
+
+func allModelsFromPayload(payload map[string]any) proxyModelCatalog {
+	catalog := proxyModelCatalog{}
+
+	if data, ok := payload["data"].([]any); ok {
+		for _, item := range data {
+			if model := firstModelFromItem(item); model != "" {
+				catalog.DataModelIDs = append(catalog.DataModelIDs, model)
+			}
+		}
+	}
+
+	if models, ok := payload["models"].([]any); ok {
+		for _, item := range models {
+			if model := firstModelFromItem(item); model != "" {
+				catalog.ExtraModelIDs = append(catalog.ExtraModelIDs, model)
+			}
+		}
+	}
+
+	catalog.AllModelIDs = uniqueStrings(append(append([]string{}, catalog.DataModelIDs...), catalog.ExtraModelIDs...))
+	if len(catalog.AllModelIDs) > 0 {
+		catalog.FirstModelID = catalog.AllModelIDs[0]
+	}
+
+	return catalog
+}
+
+func uniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(values))
+	unique := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		unique = append(unique, value)
+	}
+
+	return unique
 }
 
 func firstModelFromItem(item any) string {
@@ -317,39 +422,55 @@ func serviceProxyPath(serviceNamespace, serviceName string, servicePort int, end
 	)
 }
 
-func discoverProxyModelViaServiceProxy(serviceNamespace, serviceName string, servicePort int) string {
-	var modelID string
-	Eventually(func(g Gomega) {
-		model, err := fetchProxyModelViaServiceProxy(serviceNamespace, serviceName, servicePort)
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(model).NotTo(BeEmpty(), "proxy service should return at least one model")
-		modelID = model
-	}, 2*time.Minute, 2*time.Second).Should(Succeed())
-	return modelID
-}
-
-func fetchProxyModelViaServiceProxy(serviceNamespace, serviceName string, servicePort int) (string, error) {
+func fetchServiceProxyBody(serviceNamespace, serviceName string, servicePort int, endpointPath string) (string, error) {
 	cmd := exec.Command(
 		"kubectl",
 		"get",
 		"--raw",
-		serviceProxyPath(serviceNamespace, serviceName, servicePort, "/v1/models"),
+		serviceProxyPath(serviceNamespace, serviceName, servicePort, endpointPath),
 	)
-	body, err := utils.Run(cmd)
+	return utils.Run(cmd)
+}
+
+func waitForProxyReadyViaServiceProxy(serviceNamespace, serviceName string, servicePort int) proxyReadyResponse {
+	var ready proxyReadyResponse
+	Eventually(func(g Gomega) {
+		body, err := fetchServiceProxyBody(serviceNamespace, serviceName, servicePort, "/readyz")
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(json.Unmarshal([]byte(body), &ready)).To(Succeed())
+		g.Expect(ready.Status).To(Equal("ready"))
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+	return ready
+}
+
+func discoverProxyModelViaServiceProxy(serviceNamespace, serviceName string, servicePort int) string {
+	var modelID string
+	Eventually(func(g Gomega) {
+		catalog, err := fetchProxyModelCatalogViaServiceProxy(serviceNamespace, serviceName, servicePort)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(catalog.FirstModelID).NotTo(BeEmpty(), "proxy service should return at least one model")
+		modelID = catalog.FirstModelID
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+	return modelID
+}
+
+func fetchProxyModelCatalogViaServiceProxy(serviceNamespace, serviceName string, servicePort int) (proxyModelCatalog, error) {
+	body, err := fetchServiceProxyBody(serviceNamespace, serviceName, servicePort, "/v1/models")
 	if err != nil {
-		return "", err
+		return proxyModelCatalog{}, err
 	}
 
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(body), &payload); err != nil {
-		return "", err
+		return proxyModelCatalog{}, err
 	}
 
-	if model := firstModelFromPayload(payload); model != "" {
-		return model, nil
+	catalog := allModelsFromPayload(payload)
+	if catalog.FirstModelID != "" {
+		return catalog, nil
 	}
 
-	return "", fmt.Errorf(
+	return proxyModelCatalog{}, fmt.Errorf(
 		"no models returned from service proxy for %s/%s:%d",
 		serviceNamespace,
 		serviceName,
@@ -383,6 +504,37 @@ func liveCopilotProxyServicePort() int {
 	}
 
 	return value
+}
+
+func fetchProviderSnapshot(name string) providerSnapshot {
+	var snapshot providerSnapshot
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "provider", name, "-n", namespace, "-o", "json")
+		body, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(json.Unmarshal([]byte(body), &snapshot)).To(Succeed())
+	}, 30*time.Second, time.Second).Should(Succeed())
+	return snapshot
+}
+
+func fetchTaskSnapshot(name string) taskSnapshot {
+	var snapshot taskSnapshot
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "task", name, "-n", namespace, "-o", "json")
+		body, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(json.Unmarshal([]byte(body), &snapshot)).To(Succeed())
+	}, 30*time.Second, time.Second).Should(Succeed())
+	return snapshot
+}
+
+func findStatusCondition(conditions []statusConditionSnapshot, conditionType string) *statusConditionSnapshot {
+	for i := range conditions {
+		if conditions[i].Type == conditionType {
+			return &conditions[i]
+		}
+	}
+	return nil
 }
 
 func stopPortForward(cancel context.CancelFunc, cmd *exec.Cmd) {
@@ -444,5 +596,36 @@ func dumpDebugInfo(taskNames ...string) {
 	events, err := utils.Run(cmd)
 	if err == nil {
 		_, _ = fmt.Fprintf(GinkgoWriter, "\n=== Namespace Events ===\n%s\n", events)
+	}
+}
+
+func dumpLiveCopilotProxyDebugInfo(providerNames ...string) {
+	if !CurrentSpecReport().Failed() {
+		return
+	}
+
+	serviceNamespace := liveCopilotProxyServiceNamespace()
+	serviceName := liveCopilotProxyServiceName()
+	servicePort := liveCopilotProxyServicePort()
+
+	By("collecting live copilot proxy debug information")
+
+	for _, providerName := range providerNames {
+		if strings.TrimSpace(providerName) == "" {
+			continue
+		}
+		cmd := exec.Command("kubectl", "get", "provider", providerName, "-n", namespace, "-o", "yaml")
+		output, err := utils.Run(cmd)
+		if err == nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "\n=== Provider %s ===\n%s\n", providerName, output)
+		}
+	}
+
+	if body, err := fetchServiceProxyBody(serviceNamespace, serviceName, servicePort, "/readyz"); err == nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "\n=== copilot-proxy /readyz ===\n%s\n", body)
+	}
+
+	if body, err := fetchServiceProxyBody(serviceNamespace, serviceName, servicePort, "/v1/models"); err == nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "\n=== copilot-proxy /v1/models ===\n%s\n", body)
 	}
 }
