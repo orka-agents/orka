@@ -263,7 +263,9 @@ These tools are available to AI worker agents:
 
 ### Coordination Tools
 
-These tools are available to AI worker agents when `ORKA_COORDINATION_ENABLED=true`:
+These tools are injected into AI worker agents when the Agent has `coordination.enabled: true`. They are not returned by `GET /api/v1/tools`.
+
+The following 13 tools are **auto-injected** when coordination is enabled:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
@@ -277,10 +279,15 @@ These tools are available to AI worker agents when `ORKA_COORDINATION_ENABLED=tr
 | `auto_merge_pull_request` | Poll CI checks and merge a PR when all pass | `task_name`, `pr_number` (required); `merge_method`, `commit_title`, `commit_message`, `timeout` |
 | `review_pull_request` | Fetch PR diff for review | `task_name`, `pr_number` (required) |
 | `post_review_comment` | Post a review on a PR | `task_name`, `pr_number`, `body`, `event` (required); `comments` |
+| `create_agent` | Create an Agent CRD at runtime | `name`, `provider`, `model` (required); `systemPrompt`, `tools`, `coordination` |
+| `delete_agent` | Delete an Agent CRD | `name` (required), `namespace` |
+| `update_plan` | Update the autonomous execution plan | `summary`, `plan_document` (required); `progress_pct`, `goal_complete` |
+
+The following 4 tools require explicit `spec.tools[]` entries on the Agent CRD:
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
 | `list_issues` | List open GitHub issues in a repository | `task_name`, `repo_url`; `unassigned_only` (default true), `per_page`, `page` |
 | `list_pull_requests` | List open pull requests in a repository | `task_name`, `repo_url`; `per_page`, `page` |
 | `get_issue` | Fetch full details of a GitHub issue | `issue_number` (required); `task_name`, `repo_url` |
 | `comment_on_issue` | Post a comment on a GitHub issue | `issue_number`, `body` (required); `task_name`, `repo_url` |
-| `create_agent` | Create an Agent CRD at runtime | `name`, `provider`, `model` (required); `systemPrompt`, `tools`, `coordination` |
-| `delete_agent` | Delete an Agent CRD | `name` (required), `namespace` |
-| `update_plan` | Update the autonomous execution plan | `summary`, `plan_document` (required); `progress_pct`, `goal_complete` |

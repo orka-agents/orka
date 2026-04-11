@@ -63,7 +63,7 @@ Orka uses five CRDs:
 | Worker | Description |
 |--------|-------------|
 | **General Worker** (`workers/general/`) | Runs arbitrary container commands |
-| **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in tools (`web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`) and coordination tools (`delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, `create_pull_request`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`, `create_agent`, `delete_agent`, `update_plan`) |
+| **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in tools (`web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`) and coordination tools (13 auto-injected when `coordination.enabled`, plus 4 opt-in GitHub triage tools via `spec.tools[]`) |
 | **Copilot Agent Worker** (`workers/agent/copilot/`) | Runs tasks via GitHub Copilot CLI using the Go SDK |
 | **Claude Agent Worker** (`workers/agent/claude/`) | Runs tasks via Claude Code CLI |
 

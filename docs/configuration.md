@@ -87,7 +87,11 @@ spec:
 
 **Auto-injected coordination tools** (when `enabled: true`):
 
-`delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, `create_pull_request`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`, `create_agent`, `delete_agent`, `update_plan`
+`delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, `create_pull_request`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `create_agent`, `delete_agent`, `update_plan`
+
+**Opt-in coordination tools** (require explicit `spec.tools[]` entries on the Agent):
+
+`list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`
 
 ### Provider Fallback Chain
 
