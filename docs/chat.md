@@ -153,9 +153,9 @@ Dynamic context (agents, tools) is built once at request start and cached for th
 - Returns `429 Too Many Requests` when full
 
 ### Timeouts
-- `--chat-max-duration` (default 5m): Wall-clock timeout per request
+- `--chat-max-duration` (default 30m): Wall-clock timeout per request
 - `--chat-tool-timeout` (default 60s): Per-tool execution timeout
-- `--chat-max-iterations` (default 20): Max tool execution loops
+- `--chat-max-iterations` (default 50): Max tool execution loops
 
 ### Resource Limits
 - `--chat-max-tasks-per-turn` (default 5): Max tasks created per chat turn
@@ -198,8 +198,8 @@ Structured error responses help the LLM self-correct:
 | `--chat-enabled` | `true` | Enable/disable chat endpoint |
 | `--chat-provider` | `""` | Default Provider CRD name |
 | `--chat-model` | `""` | Default model |
-| `--chat-max-iterations` | `20` | Max tool execution loops |
-| `--chat-max-duration` | `5m` | Max wall-clock time per request |
+| `--chat-max-iterations` | `50` | Max tool execution loops |
+| `--chat-max-duration` | `30m` | Max wall-clock time per request |
 | `--chat-tool-timeout` | `60s` | Max time per tool execution |
 | `--chat-max-concurrent` | `10` | Max concurrent chat sessions |
 | `--chat-max-tasks-per-turn` | `5` | Max tasks per chat turn |

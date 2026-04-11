@@ -319,8 +319,8 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 | `--chat-enabled` | `true` | Enable the chat endpoint |
 | `--chat-provider` | `""` | Default Provider CRD name for chat |
 | `--chat-model` | `""` | Default model for chat |
-| `--chat-max-iterations` | `20` | Max tool execution loops per chat request |
-| `--chat-max-duration` | `5m` | Max wall-clock time per chat request |
+| `--chat-max-iterations` | `50` | Max tool execution loops per chat request |
+| `--chat-max-duration` | `30m` | Max wall-clock time per chat request |
 | `--chat-tool-timeout` | `60s` | Max time for single tool execution |
 | `--chat-max-concurrent` | `10` | Max concurrent chat sessions |
 | `--chat-max-tasks-per-turn` | `5` | Max tasks created per chat turn |

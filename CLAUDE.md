@@ -70,4 +70,4 @@ Single tests: `go test ./internal/api/ -run TestHandlerName -v`
 - Worker filesystem is read-only except `/tmp`, `/home/worker`, and `/workspace` — writes elsewhere will fail
 - `make build` requires UI assets — run `make ui-build` first, or the `ensure-ui-embed` target creates a stub
 - On context length errors, the AI worker truncates messages using a token-budget approach — keeps the first message (system prompt) and newest messages, dropping middle messages atomically. The truncation note includes structured metadata (tool names, file paths, URLs) extracted from dropped blocks so the LLM retains context about prior work
-- `code_exec` tool silently caps timeout at 60s — values above 60 fall back to the 30s default
+- `code_exec` tool accepts timeout up to 60s — values above 60 are ignored and the 30s default is used

@@ -211,11 +211,19 @@ docker-push-copilot-worker: ## Push docker image for the Copilot agent worker.
 docker-push-claude-worker: ## Push docker image for the Claude agent worker.
 	$(CONTAINER_TOOL) push ${CLAUDE_WORKER_IMG}
 
+.PHONY: docker-push-ai-worker
+docker-push-ai-worker: ## Push docker image for the AI worker.
+	$(CONTAINER_TOOL) push ${AI_WORKER_IMG}
+
+.PHONY: docker-push-general-worker
+docker-push-general-worker: ## Push docker image for the general worker.
+	$(CONTAINER_TOOL) push ${GENERAL_WORKER_IMG}
+
 .PHONY: docker-build-all
 docker-build-all: docker-build docker-build-copilot-worker docker-build-claude-worker docker-build-ai-worker docker-build-general-worker ## Build all docker images.
 
 .PHONY: docker-push-all
-docker-push-all: docker-push docker-push-copilot-worker docker-push-claude-worker ## Push all docker images.
+docker-push-all: docker-push docker-push-copilot-worker docker-push-claude-worker docker-push-ai-worker docker-push-general-worker ## Push all docker images.
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:

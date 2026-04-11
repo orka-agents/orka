@@ -1,4 +1,4 @@
-# CI/CD Integration Plan
+# CI/CD Integration
 
 ## Problem
 

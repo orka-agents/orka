@@ -261,17 +261,26 @@ These tools are available to AI worker agents:
 | `web_fetch` | Fetch and extract URL content | `url` (required), `max_chars` (default 50000), `raw` |
 | `file_write` | Write or append files in workspace paths | `path` (required), `content` (required), `mode` (`write`/`append`), `create_dirs` |
 
-### Coordination Tools (Chat-Only)
+### Coordination Tools
 
-These tools are available **only in the chat interface** (not via `GET /api/v1/tools`). They are registered when `ORKA_COORDINATION_ENABLED=true`:
+These tools are available to AI worker agents when `ORKA_COORDINATION_ENABLED=true`:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
 | `delegate_task` | Delegate a subtask to another agent | `agent`, `prompt` (required); `namespace`, `priority`, `auto_retry`, `max_retries` |
 | `wait_for_tasks` | Wait for delegated tasks to complete | `tasks` (required), `timeout` (default 10m) |
+| `cancel_task` | Cancel a running child task | `task_name` (required); `namespace`, `reason` |
+| `send_message` | Send a message to a sibling task | `to_task` (required, or `*` to broadcast), `content` (required) |
+| `check_messages` | Check for messages from sibling tasks | `mark_read` (boolean, default true) |
 | `create_pull_request` | Create a GitHub pull request | `task_name`, `head_branch`, `base_branch`, `title` (required); `body` |
 | `merge_pull_request` | Merge a GitHub pull request | `task_name`, `pr_number` (required); `merge_method`, `commit_title`, `commit_message` |
+| `auto_merge_pull_request` | Poll CI checks and merge a PR when all pass | `task_name`, `pr_number` (required); `merge_method`, `commit_title`, `commit_message`, `timeout` |
 | `review_pull_request` | Fetch PR diff for review | `task_name`, `pr_number` (required) |
 | `post_review_comment` | Post a review on a PR | `task_name`, `pr_number`, `body`, `event` (required); `comments` |
+| `list_issues` | List open GitHub issues in a repository | `task_name`, `repo_url`; `unassigned_only` (default true), `per_page`, `page` |
+| `list_pull_requests` | List open pull requests in a repository | `task_name`, `repo_url`; `per_page`, `page` |
+| `get_issue` | Fetch full details of a GitHub issue | `issue_number` (required); `task_name`, `repo_url` |
+| `comment_on_issue` | Post a comment on a GitHub issue | `issue_number`, `body` (required); `task_name`, `repo_url` |
 | `create_agent` | Create an Agent CRD at runtime | `name`, `provider`, `model` (required); `systemPrompt`, `tools`, `coordination` |
 | `delete_agent` | Delete an Agent CRD | `name` (required), `namespace` |
+| `update_plan` | Update the autonomous execution plan | `summary`, `plan_document` (required); `progress_pct`, `goal_complete` |

@@ -191,8 +191,8 @@ This means clients see real-time progress as tools are called and results are pr
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Max iterations | 20 | Maximum number of LLM calls per request |
-| Max duration | 5 minutes | Overall request timeout |
+| Max iterations | 50 | Maximum number of LLM calls per request |
+| Max duration | 30 minutes | Overall request timeout |
 | Tool timeout | 60 seconds | Per-tool execution timeout |
 | Max session size | 500 KB | Conversation size budget (triggers truncation) |
 

@@ -48,7 +48,7 @@ The controller is the central component that runs as a Kubernetes Deployment. It
 
 ### Custom Resource Definitions (`api/v1alpha1/`)
 
-Orka uses four CRDs:
+Orka uses five CRDs:
 
 | CRD | Purpose |
 |-----|---------|
@@ -56,13 +56,14 @@ Orka uses four CRDs:
 | **Agent** | Reusable agent configurations with model, tools, skills, and optional runtime |
 | **Tool** | Custom HTTP-based tool definitions for agents |
 | **Provider** | LLM provider configuration (Anthropic, OpenAI, Azure OpenAI) |
+| **Skill** | Reusable prompt content injected into agent system prompts |
 
 ### Worker Images (`workers/`)
 
 | Worker | Description |
 |--------|-------------|
 | **General Worker** (`workers/general/`) | Runs arbitrary container commands |
-| **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in tools (web search, code exec, file read) and coordination tools (delegate_task, wait_for_tasks, create_pull_request, merge_pull_request, review_pull_request, post_review_comment, create_agent, delete_agent) |
+| **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in tools (`web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`) and coordination tools (`delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, `create_pull_request`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`, `create_agent`, `delete_agent`, `update_plan`) |
 | **Copilot Agent Worker** (`workers/agent/copilot/`) | Runs tasks via GitHub Copilot CLI using the Go SDK |
 | **Claude Agent Worker** (`workers/agent/claude/`) | Runs tasks via Claude Code CLI |
 
@@ -77,7 +78,7 @@ Orka uses four CRDs:
 | **Task Queue** | Priority queuing (0-1000) | Higher priority tasks are scheduled first. |
 | **Secret Management** | Reference K8s Secrets in specs | Controller mounts secrets to worker pods. |
 | **Observability** | Prometheus metrics + structured logs | Standard K8s observability stack. |
-| **AI Tools** | Built-in + extensible via CRDs | Ship with `web_search`, `code_exec`, `file_read`. Extend via Tool CRDs. |
+| **AI Tools** | Built-in + extensible via CRDs | Ship with `web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`. Extend via Tool CRDs. |
 | **Failure Policy** | Configurable retry with backoff | `spec.retryPolicy` with max retries and exponential backoff. |
 | **Session Execution** | Serial per session | Tasks sharing a session run one-at-a-time to prevent race conditions. |
 | **Worker Security** | Hardened pods | Non-root, read-only rootfs, all capabilities dropped, seccomp RuntimeDefault. |
@@ -86,7 +87,7 @@ Orka uses four CRDs:
 
 ```
 orka/
-├── api/v1alpha1/           # CRD type definitions (Task, Agent, Tool, Provider)
+├── api/v1alpha1/           # CRD type definitions (Task, Agent, Tool, Provider, Skill)
 ├── cmd/
 │   ├── main.go                # Controller entrypoint
 │   ├── cli/                   # CLI tool (login, chat, agent, task, status)
@@ -205,9 +206,13 @@ Orka supports extensible AI capabilities through a three-layer system:
 │  - Mounted at /workspace/.skills and injected into prompts       │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 2: Built-in Tools (in worker image)                      │
-│  - web_search, file_read, code_exec, delegate_task, wait_for_tasks│
-│  - create_pull_request, merge_pull_request, review_pull_request,  │
-│    post_review_comment, create_agent, delete_agent                 │
+│  - web_search, file_read, code_exec, web_fetch, file_write       │
+│  - delegate_task, wait_for_tasks, cancel_task, send_message,      │
+│    check_messages, create_pull_request, merge_pull_request,        │
+│    auto_merge_pull_request, review_pull_request,                   │
+│    post_review_comment, list_issues, list_pull_requests,           │
+│    get_issue, comment_on_issue, create_agent, delete_agent,        │
+│    update_plan                                                     │
 │  - Fast, no extra infrastructure                                │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 3: Custom Tools (Tool CRD + HTTP)                        │
