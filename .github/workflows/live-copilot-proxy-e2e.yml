@@ -41,9 +41,8 @@ jobs:
           fi
 
           if [ -z "${COPILOT_GITHUB_TOKEN}" ]; then
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "reason=Skipping live copilot-proxy e2e because COPILOT_GITHUB_TOKEN is not configured for this repository." >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "COPILOT_GITHUB_TOKEN repository secret is required for live copilot-proxy e2e." >&2
+            exit 1
           fi
 
           echo "run=true" >> "$GITHUB_OUTPUT"
