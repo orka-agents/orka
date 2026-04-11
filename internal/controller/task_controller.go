@@ -666,6 +666,10 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		Namespace: task.Namespace,
 	}, job); err != nil {
 		if apierrors.IsNotFound(err) {
+			if r.shouldRetry(task) {
+				log.Info("job not found while task still has retry budget, scheduling retry", "attempt", task.Status.Attempts)
+				return r.retryTask(ctx, task)
+			}
 			log.Info("Job not found, task may have been cleaned up")
 			return r.failTask(ctx, task, "job not found")
 		}
@@ -884,7 +888,8 @@ func (r *TaskReconciler) shouldRetry(task *corev1alpha1.Task) bool {
 		return false
 	}
 	// Attempts counts the initial run plus completed retries, while MaxRetries
-	// is configured as the number of additional retry attempts.
+	// is configured as the number of additional retry attempts. Retry while the
+	// current execution count is still within that additional retry budget.
 	return task.Status.Attempts <= task.Spec.RetryPolicy.MaxRetries
 }
 

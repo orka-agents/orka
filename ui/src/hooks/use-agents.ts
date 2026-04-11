@@ -8,11 +8,18 @@ interface ListResponse<T> {
   metadata: { continue?: string; remainingItemCount?: number }
 }
 
-export function useAgentList() {
-  const namespace = useUIStore((s) => s.namespace)
+interface AgentListOptions {
+  namespace?: string
+  enabled?: boolean
+}
+
+export function useAgentList(options: AgentListOptions = {}) {
+  const selectedNamespace = useUIStore((s) => s.namespace)
+  const namespace = options.namespace ?? selectedNamespace
   return useQuery({
     queryKey: ['agents', namespace],
     queryFn: () => api.get<ListResponse<Agent>>('/agents', { namespace }),
+    enabled: options.enabled ?? true,
   })
 }
 

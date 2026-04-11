@@ -178,13 +178,26 @@ spec:
                     description: Skills references Skill CRDs to inject into the agent's
                       system prompt
                     items:
-                      description: SkillReference references a Skill CRD by name
+                      description: SkillReference references a Skill CRD by name or
+                        inline skill content from a ConfigMap key.
                       properties:
+                        configMapRef:
+                          description: ConfigMapRef references a ConfigMap key containing
+                            skill text
+                          properties:
+                            key:
+                              description: Key is the key within the ConfigMap
+                              type: string
+                            name:
+                              description: Name is the name of the ConfigMap
+                              type: string
+                          required:
+                          - key
+                          - name
+                          type: object
                         name:
                           description: Name references a Skill CR by name
                           type: string
-                      required:
-                      - name
                       type: object
                     type: array
                   systemPrompt:

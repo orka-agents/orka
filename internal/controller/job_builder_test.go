@@ -1774,6 +1774,39 @@ func TestJobBuilder_Build_AgentTask_Labels(t *testing.T) {
 	}
 }
 
+func TestJobBuilder_Build_TruncatesLongJobNamesToKubernetesLimit(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "kaset-manual-discovery-auth-secrets-privilege-1775868783-1",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAgent,
+			Prompt: "Do something",
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	if len(job.Name) > maxJobNameLength {
+		t.Fatalf("len(job.Name) = %d, want <= %d (%q)", len(job.Name), maxJobNameLength, job.Name)
+	}
+	if !strings.HasSuffix(job.Name, "-job-12345678-0") {
+		t.Fatalf("job.Name = %q, want suffix %q", job.Name, "-job-12345678-0")
+	}
+	if job.Labels[labels.LabelTask] != task.Name {
+		t.Fatalf("job.Labels[%q] = %q, want original task name %q", labels.LabelTask, job.Labels[labels.LabelTask], task.Name)
+	}
+	if job.Spec.Template.Labels[labels.LabelTask] != task.Name {
+		t.Fatalf("pod label %q = %q, want original task name %q", labels.LabelTask, job.Spec.Template.Labels[labels.LabelTask], task.Name)
+	}
+}
+
 func TestJobBuilder_Build_AgentTask_WithTimeout(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
@@ -2307,6 +2340,8 @@ func TestAddAIEnvVars_CoordinationEnabled(t *testing.T) {
 }
 
 func TestJobBuilderBuildAddsSkillVolumeAndConfigMap(t *testing.T) {
+	const skillVolumeName = "skills"
+
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -2350,16 +2385,16 @@ func TestJobBuilderBuildAddsSkillVolumeAndConfigMap(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	if !hasVolume(job.Spec.Template.Spec.Volumes, "skills") {
+	if !hasVolume(job.Spec.Template.Spec.Volumes, skillVolumeName) {
 		t.Fatal("expected skills volume to be mounted")
 	}
-	if !hasVolumeMount(job.Spec.Template.Spec.Containers[0].VolumeMounts, "skills") {
+	if !hasVolumeMount(job.Spec.Template.Spec.Containers[0].VolumeMounts, skillVolumeName) {
 		t.Fatal("expected skills volume mount")
 	}
 
 	var skillsVolume *corev1.Volume
 	for i := range job.Spec.Template.Spec.Volumes {
-		if job.Spec.Template.Spec.Volumes[i].Name == "skills" {
+		if job.Spec.Template.Spec.Volumes[i].Name == skillVolumeName {
 			skillsVolume = &job.Spec.Template.Spec.Volumes[i]
 			break
 		}
@@ -2488,5 +2523,67 @@ func TestJobBuilderBuildDeduplicatesSkills(t *testing.T) {
 	}
 	if inlineCount != 1 {
 		t.Fatalf("expected 1 inline skill entry (deduplicated), got %d", inlineCount)
+	}
+}
+
+func TestJobBuilderBuildLoadsConfigMapSkills(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+
+	skillCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "skill-cm", Namespace: defaultNS},
+		Data:       map[string]string{"skill.txt": "You are a careful reviewer."},
+	}
+
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(skillCM).Build()
+	jb := NewJobBuilder(fc)
+	jb.ControllerURL = testControllerURL
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "configmap-skill-task", Namespace: defaultNS, UID: "uid-configmap-skill"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI: &corev1alpha1.AISpec{
+				Provider: "openai",
+				Model:    "gpt-4o-mini",
+				Prompt:   "hello",
+			},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "configmap-skill-agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Skills: []corev1alpha1.SkillReference{{
+				ConfigMapRef: &corev1alpha1.ConfigMapKeySelector{Name: "skill-cm", Key: "skill.txt"},
+			}},
+		},
+	}
+
+	job, err := jb.Build(context.Background(), task, agent, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	var skillsVolume *corev1.Volume
+	for i := range job.Spec.Template.Spec.Volumes {
+		if job.Spec.Template.Spec.Volumes[i].Name == "skills" {
+			skillsVolume = &job.Spec.Template.Spec.Volumes[i]
+			break
+		}
+	}
+	if skillsVolume == nil || skillsVolume.ConfigMap == nil {
+		t.Fatal("skills volume should reference a ConfigMap")
+	}
+
+	cm := &corev1.ConfigMap{}
+	if err := fc.Get(context.Background(), types.NamespacedName{
+		Name:      skillsVolume.ConfigMap.Name,
+		Namespace: defaultNS,
+	}, cm); err != nil {
+		t.Fatalf("expected generated skill ConfigMap to exist: %v", err)
+	}
+	if got := strings.TrimSpace(cm.Data["system-prompt"]); got != "You are a careful reviewer." {
+		t.Fatalf("system-prompt = %q, want %q", got, "You are a careful reviewer.")
 	}
 }

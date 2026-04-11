@@ -294,11 +294,15 @@ type AISpec struct {
 	Tools []string `json:"tools,omitempty"`
 }
 
-// SkillReference references a Skill CRD by name
+// SkillReference references a Skill CRD by name or inline skill content from a ConfigMap key.
 type SkillReference struct {
 	// Name references a Skill CR by name
-	// +kubebuilder:validation:Required
-	Name string `json:"name"`
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// ConfigMapRef references a ConfigMap key containing skill text
+	// +optional
+	ConfigMapRef *ConfigMapKeySelector `json:"configMapRef,omitempty"`
 }
 
 // TaskStatus defines the observed state of Task

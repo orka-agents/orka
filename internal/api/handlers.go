@@ -27,6 +27,7 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/tools"
 )
 
 const queryTrue = "true"
@@ -35,11 +36,11 @@ const queryTrue = "true"
 //
 // builtinToolsList defines the built-in tools returned by list/get endpoints.
 var builtinToolsList = []fiber.Map{
-	{"name": "web_search", "builtin": true, "description": "Search the web"},
-	{"name": "code_exec", "builtin": true, "description": "Execute code in sandbox"},
-	{"name": "file_read", "builtin": true, "description": "Read files from workspace"},
-	{"name": "web_fetch", "builtin": true, "description": "Fetch and extract content from URLs"},
-	{"name": "file_write", "builtin": true, "description": "Write files to workspace"},
+	builtinToolResponse(tools.NewWebSearchTool()),
+	builtinToolResponse(tools.NewCodeExecTool()),
+	builtinToolResponse(tools.NewFileReadTool()),
+	builtinToolResponse(tools.NewWebFetchTool()),
+	builtinToolResponse(tools.NewFileWriteTool()),
 }
 
 // builtinToolsMap indexes built-in tools by name for single-tool lookup.
@@ -51,6 +52,23 @@ var builtinToolsMap = func() map[string]fiber.Map {
 	return m
 }()
 
+func builtinToolResponse(tool tools.Tool) fiber.Map {
+	var parameters any = fiber.Map{}
+	if raw := tool.Parameters(); len(raw) > 0 {
+		var parsed any
+		if err := json.Unmarshal(raw, &parsed); err == nil {
+			parameters = parsed
+		}
+	}
+
+	return fiber.Map{
+		"name":        tool.Name(),
+		"builtin":     true,
+		"description": tool.Description(),
+		"parameters":  parameters,
+	}
+}
+
 type Handlers struct {
 	client                    client.Client
 	clientset                 kubernetes.Interface
@@ -61,6 +79,7 @@ type Handlers struct {
 	planStore                 store.PlanStore
 	healthChecker             store.HealthChecker
 	artifactStore             store.ArtifactStore
+	securityStore             store.SecurityStore
 }
 
 // HandlersConfig holds configuration for creating Handlers.
@@ -74,6 +93,7 @@ type HandlersConfig struct {
 	KubeClient                kubernetes.Interface
 	HealthChecker             store.HealthChecker
 	ArtifactStore             store.ArtifactStore
+	SecurityStore             store.SecurityStore
 }
 
 // NewHandlers creates a new Handlers instance
@@ -88,6 +108,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		planStore:                 cfg.PlanStore,
 		healthChecker:             cfg.HealthChecker,
 		artifactStore:             cfg.ArtifactStore,
+		securityStore:             cfg.SecurityStore,
 	}
 }
 
@@ -714,11 +735,11 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 	}
 
 	// Add built-in tools to the response
-	tools := make([]fiber.Map, 0, len(toolList.Items)+len(builtinToolsList))
-	tools = append(tools, builtinToolsList...)
+	toolItems := make([]fiber.Map, 0, len(toolList.Items)+len(builtinToolsList))
+	toolItems = append(toolItems, builtinToolsList...)
 
 	for _, tool := range toolList.Items {
-		tools = append(tools, fiber.Map{
+		toolItems = append(toolItems, fiber.Map{
 			"name":        tool.Name,
 			"namespace":   tool.Namespace,
 			"builtin":     false,
@@ -729,7 +750,7 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 	}
 
 	response := ListResponse{
-		Items: tools,
+		Items: toolItems,
 		Metadata: ListMeta{
 			Continue:           toolList.Continue,
 			RemainingItemCount: toolList.RemainingItemCount,

@@ -247,6 +247,10 @@ type AllowedAgent struct {
 
 // AgentStatus defines the observed state of Agent
 type AgentStatus struct {
+	// Ready indicates whether the agent configuration is valid and usable
+	// +optional
+	Ready bool `json:"ready,omitempty"`
+
 	// ActiveTasks is the number of active tasks using this agent
 	ActiveTasks int32 `json:"activeTasks"`
 
@@ -265,6 +269,7 @@ type AgentStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.model.provider`
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model.name`
+// +kubebuilder:printcolumn:name="Ready",type=boolean,JSONPath=`.status.ready`
 // +kubebuilder:printcolumn:name="Active",type=integer,JSONPath=`.status.activeTasks`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 

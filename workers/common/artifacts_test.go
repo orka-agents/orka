@@ -97,6 +97,32 @@ func TestDetectContentType_KeyExtensions(t *testing.T) {
 	}
 }
 
+func TestEnsureWorkspaceArtifactsLink_CreatesRepoLocalSymlink(t *testing.T) {
+	prepareArtifactsDir(t)
+	workspaceDir := t.TempDir()
+
+	if err := EnsureWorkspaceArtifactsLink(workspaceDir); err != nil {
+		t.Fatalf("EnsureWorkspaceArtifactsLink() error = %v", err)
+	}
+
+	linkPath := filepath.Join(workspaceDir, workspaceArtifactsDirName)
+	info, err := os.Lstat(linkPath)
+	if err != nil {
+		t.Fatalf("os.Lstat(%q) error = %v", linkPath, err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%q is not a symlink", linkPath)
+	}
+
+	target, err := os.Readlink(linkPath)
+	if err != nil {
+		t.Fatalf("os.Readlink(%q) error = %v", linkPath, err)
+	}
+	if filepath.Clean(target) != filepath.Clean(artifactsDir) {
+		t.Fatalf("symlink target = %q, want %q", target, artifactsDir)
+	}
+}
+
 func TestUploadArtifacts_UploadsFilesToInternalEndpoint(t *testing.T) {
 	prepareArtifactsDir(t)
 	writeArtifactFile(t, "deck.pptx", []byte("pptx-bytes"))

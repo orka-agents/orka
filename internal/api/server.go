@@ -40,6 +40,7 @@ type ServerConfig struct {
 	PlanStore                 store.PlanStore
 	MessageStore              store.MessageStore
 	ArtifactStore             store.ArtifactStore
+	SecurityStore             store.SecurityStore
 	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
 }
@@ -60,6 +61,7 @@ type Server struct {
 	PlanStore        store.PlanStore
 	MessageStore     store.MessageStore
 	ArtifactStore    store.ArtifactStore
+	SecurityStore    store.SecurityStore
 }
 
 // NewServer creates a new API server
@@ -80,6 +82,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		PlanStore:      config.PlanStore,
 		MessageStore:   config.MessageStore,
 		ArtifactStore:  config.ArtifactStore,
+		SecurityStore:  config.SecurityStore,
 	}
 
 	server.handlers = NewHandlers(HandlersConfig{
@@ -92,6 +95,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		KubeClient:                config.Clientset,
 		HealthChecker:             config.HealthChecker,
 		ArtifactStore:             config.ArtifactStore,
+		SecurityStore:             config.SecurityStore,
 	})
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver)
@@ -184,6 +188,25 @@ func (s *Server) setupRoutes() {
 	api.Get("/skills/:name/content", s.handlers.GetSkillContent)
 	api.Put("/skills/:name", s.handlers.UpdateSkill)
 	api.Delete("/skills/:name", s.handlers.DeleteSkill)
+
+	// Security endpoints
+	api.Post("/security/repositories", s.handlers.CreateRepositoryScan)
+	api.Get("/security/repositories", s.handlers.ListRepositoryScans)
+	api.Get("/security/repositories/:name", s.handlers.GetRepositoryScan)
+	api.Put("/security/repositories/:name", s.handlers.UpdateRepositoryScan)
+	api.Delete("/security/repositories/:name", s.handlers.DeleteRepositoryScan)
+	api.Get("/security/repositories/:name/threat-model", s.handlers.GetThreatModel)
+	api.Put("/security/repositories/:name/threat-model", s.handlers.UpdateThreatModel)
+	api.Get("/security/repositories/:name/scans", s.handlers.ListSecurityScanRuns)
+	api.Post("/security/repositories/:name/scans", s.handlers.CreateManualSecurityScan)
+	api.Get("/security/repositories/:name/findings", s.handlers.ListSecurityFindings)
+	api.Get("/security/findings/:id", s.handlers.GetSecurityFinding)
+	api.Post("/security/findings/:id/dismiss", s.handlers.DismissSecurityFinding)
+	api.Post("/security/findings/:id/reopen", s.handlers.ReopenSecurityFinding)
+	api.Post("/security/findings/:id/validate", s.handlers.ValidateSecurityFinding)
+	api.Post("/security/findings/:id/patch", s.handlers.GenerateSecurityPatch)
+	api.Get("/security/findings/:id/patches", s.handlers.ListSecurityPatchProposals)
+	api.Post("/security/findings/:id/pull-request", s.handlers.CreateSecurityPullRequest)
 
 	// Auth validation endpoint
 	api.Get("/auth/validate", s.handleAuthValidate)

@@ -9,12 +9,25 @@ package main
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	copilot "github.com/github/copilot-sdk/go"
 
+	"github.com/sozercan/orka/internal/security"
 	"github.com/sozercan/orka/workers/common"
+)
+
+const (
+	testArtifactsDir        = "/tmp/artifacts/"
+	testDetailedThreatModel = "# Threat Model\n\nDetailed content"
+	testFindingsJSONManual1 = `{"version":1,"repository":{"repo_url":"https://github.com/example/repo",` +
+		`"branch":"main","head_sha":"abc","base_sha":"def"},"scan":{"mode":"manual",` +
+		`"commit_count":1,"summary":"ok"},"findings":[]}`
+	testFindingsJSONManual0 = `{"version":1,"repository":{"repo_url":"https://github.com/example/repo",` +
+		`"branch":"main","head_sha":"abc","base_sha":"def"},"scan":{"mode":"manual",` +
+		`"commit_count":0,"summary":"ok"},"findings":[]}`
 )
 
 func TestBuildSessionConfig_Minimal(t *testing.T) {
@@ -133,7 +146,7 @@ func TestExtractResult_WithContent(t *testing.T) {
 	}
 }
 
-func TestExtractResult_ResultTakesPrecedence(t *testing.T) {
+func TestExtractResult_ContentTakesPrecedence(t *testing.T) {
 	content := "assistant message"
 	event := &copilot.SessionEvent{
 		Data: copilot.Data{
@@ -141,8 +154,8 @@ func TestExtractResult_ResultTakesPrecedence(t *testing.T) {
 			Content: &content,
 		},
 	}
-	if r := extractResult(event); r != "final result" {
-		t.Errorf("extractResult() = %q, want 'final result' (Result should take precedence)", r)
+	if r := extractResult(event); r != "assistant message" {
+		t.Errorf("extractResult() = %q, want assistant content to take precedence", r)
 	}
 }
 
@@ -222,6 +235,304 @@ func TestExtractResult_EmptyResultContent(t *testing.T) {
 	}
 }
 
+func TestRequiredSecurityArtifacts(t *testing.T) {
+	cfg := &common.AgentConfig{
+		Prompt: "REQUIRED_SECURITY_ARTIFACTS: security-threat-model.md, security-findings.json",
+	}
+
+	got := requiredSecurityArtifacts(cfg)
+	if len(got) != 2 {
+		t.Fatalf("requiredSecurityArtifacts() len = %d, want 2", len(got))
+	}
+	if got[0] != "security-threat-model.md" || got[1] != "security-findings.json" {
+		t.Fatalf("requiredSecurityArtifacts() = %v", got)
+	}
+}
+
+func TestRequiredSecurityArtifactsParsesValidationDirective(t *testing.T) {
+	cfg := &common.AgentConfig{
+		Prompt: "REQUIRED_SECURITY_ARTIFACTS: security-validation.json",
+	}
+
+	got := requiredSecurityArtifacts(cfg)
+	if len(got) != 1 || got[0] != security.ArtifactValidation {
+		t.Fatalf("requiredSecurityArtifacts() = %v, want [%s]", got, security.ArtifactValidation)
+	}
+}
+
+func TestSecurityArtifactsFollowUpPrompt(t *testing.T) {
+	cfg := &common.AgentConfig{SubPath: "Sources/Kaset"}
+
+	got := securityArtifactsFollowUpPrompt(cfg, []string{"security-threat-model.md", "security-findings.json"})
+	if !strings.Contains(got, "../../.orka-artifacts/security-threat-model.md") {
+		t.Fatalf("follow-up prompt missing threat model path: %q", got)
+	}
+	if !strings.Contains(got, "Use the Bash tool only") {
+		t.Fatalf("follow-up prompt missing bash-only instruction: %q", got)
+	}
+	if !strings.Contains(got, "SECURITY_ARTIFACTS_WRITTEN") {
+		t.Fatalf("follow-up prompt missing completion sentinel: %q", got)
+	}
+}
+
+func TestSecurityArtifactsFollowUpPromptIncludesValidationSchema(t *testing.T) {
+	cfg := &common.AgentConfig{}
+
+	got := securityArtifactsFollowUpPrompt(cfg, []string{security.ArtifactValidation})
+	if !strings.Contains(got, "security-validation.json must be valid JSON") {
+		t.Fatalf("follow-up prompt missing validation schema: %q", got)
+	}
+	if !strings.Contains(got, "attack_path_analysis") {
+		t.Fatalf("follow-up prompt missing attack path field: %q", got)
+	}
+}
+
+func TestRecoverArtifactsFromDirectResultWritesThreatModel(t *testing.T) {
+	t.Cleanup(func() {
+		_ = os.RemoveAll(testArtifactsDir)
+	})
+
+	recovered, err := recoverArtifactsFromDirectResult(
+		[]string{security.ArtifactThreatModel},
+		testDetailedThreatModel,
+	)
+	if err != nil {
+		t.Fatalf("recoverArtifactsFromDirectResult() error = %v", err)
+	}
+	if recovered != 1 {
+		t.Fatalf("recoverArtifactsFromDirectResult() = %d, want 1", recovered)
+	}
+
+	data, err := os.ReadFile(filepath.Join(testArtifactsDir, security.ArtifactThreatModel))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(data), "Detailed content") {
+		t.Fatalf("artifact content = %q, want threat model body", string(data))
+	}
+}
+
+func TestRecoverArtifactsFromDirectResultRejectsThreatModelToolTranscript(t *testing.T) {
+	t.Cleanup(func() {
+		_ = os.RemoveAll(testArtifactsDir)
+	})
+
+	result := `
+<tool_call>
+<tool_name>shell</tool_name>
+<parameters>
+<command>cat > /workspace/.orka-artifacts/security-threat-model.md <<'EOF'
+# Threat Model
+EOF
+</command>
+</parameters>
+</tool_call>`
+	recovered, err := recoverArtifactsFromDirectResult([]string{security.ArtifactThreatModel}, result)
+	if err != nil {
+		t.Fatalf("recoverArtifactsFromDirectResult() error = %v", err)
+	}
+	if recovered != 0 {
+		t.Fatalf("recoverArtifactsFromDirectResult() = %d, want 0", recovered)
+	}
+	if _, err := os.Stat(filepath.Join(testArtifactsDir, security.ArtifactThreatModel)); !os.IsNotExist(err) {
+		t.Fatalf("expected no artifact to be written, stat err = %v", err)
+	}
+}
+
+func TestRecoverArtifactsAfterFollowUpWritesThreatModelFromPlainText(t *testing.T) {
+	cleanupRecoveredArtifacts(t)
+
+	required := []string{security.ArtifactThreatModel}
+	missing := []string{security.ArtifactThreatModel}
+	initial := "Initial analysis summary"
+	followUp := "# Threat Model\n\nRecovered from the follow-up response."
+
+	result, updatedMissing, directRecovered, transcriptRecovered, err :=
+		recoverArtifactsAfterFollowUp(required, missing, initial, followUp)
+	if err != nil {
+		t.Fatalf("recoverArtifactsAfterFollowUp() error = %v", err)
+	}
+	if directRecovered != 1 {
+		t.Fatalf("directRecovered = %d, want 1", directRecovered)
+	}
+	if transcriptRecovered != 0 {
+		t.Fatalf("transcriptRecovered = %d, want 0", transcriptRecovered)
+	}
+	if len(updatedMissing) != 0 {
+		t.Fatalf("updatedMissing = %v, want no missing artifacts", updatedMissing)
+	}
+	if !strings.Contains(result, "Recovered from the follow-up response.") {
+		t.Fatalf("result = %q, want appended follow-up content", result)
+	}
+
+	data, err := os.ReadFile(filepath.Join(testArtifactsDir, security.ArtifactThreatModel))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(data), "Recovered from the follow-up response.") {
+		t.Fatalf("artifact content = %q, want recovered threat model", string(data))
+	}
+}
+
+func TestArtifactFilenameForPath(t *testing.T) {
+	got, ok := artifactFilenameForPath("/workspace/.orka-artifacts/security-threat-model.md")
+	if !ok {
+		t.Fatal("artifactFilenameForPath() = not ok, want true")
+	}
+	if got != "security-threat-model.md" {
+		t.Fatalf("artifactFilenameForPath() = %q, want security-threat-model.md", got)
+	}
+}
+
+func TestRecoverArtifactsFromTranscript(t *testing.T) {
+	cleanupRecoveredArtifacts(t)
+
+	transcript := `<tool_call>
+<tool_name>create_file</tool_name>
+<parameters>
+<path>/workspace/.orka-artifacts/security-threat-model.md</path>
+<content># threat model
+</content>
+</parameters>
+</tool_call>
+
+<tool_call>
+<tool_name>shell</tool_name>
+<parameters>
+<command>cat > /workspace/.orka-artifacts/security-findings.json << 'EOF'
+{"version":1,"findings":[]}
+EOF
+</command>
+</parameters>
+</tool_call>`
+
+	recovered, err := recoverArtifactsFromTranscript(transcript)
+	if err != nil {
+		t.Fatalf("recoverArtifactsFromTranscript() error = %v", err)
+	}
+	if recovered != 2 {
+		t.Fatalf("recoverArtifactsFromTranscript() = %d, want 2", recovered)
+	}
+
+	threatModel, err := os.ReadFile(filepath.Join(testArtifactsDir, "security-threat-model.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(threat model) error = %v", err)
+	}
+	if string(threatModel) != "# threat model\n" {
+		t.Fatalf("threat model contents = %q", string(threatModel))
+	}
+
+	findings, err := os.ReadFile(filepath.Join(testArtifactsDir, "security-findings.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(findings) error = %v", err)
+	}
+	if string(findings) != "{\"version\":1,\"findings\":[]}" {
+		t.Fatalf("findings contents = %q", string(findings))
+	}
+}
+
+func TestRecoverArtifactsFromTranscriptPrefersValidShellArtifact(t *testing.T) {
+	cleanupRecoveredArtifacts(t)
+
+	transcript := `<tool_call>
+<tool_name>create_file</tool_name>
+<parameters>
+<path>/workspace/.orka-artifacts/security-findings.json</path>
+<content>{"version":1,"scan":{"summary":"broken
+</content>
+</parameters>
+</tool_call>
+
+	<tool_call>
+	<tool_name>shell</tool_name>
+	<parameters>
+	<command>cat > /workspace/.orka-artifacts/security-findings.json << 'EOF'
+` + testFindingsJSONManual1 + `
+EOF
+</command>
+</parameters>
+</tool_call>`
+
+	recovered, err := recoverArtifactsFromTranscript(transcript)
+	if err != nil {
+		t.Fatalf("recoverArtifactsFromTranscript() error = %v", err)
+	}
+	if recovered != 1 {
+		t.Fatalf("recoverArtifactsFromTranscript() = %d, want 1", recovered)
+	}
+
+	findings, err := os.ReadFile(filepath.Join(testArtifactsDir, security.ArtifactFindings))
+	if err != nil {
+		t.Fatalf("ReadFile(findings) error = %v", err)
+	}
+	if string(findings) != testFindingsJSONManual1 {
+		t.Fatalf(
+			"findings contents = %q, want %q",
+			string(findings),
+			testFindingsJSONManual1,
+		)
+	}
+}
+
+func TestRecoverArtifactsFromTranscriptSupportsJSONToolCallShell(t *testing.T) {
+	cleanupRecoveredArtifacts(t)
+
+	escapedFindings := strings.ReplaceAll(testFindingsJSONManual0, `"`, `\"`)
+	transcript := `<tool_call>
+{"name":"shell","arguments":{"command":"mkdir -p /workspace/.orka-artifacts && ` +
+		`cat > /workspace/.orka-artifacts/security-findings.json << 'ENDOFJSON'\n` +
+		escapedFindings +
+		`\nENDOFJSON\npython3 -m json.tool ` +
+		`/workspace/.orka-artifacts/security-findings.json > /dev/null && echo VALID"}}
+</tool_call>`
+
+	recovered, err := recoverArtifactsFromTranscript(transcript)
+	if err != nil {
+		t.Fatalf("recoverArtifactsFromTranscript() error = %v", err)
+	}
+	if recovered != 1 {
+		t.Fatalf("recoverArtifactsFromTranscript() = %d, want 1", recovered)
+	}
+
+	findings, err := os.ReadFile(filepath.Join(testArtifactsDir, security.ArtifactFindings))
+	if err != nil {
+		t.Fatalf("ReadFile(findings) error = %v", err)
+	}
+	if string(findings) != testFindingsJSONManual0 {
+		t.Fatalf(
+			"findings contents = %q, want %q",
+			string(findings),
+			testFindingsJSONManual0,
+		)
+	}
+}
+
+func TestRecoverArtifactsFromTranscriptFallsBackToRawShellHeredoc(t *testing.T) {
+	cleanupRecoveredArtifacts(t)
+
+	result := `The file is now written:
+cat > /workspace/.orka-artifacts/security-findings.json << 'EOF'
+	` + testFindingsJSONManual0 + `
+EOF
+SECURITY_ARTIFACTS_WRITTEN`
+
+	recovered, err := recoverArtifactsFromTranscript(result)
+	if err != nil {
+		t.Fatalf("recoverArtifactsFromTranscript() error = %v", err)
+	}
+	if recovered != 1 {
+		t.Fatalf("recoverArtifactsFromTranscript() = %d, want 1", recovered)
+	}
+
+	findings, err := os.ReadFile(filepath.Join(testArtifactsDir, security.ArtifactFindings))
+	if err != nil {
+		t.Fatalf("ReadFile(findings) error = %v", err)
+	}
+	if !strings.Contains(string(findings), `"summary":"ok"`) {
+		t.Fatalf("findings contents = %q, want recovered raw heredoc JSON", string(findings))
+	}
+}
+
 func TestExecuteCopilot_NoGitHubToken(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "")
 	t.Setenv("COPILOT_CLI_PATH", "/nonexistent/copilot-cli")
@@ -271,6 +582,16 @@ func TestExecuteCopilot_WithTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when CLI doesn't exist")
 	}
+}
+
+func cleanupRecoveredArtifacts(t *testing.T) {
+	t.Helper()
+	if err := os.RemoveAll(testArtifactsDir); err != nil {
+		t.Fatalf("RemoveAll(%q) error = %v", testArtifactsDir, err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(testArtifactsDir)
+	})
 }
 
 func TestExecuteCopilot_NoCLIPathEnv(t *testing.T) {

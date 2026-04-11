@@ -36,7 +36,7 @@ func isAllowedWebhookURL(ctx context.Context, kubeClient ctrlclient.Reader, rawU
 		return fmt.Errorf("webhook URL scheme %q not allowed, must be http or https", u.Scheme)
 	}
 
-	host := u.Hostname()
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
 
 	// Block well-known metadata endpoints and internal hostnames
 	blockedHosts := []string{

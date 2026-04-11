@@ -8,14 +8,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	copilot "github.com/github/copilot-sdk/go"
 
+	"github.com/sozercan/orka/internal/security"
 	"github.com/sozercan/orka/workers/common"
 )
 
@@ -23,6 +27,33 @@ const (
 	defaultMaxTurns = 50
 	workspaceDir    = "/workspace"
 	defaultTimeout  = 20 * time.Minute
+
+	toolNameBash       = "bash"
+	toolNameCreateFile = "create_file"
+	toolNameShell      = "shell"
+
+	findingsSchemaExample = `{"version":1,"repository":{"repo_url":"...","branch":"...","head_sha":"...",` +
+		`"base_sha":"..."},"scan":{"mode":"initial|incremental|manual","commit_count":0,` +
+		`"summary":"..."},"findings":[]}`
+	validationSchemaExample = `{"version":1,"finding_id":"fnd_...","status":"validated|failed|skipped",` +
+		`"summary":"...","validation_steps":["..."],"reproduction":"...","attack_path_analysis":"...",` +
+		`"likelihood":"...","impact":"...","assumptions":["..."],"controls":["..."],` +
+		`"blindspots":["..."],"evidence":[]}`
+)
+
+var (
+	toolCallPattern           = regexp.MustCompile(`(?s)<tool_call>(.*?)</tool_call>`)
+	toolNamePattern           = regexp.MustCompile(`<tool_name>([^<]+)</tool_name>`)
+	artifactCreateFilePattern = regexp.MustCompile(
+		`(?s)<(?:path|file_path)>([^<]+)</(?:path|file_path)>` +
+			`.*?<content>(.*?)</content>`,
+	)
+	shellCommandPattern  = regexp.MustCompile(`(?s)<command>(.*?)</command>`)
+	artifactHeredocStart = regexp.MustCompile(
+		`cat > ([^\n]+?\.orka-artifacts/([A-Za-z0-9._-]+))` +
+			` << '?([A-Za-z0-9_]+)'?\n`,
+	)
+	requiredArtifactsPattern = regexp.MustCompile(`(?m)^REQUIRED_SECURITY_ARTIFACTS:\s*(.+?)\s*$`)
 )
 
 func main() {
@@ -139,6 +170,10 @@ func executeCopilot(ctx context.Context, cfg *common.AgentConfig) (string, error
 	} else {
 		fmt.Printf("Copilot session completed (result length=%d)\n", len(result))
 	}
+	result, err = materializeRequiredSecurityArtifacts(execCtx, session, cfg, result)
+	if err != nil {
+		return result, err
+	}
 	return result, nil
 }
 
@@ -148,15 +183,473 @@ func extractResult(event *copilot.SessionEvent) string {
 		return ""
 	}
 
-	// Try Result.Content first (structured result from agent completion)
-	if event.Data.Result != nil && event.Data.Result.Content != "" {
-		return event.Data.Result.Content
-	}
-
-	// Fall back to direct Content field (assistant message)
-	if event.Data.Content != nil {
+	// SendAndWait returns the final assistant message event. Prefer the direct
+	// assistant content before falling back to lower-level result payloads.
+	if event.Data.Content != nil && *event.Data.Content != "" {
 		return *event.Data.Content
+	}
+	if event.Data.SummaryContent != nil && *event.Data.SummaryContent != "" {
+		return *event.Data.SummaryContent
+	}
+	if event.Data.Result != nil {
+		if event.Data.Result.DetailedContent != nil && *event.Data.Result.DetailedContent != "" {
+			return *event.Data.Result.DetailedContent
+		}
+		if event.Data.Result.Content != "" {
+			return event.Data.Result.Content
+		}
 	}
 
 	return ""
+}
+
+func materializeRequiredSecurityArtifacts(
+	ctx context.Context,
+	session *copilot.Session,
+	cfg *common.AgentConfig,
+	result string,
+) (string, error) {
+	required := requiredSecurityArtifacts(cfg)
+	if len(required) == 0 {
+		return result, nil
+	}
+
+	missing, err := common.MissingArtifacts(required)
+	if err != nil {
+		return result, err
+	}
+	if len(missing) == 0 {
+		return result, nil
+	}
+	if recovered, recoverErr := recoverArtifactsFromDirectResult(missing, result); recoverErr != nil {
+		fmt.Fprintf(
+			os.Stderr,
+			"warning: failed to recover artifacts from direct result: %v\n",
+			recoverErr,
+		)
+	} else if recovered > 0 {
+		fmt.Printf("Recovered %d security artifacts from direct result\n", recovered)
+		missing, err = common.MissingArtifacts(required)
+		if err != nil {
+			return result, err
+		}
+		if len(missing) == 0 {
+			return result, nil
+		}
+	}
+	if recovered, recoverErr := recoverArtifactsFromTranscript(result); recoverErr != nil {
+		fmt.Fprintf(
+			os.Stderr,
+			"warning: failed to recover artifacts from transcript: %v\n",
+			recoverErr,
+		)
+	} else if recovered > 0 {
+		fmt.Printf("Recovered %d security artifacts from transcript\n", recovered)
+		missing, err = common.MissingArtifacts(required)
+		if err != nil {
+			return result, err
+		}
+		if len(missing) == 0 {
+			return result, nil
+		}
+	}
+
+	fmt.Fprintf(
+		os.Stderr,
+		"warning: missing required security artifacts after initial session: %s\n",
+		strings.Join(missing, ", "),
+	)
+
+	response, err := session.SendAndWait(ctx, copilot.MessageOptions{
+		Prompt: securityArtifactsFollowUpPrompt(cfg, missing),
+	})
+	if err != nil {
+		return result, fmt.Errorf("artifact follow-up failed: %w", err)
+	}
+
+	if followUp := strings.TrimSpace(extractResult(response)); followUp != "" {
+		var directRecovered int
+		var transcriptRecovered int
+		result, missing, directRecovered, transcriptRecovered, err =
+			recoverArtifactsAfterFollowUp(required, missing, result, followUp)
+		if err != nil {
+			return result, err
+		}
+		if directRecovered > 0 {
+			fmt.Printf("Recovered %d security artifacts from follow-up direct result\n", directRecovered)
+		}
+		if transcriptRecovered > 0 {
+			fmt.Printf("Recovered %d security artifacts from follow-up transcript\n", transcriptRecovered)
+		}
+		if len(missing) == 0 {
+			fmt.Printf("Required security artifacts materialized after follow-up\n")
+			return result, nil
+		}
+	} else {
+		missing, err = common.MissingArtifacts(required)
+		if err != nil {
+			return result, err
+		}
+	}
+
+	if len(missing) > 0 {
+		return result, fmt.Errorf(
+			"required security artifacts still missing after follow-up: %s",
+			strings.Join(missing, ", "),
+		)
+	}
+
+	fmt.Printf("Required security artifacts materialized after follow-up\n")
+	return result, nil
+}
+
+func recoverArtifactsAfterFollowUp(
+	required []string,
+	missing []string,
+	result string,
+	followUp string,
+) (string, []string, int, int, error) {
+	trimmedFollowUp := strings.TrimSpace(followUp)
+	if trimmedFollowUp == "" {
+		updatedMissing, err := common.MissingArtifacts(required)
+		return result, updatedMissing, 0, 0, err
+	}
+
+	if strings.TrimSpace(result) != "" {
+		result = strings.TrimSpace(result) + "\n\n" + trimmedFollowUp
+	} else {
+		result = trimmedFollowUp
+	}
+
+	directRecovered, err := recoverArtifactsFromDirectResult(missing, trimmedFollowUp)
+	if err != nil {
+		return result, nil, 0, 0, fmt.Errorf("failed to recover artifacts from follow-up direct result: %w", err)
+	}
+
+	updatedMissing, err := common.MissingArtifacts(required)
+	if err != nil {
+		return result, nil, directRecovered, 0, err
+	}
+	if len(updatedMissing) == 0 {
+		return result, updatedMissing, directRecovered, 0, nil
+	}
+
+	transcriptRecovered, err := recoverArtifactsFromTranscript(trimmedFollowUp)
+	if err != nil {
+		return result, nil, directRecovered, 0, fmt.Errorf("failed to recover artifacts from follow-up transcript: %w", err)
+	}
+
+	updatedMissing, err = common.MissingArtifacts(required)
+	if err != nil {
+		return result, nil, directRecovered, transcriptRecovered, err
+	}
+	return result, updatedMissing, directRecovered, transcriptRecovered, nil
+}
+
+func requiredSecurityArtifacts(cfg *common.AgentConfig) []string {
+	match := requiredArtifactsPattern.FindStringSubmatch(cfg.Prompt)
+	if len(match) >= 2 {
+		raw := strings.Split(match[1], ",")
+		required := make([]string, 0, len(raw))
+		seen := map[string]struct{}{}
+		for _, item := range raw {
+			name := strings.TrimSpace(item)
+			if name == "" {
+				continue
+			}
+			if _, exists := seen[name]; exists {
+				continue
+			}
+			seen[name] = struct{}{}
+			required = append(required, name)
+		}
+		return required
+	}
+	if strings.Contains(cfg.Prompt, security.ArtifactThreatModel) &&
+		strings.Contains(cfg.Prompt, security.ArtifactFindings) {
+		return []string{security.ArtifactThreatModel, security.ArtifactFindings}
+	}
+	return nil
+}
+
+func securityArtifactsFollowUpPrompt(cfg *common.AgentConfig, missing []string) string {
+	artifactDir := security.ArtifactWorkspacePath(cfg.SubPath)
+
+	var prompt strings.Builder
+	prompt.WriteString("Before responding, finish the task by writing the missing required security artifacts.\n")
+	fmt.Fprintf(&prompt, "Write them under %s/.\n", artifactDir)
+	prompt.WriteString("Missing files:\n")
+	for _, name := range missing {
+		fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, name)
+	}
+	prompt.WriteString("Do not inspect more repository files unless absolutely necessary.\n")
+	prompt.WriteString("Reuse the analysis already completed in this session.\n")
+	prompt.WriteString("Use the Bash tool only for this step. Do not use create_file or edit.\n")
+	prompt.WriteString("Write the files with shell redirection or heredocs so they are definitely persisted on disk.\n")
+	for _, name := range missing {
+		switch name {
+		case security.ArtifactThreatModel:
+			prompt.WriteString("security-threat-model.md must be non-empty markdown grounded in the repository.\n")
+		case security.ArtifactFindings:
+			prompt.WriteString("security-findings.json must be valid JSON with this shape:\n")
+			prompt.WriteString(findingsSchemaExample + "\n")
+			prompt.WriteString(
+				"Each finding object must use these keys: fingerprint, title, summary, " +
+					"severity, confidence, validation_status, file_path, line, commit_sha, " +
+					"root_cause, remediation, suggested_action, evidence.\n",
+			)
+			prompt.WriteString("If there are zero findings, write valid JSON with version=1 and an empty findings array.\n")
+		case security.ArtifactValidation:
+			prompt.WriteString("security-validation.json must be valid JSON with this shape:\n")
+			prompt.WriteString(validationSchemaExample + "\n")
+		}
+	}
+	prompt.WriteString("After the files are written, reply with only: SECURITY_ARTIFACTS_WRITTEN\n")
+	return prompt.String()
+}
+
+func recoverArtifactsFromDirectResult(missing []string, result string) (int, error) {
+	if len(missing) != 1 {
+		return 0, nil
+	}
+	trimmed := strings.TrimSpace(result)
+	if trimmed == "" || !validArtifactCandidate(missing[0], []byte(trimmed)) {
+		return 0, nil
+	}
+	if err := common.WriteArtifactFile(missing[0], []byte(trimmed)); err != nil {
+		return 0, err
+	}
+	return 1, nil
+}
+
+func recoverArtifactsFromTranscript(result string) (int, error) {
+	candidates := recoveredArtifactCandidates(result)
+	recovered := 0
+	for _, candidate := range candidates {
+		if err := common.WriteArtifactFile(candidate.filename, candidate.data); err != nil {
+			return recovered, err
+		}
+		recovered++
+	}
+	return recovered, nil
+}
+
+func artifactFilenameForPath(p string) (string, bool) {
+	cleaned := strings.TrimSpace(strings.ReplaceAll(p, "\\", "/"))
+	if !strings.Contains(cleaned, security.ArtifactWorkspaceDir+"/") {
+		return "", false
+	}
+
+	filename := path.Base(cleaned)
+	if filename == "." || filename == ".." || strings.ContainsAny(filename, `/\`) {
+		return "", false
+	}
+	return filename, true
+}
+
+type artifactCandidate struct {
+	filename string
+	data     []byte
+	source   string
+	order    int
+}
+
+type jsonToolCallArguments struct {
+	Command  string `json:"command"`
+	Path     string `json:"path"`
+	FilePath string `json:"file_path"`
+	Content  string `json:"content"`
+}
+
+type jsonToolCall struct {
+	Name      string                `json:"name"`
+	Arguments jsonToolCallArguments `json:"arguments"`
+}
+
+func recoveredArtifactCandidates(result string) []artifactCandidate {
+	selected := map[string]artifactCandidate{}
+	order := 0
+
+	for _, loc := range toolCallPattern.FindAllStringSubmatchIndex(result, -1) {
+		block := result[loc[2]:loc[3]]
+		nameMatch := toolNamePattern.FindStringSubmatch(block)
+		if len(nameMatch) >= 2 {
+			switch strings.TrimSpace(nameMatch[1]) {
+			case toolNameCreateFile:
+				match := artifactCreateFilePattern.FindStringSubmatch(block)
+				if len(match) < 3 {
+					continue
+				}
+				if candidate, ok := newArtifactCandidate(
+					match[1],
+					[]byte(match[2]),
+					toolNameCreateFile,
+					order,
+				); ok {
+					selectArtifactCandidate(selected, candidate)
+					order++
+				}
+			case toolNameShell, toolNameBash:
+				match := shellCommandPattern.FindStringSubmatch(block)
+				if len(match) < 2 {
+					continue
+				}
+				for _, candidate := range artifactCandidatesFromShellCommand(match[1], order) {
+					selectArtifactCandidate(selected, candidate)
+					order++
+				}
+			}
+			continue
+		}
+
+		if call, ok := parseJSONToolCall(block); ok {
+			switch strings.TrimSpace(call.Name) {
+			case toolNameCreateFile:
+				fullPath := strings.TrimSpace(call.Arguments.Path)
+				if fullPath == "" {
+					fullPath = strings.TrimSpace(call.Arguments.FilePath)
+				}
+				if candidate, ok := newArtifactCandidate(
+					fullPath,
+					[]byte(call.Arguments.Content),
+					toolNameCreateFile,
+					order,
+				); ok {
+					selectArtifactCandidate(selected, candidate)
+					order++
+				}
+			case toolNameShell, toolNameBash:
+				for _, candidate := range artifactCandidatesFromShellCommand(call.Arguments.Command, order) {
+					selectArtifactCandidate(selected, candidate)
+					order++
+				}
+			}
+		}
+	}
+
+	for _, candidate := range artifactCandidatesFromShellCommand(result, order) {
+		selectArtifactCandidate(selected, candidate)
+		order++
+	}
+
+	candidates := make([]artifactCandidate, 0, len(selected))
+	for _, candidate := range selected {
+		candidates = append(candidates, candidate)
+	}
+	return candidates
+}
+
+func parseJSONToolCall(block string) (jsonToolCall, bool) {
+	trimmed := strings.TrimSpace(block)
+	if !strings.HasPrefix(trimmed, "{") {
+		return jsonToolCall{}, false
+	}
+
+	var call jsonToolCall
+	if err := json.Unmarshal([]byte(trimmed), &call); err != nil {
+		return jsonToolCall{}, false
+	}
+	if strings.TrimSpace(call.Name) == "" {
+		return jsonToolCall{}, false
+	}
+	return call, true
+}
+
+func artifactCandidatesFromShellCommand(command string, baseOrder int) []artifactCandidate {
+	candidates := []artifactCandidate{}
+	order := baseOrder
+
+	for _, loc := range artifactHeredocStart.FindAllStringSubmatchIndex(command, -1) {
+		fullPath := command[loc[2]:loc[3]]
+		delimiter := command[loc[6]:loc[7]]
+		contentStart := loc[1]
+		contentEnd := strings.Index(command[contentStart:], "\n"+delimiter)
+		if contentEnd < 0 {
+			continue
+		}
+
+		content := command[contentStart : contentStart+contentEnd]
+		if candidate, ok := newArtifactCandidate(fullPath, []byte(content), "shell", order); ok {
+			candidates = append(candidates, candidate)
+			order++
+		}
+	}
+
+	return candidates
+}
+
+func newArtifactCandidate(artifactPath string, data []byte, source string, order int) (artifactCandidate, bool) {
+	filename, ok := artifactFilenameForPath(artifactPath)
+	if !ok {
+		return artifactCandidate{}, false
+	}
+	if !validArtifactCandidate(filename, data) {
+		return artifactCandidate{}, false
+	}
+	return artifactCandidate{filename: filename, data: data, source: source, order: order}, true
+}
+
+func validArtifactCandidate(filename string, data []byte) bool {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return false
+	}
+
+	switch filename {
+	case security.ArtifactFindings:
+		var artifact security.FindingsArtifact
+		return json.Unmarshal([]byte(trimmed), &artifact) == nil
+	case security.ArtifactValidation:
+		var artifact security.ValidationArtifact
+		return json.Unmarshal([]byte(trimmed), &artifact) == nil
+	case security.ArtifactThreatModel:
+		return trimmed != "" && !looksLikeToolTranscript(trimmed)
+	default:
+		return true
+	}
+}
+
+func looksLikeToolTranscript(text string) bool {
+	for _, marker := range []string{
+		"<tool_call>",
+		"</tool_call>",
+		"<tool_name>",
+		"</tool_name>",
+		"<parameters>",
+		"</parameters>",
+		"<command>",
+		"</command>",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func selectArtifactCandidate(selected map[string]artifactCandidate, candidate artifactCandidate) {
+	current, exists := selected[candidate.filename]
+	if !exists || preferArtifactCandidate(current, candidate) {
+		selected[candidate.filename] = candidate
+	}
+}
+
+func preferArtifactCandidate(current, next artifactCandidate) bool {
+	currentPriority := artifactCandidateSourcePriority(current.source)
+	nextPriority := artifactCandidateSourcePriority(next.source)
+	if nextPriority != currentPriority {
+		return nextPriority > currentPriority
+	}
+	return next.order > current.order
+}
+
+func artifactCandidateSourcePriority(source string) int {
+	switch source {
+	case toolNameShell, toolNameBash:
+		return 2
+	case toolNameCreateFile:
+		return 1
+	default:
+		return 0
+	}
 }

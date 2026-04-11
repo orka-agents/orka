@@ -21,6 +21,9 @@ spec:
     - jsonPath: .spec.model.name
       name: Model
       type: string
+    - jsonPath: .status.ready
+      name: Ready
+      type: boolean
     - jsonPath: .status.activeTasks
       name: Active
       type: integer
@@ -1291,13 +1294,26 @@ spec:
               skills:
                 description: Skills lists the default skills for this agent
                 items:
-                  description: SkillReference references a Skill CRD by name
+                  description: SkillReference references a Skill CRD by name or inline
+                    skill content from a ConfigMap key.
                   properties:
+                    configMapRef:
+                      description: ConfigMapRef references a ConfigMap key containing
+                        skill text
+                      properties:
+                        key:
+                          description: Key is the key within the ConfigMap
+                          type: string
+                        name:
+                          description: Name is the name of the ConfigMap
+                          type: string
+                      required:
+                      - key
+                      - name
+                      type: object
                     name:
                       description: Name references a Skill CR by name
                       type: string
-                  required:
-                  - name
                   type: object
                 type: array
               systemPrompt:
@@ -1418,6 +1434,10 @@ spec:
                   used
                 format: date-time
                 type: string
+              ready:
+                description: Ready indicates whether the agent configuration is valid
+                  and usable
+                type: boolean
             required:
             - activeTasks
             type: object

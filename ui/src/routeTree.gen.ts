@@ -17,13 +17,17 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as ToolsIndexRouteImport } from './routes/tools/index'
 import { Route as TasksIndexRouteImport } from './routes/tasks/index'
 import { Route as SessionsIndexRouteImport } from './routes/sessions/index'
+import { Route as SecurityIndexRouteImport } from './routes/security/index'
 import { Route as AgentsIndexRouteImport } from './routes/agents/index'
 import { Route as ToolsToolNameRouteImport } from './routes/tools/$toolName'
 import { Route as TasksNewRouteImport } from './routes/tasks/new'
 import { Route as TasksTaskIdRouteImport } from './routes/tasks/$taskId'
 import { Route as SessionsSessionIdRouteImport } from './routes/sessions/$sessionId'
+import { Route as SecurityNewRouteImport } from './routes/security/new'
+import { Route as SecurityRepoIdRouteImport } from './routes/security/$repoId'
 import { Route as AgentsNewRouteImport } from './routes/agents/new'
 import { Route as AgentsAgentIdRouteImport } from './routes/agents/$agentId'
+import { Route as SecurityFindingsFindingIdRouteImport } from './routes/security/findings/$findingId'
 
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
@@ -65,6 +69,11 @@ const SessionsIndexRoute = SessionsIndexRouteImport.update({
   path: '/sessions/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SecurityIndexRoute = SecurityIndexRouteImport.update({
+  id: '/security/',
+  path: '/security/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AgentsIndexRoute = AgentsIndexRouteImport.update({
   id: '/agents/',
   path: '/agents/',
@@ -90,6 +99,16 @@ const SessionsSessionIdRoute = SessionsSessionIdRouteImport.update({
   path: '/sessions/$sessionId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SecurityNewRoute = SecurityNewRouteImport.update({
+  id: '/security/new',
+  path: '/security/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SecurityRepoIdRoute = SecurityRepoIdRouteImport.update({
+  id: '/security/$repoId',
+  path: '/security/$repoId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AgentsNewRoute = AgentsNewRouteImport.update({
   id: '/agents/new',
   path: '/agents/new',
@@ -100,6 +119,12 @@ const AgentsAgentIdRoute = AgentsAgentIdRouteImport.update({
   path: '/agents/$agentId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SecurityFindingsFindingIdRoute =
+  SecurityFindingsFindingIdRouteImport.update({
+    id: '/security/findings/$findingId',
+    path: '/security/findings/$findingId',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -109,14 +134,18 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
+  '/security/$repoId': typeof SecurityRepoIdRoute
+  '/security/new': typeof SecurityNewRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
   '/agents/': typeof AgentsIndexRoute
+  '/security/': typeof SecurityIndexRoute
   '/sessions/': typeof SessionsIndexRoute
   '/tasks/': typeof TasksIndexRoute
   '/tools/': typeof ToolsIndexRoute
+  '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -126,14 +155,18 @@ export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
+  '/security/$repoId': typeof SecurityRepoIdRoute
+  '/security/new': typeof SecurityNewRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
   '/agents': typeof AgentsIndexRoute
+  '/security': typeof SecurityIndexRoute
   '/sessions': typeof SessionsIndexRoute
   '/tasks': typeof TasksIndexRoute
   '/tools': typeof ToolsIndexRoute
+  '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -144,14 +177,18 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
+  '/security/$repoId': typeof SecurityRepoIdRoute
+  '/security/new': typeof SecurityNewRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
   '/agents/': typeof AgentsIndexRoute
+  '/security/': typeof SecurityIndexRoute
   '/sessions/': typeof SessionsIndexRoute
   '/tasks/': typeof TasksIndexRoute
   '/tools/': typeof ToolsIndexRoute
+  '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -163,14 +200,18 @@ export interface FileRouteTypes {
     | '/login'
     | '/agents/$agentId'
     | '/agents/new'
+    | '/security/$repoId'
+    | '/security/new'
     | '/sessions/$sessionId'
     | '/tasks/$taskId'
     | '/tasks/new'
     | '/tools/$toolName'
     | '/agents/'
+    | '/security/'
     | '/sessions/'
     | '/tasks/'
     | '/tools/'
+    | '/security/findings/$findingId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -180,14 +221,18 @@ export interface FileRouteTypes {
     | '/login'
     | '/agents/$agentId'
     | '/agents/new'
+    | '/security/$repoId'
+    | '/security/new'
     | '/sessions/$sessionId'
     | '/tasks/$taskId'
     | '/tasks/new'
     | '/tools/$toolName'
     | '/agents'
+    | '/security'
     | '/sessions'
     | '/tasks'
     | '/tools'
+    | '/security/findings/$findingId'
   id:
     | '__root__'
     | '/'
@@ -197,14 +242,18 @@ export interface FileRouteTypes {
     | '/login'
     | '/agents/$agentId'
     | '/agents/new'
+    | '/security/$repoId'
+    | '/security/new'
     | '/sessions/$sessionId'
     | '/tasks/$taskId'
     | '/tasks/new'
     | '/tools/$toolName'
     | '/agents/'
+    | '/security/'
     | '/sessions/'
     | '/tasks/'
     | '/tools/'
+    | '/security/findings/$findingId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -215,14 +264,18 @@ export interface RootRouteChildren {
   LoginRoute: typeof LoginRoute
   AgentsAgentIdRoute: typeof AgentsAgentIdRoute
   AgentsNewRoute: typeof AgentsNewRoute
+  SecurityRepoIdRoute: typeof SecurityRepoIdRoute
+  SecurityNewRoute: typeof SecurityNewRoute
   SessionsSessionIdRoute: typeof SessionsSessionIdRoute
   TasksTaskIdRoute: typeof TasksTaskIdRoute
   TasksNewRoute: typeof TasksNewRoute
   ToolsToolNameRoute: typeof ToolsToolNameRoute
   AgentsIndexRoute: typeof AgentsIndexRoute
+  SecurityIndexRoute: typeof SecurityIndexRoute
   SessionsIndexRoute: typeof SessionsIndexRoute
   TasksIndexRoute: typeof TasksIndexRoute
   ToolsIndexRoute: typeof ToolsIndexRoute
+  SecurityFindingsFindingIdRoute: typeof SecurityFindingsFindingIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -283,6 +336,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SessionsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/security/': {
+      id: '/security/'
+      path: '/security'
+      fullPath: '/security/'
+      preLoaderRoute: typeof SecurityIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/agents/': {
       id: '/agents/'
       path: '/agents'
@@ -318,6 +378,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SessionsSessionIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/security/new': {
+      id: '/security/new'
+      path: '/security/new'
+      fullPath: '/security/new'
+      preLoaderRoute: typeof SecurityNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/security/$repoId': {
+      id: '/security/$repoId'
+      path: '/security/$repoId'
+      fullPath: '/security/$repoId'
+      preLoaderRoute: typeof SecurityRepoIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/agents/new': {
       id: '/agents/new'
       path: '/agents/new'
@@ -332,6 +406,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentsAgentIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/security/findings/$findingId': {
+      id: '/security/findings/$findingId'
+      path: '/security/findings/$findingId'
+      fullPath: '/security/findings/$findingId'
+      preLoaderRoute: typeof SecurityFindingsFindingIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -343,14 +424,18 @@ const rootRouteChildren: RootRouteChildren = {
   LoginRoute: LoginRoute,
   AgentsAgentIdRoute: AgentsAgentIdRoute,
   AgentsNewRoute: AgentsNewRoute,
+  SecurityRepoIdRoute: SecurityRepoIdRoute,
+  SecurityNewRoute: SecurityNewRoute,
   SessionsSessionIdRoute: SessionsSessionIdRoute,
   TasksTaskIdRoute: TasksTaskIdRoute,
   TasksNewRoute: TasksNewRoute,
   ToolsToolNameRoute: ToolsToolNameRoute,
   AgentsIndexRoute: AgentsIndexRoute,
+  SecurityIndexRoute: SecurityIndexRoute,
   SessionsIndexRoute: SessionsIndexRoute,
   TasksIndexRoute: TasksIndexRoute,
   ToolsIndexRoute: ToolsIndexRoute,
+  SecurityFindingsFindingIdRoute: SecurityFindingsFindingIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

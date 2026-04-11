@@ -666,6 +666,18 @@ func TestHandlers_GetTool_Builtin(t *testing.T) {
 			if resp.StatusCode != http.StatusOK {
 				t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
 			}
+
+			var body map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+			params, ok := body["parameters"].(map[string]any)
+			if !ok {
+				t.Fatalf("parameters missing or invalid type: %T", body["parameters"])
+			}
+			if got := params["type"]; got != "object" {
+				t.Fatalf("parameters.type = %v, want object", got)
+			}
 		})
 	}
 }

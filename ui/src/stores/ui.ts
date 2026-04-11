@@ -15,7 +15,7 @@ export const useUIStore = create<UIState>()(
     (set, get) => ({
       sidebarCollapsed: false,
       theme: 'light',
-      namespace: 'default',
+      namespace: 'orka-system',
       toggleSidebar: () => set({ sidebarCollapsed: !get().sidebarCollapsed }),
       toggleTheme: () => {
         const newTheme = get().theme === 'light' ? 'dark' : 'light'

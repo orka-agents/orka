@@ -139,6 +139,82 @@ func migrate(db *sql.DB) error {
 			PRIMARY KEY (namespace, task_name, filename)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(namespace, task_name)`,
+		`CREATE TABLE IF NOT EXISTS security_scan_runs (
+			id              TEXT PRIMARY KEY,
+			namespace       TEXT NOT NULL,
+			repository_scan TEXT NOT NULL,
+			task_name       TEXT NOT NULL,
+			mode            TEXT NOT NULL,
+			phase           TEXT NOT NULL,
+			base_commit     TEXT NOT NULL DEFAULT '',
+			head_commit     TEXT NOT NULL DEFAULT '',
+			commit_count    INTEGER NOT NULL DEFAULT 0,
+			summary         TEXT NOT NULL DEFAULT '',
+			error_message   TEXT NOT NULL DEFAULT '',
+			started_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			completed_at    TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_scan_runs_repo
+			ON security_scan_runs(namespace, repository_scan, started_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS security_threat_models (
+			namespace         TEXT NOT NULL,
+			repository_scan   TEXT NOT NULL,
+			version           INTEGER NOT NULL,
+			content           TEXT NOT NULL,
+			source            TEXT NOT NULL,
+			generated_by_scan TEXT NOT NULL DEFAULT '',
+			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (namespace, repository_scan, version)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_threat_models_latest
+			ON security_threat_models(namespace, repository_scan, version DESC)`,
+		`CREATE TABLE IF NOT EXISTS security_findings (
+			id                TEXT PRIMARY KEY,
+			namespace         TEXT NOT NULL,
+			repository_scan   TEXT NOT NULL,
+			scan_run_id       TEXT NOT NULL,
+			fingerprint       TEXT NOT NULL,
+			title             TEXT NOT NULL,
+			summary           TEXT NOT NULL,
+			severity          TEXT NOT NULL,
+			confidence        TEXT NOT NULL,
+			validation_status TEXT NOT NULL,
+			state             TEXT NOT NULL,
+			file_path         TEXT NOT NULL DEFAULT '',
+			line              INTEGER NOT NULL DEFAULT 0,
+			commit_sha        TEXT NOT NULL DEFAULT '',
+			root_cause        TEXT NOT NULL DEFAULT '',
+			remediation       TEXT NOT NULL DEFAULT '',
+			suggested_action  TEXT NOT NULL DEFAULT '',
+			evidence_json     TEXT NOT NULL DEFAULT '',
+			validation_json   TEXT NOT NULL DEFAULT '',
+			patch_proposal_id TEXT NOT NULL DEFAULT '',
+			pr_number         INTEGER,
+			pr_url            TEXT NOT NULL DEFAULT '',
+			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(namespace, repository_scan, fingerprint)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_findings_repo
+			ON security_findings(namespace, repository_scan, severity, validation_status, state, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS security_patch_proposals (
+			id                TEXT PRIMARY KEY,
+			namespace         TEXT NOT NULL,
+			repository_scan   TEXT NOT NULL,
+			finding_id        TEXT NOT NULL,
+			task_name         TEXT NOT NULL,
+			branch            TEXT NOT NULL,
+			diff_artifact     TEXT NOT NULL DEFAULT '',
+			summary_artifact  TEXT NOT NULL DEFAULT '',
+			status            TEXT NOT NULL,
+			pr_number         INTEGER,
+			pr_url            TEXT NOT NULL DEFAULT '',
+			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_patch_proposals_finding
+			ON security_patch_proposals(namespace, finding_id, created_at DESC)`,
 	}
 
 	for _, stmt := range statements {
