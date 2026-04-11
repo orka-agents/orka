@@ -59,6 +59,80 @@ export function useSendMessage() {
 
   return useCallback(
     async (messageText: string) => {
+      function handleSSEEvent(event: string, data: string) {
+        const now = new Date().toISOString()
+
+        switch (event) {
+          case 'status': {
+            const status = JSON.parse(data) as SSEStatusEvent
+            setSessionId(status.sessionId)
+            addMessage({
+              id: generateMessageId(),
+              role: 'status',
+              content: `Connected to ${status.provider}/${status.model}`,
+              timestamp: now,
+              provider: status.provider,
+              model: status.model,
+              sessionId: status.sessionId,
+            })
+            break
+          }
+          case 'tool_call': {
+            const tc = JSON.parse(data) as SSEToolCallEvent
+            addMessage({
+              id: generateMessageId(),
+              role: 'tool_call',
+              content: tc.name,
+              timestamp: now,
+              toolCallId: tc.id,
+              toolName: tc.name,
+              toolArgs: tc.args,
+            })
+            break
+          }
+          case 'tool_result': {
+            const tr = JSON.parse(data) as SSEToolResultEvent
+            const result = tr.result as Record<string, unknown> | undefined
+            addMessage({
+              id: generateMessageId(),
+              role: 'tool_result',
+              content: tr.name,
+              timestamp: now,
+              toolCallId: tr.id,
+              toolName: tr.name,
+              toolResult: tr.result,
+              toolSuccess: result?.success === true,
+            })
+            break
+          }
+          case 'message': {
+            const msg = JSON.parse(data) as SSEMessageEvent
+            addMessage({
+              id: generateMessageId(),
+              role: 'assistant',
+              content: msg.content,
+              timestamp: now,
+            })
+            break
+          }
+          case 'done': {
+            const done = JSON.parse(data) as SSEDoneEvent
+            setUsageOnLastAssistant(done.usage)
+            break
+          }
+          case 'error': {
+            const err = JSON.parse(data) as { error: string }
+            addMessage({
+              id: generateMessageId(),
+              role: 'error',
+              content: err.error,
+              timestamp: now,
+            })
+            break
+          }
+        }
+      }
+
       // Add user message to store
       addMessage({
         id: generateMessageId(),
@@ -161,78 +235,4 @@ export function useSendMessage() {
     },
     [token, namespace, currentSessionId, addMessage, setSessionId, setStreaming, setUsageOnLastAssistant],
   )
-
-  function handleSSEEvent(event: string, data: string) {
-    const now = new Date().toISOString()
-
-    switch (event) {
-      case 'status': {
-        const status = JSON.parse(data) as SSEStatusEvent
-        setSessionId(status.sessionId)
-        addMessage({
-          id: generateMessageId(),
-          role: 'status',
-          content: `Connected to ${status.provider}/${status.model}`,
-          timestamp: now,
-          provider: status.provider,
-          model: status.model,
-          sessionId: status.sessionId,
-        })
-        break
-      }
-      case 'tool_call': {
-        const tc = JSON.parse(data) as SSEToolCallEvent
-        addMessage({
-          id: generateMessageId(),
-          role: 'tool_call',
-          content: tc.name,
-          timestamp: now,
-          toolCallId: tc.id,
-          toolName: tc.name,
-          toolArgs: tc.args,
-        })
-        break
-      }
-      case 'tool_result': {
-        const tr = JSON.parse(data) as SSEToolResultEvent
-        const result = tr.result as Record<string, unknown> | undefined
-        addMessage({
-          id: generateMessageId(),
-          role: 'tool_result',
-          content: tr.name,
-          timestamp: now,
-          toolCallId: tr.id,
-          toolName: tr.name,
-          toolResult: tr.result,
-          toolSuccess: result?.success === true,
-        })
-        break
-      }
-      case 'message': {
-        const msg = JSON.parse(data) as SSEMessageEvent
-        addMessage({
-          id: generateMessageId(),
-          role: 'assistant',
-          content: msg.content,
-          timestamp: now,
-        })
-        break
-      }
-      case 'done': {
-        const done = JSON.parse(data) as SSEDoneEvent
-        setUsageOnLastAssistant(done.usage)
-        break
-      }
-      case 'error': {
-        const err = JSON.parse(data) as { error: string }
-        addMessage({
-          id: generateMessageId(),
-          role: 'error',
-          content: err.error,
-          timestamp: now,
-        })
-        break
-      }
-    }
-  }
 }

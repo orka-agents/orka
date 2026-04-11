@@ -75,7 +75,7 @@ function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-background">
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
-          <div className="mb-2 text-4xl">🪸</div>
+          <div className="mb-2 text-4xl">🐋</div>
           <CardTitle className="text-2xl">Orka</CardTitle>
           <CardDescription>
             Enter your Kubernetes service account token or use <code className="text-xs">orka login</code> from the CLI.

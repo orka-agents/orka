@@ -243,11 +243,9 @@ describe('api.delete', () => {
 
 describe('custom headers', () => {
   it('merges custom headers with defaults', async () => {
-    let capturedAccept = ''
     let capturedContentType = ''
     server.use(
       http.get(`${API}/tasks`, ({ request }) => {
-        capturedAccept = request.headers.get('X-Custom') ?? ''
         capturedContentType = request.headers.get('Content-Type') ?? ''
         return HttpResponse.json({ items: [] })
       })

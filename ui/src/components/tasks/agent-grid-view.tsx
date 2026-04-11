@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react'
 import { Link } from '@tanstack/react-router'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -6,8 +7,15 @@ import { TaskStatusBadge } from './task-status-badge'
 import type { Task } from '@/schemas/task'
 
 function AgentMiniPanel({ task }: { task: Task }) {
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+
   const elapsed = task.status?.startTime
-    ? Math.floor((Date.now() - new Date(task.status.startTime).getTime()) / 1000)
+    ? Math.floor((now - new Date(task.status.startTime).getTime()) / 1000)
     : 0
 
   const formatElapsed = (s: number) => {

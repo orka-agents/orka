@@ -82,10 +82,11 @@ function StructuredResultView({ result }: { result: StructuredResult }) {
 export function TaskResultViewer({ taskId }: { taskId: string }) {
   const { data, isLoading, refetch, isFetched } = useTaskResult(taskId)
 
+  const resultText = data?.result
   const structured = useMemo(() => {
-    if (!data?.result) return null
-    return tryParseStructuredResult(data.result)
-  }, [data?.result])
+    if (!resultText) return null
+    return tryParseStructuredResult(resultText)
+  }, [resultText])
 
   if (!isFetched) {
     return (
