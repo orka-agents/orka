@@ -19,6 +19,3 @@ spec:
   # Maximum time before the task is terminated
   timeout: "20m"
   priority: 500
-  # NOTE: The Copilot CLI worker implementation is pending.
-  # This manifest is valid per the API schema and will work
-  # once the copilot worker is available.

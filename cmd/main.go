@@ -67,6 +67,7 @@ func main() {
 	var watchNamespace string
 	var copilotWorkerImage string
 	var claudeWorkerImage string
+	var codexWorkerImage string
 	var generalWorkerImage string
 	var chatEnabled bool
 	var chatProvider string
@@ -109,6 +110,8 @@ func main() {
 		controller.DefaultCopilotWorkerImage, "Container image for Copilot agent worker.")
 	flag.StringVar(&claudeWorkerImage, "claude-worker-image",
 		controller.DefaultClaudeWorkerImage, "Container image for Claude agent worker.")
+	flag.StringVar(&codexWorkerImage, "codex-worker-image",
+		controller.DefaultCodexWorkerImage, "Container image for Codex agent worker.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
@@ -258,12 +261,20 @@ func main() {
 	// Create helper components
 	sessionManager := controller.NewSessionManager(sqliteStore)
 	webhookNotifier := controller.NewWebhookNotifier()
+	webhookNotifier.SetKubeClient(mgr.GetClient())
 	jobBuilder := controller.NewJobBuilder(mgr.GetClient())
 	jobBuilder.CopilotWorkerImage = copilotWorkerImage
 	jobBuilder.ClaudeWorkerImage = claudeWorkerImage
+	jobBuilder.CodexWorkerImage = codexWorkerImage
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
-	setupLog.Info("worker images configured", "ai", aiWorkerImage, "copilot", copilotWorkerImage)
+	setupLog.Info("worker images configured",
+		"ai", aiWorkerImage,
+		"copilot", copilotWorkerImage,
+		"claude", claudeWorkerImage,
+		"codex", codexWorkerImage,
+		"general", generalWorkerImage,
+	)
 	jobBuilder.ControllerURL = controllerURL
 	// Auto-discover controller URL from in-cluster service if not explicitly set
 	if jobBuilder.ControllerURL == "" {

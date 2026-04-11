@@ -20,7 +20,7 @@ const (
 	TaskTypeContainer TaskType = "container"
 	// TaskTypeAI runs AI agent tasks with LLM integration
 	TaskTypeAI TaskType = "ai"
-	// TaskTypeAgent runs external agent CLI runtimes (e.g., Copilot CLI, Claude Code CLI)
+	// TaskTypeAgent runs external agent CLI runtimes (e.g., Copilot CLI, Claude Code CLI, Codex CLI)
 	TaskTypeAgent TaskType = "agent"
 )
 
@@ -100,6 +100,10 @@ type TaskSpec struct {
 	// Resources defines the compute resources for the task
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Execution defines worker pod runtime and placement settings.
+	// +optional
+	Execution *ExecutionSpec `json:"execution,omitempty"`
 
 	// Schedule is a cron expression for recurring tasks (e.g., "0 */6 * * *").
 	// When set, the controller creates child Task CRs on each cron tick.
@@ -407,7 +411,7 @@ type TaskList struct {
 }
 
 // AgentRuntimeType defines the agent runtime to use
-// +kubebuilder:validation:Enum=copilot;claude
+// +kubebuilder:validation:Enum=copilot;claude;codex
 type AgentRuntimeType string
 
 const (
@@ -415,6 +419,8 @@ const (
 	AgentRuntimeCopilot AgentRuntimeType = "copilot"
 	// AgentRuntimeClaude uses Claude Code CLI as the agent runtime
 	AgentRuntimeClaude AgentRuntimeType = "claude"
+	// AgentRuntimeCodex uses OpenAI Codex CLI as the agent runtime
+	AgentRuntimeCodex AgentRuntimeType = "codex"
 )
 
 // AgentRuntimeSpec defines task-level overrides for agent runtime configuration.

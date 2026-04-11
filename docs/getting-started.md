@@ -118,7 +118,7 @@ orka task download <task-name> [filename] -o <path>
 
 ## Agent Runtimes Quick Start
 
-Agent runtimes let you run tasks via Claude Code CLI or GitHub Copilot CLI with full autonomous coding capabilities.
+Agent runtimes let you run tasks via Codex CLI, Claude Code CLI, or GitHub Copilot CLI with full autonomous coding capabilities.
 
 ### 1. Create Credentials
 
@@ -133,6 +133,10 @@ kubectl create secret generic claude-credentials \
   --from-literal=ANTHROPIC_FOUNDRY_API_KEY=your-key \
   --from-literal=ANTHROPIC_FOUNDRY_RESOURCE=your-resource \
   --from-literal=ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-5
+
+# For Codex CLI
+kubectl create secret generic codex-api-key \
+  --from-literal=OPENAI_API_KEY=sk-proj-your-key
 ```
 
 ### 2. Create an Agent with Runtime
@@ -146,6 +150,10 @@ metadata:
 spec:
   secretRef:
     name: claude-credentials
+  execution:
+    runtimeClassName: gvisor
+    nodeSelector:
+      sandbox-runtime: gvisor
   runtime:
     type: claude
     defaultMaxTurns: 50
@@ -157,6 +165,8 @@ spec:
       - Bash
 EOF
 ```
+
+For Codex Agents, keep `defaultAllowBash: true` for now. The current Codex runtime implementation fails fast when bash is disabled because the upstream Codex CLI does not yet expose a reliable shell-disable mode.
 
 ### 3. Run an Agent Task
 
@@ -188,6 +198,28 @@ curl http://localhost:8080/api/v1/tasks/code-review/result \
 ```
 
 See [Agent Runtimes](agent-runtimes.md) for full configuration reference.
+
+## Optional Runtime Isolation
+
+If your cluster exposes Kubernetes `RuntimeClass` objects such as `gvisor` or `kata-qemu`, you can route worker Jobs through them with `spec.execution`.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: isolated-hello
+spec:
+  type: ai
+  agentRef:
+    name: assistant
+  prompt: "Summarize the repo"
+  execution:
+    runtimeClassName: gvisor
+    nodeSelector:
+      sandbox-runtime: gvisor
+```
+
+Use `Agent.spec.execution` for defaults, then override it per task when needed. See [Configuration](configuration.md#execution), [Agent Runtimes](agent-runtimes.md#runtime-isolation), and [Security](security.md#runtime-isolation) for details.
 
 ## Accessing the Dashboard
 
@@ -224,7 +256,7 @@ The CLI supports token extraction from bearer tokens, token files, exec-based au
 
 ## Next Steps
 
-- [Agent Runtimes](agent-runtimes.md) — Claude Code CLI and Copilot CLI configuration
+- [Agent Runtimes](agent-runtimes.md) — Codex CLI, Claude Code CLI, and Copilot CLI configuration
 - [Interactive Chat](chat.md) — Chat endpoint with tool execution
 - [Multi-Agent Coordination](multi-agent-coordination.md) — Coordinator agents and delegation
 - [OpenAI Compatibility](openai-compat.md) — Use any OpenAI-compatible client via `/openai/v1/`

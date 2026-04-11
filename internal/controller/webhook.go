@@ -19,10 +19,13 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // isAllowedWebhookURL validates that the webhook URL does not target internal/private networks.
-func isAllowedWebhookURL(rawURL, namespace string) error {
+func isAllowedWebhookURL(ctx context.Context, kubeClient ctrlclient.Reader, rawURL, namespace string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid webhook URL: %w", err)
@@ -47,10 +50,17 @@ func isAllowedWebhookURL(rawURL, namespace string) error {
 		return fmt.Errorf("webhook URL host %q is not allowed", host)
 	}
 
-	if isClusterServiceHost(host) {
-		if isAllowedInClusterServiceHost(host, namespace) {
-			return nil
+	if serviceName, serviceNamespace, ok := parseClusterServiceHost(host); ok {
+		if serviceNamespace == "" || serviceNamespace != namespace {
+			return fmt.Errorf("webhook URL host %q is outside the task namespace", host)
 		}
+		if err := validateClusterServiceWebhook(ctx, kubeClient, serviceName, serviceNamespace, host); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if isClusterServiceHost(host) {
 		return fmt.Errorf("webhook URL host %q is outside the task namespace", host)
 	}
 
@@ -71,13 +81,49 @@ func isAllowedWebhookURL(rawURL, namespace string) error {
 	return nil
 }
 
-func isAllowedInClusterServiceHost(host, namespace string) bool {
-	if namespace == "" {
-		return false
+func validateClusterServiceWebhook(ctx context.Context, kubeClient ctrlclient.Reader, serviceName, serviceNamespace, host string) error {
+	if kubeClient == nil {
+		return fmt.Errorf("webhook URL host %q cannot be validated without a Kubernetes client", host)
 	}
 
-	return strings.HasSuffix(host, "."+namespace+".svc") ||
-		strings.HasSuffix(host, "."+namespace+".svc.cluster.local")
+	service := &corev1.Service{}
+	if err := kubeClient.Get(ctx, ctrlclient.ObjectKey{Name: serviceName, Namespace: serviceNamespace}, service); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("webhook URL host %q does not reference an existing service", host)
+		}
+		return fmt.Errorf("validating webhook service %q: %w", host, err)
+	}
+
+	if service.Spec.Type == corev1.ServiceTypeExternalName {
+		return fmt.Errorf("webhook URL host %q must not reference an ExternalName service", host)
+	}
+	if service.Spec.ClusterIP == "" || service.Spec.ClusterIP == corev1.ClusterIPNone {
+		return fmt.Errorf("webhook URL host %q must reference a ClusterIP service", host)
+	}
+	if len(service.Spec.Selector) == 0 {
+		return fmt.Errorf("webhook URL host %q must reference a service with a selector", host)
+	}
+
+	return nil
+}
+
+func parseClusterServiceHost(host string) (serviceName, namespace string, ok bool) {
+	host = strings.TrimSuffix(host, ".")
+	parts := strings.Split(host, ".")
+	switch len(parts) {
+	case 3:
+		if parts[2] != "svc" {
+			return "", "", false
+		}
+		return parts[0], parts[1], true
+	case 5:
+		if parts[2] != "svc" || parts[3] != "cluster" || parts[4] != "local" {
+			return "", "", false
+		}
+		return parts[0], parts[1], true
+	default:
+		return "", "", false
+	}
 }
 
 func isClusterServiceHost(host string) bool {
@@ -105,6 +151,7 @@ type ResultRefPayload struct {
 // WebhookNotifier sends webhook notifications for task completion
 type WebhookNotifier struct {
 	client            *http.Client
+	kubeClient        ctrlclient.Reader
 	skipURLValidation bool // For testing only
 }
 
@@ -117,6 +164,12 @@ func NewWebhookNotifier() *WebhookNotifier {
 	}
 }
 
+// SetKubeClient configures the Kubernetes reader used for same-namespace
+// service validation.
+func (w *WebhookNotifier) SetKubeClient(kubeClient ctrlclient.Reader) {
+	w.kubeClient = kubeClient
+}
+
 // Notify sends a webhook notification for a completed task
 func (w *WebhookNotifier) Notify(ctx context.Context, task *corev1alpha1.Task) error {
 	if task.Spec.WebhookURL == "" {
@@ -124,7 +177,7 @@ func (w *WebhookNotifier) Notify(ctx context.Context, task *corev1alpha1.Task) e
 	}
 
 	if !w.skipURLValidation {
-		if err := isAllowedWebhookURL(task.Spec.WebhookURL, task.Namespace); err != nil {
+		if err := isAllowedWebhookURL(ctx, w.kubeClient, task.Spec.WebhookURL, task.Namespace); err != nil {
 			return fmt.Errorf("webhook URL validation failed: %w", err)
 		}
 	}

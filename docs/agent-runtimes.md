@@ -1,11 +1,12 @@
 # Agent Runtimes
 
-Agent runtimes let Orka delegate task execution to external agent CLIs—such as Claude Code CLI and GitHub Copilot CLI—instead of running tasks through Orka's built-in AI worker. This gives your tasks access to full autonomous coding capabilities (file read/write/edit, bash execution, git operations) provided by battle-tested agent runtimes, while Orka handles scheduling, lifecycle management, secrets, sessions, and Kubernetes-native orchestration.
+Agent runtimes let Orka delegate task execution to external agent CLIs—such as Codex CLI, Claude Code CLI, and GitHub Copilot CLI—instead of running tasks through Orka's built-in AI worker. This gives your tasks access to full autonomous coding capabilities (file read/write/edit, bash execution, git operations) provided by battle-tested agent runtimes, while Orka handles scheduling, lifecycle management, secrets, sessions, and Kubernetes-native orchestration.
 
 ## Supported Runtimes
 
 | Runtime | `runtime.type` | Secret Key | Status |
 |---------|---------------|------------|--------|
+| Codex CLI | `codex` | `OPENAI_API_KEY` or `CODEX_API_KEY` | GA |
 | Claude Code CLI | `claude` | `ANTHROPIC_API_KEY` (direct) or `ANTHROPIC_FOUNDRY_API_KEY` (Azure AI Foundry) | GA |
 | GitHub Copilot CLI | `copilot` | `GITHUB_TOKEN` | Technical Preview |
 
@@ -14,6 +15,10 @@ Agent runtimes let Orka delegate task execution to external agent CLIs—such as
 ### 1. Create a Secret
 
 ```bash
+# For Codex CLI
+kubectl create secret generic codex-api-key \
+  --from-literal=OPENAI_API_KEY=sk-proj-...
+
 # For Claude Code CLI
 kubectl create secret generic claude-api-key \
   --from-literal=ANTHROPIC_API_KEY=sk-ant-...
@@ -60,6 +65,10 @@ spec:
     inline: "You are a helpful coding assistant."
   secretRef:
     name: claude-api-key
+  execution:
+    runtimeClassName: gvisor
+    nodeSelector:
+      sandbox-runtime: gvisor
   runtime:
     type: claude
     defaultMaxTurns: 50
@@ -112,7 +121,7 @@ spec:
   # runtime marks this Agent for type: agent tasks
   runtime:
     # type: which CLI runtime to use (required)
-    # Valid values: "copilot", "claude"
+    # Valid values: "copilot", "claude", "codex"
     type: claude
 
     # defaultMaxTurns: default max agent loop iterations per task
@@ -131,10 +140,22 @@ spec:
     defaultAllowBash: true
 
   # secretRef: Secret containing API credentials
+  # Codex runtime expects: OPENAI_API_KEY or CODEX_API_KEY
   # Claude runtime expects: ANTHROPIC_API_KEY
   # Copilot runtime expects: GITHUB_TOKEN
   secretRef:
     name: claude-api-key
+
+  # execution: default runtime and placement settings for worker pods
+  execution:
+    runtimeClassName: gvisor
+    nodeSelector:
+      sandbox-runtime: gvisor
+    tolerations:
+      - key: sandbox-runtime
+        operator: Equal
+        value: gvisor
+        effect: NoSchedule
 
   # systemPrompt: injected via --system-prompt flag
   systemPrompt:
@@ -177,6 +198,12 @@ spec:
     name: claude-agent
     # namespace: defaults to task namespace
     # namespace: other-ns
+
+  # execution: task-level runtime/placement overrides
+  execution:
+    runtimeClassName: kata-qemu
+    nodeSelector:
+      sandbox-runtime: kata
 
   # prompt: instruction sent to the agent CLI
   prompt: "Fix the failing tests in api/"
@@ -246,6 +273,37 @@ Agent.spec.runtime (defaults)
         └─► disallowedTools (always wins)
 ```
 
+### Runtime Isolation
+
+Agent worker pods can opt into stronger sandboxing through Kubernetes `RuntimeClass` using the shared `spec.execution` field on both Agents and Tasks.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: isolated-review
+spec:
+  type: agent
+  agentRef:
+    name: claude-agent
+  prompt: "Review the repo for security issues"
+  execution:
+    runtimeClassName: gvisor
+    nodeSelector:
+      sandbox-runtime: gvisor
+    tolerations:
+      - key: sandbox-runtime
+        operator: Equal
+        value: gvisor
+        effect: NoSchedule
+```
+
+- `Agent.spec.execution` sets defaults for all tasks using that Agent.
+- `Task.spec.execution` overrides the Agent and replaces `nodeSelector`, `tolerations`, and `affinity` when set.
+- `gvisor` is the recommended first isolation profile for Linux `kind` and other containerd-based development clusters.
+- `kata-qemu` uses the same API, but is best suited to `minikube` or production clusters with virtualization-capable nodes.
+- The controller itself can remain on the default runtime; only worker Jobs need the isolation runtime.
+
 ## Workspace Management
 
 Agent tasks can clone a git repository into the worker pod's `/workspace` directory.
@@ -278,7 +336,9 @@ agentRuntime:
       name: git-credentials
 ```
 
-> **Note**: For the Copilot runtime, `GITHUB_TOKEN` from the Agent's `secretRef` can authenticate both the CLI and git clone operations. For the Claude runtime, a separate `gitSecretRef` is needed since `ANTHROPIC_API_KEY` cannot authenticate git operations.
+> **Note**: For the Copilot runtime, `GITHUB_TOKEN` from the Agent's `secretRef` can authenticate both the CLI and git clone operations. For the Claude and Codex runtimes, a separate `gitSecretRef` is usually needed because their API keys do not authenticate git operations.
+
+> **Codex caveat**: The current Codex runtime implementation requires `defaultAllowBash: true` (or task-level `allowBash: true`). If bash is disabled, the worker fails fast instead of launching Codex, because the current Codex CLI does not expose a reliable shell-disable mode.
 
 ### SubPath
 
@@ -366,6 +426,8 @@ All agent worker pods run with a hardened security context:
 | Seccomp profile | RuntimeDefault |
 | Privilege escalation | Disabled |
 
+If `spec.execution.runtimeClassName` is set, the worker pod is also routed through the selected Kubernetes `RuntimeClass` while keeping the same pod and container security defaults.
+
 Writable directories are provided via `emptyDir` volumes:
 
 | Mount | Purpose |
@@ -389,6 +451,8 @@ Writable directories are provided via `emptyDir` volumes:
 
 All tools are allowed by default for autonomous operation. To restrict high-risk tools, set `defaultAllowBash: false` on the Agent or `allowBash: false` on individual Tasks.
 
+For Codex specifically, bash-disabled tasks are not currently supported. Use `defaultAllowBash: true` for Codex Agents until the upstream CLI exposes a reliable shell-disable mode.
+
 ### Secrets
 
 API keys are injected as environment variables from Kubernetes Secrets. They are never logged or stored in Task specs.
@@ -397,6 +461,10 @@ API keys are injected as environment variables from Kubernetes Secrets. They are
 # Claude runtime
 kubectl create secret generic claude-api-key \
   --from-literal=ANTHROPIC_API_KEY=sk-ant-...
+
+# Codex runtime
+kubectl create secret generic codex-api-key \
+  --from-literal=OPENAI_API_KEY=sk-proj-...
 
 # Copilot runtime
 kubectl create secret generic copilot-token \
@@ -411,13 +479,15 @@ The controller accepts flags to configure agent worker images:
 |------|---------|-------------|
 | `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Container image for Copilot agent workers |
 | `--claude-worker-image` | `ghcr.io/sozercan/orka/agent-worker-claude:latest` | Container image for Claude agent workers |
+| `--codex-worker-image` | `ghcr.io/sozercan/orka/agent-worker-codex:latest` | Container image for Codex agent workers |
 
 Example:
 
 ```bash
 orka-controller \
   --copilot-worker-image=ghcr.io/sozercan/orka/agent-worker-copilot:v1.0.0 \
-  --claude-worker-image=ghcr.io/sozercan/orka/agent-worker-claude:v1.0.0
+  --claude-worker-image=ghcr.io/sozercan/orka/agent-worker-claude:v1.0.0 \
+  --codex-worker-image=ghcr.io/sozercan/orka/agent-worker-codex:v1.0.0
 ```
 
 ## Optimizing Agent Performance
@@ -434,6 +504,7 @@ Complete sample manifests are available in [`config/samples/`](../config/samples
 
 | File | Description |
 |------|-------------|
+| `core_v1alpha1_agent_codex.yaml` | Agent configured for Codex CLI |
 | `core_v1alpha1_agent_claude.yaml` | Agent configured for Claude Code CLI |
 | `core_v1alpha1_task_agent.yaml` | Basic agent task with workspace |
 | `core_v1alpha1_task_agent_copilot.yaml` | Agent task using Copilot runtime |

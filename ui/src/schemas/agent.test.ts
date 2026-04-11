@@ -62,6 +62,11 @@ describe('agentCLIRuntimeSchema', () => {
     expect(agentCLIRuntimeSchema.parse(data)).toEqual(data)
   })
 
+  it('parses valid codex runtime', () => {
+    const data = { type: 'codex' }
+    expect(agentCLIRuntimeSchema.parse(data)).toEqual(data)
+  })
+
   it('rejects invalid type', () => {
     expect(() => agentCLIRuntimeSchema.parse({ type: 'invalid' })).toThrow()
     expect(() => agentCLIRuntimeSchema.parse({ type: '' })).toThrow()

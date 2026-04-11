@@ -44,6 +44,21 @@ if (typeof globalThis.ResizeObserver === 'undefined') {
   } as any
 }
 
+if (typeof HTMLElement !== 'undefined') {
+  if (!HTMLElement.prototype.hasPointerCapture) {
+    HTMLElement.prototype.hasPointerCapture = () => false
+  }
+  if (!HTMLElement.prototype.setPointerCapture) {
+    HTMLElement.prototype.setPointerCapture = () => {}
+  }
+  if (!HTMLElement.prototype.releasePointerCapture) {
+    HTMLElement.prototype.releasePointerCapture = () => {}
+  }
+  if (!HTMLElement.prototype.scrollIntoView) {
+    HTMLElement.prototype.scrollIntoView = () => {}
+  }
+}
+
 import { render, screen, waitFor } from '@/test/test-utils'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
@@ -86,6 +101,16 @@ describe('AgentCreateForm', () => {
     expect(screen.getByText('Max Turns')).toBeInTheDocument()
     expect(screen.getByText('Allowed Tools')).toBeInTheDocument()
     expect(screen.getByText('Allow Bash')).toBeInTheDocument()
+  })
+
+  it('Runtime mode includes Codex as an available runtime option', async () => {
+    useStateModeOverride = 'runtime'
+    const user = userEvent.setup()
+    render(<AgentCreateForm />)
+
+    const selects = screen.getAllByRole('combobox')
+    await user.click(selects[1])
+    expect(screen.getAllByText('OpenAI Codex').length).toBeGreaterThan(0)
   })
 
   it('secret reference select is shown', () => {

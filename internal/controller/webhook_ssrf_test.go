@@ -7,7 +7,14 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
+	"context"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestIsAllowedWebhookURL_ValidURLs(t *testing.T) {
@@ -15,16 +22,36 @@ func TestIsAllowedWebhookURL_ValidURLs(t *testing.T) {
 		"https://example.com/webhook",
 		"http://public.example.org/notify",
 		"https://api.example.com:8080/hook",
-		"http://receiver.default.svc.cluster.local/webhook",
-		"http://receiver.default.svc:8080/webhook",
-		"http://receiver.default.svc/webhook",
 	}
 
 	for _, url := range validURLs {
 		t.Run(url, func(t *testing.T) {
-			err := isAllowedWebhookURL(url, "default")
+			err := isAllowedWebhookURL(context.Background(), nil, url, "default")
 			if err != nil {
 				t.Errorf("isAllowedWebhookURL(%q) returned error: %v", url, err)
+			}
+		})
+	}
+}
+
+func TestIsAllowedWebhookURL_AllowsSameNamespaceClusterIPService(t *testing.T) {
+	kubeClient := newWebhookValidationClient(t, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "receiver", Namespace: "default"},
+		Spec: corev1.ServiceSpec{
+			Type:      corev1.ServiceTypeClusterIP,
+			ClusterIP: "10.96.0.10",
+			Selector:  map[string]string{"app": "receiver"},
+		},
+	})
+
+	for _, url := range []string{
+		"http://receiver.default.svc.cluster.local/webhook",
+		"http://receiver.default.svc/webhook",
+	} {
+		t.Run(url, func(t *testing.T) {
+			err := isAllowedWebhookURL(context.Background(), kubeClient, url, "default")
+			if err != nil {
+				t.Fatalf("isAllowedWebhookURL(%q) returned error: %v", url, err)
 			}
 		})
 	}
@@ -52,7 +79,7 @@ func TestIsAllowedWebhookURL_BlockedURLs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := isAllowedWebhookURL(tt.url, "default")
+			err := isAllowedWebhookURL(context.Background(), nil, tt.url, "default")
 			if err == nil {
 				t.Errorf("isAllowedWebhookURL(%q) should have returned error but didn't", tt.url)
 			}
@@ -69,7 +96,7 @@ func TestIsAllowedWebhookURL_InvalidURLs(t *testing.T) {
 
 	for _, url := range invalidURLs {
 		t.Run(url, func(t *testing.T) {
-			err := isAllowedWebhookURL(url, "default")
+			err := isAllowedWebhookURL(context.Background(), nil, url, "default")
 			if err == nil {
 				t.Errorf("isAllowedWebhookURL(%q) should have returned error for invalid URL", url)
 			}
@@ -79,7 +106,48 @@ func TestIsAllowedWebhookURL_InvalidURLs(t *testing.T) {
 
 func TestIsAllowedWebhookURL_BlocksOtherNamespaceServices(t *testing.T) {
 	url := "http://receiver.other.svc.cluster.local/webhook"
-	if err := isAllowedWebhookURL(url, "default"); err == nil {
+	if err := isAllowedWebhookURL(context.Background(), nil, url, "default"); err == nil {
 		t.Fatalf("isAllowedWebhookURL(%q) should reject services outside the task namespace", url)
 	}
+}
+
+func TestIsAllowedWebhookURL_BlocksExternalNameServices(t *testing.T) {
+	kubeClient := newWebhookValidationClient(t, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "receiver", Namespace: "default"},
+		Spec: corev1.ServiceSpec{
+			Type:         corev1.ServiceTypeExternalName,
+			ExternalName: "169.254.169.254",
+		},
+	})
+
+	err := isAllowedWebhookURL(context.Background(), kubeClient, "http://receiver.default.svc.cluster.local/webhook", "default")
+	if err == nil {
+		t.Fatal("expected ExternalName service to be rejected")
+	}
+}
+
+func TestIsAllowedWebhookURL_BlocksSelectorlessServices(t *testing.T) {
+	kubeClient := newWebhookValidationClient(t, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "receiver", Namespace: "default"},
+		Spec: corev1.ServiceSpec{
+			Type:      corev1.ServiceTypeClusterIP,
+			ClusterIP: "10.96.0.10",
+		},
+	})
+
+	err := isAllowedWebhookURL(context.Background(), kubeClient, "http://receiver.default.svc.cluster.local/webhook", "default")
+	if err == nil {
+		t.Fatal("expected selector-less service to be rejected")
+	}
+}
+
+func newWebhookValidationClient(t *testing.T, objs ...ctrlclient.Object) ctrlclient.Client {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add corev1 to scheme: %v", err)
+	}
+
+	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 }

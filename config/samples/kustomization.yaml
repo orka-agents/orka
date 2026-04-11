@@ -7,4 +7,5 @@ resources:
 - core_v1alpha1_tool.yaml
 - core_v1alpha1_agent.yaml
 - core_v1alpha1_agent_claude.yaml
+- core_v1alpha1_agent_codex.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

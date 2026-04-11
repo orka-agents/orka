@@ -30,9 +30,14 @@ const (
 )
 
 const (
-	testTask         = "test-task"
-	defaultNS        = "default"
-	envAIProviderKey = "ORKA_AI_PROVIDER"
+	testTask               = "test-task"
+	defaultNS              = "default"
+	envAIProviderKey       = "ORKA_AI_PROVIDER"
+	testNodeLabelKey       = "sandbox-runtime"
+	testNodeValueKata      = "kata"
+	testNodeValueGVisor    = "gvisor"
+	testRuntimeClassKata   = "kata-qemu"
+	testRuntimeClassGVisor = "gvisor"
 )
 
 func setupJobBuilder() *JobBuilder {
@@ -55,6 +60,9 @@ func TestNewJobBuilder(t *testing.T) {
 	}
 	if builder.GeneralWorkerImage != DefaultGeneralWorkerImage {
 		t.Errorf("GeneralWorkerImage = %s, want %s", builder.GeneralWorkerImage, DefaultGeneralWorkerImage)
+	}
+	if builder.CodexWorkerImage != DefaultCodexWorkerImage {
+		t.Errorf("CodexWorkerImage = %s, want %s", builder.CodexWorkerImage, DefaultCodexWorkerImage)
 	}
 }
 
@@ -195,6 +203,177 @@ func TestJobBuilder_Build_WithSession(t *testing.T) {
 	initContainer := job.Spec.Template.Spec.InitContainers[0]
 	if initContainer.Name != "fetch-session" {
 		t.Errorf("Init container name = %s, want fetch-session", initContainer.Name)
+	}
+}
+
+func TestJobBuilder_Build_AppliesAgentExecutionDefaults(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeContainer,
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Execution: &corev1alpha1.ExecutionSpec{
+				RuntimeClassName: testRuntimeClassKata,
+				NodeSelector: map[string]string{
+					testNodeLabelKey: testNodeValueKata,
+				},
+				Tolerations: []corev1.Toleration{
+					{
+						Key:      testNodeLabelKey,
+						Operator: corev1.TolerationOpEqual,
+						Value:    testNodeValueKata,
+						Effect:   corev1.TaintEffectNoSchedule,
+					},
+				},
+				Affinity: &corev1.Affinity{
+					NodeAffinity: &corev1.NodeAffinity{
+						RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+							NodeSelectorTerms: []corev1.NodeSelectorTerm{
+								{
+									MatchExpressions: []corev1.NodeSelectorRequirement{
+										{
+											Key:      testNodeLabelKey,
+											Operator: corev1.NodeSelectorOpIn,
+											Values:   []string{testNodeValueKata},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, agent, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	podSpec := job.Spec.Template.Spec
+	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != testRuntimeClassKata {
+		t.Fatalf("RuntimeClassName = %v, want %s", podSpec.RuntimeClassName, testRuntimeClassKata)
+	}
+	if got := podSpec.NodeSelector[testNodeLabelKey]; got != testNodeValueKata {
+		t.Errorf("NodeSelector[%s] = %q, want %q", testNodeLabelKey, got, testNodeValueKata)
+	}
+	if len(podSpec.Tolerations) != 1 {
+		t.Fatalf("Tolerations len = %d, want 1", len(podSpec.Tolerations))
+	}
+	if podSpec.Tolerations[0].Value != testNodeValueKata {
+		t.Errorf("Tolerations[0].Value = %q, want %q", podSpec.Tolerations[0].Value, testNodeValueKata)
+	}
+	if podSpec.Affinity == nil || podSpec.Affinity.NodeAffinity == nil {
+		t.Fatal("Affinity.NodeAffinity should not be nil")
+	}
+
+	podSpec.NodeSelector[testNodeLabelKey] = "modified"
+	if agent.Spec.Execution.NodeSelector[testNodeLabelKey] != testNodeValueKata {
+		t.Error("Build should copy agent execution nodeSelector instead of aliasing it")
+	}
+}
+
+func TestJobBuilder_Build_TaskExecutionOverridesAgentExecution(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeContainer,
+			Execution: &corev1alpha1.ExecutionSpec{
+				RuntimeClassName: testRuntimeClassGVisor,
+				NodeSelector: map[string]string{
+					testNodeLabelKey: testNodeValueGVisor,
+				},
+				Tolerations: []corev1.Toleration{
+					{
+						Key:      testNodeLabelKey,
+						Operator: corev1.TolerationOpEqual,
+						Value:    testNodeValueGVisor,
+						Effect:   corev1.TaintEffectNoSchedule,
+					},
+				},
+				Affinity: &corev1.Affinity{
+					PodAntiAffinity: &corev1.PodAntiAffinity{
+						PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{
+							{
+								Weight: 1,
+								PodAffinityTerm: corev1.PodAffinityTerm{
+									TopologyKey: "kubernetes.io/hostname",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Execution: &corev1alpha1.ExecutionSpec{
+				RuntimeClassName: testRuntimeClassKata,
+				NodeSelector: map[string]string{
+					testNodeLabelKey: "kata",
+					"dedicated":      "true",
+				},
+				Tolerations: []corev1.Toleration{
+					{
+						Key:      testNodeLabelKey,
+						Operator: corev1.TolerationOpEqual,
+						Value:    testNodeValueKata,
+						Effect:   corev1.TaintEffectNoSchedule,
+					},
+					{
+						Key:      "dedicated",
+						Operator: corev1.TolerationOpExists,
+						Effect:   corev1.TaintEffectNoSchedule,
+					},
+				},
+				Affinity: &corev1.Affinity{
+					NodeAffinity: &corev1.NodeAffinity{},
+				},
+			},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, agent, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	podSpec := job.Spec.Template.Spec
+	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != testRuntimeClassGVisor {
+		t.Fatalf("RuntimeClassName = %v, want %s", podSpec.RuntimeClassName, testRuntimeClassGVisor)
+	}
+	if len(podSpec.NodeSelector) != 1 {
+		t.Fatalf("NodeSelector len = %d, want 1", len(podSpec.NodeSelector))
+	}
+	if got := podSpec.NodeSelector[testNodeLabelKey]; got != testNodeValueGVisor {
+		t.Errorf("NodeSelector[%s] = %q, want %q", testNodeLabelKey, got, testNodeValueGVisor)
+	}
+	if len(podSpec.Tolerations) != 1 {
+		t.Fatalf("Tolerations len = %d, want 1", len(podSpec.Tolerations))
+	}
+	if podSpec.Tolerations[0].Value != testNodeValueGVisor {
+		t.Errorf("Tolerations[0].Value = %q, want %q", podSpec.Tolerations[0].Value, testNodeValueGVisor)
+	}
+	if podSpec.Affinity == nil || podSpec.Affinity.PodAntiAffinity == nil {
+		t.Fatal("Affinity.PodAntiAffinity should not be nil")
+	}
+	if podSpec.Affinity.NodeAffinity != nil {
+		t.Error("Task affinity should replace agent affinity instead of merging with it")
 	}
 }
 
@@ -819,6 +998,38 @@ func TestJobBuilder_Build_AgentTask_ClaudeRuntime(t *testing.T) {
 	container := job.Spec.Template.Spec.Containers[0]
 	if container.Image != DefaultClaudeWorkerImage {
 		t.Errorf("Image = %s, want %s", container.Image, DefaultClaudeWorkerImage)
+	}
+}
+
+func TestJobBuilder_Build_AgentTask_CodexRuntime(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "agent-task",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAgent,
+			Prompt: "Fix the bug",
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: corev1alpha1.AgentRuntimeCodex,
+			},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, agent, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	container := job.Spec.Template.Spec.Containers[0]
+	if container.Image != DefaultCodexWorkerImage {
+		t.Errorf("Image = %s, want %s", container.Image, DefaultCodexWorkerImage)
 	}
 }
 
@@ -1993,6 +2204,15 @@ func TestGetAgentWorkerImage(t *testing.T) {
 				},
 			},
 			expected: DefaultClaudeWorkerImage,
+		},
+		{
+			name: "codex runtime",
+			agent: &corev1alpha1.Agent{
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+				},
+			},
+			expected: DefaultCodexWorkerImage,
 		},
 		{
 			name: "unknown runtime type",

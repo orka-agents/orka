@@ -1,0 +1,4 @@
+interface:
+  display_name: "Orka Kind Deploy"
+  short_description: "Rebuild and deploy Orka to kind"
+  default_prompt: "Use $orka-kind-deploy to rebuild all Orka images, load them into the active kind cluster, and roll out the controller."

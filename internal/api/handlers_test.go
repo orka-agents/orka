@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -236,6 +237,61 @@ func TestHandlers_CreateTask_WithTimeout(t *testing.T) {
 
 	if resp.StatusCode != http.StatusCreated {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+}
+
+func TestHandlers_CreateTask_WithExecution(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/tasks", handlers.CreateTask)
+
+	body := CreateTaskRequest{
+		Name: "test-task",
+		Type: corev1alpha1.TaskTypeContainer,
+		Execution: &corev1alpha1.ExecutionSpec{
+			RuntimeClassName: "gvisor",
+			NodeSelector: map[string]string{
+				"kubernetes.io/os": "linux",
+			},
+			Tolerations: []corev1.Toleration{
+				{Key: "sandboxed", Operator: corev1.TolerationOpExists},
+			},
+			Affinity: &corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{},
+			},
+		},
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+
+	created := &corev1alpha1.Task{}
+	err = handlers.client.Get(context.Background(), types.NamespacedName{Name: "test-task", Namespace: "default"}, created)
+	if err != nil {
+		t.Fatalf("failed to fetch created task: %v", err)
+	}
+	if created.Spec.Execution == nil {
+		t.Fatal("expected execution to be set on created task")
+	}
+	if created.Spec.Execution.RuntimeClassName != "gvisor" {
+		t.Fatalf("RuntimeClassName = %q, want %q", created.Spec.Execution.RuntimeClassName, "gvisor")
+	}
+	if got := created.Spec.Execution.NodeSelector["kubernetes.io/os"]; got != "linux" {
+		t.Fatalf("NodeSelector[kubernetes.io/os] = %q, want %q", got, "linux")
+	}
+	if len(created.Spec.Execution.Tolerations) != 1 || created.Spec.Execution.Tolerations[0].Key != "sandboxed" {
+		t.Fatalf("unexpected tolerations: %#v", created.Spec.Execution.Tolerations)
+	}
+	if created.Spec.Execution.Affinity == nil || created.Spec.Execution.Affinity.NodeAffinity == nil {
+		t.Fatal("expected affinity to be preserved on created task")
 	}
 }
 
