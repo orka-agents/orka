@@ -256,6 +256,41 @@ spec:
     authBodyKey: api_key # JSON key name when authInject=body
 ```
 
+#### URL Path Interpolation
+
+Tool CRD URLs can contain `{{paramName}}` placeholders that are replaced with parameter values at runtime. Interpolated values are URL path-escaped, and the matching parameters are removed from the request body. This is useful for REST APIs that require path parameters.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: github-merge-pr
+spec:
+  description: "Merge a GitHub pull request"
+  parameters:
+    type: object
+    properties:
+      owner:
+        type: string
+      repo:
+        type: string
+      pull_number:
+        type: integer
+      merge_method:
+        type: string
+        enum: [merge, squash, rebase]
+    required: [owner, repo, pull_number]
+  http:
+    url: "https://api.github.com/repos/{{owner}}/{{repo}}/pulls/{{pull_number}}/merge"
+    method: PUT
+    authSecretRef:
+      name: github-token
+      key: token
+    authInject: header
+```
+
+In this example, `owner`, `repo`, and `pull_number` are interpolated into the URL path and removed from the JSON body. Only `merge_method` is sent in the request body.
+
 ### Provider
 
 LLM provider configuration with credentials. Supports Anthropic, OpenAI, and Azure OpenAI.
