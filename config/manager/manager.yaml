@@ -72,6 +72,7 @@ spec:
           - --claude-worker-image=ghcr.io/sozercan/orka/agent-worker-claude:latest
           - --general-worker-image=ghcr.io/sozercan/orka/general-worker:latest
         image: controller:latest
+        imagePullPolicy: IfNotPresent
         name: manager
         ports: []
         securityContext:
