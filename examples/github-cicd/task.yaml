@@ -1,4 +1,4 @@
-# Trigger the full CI/CD flow
+# Trigger the full CI/CD flow.
 apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
@@ -8,8 +8,17 @@ spec:
   agentRef:
     name: cicd-coordinator
   prompt: |
-    Implement unit tests for the authentication module in
-    https://github.com/myorg/myrepo (branch: main).
-    Create a PR, wait for CI, and merge if green.
+    Implement unit tests for the authentication module.
+
+    Repository details:
+    - gitRepo: https://github.com/myorg/myrepo.git
+    - branch: main
+    - gitSecretRef: git-credentials
+    - pushBranch: chore/add-auth-tests
+
+    Requirements:
+    - Cover the authentication module's happy path and failure path.
+    - Run the relevant test suite before handing work back.
+    - Open a PR and auto-merge it once CI passes.
   timeout: 45m
   priority: 800
