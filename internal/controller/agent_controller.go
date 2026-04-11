@@ -166,17 +166,34 @@ func (r *AgentReconciler) validateTools(ctx context.Context, agent *corev1alpha1
 	return nil
 }
 
-// validateSkills validates that referenced Skill CRDs exist.
+// validateSkills validates that referenced Skill CRDs or ConfigMap-backed skills exist.
 func (r *AgentReconciler) validateSkills(ctx context.Context, agent *corev1alpha1.Agent) error {
 	for _, skillRef := range agent.Spec.Skills {
-		skill := &corev1alpha1.Skill{}
-		skillName := skillRef.Name
-		key := client.ObjectKey{Name: skillName, Namespace: agent.Namespace}
-		if err := r.Get(ctx, key, skill); err != nil {
-			if errors.IsNotFound(err) {
-				return fmt.Errorf("referenced Skill %q not found", skillName)
+		switch {
+		case skillRef.Name != "":
+			skill := &corev1alpha1.Skill{}
+			skillName := skillRef.Name
+			key := client.ObjectKey{Name: skillName, Namespace: agent.Namespace}
+			if err := r.Get(ctx, key, skill); err != nil {
+				if errors.IsNotFound(err) {
+					return fmt.Errorf("referenced Skill %q not found", skillName)
+				}
+				return fmt.Errorf("failed to get Skill %q: %w", skillName, err)
 			}
-			return fmt.Errorf("failed to get Skill %q: %w", skillName, err)
+		case skillRef.ConfigMapRef != nil:
+			cm := &corev1.ConfigMap{}
+			key := client.ObjectKey{Name: skillRef.ConfigMapRef.Name, Namespace: agent.Namespace}
+			if err := r.Get(ctx, key, cm); err != nil {
+				if errors.IsNotFound(err) {
+					return fmt.Errorf("referenced skill ConfigMap %q not found", skillRef.ConfigMapRef.Name)
+				}
+				return fmt.Errorf("failed to get skill ConfigMap %q: %w", skillRef.ConfigMapRef.Name, err)
+			}
+			if _, ok := cm.Data[skillRef.ConfigMapRef.Key]; !ok {
+				return fmt.Errorf("key %q not found in skill ConfigMap %q", skillRef.ConfigMapRef.Key, skillRef.ConfigMapRef.Name)
+			}
+		default:
+			return fmt.Errorf("skill reference must set either name or configMapRef")
 		}
 	}
 	return nil
@@ -248,6 +265,7 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 	now := metav1.Now()
 
 	agent.Status.ActiveTasks = activeTasks
+	agent.Status.Ready = validationErr == nil
 	if activeTasks > 0 {
 		agent.Status.LastUsed = &now
 	}
@@ -277,6 +295,7 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 			return err
 		}
 		agent.Status.ActiveTasks = activeCount
+		agent.Status.Ready = validationErr == nil
 		agent.Status.LastUsed = lastUsed
 		meta.SetStatusCondition(&agent.Status.Conditions, condition)
 		return r.Status().Update(ctx, agent)

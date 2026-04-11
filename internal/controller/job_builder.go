@@ -1055,13 +1055,19 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 		skillRefs = append(skillRefs, task.Spec.AI.Skills...)
 	}
 
-	// Deduplicate skill references by resolved name
+	// Deduplicate skill references by resolved identifier
 	seen := make(map[string]bool)
 	deduped := make([]corev1alpha1.SkillReference, 0, len(skillRefs))
 	for _, ref := range skillRefs {
-		name := ref.Name
-		if name != "" && !seen[name] {
-			seen[name] = true
+		var key string
+		switch {
+		case ref.Name != "":
+			key = "skill:" + ref.Name
+		case ref.ConfigMapRef != nil:
+			key = "configmap:" + ref.ConfigMapRef.Name + "/" + ref.ConfigMapRef.Key
+		}
+		if key != "" && !seen[key] {
+			seen[key] = true
 			deduped = append(deduped, ref)
 		}
 	}
@@ -1078,35 +1084,60 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 	promptParts := make([]string, 0, len(skillRefs))
 
 	for idx, ref := range skillRefs {
-		skill := &corev1alpha1.Skill{}
-		skillName := ref.Name
-		if err := b.Get(ctx, client.ObjectKey{Name: skillName, Namespace: task.Namespace}, skill); err != nil {
-			return fmt.Errorf("failed to get Skill %q: %w", skillName, err)
-		}
+		switch {
+		case ref.Name != "":
+			skill := &corev1alpha1.Skill{}
+			skillName := ref.Name
+			if err := b.Get(ctx, client.ObjectKey{Name: skillName, Namespace: task.Namespace}, skill); err != nil {
+				return fmt.Errorf("failed to get Skill %q: %w", skillName, err)
+			}
 
-		metrics.SkillsLoaded.WithLabelValues(skill.Name, task.Namespace).Inc()
+			metrics.SkillsLoaded.WithLabelValues(skill.Name, task.Namespace).Inc()
 
-		promptParts = append(promptParts, strings.TrimSpace(skill.Spec.Content.Inline))
+			promptParts = append(promptParts, strings.TrimSpace(skill.Spec.Content.Inline))
 
-		inlineKey := fmt.Sprintf("skill-%d-inline", idx)
-		cmData[inlineKey] = skill.Spec.Content.Inline
-		items = append(items, corev1.KeyToPath{
-			Key:  inlineKey,
-			Path: path.Join(skillName, "SKILL.md"),
-		})
-
-		filePaths := make([]string, 0, len(skill.Spec.Content.Files))
-		for filePath := range skill.Spec.Content.Files {
-			filePaths = append(filePaths, filePath)
-		}
-		sort.Strings(filePaths)
-		for i, filePath := range filePaths {
-			fileKey := fmt.Sprintf("skill-%d-file-%d", idx, i)
-			cmData[fileKey] = skill.Spec.Content.Files[filePath]
+			inlineKey := fmt.Sprintf("skill-%d-inline", idx)
+			cmData[inlineKey] = skill.Spec.Content.Inline
 			items = append(items, corev1.KeyToPath{
-				Key:  fileKey,
-				Path: path.Join(skillName, filePath),
+				Key:  inlineKey,
+				Path: path.Join(skillName, "SKILL.md"),
 			})
+
+			filePaths := make([]string, 0, len(skill.Spec.Content.Files))
+			for filePath := range skill.Spec.Content.Files {
+				filePaths = append(filePaths, filePath)
+			}
+			sort.Strings(filePaths)
+			for i, filePath := range filePaths {
+				fileKey := fmt.Sprintf("skill-%d-file-%d", idx, i)
+				cmData[fileKey] = skill.Spec.Content.Files[filePath]
+				items = append(items, corev1.KeyToPath{
+					Key:  fileKey,
+					Path: path.Join(skillName, filePath),
+				})
+			}
+		case ref.ConfigMapRef != nil:
+			cm := &corev1.ConfigMap{}
+			if err := b.Get(ctx, client.ObjectKey{Name: ref.ConfigMapRef.Name, Namespace: task.Namespace}, cm); err != nil {
+				return fmt.Errorf("failed to get skill ConfigMap %q: %w", ref.ConfigMapRef.Name, err)
+			}
+			content, ok := cm.Data[ref.ConfigMapRef.Key]
+			if !ok {
+				return fmt.Errorf("key %q not found in skill ConfigMap %q", ref.ConfigMapRef.Key, ref.ConfigMapRef.Name)
+			}
+
+			metrics.SkillsLoaded.WithLabelValues(ref.ConfigMapRef.Name, task.Namespace).Inc()
+
+			promptParts = append(promptParts, strings.TrimSpace(content))
+
+			inlineKey := fmt.Sprintf("skill-%d-inline", idx)
+			cmData[inlineKey] = content
+			items = append(items, corev1.KeyToPath{
+				Key:  inlineKey,
+				Path: path.Join(ref.ConfigMapRef.Name+"-"+ref.ConfigMapRef.Key, "SKILL.md"),
+			})
+		default:
+			return fmt.Errorf("skill reference must set either name or configMapRef")
 		}
 	}
 

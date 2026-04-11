@@ -2403,3 +2403,65 @@ func TestJobBuilderBuildDeduplicatesSkills(t *testing.T) {
 		t.Fatalf("expected 1 inline skill entry (deduplicated), got %d", inlineCount)
 	}
 }
+
+func TestJobBuilderBuildLoadsConfigMapSkills(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+
+	skillCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "skill-cm", Namespace: defaultNS},
+		Data:       map[string]string{"skill.txt": "You are a careful reviewer."},
+	}
+
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(skillCM).Build()
+	jb := NewJobBuilder(fc)
+	jb.ControllerURL = testControllerURL
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "configmap-skill-task", Namespace: defaultNS, UID: "uid-configmap-skill"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI: &corev1alpha1.AISpec{
+				Provider: "openai",
+				Model:    "gpt-4o-mini",
+				Prompt:   "hello",
+			},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "configmap-skill-agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Skills: []corev1alpha1.SkillReference{{
+				ConfigMapRef: &corev1alpha1.ConfigMapKeySelector{Name: "skill-cm", Key: "skill.txt"},
+			}},
+		},
+	}
+
+	job, err := jb.Build(context.Background(), task, agent, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	var skillsVolume *corev1.Volume
+	for i := range job.Spec.Template.Spec.Volumes {
+		if job.Spec.Template.Spec.Volumes[i].Name == "skills" {
+			skillsVolume = &job.Spec.Template.Spec.Volumes[i]
+			break
+		}
+	}
+	if skillsVolume == nil || skillsVolume.ConfigMap == nil {
+		t.Fatal("skills volume should reference a ConfigMap")
+	}
+
+	cm := &corev1.ConfigMap{}
+	if err := fc.Get(context.Background(), types.NamespacedName{
+		Name:      skillsVolume.ConfigMap.Name,
+		Namespace: defaultNS,
+	}, cm); err != nil {
+		t.Fatalf("expected generated skill ConfigMap to exist: %v", err)
+	}
+	if got := strings.TrimSpace(cm.Data["system-prompt"]); got != "You are a careful reviewer." {
+		t.Fatalf("system-prompt = %q, want %q", got, "You are a careful reviewer.")
+	}
+}

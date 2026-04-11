@@ -330,6 +330,10 @@ func TestValidateSkills(t *testing.T) {
 			Content:     corev1alpha1.SkillContent{Inline: "test content"},
 		},
 	}
+	skillCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "skill-cm", Namespace: testNS},
+		Data:       map[string]string{"skill.txt": "configmap skill"},
+	}
 
 	tests := []struct {
 		name      string
@@ -364,6 +368,30 @@ func TestValidateSkills(t *testing.T) {
 			}(),
 			wantErr:   true,
 			errSubstr: "not found",
+		},
+		{
+			name: "skill ConfigMap exists",
+			agent: func() *corev1alpha1.Agent {
+				a := baseAgent("with-skill-configmap")
+				a.Spec.Skills = []corev1alpha1.SkillReference{
+					{ConfigMapRef: &corev1alpha1.ConfigMapKeySelector{Name: "skill-cm", Key: "skill.txt"}},
+				}
+				return a
+			}(),
+			objs: []runtime.Object{skillCM},
+		},
+		{
+			name: "skill ConfigMap key missing",
+			agent: func() *corev1alpha1.Agent {
+				a := baseAgent("missing-skill-key")
+				a.Spec.Skills = []corev1alpha1.SkillReference{
+					{ConfigMapRef: &corev1alpha1.ConfigMapKeySelector{Name: "skill-cm", Key: "missing.txt"}},
+				}
+				return a
+			}(),
+			objs:      []runtime.Object{skillCM},
+			wantErr:   true,
+			errSubstr: "not found in skill ConfigMap",
 		},
 	}
 
@@ -691,6 +719,9 @@ func TestUpdateStatus(t *testing.T) {
 		if agent.Status.ActiveTasks != 0 {
 			t.Errorf("ActiveTasks = %d, want 0", agent.Status.ActiveTasks)
 		}
+		if !agent.Status.Ready {
+			t.Error("Ready = false, want true")
+		}
 		cond := findCondition(agent.Status.Conditions, "Ready")
 		if cond == nil {
 			t.Fatal("Ready condition not found")
@@ -725,6 +756,9 @@ func TestUpdateStatus(t *testing.T) {
 		}
 		if cond.Message != "bad config" {
 			t.Errorf("Message = %q, want %q", cond.Message, "bad config")
+		}
+		if agent.Status.Ready {
+			t.Error("Ready = true, want false")
 		}
 	})
 
