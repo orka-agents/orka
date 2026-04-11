@@ -16,10 +16,6 @@ vi.mock('@tanstack/react-router', async () => {
   }
 })
 
-vi.mock('next-themes', () => ({
-  useTheme: () => ({ theme: 'light' }),
-}))
-
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { RootLayout } from './root-layout'

@@ -13,16 +13,16 @@ import (
 	"strings"
 )
 
-// EstimateTokens returns an approximate token count (~4 chars per token).
-func EstimateTokens(text string) int {
+// estimateTokens returns an approximate token count (~4 chars per token).
+func estimateTokens(text string) int {
 	return (len(text) + 3) / 4
 }
 
-// EstimateMessageTokens returns approximate tokens for a Message including tool call content.
-func EstimateMessageTokens(m Message) int {
-	tokens := EstimateTokens(m.Content)
+// estimateMessageTokens returns approximate tokens for a Message including tool call content.
+func estimateMessageTokens(m Message) int {
+	tokens := estimateTokens(m.Content)
 	for _, tc := range m.ToolCalls {
-		tokens += EstimateTokens(tc.Name) + EstimateTokens(string(tc.Arguments))
+		tokens += estimateTokens(tc.Name) + estimateTokens(string(tc.Arguments))
 	}
 	return tokens
 }
@@ -42,18 +42,18 @@ func groupMessageBlocks(messages []Message) []messageBlock {
 	for i < len(messages) {
 		m := messages[i]
 		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
-			block := messageBlock{messages: []Message{m}, tokens: EstimateMessageTokens(m)}
+			block := messageBlock{messages: []Message{m}, tokens: estimateMessageTokens(m)}
 			i++
 			for i < len(messages) && messages[i].Role == "tool" {
 				block.messages = append(block.messages, messages[i])
-				block.tokens += EstimateMessageTokens(messages[i])
+				block.tokens += estimateMessageTokens(messages[i])
 				i++
 			}
 			blocks = append(blocks, block)
 		} else {
 			blocks = append(blocks, messageBlock{
 				messages: []Message{m},
-				tokens:   EstimateMessageTokens(m),
+				tokens:   estimateMessageTokens(m),
 			})
 			i++
 		}
@@ -71,7 +71,7 @@ func TruncateMessages(messages []Message, tokenBudget int) []Message {
 
 	totalTokens := 0
 	for _, m := range messages {
-		totalTokens += EstimateMessageTokens(m)
+		totalTokens += estimateMessageTokens(m)
 	}
 	if totalTokens <= tokenBudget {
 		return messages
@@ -79,7 +79,7 @@ func TruncateMessages(messages []Message, tokenBudget int) []Message {
 
 	// Always keep the first message
 	first := messages[0]
-	firstTokens := EstimateMessageTokens(first)
+	firstTokens := estimateMessageTokens(first)
 	remaining := tokenBudget - firstTokens
 	if remaining <= 0 {
 		return []Message{first}
@@ -102,7 +102,7 @@ func TruncateMessages(messages []Message, tokenBudget int) []Message {
 	droppedBlocks := len(blocks) - len(kept)
 	if droppedBlocks > 0 {
 		noteContent := extractDroppedSummary(blocks[:droppedBlocks])
-		noteTokens := EstimateTokens(noteContent)
+		noteTokens := estimateTokens(noteContent)
 
 		// If the note doesn't fit, drop more kept blocks to make room
 		for noteTokens > remaining && len(kept) > 0 {
@@ -110,7 +110,7 @@ func TruncateMessages(messages []Message, tokenBudget int) []Message {
 			droppedBlocks++
 			kept = kept[1:]
 			noteContent = extractDroppedSummary(blocks[:droppedBlocks])
-			noteTokens = EstimateTokens(noteContent)
+			noteTokens = estimateTokens(noteContent)
 		}
 
 		// If the note still doesn't fit (very tight budget), use a minimal note

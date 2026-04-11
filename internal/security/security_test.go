@@ -56,40 +56,6 @@ func TestFindingsArtifactEvidenceRefsUnmarshalJSON(t *testing.T) {
 	}
 }
 
-func TestBuildScanPromptIncludesDetailedThreatModelGuidance(t *testing.T) {
-	scan := &corev1alpha1.RepositoryScan{
-		Spec: corev1alpha1.RepositoryScanSpec{
-			RepoURL:    "https://github.com/example/project",
-			Repository: "project",
-			Branch:     "main",
-		},
-	}
-
-	got := BuildScanPrompt(scan, "manual", "abc123", "def456", "# Existing threat model")
-
-	requiredSnippets := []string{
-		"detailed, engineering-grade threat model",
-		"System Overview and deployment/runtime context",
-		"Key Assets, Trust Boundaries, and sensitive operations",
-		"Attacker-controlled inputs, operator-controlled inputs, and assumptions",
-		"Attack surface and existing mitigations by subsystem/component",
-		"Concrete attacker stories or abuse cases tied to this repository",
-		"Criticality calibration for what would count as critical, high, medium, and low impact here",
-		"security-relevant change analysis for the commits in scope",
-		"Treat the existing threat model as baseline context to refine and extend",
-		"Existing threat model context:\n# Existing threat model",
-	}
-
-	for _, snippet := range requiredSnippets {
-		if !strings.Contains(got, snippet) {
-			t.Fatalf("BuildScanPrompt() missing snippet %q in prompt:\n%s", snippet, got)
-		}
-	}
-	if !strings.Contains(got, "REQUIRED_SECURITY_ARTIFACTS: security-threat-model.md, security-findings.json") {
-		t.Fatalf("BuildScanPrompt() missing required artifacts directive:\n%s", got)
-	}
-}
-
 func TestBuildThreatModelPromptRequiresThreatModelOnly(t *testing.T) {
 	scan := &corev1alpha1.RepositoryScan{
 		Spec: corev1alpha1.RepositoryScanSpec{

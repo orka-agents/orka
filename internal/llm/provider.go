@@ -194,6 +194,4 @@ func IsContextTooLongErr(err error) bool {
 var (
 	ErrUnknownProvider = &ProviderError{Message: "unknown provider"}
 	ErrAPIKeyRequired  = &ProviderError{Message: "API key is required"}
-	ErrRateLimited     = &ProviderError{Message: "rate limited"}
-	ErrContextTooLong  = &ProviderError{Message: "context too long"}
 )

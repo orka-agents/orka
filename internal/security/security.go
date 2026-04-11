@@ -15,7 +15,6 @@ import (
 )
 
 const (
-	ArtifactScanSummary    = "security-scan-summary.json"
 	ArtifactThreatModel    = "security-threat-model.md"
 	ArtifactFindings       = "security-findings.json"
 	ArtifactValidation     = "security-validation.json"
@@ -256,14 +255,6 @@ func PatchBranch(findingID string) string {
 	return fmt.Sprintf("orka/security/%s", sanitizeName(findingID))
 }
 
-// EffectiveProvider returns the configured provider or the v1 default.
-func EffectiveProvider(scan *corev1alpha1.RepositoryScan) string {
-	if scan.Spec.Provider != "" {
-		return scan.Spec.Provider
-	}
-	return "github"
-}
-
 // EffectiveValidationMode returns the configured validation mode or the v1 default.
 func EffectiveValidationMode(scan *corev1alpha1.RepositoryScan) string {
 	if scan.Spec.ValidationMode != "" {
@@ -384,70 +375,6 @@ func ArtifactWorkspacePath(subPath string) string {
 		return ArtifactWorkspaceDir
 	}
 	return strings.Repeat("../", depth) + ArtifactWorkspaceDir
-}
-
-// BuildScanPrompt returns the prompt for repository scan tasks.
-func BuildScanPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit, threatModel string) string {
-	var prompt strings.Builder
-	artifactDir := ArtifactWorkspacePath(scan.Spec.SubPath)
-	hasExistingThreatModel := strings.TrimSpace(threatModel) != ""
-	fmt.Fprintf(&prompt, "You are running a repository security scan for %s on branch %s.\n", scan.Spec.RepoURL, EffectiveBranch(scan))
-	fmt.Fprintf(&prompt, "Mode: %s\n", mode)
-	fmt.Fprintf(&prompt, "Provider: %s\n", EffectiveProvider(scan))
-	fmt.Fprintf(&prompt, "Validation mode: %s\n", EffectiveValidationMode(scan))
-	fmt.Fprintf(&prompt, "History window: %d days\n", EffectiveHistoryDays(scan))
-	fmt.Fprintf(&prompt, "Max findings: %d\n", EffectiveMaxFindingsPerRun(scan))
-	if scan.Spec.SubPath != "" {
-		fmt.Fprintf(&prompt, "Sub-path focus: %s\n", scan.Spec.SubPath)
-	}
-	if baseCommit != "" || headCommit != "" {
-		fmt.Fprintf(&prompt, "Commit focus: base=%s head=%s\n", baseCommit, headCommit)
-	}
-	prompt.WriteString("\nTasks:\n")
-	prompt.WriteString("1. Inspect the current repository state and recent commit history for likely vulnerabilities.\n")
-	prompt.WriteString("2. Generate or update a detailed, engineering-grade threat model grounded in the actual codebase.\n")
-	prompt.WriteString("3. Prefer high-confidence findings over speculative broad coverage.\n")
-	prompt.WriteString("4. Validate findings only when safe and practical.\n")
-	prompt.WriteString("5. Do not edit code, commit, or push during scan runs.\n")
-	prompt.WriteString("\nThreat model requirements for security-threat-model.md:\n")
-	prompt.WriteString("- Do not write a short executive summary only. Produce a substantial, code-aware threat model that future scans can reuse.\n")
-	prompt.WriteString("- Use markdown headings and include these sections when applicable:\n")
-	prompt.WriteString("  1. System Overview and deployment/runtime context\n")
-	prompt.WriteString("  2. Key Assets, Trust Boundaries, and sensitive operations\n")
-	prompt.WriteString("  3. Attacker-controlled inputs, operator-controlled inputs, and assumptions\n")
-	prompt.WriteString("  4. Security-relevant data flows and entry points\n")
-	prompt.WriteString("  5. Attack surface and existing mitigations by subsystem/component\n")
-	prompt.WriteString("  6. Concrete attacker stories or abuse cases tied to this repository\n")
-	prompt.WriteString("  7. Non-applicable or low-relevance vulnerability classes when helpful\n")
-	prompt.WriteString("  8. Criticality calibration for what would count as critical, high, medium, and low impact here\n")
-	if mode == "incremental" || mode == "manual" {
-		prompt.WriteString("- Include a short section on security-relevant change analysis for the commits in scope and explain what changed versus what remains unchanged.\n")
-	}
-	prompt.WriteString("- Reference concrete files, directories, services, workflows, APIs, secrets, auth paths, network boundaries, and privileged components when you can support them from the repo.\n")
-	prompt.WriteString("- Call out important uncertainties explicitly instead of inventing details.\n")
-	prompt.WriteString("- Keep the model readable, but preserve enough technical detail to support future incremental scans and user editing.\n")
-	if hasExistingThreatModel {
-		prompt.WriteString("- Treat the existing threat model as baseline context to refine and extend. Do not replace it with a shorter version unless the repository is genuinely tiny.\n")
-	}
-	fmt.Fprintf(&prompt, "\nWrite artifacts under %s/ using these exact filenames:\n", artifactDir)
-	fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, ArtifactScanSummary)
-	fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, ArtifactThreatModel)
-	fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, ArtifactFindings)
-	appendRequiredArtifactsDirective(&prompt, ArtifactThreatModel, ArtifactFindings)
-	prompt.WriteString("The scan will be treated as failed if the threat model or findings artifact is missing, empty, or invalid.\n")
-	fmt.Fprintf(&prompt, "Even when there are zero findings, still write %s/%s with valid JSON and an empty findings array.\n", artifactDir, ArtifactFindings)
-	prompt.WriteString("Prefer Bash heredocs or shell redirection when writing artifact files so they are persisted on disk.\n")
-	prompt.WriteString("security-findings.json must be valid JSON with this top-level shape:\n")
-	prompt.WriteString(`{"version":1,"repository":{"repo_url":"...","branch":"...","head_sha":"...","base_sha":"..."},"scan":{"mode":"initial|incremental|manual","commit_count":0,"summary":"..."},"findings":[]}` + "\n")
-	prompt.WriteString("Each finding object must use these keys: fingerprint, title, summary, severity, confidence, validation_status, file_path, line, commit_sha, root_cause, remediation, suggested_action, evidence.\n")
-	prompt.WriteString("Optional validation artifacts may use flat filenames like security-validation-<finding-id>.txt and .json in the same directory.\n")
-	prompt.WriteString("Keep security-findings.json compact and avoid large code excerpts.\n")
-	if hasExistingThreatModel {
-		prompt.WriteString("\nExisting threat model context:\n")
-		prompt.WriteString(threatModel)
-		prompt.WriteString("\n")
-	}
-	return prompt.String()
 }
 
 // BuildThreatModelPrompt returns the prompt for the threat-model-first stage of a scan run.

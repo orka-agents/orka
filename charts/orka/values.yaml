@@ -70,15 +70,6 @@ workers:
       tag: latest
       pullPolicy: IfNotPresent
 
-  # Default resources for workers
-  resources:
-    limits:
-      cpu: "1"
-      memory: 512Mi
-    requests:
-      cpu: 100m
-      memory: 128Mi
-
 # Service configuration
 service:
   type: ClusterIP
