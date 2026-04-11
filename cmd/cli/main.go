@@ -196,8 +196,16 @@ func extractToken(kubeconfigPath string) (string, error) {
 	return "", fmt.Errorf("no token, token file, exec, or auth provider found for user %q", ctx.AuthInfo)
 }
 
+// openBrowserFunc is the function used to open URLs in the default browser.
+// Tests can replace this to avoid launching a real browser.
+var openBrowserFunc = openBrowserDefault
+
 // openBrowser opens the given URL in the default browser.
 func openBrowser(url string) error {
+	return openBrowserFunc(url)
+}
+
+func openBrowserDefault(url string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":

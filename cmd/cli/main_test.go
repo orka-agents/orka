@@ -348,10 +348,15 @@ func TestExtractToken_MissingContext(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestOpenBrowser_DoesNotPanic(t *testing.T) { //nolint:unparam
-	// We can't really test browser opening, but ensure it doesn't panic
+	// Stub out the browser opener so we never launch a real browser.
+	orig := openBrowserFunc
+	openBrowserFunc = func(string) error { return nil }
+	t.Cleanup(func() { openBrowserFunc = orig })
+
 	err := openBrowser("http://example.com")
-	// May succeed or fail depending on platform — just check no panic
-	_ = err
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 // ---------------------------------------------------------------------------
