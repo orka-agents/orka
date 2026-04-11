@@ -118,16 +118,6 @@ func TestProviderError_Error(t *testing.T) {
 			err:     ErrAPIKeyRequired,
 			wantMsg: "API key is required",
 		},
-		{
-			name:    "rate limited error",
-			err:     ErrRateLimited,
-			wantMsg: "rate limited",
-		},
-		{
-			name:    "context too long error",
-			err:     ErrContextTooLong,
-			wantMsg: "context too long",
-		},
 	}
 
 	for _, tt := range tests {
@@ -289,7 +279,7 @@ func TestStreamChunk(t *testing.T) {
 		},
 		{
 			name:  "error chunk",
-			chunk: StreamChunk{Error: ErrRateLimited},
+			chunk: StreamChunk{Error: &ProviderError{Message: "rate limited"}},
 		},
 	}
 

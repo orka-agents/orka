@@ -9,6 +9,7 @@ require (
 	github.com/github/copilot-sdk/go v0.1.25
 	github.com/go-logr/logr v1.4.3
 	github.com/gofiber/fiber/v3 v3.0.0
+	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.28.1
 	github.com/onsi/gomega v1.39.1
 	github.com/openai/openai-go/v3 v3.21.0
@@ -29,6 +30,7 @@ require (
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4
 	modernc.org/sqlite v1.44.3
 	sigs.k8s.io/controller-runtime v0.23.1
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -72,7 +74,6 @@ require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/pprof v0.0.0-20260115054156-294ebfa9ad83 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.26.3 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
@@ -148,5 +149,4 @@ require (
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2-0.20260122202528-d9cc6641c482 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 )

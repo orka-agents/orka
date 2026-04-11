@@ -68,8 +68,8 @@ type ChatToolResult struct {
 	Suggestion string `json:"suggestion,omitempty"`
 }
 
-// MarshalChatResult marshals a ChatToolResult to a JSON string.
-func MarshalChatResult(r ChatToolResult) (string, error) {
+// marshalChatResult marshals a ChatToolResult to a JSON string.
+func marshalChatResult(r ChatToolResult) (string, error) {
 	b, err := json.Marshal(r)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal chat tool result: %w", err)
@@ -79,12 +79,12 @@ func MarshalChatResult(r ChatToolResult) (string, error) {
 
 // ChatToolSuccess returns a successful ChatToolResult JSON string.
 func ChatToolSuccess(data any) (string, error) {
-	return MarshalChatResult(ChatToolResult{Success: true, Data: data})
+	return marshalChatResult(ChatToolResult{Success: true, Data: data})
 }
 
 // ChatToolErrorResult returns a failed ChatToolResult JSON string.
 func ChatToolErrorResult(errType, message, suggestion string) (string, error) {
-	return MarshalChatResult(ChatToolResult{
+	return marshalChatResult(ChatToolResult{
 		Error:      message,
 		ErrorType:  errType,
 		Suggestion: suggestion,

@@ -85,16 +85,6 @@ type PatchProposal struct {
 	UpdatedAt       time.Time `json:"updatedAt"`
 }
 
-// FindingFeedback records user feedback for a finding.
-type FindingFeedback struct {
-	ID        string    `json:"id"`
-	Namespace string    `json:"namespace"`
-	FindingID string    `json:"findingID"`
-	Decision  string    `json:"decision"`
-	Comment   string    `json:"comment,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
-}
-
 // FindingCounts summarizes finding counts by severity.
 type FindingCounts struct {
 	Total    int32 `json:"total"`
