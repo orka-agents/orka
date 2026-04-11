@@ -151,7 +151,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 
 	// Add agent-specific volumes (workspace, home)
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
-		b.addAgentVolumes(ctx, job, task)
+		b.addAgentVolumes(job, task)
 	}
 
 	// Add skill volumes — read Skill CRs, create ConfigMap, mount at /workspace/.skills/
@@ -949,7 +949,7 @@ func (b *JobBuilder) addAgentWorkspaceEnvVars(
 }
 
 // addAgentVolumes adds agent-specific volumes to the Job (workspace, home)
-func (b *JobBuilder) addAgentVolumes(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task) {
+func (b *JobBuilder) addAgentVolumes(job *batchv1.Job, task *corev1alpha1.Task) {
 	// /workspace emptyDir for git clone target
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 		Name: "workspace",
@@ -980,15 +980,9 @@ func (b *JobBuilder) addAgentVolumes(ctx context.Context, job *batchv1.Job, task
 		},
 	)
 
-	// Git secret volume if referenced or auto-detected
+	// Git secret volume if explicitly referenced
 	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
 		ws := task.Spec.AgentRuntime.Workspace
-		// Auto-detect git credentials if gitRepo is set but gitSecretRef is not
-		if ws.GitSecretRef == nil && ws.GitRepo != "" {
-			if secretName := b.findGitSecret(ctx, task.Namespace); secretName != "" {
-				ws.GitSecretRef = &corev1.LocalObjectReference{Name: secretName}
-			}
-		}
 		if ws.GitSecretRef != nil {
 			job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 				Name: "git-credentials",
@@ -1020,25 +1014,6 @@ func joinStrings(s []string) string {
 		result.WriteString(v)
 	}
 	return result.String()
-}
-
-// findGitSecret looks for a git credentials secret in the namespace.
-func (b *JobBuilder) findGitSecret(ctx context.Context, namespace string) string {
-	for _, name := range []string{"copilot-token", "github-credentials", "git-credentials", "github-token", "git-token"} {
-		secret := &corev1.Secret{}
-		if err := b.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, secret); err == nil {
-			if _, ok := secret.Data["token"]; ok {
-				return name
-			}
-			if _, ok := secret.Data["password"]; ok {
-				return name
-			}
-			if _, ok := secret.Data["GITHUB_TOKEN"]; ok {
-				return name
-			}
-		}
-	}
-	return ""
 }
 
 // addSkillVolumes reads Skill CRs referenced by the agent and task, creates a ConfigMap

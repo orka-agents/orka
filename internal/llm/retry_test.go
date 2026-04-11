@@ -190,10 +190,10 @@ func TestRetryProvider_Stream_PeekRetry(t *testing.T) {
 		if chunk.Error != nil {
 			t.Fatalf("unexpected error chunk: %v", chunk.Error)
 		}
-		content.WriteString(chunk.Content)
+		content.WriteString(chunk.Content) //nolint:errcheck
 	}
-	if content.String() != "hello world" {
-		t.Errorf("expected 'hello world', got %q", content.String())
+	if got := content.String(); got != "hello world" {
+		t.Errorf("expected 'hello world', got %q", got)
 	}
 	if mock.streamCallCount != 2 {
 		t.Errorf("expected 2 stream calls, got %d", mock.streamCallCount)

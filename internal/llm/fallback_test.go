@@ -192,8 +192,8 @@ func TestFallbackProvider_Stream_PrimarySucceeds(t *testing.T) {
 	for chunk := range ch {
 		content.WriteString(chunk.Content)
 	}
-	if content.String() != "chunk1chunk2" {
-		t.Errorf("expected 'chunk1chunk2', got %q", content.String())
+	if got := content.String(); got != "chunk1chunk2" {
+		t.Errorf("expected 'chunk1chunk2', got %q", got)
 	}
 	if fb.streamCallCount != 0 {
 		t.Error("fallback should not have been called")
@@ -285,8 +285,8 @@ func TestFallbackProvider_Stream_WithCooldown(t *testing.T) {
 	for chunk := range ch {
 		content.WriteString(chunk.Content)
 	}
-	if content.String() != testFallbackContent {
-		t.Errorf("expected 'from fb', got %q", content.String())
+	if got := content.String(); got != testFallbackContent {
+		t.Errorf("expected 'from fb', got %q", got)
 	}
 	if primary.streamCallCount != 0 {
 		t.Error("primary should have been skipped due to cooldown")
@@ -418,8 +418,8 @@ func TestFallbackProvider_Stream_FallbackOnFirstChunkError(t *testing.T) {
 	for chunk := range ch {
 		content.WriteString(chunk.Content)
 	}
-	if content.String() != "hello" {
-		t.Errorf("expected 'hello', got %q", content.String())
+	if got := content.String(); got != "hello" {
+		t.Errorf("expected 'hello', got %q", got)
 	}
 }
 

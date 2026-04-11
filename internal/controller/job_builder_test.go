@@ -2058,66 +2058,6 @@ func TestAddAgentWorkspaceEnvVars_AllFields(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// findGitSecret
-// ---------------------------------------------------------------------------
-
-func TestFindGitSecret_NoSecrets(t *testing.T) {
-	jb := setupJobBuilder()
-	result := jb.findGitSecret(context.Background(), defaultNS)
-	if result != "" {
-		t.Errorf("expected empty string, got %s", result)
-	}
-}
-
-func TestFindGitSecret_TokenSecret(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
-	_ = corev1alpha1.AddToScheme(scheme)
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "github-credentials", Namespace: defaultNS},
-		Data:       map[string][]byte{"token": []byte("my-token")},
-	}
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
-	jb := NewJobBuilder(fc)
-	result := jb.findGitSecret(context.Background(), defaultNS)
-	if result != "github-credentials" {
-		t.Errorf("expected github-credentials, got %s", result)
-	}
-}
-
-func TestFindGitSecret_PasswordSecret(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
-	_ = corev1alpha1.AddToScheme(scheme)
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: testGitCredentials, Namespace: defaultNS},
-		Data:       map[string][]byte{"password": []byte("my-pass")},
-	}
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
-	jb := NewJobBuilder(fc)
-	result := jb.findGitSecret(context.Background(), defaultNS)
-	if result != testGitCredentials {
-		t.Errorf("expected git-credentials, got %s", result)
-	}
-}
-
-func TestFindGitSecret_SecretWithoutTokenOrPassword(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
-	_ = corev1alpha1.AddToScheme(scheme)
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "github-credentials", Namespace: defaultNS},
-		Data:       map[string][]byte{"other-key": []byte("value")},
-	}
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
-	jb := NewJobBuilder(fc)
-	result := jb.findGitSecret(context.Background(), defaultNS)
-	if result != "" {
-		t.Errorf("expected empty string for secret without token/password, got %s", result)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // addAIEnvVars — fallback providers and child task coordination
 // ---------------------------------------------------------------------------
 
@@ -2176,46 +2116,6 @@ func TestAddAIEnvVars_CoordinationEnabled(t *testing.T) {
 	tools := envMap["ORKA_AI_TOOLS"]
 	if !strings.Contains(tools, "delegate_task") {
 		t.Errorf("expected coordination tools, got %s", tools)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// addAgentVolumes — git secret auto-detection
-// ---------------------------------------------------------------------------
-
-func TestAddAgentVolumes_GitSecretAutoDetect(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
-	_ = corev1alpha1.AddToScheme(scheme)
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "github-credentials", Namespace: defaultNS},
-		Data:       map[string][]byte{"token": []byte("tok")},
-	}
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
-	jb := NewJobBuilder(fc)
-
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "uid-1234-5678"},
-		Spec: corev1alpha1.TaskSpec{
-			Type:   corev1alpha1.TaskTypeAgent,
-			Prompt: "do it",
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/org/repo",
-				},
-			},
-		},
-	}
-	job, _ := jb.Build(context.Background(), task, nil, nil)
-	// Build already calls addAgentVolumes; check for git-credentials volume
-	found := false
-	for _, v := range job.Spec.Template.Spec.Volumes {
-		if v.Name == testGitCredentials {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("expected git-credentials volume to be auto-detected")
 	}
 }
 

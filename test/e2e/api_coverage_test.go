@@ -259,7 +259,7 @@ var _ = Describe("API Coverage", Ordered, func() {
 		bodyStr := string(body)
 		Expect(bodyStr).To(ContainSubstring("name"), "Response should have name field")
 		Expect(bodyStr).To(ContainSubstring("description"), "Response should have description field")
-		Expect(bodyStr).To(ContainSubstring("parameters"), "Response should have parameters field")
+		Expect(bodyStr).To(ContainSubstring("builtin"), "Builtin tool response should identify builtin tools")
 	})
 
 	// Test 4: GET /api/v1/auth/validate

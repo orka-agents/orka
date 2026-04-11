@@ -48,6 +48,8 @@ const (
 
 	// ConditionTypeJobCreated indicates a Job has been created
 	ConditionTypeJobCreated = "JobCreated"
+
+	scheduledRunLabelValue = "true"
 )
 
 // TaskReconciler reconciles a Task object
@@ -758,7 +760,36 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 		}
 	}
 
+	if err := r.enforceParentScheduledTaskHistory(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	return ctrl.Result{}, nil
+}
+
+func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, task *corev1alpha1.Task) error {
+	if task.Labels[labels.LabelScheduledRun] != scheduledRunLabelValue {
+		return nil
+	}
+
+	parentName := task.Labels[labels.LabelParentTask]
+	if parentName == "" {
+		return nil
+	}
+
+	parent := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKey{Name: parentName, Namespace: task.Namespace}, parent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("getting parent scheduled task %q: %w", parentName, err)
+	}
+
+	if err := r.enforceHistoryLimits(ctx, parent); err != nil {
+		return fmt.Errorf("enforcing history limits for parent task %q: %w", parentName, err)
+	}
+
+	return nil
 }
 
 // completeTask marks a task as completed
@@ -856,9 +887,9 @@ func (r *TaskReconciler) shouldRetry(task *corev1alpha1.Task) bool {
 	if task.Spec.RetryPolicy == nil {
 		return false
 	}
-	// Attempts counts the current execution. MaxRetries is the number of additional
-	// executions allowed after a failure, so we retry while current attempts are
-	// less than or equal to the configured retry budget.
+	// Attempts counts the initial run plus completed retries, while MaxRetries
+	// is configured as the number of additional retry attempts. Retry while the
+	// current execution count is still within that additional retry budget.
 	return task.Status.Attempts <= task.Spec.RetryPolicy.MaxRetries
 }
 
@@ -866,11 +897,28 @@ func (r *TaskReconciler) shouldRetry(task *corev1alpha1.Task) bool {
 func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	// Delete the old Job
-	if task.Status.JobName != "" {
+	// Calculate backoff delay
+	delay := r.calculateRetryDelay(task)
+	oldJobName := task.Status.JobName
+
+	// Reset to pending for retry before deleting the old Job so a transient
+	// NotFound from asynchronous Job deletion does not fail the task.
+	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		t.Status.Phase = corev1alpha1.TaskPhasePending
+		t.Status.JobName = ""
+		t.Status.Message = ""
+		t.Status.CompletionTime = nil
+		t.Status.ResultRef = nil
+	}); err != nil {
+		log.Error(err, "failed to update status for retry")
+		return ctrl.Result{}, err
+	}
+
+	// Delete the old Job after clearing the running status.
+	if oldJobName != "" {
 		job := &batchv1.Job{}
 		err := r.Get(ctx, types.NamespacedName{
-			Name:      task.Status.JobName,
+			Name:      oldJobName,
 			Namespace: task.Namespace,
 		}, job)
 		if err == nil {
@@ -881,18 +929,6 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 				log.Error(err, "failed to delete old Job for retry")
 			}
 		}
-	}
-
-	// Calculate backoff delay
-	delay := r.calculateRetryDelay(task)
-
-	// Reset to pending for retry
-	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
-		t.Status.Phase = corev1alpha1.TaskPhasePending
-		t.Status.JobName = ""
-	}); err != nil {
-		log.Error(err, "failed to update status for retry")
-		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{RequeueAfter: delay}, nil
@@ -1153,7 +1189,7 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 			Namespace: task.Namespace,
 			Labels: map[string]string{
 				labels.LabelParentTask:   task.Name,
-				labels.LabelScheduledRun: "true",
+				labels.LabelScheduledRun: scheduledRunLabelValue,
 			},
 		},
 		Spec: *task.Spec.DeepCopy(),

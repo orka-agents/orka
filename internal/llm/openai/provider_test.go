@@ -591,10 +591,10 @@ func TestStream_ChatCompletions(t *testing.T) {
 		if chunk.Error != nil {
 			t.Fatalf("unexpected error: %v", chunk.Error)
 		}
-		content.WriteString(chunk.Content)
+		content.WriteString(chunk.Content) //nolint:errcheck
 	}
-	if content.String() != "Hi there" {
-		t.Errorf("expected 'Hi there', got %q", content.String())
+	if got := content.String(); got != "Hi there" {
+		t.Errorf("expected 'Hi there', got %q", got)
 	}
 }
 
@@ -984,13 +984,13 @@ func TestStream_ResponsesAPI(t *testing.T) {
 		if chunk.Error != nil {
 			t.Fatalf("unexpected error: %v", chunk.Error)
 		}
-		content.WriteString(chunk.Content)
+		content.WriteString(chunk.Content) //nolint:errcheck
 		if chunk.Done {
 			gotDone = true
 		}
 	}
-	if content.String() != "Hello World" {
-		t.Errorf("expected 'Hello World', got %q", content.String())
+	if got := content.String(); got != "Hello World" {
+		t.Errorf("expected 'Hello World', got %q", got)
 	}
 	if !gotDone {
 		t.Error("expected done chunk")
@@ -1213,10 +1213,10 @@ func TestStream_AutoDetect_FallbackToChatCompletions(t *testing.T) {
 		if chunk.Error != nil {
 			t.Fatalf("unexpected error: %v", chunk.Error)
 		}
-		content.WriteString(chunk.Content)
+		content.WriteString(chunk.Content) //nolint:errcheck
 	}
-	if content.String() != "Fallback" {
-		t.Errorf("expected 'Fallback', got %q", content.String())
+	if got := content.String(); got != "Fallback" {
+		t.Errorf("expected 'Fallback', got %q", got)
 	}
 	if apiMode(provider.mode.Load()) != apiModeChatCompletions {
 		t.Error("expected mode apiModeChatCompletions after fallback")
@@ -1266,10 +1266,10 @@ func TestStream_AutoDetect_ResponsesSuccess(t *testing.T) {
 		if chunk.Error != nil {
 			t.Fatalf("unexpected error: %v", chunk.Error)
 		}
-		content.WriteString(chunk.Content)
+		content.WriteString(chunk.Content) //nolint:errcheck
 	}
-	if content.String() != "Streamed" {
-		t.Errorf("expected 'Streamed', got %q", content.String())
+	if got := content.String(); got != "Streamed" {
+		t.Errorf("expected 'Streamed', got %q", got)
 	}
 	if apiMode(provider.mode.Load()) != apiModeResponses {
 		t.Error("expected mode apiModeResponses after successful probe")
