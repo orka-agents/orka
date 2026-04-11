@@ -107,28 +107,8 @@ var _ = Describe("PR Workflow Tools", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred(), "Failed to create coordinator agent")
 
 		By("setting up port-forward to controller API")
-		ctx, cancel := context.WithCancel(context.Background())
-		cancelPF = cancel
-
-		cmd = exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
-			"-o", "jsonpath={.items[0].metadata.name}", "-n", namespace)
-		podName, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to find controller pod")
-		Expect(strings.TrimSpace(podName)).NotTo(BeEmpty())
-
-		portForwardCmd = exec.CommandContext(ctx, "kubectl", "port-forward",
-			strings.TrimSpace(podName), "18087:8080", "-n", namespace)
-		err = portForwardCmd.Start()
-		Expect(err).NotTo(HaveOccurred(), "Failed to start port-forward")
-
-		apiBaseURL = "http://localhost:18087"
-
-		Eventually(func(g Gomega) {
-			resp, err := http.Get(apiBaseURL + "/healthz")
-			g.Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
-			g.Expect(resp.StatusCode).To(Equal(http.StatusOK))
-		}, 30*time.Second, time.Second).Should(Succeed())
+		apiBaseURL, cancelPF, portForwardCmd, err = startControllerAPIPortForward(18087)
+		Expect(err).NotTo(HaveOccurred(), "Failed to start controller API port-forward")
 
 		By("getting a service account token")
 		token, err = serviceAccountToken()

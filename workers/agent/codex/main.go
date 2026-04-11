@@ -22,9 +22,10 @@ import (
 )
 
 const (
-	defaultMaxTurns  = 50
-	workspaceDir     = "/workspace"
-	defaultCodexPath = "codex"
+	defaultMaxTurns        = 50
+	workspaceDir           = "/workspace"
+	defaultCodexPath       = "codex"
+	codexWebSearchDisabled = "disabled"
 )
 
 var errCodexRequiresBash = errors.New(
@@ -52,7 +53,9 @@ func executeCodex(ctx context.Context, cfg *common.AgentConfig) (string, error) 
 	if err := outputFile.Close(); err != nil {
 		return "", fmt.Errorf("close output temp file: %w", err)
 	}
-	defer os.Remove(outputPath)
+	defer func() {
+		_ = os.Remove(outputPath)
+	}()
 
 	instructionsPath, cleanupInstructions, err := writeCodexInstructionsFile(cfg)
 	if err != nil {
@@ -145,12 +148,18 @@ func buildCodexInstructions(cfg *common.AgentConfig) string {
 		guidance = append(guidance, fmt.Sprintf("Try to complete this task within %d turns.", cfg.MaxTurns))
 	}
 	if !allowBashEnabled() {
-		guidance = append(guidance, "Do not use shell commands unless absolutely necessary. Prefer built-in file inspection and editing tools.")
+		guidance = append(guidance,
+			"Do not use shell commands unless absolutely necessary. "+
+				"Prefer built-in file inspection and editing tools.",
+		)
 	}
 
 	allowedTools := trimmedTools(cfg.AllowedTools)
 	if len(allowedTools) > 0 {
-		guidance = append(guidance, fmt.Sprintf("Respect this requested tool allowlist when possible: %s.", strings.Join(allowedTools, ", ")))
+		guidance = append(guidance, fmt.Sprintf(
+			"Respect this requested tool allowlist when possible: %s.",
+			strings.Join(allowedTools, ", "),
+		))
 	}
 
 	disallowedTools := trimmedTools(cfg.DisallowedTools)
@@ -159,7 +168,7 @@ func buildCodexInstructions(cfg *common.AgentConfig) string {
 	}
 
 	if webSearchSetting, ok := codexWebSearchSetting(cfg); ok {
-		if webSearchSetting == "disabled" {
+		if webSearchSetting == codexWebSearchDisabled {
 			guidance = append(guidance, "Web search is disabled for this task.")
 		} else {
 			guidance = append(guidance, "Web search is available for this task when needed.")
@@ -184,12 +193,12 @@ func writeCodexInstructionsFile(cfg *common.AgentConfig) (string, func(), error)
 		return "", func() {}, fmt.Errorf("create instructions temp file: %w", err)
 	}
 	if _, err := f.WriteString(instructions); err != nil {
-		f.Close()
-		os.Remove(f.Name())
+		_ = f.Close()
+		_ = os.Remove(f.Name())
 		return "", func() {}, fmt.Errorf("write instructions temp file: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(f.Name())
+		_ = os.Remove(f.Name())
 		return "", func() {}, fmt.Errorf("close instructions temp file: %w", err)
 	}
 
@@ -230,13 +239,13 @@ func allowBashEnabled() bool {
 
 func codexWebSearchSetting(cfg *common.AgentConfig) (string, bool) {
 	if hasWebSearchTool(cfg.DisallowedTools) {
-		return "disabled", true
+		return codexWebSearchDisabled, true
 	}
 	if len(cfg.AllowedTools) > 0 {
 		if hasWebSearchTool(cfg.AllowedTools) {
 			return "live", true
 		}
-		return "disabled", true
+		return codexWebSearchDisabled, true
 	}
 	return "", false
 }

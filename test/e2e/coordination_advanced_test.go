@@ -439,36 +439,12 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 		)
 
 		By("setting up port-forward to controller API")
-		ctx, cancel := context.WithCancel(context.Background())
-		cancelPF = cancel
-
-		cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
-			"-o", "jsonpath={.items[0].metadata.name}", "-n", namespace)
-		podName, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(strings.TrimSpace(podName)).NotTo(BeEmpty())
-
-		portForwardCmd = exec.CommandContext(ctx, "kubectl", "port-forward",
-			strings.TrimSpace(podName), "18089:8080", "-n", namespace)
-		err = portForwardCmd.Start()
-		Expect(err).NotTo(HaveOccurred(), "Failed to start port-forward")
-
-		apiBaseURL = "http://localhost:18089"
-
-		Eventually(func(g Gomega) {
-			resp, err := http.Get(apiBaseURL + "/healthz")
-			g.Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
-			g.Expect(resp.StatusCode).To(Equal(http.StatusOK))
-		}, 30*time.Second, time.Second).Should(Succeed())
+		var err error
+		apiBaseURL, cancelPF, portForwardCmd, err = startControllerAPIPortForward(18089)
+		Expect(err).NotTo(HaveOccurred(), "Failed to start controller API port-forward")
 
 		defer func() {
-			if cancelPF != nil {
-				cancelPF()
-			}
-			if portForwardCmd != nil && portForwardCmd.Process != nil {
-				_ = portForwardCmd.Wait()
-			}
+			stopPortForward(cancelPF, portForwardCmd)
 		}()
 
 		By("getting a service account token for auth")

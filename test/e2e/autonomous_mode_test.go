@@ -206,28 +206,9 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
 
 		By("setting up port-forward to controller API")
-		ctx, cancel := context.WithCancel(context.Background())
-		cancelPF = cancel
-
-		cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
-			"-o", "jsonpath={.items[0].metadata.name}", "-n", namespace)
-		podName, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to find controller pod")
-		Expect(strings.TrimSpace(podName)).NotTo(BeEmpty())
-
-		portForwardCmd = exec.CommandContext(ctx, "kubectl", "port-forward",
-			strings.TrimSpace(podName), "18084:8080", "-n", namespace)
-		err = portForwardCmd.Start()
-		Expect(err).NotTo(HaveOccurred(), "Failed to start port-forward")
-
-		apiBaseURL = "http://localhost:18084"
-
-		Eventually(func(g Gomega) {
-			resp, err := http.Get(apiBaseURL + "/healthz")
-			g.Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
-			g.Expect(resp.StatusCode).To(Equal(http.StatusOK))
-		}, 30*time.Second, time.Second).Should(Succeed())
+		var err error
+		apiBaseURL, cancelPF, portForwardCmd, err = startControllerAPIPortForward(18084)
+		Expect(err).NotTo(HaveOccurred(), "Failed to start controller API port-forward")
 
 		By("getting a service account token for auth")
 		token, err := serviceAccountToken()
@@ -480,28 +461,9 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 		// Ensure port-forward is available (may have been set up in earlier test)
 		if apiBaseURL == "" {
 			By("setting up port-forward to controller API")
-			ctx, cancel := context.WithCancel(context.Background())
-			cancelPF = cancel
-
-			cmd = exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
-				"-o", "jsonpath={.items[0].metadata.name}", "-n", namespace)
-			podName, pfErr := utils.Run(cmd)
+			var pfErr error
+			apiBaseURL, cancelPF, portForwardCmd, pfErr = startControllerAPIPortForward(18084)
 			Expect(pfErr).NotTo(HaveOccurred())
-			Expect(strings.TrimSpace(podName)).NotTo(BeEmpty())
-
-			portForwardCmd = exec.CommandContext(ctx, "kubectl", "port-forward",
-				strings.TrimSpace(podName), "18084:8080", "-n", namespace)
-			pfErr = portForwardCmd.Start()
-			Expect(pfErr).NotTo(HaveOccurred())
-
-			apiBaseURL = "http://localhost:18084"
-
-			Eventually(func(g Gomega) {
-				resp, err := http.Get(apiBaseURL + "/healthz")
-				g.Expect(err).NotTo(HaveOccurred())
-				defer resp.Body.Close()
-				g.Expect(resp.StatusCode).To(Equal(http.StatusOK))
-			}, 30*time.Second, time.Second).Should(Succeed())
 		}
 
 		By("getting a service account token for auth")
