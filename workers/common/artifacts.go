@@ -19,11 +19,85 @@ import (
 )
 
 const (
-	artifactsDir = "/tmp/artifacts/"
-	maxTotalSize = 50 << 20 // 50 MB
-	maxFileSize  = 10 << 20 // 10 MB
-	artifactPath = "internal/v1/artifacts"
+	artifactsDir              = "/tmp/artifacts/"
+	workspaceArtifactsDirName = ".orka-artifacts"
+	maxTotalSize              = 50 << 20 // 50 MB
+	maxFileSize               = 10 << 20 // 10 MB
+	artifactPath              = "internal/v1/artifacts"
 )
+
+// EnsureWorkspaceArtifactsLink exposes /tmp/artifacts inside the repo root so
+// runtime agents can write artifacts using a workspace-relative path.
+func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
+	if workspaceDir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(artifactsDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create artifacts directory: %w", err)
+	}
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create workspace directory: %w", err)
+	}
+
+	linkPath := filepath.Join(workspaceDir, workspaceArtifactsDirName)
+	info, err := os.Lstat(linkPath)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, readErr := os.Readlink(linkPath)
+			if readErr == nil {
+				resolved := target
+				if !filepath.IsAbs(resolved) {
+					resolved = filepath.Join(filepath.Dir(linkPath), resolved)
+				}
+				if filepath.Clean(resolved) == filepath.Clean(artifactsDir) {
+					return nil
+				}
+			}
+		}
+		return fmt.Errorf("workspace artifact path %s already exists", linkPath)
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("failed to inspect workspace artifact path: %w", err)
+	}
+
+	if err := os.Symlink(artifactsDir, linkPath); err != nil {
+		return fmt.Errorf("failed to create workspace artifact symlink: %w", err)
+	}
+	return nil
+}
+
+// MissingArtifacts returns required artifact filenames that do not exist yet
+// or are present but empty.
+func MissingArtifacts(filenames []string) ([]string, error) {
+	missing := make([]string, 0, len(filenames))
+	for _, filename := range filenames {
+		info, err := os.Stat(filepath.Join(artifactsDir, filename))
+		switch {
+		case os.IsNotExist(err):
+			missing = append(missing, filename)
+		case err != nil:
+			return nil, fmt.Errorf("failed to stat artifact %s: %w", filename, err)
+		case info.IsDir() || info.Size() == 0:
+			missing = append(missing, filename)
+		}
+	}
+	return missing, nil
+}
+
+// WriteArtifactFile writes an artifact file into the shared upload directory.
+func WriteArtifactFile(filename string, data []byte) error {
+	filename = filepath.Base(filename)
+	if filename == "." || filename == ".." || strings.ContainsAny(filename, "/\\") {
+		return fmt.Errorf("invalid artifact filename %q", filename)
+	}
+	if err := os.MkdirAll(artifactsDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create artifacts directory: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactsDir, filename), data, 0o644); err != nil {
+		return fmt.Errorf("failed to write artifact %s: %w", filename, err)
+	}
+	return nil
+}
 
 // UploadArtifacts scans /tmp/artifacts/ and uploads each file to the controller.
 // It is called after SubmitResult to persist any files the agent wrote.

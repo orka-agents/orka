@@ -59,6 +59,10 @@ const (
 
 	// defaultSecretKey is the default key name in provider secrets
 	defaultSecretKey = "api-key"
+
+	// Kubernetes Job names end up mirrored into pod labels like `job-name`,
+	// which are capped at 63 characters.
+	maxJobNameLength = 63
 )
 
 // JobBuilder builds Kubernetes Jobs for Tasks
@@ -84,9 +88,31 @@ func NewJobBuilder(c client.Client) *JobBuilder {
 	}
 }
 
+func buildTaskJobName(task *corev1alpha1.Task) string {
+	uidPrefix := string(task.UID)
+	if len(uidPrefix) > 8 {
+		uidPrefix = uidPrefix[:8]
+	}
+	suffix := fmt.Sprintf("-job-%s-%d", uidPrefix, task.Status.Attempts)
+	maxPrefixLength := maxJobNameLength - len(suffix)
+	if maxPrefixLength < 1 {
+		maxPrefixLength = 1
+	}
+
+	prefix := task.Name
+	if len(prefix) > maxPrefixLength {
+		prefix = strings.Trim(prefix[:maxPrefixLength], "-")
+		if prefix == "" {
+			prefix = "task"
+		}
+	}
+
+	return prefix + suffix
+}
+
 // Build creates a Job for the given Task
 func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (*batchv1.Job, error) {
-	jobName := fmt.Sprintf("%s-job-%s-%d", task.Name, task.UID[:8], task.Status.Attempts)
+	jobName := buildTaskJobName(task)
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{

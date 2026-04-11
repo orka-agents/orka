@@ -127,6 +127,7 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 
 	// Stage any new untracked files so they appear in the diff
 	execGit(workDir, "add", "-A") //nolint:errcheck
+	resetReservedWorkspacePaths(workDir)
 
 	diff, err := execGit(workDir, "diff", "--cached", "--binary", "--full-index")
 	if err != nil {
@@ -173,6 +174,7 @@ func pushChanges(workDir, branch string) error {
 	if _, err := execGit(workDir, "add", "-A"); err != nil {
 		return fmt.Errorf("git add failed: %w", err)
 	}
+	resetReservedWorkspacePaths(workDir)
 
 	// Check if there's anything to commit
 	status, _ := execGit(workDir, "status", "--porcelain")
@@ -199,6 +201,13 @@ func pushChanges(workDir, branch string) error {
 	}
 
 	return nil
+}
+
+func resetReservedWorkspacePaths(workDir string) {
+	// Runtime agents expose a repo-local symlink to /tmp/artifacts so scan and
+	// patch jobs can write required artifacts from inside the workspace. That
+	// symlink is infrastructure, not a user-facing code change.
+	execGit(workDir, "reset", "-q", "--", workspaceArtifactsDirName) //nolint:errcheck
 }
 
 // execGit runs a git command in the given directory and returns combined output.

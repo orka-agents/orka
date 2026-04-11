@@ -13,9 +13,15 @@ import { useUIStore } from '@/stores/ui'
 export function RepositoryCreateForm() {
   const navigate = useNavigate()
   const namespace = useUIStore((s) => s.namespace)
+  const setNamespace = useUIStore((s) => s.setNamespace)
   const createRepository = useCreateRepositoryScan()
-  const { data: agents } = useAgentList()
+  const { data: agents, isLoading: agentsLoading } = useAgentList()
+  const currentAgents = agents?.items ?? []
+  const shouldCheckSystemAgents = namespace !== 'orka-system' && currentAgents.length === 0
+  const { data: systemAgents } = useAgentList({ namespace: 'orka-system', enabled: shouldCheckSystemAgents })
   const { data: secrets } = useSecretNames()
+  const systemAgentCount = systemAgents?.items.length ?? 0
+  const noAgentsInNamespace = !agentsLoading && currentAgents.length === 0
 
   const [name, setName] = useState('')
   const [repoURL, setRepoURL] = useState('')
@@ -30,6 +36,11 @@ export function RepositoryCreateForm() {
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault()
+
+    if (!analysisAgentRef) {
+      toast.error('Select an analysis agent before registering the repository')
+      return
+    }
 
     try {
       const body: Record<string, unknown> = {
@@ -87,10 +98,10 @@ export function RepositoryCreateForm() {
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <label className="text-sm font-medium">Analysis Agent</label>
-                <Select value={analysisAgentRef} onValueChange={setAnalysisAgentRef}>
-                  <SelectTrigger><SelectValue placeholder="Select analysis agent" /></SelectTrigger>
+                <Select disabled={agentsLoading || noAgentsInNamespace} value={analysisAgentRef} onValueChange={setAnalysisAgentRef}>
+                  <SelectTrigger><SelectValue placeholder={agentsLoading ? 'Loading agents...' : 'Select analysis agent'} /></SelectTrigger>
                   <SelectContent>
-                    {(agents?.items ?? []).map((agent) => (
+                    {currentAgents.map((agent) => (
                       <SelectItem key={agent.metadata.name} value={agent.metadata.name}>{agent.metadata.name}</SelectItem>
                     ))}
                   </SelectContent>
@@ -98,15 +109,36 @@ export function RepositoryCreateForm() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">Patch Agent</label>
-                <Select value={patchAgentRef} onValueChange={setPatchAgentRef}>
+                <Select disabled={agentsLoading || noAgentsInNamespace} value={patchAgentRef} onValueChange={setPatchAgentRef}>
                   <SelectTrigger><SelectValue placeholder="Optional patch agent" /></SelectTrigger>
                   <SelectContent>
-                    {(agents?.items ?? []).map((agent) => (
+                    {currentAgents.map((agent) => (
                       <SelectItem key={agent.metadata.name} value={agent.metadata.name}>{agent.metadata.name}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </div>
+            </div>
+
+            <div className="space-y-2 rounded-md border border-dashed border-border p-3">
+              <p className="text-sm text-muted-foreground">
+                Showing agents from the <span className="font-medium text-foreground">{namespace}</span> namespace.
+              </p>
+              {noAgentsInNamespace ? (
+                <div className="space-y-2 text-sm text-muted-foreground">
+                  <p>No agents are available in this namespace.</p>
+                  {systemAgentCount > 0 ? (
+                    <div className="flex items-center gap-2">
+                      <span>{systemAgentCount} agent(s) are available in <span className="font-medium text-foreground">orka-system</span>.</span>
+                      <Button type="button" variant="outline" size="sm" onClick={() => setNamespace('orka-system')}>
+                        Switch to orka-system
+                      </Button>
+                    </div>
+                  ) : (
+                    <p>Create agents in this namespace or switch namespaces from the header.</p>
+                  )}
+                </div>
+              ) : null}
             </div>
 
             <div className="grid gap-4 md:grid-cols-2">
@@ -152,7 +184,7 @@ export function RepositoryCreateForm() {
 
             <div className="flex justify-end gap-2">
               <Button type="button" variant="outline" onClick={() => navigate({ to: '/security' })}>Cancel</Button>
-              <Button type="submit" disabled={createRepository.isPending}>Register Repository</Button>
+              <Button type="submit" disabled={createRepository.isPending || noAgentsInNamespace}>Register Repository</Button>
             </div>
           </form>
         </CardContent>

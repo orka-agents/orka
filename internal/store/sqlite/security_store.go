@@ -123,7 +123,7 @@ func (s *Store) ListScanRuns(ctx context.Context, namespace, repositoryScan stri
 	return runs, nextOffsetCursor(offset, len(runs), limit), nil
 }
 
-// GetLatestThreatModel returns the most recent threat model version.
+// GetLatestThreatModel returns the current threat model for a repository.
 func (s *Store) GetLatestThreatModel(ctx context.Context, namespace, repositoryScan string) (*store.ThreatModel, error) {
 	var model store.ThreatModel
 	err := s.db.QueryRowContext(ctx,
@@ -146,7 +146,8 @@ func (s *Store) GetLatestThreatModel(ctx context.Context, namespace, repositoryS
 	return &model, nil
 }
 
-// SaveThreatModel stores a new threat model version. When Version is zero, the next version is assigned automatically.
+// SaveThreatModel stores the current threat model, replacing any older copies for the repository.
+// When Version is zero, the revision number is incremented from the latest stored model.
 func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -154,13 +155,20 @@ func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) e
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	var latestVersion int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT version FROM security_threat_models WHERE namespace = ? AND repository_scan = ? ORDER BY version DESC LIMIT 1`,
+		model.Namespace, model.RepositoryScan,
+	).Scan(&latestVersion)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		latestVersion = 0
+	case err != nil:
+		return err
+	}
+
 	if model.Version == 0 {
-		if err := tx.QueryRowContext(ctx,
-			`SELECT COALESCE(MAX(version), 0) + 1 FROM security_threat_models WHERE namespace = ? AND repository_scan = ?`,
-			model.Namespace, model.RepositoryScan,
-		).Scan(&model.Version); err != nil {
-			return err
-		}
+		model.Version = latestVersion + 1
 	}
 
 	now := time.Now()
@@ -170,7 +178,14 @@ func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) e
 	model.UpdatedAt = now
 
 	if _, err := tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO security_threat_models
+		`DELETE FROM security_threat_models WHERE namespace = ? AND repository_scan = ?`,
+		model.Namespace, model.RepositoryScan,
+	); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO security_threat_models
 		 (namespace, repository_scan, version, content, source, generated_by_scan, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		model.Namespace, model.RepositoryScan, model.Version, model.Content, model.Source,

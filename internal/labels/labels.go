@@ -27,6 +27,8 @@ const (
 	LabelSecurityTarget    = "orka.ai/security-target"
 	LabelSecurityScanID    = "orka.ai/security-scan-id"
 	LabelSecurityMode      = "orka.ai/security-scan-mode"
+	LabelSecurityStage     = "orka.ai/security-stage"
+	LabelSecurityScope     = "orka.ai/security-scope"
 	LabelSecurityFindingID = "orka.ai/security-finding-id"
 
 	// Annotations

@@ -263,6 +263,41 @@ func TestFinalizeResult_GitRepoNoChanges(t *testing.T) {
 	}
 }
 
+func TestFinalizeResult_IgnoresWorkspaceArtifactsSymlink(t *testing.T) {
+	prepareArtifactsDir(t)
+
+	dir := t.TempDir()
+	runGitWS(t, dir, "init")
+	runGitWS(t, dir, "config", "user.email", "test@test.com")
+	runGitWS(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(dir+"/file.txt", []byte("content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, dir, "add", ".")
+	runGitWS(t, dir, "commit", "-m", "initial")
+
+	if err := EnsureWorkspaceArtifactsLink(dir); err != nil {
+		t.Fatalf("EnsureWorkspaceArtifactsLink() error = %v", err)
+	}
+	writeArtifactFile(t, "security-threat-model.md", []byte("# threat model\n"))
+
+	data, err := FinalizeResult(dir, "scan complete")
+	if err != nil {
+		t.Fatalf("FinalizeResult() error = %v", err)
+	}
+
+	var sr StructuredResult
+	if err := json.Unmarshal(data, &sr); err != nil {
+		t.Fatalf("expected JSON result, got: %s", string(data))
+	}
+	if sr.Diff != "" {
+		t.Fatalf("expected empty diff, got %q", sr.Diff)
+	}
+	if len(sr.Files) != 0 {
+		t.Fatalf("expected no changed files, got %v", sr.Files)
+	}
+}
+
 func TestFinalizeResult_PushBranchNoRemote(t *testing.T) {
 	dir := t.TempDir()
 	runGitWS(t, dir, "init")

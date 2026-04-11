@@ -77,6 +77,7 @@ export const threatModelSchema = z.object({
 
 export const findingEvidenceRefSchema = z.object({
   kind: z.string(),
+  taskName: z.string().optional(),
   name: z.string().optional(),
   label: z.string().optional(),
 })

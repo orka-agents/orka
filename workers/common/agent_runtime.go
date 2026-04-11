@@ -202,6 +202,9 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	if err := PrepareWorkspace(workspaceDir); err != nil {
 		return fmt.Errorf("workspace preparation failed: %w", err)
 	}
+	if err := EnsureWorkspaceArtifactsLink(workspaceDir); err != nil {
+		return fmt.Errorf("artifact workspace setup failed: %w", err)
+	}
 
 	result, err := executor(ctx, cfg)
 	if err != nil {

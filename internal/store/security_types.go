@@ -33,9 +33,10 @@ type ThreatModel struct {
 
 // FindingEvidenceRef points to supporting evidence for a finding.
 type FindingEvidenceRef struct {
-	Kind  string `json:"kind"`
-	Name  string `json:"name,omitempty"`
-	Label string `json:"label,omitempty"`
+	Kind     string `json:"kind"`
+	TaskName string `json:"taskName,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Label    string `json:"label,omitempty"`
 }
 
 // Finding represents a security finding associated with a repository scan.

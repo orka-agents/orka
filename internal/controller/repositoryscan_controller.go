@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	cron "github.com/robfig/cron/v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,6 +41,12 @@ const (
 	repositoryScanPhaseReady     = "Ready"
 	repositoryScanPhaseError     = "Error"
 	repositoryScanPhaseSuspended = "Suspended"
+
+	// Kubernetes rejects condition messages longer than 32 KiB. Scan summaries can
+	// exceed that, so keep the full summary in storage and only publish a capped
+	// status message on the CRD.
+	repositoryScanConditionMessageLimit  = 32 * 1024
+	repositoryScanConditionMessageSuffix = "\n...[truncated]"
 )
 
 // RepositoryScanReconciler reconciles RepositoryScan resources.
@@ -49,6 +56,28 @@ type RepositoryScanReconciler struct {
 	SecurityStore store.SecurityStore
 	ArtifactStore store.ArtifactStore
 	ResultStore   store.ResultStore
+}
+
+func repositoryScanConditionMessage(message, fallback string) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return fallback
+	}
+	if len(message) <= repositoryScanConditionMessageLimit {
+		return message
+	}
+
+	maxPrefixBytes := repositoryScanConditionMessageLimit - len(repositoryScanConditionMessageSuffix)
+	if maxPrefixBytes <= 0 {
+		return repositoryScanConditionMessageSuffix
+	}
+
+	message = message[:maxPrefixBytes]
+	for len(message) > 0 && !utf8.ValidString(message) {
+		message = message[:len(message)-1]
+	}
+	message = strings.TrimRight(message, " \t\r\n")
+	return message + repositoryScanConditionMessageSuffix
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositoryscans,verbs=get;list;watch;create;update;patch;delete
@@ -109,7 +138,7 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, nil
 	}
 
-	active, err := r.hasActiveScanTask(ctx, scan)
+	active, err := r.hasActiveScanPipelineTask(ctx, scan)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -118,9 +147,17 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	if scan.Status.LastScanID == "" {
-		if err := r.createScanTask(ctx, scan, "initial", "", ""); err != nil {
+		if err := r.createScanRun(ctx, scan, "initial", "", ""); err != nil {
 			return ctrl.Result{}, err
 		}
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+	}
+
+	progressed, err := r.progressLatestScanRun(ctx, scan)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if progressed {
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
@@ -136,7 +173,7 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 				Type:               "Ready",
 				Status:             metav1.ConditionFalse,
 				Reason:             "InvalidSchedule",
-				Message:            err.Error(),
+				Message:            repositoryScanConditionMessage(err.Error(), "invalid scan schedule"),
 				LastTransitionTime: metav1.Now(),
 				ObservedGeneration: s.Generation,
 			})
@@ -155,13 +192,84 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: time.Until(nextRun)}, nil
 	}
 
-	if err := r.createScanTask(ctx, scan, "incremental", scan.Status.LastProcessedCommit, ""); err != nil {
+	if err := r.createScanRun(ctx, scan, "incremental", scan.Status.LastProcessedCommit, ""); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 }
 
-func (r *RepositoryScanReconciler) hasActiveScanTask(ctx context.Context, scan *corev1alpha1.RepositoryScan) (bool, error) {
+func taskSecurityStage(task *corev1alpha1.Task) string {
+	if task == nil {
+		return security.StageCombined
+	}
+	if stage := strings.TrimSpace(task.Labels[labels.LabelSecurityStage]); stage != "" {
+		return stage
+	}
+	if task.Labels[labels.LabelSecurityFindingID] != "" {
+		switch strings.TrimSpace(task.Labels[labels.LabelSecurityMode]) {
+		case security.StagePatch:
+			return security.StagePatch
+		case security.StageValidation:
+			return security.StageValidation
+		}
+	}
+	return security.StageCombined
+}
+
+func isScanPipelineStage(stage string) bool {
+	switch stage {
+	case security.StageCombined, security.StageThreatModel, security.StageDiscovery:
+		return true
+	default:
+		return false
+	}
+}
+
+func isActiveTaskPhase(phase corev1alpha1.TaskPhase) bool {
+	switch phase {
+	case corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseScheduled:
+		return true
+	default:
+		return false
+	}
+}
+
+func scanTaskRunID(task *corev1alpha1.Task) string {
+	if task == nil {
+		return ""
+	}
+	if scanID := strings.TrimSpace(task.Labels[labels.LabelSecurityScanID]); scanID != "" {
+		return scanID
+	}
+	return security.ScanRunID(task.Name)
+}
+
+func latestOwnedScanPipelineRunID(tasks []corev1alpha1.Task) string {
+	var latest *corev1alpha1.Task
+	for i := range tasks {
+		task := &tasks[i]
+		if !isScanPipelineStage(taskSecurityStage(task)) {
+			continue
+		}
+		if latest == nil {
+			latest = task
+			continue
+		}
+		if task.CreationTimestamp.Time.After(latest.CreationTimestamp.Time) {
+			latest = task
+			continue
+		}
+		if task.CreationTimestamp.Time.Equal(latest.CreationTimestamp.Time) && task.Name > latest.Name {
+			latest = task
+		}
+	}
+	return scanTaskRunID(latest)
+}
+
+func (r *RepositoryScanReconciler) hasActiveScanPipelineTask(ctx context.Context, scan *corev1alpha1.RepositoryScan) (bool, error) {
+	if r.Client == nil {
+		return false, nil
+	}
 	var tasks corev1alpha1.TaskList
 	if err := r.List(ctx, &tasks,
 		client.InNamespace(scan.Namespace),
@@ -171,18 +279,17 @@ func (r *RepositoryScanReconciler) hasActiveScanTask(ctx context.Context, scan *
 	}
 
 	for _, task := range tasks.Items {
-		if task.Labels[labels.LabelSecurityFindingID] != "" {
+		if !isScanPipelineStage(taskSecurityStage(&task)) {
 			continue
 		}
-		switch task.Status.Phase {
-		case corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseScheduled:
+		if isActiveTaskPhase(task.Status.Phase) {
 			return true, nil
 		}
 	}
 	return false, nil
 }
 
-func (r *RepositoryScanReconciler) createScanTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit string) error {
+func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit string) error {
 	var threatModel string
 	if r.SecurityStore != nil {
 		model, err := r.SecurityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
@@ -193,7 +300,7 @@ func (r *RepositoryScanReconciler) createScanTask(ctx context.Context, scan *cor
 		}
 	}
 
-	taskName := security.ScanTaskName(scan.Name, mode)
+	taskName := security.ScanStageTaskName(scan.Name, mode, security.StageThreatModel, "")
 	scanID := security.ScanRunID(taskName)
 	timeout := metav1.Duration{Duration: 2 * time.Hour}
 	priority := int32(700)
@@ -208,12 +315,13 @@ func (r *RepositoryScanReconciler) createScanTask(ctx context.Context, scan *cor
 				labels.LabelSecurityTarget: scan.Name,
 				labels.LabelSecurityScanID: scanID,
 				labels.LabelSecurityMode:   mode,
+				labels.LabelSecurityStage:  security.StageThreatModel,
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &scan.Spec.AnalysisAgentRef,
-			Prompt:   security.BuildScanPrompt(scan, mode, baseCommit, headCommit, threatModel),
+			Prompt:   security.BuildThreatModelPrompt(scan, mode, baseCommit, headCommit, threatModel),
 			Timeout:  &timeout,
 			Priority: &priority,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
@@ -266,6 +374,129 @@ func (r *RepositoryScanReconciler) createScanTask(ctx context.Context, scan *cor
 	})
 }
 
+func (r *RepositoryScanReconciler) progressLatestScanRun(ctx context.Context, scan *corev1alpha1.RepositoryScan) (bool, error) {
+	if r.Client == nil || r.SecurityStore == nil {
+		return false, nil
+	}
+
+	var tasks corev1alpha1.TaskList
+	if err := r.List(ctx, &tasks,
+		client.InNamespace(scan.Namespace),
+		client.MatchingLabels(map[string]string{
+			labels.LabelSecurityTarget: scan.Name,
+		}),
+	); err != nil {
+		return false, err
+	}
+
+	scanID := latestOwnedScanPipelineRunID(tasks.Items)
+	if scanID == "" {
+		scanID = strings.TrimSpace(scan.Status.LastScanID)
+	}
+	if scanID == "" {
+		return false, nil
+	}
+
+	hasSucceededThreatModel := false
+	hasDiscoveryTasks := false
+	for i := range tasks.Items {
+		task := &tasks.Items[i]
+		if scanTaskRunID(task) != scanID {
+			continue
+		}
+		stage := taskSecurityStage(task)
+		switch stage {
+		case security.StageThreatModel:
+			if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+				hasSucceededThreatModel = true
+			}
+		case security.StageDiscovery:
+			hasDiscoveryTasks = true
+		}
+		if isActiveTaskPhase(task.Status.Phase) {
+			return false, nil
+		}
+	}
+
+	if !hasSucceededThreatModel || hasDiscoveryTasks {
+		return false, nil
+	}
+
+	run, err := r.SecurityStore.GetScanRun(ctx, scan.Namespace, scanID)
+	if err != nil {
+		return false, err
+	}
+
+	var threatModel string
+	if r.SecurityStore != nil {
+		model, err := r.SecurityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
+		if err == nil {
+			threatModel = model.Content
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return false, err
+		}
+	}
+
+	timeout := metav1.Duration{Duration: 2 * time.Hour}
+	priority := int32(700)
+	for index, scope := range security.DiscoveryScopes() {
+		taskName := fmt.Sprintf("%s-%d", security.ScanStageTaskName(scan.Name, run.Mode, security.StageDiscovery, scope.Name), index)
+		task := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      taskName,
+				Namespace: scan.Namespace,
+				Labels: map[string]string{
+					labels.LabelManaged:        "true",
+					labels.LabelCreatedBy:      "repository-security",
+					labels.LabelSecurityTarget: scan.Name,
+					labels.LabelSecurityScanID: run.ID,
+					labels.LabelSecurityMode:   run.Mode,
+					labels.LabelSecurityStage:  security.StageDiscovery,
+					labels.LabelSecurityScope:  scope.Name,
+				},
+			},
+			Spec: corev1alpha1.TaskSpec{
+				Type:     corev1alpha1.TaskTypeAgent,
+				AgentRef: &scan.Spec.AnalysisAgentRef,
+				Prompt:   security.BuildDiscoveryPrompt(scan, run.Mode, run.BaseCommit, run.HeadCommit, threatModel, scope),
+				Timeout:  &timeout,
+				Priority: &priority,
+				AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+					Workspace: &corev1alpha1.WorkspaceConfig{
+						GitRepo:      scan.Spec.RepoURL,
+						Branch:       security.EffectiveBranch(scan),
+						GitSecretRef: scan.Spec.GitSecretRef,
+						SubPath:      scan.Spec.SubPath,
+						ForkRepo:     scan.Spec.ForkRepo,
+						PRBaseBranch: scan.Spec.PRBaseBranch,
+					},
+				},
+			},
+		}
+		if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
+			return false, err
+		}
+		if err := r.Create(ctx, task); err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				continue
+			}
+			return false, err
+		}
+	}
+
+	if run.Summary == "" || strings.Contains(run.Summary, "discovery pending") {
+		run.Summary = "Threat model generated; independent discovery agents started"
+	}
+	run.Phase = "running"
+	run.CompletedAt = nil
+	run.ErrorMessage = ""
+	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
 func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan) error {
 	if r.SecurityStore == nil {
 		return nil
@@ -283,6 +514,8 @@ func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *c
 		return a.CreationTimestamp.Time.Compare(b.CreationTimestamp.Time)
 	})
 
+	latestScanRunID := latestOwnedScanPipelineRunID(tasks.Items)
+
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
 		switch task.Status.Phase {
@@ -291,19 +524,61 @@ func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *c
 			continue
 		}
 
-		if task.Labels[labels.LabelSecurityFindingID] != "" {
+		stage := taskSecurityStage(task)
+		if stage == security.StagePatch {
 			if err := r.ingestPatchTask(ctx, scan, task); err != nil {
 				return err
 			}
 			continue
 		}
+		if stage == security.StageValidation {
+			if err := r.ingestValidationTask(ctx, scan, task); err != nil {
+				return err
+			}
+			continue
+		}
 
-		if err := r.ingestScanTask(ctx, scan, task); err != nil {
+		updateStatus := latestScanRunID != "" && scanTaskRunID(task) == latestScanRunID
+		if err := r.ingestScanTask(ctx, scan, task, updateStatus); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func isTerminalScanTask(task corev1alpha1.Task) bool {
+	if task.Labels[labels.LabelSecurityFindingID] != "" {
+		return false
+	}
+	switch task.Status.Phase {
+	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func latestTerminalScanTask(tasks []corev1alpha1.Task) *corev1alpha1.Task {
+	var latest *corev1alpha1.Task
+	for i := range tasks {
+		task := &tasks[i]
+		if !isTerminalScanTask(*task) {
+			continue
+		}
+		if latest == nil {
+			latest = task
+			continue
+		}
+		if task.CreationTimestamp.Time.After(latest.CreationTimestamp.Time) {
+			latest = task
+			continue
+		}
+		if task.CreationTimestamp.Time.Equal(latest.CreationTimestamp.Time) && task.Name > latest.Name {
+			latest = task
+		}
+	}
+	return latest
 }
 
 func taskPhaseToSecurityPhase(phase corev1alpha1.TaskPhase) string {
@@ -319,11 +594,199 @@ func taskPhaseToSecurityPhase(phase corev1alpha1.TaskPhase) string {
 	return "pending"
 }
 
-func (r *RepositoryScanReconciler) ingestScanTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task) error {
-	scanID := task.Labels[labels.LabelSecurityScanID]
-	if scanID == "" {
-		scanID = security.ScanRunID(task.Name)
+type scanTaskArtifacts struct {
+	findings    security.FindingsArtifact
+	threatModel string
+}
+
+type validationTaskArtifacts struct {
+	artifact   security.ValidationArtifact
+	rawJSON    string
+	transcript string
+}
+
+func (r *RepositoryScanReconciler) persistThreatModelIfChanged(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	scanID string,
+	scanStartedAt time.Time,
+	content string,
+) error {
+	if r.SecurityStore == nil {
+		return nil
 	}
+
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil
+	}
+
+	latest, latestErr := r.SecurityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
+	if latestErr != nil && !errors.Is(latestErr, store.ErrNotFound) {
+		return latestErr
+	}
+	if latestErr == nil {
+		if strings.TrimSpace(latest.Content) == content {
+			return nil
+		}
+		if latest.GeneratedByScan != scanID && !scanStartedAt.IsZero() && scanStartedAt.Before(latest.UpdatedAt) {
+			return nil
+		}
+	}
+
+	model := &store.ThreatModel{
+		Namespace:       scan.Namespace,
+		RepositoryScan:  scan.Name,
+		Content:         content,
+		Source:          "generated",
+		GeneratedByScan: scanID,
+	}
+	if err := r.SecurityStore.SaveThreatModel(ctx, model); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func threatModelLooksLikeToolTranscript(content string) bool {
+	for _, marker := range []string{
+		"<tool_call>",
+		"</tool_call>",
+		"<tool_name>",
+		"</tool_name>",
+		"<parameters>",
+		"</parameters>",
+		"<command>",
+		"</command>",
+	} {
+		if strings.Contains(content, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *RepositoryScanReconciler) loadThreatModelArtifact(ctx context.Context, task *corev1alpha1.Task) (string, string, error) {
+	if r.ArtifactStore == nil {
+		return "", "", nil
+	}
+
+	threatModelData, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, security.ArtifactThreatModel)
+	switch {
+	case err == nil:
+		content := strings.TrimSpace(string(threatModelData))
+		if content == "" {
+			return "", fmt.Sprintf("%s is empty", security.ArtifactThreatModel), nil
+		}
+		if threatModelLooksLikeToolTranscript(content) {
+			return "", fmt.Sprintf("%s looks like tool transcript, not markdown", security.ArtifactThreatModel), nil
+		}
+		return content, "", nil
+	case errors.Is(err, store.ErrNotFound):
+		return "", fmt.Sprintf("%s is missing", security.ArtifactThreatModel), nil
+	default:
+		return "", "", err
+	}
+}
+
+func (r *RepositoryScanReconciler) loadDiscoveryFindingsArtifact(ctx context.Context, task *corev1alpha1.Task) (*security.FindingsArtifact, string, error) {
+	if r.ArtifactStore == nil {
+		return nil, "", nil
+	}
+
+	findingsData, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, security.ArtifactFindings)
+	switch {
+	case err == nil:
+		if len(strings.TrimSpace(string(findingsData))) == 0 {
+			return nil, fmt.Sprintf("%s is empty", security.ArtifactFindings), nil
+		}
+		var findings security.FindingsArtifact
+		if err := json.Unmarshal(findingsData, &findings); err != nil {
+			return nil, fmt.Sprintf("%s is invalid JSON: %v", security.ArtifactFindings, err), nil
+		}
+		return &findings, "", nil
+	case errors.Is(err, store.ErrNotFound):
+		return nil, fmt.Sprintf("%s is missing", security.ArtifactFindings), nil
+	default:
+		return nil, "", err
+	}
+}
+
+func (r *RepositoryScanReconciler) loadScanTaskArtifacts(ctx context.Context, task *corev1alpha1.Task) (*scanTaskArtifacts, string, error) {
+	if r.ArtifactStore == nil {
+		return nil, "", nil
+	}
+
+	var validationProblems []string
+	artifacts := &scanTaskArtifacts{}
+
+	findingsData, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, security.ArtifactFindings)
+	switch {
+	case err == nil:
+		if len(strings.TrimSpace(string(findingsData))) == 0 {
+			validationProblems = append(validationProblems, fmt.Sprintf("%s is empty", security.ArtifactFindings))
+			break
+		}
+		if err := json.Unmarshal(findingsData, &artifacts.findings); err != nil {
+			validationProblems = append(validationProblems, fmt.Sprintf("%s is invalid JSON: %v", security.ArtifactFindings, err))
+		}
+	case errors.Is(err, store.ErrNotFound):
+		validationProblems = append(validationProblems, fmt.Sprintf("%s is missing", security.ArtifactFindings))
+	case err != nil:
+		return nil, "", err
+	}
+
+	threatModelData, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, security.ArtifactThreatModel)
+	switch {
+	case err == nil:
+		artifacts.threatModel = strings.TrimSpace(string(threatModelData))
+		if artifacts.threatModel == "" {
+			validationProblems = append(validationProblems, fmt.Sprintf("%s is empty", security.ArtifactThreatModel))
+		} else if threatModelLooksLikeToolTranscript(artifacts.threatModel) {
+			validationProblems = append(validationProblems, fmt.Sprintf("%s looks like tool transcript, not markdown", security.ArtifactThreatModel))
+		}
+	case errors.Is(err, store.ErrNotFound):
+		validationProblems = append(validationProblems, fmt.Sprintf("%s is missing", security.ArtifactThreatModel))
+	case err != nil:
+		return nil, "", err
+	}
+
+	if len(validationProblems) > 0 {
+		return artifacts, "required scan artifacts were missing or invalid: " + strings.Join(validationProblems, "; "), nil
+	}
+	return artifacts, "", nil
+}
+
+func (r *RepositoryScanReconciler) loadValidationTaskArtifacts(ctx context.Context, task *corev1alpha1.Task) (*validationTaskArtifacts, string, error) {
+	if r.ArtifactStore == nil {
+		return nil, "", nil
+	}
+
+	data, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, security.ArtifactValidation)
+	switch {
+	case err == nil:
+		raw := strings.TrimSpace(string(data))
+		if raw == "" {
+			return nil, fmt.Sprintf("%s is empty", security.ArtifactValidation), nil
+		}
+		var artifact security.ValidationArtifact
+		if err := json.Unmarshal(data, &artifact); err != nil {
+			return nil, fmt.Sprintf("%s is invalid JSON: %v", security.ArtifactValidation, err), nil
+		}
+		result := &validationTaskArtifacts{artifact: artifact, rawJSON: raw}
+		if transcript, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, security.ArtifactValidationText); err == nil {
+			result.transcript = strings.TrimSpace(string(transcript))
+		}
+		return result, "", nil
+	case errors.Is(err, store.ErrNotFound):
+		return nil, fmt.Sprintf("%s is missing", security.ArtifactValidation), nil
+	default:
+		return nil, "", err
+	}
+}
+
+func (r *RepositoryScanReconciler) getOrCreateScanRun(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task) (*store.ScanRun, error) {
+	scanID := scanTaskRunID(task)
 
 	run, err := r.SecurityStore.GetScanRun(ctx, scan.Namespace, scanID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -336,14 +799,453 @@ func (r *RepositoryScanReconciler) ingestScanTask(ctx context.Context, scan *cor
 			StartedAt:      task.CreationTimestamp.Time,
 		}
 		if err := r.SecurityStore.CreateScanRun(ctx, run); err != nil {
-			return err
+			return nil, err
 		}
 	} else if err != nil {
+		return nil, err
+	}
+
+	return run, nil
+}
+
+func conciseTaskMessage(message, fallback string) string {
+	for _, line := range strings.Split(message, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if len(line) > 512 {
+			line = line[:512]
+		}
+		return line
+	}
+	return fallback
+}
+
+func (r *RepositoryScanReconciler) pipelineTaskSummary(ctx context.Context, task *corev1alpha1.Task, fallback string) string {
+	if task.Status.Message != "" {
+		return conciseTaskMessage(task.Status.Message, fallback)
+	}
+	if r.ResultStore != nil && task.Status.ResultRef != nil && task.Status.ResultRef.Available {
+		if result, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name); err == nil {
+			return conciseTaskMessage(string(result), fallback)
+		}
+	}
+	return fallback
+}
+
+func pipelineTaskDisplayName(task *corev1alpha1.Task) string {
+	stage := taskSecurityStage(task)
+	if stage == security.StageDiscovery {
+		if scope := strings.TrimSpace(task.Labels[labels.LabelSecurityScope]); scope != "" {
+			return fmt.Sprintf("discovery:%s", scope)
+		}
+	}
+	return stage
+}
+
+func (r *RepositoryScanReconciler) refreshScanRunStatus(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, scanID string, updateStatus bool) error {
+	if r.Client == nil {
+		if run.ErrorMessage != "" {
+			run.Phase = "failed"
+			run.Summary = run.ErrorMessage
+		} else if run.Phase == "" {
+			run.Phase = "running"
+		}
+		if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	var tasks corev1alpha1.TaskList
+	if err := r.List(ctx, &tasks,
+		client.InNamespace(scan.Namespace),
+		client.MatchingLabels(map[string]string{
+			labels.LabelSecurityTarget: scan.Name,
+			labels.LabelSecurityScanID: scanID,
+		}),
+	); err != nil {
 		return err
 	}
 
-	run.Phase = taskPhaseToSecurityPhase(task.Status.Phase)
+	hasActive := false
+	hasThreatModelSuccess := false
+	hasDiscovery := false
+	discoveryCount := 0
+	discoverySucceeded := 0
+	failedStages := []string{}
+	var latestCompletion *time.Time
+	for i := range tasks.Items {
+		task := &tasks.Items[i]
+		stage := taskSecurityStage(task)
+		if !isScanPipelineStage(stage) {
+			continue
+		}
+		if isActiveTaskPhase(task.Status.Phase) {
+			hasActive = true
+		}
+		if task.Status.CompletionTime != nil {
+			completed := task.Status.CompletionTime.Time
+			if latestCompletion == nil || completed.After(*latestCompletion) {
+				latestCompletion = &completed
+			}
+		}
+		switch stage {
+		case security.StageThreatModel:
+			if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+				hasThreatModelSuccess = true
+			}
+			if task.Status.Phase == corev1alpha1.TaskPhaseFailed {
+				failedStages = append(failedStages, pipelineTaskDisplayName(task))
+				if run.ErrorMessage == "" {
+					run.ErrorMessage = r.pipelineTaskSummary(ctx, task, "threat model stage failed")
+				}
+			}
+		case security.StageDiscovery, security.StageCombined:
+			hasDiscovery = true
+			discoveryCount++
+			if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+				discoverySucceeded++
+			}
+			if task.Status.Phase == corev1alpha1.TaskPhaseFailed {
+				failedStages = append(failedStages, pipelineTaskDisplayName(task))
+				if run.ErrorMessage == "" {
+					run.ErrorMessage = r.pipelineTaskSummary(ctx, task, "discovery stage failed")
+				}
+			}
+		}
+	}
+
+	if hasActive {
+		run.Phase = "running"
+		run.CompletedAt = nil
+		if run.Summary == "" {
+			if hasThreatModelSuccess && !hasDiscovery {
+				run.Summary = "Threat model generated; independent discovery agents pending"
+			} else {
+				run.Summary = "scan is running"
+			}
+		}
+	} else if run.ErrorMessage != "" || len(failedStages) > 0 {
+		run.Phase = "failed"
+		if latestCompletion != nil {
+			run.CompletedAt = latestCompletion
+		}
+		if run.ErrorMessage == "" {
+			run.ErrorMessage = fmt.Sprintf("scan failed in stages: %s", strings.Join(failedStages, ", "))
+		}
+		run.Summary = run.ErrorMessage
+	} else if hasThreatModelSuccess && !hasDiscovery {
+		run.Phase = "running"
+		run.CompletedAt = nil
+		run.Summary = "Threat model generated; independent discovery agents pending"
+	} else {
+		run.Phase = "succeeded"
+		run.ErrorMessage = ""
+		if latestCompletion != nil {
+			run.CompletedAt = latestCompletion
+		}
+		if discoveryCount > 0 {
+			run.Summary = fmt.Sprintf("Threat model generated and %d/%d discovery scopes completed successfully", discoverySucceeded, discoveryCount)
+		} else {
+			run.Summary = "Threat model generated successfully"
+		}
+	}
+
+	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
+		return err
+	}
+	if !updateStatus {
+		return nil
+	}
+
+	counts, err := r.SecurityStore.GetFindingCounts(ctx, scan.Namespace, scan.Name)
+	if err != nil {
+		return err
+	}
+
+	var threatModelVersion int64
+	if model, err := r.SecurityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name); err == nil {
+		threatModelVersion = model.Version
+	}
+
+	return r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
+		s.Status.LastScanID = run.ID
+		s.Status.LastScanTaskName = run.TaskName
+		s.Status.LastObservedHeadSHA = run.HeadCommit
+		s.Status.ThreatModelVersion = threatModelVersion
+		s.Status.FindingCounts = corev1alpha1.FindingCountsStatus{
+			Total:    counts.Total,
+			Critical: counts.Critical,
+			High:     counts.High,
+			Medium:   counts.Medium,
+			Low:      counts.Low,
+		}
+
+		switch run.Phase {
+		case "running", "pending":
+			s.Status.Phase = repositoryScanPhaseScanning
+			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
+				Type:               "Ready",
+				Status:             metav1.ConditionFalse,
+				Reason:             "Scanning",
+				Message:            repositoryScanConditionMessage(run.Summary, "scan is running"),
+				LastTransitionTime: metav1.Now(),
+				ObservedGeneration: s.Generation,
+			})
+		case "succeeded":
+			s.Status.Phase = repositoryScanPhaseReady
+			s.Status.LastProcessedCommit = run.HeadCommit
+			if run.CompletedAt != nil {
+				s.Status.LastSuccessfulScanAt = &metav1.Time{Time: *run.CompletedAt}
+			}
+			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
+				Type:               "Ready",
+				Status:             metav1.ConditionTrue,
+				Reason:             "ScanSucceeded",
+				Message:            repositoryScanConditionMessage(run.Summary, "scan completed successfully"),
+				LastTransitionTime: metav1.Now(),
+				ObservedGeneration: s.Generation,
+			})
+		default:
+			s.Status.Phase = repositoryScanPhaseError
+			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
+				Type:               "Ready",
+				Status:             metav1.ConditionFalse,
+				Reason:             "ScanFailed",
+				Message:            repositoryScanConditionMessage(run.Summary, "scan failed"),
+				LastTransitionTime: metav1.Now(),
+				ObservedGeneration: s.Generation,
+			})
+		}
+	})
+}
+
+func (r *RepositoryScanReconciler) shouldAutoValidateFinding(scan *corev1alpha1.RepositoryScan, finding *store.Finding, createdForTask int) bool {
+	switch security.EffectiveValidationMode(scan) {
+	case "off":
+		return false
+	case "full":
+		return true
+	default:
+		if createdForTask >= 2 {
+			return false
+		}
+		return finding.Severity == "critical" || finding.Severity == "high" || finding.Confidence == "high"
+	}
+}
+
+func (r *RepositoryScanReconciler) hasActiveValidationTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, findingID string) (bool, error) {
+	if r.Client == nil {
+		return false, nil
+	}
+	var tasks corev1alpha1.TaskList
+	if err := r.List(ctx, &tasks,
+		client.InNamespace(scan.Namespace),
+		client.MatchingLabels(map[string]string{
+			labels.LabelSecurityTarget:    scan.Name,
+			labels.LabelSecurityFindingID: findingID,
+			labels.LabelSecurityStage:     security.StageValidation,
+		}),
+	); err != nil {
+		return false, err
+	}
+	for i := range tasks.Items {
+		if isActiveTaskPhase(tasks.Items[i].Status.Phase) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (r *RepositoryScanReconciler) createValidationTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, finding *store.Finding) error {
+	if r.Client == nil {
+		return nil
+	}
+	timeout := metav1.Duration{Duration: 90 * time.Minute}
+	priority := int32(725)
+	taskName := security.ScanStageTaskName(scan.Name, "validation", security.StageValidation, finding.ID)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskName,
+			Namespace: scan.Namespace,
+			Labels: map[string]string{
+				labels.LabelManaged:           "true",
+				labels.LabelCreatedBy:         "repository-security",
+				labels.LabelSecurityTarget:    scan.Name,
+				labels.LabelSecurityScanID:    finding.ScanRunID,
+				labels.LabelSecurityMode:      security.StageValidation,
+				labels.LabelSecurityStage:     security.StageValidation,
+				labels.LabelSecurityFindingID: finding.ID,
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &scan.Spec.AnalysisAgentRef,
+			Prompt:   security.BuildValidationPrompt(scan, finding),
+			Timeout:  &timeout,
+			Priority: &priority,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      scan.Spec.RepoURL,
+					Branch:       security.EffectiveBranch(scan),
+					GitSecretRef: scan.Spec.GitSecretRef,
+					SubPath:      scan.Spec.SubPath,
+					ForkRepo:     scan.Spec.ForkRepo,
+					PRBaseBranch: scan.Spec.PRBaseBranch,
+				},
+			},
+		},
+	}
+	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Create(ctx, task); err != nil {
+		return err
+	}
+
+	finding.ValidationStatus = "pending"
+	return r.SecurityStore.UpsertFinding(ctx, finding)
+}
+
+func mergeEvidenceRefs(existing []store.FindingEvidenceRef, refs ...store.FindingEvidenceRef) []store.FindingEvidenceRef {
+	merged := append([]store.FindingEvidenceRef{}, existing...)
+	seen := map[string]struct{}{}
+	for _, ref := range merged {
+		key := strings.Join([]string{ref.Kind, ref.TaskName, ref.Name, ref.Label}, "|")
+		seen[key] = struct{}{}
+	}
+	for _, ref := range refs {
+		key := strings.Join([]string{ref.Kind, ref.TaskName, ref.Name, ref.Label}, "|")
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, ref)
+	}
+	return merged
+}
+
+func (r *RepositoryScanReconciler) enqueueAutoValidationTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan, findings []*store.Finding) error {
+	created := 0
+	for _, finding := range findings {
+		if finding == nil || !r.shouldAutoValidateFinding(scan, finding, created) {
+			continue
+		}
+		if finding.ValidationStatus == "validated" || finding.ValidationStatus == "pending" {
+			continue
+		}
+		active, err := r.hasActiveValidationTask(ctx, scan, finding.ID)
+		if err != nil {
+			return err
+		}
+		if active {
+			continue
+		}
+		if err := r.createValidationTask(ctx, scan, finding); err != nil {
+			return err
+		}
+		created++
+	}
+	return nil
+}
+
+func (r *RepositoryScanReconciler) ingestThreatModelTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, run *store.ScanRun, updateStatus bool) error {
 	run.TaskName = task.Name
+	if mode := task.Labels[labels.LabelSecurityMode]; mode != "" {
+		run.Mode = mode
+	}
+
+	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+		threatModel, validationProblem, err := r.loadThreatModelArtifact(ctx, task)
+		if err != nil {
+			return err
+		}
+		if validationProblem != "" {
+			run.ErrorMessage = "required scan artifacts were missing or invalid: " + validationProblem
+		} else {
+			if err := r.persistThreatModelIfChanged(ctx, scan, run.ID, run.StartedAt, threatModel); err != nil {
+				return err
+			}
+			run.Summary = "Threat model generated; independent discovery agents pending"
+		}
+	} else {
+		run.ErrorMessage = r.pipelineTaskSummary(ctx, task, "threat model stage failed")
+	}
+
+	return r.refreshScanRunStatus(ctx, scan, run, run.ID, updateStatus)
+}
+
+func (r *RepositoryScanReconciler) ingestDiscoveryTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, run *store.ScanRun, updateStatus bool) error {
+	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+		findingsArtifact, validationProblem, err := r.loadDiscoveryFindingsArtifact(ctx, task)
+		if err != nil {
+			return err
+		}
+		if validationProblem != "" {
+			scope := strings.TrimSpace(task.Labels[labels.LabelSecurityScope])
+			if scope != "" {
+				run.ErrorMessage = fmt.Sprintf("scope %s: %s", scope, validationProblem)
+			} else {
+				run.ErrorMessage = validationProblem
+			}
+		} else if findingsArtifact != nil {
+			if findingsArtifact.Scan.Mode != "" {
+				run.Mode = findingsArtifact.Scan.Mode
+			}
+			if findingsArtifact.Repository.BaseSHA != "" {
+				run.BaseCommit = findingsArtifact.Repository.BaseSHA
+			}
+			if findingsArtifact.Repository.HeadSHA != "" {
+				run.HeadCommit = findingsArtifact.Repository.HeadSHA
+			}
+			run.CommitCount = findingsArtifact.Scan.CommitCount
+
+			upserted := make([]*store.Finding, 0, len(findingsArtifact.Findings))
+			for _, item := range findingsArtifact.Findings {
+				finding := security.ToFinding(scan.Namespace, scan.Name, run.ID, task.Name, item)
+				if existing, err := r.SecurityStore.GetFinding(ctx, scan.Namespace, finding.ID); err == nil {
+					if existing.State != "" && existing.State != "open" {
+						finding.State = existing.State
+					}
+					if existing.PatchProposalID != "" {
+						finding.PatchProposalID = existing.PatchProposalID
+					}
+					finding.PRNumber = existing.PRNumber
+					finding.PRURL = existing.PRURL
+					finding.CreatedAt = existing.CreatedAt
+					if existing.ValidationStatus == "validated" || existing.ValidationStatus == "pending" {
+						finding.ValidationStatus = existing.ValidationStatus
+					}
+					if len(existing.Evidence) > 0 {
+						finding.Evidence = mergeEvidenceRefs(existing.Evidence, finding.Evidence...)
+					}
+					if existing.ValidationJSON != "" {
+						finding.ValidationJSON = existing.ValidationJSON
+					}
+				}
+				if err := r.SecurityStore.UpsertFinding(ctx, finding); err != nil {
+					return err
+				}
+				upserted = append(upserted, finding)
+			}
+			if err := r.enqueueAutoValidationTasks(ctx, scan, upserted); err != nil {
+				return err
+			}
+		}
+	} else {
+		run.ErrorMessage = r.pipelineTaskSummary(ctx, task, "discovery stage failed")
+	}
+
+	return r.refreshScanRunStatus(ctx, scan, run, run.ID, updateStatus)
+}
+
+func (r *RepositoryScanReconciler) ingestCombinedScanTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, run *store.ScanRun, updateStatus bool) error {
+	effectivePhase := task.Status.Phase
+	run.TaskName = task.Name
+	run.ErrorMessage = ""
 	if task.Status.CompletionTime != nil {
 		run.CompletedAt = ptr.To(task.Status.CompletionTime.Time)
 	} else {
@@ -360,60 +1262,65 @@ func (r *RepositoryScanReconciler) ingestScanTask(ctx context.Context, scan *cor
 		run.Summary = task.Status.Message
 	}
 
-	var findingsArtifact security.FindingsArtifact
-	if r.ArtifactStore != nil {
-		if data, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, security.ArtifactFindings); err == nil {
-			if err := json.Unmarshal(data, &findingsArtifact); err == nil {
-				if findingsArtifact.Scan.Mode != "" {
-					run.Mode = findingsArtifact.Scan.Mode
-				}
-				run.BaseCommit = findingsArtifact.Repository.BaseSHA
-				run.HeadCommit = findingsArtifact.Repository.HeadSHA
-				run.CommitCount = findingsArtifact.Scan.CommitCount
-				if findingsArtifact.Scan.Summary != "" {
-					run.Summary = findingsArtifact.Scan.Summary
-				}
-
-				for _, item := range findingsArtifact.Findings {
-					finding := security.ToFinding(scan.Namespace, scan.Name, scanID, item)
-					if existing, err := r.SecurityStore.GetFinding(ctx, scan.Namespace, finding.ID); err == nil {
-						if existing.State != "" && existing.State != "open" {
-							finding.State = existing.State
-						}
-						finding.PatchProposalID = existing.PatchProposalID
-						finding.PRNumber = existing.PRNumber
-						finding.PRURL = existing.PRURL
-						finding.CreatedAt = existing.CreatedAt
-					}
-					if err := r.SecurityStore.UpsertFinding(ctx, finding); err != nil {
-						return err
-					}
-				}
+	var scanArtifacts *scanTaskArtifacts
+	var err error
+	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+		scanArtifacts, run.ErrorMessage, err = r.loadScanTaskArtifacts(ctx, task)
+		if err != nil {
+			return err
+		}
+		if scanArtifacts != nil {
+			if err := r.persistThreatModelIfChanged(ctx, scan, run.ID, run.StartedAt, scanArtifacts.threatModel); err != nil {
+				return err
 			}
 		}
+		if run.ErrorMessage != "" {
+			effectivePhase = corev1alpha1.TaskPhaseFailed
+			run.Summary = run.ErrorMessage
+		}
+	}
 
-		if data, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, security.ArtifactThreatModel); err == nil {
-			content := strings.TrimSpace(string(data))
-			if content != "" {
-				latest, latestErr := r.SecurityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
-				if errors.Is(latestErr, store.ErrNotFound) || (latestErr == nil && strings.TrimSpace(latest.Content) != content) {
-					model := &store.ThreatModel{
-						Namespace:       scan.Namespace,
-						RepositoryScan:  scan.Name,
-						Content:         content,
-						Source:          "generated",
-						GeneratedByScan: scanID,
-					}
-					if err := r.SecurityStore.SaveThreatModel(ctx, model); err != nil {
-						return err
-					}
+	run.Phase = taskPhaseToSecurityPhase(effectivePhase)
+
+	if effectivePhase == corev1alpha1.TaskPhaseSucceeded && scanArtifacts != nil {
+		if scanArtifacts.findings.Scan.Mode != "" {
+			run.Mode = scanArtifacts.findings.Scan.Mode
+		}
+		run.BaseCommit = scanArtifacts.findings.Repository.BaseSHA
+		run.HeadCommit = scanArtifacts.findings.Repository.HeadSHA
+		run.CommitCount = scanArtifacts.findings.Scan.CommitCount
+		if scanArtifacts.findings.Scan.Summary != "" {
+			run.Summary = scanArtifacts.findings.Scan.Summary
+		}
+
+		for _, item := range scanArtifacts.findings.Findings {
+			finding := security.ToFinding(scan.Namespace, scan.Name, run.ID, task.Name, item)
+			if existing, err := r.SecurityStore.GetFinding(ctx, scan.Namespace, finding.ID); err == nil {
+				if existing.State != "" && existing.State != "open" {
+					finding.State = existing.State
 				}
+				finding.PatchProposalID = existing.PatchProposalID
+				finding.PRNumber = existing.PRNumber
+				finding.PRURL = existing.PRURL
+				finding.CreatedAt = existing.CreatedAt
+				if existing.ValidationJSON != "" {
+					finding.ValidationJSON = existing.ValidationJSON
+				}
+				if len(existing.Evidence) > 0 {
+					finding.Evidence = mergeEvidenceRefs(existing.Evidence, finding.Evidence...)
+				}
+			}
+			if err := r.SecurityStore.UpsertFinding(ctx, finding); err != nil {
+				return err
 			}
 		}
 	}
 
 	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
 		return err
+	}
+	if !updateStatus {
+		return nil
 	}
 
 	counts, err := r.SecurityStore.GetFindingCounts(ctx, scan.Namespace, scan.Name)
@@ -439,7 +1346,7 @@ func (r *RepositoryScanReconciler) ingestScanTask(ctx context.Context, scan *cor
 			Low:      counts.Low,
 		}
 
-		if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+		if effectivePhase == corev1alpha1.TaskPhaseSucceeded {
 			s.Status.Phase = repositoryScanPhaseReady
 			s.Status.LastProcessedCommit = run.HeadCommit
 			if task.Status.CompletionTime != nil {
@@ -449,7 +1356,7 @@ func (r *RepositoryScanReconciler) ingestScanTask(ctx context.Context, scan *cor
 				Type:               "Ready",
 				Status:             metav1.ConditionTrue,
 				Reason:             "ScanSucceeded",
-				Message:            run.Summary,
+				Message:            repositoryScanConditionMessage(run.Summary, "scan completed successfully"),
 				LastTransitionTime: metav1.Now(),
 				ObservedGeneration: s.Generation,
 			})
@@ -461,11 +1368,85 @@ func (r *RepositoryScanReconciler) ingestScanTask(ctx context.Context, scan *cor
 			Type:               "Ready",
 			Status:             metav1.ConditionFalse,
 			Reason:             "ScanFailed",
-			Message:            run.Summary,
+			Message:            repositoryScanConditionMessage(run.Summary, "scan failed"),
 			LastTransitionTime: metav1.Now(),
 			ObservedGeneration: s.Generation,
 		})
 	})
+}
+
+func (r *RepositoryScanReconciler) ingestScanTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, updateStatus bool) error {
+	run, err := r.getOrCreateScanRun(ctx, scan, task)
+	if err != nil {
+		return err
+	}
+
+	switch taskSecurityStage(task) {
+	case security.StageThreatModel:
+		return r.ingestThreatModelTask(ctx, scan, task, run, updateStatus)
+	case security.StageDiscovery:
+		return r.ingestDiscoveryTask(ctx, scan, task, run, updateStatus)
+	default:
+		return r.ingestCombinedScanTask(ctx, scan, task, run, updateStatus)
+	}
+}
+
+func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task) error {
+	findingID := task.Labels[labels.LabelSecurityFindingID]
+	if findingID == "" {
+		return nil
+	}
+
+	finding, err := r.SecurityStore.GetFinding(ctx, scan.Namespace, findingID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+
+	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+		artifacts, validationProblem, err := r.loadValidationTaskArtifacts(ctx, task)
+		if err != nil {
+			return err
+		}
+		if validationProblem != "" {
+			finding.ValidationStatus = "failed"
+			finding.ValidationJSON = fmt.Sprintf("{\"status\":\"failed\",\"summary\":%q}", validationProblem)
+		} else if artifacts != nil {
+			status := strings.TrimSpace(artifacts.artifact.Status)
+			if status == "" {
+				status = "validated"
+			}
+			finding.ValidationStatus = status
+			finding.ValidationJSON = artifacts.rawJSON
+			for _, ref := range []store.FindingEvidenceRef(artifacts.artifact.Evidence) {
+				if ref.Kind == "artifact" && ref.TaskName == "" {
+					ref.TaskName = task.Name
+				}
+				finding.Evidence = mergeEvidenceRefs(finding.Evidence, ref)
+			}
+			finding.Evidence = mergeEvidenceRefs(finding.Evidence, store.FindingEvidenceRef{
+				Kind:     "artifact",
+				TaskName: task.Name,
+				Name:     security.ArtifactValidation,
+				Label:    "Validation JSON",
+			})
+			if artifacts.transcript != "" {
+				finding.Evidence = mergeEvidenceRefs(finding.Evidence, store.FindingEvidenceRef{
+					Kind:     "artifact",
+					TaskName: task.Name,
+					Name:     security.ArtifactValidationText,
+					Label:    "Validation transcript",
+				})
+			}
+		}
+	} else {
+		finding.ValidationStatus = "failed"
+		finding.ValidationJSON = fmt.Sprintf("{\"status\":\"failed\",\"summary\":%q}", r.pipelineTaskSummary(ctx, task, "validation task failed"))
+	}
+
+	return r.SecurityStore.UpsertFinding(ctx, finding)
 }
 
 func (r *RepositoryScanReconciler) ingestPatchTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task) error {

@@ -1563,6 +1563,39 @@ func TestJobBuilder_Build_AgentTask_Labels(t *testing.T) {
 	}
 }
 
+func TestJobBuilder_Build_TruncatesLongJobNamesToKubernetesLimit(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "kaset-manual-discovery-auth-secrets-privilege-1775868783-1",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAgent,
+			Prompt: "Do something",
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	if len(job.Name) > maxJobNameLength {
+		t.Fatalf("len(job.Name) = %d, want <= %d (%q)", len(job.Name), maxJobNameLength, job.Name)
+	}
+	if !strings.HasSuffix(job.Name, "-job-12345678-0") {
+		t.Fatalf("job.Name = %q, want suffix %q", job.Name, "-job-12345678-0")
+	}
+	if job.Labels[labels.LabelTask] != task.Name {
+		t.Fatalf("job.Labels[%q] = %q, want original task name %q", labels.LabelTask, job.Labels[labels.LabelTask], task.Name)
+	}
+	if job.Spec.Template.Labels[labels.LabelTask] != task.Name {
+		t.Fatalf("pod label %q = %q, want original task name %q", labels.LabelTask, job.Spec.Template.Labels[labels.LabelTask], task.Name)
+	}
+}
+
 func TestJobBuilder_Build_AgentTask_WithTimeout(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{

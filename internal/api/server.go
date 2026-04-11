@@ -203,6 +203,7 @@ func (s *Server) setupRoutes() {
 	api.Get("/security/findings/:id", s.handlers.GetSecurityFinding)
 	api.Post("/security/findings/:id/dismiss", s.handlers.DismissSecurityFinding)
 	api.Post("/security/findings/:id/reopen", s.handlers.ReopenSecurityFinding)
+	api.Post("/security/findings/:id/validate", s.handlers.ValidateSecurityFinding)
 	api.Post("/security/findings/:id/patch", s.handlers.GenerateSecurityPatch)
 	api.Get("/security/findings/:id/patches", s.handlers.ListSecurityPatchProposals)
 	api.Post("/security/findings/:id/pull-request", s.handlers.CreateSecurityPullRequest)

@@ -10,7 +10,9 @@ import {
   useGeneratePatch,
   usePatchProposals,
   useReopenFinding,
+  useValidateFinding,
 } from '@/hooks/use-security'
+import { useUIStore } from '@/stores/ui'
 import { PatchProposalCard } from './patch-proposal-card'
 
 function severityVariant(severity?: string): 'destructive' | 'secondary' | 'outline' {
@@ -20,9 +22,11 @@ function severityVariant(severity?: string): 'destructive' | 'secondary' | 'outl
 }
 
 export function FindingDetail({ findingId }: { findingId: string }) {
+  const namespace = useUIStore((s) => s.namespace)
   const { data: finding, isLoading } = useFinding(findingId)
   const patches = usePatchProposals(findingId)
   const generatePatch = useGeneratePatch(findingId)
+  const validateFinding = useValidateFinding(findingId)
   const createPullRequest = useCreatePullRequest(findingId)
   const dismissFinding = useDismissFinding(findingId)
   const reopenFinding = useReopenFinding(findingId)
@@ -36,6 +40,19 @@ export function FindingDetail({ findingId }: { findingId: string }) {
   }
 
   const latestSuccessfulPatch = (patches.data?.items ?? []).find((proposal) => proposal.status === 'succeeded' || proposal.status === 'pr_opened')
+  let parsedValidation: Record<string, unknown> | null = null
+  if (finding.validationJSON) {
+    try {
+      parsedValidation = JSON.parse(finding.validationJSON) as Record<string, unknown>
+    } catch {
+      parsedValidation = null
+    }
+  }
+  const validationArtifactRefs = (finding.evidence ?? []).filter((evidence) =>
+    evidence.kind === 'artifact' &&
+    evidence.taskName &&
+    (evidence.name === 'security-validation.json' || evidence.name === 'security-validation.txt'),
+  )
 
   return (
     <div className="space-y-4">
@@ -80,6 +97,20 @@ export function FindingDetail({ findingId }: { findingId: string }) {
             </Button>
           )}
           <Button
+            variant="outline"
+            onClick={async () => {
+              try {
+                await validateFinding.mutateAsync()
+                toast.success('Validation task started')
+              } catch (error) {
+                toast.error(`Failed to start validation: ${error instanceof Error ? error.message : 'Unknown error'}`)
+              }
+            }}
+            disabled={validateFinding.isPending || finding.validationStatus === 'pending'}
+          >
+            {finding.validationStatus === 'pending' ? 'Validation Running' : 'Validate / Reproduce'}
+          </Button>
+          <Button
             onClick={async () => {
               try {
                 await generatePatch.mutateAsync()
@@ -118,6 +149,7 @@ export function FindingDetail({ findingId }: { findingId: string }) {
             <div>Commit: <span className="font-mono text-xs">{finding.commitSHA || '-'}</span></div>
             <div>Location: <span className="font-mono text-xs">{finding.filePath ? `${finding.filePath}${finding.line ? `:${finding.line}` : ''}` : '-'}</span></div>
             {finding.scanTaskName && <div>Scan task: <span className="font-medium">{finding.scanTaskName}</span></div>}
+            <div>Validation: <span className="font-medium">{finding.validationStatus}</span></div>
             {finding.prURL && (
               <a href={finding.prURL} target="_blank" rel="noreferrer" className="text-primary hover:underline">
                 Open PR #{finding.prNumber}
@@ -160,8 +192,20 @@ export function FindingDetail({ findingId }: { findingId: string }) {
             <div className="space-y-2">
               {(finding.evidence ?? []).map((evidence, index) => (
                 <div key={`${evidence.name || evidence.label || 'evidence'}-${index}`} className="rounded-md border border-border p-3 text-sm">
-                  <div className="font-medium">{evidence.label || evidence.name || 'Evidence'}</div>
+                  {evidence.kind === 'artifact' && evidence.taskName && evidence.name ? (
+                    <a
+                      href={`/api/v1/tasks/${evidence.taskName}/artifacts/${evidence.name}?namespace=${encodeURIComponent(namespace)}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-medium text-primary hover:underline"
+                    >
+                      {evidence.label || evidence.name || 'Evidence'}
+                    </a>
+                  ) : (
+                    <div className="font-medium">{evidence.label || evidence.name || 'Evidence'}</div>
+                  )}
                   <div className="text-muted-foreground">{evidence.kind}</div>
+                  {evidence.taskName && <div className="text-xs text-muted-foreground">Task: {evidence.taskName}</div>}
                 </div>
               ))}
             </div>
@@ -171,9 +215,90 @@ export function FindingDetail({ findingId }: { findingId: string }) {
 
       {finding.validationJSON && (
         <Card>
-          <CardHeader><CardTitle>Validation Output</CardTitle></CardHeader>
-          <CardContent>
-            <pre className="whitespace-pre-wrap rounded-md bg-muted p-4 text-xs">{finding.validationJSON}</pre>
+          <CardHeader><CardTitle>Validation</CardTitle></CardHeader>
+          <CardContent className="space-y-4">
+            {parsedValidation && typeof parsedValidation.summary === 'string' && (
+              <div>
+                <div className="font-medium">Summary</div>
+                <p className="text-sm text-muted-foreground">{parsedValidation.summary}</p>
+              </div>
+            )}
+
+            {parsedValidation && Array.isArray(parsedValidation.validation_steps) && parsedValidation.validation_steps.length > 0 && (
+              <div>
+                <div className="font-medium">Validation Steps</div>
+                <div className="mt-2 space-y-2 text-sm text-muted-foreground">
+                  {parsedValidation.validation_steps.map((step, index) => (
+                    <div key={`${String(step)}-${index}`}>{String(step)}</div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {parsedValidation && typeof parsedValidation.attack_path_analysis === 'string' && (
+              <div>
+                <div className="font-medium">Attack-Path Analysis</div>
+                <p className="mt-2 whitespace-pre-wrap text-sm text-muted-foreground">{parsedValidation.attack_path_analysis}</p>
+              </div>
+            )}
+
+            {parsedValidation && (Array.isArray(parsedValidation.assumptions) || Array.isArray(parsedValidation.controls) || Array.isArray(parsedValidation.blindspots)) && (
+              <div className="grid gap-4 md:grid-cols-3">
+                {Array.isArray(parsedValidation.assumptions) && (
+                  <div>
+                    <div className="font-medium">Assumptions</div>
+                    <div className="mt-2 space-y-2 text-sm text-muted-foreground">
+                      {parsedValidation.assumptions.map((item, index) => (
+                        <div key={`${String(item)}-${index}`}>{String(item)}</div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {Array.isArray(parsedValidation.controls) && (
+                  <div>
+                    <div className="font-medium">Controls</div>
+                    <div className="mt-2 space-y-2 text-sm text-muted-foreground">
+                      {parsedValidation.controls.map((item, index) => (
+                        <div key={`${String(item)}-${index}`}>{String(item)}</div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {Array.isArray(parsedValidation.blindspots) && (
+                  <div>
+                    <div className="font-medium">Blindspots</div>
+                    <div className="mt-2 space-y-2 text-sm text-muted-foreground">
+                      {parsedValidation.blindspots.map((item, index) => (
+                        <div key={`${String(item)}-${index}`}>{String(item)}</div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {validationArtifactRefs.length > 0 && (
+              <div>
+                <div className="font-medium">Validation Artifacts</div>
+                <div className="mt-2 space-y-2 text-sm">
+                  {validationArtifactRefs.map((evidence, index) => (
+                    <a
+                      key={`${evidence.taskName || 'task'}-${evidence.name || index}`}
+                      href={`/api/v1/tasks/${evidence.taskName}/artifacts/${evidence.name}?namespace=${encodeURIComponent(namespace)}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="block text-primary hover:underline"
+                    >
+                      {evidence.label || evidence.name}
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {!parsedValidation && (
+              <pre className="whitespace-pre-wrap rounded-md bg-muted p-4 text-xs">{finding.validationJSON}</pre>
+            )}
           </CardContent>
         </Card>
       )}

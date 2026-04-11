@@ -15,6 +15,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -84,7 +85,46 @@ func (h *Handlers) ownerRefForRepositoryScan(scan *corev1alpha1.RepositoryScan) 
 	return *metav1.NewControllerRef(scan, corev1alpha1.GroupVersion.WithKind("RepositoryScan"))
 }
 
-func (h *Handlers) createSecurityScanTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit string) (*store.ScanRun, error) {
+func (h *Handlers) hasActiveSecurityScanPipelineTask(ctx context.Context, scan *corev1alpha1.RepositoryScan) (bool, error) {
+	var tasks corev1alpha1.TaskList
+	if err := h.client.List(ctx, &tasks,
+		client.InNamespace(scan.Namespace),
+		client.MatchingLabels(map[string]string{labels.LabelSecurityTarget: scan.Name}),
+	); err != nil {
+		return false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list scan tasks: %v", err))
+	}
+
+	for i := range tasks.Items {
+		task := &tasks.Items[i]
+		stage := strings.TrimSpace(task.Labels[labels.LabelSecurityStage])
+		if stage == security.StagePatch || stage == security.StageValidation {
+			continue
+		}
+		switch task.Status.Phase {
+		case corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseScheduled:
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (h *Handlers) updateRepositoryScanRunStatus(ctx context.Context, scan *corev1alpha1.RepositoryScan, scanID, taskName string) error {
+	patch := scan.DeepCopy()
+	patch.Status.Phase = "Scanning"
+	patch.Status.LastScanID = scanID
+	patch.Status.LastScanTaskName = taskName
+	meta.SetStatusCondition(&patch.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		Reason:             "Scanning",
+		Message:            "Security scan is running",
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: patch.Generation,
+	})
+	return h.client.Status().Patch(ctx, patch, client.MergeFrom(scan))
+}
+
+func (h *Handlers) createSecurityScanRun(ctx context.Context, scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit string) (*store.ScanRun, error) {
 	if err := h.ensureSecurityStore(); err != nil {
 		return nil, err
 	}
@@ -96,7 +136,7 @@ func (h *Handlers) createSecurityScanTask(ctx context.Context, scan *corev1alpha
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to load threat model: %v", err))
 	}
 
-	taskName := security.ScanTaskName(scan.Name, mode)
+	taskName := security.ScanStageTaskName(scan.Name, mode, security.StageThreatModel, "")
 	scanID := security.ScanRunID(taskName)
 	timeout := metav1.Duration{Duration: 2 * time.Hour}
 	priority := int32(700)
@@ -111,13 +151,14 @@ func (h *Handlers) createSecurityScanTask(ctx context.Context, scan *corev1alpha
 				labels.LabelSecurityTarget: scan.Name,
 				labels.LabelSecurityScanID: scanID,
 				labels.LabelSecurityMode:   mode,
+				labels.LabelSecurityStage:  security.StageThreatModel,
 			},
 			OwnerReferences: []metav1.OwnerReference{h.ownerRefForRepositoryScan(scan)},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &scan.Spec.AnalysisAgentRef,
-			Prompt:   security.BuildScanPrompt(scan, mode, baseCommit, headCommit, threatModel),
+			Prompt:   security.BuildThreatModelPrompt(scan, mode, baseCommit, headCommit, threatModel),
 			Timeout:  &timeout,
 			Priority: &priority,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
@@ -150,7 +191,58 @@ func (h *Handlers) createSecurityScanTask(ctx context.Context, scan *corev1alpha
 	if err := h.securityStore.CreateScanRun(ctx, run); err != nil {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create scan run: %v", err))
 	}
+	if err := h.updateRepositoryScanRunStatus(ctx, scan, scanID, taskName); err != nil {
+		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update repository scan status: %v", err))
+	}
 	return run, nil
+}
+
+func (h *Handlers) createSecurityValidationTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, finding *store.Finding) error {
+	timeout := metav1.Duration{Duration: 90 * time.Minute}
+	priority := int32(725)
+	taskName := security.ScanStageTaskName(scan.Name, "validation", security.StageValidation, finding.ID)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskName,
+			Namespace: scan.Namespace,
+			Labels: map[string]string{
+				labels.LabelManaged:           "true",
+				labels.LabelCreatedBy:         "repository-security",
+				labels.LabelSecurityTarget:    scan.Name,
+				labels.LabelSecurityScanID:    finding.ScanRunID,
+				labels.LabelSecurityMode:      security.StageValidation,
+				labels.LabelSecurityStage:     security.StageValidation,
+				labels.LabelSecurityFindingID: finding.ID,
+			},
+			OwnerReferences: []metav1.OwnerReference{h.ownerRefForRepositoryScan(scan)},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &scan.Spec.AnalysisAgentRef,
+			Prompt:   security.BuildValidationPrompt(scan, finding),
+			Timeout:  &timeout,
+			Priority: &priority,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      scan.Spec.RepoURL,
+					Branch:       security.EffectiveBranch(scan),
+					GitSecretRef: scan.Spec.GitSecretRef,
+					SubPath:      scan.Spec.SubPath,
+					ForkRepo:     scan.Spec.ForkRepo,
+					PRBaseBranch: scan.Spec.PRBaseBranch,
+				},
+			},
+		},
+	}
+	if err := h.client.Create(ctx, task); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create validation task: %v", err))
+	}
+	finding.ValidationStatus = "pending"
+	if err := h.securityStore.UpsertFinding(ctx, finding); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update finding: %v", err))
+	}
+	return nil
 }
 
 func (h *Handlers) createSecurityPatchTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, finding *store.Finding) (*store.PatchProposal, error) {
@@ -179,6 +271,7 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, scan *corev1alph
 				labels.LabelSecurityTarget:    scan.Name,
 				labels.LabelSecurityScanID:    proposalID,
 				labels.LabelSecurityMode:      "patch",
+				labels.LabelSecurityStage:     security.StagePatch,
 				labels.LabelSecurityFindingID: finding.ID,
 			},
 			OwnerReferences: []metav1.OwnerReference{h.ownerRefForRepositoryScan(scan)},
@@ -352,7 +445,7 @@ func (h *Handlers) DeleteRepositoryScan(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// GetThreatModel returns the latest threat model for a repository.
+// GetThreatModel returns the current threat model for a repository.
 func (h *Handlers) GetThreatModel(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err
@@ -374,7 +467,7 @@ func (h *Handlers) GetThreatModel(c fiber.Ctx) error {
 	return c.JSON(model)
 }
 
-// UpdateThreatModel saves a new threat model version.
+// UpdateThreatModel replaces the current threat model.
 func (h *Handlers) UpdateThreatModel(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err
@@ -444,7 +537,14 @@ func (h *Handlers) CreateManualSecurityScan(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	run, err := h.createSecurityScanTask(c.Context(), scan, "manual", scan.Status.LastProcessedCommit, "")
+	active, err := h.hasActiveSecurityScanPipelineTask(c.Context(), scan)
+	if err != nil {
+		return err
+	}
+	if active {
+		return fiber.NewError(fiber.StatusConflict, "a security scan is already running for this repository")
+	}
+	run, err := h.createSecurityScanRun(c.Context(), scan, "manual", scan.Status.LastProcessedCommit, "")
 	if err != nil {
 		return err
 	}
@@ -552,6 +652,33 @@ func (h *Handlers) ReopenSecurityFinding(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to reopen finding: %v", err))
 	}
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// ValidateSecurityFinding creates a validator/repro task for a finding.
+func (h *Handlers) ValidateSecurityFinding(c fiber.Ctx) error {
+	if err := h.ensureSecurityStore(); err != nil {
+		return err
+	}
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	finding, err := h.securityStore.GetFinding(c.Context(), namespace, c.Params("id"))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "finding not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get finding: %v", err))
+	}
+	scan, err := h.fetchRepositoryScan(c.Context(), namespace, finding.RepositoryScan)
+	if err != nil {
+		return err
+	}
+
+	if err := h.createSecurityValidationTask(c.Context(), scan, finding); err != nil {
+		return err
+	}
+	return c.SendStatus(fiber.StatusAccepted)
 }
 
 // GenerateSecurityPatch creates a patch proposal task for a finding.

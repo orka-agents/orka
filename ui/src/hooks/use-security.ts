@@ -147,6 +147,19 @@ export function useGeneratePatch(id: string) {
   })
 }
 
+export function useValidateFinding(id: string) {
+  const queryClient = useQueryClient()
+  const namespace = useUIStore((s) => s.namespace)
+  return useMutation({
+    mutationFn: () => api.post<void>(`/security/findings/${id}/validate`, { namespace }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['security', 'finding', namespace, id] })
+      queryClient.invalidateQueries({ queryKey: ['security', 'findings'] })
+      queryClient.invalidateQueries({ queryKey: ['security', 'repositories'] })
+    },
+  })
+}
+
 export function usePatchProposals(id: string) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
