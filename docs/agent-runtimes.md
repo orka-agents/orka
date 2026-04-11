@@ -60,6 +60,10 @@ spec:
     inline: "You are a helpful coding assistant."
   secretRef:
     name: claude-api-key
+  execution:
+    runtimeClassName: gvisor
+    nodeSelector:
+      sandbox-runtime: gvisor
   runtime:
     type: claude
     defaultMaxTurns: 50
@@ -136,6 +140,17 @@ spec:
   secretRef:
     name: claude-api-key
 
+  # execution: default runtime and placement settings for worker pods
+  execution:
+    runtimeClassName: gvisor
+    nodeSelector:
+      sandbox-runtime: gvisor
+    tolerations:
+      - key: sandbox-runtime
+        operator: Equal
+        value: gvisor
+        effect: NoSchedule
+
   # systemPrompt: injected via --system-prompt flag
   systemPrompt:
     inline: "You are a coding assistant."
@@ -177,6 +192,12 @@ spec:
     name: claude-agent
     # namespace: defaults to task namespace
     # namespace: other-ns
+
+  # execution: task-level runtime/placement overrides
+  execution:
+    runtimeClassName: kata-qemu
+    nodeSelector:
+      sandbox-runtime: kata
 
   # prompt: instruction sent to the agent CLI
   prompt: "Fix the failing tests in api/"
@@ -245,6 +266,37 @@ Agent.spec.runtime (defaults)
   └─► Task.spec.agentRuntime (overrides)
         └─► disallowedTools (always wins)
 ```
+
+### Runtime Isolation
+
+Agent worker pods can opt into stronger sandboxing through Kubernetes `RuntimeClass` using the shared `spec.execution` field on both Agents and Tasks.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: isolated-review
+spec:
+  type: agent
+  agentRef:
+    name: claude-agent
+  prompt: "Review the repo for security issues"
+  execution:
+    runtimeClassName: gvisor
+    nodeSelector:
+      sandbox-runtime: gvisor
+    tolerations:
+      - key: sandbox-runtime
+        operator: Equal
+        value: gvisor
+        effect: NoSchedule
+```
+
+- `Agent.spec.execution` sets defaults for all tasks using that Agent.
+- `Task.spec.execution` overrides the Agent and replaces `nodeSelector`, `tolerations`, and `affinity` when set.
+- `gvisor` is the recommended first isolation profile for Linux `kind` and other containerd-based development clusters.
+- `kata-qemu` uses the same API, but is best suited to `minikube` or production clusters with virtualization-capable nodes.
+- The controller itself can remain on the default runtime; only worker Jobs need the isolation runtime.
 
 ## Workspace Management
 
@@ -365,6 +417,8 @@ All agent worker pods run with a hardened security context:
 | Capabilities | All dropped |
 | Seccomp profile | RuntimeDefault |
 | Privilege escalation | Disabled |
+
+If `spec.execution.runtimeClassName` is set, the worker pod is also routed through the selected Kubernetes `RuntimeClass` while keeping the same pod and container security defaults.
 
 Writable directories are provided via `emptyDir` volumes:
 

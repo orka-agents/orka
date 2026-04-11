@@ -12,6 +12,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+const (
+	testExecutionRuntimeClassGVisor = "gvisor"
+	testExecutionRuntimeClassKata   = "kata-qemu"
+	testExecutionNodeLabelKey       = "sandbox-runtime"
+)
+
 func TestTaskTypeAgentConstant(t *testing.T) {
 	if TaskTypeAgent != "agent" {
 		t.Errorf("TaskTypeAgent = %q, want %q", TaskTypeAgent, "agent")
@@ -287,5 +293,68 @@ func TestAgentRuntimeTypeAssignment(t *testing.T) {
 				t.Errorf("Type = %q, want %q", runtime.Type, tt.runtimeType)
 			}
 		})
+	}
+}
+
+func TestExecutionSpecFields(t *testing.T) {
+	spec := ExecutionSpec{
+		RuntimeClassName: testExecutionRuntimeClassGVisor,
+		NodeSelector: map[string]string{
+			testExecutionNodeLabelKey: testExecutionRuntimeClassGVisor,
+		},
+		Tolerations: []corev1.Toleration{
+			{
+				Key:      testExecutionNodeLabelKey,
+				Operator: corev1.TolerationOpEqual,
+				Value:    testExecutionRuntimeClassGVisor,
+				Effect:   corev1.TaintEffectNoSchedule,
+			},
+		},
+		Affinity: &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{},
+		},
+	}
+
+	if spec.RuntimeClassName != testExecutionRuntimeClassGVisor {
+		t.Errorf("RuntimeClassName = %q, want %q", spec.RuntimeClassName, testExecutionRuntimeClassGVisor)
+	}
+	if got := spec.NodeSelector[testExecutionNodeLabelKey]; got != testExecutionRuntimeClassGVisor {
+		t.Errorf("NodeSelector[%s] = %q, want %q", testExecutionNodeLabelKey, got, testExecutionRuntimeClassGVisor)
+	}
+	if len(spec.Tolerations) != 1 {
+		t.Fatalf("Tolerations len = %d, want 1", len(spec.Tolerations))
+	}
+	if spec.Tolerations[0].Effect != corev1.TaintEffectNoSchedule {
+		t.Errorf("Tolerations[0].Effect = %q, want %q", spec.Tolerations[0].Effect, corev1.TaintEffectNoSchedule)
+	}
+	if spec.Affinity == nil || spec.Affinity.NodeAffinity == nil {
+		t.Fatal("Affinity.NodeAffinity should not be nil")
+	}
+}
+
+func TestExecutionSpecOnAgentAndTaskSpec(t *testing.T) {
+	agent := AgentSpec{
+		Execution: &ExecutionSpec{
+			RuntimeClassName: testExecutionRuntimeClassKata,
+		},
+	}
+	task := TaskSpec{
+		Type: TaskTypeAgent,
+		Execution: &ExecutionSpec{
+			RuntimeClassName: testExecutionRuntimeClassGVisor,
+		},
+	}
+
+	if agent.Execution == nil {
+		t.Fatal("Agent.Execution should not be nil")
+	}
+	if agent.Execution.RuntimeClassName != testExecutionRuntimeClassKata {
+		t.Errorf("Agent.Execution.RuntimeClassName = %q, want %q", agent.Execution.RuntimeClassName, testExecutionRuntimeClassKata)
+	}
+	if task.Execution == nil {
+		t.Fatal("Task.Execution should not be nil")
+	}
+	if task.Execution.RuntimeClassName != testExecutionRuntimeClassGVisor {
+		t.Errorf("Task.Execution.RuntimeClassName = %q, want %q", task.Execution.RuntimeClassName, testExecutionRuntimeClassGVisor)
 	}
 }

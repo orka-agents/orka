@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"path"
 	"reflect"
 	"slices"
@@ -87,6 +88,7 @@ func NewJobBuilder(c client.Client) *JobBuilder {
 // Build creates a Job for the given Task
 func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (*batchv1.Job, error) {
 	jobName := fmt.Sprintf("%s-job-%s-%d", task.Name, task.UID[:8], task.Status.Attempts)
+	execution := resolveExecution(task, agent)
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -117,6 +119,8 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 			},
 		},
 	}
+
+	applyExecution(job, execution)
 
 	// Always add tmp volume for read-only root filesystem
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
@@ -229,6 +233,78 @@ func (b *JobBuilder) buildContainer(ctx context.Context, task *corev1alpha1.Task
 	})
 
 	return container
+}
+
+func resolveExecution(task *corev1alpha1.Task, agent *corev1alpha1.Agent) *corev1alpha1.ExecutionSpec {
+	var effective corev1alpha1.ExecutionSpec
+
+	if agent != nil && agent.Spec.Execution != nil {
+		effective.RuntimeClassName = agent.Spec.Execution.RuntimeClassName
+		effective.NodeSelector = copyNodeSelector(agent.Spec.Execution.NodeSelector)
+		effective.Tolerations = copyTolerations(agent.Spec.Execution.Tolerations)
+		if agent.Spec.Execution.Affinity != nil {
+			effective.Affinity = agent.Spec.Execution.Affinity.DeepCopy()
+		}
+	}
+
+	if task != nil && task.Spec.Execution != nil {
+		if task.Spec.Execution.RuntimeClassName != "" {
+			effective.RuntimeClassName = task.Spec.Execution.RuntimeClassName
+		}
+		if task.Spec.Execution.NodeSelector != nil {
+			effective.NodeSelector = copyNodeSelector(task.Spec.Execution.NodeSelector)
+		}
+		if task.Spec.Execution.Tolerations != nil {
+			effective.Tolerations = copyTolerations(task.Spec.Execution.Tolerations)
+		}
+		if task.Spec.Execution.Affinity != nil {
+			effective.Affinity = task.Spec.Execution.Affinity.DeepCopy()
+		}
+	}
+
+	if effective.RuntimeClassName == "" && len(effective.NodeSelector) == 0 && len(effective.Tolerations) == 0 && effective.Affinity == nil {
+		return nil
+	}
+
+	return &effective
+}
+
+func applyExecution(job *batchv1.Job, execution *corev1alpha1.ExecutionSpec) {
+	if job == nil || execution == nil {
+		return
+	}
+
+	if execution.RuntimeClassName != "" {
+		job.Spec.Template.Spec.RuntimeClassName = ptr.To(execution.RuntimeClassName)
+	}
+	if len(execution.NodeSelector) > 0 {
+		job.Spec.Template.Spec.NodeSelector = copyNodeSelector(execution.NodeSelector)
+	}
+	if len(execution.Tolerations) > 0 {
+		job.Spec.Template.Spec.Tolerations = copyTolerations(execution.Tolerations)
+	}
+	if execution.Affinity != nil {
+		job.Spec.Template.Spec.Affinity = execution.Affinity.DeepCopy()
+	}
+}
+
+func copyNodeSelector(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+
+	return maps.Clone(in)
+}
+
+func copyTolerations(in []corev1.Toleration) []corev1.Toleration {
+	if in == nil {
+		return nil
+	}
+
+	out := make([]corev1.Toleration, len(in))
+	copy(out, in)
+
+	return out
 }
 
 // buildResources builds the resource requirements

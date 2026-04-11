@@ -8,6 +8,17 @@ All worker pods run with a hardened security context:
 - Read-only root filesystem
 - All Linux capabilities dropped
 - Seccomp profile: RuntimeDefault
+- Optional `RuntimeClass` routing via `spec.execution.runtimeClassName`
+- Optional runtime-aware placement controls via `spec.execution.nodeSelector`, `tolerations`, and `affinity`
+
+### Runtime Isolation
+
+By default, worker pods use the cluster's standard container runtime. To opt into a stronger isolation boundary, set `spec.execution.runtimeClassName` on an Agent or Task.
+
+- `gvisor` is the first recommended profile for Linux `kind` and similar containerd-based clusters
+- `kata-qemu` is supported through the same API and is better suited to `minikube` or production clusters with virtualization-capable nodes
+- Only worker Jobs need the alternate runtime; the controller can stay on the default runtime
+- Runtime-specific node pools should usually be combined with `nodeSelector`, `tolerations`, or `affinity` so pods land on compatible nodes
 
 ### Writable Paths
 

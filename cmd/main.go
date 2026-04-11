@@ -258,6 +258,7 @@ func main() {
 	// Create helper components
 	sessionManager := controller.NewSessionManager(sqliteStore)
 	webhookNotifier := controller.NewWebhookNotifier()
+	webhookNotifier.SetKubeClient(mgr.GetClient())
 	jobBuilder := controller.NewJobBuilder(mgr.GetClient())
 	jobBuilder.CopilotWorkerImage = copilotWorkerImage
 	jobBuilder.ClaudeWorkerImage = claudeWorkerImage

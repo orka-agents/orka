@@ -39,6 +39,10 @@ type AgentSpec struct {
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
+	// Execution defines default worker pod runtime and placement settings.
+	// +optional
+	Execution *ExecutionSpec `json:"execution,omitempty"`
+
 	// SecretRef references a Secret containing LLM API keys
 	// +optional
 	SecretRef *corev1.LocalObjectReference `json:"secretRef,omitempty"`

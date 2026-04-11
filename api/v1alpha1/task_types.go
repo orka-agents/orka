@@ -101,6 +101,10 @@ type TaskSpec struct {
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
+	// Execution defines worker pod runtime and placement settings.
+	// +optional
+	Execution *ExecutionSpec `json:"execution,omitempty"`
+
 	// Schedule is a cron expression for recurring tasks (e.g., "0 */6 * * *").
 	// When set, the controller creates child Task CRs on each cron tick.
 	// +optional

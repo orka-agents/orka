@@ -146,6 +146,10 @@ metadata:
 spec:
   secretRef:
     name: claude-credentials
+  execution:
+    runtimeClassName: gvisor
+    nodeSelector:
+      sandbox-runtime: gvisor
   runtime:
     type: claude
     defaultMaxTurns: 50
@@ -188,6 +192,28 @@ curl http://localhost:8080/api/v1/tasks/code-review/result \
 ```
 
 See [Agent Runtimes](agent-runtimes.md) for full configuration reference.
+
+## Optional Runtime Isolation
+
+If your cluster exposes Kubernetes `RuntimeClass` objects such as `gvisor` or `kata-qemu`, you can route worker Jobs through them with `spec.execution`.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: isolated-hello
+spec:
+  type: ai
+  agentRef:
+    name: assistant
+  prompt: "Summarize the repo"
+  execution:
+    runtimeClassName: gvisor
+    nodeSelector:
+      sandbox-runtime: gvisor
+```
+
+Use `Agent.spec.execution` for defaults, then override it per task when needed. See [Configuration](configuration.md#execution), [Agent Runtimes](agent-runtimes.md#runtime-isolation), and [Security](security.md#runtime-isolation) for details.
 
 ## Accessing the Dashboard
 
