@@ -1,11 +1,12 @@
 # Agent Runtimes
 
-Agent runtimes let Orka delegate task execution to external agent CLIs—such as Claude Code CLI and GitHub Copilot CLI—instead of running tasks through Orka's built-in AI worker. This gives your tasks access to full autonomous coding capabilities (file read/write/edit, bash execution, git operations) provided by battle-tested agent runtimes, while Orka handles scheduling, lifecycle management, secrets, sessions, and Kubernetes-native orchestration.
+Agent runtimes let Orka delegate task execution to external agent CLIs—such as Codex CLI, Claude Code CLI, and GitHub Copilot CLI—instead of running tasks through Orka's built-in AI worker. This gives your tasks access to full autonomous coding capabilities (file read/write/edit, bash execution, git operations) provided by battle-tested agent runtimes, while Orka handles scheduling, lifecycle management, secrets, sessions, and Kubernetes-native orchestration.
 
 ## Supported Runtimes
 
 | Runtime | `runtime.type` | Secret Key | Status |
 |---------|---------------|------------|--------|
+| Codex CLI | `codex` | `OPENAI_API_KEY` or `CODEX_API_KEY` | GA |
 | Claude Code CLI | `claude` | `ANTHROPIC_API_KEY` (direct) or `ANTHROPIC_FOUNDRY_API_KEY` (Azure AI Foundry) | GA |
 | GitHub Copilot CLI | `copilot` | `GITHUB_TOKEN` | Technical Preview |
 
@@ -14,6 +15,10 @@ Agent runtimes let Orka delegate task execution to external agent CLIs—such as
 ### 1. Create a Secret
 
 ```bash
+# For Codex CLI
+kubectl create secret generic codex-api-key \
+  --from-literal=OPENAI_API_KEY=sk-proj-...
+
 # For Claude Code CLI
 kubectl create secret generic claude-api-key \
   --from-literal=ANTHROPIC_API_KEY=sk-ant-...
@@ -116,7 +121,7 @@ spec:
   # runtime marks this Agent for type: agent tasks
   runtime:
     # type: which CLI runtime to use (required)
-    # Valid values: "copilot", "claude"
+    # Valid values: "copilot", "claude", "codex"
     type: claude
 
     # defaultMaxTurns: default max agent loop iterations per task
@@ -135,6 +140,7 @@ spec:
     defaultAllowBash: true
 
   # secretRef: Secret containing API credentials
+  # Codex runtime expects: OPENAI_API_KEY or CODEX_API_KEY
   # Claude runtime expects: ANTHROPIC_API_KEY
   # Copilot runtime expects: GITHUB_TOKEN
   secretRef:
@@ -330,7 +336,9 @@ agentRuntime:
       name: git-credentials
 ```
 
-> **Note**: For the Copilot runtime, `GITHUB_TOKEN` from the Agent's `secretRef` can authenticate both the CLI and git clone operations. For the Claude runtime, a separate `gitSecretRef` is needed since `ANTHROPIC_API_KEY` cannot authenticate git operations.
+> **Note**: For the Copilot runtime, `GITHUB_TOKEN` from the Agent's `secretRef` can authenticate both the CLI and git clone operations. For the Claude and Codex runtimes, a separate `gitSecretRef` is usually needed because their API keys do not authenticate git operations.
+
+> **Codex caveat**: The current Codex runtime implementation requires `defaultAllowBash: true` (or task-level `allowBash: true`). If bash is disabled, the worker fails fast instead of launching Codex, because the current Codex CLI does not expose a reliable shell-disable mode.
 
 ### SubPath
 
@@ -443,6 +451,8 @@ Writable directories are provided via `emptyDir` volumes:
 
 All tools are allowed by default for autonomous operation. To restrict high-risk tools, set `defaultAllowBash: false` on the Agent or `allowBash: false` on individual Tasks.
 
+For Codex specifically, bash-disabled tasks are not currently supported. Use `defaultAllowBash: true` for Codex Agents until the upstream CLI exposes a reliable shell-disable mode.
+
 ### Secrets
 
 API keys are injected as environment variables from Kubernetes Secrets. They are never logged or stored in Task specs.
@@ -451,6 +461,10 @@ API keys are injected as environment variables from Kubernetes Secrets. They are
 # Claude runtime
 kubectl create secret generic claude-api-key \
   --from-literal=ANTHROPIC_API_KEY=sk-ant-...
+
+# Codex runtime
+kubectl create secret generic codex-api-key \
+  --from-literal=OPENAI_API_KEY=sk-proj-...
 
 # Copilot runtime
 kubectl create secret generic copilot-token \
@@ -465,13 +479,15 @@ The controller accepts flags to configure agent worker images:
 |------|---------|-------------|
 | `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Container image for Copilot agent workers |
 | `--claude-worker-image` | `ghcr.io/sozercan/orka/agent-worker-claude:latest` | Container image for Claude agent workers |
+| `--codex-worker-image` | `ghcr.io/sozercan/orka/agent-worker-codex:latest` | Container image for Codex agent workers |
 
 Example:
 
 ```bash
 orka-controller \
   --copilot-worker-image=ghcr.io/sozercan/orka/agent-worker-copilot:v1.0.0 \
-  --claude-worker-image=ghcr.io/sozercan/orka/agent-worker-claude:v1.0.0
+  --claude-worker-image=ghcr.io/sozercan/orka/agent-worker-claude:v1.0.0 \
+  --codex-worker-image=ghcr.io/sozercan/orka/agent-worker-codex:v1.0.0
 ```
 
 ## Optimizing Agent Performance
@@ -488,6 +504,7 @@ Complete sample manifests are available in [`config/samples/`](../config/samples
 
 | File | Description |
 |------|-------------|
+| `core_v1alpha1_agent_codex.yaml` | Agent configured for Codex CLI |
 | `core_v1alpha1_agent_claude.yaml` | Agent configured for Claude Code CLI |
 | `core_v1alpha1_task_agent.yaml` | Basic agent task with workspace |
 | `core_v1alpha1_task_agent_copilot.yaml` | Agent task using Copilot runtime |

@@ -33,41 +33,14 @@ var _ = Describe("REST API Endpoints", Ordered, func() {
 
 	BeforeAll(func() {
 		By("setting up port-forward to controller API")
-		ctx, cancel := context.WithCancel(context.Background())
-		cancelPF = cancel
-
-		// Find the controller pod
-		cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
-			"-o", "jsonpath={.items[0].metadata.name}", "-n", namespace)
-		podName, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to find controller pod")
-		Expect(strings.TrimSpace(podName)).NotTo(BeEmpty())
-
-		// Start port-forward
-		portForwardCmd = exec.CommandContext(ctx, "kubectl", "port-forward",
-			strings.TrimSpace(podName), "18080:8080", "-n", namespace)
-		err = portForwardCmd.Start()
-		Expect(err).NotTo(HaveOccurred(), "Failed to start port-forward")
-
-		apiBaseURL = "http://localhost:18080"
-
-		// Wait for port-forward to be ready
-		Eventually(func(g Gomega) {
-			resp, err := http.Get(apiBaseURL + "/healthz")
-			g.Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
-			g.Expect(resp.StatusCode).To(Equal(http.StatusOK))
-		}, 30*time.Second, time.Second).Should(Succeed())
+		var err error
+		apiBaseURL, cancelPF, portForwardCmd, err = startControllerAPIPortForward(18080)
+		Expect(err).NotTo(HaveOccurred(), "Failed to start controller API port-forward")
 	})
 
 	AfterAll(func() {
 		By("stopping port-forward")
-		if cancelPF != nil {
-			cancelPF()
-		}
-		if portForwardCmd != nil && portForwardCmd.Process != nil {
-			_ = portForwardCmd.Wait()
-		}
+		stopPortForward(cancelPF, portForwardCmd)
 	})
 
 	It("should return healthy status from /healthz", func() {

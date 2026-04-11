@@ -548,6 +548,22 @@ func TestBuildDynamicContext(t *testing.T) {
 		}
 	})
 
+	t.Run("codex runtime detected from codex-api-key secret", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "codex-api-key", Namespace: "default"},
+		}
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+		b := NewSystemPromptBuilder(c, "default")
+
+		_, _, providers, _, err := b.buildDynamicContext(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(providers, "codex") {
+			t.Errorf("providers = %q, expected codex runtime", providers)
+		}
+	})
+
 	t.Run("no runtime secrets means agent_runtimes=none", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).Build()
 		b := NewSystemPromptBuilder(c, "default")

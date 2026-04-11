@@ -6,7 +6,7 @@ metadata:
     app.kubernetes.io/name: orka
     app.kubernetes.io/managed-by: kustomize
 spec:
-  # type: agent delegates work to an external CLI runtime (e.g., Claude Code CLI)
+  # type: agent delegates work to an external CLI runtime (e.g., Claude Code CLI or Codex CLI)
   type: agent
   # agentRef references an Agent CRD that defines runtime type and credentials
   agentRef:

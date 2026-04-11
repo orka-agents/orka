@@ -22,7 +22,7 @@ type CreateAgentTaskTool struct{}
 func (t *CreateAgentTaskTool) Name() string { return "create_agent_task" }
 
 func (t *CreateAgentTaskTool) Description() string {
-	return "Create a task using an external CLI runtime (Copilot, Claude Code) for code changes in a git repo. Do NOT use for simple container commands or direct LLM reasoning."
+	return "Create a task using an external CLI runtime (Copilot, Claude Code, Codex) for code changes in a git repo. Do NOT use for simple container commands or direct LLM reasoning."
 }
 
 func (t *CreateAgentTaskTool) Parameters() json.RawMessage {

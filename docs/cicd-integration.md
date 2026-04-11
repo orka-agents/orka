@@ -2,7 +2,7 @@
 
 ## Problem
 
-`delegate_task` hardcodes `Type: TaskTypeAI` on child tasks. A coordinator agent cannot delegate to `type: agent` tasks (Claude Code, Copilot CLI). This means agents that can natively create branches, write code, commit, push, and open PRs via `gh` are unreachable from the coordination system.
+`delegate_task` hardcodes `Type: TaskTypeAI` on child tasks. A coordinator agent cannot delegate to `type: agent` tasks (Claude Code, Copilot CLI, Codex). This means agents that can natively create branches, write code, commit, push, and open PRs via `gh` are unreachable from the coordination system.
 
 Additionally, the Tool CRD HTTP executor sends all parameters as JSON body — it cannot do URL path interpolation (e.g., `/repos/{owner}/{repo}/pulls/{number}/merge`). This blocks lightweight GitHub/GitLab API calls from Tool CRDs.
 
@@ -10,7 +10,7 @@ Fixing these two issues — plus shipping sample YAML — gives Orka a full CI/C
 
 ## Key Insight
 
-Orka doesn't need built-in PR lifecycle tools. The `type: agent` tasks run Claude Code or Copilot CLI, which natively know how to create branches, write code, commit, push, and run `gh pr create`. These are full coding agents with filesystem access, bash, and git — they do PR creation **better than any custom tool we'd build**.
+Orka doesn't need built-in PR lifecycle tools. The `type: agent` tasks run Claude Code, Copilot CLI, or Codex, which natively know how to create branches, write code, commit, push, and run `gh pr create`. These are full coding agents with filesystem access, bash, and git — they do PR creation **better than any custom tool we'd build**.
 
 What's needed is:
 1. Let `delegate_task` create agent tasks (not just AI tasks)

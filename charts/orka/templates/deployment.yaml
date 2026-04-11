@@ -49,6 +49,7 @@ spec:
             - --ai-worker-image={{ .Values.workers.ai.image.repository }}:{{ .Values.workers.ai.image.tag }}
             - --copilot-worker-image={{ .Values.workers.copilot.image.repository | default "ghcr.io/sozercan/orka/agent-worker-copilot" }}:{{ .Values.workers.copilot.image.tag | default "latest" }}
             - --claude-worker-image={{ .Values.workers.claude.image.repository | default "ghcr.io/sozercan/orka/agent-worker-claude" }}:{{ .Values.workers.claude.image.tag | default "latest" }}
+            - --codex-worker-image={{ .Values.workers.codex.image.repository | default "ghcr.io/sozercan/orka/agent-worker-codex" }}:{{ .Values.workers.codex.image.tag | default "latest" }}
             {{- if .Values.controller.enforceNamespaceIsolation }}
             - --enforce-namespace-isolation=true
             {{- end }}

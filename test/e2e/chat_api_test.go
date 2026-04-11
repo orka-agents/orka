@@ -35,28 +35,9 @@ var _ = Describe("Chat and OpenAI-Compatible API", Ordered, func() {
 
 	BeforeAll(func() {
 		By("setting up port-forward to controller API")
-		ctx, cancel := context.WithCancel(context.Background())
-		cancelPF = cancel
-
-		cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
-			"-o", "jsonpath={.items[0].metadata.name}", "-n", namespace)
-		podName, err := utils.Run(cmd)
+		var err error
+		apiBaseURL, cancelPF, portForwardCmd, err = startControllerAPIPortForward(18081)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(strings.TrimSpace(podName)).NotTo(BeEmpty())
-
-		portForwardCmd = exec.CommandContext(ctx, "kubectl", "port-forward",
-			strings.TrimSpace(podName), "18081:8080", "-n", namespace)
-		err = portForwardCmd.Start()
-		Expect(err).NotTo(HaveOccurred())
-
-		apiBaseURL = "http://localhost:18081"
-
-		Eventually(func(g Gomega) {
-			resp, err := http.Get(apiBaseURL + "/healthz")
-			g.Expect(err).NotTo(HaveOccurred())
-			defer resp.Body.Close()
-			g.Expect(resp.StatusCode).To(Equal(http.StatusOK))
-		}, 30*time.Second, time.Second).Should(Succeed())
 
 		By("getting a service account token")
 		token, err = serviceAccountToken()
@@ -65,12 +46,7 @@ var _ = Describe("Chat and OpenAI-Compatible API", Ordered, func() {
 	})
 
 	AfterAll(func() {
-		if cancelPF != nil {
-			cancelPF()
-		}
-		if portForwardCmd != nil && portForwardCmd.Process != nil {
-			_ = portForwardCmd.Wait()
-		}
+		stopPortForward(cancelPF, portForwardCmd)
 	})
 
 	// --- Chat Config Endpoint ---

@@ -48,7 +48,7 @@ func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
 			"runtime": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"type":            map[string]any{"type": "string", "description": "Runtime type: copilot or claude"},
+					"type":            map[string]any{"type": "string", "description": "Runtime type: copilot, claude, or codex"},
 					"defaultMaxTurns": map[string]any{"type": "integer", "description": "Default max agent loop iterations"},
 					"secretRef":       map[string]any{"type": "string", "description": "Optional secret name containing runtime credentials. Omit to auto-discover the standard secret for this runtime."},
 				},

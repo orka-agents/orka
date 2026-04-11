@@ -162,11 +162,11 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 			},
 			"runtime": {
 				"type": "object",
-				"description": "Set to make this a CLI runtime agent (copilot or claude). Runtime agents run code, edit files, and use git. Do NOT set runtime on coordinator agents.",
+				"description": "Set to make this a CLI runtime agent (copilot, claude, or codex). Runtime agents run code, edit files, and use git. Do NOT set runtime on coordinator agents.",
 				"properties": {
 					"type": {
 						"type": "string",
-						"description": "Runtime type: copilot or claude"
+						"description": "Runtime type: copilot, claude, or codex"
 					},
 					"secretRef": {
 						"type": "string",
@@ -297,7 +297,7 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		agent.Spec.Coordination = coord
 	}
 
-	// Set runtime if provided (makes this a CLI agent like copilot/claude)
+	// Set runtime if provided (makes this a CLI agent like copilot/claude/codex)
 	if a.Runtime != nil && a.Runtime.Type != "" {
 		agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
 			Type: corev1alpha1.AgentRuntimeType(a.Runtime.Type),

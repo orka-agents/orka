@@ -1,0 +1,24 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: codex-agent
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  model:
+    name: "gpt-5.4"
+  systemPrompt:
+    inline: "You are a helpful coding assistant."
+  secretRef:
+    name: codex-api-key
+  runtime:
+    type: codex
+    defaultMaxTurns: 50
+    defaultAllowBash: true
+    defaultAllowedTools:
+      - Read
+      - Write
+      - Edit
+      - Bash
+      - WebSearch

@@ -179,7 +179,7 @@ spec:
 
 ### Agent (with Runtime)
 
-Agent configuration for external CLI runtimes (Claude Code CLI or GitHub Copilot CLI).
+Agent configuration for external CLI runtimes (Claude Code CLI, GitHub Copilot CLI, or Codex CLI).
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -194,7 +194,7 @@ spec:
   systemPrompt:
     inline: "You are a senior software engineer."
   runtime:
-    type: claude         # or "copilot"
+    type: claude         # or "copilot" / "codex"
     defaultMaxTurns: 50
     defaultAllowBash: true
     defaultAllowedTools:
@@ -359,6 +359,7 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 | `--ai-worker-image` | `ghcr.io/sozercan/orka/ai-worker:latest` | AI worker container image |
 | `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Copilot agent worker image |
 | `--claude-worker-image` | `ghcr.io/sozercan/orka/agent-worker-claude:latest` | Claude agent worker image |
+| `--codex-worker-image` | `ghcr.io/sozercan/orka/agent-worker-codex:latest` | Codex agent worker image |
 | `--general-worker-image` | `ghcr.io/sozercan/orka/general-worker:latest` | General worker container image |
 | `--store-backend` | `sqlite` | Storage backend (sqlite) |
 | `--store-path` | `/data/orka.db` | Path to SQLite database file |

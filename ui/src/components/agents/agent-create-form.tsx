@@ -28,7 +28,7 @@ export function AgentCreateForm() {
   const [systemPrompt, setSystemPrompt] = useState('')
 
   // Runtime mode fields
-  const [runtimeType, setRuntimeType] = useState<'claude' | 'copilot'>('claude')
+  const [runtimeType, setRuntimeType] = useState<'claude' | 'copilot' | 'codex'>('claude')
   const [maxTurns, setMaxTurns] = useState('50')
   const [allowBash, setAllowBash] = useState(true)
   const [allowedTools, setAllowedTools] = useState('Read,Glob,Grep,Bash,LS')
@@ -93,7 +93,7 @@ export function AgentCreateForm() {
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="ai">AI (LLM Provider)</SelectItem>
-                    <SelectItem value="runtime">CLI Runtime (Copilot / Claude)</SelectItem>
+                    <SelectItem value="runtime">CLI Runtime (Copilot / Claude / Codex)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -144,11 +144,12 @@ export function AgentCreateForm() {
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <label className="text-sm font-medium">Runtime Type</label>
-                    <Select value={runtimeType} onValueChange={(v) => setRuntimeType(v as 'claude' | 'copilot')}>
+                    <Select value={runtimeType} onValueChange={(v) => setRuntimeType(v as 'claude' | 'copilot' | 'codex')}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="claude">Claude Code</SelectItem>
                         <SelectItem value="copilot">GitHub Copilot</SelectItem>
+                        <SelectItem value="codex">OpenAI Codex</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
