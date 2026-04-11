@@ -8,6 +8,13 @@ spec:
     name: coordinator
   prompt: |
     Implement JWT authentication for the API.
+
+    Repository details for delegated agent tasks:
+    - gitRepo: https://github.com/example/api.git
+    - branch: main
+    - gitSecretRef: git-credentials
+    - pushBranch: feature/jwt-auth
+
     Requirements:
     - Login endpoint with username/password
     - Token refresh endpoint

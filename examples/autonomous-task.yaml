@@ -1,7 +1,7 @@
-# Example: Autonomous coordinator agent that plans and executes iteratively
+# Maintained example: autonomous coordinator that plans and executes iteratively
 #
 # Prerequisites:
-# - A Provider CRD configured (e.g., "anthropic-provider")
+# - A Provider CRD configured (replace "my-provider" below with its name)
 # - Specialist agents for delegation (e.g., "coder", "reviewer")
 #
 # Usage:
@@ -13,7 +13,7 @@ metadata:
   name: autonomous-coordinator
 spec:
   providerRef:
-    name: anthropic-provider
+    name: my-provider
   model:
     name: claude-sonnet-4-20250514
     temperature: 0.7

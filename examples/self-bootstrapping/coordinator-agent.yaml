@@ -6,10 +6,9 @@ metadata:
     description: "Self-bootstrapping coordinator that creates specialist agents and delegates work"
 spec:
   providerRef:
-    name: default
+    name: my-provider
   model:
     name: claude-sonnet-4-20250514
-    provider: anthropic
   systemPrompt:
     inline: |
       You are a self-bootstrapping coordinator agent. Your job is to:

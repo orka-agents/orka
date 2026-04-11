@@ -4,6 +4,8 @@
 # Required secrets:
 #   ORKA_API_URL: URL of your Orka API (e.g., https://orka.example.com)
 #   ORKA_TOKEN: ServiceAccount token for Orka API auth
+# Cluster prerequisite:
+#   - git-credentials Secret exists in the task namespace and contains a GitHub token
 name: CI Feedback to Orka
 on:
   workflow_run:
@@ -35,7 +37,10 @@ jobs:
               "agentRuntime": {
                 "workspace": {
                   "gitRepo": "https://github.com/${{ steps.logs.outputs.repo }}.git",
-                  "branch": "${{ steps.logs.outputs.branch }}"
+                  "branch": "${{ steps.logs.outputs.branch }}",
+                  "gitSecretRef": {
+                    "name": "git-credentials"
+                  }
                 }
               },
               "timeout": "15m",
