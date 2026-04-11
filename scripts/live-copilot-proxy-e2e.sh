@@ -24,21 +24,11 @@ copilot_proxy_namespace="${COPILOT_PROXY_NAMESPACE:-default}"
 copilot_proxy_service="${COPILOT_PROXY_SERVICE:-copilot-proxy}"
 copilot_proxy_service_port="${COPILOT_PROXY_SERVICE_PORT:-1337}"
 copilot_proxy_local_port="${COPILOT_PROXY_LOCAL_PORT:-18081}"
-copilot_proxy_image="${COPILOT_PROXY_IMAGE:-copilot-proxy:live-copilot-proxy-e2e}"
+copilot_proxy_image="${COPILOT_PROXY_IMAGE:-docker.io/sozercan/copilot-proxy:latest}"
 proxy_token_secret_name="${COPILOT_PROXY_TOKEN_SECRET_NAME:-live-copilot-proxy-token}"
 token_value="${COPILOT_GITHUB_TOKEN:-}"
 proxy_pf_pid=""
 work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/live-copilot-proxy-e2e.XXXXXX")"
-
-if [[ -n "${COPILOT_PROXY_REPO_DIR:-}" ]]; then
-  copilot_proxy_repo_dir="${COPILOT_PROXY_REPO_DIR}"
-elif [[ -d "${repo_root}/copilot-proxy" ]]; then
-  copilot_proxy_repo_dir="${repo_root}/copilot-proxy"
-elif [[ -d "${repo_root}/../copilot-proxy" ]]; then
-  copilot_proxy_repo_dir="${repo_root}/../copilot-proxy"
-else
-  copilot_proxy_repo_dir="${repo_root}/copilot-proxy"
-fi
 
 cleanup_port_forward() {
   local pid="$1"
@@ -143,21 +133,15 @@ main() {
   require_cmd go
   require_cmd kubectl
   require_cmd kind
-  require_cmd docker
   require_cmd curl
   require_cmd jq
 
   [[ -n "${token_value}" ]] || die "COPILOT_GITHUB_TOKEN is required"
-  [[ -d "${copilot_proxy_repo_dir}" ]] || die "copilot-proxy repo not found: ${copilot_proxy_repo_dir}"
 
   trap 'on_exit $?' EXIT
 
   log "Creating Kind cluster ${kind_cluster}"
   make setup-test-e2e KIND_CLUSTER="${kind_cluster}"
-
-  log "Building and loading copilot-proxy image"
-  docker build -t "${copilot_proxy_image}" -f "${copilot_proxy_repo_dir}/Dockerfile" "${copilot_proxy_repo_dir}"
-  kind load docker-image "${copilot_proxy_image}" --name "${kind_cluster}"
 
   log "Creating proxy namespace ${copilot_proxy_namespace}"
   kubectl create namespace "${copilot_proxy_namespace}" --dry-run=client -o yaml | kubectl apply -f -
@@ -191,7 +175,7 @@ spec:
       containers:
         - name: ${copilot_proxy_service}
           image: ${copilot_proxy_image}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - containerPort: 1337
           env:

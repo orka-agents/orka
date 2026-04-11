@@ -79,12 +79,11 @@ End-to-end tests run against a dedicated Kind cluster:
 - `E2E_ANTHROPIC_API_KEY`: required for Anthropic-specific e2e cases
 - `E2E_GITHUB_TOKEN`: required for GitHub/Copilot and PR workflow tests
 - `COPILOT_GITHUB_TOKEN`: required by the live `copilot-proxy` workflow for proxy auth
-- `COPILOT_PROXY_REPO_TOKEN`: required by the live `copilot-proxy` workflow to checkout the private `sozercan/copilot-proxy` repository
 - `E2E_LIVE_COPILOT_PROXY_BASE_URL` (or `E2E_COPILOT_PROXY_BASE_URL` / `COPILOT_PROXY_BASE_URL`): enables the focused live copilot-proxy spec against a running proxy
 - `E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE`, `E2E_LIVE_COPILOT_PROXY_SERVICE_NAME`, `E2E_LIVE_COPILOT_PROXY_SERVICE_PORT`: optional overrides for how the live spec port-forwards to the proxy for host-side `/readyz` and `/v1/models` checks
 - Structural e2e tests (job/env/volume assertions) run without external model keys
 
-The live copilot-proxy E2E path runs in a separate workflow and only executes the focused `test/e2e/live_copilot_proxy_test.go` spec. It bootstraps a fresh Kind cluster, deploys `copilot-proxy` from the private companion repo using `COPILOT_PROXY_REPO_TOKEN`, injects `COPILOT_GITHUB_TOKEN` for proxy auth, waits for proxy readiness and live models, then verifies an exact Orka task result through the proxy.
+The live copilot-proxy E2E path runs in a separate workflow and only executes the focused `test/e2e/live_copilot_proxy_test.go` spec. It bootstraps a fresh Kind cluster, deploys the published multi-arch `docker.io/sozercan/copilot-proxy:latest` image, injects `COPILOT_GITHUB_TOKEN` for proxy auth, waits for proxy readiness and live models, then verifies an exact Orka task result through the proxy.
 
 ### Frontend Tests
 

@@ -19,9 +19,8 @@ jobs:
     timeout-minutes: 75
     env:
       COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
-      COPILOT_PROXY_REPO_TOKEN: ${{ secrets.COPILOT_PROXY_REPO_TOKEN }}
       KIND_CLUSTER: orka-live-copilot-proxy-e2e
-      COPILOT_PROXY_REPO_DIR: ${{ github.workspace }}/copilot-proxy
+      COPILOT_PROXY_IMAGE: docker.io/sozercan/copilot-proxy:latest
     steps:
       - name: Decide whether live e2e can run
         id: gate
@@ -46,11 +45,6 @@ jobs:
             exit 1
           fi
 
-          if [ -z "${COPILOT_PROXY_REPO_TOKEN}" ]; then
-            echo "COPILOT_PROXY_REPO_TOKEN repository secret is required to checkout the private copilot-proxy repo." >&2
-            exit 1
-          fi
-
           echo "run=true" >> "$GITHUB_OUTPUT"
 
       - name: Explain skipped live e2e
@@ -60,14 +54,6 @@ jobs:
       - name: Clone Orka
         if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Clone copilot-proxy
-        if: steps.gate.outputs.run == 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: sozercan/copilot-proxy
-          path: copilot-proxy
-          token: ${{ secrets.COPILOT_PROXY_REPO_TOKEN }}
 
       - name: Setup Go
         if: steps.gate.outputs.run == 'true'
