@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -39,10 +38,11 @@ func (t *CreateAgentTaskTool) Parameters() json.RawMessage {
 			"workspace": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"gitRepo":    map[string]any{"type": "string", "description": "Git repository URL"},
-					"branch":     map[string]any{"type": "string", "description": "Git branch to clone from (must exist). Omit to use the default branch."},
-					"pushBranch": map[string]any{"type": "string", "description": "Branch name to push changes to (will be created if it doesn't exist). Use this for new feature branches."},
-					"subPath":    map[string]any{"type": "string", "description": "Sub-path within the repo"},
+					"gitRepo":      map[string]any{"type": "string", "description": "Git repository URL"},
+					"branch":       map[string]any{"type": "string", "description": "Git branch to clone from (must exist). Omit to use the default branch."},
+					"pushBranch":   map[string]any{"type": "string", "description": "Branch name to push changes to (will be created if it doesn't exist). Use this for new feature branches."},
+					"gitSecretRef": map[string]any{"type": "string", "description": "Optional secret name containing git credentials. Omit to auto-discover git credentials or reuse the Copilot agent secret when available."},
+					"subPath":      map[string]any{"type": "string", "description": "Sub-path within the repo"},
 				},
 			},
 			"schedule": map[string]any{"type": "string", "description": "Cron schedule for recurring tasks (e.g., '0 */6 * * *' for every 6 hours, '0 9 * * 1-5' for weekdays at 9am, '*/5 * * * *' for every 5 minutes). Leave empty for one-time tasks."},
@@ -130,13 +130,17 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 			if pushBranch := chatGetStringArg(wsMap, "pushBranch"); pushBranch != "" {
 				wsCfg.PushBranch = pushBranch
 			}
-			if gitSecretRef := chatGetStringArg(wsMap, "gitSecretRef"); gitSecretRef != "" {
-				wsCfg.GitSecretRef = &corev1.LocalObjectReference{Name: gitSecretRef}
-			} else if wsCfg.GitRepo != "" && tc.FindGitSecret != nil {
-				if secretName := tc.FindGitSecret(ctx, task.Namespace); secretName != "" {
-					wsCfg.GitSecretRef = &corev1.LocalObjectReference{Name: secretName}
-				}
+			agent, err := loadAgent(ctx, tc.Client, namespace, agentRef)
+			if err != nil {
+				result, _ := ChatToolErrorResult("internal_error", err.Error(), "")
+				return result, nil
 			}
+			secretRef, err := resolveWorkspaceGitSecretRef(ctx, tc.Client, namespace, agent, chatGetStringArg(wsMap, "gitSecretRef"))
+			if err != nil {
+				result, _ := ChatToolErrorResult("internal_error", err.Error(), "")
+				return result, nil
+			}
+			wsCfg.GitSecretRef = secretRef
 			agentRuntime.Workspace = wsCfg
 		}
 	}

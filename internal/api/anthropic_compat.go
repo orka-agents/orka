@@ -15,8 +15,6 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -318,7 +316,6 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 				return nil
 			},
 			IncrementTasks: func() { tasksCreated++ },
-			FindGitSecret:  h.findGitSecret,
 		}
 	}
 
@@ -582,22 +579,6 @@ func anthropicError(c fiber.Ctx, status int, errType, message string) error {
 			Message: message,
 		},
 	})
-}
-
-// findGitSecret looks for a git credentials secret in the given namespace.
-func (h *AnthropicCompatHandler) findGitSecret(ctx context.Context, namespace string) string {
-	for _, name := range []string{"copilot-token", "github-credentials", "git-credentials", "github-token", "git-token"} {
-		secret := &corev1.Secret{}
-		if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err == nil {
-			if _, hasToken := secret.Data["token"]; hasToken {
-				return name
-			}
-			if _, hasPassword := secret.Data["password"]; hasPassword {
-				return name
-			}
-		}
-	}
-	return ""
 }
 
 // stripClientToolMessages removes tool_use and tool_result messages from client history

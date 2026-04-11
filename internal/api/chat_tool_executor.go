@@ -13,10 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	corev1 "k8s.io/api/core/v1"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -119,7 +116,6 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 			return nil
 		},
 		IncrementTasks: func() { e.tasksCreated++ },
-		FindGitSecret:  e.findGitSecret,
 	}
 	toolCtx = tools.WithToolContext(toolCtx, tc)
 
@@ -192,23 +188,4 @@ func marshalResult(result ToolResult) (string, error) {
 		return "", fmt.Errorf("failed to marshal tool result: %w", err)
 	}
 	return string(b), nil
-}
-
-// findGitSecret looks for a git credentials secret in the namespace.
-func (e *ToolExecutor) findGitSecret(ctx context.Context, namespace string) string {
-	for _, name := range []string{"copilot-token", "github-credentials", "git-credentials", "github-token", "git-token"} {
-		secret := &corev1.Secret{}
-		if err := e.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err == nil {
-			if _, hasToken := secret.Data["token"]; hasToken {
-				return name
-			}
-			if _, hasPassword := secret.Data["password"]; hasPassword {
-				return name
-			}
-			if _, hasGHToken := secret.Data["GITHUB_TOKEN"]; hasGHToken {
-				return name
-			}
-		}
-	}
-	return ""
 }

@@ -883,8 +883,8 @@ func (r *TaskReconciler) shouldRetry(task *corev1alpha1.Task) bool {
 	if task.Spec.RetryPolicy == nil {
 		return false
 	}
-	// Attempts includes the initial run, while MaxRetries is configured as
-	// the number of additional retry attempts allowed after that first run.
+	// Attempts counts the initial run plus completed retries, while MaxRetries
+	// is configured as the number of additional retry attempts.
 	return task.Status.Attempts <= task.Spec.RetryPolicy.MaxRetries
 }
 
@@ -892,12 +892,12 @@ func (r *TaskReconciler) shouldRetry(task *corev1alpha1.Task) bool {
 func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	// Calculate backoff delay before mutating task state.
+	// Calculate backoff delay
 	delay := r.calculateRetryDelay(task)
 	oldJobName := task.Status.JobName
 
-	// Reset to pending before deleting the old Job so a transient NotFound
-	// during asynchronous job cleanup does not prevent the retry.
+	// Reset to pending for retry before deleting the old Job so a transient
+	// NotFound from asynchronous Job deletion does not fail the task.
 	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 		t.Status.Phase = corev1alpha1.TaskPhasePending
 		t.Status.JobName = ""
@@ -909,7 +909,7 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 		return ctrl.Result{}, err
 	}
 
-	// Delete the old Job after clearing the running state.
+	// Delete the old Job after clearing the running status.
 	if oldJobName != "" {
 		job := &batchv1.Job{}
 		err := r.Get(ctx, types.NamespacedName{
