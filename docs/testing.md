@@ -68,6 +68,7 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/agent_advanced_test.go` | Skills ConfigMap wiring, agent resource propagation, session maxMessages behavior |
 | `test/e2e/workspace_advanced_test.go` | Advanced workspace settings (`gitSecretRef`, `subPath`, `ref`, fork/PR env vars, session init container) |
 | `test/e2e/provider_advanced_test.go` | Provider rate-limit config coverage |
+| `test/e2e/live_copilot_proxy_test.go` | Live copilot-proxy provider path for Orka AI tasks |
 | `test/e2e/tools_test.go` | Built-in tools (including `web_fetch`, `file_write`) and custom Tool CRD |
 | `test/e2e/scheduled_task_test.go` | Cron scheduling, suspend, `concurrencyPolicy: Forbid`, history-limit cleanup |
 | `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
@@ -77,7 +78,13 @@ End-to-end tests run against a dedicated Kind cluster:
 - `E2E_OPENAI_API_KEY`: required for LLM-backed tests (AI chat/tasks, coordination, PR workflow orchestration)
 - `E2E_ANTHROPIC_API_KEY`: required for Anthropic-specific e2e cases
 - `E2E_GITHUB_TOKEN`: required for GitHub/Copilot and PR workflow tests
+- `COPILOT_GITHUB_TOKEN`: required by the live `copilot-proxy` workflow for proxy auth
+- `COPILOT_PROXY_REPO_TOKEN`: required by the live `copilot-proxy` workflow to checkout the private `sozercan/copilot-proxy` repository
+- `E2E_LIVE_COPILOT_PROXY_BASE_URL` (or `E2E_COPILOT_PROXY_BASE_URL` / `COPILOT_PROXY_BASE_URL`): enables the focused live copilot-proxy spec against a running proxy
+- `E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE`, `E2E_LIVE_COPILOT_PROXY_SERVICE_NAME`, `E2E_LIVE_COPILOT_PROXY_SERVICE_PORT`: optional overrides for how the live spec port-forwards to the proxy for host-side `/readyz` and `/v1/models` checks
 - Structural e2e tests (job/env/volume assertions) run without external model keys
+
+The live copilot-proxy E2E path runs in a separate workflow and only executes the focused `test/e2e/live_copilot_proxy_test.go` spec. It bootstraps a fresh Kind cluster, deploys `copilot-proxy` from the private companion repo using `COPILOT_PROXY_REPO_TOKEN`, injects `COPILOT_GITHUB_TOKEN` for proxy auth, waits for proxy readiness and live models, then verifies an exact Orka task result through the proxy.
 
 ### Frontend Tests
 

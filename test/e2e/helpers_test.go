@@ -11,10 +11,14 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -150,6 +154,104 @@ func createProviderCRD(name, providerType, secretName, secretKey, baseURL, model
 	}, 30*time.Second, time.Second).Should(Succeed())
 }
 
+// discoverProxyModel queries an OpenAI-compatible /v1/models endpoint and returns the first model ID.
+func discoverProxyModel(baseURL string) string {
+	var modelID string
+	Eventually(func(g Gomega) {
+		model, err := fetchProxyModel(baseURL)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(model).NotTo(BeEmpty(), "proxy should return at least one model")
+		modelID = model
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+	return modelID
+}
+
+func fetchProxyModel(baseURL string) (string, error) {
+	modelsURL := copilotProxyModelsURL(baseURL)
+	req, err := http.NewRequest(http.MethodGet, modelsURL, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("unexpected status from %s: %s (%s)", modelsURL, resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", err
+	}
+
+	if model := firstModelFromPayload(payload); model != "" {
+		return model, nil
+	}
+
+	return "", fmt.Errorf("no models returned from %s", modelsURL)
+}
+
+func copilotProxyModelsURL(baseURL string) string {
+	baseURL = strings.TrimRight(baseURL, "/")
+	if strings.HasSuffix(baseURL, "/v1") {
+		return baseURL + "/models"
+	}
+	return baseURL + "/v1/models"
+}
+
+func firstModelFromPayload(payload map[string]any) string {
+	if data, ok := payload["data"].([]any); ok {
+		for _, item := range data {
+			if model := firstModelFromItem(item); model != "" {
+				return model
+			}
+		}
+	}
+
+	if models, ok := payload["models"].([]any); ok {
+		for _, item := range models {
+			if model := firstModelFromItem(item); model != "" {
+				return model
+			}
+		}
+	}
+
+	if id, ok := payload["id"].(string); ok {
+		return strings.TrimSpace(id)
+	}
+
+	return ""
+}
+
+func firstModelFromItem(item any) string {
+	switch v := item.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case map[string]any:
+		if id, ok := v["id"].(string); ok && strings.TrimSpace(id) != "" {
+			return strings.TrimSpace(id)
+		}
+		if slug, ok := v["slug"].(string); ok && strings.TrimSpace(slug) != "" {
+			return strings.TrimSpace(slug)
+		}
+		if name, ok := v["name"].(string); ok && strings.TrimSpace(name) != "" {
+			return strings.TrimSpace(name)
+		}
+	}
+
+	return ""
+}
+
 func startControllerAPIPortForward(localPort int) (string, context.CancelFunc, *exec.Cmd, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", localPort)
@@ -175,6 +277,61 @@ func startControllerAPIPortForward(localPort int) (string, context.CancelFunc, *
 	}, 60*time.Second, time.Second).Should(Succeed())
 
 	return baseURL, cancel, cmd, nil
+}
+
+func startServicePortForward(serviceNamespace, serviceName string, localPort, remotePort int) (string, context.CancelFunc, *exec.Cmd, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", localPort)
+
+	cmd := exec.CommandContext(ctx, "kubectl", "port-forward",
+		"-n", serviceNamespace,
+		"svc/"+serviceName,
+		fmt.Sprintf("%d:%d", localPort, remotePort),
+	)
+	cmd.Stdout = GinkgoWriter
+	cmd.Stderr = GinkgoWriter
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return "", nil, nil, err
+	}
+
+	Eventually(func(g Gomega) {
+		resp, err := http.Get(baseURL + "/readyz")
+		g.Expect(err).NotTo(HaveOccurred())
+		defer resp.Body.Close()
+		g.Expect(resp.StatusCode).To(Equal(http.StatusOK))
+	}, 60*time.Second, time.Second).Should(Succeed())
+
+	return baseURL, cancel, cmd, nil
+}
+
+func liveCopilotProxyServiceNamespace() string {
+	if ns := strings.TrimSpace(firstSetEnv("E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE")); ns != "" {
+		return ns
+	}
+	return "default"
+}
+
+func liveCopilotProxyServiceName() string {
+	if name := strings.TrimSpace(firstSetEnv("E2E_LIVE_COPILOT_PROXY_SERVICE_NAME")); name != "" {
+		return name
+	}
+	return "copilot-proxy"
+}
+
+func liveCopilotProxyServicePort() int {
+	port := strings.TrimSpace(firstSetEnv("E2E_LIVE_COPILOT_PROXY_SERVICE_PORT"))
+	if port == "" {
+		return 1337
+	}
+
+	value, err := strconv.Atoi(port)
+	if err != nil || value <= 0 {
+		return 1337
+	}
+
+	return value
 }
 
 func stopPortForward(cancel context.CancelFunc, cmd *exec.Cmd) {

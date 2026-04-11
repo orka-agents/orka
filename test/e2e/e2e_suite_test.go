@@ -40,13 +40,14 @@ var (
 	codexWorkerImage   = "ghcr.io/sozercan/orka/agent-worker-codex:latest"
 
 	// E2E environment configuration (loaded from .env or environment)
-	e2eOpenAIAPIKey     string
-	e2eOpenAIBaseURL    string
-	e2eOpenAIModel      string
-	e2eAnthropicAPIKey  string
-	e2eAnthropicBaseURL string
-	e2eAnthropicModel   string
-	e2eGitHubToken      string
+	e2eOpenAIAPIKey            string
+	e2eOpenAIBaseURL           string
+	e2eOpenAIModel             string
+	e2eAnthropicAPIKey         string
+	e2eAnthropicBaseURL        string
+	e2eAnthropicModel          string
+	e2eGitHubToken             string
+	e2eLiveCopilotProxyBaseURL string
 )
 
 // TestE2E runs the e2e test suite to validate the solution in an isolated environment.
@@ -97,6 +98,11 @@ var _ = BeforeSuite(func() {
 	e2eAnthropicBaseURL = os.Getenv("E2E_ANTHROPIC_BASE_URL")
 	e2eAnthropicModel = os.Getenv("E2E_ANTHROPIC_MODEL")
 	e2eGitHubToken = os.Getenv("E2E_GITHUB_TOKEN")
+	e2eLiveCopilotProxyBaseURL = firstSetEnv(
+		"E2E_LIVE_COPILOT_PROXY_BASE_URL",
+		"E2E_COPILOT_PROXY_BASE_URL",
+		"COPILOT_PROXY_BASE_URL",
+	)
 
 	By("creating manager namespace")
 	cmd = exec.Command("kubectl", "create", "ns", namespace)
@@ -325,4 +331,13 @@ func teardownCertManager() {
 
 	By("uninstalling CertManager")
 	utils.UninstallCertManager()
+}
+
+func firstSetEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := os.Getenv(key); value != "" {
+			return value
+		}
+	}
+	return ""
 }

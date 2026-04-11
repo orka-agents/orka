@@ -1,0 +1,91 @@
+name: Live Copilot Proxy E2E
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-copilot-proxy-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-copilot-proxy-e2e:
+    name: Live Copilot Proxy E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+      COPILOT_PROXY_REPO_TOKEN: ${{ secrets.COPILOT_PROXY_REPO_TOKEN }}
+      KIND_CLUSTER: orka-live-copilot-proxy-e2e
+      COPILOT_PROXY_REPO_DIR: ${{ github.workspace }}/copilot-proxy
+    steps:
+      - name: Decide whether live e2e can run
+        id: gate
+        env:
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork || false }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${IS_FORK}" = "true" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "reason=Skipping live copilot-proxy e2e for fork pull requests because repository secrets are not exposed." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "${ACTOR}" = "dependabot[bot]" ] && [ -z "${COPILOT_GITHUB_TOKEN}" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "reason=Skipping live copilot-proxy e2e for Dependabot pull requests because repository secrets are not exposed." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "${COPILOT_GITHUB_TOKEN}" ]; then
+            echo "COPILOT_GITHUB_TOKEN repository secret is required for live copilot-proxy e2e." >&2
+            exit 1
+          fi
+
+          if [ -z "${COPILOT_PROXY_REPO_TOKEN}" ]; then
+            echo "COPILOT_PROXY_REPO_TOKEN repository secret is required to checkout the private copilot-proxy repo." >&2
+            exit 1
+          fi
+
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Explain skipped live e2e
+        if: steps.gate.outputs.run != 'true'
+        run: echo "${{ steps.gate.outputs.reason }}"
+
+      - name: Clone Orka
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Clone copilot-proxy
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: sozercan/copilot-proxy
+          path: copilot-proxy
+          token: ${{ secrets.COPILOT_PROXY_REPO_TOKEN }}
+
+      - name: Setup Go
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install kind
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          curl -fsSL -o ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Verify kind installation
+        if: steps.gate.outputs.run == 'true'
+        run: kind version
+
+      - name: Run live copilot proxy e2e
+        if: steps.gate.outputs.run == 'true'
+        run: bash scripts/live-copilot-proxy-e2e.sh
