@@ -2220,6 +2220,8 @@ func TestAddAgentVolumes_GitSecretAutoDetect(t *testing.T) {
 }
 
 func TestJobBuilderBuildAddsSkillVolumeAndConfigMap(t *testing.T) {
+	const skillVolumeName = "skills"
+
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -2263,16 +2265,16 @@ func TestJobBuilderBuildAddsSkillVolumeAndConfigMap(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	if !hasVolume(job.Spec.Template.Spec.Volumes, "skills") {
+	if !hasVolume(job.Spec.Template.Spec.Volumes, skillVolumeName) {
 		t.Fatal("expected skills volume to be mounted")
 	}
-	if !hasVolumeMount(job.Spec.Template.Spec.Containers[0].VolumeMounts, "skills") {
+	if !hasVolumeMount(job.Spec.Template.Spec.Containers[0].VolumeMounts, skillVolumeName) {
 		t.Fatal("expected skills volume mount")
 	}
 
 	var skillsVolume *corev1.Volume
 	for i := range job.Spec.Template.Spec.Volumes {
-		if job.Spec.Template.Spec.Volumes[i].Name == "skills" {
+		if job.Spec.Template.Spec.Volumes[i].Name == skillVolumeName {
 			skillsVolume = &job.Spec.Template.Spec.Volumes[i]
 			break
 		}

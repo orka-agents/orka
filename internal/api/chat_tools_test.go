@@ -13,6 +13,8 @@ import (
 	"github.com/sozercan/orka/internal/tools"
 )
 
+const schemaTypeObject = "object"
+
 func TestChatRegistry_AllToolsRegistered(t *testing.T) {
 	reg := tools.NewRegistry()
 	tools.RegisterChatTools(reg)
@@ -60,7 +62,7 @@ func TestChatRegistry_CoreToolNames(t *testing.T) {
 			t.Errorf("core tool %q has invalid JSON parameters: %v", name, err)
 			continue
 		}
-		if params["type"] != "object" {
+		if params["type"] != schemaTypeObject {
 			t.Errorf("core tool %q parameters type=%v, want object", name, params["type"])
 		}
 	}
@@ -97,7 +99,7 @@ func TestChatRegistry_ManagementToolNames(t *testing.T) {
 			t.Errorf("management tool %q has invalid JSON parameters: %v", name, err)
 			continue
 		}
-		if params["type"] != "object" {
+		if params["type"] != schemaTypeObject {
 			t.Errorf("management tool %q parameters type=%v, want object", name, params["type"])
 		}
 	}

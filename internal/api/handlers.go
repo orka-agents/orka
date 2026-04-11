@@ -731,11 +731,11 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 	}
 
 	// Add built-in tools to the response
-	tools := make([]fiber.Map, 0, len(toolList.Items)+len(builtinToolsList))
-	tools = append(tools, builtinToolsList...)
+	toolItems := make([]fiber.Map, 0, len(toolList.Items)+len(builtinToolsList))
+	toolItems = append(toolItems, builtinToolsList...)
 
 	for _, tool := range toolList.Items {
-		tools = append(tools, fiber.Map{
+		toolItems = append(toolItems, fiber.Map{
 			"name":        tool.Name,
 			"namespace":   tool.Namespace,
 			"builtin":     false,
@@ -746,7 +746,7 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 	}
 
 	response := ListResponse{
-		Items: tools,
+		Items: toolItems,
 		Metadata: ListMeta{
 			Continue:           toolList.Continue,
 			RemainingItemCount: toolList.RemainingItemCount,
