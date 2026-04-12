@@ -255,15 +255,26 @@ YAML
     "copilot-proxy /v1/models" \
     "${work_dir}/copilot-proxy-models.json"
   jq -e '.data | length > 0' "${work_dir}/copilot-proxy-models.json" >/dev/null
+  jq -e '
+    (.data | map(.id // "")) as $ids
+    | ($ids | any(startswith("gpt-")))
+    and ($ids | any(startswith("claude-")))
+    and ($ids | any(startswith("gemini-")))
+  ' "${work_dir}/copilot-proxy-models.json" >/dev/null
 
-  log "Running focused live copilot-proxy Go e2e spec"
+  log "Live proxy model families detected"
+  jq -r '.data[].id' "${work_dir}/copilot-proxy-models.json" | redact >&2
+
+  log "Running focused live copilot-proxy Go e2e specs"
   CERT_MANAGER_INSTALL_SKIP=true \
   KIND_CLUSTER="${kind_cluster}" \
+  E2E_GITHUB_TOKEN="${token_value}" \
   E2E_LIVE_COPILOT_PROXY_BASE_URL="http://${copilot_proxy_service}.${copilot_proxy_namespace}.svc.cluster.local:${copilot_proxy_service_port}/v1" \
   E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE="${copilot_proxy_namespace}" \
   E2E_LIVE_COPILOT_PROXY_SERVICE_NAME="${copilot_proxy_service}" \
   E2E_LIVE_COPILOT_PROXY_SERVICE_PORT="${copilot_proxy_service_port}" \
-  go test -tags=e2e ./test/e2e/ -timeout 45m -v -ginkgo.v -ginkgo.focus="Live Copilot Proxy Provider"
+  go test -tags=e2e ./test/e2e/ -timeout 45m -v -ginkgo.v \
+    -ginkgo.focus="Live Copilot Proxy Provider|Live Chat API|Live Agent Runtime Matrix"
 
   log "Live copilot-proxy e2e passed"
 }

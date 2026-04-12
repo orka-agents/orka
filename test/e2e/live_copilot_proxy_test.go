@@ -11,10 +11,7 @@ package e2e
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os/exec"
 	"strings"
 	"time"
@@ -85,18 +82,20 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(catalog.DataModelIDs).NotTo(BeEmpty(), "proxy should expose models via the OpenAI data field")
 		Expect(catalog.AllModelIDs).NotTo(BeEmpty(), "proxy should expose at least one model")
-		discoveredModel = catalog.FirstModelID
+		discoveredModel = firstProxyModelMatchingPrefixes(catalog, "gpt-")
 		Expect(discoveredModel).To(BeElementOf(catalog.DataModelIDs))
+		Expect(discoveredModel).NotTo(BeEmpty(), "proxy should expose a GPT-family model")
 	})
 
 	It("should run a tiny AI task through the live copilot proxy and return the exact output", func() {
-		By("discovering a live model from the proxy service")
+		By("discovering a live GPT-family model from the proxy service")
 		model := discoveredModel
 		if model == "" {
-			model = discoverProxyModelViaServiceProxy(
+			model = discoverProxyModelByFamilyViaServiceProxy(
 				liveCopilotProxyServiceNamespace(),
 				liveCopilotProxyServiceName(),
 				liveCopilotProxyServicePort(),
+				"gpt-",
 			)
 		}
 		Expect(model).NotTo(BeEmpty())
@@ -187,50 +186,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		Expect(completeCondition.Reason).To(Equal("TaskSucceeded"))
 
 		By("fetching the task result through the controller API")
-		result := fetchTaskResult(apiBaseURL, token, liveProxyTaskName)
+		result := fetchTaskResultViaAPI(apiBaseURL, token, liveProxyTaskName)
 		Expect(strings.TrimSpace(result)).To(Equal(expectedOutput))
 	})
 })
-
-func fetchTaskResult(apiBaseURL, token, taskName string) string {
-	var result string
-	Eventually(func(g Gomega) {
-		got, err := getTaskResult(apiBaseURL, token, taskName)
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(strings.TrimSpace(got)).NotTo(BeEmpty())
-		result = got
-	}, 2*time.Minute, 2*time.Second).Should(Succeed())
-	return result
-}
-
-func getTaskResult(apiBaseURL, token, taskName string) (string, error) {
-	url := fmt.Sprintf("%s/api/v1/tasks/%s/result?namespace=%s", strings.TrimRight(apiBaseURL, "/"), taskName, namespace)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected status from task result endpoint: %s (%s)", resp.Status, strings.TrimSpace(string(body)))
-	}
-
-	var payload struct {
-		Result string `json:"result"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", err
-	}
-
-	return payload.Result, nil
-}

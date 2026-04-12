@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/sozercan/orka/test/utils"
+	workercommon "github.com/sozercan/orka/workers/common"
 )
 
 const controllerAPIService = "orka-api"
@@ -75,6 +76,10 @@ type proxyModelCatalog struct {
 	DataModelIDs  []string
 	ExtraModelIDs []string
 	AllModelIDs   []string
+}
+
+type apiTaskResultResponse struct {
+	Result string `json:"result"`
 }
 
 // skipIfNoKey skips the current test if the given environment variable is not set or empty.
@@ -478,6 +483,47 @@ func fetchProxyModelCatalogViaServiceProxy(serviceNamespace, serviceName string,
 	)
 }
 
+func discoverProxyModelByFamilyViaServiceProxy(serviceNamespace, serviceName string, servicePort int, prefixes ...string) string {
+	var modelID string
+	Eventually(func(g Gomega) {
+		catalog, err := fetchProxyModelCatalogViaServiceProxy(serviceNamespace, serviceName, servicePort)
+		g.Expect(err).NotTo(HaveOccurred())
+		modelID = firstProxyModelMatchingPrefixes(catalog, prefixes...)
+		g.Expect(modelID).NotTo(BeEmpty(), "proxy service should expose a model matching %v", prefixes)
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+	return modelID
+}
+
+func firstProxyModelMatchingPrefixes(catalog proxyModelCatalog, prefixes ...string) string {
+	for _, modelID := range catalog.AllModelIDs {
+		if modelMatchesAnyPrefix(modelID, prefixes...) {
+			return modelID
+		}
+	}
+	return ""
+}
+
+func modelMatchesAnyPrefix(modelID string, prefixes ...string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if modelID == "" {
+		return false
+	}
+
+	for _, prefix := range prefixes {
+		prefix = strings.ToLower(strings.TrimSpace(prefix))
+		if prefix != "" && strings.HasPrefix(modelID, prefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func liveCopilotProxyRootURL() string {
+	baseURL := strings.TrimRight(e2eLiveCopilotProxyBaseURL, "/")
+	return strings.TrimSuffix(baseURL, "/v1")
+}
+
 func liveCopilotProxyServiceNamespace() string {
 	if ns := strings.TrimSpace(firstSetEnv("E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE")); ns != "" {
 		return ns
@@ -528,6 +574,46 @@ func fetchTaskSnapshot(name string) taskSnapshot {
 	return snapshot
 }
 
+func getJobEnvMap(taskName string) map[string]string {
+	var envMap map[string]string
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "jobs",
+			"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
+			"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
+			"-n", namespace,
+		)
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(output).NotTo(BeEmpty())
+
+		var envVars []envVar
+		g.Expect(json.Unmarshal([]byte(output), &envVars)).To(Succeed())
+
+		envMap = make(map[string]string, len(envVars))
+		for _, envVar := range envVars {
+			envMap[envVar.Name] = envVar.Value
+		}
+	}, 30*time.Second, time.Second).Should(Succeed())
+
+	return envMap
+}
+
+func getJobInitContainerNames(taskName string) []string {
+	var names []string
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "jobs",
+			"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
+			"-o", "jsonpath={.items[0].spec.template.spec.initContainers[*].name}",
+			"-n", namespace,
+		)
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		names = strings.Fields(output)
+	}, 30*time.Second, time.Second).Should(Succeed())
+
+	return names
+}
+
 func findStatusCondition(conditions []statusConditionSnapshot, conditionType string) *statusConditionSnapshot {
 	for i := range conditions {
 		if conditions[i].Type == conditionType {
@@ -544,6 +630,91 @@ func stopPortForward(cancel context.CancelFunc, cmd *exec.Cmd) {
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Wait()
 	}
+}
+
+func fetchTaskResultViaAPI(apiBaseURL, token, taskName string) string {
+	var result string
+	Eventually(func(g Gomega) {
+		got, err := getTaskResultViaAPI(apiBaseURL, token, taskName)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(strings.TrimSpace(got)).NotTo(BeEmpty())
+		result = got
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+	return result
+}
+
+func fetchTaskResultSummaryViaAPI(apiBaseURL, token, taskName string) string {
+	return workercommon.ParseStructuredResult(fetchTaskResultViaAPI(apiBaseURL, token, taskName)).Summary
+}
+
+func getTaskResultViaAPI(apiBaseURL, token, taskName string) (string, error) {
+	url := fmt.Sprintf("%s/api/v1/tasks/%s/result?namespace=%s", strings.TrimRight(apiBaseURL, "/"), taskName, namespace)
+	body, statusCode, err := doAuthorizedJSONRequest(http.MethodGet, url, token, "", "")
+	if err != nil {
+		return "", err
+	}
+	if statusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status from task result endpoint: %d (%s)", statusCode, strings.TrimSpace(body))
+	}
+
+	var payload apiTaskResultResponse
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return "", err
+	}
+
+	return payload.Result, nil
+}
+
+func fetchSessionViaAPI(apiBaseURL, token, sessionID string) string {
+	var body string
+	Eventually(func(g Gomega) {
+		got, statusCode, err := doAuthorizedJSONRequest(
+			http.MethodGet,
+			fmt.Sprintf("%s/api/v1/sessions/%s", strings.TrimRight(apiBaseURL, "/"), sessionID),
+			token,
+			"",
+			"",
+		)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(statusCode).To(Equal(http.StatusOK))
+		body = got
+	}, 30*time.Second, time.Second).Should(Succeed())
+
+	return body
+}
+
+func doAuthorizedJSONRequest(method, url, token, body, accept string) (string, int, error) {
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+
+	req, err := http.NewRequest(method, url, reader)
+	if err != nil {
+		return "", 0, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+
+	resp, err := (&http.Client{Timeout: 2 * time.Minute}).Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", resp.StatusCode, err
+	}
+
+	return string(responseBody), resp.StatusCode, nil
 }
 
 // dumpDebugInfo collects and prints debug information on test failure.
