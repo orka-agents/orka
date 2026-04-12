@@ -96,6 +96,15 @@ Send `Accept: application/json` for a blocking JSON response:
 }
 ```
 
+## Live Coverage
+
+PR-blocking live CI covers the chat endpoint against a real backend in both:
+
+- SSE mode via `Accept: text/event-stream`
+- JSON mode via `Accept: application/json`
+
+The live suite verifies transport behavior, session creation/persistence, and usage reporting. Exact model wording is still covered primarily by deterministic chat tests in `test/e2e/` and unit tests.
+
 ## Available Tools
 
 ### Core Tools (always loaded)

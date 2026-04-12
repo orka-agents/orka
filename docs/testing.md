@@ -68,6 +68,10 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/agent_advanced_test.go` | Skills ConfigMap wiring, agent resource propagation, session maxMessages behavior |
 | `test/e2e/workspace_advanced_test.go` | Advanced workspace settings (`gitSecretRef`, `subPath`, `ref`, fork/PR env vars, session init container) |
 | `test/e2e/provider_advanced_test.go` | Provider rate-limit config coverage |
+| `test/e2e/live_copilot_proxy_test.go` | Live Orka Provider + `type: ai` path using copilot-proxy as the backend harness |
+| `test/e2e/live_chat_api_test.go` | Live chat SSE and JSON transport/session coverage using a proxy-backed Provider |
+| `test/e2e/live_anthropic_compat_test.go` | Live Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` coverage with default tools-enabled behavior |
+| `test/e2e/live_agent_runtime_matrix_test.go` | Live Orka runtime matrix: Codex+GPT, Claude Code+Claude, Copilot+Gemini |
 | `test/e2e/tools_test.go` | Built-in tools (including `web_fetch`, `file_write`) and custom Tool CRD |
 | `test/e2e/scheduled_task_test.go` | Cron scheduling, suspend, `concurrencyPolicy: Forbid`, history-limit cleanup |
 | `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
@@ -76,8 +80,26 @@ End-to-end tests run against a dedicated Kind cluster:
 
 - `E2E_OPENAI_API_KEY`: required for LLM-backed tests (AI chat/tasks, coordination, PR workflow orchestration)
 - `E2E_ANTHROPIC_API_KEY`: required for Anthropic-specific e2e cases
-- `E2E_GITHUB_TOKEN`: required for GitHub/Copilot and PR workflow tests
+- `E2E_GITHUB_TOKEN`: required for GitHub/Copilot and live Copilot runtime tests
+- `COPILOT_GITHUB_TOKEN`: required by the live `copilot-proxy` workflow for proxy auth
+- `E2E_LIVE_COPILOT_PROXY_BASE_URL` (or `E2E_COPILOT_PROXY_BASE_URL` / `COPILOT_PROXY_BASE_URL`): enables the focused live copilot-proxy spec against a running proxy
+- `E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE`, `E2E_LIVE_COPILOT_PROXY_SERVICE_NAME`, `E2E_LIVE_COPILOT_PROXY_SERVICE_PORT`: optional overrides for how the live spec reaches the in-cluster proxy service for `/readyz` and `/v1/models` checks
 - Structural e2e tests (job/env/volume assertions) run without external model keys
+
+The live copilot-proxy E2E path runs in a separate workflow and executes the focused live suites for:
+
+- provider-backed `type: ai` tasks
+- chat SSE/JSON flows via `/api/v1/chat`
+- Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` flows with the default Orka tool loop enabled
+- external agent runtimes across `codex` + GPT, `claude` + Claude, and `copilot` + Gemini
+
+This is an **Orka** live integration suite, not a deep `copilot-proxy` feature suite. The proxy is test harness infrastructure that gives non-Copilot runtimes access to live GPT, Claude, and Gemini models in CI. The only proxy-specific assertions are smoke checks that the harness is alive and usable:
+
+- `/readyz` returns healthy
+- `/v1/models` is non-empty
+- GPT, Claude, and Gemini model families are present
+
+It bootstraps a fresh Kind cluster, deploys the published multi-arch `docker.io/sozercan/copilot-proxy:latest` image, injects `COPILOT_GITHUB_TOKEN` for proxy auth, requires the live proxy to expose GPT/Claude/Gemini model families, maps that same secret to `E2E_GITHUB_TOKEN` for the Copilot runtime case, and then runs the focused live suites against the in-cluster proxy.
 
 ### Frontend Tests
 

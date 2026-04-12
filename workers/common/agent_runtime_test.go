@@ -266,6 +266,24 @@ func TestCloneRepo_CancelledContext(t *testing.T) {
 	}
 }
 
+func TestGitSafeDirectoryArgs(t *testing.T) {
+	dir := t.TempDir()
+
+	args := gitSafeDirectoryArgs(dir, "status", "--short")
+	if len(args) != 4 {
+		t.Fatalf("len(args) = %d, want 4", len(args))
+	}
+	if args[0] != "-c" {
+		t.Fatalf("args[0] = %q, want -c", args[0])
+	}
+	if !strings.HasPrefix(args[1], "safe.directory=") {
+		t.Fatalf("args[1] = %q, want safe.directory=...", args[1])
+	}
+	if args[2] != "status" || args[3] != "--short" {
+		t.Fatalf("tail args = %v, want [status --short]", args[2:])
+	}
+}
+
 func TestRunAgent_ConfigError(t *testing.T) {
 	// Missing ORKA_PROMPT should cause config error
 	t.Setenv("ORKA_PROMPT", "")

@@ -11,19 +11,76 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/sozercan/orka/test/utils"
+	workercommon "github.com/sozercan/orka/workers/common"
 )
 
 const controllerAPIService = "orka-api"
+
+type statusConditionSnapshot struct {
+	Type    string `json:"type"`
+	Status  string `json:"status"`
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
+}
+
+type providerSnapshot struct {
+	Spec struct {
+		Type         string `json:"type"`
+		BaseURL      string `json:"baseURL"`
+		DefaultModel string `json:"defaultModel"`
+	} `json:"spec"`
+	Status struct {
+		Ready         bool                      `json:"ready"`
+		Message       string                    `json:"message"`
+		LastValidated string                    `json:"lastValidated"`
+		Conditions    []statusConditionSnapshot `json:"conditions"`
+	} `json:"status"`
+}
+
+type taskSnapshot struct {
+	Status struct {
+		Phase          string `json:"phase"`
+		StartTime      string `json:"startTime"`
+		CompletionTime string `json:"completionTime"`
+		Attempts       int32  `json:"attempts"`
+		JobName        string `json:"jobName"`
+		Message        string `json:"message"`
+		ResultRef      *struct {
+			Available bool `json:"available"`
+		} `json:"resultRef"`
+		Conditions []statusConditionSnapshot `json:"conditions"`
+	} `json:"status"`
+}
+
+type proxyReadyResponse struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+type proxyModelCatalog struct {
+	FirstModelID  string
+	DataModelIDs  []string
+	ExtraModelIDs []string
+	AllModelIDs   []string
+}
+
+type apiTaskResultResponse struct {
+	Result string `json:"result"`
+}
 
 // skipIfNoKey skips the current test if the given environment variable is not set or empty.
 func skipIfNoKey(envVar string) {
@@ -150,6 +207,161 @@ func createProviderCRD(name, providerType, secretName, secretKey, baseURL, model
 	}, 30*time.Second, time.Second).Should(Succeed())
 }
 
+// discoverProxyModel queries an OpenAI-compatible /v1/models endpoint and returns the first model ID.
+func discoverProxyModel(baseURL string) string {
+	var modelID string
+	Eventually(func(g Gomega) {
+		model, err := fetchProxyModel(baseURL)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(model).NotTo(BeEmpty(), "proxy should return at least one model")
+		modelID = model
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+	return modelID
+}
+
+func fetchProxyModel(baseURL string) (string, error) {
+	modelsURL := copilotProxyModelsURL(baseURL)
+	req, err := http.NewRequest(http.MethodGet, modelsURL, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := readResponseBody(resp)
+		return "", fmt.Errorf("unexpected status from %s: %s (%s)", modelsURL, resp.Status, strings.TrimSpace(body))
+	}
+
+	body, err := readResponseBody(resp)
+	if err != nil {
+		return "", err
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return "", err
+	}
+
+	if model := firstModelFromPayload(payload); model != "" {
+		return model, nil
+	}
+
+	return "", fmt.Errorf("no models returned from %s", modelsURL)
+}
+
+func copilotProxyModelsURL(baseURL string) string {
+	baseURL = strings.TrimRight(baseURL, "/")
+	if strings.HasSuffix(baseURL, "/v1") {
+		return baseURL + "/models"
+	}
+	return baseURL + "/v1/models"
+}
+
+func readResponseBody(resp *http.Response) (string, error) {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func firstModelFromPayload(payload map[string]any) string {
+	if data, ok := payload["data"].([]any); ok {
+		for _, item := range data {
+			if model := firstModelFromItem(item); model != "" {
+				return model
+			}
+		}
+	}
+
+	if models, ok := payload["models"].([]any); ok {
+		for _, item := range models {
+			if model := firstModelFromItem(item); model != "" {
+				return model
+			}
+		}
+	}
+
+	if id, ok := payload["id"].(string); ok {
+		return strings.TrimSpace(id)
+	}
+
+	return ""
+}
+
+func allModelsFromPayload(payload map[string]any) proxyModelCatalog {
+	catalog := proxyModelCatalog{}
+
+	if data, ok := payload["data"].([]any); ok {
+		for _, item := range data {
+			if model := firstModelFromItem(item); model != "" {
+				catalog.DataModelIDs = append(catalog.DataModelIDs, model)
+			}
+		}
+	}
+
+	if models, ok := payload["models"].([]any); ok {
+		for _, item := range models {
+			if model := firstModelFromItem(item); model != "" {
+				catalog.ExtraModelIDs = append(catalog.ExtraModelIDs, model)
+			}
+		}
+	}
+
+	catalog.AllModelIDs = uniqueStrings(append(append([]string{}, catalog.DataModelIDs...), catalog.ExtraModelIDs...))
+	if len(catalog.AllModelIDs) > 0 {
+		catalog.FirstModelID = catalog.AllModelIDs[0]
+	}
+
+	return catalog
+}
+
+func uniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(values))
+	unique := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		unique = append(unique, value)
+	}
+
+	return unique
+}
+
+func firstModelFromItem(item any) string {
+	switch v := item.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case map[string]any:
+		if id, ok := v["id"].(string); ok && strings.TrimSpace(id) != "" {
+			return strings.TrimSpace(id)
+		}
+		if slug, ok := v["slug"].(string); ok && strings.TrimSpace(slug) != "" {
+			return strings.TrimSpace(slug)
+		}
+		if name, ok := v["name"].(string); ok && strings.TrimSpace(name) != "" {
+			return strings.TrimSpace(name)
+		}
+	}
+
+	return ""
+}
+
 func startControllerAPIPortForward(localPort int) (string, context.CancelFunc, *exec.Cmd, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", localPort)
@@ -177,6 +389,268 @@ func startControllerAPIPortForward(localPort int) (string, context.CancelFunc, *
 	return baseURL, cancel, cmd, nil
 }
 
+func startServicePortForward(serviceNamespace, serviceName string, localPort, remotePort int) (string, context.CancelFunc, *exec.Cmd, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", localPort)
+
+	cmd := exec.CommandContext(ctx, "kubectl", "port-forward",
+		"-n", serviceNamespace,
+		"svc/"+serviceName,
+		fmt.Sprintf("%d:%d", localPort, remotePort),
+	)
+	cmd.Stdout = GinkgoWriter
+	cmd.Stderr = GinkgoWriter
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return "", nil, nil, err
+	}
+
+	Eventually(func(g Gomega) {
+		resp, err := http.Get(baseURL + "/readyz")
+		g.Expect(err).NotTo(HaveOccurred())
+		defer resp.Body.Close()
+		g.Expect(resp.StatusCode).To(Equal(http.StatusOK))
+	}, 60*time.Second, time.Second).Should(Succeed())
+
+	return baseURL, cancel, cmd, nil
+}
+
+func serviceProxyPath(serviceNamespace, serviceName string, servicePort int, endpointPath string) string {
+	endpointPath = "/" + strings.TrimLeft(endpointPath, "/")
+	return fmt.Sprintf(
+		"/api/v1/namespaces/%s/services/http:%s:%d/proxy%s",
+		serviceNamespace,
+		serviceName,
+		servicePort,
+		endpointPath,
+	)
+}
+
+func fetchServiceProxyBody(serviceNamespace, serviceName string, servicePort int, endpointPath string) (string, error) {
+	cmd := exec.Command(
+		"kubectl",
+		"get",
+		"--raw",
+		serviceProxyPath(serviceNamespace, serviceName, servicePort, endpointPath),
+	)
+	return utils.Run(cmd)
+}
+
+func waitForProxyReadyViaServiceProxy(serviceNamespace, serviceName string, servicePort int) proxyReadyResponse {
+	var ready proxyReadyResponse
+	Eventually(func(g Gomega) {
+		body, err := fetchServiceProxyBody(serviceNamespace, serviceName, servicePort, "/readyz")
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(json.Unmarshal([]byte(body), &ready)).To(Succeed())
+		g.Expect(ready.Status).To(Equal("ready"))
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+	return ready
+}
+
+func discoverProxyModelViaServiceProxy(serviceNamespace, serviceName string, servicePort int) string {
+	var modelID string
+	Eventually(func(g Gomega) {
+		catalog, err := fetchProxyModelCatalogViaServiceProxy(serviceNamespace, serviceName, servicePort)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(catalog.FirstModelID).NotTo(BeEmpty(), "proxy service should return at least one model")
+		modelID = catalog.FirstModelID
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+	return modelID
+}
+
+func fetchProxyModelCatalogViaServiceProxy(serviceNamespace, serviceName string, servicePort int) (proxyModelCatalog, error) {
+	body, err := fetchServiceProxyBody(serviceNamespace, serviceName, servicePort, "/v1/models")
+	if err != nil {
+		return proxyModelCatalog{}, err
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return proxyModelCatalog{}, err
+	}
+
+	catalog := allModelsFromPayload(payload)
+	if catalog.FirstModelID != "" {
+		return catalog, nil
+	}
+
+	return proxyModelCatalog{}, fmt.Errorf(
+		"no models returned from service proxy for %s/%s:%d",
+		serviceNamespace,
+		serviceName,
+		servicePort,
+	)
+}
+
+func discoverProxyModelByFamilyViaServiceProxy(serviceNamespace, serviceName string, servicePort int, prefixes ...string) string {
+	var modelID string
+	Eventually(func(g Gomega) {
+		catalog, err := fetchProxyModelCatalogViaServiceProxy(serviceNamespace, serviceName, servicePort)
+		g.Expect(err).NotTo(HaveOccurred())
+		modelID = firstProxyModelMatchingPrefixes(catalog, prefixes...)
+		g.Expect(modelID).NotTo(BeEmpty(), "proxy service should expose a model matching %v", prefixes)
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+	return modelID
+}
+
+func discoverPreferredProxyModelViaServiceProxy(serviceNamespace, serviceName string, servicePort int, preferredIDs []string, prefixes ...string) string {
+	var modelID string
+	Eventually(func(g Gomega) {
+		catalog, err := fetchProxyModelCatalogViaServiceProxy(serviceNamespace, serviceName, servicePort)
+		g.Expect(err).NotTo(HaveOccurred())
+		modelID = firstPreferredProxyModel(catalog, preferredIDs, prefixes...)
+		g.Expect(modelID).NotTo(BeEmpty(), "proxy service should expose a preferred model matching %v", prefixes)
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+	return modelID
+}
+
+func firstProxyModelMatchingPrefixes(catalog proxyModelCatalog, prefixes ...string) string {
+	for _, modelID := range catalog.AllModelIDs {
+		if modelMatchesAnyPrefix(modelID, prefixes...) {
+			return modelID
+		}
+	}
+	return ""
+}
+
+func firstPreferredProxyModel(catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) string {
+	for _, preferredID := range preferredIDs {
+		preferredID = strings.ToLower(strings.TrimSpace(preferredID))
+		if preferredID == "" {
+			continue
+		}
+
+		for _, modelID := range catalog.AllModelIDs {
+			if strings.EqualFold(strings.TrimSpace(modelID), preferredID) {
+				return modelID
+			}
+		}
+	}
+
+	return firstProxyModelMatchingPrefixes(catalog, prefixes...)
+}
+
+func modelMatchesAnyPrefix(modelID string, prefixes ...string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if modelID == "" {
+		return false
+	}
+
+	for _, prefix := range prefixes {
+		prefix = strings.ToLower(strings.TrimSpace(prefix))
+		if prefix != "" && strings.HasPrefix(modelID, prefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func liveCopilotProxyRootURL() string {
+	baseURL := strings.TrimRight(e2eLiveCopilotProxyBaseURL, "/")
+	return strings.TrimSuffix(baseURL, "/v1")
+}
+
+func liveCopilotProxyServiceNamespace() string {
+	if ns := strings.TrimSpace(firstSetEnv("E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE")); ns != "" {
+		return ns
+	}
+	return "default"
+}
+
+func liveCopilotProxyServiceName() string {
+	if name := strings.TrimSpace(firstSetEnv("E2E_LIVE_COPILOT_PROXY_SERVICE_NAME")); name != "" {
+		return name
+	}
+	return "copilot-proxy"
+}
+
+func liveCopilotProxyServicePort() int {
+	port := strings.TrimSpace(firstSetEnv("E2E_LIVE_COPILOT_PROXY_SERVICE_PORT"))
+	if port == "" {
+		return 1337
+	}
+
+	value, err := strconv.Atoi(port)
+	if err != nil || value <= 0 {
+		return 1337
+	}
+
+	return value
+}
+
+func fetchProviderSnapshot(name string) providerSnapshot {
+	var snapshot providerSnapshot
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "provider", name, "-n", namespace, "-o", "json")
+		body, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(json.Unmarshal([]byte(body), &snapshot)).To(Succeed())
+	}, 30*time.Second, time.Second).Should(Succeed())
+	return snapshot
+}
+
+func fetchTaskSnapshot(name string) taskSnapshot {
+	var snapshot taskSnapshot
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "task", name, "-n", namespace, "-o", "json")
+		body, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(json.Unmarshal([]byte(body), &snapshot)).To(Succeed())
+	}, 30*time.Second, time.Second).Should(Succeed())
+	return snapshot
+}
+
+func getJobEnvMap(taskName string) map[string]string {
+	var envMap map[string]string
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "jobs",
+			"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
+			"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
+			"-n", namespace,
+		)
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(output).NotTo(BeEmpty())
+
+		var envVars []envVar
+		g.Expect(json.Unmarshal([]byte(output), &envVars)).To(Succeed())
+
+		envMap = make(map[string]string, len(envVars))
+		for _, envVar := range envVars {
+			envMap[envVar.Name] = envVar.Value
+		}
+	}, 30*time.Second, time.Second).Should(Succeed())
+
+	return envMap
+}
+
+func getJobInitContainerNames(taskName string) []string {
+	var names []string
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "jobs",
+			"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
+			"-o", "jsonpath={.items[0].spec.template.spec.initContainers[*].name}",
+			"-n", namespace,
+		)
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		names = strings.Fields(output)
+	}, 30*time.Second, time.Second).Should(Succeed())
+
+	return names
+}
+
+func findStatusCondition(conditions []statusConditionSnapshot, conditionType string) *statusConditionSnapshot {
+	for i := range conditions {
+		if conditions[i].Type == conditionType {
+			return &conditions[i]
+		}
+	}
+	return nil
+}
+
 func stopPortForward(cancel context.CancelFunc, cmd *exec.Cmd) {
 	if cancel != nil {
 		cancel()
@@ -184,6 +658,91 @@ func stopPortForward(cancel context.CancelFunc, cmd *exec.Cmd) {
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Wait()
 	}
+}
+
+func fetchTaskResultViaAPI(apiBaseURL, token, taskName string) string {
+	var result string
+	Eventually(func(g Gomega) {
+		got, err := getTaskResultViaAPI(apiBaseURL, token, taskName)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(strings.TrimSpace(got)).NotTo(BeEmpty())
+		result = got
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+	return result
+}
+
+func fetchTaskResultSummaryViaAPI(apiBaseURL, token, taskName string) string {
+	return workercommon.ParseStructuredResult(fetchTaskResultViaAPI(apiBaseURL, token, taskName)).Summary
+}
+
+func getTaskResultViaAPI(apiBaseURL, token, taskName string) (string, error) {
+	url := fmt.Sprintf("%s/api/v1/tasks/%s/result?namespace=%s", strings.TrimRight(apiBaseURL, "/"), taskName, namespace)
+	body, statusCode, err := doAuthorizedJSONRequest(http.MethodGet, url, token, "", "")
+	if err != nil {
+		return "", err
+	}
+	if statusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status from task result endpoint: %d (%s)", statusCode, strings.TrimSpace(body))
+	}
+
+	var payload apiTaskResultResponse
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return "", err
+	}
+
+	return payload.Result, nil
+}
+
+func fetchSessionViaAPI(apiBaseURL, token, sessionID string) string {
+	var body string
+	Eventually(func(g Gomega) {
+		got, statusCode, err := doAuthorizedJSONRequest(
+			http.MethodGet,
+			fmt.Sprintf("%s/api/v1/sessions/%s", strings.TrimRight(apiBaseURL, "/"), sessionID),
+			token,
+			"",
+			"",
+		)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(statusCode).To(Equal(http.StatusOK))
+		body = got
+	}, 30*time.Second, time.Second).Should(Succeed())
+
+	return body
+}
+
+func doAuthorizedJSONRequest(method, url, token, body, accept string) (string, int, error) {
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+
+	req, err := http.NewRequest(method, url, reader)
+	if err != nil {
+		return "", 0, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+
+	resp, err := (&http.Client{Timeout: 2 * time.Minute}).Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", resp.StatusCode, err
+	}
+
+	return string(responseBody), resp.StatusCode, nil
 }
 
 // dumpDebugInfo collects and prints debug information on test failure.
@@ -236,5 +795,36 @@ func dumpDebugInfo(taskNames ...string) {
 	events, err := utils.Run(cmd)
 	if err == nil {
 		_, _ = fmt.Fprintf(GinkgoWriter, "\n=== Namespace Events ===\n%s\n", events)
+	}
+}
+
+func dumpLiveCopilotProxyDebugInfo(providerNames ...string) {
+	if !CurrentSpecReport().Failed() {
+		return
+	}
+
+	serviceNamespace := liveCopilotProxyServiceNamespace()
+	serviceName := liveCopilotProxyServiceName()
+	servicePort := liveCopilotProxyServicePort()
+
+	By("collecting live copilot proxy debug information")
+
+	for _, providerName := range providerNames {
+		if strings.TrimSpace(providerName) == "" {
+			continue
+		}
+		cmd := exec.Command("kubectl", "get", "provider", providerName, "-n", namespace, "-o", "yaml")
+		output, err := utils.Run(cmd)
+		if err == nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "\n=== Provider %s ===\n%s\n", providerName, output)
+		}
+	}
+
+	if body, err := fetchServiceProxyBody(serviceNamespace, serviceName, servicePort, "/readyz"); err == nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "\n=== copilot-proxy /readyz ===\n%s\n", body)
+	}
+
+	if body, err := fetchServiceProxyBody(serviceNamespace, serviceName, servicePort, "/v1/models"); err == nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "\n=== copilot-proxy /v1/models ===\n%s\n", body)
 	}
 }
