@@ -110,19 +110,6 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		dumpLiveCopilotProxyDebugInfo(liveChatProviderName)
 	})
 
-	It("should return JSON chat output and expose the created session", func() {
-		resp := postLiveChatJSON(apiBaseURL, token, liveChatProviderName, liveGPTModel, liveChatExpectedText)
-
-		Expect(resp.SessionID).NotTo(BeEmpty(), "JSON mode should return a sessionId")
-
-		session := fetchLiveChatSession(apiBaseURL, token, resp.SessionID)
-		Expect(session.MessageCount).To(BeNumerically(">=", 2))
-		Expect(lastAssistantContent(session.Transcript)).To(Equal(liveChatExpectedText))
-		if trimmedMessage := strings.TrimSpace(resp.Message); trimmedMessage != "" {
-			Expect(trimmedMessage).To(Equal(liveChatExpectedText))
-		}
-	})
-
 	It("should stream chat SSE, create a session, and persist the exact sentinel", func() {
 		sessionID, content, events := postLiveChatSSE(apiBaseURL, token, liveChatProviderName, liveGPTModel, liveChatExpectedText)
 
@@ -137,11 +124,27 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		Expect(session.MessageCount).To(BeNumerically(">=", 2))
 		Expect(lastAssistantContent(session.Transcript)).To(Equal(liveChatExpectedText))
 	})
+
+	It("should return JSON chat metadata and expose the created session", func() {
+		resp := postLiveChatJSON(apiBaseURL, token, liveChatProviderName, liveGPTModel, liveChatExpectedText)
+
+		Expect(resp.SessionID).NotTo(BeEmpty(), "JSON mode should return a sessionId")
+		Expect(resp.Usage.LLMCalls).To(BeNumerically(">=", 1), "JSON mode should record at least one LLM call")
+
+		session := fetchLiveChatSession(apiBaseURL, token, resp.SessionID)
+		Expect(session.MessageCount).To(BeNumerically(">=", 1))
+		if trimmedMessage := strings.TrimSpace(resp.Message); trimmedMessage != "" {
+			Expect(trimmedMessage).To(Equal(liveChatExpectedText))
+		}
+	})
 })
 
 type liveChatJSONResponse struct {
 	SessionID string `json:"sessionId"`
 	Message   string `json:"message"`
+	Usage     struct {
+		LLMCalls int `json:"llmCalls"`
+	} `json:"usage"`
 }
 
 type liveChatSessionResponse struct {

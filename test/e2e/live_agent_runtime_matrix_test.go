@@ -159,8 +159,8 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			codexTaskWriteName,
 			codexPriorAgentName,
-			fmt.Sprintf("Create %s in the repository root containing exactly %s followed by a newline. Reply with exactly CREATED and nothing else.", codexNonceFile, codexNonce),
-			3,
+			fmt.Sprintf("Use the simplest possible edit to create %s in the repository root containing exactly %s followed by a newline. Reply with exactly CREATED and nothing else.", codexNonceFile, codexNonce),
+			6,
 			boolPtr(true),
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
 			"",
@@ -177,7 +177,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			claudeWorkerImage,
 			map[string]string{
 				"ORKA_MODEL":      claudeModel,
-				"ORKA_MAX_TURNS":  "3",
+				"ORKA_MAX_TURNS":  "6",
 				"ORKA_ALLOW_BASH": "true",
 				"ORKA_GIT_REPO":   liveRuntimeRepoURL,
 				"ORKA_GIT_REF":    liveRuntimeRepoRef,
