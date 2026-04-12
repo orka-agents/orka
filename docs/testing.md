@@ -70,6 +70,7 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/provider_advanced_test.go` | Provider rate-limit config coverage |
 | `test/e2e/live_copilot_proxy_test.go` | Live Orka Provider + `type: ai` path using copilot-proxy as the backend harness |
 | `test/e2e/live_chat_api_test.go` | Live chat SSE and JSON transport/session coverage using a proxy-backed Provider |
+| `test/e2e/live_anthropic_compat_test.go` | Live Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` coverage with default tools-enabled behavior |
 | `test/e2e/live_agent_runtime_matrix_test.go` | Live Orka runtime matrix: Codex+GPT, Claude Code+Claude, Copilot+Gemini |
 | `test/e2e/tools_test.go` | Built-in tools (including `web_fetch`, `file_write`) and custom Tool CRD |
 | `test/e2e/scheduled_task_test.go` | Cron scheduling, suspend, `concurrencyPolicy: Forbid`, history-limit cleanup |
@@ -89,6 +90,7 @@ The live copilot-proxy E2E path runs in a separate workflow and executes the foc
 
 - provider-backed `type: ai` tasks
 - chat SSE/JSON flows via `/api/v1/chat`
+- Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` flows with the default Orka tool loop enabled
 - external agent runtimes across `codex` + GPT, `claude` + Claude, and `copilot` + Gemini
 
 This is an **Orka** live integration suite, not a deep `copilot-proxy` feature suite. The proxy is test harness infrastructure that gives non-Copilot runtimes access to live GPT, Claude, and Gemini models in CI. The only proxy-specific assertions are smoke checks that the harness is alive and usable:

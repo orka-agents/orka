@@ -11,6 +11,8 @@ Orka acts as a **proxy** to whichever LLM provider is configured in your cluster
 | `POST` | `/anthropic/v1/messages` | Create a message (streaming & non-streaming) |
 | `GET` | `/anthropic/v1/models` | List available models from configured providers |
 
+PR-blocking live CI exercises this API directly against a live Claude-family backend by checking `/anthropic/v1/models` and both non-streaming and streaming `/anthropic/v1/messages` requests. Those live checks keep the default Orka tool-loop behavior enabled unless a client explicitly sets `X-Orka-Tools: disabled`.
+
 ## Authentication
 
 Two authentication methods are supported:
