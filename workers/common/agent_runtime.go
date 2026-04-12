@@ -143,31 +143,39 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 
 	// Checkout specific ref if provided (overrides branch)
 	if cfg.GitRef != "" {
-		fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin", cfg.GitRef)
-		fetchCmd.Dir = workspaceDir
-		fetchCmd.Stdout = os.Stdout
-		fetchCmd.Stderr = os.Stderr
-		if err := fetchCmd.Run(); err != nil {
+		if _, err := execGitContext(ctx, workspaceDir, "fetch", "origin", cfg.GitRef); err != nil {
 			return fmt.Errorf("git fetch ref failed: %w", err)
 		}
 
-		checkoutCmd := exec.CommandContext(ctx, "git", "checkout", cfg.GitRef)
-		checkoutCmd.Dir = workspaceDir
-		checkoutCmd.Stdout = os.Stdout
-		checkoutCmd.Stderr = os.Stderr
-		if err := checkoutCmd.Run(); err != nil {
+		if _, err := execGitContext(ctx, workspaceDir, "checkout", cfg.GitRef); err != nil {
 			// Ref may not exist as a local branch; fall back to FETCH_HEAD
-			fallbackCmd := exec.CommandContext(ctx, "git", "checkout", "FETCH_HEAD")
-			fallbackCmd.Dir = workspaceDir
-			fallbackCmd.Stdout = os.Stdout
-			fallbackCmd.Stderr = os.Stderr
-			if fbErr := fallbackCmd.Run(); fbErr != nil {
+			if _, fbErr := execGitContext(ctx, workspaceDir, "checkout", "FETCH_HEAD"); fbErr != nil {
 				return fmt.Errorf("git checkout ref failed: %w", err)
 			}
 		}
 	}
 
 	return nil
+}
+
+func gitSafeDirectoryArgs(dir string, args ...string) []string {
+	if strings.TrimSpace(dir) == "" {
+		return args
+	}
+
+	safeDir := dir
+	if absDir, err := filepath.Abs(dir); err == nil {
+		safeDir = absDir
+	}
+
+	return append([]string{"-c", "safe.directory=" + safeDir}, args...)
+}
+
+func execGitContext(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", gitSafeDirectoryArgs(dir, args...)...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 // AgentExecutor is a function that runs the agent and returns its output.

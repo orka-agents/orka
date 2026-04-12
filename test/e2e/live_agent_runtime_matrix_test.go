@@ -85,22 +85,25 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		Expect(ready.Error).To(BeEmpty())
 
 		By("discovering live runtime models by family")
-		gptModel = discoverProxyModelByFamilyViaServiceProxy(
+		gptModel = discoverPreferredProxyModelViaServiceProxy(
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
 			liveCopilotProxyServicePort(),
+			[]string{"gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.4", "gpt-5.2"},
 			"gpt-",
 		)
-		claudeModel = discoverProxyModelByFamilyViaServiceProxy(
+		claudeModel = discoverPreferredProxyModelViaServiceProxy(
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
 			liveCopilotProxyServicePort(),
+			[]string{"claude-sonnet-4.6", "claude-sonnet-4.5", "claude-sonnet-4"},
 			"claude-",
 		)
-		geminiModel = discoverProxyModelByFamilyViaServiceProxy(
+		geminiModel = discoverPreferredProxyModelViaServiceProxy(
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
 			liveCopilotProxyServicePort(),
+			[]string{"gemini-2.5-pro", "gemini-3.1-pro-preview", "gemini-3-flash-preview"},
 			"gemini-",
 		)
 

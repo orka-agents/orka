@@ -494,6 +494,17 @@ func discoverProxyModelByFamilyViaServiceProxy(serviceNamespace, serviceName str
 	return modelID
 }
 
+func discoverPreferredProxyModelViaServiceProxy(serviceNamespace, serviceName string, servicePort int, preferredIDs []string, prefixes ...string) string {
+	var modelID string
+	Eventually(func(g Gomega) {
+		catalog, err := fetchProxyModelCatalogViaServiceProxy(serviceNamespace, serviceName, servicePort)
+		g.Expect(err).NotTo(HaveOccurred())
+		modelID = firstPreferredProxyModel(catalog, preferredIDs, prefixes...)
+		g.Expect(modelID).NotTo(BeEmpty(), "proxy service should expose a preferred model matching %v", prefixes)
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+	return modelID
+}
+
 func firstProxyModelMatchingPrefixes(catalog proxyModelCatalog, prefixes ...string) string {
 	for _, modelID := range catalog.AllModelIDs {
 		if modelMatchesAnyPrefix(modelID, prefixes...) {
@@ -501,6 +512,23 @@ func firstProxyModelMatchingPrefixes(catalog proxyModelCatalog, prefixes ...stri
 		}
 	}
 	return ""
+}
+
+func firstPreferredProxyModel(catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) string {
+	for _, preferredID := range preferredIDs {
+		preferredID = strings.ToLower(strings.TrimSpace(preferredID))
+		if preferredID == "" {
+			continue
+		}
+
+		for _, modelID := range catalog.AllModelIDs {
+			if strings.EqualFold(strings.TrimSpace(modelID), preferredID) {
+				return modelID
+			}
+		}
+	}
+
+	return firstProxyModelMatchingPrefixes(catalog, prefixes...)
 }
 
 func modelMatchesAnyPrefix(modelID string, prefixes ...string) bool {

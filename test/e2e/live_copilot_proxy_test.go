@@ -82,7 +82,11 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(catalog.DataModelIDs).NotTo(BeEmpty(), "proxy should expose models via the OpenAI data field")
 		Expect(catalog.AllModelIDs).NotTo(BeEmpty(), "proxy should expose at least one model")
-		discoveredModel = firstProxyModelMatchingPrefixes(catalog, "gpt-")
+		discoveredModel = firstPreferredProxyModel(catalog, []string{
+			"gpt-5.4",
+			"gpt-5.2",
+			"gpt-5.4-mini",
+		}, "gpt-")
 		Expect(discoveredModel).To(BeElementOf(catalog.DataModelIDs))
 		Expect(discoveredModel).NotTo(BeEmpty(), "proxy should expose a GPT-family model")
 	})
@@ -91,10 +95,11 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		By("discovering a live GPT-family model from the proxy service")
 		model := discoveredModel
 		if model == "" {
-			model = discoverProxyModelByFamilyViaServiceProxy(
+			model = discoverPreferredProxyModelViaServiceProxy(
 				liveCopilotProxyServiceNamespace(),
 				liveCopilotProxyServiceName(),
 				liveCopilotProxyServicePort(),
+				[]string{"gpt-5.4", "gpt-5.2", "gpt-5.4-mini"},
 				"gpt-",
 			)
 		}

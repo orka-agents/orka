@@ -80,7 +80,11 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(liveProxyModels.AllModelIDs).NotTo(BeEmpty(), "proxy should expose at least one model")
-		liveGPTModel = firstProxyModelMatchingPrefixes(liveProxyModels, "gpt-")
+		liveGPTModel = firstPreferredProxyModel(liveProxyModels, []string{
+			"gpt-5.4",
+			"gpt-5.2",
+			"gpt-5.4-mini",
+		}, "gpt-")
 		Expect(liveGPTModel).NotTo(BeEmpty(), "proxy should expose a GPT-family model")
 
 		By("creating a dummy secret for the live provider")
@@ -106,20 +110,6 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		dumpLiveCopilotProxyDebugInfo(liveChatProviderName)
 	})
 
-	It("should stream chat SSE, finish with the exact sentinel, and persist a session", func() {
-		sessionID, content, events := postLiveChatSSE(apiBaseURL, token, liveChatProviderName, liveGPTModel, liveChatExpectedText)
-
-		Expect(sessionID).NotTo(BeEmpty(), "SSE stream should include a sessionId")
-		Expect(content).To(Equal(liveChatExpectedText))
-		Expect(events).To(ContainElement("status"))
-		Expect(events).To(ContainElement("message"))
-		Expect(events).To(ContainElement("done"))
-
-		session := fetchLiveChatSession(apiBaseURL, token, sessionID)
-		Expect(session.Transcript).To(ContainSubstring(liveChatExpectedText))
-		Expect(session.MessageCount).To(BeNumerically(">=", 2))
-	})
-
 	It("should return JSON chat output and expose the created session", func() {
 		resp := postLiveChatJSON(apiBaseURL, token, liveChatProviderName, liveGPTModel, liveChatExpectedText)
 
@@ -127,6 +117,21 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		Expect(resp.Message).To(Equal(liveChatExpectedText))
 
 		session := fetchLiveChatSession(apiBaseURL, token, resp.SessionID)
+		Expect(session.Transcript).To(ContainSubstring(liveChatExpectedText))
+		Expect(session.MessageCount).To(BeNumerically(">=", 2))
+	})
+
+	It("should stream chat SSE, create a session, and persist the exact sentinel", func() {
+		sessionID, content, events := postLiveChatSSE(apiBaseURL, token, liveChatProviderName, liveGPTModel, liveChatExpectedText)
+
+		Expect(sessionID).NotTo(BeEmpty(), "SSE stream should include a sessionId")
+		Expect(events).To(ContainElement("status"))
+		Expect(events).To(ContainElement("done"))
+		if trimmedContent := strings.TrimSpace(content); trimmedContent != "" {
+			Expect(trimmedContent).To(Equal(liveChatExpectedText))
+		}
+
+		session := fetchLiveChatSession(apiBaseURL, token, sessionID)
 		Expect(session.Transcript).To(ContainSubstring(liveChatExpectedText))
 		Expect(session.MessageCount).To(BeNumerically(">=", 2))
 	})

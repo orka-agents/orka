@@ -212,7 +212,7 @@ func resetReservedWorkspacePaths(workDir string) {
 
 // execGit runs a git command in the given directory and returns combined output.
 func execGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", gitSafeDirectoryArgs(dir, args...)...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	return string(out), err
