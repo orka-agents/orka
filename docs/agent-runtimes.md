@@ -10,6 +10,16 @@ Agent runtimes let Orka delegate task execution to external agent CLIs—such as
 | Claude Code CLI | `claude` | `ANTHROPIC_API_KEY` (direct) or `ANTHROPIC_FOUNDRY_API_KEY` (Azure AI Foundry) | GA |
 | GitHub Copilot CLI | `copilot` | `GITHUB_TOKEN` | Technical Preview |
 
+## Live Coverage
+
+PR-blocking live CI currently exercises these runtime scenarios against real model families:
+
+- `codex` + GPT with a pinned git workspace and `priorTaskRef`
+- `claude` + Claude with `sessionRef`
+- `copilot` + Gemini with a pinned public repo checkout
+
+This coverage is about Orka's runtime wiring and task/session/workspace behavior. The live backend used in CI is harness infrastructure, not the main product under test.
+
 ## Quick Start
 
 ### 1. Create a Secret
