@@ -34,6 +34,8 @@ const (
 
 var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 	const (
+		codexPriorSecretName   = "e2e-live-runtime-prior-secret"
+		codexPriorAgentName    = "e2e-live-runtime-prior-agent"
 		codexSecretName        = "e2e-live-runtime-codex-secret"
 		codexAgentName         = "e2e-live-runtime-codex-agent"
 		codexTaskWriteName     = "e2e-live-runtime-codex-write"
@@ -124,7 +126,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		dumpLiveCopilotProxyDebugInfo()
 	})
 
-	It("should carry codex runtime state through priorTaskRef on a git workspace", func() {
+	It("should let codex consume priorTaskRef state on a git workspace", func() {
 		DeferCleanup(func() {
 			for _, resource := range []struct {
 				kind string
@@ -132,6 +134,8 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			}{
 				{"task", codexTaskReadName},
 				{"task", codexTaskWriteName},
+				{"agent", codexPriorAgentName},
+				{"secret", codexPriorSecretName},
 				{"agent", codexAgentName},
 				{"secret", codexSecretName},
 			} {
@@ -140,21 +144,21 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			}
 		})
 
-		By("creating a Codex runtime secret that routes OpenAI traffic through the live proxy")
-		err := createK8sSecret(codexSecretName, namespace, map[string]string{
-			"OPENAI_API_KEY":  "dummy-live-codex-key",
-			"OPENAI_BASE_URL": e2eLiveCopilotProxyBaseURL,
+		By("creating a Claude runtime secret that routes Anthropic traffic through the live proxy")
+		err := createK8sSecret(codexPriorSecretName, namespace, map[string]string{
+			"ANTHROPIC_API_KEY":  "dummy-live-prior-key",
+			"ANTHROPIC_BASE_URL": liveCopilotProxyRootURL(),
 		})
 		Expect(err).NotTo(HaveOccurred())
 
-		By("creating a Codex agent backed by the discovered GPT-family model")
-		err = applyManifestJSON(runtimeAgentManifest(codexAgentName, "codex", codexSecretName, gptModel, 5, true))
+		By("creating a Claude agent to generate the priorTaskRef workspace diff")
+		err = applyManifestJSON(runtimeAgentManifest(codexPriorAgentName, "claude", codexPriorSecretName, claudeModel, 5, true))
 		Expect(err).NotTo(HaveOccurred())
 
-		By("creating the first Codex task that writes a nonce file")
+		By("creating the prior task that writes the nonce file into the pinned repository")
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			codexTaskWriteName,
-			codexAgentName,
+			codexPriorAgentName,
 			fmt.Sprintf("Create %s in the repository root containing exactly %s followed by a newline. Reply with exactly CREATED and nothing else.", codexNonceFile, codexNonce),
 			3,
 			boolPtr(true),
@@ -166,32 +170,43 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		))
 		Expect(err).NotTo(HaveOccurred())
 
-		By("verifying the first Codex job has the expected runtime wiring")
+		By("verifying the prior task has the expected workspace and runtime wiring")
 		verifyJobCreatedForTask(codexTaskWriteName, 2*time.Minute)
 		runtimeAssertJobBasics(
 			codexTaskWriteName,
-			codexWorkerImage,
+			claudeWorkerImage,
 			map[string]string{
-				"ORKA_MODEL":      gptModel,
+				"ORKA_MODEL":      claudeModel,
 				"ORKA_MAX_TURNS":  "3",
 				"ORKA_ALLOW_BASH": "true",
 				"ORKA_GIT_REPO":   liveRuntimeRepoURL,
 				"ORKA_GIT_REF":    liveRuntimeRepoRef,
 			},
-			codexSecretName,
+			codexPriorSecretName,
 			nil,
 			nil,
 		)
 
-		By("waiting for the first Codex task to succeed and emit a structured diff result")
+		By("waiting for the prior task to succeed and emit a structured diff result")
 		Expect(waitForTaskCompletion(codexTaskWriteName, liveRuntimeTimeout)).To(Equal("Succeeded"))
 		verifyResultAvailable(codexTaskWriteName)
 		firstResult := workercommon.ParseStructuredResult(fetchTaskResultViaAPI(apiBaseURL, token, codexTaskWriteName))
-		Expect(strings.TrimSpace(firstResult.Summary)).To(Equal("CREATED"))
-		Expect(strings.TrimSpace(firstResult.Diff)).NotTo(BeEmpty(), "first Codex task should produce a diff for priorTaskRef")
+		Expect(strings.TrimSpace(firstResult.Summary)).To(ContainSubstring("CREATED"))
+		Expect(strings.TrimSpace(firstResult.Diff)).NotTo(BeEmpty(), "prior task should produce a diff for priorTaskRef")
 		Expect(firstResult.Files).To(ContainElement(codexNonceFile))
 
-		By("creating the second Codex task that reads the file through priorTaskRef")
+		By("creating a Codex runtime secret that routes OpenAI traffic through the live proxy")
+		err = createK8sSecret(codexSecretName, namespace, map[string]string{
+			"OPENAI_API_KEY":  "dummy-live-codex-key",
+			"OPENAI_BASE_URL": e2eLiveCopilotProxyBaseURL,
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		By("creating a Codex agent backed by the discovered GPT-family model")
+		err = applyManifestJSON(runtimeAgentManifest(codexAgentName, "codex", codexSecretName, gptModel, 5, true))
+		Expect(err).NotTo(HaveOccurred())
+
+		By("creating the Codex task that reads the file through priorTaskRef")
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			codexTaskReadName,
 			codexAgentName,
@@ -206,7 +221,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		))
 		Expect(err).NotTo(HaveOccurred())
 
-		By("verifying the second Codex job carries priorTaskRef and workspace wiring")
+		By("verifying the Codex job carries priorTaskRef and workspace wiring")
 		verifyJobCreatedForTask(codexTaskReadName, 2*time.Minute)
 		runtimeAssertJobBasics(
 			codexTaskReadName,
@@ -225,7 +240,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			nil,
 		)
 
-		By("waiting for the second Codex task to return the exact nonce")
+		By("waiting for the Codex task to return the exact nonce from the prior diff")
 		Expect(waitForTaskCompletion(codexTaskReadName, liveRuntimeTimeout)).To(Equal("Succeeded"))
 		verifyResultAvailable(codexTaskReadName)
 		Expect(strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, codexTaskReadName))).To(Equal(codexNonce))

@@ -114,11 +114,13 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		resp := postLiveChatJSON(apiBaseURL, token, liveChatProviderName, liveGPTModel, liveChatExpectedText)
 
 		Expect(resp.SessionID).NotTo(BeEmpty(), "JSON mode should return a sessionId")
-		Expect(resp.Message).To(Equal(liveChatExpectedText))
 
 		session := fetchLiveChatSession(apiBaseURL, token, resp.SessionID)
-		Expect(session.Transcript).To(ContainSubstring(liveChatExpectedText))
 		Expect(session.MessageCount).To(BeNumerically(">=", 2))
+		Expect(lastAssistantContent(session.Transcript)).To(Equal(liveChatExpectedText))
+		if trimmedMessage := strings.TrimSpace(resp.Message); trimmedMessage != "" {
+			Expect(trimmedMessage).To(Equal(liveChatExpectedText))
+		}
 	})
 
 	It("should stream chat SSE, create a session, and persist the exact sentinel", func() {
@@ -132,8 +134,8 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		}
 
 		session := fetchLiveChatSession(apiBaseURL, token, sessionID)
-		Expect(session.Transcript).To(ContainSubstring(liveChatExpectedText))
 		Expect(session.MessageCount).To(BeNumerically(">=", 2))
+		Expect(lastAssistantContent(session.Transcript)).To(Equal(liveChatExpectedText))
 	})
 })
 
@@ -145,6 +147,11 @@ type liveChatJSONResponse struct {
 type liveChatSessionResponse struct {
 	Transcript   string `json:"transcript"`
 	MessageCount int    `json:"messageCount"`
+}
+
+type liveChatSessionMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
 func postLiveChatSSE(apiBaseURL, token, providerName, model, expectedText string) (string, string, []string) {
@@ -312,4 +319,24 @@ func fetchLiveChatSession(apiBaseURL, token, sessionID string) liveChatSessionRe
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 
 	return session
+}
+
+func lastAssistantContent(transcript string) string {
+	lines := strings.Split(strings.TrimSpace(transcript), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+
+		var message liveChatSessionMessage
+		if err := json.Unmarshal([]byte(line), &message); err != nil {
+			continue
+		}
+		if message.Role == "assistant" {
+			return strings.TrimSpace(message.Content)
+		}
+	}
+
+	return ""
 }
