@@ -1,12 +1,6 @@
 //go:build e2e
 // +build e2e
 
-/*
-Copyright (c) 2026.
-
-MIT License - see LICENSE file for details.
-*/
-
 package e2e
 
 import (
