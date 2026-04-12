@@ -7,6 +7,11 @@ spec:
     type: claude
     defaultMaxTurns: 50
     defaultAllowBash: true
+    defaultAllowedTools:
+      - Read
+      - Bash
+      - Glob
+      - Grep
   model:
     name: claude-sonnet-4-20250514
   systemPrompt:
@@ -16,4 +21,4 @@ spec:
       - "APPROVED" if the code is ready
       - "CHANGES_NEEDED" with specific feedback if changes are required
   secretRef:
-    name: anthropic-credentials
+    name: claude-credentials

@@ -1,4 +1,4 @@
-# Claude Code agent that writes code and creates PRs
+# Claude Code agent that writes code and pushes a feature branch.
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
@@ -8,54 +8,63 @@ spec:
     type: claude
     defaultMaxTurns: 100
     defaultAllowBash: true
+    defaultAllowedTools:
+      - Read
+      - Write
+      - Edit
+      - Bash
+      - Glob
+      - Grep
   systemPrompt:
     inline: |
       You are a software developer. When given a task:
-      1. Create a feature branch from main
-      2. Implement the changes
-      3. Run any existing tests
-      4. Commit with a descriptive message
-      5. Push and create a PR using `gh pr create`
-      6. Report the PR number and URL in your final output
+      1. Work in the repository and branch provided through workspace config.
+      2. Implement the requested changes cleanly.
+      3. Run relevant tests if they exist.
+      4. Commit with a descriptive message.
+      5. Push to the configured pushBranch.
+      6. Report what changed and any test results.
+
+      Do not create or merge pull requests yourself.
+      The coordinator handles GitHub workflow steps with Orka's built-in tools.
   secretRef:
-    name: claude-coder-secrets
+    name: claude-credentials
 ---
-# Coordinator agent that orchestrates the full CI/CD flow
+# Coordinator agent that orchestrates the full CI/CD flow with built-in PR tools.
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: cicd-coordinator
 spec:
   providerRef:
-    name: anthropic-provider
+    name: my-provider
   model:
     name: claude-sonnet-4-20250514
   systemPrompt:
     inline: |
       You are a CI/CD coordinator. You manage the full lifecycle of code changes:
 
-      1. Use delegate_task to assign coding work to the claude-coder agent.
-         Include workspace.gitRepo and workspace.branch so the agent clones the right repo.
-      2. Use wait_for_tasks to get the result (which should include the PR number).
-      3. Use github-check-ci to poll CI status on the PR's head commit.
-         Poll every 30 seconds until checks complete (allow up to 10 minutes).
-      4. If CI passes: use github-merge-pr to merge the PR.
-      5. If CI fails: delegate_task to claude-coder to fix the failures,
-         referencing the same branch.
-      6. Report the final outcome.
+      1. Read the repository details from the task prompt:
+         - gitRepo
+         - branch
+         - gitSecretRef
+         - pushBranch
+      2. Delegate the implementation to the claude-coder agent with that workspace config.
+      3. Wait for the coder to finish.
+      4. Create a pull request with create_pull_request.
+         Remember the PR number after the first PR is opened.
+      5. Call auto_merge_pull_request to wait for CI and merge automatically.
+      6. If auto_merge_pull_request reports ci_failed or timeout:
+         - Summarize the failure for the coder.
+         - Delegate a fix to claude-coder using prior_task and the same pushBranch.
+         - Wait for the fix to finish.
+         - Reuse the existing PR and call auto_merge_pull_request again.
+      7. Report the final PR URL and merge outcome.
 
-      Always include the full owner/repo when calling GitHub tools.
-  tools:
-    - name: delegate_task
-    - name: wait_for_tasks
-    - name: github-check-ci
-    - name: github-merge-pr
-    - name: github-get-pr
+      Use Orka's built-in PR tools rather than shelling out to GitHub CLI.
   coordination:
     enabled: true
     maxConcurrentChildren: 3
     maxDepth: 2
     allowedAgents:
       - name: claude-coder
-  secretRef:
-    name: llm-credentials

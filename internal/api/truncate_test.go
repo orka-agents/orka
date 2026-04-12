@@ -121,17 +121,3 @@ func TestTruncateMessages_BudgetTooSmallForAnythingButFirst(t *testing.T) {
 		t.Error("should keep first message even if over budget")
 	}
 }
-
-func TestEstimateMessageTokens_IncludesToolCalls(t *testing.T) {
-	m := llm.Message{
-		Content: "test",
-		ToolCalls: []llm.ToolCall{
-			{Name: "my_tool", Arguments: json.RawMessage(`{"key":"value"}`)},
-		},
-	}
-	tokens := llm.EstimateMessageTokens(m)
-	contentOnly := llm.EstimateTokens("test")
-	if tokens <= contentOnly {
-		t.Error("token count should include tool call content")
-	}
-}

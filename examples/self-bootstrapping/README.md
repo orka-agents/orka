@@ -13,17 +13,19 @@ agent dynamically creates specialist agents and delegates work to them.
 
 ## Usage
 
+Update `spec.providerRef.name` in `coordinator-agent.yaml` to match the Provider CRD in your cluster before applying it.
+
 ### Via YAML
 ```bash
-kubectl apply -f coordinator-agent.yaml
-kubectl apply -f coordinator-task.yaml
+kubectl apply -f examples/self-bootstrapping/coordinator-agent.yaml
+kubectl apply -f examples/self-bootstrapping/coordinator-task.yaml
 ```
 
 ### Via Chat (One-Shot)
 In the Orka chat, simply ask:
 > "Create a coordinator to build a TODO REST API in Go with tests"
 
-The chat will use `create_agent` with `initialPrompt` to bootstrap everything in one step.
+The chat can bootstrap the coordinator and let it create the specialists it needs.
 
 ### Via CLI
 ```bash

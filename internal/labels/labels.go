@@ -37,6 +37,4 @@ const (
 	AnnotationMaxRetries        = "orka.ai/max-retries"
 	AnnotationRetryCount        = "orka.ai/retry-count"
 	AnnotationOriginalPrompt    = "orka.ai/original-prompt"
-	AnnotationRetriedFrom       = "orka.ai/retried-from"
-	AnnotationRetriedAs         = "orka.ai/retried-as"
 )

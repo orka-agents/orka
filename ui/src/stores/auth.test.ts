@@ -26,13 +26,4 @@ describe('useAuthStore', () => {
     useAuthStore.getState().clearToken()
     expect(useAuthStore.getState().token).toBeNull()
   })
-
-  it('isAuthenticated returns true when token is set', () => {
-    useAuthStore.getState().setToken('abc123')
-    expect(useAuthStore.getState().isAuthenticated()).toBe(true)
-  })
-
-  it('isAuthenticated returns false when token is null', () => {
-    expect(useAuthStore.getState().isAuthenticated()).toBe(false)
-  })
 })

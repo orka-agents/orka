@@ -1,9 +1,0 @@
-apiVersion: core.orka.ai/v1alpha1
-kind: Provider
-metadata:
-  name: llm-provider
-spec:
-  type: anthropic
-  secretRef:
-    name: anthropic-api-key
-  defaultModel: claude-sonnet-4-20250514

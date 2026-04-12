@@ -7,6 +7,13 @@ spec:
     type: claude
     defaultMaxTurns: 100
     defaultAllowBash: true
+    defaultAllowedTools:
+      - Read
+      - Write
+      - Edit
+      - Bash
+      - Glob
+      - Grep
   model:
     name: claude-sonnet-4-20250514
   systemPrompt:
@@ -14,4 +21,4 @@ spec:
       You are a coding agent. Write clean, well-tested code.
       If you receive FEEDBACK FROM REVIEW, address all feedback items.
   secretRef:
-    name: anthropic-credentials
+    name: claude-credentials

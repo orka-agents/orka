@@ -41,12 +41,6 @@ func RuntimeSecretCandidates(runtimeType corev1alpha1.AgentRuntimeType) []string
 	}
 }
 
-// GitCredentialSecretCandidates returns the well-known secret names that can
-// authenticate git operations for agent tasks.
-func GitCredentialSecretCandidates() []string {
-	return append([]string(nil), gitCredentialSecretCandidates...)
-}
-
 // FirstPresentSecretName returns the first candidate found in the present map.
 func FirstPresentSecretName(present map[string]bool, candidates []string) string {
 	for _, name := range candidates {
@@ -100,7 +94,7 @@ func resolveWorkspaceGitSecretRef(ctx context.Context, k8sClient client.Reader, 
 		return &corev1.LocalObjectReference{Name: agent.Spec.SecretRef.Name}, nil
 	}
 
-	name, err := firstExistingSecretName(ctx, k8sClient, namespace, GitCredentialSecretCandidates())
+	name, err := firstExistingSecretName(ctx, k8sClient, namespace, append([]string(nil), gitCredentialSecretCandidates...))
 	if err != nil {
 		return nil, err
 	}

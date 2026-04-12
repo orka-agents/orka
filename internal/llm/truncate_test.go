@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestEstimateTokens(t *testing.T) {
+func Test_estimateTokens(t *testing.T) {
 	tests := []struct {
 		name string
 		text string
@@ -23,14 +23,14 @@ func TestEstimateTokens(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := EstimateTokens(tt.text); got != tt.want {
-				t.Errorf("EstimateTokens(%q) = %d, want %d", tt.text, got, tt.want)
+			if got := estimateTokens(tt.text); got != tt.want {
+				t.Errorf("estimateTokens(%q) = %d, want %d", tt.text, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestEstimateMessageTokens(t *testing.T) {
+func Test_estimateMessageTokens(t *testing.T) {
 	tests := []struct {
 		name string
 		msg  Message
@@ -39,7 +39,7 @@ func TestEstimateMessageTokens(t *testing.T) {
 		{
 			name: "content only",
 			msg:  Message{Content: "hello world!"},
-			want: EstimateTokens("hello world!"),
+			want: estimateTokens("hello world!"),
 		},
 		{
 			name: "empty message",
@@ -54,7 +54,7 @@ func TestEstimateMessageTokens(t *testing.T) {
 					{Name: "search", Arguments: json.RawMessage(`{"q":"hi"}`)},
 				},
 			},
-			want: EstimateTokens("text") + EstimateTokens("search") + EstimateTokens(`{"q":"hi"}`),
+			want: estimateTokens("text") + estimateTokens("search") + estimateTokens(`{"q":"hi"}`),
 		},
 		{
 			name: "multiple tool calls",
@@ -64,13 +64,13 @@ func TestEstimateMessageTokens(t *testing.T) {
 					{Name: "bb", Arguments: json.RawMessage(`{"x":1}`)},
 				},
 			},
-			want: EstimateTokens("a") + EstimateTokens("{}") + EstimateTokens("bb") + EstimateTokens(`{"x":1}`),
+			want: estimateTokens("a") + estimateTokens("{}") + estimateTokens("bb") + estimateTokens(`{"x":1}`),
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := EstimateMessageTokens(tt.msg); got != tt.want {
-				t.Errorf("EstimateMessageTokens() = %d, want %d", got, tt.want)
+			if got := estimateMessageTokens(tt.msg); got != tt.want {
+				t.Errorf("estimateMessageTokens() = %d, want %d", got, tt.want)
 			}
 		})
 	}

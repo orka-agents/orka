@@ -3,10 +3,6 @@ import { cn } from '@/lib/utils'
 import { ChatToolCall } from './chat-tool-call'
 import type { ChatMessage as ChatMessageType } from '@/schemas/chat'
 
-function formatMarkdown(text: string): string {
-  return text
-}
-
 export function ChatMessage({ message }: { message: ChatMessageType }) {
   // Tool call/result messages get their own compact display
   if (message.role === 'tool_call' || message.role === 'tool_result') {
@@ -55,7 +51,7 @@ export function ChatMessage({ message }: { message: ChatMessageType }) {
               : 'bg-muted text-foreground',
           )}
         >
-          <div className="whitespace-pre-wrap">{formatMarkdown(message.content)}</div>
+          <div className="whitespace-pre-wrap">{message.content}</div>
         </div>
         {message.usage && (
           <div className="flex gap-3 px-2 text-[10px] text-muted-foreground">
