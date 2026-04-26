@@ -22,7 +22,7 @@ func TestBuildClaudeArgs_Minimal(t *testing.T) {
 		MaxTurns: 50,
 	}
 
-	args := buildClaudeArgs(cfg)
+	args := buildClaudeArgs(cfg, cfg.Prompt)
 
 	// Must contain --print, --verbose, --max-turns, and prompt
 	assertContains(t, args, "--print")
@@ -48,7 +48,7 @@ func TestBuildClaudeArgs_Full(t *testing.T) {
 		DisallowedTools: []string{"Bash"},
 	}
 
-	args := buildClaudeArgs(cfg)
+	args := buildClaudeArgs(cfg, cfg.Prompt)
 
 	assertContains(t, args, "--model")
 	assertContains(t, args, "claude-sonnet-4-20250514")
@@ -81,7 +81,7 @@ func TestBuildClaudeArgs_AllowBash(t *testing.T) {
 		MaxTurns: 50,
 	}
 
-	args := buildClaudeArgs(cfg)
+	args := buildClaudeArgs(cfg, cfg.Prompt)
 	assertContains(t, args, "--dangerously-skip-permissions")
 }
 
@@ -183,7 +183,7 @@ func TestBuildClaudeArgs_NoTools(t *testing.T) {
 		MaxTurns: 10,
 	}
 
-	args := buildClaudeArgs(cfg)
+	args := buildClaudeArgs(cfg, cfg.Prompt)
 
 	assertContains(t, args, "--print")
 	assertContains(t, args, "--verbose")
@@ -214,7 +214,7 @@ func TestBuildClaudeArgs_PromptIsLast(t *testing.T) {
 		DisallowedTools: []string{"Bash"},
 	}
 
-	args := buildClaudeArgs(cfg)
+	args := buildClaudeArgs(cfg, cfg.Prompt)
 
 	// Prompt uses -p flag, so prompt should be last arg
 	if args[len(args)-1] != "my prompt text" {

@@ -123,7 +123,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 			Name:      jobName,
 			Namespace: task.Namespace,
 			Labels: map[string]string{
-				labels.LabelTask:     task.Name,
+				labels.LabelTask:     labels.SelectorValue(task.Name),
 				labels.LabelTaskType: string(task.Spec.Type),
 			},
 		},
@@ -132,7 +132,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						labels.LabelTask:     task.Name,
+						labels.LabelTask:     labels.SelectorValue(task.Name),
 						labels.LabelTaskType: string(task.Spec.Type),
 					},
 				},
@@ -399,7 +399,7 @@ func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, 
 	}
 
 	// Add parent task env var for inter-agent messaging
-	if parentTask, ok := task.Labels[labels.LabelParentTask]; ok {
+	if parentTask := labels.ParentTaskName(task.Labels, task.Annotations); parentTask != "" {
 		envVars = append(envVars,
 			corev1.EnvVar{Name: "ORKA_PARENT_TASK", Value: parentTask},
 		)
@@ -1027,6 +1027,9 @@ func (b *JobBuilder) addAgentWorkspaceEnvVars(
 		envVars = append(envVars, corev1.EnvVar{
 			Name: "ORKA_PUSH_BRANCH", Value: ws.PushBranch,
 		})
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "ORKA_REQUIRE_PUSH_BRANCH", Value: "true",
+		})
 	}
 	return envVars
 }
@@ -1212,7 +1215,7 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 			Name:      job.Name + "-skills",
 			Namespace: job.Namespace,
 			Labels: map[string]string{
-				labels.LabelTask:    task.Name,
+				labels.LabelTask:    labels.SelectorValue(task.Name),
 				labels.LabelPurpose: "skills",
 				labels.LabelManaged: "true",
 			},

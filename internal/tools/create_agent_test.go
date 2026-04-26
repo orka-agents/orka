@@ -359,14 +359,17 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 	}
 
 	// Verify labels
-	if agent.Labels[labels.LabelParentTask] != parentTaskName {
-		t.Errorf("label orka.ai/parent-task = %q, want %q", agent.Labels[labels.LabelParentTask], parentTaskName)
+	if agent.Labels[labels.LabelParentTask] != labels.SelectorValue(parentTaskName) {
+		t.Errorf("label orka.ai/parent-task = %q, want %q", agent.Labels[labels.LabelParentTask], labels.SelectorValue(parentTaskName))
 	}
 	if agent.Labels[labels.LabelCreatedBy] != createAgentToolName {
 		t.Errorf("label orka.ai/created-by = %q, want %q", agent.Labels[labels.LabelCreatedBy], createAgentToolName)
 	}
 	if agent.Labels[labels.LabelAgentRole] != "coder" {
 		t.Errorf("label orka.ai/agent-role = %q, want %q", agent.Labels[labels.LabelAgentRole], "coder")
+	}
+	if agent.Annotations[labels.AnnotationParentTaskName] != parentTaskName {
+		t.Errorf("annotation orka.ai/parent-task-name = %q, want %q", agent.Annotations[labels.AnnotationParentTaskName], parentTaskName)
 	}
 }
 

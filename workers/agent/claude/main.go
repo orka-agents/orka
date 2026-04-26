@@ -36,7 +36,24 @@ func main() {
 
 // executeClaude invokes the Claude Code CLI and returns its output.
 func executeClaude(ctx context.Context, cfg *common.AgentConfig) (string, error) {
-	args := buildClaudeArgs(cfg)
+	result, err := executeClaudePrompt(ctx, cfg, cfg.Prompt)
+	if err != nil {
+		return result, err
+	}
+
+	return common.EnsureRequiredSecurityArtifacts(
+		ctx,
+		cfg,
+		result,
+		func(followUpCtx context.Context, prompt string) (string, error) {
+			followUpCfg := *cfg
+			return executeClaudePrompt(followUpCtx, &followUpCfg, prompt)
+		},
+	)
+}
+
+func executeClaudePrompt(ctx context.Context, cfg *common.AgentConfig, prompt string) (string, error) {
+	args := buildClaudeArgs(cfg, prompt)
 
 	fmt.Printf("Executing: claude %s\n", strings.Join(args, " "))
 
@@ -82,7 +99,7 @@ func executeClaude(ctx context.Context, cfg *common.AgentConfig) (string, error)
 }
 
 // buildClaudeArgs constructs the CLI arguments for the claude command.
-func buildClaudeArgs(cfg *common.AgentConfig) []string {
+func buildClaudeArgs(cfg *common.AgentConfig, prompt string) []string {
 	args := []string{
 		"--print",   // non-interactive: print output and exit
 		"--verbose", // verbose output for logging
@@ -113,7 +130,7 @@ func buildClaudeArgs(cfg *common.AgentConfig) []string {
 	}
 
 	// Prompt (use -p flag to avoid ambiguity with variadic tool flags)
-	args = append(args, "-p", cfg.Prompt)
+	args = append(args, "-p", prompt)
 
 	return args
 }

@@ -41,6 +41,23 @@ func main() {
 
 // executeCodex invokes the Codex CLI and returns its final response.
 func executeCodex(ctx context.Context, cfg *common.AgentConfig) (string, error) {
+	result, err := executeCodexPrompt(ctx, cfg, cfg.Prompt)
+	if err != nil {
+		return result, err
+	}
+
+	return common.EnsureRequiredSecurityArtifacts(
+		ctx,
+		cfg,
+		result,
+		func(followUpCtx context.Context, prompt string) (string, error) {
+			followUpCfg := *cfg
+			return executeCodexPrompt(followUpCtx, &followUpCfg, prompt)
+		},
+	)
+}
+
+func executeCodexPrompt(ctx context.Context, cfg *common.AgentConfig, prompt string) (string, error) {
 	if !allowBashEnabled() {
 		return "", errCodexRequiresBash
 	}
@@ -78,7 +95,7 @@ func executeCodex(ctx context.Context, cfg *common.AgentConfig) (string, error) 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = io.MultiWriter(&stdout, os.Stdout)
 	cmd.Stderr = io.MultiWriter(&stderr, os.Stderr)
-	cmd.Stdin = strings.NewReader(cfg.Prompt)
+	cmd.Stdin = strings.NewReader(prompt)
 
 	dir := workspaceDir
 	if cfg.SubPath != "" {

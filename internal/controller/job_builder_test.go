@@ -1157,6 +1157,7 @@ func TestJobBuilder_Build_AgentTask_EnvVars(t *testing.T) {
 		{"ORKA_GIT_REF", "abc123"},
 		{"ORKA_WORKSPACE_SUBPATH", "src"},
 		{"ORKA_PUSH_BRANCH", "feature/my-change"},
+		{"ORKA_REQUIRE_PUSH_BRANCH", "true"},
 	}
 
 	for _, tt := range tests {
@@ -1799,11 +1800,15 @@ func TestJobBuilder_Build_TruncatesLongJobNamesToKubernetesLimit(t *testing.T) {
 	if !strings.HasSuffix(job.Name, "-job-12345678-0") {
 		t.Fatalf("job.Name = %q, want suffix %q", job.Name, "-job-12345678-0")
 	}
-	if job.Labels[labels.LabelTask] != task.Name {
-		t.Fatalf("job.Labels[%q] = %q, want original task name %q", labels.LabelTask, job.Labels[labels.LabelTask], task.Name)
+	wantTaskLabel := labels.SelectorValue(task.Name)
+	if job.Labels[labels.LabelTask] != wantTaskLabel {
+		t.Fatalf("job.Labels[%q] = %q, want selector-safe task label %q", labels.LabelTask, job.Labels[labels.LabelTask], wantTaskLabel)
 	}
-	if job.Spec.Template.Labels[labels.LabelTask] != task.Name {
-		t.Fatalf("pod label %q = %q, want original task name %q", labels.LabelTask, job.Spec.Template.Labels[labels.LabelTask], task.Name)
+	if job.Spec.Template.Labels[labels.LabelTask] != wantTaskLabel {
+		t.Fatalf("pod label %q = %q, want selector-safe task label %q", labels.LabelTask, job.Spec.Template.Labels[labels.LabelTask], wantTaskLabel)
+	}
+	if len(job.Labels[labels.LabelTask]) > 63 {
+		t.Fatalf("job label %q length = %d, want <= 63", labels.LabelTask, len(job.Labels[labels.LabelTask]))
 	}
 }
 
@@ -1842,6 +1847,40 @@ func TestJobBuilder_Build_AgentTask_WithTimeout(t *testing.T) {
 	}
 	if *job.Spec.ActiveDeadlineSeconds != 600 {
 		t.Errorf("ActiveDeadlineSeconds = %d, want 600", *job.Spec.ActiveDeadlineSeconds)
+	}
+}
+
+func TestJobBuilder_Build_UsesParentTaskAnnotationForEnvVar(t *testing.T) {
+	builder := setupJobBuilder()
+	parentName := "very-long-parent-task-name-that-exceeds-kubernetes-label-limits-1234567890"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-task",
+			Namespace: defaultNS,
+			Labels: map[string]string{
+				labels.LabelParentTask: labels.SelectorValue(parentName),
+			},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName: parentName,
+			},
+			UID: types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "ORKA_PARENT_TASK")
+	if !ok {
+		t.Fatal("Missing ORKA_PARENT_TASK")
+	}
+	if ev.Value != parentName {
+		t.Fatalf("ORKA_PARENT_TASK = %q, want %q", ev.Value, parentName)
 	}
 }
 
@@ -2258,13 +2297,14 @@ func TestAddAgentWorkspaceEnvVars_AllFields(t *testing.T) {
 	}
 	envVars := jb.addAgentWorkspaceEnvVars(nil, task)
 	expectedVars := map[string]string{
-		"ORKA_GIT_REPO":          "https://github.com/org/repo",
-		"ORKA_GIT_BRANCH":        "main",
-		"ORKA_GIT_REF":           "abc123",
-		"ORKA_WORKSPACE_SUBPATH": "src/",
-		"ORKA_FORK_REPO":         "https://github.com/fork/repo",
-		"ORKA_PR_BASE_BRANCH":    "develop",
-		"ORKA_PUSH_BRANCH":       "feature-branch",
+		"ORKA_GIT_REPO":            "https://github.com/org/repo",
+		"ORKA_GIT_BRANCH":          "main",
+		"ORKA_GIT_REF":             "abc123",
+		"ORKA_WORKSPACE_SUBPATH":   "src/",
+		"ORKA_FORK_REPO":           "https://github.com/fork/repo",
+		"ORKA_PR_BASE_BRANCH":      "develop",
+		"ORKA_PUSH_BRANCH":         "feature-branch",
+		"ORKA_REQUIRE_PUSH_BRANCH": "true",
 	}
 	envMap := make(map[string]string)
 	for _, e := range envVars {

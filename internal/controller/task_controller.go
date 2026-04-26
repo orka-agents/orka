@@ -112,6 +112,18 @@ func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1
 	})
 }
 
+func childTaskStatusesEqual(a, b []corev1alpha1.ChildTaskStatus) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return slices.EqualFunc(a, b, func(left, right corev1alpha1.ChildTaskStatus) bool {
+		return left.Name == right.Name &&
+			left.Agent == right.Agent &&
+			left.Phase == right.Phase &&
+			left.Result == right.Result
+	})
+}
+
 // Reconcile handles the reconciliation loop for Task resources
 func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -420,7 +432,7 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 	}
 
 	log := logf.FromContext(ctx)
-	parentName := task.Labels[labels.LabelParentTask]
+	parentName := labels.ParentTaskName(task.Labels, task.Annotations)
 	depthInt, _ := strconv.Atoi(depthStr)
 
 	// Look up parent task to find its agent's coordination config
@@ -473,7 +485,7 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 				agentNS = task.Namespace
 			}
 			if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.AgentRef.Name, Namespace: agentNS}, childAgent); err == nil {
-				if childAgent.Labels[labels.LabelCreatedBy] == "create_agent" && childAgent.Labels[labels.LabelParentTask] == parentName {
+				if childAgent.Labels[labels.LabelCreatedBy] == "create_agent" && labels.ParentTaskName(childAgent.Labels, childAgent.Annotations) == parentName {
 					allowed = true
 				}
 			}
@@ -488,7 +500,7 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 	if coord.MaxConcurrentChildren > 0 {
 		var siblings corev1alpha1.TaskList
 		if err := r.List(ctx, &siblings, client.InNamespace(task.Namespace),
-			client.MatchingLabels{labels.LabelParentTask: parentName}); err != nil {
+			client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parentName)}); err != nil {
 			log.Error(err, "failed to list sibling tasks")
 			return ctrl.Result{}, err, true
 		}
@@ -622,7 +634,18 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	if _, isChild := task.Labels[labels.LabelParentTask]; !isChild {
 		var children corev1alpha1.TaskList
 		if err := r.List(ctx, &children, client.InNamespace(task.Namespace),
-			client.MatchingLabels{labels.LabelParentTask: task.Name}); err == nil && len(children.Items) > 0 {
+			client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(task.Name)}); err == nil {
+			slices.SortFunc(children.Items, func(a, b corev1alpha1.Task) int {
+				switch {
+				case a.Name < b.Name:
+					return -1
+				case a.Name > b.Name:
+					return 1
+				default:
+					return 0
+				}
+			})
+
 			childStatuses := make([]corev1alpha1.ChildTaskStatus, 0, len(children.Items))
 			for _, child := range children.Items {
 				phase := child.Status.Phase
@@ -650,9 +673,11 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 				}
 				childStatuses = append(childStatuses, cs)
 			}
-			if len(childStatuses) > 0 {
-				task.Status.ChildTasks = childStatuses
-				if err := r.Status().Update(ctx, task); err != nil {
+			if !childTaskStatusesEqual(task.Status.ChildTasks, childStatuses) {
+				childStatusesCopy := append([]corev1alpha1.ChildTaskStatus(nil), childStatuses...)
+				if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+					t.Status.ChildTasks = childStatusesCopy
+				}); err != nil {
 					log.Error(err, "failed to update child task status")
 				}
 			}
@@ -700,7 +725,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	// (e.g., missing secrets, missing configmaps, image pull errors)
 	var podList corev1.PodList
 	if err := r.List(ctx, &podList, client.InNamespace(task.Namespace),
-		client.MatchingLabels{labels.LabelTask: task.Name}); err == nil {
+		client.MatchingLabels{labels.LabelTask: labels.SelectorValue(task.Name)}); err == nil {
 		for i := range podList.Items {
 			pod := &podList.Items[i]
 			if pod.Status.Phase != corev1.PodPending {
@@ -772,7 +797,7 @@ func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, 
 		return nil
 	}
 
-	parentName := task.Labels[labels.LabelParentTask]
+	parentName := labels.ParentTaskName(task.Labels, task.Annotations)
 	if parentName == "" {
 		return nil
 	}
@@ -865,16 +890,23 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 
 	// Update the Agent's LastUsed timestamp so TTL tracking works
 	if task.Spec.AgentRef != nil {
-		agent := &corev1alpha1.Agent{}
-		if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.AgentRef.Name, Namespace: task.Namespace}, agent); err == nil {
-			agent.Status.LastUsed = &now
-			if err := r.Status().Update(ctx, agent); err != nil {
-				log.Error(err, "failed to update agent LastUsed")
-			}
+		if err := r.updateAgentLastUsed(ctx, task.Namespace, task.Spec.AgentRef.Name, now); err != nil && !apierrors.IsNotFound(err) {
+			log.Error(err, "failed to update agent LastUsed")
 		}
 	}
 
 	return ctrl.Result{RequeueAfter: time.Second}, nil
+}
+
+func (r *TaskReconciler) updateAgentLastUsed(ctx context.Context, namespace, name string, at metav1.Time) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		agent := &corev1alpha1.Agent{}
+		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, agent); err != nil {
+			return err
+		}
+		agent.Status.LastUsed = &at
+		return r.Status().Update(ctx, agent)
+	})
 }
 
 // failTask marks a task as failed
@@ -1138,8 +1170,10 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	if now.Before(scheduledTime) {
 		nextSchedule := metav1.NewTime(scheduledTime)
 		if task.Status.NextScheduleTime == nil || !task.Status.NextScheduleTime.Equal(&nextSchedule) {
-			task.Status.NextScheduleTime = &nextSchedule
-			_ = r.Status().Update(ctx, task)
+			nextScheduleCopy := nextSchedule
+			_ = r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+				t.Status.NextScheduleTime = &nextScheduleCopy
+			})
 		}
 		return ctrl.Result{RequeueAfter: time.Until(scheduledTime)}, nil
 	}
@@ -1155,8 +1189,10 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 		// Advance to next schedule time
 		next := sched.Next(now)
 		nextSchedule := metav1.NewTime(next)
-		task.Status.NextScheduleTime = &nextSchedule
-		_ = r.Status().Update(ctx, task)
+		nextScheduleCopy := nextSchedule
+		_ = r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+			t.Status.NextScheduleTime = &nextScheduleCopy
+		})
 		return ctrl.Result{RequeueAfter: time.Until(next)}, nil
 	}
 
@@ -1164,7 +1200,7 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	if task.Spec.ConcurrencyPolicy == corev1alpha1.ForbidConcurrent || task.Spec.ConcurrencyPolicy == "" {
 		var childList corev1alpha1.TaskList
 		if err := r.List(ctx, &childList, client.InNamespace(task.Namespace), client.MatchingLabels{
-			labels.LabelParentTask: task.Name,
+			labels.LabelParentTask: labels.SelectorValue(task.Name),
 		}); err != nil {
 			return ctrl.Result{}, fmt.Errorf("listing child tasks: %w", err)
 		}
@@ -1174,8 +1210,10 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 				log.Info("Concurrency policy Forbid: active child task exists, skipping", "activeChild", childList.Items[i].Name)
 				next := sched.Next(now)
 				nextSchedule := metav1.NewTime(next)
-				task.Status.NextScheduleTime = &nextSchedule
-				_ = r.Status().Update(ctx, task)
+				nextScheduleCopy := nextSchedule
+				_ = r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+					t.Status.NextScheduleTime = &nextScheduleCopy
+				})
 				return ctrl.Result{RequeueAfter: time.Until(next)}, nil
 			}
 		}
@@ -1188,8 +1226,11 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 			Name:      childName,
 			Namespace: task.Namespace,
 			Labels: map[string]string{
-				labels.LabelParentTask:   task.Name,
+				labels.LabelParentTask:   labels.SelectorValue(task.Name),
 				labels.LabelScheduledRun: scheduledRunLabelValue,
+			},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName: task.Name,
 			},
 		},
 		Spec: *task.Spec.DeepCopy(),
@@ -1224,9 +1265,12 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	nowTime := metav1.NewTime(scheduledTime)
 	next := sched.Next(now)
 	nextSchedule := metav1.NewTime(next)
-	task.Status.LastScheduleTime = &nowTime
-	task.Status.NextScheduleTime = &nextSchedule
-	if err := r.Status().Update(ctx, task); err != nil {
+	nowTimeCopy := nowTime
+	nextScheduleCopy := nextSchedule
+	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		t.Status.LastScheduleTime = &nowTimeCopy
+		t.Status.NextScheduleTime = &nextScheduleCopy
+	}); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -1242,7 +1286,7 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1alpha1.Task) error {
 	var childList corev1alpha1.TaskList
 	if err := r.List(ctx, &childList, client.InNamespace(task.Namespace), client.MatchingLabels{
-		labels.LabelParentTask: task.Name,
+		labels.LabelParentTask: labels.SelectorValue(task.Name),
 	}); err != nil {
 		return fmt.Errorf("listing child tasks: %w", err)
 	}

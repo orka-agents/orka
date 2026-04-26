@@ -8,12 +8,14 @@ package common
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPrepareWorkspace_NoOp(t *testing.T) {
@@ -332,6 +334,56 @@ func TestFinalizeResult_PushBranchNoRemote(t *testing.T) {
 	}
 }
 
+func TestFinalizeResult_RequirePushBranchNoRemote(t *testing.T) {
+	dir := t.TempDir()
+	runGitWS(t, dir, "init")
+	runGitWS(t, dir, "config", "user.email", "test@test.com")
+	runGitWS(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(dir+"/file.txt", []byte("content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, dir, "add", ".")
+	runGitWS(t, dir, "commit", "-m", "initial")
+
+	if err := os.WriteFile(dir+"/new.txt", []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("ORKA_PUSH_BRANCH", "feature-branch")
+	t.Setenv(requirePushBranchEnvVar, "true")
+
+	_, err := FinalizeResult(dir, "agent output")
+	if err == nil {
+		t.Fatal("expected push-required finalize to fail without a remote")
+	}
+	if !strings.Contains(err.Error(), "failed to push to feature-branch") {
+		t.Fatalf("expected push failure error, got: %v", err)
+	}
+}
+
+func TestFinalizeResult_RequirePushBranchWithoutWorkspaceDiff(t *testing.T) {
+	dir := t.TempDir()
+	runGitWS(t, dir, "init")
+	runGitWS(t, dir, "config", "user.email", "test@test.com")
+	runGitWS(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(dir+"/file.txt", []byte("content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, dir, "add", ".")
+	runGitWS(t, dir, "commit", "-m", "initial")
+
+	t.Setenv("ORKA_PUSH_BRANCH", "feature-branch")
+	t.Setenv(requirePushBranchEnvVar, "true")
+
+	_, err := FinalizeResult(dir, "agent output")
+	if err == nil {
+		t.Fatal("expected push-required finalize to fail without a workspace diff")
+	}
+	if !strings.Contains(err.Error(), "no workspace diff was produced") {
+		t.Fatalf("expected no-diff error, got: %v", err)
+	}
+}
+
 func TestPushChanges_NothingToCommit(t *testing.T) {
 	dir := t.TempDir()
 	runGitWS(t, dir, "init")
@@ -400,9 +452,67 @@ func TestPushChanges_WithRemote(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	origWait := waitForRemoteBranchVisibility
+	t.Cleanup(func() { waitForRemoteBranchVisibility = origWait })
+	waitCalled := false
+	waitForRemoteBranchVisibility = func(workDir, remote, branch string, timeout time.Duration) error {
+		waitCalled = true
+		if remote != "origin" {
+			t.Fatalf("remote = %q, want origin", remote)
+		}
+		if branch != "feature-branch" {
+			t.Fatalf("branch = %q, want feature-branch", branch)
+		}
+		if timeout <= 0 {
+			t.Fatalf("timeout = %v, want > 0", timeout)
+		}
+		return nil
+	}
+
 	err := pushChanges(dir, "feature-branch")
 	if err != nil {
 		t.Fatalf("pushChanges failed: %v", err)
+	}
+	if !waitCalled {
+		t.Fatal("expected waitForRemoteBranchVisibility to be called")
+	}
+}
+
+func TestPushChanges_WithRemoteBranchVisibilityFailure(t *testing.T) {
+	// Create a bare remote
+	bareDir := t.TempDir()
+	runGitWS(t, bareDir, "init", "--bare")
+
+	// Create a working repo with a remote
+	dir := t.TempDir()
+	runGitWS(t, dir, "init")
+	runGitWS(t, dir, "checkout", "-b", "main")
+	runGitWS(t, dir, "config", "user.email", "test@test.com")
+	runGitWS(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(dir+"/file.txt", []byte("content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, dir, "add", ".")
+	runGitWS(t, dir, "commit", "-m", "initial")
+	runGitWS(t, dir, "remote", "add", "origin", bareDir)
+	runGitWS(t, dir, "push", "-u", "origin", "main")
+
+	if err := os.WriteFile(dir+"/new.txt", []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origWait := waitForRemoteBranchVisibility
+	t.Cleanup(func() { waitForRemoteBranchVisibility = origWait })
+	waitForRemoteBranchVisibility = func(workDir, remote, branch string, timeout time.Duration) error {
+		return errors.New("branch not visible yet")
+	}
+
+	err := pushChanges(dir, "feature-branch")
+	if err == nil {
+		t.Fatal("expected pushChanges to fail when remote branch never becomes visible")
+	}
+	if !strings.Contains(err.Error(), "remote branch feature-branch not visible after push") {
+		t.Fatalf("expected visibility failure, got: %v", err)
 	}
 }
 

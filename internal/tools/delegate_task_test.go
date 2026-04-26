@@ -275,8 +275,8 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 	}
 
 	// Verify labels
-	if childTask.Labels[labels.LabelParentTask] != parentTaskName {
-		t.Errorf("label orka.ai/parent-task = %q, want %q", childTask.Labels[labels.LabelParentTask], "parent-task")
+	if childTask.Labels[labels.LabelParentTask] != labels.SelectorValue(parentTaskName) {
+		t.Errorf("label orka.ai/parent-task = %q, want %q", childTask.Labels[labels.LabelParentTask], labels.SelectorValue(parentTaskName))
 	}
 	if childTask.Labels[labels.LabelCoordinator] != trueStr {
 		t.Errorf("label orka.ai/coordinator = %q, want %q", childTask.Labels[labels.LabelCoordinator], trueStr)
@@ -286,6 +286,9 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 	}
 
 	// Verify annotations
+	if childTask.Annotations[labels.AnnotationParentTaskName] != parentTaskName {
+		t.Errorf("annotation orka.ai/parent-task-name = %q, want %q", childTask.Annotations[labels.AnnotationParentTaskName], parentTaskName)
+	}
 	if childTask.Annotations[labels.AnnotationCoordinationDepth] != "2" {
 		t.Errorf("annotation orka.ai/coordination-depth = %q, want %q", childTask.Annotations[labels.AnnotationCoordinationDepth], "2")
 	}

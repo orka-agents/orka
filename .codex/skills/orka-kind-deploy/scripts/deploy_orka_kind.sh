@@ -163,5 +163,6 @@ echo "Controller image: $controller_image"
   KUBECTL="$kubectl_wrapper" make install deploy IMG="$controller_image"
 )
 
+"${kube_cmd[@]}" -n "$namespace" rollout restart deployment/orka-controller-manager
 "${kube_cmd[@]}" -n "$namespace" rollout status deployment/orka-controller-manager --timeout=180s
 "${kube_cmd[@]}" -n "$namespace" get pods,svc,deploy

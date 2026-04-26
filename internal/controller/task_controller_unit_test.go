@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/robfig/cron/v3"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -686,6 +687,49 @@ func TestEnforceHistoryLimits_CustomLimits(t *testing.T) {
 	}
 	if failed != 0 {
 		t.Errorf("expected 0 failed, got %d", failed)
+	}
+}
+
+func TestEnforceHistoryLimits_LongParentNameUsesSelectorValue(t *testing.T) {
+	scheme := newTestScheme()
+
+	parentName := "very-long-parent-task-name-that-exceeds-kubernetes-label-limits-1234567890"
+	parent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: parentName, Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+		},
+	}
+
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-1",
+			Namespace: "default",
+			Labels: map[string]string{
+				labels.LabelParentTask: labels.SelectorValue(parentName),
+			},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName: parentName,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+
+	r := newUnitReconciler(scheme, parent, child)
+	if err := r.enforceHistoryLimits(context.Background(), parent); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var remaining corev1alpha1.TaskList
+	if err := r.List(context.Background(), &remaining, client.InNamespace("default"),
+		client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parentName)}); err != nil {
+		t.Fatalf("listing child tasks: %v", err)
+	}
+	if len(remaining.Items) != 1 {
+		t.Fatalf("expected 1 child task, got %d", len(remaining.Items))
+	}
+	if labels.ParentTaskName(remaining.Items[0].Labels, remaining.Items[0].Annotations) != parentName {
+		t.Fatalf("ParentTaskName() = %q, want %q", labels.ParentTaskName(remaining.Items[0].Labels, remaining.Items[0].Annotations), parentName)
 	}
 }
 
@@ -2220,6 +2264,65 @@ func TestHandleScheduled_CreateChildTask(t *testing.T) {
 	}
 }
 
+func TestHandleScheduled_ExistingChildTaskStillUpdatesScheduleStatus(t *testing.T) {
+	scheme := newTestScheme()
+	lastSchedule := metav1.NewTime(time.Now().Add(-2 * time.Minute).UTC())
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-existing-child",
+			Namespace:         "default",
+			UID:               "12345678-abcd-efgh-ijkl-1234567890ac",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour).UTC()),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeContainer,
+			Image:    "busybox:latest",
+			Schedule: "* * * * *",
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseScheduled,
+			LastScheduleTime: &lastSchedule,
+		},
+	}
+
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	schedule, err := parser.Parse(task.Spec.Schedule)
+	if err != nil {
+		t.Fatalf("parse cron: %v", err)
+	}
+	scheduledTime := schedule.Next(lastSchedule.Time)
+	childName := fmt.Sprintf("%s-%d", task.Name, scheduledTime.Unix())
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      childName,
+			Namespace: "default",
+			Labels: map[string]string{
+				labels.LabelParentTask:   labels.SelectorValue(task.Name),
+				labels.LabelScheduledRun: scheduledRunLabelValue,
+			},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName: task.Name,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+
+	r := newUnitReconciler(scheme, task, child)
+	result, err := r.handleScheduled(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Error("expected positive RequeueAfter after handling existing child")
+	}
+	if task.Status.LastScheduleTime == nil || !task.Status.LastScheduleTime.Time.Equal(scheduledTime) {
+		t.Fatalf("expected LastScheduleTime %s, got %v", scheduledTime.Format(time.RFC3339), task.Status.LastScheduleTime)
+	}
+	if task.Status.NextScheduleTime == nil {
+		t.Fatal("expected NextScheduleTime to be updated")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // handleAutonomousIteration
 // ---------------------------------------------------------------------------
@@ -2828,6 +2931,57 @@ func TestHandleRunning_ChildTaskWithResult(t *testing.T) {
 	}
 	if task.Status.ChildTasks[0].Result == "" {
 		t.Error("expected child task result to be populated")
+	}
+}
+
+func TestHandleRunning_ChildTasksSortedByName(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-job-sorted", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	childZ := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "z-child",
+			Namespace: "default",
+			Labels:    map[string]string{labels.LabelParentTask: "parent-sorted"},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "z-agent"},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+	childA := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "a-child",
+			Namespace: "default",
+			Labels:    map[string]string{labels.LabelParentTask: "parent-sorted"},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "a-agent"},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-sorted", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseRunning,
+			JobName: "parent-job-sorted",
+		},
+	}
+	r := newUnitReconciler(scheme, task, job, childZ, childA)
+	_, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(task.Status.ChildTasks) != 2 {
+		t.Fatalf("expected 2 child statuses, got %d", len(task.Status.ChildTasks))
+	}
+	if task.Status.ChildTasks[0].Name != "a-child" || task.Status.ChildTasks[1].Name != "z-child" {
+		t.Fatalf("expected child statuses to be sorted by name, got %#v", task.Status.ChildTasks)
 	}
 }
 

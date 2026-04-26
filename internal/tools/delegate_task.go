@@ -290,12 +290,13 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 			GenerateName: dc.parentName + "-child-",
 			Namespace:    dc.namespace,
 			Labels: map[string]string{
-				labels.LabelParentTask:     dc.parentName,
+				labels.LabelParentTask:     labels.SelectorValue(dc.parentName),
 				labels.LabelCoordinator:    trueStr,
 				labels.LabelDelegatedAgent: dc.args.Agent,
 			},
 			Annotations: map[string]string{
 				labels.AnnotationCoordinationDepth: strconv.Itoa(dc.currentDepth + 1),
+				labels.AnnotationParentTaskName:    dc.parentName,
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{

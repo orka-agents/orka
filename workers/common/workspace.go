@@ -18,6 +18,10 @@ import (
 	"time"
 )
 
+const requirePushBranchEnvVar = "ORKA_REQUIRE_PUSH_BRANCH"
+
+var waitForRemoteBranchVisibility = waitForRemoteBranchVisibilityWithGit
+
 // PrepareWorkspace applies the diff from a prior task's result to the working
 // directory. It is called after git clone and before the LLM agent starts.
 // If ORKA_PRIOR_TASK is not set the function is a no-op.
@@ -147,8 +151,19 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 
 	// Auto-push if ORKA_PUSH_BRANCH is set and there are changes
 	pushBranch := os.Getenv("ORKA_PUSH_BRANCH")
-	if pushBranch != "" && diff != "" {
-		if pushErr := pushChanges(workDir, pushBranch); pushErr != nil {
+	requirePushBranch := strings.EqualFold(os.Getenv(requirePushBranchEnvVar), "true")
+	if requirePushBranch && pushBranch == "" {
+		return nil, fmt.Errorf("%s is true but ORKA_PUSH_BRANCH is empty", requirePushBranchEnvVar)
+	}
+	if pushBranch != "" {
+		if diff == "" {
+			if requirePushBranch {
+				return nil, fmt.Errorf("ORKA_PUSH_BRANCH=%s but no workspace diff was produced", pushBranch)
+			}
+		} else if pushErr := pushChanges(workDir, pushBranch); pushErr != nil {
+			if requirePushBranch {
+				return nil, fmt.Errorf("failed to push to %s: %w", pushBranch, pushErr)
+			}
 			fmt.Fprintf(os.Stderr, "warning: failed to push to %s: %v\n", pushBranch, pushErr)
 		} else {
 			fmt.Fprintf(os.Stderr, "pushed changes to branch %s\n", pushBranch)
@@ -199,8 +214,32 @@ func pushChanges(workDir, branch string) error {
 	if out, err := execGit(workDir, "push", "-u", "origin", branch); err != nil {
 		return fmt.Errorf("git push failed: %s: %w", out, err)
 	}
+	if err := waitForRemoteBranchVisibility(workDir, "origin", branch, 15*time.Second); err != nil {
+		return fmt.Errorf("remote branch %s not visible after push: %w", branch, err)
+	}
 
 	return nil
+}
+
+func waitForRemoteBranchVisibilityWithGit(workDir, remote, branch string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	ref := "refs/heads/" + branch
+	var lastErr error
+	for {
+		out, err := execGit(workDir, "ls-remote", "--heads", remote, ref)
+		if err == nil && strings.TrimSpace(out) != "" {
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("branch %s not advertised by remote %s yet", branch, remote)
+		}
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		time.Sleep(1 * time.Second)
+	}
 }
 
 func resetReservedWorkspacePaths(workDir string) {

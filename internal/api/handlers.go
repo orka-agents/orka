@@ -1210,7 +1210,7 @@ func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
 	var taskList corev1alpha1.TaskList
 	if err := h.client.List(c.Context(), &taskList,
 		client.InNamespace(namespace),
-		client.MatchingLabels{labels.LabelParentTask: taskName},
+		client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(taskName)},
 	); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list child tasks: %v", err))
 	}

@@ -121,3 +121,27 @@ func TestBuildValidationPromptIncludesAttackPathAnalysis(t *testing.T) {
 		t.Fatalf("BuildValidationPrompt() missing attack path schema:\n%s", got)
 	}
 }
+
+func TestBuildPatchPromptRequiresWorkspaceEdit(t *testing.T) {
+	scan := &corev1alpha1.RepositoryScan{
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL: "https://github.com/example/project",
+			Branch:  "main",
+		},
+	}
+
+	finding := &store.Finding{
+		ID:         "fnd_123",
+		Title:      "Command injection",
+		Severity:   "high",
+		Confidence: "high",
+	}
+
+	got := BuildPatchPrompt(scan, finding)
+	if !strings.Contains(got, "Apply the fix directly to the checked-out workspace files.") {
+		t.Fatalf("BuildPatchPrompt() missing workspace-edit directive:\n%s", got)
+	}
+	if !strings.Contains(got, "Orka will commit and push the workspace changes for you.") {
+		t.Fatalf("BuildPatchPrompt() missing push-handling directive:\n%s", got)
+	}
+}

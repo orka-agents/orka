@@ -27,6 +27,7 @@ const (
 	testBearerToken = "Bearer test-token"
 	testBranch      = "main"
 	statusCreated   = "created"
+	statusExisting  = "existing"
 )
 
 func TestParseGitHubRepo(t *testing.T) {
@@ -150,6 +151,8 @@ func TestCreatePullRequestTool_NoWorkspace(t *testing.T) {
 }
 
 func TestCreatePullRequestTool_Success(t *testing.T) {
+	largeBody := strings.Repeat("x", 9000)
+
 	// Mock GitHub API
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -172,7 +175,7 @@ func TestCreatePullRequestTool_Success(t *testing.T) {
 		}
 
 		w.WriteHeader(201)
-		fmt.Fprintf(w, `{"html_url":"https://github.com/sozercan/ayna/pull/42","number":42}`) //nolint:errcheck
+		fmt.Fprintf(w, `{"html_url":"https://github.com/sozercan/ayna/pull/42","number":42,"body":%q}`, largeBody) //nolint:errcheck
 	}))
 	defer server.Close()
 
@@ -249,6 +252,100 @@ func TestCreatePullRequestTool_Success(t *testing.T) {
 	params := publicTool.Parameters()
 	if len(params) == 0 {
 		t.Error("parameters should not be empty")
+	}
+}
+
+func TestCreatePullRequestTool_ExistingPR(t *testing.T) {
+	largeBody := strings.Repeat("x", 9000)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if auth := r.Header.Get("Authorization"); auth != testBearerToken {
+			t.Errorf("unexpected auth header: %s", auth)
+		}
+
+		switch r.Method {
+		case http.MethodPost:
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			fmt.Fprint(w, `{"message":"Validation Failed","errors":[{"message":"A pull request already exists for sozercan:feature/edit-msg."}]}`) //nolint:errcheck
+		case http.MethodGet:
+			if got := r.URL.Query().Get("head"); got != "sozercan:feature/edit-msg" {
+				t.Errorf("unexpected head query: %s", got)
+			}
+			if got := r.URL.Query().Get("base"); got != testBranch {
+				t.Errorf("unexpected base query: %s", got)
+			}
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `[{"html_url":"https://github.com/sozercan/ayna/pull/43","number":43,"body":%q}]`, largeBody) //nolint:errcheck
+		default:
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/sozercan/ayna",
+					Branch:  testBranch,
+					GitSecretRef: &corev1.LocalObjectReference{
+						Name: "git-creds",
+					},
+				},
+			},
+		},
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data: map[string][]byte{
+			"token": []byte("test-token"),
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := &CreatePullRequestTool{
+		k8sClient:  k8sClient,
+		apiBaseURL: server.URL,
+	}
+
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+
+	args, _ := json.Marshal(CreatePullRequestArgs{
+		TaskName:   "coder-task",
+		HeadBranch: "feature/edit-msg",
+		BaseBranch: testBranch,
+		Title:      "feat: edit message",
+		Body:       "Implements #19",
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var prResult CreatePullRequestResult
+	if err := json.Unmarshal([]byte(result), &prResult); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if prResult.PRURL != "https://github.com/sozercan/ayna/pull/43" {
+		t.Errorf("unexpected PR URL: %s", prResult.PRURL)
+	}
+	if prResult.PRNumber != 43 {
+		t.Errorf("unexpected PR number: %d", prResult.PRNumber)
+	}
+	if prResult.Status != statusExisting {
+		t.Errorf("unexpected status: %s", prResult.Status)
+	}
+	if requests != 2 {
+		t.Errorf("expected 2 GitHub API requests, got %d", requests)
 	}
 }
 
@@ -410,11 +507,11 @@ func TestCreatePullRequestTool_EmptyToken(t *testing.T) {
 func TestCreateGitHubPR_APIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		_, _ = fmt.Fprintf(w, `{"message":"Validation Failed"}`)
+		_, _ = fmt.Fprintf(w, `{"message":"Validation Failed","errors":[{"message":"No commits between base and head"}]}`)
 	}))
 	defer server.Close()
 
-	_, _, err := createGitHubPR(context.Background(), "token", "owner", "repo", "head", "base", "title", "body", server.URL)
+	_, _, _, err := createGitHubPR(context.Background(), "token", "owner", "repo", "head", "base", "title", "body", server.URL)
 	if err == nil {
 		t.Fatal("expected error for API failure")
 	}

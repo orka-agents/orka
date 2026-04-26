@@ -1,13 +1,9 @@
 package api
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +20,7 @@ import (
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/security"
 	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/tools"
 )
 
 type CreateRepositoryScanRequest struct {
@@ -89,7 +86,7 @@ func (h *Handlers) hasActiveSecurityScanPipelineTask(ctx context.Context, scan *
 	var tasks corev1alpha1.TaskList
 	if err := h.client.List(ctx, &tasks,
 		client.InNamespace(scan.Namespace),
-		client.MatchingLabels(map[string]string{labels.LabelSecurityTarget: scan.Name}),
+		client.MatchingLabels(map[string]string{labels.LabelSecurityTarget: labels.SelectorValue(scan.Name)}),
 	); err != nil {
 		return false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list scan tasks: %v", err))
 	}
@@ -148,7 +145,7 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, scan *corev1alpha1
 			Labels: map[string]string{
 				labels.LabelManaged:        "true",
 				labels.LabelCreatedBy:      "repository-security",
-				labels.LabelSecurityTarget: scan.Name,
+				labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
 				labels.LabelSecurityScanID: scanID,
 				labels.LabelSecurityMode:   mode,
 				labels.LabelSecurityStage:  security.StageThreatModel,
@@ -209,7 +206,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, scan *corev
 			Labels: map[string]string{
 				labels.LabelManaged:           "true",
 				labels.LabelCreatedBy:         "repository-security",
-				labels.LabelSecurityTarget:    scan.Name,
+				labels.LabelSecurityTarget:    labels.SelectorValue(scan.Name),
 				labels.LabelSecurityScanID:    finding.ScanRunID,
 				labels.LabelSecurityMode:      security.StageValidation,
 				labels.LabelSecurityStage:     security.StageValidation,
@@ -268,7 +265,7 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, scan *corev1alph
 			Labels: map[string]string{
 				labels.LabelManaged:           "true",
 				labels.LabelCreatedBy:         "repository-security",
-				labels.LabelSecurityTarget:    scan.Name,
+				labels.LabelSecurityTarget:    labels.SelectorValue(scan.Name),
 				labels.LabelSecurityScanID:    proposalID,
 				labels.LabelSecurityMode:      "patch",
 				labels.LabelSecurityStage:     security.StagePatch,
@@ -282,6 +279,9 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, scan *corev1alph
 			Prompt:   security.BuildPatchPrompt(scan, finding),
 			Timeout:  &timeout,
 			Priority: &priority,
+			Env: []corev1.EnvVar{
+				{Name: "ORKA_REQUIRE_PUSH_BRANCH", Value: "true"},
+			},
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
 					GitRepo:      scan.Spec.RepoURL,
@@ -742,43 +742,14 @@ func extractGitToken(secret *corev1.Secret) string {
 	return ""
 }
 
-func createGitHubPullRequest(ctx context.Context, token, owner, repo, head, base, title, body string) (string, int, error) {
-	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", owner, repo)
-	payload, _ := json.Marshal(map[string]string{
-		"title": title,
-		"body":  body,
-		"head":  head,
-		"base":  base,
-	})
+var githubPullRequestAPIBaseURL = "https://api.github.com"
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+func createGitHubPullRequest(ctx context.Context, token, owner, repo, head, base, title, body string) (string, int, string, error) {
+	pr, err := tools.CreateOrGetGitHubPullRequest(ctx, token, owner, repo, head, base, title, body, githubPullRequestAPIBaseURL)
 	if err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-	if err != nil {
-		return "", 0, err
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", 0, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	var result struct {
-		HTMLURL string `json:"html_url"`
-		Number  int    `json:"number"`
-	}
-	if err := json.Unmarshal(bodyBytes, &result); err != nil {
-		return "", 0, err
-	}
-	return result.HTMLURL, result.Number, nil
+	return pr.HTMLURL, pr.Number, pr.Status, nil
 }
 
 // CreateSecurityPullRequest opens a pull request from the latest successful patch proposal.
@@ -845,7 +816,7 @@ func (h *Handlers) CreateSecurityPullRequest(c fiber.Ctx) error {
 	body := fmt.Sprintf("Security remediation for finding `%s`.\n\nSummary:\n%s\n\nRoot cause:\n%s\n\nRemediation guidance:\n%s\n",
 		finding.ID, finding.Summary, finding.RootCause, finding.Remediation)
 
-	prURL, prNumber, err := createGitHubPullRequest(c.Context(), token, owner, repo, proposal.Branch, baseBranch, title, body)
+	prURL, prNumber, prStatus, err := createGitHubPullRequest(c.Context(), token, owner, repo, proposal.Branch, baseBranch, title, body)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create pull request: %v", err))
 	}
@@ -868,6 +839,6 @@ func (h *Handlers) CreateSecurityPullRequest(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"prNumber": prNumber,
 		"prURL":    prURL,
-		"status":   "created",
+		"status":   prStatus,
 	})
 }
