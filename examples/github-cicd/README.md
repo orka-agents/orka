@@ -5,15 +5,16 @@ This maintained example shows how to use Orka's multi-agent coordination to auto
 1. An AI coordinator delegates code changes to a Claude Code runtime agent.
 2. The runtime agent pushes a feature branch.
 3. The coordinator opens a PR with Orka's built-in `create_pull_request` tool.
-4. The coordinator waits for CI and merges with `auto_merge_pull_request`.
-5. If CI fails, the coordinator loops back with fix feedback on the same branch.
+4. The coordinator checks CI with `check_pull_request_ci` and reports readiness for review.
+5. If CI fails, the coordinator loops back with fix feedback on the same branch and checks CI again.
 
 ## How It Works
 
 1. A **coordinator agent** (AI type with coordination enabled) receives a task
 2. It delegates work to a **Claude Code agent** via `delegate_task`, including workspace details for clone, push, and PR creation
-3. It uses built-in GitHub coordination tools to create the PR and auto-merge when checks pass
+3. It uses built-in GitHub coordination tools to create the PR and check CI status
 4. On CI failure, it can delegate a follow-up fix using `prior_task`
+5. It reports the PR URL, CI status, and review readiness; it does not merge unless the task explicitly requests merging
 
 ## Files
 

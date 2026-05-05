@@ -23,13 +23,14 @@ spec:
   #       effect: NoSchedule
   # prompt is the instruction sent to the agent CLI
   prompt: "Refactor the main.go file to use structured logging"
+  # workspace configures the repository cloned into the agent's workspace
+  workspace:
+    # gitRepo is the repository URL to clone into the agent's workspace
+    gitRepo: "https://github.com/example/my-project.git"
+    # branch to checkout
+    branch: "main"
   # agentRuntime allows task-level overrides of the Agent's runtime defaults
   agentRuntime:
-    workspace:
-      # gitRepo is the repository URL to clone into the agent's workspace
-      gitRepo: "https://github.com/example/my-project.git"
-      # branch to checkout
-      branch: "main"
     # maxTurns limits agent loop iterations (overrides Agent's defaultMaxTurns)
     maxTurns: 100
     # allowBash enables bash command execution (overrides Agent's defaultAllowBash)

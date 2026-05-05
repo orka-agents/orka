@@ -181,12 +181,13 @@ spec:
   agentRef:
     name: claude-agent
   prompt: "Review the code in this repo for security issues"
-  agentRuntime:
-    workspace:
-      gitRepo: "https://github.com/example/repo.git"
-      branch: main
+  workspace:
+    gitRepo: "https://github.com/example/repo.git"
+    branch: main
 EOF
 ```
+
+Prefer `spec.workspace` for repository-backed agent tasks. Existing manifests that use `spec.agentRuntime.workspace` are still supported for compatibility.
 
 ### 4. Check the Result
 

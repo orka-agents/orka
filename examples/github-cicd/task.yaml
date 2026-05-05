@@ -19,6 +19,7 @@ spec:
     Requirements:
     - Cover the authentication module's happy path and failure path.
     - Run the relevant test suite before handing work back.
-    - Open a PR and auto-merge it once CI passes.
+    - Open a PR, check CI, fix failures if needed, and report when ready for human review.
+    - Do not merge unless explicitly requested.
   timeout: 45m
   priority: 800

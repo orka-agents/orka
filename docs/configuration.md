@@ -139,6 +139,33 @@ Resolution order:
 - `runtimeClassName` is a scalar override
 - `nodeSelector`, `tolerations`, and `affinity` replace Agent defaults when they are set on the Task
 
+### Workspace
+
+Use `Task.spec.workspace` to clone a repository for `agent` and `container` tasks. Agent tasks should prefer this top-level field; `spec.agentRuntime.workspace` remains supported for existing runtime manifests.
+
+```yaml
+workspace:
+  gitRepo: "https://github.com/example/repo.git"
+  branch: main
+  gitSecretRef:
+    name: git-credentials
+  subPath: "services/api"
+  pushBranch: "orka/my-change"
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `gitRepo` | string | Repository URL to clone into the worker workspace |
+| `branch` | string | Branch to check out; omit when using `ref` |
+| `ref` | string | Specific commit SHA or tag to check out instead of `branch` |
+| `gitSecretRef` | object | Secret containing git credentials for private clone, commit, or push operations |
+| `subPath` | string | Repository subdirectory to use as the task working directory |
+| `forkRepo` | string | Writable fork URL to use as the push remote for fork-based workflows |
+| `prBaseBranch` | string | Upstream branch targeted by pull requests created from the workspace |
+| `pushBranch` | string | Branch name to commit and push at task completion when supported by the worker |
+
+The repository is cloned at `/workspace`. When `subPath` is set, the worker runs from `/workspace/<subPath>`. `pushBranch` enables commit/push behavior where supported and requires credentials with write access, either via `gitSecretRef` or runtime-specific credentials.
+
 ### Provider Fallback Chain
 
 You can configure fallback providers that are automatically tried when the primary provider fails (e.g., due to auth errors, provider outages, or rate limiting). Fallbacks are configured on the Agent CRD's `spec.model.fallbacks` field.
@@ -220,13 +247,13 @@ spec:
   agentRef:
     name: claude-agent
   prompt: "Review the code in this repo for security issues"
+  workspace:
+    gitRepo: "https://github.com/example/repo.git"
+    branch: main
+    # gitSecretRef:
+    #   name: git-credentials
+    # subPath: "services/api"
   agentRuntime:
-    workspace:
-      gitRepo: "https://github.com/example/repo.git"
-      branch: main
-      # gitSecretRef:
-      #   name: git-credentials
-      # subPath: "services/api"
     maxTurns: 100
     allowBash: true
     allowedTools:
@@ -377,6 +404,7 @@ Key configuration values for the Helm chart:
 | `controller.logLevel` | `info` | Log level (debug/info/warn/error) |
 | `workers.ai.image.repository` | `ghcr.io/sozercan/orka/ai-worker` | AI worker image |
 | `workers.general.image.repository` | `ghcr.io/sozercan/orka/general-worker` | General worker image |
+| `workers.codex.sandboxMode` | `""` | Optional Codex CLI `--sandbox` mode injected into Codex workers via `ORKA_CODEX_SANDBOX_MODE` |
 | `service.type` | `ClusterIP` | Service type |
 | `crds.install` | `true` | Install CRDs |
 | `crds.keep` | `true` | Keep CRDs on uninstall |
@@ -399,6 +427,7 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 | `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Copilot agent worker image |
 | `--claude-worker-image` | `ghcr.io/sozercan/orka/agent-worker-claude:latest` | Claude agent worker image |
 | `--codex-worker-image` | `ghcr.io/sozercan/orka/agent-worker-codex:latest` | Codex agent worker image |
+| `--codex-sandbox-mode` | `""` | Override Codex CLI sandbox mode for Codex worker pods; empty uses worker default `workspace-write` |
 | `--general-worker-image` | `ghcr.io/sozercan/orka/general-worker:latest` | General worker container image |
 | `--store-backend` | `sqlite` | Storage backend (sqlite) |
 | `--store-path` | `/data/orka.db` | Path to SQLite database file |

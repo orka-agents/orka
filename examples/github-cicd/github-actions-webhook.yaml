@@ -34,13 +34,11 @@ jobs:
               "type": "agent",
               "agentRef": {"name": "claude-coder"},
               "prompt": "CI failed on branch ${{ steps.logs.outputs.branch }} (commit ${{ steps.logs.outputs.sha }}). Check the CI failures, fix the code, and push to the same branch.",
-              "agentRuntime": {
-                "workspace": {
-                  "gitRepo": "https://github.com/${{ steps.logs.outputs.repo }}.git",
-                  "branch": "${{ steps.logs.outputs.branch }}",
-                  "gitSecretRef": {
-                    "name": "git-credentials"
-                  }
+              "workspace": {
+                "gitRepo": "https://github.com/${{ steps.logs.outputs.repo }}.git",
+                "branch": "${{ steps.logs.outputs.branch }}",
+                "gitSecretRef": {
+                  "name": "git-credentials"
                 }
               },
               "timeout": "15m",

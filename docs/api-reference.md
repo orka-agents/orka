@@ -17,6 +17,34 @@ The controller exposes a REST API for programmatic access. All `/api/v1/*` endpo
 | `/api/v1/tasks/:id/plan` | GET | Get task plan |
 | `/api/v1/tasks/:id/children` | GET | Get child tasks |
 
+### Task Workspace
+
+`Task.spec.workspace` configures a repository checkout for `agent` and `container` tasks. For agent runtime tasks, prefer this top-level field; `Task.spec.agentRuntime.workspace` remains accepted for compatibility with existing manifests.
+
+```yaml
+spec:
+  type: agent
+  workspace:
+    gitRepo: https://github.com/example/repo.git
+    branch: main
+    pushBranch: orka/my-change
+  agentRuntime:
+    maxTurns: 100
+```
+
+| Field | Description |
+|-------|-------------|
+| `gitRepo` | Repository URL cloned into `/workspace` before the worker starts |
+| `branch` | Branch to check out; omit when using `ref` |
+| `ref` | Commit SHA or tag to check out instead of a branch |
+| `gitSecretRef` | Secret reference containing git credentials for private repositories or push access |
+| `subPath` | Subdirectory used as the working directory (`/workspace/<subPath>`) |
+| `forkRepo` | Writable fork remote for fork-and-PR workflows |
+| `prBaseBranch` | Base branch to target when PR tooling is used |
+| `pushBranch` | Branch the worker may commit and push to after completing changes |
+
+Without `subPath`, workers run from `/workspace`. With `subPath`, workers run from `/workspace/<subPath>`. `pushBranch` only enables commit/push behavior for workers that support it and requires write-capable git credentials.
+
 ### Get Task Plan
 
 Retrieve the autonomous plan state for a task.

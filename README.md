@@ -100,6 +100,7 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Interactive Chat](docs/chat.md)                             | Chat endpoint, tools, and SSE streaming               |
 | [Multi-Agent Coordination](docs/multi-agent-coordination.md) | Coordinator agents and task delegation                |
 | [API Reference](docs/api-reference.md)                       | REST API endpoints and usage examples                 |
+| [Demo Workflows](hack/demos/README.md)                       | End-to-end demo workflows and scripts                 |
 | [OpenAI Compatibility](docs/openai-compat.md)                | OpenAI-compatible chat completions API                |
 | [Anthropic Compatibility](docs/anthropic-compat.md)          | Anthropic-compatible Messages API                     |
 | [Web Dashboard](docs/ui.md)                                  | Frontend architecture and pages                       |

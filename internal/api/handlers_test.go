@@ -119,6 +119,56 @@ func TestHandlers_CreateTask_Valid(t *testing.T) {
 	}
 }
 
+func TestHandlers_CreateTask_WithTopLevelWorkspace(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/tasks", handlers.CreateTask)
+
+	body := CreateTaskRequest{
+		Name: "test-task",
+		Type: corev1alpha1.TaskTypeAgent,
+		AgentRef: &corev1alpha1.AgentReference{
+			Name: "claude-agent",
+		},
+		Prompt: "fix tests",
+		Workspace: &corev1alpha1.WorkspaceConfig{
+			GitRepo: "https://github.com/example/repo.git",
+			Branch:  "feature/fix-tests",
+			GitSecretRef: &corev1.LocalObjectReference{
+				Name: "git-credentials",
+			},
+		},
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+
+	created := &corev1alpha1.Task{}
+	if err := handlers.client.Get(context.Background(), types.NamespacedName{Name: "test-task", Namespace: "default"}, created); err != nil {
+		t.Fatalf("failed to fetch created task: %v", err)
+	}
+	if created.Spec.Workspace == nil {
+		t.Fatal("expected top-level workspace to be set")
+	}
+	if created.Spec.Workspace.GitRepo != "https://github.com/example/repo.git" {
+		t.Fatalf("GitRepo = %q, want %q", created.Spec.Workspace.GitRepo, "https://github.com/example/repo.git")
+	}
+	if created.Spec.Workspace.Branch != "feature/fix-tests" {
+		t.Fatalf("Branch = %q, want %q", created.Spec.Workspace.Branch, "feature/fix-tests")
+	}
+	if created.Spec.Workspace.GitSecretRef == nil || created.Spec.Workspace.GitSecretRef.Name != "git-credentials" {
+		t.Fatalf("GitSecretRef = %#v, want name git-credentials", created.Spec.Workspace.GitSecretRef)
+	}
+}
+
 func TestHandlers_CreateTask_MissingName(t *testing.T) {
 	handlers, app := setupTestHandlers()
 	app.Post("/tasks", handlers.CreateTask)

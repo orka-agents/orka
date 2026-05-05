@@ -79,14 +79,15 @@ These existing pieces are already strong enough to anchor the implementation:
 - Repo-backed agent workspaces in `api/v1alpha1/task_types.go`
 - Agent runtime workers that can clone repos and return structured results in `workers/common/agent_runtime.go`
 - Autonomous coordination plan persistence in `internal/store/` and `workers/ai/autonomous_prompt.go`
-- Artifact upload support for AI tasks in `workers/common/artifacts.go`
+- Artifact upload support for AI and agent runtime tasks in `workers/common/artifacts.go`
 - GitHub PR tools already registered in `internal/tools/registry.go`
 
-Important gap discovered during design:
+Artifact handling already available:
 
-- AI tasks already upload `/tmp/artifacts`, but agent runtime tasks do not currently call `common.UploadArtifacts()`.
-- Security scanning in v1 should rely heavily on agent runtime tasks because they already support git workspaces.
-- Therefore, agent runtime artifact upload is a prerequisite for high-quality threat model, finding, evidence, and patch persistence.
+- AI workers and agent runtime workers upload flat files from `/tmp/artifacts` through `workers/common/artifacts.go`.
+- Agent runtime workers upload artifacts after successful result submission and also attempt upload on failure so partial threat models, findings, validation logs, or patch proposals can be recovered.
+- Agent workspaces include a `.orka-artifacts` symlink that points to `/tmp/artifacts`, so prompts can tell agents to write artifacts from the repository working directory.
+- Security scanning in v1 should rely heavily on agent runtime tasks because they already support git workspaces and artifact upload.
 
 ## High-level Product Flow
 
@@ -202,7 +203,8 @@ Fiber API (/api/v1/security/*)
            +--> result summary
            +--> security-threat-model.md
            +--> security-findings.json
-           +--> security-validation-*.txt
+           +--> security-validation.json
+           +--> security-validation.txt
            +--> security-patch-*.diff
            |
            v
@@ -498,27 +500,22 @@ Security runs should communicate detailed outputs through artifacts, not only th
 
 Because `workers/common/artifacts.go` uploads a flat directory under `/tmp/artifacts/`, artifact filenames in v1 must be flat and path-safe.
 
-Required artifact filenames:
+Required artifact filenames for scan runs:
 
-- `security-scan-summary.json`
 - `security-threat-model.md`
 - `security-findings.json`
+- `security-validation.json`
 
 Optional artifact filenames:
 
-- `security-validation-<finding-id>.txt`
-- `security-validation-<finding-id>.json`
+- `security-scan-summary.json`
+- `security-validation.txt` (preferred human-readable validation summary)
 - `security-patch-<finding-id>.diff`
 - `security-patch-<finding-id>.json`
 
-### Required worker runtime change
+AI workers and agent runtime workers upload `/tmp/artifacts`. Agent runtime workers upload artifacts after successful result submission and attempt upload on failure for partial artifacts. In agent workspaces, `.orka-artifacts` points to `/tmp/artifacts`; security prompts should require agents to write the artifact contract there. Current upload limits are 10 MB per file and 50 MB total per task, and filenames must be flat/path-safe.
 
-Update `workers/common/agent_runtime.go` to call `common.UploadArtifacts()` after result submission on both:
-
-- success path
-- failure path where partial artifacts still exist
-
-Without this change, the scan task can summarize results in stdout/result JSON, but the threat model, finding payload, validation evidence, and patch diff cannot be persisted reliably.
+Required security artifacts can be recovered and enforced by worker prompts: if an agent produces the information in stdout but misses a file, follow-up validation or repair prompts should ask it to materialize the missing artifact before the task is considered complete.
 
 ### `security-findings.json` contract
 
@@ -555,7 +552,7 @@ The scanner task should write a single compact JSON payload:
       "evidence": [
         {
           "kind": "artifact",
-          "name": "security-validation-fnd_01.txt",
+          "name": "security-validation.txt",
           "label": "Validation transcript"
         }
       ]
@@ -605,13 +602,12 @@ spec:
   prompt: "<generated prompt>"
   timeout: "2h"
   priority: 700
-  agentRuntime:
-    workspace:
-      gitRepo: "https://github.com/org/repo.git"
-      branch: "main"
-      gitSecretRef:
-        name: repo-git-creds
-      subPath: "services/api"
+  workspace:
+    gitRepo: "https://github.com/org/repo.git"
+    branch: "main"
+    gitSecretRef:
+      name: repo-git-creds
+    subPath: "services/api"
 ```
 
 ### Prompt building

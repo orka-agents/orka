@@ -189,6 +189,7 @@ type CreateTaskRequest struct {
 	AgentRef          *corev1alpha1.AgentReference   `json:"agentRef,omitempty"`
 	Prompt            string                         `json:"prompt,omitempty"`
 	AgentRuntime      *corev1alpha1.AgentRuntimeSpec `json:"agentRuntime,omitempty"`
+	Workspace         *corev1alpha1.WorkspaceConfig  `json:"workspace,omitempty"`
 	Execution         *corev1alpha1.ExecutionSpec    `json:"execution,omitempty"`
 	Schedule          string                         `json:"schedule,omitempty"`
 	TimeZone          *string                        `json:"timeZone,omitempty"`
@@ -291,6 +292,7 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 			AgentRef:     req.AgentRef,
 			Prompt:       req.Prompt,
 			AgentRuntime: req.AgentRuntime,
+			Workspace:    req.Workspace,
 			Schedule:     req.Schedule,
 			Suspend:      req.Suspend,
 		},

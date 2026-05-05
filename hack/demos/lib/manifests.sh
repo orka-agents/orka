@@ -389,20 +389,19 @@ EOF
   emit_block "    " "${DEMO_CRON_REQUEST}"
   printf '\n'
   cat <<EOF
-  agentRuntime:
-    workspace:
-      gitRepo: ${DEMO_GIT_REPO}
-      branch: ${DEMO_GIT_BRANCH}
+  workspace:
+    gitRepo: ${DEMO_GIT_REPO}
+    branch: ${DEMO_GIT_BRANCH}
 EOF
   if [[ -n "${DEMO_GIT_SECRET_REF:-}" ]]; then
     cat <<EOF
-      gitSecretRef:
-        name: ${DEMO_GIT_SECRET_REF}
+    gitSecretRef:
+      name: ${DEMO_GIT_SECRET_REF}
 EOF
   fi
   if [[ -n "${DEMO_GIT_SUB_PATH:-}" ]]; then
     cat <<EOF
-      subPath: ${DEMO_GIT_SUB_PATH}
+    subPath: ${DEMO_GIT_SUB_PATH}
 EOF
   fi
 }

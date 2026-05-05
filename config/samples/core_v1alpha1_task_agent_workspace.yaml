@@ -13,20 +13,21 @@ spec:
     name: claude-agent
   # Prompt for the agent to execute in the cloned workspace
   prompt: "Fix the failing CI tests in the api/ directory"
-  # Agent runtime overrides with workspace git clone configuration
+  # Workspace git clone configuration. Prefer this top-level field for new tasks.
+  workspace:
+    # gitRepo is the repository URL to clone into the workspace
+    gitRepo: "https://github.com/example/my-project.git"
+    # branch to checkout (optional, defaults to repo default branch)
+    branch: "feature/fix-tests"
+    # ref can be a specific commit SHA or tag (optional, mutually exclusive with branch)
+    # ref: "abc123"
+    # gitSecretRef references a Secret with git credentials for private repos
+    gitSecretRef:
+      name: git-credentials
+    # subPath restricts the workspace root to a subdirectory of the repo
+    # subPath: "services/api"
+  # Agent runtime overrides
   agentRuntime:
-    workspace:
-      # gitRepo is the repository URL to clone into the workspace
-      gitRepo: "https://github.com/example/my-project.git"
-      # branch to checkout (optional, defaults to repo default branch)
-      branch: "feature/fix-tests"
-      # ref can be a specific commit SHA or tag (optional, mutually exclusive with branch)
-      # ref: "abc123"
-      # gitSecretRef references a Secret with git credentials for private repos
-      gitSecretRef:
-        name: git-credentials
-      # subPath restricts the workspace root to a subdirectory of the repo
-      # subPath: "services/api"
     maxTurns: 100
     allowBash: true
     # allowedTools overrides the Agent's defaultAllowedTools for this task

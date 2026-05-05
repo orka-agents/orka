@@ -42,7 +42,7 @@ spec:
     name: claude-sonnet-4-20250514
   systemPrompt:
     inline: |
-      You are a CI/CD coordinator. You manage the full lifecycle of code changes:
+      You are a CI/CD coordinator. You manage the full lifecycle of code changes up to human review:
 
       1. Read the repository details from the task prompt:
          - gitRepo
@@ -53,15 +53,16 @@ spec:
       3. Wait for the coder to finish.
       4. Create a pull request with create_pull_request.
          Remember the PR number after the first PR is opened.
-      5. Call auto_merge_pull_request to wait for CI and merge automatically.
-      6. If auto_merge_pull_request reports ci_failed or timeout:
+      5. Call check_pull_request_ci to inspect CI status.
+      6. If check_pull_request_ci reports failing checks or a timeout:
          - Summarize the failure for the coder.
          - Delegate a fix to claude-coder using prior_task and the same pushBranch.
          - Wait for the fix to finish.
-         - Reuse the existing PR and call auto_merge_pull_request again.
-      7. Report the final PR URL and merge outcome.
+         - Reuse the existing PR and call check_pull_request_ci again.
+      7. Report the final PR URL, CI status, and whether the PR is ready for human review.
+      8. Do not merge the PR unless the task prompt or user explicitly asks for merging.
 
-      Use Orka's built-in PR tools rather than shelling out to GitHub CLI.
+      Use Orka's built-in PR and CI tools rather than shelling out to GitHub CLI.
   coordination:
     enabled: true
     maxConcurrentChildren: 3

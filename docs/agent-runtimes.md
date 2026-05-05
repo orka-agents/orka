@@ -218,26 +218,26 @@ spec:
   # prompt: instruction sent to the agent CLI
   prompt: "Fix the failing tests in api/"
 
-  # agentRuntime: task-level overrides (all optional)
-  agentRuntime:
-    # workspace: git clone configuration
-    workspace:
-      gitRepo: "https://github.com/example/my-project.git"
-      branch: "main"
-      # ref: specific commit SHA or tag (mutually exclusive with branch)
-      # ref: "abc123"
-      # gitSecretRef: Secret with git credentials for private repos
-      # gitSecretRef:
-      #   name: git-credentials
-      # subPath: subdirectory within repo to use as workspace root
-      # subPath: "services/api"
-      # forkRepo: writable fork URL used as git remote for pushes
-      # forkRepo: "https://github.com/my-org/my-project.git"
-      # prBaseBranch: upstream branch to target when creating PRs
-      # prBaseBranch: "main"
-      # pushBranch: branch name to push changes to after task completion
-      # pushBranch: "feature/my-change"
+  # workspace: git clone configuration for this task
+  workspace:
+    gitRepo: "https://github.com/example/my-project.git"
+    branch: "main"
+    # ref: specific commit SHA or tag (mutually exclusive with branch)
+    # ref: "abc123"
+    # gitSecretRef: Secret with git credentials for private repos
+    # gitSecretRef:
+    #   name: git-credentials
+    # subPath: subdirectory within repo to use as workspace root
+    # subPath: "services/api"
+    # forkRepo: writable fork URL used as git remote for pushes
+    # forkRepo: "https://github.com/my-org/my-project.git"
+    # prBaseBranch: upstream branch to target when creating PRs
+    # prBaseBranch: "main"
+    # pushBranch: branch name to push changes to after task completion
+    # pushBranch: "feature/my-change"
 
+  # agentRuntime: task-level runtime overrides (all optional)
+  agentRuntime:
     # maxTurns: override Agent's defaultMaxTurns (range: 1-1000)
     maxTurns: 100
 
@@ -316,15 +316,14 @@ spec:
 
 ## Workspace Management
 
-Agent tasks can clone a git repository into the worker pod's `/workspace` directory.
+Agent tasks can clone a git repository into the worker pod's `/workspace` directory. Prefer `spec.workspace` on the Task; `spec.agentRuntime.workspace` is still accepted for existing manifests.
 
 ### Public Repositories
 
 ```yaml
-agentRuntime:
-  workspace:
-    gitRepo: "https://github.com/example/public-repo.git"
-    branch: "main"
+workspace:
+  gitRepo: "https://github.com/example/public-repo.git"
+  branch: "main"
 ```
 
 ### Private Repositories
@@ -338,27 +337,35 @@ kubectl create secret generic git-credentials \
 ```
 
 ```yaml
-agentRuntime:
-  workspace:
-    gitRepo: "https://github.com/example/private-repo.git"
-    branch: "feature/fix-tests"
-    gitSecretRef:
-      name: git-credentials
+workspace:
+  gitRepo: "https://github.com/example/private-repo.git"
+  branch: "feature/fix-tests"
+  gitSecretRef:
+    name: git-credentials
 ```
 
 > **Note**: For the Copilot runtime, `GITHUB_TOKEN` from the Agent's `secretRef` can authenticate both the CLI and git clone operations. For the Claude and Codex runtimes, a separate `gitSecretRef` is usually needed because their API keys do not authenticate git operations.
 
 > **Codex caveat**: The current Codex runtime implementation requires `defaultAllowBash: true` (or task-level `allowBash: true`). If bash is disabled, the worker fails fast instead of launching Codex, because the current Codex CLI does not expose a reliable shell-disable mode.
 
+### Codex Sandbox Mode
+
+Codex workers default the Codex CLI sandbox to `workspace-write`. Operators can override the mode without changing manifests:
+
+- Controller flag: `--codex-sandbox-mode`
+- Helm value: `workers.codex.sandboxMode`
+- Worker environment variable: `ORKA_CODEX_SANDBOX_MODE`
+
+For example, a trusted cluster that already isolates worker pods with a Kubernetes runtime sandbox might choose `danger-full-access`. Only use permissive sandbox modes for trusted workloads and appropriately isolated clusters.
+
 ### SubPath
 
 Restrict the agent's workspace to a subdirectory of the cloned repository:
 
 ```yaml
-agentRuntime:
-  workspace:
-    gitRepo: "https://github.com/example/monorepo.git"
-    subPath: "services/api"
+workspace:
+  gitRepo: "https://github.com/example/monorepo.git"
+  subPath: "services/api"
 ```
 
 ### Specific Commit or Tag
@@ -366,10 +373,9 @@ agentRuntime:
 Use `ref` instead of `branch` to check out a specific commit SHA or tag:
 
 ```yaml
-agentRuntime:
-  workspace:
-    gitRepo: "https://github.com/example/repo.git"
-    ref: "v1.2.3"
+workspace:
+  gitRepo: "https://github.com/example/repo.git"
+  ref: "v1.2.3"
 ```
 
 ### Push Changes to a Branch
@@ -378,12 +384,11 @@ Use `pushBranch` to have the worker commit and push changes automatically at the
 For fork-based workflows, also set `forkRepo` and `prBaseBranch`.
 
 ```yaml
-agentRuntime:
-  workspace:
-    gitRepo: "https://github.com/upstream/repo.git"
-    forkRepo: "https://github.com/my-user/repo.git"
-    prBaseBranch: "main"
-    pushBranch: "feature/my-change"
+workspace:
+  gitRepo: "https://github.com/upstream/repo.git"
+  forkRepo: "https://github.com/my-user/repo.git"
+  prBaseBranch: "main"
+  pushBranch: "feature/my-change"
 ```
 
 ## Session Continuity
@@ -483,13 +488,14 @@ kubectl create secret generic copilot-token \
 
 ## Controller Configuration
 
-The controller accepts flags to configure agent worker images:
+The controller accepts flags to configure agent worker images and Codex runtime behavior:
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Container image for Copilot agent workers |
 | `--claude-worker-image` | `ghcr.io/sozercan/orka/agent-worker-claude:latest` | Container image for Claude agent workers |
 | `--codex-worker-image` | `ghcr.io/sozercan/orka/agent-worker-codex:latest` | Container image for Codex agent workers |
+| `--codex-sandbox-mode` | `""` | Override Codex CLI sandbox mode for Codex worker pods; empty uses worker default `workspace-write` |
 
 Example:
 
@@ -564,10 +570,10 @@ spec:
   agentRef:
     name: claude-agent
   prompt: "Fix the failing CI tests in the api/ directory"
+  workspace:
+    gitRepo: "https://github.com/example/my-project.git"
+    branch: "main"
   agentRuntime:
-    workspace:
-      gitRepo: "https://github.com/example/my-project.git"
-      branch: "main"
     maxTurns: 100
   timeout: "30m"
   priority: 600
