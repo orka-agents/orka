@@ -2242,9 +2242,10 @@ func TestHandleScheduled_CreateChildTask(t *testing.T) {
 			CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
 		},
 		Spec: corev1alpha1.TaskSpec{
-			Type:     corev1alpha1.TaskTypeContainer,
-			Image:    "busybox:latest",
-			Schedule: "* * * * *",
+			Type:                    corev1alpha1.TaskTypeContainer,
+			Image:                   "busybox:latest",
+			Schedule:                "* * * * *",
+			StartingDeadlineSeconds: ptr.To[int64](300),
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:            corev1alpha1.TaskPhaseScheduled,
@@ -2275,9 +2276,10 @@ func TestHandleScheduled_ExistingChildTaskStillUpdatesScheduleStatus(t *testing.
 			CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour).UTC()),
 		},
 		Spec: corev1alpha1.TaskSpec{
-			Type:     corev1alpha1.TaskTypeContainer,
-			Image:    "busybox:latest",
-			Schedule: "* * * * *",
+			Type:                    corev1alpha1.TaskTypeContainer,
+			Image:                   "busybox:latest",
+			Schedule:                "* * * * *",
+			StartingDeadlineSeconds: ptr.To[int64](300),
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:            corev1alpha1.TaskPhaseScheduled,

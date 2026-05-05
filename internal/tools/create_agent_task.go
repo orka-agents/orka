@@ -96,7 +96,7 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		},
 	}
 
-	if d, errResult, ok := parseDurationArg(a, "timeout"); !ok {
+	if d, errResult, ok := parseTimeoutArg(a); !ok {
 		return errResult, nil
 	} else if d > 0 {
 		task.Spec.Timeout = &metav1.Duration{Duration: d}

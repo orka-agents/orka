@@ -17,6 +17,8 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
+const testAITaskName = "ai-task-1"
+
 func TestCreateAITaskTool_Name(t *testing.T) {
 	tool := &CreateAITaskTool{}
 	if got := tool.Name(); got != "create_ai_task" {
@@ -64,7 +66,7 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 			Namespace: defaultNamespace,
 			GenerateTaskName: func() string {
 				taskCounter++
-				return "ai-task-1"
+				return testAITaskName
 			},
 			TaskLabels: func() map[string]string {
 				return map[string]string{"orka.ai/managed": "true"}
@@ -99,8 +101,8 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 				if !ok {
 					t.Fatal("data is not a map")
 				}
-				if data["name"] != "ai-task-1" {
-					t.Errorf("name = %v, want ai-task-1", data["name"])
+				if data["name"] != testAITaskName {
+					t.Errorf("name = %v, want %s", data["name"], testAITaskName)
 				}
 				if data["namespace"] != defaultNamespace {
 					t.Errorf("namespace = %v, want default", data["namespace"])
@@ -183,7 +185,7 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 			objects: []client.Object{
 				&corev1alpha1.Task{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "ai-task-1",
+						Name:      testAITaskName,
 						Namespace: defaultNamespace,
 					},
 					Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
@@ -219,6 +221,153 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 				tt.checkResult(t, result)
 			}
 		})
+	}
+}
+
+func TestCreateAITaskTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
+	fc := newFakeClient()
+	taskCounter := 0
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Client:    fc,
+		Namespace: defaultNamespace,
+		GenerateTaskName: func() string {
+			taskCounter++
+			return testAITaskName
+		},
+		TaskLabels: func() map[string]string {
+			return map[string]string{"orka.ai/managed": "true"}
+		},
+		CheckTaskLimit: func() *ChatToolError { return nil },
+		IncrementTasks: func() { taskCounter++ },
+	})
+
+	tool := &CreateAITaskTool{}
+	result, err := tool.Execute(ctx, json.RawMessage(`{"prompt":"Analyze code"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var r ChatToolResult
+	if err := json.Unmarshal([]byte(result), &r); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !r.Success {
+		t.Fatalf("expected success, got error: %s", r.Error)
+	}
+
+	var created corev1alpha1.Task
+	if err := fc.Get(context.Background(), client.ObjectKey{
+		Name:      testAITaskName,
+		Namespace: defaultNamespace,
+	}, &created); err != nil {
+		t.Fatalf("failed to get created task: %v", err)
+	}
+
+	if created.Spec.AI != nil && created.Spec.AI.ProviderRef != nil {
+		t.Fatalf("AI.providerRef = %#v, want nil when providerRef argument is omitted", created.Spec.AI.ProviderRef)
+	}
+}
+
+func TestCreateAITaskTool_Execute_ExplicitProviderRefPreserved(t *testing.T) {
+	fc := newFakeClient()
+	taskCounter := 0
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Client:    fc,
+		Namespace: defaultNamespace,
+		GenerateTaskName: func() string {
+			taskCounter++
+			return testAITaskName
+		},
+		TaskLabels: func() map[string]string {
+			return map[string]string{"orka.ai/managed": "true"}
+		},
+		CheckTaskLimit: func() *ChatToolError { return nil },
+		IncrementTasks: func() { taskCounter++ },
+	})
+
+	tool := &CreateAITaskTool{}
+	result, err := tool.Execute(ctx, json.RawMessage(`{"prompt":"Analyze code","providerRef":"openai"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var r ChatToolResult
+	if err := json.Unmarshal([]byte(result), &r); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !r.Success {
+		t.Fatalf("expected success, got error: %s", r.Error)
+	}
+
+	var created corev1alpha1.Task
+	if err := fc.Get(context.Background(), client.ObjectKey{
+		Name:      testAITaskName,
+		Namespace: defaultNamespace,
+	}, &created); err != nil {
+		t.Fatalf("failed to get created task: %v", err)
+	}
+
+	if created.Spec.AI == nil {
+		t.Fatal("AI spec is nil, want providerRef")
+	}
+	if created.Spec.AI.ProviderRef == nil {
+		t.Fatal("AI.providerRef is nil, want openai")
+	}
+	if created.Spec.AI.ProviderRef.Name != "openai" {
+		t.Fatalf("AI.providerRef.name = %q, want openai", created.Spec.AI.ProviderRef.Name)
+	}
+}
+
+func TestCreateAITaskTool_Execute_SessionRefCreatesAndAppends(t *testing.T) {
+	fc := newFakeClient()
+	taskCounter := 0
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Client:    fc,
+		Namespace: defaultNamespace,
+		GenerateTaskName: func() string {
+			taskCounter++
+			return testAITaskName
+		},
+		TaskLabels: func() map[string]string {
+			return map[string]string{"orka.ai/managed": "true"}
+		},
+		CheckTaskLimit: func() *ChatToolError { return nil },
+		IncrementTasks: func() { taskCounter++ },
+	})
+
+	tool := &CreateAITaskTool{}
+	result, err := tool.Execute(ctx, json.RawMessage(`{"prompt":"Analyze code","sessionRef":"sess-1"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var r ChatToolResult
+	if err := json.Unmarshal([]byte(result), &r); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !r.Success {
+		t.Fatalf("expected success, got error: %s", r.Error)
+	}
+
+	var created corev1alpha1.Task
+	if err := fc.Get(context.Background(), client.ObjectKey{
+		Name:      testAITaskName,
+		Namespace: defaultNamespace,
+	}, &created); err != nil {
+		t.Fatalf("failed to get created task: %v", err)
+	}
+
+	if created.Spec.SessionRef == nil {
+		t.Fatal("SessionRef is nil")
+	}
+	if created.Spec.SessionRef.Name != "sess-1" {
+		t.Errorf("SessionRef.Name = %q, want sess-1", created.Spec.SessionRef.Name)
+	}
+	if !created.Spec.SessionRef.Create {
+		t.Error("SessionRef.Create = false, want true")
+	}
+	if !created.Spec.SessionRef.Append {
+		t.Error("SessionRef.Append = false, want true")
 	}
 }
 

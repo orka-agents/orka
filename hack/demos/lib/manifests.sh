@@ -56,6 +56,8 @@ spec:
       You are the implementation agent for a live Orka demo.
       Work only in the repository workspace provided by the task.
       Keep the diff focused and run the smallest relevant validation you can.
+      Do not modify .github/workflows/* or CI, release, Dockerfile, Makefile, Goreleaser, or other build automation unless the task explicitly requests workflow/build/release changes.
+      Do not install language runtimes or large toolchains into the agent workspace; the coordinator runs full validation in a separate container task.
       Do not manually commit, push, or open a pull request unless the task explicitly asks you to repair git state.
       Leave the final file changes in the workspace; Orka will capture the diff and push it to ORKA_PUSH_BRANCH automatically.
       If git reports dubious ownership, mark /workspace as a safe.directory before continuing.
@@ -101,11 +103,14 @@ spec:
       The task workspace already contains the checked-out repository and branch. Do not run git clone or create nested repositories inside the workspace.
       Run git commands to ground your review. First fetch origin, then list changed files with git diff --name-only origin/<base-branch>...HEAD, then inspect only that diff with git diff origin/<base-branch>...HEAD.
       Scope decisions must come only from that diff. Ignore repository files that already exist on the branch or in history if they are not part of the current diff.
+      Do not block on unrelated existing files, generated artifacts, or any file that is not listed by git diff --name-only origin/<base-branch>...HEAD.
+      Blocking feedback must cite only changed files and exact diff lines from git diff origin/<base-branch>...HEAD.
+      If you cannot point to diff evidence for a concern, do not return CHANGES_NEEDED; approve or include the concern as a non-blocking note.
       Your final answer must not mention any file that is absent from git diff --name-only origin/<base-branch>...HEAD.
-      If the diff contains only README.md and/or CONTRIBUTING.md changes, treat the change as documentation-only.
       Follow that heading with concise, actionable feedback.
+      For code changes, look for secret exposure, command injection, unsafe shell invocation, unsafe file or network access, and credential handling issues.
       Approve when the requested change is already correct, clearly scoped, and safe.
-      Do not request preference-only wording changes for documentation unless they materially affect security, policy accuracy, or the user's explicit requirements.
+      Do not request preference-only changes unless they materially affect security, correctness, or the user's explicit requirements.
       Never commit, push, or open a pull request.
   resources:
     requests:
@@ -148,10 +153,12 @@ spec:
       The task workspace already contains the checked-out repository and branch. Do not run git clone or create nested repositories inside the workspace.
       Run git commands to ground your review. First fetch origin, then list changed files with git diff --name-only origin/<base-branch>...HEAD, then inspect only that diff with git diff origin/<base-branch>...HEAD.
       Scope decisions must come only from that diff. Ignore repository files that already exist on the branch or in history if they are not part of the current diff.
+      Do not block on unrelated existing files, generated artifacts, or any file that is not listed by git diff --name-only origin/<base-branch>...HEAD.
+      Blocking feedback must cite only changed files and exact diff lines from git diff origin/<base-branch>...HEAD.
+      If you cannot point to diff evidence for a concern, do not return CHANGES_NEEDED; approve or include the concern as a non-blocking note.
       Your final answer must not mention any file that is absent from git diff --name-only origin/<base-branch>...HEAD.
-      If the diff contains only README.md and/or CONTRIBUTING.md changes, treat the change as documentation-only.
       Follow that heading with concise, actionable feedback.
-      Focus on correctness, clarity, and testability.
+      Focus on feature behavior, correctness, clarity, testability, and fit with project conventions.
       Approve when the requested change is already correct and reviewable.
       Do not request preference-only wording or placement changes unless they materially improve correctness, clarity of the explicit request, or maintainability.
       Never commit, push, or open a pull request.
@@ -183,13 +190,16 @@ spec:
       You are the coordinator for a live Orka demo.
       Follow this workflow exactly:
       1. Read the repository details from the task prompt.
-      2. Delegate implementation to ${DEMO_CODER_AGENT_NAME} with that workspace and a pushBranch. Tell the coder to edit files only and let Orka push the final diff automatically.
+      2. Delegate implementation to ${DEMO_CODER_AGENT_NAME} with that workspace, a pushBranch, timeout "40m", and maxTurns 60. Tell the coder to edit files only and let Orka push the final diff automatically.
       3. Wait for the coder to finish.
-      4. Delegate parallel review to ${DEMO_SECURITY_REVIEWER_NAME} and ${DEMO_QUALITY_REVIEWER_NAME} without prior_task. For review tasks, set workspace.gitRepo, workspace.gitSecretRef, and workspace.branch = pushBranch, and set maxTurns to at least 60. NEVER include workspace.pushBranch on review tasks. In each review prompt, explicitly tell reviewers the workspace is already checked out for them, so they must not clone again. Tell them to fetch origin, run git diff --name-only origin/<base-branch>...HEAD, inspect only that diff, and ignore unchanged repository files outside that diff. If the coder result includes a files list, include an "Expected changed files" section in the review prompt and tell reviewers their final answer must not mention files outside that list or outside git diff --name-only origin/<base-branch>...HEAD. Reviewers should inspect the current branch diff against the base branch from the prompt; they do not need prior_task.
-      5. Wait for both reviewers.
-      6. If either reviewer returns CHANGES_NEEDED and you have not already iterated twice, summarize all feedback and delegate a follow-up fix to ${DEMO_CODER_AGENT_NAME}. For follow-up coder tasks, set workspace.gitRepo, workspace.gitSecretRef, workspace.branch = pushBranch, and workspace.pushBranch = pushBranch. Do NOT use prior_task for follow-up coder tasks after the first push, because that creates a fresh local history that cannot be pushed back to the same branch cleanly. Make it explicit that the workspace is already checked out for the coder, so the coder must edit files in place and must not clone the repo again. Tell the coder to preserve the explicit original request while addressing review feedback; if a reviewer flags a broken newly-added documentation link, prefer creating the minimal supporting file instead of deleting requested content. Tell the coder to edit files only and let Orka push the incremental update automatically. Then repeat the review step.
-      7. When both reviewers approve, create a pull request with create_pull_request using the coder task name, the pushed branch, and the base branch from the prompt.
-      8. Report the pull request URL and a brief summary of the result.
+      If the coder task fails or times out, do not create a pull request, and report the failure clearly.
+      4. Validate the pushed change with create_container_task before review. First determine the validation environment from repository evidence, not from demo defaults. Every discovery and validation container task that inspects repository files MUST set workspace.gitRepo, workspace.gitSecretRef, and either workspace.ref=headSHA or workspace.branch=pushBranch. Do not run repo validation without workspace. Prefer immutable validation: if the latest coder result includes headSHA, set workspace.ref = headSHA; otherwise set workspace.branch = pushBranch. Do not set workspace.pushBranch for validation. If the environment is not already clear, create a read-only discovery container task with the default worker image and that workspace to inspect project files such as .github/workflows, go.mod, package.json, pyproject.toml, Cargo.toml, Makefile, Dockerfile, and .devcontainer. Choose and report the validation image, command, workspace ref/branch, and evidence. For Go repositories, prefer the go.mod toolchain directive when present, otherwise the go directive, choose a matching golang:<major.minor> image, and prepend: export PATH=/usr/local/go/bin:\$PATH; export GOCACHE=/tmp/go-cache; export GOMODCACHE=/tmp/go-mod-cache; export CGO_ENABLED=0; Use command ["sh", "-lc"] and args [the selected validation command]. If validation fails because the repo is missing, go is not on PATH, or caches are unwritable, retry validation with corrected configuration or report VALIDATION_CONFIG_BLOCKED rather than treating it as a code failure. If the validation environment cannot be determined confidently, report VALIDATION_CONFIG_BLOCKED and do not create a pull request. Wait for the validation task. If validation fails, summarize its result and delegate a focused repair task to ${DEMO_CODER_AGENT_NAME} with workspace.gitRepo, workspace.gitSecretRef, workspace.branch = pushBranch, workspace.pushBranch = pushBranch, timeout "40m", and maxTurns 60. Tell the coder to fix only validation failures. Repeat validation. Use at most ${DEMO_VALIDATION_REPAIR_LIMIT} validation repair tasks; if validation still fails, report VALIDATION_BLOCKED and do not create a pull request.
+      5. Delegate parallel review to ${DEMO_SECURITY_REVIEWER_NAME} and ${DEMO_QUALITY_REVIEWER_NAME} without prior_task. For review tasks, set workspace.gitRepo, workspace.gitSecretRef, workspace.branch = pushBranch, timeout "20m", and maxTurns 40. NEVER include workspace.pushBranch on review tasks. Include the latest validation task name and validation summary in each review prompt. In each review prompt, explicitly tell reviewers the workspace is already checked out for them, so they must not clone again. Tell them to fetch origin, run git diff --name-only origin/<base-branch>...HEAD, inspect only that diff with git diff origin/<base-branch>...HEAD, ignore unchanged repository files outside that diff, avoid blocking on concerns without diff evidence, and cite only changed files/lines in feedback. Explicitly include the original change request acceptance criteria in each review prompt. Reviewers must judge the change against the original request and acceptance criteria, not hidden demo expectations. They may require bounded labels, clear documentation/warnings, and no user/key/prompt label values when those criteria apply. If the coder result includes a files list, include an "Expected changed files" section in the review prompt and tell reviewers their final answer must not mention files outside that list or outside git diff --name-only origin/<base-branch>...HEAD. Reviewers should inspect the current branch diff against the base branch from the prompt; they do not need prior_task.
+      6. Wait for both reviewers.
+      7. If either reviewer returns CHANGES_NEEDED, summarize all review feedback and delegate a focused repair task to ${DEMO_CODER_AGENT_NAME}. For repair tasks, set workspace.gitRepo, workspace.gitSecretRef, workspace.branch = pushBranch, workspace.pushBranch = pushBranch, timeout "40m", and maxTurns 60. Tell the coder to preserve the original request and fix only the review issues. Prefer additional focused repair iterations over stopping early when reviewers identify concrete diff-backed security, correctness, or acceptance-criteria issues. Then repeat validation and review. Use at most ${DEMO_REVIEW_REPAIR_LIMIT} review repair tasks; if reviewers still request changes, report REVIEW_BLOCKED and do not create a pull request.
+      8. When validation passes and both reviewers approve, create a pull request with create_pull_request using the latest successful coder task name, the pushed branch, and the base branch from the prompt.
+      9. After the pull request exists, call check_pull_request_ci with the latest coder task and PR number. If CI is pending, keep checking for up to 30 minutes. If CI fails, summarize the failed check details and delegate a focused CI repair task to ${DEMO_CODER_AGENT_NAME} with workspace.branch = pushBranch and workspace.pushBranch = pushBranch. Tell the coder to fix only build, lint, formatting, dependency, or test failures. After each CI repair, repeat validation and review before checking CI again. Use at most ${DEMO_CI_REPAIR_LIMIT} CI repair tasks; if CI still fails, report CI_BLOCKED.
+      10. Report the pull request URL, final validation status, final review status, CI status, child-task count, and a brief summary. Do not report the PR as ready unless validation passes, reviewers approve, and CI passes.
   coordination:
     enabled: true
     maxDepth: 3
@@ -201,16 +211,92 @@ spec:
 EOF
 }
 
+
 render_chat_request_file() {
-  emit_block "" "Create an AI task in namespace ${DEMO_NAMESPACE} using the existing ${DEMO_PR_COORDINATOR_NAME} agent in that namespace.
-Do not create, update, or delete agents or providers for this demo.
-Wait for the workflow to finish and report the pull request URL.
-"
-  printf '\n'
+  emit_block "" "Claude Code is the local client. Orka is the server-side orchestrator.
+Start exactly one coordinator task for this demo, but first create the coordinator and specialist Agents through Orka's chat tool path.
+
+Create the Agents by translating the Agent specs below into create_agent tool calls. This YAML is the source of truth for the four demo Agents; do not apply it with kubectl and do not create any extra Agents.
+
+Critical tool-use constraints:
+- The first four Orka tool calls MUST be direct create_agent tool calls.
+- Do not use create_ai_task, create_agent_task, or create_container_task to create Agents.
+- A Task whose prompt starts with "create_agent" is incorrect and must not be created.
+- Only after all four create_agent calls return success may you call create_ai_task once for the coordinator.
+
+Create-agent mapping rules:
+- Call create_agent exactly four times before creating the coordinator task, one call for each Agent object in this order: ${DEMO_CODER_AGENT_NAME}, ${DEMO_SECURITY_REVIEWER_NAME}, ${DEMO_QUALITY_REVIEWER_NAME}, ${DEMO_PR_COORDINATOR_NAME}.
+- Pass metadata.name as name and metadata.namespace as namespace.
+- Pass spec.providerRef.name as providerRef when present.
+- Pass spec.model.name as model.name.
+- Pass spec.systemPrompt.inline as systemPrompt verbatim.
+- Pass spec.runtime as runtime. For runtime Agents, map spec.secretRef.name to runtime.secretRef.
+- Preserve runtime.defaultMaxTurns, runtime.defaultAllowedTools, and runtime.defaultAllowBash.
+- Pass spec.resources as resources, including requests and limits, when present.
+- Pass spec.coordination as coordination, including allowedAgents, maxDepth, and maxConcurrentChildren.
+- Do not use create_agent initialPrompt. Agent creation must not start any task.
+- create_agent does not need labels for this chat demo path; ignore metadata.labels if they are not supported by the tool.
+
+---BEGIN AGENT SPECS---"
+  render_pr_agents_manifest
+  emit_block "" "---END AGENT SPECS---
+
+After all four create_agent calls succeed, use Orka's create_ai_task tool exactly once with these arguments:
+- name: ${DEMO_CHAT_SESSION}
+- namespace: ${DEMO_NAMESPACE}
+- agentRef: ${DEMO_PR_COORDINATOR_NAME}
+- providerRef: ${DEMO_PROVIDER_REF}
+- sessionRef: ${DEMO_CHAT_SESSION}
+- timeout: ${DEMO_PR_WORKFLOW_TIMEOUT}
+- priority: 700
+- prompt: use the entire Coordinator task prompt section below verbatim
+
+Do not create, update, or delete tools or providers in this chat turn.
+Do not create any task except the one coordinator create_ai_task call described above.
+After creating the coordinator task, capture the returned task name, use wait_for_task until it reaches Succeeded or Failed, then use fetch_task_output and report only a concise final status.
+
+Coordinator task prompt (verbatim):
+---BEGIN COORDINATOR TASK PROMPT---"
   pr_repo_details_block "${DEMO_CHAT_PUSH_BRANCH}"
   printf '\n\n'
   emit_block "" "Change request:
-${DEMO_CHAT_REQUEST}"
+${DEMO_CHAT_REQUEST}
+---END COORDINATOR TASK PROMPT---"
+}
+
+render_chat_story_file() {
+  emit_block "" "Scenario:
+A maintainer gives Orka a live change request through an Anthropic-compatible chat client. Orka should turn that request into an auditable coordinator Task, specialist child Tasks, validation, review, and a PR handoff.
+
+What to watch:
+- Claude Code sends one chat request to Orka's Anthropic-compatible endpoint.
+- The chat request creates the coordinator, coder, and reviewer Agents through the create_agent tool path.
+- The chat request then creates one coordinator Task in Kubernetes.
+- The chat-created coordinator delegates to coder and reviewer Agents.
+- Child Tasks implement the current request, run validation, and perform parallel review.
+- The final result points to the PR handoff with review and CI status.
+
+Current change request:
+${DEMO_CHAT_REQUEST}
+
+Repository details:"
+  pr_repo_details_block "${DEMO_CHAT_PUSH_BRANCH}"
+}
+
+render_manual_story_file() {
+  emit_block "" "Scenario:
+The platform team submits the same kind of work as declarative Kubernetes YAML instead of a chat turn. The request can be the default Vekil metrics slice or a live request supplied with DEMO_MANUAL_REQUEST, DEMO_REQUEST_FILE, or DEMO_MANUAL_REQUEST_FILE.
+
+What to watch:
+- The coordinator, coder, and reviewer Agents are applied up front.
+- The Task CR starts a bounded workflow from the rendered prompt.
+- Orka records child Tasks, runtime logs, validation, review, CI repair if needed, and the final PR status.
+
+Current change request:
+${DEMO_MANUAL_REQUEST}
+
+Repository details:"
+  pr_repo_details_block "${DEMO_MANUAL_PUSH_BRANCH}"
 }
 
 render_manual_task_manifest() {
@@ -225,9 +311,12 @@ metadata:
     demo.orka.ai/scenario: manual-workflow
 spec:
   type: ai
+  ai:
+    providerRef:
+      name: ${DEMO_PROVIDER_REF}
   agentRef:
     name: ${DEMO_PR_COORDINATOR_NAME}
-  timeout: 45m
+  timeout: ${DEMO_PR_WORKFLOW_TIMEOUT}
   priority: 800
   prompt: |
 EOF

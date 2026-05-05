@@ -68,6 +68,7 @@ func main() {
 	var copilotWorkerImage string
 	var claudeWorkerImage string
 	var codexWorkerImage string
+	var codexSandboxMode string
 	var generalWorkerImage string
 	var chatEnabled bool
 	var chatProvider string
@@ -112,6 +113,8 @@ func main() {
 		controller.DefaultClaudeWorkerImage, "Container image for Claude agent worker.")
 	flag.StringVar(&codexWorkerImage, "codex-worker-image",
 		controller.DefaultCodexWorkerImage, "Container image for Codex agent worker.")
+	flag.StringVar(&codexSandboxMode, "codex-sandbox-mode", "",
+		"Sandbox mode for Codex agent worker. Empty uses worker default.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
@@ -266,6 +269,7 @@ func main() {
 	jobBuilder.CopilotWorkerImage = copilotWorkerImage
 	jobBuilder.ClaudeWorkerImage = claudeWorkerImage
 	jobBuilder.CodexWorkerImage = codexWorkerImage
+	jobBuilder.CodexSandboxMode = codexSandboxMode
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
 	setupLog.Info("worker images configured",
@@ -273,6 +277,7 @@ func main() {
 		"copilot", copilotWorkerImage,
 		"claude", claudeWorkerImage,
 		"codex", codexWorkerImage,
+		"codexSandboxMode", codexSandboxMode,
 		"general", generalWorkerImage,
 	)
 	jobBuilder.ControllerURL = controllerURL

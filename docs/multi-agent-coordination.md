@@ -51,7 +51,7 @@ Controller: parent Job succeeded → parent Task → Succeeded
 
 ### Coordination Tools
 
-Located in `internal/tools/`. Coordination tools include `delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, PR tools (`create_pull_request`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`), issue tools (`list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`), agent management tools (`create_agent`, `delete_agent`), and `update_plan` (autonomous mode). All are registered via `RegisterCoordinationTools(k8sClient)` in `internal/tools/registry.go` when `ORKA_COORDINATION_ENABLED=true`.
+Located in `internal/tools/`. Coordination tools include `delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, PR tools (`create_pull_request`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`), issue tools (`list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`), agent management tools (`create_agent`, `delete_agent`), and `update_plan` (autonomous mode). All are registered via `RegisterCoordinationTools(k8sClient)` in `internal/tools/registry.go` when `ORKA_COORDINATION_ENABLED=true`.
 
 #### `delegate_task` Tool
 
@@ -471,6 +471,8 @@ status:
 | `internal/tools/wait_for_tasks_test.go` | Unit tests with fake K8s client |
 | `internal/tools/create_pull_request.go` | create_pull_request tool implementation |
 | `internal/tools/create_pull_request_test.go` | Unit tests with fake K8s client |
+| `internal/tools/check_pull_request_ci.go` | check_pull_request_ci tool implementation |
+| `internal/tools/check_pull_request_ci_test.go` | Unit tests with fake K8s client |
 | `internal/tools/merge_pull_request.go` | merge_pull_request tool implementation |
 | `internal/tools/merge_pull_request_test.go` | Unit tests with fake K8s client |
 | `internal/tools/auto_merge_pull_request.go` | auto_merge_pull_request tool implementation |
@@ -596,6 +598,9 @@ COORDINATOR (AI worker)
   │                       body="LGTM", event="APPROVE")
   │     → posts review with verdict and optional line comments
   │
+  ├── check_pull_request_ci(task_name="coder-task-xyz", pr_number=42)
+  │     → checks GitHub CI status without merging
+  │
   ├── merge_pull_request(task_name="coder-task-xyz", pr_number=42)
   │     → verifies CI checks pass, then merges the PR (instant, fails if CI not green)
   │
@@ -688,6 +693,36 @@ Creates a GitHub pull request from a branch that was pushed by a completed agent
 | `body` | string | no | Pull request body in Markdown |
 
 The tool reads the git credentials from the child task's `gitSecretRef` secret (looks for `token` or `password` key) and calls the GitHub REST API. The coordinator must have RBAC access to read Secrets.
+
+### check_pull_request_ci Tool
+
+Checks GitHub CI status for a pull request without merging it. Use this after creating or updating a PR to decide whether the branch is ready or needs a focused repair task.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pr_number` | integer | yes | GitHub pull request number to inspect |
+| `task_name` | string | no | Name of the child task whose workspace config has the repo and git credentials |
+| `repo_url` | string | no | Direct GitHub repository URL. Falls back to `ORKA_GIT_REPO` when `task_name` is empty |
+| `wait_timeout` | string | no | Maximum time to wait for pending checks, e.g. `30m`. Empty means one immediate check |
+| `poll_interval` | string | no | Delay between checks while waiting, e.g. `30s`. Defaults to `30s` when waiting |
+
+Returns:
+```json
+{
+  "status": "failed",
+  "pr_number": 42,
+  "head_sha": "abc123",
+  "checks_passed": false,
+  "checks_failed": true,
+  "checks_pending": false,
+  "checks_details": "lint (conclusion=failure)",
+  "wait_timed_out": false,
+  "attempts": 1,
+  "message": "one or more CI checks failed"
+}
+```
+
+Possible `status` values: `passed`, `failed`, `pending`, `no_checks`, `closed`, `merged`, and `unknown`.
 
 ### review_pull_request Tool
 
@@ -873,9 +908,11 @@ You are a coordinator agent. Follow this protocol:
    Call create_pull_request with the coder's task name and pushBranch.
    Call review_pull_request to fetch the PR diff for final review.
    Call post_review_comment to approve the PR.
-   Call merge_pull_request to merge the PR after CI passes.
-   Or call auto_merge_pull_request to wait for CI and merge automatically.
-7. Report final result with the PR URL.
+   Call check_pull_request_ci to verify CI status.
+   If CI failed, delegate a focused repair task to the coder on the PR branch,
+   then check CI again before reporting the PR as ready.
+   Call merge_pull_request or auto_merge_pull_request only if the user asked to merge.
+7. Report final result with the PR URL, review result, and CI status.
 ```
 
 ## Autonomous Mode

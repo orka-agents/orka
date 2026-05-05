@@ -153,9 +153,31 @@ func (e *FindingsArtifactEvidenceRefs) UnmarshalJSON(data []byte) error {
 		*e = FindingsArtifactEvidenceRefs{ref}
 		return nil
 	default:
-		var refs []store.FindingEvidenceRef
-		if err := json.Unmarshal(data, &refs); err != nil {
+		var items []json.RawMessage
+		if err := json.Unmarshal(data, &items); err != nil {
 			return err
+		}
+		refs := make([]store.FindingEvidenceRef, 0, len(items))
+		for _, item := range items {
+			itemTrimmed := strings.TrimSpace(string(item))
+			if itemTrimmed == "" || itemTrimmed == "null" {
+				continue
+			}
+			if strings.HasPrefix(itemTrimmed, `"`) {
+				var text string
+				if err := json.Unmarshal(item, &text); err != nil {
+					return err
+				}
+				if strings.TrimSpace(text) != "" {
+					refs = append(refs, store.FindingEvidenceRef{Kind: "note", Label: text})
+				}
+				continue
+			}
+			var ref store.FindingEvidenceRef
+			if err := json.Unmarshal(item, &ref); err != nil {
+				return err
+			}
+			refs = append(refs, ref)
 		}
 		*e = FindingsArtifactEvidenceRefs(refs)
 		return nil

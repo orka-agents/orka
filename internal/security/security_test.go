@@ -38,6 +38,8 @@ func TestFindingsArtifactEvidenceRefsUnmarshalJSON(t *testing.T) {
 		want int
 	}{
 		{name: "array", raw: `[{"kind":"artifact","name":"file.txt","label":"trace"}]`, want: 1},
+		{name: "string array shorthand", raw: `["inline evidence"]`, want: 1},
+		{name: "mixed array shorthand", raw: `["inline evidence", {"kind":"artifact","name":"file.txt"}]`, want: 2},
 		{name: "string shorthand", raw: `"inline evidence"`, want: 1},
 		{name: "object shorthand", raw: `{"kind":"artifact","name":"file.txt"}`, want: 1},
 		{name: "null", raw: `null`, want: 0},

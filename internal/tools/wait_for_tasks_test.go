@@ -302,6 +302,59 @@ func TestWaitForTasksTool_Execute_InvalidTimeout(t *testing.T) {
 	}
 }
 
+func TestWaitForTasksTool_Execute_TruncatesLongStructuredSummary(t *testing.T) {
+	longSummary := strings.Repeat("x", maxWaitTaskSummaryChars+128)
+	sr := common.StructuredResult{Version: 1, Summary: longSummary}
+	srJSON, _ := json.Marshal(sr)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"result": string(srJSON)}) //nolint:errcheck
+	}))
+	defer server.Close()
+
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_CONTROLLER_URL", server.URL)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "long-summary", Namespace: "default"},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseSucceeded,
+			ResultRef: &corev1alpha1.ResultReference{Available: true},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithObjects(task).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+
+	tool := NewWaitForTasksTool(fakeClient)
+	args, _ := json.Marshal(WaitForTasksArgs{Tasks: []string{"long-summary"}, Timeout: "5s"})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	var waitResult WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	got := waitResult.Results[0].Summary
+	if len(got) >= len(longSummary) {
+		t.Fatalf("summary was not truncated: got %d want less than %d", len(got), len(longSummary))
+	}
+	if !strings.Contains(got, "summary truncated") {
+		t.Fatalf("summary missing truncation marker: %q", got)
+	}
+	if waitResult.Results[0].Result != got {
+		t.Fatalf("result should match truncated summary")
+	}
+}
+
 func TestWaitForTasksTool_Execute_MissingNamespace(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAMESPACE", "")
 	tool := NewWaitForTasksTool(nil)

@@ -44,20 +44,23 @@ type WaitForTasksResult struct {
 
 // TaskResultInfo holds individual task result information
 type TaskResultInfo struct {
-	Task           string          `json:"task"`
-	Agent          string          `json:"agent,omitempty"`
-	Phase          string          `json:"phase"`
-	Result         string          `json:"result,omitempty"`
-	Summary        string          `json:"summary,omitempty"`
-	Verdict        string          `json:"verdict,omitempty"`
-	Feedback       string          `json:"feedback,omitempty"`
-	Files          []string        `json:"files,omitempty"`
-	BaseSHA        string          `json:"baseSHA,omitempty"`
-	PushBranch     string          `json:"pushBranch,omitempty"`
-	Iteration      string          `json:"iteration,omitempty"`
-	FailureDetails *FailureDetails `json:"failureDetails,omitempty"`
-	Retried        bool            `json:"retried,omitempty"`
-	RetryTaskName  string          `json:"retryTaskName,omitempty"`
+	Task            string          `json:"task"`
+	Agent           string          `json:"agent,omitempty"`
+	Phase           string          `json:"phase"`
+	Result          string          `json:"result,omitempty"`
+	Summary         string          `json:"summary,omitempty"`
+	Verdict         string          `json:"verdict,omitempty"`
+	Feedback        string          `json:"feedback,omitempty"`
+	Files           []string        `json:"files,omitempty"`
+	BaseSHA         string          `json:"baseSHA,omitempty"`
+	HeadSHA         string          `json:"headSHA,omitempty"`
+	PushBranch      string          `json:"pushBranch,omitempty"`
+	WorkspaceRef    string          `json:"workspaceRef,omitempty"`
+	WorkspaceBranch string          `json:"workspaceBranch,omitempty"`
+	Iteration       string          `json:"iteration,omitempty"`
+	FailureDetails  *FailureDetails `json:"failureDetails,omitempty"`
+	Retried         bool            `json:"retried,omitempty"`
+	RetryTaskName   string          `json:"retryTaskName,omitempty"`
 }
 
 // FailureDetails provides structured information about a failed task
@@ -66,6 +69,8 @@ type FailureDetails struct {
 	RetryCount int    `json:"retryCount"`
 	MaxRetries int    `json:"maxRetries"`
 }
+
+const maxWaitTaskSummaryChars = 4096
 
 // NewWaitForTasksTool creates a new wait_for_tasks tool
 func NewWaitForTasksTool(k8sClient client.Client) *WaitForTasksTool {
@@ -164,6 +169,10 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			if task.Spec.AgentRef != nil {
 				results[taskName].Agent = task.Spec.AgentRef.Name
 			}
+			if ws := taskWorkspace(&task); ws != nil {
+				results[taskName].WorkspaceRef = ws.Ref
+				results[taskName].WorkspaceBranch = ws.Branch
+			}
 
 			if phase != corev1alpha1.TaskPhaseSucceeded && phase != corev1alpha1.TaskPhaseFailed {
 				allTerminal = false
@@ -188,16 +197,18 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
 				resultStr, fetchErr := fetchTaskResult(ctx, taskName)
 				if fetchErr == nil {
-					// Parse structured result and strip diff to avoid context bloat
+					// Parse structured result and strip diff to avoid context bloat.
 					sr := common.ParseStructuredResult(resultStr)
-					results[taskName].Summary = sr.Summary
+					summary := truncateWaitTaskSummary(sr.Summary)
+					results[taskName].Summary = summary
 					results[taskName].Verdict = sr.Verdict
 					results[taskName].Feedback = sr.Feedback
 					results[taskName].Files = sr.Files
 					results[taskName].BaseSHA = sr.BaseSHA
+					results[taskName].HeadSHA = sr.HeadSHA
 					results[taskName].PushBranch = sr.PushBranch
-					// Set Result to summary only (never include raw diff)
-					results[taskName].Result = sr.Summary
+					// Set Result to summary only (never include raw diff).
+					results[taskName].Result = summary
 				} else {
 					results[taskName].Result = fmt.Sprintf("error reading result: %v", fetchErr)
 				}
@@ -251,6 +262,16 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 
 // Ensure WaitForTasksTool implements Tool
 var _ Tool = (*WaitForTasksTool)(nil)
+
+func truncateWaitTaskSummary(summary string) string {
+	if len(summary) <= maxWaitTaskSummaryChars {
+		return summary
+	}
+	return summary[:maxWaitTaskSummaryChars] + fmt.Sprintf(
+		"\n[summary truncated, full summary: %d chars]",
+		len(summary),
+	)
+}
 
 // getRetryInfo extracts retry count and max retries from task annotations.
 func getRetryInfo(task *corev1alpha1.Task) (retryCount, maxRetries int) {

@@ -47,7 +47,7 @@ func TestTruncateMessages_DropsMiddleKeepsFirstAndRecent(t *testing.T) {
 	if result[0].Content != "original request" {
 		t.Errorf("first message should be preserved, got %q", result[0].Content)
 	}
-	if result[1].Role != "system" { //nolint:goconst // test string, not worth a constant
+	if result[1].Role != oaiRoleSystem {
 		t.Errorf("second message should be truncation note, got role %q", result[1].Role)
 	}
 	if !strings.Contains(result[1].Content, "truncated") {
@@ -97,7 +97,7 @@ func TestTruncateMessages_ToolCallsKeptAtomic(t *testing.T) {
 
 	// Verify truncation note content when truncation occurred
 	for _, m := range result {
-		if m.Role == "system" {
+		if m.Role == oaiRoleSystem {
 			if !strings.Contains(m.Content, "truncated") {
 				t.Errorf("truncation note should contain 'truncated', got %q", m.Content)
 			}

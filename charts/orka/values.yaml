@@ -69,6 +69,8 @@ workers:
       repository: ghcr.io/sozercan/orka/agent-worker-codex
       tag: latest
       pullPolicy: IfNotPresent
+    # Optional Codex CLI sandbox mode passed to Codex worker pods (e.g. danger-full-access)
+    sandboxMode: ""
 
 # Service configuration
 service:

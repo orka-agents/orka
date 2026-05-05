@@ -32,11 +32,11 @@ func (t *CreateAITaskTool) Parameters() json.RawMessage {
 			"name":        map[string]any{"type": "string", "description": "Task name"},
 			"prompt":      map[string]any{"type": "string", "description": "The prompt/instruction for the AI task"},
 			"agentRef":    map[string]any{"type": "string", "description": "Optional Agent name to use"},
-			"providerRef": map[string]any{"type": "string", "description": "Provider name (defaults to 'default')"},
+			"providerRef": map[string]any{"type": "string", "description": "Optional Provider CRD reference name. Omit to let the controller resolve the task from the referenced Agent or model settings."},
 			"namespace":   map[string]any{"type": "string", "description": "Namespace"},
 			"timeout":     map[string]any{"type": "string", "description": "Timeout duration, e.g. \"5m\""},
 			"priority":    map[string]any{"type": "integer", "description": "Priority 0-1000"},
-			"sessionRef":  map[string]any{"type": "string", "description": "Session name for conversation continuity"},
+			"sessionRef":  map[string]any{"type": "string", "description": "Session name for conversation continuity; creates the session if missing and appends the transcript on completion"},
 			"schedule":    map[string]any{"type": "string", "description": "Cron schedule for recurring tasks (e.g., '0 */6 * * *' for every 6 hours, '0 9 * * 1-5' for weekdays at 9am, '*/5 * * * *' for every 5 minutes). Leave empty for one-time tasks."},
 		},
 		"required": []string{"name", "prompt"},
@@ -84,13 +84,14 @@ func (t *CreateAITaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		task.Spec.AgentRef = &corev1alpha1.AgentReference{Name: agentRef}
 	}
 
-	providerName := chatGetStringArgDefault(a, "providerRef", "default")
-	if task.Spec.AI == nil {
-		task.Spec.AI = &corev1alpha1.AISpec{}
+	if providerName := chatGetStringArg(a, "providerRef"); providerName != "" {
+		if task.Spec.AI == nil {
+			task.Spec.AI = &corev1alpha1.AISpec{}
+		}
+		task.Spec.AI.ProviderRef = &corev1alpha1.ProviderReference{Name: providerName}
 	}
-	task.Spec.AI.ProviderRef = &corev1alpha1.ProviderReference{Name: providerName}
 
-	if d, errResult, ok := parseDurationArg(a, "timeout"); !ok {
+	if d, errResult, ok := parseTimeoutArg(a); !ok {
 		return errResult, nil
 	} else if d > 0 {
 		task.Spec.Timeout = &metav1.Duration{Duration: d}
@@ -102,7 +103,11 @@ func (t *CreateAITaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	if sessionRef := chatGetStringArg(a, "sessionRef"); sessionRef != "" {
-		task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: sessionRef}
+		task.Spec.SessionRef = &corev1alpha1.SessionReference{
+			Name:   sessionRef,
+			Create: true,
+			Append: true,
+		}
 	}
 
 	schedule := chatGetStringArg(a, "schedule")

@@ -252,6 +252,52 @@ func TestCloneRepo_WithRef(t *testing.T) {
 	}
 }
 
+func TestCloneRepo_WithCommitRefFromNonDefaultBranch(t *testing.T) {
+	bareDir := t.TempDir()
+	runGit(t, bareDir, "init", "--bare")
+
+	workDir := t.TempDir()
+	runGit(t, workDir, "init")
+	runGit(t, workDir, "checkout", "-b", "main")
+	runGit(t, workDir, "config", "user.email", "test@test.com")
+	runGit(t, workDir, "config", "user.name", "Test")
+	if err := os.WriteFile(workDir+"/main.txt", []byte("main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workDir, "add", ".")
+	runGit(t, workDir, "commit", "-m", "main")
+	runGit(t, workDir, "remote", "add", "origin", bareDir)
+	runGit(t, workDir, "push", "origin", "main")
+	runGit(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	runGit(t, workDir, "checkout", "-b", "feature/validation")
+	if err := os.WriteFile(workDir+"/feature.txt", []byte("feature"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workDir, "add", ".")
+	runGit(t, workDir, "commit", "-m", "feature")
+	featureSHA := strings.TrimSpace(runGitOutput(t, workDir, "rev-parse", "HEAD"))
+	runGit(t, workDir, "push", "origin", "feature/validation")
+
+	cloneDir := t.TempDir() + "/cloned"
+	cfg := &AgentConfig{
+		GitRepo: bareDir,
+		GitRef:  featureSHA,
+	}
+
+	if err := CloneRepo(context.Background(), cfg, cloneDir); err != nil {
+		t.Fatalf("CloneRepo failed: %v", err)
+	}
+
+	gotSHA := strings.TrimSpace(runGitOutput(t, cloneDir, "rev-parse", "HEAD"))
+	if gotSHA != featureSHA {
+		t.Fatalf("HEAD = %s, want feature SHA %s", gotSHA, featureSHA)
+	}
+	if _, err := os.Stat(cloneDir + "/feature.txt"); err != nil {
+		t.Errorf("expected feature.txt from non-default branch commit: %v", err)
+	}
+}
+
 func TestCloneRepo_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
@@ -395,6 +441,17 @@ func TestRunAgent_GitCloneFailure(t *testing.T) {
 	if !strings.Contains(err.Error(), "git clone failed") {
 		t.Errorf("error should mention git clone failed, got: %v", err)
 	}
+}
+
+func runGitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+	return string(out)
 }
 
 // runGit is a test helper to execute git commands.

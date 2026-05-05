@@ -131,10 +131,10 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 	}
 
 	// Extract repo URL and git secret from the task's workspace config
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	ws := taskWorkspace(&task)
+	if ws == nil {
 		return "", fmt.Errorf("task %s does not have workspace configuration", args.TaskName)
 	}
-	ws := task.Spec.AgentRuntime.Workspace
 
 	repoURL := ws.GitRepo
 	if repoURL == "" {

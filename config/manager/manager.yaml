@@ -71,6 +71,7 @@ spec:
           - --copilot-worker-image=ghcr.io/sozercan/orka/agent-worker-copilot:latest
           - --claude-worker-image=ghcr.io/sozercan/orka/agent-worker-claude:latest
           - --codex-worker-image=ghcr.io/sozercan/orka/agent-worker-codex:latest
+          - --codex-sandbox-mode=danger-full-access
           - --general-worker-image=ghcr.io/sozercan/orka/general-worker:latest
         image: controller:latest
         imagePullPolicy: IfNotPresent

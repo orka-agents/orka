@@ -9,6 +9,7 @@ package main
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -43,6 +44,13 @@ func TestRun_CommandFromEnv(t *testing.T) {
 	err := run()
 	if err != nil {
 		t.Errorf("run() returned error: %v", err)
+	}
+}
+
+func TestWorkspaceRootUsesSubPath(t *testing.T) {
+	t.Setenv("ORKA_WORKSPACE_SUBPATH", "src")
+	if got := workspaceRoot(); got != filepath.Join(workspaceDir, "src") {
+		t.Fatalf("workspaceRoot() = %q", got)
 	}
 }
 

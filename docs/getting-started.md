@@ -225,7 +225,7 @@ Use `Agent.spec.execution` for defaults, then override it per task when needed. 
 
 ```bash
 # Port-forward the controller service
-kubectl port-forward -n orka-system svc/orka-controller 8080:8080
+kubectl port-forward -n orka-system svc/orka-api 8080:8080
 
 # Open in browser
 open http://localhost:8080

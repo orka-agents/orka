@@ -179,27 +179,7 @@ func convertResponsesTools(tools []llm.Tool) []responses.ToolUnionParam {
 }
 
 func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
-	params := responses.ResponseNewParams{
-		Model: req.Model,
-		Input: responses.ResponseNewParamsInputUnion{
-			OfInputItemList: convertInputItems(req.Messages),
-		},
-	}
-	if req.SystemPrompt != "" {
-		params.Instructions = openai.String(req.SystemPrompt)
-	}
-	if req.MaxTokens > 0 {
-		params.MaxOutputTokens = openai.Int(int64(req.MaxTokens))
-	}
-	if req.Temperature > 0 {
-		params.Temperature = openai.Float(req.Temperature)
-	}
-	if len(req.Tools) > 0 {
-		params.Tools = convertResponsesTools(req.Tools)
-	}
-	if req.ResponseFormat != nil {
-		params.Text = convertResponsesTextFormat(req.ResponseFormat)
-	}
+	params := buildResponsesParams(req)
 
 	resp, err := p.client.Responses.New(ctx, params)
 	if err != nil {
@@ -230,115 +210,307 @@ func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionReq
 	return result, nil
 }
 
+type streamSender func(llm.StreamChunk) bool
+
+func newStreamSender(ctx context.Context, ch chan<- llm.StreamChunk) streamSender {
+	return func(chunk llm.StreamChunk) bool {
+		select {
+		case ch <- chunk:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+func buildResponsesParams(req *llm.CompletionRequest) responses.ResponseNewParams {
+	params := responses.ResponseNewParams{
+		Model: req.Model,
+		Input: responses.ResponseNewParamsInputUnion{
+			OfInputItemList: convertInputItems(req.Messages),
+		},
+	}
+	if req.SystemPrompt != "" {
+		params.Instructions = openai.String(req.SystemPrompt)
+	}
+	if req.MaxTokens > 0 {
+		params.MaxOutputTokens = openai.Int(int64(req.MaxTokens))
+	}
+	if req.Temperature > 0 {
+		params.Temperature = openai.Float(req.Temperature)
+	}
+	if len(req.Tools) > 0 {
+		params.Tools = convertResponsesTools(req.Tools)
+	}
+	if req.ResponseFormat != nil {
+		params.Text = convertResponsesTextFormat(req.ResponseFormat)
+	}
+
+	return params
+}
+
+type responseStream interface {
+	Next() bool
+	Current() responses.ResponseStreamEventUnion
+	Err() error
+}
+
+type responseFuncCallState struct {
+	itemID         string
+	outputIndex    int64
+	hasOutputIndex bool
+	callID         string
+	name           string
+	arguments      string
+	argumentsDone  bool
+	args           strings.Builder
+	emitted        bool
+}
+
+type responseFuncCallTracker struct {
+	byItemID      map[string]*responseFuncCallState
+	byOutputIndex map[int64]*responseFuncCallState
+	byCallID      map[string]*responseFuncCallState
+}
+
+func newResponseFuncCallTracker() *responseFuncCallTracker {
+	return &responseFuncCallTracker{
+		byItemID:      make(map[string]*responseFuncCallState),
+		byOutputIndex: make(map[int64]*responseFuncCallState),
+		byCallID:      make(map[string]*responseFuncCallState),
+	}
+}
+
+func (t *responseFuncCallTracker) register(fc *responseFuncCallState) {
+	if fc == nil {
+		return
+	}
+	if fc.itemID != "" {
+		t.byItemID[fc.itemID] = fc
+	}
+	if fc.hasOutputIndex {
+		t.byOutputIndex[fc.outputIndex] = fc
+	}
+	if fc.callID != "" {
+		t.byCallID[fc.callID] = fc
+	}
+}
+
+func (t *responseFuncCallTracker) merge(dst, src *responseFuncCallState) {
+	if dst == nil || src == nil || dst == src {
+		return
+	}
+	if dst.itemID == "" {
+		dst.itemID = src.itemID
+	}
+	if !dst.hasOutputIndex && src.hasOutputIndex {
+		dst.outputIndex = src.outputIndex
+		dst.hasOutputIndex = true
+	}
+	if dst.callID == "" {
+		dst.callID = src.callID
+	}
+	if dst.name == "" {
+		dst.name = src.name
+	}
+	if dst.arguments == "" {
+		dst.arguments = src.arguments
+	}
+	if !dst.argumentsDone {
+		dst.argumentsDone = src.argumentsDone
+	}
+	if dst.args.Len() == 0 && src.args.Len() > 0 {
+		dst.args.WriteString(src.args.String())
+	}
+	dst.emitted = dst.emitted || src.emitted
+}
+
+func (t *responseFuncCallTracker) get(itemID string, outputIndex int64, hasOutputIndex bool, callID string) *responseFuncCallState {
+	var fc *responseFuncCallState
+	if itemID != "" {
+		fc = t.byItemID[itemID]
+	}
+	if fc == nil && callID != "" {
+		fc = t.byCallID[callID]
+	}
+	if fc == nil && hasOutputIndex {
+		fc = t.byOutputIndex[outputIndex]
+	}
+	if fc == nil {
+		fc = &responseFuncCallState{}
+	}
+
+	if itemID != "" {
+		if other := t.byItemID[itemID]; other != nil && other != fc {
+			t.merge(fc, other)
+		}
+		fc.itemID = itemID
+	}
+	if hasOutputIndex {
+		if other := t.byOutputIndex[outputIndex]; other != nil && other != fc {
+			t.merge(fc, other)
+		}
+		fc.outputIndex = outputIndex
+		fc.hasOutputIndex = true
+	}
+	if callID != "" {
+		if other := t.byCallID[callID]; other != nil && other != fc {
+			t.merge(fc, other)
+		}
+		fc.callID = callID
+	}
+	t.register(fc)
+	return fc
+}
+
+func (t *responseFuncCallTracker) mergeItem(fc *responseFuncCallState, item responses.ResponseOutputItemUnion, argumentsDone bool) {
+	if fc == nil {
+		return
+	}
+	if item.ID != "" {
+		fc.itemID = item.ID
+	}
+	if item.CallID != "" {
+		fc.callID = item.CallID
+	}
+	if item.Name != "" {
+		fc.name = item.Name
+	}
+	if item.Arguments != "" {
+		fc.arguments = item.Arguments
+		fc.argumentsDone = true
+	} else if argumentsDone {
+		if fc.arguments == "" {
+			fc.arguments = fc.args.String()
+		}
+		fc.argumentsDone = true
+	}
+	t.register(fc)
+}
+
+func (t *responseFuncCallTracker) emit(fc *responseFuncCallState, send streamSender) bool {
+	if fc == nil || fc.emitted || fc.name == "" || !fc.argumentsDone {
+		return true
+	}
+	args := fc.arguments
+	if args == "" {
+		args = fc.args.String()
+	}
+	callID := fc.callID
+	if callID == "" {
+		callID = fc.itemID
+	}
+	if !send(llm.StreamChunk{
+		ToolCall: &llm.ToolCall{ID: callID, Name: fc.name, Arguments: json.RawMessage(args)},
+	}) {
+		return false
+	}
+	fc.emitted = true
+	return true
+}
+
+func streamResponsesEvents(stream responseStream, send streamSender) {
+	tracker := newResponseFuncCallTracker()
+	for stream.Next() {
+		if !handleResponsesStreamEvent(stream.Current(), tracker, send) {
+			return
+		}
+	}
+	if err := stream.Err(); err != nil {
+		send(llm.StreamChunk{Error: toProviderError(err), Done: true})
+		return
+	}
+	send(llm.StreamChunk{Done: true})
+}
+
+func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender) bool {
+	switch evt.Type {
+	case "response.output_text.delta":
+		return handleResponseTextDelta(evt, send)
+	case "response.function_call_arguments.delta":
+		return handleResponseFunctionCallArgumentsDelta(evt, tracker, send)
+	case "response.function_call_arguments.done":
+		return handleResponseFunctionCallArgumentsDone(evt, tracker, send)
+	case "response.output_item.added":
+		return handleResponseOutputItem(evt, tracker, send, false)
+	case "response.output_item.done":
+		return handleResponseOutputItem(evt, tracker, send, true)
+	case "response.completed":
+		return handleResponseCompleted(evt, tracker, send)
+	case "response.failed", "response.incomplete":
+		send(llm.StreamChunk{Done: true, StopReason: evt.Type})
+		return false
+	case "error":
+		send(llm.StreamChunk{Error: &llm.ProviderError{Provider: "openai", Message: evt.Message}, Done: true})
+		return false
+	default:
+		return true
+	}
+}
+
+func handleResponseTextDelta(evt responses.ResponseStreamEventUnion, send streamSender) bool {
+	if evt.Delta == "" {
+		return true
+	}
+	return send(llm.StreamChunk{Content: evt.Delta})
+}
+
+func handleResponseFunctionCallArgumentsDelta(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender) bool {
+	fc := tracker.get(evt.ItemID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), "")
+	if evt.Name != "" {
+		fc.name = evt.Name
+	}
+	fc.args.WriteString(evt.Delta)
+	return tracker.emit(fc, send)
+}
+
+func handleResponseFunctionCallArgumentsDone(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender) bool {
+	fc := tracker.get(evt.ItemID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), "")
+	if evt.Name != "" {
+		fc.name = evt.Name
+	}
+	if evt.Arguments != "" {
+		fc.arguments = evt.Arguments
+	} else {
+		fc.arguments = fc.args.String()
+	}
+	fc.argumentsDone = true
+	return tracker.emit(fc, send)
+}
+
+func handleResponseOutputItem(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender, argumentsDone bool) bool {
+	if evt.Item.Type != eventTypeFunctionCall {
+		return true
+	}
+	fc := tracker.get(evt.Item.ID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), evt.Item.CallID)
+	tracker.mergeItem(fc, evt.Item, argumentsDone)
+	return tracker.emit(fc, send)
+}
+
+func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender) bool {
+	stopReason := "stop"
+	for i, item := range evt.Response.Output {
+		if item.Type != eventTypeFunctionCall {
+			continue
+		}
+		stopReason = "tool_calls"
+		fc := tracker.get(item.ID, int64(i), true, item.CallID)
+		tracker.mergeItem(fc, item, true)
+		if !tracker.emit(fc, send) {
+			return false
+		}
+	}
+	send(llm.StreamChunk{Done: true, StopReason: stopReason})
+	return false
+}
+
 func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionRequest) <-chan llm.StreamChunk {
 	ch := make(chan llm.StreamChunk)
 	go func() {
 		defer close(ch)
 
-		send := func(chunk llm.StreamChunk) bool {
-			select {
-			case ch <- chunk:
-				return true
-			case <-ctx.Done():
-				return false
-			}
-		}
-
-		params := responses.ResponseNewParams{
-			Model: req.Model,
-			Input: responses.ResponseNewParamsInputUnion{
-				OfInputItemList: convertInputItems(req.Messages),
-			},
-		}
-		if req.SystemPrompt != "" {
-			params.Instructions = openai.String(req.SystemPrompt)
-		}
-		if req.MaxTokens > 0 {
-			params.MaxOutputTokens = openai.Int(int64(req.MaxTokens))
-		}
-		if len(req.Tools) > 0 {
-			params.Tools = convertResponsesTools(req.Tools)
-		}
-		if req.ResponseFormat != nil {
-			params.Text = convertResponsesTextFormat(req.ResponseFormat)
-		}
-		if req.Temperature > 0 {
-			params.Temperature = openai.Float(req.Temperature)
-		}
-
-		stream := p.client.Responses.NewStreaming(ctx, params)
-
-		type funcCallState struct {
-			callID string
-			name   string
-			args   strings.Builder
-		}
-		active := make(map[string]*funcCallState)
-
-		for stream.Next() {
-			evt := stream.Current()
-			switch evt.Type {
-			case "response.output_text.delta":
-				if evt.Delta != "" {
-					if !send(llm.StreamChunk{Content: evt.Delta}) {
-						return
-					}
-				}
-			case "response.function_call_arguments.delta":
-				fc := active[evt.ItemID]
-				if fc == nil {
-					fc = &funcCallState{}
-					active[evt.ItemID] = fc
-				}
-				fc.args.WriteString(evt.Delta)
-			case "response.function_call_arguments.done":
-				fc := active[evt.ItemID]
-				args, name, callID := evt.Arguments, evt.Name, ""
-				if fc != nil {
-					callID = fc.callID
-					if args == "" {
-						args = fc.args.String()
-					}
-					if name == "" {
-						name = fc.name
-					}
-					delete(active, evt.ItemID)
-				}
-				if callID == "" {
-					callID = evt.ItemID
-				}
-				if !send(llm.StreamChunk{
-					ToolCall: &llm.ToolCall{ID: callID, Name: name, Arguments: json.RawMessage(args)},
-				}) {
-					return
-				}
-			case "response.output_item.added":
-				if evt.Item.Type == eventTypeFunctionCall {
-					active[evt.Item.ID] = &funcCallState{callID: evt.Item.CallID, name: evt.Item.Name}
-				}
-			case "response.completed":
-				stopReason := "stop"
-				for _, item := range evt.Response.Output {
-					if item.Type == eventTypeFunctionCall {
-						stopReason = "tool_calls"
-						break
-					}
-				}
-				send(llm.StreamChunk{Done: true, StopReason: stopReason})
-				return
-			case "response.failed", "response.incomplete":
-				send(llm.StreamChunk{Done: true, StopReason: evt.Type})
-				return
-			case "error":
-				send(llm.StreamChunk{Error: &llm.ProviderError{Provider: "openai", Message: evt.Message}, Done: true})
-				return
-			}
-		}
-		if err := stream.Err(); err != nil {
-			send(llm.StreamChunk{Error: toProviderError(err), Done: true})
-			return
-		}
-		send(llm.StreamChunk{Done: true})
+		send := newStreamSender(ctx, ch)
+		streamResponsesEvents(p.client.Responses.NewStreaming(ctx, buildResponsesParams(req)), send)
 	}()
 	return ch
 }

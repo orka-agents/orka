@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -42,6 +43,7 @@ type DelegateTaskArgs struct {
 	Prompt    string         `json:"prompt"`
 	Namespace string         `json:"namespace,omitempty"`
 	Priority  *int32         `json:"priority,omitempty"`
+	Timeout   string         `json:"timeout,omitempty"`
 	Workspace *WorkspaceArgs `json:"workspace,omitempty"`
 	MaxTurns  *int32         `json:"maxTurns,omitempty"`
 	AllowBash *bool          `json:"allowBash,omitempty"`
@@ -108,6 +110,10 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 			"priority": {
 				"type": "integer",
 				"description": "Priority 0-1000 (defaults to parent priority)"
+			},
+			"timeout": {
+				"type": "string",
+				"description": "Task timeout duration, e.g. \"20m\""
 			},
 			"workspace": {
 				"type": "object",
@@ -309,6 +315,16 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 		},
 	}
 
+	if dc.args.Timeout != "" {
+		timeout, err := time.ParseDuration(dc.args.Timeout)
+		if err != nil {
+			return nil, fmt.Errorf("invalid timeout %q: %w", dc.args.Timeout, err)
+		}
+		if timeout > 0 {
+			childTask.Spec.Timeout = &metav1.Duration{Duration: timeout}
+		}
+	}
+
 	// Store auto-retry config as annotations
 	if dc.args.AutoRetry {
 		childTask.Annotations[labels.AnnotationAutoRetry] = trueStr
@@ -395,11 +411,11 @@ func (t *DelegateTaskTool) applyPriorTaskConfig(ctx context.Context, childTask *
 	if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: dc.args.PriorTask, Namespace: dc.namespace}, priorTask); err == nil {
 		// Copy workspace from prior task if not explicitly provided
 		if dc.args.Workspace == nil {
-			if priorTask.Spec.AgentRuntime != nil && priorTask.Spec.AgentRuntime.Workspace != nil {
+			if priorWorkspace := taskWorkspace(priorTask); priorWorkspace != nil {
 				if childTask.Spec.AgentRuntime == nil {
 					childTask.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
 				}
-				childTask.Spec.AgentRuntime.Workspace = priorTask.Spec.AgentRuntime.Workspace.DeepCopy()
+				childTask.Spec.AgentRuntime.Workspace = priorWorkspace.DeepCopy()
 			}
 		}
 

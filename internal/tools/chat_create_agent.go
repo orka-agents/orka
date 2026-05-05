@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -34,9 +36,17 @@ func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
 		"properties": map[string]any{
 			"name":         map[string]any{"type": "string", "description": "Agent name"},
 			"namespace":    map[string]any{"type": "string", "description": "Namespace"},
-			"providerRef":  map[string]any{"type": "string", "description": "Provider name (defaults to 'default')"},
+			"providerRef":  map[string]any{"type": "string", "description": "Optional Provider CRD reference name. Omit for runtime Agents; provide explicitly for AI/coordinator Agents when a specific provider is required."},
 			"systemPrompt": map[string]any{"type": "string", "description": "System prompt for the agent"},
 			"tools":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Tool names to attach"},
+			"resources": map[string]any{
+				"type":        "object",
+				"description": `Optional Kubernetes resource requests/limits for tasks using this agent, e.g. {requests:{cpu:"100m",memory:"512Mi"},limits:{cpu:"1",memory:"2Gi"}}`,
+				"properties": map[string]any{
+					"requests": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
+					"limits":   map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
+				},
+			},
 			"model": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -48,9 +58,11 @@ func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
 			"runtime": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"type":            map[string]any{"type": "string", "description": "Runtime type: copilot, claude, or codex"},
-					"defaultMaxTurns": map[string]any{"type": "integer", "description": "Default max agent loop iterations"},
-					"secretRef":       map[string]any{"type": "string", "description": "Optional secret name containing runtime credentials. Omit to auto-discover the standard secret for this runtime."},
+					"type":                map[string]any{"type": "string", "description": "Runtime type: copilot, claude, or codex"},
+					"defaultMaxTurns":     map[string]any{"type": "integer", "description": "Default max agent loop iterations"},
+					"defaultAllowedTools": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Default CLI tools allowed for tasks using this runtime agent"},
+					"defaultAllowBash":    map[string]any{"type": "boolean", "description": "Whether bash is allowed by default for tasks using this runtime agent"},
+					"secretRef":           map[string]any{"type": "string", "description": "Optional secret name containing runtime credentials. Omit to auto-discover the standard secret for this runtime."},
 				},
 			},
 			"initialPrompt": map[string]any{
@@ -140,11 +152,12 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		}
 	}
 
-	// Set providerRef
-	providerRefName := chatGetStringArgDefault(a, "providerRef", "default")
-	agent.Spec.ProviderRef = &corev1alpha1.ProviderReference{Name: providerRefName}
+	// Set providerRef only when explicitly provided. Runtime Agents clear it below.
+	if providerRefName := chatGetStringArg(a, "providerRef"); providerRefName != "" {
+		agent.Spec.ProviderRef = &corev1alpha1.ProviderReference{Name: providerRefName}
+	}
 
-	if agent.Spec.Model != nil && agent.Spec.Model.Provider != "" {
+	if agent.Spec.ProviderRef != nil && agent.Spec.Model != nil && agent.Spec.Model.Provider != "" {
 		agent.Spec.Model.Provider = ""
 	}
 
@@ -158,6 +171,12 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		for _, tn := range toolNames {
 			agent.Spec.Tools = append(agent.Spec.Tools, corev1alpha1.ToolReference{Name: tn})
 		}
+	}
+
+	if resources, errResult, ok := parseResourceRequirementsArg(a); !ok {
+		return errResult, nil
+	} else {
+		agent.Spec.Resources = resources
 	}
 
 	if errResult, ok := parseRuntimeConfig(ctx, tc.Client, namespace, a, agent); !ok {
@@ -235,6 +254,65 @@ func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolC
 	})
 }
 
+func parseResourceRequirementsArg(args map[string]any) (corev1.ResourceRequirements, string, bool) {
+	var requirements corev1.ResourceRequirements
+	value, ok := args["resources"]
+	if !ok || value == nil {
+		return requirements, "", true
+	}
+
+	resourcesMap, ok := value.(map[string]any)
+	if !ok {
+		result, _ := ChatToolErrorResult("invalid_arguments", "resources must be an object", "Use resources.requests and/or resources.limits maps with Kubernetes quantity strings")
+		return requirements, result, false
+	}
+
+	requests, errResult, ok := parseResourceListArg(resourcesMap, "requests")
+	if !ok {
+		return requirements, errResult, false
+	}
+	limits, errResult, ok := parseResourceListArg(resourcesMap, "limits")
+	if !ok {
+		return requirements, errResult, false
+	}
+
+	if len(requests) > 0 {
+		requirements.Requests = requests
+	}
+	if len(limits) > 0 {
+		requirements.Limits = limits
+	}
+	return requirements, "", true
+}
+
+func parseResourceListArg(resourcesMap map[string]any, key string) (corev1.ResourceList, string, bool) {
+	value, ok := resourcesMap[key]
+	if !ok || value == nil {
+		return nil, "", true
+	}
+
+	values, ok := value.(map[string]any)
+	if !ok {
+		result, _ := ChatToolErrorResult("invalid_arguments", fmt.Sprintf("resources.%s must be an object", key), "Use resource names mapped to Kubernetes quantity strings")
+		return nil, result, false
+	}
+
+	resourceList := corev1.ResourceList{}
+	for name, raw := range values {
+		quantityText := chatGetStringArg(values, name)
+		if quantityText == "" || raw == nil {
+			continue
+		}
+		quantity, err := resource.ParseQuantity(quantityText)
+		if err != nil {
+			result, _ := ChatToolErrorResult("invalid_arguments", fmt.Sprintf("invalid resources.%s.%s: %v", key, name, err), "Use Kubernetes quantity strings such as 100m, 512Mi, 1, or 2Gi")
+			return nil, result, false
+		}
+		resourceList[corev1.ResourceName(name)] = quantity
+	}
+	return resourceList, "", true
+}
+
 // parseRuntimeConfig extracts runtime configuration from chat args into the agent spec.
 func parseRuntimeConfig(ctx context.Context, k8sClient client.Reader, namespace string, a map[string]any, agent *corev1alpha1.Agent) (string, bool) {
 	if coord, ok := a["coordination"].(map[string]any); ok {
@@ -256,6 +334,16 @@ func parseRuntimeConfig(ctx context.Context, k8sClient client.Reader, namespace 
 	}
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
 		Type: corev1alpha1.AgentRuntimeType(runtimeType),
+	}
+	if maxTurns, ok := rtMap["defaultMaxTurns"].(float64); ok && maxTurns > 0 {
+		maxTurnsInt := int32(maxTurns)
+		agent.Spec.Runtime.DefaultMaxTurns = &maxTurnsInt
+	}
+	if allowedTools := chatGetStringSliceArg(rtMap, "defaultAllowedTools"); len(allowedTools) > 0 {
+		agent.Spec.Runtime.DefaultAllowedTools = allowedTools
+	}
+	if allowBash, ok := rtMap["defaultAllowBash"].(bool); ok {
+		agent.Spec.Runtime.DefaultAllowBash = &allowBash
 	}
 	secretRef, err := resolveRuntimeSecretRef(ctx, k8sClient, namespace, agent.Spec.Runtime.Type, chatGetRuntimeSecretRefArg(a))
 	if err != nil {

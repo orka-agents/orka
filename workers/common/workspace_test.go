@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -199,6 +200,35 @@ func TestPrepareWorkspace_NamespaceFallback(t *testing.T) {
 	err := PrepareWorkspace("/tmp/test")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestFinalizeResult_TruncatesLongSummary(t *testing.T) {
+	dir := t.TempDir()
+	runGitWS(t, dir, "init")
+	runGitWS(t, dir, "config", "user.email", "test@test.com")
+	runGitWS(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, "initial.txt"), []byte("init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, dir, "add", ".")
+	runGitWS(t, dir, "commit", "-m", "initial")
+
+	longSummary := strings.Repeat("x", MaxStructuredSummaryChars+128)
+	data, err := FinalizeResult(dir, longSummary)
+	if err != nil {
+		t.Fatalf("FinalizeResult failed: %v", err)
+	}
+
+	var sr StructuredResult
+	if err := json.Unmarshal(data, &sr); err != nil {
+		t.Fatalf("expected JSON result, got: %s", string(data))
+	}
+	if len(sr.Summary) >= len(longSummary) {
+		t.Fatalf("summary was not truncated: got %d want less than %d", len(sr.Summary), len(longSummary))
+	}
+	if !strings.Contains(sr.Summary, "summary truncated") {
+		t.Fatalf("summary missing truncation marker: %q", sr.Summary)
 	}
 }
 

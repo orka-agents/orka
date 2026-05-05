@@ -49,6 +49,10 @@ const (
 	// ConditionTypeJobCreated indicates a Job has been created
 	ConditionTypeJobCreated = "JobCreated"
 
+	// jobCreationVisibilityGracePeriod avoids failing a task when the controller cache
+	// has not observed the Job immediately after create.
+	jobCreationVisibilityGracePeriod = 30 * time.Second
+
 	scheduledRunLabelValue = "true"
 )
 
@@ -691,6 +695,13 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		Namespace: task.Namespace,
 	}, job); err != nil {
 		if apierrors.IsNotFound(err) {
+			if r.isWithinJobCreationVisibilityGracePeriod(task) {
+				log.Info("job not found shortly after creation, waiting for cache visibility",
+					"job", task.Status.JobName,
+					"startTime", task.Status.StartTime,
+				)
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
 			if r.shouldRetry(task) {
 				log.Info("job not found while task still has retry budget, scheduling retry", "attempt", task.Status.Attempts)
 				return r.retryTask(ctx, task)
@@ -765,6 +776,13 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 
 	// Job still running, requeue
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1alpha1.Task) bool {
+	if task == nil || task.Status.JobName == "" || task.Status.StartTime == nil {
+		return false
+	}
+	return time.Since(task.Status.StartTime.Time) < jobCreationVisibilityGracePeriod
 }
 
 // handleCompleted handles Tasks that have completed (Succeeded or Failed)

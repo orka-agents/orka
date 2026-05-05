@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -360,6 +361,7 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 			"gitRepo": "https://github.com/myorg/myrepo.git",
 			"branch": "main"
 		},
+		"timeout": "20m",
 		"maxTurns": 50,
 		"allowBash": true
 	}`)
@@ -416,6 +418,42 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 	}
 	if childTask.Spec.AgentRuntime.AllowBash == nil || !*childTask.Spec.AgentRuntime.AllowBash {
 		t.Error("agentRuntime.allowBash should be true")
+	}
+	if childTask.Spec.Timeout == nil || childTask.Spec.Timeout.Duration != 20*time.Minute {
+		t.Errorf("spec.timeout = %v, want 20m", childTask.Spec.Timeout)
+	}
+}
+
+func TestDelegateTaskTool_Execute_InvalidTimeout(t *testing.T) {
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
+	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "claude-coder")
+	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
+
+	agentTask := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "claude-coder",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: "claude"},
+		},
+	}
+
+	k8sClient := newFakeClient(parentTask(), agentTask)
+	tool := NewDelegateTaskTool(k8sClient)
+
+	_, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"agent": "claude-coder",
+		"prompt": "Fix the auth module",
+		"timeout": "eventually"
+	}`))
+	if err == nil {
+		t.Fatal("Execute() expected error for invalid timeout")
+	}
+	if !contains(err.Error(), "invalid timeout") {
+		t.Errorf("Execute() error = %v, want error containing %q", err, "invalid timeout")
 	}
 }
 

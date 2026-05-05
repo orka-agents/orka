@@ -22,10 +22,12 @@ import (
 )
 
 const (
-	defaultMaxTurns        = 50
-	workspaceDir           = "/workspace"
-	defaultCodexPath       = "codex"
-	codexWebSearchDisabled = "disabled"
+	defaultMaxTurns         = 50
+	workspaceDir            = "/workspace"
+	defaultCodexPath        = "codex"
+	defaultCodexSandboxMode = "workspace-write"
+	codexWebSearchDisabled  = "disabled"
+	defaultAutoCompactLimit = "240000"
 )
 
 var errCodexRequiresBash = errors.New(
@@ -126,13 +128,16 @@ func executeCodexPrompt(ctx context.Context, cfg *common.AgentConfig, prompt str
 }
 
 func buildCodexArgs(cfg *common.AgentConfig, outputPath, instructionsPath string) []string {
+	sandboxMode := codexSandboxMode()
 	args := []string{
 		"exec",
 		"--skip-git-repo-check",
+		"--ephemeral",
 		"--color", "never",
 		"--output-last-message", outputPath,
 		"--config", "approval_policy=never",
-		"--sandbox", "workspace-write",
+		"--config", "model_auto_compact_token_limit=" + codexAutoCompactTokenLimit(),
+		"--sandbox", sandboxMode,
 	}
 
 	if cfg.Model != "" {
@@ -144,13 +149,29 @@ func buildCodexArgs(cfg *common.AgentConfig, outputPath, instructionsPath string
 	if baseURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")); baseURL != "" {
 		args = append(args, "--config", "openai_base_url="+baseURL)
 	}
-	args = append(args, "--config", "sandbox_workspace_write.network_access=true")
+	if sandboxMode == defaultCodexSandboxMode {
+		args = append(args, "--config", "sandbox_workspace_write.network_access=true")
+	}
 	if webSearchSetting, ok := codexWebSearchSetting(cfg); ok {
 		args = append(args, "--config", "web_search="+webSearchSetting)
 	}
 
 	args = append(args, "-")
 	return args
+}
+
+func codexAutoCompactTokenLimit() string {
+	if limit := strings.TrimSpace(os.Getenv("ORKA_CODEX_AUTO_COMPACT_TOKEN_LIMIT")); limit != "" {
+		return limit
+	}
+	return defaultAutoCompactLimit
+}
+
+func codexSandboxMode() string {
+	if mode := strings.TrimSpace(os.Getenv("ORKA_CODEX_SANDBOX_MODE")); mode != "" {
+		return mode
+	}
+	return defaultCodexSandboxMode
 }
 
 func buildCodexInstructions(cfg *common.AgentConfig) string {

@@ -9,7 +9,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -23,7 +22,7 @@ import (
 var (
 	copilotRuntimeSecretCandidates = []string{"copilot-token"}
 	claudeRuntimeSecretCandidates  = []string{"claude-credentials", "claude-api-key"}
-	codexRuntimeSecretCandidates   = []string{"codex-credentials", "codex-api-key", "openai-api-key"}
+	codexRuntimeSecretCandidates   = []string{"codex-runtime-copilot", "codex-runtime-openai", "codex-credentials", "codex-api-key", "codex-proxy-token", "openai-api-key"}
 	gitCredentialSecretCandidates  = []string{"git-credentials", "github-credentials", "copilot-token", "github-token", "git-token"}
 )
 
@@ -58,9 +57,6 @@ func resolveRuntimeSecretRef(ctx context.Context, k8sClient client.Reader, names
 	}
 
 	if requested != "" {
-		if !slices.Contains(candidates, requested) {
-			return nil, fmt.Errorf("runtime secretRef %q is not allowed for %s runtime; supported names: %s", requested, runtimeType, strings.Join(candidates, ", "))
-		}
 		exists, err := secretExists(ctx, k8sClient, namespace, requested)
 		if err != nil {
 			return nil, err
@@ -102,6 +98,19 @@ func resolveWorkspaceGitSecretRef(ctx context.Context, k8sClient client.Reader, 
 		return nil, nil
 	}
 	return &corev1.LocalObjectReference{Name: name}, nil
+}
+
+func taskWorkspace(task *corev1alpha1.Task) *corev1alpha1.WorkspaceConfig {
+	if task == nil {
+		return nil
+	}
+	if task.Spec.Workspace != nil {
+		return task.Spec.Workspace
+	}
+	if task.Spec.AgentRuntime != nil {
+		return task.Spec.AgentRuntime.Workspace
+	}
+	return nil
 }
 
 func loadAgent(ctx context.Context, k8sClient client.Reader, namespace, agentName string) (*corev1alpha1.Agent, error) {

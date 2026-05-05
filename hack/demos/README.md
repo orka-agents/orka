@@ -2,8 +2,8 @@
 
 This directory contains a small `demo-magic` kit for showing Orka in four ways:
 
-- `10-chat-pr.sh`: chat endpoint -> coordinator -> coder -> reviewers -> PR
-- `20-manual-workflow.sh`: explicit coordinator task with the same PR workflow
+- `10-chat-pr.sh`: Claude Code -> Orka's Anthropic-compatible API -> prepared coordinator -> coder/reviewer/CI loops -> PR
+- `20-manual-workflow.sh`: explicit coordinator Task CR for a focused Vekil metrics first-PR workflow
 - `30-cron-workflow.sh`: scheduled runtime task with recurring child runs
 - `40-security-scanning.sh`: repository scan -> findings -> patch -> PR
 
@@ -15,33 +15,144 @@ There is also:
 ## Prerequisites
 
 - A running Orka controller reachable at `ORKA_API_BASE`
-- `kubectl`, `curl`, `jq`, and a built `bin/orka`
-- A local `demo-magic.sh`
+- `kubectl`, `curl`, `jq`, and `claude` (Claude Code) on your local PATH
+- Optional: an upstream `demo-magic.sh` if you want to override the vendored fallback
 - A demo namespace that is not the controller namespace
 - A Provider CRD and runtime credential Secret in that demo namespace
 - A git credential Secret in that demo namespace for clone, push, and PR creation
 
-Set `DEMO_MAGIC_PATH` to your local checkout of `demo-magic.sh`. The scripts also look in a few common locations, but the environment variable is the most reliable option.
+The demo scripts include a lightweight `demo-magic.sh` fallback at `hack/demos/lib/demo-magic.sh`, so no separate checkout is required. If you prefer the upstream `demo-magic` behavior, set `DEMO_MAGIC_PATH` to your local checkout. If `DEMO_MAGIC_PATH` points at a missing file, the scripts ignore it and use the vendored fallback.
 
 ## Required Environment
 
 Set these before running the scenarios:
 
 ```bash
-export DEMO_MAGIC_PATH="$HOME/src/demo-magic/demo-magic.sh"
+# Optional override for upstream demo-magic. Usually unnecessary because a fallback is vendored.
+# export DEMO_MAGIC_PATH="$HOME/src/demo-magic/demo-magic.sh"
 export ORKA_API_BASE="http://127.0.0.1:8080"
 export DEMO_NAMESPACE="demo-magic"
 
-export DEMO_PROVIDER_REF="copilot-proxy-openai"
+# Must match metadata.name from: kubectl get provider -n "$DEMO_NAMESPACE"
+export DEMO_PROVIDER_REF="<existing-provider-name>"
 export DEMO_AI_MODEL="gpt-5.4"
 
 export DEMO_RUNTIME_TYPE="codex"
 export DEMO_RUNTIME_MODEL="gpt-5.4"
-export DEMO_RUNTIME_SECRET_REF="codex-proxy-token"
+export DEMO_RUNTIME_SECRET_REF="<runtime-secret-name>"
 
-export DEMO_GIT_REPO="https://github.com/your-org/your-demo-repo.git"
+export DEMO_GIT_REPO="https://github.com/sozercan/vekil.git"
 export DEMO_GIT_BRANCH="main"
-export DEMO_GIT_SECRET_REF="git-credentials"
+export DEMO_GIT_SECRET_REF="<git-secret-name>"
+```
+
+`DEMO_PROVIDER_REF` is an exact Kubernetes resource name, not a display label. The preflight checks `providers.core.orka.ai/$DEMO_PROVIDER_REF` in `$DEMO_NAMESPACE`; if the name does not exist, the scripts now print the visible Providers and non-secret setup hints. The name `copilot-proxy-openai` is only valid after you create a Provider with that exact `metadata.name`.
+
+For the current shared demo cluster, the immediate fix is usually:
+
+```bash
+kubectl get provider -n demo-magic
+export DEMO_PROVIDER_REF="copilot"
+export DEMO_RUNTIME_SECRET_REF="codex-runtime-copilot"
+export DEMO_GIT_SECRET_REF="github-credentials"
+```
+
+If you want to keep `DEMO_PROVIDER_REF="copilot-proxy-openai"`, create an alias Provider in `demo-magic` instead:
+
+```bash
+cat <<'YAML' | kubectl apply -f -
+apiVersion: core.orka.ai/v1alpha1
+kind: Provider
+metadata:
+  name: copilot-proxy-openai
+  namespace: demo-magic
+spec:
+  type: openai
+  secretRef:
+    name: copilot-provider-key
+    key: api-key
+  baseURL: https://api.githubcopilot.com
+  defaultModel: gpt-5.4
+YAML
+```
+
+## One-time Namespace, Provider, and Secret Setup
+
+These commands show resource shape only. Replace placeholder values locally and do not commit, echo, or paste real tokens into logs.
+
+Create the demo namespace:
+
+```bash
+kubectl create namespace "$DEMO_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Create the Provider's API-key Secret and Provider CR. `spec.secretRef.name` and `spec.secretRef.key` must point at the Secret/key you create here. `baseURL` is optional for the built-in provider types, but useful for OpenAI-compatible proxies.
+
+```bash
+export DEMO_PROVIDER_REF="copilot-proxy-openai"
+export DEMO_PROVIDER_TYPE="openai"              # openai, anthropic, or azure-openai
+export DEMO_PROVIDER_SECRET_REF="provider-api-key"
+export DEMO_PROVIDER_SECRET_KEY="api-key"
+# Optional, for OpenAI-compatible proxies:
+# export DEMO_PROVIDER_BASE_URL="http://<openai-compatible-proxy>/v1"
+
+kubectl -n "$DEMO_NAMESPACE" create secret generic "$DEMO_PROVIDER_SECRET_REF" \
+  --from-literal="$DEMO_PROVIDER_SECRET_KEY=<provider-api-key-or-proxy-placeholder>" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+cat <<YAML | kubectl apply -f -
+apiVersion: core.orka.ai/v1alpha1
+kind: Provider
+metadata:
+  name: ${DEMO_PROVIDER_REF}
+  namespace: ${DEMO_NAMESPACE}
+spec:
+  type: ${DEMO_PROVIDER_TYPE}
+  secretRef:
+    name: ${DEMO_PROVIDER_SECRET_REF}
+    key: ${DEMO_PROVIDER_SECRET_KEY}
+  # Uncomment for an OpenAI-compatible proxy:
+  # baseURL: ${DEMO_PROVIDER_BASE_URL:-http://<openai-compatible-proxy>/v1}
+  defaultModel: ${DEMO_AI_MODEL}
+YAML
+```
+
+Create the runtime credential Secret for the Agent runtime. Codex accepts `OPENAI_API_KEY` or `CODEX_API_KEY`; Copilot accepts `GITHUB_TOKEN`; Claude accepts `ANTHROPIC_API_KEY`.
+
+```bash
+# Codex example:
+kubectl -n "$DEMO_NAMESPACE" create secret generic "$DEMO_RUNTIME_SECRET_REF" \
+  --from-literal=OPENAI_API_KEY='<codex-or-openai-token>' \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Copilot runtime example:
+# kubectl -n "$DEMO_NAMESPACE" create secret generic "$DEMO_RUNTIME_SECRET_REF" \
+#   --from-literal=GITHUB_TOKEN='<github-token>' \
+#   --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Create the git credential Secret used for clone, push, and PR creation:
+
+```bash
+kubectl -n "$DEMO_NAMESPACE" create secret generic "$DEMO_GIT_SECRET_REF" \
+  --from-literal=username='<git-username-or-oauth2>' \
+  --from-literal=password='<git-token>' \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+If you use the default local API URL, the scripts auto-start a port-forward to `svc/orka-api` when needed and write its PID/log under `DEMO_WORKDIR`. To manage it yourself instead, set `DEMO_AUTO_PORT_FORWARD=0` and keep this running in another terminal:
+
+```bash
+kubectl -n orka-system port-forward svc/orka-api 8080:8080
+```
+
+Claude Code chat defaults:
+
+```bash
+export DEMO_CHAT_CLIENT="claude-code"
+export DEMO_CLAUDE_BIN="claude"
+# Optional override. By default the scripts compute provider/model, e.g. copilot-proxy-openai/gpt-5.4.
+# export DEMO_CLAUDE_MODEL="copilot-proxy-openai/gpt-5.4"
 ```
 
 Optional tuning:
@@ -51,13 +162,59 @@ export DEMO_GIT_FORK_REPO="https://github.com/your-org/your-demo-fork.git"
 export DEMO_PR_BASE_BRANCH="main"
 export DEMO_GIT_SUB_PATH="services/api"
 
-export DEMO_CHAT_REQUEST="..."
-export DEMO_MANUAL_REQUEST="..."
-export DEMO_CRON_REQUEST="..."
+# export DEMO_CHAT_REQUEST="..."
+# export DEMO_MANUAL_REQUEST="..."
+# Or put the live request in a file. DEMO_REQUEST_FILE feeds both chat and manual demos;
+# DEMO_CHAT_REQUEST_FILE and DEMO_MANUAL_REQUEST_FILE override one path only.
+# export DEMO_REQUEST_FILE="/tmp/live-demo-request.txt"
+# The suite defaults to a short “implement GitHub issue #77” request so agents discover requirements live.
+# Override the request variables or request files to prove the workflow is not tied to the default story.
+# export DEMO_VEKIL_METRICS_SLICE_REQUEST="..."
+# export DEMO_CRON_REQUEST="..."
 export DEMO_CRON_SCHEDULE="*/1 * * * *"
 export DEMO_SECURITY_SCAN_NAME="demo-security-repository"
 export DEMO_SECURITY_SCHEDULE="0 */6 * * *"
+export DEMO_AUTO_PORT_FORWARD="1"
+export DEMO_AGENT_MEMORY_REQUEST="512Mi"
+export DEMO_AGENT_MEMORY_LIMIT="2Gi"
+export DEMO_PR_WORKFLOW_TIMEOUT="300m"
+export DEMO_VALIDATION_REPAIR_LIMIT="6"
+export DEMO_REVIEW_REPAIR_LIMIT="8"
+export DEMO_CI_REPAIR_LIMIT="3"
+
+# Claude Code knobs used by 10-chat-pr.sh.
+export DEMO_CLAUDE_PERMISSION_MODE="dontAsk"
+export DEMO_CLAUDE_OUTPUT_FORMAT="json"
+export DEMO_CLAUDE_SETTING_SOURCES=""
+export DEMO_CLAUDE_TOOLS=""
+export DEMO_SHOW_CHAT_CLIENT_RESULT="0"
+# Transparency defaults are on: print the exact rendered prompt/manifest before execution.
+export DEMO_SHOW_FULL_PROMPT="1"
+export DEMO_SHOW_FULL_MANIFEST="1"
 ```
+
+## Live request / transparency mode
+
+The demos are still scripted for repeatability, but the request is intentionally overridable:
+
+```bash
+cat > /tmp/live-demo-request.txt <<'EOF'
+Implement a small, reviewable repository change. Include tests or documentation when appropriate, and keep the PR focused.
+EOF
+
+export DEMO_GIT_REPO="https://github.com/your-org/your-repo.git"
+export DEMO_GIT_BRANCH="main"
+export DEMO_GIT_FORK_REPO="https://github.com/your-org/your-demo-fork.git"
+export DEMO_REQUEST_FILE="/tmp/live-demo-request.txt"
+export DEMO_SHOW_FULL_PROMPT="1"
+export DEMO_SHOW_FULL_MANIFEST="1"
+
+hack/demos/10-chat-pr.sh
+# or
+hack/demos/20-manual-workflow.sh
+```
+
+Transparency mode prints the exact rendered prompt or Task manifest before the run. That makes the demo auditable: the final child Tasks and PR should correspond to the visible input rather than a hidden canned result.
 
 ## Suggested Run Order
 
@@ -70,11 +227,39 @@ hack/demos/30-cron-workflow.sh
 hack/demos/40-security-scanning.sh
 ```
 
+## Presenter Flow
+
+Each demo uses the same rhythm:
+
+- `Brief`: one sentence about the scenario and outcome.
+- `Show`: the object or command the audience should notice.
+- `Run`: the action that changes state.
+- `Follow`: waits for Orka to finish the real work.
+- `Inspect`: Kubernetes/API views of what happened.
+- `Summary`: compact JSON of the final state.
+
+The scenarios are:
+
+- `00-preflight.sh`: prove the namespace, controller, API tunnel, provider, Secrets, model surface, and local client are ready.
+- `10-chat-pr.sh`: a live or default repo-change request starts as a Claude Code chat request and ends as a coordinator Task, specialist child Tasks, validation/review/CI repair if needed, and PR result.
+- `20-manual-workflow.sh`: the same kind of live or default repo-change workflow runs from declarative Kubernetes YAML.
+- `30-cron-workflow.sh`: a scheduled parent Task creates recurring repository heartbeat child runs.
+- `40-security-scanning.sh`: an open finding becomes a patch proposal and human-reviewable PR.
+
+## How the Claude Code Scenario Works
+
+`10-chat-pr.sh` intentionally uses Claude Code only as a local Anthropic client. The script applies the prepared coordinator/coder/reviewer Agents, renders the exact operational prompt to `${DEMO_WORKDIR}/chat-request.txt`, prints it by default for transparency, sends it to Orka, and saves the raw Claude Code JSON response to `${DEMO_WORKDIR}/chat-client-result.json` for debugging. Set `DEMO_SHOW_FULL_PROMPT=0` if you want the presenter view to show only the story and file path.
+
+Use a fully qualified Anthropic model name for this path, such as `copilot-proxy-openai/gpt-5.4`. If `DEMO_CLAUDE_MODEL` is empty, the helper computes it from `DEMO_PROVIDER_REF` and `DEMO_AI_MODEL`.
+
+The default `DEMO_CLAUDE_SETTING_SOURCES=""` is deliberate: the generated Claude Code command passes `--setting-sources ""` so local `~/.claude/settings.json` environment overrides do not silently point Claude Code at a different API base URL. When `DEMO_CLAUDE_TOOLS=""`, the scripts omit `--tools` entirely because current Claude Code builds reject an empty tool name; set `DEMO_CLAUDE_TOOLS` only when you intentionally want to pass a local Claude Code tool allow-list. Orka injects the Kubernetes task tools server-side.
+
 ## Notes
 
 - The scripts render working files into `DEMO_WORKDIR`, which defaults to `/tmp/orka-demo`.
-- `30-cron-workflow.sh` quietly waits for at least one scheduled child run before it starts presenting commands.
-- `40-security-scanning.sh` quietly seeds the repository scan if needed. The very first run can take a while.
+- `10-chat-pr.sh` discovers the Task created through the Anthropic proxy by the generated `sessionRef` and the `orka.ai/source=anthropic-proxy` label, then shows the prepared Agents, child Tasks, and final result through `kubectl` and the Orka HTTP API.
+- `20-manual-workflow.sh` streams task logs with `kubectl logs` against the Pod created for the Task; it no longer depends on the Orka CLI.
+- `30-cron-workflow.sh` intentionally waits for at least one scheduled child run before it starts presenting commands, and labels this as accelerated demo pacing.
+- `40-security-scanning.sh` intentionally seeds the repository scan if needed before the presenter view. The very first run can take a while.
 - The security demo is one-shot by default. Set `DEMO_SECURITY_SCHEDULE` if you want the `RepositoryScan` to recur.
 - Security scan history is stored in SQLite. Deleting the `RepositoryScan` CR cleans up Kubernetes resources, but historical findings and scan runs may still exist. If you want a visually clean slate for that demo, use a fresh `DEMO_SECURITY_SCAN_NAME`.
-- If `bin/orka` is not built in this repo, the scripts automatically fall back to a sibling checkout at `../orka/bin/orka` when present.

@@ -33,6 +33,7 @@ const (
 	testTask               = "test-task"
 	defaultNS              = "default"
 	envAIProviderKey       = "ORKA_AI_PROVIDER"
+	testCodexSandboxMode   = "danger-full-access"
 	testNodeLabelKey       = "sandbox-runtime"
 	testNodeValueKata      = "kata"
 	testNodeValueGVisor    = "gvisor"
@@ -63,6 +64,9 @@ func TestNewJobBuilder(t *testing.T) {
 	}
 	if builder.CodexWorkerImage != DefaultCodexWorkerImage {
 		t.Errorf("CodexWorkerImage = %s, want %s", builder.CodexWorkerImage, DefaultCodexWorkerImage)
+	}
+	if builder.CodexSandboxMode != "" {
+		t.Errorf("CodexSandboxMode = %s, want empty", builder.CodexSandboxMode)
 	}
 }
 
@@ -812,7 +816,7 @@ func TestJobBuilder_buildEnvVars_WithCoordination(t *testing.T) {
 	if !found {
 		t.Fatal("Missing ORKA_AI_TOOLS")
 	}
-	for _, tool := range []string{"delegate_task", "wait_for_tasks"} {
+	for _, tool := range []string{"delegate_task", "wait_for_tasks", "create_container_task", "check_pull_request_ci"} {
 		if !strings.Contains(toolsEnv.Value, tool) {
 			t.Errorf("ORKA_AI_TOOLS = %s, want to contain %s", toolsEnv.Value, tool)
 		}
@@ -1030,6 +1034,124 @@ func TestJobBuilder_Build_AgentTask_CodexRuntime(t *testing.T) {
 	container := job.Spec.Template.Spec.Containers[0]
 	if container.Image != DefaultCodexWorkerImage {
 		t.Errorf("Image = %s, want %s", container.Image, DefaultCodexWorkerImage)
+	}
+}
+
+func TestJobBuilder_Build_AgentTask_CodexRuntime_ConfiguredSandboxMode(t *testing.T) {
+	builder := setupJobBuilder()
+	builder.CodexSandboxMode = testCodexSandboxMode
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "agent-task",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAgent,
+			Prompt: "Fix the bug",
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: corev1alpha1.AgentRuntimeCodex,
+			},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, agent, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	ev, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "ORKA_CODEX_SANDBOX_MODE")
+	if !ok {
+		t.Fatal("Missing ORKA_CODEX_SANDBOX_MODE")
+	}
+	if ev.Value != testCodexSandboxMode {
+		t.Errorf("ORKA_CODEX_SANDBOX_MODE = %q, want %q", ev.Value, testCodexSandboxMode)
+	}
+}
+
+func TestJobBuilder_Build_AgentTask_CodexRuntime_TaskEnvOverridesConfiguredSandboxMode(t *testing.T) {
+	builder := setupJobBuilder()
+	builder.CodexSandboxMode = testCodexSandboxMode
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "agent-task",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAgent,
+			Prompt: "Fix the bug",
+			Env: []corev1.EnvVar{
+				{Name: "ORKA_CODEX_SANDBOX_MODE", Value: "workspace-write"},
+			},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: corev1alpha1.AgentRuntimeCodex,
+			},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, agent, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	envVars := job.Spec.Template.Spec.Containers[0].Env
+	ev, ok := findEnvVar(envVars, "ORKA_CODEX_SANDBOX_MODE")
+	if !ok {
+		t.Fatal("Missing ORKA_CODEX_SANDBOX_MODE")
+	}
+	if ev.Value != "workspace-write" {
+		t.Errorf("ORKA_CODEX_SANDBOX_MODE = %q, want task env value %q", ev.Value, "workspace-write")
+	}
+
+	count := 0
+	for _, envVar := range envVars {
+		if envVar.Name == "ORKA_CODEX_SANDBOX_MODE" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("ORKA_CODEX_SANDBOX_MODE count = %d, want 1", count)
+	}
+}
+
+func TestJobBuilder_Build_AgentTask_NonCodexRuntime_NoConfiguredSandboxMode(t *testing.T) {
+	builder := setupJobBuilder()
+	builder.CodexSandboxMode = testCodexSandboxMode
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "agent-task",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAgent,
+			Prompt: "Fix the bug",
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type: corev1alpha1.AgentRuntimeClaude,
+			},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, agent, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	if _, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, "ORKA_CODEX_SANDBOX_MODE"); ok {
+		t.Fatal("Unexpected ORKA_CODEX_SANDBOX_MODE for non-Codex runtime")
 	}
 }
 
@@ -1745,6 +1867,71 @@ func TestJobBuilder_Build_AgentTask_ContainerTaskNoAgentVolumes(t *testing.T) {
 	}
 	if hasVolume(job.Spec.Template.Spec.Volumes, "home") {
 		t.Error("Container task should not have home volume")
+	}
+}
+
+func TestJobBuilder_Build_ContainerTask_Workspace(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "container-task",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   "golang:1.26",
+			Command: []string{"sh", "-lc"},
+			Args:    []string{"go test ./..."},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:    "https://github.com/example/repo.git",
+				Branch:     "feature",
+				Ref:        "abc123",
+				SubPath:    "src",
+				PushBranch: "demo/fixup",
+				GitSecretRef: &corev1.LocalObjectReference{
+					Name: "git-credentials",
+				},
+			},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	if !hasVolume(job.Spec.Template.Spec.Volumes, "workspace") {
+		t.Fatal("missing workspace volume")
+	}
+	if !hasVolume(job.Spec.Template.Spec.Volumes, "home") {
+		t.Fatal("missing home volume")
+	}
+	if !hasVolume(job.Spec.Template.Spec.Volumes, testGitCredentials) {
+		t.Fatal("missing git credentials volume")
+	}
+	if len(job.Spec.Template.Spec.InitContainers) != 1 {
+		t.Fatalf("init container count = %d, want 1", len(job.Spec.Template.Spec.InitContainers))
+	}
+	init := job.Spec.Template.Spec.InitContainers[0]
+	if init.Name != "prepare-workspace" {
+		t.Errorf("init name = %q", init.Name)
+	}
+	if init.Image != builder.GeneralWorkerImage {
+		t.Errorf("init image = %q, want %q", init.Image, builder.GeneralWorkerImage)
+	}
+	if _, ok := findEnvVar(init.Env, "ORKA_GIT_REPO"); !ok {
+		t.Fatal("init missing ORKA_GIT_REPO")
+	}
+	container := job.Spec.Template.Spec.Containers[0]
+	if container.WorkingDir != "/workspace/src" {
+		t.Errorf("workingDir = %q, want /workspace/src", container.WorkingDir)
+	}
+	if _, ok := findEnvVar(container.Env, "ORKA_GIT_REF"); !ok {
+		t.Fatal("container missing ORKA_GIT_REF")
+	}
+	if _, ok := findEnvVar(container.Env, "ORKA_PUSH_BRANCH"); !ok {
+		t.Fatal("container missing ORKA_PUSH_BRANCH")
 	}
 }
 

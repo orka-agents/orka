@@ -285,10 +285,12 @@ func TestRegisterCoordinationTools(t *testing.T) {
 	expectedTools := []string{
 		"delegate_task",
 		"wait_for_tasks",
+		"create_container_task",
 		"cancel_task",
 		"send_message",
 		"check_messages",
 		"create_pull_request",
+		"check_pull_request_ci",
 		"merge_pull_request",
 		"auto_merge_pull_request",
 		"review_pull_request",

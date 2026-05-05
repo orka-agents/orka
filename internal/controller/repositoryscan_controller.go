@@ -1563,7 +1563,9 @@ func (r *RepositoryScanReconciler) ingestPatchTask(ctx context.Context, scan *co
 	}
 
 	proposal.Status = taskPhaseToSecurityPhase(task.Status.Phase)
-	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
+	if task.Spec.Workspace != nil {
+		proposal.Branch = task.Spec.Workspace.PushBranch
+	} else if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
 		proposal.Branch = task.Spec.AgentRuntime.Workspace.PushBranch
 	}
 

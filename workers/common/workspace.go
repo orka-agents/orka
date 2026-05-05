@@ -170,9 +170,15 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 		}
 	}
 
+	headSHA := baseSHA
+	if out, err := execGit(workDir, "rev-parse", "HEAD"); err == nil {
+		headSHA = strings.TrimSpace(out)
+	}
+
 	sr := &StructuredResult{
-		Summary:    agentOutput,
+		Summary:    TruncateStructuredSummary(agentOutput),
 		BaseSHA:    baseSHA,
+		HeadSHA:    headSHA,
 		PushBranch: pushBranch,
 	}
 	if diff != "" {

@@ -356,6 +356,16 @@ func TestAutonomousSystemPromptSuffix(t *testing.T) {
 		if !strings.Contains(result, "Autonomous Coordinator") {
 			t.Errorf("should contain autonomous instructions, got: %s", result)
 		}
+		for _, want := range []string{
+			"at most eight coder repair passes",
+			"at most three times",
+			"more than 30 minutes",
+			"run the reviewer tasks again",
+		} {
+			if !strings.Contains(result, want) {
+				t.Errorf("should contain %q, got: %s", want, result)
+			}
+		}
 	})
 
 	t.Run("unlimited iterations", func(t *testing.T) {
