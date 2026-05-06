@@ -34,8 +34,8 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		codexAgentName         = "e2e-live-runtime-codex-agent"
 		codexTaskWriteName     = "e2e-live-runtime-codex-write"
 		codexTaskReadName      = "e2e-live-runtime-codex-read"
-		codexNonce             = "CODEX_LIVE_RUNTIME_NONCE_1"
-		codexNonceFile         = "codex-live-nonce.txt"
+		codexMarker            = "CODEX_LIVE_RUNTIME_MARKER_1"
+		codexMarkerFile        = "codex-live-marker.txt"
 		claudeSecretName       = "e2e-live-runtime-claude-secret"
 		claudeAgentName        = "e2e-live-runtime-claude-agent"
 		claudeTaskName         = "e2e-live-runtime-claude-task"
@@ -149,11 +149,11 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		err = applyManifestJSON(runtimeAgentManifest(codexPriorAgentName, "claude", codexPriorSecretName, claudeModel, 5, true))
 		Expect(err).NotTo(HaveOccurred())
 
-		By("creating the prior task that writes the nonce file into the pinned repository")
+		By("creating the prior task that writes the marker file into the pinned repository")
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			codexTaskWriteName,
 			codexPriorAgentName,
-			fmt.Sprintf("Use the simplest possible edit to create %s in the repository root containing exactly %s followed by a newline. Reply with exactly CREATED and nothing else.", codexNonceFile, codexNonce),
+			fmt.Sprintf("Use the simplest possible edit to create %s in the repository root containing exactly %s followed by a newline. Reply with exactly CREATED and nothing else.", codexMarkerFile, codexMarker),
 			6,
 			boolPtr(true),
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
@@ -187,7 +187,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		firstResult := workercommon.ParseStructuredResult(fetchTaskResultViaAPI(apiBaseURL, token, codexTaskWriteName))
 		Expect(strings.TrimSpace(firstResult.Summary)).To(ContainSubstring("CREATED"))
 		Expect(strings.TrimSpace(firstResult.Diff)).NotTo(BeEmpty(), "prior task should produce a diff for priorTaskRef")
-		Expect(firstResult.Files).To(ContainElement(codexNonceFile))
+		Expect(firstResult.Files).To(ContainElement(codexMarkerFile))
 
 		By("creating a Codex runtime secret that routes OpenAI traffic through the live proxy")
 		err = createK8sSecret(codexSecretName, namespace, map[string]string{
@@ -204,7 +204,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			codexTaskReadName,
 			codexAgentName,
-			fmt.Sprintf("Read %s from the repository root and reply with exactly %s and nothing else.", codexNonceFile, codexNonce),
+			fmt.Sprintf("Read %s from the repository root and reply with exactly %s and nothing else.", codexMarkerFile, codexMarker),
 			3,
 			boolPtr(true),
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
@@ -234,10 +234,10 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			nil,
 		)
 
-		By("waiting for the Codex task to return the exact nonce from the prior diff")
+		By("waiting for the Codex task to return the exact marker from the prior diff")
 		Expect(waitForTaskCompletion(codexTaskReadName, liveRuntimeTimeout)).To(Equal("Succeeded"))
 		verifyResultAvailable(codexTaskReadName)
-		Expect(strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, codexTaskReadName))).To(Equal(codexNonce))
+		Expect(strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, codexTaskReadName))).To(Equal(codexMarker))
 	})
 
 	It("should run claude code through the live proxy with session wiring and exact output", func() {
