@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -80,6 +81,10 @@ type proxyModelCatalog struct {
 
 type apiTaskResultResponse struct {
 	Result string `json:"result"`
+}
+
+type apiMemoryProposalListResponse struct {
+	Items []map[string]any `json:"items"`
 }
 
 // skipIfNoKey skips the current test if the given environment variable is not set or empty.
@@ -673,6 +678,32 @@ func fetchTaskResultViaAPI(apiBaseURL, token, taskName string) string {
 
 func fetchTaskResultSummaryViaAPI(apiBaseURL, token, taskName string) string {
 	return workercommon.ParseStructuredResult(fetchTaskResultViaAPI(apiBaseURL, token, taskName)).Summary
+}
+
+func fetchMemoryProposalsViaAPI(apiBaseURL, token, taskName, query string) []map[string]any {
+	var items []map[string]any
+	Eventually(func(g Gomega) {
+		values := url.Values{}
+		values.Set("namespace", namespace)
+		if strings.TrimSpace(taskName) != "" {
+			values.Set("taskName", taskName)
+		}
+		if strings.TrimSpace(query) != "" {
+			values.Set("query", query)
+		}
+
+		endpoint := fmt.Sprintf("%s/api/v1/memory-proposals?%s", strings.TrimRight(apiBaseURL, "/"), values.Encode())
+		body, statusCode, err := doAuthorizedJSONRequest(http.MethodGet, endpoint, token, "", "")
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(statusCode).To(Equal(http.StatusOK), "unexpected memory proposal list response: %s", strings.TrimSpace(body))
+
+		var payload apiMemoryProposalListResponse
+		g.Expect(json.Unmarshal([]byte(body), &payload)).To(Succeed())
+		g.Expect(payload.Items).NotTo(BeEmpty(), "expected at least one memory proposal for task %s containing %s", taskName, query)
+		items = payload.Items
+	}, time.Minute, 2*time.Second).Should(Succeed())
+
+	return items
 }
 
 func getTaskResultViaAPI(apiBaseURL, token, taskName string) (string, error) {

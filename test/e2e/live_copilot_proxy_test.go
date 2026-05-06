@@ -21,7 +21,11 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		liveProxyProviderName = "e2e-live-copilot-provider"
 		liveProxySecretName   = "e2e-live-copilot-secret"
 		liveProxyTaskName     = "e2e-live-copilot-task"
+		liveProxyCoordAgent   = "e2e-live-copilot-coord-agent"
+		liveProxyCoordTask    = "e2e-live-copilot-coord-task"
 		expectedOutput        = "ORKA_LIVE_COPILOT_OK"
+		expectedCoordOutput   = "ORKA_LIVE_COPILOT_COORDINATION_OK"
+		memoryProposalMarker  = "orka-live-copilot-coordination-memory-e2e"
 	)
 
 	var (
@@ -53,7 +57,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 	})
 
 	AfterEach(func() {
-		dumpDebugInfo(liveProxyTaskName)
+		dumpDebugInfo(liveProxyTaskName, liveProxyCoordTask)
 		dumpLiveCopilotProxyDebugInfo(liveProxyProviderName)
 	})
 
@@ -187,5 +191,157 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		By("fetching the task result through the controller API")
 		result := fetchTaskResultViaAPI(apiBaseURL, token, liveProxyTaskName)
 		Expect(strings.TrimSpace(result)).To(Equal(expectedOutput))
+	})
+
+	It("should auto-inject and execute coordination memory tools for a live copilot proxy Agent", func() {
+		By("discovering a live GPT-family model from the proxy service")
+		model := discoveredModel
+		if model == "" {
+			model = discoverPreferredProxyModelViaServiceProxy(
+				liveCopilotProxyServiceNamespace(),
+				liveCopilotProxyServiceName(),
+				liveCopilotProxyServicePort(),
+				[]string{"gpt-5.4", "gpt-5.2", "gpt-5.4-mini"},
+				"gpt-",
+			)
+		}
+		Expect(model).NotTo(BeEmpty())
+
+		By("creating a dummy secret for provider validation")
+		DeferCleanup(func() {
+			cmd := exec.Command("kubectl", "delete", "secret", liveProxySecretName, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+		err := createK8sSecret(liveProxySecretName, namespace, map[string]string{
+			"api-key": "dummy-live-copilot-proxy-key",
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		By(fmt.Sprintf("creating a Provider CRD backed by copilot-proxy model %q", model))
+		DeferCleanup(func() {
+			cmd := exec.Command("kubectl", "delete", "provider", liveProxyProviderName, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+		createProviderCRD(liveProxyProviderName, "openai", liveProxySecretName, "api-key", e2eLiveCopilotProxyBaseURL, model)
+
+		By("verifying the Provider is ready")
+		provider := fetchProviderSnapshot(liveProxyProviderName)
+		Expect(provider.Status.Ready).To(BeTrue())
+
+		By("creating an AI Agent with coordination enabled and no explicit tools")
+		DeferCleanup(func() {
+			cmd := exec.Command("kubectl", "delete", "agent", liveProxyCoordAgent, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+		agentManifest := fmt.Sprintf(`{
+			"apiVersion": "core.orka.ai/v1alpha1",
+			"kind": "Agent",
+			"metadata": {
+				"name": "%s",
+				"namespace": "%s"
+			},
+			"spec": {
+				"providerRef": {
+					"name": "%s"
+				},
+				"model": {
+					"name": "%s",
+					"temperature": 0,
+					"maxTokens": 512
+				},
+				"systemPrompt": {
+					"inline": "You are an Orka E2E test coordinator. When the user asks you to verify tools, call the requested tools before returning the final exact marker."
+				},
+				"coordination": {
+					"enabled": true
+				}
+			}
+		}`, liveProxyCoordAgent, namespace, liveProxyProviderName, model)
+
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = stringReader(agentManifest)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create live copilot proxy coordination Agent")
+
+		By("creating an AI Task referencing the coordination Agent")
+		DeferCleanup(func() {
+			cmd := exec.Command("kubectl", "delete", "task", liveProxyCoordTask, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+		prompt := fmt.Sprintf(`This is an Orka live Copilot proxy E2E tool execution check.
+
+Use these tools exactly once before your final answer:
+1. search_transcript with query "%[1]s"
+2. recall_memory with query "%[1]s"
+3. propose_memory with a title containing "%[1]s" and content describing that live Copilot proxy coordination memory tools executed
+4. remember with content containing "%[1]s"
+
+After the tools have been called, reply with exactly %[2]s and nothing else.`, memoryProposalMarker, expectedCoordOutput)
+		taskManifest := fmt.Sprintf(`{
+			"apiVersion": "core.orka.ai/v1alpha1",
+			"kind": "Task",
+			"metadata": {
+				"name": "%s",
+				"namespace": "%s"
+			},
+			"spec": {
+				"type": "ai",
+				"agentRef": {
+					"name": "%s"
+				},
+				"ai": {
+					"providerRef": {
+						"name": "%s"
+					},
+					"model": "%s",
+					"prompt": %q,
+					"temperature": 0,
+					"maxTokens": 512
+				}
+			}
+		}`, liveProxyCoordTask, namespace, liveProxyCoordAgent, liveProxyProviderName, model, prompt)
+
+		cmd = exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = stringReader(taskManifest)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create live copilot proxy coordination AI task")
+
+		By("verifying Orka created a worker Job for the coordination task")
+		verifyJobCreatedForTask(liveProxyCoordTask, 30*time.Second)
+
+		By("verifying coordination env vars and memory tools were auto-injected")
+		envMap := getJobEnvMap(liveProxyCoordTask)
+		Expect(envMap).To(HaveKeyWithValue("ORKA_COORDINATION_ENABLED", "true"))
+
+		toolsEnv := envMap["ORKA_AI_TOOLS"]
+		Expect(toolsEnv).NotTo(BeEmpty())
+		toolSet := map[string]bool{}
+		for _, tool := range strings.Split(toolsEnv, ",") {
+			toolSet[strings.TrimSpace(tool)] = true
+		}
+		for _, tool := range []string{"recall_memory", "remember", "propose_memory", "search_transcript"} {
+			Expect(toolSet).To(HaveKey(tool), "ORKA_AI_TOOLS = %s", toolsEnv)
+		}
+
+		By("waiting for the coordination AI task to complete")
+		phase := waitForTaskCompletion(liveProxyCoordTask, 8*time.Minute)
+		Expect(phase).To(Equal("Succeeded"), "Live copilot proxy coordination AI task should succeed")
+
+		By("verifying the worker logs show each memory tool was executed")
+		Eventually(func(g Gomega) {
+			task := fetchTaskSnapshot(liveProxyCoordTask)
+			g.Expect(task.Status.JobName).NotTo(BeEmpty())
+
+			cmd := exec.Command("kubectl", "logs", "job/"+task.Status.JobName, "-n", namespace)
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			for _, tool := range []string{"recall_memory", "remember", "propose_memory", "search_transcript"} {
+				g.Expect(output).To(ContainSubstring("Executing tool: " + tool))
+			}
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("verifying the propose_memory tool persisted a memory proposal")
+		proposals := fetchMemoryProposalsViaAPI(apiBaseURL, token, liveProxyCoordTask, memoryProposalMarker)
+		Expect(proposals).NotTo(BeEmpty())
 	})
 })

@@ -823,6 +823,49 @@ func TestJobBuilder_buildEnvVars_WithCoordination(t *testing.T) {
 	}
 }
 
+func TestJobBuilder_buildEnvVars_WithCoordination_IncludesMemoryTools(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: defaultNS,
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAI,
+			Prompt: "Coordinate work and remember important findings",
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Provider: "anthropic",
+				Name:     "claude-3-5-sonnet",
+			},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled: true,
+			},
+		},
+	}
+
+	envVars := builder.buildEnvVars(context.Background(), task, agent, nil)
+
+	toolsEnv, found := findEnvVar(envVars, "ORKA_AI_TOOLS")
+	if !found {
+		t.Fatal("Missing ORKA_AI_TOOLS")
+	}
+
+	tools := map[string]bool{}
+	for _, tool := range strings.Split(toolsEnv.Value, ",") {
+		tools[strings.TrimSpace(tool)] = true
+	}
+
+	for _, want := range []string{"recall_memory", "remember", "propose_memory", "search_transcript"} {
+		if !tools[want] {
+			t.Errorf("ORKA_AI_TOOLS = %s, want to contain %s", toolsEnv.Value, want)
+		}
+	}
+}
+
 func TestJobBuilder_buildEnvVars_WithCoordination_ChildTask(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
