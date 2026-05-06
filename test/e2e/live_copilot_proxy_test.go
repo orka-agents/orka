@@ -6,6 +6,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/test/utils"
 )
 
@@ -263,6 +265,29 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create live copilot proxy coordination Agent")
 
+		uniqueMarkerSuffix := time.Now().UnixNano()
+		durableMemoryMarker := fmt.Sprintf("orka-live-copilot-coordination-durable-e2e-%d", uniqueMarkerSuffix)
+		proposalMarker := fmt.Sprintf("%s-%d", memoryProposalMarker, uniqueMarkerSuffix)
+
+		By("pre-seeding a durable memory for recall")
+		preseededMemory := createDurableMemoryViaAPI(apiBaseURL, token, store.Memory{
+			TaskName:  liveProxyCoordTask,
+			AgentName: liveProxyCoordAgent,
+			Source:    "e2e",
+			Content:   fmt.Sprintf("Durable live Copilot proxy coordination memory marker %s for recall only.", durableMemoryMarker),
+			Tags:      []string{"e2e", "live-copilot-proxy", "coordination"},
+		})
+		DeferCleanup(func() {
+			deleteDurableMemoryViaAPI(apiBaseURL, token, preseededMemory.ID)
+		})
+		initialDurableMemories := listDurableMemoriesViaAPI(apiBaseURL, token, url.Values{
+			"query": []string{durableMemoryMarker},
+		})
+		Expect(initialDurableMemories).To(ContainElement(WithTransform(func(memory store.Memory) string {
+			return memory.ID
+		}, Equal(preseededMemory.ID))))
+		initialDurableMemoryCount := len(initialDurableMemories)
+
 		By("creating an AI Task referencing the coordination Agent")
 		DeferCleanup(func() {
 			cmd := exec.Command("kubectl", "delete", "task", liveProxyCoordTask, "-n", namespace, "--ignore-not-found")
@@ -272,11 +297,12 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 
 Use these tools exactly once before your final answer:
 1. search_transcript with query "%[1]s"
-2. recall_memory with query "%[1]s"
-3. propose_memory with a title containing "%[1]s" and content describing that live Copilot proxy coordination memory tools executed
+2. recall_memory with query "%[2]s"
+3. propose_memory with a title containing "%[1]s" and content containing "%[1]s" describing that live Copilot proxy coordination memory tools executed
 4. remember with content containing "%[1]s"
 
-After the tools have been called, reply with exactly %[2]s and nothing else.`, memoryProposalMarker, expectedCoordOutput)
+The recall_memory query marker and proposal marker are intentionally different. Do not put "%[2]s" in the proposed memory content.
+After the tools have been called, reply with exactly %[3]s and nothing else.`, proposalMarker, durableMemoryMarker, expectedCoordOutput)
 		taskManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Task",
@@ -340,8 +366,60 @@ After the tools have been called, reply with exactly %[2]s and nothing else.`, m
 			}
 		}, 2*time.Minute, 5*time.Second).Should(Succeed())
 
-		By("verifying the propose_memory tool persisted a memory proposal")
-		proposals := fetchMemoryProposalsViaAPI(apiBaseURL, token, liveProxyCoordTask, memoryProposalMarker)
-		Expect(proposals).NotTo(BeEmpty())
+		By("verifying recall used durable memory without creating new durable entries")
+		durableMemories := listDurableMemoriesViaAPI(apiBaseURL, token, url.Values{
+			"query": []string{durableMemoryMarker},
+		})
+		Expect(durableMemories).To(ContainElement(WithTransform(func(memory store.Memory) string {
+			return memory.ID
+		}, Equal(preseededMemory.ID))))
+		Expect(durableMemories).To(HaveLen(initialDurableMemoryCount))
+
+		By("verifying proposed memory content was not written as durable memory")
+		proposalDurableMemories := listDurableMemoriesViaAPI(apiBaseURL, token, url.Values{
+			"query": []string{proposalMarker},
+		})
+		Expect(proposalDurableMemories).To(BeEmpty())
+
+		By("verifying propose_memory and remember persisted governance proposals")
+		var proposals []store.MemoryProposal
+		Eventually(func(g Gomega) {
+			proposals = listMemoryProposalsViaAPI(apiBaseURL, token, url.Values{
+				"taskName": []string{liveProxyCoordTask},
+				"query":    []string{proposalMarker},
+			})
+			g.Expect(len(proposals)).To(BeNumerically(">=", 2))
+		}, time.Minute, 2*time.Second).Should(Succeed())
+
+		By("reviewing memory proposals without applying them to durable memory")
+		acceptedProposal := reviewMemoryProposalViaAPI(apiBaseURL, token, proposals[0].ID, store.MemoryProposalReview{
+			Status:     "accepted",
+			Reviewer:   "e2e-live-copilot",
+			ReviewNote: "Accepted during live Copilot proxy E2E coverage.",
+		})
+		rejectedProposal := reviewMemoryProposalViaAPI(apiBaseURL, token, proposals[1].ID, store.MemoryProposalReview{
+			Status:     "rejected",
+			Reviewer:   "e2e-live-copilot",
+			ReviewNote: "Rejected during live Copilot proxy E2E coverage.",
+		})
+		Expect(acceptedProposal.Status).To(Equal("accepted"))
+		Expect(acceptedProposal.Reviewer).To(Equal("e2e-live-copilot"))
+		Expect(acceptedProposal.ReviewedAt).NotTo(BeNil())
+		Expect(rejectedProposal.Status).To(Equal("rejected"))
+		Expect(rejectedProposal.Reviewer).To(Equal("e2e-live-copilot"))
+		Expect(rejectedProposal.ReviewedAt).NotTo(BeNil())
+
+		By("verifying reviewed proposals still were not applied as durable memory")
+		proposalDurableMemories = listDurableMemoriesViaAPI(apiBaseURL, token, url.Values{
+			"query": []string{proposalMarker},
+		})
+		Expect(proposalDurableMemories).To(BeEmpty())
+		durableMemories = listDurableMemoriesViaAPI(apiBaseURL, token, url.Values{
+			"query": []string{durableMemoryMarker},
+		})
+		Expect(durableMemories).To(ContainElement(WithTransform(func(memory store.Memory) string {
+			return memory.ID
+		}, Equal(preseededMemory.ID))))
+		Expect(durableMemories).To(HaveLen(initialDurableMemoryCount))
 	})
 })

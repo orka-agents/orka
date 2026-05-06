@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/test/utils"
 	workercommon "github.com/sozercan/orka/workers/common"
 )
@@ -83,8 +84,12 @@ type apiTaskResultResponse struct {
 	Result string `json:"result"`
 }
 
+type apiMemoryListResponse struct {
+	Items []store.Memory `json:"items"`
+}
+
 type apiMemoryProposalListResponse struct {
-	Items []map[string]any `json:"items"`
+	Items []store.MemoryProposal `json:"items"`
 }
 
 // skipIfNoKey skips the current test if the given environment variable is not set or empty.
@@ -680,30 +685,241 @@ func fetchTaskResultSummaryViaAPI(apiBaseURL, token, taskName string) string {
 	return workercommon.ParseStructuredResult(fetchTaskResultViaAPI(apiBaseURL, token, taskName)).Summary
 }
 
-func fetchMemoryProposalsViaAPI(apiBaseURL, token, taskName, query string) []map[string]any {
-	var items []map[string]any
-	Eventually(func(g Gomega) {
-		values := url.Values{}
-		values.Set("namespace", namespace)
-		if strings.TrimSpace(taskName) != "" {
-			values.Set("taskName", taskName)
+func apiValuesWithNamespace(values url.Values) url.Values {
+	cloned := url.Values{}
+	for key, existing := range values {
+		for _, value := range existing {
+			cloned.Add(key, value)
 		}
-		if strings.TrimSpace(query) != "" {
-			values.Set("query", query)
-		}
+	}
+	if strings.TrimSpace(cloned.Get("namespace")) == "" {
+		cloned.Set("namespace", namespace)
+	}
+	return cloned
+}
 
-		endpoint := fmt.Sprintf("%s/api/v1/memory-proposals?%s", strings.TrimRight(apiBaseURL, "/"), values.Encode())
-		body, statusCode, err := doAuthorizedJSONRequest(http.MethodGet, endpoint, token, "", "")
+func apiEndpoint(apiBaseURL, path string, values url.Values) string {
+	endpoint := strings.TrimRight(apiBaseURL, "/") + path
+	if len(values) > 0 {
+		endpoint += "?" + values.Encode()
+	}
+	return endpoint
+}
+
+func createDurableMemoryViaAPI(apiBaseURL, token string, memory store.Memory) store.Memory {
+	if strings.TrimSpace(memory.Namespace) == "" {
+		memory.Namespace = namespace
+	}
+	payload, err := json.Marshal(memory)
+	Expect(err).NotTo(HaveOccurred())
+
+	body, statusCode, err := doAuthorizedJSONRequest(
+		http.MethodPost,
+		apiEndpoint(apiBaseURL, "/api/v1/memories", nil),
+		token,
+		string(payload),
+		"",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(statusCode).To(Equal(http.StatusCreated), "unexpected durable memory create response: %s", strings.TrimSpace(body))
+
+	var created store.Memory
+	Expect(json.Unmarshal([]byte(body), &created)).To(Succeed())
+	return created
+}
+
+func listDurableMemoriesViaAPI(apiBaseURL, token string, values url.Values) []store.Memory {
+	var memories []store.Memory
+	Eventually(func(g Gomega) {
+		body, statusCode, err := doAuthorizedJSONRequest(
+			http.MethodGet,
+			apiEndpoint(apiBaseURL, "/api/v1/memories", apiValuesWithNamespace(values)),
+			token,
+			"",
+			"",
+		)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(statusCode).To(Equal(http.StatusOK), "unexpected durable memory list response: %s", strings.TrimSpace(body))
+
+		var payload apiMemoryListResponse
+		g.Expect(json.Unmarshal([]byte(body), &payload)).To(Succeed())
+		memories = payload.Items
+	}, time.Minute, 2*time.Second).Should(Succeed())
+
+	return memories
+}
+
+func getDurableMemoryViaAPI(apiBaseURL, token, id string) store.Memory {
+	body, statusCode, err := doAuthorizedJSONRequest(
+		http.MethodGet,
+		apiEndpoint(apiBaseURL, "/api/v1/memories/"+url.PathEscape(id), apiValuesWithNamespace(nil)),
+		token,
+		"",
+		"",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(statusCode).To(Equal(http.StatusOK), "unexpected durable memory get response: %s", strings.TrimSpace(body))
+
+	var memory store.Memory
+	Expect(json.Unmarshal([]byte(body), &memory)).To(Succeed())
+	return memory
+}
+
+func updateDurableMemoryViaAPI(apiBaseURL, token, id string, memory store.Memory) store.Memory {
+	if strings.TrimSpace(memory.Namespace) == "" {
+		memory.Namespace = namespace
+	}
+	payload, err := json.Marshal(memory)
+	Expect(err).NotTo(HaveOccurred())
+
+	body, statusCode, err := doAuthorizedJSONRequest(
+		http.MethodPut,
+		apiEndpoint(apiBaseURL, "/api/v1/memories/"+url.PathEscape(id), apiValuesWithNamespace(nil)),
+		token,
+		string(payload),
+		"",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(statusCode).To(Equal(http.StatusOK), "unexpected durable memory update response: %s", strings.TrimSpace(body))
+
+	var updated store.Memory
+	Expect(json.Unmarshal([]byte(body), &updated)).To(Succeed())
+	return updated
+}
+
+func setDurableMemoryEnabledViaAPI(apiBaseURL, token, id string, enabled bool) store.Memory {
+	action := "enable"
+	if !enabled {
+		action = "disable"
+	}
+	body, statusCode, err := doAuthorizedJSONRequest(
+		http.MethodPost,
+		apiEndpoint(apiBaseURL, "/api/v1/memories/"+url.PathEscape(id)+"/"+action, apiValuesWithNamespace(nil)),
+		token,
+		"",
+		"",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(statusCode).To(Equal(http.StatusNoContent), "unexpected durable memory %s response: %s", action, strings.TrimSpace(body))
+	return getDurableMemoryViaAPI(apiBaseURL, token, id)
+}
+
+func deleteDurableMemoryViaAPI(apiBaseURL, token, id string) {
+	body, statusCode, err := doAuthorizedJSONRequest(
+		http.MethodDelete,
+		apiEndpoint(apiBaseURL, "/api/v1/memories/"+url.PathEscape(id), apiValuesWithNamespace(nil)),
+		token,
+		"",
+		"",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(statusCode).To(Equal(http.StatusNoContent), "unexpected durable memory delete response: %s", strings.TrimSpace(body))
+}
+
+func createMemoryProposalViaAPI(apiBaseURL, token string, proposal store.MemoryProposal) store.MemoryProposal {
+	if strings.TrimSpace(proposal.Namespace) == "" {
+		proposal.Namespace = namespace
+	}
+	payload, err := json.Marshal(proposal)
+	Expect(err).NotTo(HaveOccurred())
+
+	body, statusCode, err := doAuthorizedJSONRequest(
+		http.MethodPost,
+		apiEndpoint(apiBaseURL, "/api/v1/memory-proposals", nil),
+		token,
+		string(payload),
+		"",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(statusCode).To(Equal(http.StatusCreated), "unexpected memory proposal create response: %s", strings.TrimSpace(body))
+
+	var created store.MemoryProposal
+	Expect(json.Unmarshal([]byte(body), &created)).To(Succeed())
+	return created
+}
+
+func listMemoryProposalsViaAPI(apiBaseURL, token string, values url.Values) []store.MemoryProposal {
+	var proposals []store.MemoryProposal
+	Eventually(func(g Gomega) {
+		body, statusCode, err := doAuthorizedJSONRequest(
+			http.MethodGet,
+			apiEndpoint(apiBaseURL, "/api/v1/memory-proposals", apiValuesWithNamespace(values)),
+			token,
+			"",
+			"",
+		)
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(statusCode).To(Equal(http.StatusOK), "unexpected memory proposal list response: %s", strings.TrimSpace(body))
 
 		var payload apiMemoryProposalListResponse
 		g.Expect(json.Unmarshal([]byte(body), &payload)).To(Succeed())
-		g.Expect(payload.Items).NotTo(BeEmpty(), "expected at least one memory proposal for task %s containing %s", taskName, query)
-		items = payload.Items
+		proposals = payload.Items
 	}, time.Minute, 2*time.Second).Should(Succeed())
 
-	return items
+	return proposals
+}
+
+func fetchMemoryProposalsViaAPI(apiBaseURL, token, taskName, query string) []store.MemoryProposal {
+	values := url.Values{}
+	if strings.TrimSpace(taskName) != "" {
+		values.Set("taskName", taskName)
+	}
+	if strings.TrimSpace(query) != "" {
+		values.Set("query", query)
+	}
+
+	var proposals []store.MemoryProposal
+	Eventually(func(g Gomega) {
+		proposals = listMemoryProposalsViaAPI(apiBaseURL, token, values)
+		g.Expect(proposals).NotTo(BeEmpty(), "expected at least one memory proposal for task %s containing %s", taskName, query)
+	}, time.Minute, 2*time.Second).Should(Succeed())
+
+	return proposals
+}
+
+func getMemoryProposalViaAPI(apiBaseURL, token, id string) store.MemoryProposal {
+	body, statusCode, err := doAuthorizedJSONRequest(
+		http.MethodGet,
+		apiEndpoint(apiBaseURL, "/api/v1/memory-proposals/"+url.PathEscape(id), apiValuesWithNamespace(nil)),
+		token,
+		"",
+		"",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(statusCode).To(Equal(http.StatusOK), "unexpected memory proposal get response: %s", strings.TrimSpace(body))
+
+	var proposal store.MemoryProposal
+	Expect(json.Unmarshal([]byte(body), &proposal)).To(Succeed())
+	return proposal
+}
+
+func reviewMemoryProposalViaAPI(apiBaseURL, token, id string, review store.MemoryProposalReview) store.MemoryProposal {
+	if strings.TrimSpace(review.Namespace) == "" {
+		review.Namespace = namespace
+	}
+	payload, err := json.Marshal(struct {
+		Namespace  string `json:"namespace"`
+		Status     string `json:"status"`
+		Reviewer   string `json:"reviewer,omitempty"`
+		ReviewNote string `json:"reviewNote,omitempty"`
+	}{
+		Namespace:  review.Namespace,
+		Status:     review.Status,
+		Reviewer:   review.Reviewer,
+		ReviewNote: review.ReviewNote,
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	body, statusCode, err := doAuthorizedJSONRequest(
+		http.MethodPost,
+		apiEndpoint(apiBaseURL, "/api/v1/memory-proposals/"+url.PathEscape(id)+"/review", apiValuesWithNamespace(nil)),
+		token,
+		string(payload),
+		"",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(statusCode).To(Equal(http.StatusNoContent), "unexpected memory proposal review response: %s", strings.TrimSpace(body))
+	return getMemoryProposalViaAPI(apiBaseURL, token, id)
 }
 
 func getTaskResultViaAPI(apiBaseURL, token, taskName string) (string, error) {
