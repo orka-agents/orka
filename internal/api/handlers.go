@@ -251,8 +251,38 @@ func (h *Handlers) Readyz(c fiber.Ctx) error {
 	})
 }
 
+func rejectRequestedByTampering(body []byte) error {
+	if len(body) == 0 {
+		return nil
+	}
+
+	var topLevel map[string]json.RawMessage
+	if err := json.Unmarshal(body, &topLevel); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+
+	if _, ok := topLevel["requestedBy"]; ok {
+		return fiber.NewError(fiber.StatusBadRequest, "requestedBy cannot be set by clients")
+	}
+
+	if specRaw, ok := topLevel["spec"]; ok {
+		var spec map[string]json.RawMessage
+		if err := json.Unmarshal(specRaw, &spec); err == nil {
+			if _, ok := spec["requestedBy"]; ok {
+				return fiber.NewError(fiber.StatusBadRequest, "spec.requestedBy cannot be set by clients")
+			}
+		}
+	}
+
+	return nil
+}
+
 // CreateTask creates a new task
 func (h *Handlers) CreateTask(c fiber.Ctx) error {
+	if err := rejectRequestedByTampering(c.Body()); err != nil {
+		return err
+	}
+
 	var req CreateTaskRequest
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
@@ -297,6 +327,17 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	}
 	if req.Execution != nil {
 		task.Spec.Execution = req.Execution.DeepCopy()
+	}
+
+	if ui := GetUserInfo(c); ui != nil && ui.AuthType == AuthTypeOIDC {
+		task.Spec.RequestedBy = &corev1alpha1.RequestedBy{
+			Subject:  ui.Subject,
+			Issuer:   ui.Issuer,
+			Username: ui.Username,
+			Email:    ui.Email,
+			Groups:   append([]string{}, ui.Groups...),
+			Roles:    append([]string{}, ui.Roles...),
+		}
 	}
 
 	// Parse timeout if provided

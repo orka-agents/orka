@@ -85,6 +85,9 @@ func main() {
 	var controllerURL string
 	var enforceNamespaceIsolation bool
 	var maxTasksPerNamespace int
+	var oidcIssuer string
+	var oidcAudience string
+	var oidcJWKSURL string
 	var enableTracing bool
 	var tlsOpts []func(*tls.Config)
 
@@ -137,6 +140,12 @@ func main() {
 		"When true, restrict users to their ServiceAccount's namespace for all operations.")
 	flag.IntVar(&maxTasksPerNamespace, "max-tasks-per-namespace", 0,
 		"Maximum active tasks per namespace (0 = unlimited).")
+	flag.StringVar(&oidcIssuer, "oidc-issuer", os.Getenv("ORKA_OIDC_ISSUER"),
+		"OIDC issuer URL for authenticating external API requests. Requires --oidc-audience when set.")
+	flag.StringVar(&oidcAudience, "oidc-audience", os.Getenv("ORKA_OIDC_AUDIENCE"),
+		"OIDC audience expected in external API bearer tokens. Requires --oidc-issuer when set.")
+	flag.StringVar(&oidcJWKSURL, "oidc-jwks-url", os.Getenv("ORKA_OIDC_JWKS_URL"),
+		"Optional OIDC JWKS URL. When empty, it is discovered from the issuer metadata.")
 	flag.BoolVar(&enableTracing, "enable-tracing", false,
 		"Enable OpenTelemetry tracing. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
 
@@ -371,14 +380,19 @@ func main() {
 		Port:                      apiPort,
 		WatchNamespace:            watchNamespace,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
-		ResultStore:               sqliteStore,
-		SessionStore:              sqliteStore,
-		PlanStore:                 sqliteStore,
-		MessageStore:              sqliteStore,
-		ArtifactStore:             sqliteStore,
-		SecurityStore:             sqliteStore,
-		HealthChecker:             sqliteStore,
-		Clientset:                 kubeClient,
+		OIDC: api.OIDCConfig{
+			Issuer:   oidcIssuer,
+			Audience: oidcAudience,
+			JWKSURL:  oidcJWKSURL,
+		},
+		ResultStore:   sqliteStore,
+		SessionStore:  sqliteStore,
+		PlanStore:     sqliteStore,
+		MessageStore:  sqliteStore,
+		ArtifactStore: sqliteStore,
+		SecurityStore: sqliteStore,
+		HealthChecker: sqliteStore,
+		Clientset:     kubeClient,
 		Chat: api.ChatConfig{
 			Enabled:         chatEnabled,
 			Provider:        chatProvider,
