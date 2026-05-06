@@ -1055,6 +1055,67 @@ func TestStream_ResponsesAPI_WithToolCalls(t *testing.T) {
 	}
 }
 
+func TestStream_ResponsesAPI_ToolCallNameFromCompletedOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		flusher, _ := w.(http.Flusher)
+
+		fmt.Fprint(w, "event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_item\",\"output_index\":0,\"arguments\":\"{\\\"q\\\":\\\"test\\\"}\"}\n\n") //nolint:errcheck
+		flusher.Flush()
+		fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tc\",\"status\":\"completed\",\"model\":\"gpt-4\",\"output\":[{\"type\":\"function_call\",\"id\":\"fc_item\",\"call_id\":\"call_123\",\"name\":\"search\",\"arguments\":\"{\\\"q\\\":\\\"test\\\"}\"}],\"usage\":{\"input_tokens\":5,\"output_tokens\":3,\"total_tokens\":8}}}\n\n") //nolint:errcheck
+		flusher.Flush()
+		fmt.Fprint(w, "data: [DONE]\n\n") //nolint:errcheck
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(llm.ProviderConfig{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	provider.mode.Store(int32(apiModeResponses))
+
+	ch, err := provider.Stream(context.Background(), &llm.CompletionRequest{
+		Model:    "gpt-4",
+		Messages: []llm.Message{{Role: "user", Content: testToolNameSearch}},
+		Tools:    []llm.Tool{{Name: testToolNameSearch, Description: testToolNameSearch, Parameters: json.RawMessage(`{"type":"object"}`)}},
+	})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+
+	var toolCalls []llm.ToolCall
+	var stopReason string
+	for chunk := range ch {
+		if chunk.Error != nil {
+			t.Fatalf("unexpected error: %v", chunk.Error)
+		}
+		if chunk.ToolCall != nil {
+			toolCalls = append(toolCalls, *chunk.ToolCall)
+		}
+		if chunk.Done {
+			stopReason = chunk.StopReason
+		}
+	}
+
+	if len(toolCalls) != 1 {
+		t.Fatalf("expected exactly one tool call, got %d", len(toolCalls))
+	}
+	if toolCalls[0].Name != testToolNameSearch {
+		t.Errorf("expected tool name 'search', got %q", toolCalls[0].Name)
+	}
+	if toolCalls[0].ID != "call_123" {
+		t.Errorf("expected tool ID 'call_123', got %q", toolCalls[0].ID)
+	}
+	if string(toolCalls[0].Arguments) != `{"q":"test"}` {
+		t.Errorf("expected arguments %q, got %q", `{"q":"test"}`, string(toolCalls[0].Arguments))
+	}
+	if stopReason != testStopReasonToolCalls {
+		t.Errorf("expected stop reason 'tool_calls', got %q", stopReason)
+	}
+}
+
 func TestStream_ResponsesAPI_WithAllOptions(t *testing.T) {
 	var receivedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

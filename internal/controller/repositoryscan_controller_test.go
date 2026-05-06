@@ -715,6 +715,105 @@ func TestProgressLatestScanRunUsesNewestOwnedScanWhenStatusIsStale(t *testing.T)
 	}
 }
 
+func TestCreateScanRunIsIdempotentWhenTaskAlreadyExists(t *testing.T) {
+	ctx := context.Background()
+	store := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	scan := &corev1alpha1.RepositoryScan{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: corev1alpha1.GroupVersion.String(),
+			Kind:       "RepositoryScan",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo-security-repository-20260425175643",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:          "https://github.com/sozercan/actions-test.git",
+			Branch:           "demo/security-python-command-injection",
+			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "demo-security-analysis"},
+		},
+		Status: corev1alpha1.RepositoryScanStatus{
+			Phase: repositoryScanPhasePending,
+		},
+	}
+
+	taskName := security.ScanStageTaskName(scan.Name, "initial", security.StageThreatModel, "")
+	scanID := security.ScanRunID(taskName)
+	timeout := metav1.Duration{Duration: 2 * time.Hour}
+	priority := int32(700)
+	existingTask := &corev1alpha1.Task{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: corev1alpha1.GroupVersion.String(),
+			Kind:       "Task",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskName,
+			Namespace: scan.Namespace,
+			Labels: map[string]string{
+				labels.LabelManaged:        "true",
+				labels.LabelCreatedBy:      "repository-security",
+				labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
+				labels.LabelSecurityScanID: scanID,
+				labels.LabelSecurityMode:   "initial",
+				labels.LabelSecurityStage:  security.StageThreatModel,
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &scan.Spec.AnalysisAgentRef,
+			Prompt:   security.BuildThreatModelPrompt(scan, "initial", "", "", ""),
+			Timeout:  &timeout,
+			Priority: &priority,
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
+		WithObjects(scan, existingTask).
+		Build()
+
+	reconciler := &RepositoryScanReconciler{
+		Client:        cl,
+		Scheme:        scheme,
+		SecurityStore: store,
+	}
+
+	if err := reconciler.createScanRun(ctx, scan, "initial", "", ""); err != nil {
+		t.Fatalf("createScanRun() error = %v", err)
+	}
+
+	run, err := store.GetScanRun(ctx, scan.Namespace, scanID)
+	if err != nil {
+		t.Fatalf("GetScanRun() error = %v", err)
+	}
+	if run.TaskName != taskName {
+		t.Fatalf("run.TaskName = %q, want %q", run.TaskName, taskName)
+	}
+	if run.Phase != scanRunPhasePending {
+		t.Fatalf("run.Phase = %q, want pending", run.Phase)
+	}
+
+	current := &corev1alpha1.RepositoryScan{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		t.Fatalf("Get(scan) error = %v", err)
+	}
+	if current.Status.Phase != repositoryScanPhaseScanning {
+		t.Fatalf("scan.Status.Phase = %q, want %q", current.Status.Phase, repositoryScanPhaseScanning)
+	}
+	if current.Status.LastScanID != scanID {
+		t.Fatalf("scan.Status.LastScanID = %q, want %q", current.Status.LastScanID, scanID)
+	}
+	if current.Status.LastScanTaskName != taskName {
+		t.Fatalf("scan.Status.LastScanTaskName = %q, want %q", current.Status.LastScanTaskName, taskName)
+	}
+}
+
 func setupControllerSQLiteStore(t *testing.T) *sqlitestore.Store {
 	t.Helper()
 

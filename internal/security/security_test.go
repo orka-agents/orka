@@ -38,6 +38,8 @@ func TestFindingsArtifactEvidenceRefsUnmarshalJSON(t *testing.T) {
 		want int
 	}{
 		{name: "array", raw: `[{"kind":"artifact","name":"file.txt","label":"trace"}]`, want: 1},
+		{name: "string array shorthand", raw: `["inline evidence"]`, want: 1},
+		{name: "mixed array shorthand", raw: `["inline evidence", {"kind":"artifact","name":"file.txt"}]`, want: 2},
 		{name: "string shorthand", raw: `"inline evidence"`, want: 1},
 		{name: "object shorthand", raw: `{"kind":"artifact","name":"file.txt"}`, want: 1},
 		{name: "null", raw: `null`, want: 0},
@@ -119,5 +121,29 @@ func TestBuildValidationPromptIncludesAttackPathAnalysis(t *testing.T) {
 	}
 	if !strings.Contains(got, "attack_path_analysis") {
 		t.Fatalf("BuildValidationPrompt() missing attack path schema:\n%s", got)
+	}
+}
+
+func TestBuildPatchPromptRequiresWorkspaceEdit(t *testing.T) {
+	scan := &corev1alpha1.RepositoryScan{
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL: "https://github.com/example/project",
+			Branch:  "main",
+		},
+	}
+
+	finding := &store.Finding{
+		ID:         "fnd_123",
+		Title:      "Command injection",
+		Severity:   "high",
+		Confidence: "high",
+	}
+
+	got := BuildPatchPrompt(scan, finding)
+	if !strings.Contains(got, "Apply the fix directly to the checked-out workspace files.") {
+		t.Fatalf("BuildPatchPrompt() missing workspace-edit directive:\n%s", got)
+	}
+	if !strings.Contains(got, "Orka will commit and push the workspace changes for you.") {
+		t.Fatalf("BuildPatchPrompt() missing push-handling directive:\n%s", got)
 	}
 }

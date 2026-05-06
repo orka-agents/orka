@@ -1559,6 +1559,53 @@ spec:
               webhookURL:
                 description: WebhookURL is the URL to call when the task completes
                 type: string
+              workspace:
+                description: |-
+                  Workspace defines repository checkout and push settings for tasks that need
+                  a git workspace. Agent tasks can continue to use agentRuntime.workspace for
+                  compatibility; this top-level field is used by container tasks as well.
+                properties:
+                  branch:
+                    description: Branch is the git branch to checkout
+                    type: string
+                  forkRepo:
+                    description: ForkRepo is the writable fork repository URL for
+                      pushing changes
+                    type: string
+                  gitRepo:
+                    description: GitRepo is the repository URL to clone
+                    type: string
+                  gitSecretRef:
+                    description: GitSecretRef references a Secret containing git credentials
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  prBaseBranch:
+                    description: PRBaseBranch is the upstream branch to target for
+                      pull requests
+                    type: string
+                  pushBranch:
+                    description: |-
+                      PushBranch is the remote branch name to push changes to after the agent completes.
+                      When set, FinalizeResult will commit and push changes to this branch.
+                    type: string
+                  ref:
+                    description: Ref is a specific git ref (commit SHA, tag) to checkout
+                    type: string
+                  subPath:
+                    description: SubPath is a subdirectory within the repo to use
+                      as workspace root
+                    type: string
+                type: object
             required:
             - type
             type: object

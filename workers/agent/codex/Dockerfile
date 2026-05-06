@@ -22,7 +22,21 @@ FROM node:22-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ca-certificates \
+    curl \
+    ripgrep \
+    make \
+    build-essential \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
+
+# Reuse the current Go toolchain from the builder image so runtime validation
+# can handle repositories that require modern Go versions. Codex executes
+# commands through a login shell whose PATH may be reset, so expose the common
+# Go entrypoints from /usr/local/bin as well as setting PATH on the image.
+COPY --from=builder /usr/local/go /usr/local/go
+RUN ln -sf /usr/local/go/bin/go /usr/local/bin/go     && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+ENV GOROOT=/usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 # Install the published Codex CLI package. It resolves the correct optional
 # platform dependency for the target linux architecture during install.

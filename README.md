@@ -81,7 +81,7 @@ EOF
 Use the built-in dashboard, or connect any OpenAI-compatible client:
 
 ```bash
-kubectl port-forward -n orka-system svc/orka-controller 8080:8080
+kubectl port-forward -n orka-system svc/orka-api 8080:8080
 
 # Open the web dashboard
 open http://localhost:8080

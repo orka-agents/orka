@@ -15,10 +15,10 @@ controller:
   resources:
     limits:
       cpu: 500m
-      memory: 128Mi
+      memory: 512Mi
     requests:
       cpu: 100m
-      memory: 64Mi
+      memory: 256Mi
 
   # Watch namespace (empty for cluster-scoped)
   watchNamespace: ""
@@ -69,6 +69,8 @@ workers:
       repository: ghcr.io/sozercan/orka/agent-worker-codex
       tag: latest
       pullPolicy: IfNotPresent
+    # Optional Codex CLI sandbox mode passed to Codex worker pods (e.g. danger-full-access)
+    sandboxMode: ""
 
 # Service configuration
 service:

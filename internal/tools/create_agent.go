@@ -265,9 +265,12 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 			Name:      agentName,
 			Namespace: ns,
 			Labels: map[string]string{
-				labels.LabelParentTask: parentName,
+				labels.LabelParentTask: labels.SelectorValue(parentName),
 				labels.LabelCreatedBy:  "create_agent",
 				labels.LabelAgentRole:  a.Role,
+			},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName: parentName,
 			},
 		},
 		Spec: corev1alpha1.AgentSpec{

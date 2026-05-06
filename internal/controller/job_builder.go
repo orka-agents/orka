@@ -77,6 +77,7 @@ type JobBuilder struct {
 	CopilotWorkerImage string
 	ClaudeWorkerImage  string
 	CodexWorkerImage   string
+	CodexSandboxMode   string
 	InitImage          string
 	ControllerURL      string // e.g. http://orka-controller.orka-system.svc:8080
 }
@@ -123,7 +124,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 			Name:      jobName,
 			Namespace: task.Namespace,
 			Labels: map[string]string{
-				labels.LabelTask:     task.Name,
+				labels.LabelTask:     labels.SelectorValue(task.Name),
 				labels.LabelTaskType: string(task.Spec.Type),
 			},
 		},
@@ -132,7 +133,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						labels.LabelTask:     task.Name,
+						labels.LabelTask:     labels.SelectorValue(task.Name),
 						labels.LabelTaskType: string(task.Spec.Type),
 					},
 				},
@@ -158,9 +159,13 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 		},
 	})
 
-	// Add agent-specific volumes (workspace, home)
-	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
-		b.addAgentVolumes(job, task)
+	// Add workspace/home volumes for tasks that need a git workspace.
+	if taskNeedsWorkspace(task) {
+		b.addWorkspaceVolumes(job, task)
+	}
+
+	if task.Spec.Type == corev1alpha1.TaskTypeContainer && effectiveWorkspace(task) != nil && task.Spec.Image != "" {
+		b.addWorkspaceInitContainer(job, task)
 	}
 
 	// Add skill volumes — read Skill CRs, create ConfigMap, mount at /workspace/.skills/
@@ -233,6 +238,12 @@ func (b *JobBuilder) buildContainer(ctx context.Context, task *corev1alpha1.Task
 	case corev1alpha1.TaskTypeContainer:
 		if task.Spec.Image != "" {
 			container.Image = task.Spec.Image
+			if effectiveWorkspace(task) != nil {
+				container.WorkingDir = workspaceWorkingDir(task)
+				if !envVarExists(container.Env, "HOME") {
+					container.Env = append(container.Env, corev1.EnvVar{Name: "HOME", Value: "/home/worker"})
+				}
+			}
 			if len(task.Spec.Command) > 0 {
 				container.Command = task.Spec.Command
 			}
@@ -399,7 +410,7 @@ func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, 
 	}
 
 	// Add parent task env var for inter-agent messaging
-	if parentTask, ok := task.Labels[labels.LabelParentTask]; ok {
+	if parentTask := labels.ParentTaskName(task.Labels, task.Annotations); parentTask != "" {
 		envVars = append(envVars,
 			corev1.EnvVar{Name: "ORKA_PARENT_TASK", Value: parentTask},
 		)
@@ -413,6 +424,11 @@ func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, 
 	// Add agent-specific env vars
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
 		envVars = b.addAgentEnvVars(ctx, envVars, task, agent)
+		envVars = b.addCodexSandboxEnvVars(envVars, agent)
+	}
+
+	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
+		envVars = b.addWorkspaceEnvVars(envVars, task)
 	}
 
 	return envVars
@@ -568,7 +584,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 
 	// Auto-inject coordination tools when coordination is enabled
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
-		for _, ct := range []string{"delegate_task", "wait_for_tasks", "cancel_task", "send_message", "check_messages", "create_pull_request", "merge_pull_request", "auto_merge_pull_request", "review_pull_request", "post_review_comment", "create_agent", "delete_agent", "update_plan"} {
+		for _, ct := range []string{"delegate_task", "wait_for_tasks", "create_container_task", "cancel_task", "send_message", "check_messages", "create_pull_request", "check_pull_request_ci", "merge_pull_request", "auto_merge_pull_request", "review_pull_request", "post_review_comment", "create_agent", "delete_agent", "update_plan"} {
 			if !slices.Contains(cfg.tools, ct) {
 				cfg.tools = append(cfg.tools, ct)
 			}
@@ -850,6 +866,28 @@ func (b *JobBuilder) getAgentWorkerImage(agent *corev1alpha1.Agent) string {
 	}
 }
 
+func envVarExists(envVars []corev1.EnvVar, name string) bool {
+	for _, envVar := range envVars {
+		if envVar.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func isCodexAgent(agent *corev1alpha1.Agent) bool {
+	return agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeCodex
+}
+
+// addCodexSandboxEnvVars injects controller-configured Codex sandbox mode when set.
+func (b *JobBuilder) addCodexSandboxEnvVars(envVars []corev1.EnvVar, agent *corev1alpha1.Agent) []corev1.EnvVar {
+	if b.CodexSandboxMode == "" || !isCodexAgent(agent) || envVarExists(envVars, "ORKA_CODEX_SANDBOX_MODE") {
+		return envVars
+	}
+
+	return append(envVars, corev1.EnvVar{Name: "ORKA_CODEX_SANDBOX_MODE", Value: b.CodexSandboxMode})
+}
+
 // addAgentEnvVars adds agent-runtime-specific environment variables
 func (b *JobBuilder) addAgentEnvVars(ctx context.Context, envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent) []corev1.EnvVar {
 	// Prompt (required)
@@ -861,7 +899,7 @@ func (b *JobBuilder) addAgentEnvVars(ctx context.Context, envVars []corev1.EnvVa
 
 	envVars = b.addAgentModelEnvVars(ctx, envVars, agent)
 	envVars = b.addAgentToolsEnvVars(envVars, task, agent)
-	envVars = b.addAgentWorkspaceEnvVars(envVars, task)
+	envVars = b.addWorkspaceEnvVars(envVars, task)
 
 	// Timeout (task level)
 	if task.Spec.Timeout != nil {
@@ -984,20 +1022,25 @@ func (b *JobBuilder) addAgentToolsEnvVars(
 	return envVars
 }
 
-// addAgentWorkspaceEnvVars adds workspace-related env vars from the task.
-func (b *JobBuilder) addAgentWorkspaceEnvVars(
+// addWorkspaceEnvVars adds workspace-related env vars from the task.
+func (b *JobBuilder) addWorkspaceEnvVars(
 	envVars []corev1.EnvVar,
 	task *corev1alpha1.Task,
 ) []corev1.EnvVar {
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	ws := effectiveWorkspace(task)
+	if ws == nil {
 		return envVars
 	}
-	ws := task.Spec.AgentRuntime.Workspace
 	if ws.GitRepo != "" {
 		envVars = append(envVars, corev1.EnvVar{
 			Name: "ORKA_GIT_REPO", Value: ws.GitRepo,
 		})
 	}
+	envVars = append(envVars,
+		corev1.EnvVar{Name: "GIT_CONFIG_COUNT", Value: "1"},
+		corev1.EnvVar{Name: "GIT_CONFIG_KEY_0", Value: "safe.directory"},
+		corev1.EnvVar{Name: "GIT_CONFIG_VALUE_0", Value: "/workspace"},
+	)
 	if ws.Branch != "" {
 		envVars = append(envVars, corev1.EnvVar{
 			Name: "ORKA_GIT_BRANCH", Value: ws.Branch,
@@ -1027,12 +1070,21 @@ func (b *JobBuilder) addAgentWorkspaceEnvVars(
 		envVars = append(envVars, corev1.EnvVar{
 			Name: "ORKA_PUSH_BRANCH", Value: ws.PushBranch,
 		})
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "ORKA_REQUIRE_PUSH_BRANCH", Value: "true",
+		})
 	}
 	return envVars
 }
 
-// addAgentVolumes adds agent-specific volumes to the Job (workspace, home)
-func (b *JobBuilder) addAgentVolumes(job *batchv1.Job, task *corev1alpha1.Task) {
+// addAgentWorkspaceEnvVars adds workspace-related env vars from the task.
+// Deprecated: use addWorkspaceEnvVars.
+func (b *JobBuilder) addAgentWorkspaceEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev1.EnvVar {
+	return b.addWorkspaceEnvVars(envVars, task)
+}
+
+// addWorkspaceVolumes adds workspace-specific volumes to the Job (workspace, home)
+func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Task) {
 	// /workspace emptyDir for git clone target
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 		Name: "workspace",
@@ -1064,27 +1116,93 @@ func (b *JobBuilder) addAgentVolumes(job *batchv1.Job, task *corev1alpha1.Task) 
 	)
 
 	// Git secret volume if explicitly referenced
-	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
-		ws := task.Spec.AgentRuntime.Workspace
-		if ws.GitSecretRef != nil {
-			job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
-				Name: "git-credentials",
-				VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{
-						SecretName: ws.GitSecretRef.Name,
-					},
+	ws := effectiveWorkspace(task)
+	if ws != nil && ws.GitSecretRef != nil {
+		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+			Name: "git-credentials",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: ws.GitSecretRef.Name,
 				},
-			})
-			job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
-				job.Spec.Template.Spec.Containers[0].VolumeMounts,
-				corev1.VolumeMount{
-					Name:      "git-credentials",
-					MountPath: "/secrets/git",
-					ReadOnly:  true,
-				},
-			)
-		}
+			},
+		})
+		job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
+			job.Spec.Template.Spec.Containers[0].VolumeMounts,
+			corev1.VolumeMount{
+				Name:      "git-credentials",
+				MountPath: "/secrets/git",
+				ReadOnly:  true,
+			},
+		)
 	}
+}
+
+func taskNeedsWorkspace(task *corev1alpha1.Task) bool {
+	return task != nil && (task.Spec.Type == corev1alpha1.TaskTypeAgent || effectiveWorkspace(task) != nil)
+}
+
+func effectiveWorkspace(task *corev1alpha1.Task) *corev1alpha1.WorkspaceConfig {
+	if task == nil {
+		return nil
+	}
+	if task.Spec.Workspace != nil {
+		return task.Spec.Workspace
+	}
+	if task.Spec.AgentRuntime != nil {
+		return task.Spec.AgentRuntime.Workspace
+	}
+	return nil
+}
+
+func (b *JobBuilder) addWorkspaceInitContainer(job *batchv1.Job, task *corev1alpha1.Task) {
+	initContainer := corev1.Container{
+		Name:            "prepare-workspace",
+		Image:           b.GeneralWorkerImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		SecurityContext: b.buildContainerSecurityContext(),
+		Command:         []string{"/worker"},
+		Args:            []string{"--prepare-workspace-only"},
+		Env:             b.workspaceInitEnvVars(task),
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "workspace", MountPath: "/workspace"},
+			{Name: "home", MountPath: "/home/worker"},
+			{Name: "tmp", MountPath: "/tmp"},
+		},
+	}
+	if effectiveWorkspace(task).GitSecretRef != nil {
+		initContainer.VolumeMounts = append(initContainer.VolumeMounts, corev1.VolumeMount{
+			Name:      "git-credentials",
+			MountPath: "/secrets/git",
+			ReadOnly:  true,
+		})
+	}
+	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, initContainer)
+}
+
+func (b *JobBuilder) workspaceInitEnvVars(task *corev1alpha1.Task) []corev1.EnvVar {
+	envVars := []corev1.EnvVar{
+		{Name: TaskNameEnvVar, Value: task.Name},
+		{Name: TaskNamespaceEnvVar, Value: task.Namespace},
+		{Name: ControllerURLEnvVar, Value: b.ControllerURL},
+	}
+	envVars = append(envVars, task.Spec.Env...)
+	if task.Spec.PriorTaskRef != nil {
+		envVars = append(envVars, corev1.EnvVar{Name: "ORKA_PRIOR_TASK", Value: task.Spec.PriorTaskRef.Name})
+		priorNS := task.Spec.PriorTaskRef.Namespace
+		if priorNS == "" {
+			priorNS = task.Namespace
+		}
+		envVars = append(envVars, corev1.EnvVar{Name: "ORKA_PRIOR_TASK_NAMESPACE", Value: priorNS})
+	}
+	return b.addWorkspaceEnvVars(envVars, task)
+}
+
+func workspaceWorkingDir(task *corev1alpha1.Task) string {
+	ws := effectiveWorkspace(task)
+	if ws != nil && ws.SubPath != "" {
+		return path.Join("/workspace", ws.SubPath)
+	}
+	return "/workspace"
 }
 
 // joinStrings joins a string slice with commas
@@ -1212,7 +1330,7 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 			Name:      job.Name + "-skills",
 			Namespace: job.Namespace,
 			Labels: map[string]string{
-				labels.LabelTask:    task.Name,
+				labels.LabelTask:    labels.SelectorValue(task.Name),
 				labels.LabelPurpose: "skills",
 				labels.LabelManaged: "true",
 			},

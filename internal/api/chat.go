@@ -254,10 +254,11 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 			"2) Follow this adaptive workflow: "+
 			"Phase 1 — ANALYZE: Read the issue and determine what phases are needed. "+
 			"Phase 2 — PLAN & DESIGN: If needed, delegate design/planning to a coder agent, then review with multiple reviewer agents in parallel. "+
-			"Phase 3 — CODE: Delegate implementation to the coder agent with a pushBranch. Create a PR. "+
-			"Phase 4 — REVIEW: Delegate parallel read-only reviews to reviewer agents. Reviewers must NOT set a branch in workspace — they use review_pull_request via GitHub API. Iterate until all approve. "+
-			"Phase 5 — CI: Delegate CI monitoring to the coder agent — poll GitHub Actions via curl + $GITHUB_TOKEN, fix failures, iterate until green. "+
-			"Phase 6 — APPROVE: Post final approval after CI is green. "+
+			"Phase 3 — CODE: Delegate implementation to the coder agent with a pushBranch. "+
+			"Phase 4 — VALIDATE: Before review, determine the validation image and command from repository evidence such as CI workflows, toolchain files, Dockerfiles/devcontainers, Makefiles, and docs. Run validation with create_container_task on an immutable ref when available. If the environment cannot be determined confidently, report VALIDATION_CONFIG_BLOCKED. Allow up to 6 validation repair tasks before reporting VALIDATION_BLOCKED. "+
+			"Phase 5 — REVIEW LOOP: Delegate parallel reviews to reviewer agents, then delegate coder repairs on the same branch until validation passes and all reviewers approve. Bound this to at most 8 review repair tasks. "+
+			"Phase 6 — PR + CI LOOP: After validation passes and reviewers approve, create or update the PR, then call check_pull_request_ci once with wait_timeout=\"30m\" and poll_interval=\"30s\". If checks fail, delegate a focused CI repair task to the coder on the PR branch, then re-run validation and reviewers before re-checking CI. Bound this to at most 3 CI repair tasks; if the CI check times out while still pending, report CI_PENDING. "+
+			"Phase 7 — APPROVE: Post final approval only after validation passes, reviewers approve, and CI is green. Prefer additional focused repair iterations over stopping early when reviewers identify concrete diff-backed security, correctness, or acceptance-criteria issues. Report VALIDATION_BLOCKED, REVIEW_BLOCKED, CI_BLOCKED, or CI_PENDING when a bounded loop is exhausted. Do not merge unless the user explicitly asks. "+
 			"Use initialPrompt to pass the user's request so the coordinator starts immediately. "+
 			"Include the gitRepo URL in the initialPrompt.]\n\n%s", req.Message)
 	}

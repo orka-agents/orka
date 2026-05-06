@@ -63,7 +63,7 @@ Orka uses five CRDs:
 | Worker | Description |
 |--------|-------------|
 | **General Worker** (`workers/general/`) | Runs arbitrary container commands |
-| **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in tools (`web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`) and coordination tools (13 auto-injected when `coordination.enabled`, plus 4 opt-in GitHub triage tools via `spec.tools[]`) |
+| **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in tools (`web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`) and coordination tools (14 auto-injected when `coordination.enabled`, plus 4 opt-in GitHub triage tools via `spec.tools[]`) |
 | **Copilot Agent Worker** (`workers/agent/copilot/`) | Runs tasks via GitHub Copilot CLI using the Go SDK |
 | **Claude Agent Worker** (`workers/agent/claude/`) | Runs tasks via Claude Code CLI |
 | **Codex Agent Worker** (`workers/agent/codex/`) | Runs tasks via OpenAI Codex CLI |
@@ -152,7 +152,7 @@ Webhook delivered (if configured)
 
 ## Multi-Agent Coordination
 
-Coordinator agents can delegate subtasks to specialist agents at runtime. The LLM uses `delegate_task` and `wait_for_tasks` tools to create child Tasks and collect results. GitHub PR tools (`create_pull_request`, `merge_pull_request`, `review_pull_request`, `post_review_comment`) enable end-to-end code review workflows. The controller enforces guardrails:
+Coordinator agents can delegate subtasks to specialist agents at runtime. The LLM uses `delegate_task` and `wait_for_tasks` tools to create child Tasks and collect results. GitHub PR tools (`create_pull_request`, `check_pull_request_ci`, `review_pull_request`, `post_review_comment`, `merge_pull_request`, `auto_merge_pull_request`) enable end-to-end code review workflows. The controller enforces guardrails:
 
 ```
 Coordinator Agent (depth 0)
@@ -210,10 +210,11 @@ Orka supports extensible AI capabilities through a three-layer system:
 │  Layer 2: Built-in Tools (in worker image)                      │
 │  - web_search, file_read, code_exec, web_fetch, file_write       │
 │  - delegate_task, wait_for_tasks, cancel_task, send_message,      │
-│    check_messages, create_pull_request, merge_pull_request,        │
-│    auto_merge_pull_request, review_pull_request,                   │
-│    post_review_comment, list_issues, list_pull_requests,           │
-│    get_issue, comment_on_issue, create_agent, delete_agent,        │
+│    check_messages, create_pull_request, check_pull_request_ci,     │
+│    merge_pull_request, auto_merge_pull_request,                    │
+│    review_pull_request, post_review_comment, list_issues,          │
+│    list_pull_requests, get_issue, comment_on_issue, create_agent,  │
+│    delete_agent,                                                   │
 │    update_plan                                                     │
 │  - Fast, no extra infrastructure                                │
 ├─────────────────────────────────────────────────────────────────┤

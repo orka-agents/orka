@@ -7,21 +7,12 @@ MIT License - see LICENSE file for details.
 package tools
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
 	"strings"
-	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 // CreatePullRequestTool creates a GitHub pull request from a pushed branch.
@@ -113,58 +104,13 @@ func (t *CreatePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 		return "", fmt.Errorf("task_name, head_branch, base_branch, and title are required")
 	}
 
-	// Determine namespace from environment
-	ns := os.Getenv("ORKA_TASK_NAMESPACE")
-	if ns == "" {
-		ns = defaultNamespace
-	}
-
-	// Look up the child task to get workspace config
-	var task corev1alpha1.Task
-	if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: args.TaskName, Namespace: ns}, &task); err != nil {
-		return "", fmt.Errorf("failed to get task %s: %w", args.TaskName, err)
-	}
-
-	// Extract repo URL and git secret from the task's workspace config
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
-		return "", fmt.Errorf("task %s does not have workspace configuration", args.TaskName)
-	}
-	ws := task.Spec.AgentRuntime.Workspace
-
-	repoURL := ws.GitRepo
-	if repoURL == "" {
-		return "", fmt.Errorf("task %s workspace has no gitRepo configured", args.TaskName)
-	}
-
-	// Parse owner/repo from the git URL
-	owner, repo, err := parseGitHubRepo(repoURL)
+	owner, repo, token, baseURL, err := resolveRepoAndToken(ctx, t.k8sClient, args.TaskName, "", t.apiBaseURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse GitHub repo from %s: %w", repoURL, err)
-	}
-
-	// Get the git token from the referenced secret
-	if ws.GitSecretRef == nil {
-		return "", fmt.Errorf("task %s workspace has no gitSecretRef configured", args.TaskName)
-	}
-
-	var secret corev1.Secret
-	if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: ws.GitSecretRef.Name, Namespace: ns}, &secret); err != nil {
-		return "", fmt.Errorf("failed to get git secret %s: %w", ws.GitSecretRef.Name, err)
-	}
-
-	token := ""
-	for _, key := range []string{"token", "password"} {
-		if v, ok := secret.Data[key]; ok {
-			token = strings.TrimSpace(string(v))
-			break
-		}
-	}
-	if token == "" {
-		return "", fmt.Errorf("git secret %s does not contain a 'token' or 'password' key", ws.GitSecretRef.Name)
+		return "", err
 	}
 
 	// Create the pull request via GitHub API
-	prURL, prNumber, err := createGitHubPR(ctx, token, owner, repo, args.HeadBranch, args.BaseBranch, args.Title, args.Body, t.apiBaseURL)
+	prURL, prNumber, status, err := createGitHubPR(ctx, token, owner, repo, args.HeadBranch, args.BaseBranch, args.Title, args.Body, baseURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to create pull request: %w", err)
 	}
@@ -172,7 +118,7 @@ func (t *CreatePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 	result := CreatePullRequestResult{
 		PRURL:    prURL,
 		PRNumber: prNumber,
-		Status:   "created",
+		Status:   status,
 	}
 	resultJSON, _ := json.Marshal(result)
 	return string(resultJSON), nil
@@ -209,51 +155,12 @@ func parseGitHubRepo(repoURL string) (string, string, error) {
 }
 
 // createGitHubPR creates a pull request via the GitHub REST API.
-// An optional apiBaseURL can be provided for testing; if empty, uses https://api.github.com.
-func createGitHubPR(ctx context.Context, token, owner, repo, head, base, title, body string, apiBaseURL ...string) (string, int, error) {
-	baseURL := githubAPIBaseURL
-	if len(apiBaseURL) > 0 && apiBaseURL[0] != "" {
-		baseURL = apiBaseURL[0]
-	}
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls", baseURL, owner, repo)
-
-	payload := map[string]string{
-		"title": title,
-		"body":  body,
-		"head":  head,
-		"base":  base,
-	}
-	payloadBytes, _ := json.Marshal(payload)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payloadBytes))
+// If the pull request already exists, it resolves and returns the existing PR.
+func createGitHubPR(ctx context.Context, token, owner, repo, head, base, title, body, apiBaseURL string) (string, int, string, error) {
+	pr, err := CreateOrGetGitHubPullRequest(ctx, token, owner, repo, head, base, title, body, apiBaseURL)
 	if err != nil {
-		return "", 0, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	httpClient := &http.Client{Timeout: 30 * time.Second}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", 0, fmt.Errorf("HTTP request failed: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", 0, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return "", 0, "", err
 	}
 
-	var prResp struct {
-		HTMLURL string `json:"html_url"`
-		Number  int    `json:"number"`
-	}
-	if err := json.Unmarshal(respBody, &prResp); err != nil {
-		return "", 0, fmt.Errorf("failed to parse GitHub response: %w", err)
-	}
-
-	return prResp.HTMLURL, prResp.Number, nil
+	return pr.HTMLURL, pr.Number, pr.Status, nil
 }

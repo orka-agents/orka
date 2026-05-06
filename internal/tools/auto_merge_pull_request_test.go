@@ -70,7 +70,7 @@ func TestAutoMergePullRequestTool_CIPassesImmediately(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
 			w.WriteHeader(200)
-			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPullRequestCITestSHA)
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
 			w.WriteHeader(200)
 			_, _ = fmt.Fprintf(w, `{"total_count":2,"check_runs":[{"name":"build","status":"completed","conclusion":"success"},{"name":"lint","status":"completed","conclusion":"success"}]}`)
@@ -151,7 +151,7 @@ func TestAutoMergePullRequestTool_CIFails(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
 			w.WriteHeader(200)
-			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPullRequestCITestSHA)
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
 			w.WriteHeader(200)
 			_, _ = fmt.Fprintf(w, `{"total_count":2,"check_runs":[{"name":"build","status":"completed","conclusion":"success"},{"name":"lint","status":"completed","conclusion":"failure"}]}`)
@@ -226,7 +226,7 @@ func TestAutoMergePullRequestTool_Timeout(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
 			w.WriteHeader(200)
-			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPullRequestCITestSHA)
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
 			w.WriteHeader(200)
 			_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"name":"build","status":"in_progress","conclusion":""}]}`)
@@ -288,7 +288,7 @@ func TestAutoMergePullRequestTool_ContextCancelled(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
 			w.WriteHeader(200)
-			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPullRequestCITestSHA)
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
 			w.WriteHeader(200)
 			_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"name":"build","status":"in_progress","conclusion":""}]}`)
@@ -360,7 +360,7 @@ func TestAutoMergePullRequestTool_MergeMethods(t *testing.T) {
 				switch {
 				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/10"):
 					w.WriteHeader(200)
-					_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+					_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPullRequestCITestSHA)
 				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
 					w.WriteHeader(200)
 					_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}`)
@@ -439,7 +439,7 @@ func TestAutoMergePullRequestTool_PRClosedExternally(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
 			w.WriteHeader(200)
-			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"closed","merged":false}`)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"closed","merged":false}`, checkPullRequestCITestSHA)
 		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/merge"):
 			mergeCalled.Store(true)
 			w.WriteHeader(200)
@@ -509,7 +509,7 @@ func TestAutoMergePullRequestTool_PRAlreadyMerged(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
 			w.WriteHeader(200)
-			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"closed","merged":true}`)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"closed","merged":true}`, checkPullRequestCITestSHA)
 		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/merge"):
 			mergeCalled.Store(true)
 			w.WriteHeader(200)
@@ -674,7 +674,7 @@ func TestCheckCIStatusDetailed_AllPassed(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", "abc123", server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -696,7 +696,7 @@ func TestCheckCIStatusDetailed_SomePending(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", "abc123", server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -721,7 +721,7 @@ func TestCheckCIStatusDetailed_SomeFailed(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", "abc123", server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -772,7 +772,7 @@ func TestAutoMergePullRequestTool_ForcePushNewSHA(t *testing.T) {
 			n := callCount.Add(1)
 			if n == 1 {
 				w.WriteHeader(200)
-				_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+				_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPullRequestCITestSHA)
 			} else {
 				w.WriteHeader(200)
 				_, _ = fmt.Fprintf(w, `{"head":{"sha":"def456"},"state":"open","merged":false}`)
@@ -787,7 +787,7 @@ func TestAutoMergePullRequestTool_ForcePushNewSHA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if sha1 != "abc123" {
+	if sha1 != checkPullRequestCITestSHA {
 		t.Errorf("expected first SHA 'abc123', got: %s", sha1)
 	}
 	if state1 != prStateOpen {
@@ -900,7 +900,7 @@ func TestPollOnce_TransientCIError(t *testing.T) {
 		switch {
 		case strings.Contains(r.URL.Path, "/pulls/"):
 			w.WriteHeader(200)
-			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPullRequestCITestSHA)
 		case strings.Contains(r.URL.Path, "/check-runs"):
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = fmt.Fprintf(w, `{"message":"rate limited"}`)
@@ -933,7 +933,7 @@ func TestPollOnce_NonTransientCIError(t *testing.T) {
 		switch {
 		case strings.Contains(r.URL.Path, "/pulls/"):
 			w.WriteHeader(200)
-			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPullRequestCITestSHA)
 		case strings.Contains(r.URL.Path, "/check-runs"):
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = fmt.Fprintf(w, `{"message":"not found"}`)
@@ -963,7 +963,7 @@ func TestPollOnce_MergeFailure(t *testing.T) {
 		switch {
 		case strings.Contains(r.URL.Path, "/pulls/") && !strings.Contains(r.URL.Path, "/merge"):
 			w.WriteHeader(200)
-			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPullRequestCITestSHA)
 		case strings.Contains(r.URL.Path, "/check-runs"):
 			w.WriteHeader(200)
 			_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}`)
@@ -996,7 +996,7 @@ func TestPollOnce_CIPending(t *testing.T) {
 		switch {
 		case strings.Contains(r.URL.Path, "/pulls/"):
 			w.WriteHeader(200)
-			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPullRequestCITestSHA)
 		case strings.Contains(r.URL.Path, "/check-runs"):
 			w.WriteHeader(200)
 			_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"name":"build","status":"queued","conclusion":""}]}`)
@@ -1031,7 +1031,7 @@ func TestCheckCIStatusDetailed_SkippedConclusion(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", "abc123", server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1047,7 +1047,7 @@ func TestCheckCIStatusDetailed_CancelledConclusion(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", "abc123", server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1066,7 +1066,7 @@ func TestCheckCIStatusDetailed_TimedOutConclusion(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", "abc123", server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1082,7 +1082,7 @@ func TestCheckCIStatusDetailed_ActionRequiredConclusion(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", "abc123", server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1098,7 +1098,7 @@ func TestCheckCIStatusDetailed_StaleConclusion(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", "abc123", server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1114,7 +1114,7 @@ func TestCheckCIStatusDetailed_UnknownConclusion(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", "abc123", server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1130,7 +1130,7 @@ func TestCheckCIStatusDetailed_APIError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", "abc123", server.URL)
+	_, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
 	if err == nil {
 		t.Fatal("expected error for API error")
 	}
@@ -1294,7 +1294,7 @@ func TestAutoMergePullRequestTool_PasswordKey(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
 			w.WriteHeader(200)
-			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPullRequestCITestSHA)
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
 			w.WriteHeader(200)
 			_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}`)
@@ -1369,7 +1369,7 @@ func TestAutoMergePullRequestTool_Transient5xx(t *testing.T) {
 			_, _ = fmt.Fprintf(w, `{"message":"server error"}`)
 		} else {
 			w.WriteHeader(200)
-			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"state":"open","merged":false}`)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPullRequestCITestSHA)
 		}
 	}))
 	defer server.Close()
@@ -1388,7 +1388,7 @@ func TestAutoMergePullRequestTool_Transient5xx(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error on retry: %v", err)
 	}
-	if sha != "abc123" {
+	if sha != checkPullRequestCITestSHA {
 		t.Errorf("unexpected SHA: %s", sha)
 	}
 	if state != prStateOpen {

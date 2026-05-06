@@ -21,6 +21,11 @@ const (
 	maxRetries      = 5
 	saTokenPath     = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	saNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+	// MaxStructuredSummaryChars bounds agent-written summaries stored in structured
+	// results. Diffs remain intact for workspace handoff, but oversized summaries
+	// can otherwise blow up coordinator context windows and provider request limits.
+	MaxStructuredSummaryChars = 32 * 1024
 )
 
 // SubmitResult sends the task result to the controller via HTTP POST.
@@ -115,6 +120,7 @@ type StructuredResult struct {
 	Version    int      `json:"version"`
 	Summary    string   `json:"summary"`
 	BaseSHA    string   `json:"baseSHA,omitempty"`
+	HeadSHA    string   `json:"headSHA,omitempty"`
 	Diff       string   `json:"diff,omitempty"`
 	Verdict    string   `json:"verdict,omitempty"`
 	Feedback   string   `json:"feedback,omitempty"`
@@ -142,4 +148,16 @@ func ParseStructuredResult(raw string) *StructuredResult {
 		}
 	}
 	return &sr
+}
+
+// TruncateStructuredSummary bounds human-readable result summaries while making
+// truncation explicit to downstream coordinators.
+func TruncateStructuredSummary(summary string) string {
+	if len(summary) <= MaxStructuredSummaryChars {
+		return summary
+	}
+	return summary[:MaxStructuredSummaryChars] + fmt.Sprintf(
+		"\n[summary truncated, full summary: %d chars]",
+		len(summary),
+	)
 }

@@ -35,8 +35,18 @@ type AgentConfig struct {
 	TimeoutSeconds  int
 }
 
-// LoadConfig reads and validates configuration from environment variables.
+// LoadConfig reads and validates agent configuration from environment variables.
 func LoadConfig(defaultMaxTurns int) (*AgentConfig, error) {
+	return loadConfig(defaultMaxTurns, true)
+}
+
+// LoadWorkspaceConfig reads and validates workspace configuration without
+// requiring an agent prompt. Container workers use this for deterministic tasks.
+func LoadWorkspaceConfig() (*AgentConfig, error) {
+	return loadConfig(0, false)
+}
+
+func loadConfig(defaultMaxTurns int, requirePrompt bool) (*AgentConfig, error) {
 	cfg := &AgentConfig{
 		TaskName:      os.Getenv("ORKA_TASK_NAME"),
 		TaskNamespace: os.Getenv("ORKA_TASK_NAMESPACE"),
@@ -50,7 +60,7 @@ func LoadConfig(defaultMaxTurns int) (*AgentConfig, error) {
 		MaxTurns:      defaultMaxTurns,
 	}
 
-	if cfg.Prompt == "" {
+	if requirePrompt && cfg.Prompt == "" {
 		return nil, fmt.Errorf("ORKA_PROMPT is required")
 	}
 
@@ -141,16 +151,26 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 		return fmt.Errorf("git clone failed: %w", err)
 	}
 
-	// Checkout specific ref if provided (overrides branch)
+	// Checkout specific ref if provided (overrides branch). Validation tasks often
+	// pin workspace.ref to a pushed branch head SHA without also providing the
+	// branch name, so fall back to fetching all remote heads when the server does
+	// not allow fetching the object by SHA directly.
 	if cfg.GitRef != "" {
-		if err := execGitContext(ctx, workspaceDir, "fetch", "origin", cfg.GitRef); err != nil {
-			return fmt.Errorf("git fetch ref failed: %w", err)
+		fetchErr := execGitContext(ctx, workspaceDir, "fetch", "origin", cfg.GitRef)
+		if fetchErr != nil {
+			fetchErr = execGitContext(ctx, workspaceDir, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*")
+		}
+		if fetchErr != nil {
+			return fmt.Errorf("git fetch ref failed: %w", fetchErr)
 		}
 
 		if err := execGitContext(ctx, workspaceDir, "checkout", cfg.GitRef); err != nil {
-			// Ref may not exist as a local branch; fall back to FETCH_HEAD
+			// Ref may not exist as a local branch; fall back to FETCH_HEAD from a
+			// direct ref fetch, then to origin/<ref> for branch-name refs.
 			if fbErr := execGitContext(ctx, workspaceDir, "checkout", "FETCH_HEAD"); fbErr != nil {
-				return fmt.Errorf("git checkout ref failed: %w", err)
+				if branchErr := execGitContext(ctx, workspaceDir, "checkout", "origin/"+cfg.GitRef); branchErr != nil {
+					return fmt.Errorf("git checkout ref failed: %w", err)
+				}
 			}
 		}
 	}

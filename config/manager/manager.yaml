@@ -71,6 +71,7 @@ spec:
           - --copilot-worker-image=ghcr.io/sozercan/orka/agent-worker-copilot:latest
           - --claude-worker-image=ghcr.io/sozercan/orka/agent-worker-claude:latest
           - --codex-worker-image=ghcr.io/sozercan/orka/agent-worker-codex:latest
+          - --codex-sandbox-mode=danger-full-access
           - --general-worker-image=ghcr.io/sozercan/orka/general-worker:latest
         image: controller:latest
         imagePullPolicy: IfNotPresent
@@ -99,10 +100,10 @@ spec:
         resources:
           limits:
             cpu: 500m
-            memory: 128Mi
+            memory: 512Mi
           requests:
-            cpu: 10m
-            memory: 64Mi
+            cpu: 100m
+            memory: 256Mi
         volumeMounts:
           - name: store
             mountPath: /data

@@ -19,6 +19,8 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
+const githubPRStateClosed = "closed"
+
 // resolveRepoAndToken resolves GitHub owner/repo, auth token, and API base URL.
 // Resolution priority for owner/repo:
 //  1. repoURL arg → parse owner/repo directly
@@ -94,10 +96,13 @@ func resolveFromTask(ctx context.Context, k8sClient client.Client, taskName stri
 		return "", "", "", fmt.Errorf("failed to get task %s: %w", taskName, err)
 	}
 
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	ws := task.Spec.Workspace
+	if ws == nil && task.Spec.AgentRuntime != nil {
+		ws = task.Spec.AgentRuntime.Workspace
+	}
+	if ws == nil {
 		return "", "", "", fmt.Errorf("task %s does not have workspace configuration", taskName)
 	}
-	ws := task.Spec.AgentRuntime.Workspace
 
 	repoURL := ws.GitRepo
 	if repoURL == "" {

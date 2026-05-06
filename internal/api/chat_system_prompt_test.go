@@ -124,11 +124,44 @@ func TestBuildTaskTypesSection(t *testing.T) {
 			if tt.wantContainer && !strings.Contains(s, "container") {
 				t.Error("missing container task type")
 			}
+			for _, want := range []string{
+				"Use create_agent_task only for Agents that have runtime listed",
+				"use create_ai_task with agentRef and providerRef instead",
+				"Do NOT use create_agent_task for non-runtime agents",
+			} {
+				if !strings.Contains(s, want) {
+					t.Errorf("missing %q", want)
+				}
+			}
 			hasImages := strings.Contains(s, "cgr.dev/chainguard")
 			if hasImages != tt.wantImages {
 				t.Errorf("images present = %v, want %v", hasImages, tt.wantImages)
 			}
 		})
+	}
+}
+
+func TestBuildValidationSection(t *testing.T) {
+	s := buildValidationSection()
+	for _, want := range []string{
+		"<validation>",
+		"repository evidence",
+		"workspace.gitRepo",
+		"workspace.ref",
+		"workspace.branch",
+		"CI workflow files",
+		"toolchain directive",
+		"golang:<major.minor>",
+		"PATH=/usr/local/go/bin:$PATH",
+		"GOCACHE=/tmp/go-cache",
+		"GOMODCACHE=/tmp/go-mod-cache",
+		"CGO_ENABLED=0",
+		"VALIDATION_CONFIG_BLOCKED",
+		"</validation>",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing %q", want)
+		}
 	}
 }
 
@@ -161,6 +194,15 @@ func TestBuildCoordinationSection(t *testing.T) {
 				}
 				if !strings.Contains(s, "delegate_task") {
 					t.Error("missing delegate_task mention")
+				}
+				for _, want := range []string{
+					"use create_agent_task only when the",
+					"coordinator has runtime listed",
+					"use create_ai_task with agentRef and providerRef",
+				} {
+					if !strings.Contains(s, want) {
+						t.Errorf("missing %q", want)
+					}
 				}
 			} else {
 				if s != "" {
@@ -210,6 +252,22 @@ func TestBuildRulesSection(t *testing.T) {
 	}
 	if !strings.Contains(s, "create_container_task") {
 		t.Error("missing create_container_task mention")
+	}
+	for _, want := range []string{
+		`When an agent has no "runtime" listed, including coordinator agents, use create_ai_task`,
+		`agents whose names contain "coordinator"`,
+		`if "dev-coordinator" exists, prefer it`,
+		`chosen coordinator has "runtime" listed`,
+		`chosen coordinator has no "runtime" listed`,
+		"create_ai_task using agentRef and providerRef",
+		"code → validate → review repair loop → PR → CI repair loop → validate + re-review → approve",
+		"at most 8 review repair tasks",
+		"at most 3 repair tasks",
+		"30 minutes of pending-check waiting",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing %q", want)
+		}
 	}
 }
 
@@ -548,9 +606,9 @@ func TestBuildDynamicContext(t *testing.T) {
 		}
 	})
 
-	t.Run("codex runtime detected from codex-api-key secret", func(t *testing.T) {
+	t.Run("codex runtime detected from codex-proxy-token secret", func(t *testing.T) {
 		secret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "codex-api-key", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "codex-proxy-token", Namespace: "default"},
 		}
 		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 		b := NewSystemPromptBuilder(c, "default")
@@ -609,7 +667,7 @@ func TestBuildSystemPrompt(t *testing.T) {
 		}
 		for _, section := range []string{
 			"<identity>", "<capabilities>", "<behavior>",
-			"<tool_call_style>", "<task_types>", "<coordination>",
+			"<tool_call_style>", "<task_types>", "<validation>", "<coordination>",
 			"<scheduling>", "<rules>", "<examples>",
 			"<available_agents>", "<available_tools>",
 		} {

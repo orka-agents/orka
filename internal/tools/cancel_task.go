@@ -111,7 +111,7 @@ func (t *CancelTaskTool) Execute(ctx context.Context, args json.RawMessage) (str
 
 	// Verify this is a child of the current task (only when running inside a task context)
 	if parentTaskName != "" {
-		parentLabel := task.Labels[labels.LabelParentTask]
+		parentLabel := labels.ParentTaskName(task.Labels, task.Annotations)
 		if parentLabel != parentTaskName {
 			return "", fmt.Errorf("task %q is not a child of the current task %q", a.TaskName, parentTaskName)
 		}

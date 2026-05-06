@@ -21,6 +21,7 @@ import (
 func TestBuildCodexArgs_Minimal(t *testing.T) {
 	t.Setenv("ORKA_ALLOW_BASH", "true")
 	t.Setenv("OPENAI_BASE_URL", "")
+	t.Setenv("ORKA_CODEX_SANDBOX_MODE", "")
 
 	cfg := &common.AgentConfig{
 		Prompt:   "hello world",
@@ -31,12 +32,14 @@ func TestBuildCodexArgs_Minimal(t *testing.T) {
 
 	assertContains(t, args, "exec")
 	assertContains(t, args, "--skip-git-repo-check")
+	assertContains(t, args, "--ephemeral")
 	assertContains(t, args, "--output-last-message")
 	assertContains(t, args, "/tmp/result.txt")
 	assertContains(t, args, "--sandbox")
 	assertContains(t, args, "workspace-write")
 	assertContains(t, args, "--config")
 	assertContains(t, args, "approval_policy=never")
+	assertContains(t, args, "model_auto_compact_token_limit=240000")
 	assertContains(t, args, "sandbox_workspace_write.network_access=true")
 
 	if args[len(args)-1] != "-" {
@@ -44,9 +47,28 @@ func TestBuildCodexArgs_Minimal(t *testing.T) {
 	}
 }
 
+func TestBuildCodexArgs_UsesConfiguredSandboxMode(t *testing.T) {
+	t.Setenv("ORKA_ALLOW_BASH", "true")
+	t.Setenv("OPENAI_BASE_URL", "")
+	t.Setenv("ORKA_CODEX_SANDBOX_MODE", "danger-full-access")
+
+	cfg := &common.AgentConfig{
+		Prompt:   "hello world",
+		MaxTurns: 50,
+	}
+
+	args := buildCodexArgs(cfg, "/tmp/result.txt", "")
+
+	assertContains(t, args, "--sandbox")
+	assertContains(t, args, "danger-full-access")
+	assertNotContains(t, args, "workspace-write")
+	assertNotContains(t, args, "sandbox_workspace_write.network_access=true")
+}
+
 func TestBuildCodexArgs_Full(t *testing.T) {
 	t.Setenv("ORKA_ALLOW_BASH", "true")
 	t.Setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
+	t.Setenv("ORKA_CODEX_SANDBOX_MODE", "")
 
 	cfg := &common.AgentConfig{
 		Prompt:          "fix bugs",
@@ -65,6 +87,16 @@ func TestBuildCodexArgs_Full(t *testing.T) {
 	assertContains(t, args, "openai_base_url=https://example.invalid/v1")
 	assertContains(t, args, "sandbox_workspace_write.network_access=true")
 	assertContains(t, args, "web_search=live")
+}
+
+func TestBuildCodexArgs_UsesConfiguredAutoCompactLimit(t *testing.T) {
+	t.Setenv("ORKA_ALLOW_BASH", "true")
+	t.Setenv("ORKA_CODEX_AUTO_COMPACT_TOKEN_LIMIT", "200000")
+
+	cfg := &common.AgentConfig{Prompt: "test"}
+
+	args := buildCodexArgs(cfg, "/tmp/result.txt", "")
+	assertContains(t, args, "model_auto_compact_token_limit=200000")
 }
 
 func TestBuildCodexArgs_WebSearchDisabled(t *testing.T) {
@@ -260,6 +292,13 @@ func assertContains(t *testing.T, values []string, want string) {
 		return
 	}
 	t.Fatalf("expected args to contain %q, got %v", want, values)
+}
+
+func assertNotContains(t *testing.T, values []string, want string) {
+	t.Helper()
+	if slices.Contains(values, want) {
+		t.Fatalf("expected args not to contain %q, got %v", want, values)
+	}
 }
 
 func writeCodexStub(t *testing.T, content string) string {

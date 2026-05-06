@@ -295,7 +295,7 @@ func (r *RepositoryScanReconciler) hasActiveScanPipelineTask(ctx context.Context
 	var tasks corev1alpha1.TaskList
 	if err := r.List(ctx, &tasks,
 		client.InNamespace(scan.Namespace),
-		client.MatchingLabels(map[string]string{labels.LabelSecurityTarget: scan.Name}),
+		client.MatchingLabels(map[string]string{labels.LabelSecurityTarget: labels.SelectorValue(scan.Name)}),
 	); err != nil {
 		return false, err
 	}
@@ -334,7 +334,7 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 			Labels: map[string]string{
 				labels.LabelManaged:        "true",
 				labels.LabelCreatedBy:      "repository-security",
-				labels.LabelSecurityTarget: scan.Name,
+				labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
 				labels.LabelSecurityScanID: scanID,
 				labels.LabelSecurityMode:   mode,
 				labels.LabelSecurityStage:  security.StageThreatModel,
@@ -361,24 +361,22 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
 		return err
 	}
-	if err := r.Create(ctx, task); err != nil {
+	if err := r.Create(ctx, task); err != nil && !apierrors.IsAlreadyExists(err) {
 		return err
 	}
 
-	if r.SecurityStore != nil {
-		if err := r.SecurityStore.CreateScanRun(ctx, &store.ScanRun{
-			ID:             scanID,
-			Namespace:      scan.Namespace,
-			RepositoryScan: scan.Name,
-			TaskName:       taskName,
-			Mode:           mode,
-			Phase:          scanRunPhasePending,
-			BaseCommit:     baseCommit,
-			HeadCommit:     headCommit,
-			StartedAt:      time.Now(),
-		}); err != nil {
-			return err
-		}
+	if err := r.ensureScanRunRecord(ctx, &store.ScanRun{
+		ID:             scanID,
+		Namespace:      scan.Namespace,
+		RepositoryScan: scan.Name,
+		TaskName:       taskName,
+		Mode:           mode,
+		Phase:          scanRunPhasePending,
+		BaseCommit:     baseCommit,
+		HeadCommit:     headCommit,
+		StartedAt:      time.Now(),
+	}); err != nil {
+		return err
 	}
 
 	return r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
@@ -396,6 +394,34 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 	})
 }
 
+func (r *RepositoryScanReconciler) ensureScanRunRecord(ctx context.Context, run *store.ScanRun) error {
+	if r.SecurityStore == nil || run == nil {
+		return nil
+	}
+
+	_, err := r.SecurityStore.GetScanRun(ctx, run.Namespace, run.ID)
+	switch {
+	case err == nil:
+		return nil
+	case !errors.Is(err, store.ErrNotFound):
+		return err
+	}
+
+	if err := r.SecurityStore.CreateScanRun(ctx, run); err != nil {
+		_, getErr := r.SecurityStore.GetScanRun(ctx, run.Namespace, run.ID)
+		switch {
+		case getErr == nil:
+			return nil
+		case errors.Is(getErr, store.ErrNotFound):
+			return err
+		default:
+			return getErr
+		}
+	}
+
+	return nil
+}
+
 func (r *RepositoryScanReconciler) progressLatestScanRun(ctx context.Context, scan *corev1alpha1.RepositoryScan) (bool, error) {
 	if r.Client == nil || r.SecurityStore == nil {
 		return false, nil
@@ -405,7 +431,7 @@ func (r *RepositoryScanReconciler) progressLatestScanRun(ctx context.Context, sc
 	if err := r.List(ctx, &tasks,
 		client.InNamespace(scan.Namespace),
 		client.MatchingLabels(map[string]string{
-			labels.LabelSecurityTarget: scan.Name,
+			labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
 		}),
 	); err != nil {
 		return false, err
@@ -470,7 +496,7 @@ func (r *RepositoryScanReconciler) progressLatestScanRun(ctx context.Context, sc
 				Labels: map[string]string{
 					labels.LabelManaged:        "true",
 					labels.LabelCreatedBy:      "repository-security",
-					labels.LabelSecurityTarget: scan.Name,
+					labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
 					labels.LabelSecurityScanID: run.ID,
 					labels.LabelSecurityMode:   run.Mode,
 					labels.LabelSecurityStage:  security.StageDiscovery,
@@ -527,7 +553,7 @@ func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *c
 	var tasks corev1alpha1.TaskList
 	if err := r.List(ctx, &tasks,
 		client.InNamespace(scan.Namespace),
-		client.MatchingLabels(map[string]string{labels.LabelSecurityTarget: scan.Name}),
+		client.MatchingLabels(map[string]string{labels.LabelSecurityTarget: labels.SelectorValue(scan.Name)}),
 	); err != nil {
 		return err
 	}
@@ -1001,7 +1027,7 @@ func (r *RepositoryScanReconciler) refreshScanRunStatus(
 	if err := r.List(ctx, &tasks,
 		client.InNamespace(scan.Namespace),
 		client.MatchingLabels(map[string]string{
-			labels.LabelSecurityTarget: scan.Name,
+			labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
 			labels.LabelSecurityScanID: scanID,
 		}),
 	); err != nil {
@@ -1101,7 +1127,7 @@ func (r *RepositoryScanReconciler) hasActiveValidationTask(ctx context.Context, 
 	if err := r.List(ctx, &tasks,
 		client.InNamespace(scan.Namespace),
 		client.MatchingLabels(map[string]string{
-			labels.LabelSecurityTarget:    scan.Name,
+			labels.LabelSecurityTarget:    labels.SelectorValue(scan.Name),
 			labels.LabelSecurityFindingID: findingID,
 			labels.LabelSecurityStage:     security.StageValidation,
 		}),
@@ -1131,7 +1157,7 @@ func (r *RepositoryScanReconciler) createValidationTask(ctx context.Context, sca
 			Labels: map[string]string{
 				labels.LabelManaged:           "true",
 				labels.LabelCreatedBy:         "repository-security",
-				labels.LabelSecurityTarget:    scan.Name,
+				labels.LabelSecurityTarget:    labels.SelectorValue(scan.Name),
 				labels.LabelSecurityScanID:    finding.ScanRunID,
 				labels.LabelSecurityMode:      security.StageValidation,
 				labels.LabelSecurityStage:     security.StageValidation,
@@ -1537,7 +1563,9 @@ func (r *RepositoryScanReconciler) ingestPatchTask(ctx context.Context, scan *co
 	}
 
 	proposal.Status = taskPhaseToSecurityPhase(task.Status.Phase)
-	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
+	if task.Spec.Workspace != nil {
+		proposal.Branch = task.Spec.Workspace.PushBranch
+	} else if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
 		proposal.Branch = task.Spec.AgentRuntime.Workspace.PushBranch
 	}
 

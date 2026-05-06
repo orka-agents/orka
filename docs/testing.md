@@ -39,7 +39,7 @@ Tests use **Ginkgo + Gomega** (BDD style) for controller/integration tests and s
 | `internal/llm/anthropic/` | `provider_test.go` | Anthropic API integration |
 | `internal/llm/openai/` | `provider_test.go` | OpenAI API integration |
 | `internal/metrics/` | `metrics_test.go` | Prometheus metrics recording |
-| `internal/tools/` | `registry_test.go`, `web_search_test.go`, `code_exec_test.go`, `file_read_test.go`, `delegate_task_test.go`, `wait_for_tasks_test.go`, `create_pull_request_test.go`, `merge_pull_request_test.go`, `review_pull_request_test.go`, `post_review_comment_test.go`, `create_agent_test.go`, `delete_agent_test.go`, `integration_test.go` | Built-in tool implementations, coordination tools, PR tools, agent management tools |
+| `internal/tools/` | `registry_test.go`, `web_search_test.go`, `code_exec_test.go`, `file_read_test.go`, `delegate_task_test.go`, `wait_for_tasks_test.go`, `create_pull_request_test.go`, `check_pull_request_ci_test.go`, `merge_pull_request_test.go`, `review_pull_request_test.go`, `post_review_comment_test.go`, `create_agent_test.go`, `delete_agent_test.go`, `integration_test.go` | Built-in tool implementations, coordination tools, PR tools, agent management tools |
 | `internal/worker/` | `tool_executor_test.go` | Custom Tool CRD executor |
 | `workers/ai/` | `main_test.go` | AI worker functions |
 | `workers/general/` | `main_test.go` | General worker functions |

@@ -159,6 +159,12 @@ type TaskSpec struct {
 	// +optional
 	AgentRuntime *AgentRuntimeSpec `json:"agentRuntime,omitempty"`
 
+	// Workspace defines repository checkout and push settings for tasks that need
+	// a git workspace. Agent tasks can continue to use agentRuntime.workspace for
+	// compatibility; this top-level field is used by container tasks as well.
+	// +optional
+	Workspace *WorkspaceConfig `json:"workspace,omitempty"`
+
 	// PriorTaskRef references a previously completed task whose diff should be
 	// applied to the workspace before this task begins execution.
 	// +optional

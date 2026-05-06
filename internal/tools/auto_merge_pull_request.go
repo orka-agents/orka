@@ -9,6 +9,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,6 +65,8 @@ type CICheckResult struct {
 	Pending bool
 	Details string
 }
+
+var errNoCIChecksConfigured = errors.New("no CI checks configured for this PR")
 
 // NewAutoMergePullRequestTool creates a new auto_merge_pull_request tool.
 func NewAutoMergePullRequestTool(k8sClient client.Client) *AutoMergePullRequestTool {
@@ -157,10 +160,10 @@ func (t *AutoMergePullRequestTool) Execute(ctx context.Context, argsJSON json.Ra
 	}
 
 	// Extract repo URL and git secret from the task's workspace config
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	ws := taskWorkspace(&task)
+	if ws == nil {
 		return "", fmt.Errorf("task %s does not have workspace configuration", args.TaskName)
 	}
-	ws := task.Spec.AgentRuntime.Workspace
 
 	repoURL := ws.GitRepo
 	if repoURL == "" {
@@ -267,9 +270,9 @@ func (pc *pollContext) pollOnce(ctx context.Context) (*AutoMergePullRequestResul
 		}, true, nil
 	}
 
-	if state == "closed" {
+	if state == githubPRStateClosed {
 		return &AutoMergePullRequestResult{
-			Message: "Pull request is closed", Outcome: "closed",
+			Message: "Pull request is closed", Outcome: githubPRStateClosed,
 		}, true, nil
 	}
 
@@ -394,7 +397,7 @@ func checkCIStatusDetailed(ctx context.Context, token, owner, repo, sha, baseURL
 	}
 
 	if checkResp.TotalCount == 0 {
-		return CICheckResult{}, fmt.Errorf("no CI checks configured for this PR")
+		return CICheckResult{}, errNoCIChecksConfigured
 	}
 
 	var failed, pending []string
@@ -443,7 +446,8 @@ func (e *githubAPIError) Error() string {
 
 // isTransientHTTPError returns true if the error represents a transient GitHub API error (429 or 5xx).
 func isTransientHTTPError(err error) bool {
-	if apiErr, ok := err.(*githubAPIError); ok { //nolint:errorlint
+	var apiErr *githubAPIError
+	if errors.As(err, &apiErr) {
 		return apiErr.StatusCode == 429 || apiErr.StatusCode >= 500
 	}
 	return false

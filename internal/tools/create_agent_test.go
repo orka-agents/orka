@@ -359,14 +359,17 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 	}
 
 	// Verify labels
-	if agent.Labels[labels.LabelParentTask] != parentTaskName {
-		t.Errorf("label orka.ai/parent-task = %q, want %q", agent.Labels[labels.LabelParentTask], parentTaskName)
+	if agent.Labels[labels.LabelParentTask] != labels.SelectorValue(parentTaskName) {
+		t.Errorf("label orka.ai/parent-task = %q, want %q", agent.Labels[labels.LabelParentTask], labels.SelectorValue(parentTaskName))
 	}
 	if agent.Labels[labels.LabelCreatedBy] != createAgentToolName {
 		t.Errorf("label orka.ai/created-by = %q, want %q", agent.Labels[labels.LabelCreatedBy], createAgentToolName)
 	}
 	if agent.Labels[labels.LabelAgentRole] != "coder" {
 		t.Errorf("label orka.ai/agent-role = %q, want %q", agent.Labels[labels.LabelAgentRole], "coder")
+	}
+	if agent.Annotations[labels.AnnotationParentTaskName] != parentTaskName {
+		t.Errorf("annotation orka.ai/parent-task-name = %q, want %q", agent.Annotations[labels.AnnotationParentTaskName], parentTaskName)
 	}
 }
 
@@ -521,7 +524,7 @@ func TestCreateAgentTool_Execute_AutoDiscoversCodexRuntimeSecretRefWhenOmitted(t
 
 	k8sClient := newFakeClient(
 		parentTask(),
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "codex-api-key", Namespace: defaultNamespace}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "codex-proxy-token", Namespace: defaultNamespace}},
 	)
 	tool := NewCreateAgentTool(k8sClient)
 
@@ -560,12 +563,12 @@ func TestCreateAgentTool_Execute_AutoDiscoversCodexRuntimeSecretRefWhenOmitted(t
 	if agent.Spec.SecretRef == nil {
 		t.Fatal("agent.Spec.SecretRef is nil")
 	}
-	if agent.Spec.SecretRef.Name != "codex-api-key" {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "codex-api-key")
+	if agent.Spec.SecretRef.Name != "codex-proxy-token" {
+		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "codex-proxy-token")
 	}
 }
 
-func TestCreateAgentTool_Execute_RejectsUnsupportedRuntimeSecretRef(t *testing.T) {
+func TestCreateAgentTool_Execute_AcceptsCustomRuntimeSecretRef(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", parentTaskName)
 	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
 
@@ -584,12 +587,53 @@ func TestCreateAgentTool_Execute_RejectsUnsupportedRuntimeSecretRef(t *testing.T
 		}
 	}`)
 
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var agentResult CreateAgentResult
+	if err := json.Unmarshal([]byte(result), &agentResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+
+	agent := &corev1alpha1.Agent{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
+		Name:      agentResult.AgentName,
+		Namespace: agentResult.Namespace,
+	}, agent); err != nil {
+		t.Fatalf("failed to get agent: %v", err)
+	}
+	if agent.Spec.SecretRef == nil {
+		t.Fatal("agent.Spec.SecretRef is nil")
+	}
+	if agent.Spec.SecretRef.Name != "runtime-creds" {
+		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "runtime-creds")
+	}
+}
+
+func TestCreateAgentTool_Execute_RejectsMissingRuntimeSecretRef(t *testing.T) {
+	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
+
+	k8sClient := newFakeClient(parentTask())
+	tool := NewCreateAgentTool(k8sClient)
+
+	args := json.RawMessage(`{
+		"role": "coder",
+		"systemPrompt": "You write code",
+		"runtime": {
+			"type": "claude",
+			"secretRef": "runtime-creds"
+		}
+	}`)
+
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "not allowed") {
-		t.Fatalf("error = %v, want it to mention not allowed", err)
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error = %v, want it to mention not found", err)
 	}
 }
 

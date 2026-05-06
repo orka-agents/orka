@@ -265,7 +265,7 @@ These tools are available to AI worker agents:
 
 These tools are injected into AI worker agents when the Agent has `coordination.enabled: true`. They are not returned by `GET /api/v1/tools`.
 
-The following 13 tools are **auto-injected** when coordination is enabled:
+The following 14 tools are **auto-injected** when coordination is enabled:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
@@ -275,6 +275,7 @@ The following 13 tools are **auto-injected** when coordination is enabled:
 | `send_message` | Send a message to a sibling task | `to_task` (required, or `*` to broadcast), `content` (required) |
 | `check_messages` | Check for messages from sibling tasks | `mark_read` (boolean, default true) |
 | `create_pull_request` | Create a GitHub pull request | `task_name`, `head_branch`, `base_branch`, `title` (required); `body` |
+| `check_pull_request_ci` | Check GitHub CI status without merging | `pr_number` (required); `task_name`, `repo_url`, `wait_timeout`, `poll_interval` |
 | `merge_pull_request` | Merge a GitHub pull request | `task_name`, `pr_number` (required); `merge_method`, `commit_title`, `commit_message` |
 | `auto_merge_pull_request` | Poll CI checks and merge a PR when all pass | `task_name`, `pr_number` (required); `merge_method`, `commit_title`, `commit_message`, `timeout` |
 | `review_pull_request` | Fetch PR diff for review | `task_name`, `pr_number` (required) |

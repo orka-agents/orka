@@ -20,6 +20,7 @@ func autonomousSystemPromptSuffix(iteration int, maxIterations int) string {
 		iterInfo += fmt.Sprintf(" of %d", maxIterations)
 	}
 
+	prCISection := githubPRCISection()
 	triageSection := githubTriageSection()
 
 	return fmt.Sprintf(`
@@ -59,7 +60,36 @@ Use 'update_plan' to maintain a markdown plan:
 `+"```"+`
 
 If no further progress is possible, set 'goal_complete: true' and explain why.
-%s`, iterInfo, triageSection)
+%s%s`, iterInfo, prCISection, triageSection)
+}
+
+// githubPRCISection returns guidance for PR workflows that include CI checks.
+func githubPRCISection() string {
+	return `
+## GitHub PR CI Workflow
+
+When your workflow creates or updates a GitHub pull request and check_pull_request_ci is available:
+
+1. Before declaring a PR ready, complete the code-review loop:
+   coder implementation → reviewer tasks → coder repairs → reviewer tasks, until every reviewer approves.
+2. Bound the review loop to one initial implementation plus at most eight coder repair passes.
+   If reviewers still return changes needed after that, report REVIEW_BLOCKED with the remaining issues.
+   Prefer additional focused repair iterations over stopping early when reviewers identify concrete diff-backed
+   security, correctness, or acceptance-criteria issues.
+3. After reviewers approve, create or update the pull request, then call
+   check_pull_request_ci(task_name="<latest coder task>", pr_number=N, wait_timeout="30m", poll_interval="30s").
+4. If CI is passed, the PR is ready for handoff or approval.
+5. If CI is failed, delegate one focused CI repair task to the coder/implementation agent on the PR branch.
+   Set workspace.branch and workspace.pushBranch to the PR head branch, include the failed check names/details,
+   and tell the agent to fix only build, lint, formatting, dependency, or test failures.
+6. After each CI repair, run the reviewer tasks again on the updated branch. Only after reviewers approve again
+   should you call check_pull_request_ci again.
+7. Repeat the CI repair loop at most three times. If CI still fails, report CI_BLOCKED with the failed checks.
+8. If CI is pending for more than 30 minutes (check_pull_request_ci returns status=pending with
+   wait_timed_out=true), report CI_PENDING with the pending check names instead of spinning.
+9. If CI is no_checks or closed, report that exact status instead of saying the PR is green.
+10. Do not call auto_merge_pull_request or merge_pull_request unless the user explicitly asked you to merge.
+`
 }
 
 // githubTriageSection returns the GitHub triage workflow guidance when GitHub
@@ -94,13 +124,14 @@ When you have access to list_issues and list_pull_requests tools, follow this wo
 ### Follow-up Phase
 11. If the coder created a new PR, delegate a reviewer agent to review it
 12. If the reviewer requested changes on an existing PR, delegate a coder with feedback
-13. Call update_plan() to record what was done and what remains
+13. For every PR you created or updated, follow the GitHub PR CI workflow before reporting it ready
+14. Call update_plan() to record what was done and what remains
 
 ### Important Guidelines
 - Only pick ONE issue and ONE PR per iteration to keep work manageable
 - Always comment on an issue before starting work to prevent duplicate effort
 - When delegating, pass the full workspace config including gitRepo and pushBranch
-- Approve PRs only — do not auto-merge
+- Approve PRs only after review and CI are green — do not auto-merge
 `
 }
 

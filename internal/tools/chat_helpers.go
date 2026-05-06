@@ -106,8 +106,9 @@ func chatGetStringSliceArg(args map[string]any, key string) []string {
 	return result
 }
 
-// parseDurationArg parses a duration string from args and returns an error result if invalid.
-func parseDurationArg(args map[string]any, key string) (time.Duration, string, bool) {
+// parseTimeoutArg parses a timeout duration string from args and returns an error result if invalid.
+func parseTimeoutArg(args map[string]any) (time.Duration, string, bool) {
+	const key = "timeout"
 	s := chatGetStringArg(args, key)
 	if s == "" {
 		return 0, "", true

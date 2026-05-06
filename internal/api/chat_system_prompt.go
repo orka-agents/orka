@@ -79,6 +79,7 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 	sb.WriteString(buildBehaviorSection())
 	sb.WriteString(buildToolCallStyleSection())
 	sb.WriteString(buildTaskTypesSection(m))
+	sb.WriteString(buildValidationSection())
 	sb.WriteString(buildCoordinationSection(m))
 	sb.WriteString(buildSchedulingSection(m))
 
@@ -188,22 +189,43 @@ func buildTaskTypesSection(mode PromptMode) string {
   answering questions about data. The AI worker has built-in tools (code_exec,
   web_search, file_read, web_fetch, file_write) but runs in a minimal container without CLI tools.
   Do NOT use for infrastructure commands.
-- agent: Run an external CLI runtime (Copilot, Claude Code, Codex). Use create_agent_task.
+- agent: Run an external CLI runtime (Copilot, Claude Code, Codex).
+  Use create_agent_task only for Agents that have runtime listed in available_agents.
   Use for: code changes in a git repo, multi-file refactoring.
   IMPORTANT: When the user specifies an agent (via --agent or agentRef) that has a
   runtime configured, ALWAYS use create_agent_task with that agent name.
+  If the specified Agent has no runtime listed, including coordinator Agents backed
+  by providerRef/model only, use create_ai_task with agentRef and providerRef instead.
   When the task involves a git repository, ALWAYS include the gitRepo URL in the
   workspace config so credentials are automatically mounted:
     create_agent_task(agent: "coder", prompt: "...", gitRepo: "https://github.com/org/repo", timeout: "15m")
   When creating new agents for coding tasks, check the agent_runtimes in the Runtime line above.
   Use whichever runtime is available. If multiple runtimes are available, prefer codex, then copilot.
-  If no agent runtimes are available, use create_ai_task with workspace config instead.
+  If no agent runtimes are available, use create_ai_task with agentRef/providerRef for existing non-runtime agents, or create_ai_task directly for LLM-only work.
   Agent tasks need more time than AI tasks. Set timeout to at least 15m.
   Do NOT use create_container_task or create_ai_task for runtime agents.
+  Do NOT use create_agent_task for non-runtime agents.
 </task_types>
 
 `)
 	return sb.String()
+}
+
+func buildValidationSection() string {
+	return `<validation>
+When validating code changes, determine the validation environment from repository evidence rather than demo- or scenario-specific defaults.
+Every validation or discovery container task that inspects repository files MUST include a workspace with workspace.gitRepo, workspace.gitSecretRef when credentials are needed, and the exact branch/ref under test. Prefer workspace.ref = the implementation headSHA; otherwise use workspace.branch = the pushed branch. Do not validate repo changes from an empty container filesystem.
+Before running full validation, inspect the workspace or run a read-only discovery container task with that workspace when needed. Prefer evidence in this order: CI workflow files, language/toolchain files (go.mod, package.json, pyproject.toml, Cargo.toml, etc.), Dockerfile/devcontainer files, Makefile targets, and project documentation.
+For Go repositories, read go.mod and prefer a toolchain directive when present; otherwise use the go directive. Choose a matching golang:<major.minor> image. With golang:<major.minor>, commands MUST export:
+  export PATH=/usr/local/go/bin:$PATH
+  export GOCACHE=/tmp/go-cache
+  export GOMODCACHE=/tmp/go-mod-cache
+  export CGO_ENABLED=0
+For other ecosystems, choose the image and command that match the repo's declared runtime and standard test command.
+Report the selected validation image, command, workspace ref/branch, and evidence. If validation fails because the container is missing the repo, a tool is not on PATH, caches are unwritable, or the validation environment cannot be determined confidently, report VALIDATION_CONFIG_BLOCKED or retry validation with corrected configuration instead of treating it as a code failure.
+</validation>
+
+`
 }
 
 func buildCoordinationSection(mode PromptMode) string {
@@ -244,7 +266,8 @@ or when a child task's result makes other tasks unnecessary.
 MANUAL (multi-step): For more control, create agents separately:
 1. Create specialist agents with create_agent
 2. Create a coordinator agent with coordination.enabled=true
-3. Create a task with create_agent_task or create_ai_task referencing the coordinator
+3. Create a task referencing the coordinator: use create_agent_task only when the
+   coordinator has runtime listed; otherwise use create_ai_task with agentRef and providerRef.
 
 When no agents exist and the user needs complex work done:
 - For simple commands (e.g., "list pods", "check disk"): use create_container_task
@@ -293,11 +316,27 @@ func buildRulesSection() string {
 10. When the user specifies an agent (agentRef) that has a "runtime" listed in the
    available_agents section, ALWAYS use create_agent_task — never create_container_task
    or create_ai_task. Runtime agents have their own CLI environment with full tool access.
+   When an agent has no "runtime" listed, including coordinator agents, use create_ai_task
+   with agentRef and providerRef — never create_agent_task.
 11. For multi-step workflows involving coding + review + PR creation:
-    - If a "dev-coordinator" agent exists, ALWAYS use it (create_agent_task with agent="dev-coordinator").
-      It handles the full workflow: code → PR → multi-model review → iterate → approve.
-    - Otherwise, use the coordinator pattern: create a coordinator agent that delegates to
+    - Prefer available coordinator candidates: agents whose names contain "coordinator";
+      if "dev-coordinator" exists, prefer it.
+    - If the chosen coordinator has "runtime" listed in available_agents, start it with create_agent_task.
+    - If the chosen coordinator has no "runtime" listed, start it with create_ai_task using agentRef and providerRef.
+      A coordinator handles the full workflow: code → validate → review repair loop → PR → CI repair loop → validate + re-review → approve.
+    - If no coordinator candidate exists, use the coordinator pattern: create a coordinator agent that delegates to
       specialist agents (coder, reviewer) sequentially.
+      In the coordinator prompt, tell it to:
+      * run coder → validation → reviewers → coder repairs → validation → reviewers until validation passes and all reviewers approve,
+        with at most 8 review repair tasks;
+      * determine validation image/command from repository evidence before running validation, and allow up to 6 validation repair tasks before reporting VALIDATION_BLOCKED;
+      * create or update the PR only after validation passes and reviewer approval;
+      * call check_pull_request_ci after PR creation with wait_timeout="30m" and poll_interval="30s";
+      * when CI fails, delegate a focused CI repair to the coder on the PR branch,
+        run validation and reviewers again, then re-check CI;
+      * bound CI repair to at most 3 repair tasks; if checks are still pending after 30 minutes of pending-check waiting (status=pending with wait_timed_out=true), report CI_PENDING;
+      * prefer additional focused repair iterations over stopping early when reviewers identify concrete diff-backed security, correctness, or acceptance-criteria issues;
+      * avoid merge tools unless the user explicitly asks to merge.
     - Do NOT bundle all steps into a single agent task prompt.
 12. Agent tasks run for 5-20 minutes. NEVER stop polling wait_for_task while a task
     is still running. Keep calling wait_for_task until the task reaches Succeeded or Failed.
@@ -327,7 +366,7 @@ Example 4: "review this code for security issues"
 → create_ai_task (prompt: "Review for security vulnerabilities: ...", providerRef: "openai")
 → wait_for_task → fetch_task_output → summarize findings
 
-Example 5: "refactor the auth module" (with agent available)
+Example 5: "refactor the auth module" (with runtime agent available)
 → create_agent_task (agent: "coder", prompt: "Refactor the auth module...", gitRepo: "https://github.com/org/repo")
 → wait_for_task → fetch_task_output
 

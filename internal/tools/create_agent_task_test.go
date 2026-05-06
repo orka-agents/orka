@@ -20,9 +20,10 @@ import (
 )
 
 const (
-	phasePending         = "Pending"
-	msgTaskCreated       = "Task created"
-	errTypeAlreadyExists = "already_exists"
+	phasePending             = "Pending"
+	msgTaskCreated           = "Task created"
+	errTypeAlreadyExists     = "already_exists"
+	testGitCredentialsSecret = "git-credentials"
 )
 
 func TestCreateAgentTaskTool_Name(t *testing.T) {
@@ -306,7 +307,7 @@ func TestCreateAgentTaskTool_Execute_PreservesExplicitGitSecretRef(t *testing.T)
 
 func TestCreateAgentTaskTool_Execute_AutoDiscoversGitSecretRefWhenOmitted(t *testing.T) {
 	fc := newFakeClient(
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-credentials", Namespace: defaultNamespace}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testGitCredentialsSecret, Namespace: defaultNamespace}},
 	)
 	ctx := newCreateAgentTaskToolCtx(fc)
 	tool := &CreateAgentTaskTool{}
@@ -340,8 +341,8 @@ func TestCreateAgentTaskTool_Execute_AutoDiscoversGitSecretRefWhenOmitted(t *tes
 	if task.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
 		t.Fatal("expected gitSecretRef to be auto-discovered")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "git-credentials" {
-		t.Fatalf("gitSecretRef = %q, want %q", task.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "git-credentials")
+	if task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != testGitCredentialsSecret {
+		t.Fatalf("gitSecretRef = %q, want %q", task.Spec.AgentRuntime.Workspace.GitSecretRef.Name, testGitCredentialsSecret)
 	}
 }
 

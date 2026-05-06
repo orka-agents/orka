@@ -1287,6 +1287,11 @@ func (in *TaskSpec) DeepCopyInto(out *TaskSpec) {
 		*out = new(AgentRuntimeSpec)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.Workspace != nil {
+		in, out := &in.Workspace, &out.Workspace
+		*out = new(WorkspaceConfig)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.PriorTaskRef != nil {
 		in, out := &in.PriorTaskRef, &out.PriorTaskRef
 		*out = new(PriorTaskReference)

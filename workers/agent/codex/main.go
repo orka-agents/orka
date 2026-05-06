@@ -22,10 +22,12 @@ import (
 )
 
 const (
-	defaultMaxTurns        = 50
-	workspaceDir           = "/workspace"
-	defaultCodexPath       = "codex"
-	codexWebSearchDisabled = "disabled"
+	defaultMaxTurns         = 50
+	workspaceDir            = "/workspace"
+	defaultCodexPath        = "codex"
+	defaultCodexSandboxMode = "workspace-write"
+	codexWebSearchDisabled  = "disabled"
+	defaultAutoCompactLimit = "240000"
 )
 
 var errCodexRequiresBash = errors.New(
@@ -41,6 +43,23 @@ func main() {
 
 // executeCodex invokes the Codex CLI and returns its final response.
 func executeCodex(ctx context.Context, cfg *common.AgentConfig) (string, error) {
+	result, err := executeCodexPrompt(ctx, cfg, cfg.Prompt)
+	if err != nil {
+		return result, err
+	}
+
+	return common.EnsureRequiredSecurityArtifacts(
+		ctx,
+		cfg,
+		result,
+		func(followUpCtx context.Context, prompt string) (string, error) {
+			followUpCfg := *cfg
+			return executeCodexPrompt(followUpCtx, &followUpCfg, prompt)
+		},
+	)
+}
+
+func executeCodexPrompt(ctx context.Context, cfg *common.AgentConfig, prompt string) (string, error) {
 	if !allowBashEnabled() {
 		return "", errCodexRequiresBash
 	}
@@ -78,7 +97,7 @@ func executeCodex(ctx context.Context, cfg *common.AgentConfig) (string, error) 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = io.MultiWriter(&stdout, os.Stdout)
 	cmd.Stderr = io.MultiWriter(&stderr, os.Stderr)
-	cmd.Stdin = strings.NewReader(cfg.Prompt)
+	cmd.Stdin = strings.NewReader(prompt)
 
 	dir := workspaceDir
 	if cfg.SubPath != "" {
@@ -109,13 +128,16 @@ func executeCodex(ctx context.Context, cfg *common.AgentConfig) (string, error) 
 }
 
 func buildCodexArgs(cfg *common.AgentConfig, outputPath, instructionsPath string) []string {
+	sandboxMode := codexSandboxMode()
 	args := []string{
 		"exec",
 		"--skip-git-repo-check",
+		"--ephemeral",
 		"--color", "never",
 		"--output-last-message", outputPath,
 		"--config", "approval_policy=never",
-		"--sandbox", "workspace-write",
+		"--config", "model_auto_compact_token_limit=" + codexAutoCompactTokenLimit(),
+		"--sandbox", sandboxMode,
 	}
 
 	if cfg.Model != "" {
@@ -127,13 +149,29 @@ func buildCodexArgs(cfg *common.AgentConfig, outputPath, instructionsPath string
 	if baseURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")); baseURL != "" {
 		args = append(args, "--config", "openai_base_url="+baseURL)
 	}
-	args = append(args, "--config", "sandbox_workspace_write.network_access=true")
+	if sandboxMode == defaultCodexSandboxMode {
+		args = append(args, "--config", "sandbox_workspace_write.network_access=true")
+	}
 	if webSearchSetting, ok := codexWebSearchSetting(cfg); ok {
 		args = append(args, "--config", "web_search="+webSearchSetting)
 	}
 
 	args = append(args, "-")
 	return args
+}
+
+func codexAutoCompactTokenLimit() string {
+	if limit := strings.TrimSpace(os.Getenv("ORKA_CODEX_AUTO_COMPACT_TOKEN_LIMIT")); limit != "" {
+		return limit
+	}
+	return defaultAutoCompactLimit
+}
+
+func codexSandboxMode() string {
+	if mode := strings.TrimSpace(os.Getenv("ORKA_CODEX_SANDBOX_MODE")); mode != "" {
+		return mode
+	}
+	return defaultCodexSandboxMode
 }
 
 func buildCodexInstructions(cfg *common.AgentConfig) string {
