@@ -362,6 +362,52 @@ func TestFinalizeResult_PushBranchNoRemote(t *testing.T) {
 	if sr.Diff == "" {
 		t.Error("expected diff in result")
 	}
+	if sr.PushBranch != "" {
+		t.Errorf("PushBranch = %q, want empty when push fails", sr.PushBranch)
+	}
+	if !strings.Contains(sr.PushError, "git push failed") {
+		t.Errorf("PushError = %q, want git push failure", sr.PushError)
+	}
+}
+
+func TestFinalizeResult_PushBranchWithRemote(t *testing.T) {
+	bareDir := t.TempDir()
+	runGitWS(t, bareDir, "init", "--bare")
+
+	dir := t.TempDir()
+	runGitWS(t, dir, "init")
+	runGitWS(t, dir, "checkout", "-b", "main")
+	runGitWS(t, dir, "config", "user.email", "test@test.com")
+	runGitWS(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(dir+"/file.txt", []byte("content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, dir, "add", ".")
+	runGitWS(t, dir, "commit", "-m", "initial")
+	runGitWS(t, dir, "remote", "add", "origin", bareDir)
+	runGitWS(t, dir, "push", "-u", "origin", "main")
+
+	if err := os.WriteFile(dir+"/new.txt", []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("ORKA_PUSH_BRANCH", "feature-branch")
+
+	data, err := FinalizeResult(dir, "agent output")
+	if err != nil {
+		t.Fatalf("FinalizeResult failed: %v", err)
+	}
+
+	var sr StructuredResult
+	if err := json.Unmarshal(data, &sr); err != nil {
+		t.Fatalf("expected JSON result, got: %s", string(data))
+	}
+	if sr.PushBranch != "feature-branch" {
+		t.Errorf("PushBranch = %q, want feature-branch", sr.PushBranch)
+	}
+	if sr.PushError != "" {
+		t.Errorf("PushError = %q, want empty", sr.PushError)
+	}
 }
 
 func TestFinalizeResult_RequirePushBranchNoRemote(t *testing.T) {

@@ -126,6 +126,7 @@ type StructuredResult struct {
 	Feedback   string   `json:"feedback,omitempty"`
 	Files      []string `json:"files,omitempty"`
 	PushBranch string   `json:"pushBranch,omitempty"`
+	PushError  string   `json:"pushError,omitempty"`
 }
 
 // FormatStructuredResult serializes a StructuredResult to JSON bytes.

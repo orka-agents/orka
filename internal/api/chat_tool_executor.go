@@ -8,8 +8,12 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -157,11 +161,25 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 
 func (e *ToolExecutor) generateTaskName() string {
 	seq := e.taskSeq.Add(1)
-	prefix := e.sessionID
-	if len(prefix) > 8 {
-		prefix = prefix[:8]
+	prefix := sanitizeTaskNameComponent(e.sessionID)
+	if prefix == "" {
+		prefix = "session"
 	}
-	return fmt.Sprintf("chat-%s-%d", prefix, seq)
+	hash := sha256.Sum256([]byte(e.sessionID))
+	hashSuffix := hex.EncodeToString(hash[:])[:8]
+	seqSuffix := strconv.FormatInt(int64(seq), 10)
+
+	// Kubernetes task names must fit DNS label rules (max 63 chars).
+	const taskNameOverhead = len("chat-") + len("-") + len("-")
+	maxPrefixLen := max(63-taskNameOverhead-len(hashSuffix)-len(seqSuffix), 1)
+	if len(prefix) > maxPrefixLen {
+		prefix = strings.Trim(prefix[:maxPrefixLen], "-")
+		if prefix == "" {
+			prefix = "session"
+		}
+	}
+
+	return fmt.Sprintf("chat-%s-%s-%s", prefix, hashSuffix, seqSuffix)
 }
 
 func (e *ToolExecutor) taskLabels() map[string]string {
@@ -169,6 +187,29 @@ func (e *ToolExecutor) taskLabels() map[string]string {
 		labels.LabelCreatedBy:   "orchestrator",
 		labels.LabelChatSession: e.sessionID,
 	}
+}
+
+func sanitizeTaskNameComponent(s string) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	b.Grow(len(s))
+	lastDash := false
+
+	for _, r := range s {
+		isLower := r >= 'a' && r <= 'z'
+		isDigit := r >= '0' && r <= '9'
+		if isLower || isDigit {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+
+	return strings.Trim(b.String(), "-")
 }
 
 // ---- Error handling helpers ----

@@ -149,7 +149,17 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 		files = append(files, parseDiffStatFiles(unstagedStat)...)
 	}
 
-	// Auto-push if ORKA_PUSH_BRANCH is set and there are changes
+	sr := &StructuredResult{
+		Summary: TruncateStructuredSummary(agentOutput),
+		BaseSHA: baseSHA,
+		HeadSHA: baseSHA,
+	}
+	if diff != "" {
+		sr.Diff = diff
+		sr.Files = files
+	}
+
+	// Auto-push if ORKA_PUSH_BRANCH is set and there are changes.
 	pushBranch := os.Getenv("ORKA_PUSH_BRANCH")
 	requirePushBranch := strings.EqualFold(os.Getenv(requirePushBranchEnvVar), "true")
 	if requirePushBranch && pushBranch == "" {
@@ -161,29 +171,19 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 				return nil, fmt.Errorf("ORKA_PUSH_BRANCH=%s but no workspace diff was produced", pushBranch)
 			}
 		} else if pushErr := pushChanges(workDir, pushBranch); pushErr != nil {
+			sr.PushError = pushErr.Error()
 			if requirePushBranch {
 				return nil, fmt.Errorf("failed to push to %s: %w", pushBranch, pushErr)
 			}
 			fmt.Fprintf(os.Stderr, "warning: failed to push to %s: %v\n", pushBranch, pushErr)
 		} else {
 			fmt.Fprintf(os.Stderr, "pushed changes to branch %s\n", pushBranch)
+			sr.PushBranch = pushBranch
 		}
 	}
 
-	headSHA := baseSHA
 	if out, err := execGit(workDir, "rev-parse", "HEAD"); err == nil {
-		headSHA = strings.TrimSpace(out)
-	}
-
-	sr := &StructuredResult{
-		Summary:    TruncateStructuredSummary(agentOutput),
-		BaseSHA:    baseSHA,
-		HeadSHA:    headSHA,
-		PushBranch: pushBranch,
-	}
-	if diff != "" {
-		sr.Diff = diff
-		sr.Files = files
+		sr.HeadSHA = strings.TrimSpace(out)
 	}
 
 	return FormatStructuredResult(sr)

@@ -33,6 +33,7 @@ import (
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/security"
 	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/workers/common"
 )
 
 const (
@@ -48,6 +49,8 @@ const (
 	scanRunPhaseFailed    = "failed"
 
 	findingStateOpen                 = "open"
+	findingStatePatchPending         = "patch_pending"
+	findingStatePatchReady           = "patch_ready"
 	findingValidationStatusPending   = "pending"
 	findingValidationStatusValidated = "validated"
 	findingValidationStatusFailed    = "failed"
@@ -488,7 +491,7 @@ func (r *RepositoryScanReconciler) progressLatestScanRun(ctx context.Context, sc
 	timeout := metav1.Duration{Duration: 2 * time.Hour}
 	priority := int32(700)
 	for index, scope := range security.DiscoveryScopes() {
-		taskName := fmt.Sprintf("%s-%d", security.ScanStageTaskName(scan.Name, run.Mode, security.StageDiscovery, scope.Name), index)
+		taskName := security.ScanStageTaskName(scan.Name, run.Mode, security.StageDiscovery, fmt.Sprintf("%s-%d", scope.Name, index))
 		task := &corev1alpha1.Task{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      taskName,
@@ -1563,10 +1566,43 @@ func (r *RepositoryScanReconciler) ingestPatchTask(ctx context.Context, scan *co
 	}
 
 	proposal.Status = taskPhaseToSecurityPhase(task.Status.Phase)
+	requestedBranch := ""
 	if task.Spec.Workspace != nil {
-		proposal.Branch = task.Spec.Workspace.PushBranch
+		requestedBranch = strings.TrimSpace(task.Spec.Workspace.PushBranch)
 	} else if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
-		proposal.Branch = task.Spec.AgentRuntime.Workspace.PushBranch
+		requestedBranch = strings.TrimSpace(task.Spec.AgentRuntime.Workspace.PushBranch)
+	}
+	if requestedBranch != "" && strings.TrimSpace(proposal.Branch) == "" {
+		proposal.Branch = requestedBranch
+	}
+
+	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+		switch {
+		case r.ResultStore == nil:
+			proposal.Status = scanRunPhasePending
+		case task.Status.ResultRef == nil || !task.Status.ResultRef.Available:
+			proposal.Status = scanRunPhasePending
+		default:
+			result, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					proposal.Status = scanRunPhasePending
+				} else {
+					return err
+				}
+			} else {
+				sr := common.ParseStructuredResult(string(result))
+				switch {
+				case strings.TrimSpace(sr.PushError) != "":
+					proposal.Status = scanRunPhaseFailed
+				case strings.TrimSpace(sr.PushBranch) != "":
+					proposal.Branch = strings.TrimSpace(sr.PushBranch)
+					proposal.Status = scanRunPhaseSucceeded
+				default:
+					proposal.Status = scanRunPhaseFailed
+				}
+			}
+		}
 	}
 
 	if r.ArtifactStore != nil {
@@ -1592,9 +1628,12 @@ func (r *RepositoryScanReconciler) ingestPatchTask(ctx context.Context, scan *co
 		return err
 	}
 	finding.PatchProposalID = proposal.ID
-	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
-		finding.State = "patch_ready"
-	} else {
+	switch proposal.Status {
+	case scanRunPhaseSucceeded:
+		finding.State = findingStatePatchReady
+	case scanRunPhasePending:
+		finding.State = findingStatePatchPending
+	default:
 		finding.State = findingStateOpen
 	}
 	return r.SecurityStore.UpsertFinding(ctx, finding)

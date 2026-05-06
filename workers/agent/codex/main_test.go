@@ -28,7 +28,7 @@ func TestBuildCodexArgs_Minimal(t *testing.T) {
 		MaxTurns: 50,
 	}
 
-	args := buildCodexArgs(cfg, "/tmp/result.txt", "")
+	args := buildCodexArgsForMode(cfg, "/tmp/result.txt", "", false)
 
 	assertContains(t, args, "exec")
 	assertContains(t, args, "--skip-git-repo-check")
@@ -57,7 +57,7 @@ func TestBuildCodexArgs_UsesConfiguredSandboxMode(t *testing.T) {
 		MaxTurns: 50,
 	}
 
-	args := buildCodexArgs(cfg, "/tmp/result.txt", "")
+	args := buildCodexArgsForMode(cfg, "/tmp/result.txt", "", false)
 
 	assertContains(t, args, "--sandbox")
 	assertContains(t, args, "danger-full-access")
@@ -79,7 +79,7 @@ func TestBuildCodexArgs_Full(t *testing.T) {
 		DisallowedTools: []string{"Shell"},
 	}
 
-	args := buildCodexArgs(cfg, "/tmp/result.txt", "/tmp/instructions.md")
+	args := buildCodexArgsForMode(cfg, "/tmp/result.txt", "/tmp/instructions.md", false)
 
 	assertContains(t, args, "--model")
 	assertContains(t, args, "gpt-5.4")
@@ -95,8 +95,24 @@ func TestBuildCodexArgs_UsesConfiguredAutoCompactLimit(t *testing.T) {
 
 	cfg := &common.AgentConfig{Prompt: "test"}
 
-	args := buildCodexArgs(cfg, "/tmp/result.txt", "")
+	args := buildCodexArgsForMode(cfg, "/tmp/result.txt", "", false)
 	assertContains(t, args, "model_auto_compact_token_limit=200000")
+}
+
+func TestBuildCodexArgs_BypassSandbox(t *testing.T) {
+	t.Setenv("ORKA_ALLOW_BASH", "true")
+
+	cfg := &common.AgentConfig{
+		Prompt: "fix bugs",
+		Model:  "gpt-5.4",
+	}
+
+	args := buildCodexArgsForMode(cfg, "/tmp/result.txt", "", true)
+
+	assertContains(t, args, "--dangerously-bypass-approvals-and-sandbox")
+	assertNotContains(t, args, "--sandbox")
+	assertNotContains(t, args, "workspace-write")
+	assertNotContains(t, args, "sandbox_workspace_write.network_access=true")
 }
 
 func TestBuildCodexArgs_WebSearchDisabled(t *testing.T) {
@@ -107,7 +123,7 @@ func TestBuildCodexArgs_WebSearchDisabled(t *testing.T) {
 		AllowedTools: []string{"Read", "Write"},
 	}
 
-	args := buildCodexArgs(cfg, "/tmp/result.txt", "")
+	args := buildCodexArgsForMode(cfg, "/tmp/result.txt", "", false)
 	assertContains(t, args, "web_search=disabled")
 }
 
@@ -283,6 +299,221 @@ printf 'arg=%s\nstdin=%s\n' "$LAST_ARG" "$INPUT" > "$OUTPUT"
 	}
 	if !strings.Contains(result, "stdin=--help") {
 		t.Fatalf("executeCodex() = %q, want stdin prompt", result)
+	}
+}
+
+func TestExecuteCodex_RetriesWithoutSandboxOnNamespaceError(t *testing.T) {
+	scriptPath := writeCodexStub(t, `#!/bin/sh
+OUTPUT=""
+ARGS_FILE=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then
+    OUTPUT="$2"
+    shift 2
+    continue
+  fi
+  if [ "$1" = "--dangerously-bypass-approvals-and-sandbox" ]; then
+    printf '%s\n' "$*" > "$OUTPUT.args"
+    printf 'fallback-ok' > "$OUTPUT"
+    exit 0
+  fi
+  shift
+done
+printf 'bwrap: No permissions to create a new namespace\n' >&2
+exit 1
+`)
+
+	t.Setenv("CODEX_CLI_PATH", scriptPath)
+	t.Setenv("ORKA_ALLOW_BASH", "true")
+
+	cfg := &common.AgentConfig{
+		Prompt:   "make a real edit",
+		MaxTurns: 5,
+	}
+
+	result, err := executeCodex(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("executeCodex() error = %v", err)
+	}
+	if result != "fallback-ok" {
+		t.Fatalf("executeCodex() = %q, want %q", result, "fallback-ok")
+	}
+}
+
+func TestExecuteCodex_DoesNotRetryWithoutSandboxWhenSuccessfulOutputMentionsNamespaceError(t *testing.T) {
+	scriptPath := writeCodexStub(t, `#!/bin/sh
+OUTPUT=""
+BYPASS=0
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then
+    OUTPUT="$2"
+    shift 2
+    continue
+  fi
+  if [ "$1" = "--dangerously-bypass-approvals-and-sandbox" ]; then
+    BYPASS=1
+  fi
+  shift
+done
+
+if [ "$BYPASS" -eq 1 ]; then
+  printf 'unexpected-retry' > "$OUTPUT"
+  exit 0
+fi
+
+printf 'codex summary mentioning sandbox diagnostics
+'
+printf 'bwrap: No permissions to create a new namespace
+'
+printf 'blocked-result' > "$OUTPUT"
+exit 0
+`)
+
+	t.Setenv("CODEX_CLI_PATH", scriptPath)
+	t.Setenv("ORKA_ALLOW_BASH", "true")
+
+	cfg := &common.AgentConfig{
+		Prompt:   "make a real edit",
+		MaxTurns: 5,
+	}
+
+	result, err := executeCodex(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("executeCodex() error = %v", err)
+	}
+	if result != "blocked-result" {
+		t.Fatalf("executeCodex() = %q, want %q", result, "blocked-result")
+	}
+}
+
+func TestShouldRetryCodexWithoutSandbox(t *testing.T) {
+	if !shouldRetryCodexWithoutSandbox("bwrap: No permissions to create a new namespace") {
+		t.Fatal("expected bubblewrap namespace error to trigger retry")
+	}
+	if shouldRetryCodexWithoutSandbox("some other failure") {
+		t.Fatal("expected unrelated stderr to skip retry")
+	}
+}
+
+func TestShouldStartCodexWithoutSandbox_EnvOverride(t *testing.T) {
+	t.Setenv("ORKA_CODEX_DISABLE_SANDBOX", "true")
+
+	if !shouldStartCodexWithoutSandbox() {
+		t.Fatal("expected env override to disable sandbox")
+	}
+}
+
+func TestShouldStartCodexWithoutSandbox_ProcSysSignalsUnsupportedNamespaces(t *testing.T) {
+	originalProcSysDir := codexProcSysDir
+	codexProcSysDir = t.TempDir()
+	t.Cleanup(func() {
+		codexProcSysDir = originalProcSysDir
+	})
+	originalProbe := codexUserNamespaceProbe
+	codexUserNamespaceProbe = func() error {
+		t.Fatal("user namespace probe should not run when proc sys already disables sandbox")
+		return nil
+	}
+	t.Cleanup(func() {
+		codexUserNamespaceProbe = originalProbe
+	})
+	t.Setenv("ORKA_CODEX_DISABLE_SANDBOX", "")
+
+	if err := os.MkdirAll(filepath.Join(codexProcSysDir, "kernel"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(kernel): %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(codexProcSysDir, "kernel", "unprivileged_userns_clone"),
+		[]byte("0\n"),
+		0o644,
+	); err != nil {
+		t.Fatalf("WriteFile(unprivileged_userns_clone): %v", err)
+	}
+
+	if !shouldStartCodexWithoutSandbox() {
+		t.Fatal("expected kernel sysctl to disable sandbox")
+	}
+}
+
+func TestShouldStartCodexWithoutSandbox_ProbeSignalsUnsupportedNamespaces(t *testing.T) {
+	originalProcSysDir := codexProcSysDir
+	codexProcSysDir = t.TempDir()
+	t.Cleanup(func() {
+		codexProcSysDir = originalProcSysDir
+	})
+	originalProbe := codexUserNamespaceProbe
+	codexUserNamespaceProbe = func() error {
+		return errors.New("unshare: unshare failed: Operation not permitted")
+	}
+	t.Cleanup(func() {
+		codexUserNamespaceProbe = originalProbe
+	})
+	t.Setenv("ORKA_CODEX_DISABLE_SANDBOX", "")
+
+	if err := os.MkdirAll(filepath.Join(codexProcSysDir, "kernel"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(kernel): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(codexProcSysDir, "user"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(user): %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(codexProcSysDir, "kernel", "unprivileged_userns_clone"),
+		[]byte("1\n"),
+		0o644,
+	); err != nil {
+		t.Fatalf("WriteFile(unprivileged_userns_clone): %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(codexProcSysDir, "user", "max_user_namespaces"),
+		[]byte("1024\n"),
+		0o644,
+	); err != nil {
+		t.Fatalf("WriteFile(max_user_namespaces): %v", err)
+	}
+
+	if !shouldStartCodexWithoutSandbox() {
+		t.Fatal("expected runtime user namespace probe to disable sandbox")
+	}
+}
+
+func TestShouldStartCodexWithoutSandbox_ProcSysAllowsNamespacesAndProbeSucceeds(t *testing.T) {
+	originalProcSysDir := codexProcSysDir
+	codexProcSysDir = t.TempDir()
+	t.Cleanup(func() {
+		codexProcSysDir = originalProcSysDir
+	})
+	originalProbe := codexUserNamespaceProbe
+	codexUserNamespaceProbe = func() error {
+		return nil
+	}
+	t.Cleanup(func() {
+		codexUserNamespaceProbe = originalProbe
+	})
+	t.Setenv("ORKA_CODEX_DISABLE_SANDBOX", "")
+
+	if err := os.MkdirAll(filepath.Join(codexProcSysDir, "kernel"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(kernel): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(codexProcSysDir, "user"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(user): %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(codexProcSysDir, "kernel", "unprivileged_userns_clone"),
+		[]byte("1\n"),
+		0o644,
+	); err != nil {
+		t.Fatalf("WriteFile(unprivileged_userns_clone): %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(codexProcSysDir, "user", "max_user_namespaces"),
+		[]byte("1024\n"),
+		0o644,
+	); err != nil {
+		t.Fatalf("WriteFile(max_user_namespaces): %v", err)
+	}
+
+	if shouldStartCodexWithoutSandbox() {
+		t.Fatal("expected sandbox to remain enabled when proc sys and probe both allow user namespaces")
 	}
 }
 

@@ -187,7 +187,7 @@ func TestCreateSecurityPatchTaskRequiresPushedBranch(t *testing.T) {
 
 	proposal, err := handlers.createSecurityPatchTask(context.Background(), scan, finding)
 	require.NoError(t, err)
-	require.Equal(t, "orka/security/fnd-123", proposal.Branch)
+	require.Regexp(t, `^orka/security/fnd-123-[a-f0-9]{12}$`, proposal.Branch)
 
 	task := &corev1alpha1.Task{}
 	require.NoError(t, fakeClient.Get(context.Background(), clientObjectKey("demo", proposal.TaskName), task))
