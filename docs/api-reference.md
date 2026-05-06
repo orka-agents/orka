@@ -78,6 +78,74 @@ Retrieve the autonomous plan state for a task.
 | `/api/v1/tools` | GET | List tools (built-in + CRDs) |
 | `/api/v1/tools/:name` | GET | Get tool details |
 
+## Security
+
+Repository security endpoints manage `RepositoryScan` configurations and their generated threat models, scan runs, findings, patch proposals, and remediation pull requests. Like other `/api/v1/*` endpoints, they require ServiceAccount bearer token authentication.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/security/repositories` | POST | Create a repository scan |
+| `/api/v1/security/repositories` | GET | List repository scans |
+| `/api/v1/security/repositories/:name` | GET | Get repository scan details |
+| `/api/v1/security/repositories/:name` | PUT | Update repository scan spec |
+| `/api/v1/security/repositories/:name` | DELETE | Delete repository scan |
+| `/api/v1/security/repositories/:name/threat-model` | GET | Get latest threat model |
+| `/api/v1/security/repositories/:name/threat-model` | PUT | Update threat model |
+| `/api/v1/security/repositories/:name/scans` | GET | List scan runs |
+| `/api/v1/security/repositories/:name/scans` | POST | Trigger manual scan |
+| `/api/v1/security/repositories/:name/findings` | GET | List findings |
+| `/api/v1/security/findings/:id` | GET | Get finding details |
+| `/api/v1/security/findings/:id/dismiss` | POST | Dismiss finding |
+| `/api/v1/security/findings/:id/reopen` | POST | Reopen finding |
+| `/api/v1/security/findings/:id/validate` | POST | Trigger validation |
+| `/api/v1/security/findings/:id/patch` | POST | Generate patch proposal |
+| `/api/v1/security/findings/:id/patches` | GET | List patch proposals |
+| `/api/v1/security/findings/:id/pull-request` | POST | Create remediation PR |
+
+Common query parameters:
+
+- `namespace` — Kubernetes namespace to operate in.
+- `limit` — page size for list endpoints that support pagination.
+- `continue` — Kubernetes continue token for `GET /api/v1/security/repositories`.
+- `cursor` — store cursor for `GET /api/v1/security/repositories/:name/scans` and `GET /api/v1/security/repositories/:name/findings`.
+- `severity`, `validationStatus`, `state` — filters for `GET /api/v1/security/repositories/:name/findings`.
+- `recommended=true` — filters findings to recommended remediation candidates.
+
+### Create Repository Scan
+
+**Endpoint:** `POST /api/v1/security/repositories`
+
+**Request Body:**
+```json
+{
+  "name": "example-repo",
+  "namespace": "default",
+  "spec": {
+    "provider": "github",
+    "repoURL": "https://github.com/example/app",
+    "branch": "main",
+    "schedule": "0 2 * * *",
+    "validationMode": "light",
+    "analysisAgentRef": {"name": "security-reviewer"}
+  }
+}
+```
+
+**Response (201):** The created `RepositoryScan` resource.
+
+Required fields are `name`, `spec.repoURL`, and `spec.analysisAgentRef.name`. The API defaults or infers provider, owner, repository, branch, and validation mode where possible.
+
+### Security Findings Workflow
+
+A typical remediation workflow is:
+
+1. List findings with `GET /api/v1/security/repositories/:name/findings?namespace=default&recommended=true`.
+2. Inspect evidence with `GET /api/v1/security/findings/:id`.
+3. Optionally validate with `POST /api/v1/security/findings/:id/validate`.
+4. Generate a patch with `POST /api/v1/security/findings/:id/patch`.
+5. Review patch proposals with `GET /api/v1/security/findings/:id/patches`.
+6. Create a remediation pull request with `POST /api/v1/security/findings/:id/pull-request`.
+
 ## Auth
 
 | Endpoint | Method | Description |

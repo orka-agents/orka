@@ -38,6 +38,7 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 - 🛠️ **Agent Runtimes** — Delegate to Codex CLI, Claude Code CLI, or GitHub Copilot CLI for full autonomous coding
 - 🔀 **Multi-Agent Coordination** — Coordinators delegate to specialists with depth and concurrency controls
 - 💬 **Interactive Chat** — Agentic orchestrator with SSE streaming that creates and manages agents and tasks for you
+- 🛡️ **Repository Security Scanning** — Scheduled and incremental repository scans with threat models, validated findings, patch generation, and remediation PRs
 - 🖥️ **Web Dashboard** — Built-in React UI embedded in the controller binary — zero extra deployments
 - 📦 **Declarative CRDs** — Task, Agent, Tool, Provider, and Skill custom resources for GitOps workflows
 - ⏰ **Scheduled Tasks** — Cron-based recurring execution with concurrency policies
@@ -104,5 +105,6 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Anthropic Compatibility](docs/anthropic-compat.md)          | Anthropic-compatible Messages API                     |
 | [Web Dashboard](docs/ui.md)                                  | Frontend architecture and pages                       |
 | [Security](docs/security.md)                                 | Security model and hardening                          |
+| [Repository Security Scanning](docs/repository-security-scanning.md) | Repository scan workflow, threat models, findings, and remediation |
 | [Development](docs/development.md)                           | Building, testing, and contributing                   |
 | [Testing](docs/testing.md)                                   | Test structure, patterns, and commands                |

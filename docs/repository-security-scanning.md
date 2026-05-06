@@ -1,7 +1,9 @@
-# Repository Security Scanning Spec
+# Repository Security Scanning
 
-Status: Draft
-Last updated: 2026-04-09
+Status: Implementation guide and design reference
+Last updated: 2026-05-06
+
+This document mixes user-facing workflow guidance with lower-level v1 design notes. For a concise endpoint reference, see [API Reference](api-reference.md#security); for CRD fields, see [Configuration](configuration.md#repositoryscan).
 
 ## Summary
 
@@ -19,6 +21,17 @@ Add a Codex Security-like workflow to Orka:
 5. From a finding detail page, the user can generate a patch and then open a pull request.
 
 The feature should be GitHub-first in v1, human-in-the-loop for remediation, and built primarily on top of Orka's existing task, agent runtime, artifact, scheduling, and PR plumbing.
+
+## Quick Start
+
+1. Create or choose an Agent that can run repository security analysis.
+2. Open the embedded dashboard and go to **Security** (`/security`).
+3. Select **New Repository**, enter the GitHub repository URL, branch, optional `subPath`, scan schedule, validation mode, and analysis agent, then save.
+4. Use **Scan Now** on the repository card or detail page to start a manual scan immediately, or rely on the configured cron schedule for incremental scans.
+5. Review the generated threat model, scan runs, recommended findings, evidence, and validation status from the repository detail page.
+6. From a finding detail page, optionally validate/reproduce the finding, generate a patch proposal, review the patch artifacts, and create a remediation pull request.
+
+You can perform the same workflow with the `RepositoryScan` CRD and `/api/v1/security/*` endpoints if you prefer GitOps or automation.
 
 ## Confirmed v1 Decisions
 

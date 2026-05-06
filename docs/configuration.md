@@ -101,6 +101,65 @@ spec:
 
 `list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`
 
+### RepositoryScan
+
+Repository security scan configuration. A `RepositoryScan` is namespace-scoped and tells Orka which repository to scan, how to schedule incremental scans, and which Agents should perform analysis and remediation.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: RepositoryScan
+metadata:
+  name: example-repo
+  namespace: default
+spec:
+  provider: github
+  repoURL: "https://github.com/example/app"
+  owner: example
+  repository: app
+  branch: main
+  subPath: "services/api"       # optional monorepo scope
+  gitSecretRef:                  # optional for private repositories
+    name: github-credentials
+  forkRepo: "https://github.com/example/app-security-fork" # optional remediation fork
+  prBaseBranch: main             # optional PR base branch override
+  schedule: "0 2 * * *"         # optional cron expression for incremental scans
+  timeZone: "UTC"               # optional IANA time zone
+  historyDays: 30                # optional initial history window
+  validationMode: light          # off, light, or full
+  analysisAgentRef:
+    name: security-reviewer
+  patchAgentRef:                 # optional; defaults to the analysis agent when omitted
+    name: security-patcher
+  maxFindingsPerRun: 25
+  suspend: false                 # pause scheduled incremental scans when true
+```
+
+**Spec fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `provider` | string | No | Source control provider. `github` is the supported v1 provider and default. |
+| `repoURL` | string | Yes | Repository URL to scan. |
+| `owner` | string | No | Repository owner or organization. Inferred from `repoURL` when omitted. |
+| `repository` | string | No | Repository name. Inferred from `repoURL` when omitted. |
+| `branch` | string | No | Base branch to scan. Defaults to the repository default branch when omitted. |
+| `subPath` | string | No | Optional subdirectory to scan in a monorepo. |
+| `gitSecretRef` | LocalObjectReference | No | Secret containing credentials for private repository access. |
+| `forkRepo` | string | No | Writable fork repository URL for patch proposal branches and remediation PRs. |
+| `prBaseBranch` | string | No | Pull request base branch for remediation. Defaults to `branch` when omitted. |
+| `schedule` | string | No | Cron expression for scheduled incremental scans. |
+| `timeZone` | string | No | IANA time zone used by `schedule`. |
+| `historyDays` | int32 | No | How far back the initial scan should inspect repository history. |
+| `validationMode` | string | No | Validation aggressiveness: `off`, `light`, or `full`. Defaults to `light`. |
+| `analysisAgentRef` | AgentReference | Yes | Agent used for repository scan runs and threat model generation. |
+| `patchAgentRef` | AgentReference | No | Agent used for patch proposal runs. |
+| `maxFindingsPerRun` | int32 | No | Bounds scan output volume. |
+| `suspend` | bool | No | Pauses scheduled incremental scans while preserving the scan configuration. |
+
+**Status fields:**
+
+`status.phase`, `status.lastScanID`, `status.lastScanTaskName`, `status.lastSuccessfulScanAt`, `status.lastObservedHeadSHA`, `status.lastProcessedCommit`, `status.threatModelVersion`, `status.findingCounts`, and `status.conditions` summarize the latest scan lifecycle and open findings. Dynamic scan runs, threat models, findings, and patch proposals are stored by the controller and surfaced through the security API/UI rather than embedded directly in the CRD status.
+
 ### Execution
 
 Tasks and Agents both support `spec.execution` for worker pod runtime selection and placement.
