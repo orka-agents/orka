@@ -28,8 +28,8 @@ const (
 func researcherAgent() *corev1alpha1.Agent {
 	return &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "researcher",
-			Namespace: "default",
+			Name:      testResearcherAgentName,
+			Namespace: defaultNamespace,
 		},
 		Spec: corev1alpha1.AgentSpec{},
 	}
@@ -40,7 +40,7 @@ func parentTask() *corev1alpha1.Task {
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      parentTaskName,
-			Namespace: "default",
+			Namespace: defaultNamespace,
 			UID:       apitypes.UID("parent-uid-1234"),
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -52,8 +52,8 @@ func parentTask() *corev1alpha1.Task {
 
 func TestDelegateTaskTool_Name(t *testing.T) {
 	tool := NewDelegateTaskTool(newFakeClient())
-	if got := tool.Name(); got != "delegate_task" {
-		t.Errorf("Name() = %v, want %v", got, "delegate_task")
+	if got := tool.Name(); got != delegateTaskToolName {
+		t.Errorf("Name() = %v, want %v", got, delegateTaskToolName)
 	}
 }
 
@@ -75,7 +75,7 @@ func TestDelegateTaskTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Errorf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 }
@@ -93,25 +93,25 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "successful delegation",
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":                   parentTaskName,
-				"ORKA_TASK_NAMESPACE":              "default",
-				"ORKA_COORDINATION_DEPTH":          "0",
-				"ORKA_COORDINATION_ALLOWED_AGENTS": "researcher,coder",
-				"ORKA_COORDINATION_MAX_DEPTH":      "3",
+				envOrkaTaskName:                  parentTaskName,
+				envOrkaTaskNamespace:             defaultNamespace,
+				envOrkaCoordinationDepth:         "0",
+				envOrkaCoordinationAllowedAgents: "researcher,coder",
+				envOrkaCoordinationMaxDepth:      "3",
 			},
 			args:        json.RawMessage(`{"agent": "researcher", "prompt": "Research the topic"}`),
 			wantErr:     false,
 			checkResult: true,
-			wantStatus:  "created",
+			wantStatus:  GitHubPullRequestStatusCreated,
 		},
 		{
 			name: "agent not allowed",
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":                   parentTaskName,
-				"ORKA_TASK_NAMESPACE":              "default",
-				"ORKA_COORDINATION_DEPTH":          "0",
-				"ORKA_COORDINATION_ALLOWED_AGENTS": "researcher,coder",
-				"ORKA_COORDINATION_MAX_DEPTH":      "3",
+				envOrkaTaskName:                  parentTaskName,
+				envOrkaTaskNamespace:             defaultNamespace,
+				envOrkaCoordinationDepth:         "0",
+				envOrkaCoordinationAllowedAgents: "researcher,coder",
+				envOrkaCoordinationMaxDepth:      "3",
 			},
 			args:       json.RawMessage(`{"agent": "unauthorized-agent", "prompt": "Do something"}`),
 			wantErr:    true,
@@ -120,11 +120,11 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "depth exceeded",
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":                   parentTaskName,
-				"ORKA_TASK_NAMESPACE":              "default",
-				"ORKA_COORDINATION_DEPTH":          "3",
-				"ORKA_COORDINATION_ALLOWED_AGENTS": "researcher",
-				"ORKA_COORDINATION_MAX_DEPTH":      "3",
+				envOrkaTaskName:                  parentTaskName,
+				envOrkaTaskNamespace:             defaultNamespace,
+				envOrkaCoordinationDepth:         "3",
+				envOrkaCoordinationAllowedAgents: testResearcherAgentName,
+				envOrkaCoordinationMaxDepth:      "3",
 			},
 			args:       json.RawMessage(`{"agent": "researcher", "prompt": "Research the topic"}`),
 			wantErr:    true,
@@ -133,11 +133,11 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "missing agent arg",
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":                   parentTaskName,
-				"ORKA_TASK_NAMESPACE":              "default",
-				"ORKA_COORDINATION_DEPTH":          "0",
-				"ORKA_COORDINATION_ALLOWED_AGENTS": "researcher",
-				"ORKA_COORDINATION_MAX_DEPTH":      "3",
+				envOrkaTaskName:                  parentTaskName,
+				envOrkaTaskNamespace:             defaultNamespace,
+				envOrkaCoordinationDepth:         "0",
+				envOrkaCoordinationAllowedAgents: testResearcherAgentName,
+				envOrkaCoordinationMaxDepth:      "3",
 			},
 			args:       json.RawMessage(`{"prompt": "Research the topic"}`),
 			wantErr:    true,
@@ -146,48 +146,48 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 		{
 			name: "missing prompt arg",
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":                   parentTaskName,
-				"ORKA_TASK_NAMESPACE":              "default",
-				"ORKA_COORDINATION_DEPTH":          "0",
-				"ORKA_COORDINATION_ALLOWED_AGENTS": "researcher",
-				"ORKA_COORDINATION_MAX_DEPTH":      "3",
+				envOrkaTaskName:                  parentTaskName,
+				envOrkaTaskNamespace:             defaultNamespace,
+				envOrkaCoordinationDepth:         "0",
+				envOrkaCoordinationAllowedAgents: testResearcherAgentName,
+				envOrkaCoordinationMaxDepth:      "3",
 			},
 			args:       json.RawMessage(`{"agent": "researcher"}`),
 			wantErr:    true,
 			wantErrMsg: "prompt is required",
 		},
 		{
-			name: "invalid JSON args",
+			name: invalidJSONArgsCaseName,
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":      parentTaskName,
-				"ORKA_TASK_NAMESPACE": "default",
+				envOrkaTaskName:      parentTaskName,
+				envOrkaTaskNamespace: defaultNamespace,
 			},
-			args:       json.RawMessage(`{invalid}`),
+			args:       json.RawMessage(invalidJSONText),
 			wantErr:    true,
-			wantErrMsg: "invalid arguments",
+			wantErrMsg: invalidArgumentsMessage,
 		},
 		{
 			name: "custom priority",
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":                   parentTaskName,
-				"ORKA_TASK_NAMESPACE":              "default",
-				"ORKA_COORDINATION_DEPTH":          "0",
-				"ORKA_COORDINATION_ALLOWED_AGENTS": "researcher",
-				"ORKA_COORDINATION_MAX_DEPTH":      "3",
+				envOrkaTaskName:                  parentTaskName,
+				envOrkaTaskNamespace:             defaultNamespace,
+				envOrkaCoordinationDepth:         "0",
+				envOrkaCoordinationAllowedAgents: testResearcherAgentName,
+				envOrkaCoordinationMaxDepth:      "3",
 			},
 			args:        json.RawMessage(`{"agent": "researcher", "prompt": "Research", "priority": 800}`),
 			wantErr:     false,
 			checkResult: true,
-			wantStatus:  "created",
+			wantStatus:  GitHubPullRequestStatusCreated,
 		},
 		{
-			name: "custom namespace",
+			name: testCustomNamespaceCaseName,
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":                   parentTaskName,
-				"ORKA_TASK_NAMESPACE":              "default",
-				"ORKA_COORDINATION_DEPTH":          "0",
-				"ORKA_COORDINATION_ALLOWED_AGENTS": "researcher",
-				"ORKA_COORDINATION_MAX_DEPTH":      "3",
+				envOrkaTaskName:                  parentTaskName,
+				envOrkaTaskNamespace:             defaultNamespace,
+				envOrkaCoordinationDepth:         "0",
+				envOrkaCoordinationAllowedAgents: testResearcherAgentName,
+				envOrkaCoordinationMaxDepth:      "3",
 			},
 			args:    json.RawMessage(`{"agent": "researcher", "prompt": "Research", "namespace": "other-ns"}`),
 			wantErr: true, // parent task not found in other-ns
@@ -236,11 +236,11 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_COORDINATION_DEPTH", "1")
-	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "researcher")
-	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "5")
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "1")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testResearcherAgentName)
+	t.Setenv(envOrkaCoordinationMaxDepth, "5")
 
 	k8sClient := newFakeClient(parentTask(), researcherAgent())
 	tool := NewDelegateTaskTool(k8sClient)
@@ -282,8 +282,8 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 	if childTask.Labels[labels.LabelCoordinator] != trueStr {
 		t.Errorf("label orka.ai/coordinator = %q, want %q", childTask.Labels[labels.LabelCoordinator], trueStr)
 	}
-	if childTask.Labels[labels.LabelDelegatedAgent] != "researcher" {
-		t.Errorf("label orka.ai/delegated-agent = %q, want %q", childTask.Labels[labels.LabelDelegatedAgent], "researcher")
+	if childTask.Labels[labels.LabelDelegatedAgent] != testResearcherAgentName {
+		t.Errorf("label orka.ai/delegated-agent = %q, want %q", childTask.Labels[labels.LabelDelegatedAgent], testResearcherAgentName)
 	}
 
 	// Verify annotations
@@ -298,8 +298,8 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 	if childTask.Spec.Type != corev1alpha1.TaskTypeAI {
 		t.Errorf("spec.type = %q, want %q", childTask.Spec.Type, corev1alpha1.TaskTypeAI)
 	}
-	if childTask.Spec.AgentRef == nil || childTask.Spec.AgentRef.Name != "researcher" {
-		t.Errorf("spec.agentRef.name = %v, want %q", childTask.Spec.AgentRef, "researcher")
+	if childTask.Spec.AgentRef == nil || childTask.Spec.AgentRef.Name != testResearcherAgentName {
+		t.Errorf("spec.agentRef.name = %v, want %q", childTask.Spec.AgentRef, testResearcherAgentName)
 	}
 	if childTask.Spec.Prompt != "Investigate this" {
 		t.Errorf("spec.prompt = %q, want %q", childTask.Spec.Prompt, "Investigate this")
@@ -330,21 +330,21 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
-	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "claude-coder")
-	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testClaudeCoderName)
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
 
 	maxTurns := int32(100)
 	agentTask := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "claude-coder",
-			Namespace: "default",
+			Name:      testClaudeCoderName,
+			Namespace: defaultNamespace,
 		},
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
-				Type:             "claude",
+				Type:             runtimeTypeClaude,
 				DefaultMaxTurns:  &maxTurns,
 				DefaultAllowBash: boolPtr(true),
 			},
@@ -374,8 +374,8 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &delegateResult); err != nil {
 		t.Fatalf("failed to unmarshal result: %v", err)
 	}
-	if delegateResult.Status != "created" {
-		t.Errorf("status = %q, want %q", delegateResult.Status, "created")
+	if delegateResult.Status != GitHubPullRequestStatusCreated {
+		t.Errorf("status = %q, want %q", delegateResult.Status, GitHubPullRequestStatusCreated)
 	}
 
 	// Fetch the child task
@@ -425,19 +425,19 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_InvalidTimeout(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
-	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "claude-coder")
-	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testClaudeCoderName)
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
 
 	agentTask := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "claude-coder",
-			Namespace: "default",
+			Name:      testClaudeCoderName,
+			Namespace: defaultNamespace,
 		},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: "claude"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: runtimeTypeClaude},
 		},
 	}
 
@@ -452,17 +452,17 @@ func TestDelegateTaskTool_Execute_InvalidTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("Execute() expected error for invalid timeout")
 	}
-	if !contains(err.Error(), "invalid timeout") {
-		t.Errorf("Execute() error = %v, want error containing %q", err, "invalid timeout")
+	if !contains(err.Error(), invalidTimeoutCaseName) {
+		t.Errorf("Execute() error = %v, want error containing %q", err, invalidTimeoutCaseName)
 	}
 }
 
 func TestDelegateTaskTool_Execute_AgentNotFound(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
-	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "nonexistent-agent")
-	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, "nonexistent-agent")
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
 
 	// No agent registered in the fake client
 	k8sClient := newFakeClient(parentTask())
@@ -479,20 +479,20 @@ func TestDelegateTaskTool_Execute_AgentNotFound(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_AgentTypeNoWorkspace(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
-	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "claude-coder")
-	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testClaudeCoderName)
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
 
 	agentWithRuntime := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "claude-coder",
-			Namespace: "default",
+			Name:      testClaudeCoderName,
+			Namespace: defaultNamespace,
 		},
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
-				Type: "claude",
+				Type: runtimeTypeClaude,
 			},
 		},
 	}
@@ -541,11 +541,11 @@ func TestDelegateTaskTool_Execute_AgentTypeNoWorkspace(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_AITypeNoRuntime(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
-	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "researcher")
-	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testResearcherAgentName)
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
 
 	k8sClient := newFakeClient(parentTask(), researcherAgent())
 	tool := NewDelegateTaskTool(k8sClient)
@@ -597,8 +597,8 @@ func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
 	// Create a prior task in the fake client
 	prior := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "prior-task-1",
-			Namespace: "default",
+			Name:      testPriorTaskName,
+			Namespace: defaultNamespace,
 			UID:       "prior-uid",
 			Labels: map[string]string{
 				labels.LabelIteration:      "1",
@@ -611,7 +611,7 @@ func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
 					GitRepo: "https://github.com/example/repo",
-					Branch:  "main",
+					Branch:  testBranch,
 				},
 			},
 		},
@@ -626,16 +626,13 @@ func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
 	fakeClient := newFakeClient(parent, agent, prior)
 	tool := NewDelegateTaskTool(fakeClient)
 
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
-	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "researcher")
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testResearcherAgentName)
 
 	args, _ := json.Marshal(map[string]any{
-		"agent":      "researcher",
-		"prompt":     "fix the bug",
-		"prior_task": "prior-task-1",
-		"feedback":   "Add error handling",
+		"agent": testResearcherAgentName, promptField: "fix the bug", priorTaskField: testPriorTaskName, "feedback": "Add error handling",
 	})
 
 	result, err := tool.Execute(context.Background(), args)
@@ -647,14 +644,14 @@ func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &delegateResult); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
 	}
-	if delegateResult.Status != "created" {
+	if delegateResult.Status != GitHubPullRequestStatusCreated {
 		t.Errorf("expected status 'created', got %q", delegateResult.Status)
 	}
 
 	// Verify the child task was created with PriorTaskRef
 	childTask := &corev1alpha1.Task{}
 	if err := fakeClient.Get(context.Background(), apitypes.NamespacedName{
-		Name: delegateResult.TaskName, Namespace: "default",
+		Name: delegateResult.TaskName, Namespace: defaultNamespace,
 	}, childTask); err != nil {
 		t.Fatalf("get child task: %v", err)
 	}
@@ -662,7 +659,7 @@ func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
 	if childTask.Spec.PriorTaskRef == nil {
 		t.Fatal("expected PriorTaskRef to be set")
 	}
-	if childTask.Spec.PriorTaskRef.Name != "prior-task-1" {
+	if childTask.Spec.PriorTaskRef.Name != testPriorTaskName {
 		t.Errorf("expected PriorTaskRef.Name 'prior-task-1', got %q", childTask.Spec.PriorTaskRef.Name)
 	}
 
@@ -698,15 +695,13 @@ func TestDelegateTaskTool_Execute_FeedbackOnly(t *testing.T) {
 	fakeClient := newFakeClient(parent, agent)
 	tool := NewDelegateTaskTool(fakeClient)
 
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
-	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "researcher")
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testResearcherAgentName)
 
 	args, _ := json.Marshal(map[string]any{
-		"agent":    "researcher",
-		"prompt":   "implement feature",
-		"feedback": "Use dependency injection",
+		"agent": testResearcherAgentName, promptField: "implement feature", "feedback": "Use dependency injection",
 	})
 
 	result, err := tool.Execute(context.Background(), args)
@@ -720,7 +715,7 @@ func TestDelegateTaskTool_Execute_FeedbackOnly(t *testing.T) {
 	// Verify the child task was created with feedback in prompt
 	childTask := &corev1alpha1.Task{}
 	_ = fakeClient.Get(context.Background(), apitypes.NamespacedName{
-		Name: delegateResult.TaskName, Namespace: "default",
+		Name: delegateResult.TaskName, Namespace: defaultNamespace,
 	}, childTask)
 
 	if !strings.Contains(childTask.Spec.Prompt, "FEEDBACK FROM REVIEW") {
@@ -733,20 +728,20 @@ func TestDelegateTaskTool_Execute_FeedbackOnly(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_PushBranch(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
-	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "claude-coder")
-	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testClaudeCoderName)
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
 
 	agentWithRuntime := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "claude-coder",
-			Namespace: "default",
+			Name:      testClaudeCoderName,
+			Namespace: defaultNamespace,
 		},
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
-				Type: "claude",
+				Type: runtimeTypeClaude,
 			},
 		},
 	}
@@ -775,7 +770,7 @@ func TestDelegateTaskTool_Execute_PushBranch(t *testing.T) {
 
 	childTask := &corev1alpha1.Task{}
 	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
-		Name: delegateResult.TaskName, Namespace: "default",
+		Name: delegateResult.TaskName, Namespace: defaultNamespace,
 	}, childTask); err != nil {
 		t.Fatalf("failed to get child task: %v", err)
 	}
@@ -787,8 +782,8 @@ func TestDelegateTaskTool_Execute_PushBranch(t *testing.T) {
 	if ws.PushBranch != "feature/edit-message" {
 		t.Errorf("pushBranch = %q, want %q", ws.PushBranch, "feature/edit-message")
 	}
-	if ws.GitRepo != "https://github.com/sozercan/ayna" {
-		t.Errorf("gitRepo = %q, want %q", ws.GitRepo, "https://github.com/sozercan/ayna")
+	if ws.GitRepo != testSozercanAynaRepoURL {
+		t.Errorf("gitRepo = %q, want %q", ws.GitRepo, testSozercanAynaRepoURL)
 	}
 	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != "git-credentials" {
 		t.Errorf("gitSecretRef = %v, want git-credentials", ws.GitSecretRef)
@@ -796,20 +791,20 @@ func TestDelegateTaskTool_Execute_PushBranch(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_AutoDiscoversGitSecretRef(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
-	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "copilot-coder")
-	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, "copilot-coder")
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
 
 	agentWithRuntime := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "copilot-coder",
-			Namespace: "default",
+			Namespace: defaultNamespace,
 		},
 		Spec: corev1alpha1.AgentSpec{
 			Runtime:   &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
-			SecretRef: &corev1.LocalObjectReference{Name: "custom-copilot-secret"},
+			SecretRef: &corev1.LocalObjectReference{Name: testCustomCopilotSecretName},
 		},
 	}
 
@@ -836,7 +831,7 @@ func TestDelegateTaskTool_Execute_AutoDiscoversGitSecretRef(t *testing.T) {
 
 	childTask := &corev1alpha1.Task{}
 	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
-		Name: delegateResult.TaskName, Namespace: "default",
+		Name: delegateResult.TaskName, Namespace: defaultNamespace,
 	}, childTask); err != nil {
 		t.Fatalf("failed to get child task: %v", err)
 	}
@@ -847,17 +842,17 @@ func TestDelegateTaskTool_Execute_AutoDiscoversGitSecretRef(t *testing.T) {
 	if childTask.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
 		t.Fatal("expected gitSecretRef to be auto-populated")
 	}
-	if childTask.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "custom-copilot-secret" {
-		t.Errorf("gitSecretRef = %q, want %q", childTask.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "custom-copilot-secret")
+	if childTask.Spec.AgentRuntime.Workspace.GitSecretRef.Name != testCustomCopilotSecretName {
+		t.Errorf("gitSecretRef = %q, want %q", childTask.Spec.AgentRuntime.Workspace.GitSecretRef.Name, testCustomCopilotSecretName)
 	}
 }
 
 func TestDelegateTaskTool_Execute_AutoRetry(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
-	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "researcher")
-	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testResearcherAgentName)
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
 
 	k8sClient := newFakeClient(parentTask(), researcherAgent())
 	tool := NewDelegateTaskTool(k8sClient)
@@ -876,7 +871,7 @@ func TestDelegateTaskTool_Execute_AutoRetry(t *testing.T) {
 	// Fetch child task and verify annotations
 	childTask := &corev1alpha1.Task{}
 	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
-		Name: delegateResult.TaskName, Namespace: "default",
+		Name: delegateResult.TaskName, Namespace: defaultNamespace,
 	}, childTask); err != nil {
 		t.Fatalf("get child task: %v", err)
 	}
@@ -896,11 +891,11 @@ func TestDelegateTaskTool_Execute_AutoRetry(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_AutoRetryDefault(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
-	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "researcher")
-	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testResearcherAgentName)
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
 
 	k8sClient := newFakeClient(parentTask(), researcherAgent())
 	tool := NewDelegateTaskTool(k8sClient)
@@ -919,7 +914,7 @@ func TestDelegateTaskTool_Execute_AutoRetryDefault(t *testing.T) {
 
 	childTask := &corev1alpha1.Task{}
 	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
-		Name: delegateResult.TaskName, Namespace: "default",
+		Name: delegateResult.TaskName, Namespace: defaultNamespace,
 	}, childTask); err != nil {
 		t.Fatalf("get child task: %v", err)
 	}
@@ -930,11 +925,11 @@ func TestDelegateTaskTool_Execute_AutoRetryDefault(t *testing.T) {
 }
 
 func TestDelegateTaskTool_Execute_NoAutoRetry(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_COORDINATION_DEPTH", "0")
-	t.Setenv("ORKA_COORDINATION_ALLOWED_AGENTS", "researcher")
-	t.Setenv("ORKA_COORDINATION_MAX_DEPTH", "3")
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testResearcherAgentName)
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
 
 	k8sClient := newFakeClient(parentTask(), researcherAgent())
 	tool := NewDelegateTaskTool(k8sClient)
@@ -952,7 +947,7 @@ func TestDelegateTaskTool_Execute_NoAutoRetry(t *testing.T) {
 
 	childTask := &corev1alpha1.Task{}
 	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
-		Name: delegateResult.TaskName, Namespace: "default",
+		Name: delegateResult.TaskName, Namespace: defaultNamespace,
 	}, childTask); err != nil {
 		t.Fatalf("get child task: %v", err)
 	}

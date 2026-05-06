@@ -17,10 +17,10 @@ func TestSendMessageTool(t *testing.T) {
 	}
 
 	t.Run("missing env vars returns error", func(t *testing.T) {
-		t.Setenv("ORKA_CONTROLLER_URL", "")
-		t.Setenv("ORKA_TASK_NAME", "")
-		t.Setenv("ORKA_TASK_NAMESPACE", "")
-		t.Setenv("ORKA_PARENT_TASK", "")
+		t.Setenv(envOrkaControllerURL, "")
+		t.Setenv(envOrkaTaskName, "")
+		t.Setenv(envOrkaTaskNamespace, "")
+		t.Setenv(envOrkaParentTask, "")
 
 		args, _ := json.Marshal(SendMessageArgs{ToTask: "peer", Content: "hi"})
 		_, err := tool.Execute(context.Background(), args)
@@ -30,10 +30,10 @@ func TestSendMessageTool(t *testing.T) {
 	})
 
 	t.Run("missing required args returns error", func(t *testing.T) {
-		t.Setenv("ORKA_CONTROLLER_URL", "http://localhost")
-		t.Setenv("ORKA_TASK_NAME", "task-a")
-		t.Setenv("ORKA_TASK_NAMESPACE", "ns")
-		t.Setenv("ORKA_PARENT_TASK", "parent")
+		t.Setenv(envOrkaControllerURL, localhostURL)
+		t.Setenv(envOrkaTaskName, testTaskAName)
+		t.Setenv(envOrkaTaskNamespace, "ns")
+		t.Setenv(envOrkaParentTask, "parent")
 
 		args, _ := json.Marshal(SendMessageArgs{ToTask: "", Content: "hi"})
 		_, err := tool.Execute(context.Background(), args)
@@ -59,12 +59,12 @@ func TestSendMessageTool(t *testing.T) {
 		}))
 		defer server.Close()
 
-		t.Setenv("ORKA_CONTROLLER_URL", server.URL)
-		t.Setenv("ORKA_TASK_NAME", "task-a")
-		t.Setenv("ORKA_TASK_NAMESPACE", "default")
-		t.Setenv("ORKA_PARENT_TASK", "coordinator")
+		t.Setenv(envOrkaControllerURL, server.URL)
+		t.Setenv(envOrkaTaskName, testTaskAName)
+		t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+		t.Setenv(envOrkaParentTask, testCoordinatorTaskName)
 
-		args, _ := json.Marshal(SendMessageArgs{ToTask: "task-b", Content: "found a bug"})
+		args, _ := json.Marshal(SendMessageArgs{ToTask: testTaskBName, Content: "found a bug"})
 		result, err := tool.Execute(context.Background(), args)
 		if err != nil {
 			t.Fatalf("Execute: %v", err)
@@ -75,14 +75,14 @@ func TestSendMessageTool(t *testing.T) {
 
 		mu.Lock()
 		defer mu.Unlock()
-		if receivedBody["fromTask"] != "task-a" {
-			t.Errorf("fromTask = %q, want %q", receivedBody["fromTask"], "task-a")
+		if receivedBody["fromTask"] != testTaskAName {
+			t.Errorf("fromTask = %q, want %q", receivedBody["fromTask"], testTaskAName)
 		}
-		if receivedBody["toTask"] != "task-b" {
-			t.Errorf("toTask = %q, want %q", receivedBody["toTask"], "task-b")
+		if receivedBody["toTask"] != testTaskBName {
+			t.Errorf("toTask = %q, want %q", receivedBody["toTask"], testTaskBName)
 		}
-		if receivedBody["parentTask"] != "coordinator" {
-			t.Errorf("parentTask = %q, want %q", receivedBody["parentTask"], "coordinator")
+		if receivedBody["parentTask"] != testCoordinatorTaskName {
+			t.Errorf("parentTask = %q, want %q", receivedBody["parentTask"], testCoordinatorTaskName)
 		}
 	})
 
@@ -92,10 +92,10 @@ func TestSendMessageTool(t *testing.T) {
 		}))
 		defer server.Close()
 
-		t.Setenv("ORKA_CONTROLLER_URL", server.URL)
-		t.Setenv("ORKA_TASK_NAME", "task-a")
-		t.Setenv("ORKA_TASK_NAMESPACE", "default")
-		t.Setenv("ORKA_PARENT_TASK", "coordinator")
+		t.Setenv(envOrkaControllerURL, server.URL)
+		t.Setenv(envOrkaTaskName, testTaskAName)
+		t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+		t.Setenv(envOrkaParentTask, testCoordinatorTaskName)
 
 		args, _ := json.Marshal(SendMessageArgs{ToTask: "*", Content: "heads up everyone"})
 		result, err := tool.Execute(context.Background(), args)
@@ -114,12 +114,12 @@ func TestSendMessageTool(t *testing.T) {
 		}))
 		defer server.Close()
 
-		t.Setenv("ORKA_CONTROLLER_URL", server.URL)
-		t.Setenv("ORKA_TASK_NAME", "task-a")
-		t.Setenv("ORKA_TASK_NAMESPACE", "default")
-		t.Setenv("ORKA_PARENT_TASK", "coordinator")
+		t.Setenv(envOrkaControllerURL, server.URL)
+		t.Setenv(envOrkaTaskName, testTaskAName)
+		t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+		t.Setenv(envOrkaParentTask, testCoordinatorTaskName)
 
-		args, _ := json.Marshal(SendMessageArgs{ToTask: "task-b", Content: "hi"})
+		args, _ := json.Marshal(SendMessageArgs{ToTask: testTaskBName, Content: "hi"})
 		_, err := tool.Execute(context.Background(), args)
 		if err == nil {
 			t.Fatal("expected error for 500 response")
@@ -130,15 +130,15 @@ func TestSendMessageTool(t *testing.T) {
 func TestCheckMessagesTool(t *testing.T) {
 	tool := NewCheckMessagesTool()
 
-	if tool.Name() != "check_messages" {
-		t.Errorf("Name() = %q, want %q", tool.Name(), "check_messages")
+	if tool.Name() != checkMessagesToolName {
+		t.Errorf("Name() = %q, want %q", tool.Name(), checkMessagesToolName)
 	}
 
 	t.Run("missing env vars returns error", func(t *testing.T) {
-		t.Setenv("ORKA_CONTROLLER_URL", "")
-		t.Setenv("ORKA_TASK_NAME", "")
-		t.Setenv("ORKA_TASK_NAMESPACE", "")
-		t.Setenv("ORKA_PARENT_TASK", "")
+		t.Setenv(envOrkaControllerURL, "")
+		t.Setenv(envOrkaTaskName, "")
+		t.Setenv(envOrkaTaskNamespace, "")
+		t.Setenv(envOrkaParentTask, "")
 
 		_, err := tool.Execute(context.Background(), nil)
 		if err == nil {
@@ -153,35 +153,35 @@ func TestCheckMessagesTool(t *testing.T) {
 		}))
 		defer server.Close()
 
-		t.Setenv("ORKA_CONTROLLER_URL", server.URL)
-		t.Setenv("ORKA_TASK_NAME", "task-b")
-		t.Setenv("ORKA_TASK_NAMESPACE", "default")
-		t.Setenv("ORKA_PARENT_TASK", "coordinator")
+		t.Setenv(envOrkaControllerURL, server.URL)
+		t.Setenv(envOrkaTaskName, testTaskBName)
+		t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+		t.Setenv(envOrkaParentTask, testCoordinatorTaskName)
 
 		result, err := tool.Execute(context.Background(), nil)
 		if err != nil {
 			t.Fatalf("Execute: %v", err)
 		}
-		if result != "No new messages" {
-			t.Errorf("result = %q, want %q", result, "No new messages")
+		if result != noNewMessagesText {
+			t.Errorf("result = %q, want %q", result, noNewMessagesText)
 		}
 	})
 
 	t.Run("returns messages", func(t *testing.T) {
 		msgs := `[{"id":1,"fromTask":"task-a","content":"hello"}]`
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Query().Get("markRead") != "true" {
-				t.Errorf("markRead = %q, want %q", r.URL.Query().Get("markRead"), "true")
+			if r.URL.Query().Get("markRead") != trueStr {
+				t.Errorf("markRead = %q, want %q", r.URL.Query().Get("markRead"), trueStr)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(msgs)) //nolint:errcheck
 		}))
 		defer server.Close()
 
-		t.Setenv("ORKA_CONTROLLER_URL", server.URL)
-		t.Setenv("ORKA_TASK_NAME", "task-b")
-		t.Setenv("ORKA_TASK_NAMESPACE", "default")
-		t.Setenv("ORKA_PARENT_TASK", "coordinator")
+		t.Setenv(envOrkaControllerURL, server.URL)
+		t.Setenv(envOrkaTaskName, testTaskBName)
+		t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+		t.Setenv(envOrkaParentTask, testCoordinatorTaskName)
 
 		result, err := tool.Execute(context.Background(), nil)
 		if err != nil {
@@ -194,18 +194,18 @@ func TestCheckMessagesTool(t *testing.T) {
 
 	t.Run("mark_read false passes through", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Query().Get("markRead") != "false" {
-				t.Errorf("markRead = %q, want %q", r.URL.Query().Get("markRead"), "false")
+			if r.URL.Query().Get("markRead") != falseStr {
+				t.Errorf("markRead = %q, want %q", r.URL.Query().Get("markRead"), falseStr)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte("[]")) //nolint:errcheck
 		}))
 		defer server.Close()
 
-		t.Setenv("ORKA_CONTROLLER_URL", server.URL)
-		t.Setenv("ORKA_TASK_NAME", "task-b")
-		t.Setenv("ORKA_TASK_NAMESPACE", "default")
-		t.Setenv("ORKA_PARENT_TASK", "coordinator")
+		t.Setenv(envOrkaControllerURL, server.URL)
+		t.Setenv(envOrkaTaskName, testTaskBName)
+		t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+		t.Setenv(envOrkaParentTask, testCoordinatorTaskName)
 
 		markRead := false
 		args, _ := json.Marshal(CheckMessagesArgs{MarkRead: &markRead})

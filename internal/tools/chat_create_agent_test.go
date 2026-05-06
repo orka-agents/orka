@@ -64,7 +64,7 @@ func TestChatCreateAgentTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 func TestParseRuntimeConfig_ResolvesExplicitSecretRef(t *testing.T) {
 	fc := newFakeClient(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "claude-credentials",
+			Name:      claudeCredentialsSecretName,
 			Namespace: defaultNamespace,
 		},
 	})
@@ -74,12 +74,7 @@ func TestParseRuntimeConfig_ResolvesExplicitSecretRef(t *testing.T) {
 		},
 	}
 
-	args := map[string]any{
-		"runtime": map[string]any{
-			"type":      "claude",
-			"secretRef": "claude-credentials",
-		},
-	}
+	args := map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: runtimeTypeClaude, secretRefField: claudeCredentialsSecretName}}
 
 	if errResult, ok := parseRuntimeConfig(context.Background(), fc, defaultNamespace, args, agent); !ok {
 		t.Fatalf("parseRuntimeConfig returned error: %s", errResult)
@@ -88,14 +83,14 @@ func TestParseRuntimeConfig_ResolvesExplicitSecretRef(t *testing.T) {
 	if agent.Spec.Runtime == nil {
 		t.Fatal("agent.Spec.Runtime is nil")
 	}
-	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType("claude") {
-		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, "claude")
+	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType(runtimeTypeClaude) {
+		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, runtimeTypeClaude)
 	}
 	if agent.Spec.SecretRef == nil {
 		t.Fatal("agent.Spec.SecretRef is nil")
 	}
-	if agent.Spec.SecretRef.Name != "claude-credentials" {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "claude-credentials")
+	if agent.Spec.SecretRef.Name != claudeCredentialsSecretName {
+		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, claudeCredentialsSecretName)
 	}
 	if agent.Spec.ProviderRef != nil {
 		t.Errorf("providerRef = %v, want nil", agent.Spec.ProviderRef)
@@ -105,7 +100,7 @@ func TestParseRuntimeConfig_ResolvesExplicitSecretRef(t *testing.T) {
 func TestParseRuntimeConfig_AutoDiscoversSecretRef(t *testing.T) {
 	fc := newFakeClient(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "claude-api-key",
+			Name:      claudeAPIKeySecretName,
 			Namespace: defaultNamespace,
 		},
 	})
@@ -115,11 +110,7 @@ func TestParseRuntimeConfig_AutoDiscoversSecretRef(t *testing.T) {
 		},
 	}
 
-	args := map[string]any{
-		"runtime": map[string]any{
-			"type": "claude",
-		},
-	}
+	args := map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: runtimeTypeClaude}}
 
 	if errResult, ok := parseRuntimeConfig(context.Background(), fc, defaultNamespace, args, agent); !ok {
 		t.Fatalf("parseRuntimeConfig returned error: %s", errResult)
@@ -128,15 +119,15 @@ func TestParseRuntimeConfig_AutoDiscoversSecretRef(t *testing.T) {
 	if agent.Spec.SecretRef == nil {
 		t.Fatal("agent.Spec.SecretRef is nil")
 	}
-	if agent.Spec.SecretRef.Name != "claude-api-key" {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "claude-api-key")
+	if agent.Spec.SecretRef.Name != claudeAPIKeySecretName {
+		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, claudeAPIKeySecretName)
 	}
 }
 
 func TestParseRuntimeConfig_AutoDiscoversCodexSecretRef(t *testing.T) {
 	fc := newFakeClient(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "codex-runtime-copilot",
+			Name:      codexRuntimeCopilotSecretName,
 			Namespace: defaultNamespace,
 		},
 	})
@@ -146,11 +137,7 @@ func TestParseRuntimeConfig_AutoDiscoversCodexSecretRef(t *testing.T) {
 		},
 	}
 
-	args := map[string]any{
-		"runtime": map[string]any{
-			"type": "codex",
-		},
-	}
+	args := map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: "codex"}}
 
 	if errResult, ok := parseRuntimeConfig(context.Background(), fc, defaultNamespace, args, agent); !ok {
 		t.Fatalf("parseRuntimeConfig returned error: %s", errResult)
@@ -165,15 +152,15 @@ func TestParseRuntimeConfig_AutoDiscoversCodexSecretRef(t *testing.T) {
 	if agent.Spec.SecretRef == nil {
 		t.Fatal("agent.Spec.SecretRef is nil")
 	}
-	if agent.Spec.SecretRef.Name != "codex-runtime-copilot" {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "codex-runtime-copilot")
+	if agent.Spec.SecretRef.Name != codexRuntimeCopilotSecretName {
+		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, codexRuntimeCopilotSecretName)
 	}
 }
 
 func TestParseRuntimeConfig_AppliesRuntimeDefaults(t *testing.T) {
 	fc := newFakeClient(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "claude-api-key",
+			Name:      claudeAPIKeySecretName,
 			Namespace: defaultNamespace,
 		},
 	})
@@ -183,13 +170,10 @@ func TestParseRuntimeConfig_AppliesRuntimeDefaults(t *testing.T) {
 		},
 	}
 
-	args := map[string]any{
-		"runtime": map[string]any{
-			"type":                "claude",
-			"defaultMaxTurns":     float64(15),
-			"defaultAllowedTools": []any{"Read", "Write", "Bash"},
-			"defaultAllowBash":    false,
-		},
+	args := map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: runtimeTypeClaude, "defaultMaxTurns": float64(15),
+		"defaultAllowedTools": []any{"Read", "Write", "Bash"},
+		"defaultAllowBash":    false,
+	},
 	}
 
 	if errResult, ok := parseRuntimeConfig(context.Background(), fc, defaultNamespace, args, agent); !ok {
@@ -213,7 +197,7 @@ func TestParseRuntimeConfig_AppliesRuntimeDefaults(t *testing.T) {
 func TestParseRuntimeConfig_AcceptsCustomSecretRef(t *testing.T) {
 	fc := newFakeClient(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "runtime-creds",
+			Name:      testRuntimeCredsSecretName,
 			Namespace: defaultNamespace,
 		},
 	})
@@ -223,12 +207,7 @@ func TestParseRuntimeConfig_AcceptsCustomSecretRef(t *testing.T) {
 		},
 	}
 
-	args := map[string]any{
-		"runtime": map[string]any{
-			"type":      "claude",
-			"secretRef": "runtime-creds",
-		},
-	}
+	args := map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: runtimeTypeClaude, secretRefField: testRuntimeCredsSecretName}}
 
 	if errResult, ok := parseRuntimeConfig(context.Background(), fc, defaultNamespace, args, agent); !ok {
 		t.Fatalf("parseRuntimeConfig returned error: %s", errResult)
@@ -236,8 +215,8 @@ func TestParseRuntimeConfig_AcceptsCustomSecretRef(t *testing.T) {
 	if agent.Spec.SecretRef == nil {
 		t.Fatal("agent.Spec.SecretRef is nil")
 	}
-	if agent.Spec.SecretRef.Name != "runtime-creds" {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "runtime-creds")
+	if agent.Spec.SecretRef.Name != testRuntimeCredsSecretName {
+		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, testRuntimeCredsSecretName)
 	}
 }
 
@@ -249,18 +228,13 @@ func TestParseRuntimeConfig_RejectsMissingSecretRef(t *testing.T) {
 		},
 	}
 
-	args := map[string]any{
-		"runtime": map[string]any{
-			"type":      "claude",
-			"secretRef": "runtime-creds",
-		},
-	}
+	args := map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: runtimeTypeClaude, secretRefField: testRuntimeCredsSecretName}}
 
 	errResult, ok := parseRuntimeConfig(context.Background(), fc, defaultNamespace, args, agent)
 	if ok {
 		t.Fatal("expected parseRuntimeConfig to fail")
 	}
-	if !strings.Contains(errResult, "not found") {
+	if !strings.Contains(errResult, notFoundMessage) {
 		t.Fatalf("error = %q, want it to mention not found", errResult)
 	}
 }
@@ -268,14 +242,14 @@ func TestParseRuntimeConfig_RejectsMissingSecretRef(t *testing.T) {
 func TestParseCoordinationConfig_EnabledClearsRuntimeAndSecretRef(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		Spec: corev1alpha1.AgentSpec{
-			Runtime:   &corev1alpha1.AgentCLIRuntime{Type: "claude"},
-			SecretRef: &corev1.LocalObjectReference{Name: "runtime-creds"},
+			Runtime:   &corev1alpha1.AgentCLIRuntime{Type: runtimeTypeClaude},
+			SecretRef: &corev1.LocalObjectReference{Name: testRuntimeCredsSecretName},
 		},
 	}
 
 	args := map[string]any{
 		"coordination": map[string]any{
-			"enabled": true,
+			enabledString: true,
 		},
 	}
 

@@ -81,7 +81,7 @@ func NewWaitForTasksTool(k8sClient client.Client) *WaitForTasksTool {
 
 // Name returns the tool name
 func (t *WaitForTasksTool) Name() string {
-	return "wait_for_tasks"
+	return waitForTasksToolName
 }
 
 // Description returns the tool description
@@ -95,7 +95,7 @@ func (t *WaitForTasksTool) Parameters() json.RawMessage {
 		"type": "object",
 		"properties": {
 			"tasks": {
-				"type": "array",
+				"type": "` + jsonSchemaTypeArray + `",
 				"items": {"type": "string"},
 				"description": "Child task names to wait for"
 			},
@@ -129,7 +129,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 		return "", fmt.Errorf("invalid timeout %q: %w", timeoutStr, err)
 	}
 
-	ns := os.Getenv("ORKA_TASK_NAMESPACE")
+	ns := os.Getenv(envOrkaTaskNamespace)
 	if ns == "" {
 		return "", fmt.Errorf("ORKA_TASK_NAMESPACE environment variable is not set")
 	}
@@ -154,7 +154,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			var task corev1alpha1.Task
 			err := t.k8sClient.Get(ctx, types.NamespacedName{Name: taskName, Namespace: ns}, &task)
 			if err != nil {
-				results[taskName].Phase = "Error"
+				results[taskName].Phase = taskPhaseErrorString
 				results[taskName].Result = fmt.Sprintf("error: %v", err)
 				continue
 			}
@@ -289,7 +289,7 @@ const saTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
 // fetchTaskResult fetches a task result from the controller via HTTP GET.
 func fetchTaskResult(ctx context.Context, taskName string) (string, error) {
-	controllerURL := os.Getenv("ORKA_CONTROLLER_URL")
+	controllerURL := os.Getenv(envOrkaControllerURL)
 	if controllerURL == "" {
 		return "", fmt.Errorf("ORKA_CONTROLLER_URL is not set")
 	}

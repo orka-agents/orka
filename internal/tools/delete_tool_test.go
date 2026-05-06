@@ -19,8 +19,8 @@ import (
 
 func TestDeleteToolTool_Name(t *testing.T) {
 	tool := &DeleteToolTool{}
-	if got := tool.Name(); got != "delete_tool" {
-		t.Errorf("Name() = %v, want %v", got, "delete_tool")
+	if got := tool.Name(); got != deleteToolToolName {
+		t.Errorf("Name() = %v, want %v", got, deleteToolToolName)
 	}
 }
 
@@ -41,14 +41,14 @@ func TestDeleteToolTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	for _, key := range []string{"name", "namespace"} {
+	for _, key := range []string{nameField, namespaceField} {
 		if _, ok := props[key]; !ok {
 			t.Errorf("missing %s property", key)
 		}
@@ -58,14 +58,14 @@ func TestDeleteToolTool_Parameters(t *testing.T) {
 func TestDeleteToolTool_Execute(t *testing.T) {
 	existingTool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "my-tool",
-			Namespace: "default",
+			Name:      testMyToolName,
+			Namespace: defaultNamespace,
 		},
 		Spec: corev1alpha1.ToolSpec{
 			Description: "test tool",
 			HTTP: corev1alpha1.HTTPExecution{
-				URL:    "http://example.com",
-				Method: "POST",
+				URL:    exampleDotComURL,
+				Method: httpMethodPostString,
 			},
 		},
 	}
@@ -79,19 +79,19 @@ func TestDeleteToolTool_Execute(t *testing.T) {
 	}{
 		{
 			name: "success - tool deleted",
-			args: map[string]any{"name": "my-tool"},
+			args: map[string]any{nameField: testMyToolName},
 		},
 		{
-			name:    "missing name",
+			name:    missingNameCaseName,
 			args:    map[string]any{},
 			wantErr: true,
 			errType: errTypeInvalidArgs,
 		},
 		{
 			name:    "tool not found",
-			args:    map[string]any{"name": "nonexistent"},
+			args:    map[string]any{nameField: testNonexistentName},
 			wantErr: true,
-			errType: "not_found",
+			errType: errTypeNotFound,
 		},
 	}
 
@@ -101,7 +101,7 @@ func TestDeleteToolTool_Execute(t *testing.T) {
 			if tt.name == "success - tool deleted" {
 				fc = newFakeClient(existingTool.DeepCopy())
 			}
-			tc := &ToolContext{Client: fc, Namespace: "default"}
+			tc := &ToolContext{Client: fc, Namespace: defaultNamespace}
 			ctx := WithToolContext(context.Background(), tc)
 
 			argsJSON, _ := json.Marshal(tt.args)
@@ -134,16 +134,16 @@ func TestDeleteToolTool_Execute(t *testing.T) {
 			if !ok {
 				t.Fatalf("expected data to be map, got %T", res.Data)
 			}
-			if data["name"] != "my-tool" {
-				t.Errorf("expected name 'my-tool', got %v", data["name"])
+			if data[nameField] != testMyToolName {
+				t.Errorf("expected name 'my-tool', got %v", data[nameField])
 			}
-			if data["message"] != "Tool deleted" {
-				t.Errorf("expected message 'Tool deleted', got %v", data["message"])
+			if data[messageField] != "Tool deleted" {
+				t.Errorf("expected message 'Tool deleted', got %v", data[messageField])
 			}
 
 			// Verify the tool is actually deleted
 			deleted := &corev1alpha1.Tool{}
-			err = fc.Get(context.Background(), apitypes.NamespacedName{Name: "my-tool", Namespace: "default"}, deleted)
+			err = fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyToolName, Namespace: defaultNamespace}, deleted)
 			if err == nil {
 				t.Error("expected tool to be deleted, but it still exists")
 			}
@@ -168,11 +168,11 @@ func TestDeleteToolTool_Execute_MissingToolContext(t *testing.T) {
 
 func TestDeleteToolTool_Execute_InvalidJSON(t *testing.T) {
 	fc := newFakeClient()
-	tc := &ToolContext{Client: fc, Namespace: "default"}
+	tc := &ToolContext{Client: fc, Namespace: defaultNamespace}
 	ctx := WithToolContext(context.Background(), tc)
 
 	tool := &DeleteToolTool{}
-	result, err := tool.Execute(ctx, json.RawMessage(`{invalid}`))
+	result, err := tool.Execute(ctx, json.RawMessage(invalidJSONText))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

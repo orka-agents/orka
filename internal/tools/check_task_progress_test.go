@@ -20,13 +20,13 @@ import (
 
 const (
 	errTypeInvalidArgs   = "invalid_arguments"
-	errTypeInternalError = "internal_error"
+	errTypeInternalError = internalErrorType
 )
 
 func TestCheckTaskProgressTool_Name(t *testing.T) {
 	tool := &CheckTaskProgressTool{}
-	if got := tool.Name(); got != "check_task_progress" {
-		t.Errorf("Name() = %v, want %v", got, "check_task_progress")
+	if got := tool.Name(); got != checkTaskProgressToolName {
+		t.Errorf("Name() = %v, want %v", got, checkTaskProgressToolName)
 	}
 }
 
@@ -47,14 +47,14 @@ func TestCheckTaskProgressTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	for _, key := range []string{"name", "namespace"} {
+	for _, key := range []string{nameField, namespaceField} {
 		if _, ok := props[key]; !ok {
 			t.Errorf("missing %s property", key)
 		}
@@ -65,7 +65,7 @@ func TestCheckTaskProgressTool_Execute(t *testing.T) {
 	newToolCtx := func(fc client.Client) context.Context {
 		tc := &ToolContext{
 			Client:    fc,
-			Namespace: "default",
+			Namespace: defaultNamespace,
 		}
 		return WithToolContext(context.Background(), tc)
 	}
@@ -84,8 +84,8 @@ func TestCheckTaskProgressTool_Execute(t *testing.T) {
 			objects: []client.Object{
 				&corev1alpha1.Task{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-task",
-						Namespace: "default",
+						Name:      testMyTaskName,
+						Namespace: defaultNamespace,
 					},
 					Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 					Status: corev1alpha1.TaskStatus{
@@ -104,14 +104,14 @@ func TestCheckTaskProgressTool_Execute(t *testing.T) {
 					t.Errorf("expected success, got error: %s", r.Error)
 				}
 				data := r.Data.(map[string]any)
-				if data["name"] != "my-task" {
-					t.Errorf("name = %v, want my-task", data["name"])
+				if data[nameField] != testMyTaskName {
+					t.Errorf("name = %v, want my-task", data[nameField])
 				}
-				if data["phase"] != "Running" {
-					t.Errorf("phase = %v, want Running", data["phase"])
+				if data[phaseField] != taskPhaseRunningString {
+					t.Errorf("phase = %v, want Running", data[phaseField])
 				}
-				if data["message"] != "Processing" {
-					t.Errorf("message = %v, want Processing", data["message"])
+				if data[messageField] != "Processing" {
+					t.Errorf("message = %v, want Processing", data[messageField])
 				}
 				if _, ok := data["duration"]; !ok {
 					t.Error("expected duration to be set for running task with start time")
@@ -125,7 +125,7 @@ func TestCheckTaskProgressTool_Execute(t *testing.T) {
 				&corev1alpha1.Task{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "cond-task",
-						Namespace: "default",
+						Namespace: defaultNamespace,
 					},
 					Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 					Status: corev1alpha1.TaskStatus{
@@ -151,8 +151,8 @@ func TestCheckTaskProgressTool_Execute(t *testing.T) {
 					t.Errorf("expected success, got error: %s", r.Error)
 				}
 				data := r.Data.(map[string]any)
-				if data["phase"] != "Succeeded" {
-					t.Errorf("phase = %v, want Succeeded", data["phase"])
+				if data[phaseField] != taskPhaseSucceededString {
+					t.Errorf("phase = %v, want Succeeded", data[phaseField])
 				}
 				conditions, ok := data["conditions"].([]any)
 				if !ok {
@@ -162,8 +162,8 @@ func TestCheckTaskProgressTool_Execute(t *testing.T) {
 					t.Fatalf("expected 1 condition, got %d", len(conditions))
 				}
 				cond := conditions[0].(map[string]any)
-				if cond["type"] != "Ready" {
-					t.Errorf("condition type = %v, want Ready", cond["type"])
+				if cond[jsonSchemaTypeField] != "Ready" {
+					t.Errorf("condition type = %v, want Ready", cond[jsonSchemaTypeField])
 				}
 			},
 		},
@@ -174,7 +174,7 @@ func TestCheckTaskProgressTool_Execute(t *testing.T) {
 				&corev1alpha1.Task{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "ns-task",
-						Namespace: "prod",
+						Namespace: testProdNamespace,
 					},
 					Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 					Status: corev1alpha1.TaskStatus{
@@ -191,13 +191,13 @@ func TestCheckTaskProgressTool_Execute(t *testing.T) {
 					t.Errorf("expected success, got error: %s", r.Error)
 				}
 				data := r.Data.(map[string]any)
-				if data["namespace"] != "prod" {
-					t.Errorf("namespace = %v, want prod", data["namespace"])
+				if data[namespaceField] != testProdNamespace {
+					t.Errorf("namespace = %v, want prod", data[namespaceField])
 				}
 			},
 		},
 		{
-			name: "missing name",
+			name: missingNameCaseName,
 			args: json.RawMessage(`{}`),
 			checkResult: func(t *testing.T, result string) {
 				var r ChatToolResult
@@ -213,7 +213,7 @@ func TestCheckTaskProgressTool_Execute(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid JSON args",
+			name: invalidJSONArgsCaseName,
 			args: json.RawMessage(`{bad`),
 			checkResult: func(t *testing.T, result string) {
 				var r ChatToolResult
@@ -229,7 +229,7 @@ func TestCheckTaskProgressTool_Execute(t *testing.T) {
 			},
 		},
 		{
-			name: "task not found",
+			name: taskNotFoundCaseName,
 			args: json.RawMessage(`{"name":"nonexistent"}`),
 			checkResult: func(t *testing.T, result string) {
 				var r ChatToolResult
@@ -239,7 +239,7 @@ func TestCheckTaskProgressTool_Execute(t *testing.T) {
 				if r.Success {
 					t.Error("expected failure for not found")
 				}
-				if r.ErrorType != "not_found" {
+				if r.ErrorType != errTypeNotFound {
 					t.Errorf("errorType = %v, want not_found", r.ErrorType)
 				}
 			},

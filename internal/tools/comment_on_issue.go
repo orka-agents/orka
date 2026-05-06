@@ -64,28 +64,7 @@ func (t *CommentOnIssueTool) Description() string {
 
 // Parameters returns the JSON schema for tool parameters.
 func (t *CommentOnIssueTool) Parameters() json.RawMessage {
-	schema := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"task_name": map[string]any{
-				"type":        "string",
-				"description": "Name of a task whose workspace config has the repo and git credentials",
-			},
-			"repo_url": map[string]any{
-				"type":        "string",
-				"description": "Direct GitHub repository URL (e.g. 'https://github.com/owner/repo'). Falls back to ORKA_GIT_REPO env var if not provided.",
-			},
-			"issue_number": map[string]any{
-				"type":        "integer",
-				"description": "GitHub issue number to comment on",
-			},
-			"body": map[string]any{
-				"type":        "string",
-				"description": "Comment text to post on the issue (Markdown supported)",
-			},
-		},
-		"required": []string{"issue_number", "body"},
-	}
+	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: workspaceTaskDescription}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Direct GitHub repository URL (e.g. 'https://github.com/owner/repo'). Falls back to ORKA_GIT_REPO env var if not provided."}, githubIssueNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub issue number to comment on"}, githubBodyField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Comment text to post on the issue (Markdown supported)"}}, jsonSchemaRequiredField: []string{githubIssueNumberField, githubBodyField}}
 	data, _ := json.Marshal(schema)
 	return data
 }
@@ -119,7 +98,7 @@ func (t *CommentOnIssueTool) Execute(ctx context.Context, argsJSON json.RawMessa
 	result := CommentOnIssueResult{
 		CommentID: commentID,
 		HTMLURL:   htmlURL,
-		Status:    "created",
+		Status:    GitHubPullRequestStatusCreated,
 	}
 	resultJSON, _ := json.Marshal(result)
 	return string(resultJSON), nil
@@ -134,7 +113,7 @@ func postIssueComment(ctx context.Context, token, owner, repo string, issueNumbe
 	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", baseURL, owner, repo, issueNumber)
 
 	payload := map[string]string{
-		"body": body,
+		githubBodyField: body,
 	}
 	payloadBytes, _ := json.Marshal(payload)
 

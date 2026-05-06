@@ -16,8 +16,8 @@ import (
 
 func TestWebFetchTool_Name(t *testing.T) {
 	tool := NewWebFetchTool()
-	if got := tool.Name(); got != "web_fetch" {
-		t.Errorf("Name() = %v, want %v", got, "web_fetch")
+	if got := tool.Name(); got != webFetchToolName {
+		t.Errorf("Name() = %v, want %v", got, webFetchToolName)
 	}
 }
 
@@ -38,7 +38,7 @@ func TestWebFetchTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Errorf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 }
@@ -234,7 +234,7 @@ func TestWebFetchTool_Execute_Redirect(t *testing.T) {
 
 func TestWebFetchTool_Execute_InvalidJSON(t *testing.T) {
 	tool := NewWebFetchTool()
-	args := json.RawMessage(`{invalid}`)
+	args := json.RawMessage(invalidJSONText)
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
 		t.Error("Execute() expected error for invalid JSON")

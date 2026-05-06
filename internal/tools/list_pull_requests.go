@@ -72,27 +72,7 @@ func (t *ListPullRequestsTool) Description() string {
 
 // Parameters returns the JSON schema for tool parameters.
 func (t *ListPullRequestsTool) Parameters() json.RawMessage {
-	schema := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"task_name": map[string]any{
-				"type":        "string",
-				"description": "Name of the task whose workspace config has the repo and git credentials",
-			},
-			"repo_url": map[string]any{
-				"type":        "string",
-				"description": "GitHub repository URL (e.g. https://github.com/owner/repo). Falls back to ORKA_GIT_REPO env var if not provided",
-			},
-			"per_page": map[string]any{
-				"type":        "integer",
-				"description": "Number of results per page (default: 30, max: 100)",
-			},
-			"page": map[string]any{
-				"type":        "integer",
-				"description": "Page number for pagination (default: 1)",
-			},
-		},
-	}
+	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Name of the task whose workspace config has the repo and git credentials"}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "GitHub repository URL (e.g. https://github.com/owner/repo). Falls back to ORKA_GIT_REPO env var if not provided"}, perPageField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Number of results per page (default: 30, max: 100)"}, pageField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Page number for pagination (default: 1)"}}}
 	data, _ := json.Marshal(schema)
 	return data
 }

@@ -13,13 +13,21 @@ import (
 	"sync"
 
 	"github.com/sozercan/orka/internal/llm"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // ToolContext provides dependencies for tools that need K8s client access or other services.
 type ToolContext struct {
 	Client                    client.Client
+	KubeClient                kubernetes.Interface
 	Namespace                 string
+	SessionID                 string
+	TaskID                    string
+	ToolCallID                string
+	Tenant                    string
+	Provider                  string
+	ProviderType              string
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
 	// ResultStore for fetching task outputs (store.ResultStore)
@@ -243,22 +251,13 @@ func RegisterChatToolsDefault() {
 // ChatToolNames returns the names of all chat tools in registration order.
 func ChatToolNames() []string {
 	return []string{
-		"create_ai_task",
-		"create_container_task",
-		"create_agent_task",
-		"check_task_progress",
-		"fetch_task_output",
-		"wait_for_task",
-		"cancel_task",
-		"list_agents",
-		"list_tools",
-		"list_tasks",
-		"create_agent",
-		"update_agent",
-		"delete_agent",
-		"create_tool",
-		"delete_tool",
-		"delete_session",
+		createAITaskToolName,
+		createContainerTaskToolName,
+		createAgentTaskToolName,
+		checkTaskProgressToolName, fetchTaskOutputToolName, waitForTaskToolName, cancelTaskToolName, listAgentsToolName, listToolsToolName, listTasksToolName, createAgentToolName, updateAgentToolName, "delete_agent",
+		createToolCRDToolName,
+		deleteToolToolName,
+		deleteSessionToolName,
 	}
 }
 

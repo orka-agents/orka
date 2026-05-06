@@ -28,8 +28,8 @@ func (m *mockSessionDeleter) DeleteSession(_ context.Context, namespace, session
 
 func TestDeleteSessionTool_Name(t *testing.T) {
 	tool := &DeleteSessionTool{}
-	if got := tool.Name(); got != "delete_session" {
-		t.Errorf("Name() = %v, want %v", got, "delete_session")
+	if got := tool.Name(); got != deleteSessionToolName {
+		t.Errorf("Name() = %v, want %v", got, deleteSessionToolName)
 	}
 }
 
@@ -50,14 +50,14 @@ func TestDeleteSessionTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	for _, key := range []string{"sessionId", "namespace"} {
+	for _, key := range []string{sessionIDField, namespaceField} {
 		if _, ok := props[key]; !ok {
 			t.Errorf("missing %s property", key)
 		}
@@ -75,12 +75,12 @@ func TestDeleteSessionTool_Execute(t *testing.T) {
 	}{
 		{
 			name:    "success - session deleted",
-			args:    map[string]any{"sessionId": "sess-123"},
+			args:    map[string]any{sessionIDField: testSessionID},
 			deleter: &mockSessionDeleter{},
 		},
 		{
 			name:    "success - explicit namespace",
-			args:    map[string]any{"sessionId": "sess-456", "namespace": "prod"},
+			args:    map[string]any{sessionIDField: "sess-456", namespaceField: testProdNamespace},
 			deleter: &mockSessionDeleter{},
 		},
 		{
@@ -92,14 +92,14 @@ func TestDeleteSessionTool_Execute(t *testing.T) {
 		},
 		{
 			name:       "session manager not configured",
-			args:       map[string]any{"sessionId": "sess-123"},
+			args:       map[string]any{sessionIDField: testSessionID},
 			nilDeleter: true,
 			wantErr:    true,
-			errType:    "internal_error",
+			errType:    internalErrorType,
 		},
 		{
 			name:    "delete error",
-			args:    map[string]any{"sessionId": "sess-123"},
+			args:    map[string]any{sessionIDField: testSessionID},
 			deleter: &mockSessionDeleter{err: fmt.Errorf("delete failed")},
 			wantErr: true,
 		},
@@ -108,7 +108,7 @@ func TestDeleteSessionTool_Execute(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fc := newFakeClient()
-			tc := &ToolContext{Client: fc, Namespace: "default"}
+			tc := &ToolContext{Client: fc, Namespace: defaultNamespace}
 			if !tt.nilDeleter {
 				tc.SessionDeleter = tt.deleter
 			}
@@ -144,21 +144,21 @@ func TestDeleteSessionTool_Execute(t *testing.T) {
 			if !ok {
 				t.Fatalf("expected data to be map, got %T", res.Data)
 			}
-			if data["message"] != "Session deleted" {
-				t.Errorf("expected message 'Session deleted', got %v", data["message"])
+			if data[messageField] != "Session deleted" {
+				t.Errorf("expected message 'Session deleted', got %v", data[messageField])
 			}
 
 			// Verify the deleter was called with correct args
 			if tt.deleter != nil {
-				expectedNS := "default"
-				if ns, ok := tt.args["namespace"].(string); ok && ns != "" {
+				expectedNS := defaultNamespace
+				if ns, ok := tt.args[namespaceField].(string); ok && ns != "" {
 					expectedNS = ns
 				}
 				if tt.deleter.deletedNamespace != expectedNS {
 					t.Errorf("deleter namespace = %q, want %q", tt.deleter.deletedNamespace, expectedNS)
 				}
-				if tt.deleter.deletedSessionID != tt.args["sessionId"] {
-					t.Errorf("deleter sessionID = %q, want %q", tt.deleter.deletedSessionID, tt.args["sessionId"])
+				if tt.deleter.deletedSessionID != tt.args[sessionIDField] {
+					t.Errorf("deleter sessionID = %q, want %q", tt.deleter.deletedSessionID, tt.args[sessionIDField])
 				}
 			}
 		})
@@ -182,11 +182,11 @@ func TestDeleteSessionTool_Execute_MissingToolContext(t *testing.T) {
 
 func TestDeleteSessionTool_Execute_InvalidJSON(t *testing.T) {
 	fc := newFakeClient()
-	tc := &ToolContext{Client: fc, Namespace: "default"}
+	tc := &ToolContext{Client: fc, Namespace: defaultNamespace}
 	ctx := WithToolContext(context.Background(), tc)
 
 	tool := &DeleteSessionTool{}
-	result, err := tool.Execute(ctx, json.RawMessage(`{invalid}`))
+	result, err := tool.Execute(ctx, json.RawMessage(invalidJSONText))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

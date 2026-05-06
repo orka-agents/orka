@@ -77,7 +77,7 @@ func NewAutoMergePullRequestTool(k8sClient client.Client) *AutoMergePullRequestT
 
 // Name returns the tool name.
 func (t *AutoMergePullRequestTool) Name() string {
-	return "auto_merge_pull_request"
+	return autoMergePullRequestToolName
 }
 
 // Description returns the tool description.
@@ -88,36 +88,11 @@ func (t *AutoMergePullRequestTool) Description() string {
 
 // Parameters returns the JSON schema for tool parameters.
 func (t *AutoMergePullRequestTool) Parameters() json.RawMessage {
-	schema := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"task_name": map[string]any{
-				"type":        "string",
-				"description": "Name of the child task whose workspace config has the repo and git credentials",
-			},
-			"pr_number": map[string]any{
-				"type":        "integer",
-				"description": "GitHub pull request number to merge",
-			},
-			"merge_method": map[string]any{
-				"type":        "string",
-				"description": "Merge method: 'merge', 'squash', or 'rebase'. Defaults to 'squash'",
-				"enum":        []string{"merge", "squash", "rebase"},
-			},
-			"commit_title": map[string]any{
-				"type":        "string",
-				"description": "Custom merge commit title",
-			},
-			"commit_message": map[string]any{
-				"type":        "string",
-				"description": "Custom merge commit message",
-			},
-			"timeout": map[string]any{
-				"type":        "string",
-				"description": "Maximum time to wait for CI checks (e.g. '30m', '1h'). Defaults to '30m'",
-			},
-		},
-		"required": []string{"task_name", "pr_number"},
+	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: childWorkspaceTaskDescription}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number to merge"}, mergeMethodField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Merge method: 'merge', 'squash', or 'rebase'. Defaults to 'squash'",
+		jsonSchemaEnumField: []string{mergeMethodMerge, defaultMergeMethod, mergeMethodRebase},
+	}, githubCommitTitleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Custom merge commit title"},
+		githubCommitMessageField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Custom merge commit message"}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Maximum time to wait for CI checks (e.g. '30m', '1h'). Defaults to '30m'"},
+	}, jsonSchemaRequiredField: []string{taskNameField, githubPRNumberField},
 	}
 	data, _ := json.Marshal(schema)
 	return data
@@ -148,7 +123,7 @@ func (t *AutoMergePullRequestTool) Execute(ctx context.Context, argsJSON json.Ra
 	}
 
 	// Determine namespace from environment
-	ns := os.Getenv("ORKA_TASK_NAMESPACE")
+	ns := os.Getenv(envOrkaTaskNamespace)
 	if ns == "" {
 		ns = defaultNamespace
 	}
@@ -187,7 +162,7 @@ func (t *AutoMergePullRequestTool) Execute(ctx context.Context, argsJSON json.Ra
 	}
 
 	token := ""
-	for _, key := range []string{"token", "password"} {
+	for _, key := range []string{tokenKey, passwordKey} {
 		if v, ok := secret.Data[key]; ok {
 			token = strings.TrimSpace(string(v))
 			break
@@ -221,12 +196,12 @@ func (t *AutoMergePullRequestTool) Execute(ctx context.Context, argsJSON json.Ra
 			case <-ctx.Done():
 				return marshalResult(AutoMergePullRequestResult{
 					Message: "context cancelled while waiting for CI checks",
-					Outcome: "timeout",
+					Outcome: timeoutField,
 				}), nil
 			case <-deadline:
 				return marshalResult(AutoMergePullRequestResult{
 					Message: fmt.Sprintf("timed out after %s waiting for CI checks to pass", args.Timeout),
-					Outcome: "timeout",
+					Outcome: timeoutField,
 				}), nil
 			case <-ticker.C:
 			}
@@ -300,7 +275,7 @@ func (pc *pollContext) pollOnce(ctx context.Context) (*AutoMergePullRequestResul
 		}
 		return &AutoMergePullRequestResult{
 			Merged: true, ChecksPassed: true, SHA: sha,
-			Message: "Pull request merged successfully", Outcome: "merged",
+			Message: pullRequestMergedMessage, Outcome: mergedStatusString,
 		}, true, nil
 	}
 
@@ -408,9 +383,9 @@ func checkCIStatusDetailed(ctx context.Context, token, owner, repo, sha, baseURL
 			continue
 		}
 		switch check.Conclusion {
-		case "success", "neutral", "skipped":
+		case successStatusString, "neutral", "skipped":
 			// passed — nothing to report
-		case "failure", "cancelled", "timed_out", "action_required", "stale":
+		case "failure", cancelledStatusString, "timed_out", "action_required", "stale":
 			failed = append(failed, fmt.Sprintf("%s (conclusion=%s)", check.Name, check.Conclusion))
 		default:
 			failed = append(failed, fmt.Sprintf("%s (conclusion=%s)", check.Name, check.Conclusion))

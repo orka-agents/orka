@@ -44,7 +44,7 @@ func setupIntegrationClient(t *testing.T) (*fake.ClientBuilder, string) {
 	}
 
 	// Set namespace env var
-	os.Setenv("ORKA_TASK_NAMESPACE", "default")
+	os.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	return fake.NewClientBuilder(), token
 }
@@ -53,7 +53,7 @@ func buildIntegrationObjects(token string) (*corev1alpha1.Task, *corev1.Secret) 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      integrationTaskName,
-			Namespace: "default",
+			Namespace: defaultNamespace,
 		},
 		Spec: corev1alpha1.TaskSpec{
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
@@ -70,11 +70,9 @@ func buildIntegrationObjects(token string) (*corev1alpha1.Task, *corev1.Secret) 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      integrationSecretName,
-			Namespace: "default",
+			Namespace: defaultNamespace,
 		},
-		Data: map[string][]byte{
-			"token": []byte(token),
-		},
+		Data: map[string][]byte{tokenKey: []byte(token)},
 	}
 
 	return task, secret
@@ -155,7 +153,7 @@ func TestIntegration_PostReviewComment(t *testing.T) {
 		TaskName: integrationTaskName,
 		PRNumber: integrationPRNumber,
 		Body:     "🤖 Automated integration test review from Orka coordination tools. This review will be cleaned up.",
-		Event:    "COMMENT",
+		Event:    reviewEventComment,
 	})
 
 	result, err := tool.Execute(context.Background(), args)
@@ -198,7 +196,7 @@ func TestIntegration_PostReviewComment_WithLineComment(t *testing.T) {
 		TaskName: integrationTaskName,
 		PRNumber: integrationPRNumber,
 		Body:     "🤖 Integration test: review with line comment. This will be cleaned up.",
-		Event:    "COMMENT",
+		Event:    reviewEventComment,
 		Comments: []ReviewComment{
 			{
 				Path: "main.go",
@@ -242,7 +240,7 @@ func TestIntegration_MergePullRequest_CICheck(t *testing.T) {
 	args, _ := json.Marshal(MergePullRequestArgs{
 		TaskName:    integrationTaskName,
 		PRNumber:    integrationPRNumber,
-		MergeMethod: "squash",
+		MergeMethod: defaultMergeMethod,
 	})
 
 	result, err := tool.Execute(context.Background(), args)

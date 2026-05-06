@@ -55,11 +55,9 @@ func CreateOrGetGitHubPullRequest(ctx context.Context, token, owner, repo, head,
 	}
 
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls", baseURL, owner, repo)
-	payload := map[string]string{
-		"title": title,
-		"body":  body,
-		"head":  head,
-		"base":  base,
+	payload := map[string]string{titleField: title, githubBodyField: body,
+		"head": head,
+		"base": base,
 	}
 	payloadBytes, _ := json.Marshal(payload)
 
@@ -108,7 +106,7 @@ func findExistingGitHubPullRequest(ctx context.Context, token, owner, repo, head
 	if strings.TrimSpace(base) != "" {
 		query.Set("base", base)
 	}
-	query.Set("per_page", "10")
+	query.Set(perPageField, "10")
 
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls?%s", baseURL, owner, repo, query.Encode())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)

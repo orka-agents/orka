@@ -47,22 +47,22 @@ type FileWriteResult struct {
 func NewFileWriteTool() *FileWriteTool {
 	workDir := os.Getenv("ORKA_WORK_DIR")
 	if workDir == "" {
-		workDir = "/workspace"
+		workDir = defaultWorkspacePath
 	}
 
 	return &FileWriteTool{
 		workDir:     workDir,
 		maxFileSize: 1024 * 1024, // 1MB max
 		allowedPaths: []string{
-			"/workspace",
-			"/tmp",
+			defaultWorkspacePath,
+			tempDirPath,
 		},
 	}
 }
 
 // Name returns the tool name
 func (t *FileWriteTool) Name() string {
-	return "file_write"
+	return fileWriteToolName
 }
 
 // Description returns the tool description

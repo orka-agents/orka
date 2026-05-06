@@ -36,7 +36,7 @@ func TestCommentOnIssueTool_Metadata(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("failed to parse parameters schema: %v", err)
 	}
-	required, ok := schema["required"].([]any)
+	required, ok := schema[jsonSchemaRequiredField].([]any)
 	if !ok {
 		t.Fatal("schema missing required field")
 	}
@@ -44,18 +44,18 @@ func TestCommentOnIssueTool_Metadata(t *testing.T) {
 	for _, r := range required {
 		requiredSet[r.(string)] = true
 	}
-	for _, field := range []string{"issue_number", "body"} {
+	for _, field := range []string{githubIssueNumberField, githubBodyField} {
 		if !requiredSet[field] {
 			t.Errorf("expected %q in required fields", field)
 		}
 	}
 
 	// Verify all properties exist
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("schema missing properties")
 	}
-	for _, field := range []string{"task_name", "repo_url", "issue_number", "body"} {
+	for _, field := range []string{taskNameField, repoURLField, githubIssueNumberField, githubBodyField} {
 		if _, ok := props[field]; !ok {
 			t.Errorf("schema missing %s property", field)
 		}
@@ -85,8 +85,8 @@ func TestCommentOnIssueTool_Success(t *testing.T) {
 
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
-		if body["body"] != "🤖 Agent is working on this issue" {
-			t.Errorf("unexpected body: %v", body["body"])
+		if body[githubBodyField] != "🤖 Agent is working on this issue" {
+			t.Errorf("unexpected body: %v", body[githubBodyField])
 		}
 
 		w.WriteHeader(http.StatusCreated)
@@ -94,7 +94,7 @@ func TestCommentOnIssueTool_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &CommentOnIssueTool{
 		k8sClient:  newFakeClient(),
@@ -102,7 +102,7 @@ func TestCommentOnIssueTool_Success(t *testing.T) {
 	}
 
 	args, _ := json.Marshal(CommentOnIssueArgs{
-		RepoURL:     "https://github.com/testorg/testrepo",
+		RepoURL:     testOrgTestRepoURL,
 		IssueNumber: 42,
 		Body:        "🤖 Agent is working on this issue",
 	})
@@ -128,16 +128,16 @@ func TestCommentOnIssueTool_Success(t *testing.T) {
 }
 
 func TestCommentOnIssueTool_IssueNumberZero(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &CommentOnIssueTool{
 		k8sClient: newFakeClient(),
 	}
 
 	args, _ := json.Marshal(CommentOnIssueArgs{
-		RepoURL:     "https://github.com/testorg/testrepo",
+		RepoURL:     testOrgTestRepoURL,
 		IssueNumber: 0,
-		Body:        "some comment",
+		Body:        testCommentBody,
 	})
 
 	_, err := tool.Execute(context.Background(), args)
@@ -150,16 +150,16 @@ func TestCommentOnIssueTool_IssueNumberZero(t *testing.T) {
 }
 
 func TestCommentOnIssueTool_IssueNumberNegative(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &CommentOnIssueTool{
 		k8sClient: newFakeClient(),
 	}
 
 	args, _ := json.Marshal(CommentOnIssueArgs{
-		RepoURL:     "https://github.com/testorg/testrepo",
+		RepoURL:     testOrgTestRepoURL,
 		IssueNumber: -1,
-		Body:        "some comment",
+		Body:        testCommentBody,
 	})
 
 	_, err := tool.Execute(context.Background(), args)
@@ -172,14 +172,14 @@ func TestCommentOnIssueTool_IssueNumberNegative(t *testing.T) {
 }
 
 func TestCommentOnIssueTool_EmptyBody(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &CommentOnIssueTool{
 		k8sClient: newFakeClient(),
 	}
 
 	args, _ := json.Marshal(CommentOnIssueArgs{
-		RepoURL:     "https://github.com/testorg/testrepo",
+		RepoURL:     testOrgTestRepoURL,
 		IssueNumber: 1,
 		Body:        "",
 	})
@@ -200,7 +200,7 @@ func TestCommentOnIssueTool_GitHub404(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &CommentOnIssueTool{
 		k8sClient:  newFakeClient(),
@@ -208,7 +208,7 @@ func TestCommentOnIssueTool_GitHub404(t *testing.T) {
 	}
 
 	args, _ := json.Marshal(CommentOnIssueArgs{
-		RepoURL:     "https://github.com/testorg/testrepo",
+		RepoURL:     testOrgTestRepoURL,
 		IssueNumber: 9999,
 		Body:        "comment on missing issue",
 	})
@@ -232,7 +232,7 @@ func TestCommentOnIssueTool_GitHub422(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &CommentOnIssueTool{
 		k8sClient:  newFakeClient(),
@@ -240,9 +240,9 @@ func TestCommentOnIssueTool_GitHub422(t *testing.T) {
 	}
 
 	args, _ := json.Marshal(CommentOnIssueArgs{
-		RepoURL:     "https://github.com/testorg/testrepo",
+		RepoURL:     testOrgTestRepoURL,
 		IssueNumber: 1,
-		Body:        "some comment",
+		Body:        testCommentBody,
 	})
 
 	_, err := tool.Execute(context.Background(), args)
@@ -259,7 +259,7 @@ func TestCommentOnIssueTool_GitHub422(t *testing.T) {
 
 func TestCommentOnIssueTool_NoRepoURL(t *testing.T) {
 	t.Setenv("ORKA_GIT_REPO", "")
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &CommentOnIssueTool{
 		k8sClient: newFakeClient(),
@@ -288,7 +288,7 @@ func TestCommentOnIssueTool_WithRepoURL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &CommentOnIssueTool{
 		k8sClient:  newFakeClient(),
@@ -296,7 +296,7 @@ func TestCommentOnIssueTool_WithRepoURL(t *testing.T) {
 	}
 
 	args, _ := json.Marshal(CommentOnIssueArgs{
-		RepoURL:     "https://github.com/myorg/myrepo",
+		RepoURL:     testMyOrgRepoURL,
 		IssueNumber: 7,
 		Body:        "status update",
 	})
@@ -331,7 +331,7 @@ func TestCommentOnIssueTool_EmojiMarkdownContent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &CommentOnIssueTool{
 		k8sClient:  newFakeClient(),
@@ -345,7 +345,7 @@ func TestCommentOnIssueTool_EmojiMarkdownContent(t *testing.T) {
 		"```go\nfmt.Println(\"Hello, world!\")\n```"
 
 	args, _ := json.Marshal(CommentOnIssueArgs{
-		RepoURL:     "https://github.com/testorg/testrepo",
+		RepoURL:     testOrgTestRepoURL,
 		IssueNumber: 3,
 		Body:        markdownBody,
 	})
@@ -356,8 +356,8 @@ func TestCommentOnIssueTool_EmojiMarkdownContent(t *testing.T) {
 	}
 
 	// Verify the full markdown body was sent to GitHub
-	if receivedBody["body"] != markdownBody {
-		t.Errorf("expected markdown body to be preserved, got: %v", receivedBody["body"])
+	if receivedBody[githubBodyField] != markdownBody {
+		t.Errorf("expected markdown body to be preserved, got: %v", receivedBody[githubBodyField])
 	}
 
 	var commentResult CommentOnIssueResult

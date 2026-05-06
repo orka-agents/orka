@@ -29,7 +29,7 @@ func TestMergePullRequestTool_Metadata(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewMergePullRequestTool(k8sClient)
 
-	if tool.Name() != "merge_pull_request" {
+	if tool.Name() != mergePullRequestToolName {
 		t.Errorf("unexpected name: %s", tool.Name())
 	}
 	if tool.Description() == "" {
@@ -47,14 +47,14 @@ func TestMergePullRequestTool_Metadata(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("failed to parse parameters: %v", err)
 	}
-	props := schema["properties"].(map[string]any)
-	if _, ok := props["task_name"]; !ok {
+	props := schema[jsonSchemaPropertiesField].(map[string]any)
+	if _, ok := props[taskNameField]; !ok {
 		t.Error("parameters should contain task_name")
 	}
-	if _, ok := props["pr_number"]; !ok {
+	if _, ok := props[githubPRNumberField]; !ok {
 		t.Error("parameters should contain pr_number")
 	}
-	if _, ok := props["merge_method"]; !ok {
+	if _, ok := props[mergeMethodField]; !ok {
 		t.Error("parameters should contain merge_method")
 	}
 }
@@ -67,10 +67,10 @@ func TestMergePullRequestTool_MissingTask(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewMergePullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(MergePullRequestArgs{
-		TaskName: "nonexistent",
+		TaskName: testNonexistentName,
 		PRNumber: 42,
 	})
 
@@ -89,15 +89,15 @@ func TestMergePullRequestTool_MissingSecret(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 					GitSecretRef: &corev1.LocalObjectReference{
-						Name: "git-creds",
+						Name: testGitCredsSecretName,
 					},
 				},
 			},
@@ -107,10 +107,10 @@ func TestMergePullRequestTool_MissingSecret(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewMergePullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(MergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 	})
 
@@ -147,15 +147,15 @@ func TestMergePullRequestTool_CIChecksFailed(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 					GitSecretRef: &corev1.LocalObjectReference{
-						Name: "git-creds",
+						Name: testGitCredsSecretName,
 					},
 				},
 			},
@@ -163,10 +163,8 @@ func TestMergePullRequestTool_CIChecksFailed(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data: map[string][]byte{
-			"token": []byte("test-token"),
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -175,10 +173,10 @@ func TestMergePullRequestTool_CIChecksFailed(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(MergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 	})
 
@@ -222,11 +220,11 @@ func TestMergePullRequestTool_Success(t *testing.T) {
 			// Verify merge request body
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
-			if body["merge_method"] != "squash" {
-				t.Errorf("unexpected merge_method: %v", body["merge_method"])
+			if body[mergeMethodField] != defaultMergeMethod {
+				t.Errorf("unexpected merge_method: %v", body[mergeMethodField])
 			}
-			if body["commit_title"] != "feat: awesome feature (#42)" {
-				t.Errorf("unexpected commit_title: %v", body["commit_title"])
+			if body[githubCommitTitleField] != "feat: awesome feature (#42)" {
+				t.Errorf("unexpected commit_title: %v", body[githubCommitTitleField])
 			}
 			w.WriteHeader(200)
 			_, _ = fmt.Fprintf(w, `{"sha":"def456","merged":true,"message":"Pull Request successfully merged"}`)
@@ -242,15 +240,15 @@ func TestMergePullRequestTool_Success(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 					GitSecretRef: &corev1.LocalObjectReference{
-						Name: "git-creds",
+						Name: testGitCredsSecretName,
 					},
 				},
 			},
@@ -258,10 +256,8 @@ func TestMergePullRequestTool_Success(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data: map[string][]byte{
-			"token": []byte("test-token"),
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -270,10 +266,10 @@ func TestMergePullRequestTool_Success(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(MergePullRequestArgs{
-		TaskName:      "coder-task",
+		TaskName:      testCoderTaskName,
 		PRNumber:      42,
 		CommitTitle:   "feat: awesome feature (#42)",
 		CommitMessage: "Implements the awesome feature",
@@ -297,7 +293,7 @@ func TestMergePullRequestTool_Success(t *testing.T) {
 	if mergeResult.SHA != "def456" {
 		t.Errorf("unexpected SHA: %s", mergeResult.SHA)
 	}
-	if mergeResult.Message != "Pull request merged successfully" {
+	if mergeResult.Message != pullRequestMergedMessage {
 		t.Errorf("unexpected message: %s", mergeResult.Message)
 	}
 }
@@ -315,15 +311,15 @@ func TestMergePullRequestTool_Execute_APIError(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 					GitSecretRef: &corev1.LocalObjectReference{
-						Name: "git-creds",
+						Name: testGitCredsSecretName,
 					},
 				},
 			},
@@ -331,10 +327,8 @@ func TestMergePullRequestTool_Execute_APIError(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data: map[string][]byte{
-			"token": []byte("test-token"),
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -343,10 +337,10 @@ func TestMergePullRequestTool_Execute_APIError(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(MergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 	})
 
@@ -367,7 +361,7 @@ func TestMergePullRequestTool_Execute_InvalidArgs(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewMergePullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	// Pass args missing required fields
 	args := json.RawMessage(`{"bad": true}`)
@@ -382,7 +376,7 @@ func TestMergePullRequestTool_Execute_InvalidArgs(t *testing.T) {
 }
 
 func TestMergePullRequestTool_Execute_DifferentMergeMethods(t *testing.T) {
-	for _, method := range []string{"merge", "rebase"} {
+	for _, method := range []string{mergeMethodMerge, mergeMethodRebase} {
 		t.Run(method, func(t *testing.T) {
 			var capturedMethod string
 
@@ -397,7 +391,7 @@ func TestMergePullRequestTool_Execute_DifferentMergeMethods(t *testing.T) {
 				case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/pulls/10/merge"):
 					var body map[string]any
 					_ = json.NewDecoder(r.Body).Decode(&body)
-					if mm, ok := body["merge_method"].(string); ok {
+					if mm, ok := body[mergeMethodField].(string); ok {
 						capturedMethod = mm
 					}
 					w.WriteHeader(200)
@@ -413,15 +407,15 @@ func TestMergePullRequestTool_Execute_DifferentMergeMethods(t *testing.T) {
 			_ = corev1.AddToScheme(scheme)
 
 			task := &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 				Spec: corev1alpha1.TaskSpec{
 					Type: corev1alpha1.TaskTypeAgent,
 					AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 						Workspace: &corev1alpha1.WorkspaceConfig{
-							GitRepo: "https://github.com/sozercan/ayna",
-							Branch:  "main",
+							GitRepo: testSozercanAynaRepoURL,
+							Branch:  testBranch,
 							GitSecretRef: &corev1.LocalObjectReference{
-								Name: "git-creds",
+								Name: testGitCredsSecretName,
 							},
 						},
 					},
@@ -429,10 +423,8 @@ func TestMergePullRequestTool_Execute_DifferentMergeMethods(t *testing.T) {
 			}
 
 			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-				Data: map[string][]byte{
-					"token": []byte("test-token"),
-				},
+				ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+				Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 			}
 
 			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -441,10 +433,10 @@ func TestMergePullRequestTool_Execute_DifferentMergeMethods(t *testing.T) {
 				apiBaseURL: server.URL,
 			}
 
-			t.Setenv("ORKA_TASK_NAMESPACE", "default")
+			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 			args, _ := json.Marshal(MergePullRequestArgs{
-				TaskName:    "coder-task",
+				TaskName:    testCoderTaskName,
 				PRNumber:    10,
 				MergeMethod: method,
 			})
@@ -493,15 +485,15 @@ func TestMergePullRequestTool_Execute_PRAlreadyMerged(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 					GitSecretRef: &corev1.LocalObjectReference{
-						Name: "git-creds",
+						Name: testGitCredsSecretName,
 					},
 				},
 			},
@@ -509,10 +501,8 @@ func TestMergePullRequestTool_Execute_PRAlreadyMerged(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data: map[string][]byte{
-			"token": []byte("test-token"),
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -521,10 +511,10 @@ func TestMergePullRequestTool_Execute_PRAlreadyMerged(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(MergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 	})
 
@@ -546,7 +536,7 @@ func TestMergePullRequestTool_NoWorkspace(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 		},
@@ -555,10 +545,10 @@ func TestMergePullRequestTool_NoWorkspace(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewMergePullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(MergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 	})
 
@@ -577,12 +567,12 @@ func TestMergePullRequestTool_NoGitRepo(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					Branch: "main",
+					Branch: testBranch,
 				},
 			},
 		},
@@ -591,10 +581,10 @@ func TestMergePullRequestTool_NoGitRepo(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewMergePullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(MergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 	})
 
@@ -613,13 +603,13 @@ func TestMergePullRequestTool_NoGitSecretRef(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 				},
 			},
 		},
@@ -628,10 +618,10 @@ func TestMergePullRequestTool_NoGitSecretRef(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewMergePullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(MergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 	})
 
@@ -650,30 +640,30 @@ func TestMergePullRequestTool_EmptyToken(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      "https://github.com/sozercan/ayna",
-					Branch:       "main",
-					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+					GitRepo:      testSozercanAynaRepoURL,
+					Branch:       testBranch,
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
 				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data:       map[string][]byte{"other-key": []byte("value")},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{otherSecretKey: []byte("value")},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := NewMergePullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(MergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 	})
 
@@ -709,30 +699,30 @@ func TestMergePullRequestTool_PasswordKey(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      "https://github.com/sozercan/ayna",
-					Branch:       "main",
-					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+					GitRepo:      testSozercanAynaRepoURL,
+					Branch:       testBranch,
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
 				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data:       map[string][]byte{"password": []byte("my-password")},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{passwordKey: []byte("my-password")},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := &MergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(MergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 	})
 

@@ -19,27 +19,20 @@ import (
 // ChatCancelTaskTool cancels and deletes a task (chat version).
 type ChatCancelTaskTool struct{}
 
-func (t *ChatCancelTaskTool) Name() string { return "cancel_task" }
+func (t *ChatCancelTaskTool) Name() string { return cancelTaskToolName }
 
 func (t *ChatCancelTaskTool) Description() string {
 	return "Cancel and delete a task. Use when a task is stuck, no longer needed, or the user requests cancellation."
 }
 
 func (t *ChatCancelTaskTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"name":      map[string]any{"type": "string", "description": "Task name"},
-			"namespace": map[string]any{"type": "string", "description": "Namespace"},
-		},
-		"required": []string{"name"},
-	})
+	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: taskNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}}, jsonSchemaRequiredField: []string{nameField}})
 }
 
 func (t *ChatCancelTaskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil {
-		return ChatToolErrorResult("internal_error", "missing tool context", "")
+		return ChatToolErrorResult(internalErrorType, "missing tool context", "")
 	}
 
 	var a map[string]any
@@ -47,11 +40,11 @@ func (t *ChatCancelTaskTool) Execute(ctx context.Context, args json.RawMessage) 
 		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
 	}
 
-	name := chatGetStringArg(a, "name")
+	name := chatGetStringArg(a, nameField)
 	if name == "" {
 		return ChatToolErrorResult("invalid_arguments", "name is required", "Provide the task name")
 	}
-	namespace := chatGetStringArgDefault(a, "namespace", tc.Namespace)
+	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
 
 	task := &corev1alpha1.Task{}
 	if err := tc.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, task); err != nil {
@@ -62,8 +55,5 @@ func (t *ChatCancelTaskTool) Execute(ctx context.Context, args json.RawMessage) 
 		return classifyChatK8sErr(err)
 	}
 
-	return ChatToolSuccess(map[string]any{
-		"name":    task.Name,
-		"message": "Task cancelled and deleted",
-	})
+	return ChatToolSuccess(map[string]any{nameField: task.Name, messageField: "Task cancelled and deleted"})
 }

@@ -19,7 +19,7 @@ import (
 	"github.com/sozercan/orka/internal/labels"
 )
 
-const testCancelTaskName = "cancel_task"
+const testCancelTaskName = cancelTaskToolName
 
 func TestCancelTaskTool_Name(t *testing.T) {
 	tool := NewCancelTaskTool(newFakeClient())
@@ -45,17 +45,17 @@ func TestCancelTaskTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	if _, ok := props["task_name"]; !ok {
+	if _, ok := props[taskNameField]; !ok {
 		t.Error("missing task_name property")
 	}
-	if _, ok := props["namespace"]; !ok {
+	if _, ok := props[namespaceField]; !ok {
 		t.Error("missing namespace property")
 	}
 	if _, ok := props["reason"]; !ok {
@@ -75,14 +75,14 @@ func TestCancelTaskTool_Execute(t *testing.T) {
 		{
 			name: "cancel running child task",
 			args: CancelTaskArgs{
-				TaskName:  "child-task-1",
-				Namespace: "default",
+				TaskName:  testChildTaskName,
+				Namespace: defaultNamespace,
 				Reason:    "wrong approach",
 			},
 			childTask: &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "child-task-1",
-					Namespace: "default",
+					Name:      testChildTaskName,
+					Namespace: defaultNamespace,
 					Labels: map[string]string{
 						labels.LabelParentTask: parentTaskName,
 					},
@@ -94,19 +94,19 @@ func TestCancelTaskTool_Execute(t *testing.T) {
 					Phase: corev1alpha1.TaskPhaseRunning,
 				},
 			},
-			envVars:    map[string]string{"ORKA_TASK_NAME": parentTaskName, "ORKA_TASK_NAMESPACE": "default"},
-			wantStatus: "cancelled",
+			envVars:    map[string]string{envOrkaTaskName: parentTaskName, envOrkaTaskNamespace: defaultNamespace},
+			wantStatus: cancelledStatusString,
 		},
 		{
 			name: "cancel pending child task",
 			args: CancelTaskArgs{
 				TaskName:  "child-task-2",
-				Namespace: "default",
+				Namespace: defaultNamespace,
 			},
 			childTask: &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "child-task-2",
-					Namespace: "default",
+					Namespace: defaultNamespace,
 					Labels: map[string]string{
 						labels.LabelParentTask: parentTaskName,
 					},
@@ -118,19 +118,19 @@ func TestCancelTaskTool_Execute(t *testing.T) {
 					Phase: corev1alpha1.TaskPhasePending,
 				},
 			},
-			envVars:    map[string]string{"ORKA_TASK_NAME": parentTaskName, "ORKA_TASK_NAMESPACE": "default"},
-			wantStatus: "cancelled",
+			envVars:    map[string]string{envOrkaTaskName: parentTaskName, envOrkaTaskNamespace: defaultNamespace},
+			wantStatus: cancelledStatusString,
 		},
 		{
 			name: "cannot cancel already succeeded task",
 			args: CancelTaskArgs{
 				TaskName:  "child-task-3",
-				Namespace: "default",
+				Namespace: defaultNamespace,
 			},
 			childTask: &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "child-task-3",
-					Namespace: "default",
+					Namespace: defaultNamespace,
 					Labels: map[string]string{
 						labels.LabelParentTask: parentTaskName,
 					},
@@ -142,19 +142,19 @@ func TestCancelTaskTool_Execute(t *testing.T) {
 					Phase: corev1alpha1.TaskPhaseSucceeded,
 				},
 			},
-			envVars:    map[string]string{"ORKA_TASK_NAME": parentTaskName, "ORKA_TASK_NAMESPACE": "default"},
+			envVars:    map[string]string{envOrkaTaskName: parentTaskName, envOrkaTaskNamespace: defaultNamespace},
 			wantStatus: "task is already in Succeeded phase, cannot cancel",
 		},
 		{
 			name: "cannot cancel task from different parent",
 			args: CancelTaskArgs{
 				TaskName:  "other-child",
-				Namespace: "default",
+				Namespace: defaultNamespace,
 			},
 			childTask: &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "other-child",
-					Namespace: "default",
+					Namespace: defaultNamespace,
 					Labels: map[string]string{
 						labels.LabelParentTask: "other-parent",
 					},
@@ -166,19 +166,19 @@ func TestCancelTaskTool_Execute(t *testing.T) {
 					Phase: corev1alpha1.TaskPhaseRunning,
 				},
 			},
-			envVars: map[string]string{"ORKA_TASK_NAME": parentTaskName, "ORKA_TASK_NAMESPACE": "default"},
+			envVars: map[string]string{envOrkaTaskName: parentTaskName, envOrkaTaskNamespace: defaultNamespace},
 			wantErr: true,
 		},
 		{
 			name: "cancel without ORKA_TASK_NAME skips parent check",
 			args: CancelTaskArgs{
 				TaskName:  "child-task-no-parent",
-				Namespace: "default",
+				Namespace: defaultNamespace,
 			},
 			childTask: &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "child-task-no-parent",
-					Namespace: "default",
+					Namespace: defaultNamespace,
 				},
 				Spec: corev1alpha1.TaskSpec{
 					Type: corev1alpha1.TaskTypeAI,
@@ -188,23 +188,23 @@ func TestCancelTaskTool_Execute(t *testing.T) {
 				},
 			},
 			envVars:    map[string]string{},
-			wantStatus: "cancelled",
+			wantStatus: cancelledStatusString,
 		},
 		{
 			name: "missing task name",
 			args: CancelTaskArgs{
-				Namespace: "default",
+				Namespace: defaultNamespace,
 			},
-			envVars: map[string]string{"ORKA_TASK_NAME": parentTaskName},
+			envVars: map[string]string{envOrkaTaskName: parentTaskName},
 			wantErr: true,
 		},
 		{
-			name: "task not found",
+			name: taskNotFoundCaseName,
 			args: CancelTaskArgs{
-				TaskName:  "nonexistent",
-				Namespace: "default",
+				TaskName:  testNonexistentName,
+				Namespace: defaultNamespace,
 			},
-			envVars: map[string]string{"ORKA_TASK_NAME": parentTaskName},
+			envVars: map[string]string{envOrkaTaskName: parentTaskName},
 			wantErr: true,
 		},
 	}
@@ -247,7 +247,7 @@ func TestCancelTaskTool_Execute(t *testing.T) {
 			}
 
 			// Verify task was updated if cancelled
-			if tt.wantStatus == "cancelled" && tt.childTask != nil {
+			if tt.wantStatus == cancelledStatusString && tt.childTask != nil {
 				updated := &corev1alpha1.Task{}
 				err := fc.Get(context.Background(), apitypes.NamespacedName{
 					Name:      tt.childTask.Name,

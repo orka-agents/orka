@@ -81,7 +81,7 @@ func NewCreateAgentTool(k8sClient client.Client) *CreateAgentTool {
 
 // Name returns the tool name
 func (t *CreateAgentTool) Name() string {
-	return "create_agent"
+	return createAgentToolName
 }
 
 // Description returns the tool description
@@ -121,12 +121,12 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 				"description": "Provider CRD reference name; inherited from coordinator if not set"
 			},
 			"tools": {
-				"type": "array",
+				"type": "` + jsonSchemaTypeArray + `",
 				"items": {"type": "string"},
 				"description": "Tool names to attach to the agent"
 			},
 			"skills": {
-				"type": "array",
+				"type": "` + jsonSchemaTypeArray + `",
 				"items": {"type": "string"},
 				"description": "Skill names to attach to the agent"
 			},
@@ -135,7 +135,7 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 				"description": "Enable sub-delegation for the agent",
 				"properties": {
 					"enabled": {
-						"type": "boolean",
+						"type": "` + jsonSchemaTypeBoolean + `",
 						"description": "Whether coordination is enabled"
 					},
 					"maxDepth": {
@@ -147,7 +147,7 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 						"description": "Maximum concurrent child tasks"
 					},
 					"allowedAgents": {
-						"type": "array",
+						"type": "` + jsonSchemaTypeArray + `",
 						"items": {
 							"type": "object",
 							"properties": {
@@ -193,8 +193,8 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return "", fmt.Errorf("systemPrompt is required")
 	}
 
-	parentName := os.Getenv("ORKA_TASK_NAME")
-	parentNamespace := os.Getenv("ORKA_TASK_NAMESPACE")
+	parentName := os.Getenv(envOrkaTaskName)
+	parentNamespace := os.Getenv(envOrkaTaskNamespace)
 
 	ns := parentNamespace
 	if ns == "" {
@@ -266,7 +266,7 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 			Namespace: ns,
 			Labels: map[string]string{
 				labels.LabelParentTask: labels.SelectorValue(parentName),
-				labels.LabelCreatedBy:  "create_agent",
+				labels.LabelCreatedBy:  createAgentToolName,
 				labels.LabelAgentRole:  a.Role,
 			},
 			Annotations: map[string]string{
@@ -320,7 +320,7 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	agent.OwnerReferences = []metav1.OwnerReference{
 		{
 			APIVersion:         corev1alpha1.GroupVersion.String(),
-			Kind:               "Task",
+			Kind:               taskKindString,
 			Name:               parentTask.Name,
 			UID:                parentTask.UID,
 			Controller:         &isController,
@@ -335,7 +335,7 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	result := CreateAgentResult{
 		AgentName: agent.Name,
 		Namespace: agent.Namespace,
-		Status:    "created",
+		Status:    GitHubPullRequestStatusCreated,
 	}
 	output, err := json.Marshal(result)
 	if err != nil {

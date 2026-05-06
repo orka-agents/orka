@@ -61,7 +61,7 @@ func NewMergePullRequestTool(k8sClient client.Client) *MergePullRequestTool {
 
 // Name returns the tool name.
 func (t *MergePullRequestTool) Name() string {
-	return "merge_pull_request"
+	return mergePullRequestToolName
 }
 
 // Description returns the tool description.
@@ -72,32 +72,11 @@ func (t *MergePullRequestTool) Description() string {
 
 // Parameters returns the JSON schema for tool parameters.
 func (t *MergePullRequestTool) Parameters() json.RawMessage {
-	schema := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"task_name": map[string]any{
-				"type":        "string",
-				"description": "Name of the child task whose workspace config has the repo and git credentials",
-			},
-			"pr_number": map[string]any{
-				"type":        "integer",
-				"description": "GitHub pull request number to merge",
-			},
-			"merge_method": map[string]any{
-				"type":        "string",
-				"description": "Merge method: 'merge', 'squash', or 'rebase'. Defaults to 'squash'",
-				"enum":        []string{"merge", "squash", "rebase"},
-			},
-			"commit_title": map[string]any{
-				"type":        "string",
-				"description": "Custom merge commit title",
-			},
-			"commit_message": map[string]any{
-				"type":        "string",
-				"description": "Custom merge commit message",
-			},
-		},
-		"required": []string{"task_name", "pr_number"},
+	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: childWorkspaceTaskDescription}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number to merge"}, mergeMethodField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Merge method: 'merge', 'squash', or 'rebase'. Defaults to 'squash'",
+		jsonSchemaEnumField: []string{mergeMethodMerge, defaultMergeMethod, mergeMethodRebase},
+	}, githubCommitTitleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Custom merge commit title"},
+		githubCommitMessageField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Custom merge commit message"},
+	}, jsonSchemaRequiredField: []string{taskNameField, githubPRNumberField},
 	}
 	data, _ := json.Marshal(schema)
 	return data
@@ -119,7 +98,7 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 	}
 
 	// Determine namespace from environment
-	ns := os.Getenv("ORKA_TASK_NAMESPACE")
+	ns := os.Getenv(envOrkaTaskNamespace)
 	if ns == "" {
 		ns = defaultNamespace
 	}
@@ -158,7 +137,7 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 	}
 
 	token := ""
-	for _, key := range []string{"token", "password"} {
+	for _, key := range []string{tokenKey, passwordKey} {
 		if v, ok := secret.Data[key]; ok {
 			token = strings.TrimSpace(string(v))
 			break
@@ -205,7 +184,7 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 		SHA:          sha,
 		Merged:       true,
 		ChecksPassed: true,
-		Message:      "Pull request merged successfully",
+		Message:      pullRequestMergedMessage,
 	}
 	resultJSON, _ := json.Marshal(result)
 	return string(resultJSON), nil
@@ -291,7 +270,7 @@ func checkGitHubCIStatus(ctx context.Context, token, owner, repo, sha, baseURL s
 
 	var failures []string
 	for _, check := range checkResp.CheckRuns {
-		if check.Status != "completed" || check.Conclusion != "success" {
+		if check.Status != "completed" || check.Conclusion != successStatusString {
 			failures = append(failures, fmt.Sprintf("%s (status=%s, conclusion=%s)", check.Name, check.Status, check.Conclusion))
 		}
 	}
@@ -307,14 +286,12 @@ func checkGitHubCIStatus(ctx context.Context, token, owner, repo, sha, baseURL s
 func mergeGitHubPR(ctx context.Context, token, owner, repo string, prNumber int, mergeMethod, commitTitle, commitMessage, baseURL string) (string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", baseURL, owner, repo, prNumber)
 
-	payload := map[string]any{
-		"merge_method": mergeMethod,
-	}
+	payload := map[string]any{mergeMethodField: mergeMethod}
 	if commitTitle != "" {
-		payload["commit_title"] = commitTitle
+		payload[githubCommitTitleField] = commitTitle
 	}
 	if commitMessage != "" {
-		payload["commit_message"] = commitMessage
+		payload[githubCommitMessageField] = commitMessage
 	}
 	payloadBytes, _ := json.Marshal(payload)
 

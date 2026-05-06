@@ -38,7 +38,7 @@ type PostReviewCommentArgs struct {
 	PRNumber int `json:"pr_number"`
 	// Body is the top-level review body text.
 	Body string `json:"body"`
-	// Event is one of "APPROVE", "REQUEST_CHANGES", "COMMENT".
+	// Event is one of reviewEventApprove, reviewEventRequestChanges, reviewEventComment.
 	Event string `json:"event"`
 	// Comments is an optional list of line-level review comments.
 	Comments []ReviewComment `json:"comments,omitempty"`
@@ -70,7 +70,7 @@ func NewPostReviewCommentTool(k8sClient client.Client) *PostReviewCommentTool {
 
 // Name returns the tool name.
 func (t *PostReviewCommentTool) Name() string {
-	return "post_review_comment"
+	return postReviewCommentToolName
 }
 
 // Description returns the tool description.
@@ -81,50 +81,18 @@ func (t *PostReviewCommentTool) Description() string {
 
 // Parameters returns the JSON schema for tool parameters.
 func (t *PostReviewCommentTool) Parameters() json.RawMessage {
-	schema := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"task_name": map[string]any{
-				"type":        "string",
-				"description": "Name of the child task whose workspace config has the repo and git credentials",
-			},
-			"pr_number": map[string]any{
-				"type":        "integer",
-				"description": "GitHub pull request number",
-			},
-			"body": map[string]any{
-				"type":        "string",
-				"description": "Top-level review body text",
-			},
-			"event": map[string]any{
-				"type":        "string",
-				"enum":        []string{"APPROVE", "REQUEST_CHANGES", "COMMENT"},
-				"description": "Review verdict: APPROVE, REQUEST_CHANGES, or COMMENT",
-			},
-			"comments": map[string]any{
-				"type":        "array",
-				"description": "Optional line-level review comments",
-				"items": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path": map[string]any{
-							"type":        "string",
-							"description": "File path relative to repo root",
-						},
-						"line": map[string]any{
-							"type":        "integer",
-							"description": "Line number in the diff (new file line number)",
-						},
-						"body": map[string]any{
-							"type":        "string",
-							"description": "Comment text",
-						},
-					},
-					"required": []string{"path", "line", "body"},
-				},
-			},
+	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: childWorkspaceTaskDescription}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number"}, githubBodyField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Top-level review body text"},
+		githubReviewEventField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaEnumField: []string{reviewEventApprove, reviewEventRequestChanges, reviewEventComment},
+			jsonSchemaDescriptionField: "Review verdict: APPROVE, REQUEST_CHANGES, or COMMENT",
 		},
-		"required": []string{"task_name", "pr_number", "body", "event"},
+		"comments": map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, jsonSchemaDescriptionField: "Optional line-level review comments", itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
+			"path":          map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "File path relative to repo root"},
+			"line":          map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Line number in the diff (new file line number)"},
+			githubBodyField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Comment text"},
+		}, jsonSchemaRequiredField: []string{"path", "line", githubBodyField},
+		},
+		},
+	}, jsonSchemaRequiredField: []string{taskNameField, githubPRNumberField, githubBodyField, githubReviewEventField},
 	}
 	data, _ := json.Marshal(schema)
 	return data
@@ -143,14 +111,14 @@ func (t *PostReviewCommentTool) Execute(ctx context.Context, argsJSON json.RawMe
 
 	// Validate event value
 	switch args.Event {
-	case "APPROVE", "REQUEST_CHANGES", "COMMENT":
+	case reviewEventApprove, reviewEventRequestChanges, reviewEventComment:
 		// valid
 	default:
 		return "", fmt.Errorf("invalid event value %q: must be APPROVE, REQUEST_CHANGES, or COMMENT", args.Event)
 	}
 
 	// Determine namespace from environment
-	ns := os.Getenv("ORKA_TASK_NAMESPACE")
+	ns := os.Getenv(envOrkaTaskNamespace)
 	if ns == "" {
 		ns = defaultNamespace
 	}
@@ -189,7 +157,7 @@ func (t *PostReviewCommentTool) Execute(ctx context.Context, argsJSON json.RawMe
 	}
 
 	token := ""
-	for _, key := range []string{"token", "password"} {
+	for _, key := range []string{tokenKey, passwordKey} {
 		if v, ok := secret.Data[key]; ok {
 			token = strings.TrimSpace(string(v))
 			break
@@ -223,8 +191,8 @@ func postGitHubReview(ctx context.Context, token, owner, repo string, prNumber i
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews", baseURL, owner, repo, prNumber)
 
 	payload := map[string]any{
-		"body":  body,
-		"event": event,
+		githubBodyField:        body,
+		githubReviewEventField: event,
 	}
 	if len(comments) > 0 {
 		payload["comments"] = comments

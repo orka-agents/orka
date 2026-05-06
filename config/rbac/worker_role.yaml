@@ -19,12 +19,14 @@ rules:
   - get
   - list
   - watch
-# Secrets: read-only (git credentials for create_pull_request tool)
+# Secrets: read existing credentials and create ephemeral code_exec code Secrets
 - apiGroups:
   - ""
   resources:
   - secrets
   verbs:
+  - create
+  - delete
   - get
 # Orka Tool CRDs
 - apiGroups:
@@ -79,6 +81,17 @@ rules:
   - pods/log
   verbs:
   - get
+# code_exec Kubernetes backend: per-job ServiceAccounts
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
 - apiGroups:
   - apps
   resources:
@@ -100,11 +113,28 @@ rules:
   - list
   - watch
 - apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+- apiGroups:
   - networking.k8s.io
   resources:
   - ingresses
+  verbs:
+  - get
+  - list
+  - watch
+# code_exec Kubernetes backend: deny-all NetworkPolicies
+- apiGroups:
+  - networking.k8s.io
+  resources:
   - networkpolicies
   verbs:
+  - create
+  - delete
   - get
   - list
   - watch

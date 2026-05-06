@@ -20,7 +20,6 @@ import (
 )
 
 const (
-	phasePending             = "Pending"
 	msgTaskCreated           = "Task created"
 	errTypeAlreadyExists     = "already_exists"
 	testGitCredentialsSecret = "git-credentials"
@@ -28,8 +27,8 @@ const (
 
 func TestCreateAgentTaskTool_Name(t *testing.T) {
 	tool := &CreateAgentTaskTool{}
-	if got := tool.Name(); got != "create_agent_task" {
-		t.Errorf("Name() = %v, want %v", got, "create_agent_task")
+	if got := tool.Name(); got != createAgentTaskToolName {
+		t.Errorf("Name() = %v, want %v", got, createAgentTaskToolName)
 	}
 }
 
@@ -50,14 +49,14 @@ func TestCreateAgentTaskTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	for _, key := range []string{"name", "prompt", "agentRef", "namespace", "timeout", "maxTurns", "workspace", "schedule"} {
+	for _, key := range []string{nameField, promptField, agentRefField, namespaceField, timeoutField, "maxTurns", workspaceField, scheduleField} {
 		if _, ok := props[key]; !ok {
 			t.Errorf("missing %s property", key)
 		}
@@ -71,10 +70,10 @@ func newCreateAgentTaskToolCtx(fc client.Client) context.Context {
 		Namespace: defaultNamespace,
 		GenerateTaskName: func() string {
 			taskCounter++
-			return "agent-task-1"
+			return testAgentTaskGeneratedName
 		},
 		TaskLabels: func() map[string]string {
-			return map[string]string{"orka.ai/managed": "true"}
+			return map[string]string{managedByLabelValue: trueStr}
 		},
 		CheckTaskLimit: func() *ChatToolError { return nil },
 		IncrementTasks: func() { taskCounter++ },
@@ -101,14 +100,14 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 					t.Errorf("expected success, got error: %s", r.Error)
 				}
 				data := r.Data.(map[string]any)
-				if data["name"] != "agent-task-1" {
-					t.Errorf("name = %v, want agent-task-1", data["name"])
+				if data[nameField] != testAgentTaskGeneratedName {
+					t.Errorf("name = %v, want agent-task-1", data[nameField])
 				}
-				if data["namespace"] != defaultNamespace {
-					t.Errorf("namespace = %v, want default", data["namespace"])
+				if data[namespaceField] != defaultNamespace {
+					t.Errorf("namespace = %v, want default", data[namespaceField])
 				}
-				if data["phase"] != phasePending {
-					t.Errorf("phase = %v, want Pending", data["phase"])
+				if data[phaseField] != taskPhasePendingString {
+					t.Errorf("phase = %v, want Pending", data[phaseField])
 				}
 			},
 		},
@@ -148,7 +147,7 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 					t.Errorf("expected success, got error: %s", r.Error)
 				}
 				data := r.Data.(map[string]any)
-				msg := data["message"].(string)
+				msg := data[messageField].(string)
 				if msg == msgTaskCreated {
 					t.Error("expected scheduled message, got one-time message")
 				}
@@ -187,7 +186,7 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid JSON args",
+			name: invalidJSONArgsCaseName,
 			args: json.RawMessage(`{bad`),
 			checkResult: func(t *testing.T, result string) {
 				var r ChatToolResult
@@ -203,7 +202,7 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid timeout",
+			name: invalidTimeoutCaseName,
 			args: json.RawMessage(`{"name":"t","prompt":"p","agentRef":"a","timeout":"bad"}`),
 			checkResult: func(t *testing.T, result string) {
 				var r ChatToolResult
@@ -219,12 +218,12 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 			},
 		},
 		{
-			name: "k8s already exists error",
+			name: k8sAlreadyExistsErrorCaseName,
 			args: json.RawMessage(`{"name":"existing","prompt":"do it","agentRef":"a"}`),
 			objects: []client.Object{
 				&corev1alpha1.Task{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "agent-task-1",
+						Name:      testAgentTaskGeneratedName,
 						Namespace: defaultNamespace,
 					},
 					Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
@@ -291,7 +290,7 @@ func TestCreateAgentTaskTool_Execute_PreservesExplicitGitSecretRef(t *testing.T)
 	}
 
 	task := &corev1alpha1.Task{}
-	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: "agent-task-1", Namespace: defaultNamespace}, task); err != nil {
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testAgentTaskGeneratedName, Namespace: defaultNamespace}, task); err != nil {
 		t.Fatalf("failed to get task: %v", err)
 	}
 	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
@@ -332,7 +331,7 @@ func TestCreateAgentTaskTool_Execute_AutoDiscoversGitSecretRefWhenOmitted(t *tes
 	}
 
 	task := &corev1alpha1.Task{}
-	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: "agent-task-1", Namespace: defaultNamespace}, task); err != nil {
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testAgentTaskGeneratedName, Namespace: defaultNamespace}, task); err != nil {
 		t.Fatalf("failed to get task: %v", err)
 	}
 	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
@@ -352,7 +351,7 @@ func TestCreateAgentTaskTool_Execute_UsesCopilotAgentSecretForGitCredentials(t *
 			ObjectMeta: metav1.ObjectMeta{Name: "copilot-agent", Namespace: defaultNamespace},
 			Spec: corev1alpha1.AgentSpec{
 				Runtime:   &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
-				SecretRef: &corev1.LocalObjectReference{Name: "custom-copilot-secret"},
+				SecretRef: &corev1.LocalObjectReference{Name: testCustomCopilotSecretName},
 			},
 		},
 	)
@@ -379,14 +378,14 @@ func TestCreateAgentTaskTool_Execute_UsesCopilotAgentSecretForGitCredentials(t *
 	}
 
 	task := &corev1alpha1.Task{}
-	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: "agent-task-1", Namespace: defaultNamespace}, task); err != nil {
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testAgentTaskGeneratedName, Namespace: defaultNamespace}, task); err != nil {
 		t.Fatalf("failed to get task: %v", err)
 	}
 	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil || task.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
 		t.Fatal("expected gitSecretRef to be populated from the copilot agent")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "custom-copilot-secret" {
-		t.Fatalf("gitSecretRef = %q, want %q", task.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "custom-copilot-secret")
+	if task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != testCustomCopilotSecretName {
+		t.Fatalf("gitSecretRef = %q, want %q", task.Spec.AgentRuntime.Workspace.GitSecretRef.Name, testCustomCopilotSecretName)
 	}
 }
 

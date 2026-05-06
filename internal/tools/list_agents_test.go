@@ -19,8 +19,8 @@ import (
 
 func TestListAgentsTool_Name(t *testing.T) {
 	tool := &ListAgentsTool{}
-	if got := tool.Name(); got != "list_agents" {
-		t.Errorf("Name() = %q, want %q", got, "list_agents")
+	if got := tool.Name(); got != listAgentsToolName {
+		t.Errorf("Name() = %q, want %q", got, listAgentsToolName)
 	}
 }
 
@@ -41,11 +41,11 @@ func TestListAgentsTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	if _, ok := props["namespace"]; !ok {
+	if _, ok := props[namespaceField]; !ok {
 		t.Error("missing namespace property")
 	}
 }
@@ -71,9 +71,9 @@ func TestListAgentsTool_Execute(t *testing.T) {
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "coder-agent",
-						Namespace: "default",
+						Namespace: defaultNamespace,
 						Annotations: map[string]string{
-							"description": "A coding agent",
+							jsonSchemaDescriptionField: "A coding agent",
 						},
 					},
 					Spec: corev1alpha1.AgentSpec{
@@ -82,8 +82,8 @@ func TestListAgentsTool_Execute(t *testing.T) {
 							Name:     "claude-sonnet-4-20250514",
 						},
 						Tools: []corev1alpha1.ToolReference{
-							{Name: "web_search"},
-							{Name: "code_exec"},
+							{Name: webSearchToolName},
+							{Name: codeExecToolName},
 						},
 					},
 				},
@@ -97,14 +97,14 @@ func TestListAgentsTool_Execute(t *testing.T) {
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "agent-1",
-						Namespace: "default",
+						Namespace: defaultNamespace,
 					},
 					Spec: corev1alpha1.AgentSpec{},
 				},
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "agent-2",
-						Namespace: "default",
+						Namespace: defaultNamespace,
 					},
 					Spec: corev1alpha1.AgentSpec{},
 				},
@@ -118,7 +118,7 @@ func TestListAgentsTool_Execute(t *testing.T) {
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "cli-agent",
-						Namespace: "default",
+						Namespace: defaultNamespace,
 					},
 					Spec: corev1alpha1.AgentSpec{
 						Runtime: &corev1alpha1.AgentCLIRuntime{
@@ -130,13 +130,13 @@ func TestListAgentsTool_Execute(t *testing.T) {
 			wantCount: 1,
 		},
 		{
-			name: "custom namespace",
+			name: testCustomNamespaceCaseName,
 			args: `{"namespace": "prod"}`,
 			agents: []*corev1alpha1.Agent{
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "prod-agent",
-						Namespace: "prod",
+						Namespace: testProdNamespace,
 					},
 					Spec: corev1alpha1.AgentSpec{},
 				},
@@ -144,9 +144,9 @@ func TestListAgentsTool_Execute(t *testing.T) {
 			wantCount: 1,
 		},
 		{
-			name:       "invalid JSON args",
+			name:       invalidJSONArgsCaseName,
 			args:       `{bad}`,
-			wantErrStr: "failed to parse arguments",
+			wantErrStr: failedToParseArgumentsMessage,
 		},
 	}
 
@@ -161,7 +161,7 @@ func TestListAgentsTool_Execute(t *testing.T) {
 
 			tc := &ToolContext{
 				Client:    fc,
-				Namespace: "default",
+				Namespace: defaultNamespace,
 			}
 			ctx := WithToolContext(context.Background(), tc)
 
@@ -196,26 +196,26 @@ func TestListAgentsTool_Execute(t *testing.T) {
 			// Verify specific fields for single agent test
 			if tt.name == "single agent with model and tools" && len(data) > 0 {
 				agent := data[0].(map[string]any)
-				if agent["name"] != "coder-agent" {
-					t.Errorf("agent name = %q, want %q", agent["name"], "coder-agent")
+				if agent[nameField] != "coder-agent" {
+					t.Errorf("agent name = %q, want %q", agent[nameField], "coder-agent")
 				}
-				if agent["model"] != "anthropic/claude-sonnet-4-20250514" {
-					t.Errorf("agent model = %q, want %q", agent["model"], "anthropic/claude-sonnet-4-20250514")
+				if agent[modelField] != "anthropic/claude-sonnet-4-20250514" {
+					t.Errorf("agent model = %q, want %q", agent[modelField], "anthropic/claude-sonnet-4-20250514")
 				}
-				if agent["description"] != "A coding agent" {
-					t.Errorf("agent description = %q, want %q", agent["description"], "A coding agent")
+				if agent[jsonSchemaDescriptionField] != "A coding agent" {
+					t.Errorf("agent description = %q, want %q", agent[jsonSchemaDescriptionField], "A coding agent")
 				}
-				tools, ok := agent["tools"].([]any)
+				tools, ok := agent[toolsField].([]any)
 				if !ok || len(tools) != 2 {
-					t.Errorf("expected 2 tools, got %v", agent["tools"])
+					t.Errorf("expected 2 tools, got %v", agent[toolsField])
 				}
 			}
 
 			// Verify runtime field
 			if tt.name == "agent with runtime" && len(data) > 0 {
 				agent := data[0].(map[string]any)
-				if agent["runtime"] != "claude" {
-					t.Errorf("agent runtime = %q, want %q", agent["runtime"], "claude")
+				if agent[runtimeField] != runtimeTypeClaude {
+					t.Errorf("agent runtime = %q, want %q", agent[runtimeField], runtimeTypeClaude)
 				}
 			}
 		})

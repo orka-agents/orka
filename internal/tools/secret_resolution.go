@@ -21,8 +21,8 @@ import (
 
 var (
 	copilotRuntimeSecretCandidates = []string{"copilot-token"}
-	claudeRuntimeSecretCandidates  = []string{"claude-credentials", "claude-api-key"}
-	codexRuntimeSecretCandidates   = []string{"codex-runtime-copilot", "codex-runtime-openai", "codex-credentials", "codex-api-key", "codex-proxy-token", "openai-api-key"}
+	claudeRuntimeSecretCandidates  = []string{claudeCredentialsSecretName, claudeAPIKeySecretName}
+	codexRuntimeSecretCandidates   = []string{codexRuntimeCopilotSecretName, "codex-runtime-openai", "codex-credentials", "codex-api-key", codexProxyTokenSecretName, "openai-api-key"}
 	gitCredentialSecretCandidates  = []string{"git-credentials", "github-credentials", "copilot-token", "github-token", "git-token"}
 )
 

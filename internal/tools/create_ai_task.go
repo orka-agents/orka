@@ -19,34 +19,20 @@ import (
 // CreateAITaskTool creates an AI-type Task CR.
 type CreateAITaskTool struct{}
 
-func (t *CreateAITaskTool) Name() string { return "create_ai_task" }
+func (t *CreateAITaskTool) Name() string { return createAITaskToolName }
 
 func (t *CreateAITaskTool) Description() string {
 	return "Create an AI/LLM-powered task. Use when the user needs LLM reasoning, code review, content generation, or analysis. Do NOT use for running shell commands or CLI runtimes."
 }
 
 func (t *CreateAITaskTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"name":        map[string]any{"type": "string", "description": "Task name"},
-			"prompt":      map[string]any{"type": "string", "description": "The prompt/instruction for the AI task"},
-			"agentRef":    map[string]any{"type": "string", "description": "Optional Agent name to use"},
-			"providerRef": map[string]any{"type": "string", "description": "Optional Provider CRD reference name. Omit to let the controller resolve the task from the referenced Agent or model settings."},
-			"namespace":   map[string]any{"type": "string", "description": "Namespace"},
-			"timeout":     map[string]any{"type": "string", "description": "Timeout duration, e.g. \"5m\""},
-			"priority":    map[string]any{"type": "integer", "description": "Priority 0-1000"},
-			"sessionRef":  map[string]any{"type": "string", "description": "Session name for conversation continuity; creates the session if missing and appends the transcript on completion"},
-			"schedule":    map[string]any{"type": "string", "description": "Cron schedule for recurring tasks (e.g., '0 */6 * * *' for every 6 hours, '0 9 * * 1-5' for weekdays at 9am, '*/5 * * * *' for every 5 minutes). Leave empty for one-time tasks."},
-		},
-		"required": []string{"name", "prompt"},
-	})
+	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: taskNameDescription}, promptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "The prompt/instruction for the AI task"}, agentRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Agent name to use"}, providerRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Provider CRD reference name. Omit to let the controller resolve the task from the referenced Agent or model settings."}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, priorityField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Priority 0-1000"}, "sessionRef": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Session name for conversation continuity; creates the session if missing and appends the transcript on completion"}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription}}, jsonSchemaRequiredField: []string{nameField, promptField}})
 }
 
 func (t *CreateAITaskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil {
-		return ChatToolErrorResult("internal_error", "missing tool context", "")
+		return ChatToolErrorResult(internalErrorType, "missing tool context", "")
 	}
 
 	var a map[string]any
@@ -58,12 +44,12 @@ func (t *CreateAITaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		return ChatToolErrorResult(limitErr.Type, limitErr.Message, limitErr.Suggestion)
 	}
 
-	prompt := chatGetStringArg(a, "prompt")
+	prompt := chatGetStringArg(a, promptField)
 	if prompt == "" {
 		return ChatToolErrorResult("invalid_arguments", "prompt is required", "Provide a prompt for the AI task")
 	}
 
-	namespace := chatGetStringArgDefault(a, "namespace", tc.Namespace)
+	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
 	if r, ok := checkChatNamespaceScope(tc, namespace); !ok {
 		return r, nil
 	}
@@ -80,11 +66,11 @@ func (t *CreateAITaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		},
 	}
 
-	if agentRef := chatGetStringArg(a, "agentRef"); agentRef != "" {
+	if agentRef := chatGetStringArg(a, agentRefField); agentRef != "" {
 		task.Spec.AgentRef = &corev1alpha1.AgentReference{Name: agentRef}
 	}
 
-	if providerName := chatGetStringArg(a, "providerRef"); providerName != "" {
+	if providerName := chatGetStringArg(a, providerRefField); providerName != "" {
 		if task.Spec.AI == nil {
 			task.Spec.AI = &corev1alpha1.AISpec{}
 		}
@@ -97,8 +83,8 @@ func (t *CreateAITaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		task.Spec.Timeout = &metav1.Duration{Duration: d}
 	}
 
-	if _, ok := a["priority"]; ok {
-		p := int32(chatGetIntArg(a, "priority", 500))
+	if _, ok := a[priorityField]; ok {
+		p := int32(chatGetIntArg(a, priorityField, 500))
 		task.Spec.Priority = &p
 	}
 
@@ -110,7 +96,7 @@ func (t *CreateAITaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		}
 	}
 
-	schedule := chatGetStringArg(a, "schedule")
+	schedule := chatGetStringArg(a, scheduleField)
 	if schedule != "" {
 		task.Spec.Schedule = schedule
 	}
@@ -120,12 +106,7 @@ func (t *CreateAITaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	tc.IncrementTasks()
-	return ChatToolSuccess(map[string]any{
-		"name":      task.Name,
-		"namespace": task.Namespace,
-		"phase":     "Pending",
-		"message":   taskCreatedMsg(schedule),
-	})
+	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(schedule)})
 }
 
 func mustMarshalSchema(v any) json.RawMessage {
