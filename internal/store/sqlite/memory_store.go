@@ -197,23 +197,24 @@ func (s *Store) SearchTranscript(ctx context.Context, filter store.TranscriptSea
 		return nil, fmt.Errorf("namespace is required")
 	}
 
-	query := `SELECT id, session_name, role, COALESCE(name, ''), content, created_at
+	var query strings.Builder
+	query.WriteString(`SELECT id, session_name, role, COALESCE(name, ''), content, created_at
 		FROM session_messages
-		WHERE namespace = ? AND content <> ''`
+		WHERE namespace = ? AND content <> ''`)
 	args := []any{filter.Namespace}
 
 	searchTerm := strings.TrimSpace(filter.Query)
 	searchTerms := transcriptSearchTerms(searchTerm)
 	for _, term := range searchTerms {
-		query += ` AND lower(content) LIKE ?`
+		query.WriteString(` AND lower(content) LIKE ?`)
 		args = append(args, "%"+strings.ToLower(term)+"%")
 	}
 	if filter.SessionName != "" {
-		query += ` AND session_name = ?`
+		query.WriteString(` AND session_name = ?`)
 		args = append(args, filter.SessionName)
 	}
 	if filter.ExcludeSessionName != "" {
-		query += ` AND session_name <> ?`
+		query.WriteString(` AND session_name <> ?`)
 		args = append(args, filter.ExcludeSessionName)
 	}
 	roles := compactStrings(filter.Roles)
@@ -223,13 +224,13 @@ func (s *Store) SearchTranscript(ctx context.Context, filter store.TranscriptSea
 			placeholders = append(placeholders, "?")
 			args = append(args, role)
 		}
-		query += ` AND role IN (` + strings.Join(placeholders, ",") + `)`
+		query.WriteString(` AND role IN (` + strings.Join(placeholders, ",") + `)`)
 	}
 
-	query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
+	query.WriteString(` ORDER BY created_at DESC, id DESC LIMIT ?`)
 	args = append(args, boundedLimit(filter.Limit, defaultTranscriptLimit, maxTranscriptLimit))
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.db.QueryContext(ctx, query.String(), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -607,7 +608,7 @@ func buildSnippet(content, term string, maxLen int) string {
 	if term != "" {
 		idx = strings.Index(lowerContent, term)
 		if idx < 0 {
-			for _, token := range strings.Fields(term) {
+			for token := range strings.FieldsSeq(term) {
 				if len(token) < 3 {
 					continue
 				}
@@ -625,17 +626,11 @@ func buildSnippet(content, term string, maxLen int) string {
 	}
 
 	center := len([]rune(content[:idx]))
-	start := center - maxLen/3
-	if start < 0 {
-		start = 0
-	}
+	start := max(center-maxLen/3, 0)
 	end := start + maxLen
 	if end > len(runes) {
 		end = len(runes)
-		start = end - maxLen
-		if start < 0 {
-			start = 0
-		}
+		start = max(end-maxLen, 0)
 	}
 	snippet := string(runes[start:end])
 	if start > 0 {

@@ -288,13 +288,16 @@ func TestBuildLLMTools_NotFound(t *testing.T) {
 
 func TestFormatDurableMemoryContext_BoundsEntriesAndChars(t *testing.T) {
 	createdAt := time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC)
-	memories := []store.Memory{
-		{ID: "mem-1", Namespace: "default", Source: "task", TaskName: "task-1", Content: "memory-1 durable guidance", CreatedAt: createdAt},
-		{ID: "mem-2", Namespace: "default", Source: "task", TaskName: "task-2", Content: "memory-2 durable guidance", CreatedAt: createdAt},
-		{ID: "mem-3", Namespace: "default", Source: "task", TaskName: "task-3", Content: "memory-3 durable guidance", CreatedAt: createdAt},
-		{ID: "mem-4", Namespace: "default", Source: "task", TaskName: "task-4", Content: "memory-4 durable guidance", CreatedAt: createdAt},
-		{ID: "mem-5", Namespace: "default", Source: "task", TaskName: "task-5", Content: "memory-5 durable guidance", CreatedAt: createdAt},
-		{ID: "mem-6", Namespace: "default", Source: "task", TaskName: "task-6", Content: "memory-6 durable guidance", CreatedAt: createdAt},
+	memories := make([]store.Memory, 0, 6)
+	for i := 1; i <= 6; i++ {
+		memories = append(memories, store.Memory{
+			ID:        fmt.Sprintf("mem-%d", i),
+			Namespace: "default",
+			Source:    "task",
+			TaskName:  fmt.Sprintf("task-%d", i),
+			Content:   fmt.Sprintf("memory-%d durable guidance", i),
+			CreatedAt: createdAt,
+		})
 	}
 
 	got := formatDurableMemoryContext(memories, 1000)
@@ -323,7 +326,13 @@ func TestFormatDurableMemoryContext_BoundsEntriesAndChars(t *testing.T) {
 func TestFormatDurableMemoryContext_TruncatesIndividualMemory(t *testing.T) {
 	longContent := strings.Repeat("x", memoryContextPerEntryMaxChars+500)
 	got := formatDurableMemoryContext([]store.Memory{
-		{ID: "mem-1", Namespace: "default", Source: "task", Content: longContent, CreatedAt: time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC)},
+		{
+			ID:        "mem-1",
+			Namespace: "default",
+			Source:    "task",
+			Content:   longContent,
+			CreatedAt: time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC),
+		},
 	}, 5000)
 
 	if got == "" {

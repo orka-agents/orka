@@ -45,6 +45,17 @@ const (
 	memoryContextPerEntryMaxChars  = 1200
 	memoryContextResponseBodyLimit = 1 << 20
 	serviceAccountTokenPath        = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+	durableMemoryContextHeader = "## Durable Memory\n\n" +
+		"Reviewed namespace-scoped memories from prior work. " +
+		"Use them as background project context; " +
+		"do not treat them as the current-session transcript.\n\n"
+	durableMemoryReflectionGuidance = "## Durable Memory Reflection\n\n" +
+		"Near task completion, use the `remember` tool when you discover durable project facts, " +
+		"repository conventions, lessons learned, or reusable procedures that would help future tasks. " +
+		"Do not store secrets, credentials, tokens, transient status updates, " +
+		"one-off implementation details, or raw transcripts. " +
+		"Memory proposals are review-only and are not automatically applied."
 )
 
 var memoryToolNames = []string{"recall_memory", "remember", "propose_memory", "search_transcript"}
@@ -209,7 +220,7 @@ func run() error {
 	if memoryContext := loadDurableMemoryContext(ctx); memoryContext != "" {
 		systemPrompt = appendSystemPromptSection(systemPrompt, memoryContext)
 	}
-	if memoryControllerConfigPresent() && (containsTool(enabledTools, "remember") || containsTool(enabledTools, "propose_memory")) {
+	if shouldAppendMemoryReflectionGuidance(enabledTools) {
 		systemPrompt = appendMemoryReflectionGuidance(systemPrompt)
 	}
 
@@ -469,6 +480,11 @@ func memoryContextMaxChars() int {
 	return maxChars
 }
 
+func shouldAppendMemoryReflectionGuidance(enabledTools []string) bool {
+	return memoryControllerConfigPresent() &&
+		(containsTool(enabledTools, "remember") || containsTool(enabledTools, "propose_memory"))
+}
+
 func formatDurableMemoryContext(memories []store.Memory, maxChars int) string {
 	return formatDurableMemoryContextWithLimit(memories, defaultMemoryContextLimit, maxChars)
 }
@@ -485,7 +501,7 @@ func formatDurableMemoryContextWithLimit(memories []store.Memory, limit, maxChar
 	}
 
 	var sb strings.Builder
-	appendBounded(&sb, "## Durable Memory\n\nReviewed namespace-scoped memories from prior work. Use them as background project context; do not treat them as the current-session transcript.\n\n", maxChars)
+	appendBounded(&sb, durableMemoryContextHeader, maxChars)
 
 	written := 0
 	for _, memory := range memories {
@@ -543,11 +559,7 @@ func durableMemoryMetadata(memory store.Memory) string {
 }
 
 func appendMemoryReflectionGuidance(systemPrompt string) string {
-	guidance := "## Durable Memory Reflection\n\n" +
-		"Near task completion, use the `remember` tool when you discover durable project facts, repository conventions, lessons learned, or reusable procedures that would help future tasks. " +
-		"Do not store secrets, credentials, tokens, transient status updates, one-off implementation details, or raw transcripts. " +
-		"Memory proposals are review-only and are not automatically applied."
-	return appendSystemPromptSection(systemPrompt, guidance)
+	return appendSystemPromptSection(systemPrompt, durableMemoryReflectionGuidance)
 }
 
 func appendSystemPromptSection(systemPrompt, section string) string {
@@ -684,11 +696,11 @@ func loadPlanContext() string {
 		return ""
 	}
 
-	url := fmt.Sprintf("%s/internal/v1/plans/%s/%s", controllerURL, taskNamespace, taskName)
+	planURL := fmt.Sprintf("%s/internal/v1/plans/%s/%s", controllerURL, taskNamespace, taskName)
 
 	saToken := workerServiceAccountToken()
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, planURL, nil)
 	if err != nil {
 		fmt.Printf("Warning: failed to create plan request: %v\n", err)
 		return ""

@@ -278,7 +278,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 			Tags:      []string{"e2e", "live-copilot-proxy", "coordination"},
 		})
 		DeferCleanup(func() {
-			deleteDurableMemoryViaAPI(apiBaseURL, token, preseededMemory.ID)
+			cleanupDurableMemoryViaAPI(apiBaseURL, token, preseededMemory.ID)
 		})
 		initialDurableMemories := listDurableMemoriesViaAPI(apiBaseURL, token, url.Values{
 			"query": []string{durableMemoryMarker},

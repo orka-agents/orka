@@ -354,7 +354,7 @@ func (t *RememberMemoryTool) Execute(ctx context.Context, args json.RawMessage) 
 }
 
 func deriveRememberTitle(content string) string {
-	for _, line := range strings.Split(content, "\n") {
+	for line := range strings.SplitSeq(content, "\n") {
 		title := strings.Join(strings.Fields(line), " ")
 		if title == "" {
 			continue

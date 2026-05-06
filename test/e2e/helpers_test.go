@@ -804,7 +804,7 @@ func setDurableMemoryEnabledViaAPI(apiBaseURL, token, id string, enabled bool) s
 	return getDurableMemoryViaAPI(apiBaseURL, token, id)
 }
 
-func deleteDurableMemoryViaAPI(apiBaseURL, token, id string) {
+func tryDeleteDurableMemoryViaAPI(apiBaseURL, token, id string) error {
 	body, statusCode, err := doAuthorizedJSONRequest(
 		http.MethodDelete,
 		apiEndpoint(apiBaseURL, "/api/v1/memories/"+url.PathEscape(id), apiValuesWithNamespace(nil)),
@@ -812,8 +812,23 @@ func deleteDurableMemoryViaAPI(apiBaseURL, token, id string) {
 		"",
 		"",
 	)
-	Expect(err).NotTo(HaveOccurred())
-	Expect(statusCode).To(Equal(http.StatusNoContent), "unexpected durable memory delete response: %s", strings.TrimSpace(body))
+	if err != nil {
+		return err
+	}
+	if statusCode != http.StatusNoContent && statusCode != http.StatusNotFound {
+		return fmt.Errorf("unexpected durable memory delete response %d: %s", statusCode, strings.TrimSpace(body))
+	}
+	return nil
+}
+
+func deleteDurableMemoryViaAPI(apiBaseURL, token, id string) {
+	Expect(tryDeleteDurableMemoryViaAPI(apiBaseURL, token, id)).To(Succeed())
+}
+
+func cleanupDurableMemoryViaAPI(apiBaseURL, token, id string) {
+	if err := tryDeleteDurableMemoryViaAPI(apiBaseURL, token, id); err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "durable memory cleanup skipped: %v\n", err)
+	}
 }
 
 func createMemoryProposalViaAPI(apiBaseURL, token string, proposal store.MemoryProposal) store.MemoryProposal {

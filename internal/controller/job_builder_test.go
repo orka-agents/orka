@@ -855,7 +855,7 @@ func TestJobBuilder_buildEnvVars_WithCoordination_IncludesMemoryTools(t *testing
 	}
 
 	tools := map[string]bool{}
-	for _, tool := range strings.Split(toolsEnv.Value, ",") {
+	for tool := range strings.SplitSeq(toolsEnv.Value, ",") {
 		tools[strings.TrimSpace(tool)] = true
 	}
 
