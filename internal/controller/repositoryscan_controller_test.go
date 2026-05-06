@@ -25,6 +25,7 @@ import (
 	"github.com/sozercan/orka/internal/security"
 	storepkg "github.com/sozercan/orka/internal/store"
 	sqlitestore "github.com/sozercan/orka/internal/store/sqlite"
+	"github.com/sozercan/orka/workers/common"
 )
 
 func TestRepositoryScanConditionMessageUsesFallback(t *testing.T) {
@@ -812,6 +813,188 @@ func TestCreateScanRunIsIdempotentWhenTaskAlreadyExists(t *testing.T) {
 	if current.Status.LastScanTaskName != taskName {
 		t.Fatalf("scan.Status.LastScanTaskName = %q, want %q", current.Status.LastScanTaskName, taskName)
 	}
+}
+
+type patchIngestFixture struct {
+	store      *sqlitestore.Store
+	reconciler *RepositoryScanReconciler
+	scan       *corev1alpha1.RepositoryScan
+	finding    *storepkg.Finding
+	proposal   *storepkg.PatchProposal
+}
+
+func newPatchIngestFixture(t *testing.T, id string) patchIngestFixture {
+	t.Helper()
+	ctx := context.Background()
+	securityStore := setupControllerSQLiteStore(t)
+
+	findingID := "fnd_patch_" + id
+	taskName := "kaset-patch-" + id
+	branch := "orka/security/" + findingID
+	fixture := patchIngestFixture{
+		store: securityStore,
+		reconciler: &RepositoryScanReconciler{
+			SecurityStore: securityStore,
+			ArtifactStore: securityStore,
+			ResultStore:   securityStore,
+		},
+		scan: &corev1alpha1.RepositoryScan{
+			ObjectMeta: metav1.ObjectMeta{Name: "kaset", Namespace: "default"},
+		},
+		finding: &storepkg.Finding{
+			ID:               findingID,
+			Namespace:        "default",
+			RepositoryScan:   "kaset",
+			ScanRunID:        "scan_patch",
+			Fingerprint:      "sha256:patch-" + id,
+			Title:            "Patch target",
+			Summary:          "candidate finding",
+			Severity:         "high",
+			Confidence:       "high",
+			ValidationStatus: "validated",
+			State:            findingStatePatchPending,
+		},
+		proposal: &storepkg.PatchProposal{
+			ID:             "patch_" + id,
+			Namespace:      "default",
+			RepositoryScan: "kaset",
+			FindingID:      findingID,
+			TaskName:       taskName,
+			Branch:         branch,
+			Status:         scanRunPhasePending,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		},
+	}
+	if err := securityStore.UpsertFinding(ctx, fixture.finding); err != nil {
+		t.Fatalf("UpsertFinding() error = %v", err)
+	}
+	if err := securityStore.CreatePatchProposal(ctx, fixture.proposal); err != nil {
+		t.Fatalf("CreatePatchProposal() error = %v", err)
+	}
+	return fixture
+}
+
+func patchTaskForFixture(fixture patchIngestFixture, resultAvailable bool) *corev1alpha1.Task {
+	return &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fixture.proposal.TaskName,
+			Namespace: fixture.proposal.Namespace,
+			Labels: map[string]string{
+				labels.LabelSecurityTarget:    fixture.scan.Name,
+				labels.LabelSecurityFindingID: fixture.finding.ID,
+				labels.LabelSecurityStage:     security.StagePatch,
+				labels.LabelSecurityMode:      security.StagePatch,
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					PushBranch: fixture.proposal.Branch,
+				},
+			},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseSucceeded,
+			ResultRef: &corev1alpha1.ResultReference{Available: resultAvailable},
+		},
+	}
+}
+
+func savePatchStructuredResult(t *testing.T, fixture patchIngestFixture, sr *common.StructuredResult) {
+	t.Helper()
+	result, err := common.FormatStructuredResult(sr)
+	if err != nil {
+		t.Fatalf("FormatStructuredResult() error = %v", err)
+	}
+	if err := fixture.store.SaveResult(context.Background(), fixture.proposal.Namespace, fixture.proposal.TaskName, result); err != nil {
+		t.Fatalf("SaveResult() error = %v", err)
+	}
+}
+
+func assertPatchIngestState(t *testing.T, fixture patchIngestFixture, wantProposalStatus, wantFindingState string) {
+	t.Helper()
+	proposals, err := fixture.store.ListPatchProposals(context.Background(), fixture.proposal.Namespace, fixture.finding.ID)
+	if err != nil {
+		t.Fatalf("ListPatchProposals() error = %v", err)
+	}
+	if len(proposals) != 1 {
+		t.Fatalf("len(proposals) = %d, want 1", len(proposals))
+	}
+	if proposals[0].Status != wantProposalStatus {
+		t.Fatalf("proposal.Status = %q, want %q", proposals[0].Status, wantProposalStatus)
+	}
+	updatedFinding, err := fixture.store.GetFinding(context.Background(), fixture.proposal.Namespace, fixture.finding.ID)
+	if err != nil {
+		t.Fatalf("GetFinding() error = %v", err)
+	}
+	if updatedFinding.State != wantFindingState {
+		t.Fatalf("finding.State = %q, want %q", updatedFinding.State, wantFindingState)
+	}
+}
+
+func TestIngestPatchTaskMarksPatchReadyAfterConfirmedPush(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPatchIngestFixture(t, "ready")
+	savePatchStructuredResult(t, fixture, &common.StructuredResult{
+		Summary:    "patched successfully",
+		Diff:       "diff --git a/app.py b/app.py",
+		PushBranch: fixture.proposal.Branch,
+	})
+
+	if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, true)); err != nil {
+		t.Fatalf("ingestPatchTask() error = %v", err)
+	}
+	assertPatchIngestState(t, fixture, scanRunPhaseSucceeded, findingStatePatchReady)
+}
+
+func TestIngestPatchTaskFailsSucceededTaskWhenPushFails(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPatchIngestFixture(t, "failed")
+	savePatchStructuredResult(t, fixture, &common.StructuredResult{
+		Summary:   "patch created but push failed",
+		Diff:      "diff --git a/app.py b/app.py",
+		PushError: "git push failed: remote rejected",
+	})
+
+	if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, true)); err != nil {
+		t.Fatalf("ingestPatchTask() error = %v", err)
+	}
+	assertPatchIngestState(t, fixture, scanRunPhaseFailed, findingStateOpen)
+}
+
+func TestIngestPatchTaskFailsSucceededTaskWithoutConfirmedPushBranch(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPatchIngestFixture(t, "missing-push")
+	savePatchStructuredResult(t, fixture, &common.StructuredResult{
+		Summary: "patch created without confirmed push",
+		Diff:    "diff --git a/app.py b/app.py",
+	})
+
+	if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, true)); err != nil {
+		t.Fatalf("ingestPatchTask() error = %v", err)
+	}
+	assertPatchIngestState(t, fixture, scanRunPhaseFailed, findingStateOpen)
+}
+
+func TestIngestPatchTaskKeepsPatchPendingUntilResultIsAvailable(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPatchIngestFixture(t, "pending-ref")
+
+	if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, false)); err != nil {
+		t.Fatalf("ingestPatchTask() error = %v", err)
+	}
+	assertPatchIngestState(t, fixture, scanRunPhasePending, findingStatePatchPending)
+}
+
+func TestIngestPatchTaskKeepsPatchPendingUntilResultExists(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPatchIngestFixture(t, "pending-result")
+
+	if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, true)); err != nil {
+		t.Fatalf("ingestPatchTask() error = %v", err)
+	}
+	assertPatchIngestState(t, fixture, scanRunPhasePending, findingStatePatchPending)
 }
 
 func setupControllerSQLiteStore(t *testing.T) *sqlitestore.Store {

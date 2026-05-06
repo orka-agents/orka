@@ -248,8 +248,50 @@ func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error
 		   summary = excluded.summary,
 		   severity = excluded.severity,
 		   confidence = excluded.confidence,
-		   validation_status = excluded.validation_status,
-		   state = excluded.state,
+		   validation_status = CASE
+		     WHEN security_findings.validation_status = 'validated'
+		       AND excluded.validation_status != 'validated'
+		       THEN security_findings.validation_status
+		     WHEN excluded.validation_status IN ('validated', 'failed', 'skipped', 'pending')
+		       THEN excluded.validation_status
+		     WHEN CASE security_findings.validation_status
+		       WHEN 'validated' THEN 4
+		       WHEN 'failed' THEN 3
+		       WHEN 'skipped' THEN 3
+		       WHEN 'pending' THEN 2
+		       WHEN 'unvalidated' THEN 1
+		       ELSE 0
+		     END >= CASE excluded.validation_status
+		       WHEN 'validated' THEN 4
+		       WHEN 'failed' THEN 3
+		       WHEN 'skipped' THEN 3
+		       WHEN 'pending' THEN 2
+		       WHEN 'unvalidated' THEN 1
+		       ELSE 0
+		     END THEN security_findings.validation_status
+		     ELSE excluded.validation_status
+		   END,
+		   state = CASE
+		     WHEN security_findings.state IN ('fixed', 'resolved', 'dismissed', 'suppressed', 'false_positive')
+		       THEN security_findings.state
+		     WHEN security_findings.state = 'patch_pending'
+		       AND excluded.state = 'open'
+		       THEN excluded.state
+		     WHEN CASE security_findings.state
+		       WHEN 'pr_open' THEN 4
+		       WHEN 'patch_ready' THEN 3
+		       WHEN 'patch_pending' THEN 2
+		       WHEN 'open' THEN 1
+		       ELSE 0
+		     END >= CASE excluded.state
+		       WHEN 'pr_open' THEN 4
+		       WHEN 'patch_ready' THEN 3
+		       WHEN 'patch_pending' THEN 2
+		       WHEN 'open' THEN 1
+		       ELSE 0
+		     END THEN security_findings.state
+		     ELSE excluded.state
+		   END,
 		   file_path = excluded.file_path,
 		   line = excluded.line,
 		   commit_sha = excluded.commit_sha,
@@ -257,10 +299,38 @@ func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error
 		   remediation = excluded.remediation,
 		   suggested_action = excluded.suggested_action,
 		   evidence_json = excluded.evidence_json,
-		   validation_json = excluded.validation_json,
-		   patch_proposal_id = excluded.patch_proposal_id,
-		   pr_number = excluded.pr_number,
-		   pr_url = excluded.pr_url,
+		   validation_json = CASE
+		     WHEN security_findings.validation_status = 'validated'
+		       AND excluded.validation_status != 'validated'
+		       THEN security_findings.validation_json
+		     WHEN excluded.validation_status IN ('validated', 'failed', 'skipped', 'pending')
+		       THEN excluded.validation_json
+		     WHEN CASE security_findings.validation_status
+		       WHEN 'validated' THEN 4
+		       WHEN 'failed' THEN 3
+		       WHEN 'skipped' THEN 3
+		       WHEN 'pending' THEN 2
+		       WHEN 'unvalidated' THEN 1
+		       ELSE 0
+		     END >= CASE excluded.validation_status
+		       WHEN 'validated' THEN 4
+		       WHEN 'failed' THEN 3
+		       WHEN 'skipped' THEN 3
+		       WHEN 'pending' THEN 2
+		       WHEN 'unvalidated' THEN 1
+		       ELSE 0
+		     END THEN security_findings.validation_json
+		     ELSE excluded.validation_json
+		   END,
+		   patch_proposal_id = CASE
+		     WHEN excluded.patch_proposal_id IS NOT NULL AND excluded.patch_proposal_id != '' THEN excluded.patch_proposal_id
+		     ELSE security_findings.patch_proposal_id
+		   END,
+		   pr_number = COALESCE(excluded.pr_number, security_findings.pr_number),
+		   pr_url = CASE
+		     WHEN excluded.pr_url IS NOT NULL AND excluded.pr_url != '' THEN excluded.pr_url
+		     ELSE security_findings.pr_url
+		   END,
 		   updated_at = excluded.updated_at`,
 		finding.ID, finding.Namespace, finding.RepositoryScan, finding.ScanRunID, finding.Fingerprint, finding.Title, finding.Summary,
 		finding.Severity, finding.Confidence, finding.ValidationStatus, finding.State, finding.FilePath, finding.Line, finding.CommitSHA,

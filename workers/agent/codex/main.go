@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,11 +29,15 @@ const (
 	defaultCodexSandboxMode = "workspace-write"
 	codexWebSearchDisabled  = "disabled"
 	defaultAutoCompactLimit = "240000"
+	codexBwrapNamespaceErr  = "bwrap: no permissions to create a new namespace"
 )
 
 var errCodexRequiresBash = errors.New(
 	"codex runtime requires allowBash=true because the Codex CLI cannot disable shell execution",
 )
+
+var codexProcSysDir = "/proc/sys"
+var codexUserNamespaceProbe = probeUserNamespaceSupport
 
 func main() {
 	if err := common.RunAgent("codex", workspaceDir, defaultMaxTurns, executeCodex); err != nil {
@@ -82,22 +87,12 @@ func executeCodexPrompt(ctx context.Context, cfg *common.AgentConfig, prompt str
 	}
 	defer cleanupInstructions()
 
-	args := buildCodexArgs(cfg, outputPath, instructionsPath)
-	fmt.Printf("Executing: %s %s\n", codexPath(), strings.Join(args, " "))
-
 	execCtx := ctx
 	if cfg.TimeoutSeconds > 0 {
 		var timeoutCancel context.CancelFunc
 		execCtx, timeoutCancel = context.WithTimeout(ctx, time.Duration(cfg.TimeoutSeconds)*time.Second)
 		defer timeoutCancel()
 	}
-
-	cmd := exec.CommandContext(execCtx, codexPath(), args...)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = io.MultiWriter(&stdout, os.Stdout)
-	cmd.Stderr = io.MultiWriter(&stderr, os.Stderr)
-	cmd.Stdin = strings.NewReader(prompt)
 
 	dir := workspaceDir
 	if cfg.SubPath != "" {
@@ -113,22 +108,42 @@ func executeCodexPrompt(ctx context.Context, cfg *common.AgentConfig, prompt str
 		}
 		dir = fallbackDir
 	}
-	cmd.Dir = dir
-	cmd.Env = buildCodexEnv()
 
-	if err := cmd.Run(); err != nil {
-		result := readCodexResult(outputPath, stdout.String())
-		if stderrStr := stderr.String(); stderrStr != "" {
-			return result, fmt.Errorf("%w: %s", err, stderrStr)
+	if shouldStartCodexWithoutSandbox() {
+		fmt.Fprintln(
+			os.Stderr,
+			"workspace-write sandbox unavailable on this kernel; starting Codex without sandbox isolation",
+		)
+		retry := runCodex(execCtx, cfg, dir, outputPath, instructionsPath, prompt, true)
+		if retry.err == nil {
+			return retry.result, nil
 		}
-		return result, err
+		return retry.result, fmt.Errorf(
+			"codex without sandbox after kernel capability check: %w",
+			wrapCodexError(retry.err, retry.stderr),
+		)
 	}
 
-	return readCodexResult(outputPath, stdout.String()), nil
+	primary := runCodex(execCtx, cfg, dir, outputPath, instructionsPath, prompt, false)
+	if primary.err != nil && shouldRetryCodexWithoutSandbox(primary.combinedOutput()) {
+		fmt.Fprintln(os.Stderr, "workspace-write sandbox unavailable; retrying Codex without sandbox isolation")
+		retry := runCodex(execCtx, cfg, dir, outputPath, instructionsPath, prompt, true)
+		if retry.err == nil {
+			return retry.result, nil
+		}
+		return retry.result, fmt.Errorf(
+			"codex retry without sandbox after workspace-write failure: %w",
+			wrapCodexError(retry.err, retry.stderr),
+		)
+	}
+	if primary.err == nil {
+		return primary.result, nil
+	}
+
+	return primary.result, wrapCodexError(primary.err, primary.stderr)
 }
 
-func buildCodexArgs(cfg *common.AgentConfig, outputPath, instructionsPath string) []string {
-	sandboxMode := codexSandboxMode()
+func buildCodexArgsForMode(cfg *common.AgentConfig, outputPath, instructionsPath string, bypassSandbox bool) []string {
 	args := []string{
 		"exec",
 		"--skip-git-repo-check",
@@ -137,7 +152,13 @@ func buildCodexArgs(cfg *common.AgentConfig, outputPath, instructionsPath string
 		"--output-last-message", outputPath,
 		"--config", "approval_policy=never",
 		"--config", "model_auto_compact_token_limit=" + codexAutoCompactTokenLimit(),
-		"--sandbox", sandboxMode,
+	}
+
+	sandboxMode := codexSandboxMode()
+	if bypassSandbox {
+		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+	} else {
+		args = append(args, "--sandbox", sandboxMode)
 	}
 
 	if cfg.Model != "" {
@@ -149,7 +170,7 @@ func buildCodexArgs(cfg *common.AgentConfig, outputPath, instructionsPath string
 	if baseURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")); baseURL != "" {
 		args = append(args, "--config", "openai_base_url="+baseURL)
 	}
-	if sandboxMode == defaultCodexSandboxMode {
+	if !bypassSandbox && sandboxMode == defaultCodexSandboxMode {
 		args = append(args, "--config", "sandbox_workspace_write.network_access=true")
 	}
 	if webSearchSetting, ok := codexWebSearchSetting(cfg); ok {
@@ -256,6 +277,59 @@ func buildCodexEnv() []string {
 	return env
 }
 
+type codexRunResult struct {
+	result string
+	stdout string
+	stderr string
+	err    error
+}
+
+func runCodex(
+	ctx context.Context,
+	cfg *common.AgentConfig,
+	dir, outputPath, instructionsPath string,
+	prompt string,
+	bypassSandbox bool,
+) codexRunResult {
+	if err := os.Truncate(outputPath, 0); err != nil {
+		return codexRunResult{err: fmt.Errorf("reset output temp file: %w", err)}
+	}
+
+	args := buildCodexArgsForMode(cfg, outputPath, instructionsPath, bypassSandbox)
+	fmt.Printf("Executing: %s %s\n", codexPath(), strings.Join(args, " "))
+
+	cmd := exec.CommandContext(ctx, codexPath(), args...)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = io.MultiWriter(&stdout, os.Stdout)
+	cmd.Stderr = io.MultiWriter(&stderr, os.Stderr)
+	cmd.Stdin = strings.NewReader(prompt)
+	cmd.Dir = dir
+	cmd.Env = buildCodexEnv()
+
+	err := cmd.Run()
+	return codexRunResult{
+		result: readCodexResult(outputPath, stdout.String()),
+		stdout: stdout.String(),
+		stderr: stderr.String(),
+		err:    err,
+	}
+}
+
+func (r codexRunResult) combinedOutput() string {
+	return r.stdout + "\n" + r.stderr
+}
+
+func wrapCodexError(err error, stderr string) error {
+	if err == nil {
+		return nil
+	}
+	if stderrStr := strings.TrimSpace(stderr); stderrStr != "" {
+		return fmt.Errorf("%w: %s", err, stderrStr)
+	}
+	return err
+}
+
 func readCodexResult(outputPath, fallback string) string {
 	data, err := os.ReadFile(outputPath)
 	if err == nil && len(data) > 0 {
@@ -273,6 +347,99 @@ func codexPath() string {
 
 func allowBashEnabled() bool {
 	return os.Getenv("ORKA_ALLOW_BASH") == "true"
+}
+
+func shouldRetryCodexWithoutSandbox(output string) bool {
+	if codexSandboxMode() != defaultCodexSandboxMode {
+		return false
+	}
+
+	normalized := strings.ToLower(output)
+	if strings.Contains(normalized, codexBwrapNamespaceErr) {
+		return true
+	}
+
+	if strings.Contains(normalized, "unshare failed") && strings.Contains(normalized, "operation not permitted") {
+		return true
+	}
+
+	return strings.Contains(normalized, "bwrap: creating new namespace failed") &&
+		strings.Contains(normalized, "operation not permitted")
+}
+
+func shouldStartCodexWithoutSandbox() bool {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("ORKA_CODEX_DISABLE_SANDBOX")), "true") {
+		return true
+	}
+	if codexSandboxMode() != defaultCodexSandboxMode {
+		return false
+	}
+
+	if value, err := readProcSysInt("kernel/unprivileged_userns_clone"); err == nil && value == 0 {
+		return true
+	}
+
+	if value, err := readProcSysInt("user/max_user_namespaces"); err == nil && value == 0 {
+		return true
+	}
+
+	if err := codexUserNamespaceProbe(); isUserNamespacePermissionError(err) {
+		return true
+	}
+
+	return false
+}
+
+func probeUserNamespaceSupport() error {
+	unsharePath, err := exec.LookPath("unshare")
+	if err != nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, unsharePath, "-Ur", "true")
+	var stderr bytes.Buffer
+	cmd.Stdout = io.Discard
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+
+	return nil
+}
+
+func isUserNamespacePermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	normalized := strings.ToLower(err.Error())
+	if strings.Contains(normalized, codexBwrapNamespaceErr) {
+		return true
+	}
+	if strings.Contains(normalized, "bwrap: creating new namespace failed") &&
+		strings.Contains(normalized, "operation not permitted") {
+		return true
+	}
+	return strings.Contains(normalized, "unshare failed") &&
+		strings.Contains(normalized, "operation not permitted")
+}
+
+func readProcSysInt(relPath string) (int, error) {
+	path := filepath.Join(codexProcSysDir, filepath.FromSlash(relPath))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+
+	value, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	return value, nil
 }
 
 func codexWebSearchSetting(cfg *common.AgentConfig) (string, bool) {
@@ -298,8 +465,8 @@ func hasWebSearchTool(tools []string) bool {
 }
 
 func normalizeToolName(tool string) string {
-	replacer := strings.NewReplacer("_", "", "-", "", " ", "")
-	return replacer.Replace(strings.ToLower(strings.TrimSpace(tool)))
+	replacer := strings.NewReplacer("_", "-", " ", "")
+	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(replacer.Replace(tool))), "-", "")
 }
 
 func trimmedTools(tools []string) []string {

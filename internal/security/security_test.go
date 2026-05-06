@@ -39,7 +39,9 @@ func TestFindingsArtifactEvidenceRefsUnmarshalJSON(t *testing.T) {
 	}{
 		{name: "array", raw: `[{"kind":"artifact","name":"file.txt","label":"trace"}]`, want: 1},
 		{name: "string array shorthand", raw: `["inline evidence"]`, want: 1},
+		{name: "array of strings", raw: `["note one","note two"]`, want: 2},
 		{name: "mixed array shorthand", raw: `["inline evidence", {"kind":"artifact","name":"file.txt"}]`, want: 2},
+		{name: "mixed array with blanks", raw: `["inline evidence",{"kind":"artifact","name":"file.txt","label":"trace"},null,"  "]`, want: 2},
 		{name: "string shorthand", raw: `"inline evidence"`, want: 1},
 		{name: "object shorthand", raw: `{"kind":"artifact","name":"file.txt"}`, want: 1},
 		{name: "null", raw: `null`, want: 0},
@@ -55,6 +57,17 @@ func TestFindingsArtifactEvidenceRefsUnmarshalJSON(t *testing.T) {
 				t.Fatalf("len(got) = %d, want %d", len(got), tt.want)
 			}
 		})
+	}
+
+	var got FindingsArtifactEvidenceRefs
+	if err := json.Unmarshal([]byte(`["inline evidence"]`), &got); err != nil {
+		t.Fatalf("json.Unmarshal(array shorthand) error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0].Kind != "note" || got[0].Label != "inline evidence" {
+		t.Fatalf("got[0] = %#v, want note shorthand normalization", got[0])
 	}
 }
 
@@ -124,7 +137,7 @@ func TestBuildValidationPromptIncludesAttackPathAnalysis(t *testing.T) {
 	}
 }
 
-func TestBuildPatchPromptRequiresWorkspaceEdit(t *testing.T) {
+func TestBuildPatchPromptRequiresWorkspaceEditAndManagedPush(t *testing.T) {
 	scan := &corev1alpha1.RepositoryScan{
 		Spec: corev1alpha1.RepositoryScanSpec{
 			RepoURL: "https://github.com/example/project",
@@ -135,15 +148,54 @@ func TestBuildPatchPromptRequiresWorkspaceEdit(t *testing.T) {
 	finding := &store.Finding{
 		ID:         "fnd_123",
 		Title:      "Command injection",
-		Severity:   "high",
+		Severity:   "critical",
 		Confidence: "high",
 	}
 
-	got := BuildPatchPrompt(scan, finding)
+	got := BuildPatchPrompt(scan, finding, "orka/security/fnd-123")
+	if !strings.Contains(got, "patch branch orka/security/fnd-123") {
+		t.Fatalf("BuildPatchPrompt() missing patch branch guidance:\n%s", got)
+	}
 	if !strings.Contains(got, "Apply the fix directly to the checked-out workspace files.") {
 		t.Fatalf("BuildPatchPrompt() missing workspace-edit directive:\n%s", got)
 	}
-	if !strings.Contains(got, "Orka will commit and push the workspace changes for you.") {
-		t.Fatalf("BuildPatchPrompt() missing push-handling directive:\n%s", got)
+	if !strings.Contains(got, "Do not commit, push, or open a pull request directly.") {
+		t.Fatalf("BuildPatchPrompt() missing no-manual-push instruction:\n%s", got)
+	}
+	if !strings.Contains(got, "Orka can create the commit and push it to the patch branch automatically.") {
+		t.Fatalf("BuildPatchPrompt() missing Orka-managed push instruction:\n%s", got)
+	}
+}
+
+func TestGeneratedSecurityTaskNamesStayLabelSafe(t *testing.T) {
+	scanName := "demo-security-repository-security1-1776034262"
+
+	names := []string{
+		ScanTaskName(scanName, "initial"),
+		ScanStageTaskName(scanName, "initial", "threat-model", ""),
+		ScanStageTaskName(scanName, "initial", "discovery", "ci-cd-supply-chain"),
+		ScanStageTaskName(scanName, "initial", "discovery", "ci-cd-supply-chain-4"),
+		PatchTaskName(scanName, "fnd_1234567890abcdef"),
+	}
+
+	for _, name := range names {
+		if len(name) > 63 {
+			t.Fatalf("generated task name %q has length %d, want <= 63", name, len(name))
+		}
+		if strings.Contains(name, "--") {
+			t.Fatalf("generated task name %q should not contain duplicate separators", name)
+		}
+	}
+}
+
+func TestPatchBranchUsesUniqueTaskHash(t *testing.T) {
+	branchA := PatchBranch("fnd_1234567890abcdef", "demo-security-repository-patch-a")
+	branchB := PatchBranch("fnd_1234567890abcdef", "demo-security-repository-patch-b")
+
+	if !strings.HasPrefix(branchA, "orka/security/fnd-1234567890abcdef-") {
+		t.Fatalf("PatchBranch() = %q, want finding prefix preserved", branchA)
+	}
+	if branchA == branchB {
+		t.Fatalf("PatchBranch() should vary by task name, got identical branches %q", branchA)
 	}
 }

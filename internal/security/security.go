@@ -22,6 +22,7 @@ const (
 	// ArtifactWorkspaceDir is the repo-root symlink the worker exposes for
 	// writing security artifacts from inside the agent workspace.
 	ArtifactWorkspaceDir = ".orka-artifacts"
+	maxGeneratedTaskName = 63
 )
 
 const (
@@ -135,19 +136,19 @@ func (e *FindingsArtifactEvidenceRefs) UnmarshalJSON(data []byte) error {
 		*e = nil
 		return nil
 	case strings.HasPrefix(trimmed, `"`):
-		var text string
-		if err := json.Unmarshal(data, &text); err != nil {
+		ref, ok, err := findingsArtifactEvidenceRefFromJSON(data)
+		if err != nil {
 			return err
 		}
-		if strings.TrimSpace(text) == "" {
+		if !ok {
 			*e = nil
 			return nil
 		}
-		*e = FindingsArtifactEvidenceRefs{{Kind: "note", Label: text}}
+		*e = FindingsArtifactEvidenceRefs{ref}
 		return nil
 	case strings.HasPrefix(trimmed, "{"):
-		var ref store.FindingEvidenceRef
-		if err := json.Unmarshal(data, &ref); err != nil {
+		ref, _, err := findingsArtifactEvidenceRefFromJSON(data)
+		if err != nil {
 			return err
 		}
 		*e = FindingsArtifactEvidenceRefs{ref}
@@ -159,28 +160,40 @@ func (e *FindingsArtifactEvidenceRefs) UnmarshalJSON(data []byte) error {
 		}
 		refs := make([]store.FindingEvidenceRef, 0, len(items))
 		for _, item := range items {
-			itemTrimmed := strings.TrimSpace(string(item))
-			if itemTrimmed == "" || itemTrimmed == "null" {
-				continue
-			}
-			if strings.HasPrefix(itemTrimmed, `"`) {
-				var text string
-				if err := json.Unmarshal(item, &text); err != nil {
-					return err
-				}
-				if strings.TrimSpace(text) != "" {
-					refs = append(refs, store.FindingEvidenceRef{Kind: "note", Label: text})
-				}
-				continue
-			}
-			var ref store.FindingEvidenceRef
-			if err := json.Unmarshal(item, &ref); err != nil {
+			ref, ok, err := findingsArtifactEvidenceRefFromJSON(item)
+			if err != nil {
 				return err
+			}
+			if !ok {
+				continue
 			}
 			refs = append(refs, ref)
 		}
 		*e = FindingsArtifactEvidenceRefs(refs)
 		return nil
+	}
+}
+
+func findingsArtifactEvidenceRefFromJSON(data []byte) (store.FindingEvidenceRef, bool, error) {
+	trimmed := strings.TrimSpace(string(data))
+	switch {
+	case trimmed == "", trimmed == "null":
+		return store.FindingEvidenceRef{}, false, nil
+	case strings.HasPrefix(trimmed, `"`):
+		var text string
+		if err := json.Unmarshal(data, &text); err != nil {
+			return store.FindingEvidenceRef{}, false, err
+		}
+		if strings.TrimSpace(text) == "" {
+			return store.FindingEvidenceRef{}, false, nil
+		}
+		return store.FindingEvidenceRef{Kind: "note", Label: text}, true, nil
+	default:
+		var ref store.FindingEvidenceRef
+		if err := json.Unmarshal(data, &ref); err != nil {
+			return store.FindingEvidenceRef{}, false, err
+		}
+		return ref, true, nil
 	}
 }
 
@@ -254,7 +267,11 @@ func PatchProposalID(taskName string) string {
 
 // ScanTaskName returns a task name for a scan run.
 func ScanTaskName(repositoryScanName, mode string) string {
-	return fmt.Sprintf("%s-%s-%d", sanitizeName(repositoryScanName), sanitizeName(mode), time.Now().Unix())
+	return boundedTaskName(
+		sanitizeName(repositoryScanName),
+		sanitizeName(mode),
+		fmt.Sprintf("%d", time.Now().Unix()),
+	)
 }
 
 // ScanStageTaskName returns a task name for a specific scan stage and optional scope.
@@ -264,17 +281,45 @@ func ScanStageTaskName(repositoryScanName, mode, stage, scope string) string {
 		parts = append(parts, sanitizeName(scope))
 	}
 	parts = append(parts, fmt.Sprintf("%d", time.Now().Unix()))
-	return strings.Join(parts, "-")
+	return boundedTaskName(parts...)
 }
 
 // PatchTaskName returns a task name for a patch proposal.
 func PatchTaskName(repositoryScanName, findingID string) string {
-	return fmt.Sprintf("%s-patch-%s-%d", sanitizeName(repositoryScanName), sanitizeName(findingID), time.Now().Unix())
+	return boundedTaskName(
+		sanitizeName(repositoryScanName),
+		"patch",
+		sanitizeName(findingID),
+		fmt.Sprintf("%d", time.Now().Unix()),
+	)
 }
 
 // PatchBranch returns the default branch name for a security patch proposal.
-func PatchBranch(findingID string) string {
-	return fmt.Sprintf("orka/security/%s", sanitizeName(findingID))
+func PatchBranch(findingID, taskName string) string {
+	return fmt.Sprintf("orka/security/%s-%s", sanitizeName(findingID), shortHash(taskName))
+}
+
+func boundedTaskName(parts ...string) string {
+	base := strings.Join(parts, "-")
+	if len(base) <= maxGeneratedTaskName {
+		return base
+	}
+
+	visibleParts := parts
+	if len(visibleParts) > 3 {
+		visibleParts = visibleParts[:3]
+	}
+	visible := strings.Join(visibleParts, "-")
+	hash := shortHash(base)
+	maxVisible := max(maxGeneratedTaskName-len(hash)-1, 1)
+	if len(visible) > maxVisible {
+		visible = strings.Trim(visible[:maxVisible], "-")
+		if visible == "" {
+			visible = "security"
+		}
+	}
+
+	return visible + "-" + hash
 }
 
 // EffectiveValidationMode returns the configured validation mode or the v1 default.
@@ -549,10 +594,13 @@ func appendRequiredArtifactsDirective(prompt *strings.Builder, artifacts ...stri
 }
 
 // BuildPatchPrompt returns the prompt for patch proposal tasks.
-func BuildPatchPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding) string {
+func BuildPatchPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding, patchBranch string) string {
 	var prompt strings.Builder
 	artifactDir := ArtifactWorkspacePath(scan.Spec.SubPath)
 	fmt.Fprintf(&prompt, "Generate a minimal security patch for repository %s on branch %s.\n", scan.Spec.RepoURL, EffectiveBranch(scan))
+	if strings.TrimSpace(patchBranch) != "" {
+		fmt.Fprintf(&prompt, "Orka will push the final diff to patch branch %s after the task finishes.\n", patchBranch)
+	}
 	fmt.Fprintf(&prompt, "Finding ID: %s\nTitle: %s\nSeverity: %s\nConfidence: %s\n", finding.ID, finding.Title, finding.Severity, finding.Confidence)
 	if finding.FilePath != "" {
 		fmt.Fprintf(&prompt, "Primary file: %s:%d\n", finding.FilePath, finding.Line)
@@ -570,7 +618,7 @@ func BuildPatchPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding)
 	prompt.WriteString("4. Preserve existing behavior unless the vulnerability requires a behavior change.\n")
 	prompt.WriteString("5. Run focused tests when available.\n")
 	prompt.WriteString("6. The diff artifact must match the actual workspace changes after your edit.\n")
-	prompt.WriteString("7. Do not open a pull request directly. Orka will commit and push the workspace changes for you.\n")
+	prompt.WriteString("7. Do not commit, push, or open a pull request directly. Leave the final file changes in the workspace so Orka can create the commit and push it to the patch branch automatically.\n")
 	fmt.Fprintf(&prompt, "\nWrite these artifacts under %s/:\n", artifactDir)
 	fmt.Fprintf(&prompt, "- %s/security-patch-%s.diff\n", artifactDir, finding.ID)
 	fmt.Fprintf(&prompt, "- %s/security-patch-%s.json\n", artifactDir, finding.ID)

@@ -254,7 +254,7 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, scan *corev1alph
 
 	taskName := security.PatchTaskName(scan.Name, finding.ID)
 	proposalID := security.PatchProposalID(taskName)
-	branch := security.PatchBranch(finding.ID)
+	branch := security.PatchBranch(finding.ID, taskName)
 	timeout := metav1.Duration{Duration: 2 * time.Hour}
 	priority := int32(750)
 
@@ -276,7 +276,7 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, scan *corev1alph
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &agentRef,
-			Prompt:   security.BuildPatchPrompt(scan, finding),
+			Prompt:   security.BuildPatchPrompt(scan, finding, branch),
 			Timeout:  &timeout,
 			Priority: &priority,
 			Env: []corev1.EnvVar{

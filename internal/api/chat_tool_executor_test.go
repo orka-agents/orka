@@ -471,11 +471,62 @@ func TestGenerateTaskName(t *testing.T) {
 	name1 := e.generateTaskName()
 	name2 := e.generateTaskName()
 
-	if !strings.HasPrefix(name1, "chat-sess-123-") {
-		t.Errorf("name1 = %q, expected prefix chat-sess-123-", name1)
+	if !strings.HasPrefix(name1, "chat-sess-12345678-") {
+		t.Errorf("name1 = %q, expected prefix chat-sess-12345678-", name1)
 	}
 	if name1 == name2 {
 		t.Errorf("expected unique names, got %q twice", name1)
+	}
+}
+
+func TestGenerateTaskName_AvoidsCrossSessionCollisions(t *testing.T) {
+	e1 := newTestExecutor()
+	e1.sessionID = "demo-magic-chat-pr-one"
+	e2 := newTestExecutor()
+	e2.sessionID = "demo-magic-chat-pr-two"
+
+	name1 := e1.generateTaskName()
+	name2 := e2.generateTaskName()
+
+	if name1 == name2 {
+		t.Fatalf("expected distinct names for different sessions, got %q", name1)
+	}
+	if !strings.HasPrefix(name1, "chat-demo-magic-chat-pr-") {
+		t.Fatalf("name1 = %q, expected sanitized session prefix", name1)
+	}
+	if !strings.HasPrefix(name2, "chat-demo-magic-chat-pr-") {
+		t.Fatalf("name2 = %q, expected sanitized session prefix", name2)
+	}
+}
+
+func TestGenerateTaskNameTruncatesLongSessionToDNSLabelLimit(t *testing.T) {
+	e := newTestExecutor()
+	e.sessionID = strings.Repeat("a", 80)
+
+	name := e.generateTaskName()
+
+	if len(name) > 63 {
+		t.Fatalf("len(name) = %d, want <= 63: %q", len(name), name)
+	}
+	if !strings.HasPrefix(name, "chat-") {
+		t.Fatalf("name = %q, expected chat prefix", name)
+	}
+	if strings.Contains(name, "--") {
+		t.Fatalf("name = %q, expected no empty DNS label components", name)
+	}
+}
+
+func TestSanitizeTaskNameComponent(t *testing.T) {
+	tests := map[string]string{
+		"Demo Session/ABC": "demo-session-abc",
+		"---already---":    "already",
+		"MiXeD___123":      "mixed-123",
+	}
+
+	for input, want := range tests {
+		if got := sanitizeTaskNameComponent(input); got != want {
+			t.Fatalf("sanitizeTaskNameComponent(%q) = %q, want %q", input, got, want)
+		}
 	}
 }
 
