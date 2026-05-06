@@ -14,6 +14,11 @@ import (
 	"github.com/sozercan/orka/internal/store"
 )
 
+const (
+	testScanRunID2 = "scan-2"
+	testStateOpen  = "open"
+)
+
 func TestSaveThreatModelReplacesCurrentModel(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -145,7 +150,7 @@ func TestUpsertFindingPreservesMostAdvancedStateAndPRMetadata(t *testing.T) {
 		ID:               "fnd-123",
 		Namespace:        "ns1",
 		RepositoryScan:   "repo1",
-		ScanRunID:        "scan-2",
+		ScanRunID:        testScanRunID2,
 		Fingerprint:      initial.Fingerprint,
 		Title:            initial.Title,
 		Summary:          "later summary",
@@ -211,7 +216,7 @@ func TestUpsertFindingAllowsPendingValidationToBecomeTerminal(t *testing.T) {
 				Severity:         "high",
 				Confidence:       "medium",
 				ValidationStatus: "pending",
-				State:            "open",
+				State:            testStateOpen,
 				ValidationJSON:   `{"status":"pending"}`,
 			}
 			if err := s.UpsertFinding(ctx, initial); err != nil {
@@ -219,7 +224,7 @@ func TestUpsertFindingAllowsPendingValidationToBecomeTerminal(t *testing.T) {
 			}
 
 			terminal := *initial
-			terminal.ScanRunID = "scan-2"
+			terminal.ScanRunID = testScanRunID2
 			terminal.Summary = "terminal validation"
 			terminal.ValidationStatus = tc.status
 			terminal.ValidationJSON = tc.validationJSON
@@ -256,7 +261,7 @@ func TestUpsertFindingKeepsValidationJSONWhenValidatedStatusIsPreserved(t *testi
 		Severity:         "high",
 		Confidence:       "medium",
 		ValidationStatus: "validated",
-		State:            "open",
+		State:            testStateOpen,
 		ValidationJSON:   `{"status":"validated","summary":"confirmed"}`,
 	}
 	if err := s.UpsertFinding(ctx, initial); err != nil {
@@ -264,7 +269,7 @@ func TestUpsertFindingKeepsValidationJSONWhenValidatedStatusIsPreserved(t *testi
 	}
 
 	lowerStatus := *initial
-	lowerStatus.ScanRunID = "scan-2"
+	lowerStatus.ScanRunID = testScanRunID2
 	lowerStatus.ValidationStatus = "failed"
 	lowerStatus.ValidationJSON = `{"status":"failed","summary":"later failure"}`
 	if err := s.UpsertFinding(ctx, &lowerStatus); err != nil {
@@ -306,8 +311,8 @@ func TestUpsertFindingAllowsPatchPendingToReturnOpen(t *testing.T) {
 	}
 
 	open := *initial
-	open.ScanRunID = "scan-2"
-	open.State = "open"
+	open.ScanRunID = testScanRunID2
+	open.State = testStateOpen
 	if err := s.UpsertFinding(ctx, &open); err != nil {
 		t.Fatalf("UpsertFinding(open): %v", err)
 	}
@@ -316,7 +321,7 @@ func TestUpsertFindingAllowsPatchPendingToReturnOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetFinding: %v", err)
 	}
-	if got.State != "open" {
+	if got.State != testStateOpen {
 		t.Fatalf("State = %q, want open", got.State)
 	}
 }
@@ -345,8 +350,8 @@ func TestUpsertFindingPreservesFinalStatesOverOpen(t *testing.T) {
 			}
 
 			reopened := *initial
-			reopened.ScanRunID = "scan-2"
-			reopened.State = "open"
+			reopened.ScanRunID = testScanRunID2
+			reopened.State = testStateOpen
 			if err := s.UpsertFinding(ctx, &reopened); err != nil {
 				t.Fatalf("UpsertFinding(reopened): %v", err)
 			}
