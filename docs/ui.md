@@ -46,6 +46,12 @@ Production:
 | Tasks | `/tasks` | Create, monitor, and manage tasks with log streaming |
 | Task Detail | `/tasks/:taskId` | Task metadata, spec, status, result viewer, logs |
 | Create Task | `/tasks/new` | Form with type selector (container/AI/agent) and conditional fields |
+| Board / Kanban | `/kanban` | Kanban board for task status and work-in-progress tracking |
+| Live | `/live` | Live agent grid for active task execution and status updates |
+| Security | `/security` | Repository scan inventory with scan status, finding counts, and manual scan actions |
+| New Repository Scan | `/security/new` | Form for creating a RepositoryScan from provider, URL, branch, schedule, and analysis agent |
+| Repository Security Detail | `/security/:repoId` | Threat model editor, scan history, finding tables, and recommended remediation view |
+| Security Finding Detail | `/security/findings/:findingId` | Evidence, validation status, patch proposal, dismissal/reopen, and remediation PR actions |
 | Sessions | `/sessions` | Browse sessions with message count and token stats |
 | Session Detail | `/sessions/:sessionId` | Transcript viewer with chat-like message rendering |
 | Agents | `/agents` | Card grid of agents with model and tool info |
@@ -70,6 +76,7 @@ All API requests include `Authorization: Bearer <token>`.
 
 - **Dark/light theme**: Toggle with localStorage persistence
 - **Namespace selector**: Filter all views by Kubernetes namespace
+- **Security workflow**: Manage repository scans, edit threat models, triage findings, validate/reproduce issues, generate patch proposals, and open remediation PRs
 - **Skeleton loaders**: Loading states for all list/detail pages
 - **Error handling**: Global error boundary, toast notifications, 401 redirect
 - **Responsive design**: Mobile-responsive sidebar, tables, and cards
@@ -115,21 +122,48 @@ ui/
 │   │   ├── api-client.ts        # Fetch wrapper with auth
 │   │   └── utils.ts             # cn() helper
 │   ├── schemas/                 # Zod schemas matching Go API types
+│   │   ├── agent.ts
+│   │   ├── chat.ts
+│   │   ├── security.ts          # RepositoryScan, findings, scan runs, patch proposals
+│   │   ├── session.ts
+│   │   ├── task.ts
+│   │   └── tool.ts
 │   ├── stores/
 │   │   ├── auth.ts              # Zustand: token, user info
 │   │   ├── chat.ts              # Zustand: chat state
 │   │   └── ui.ts                # Zustand: sidebar, theme, namespace
 │   ├── hooks/                   # TanStack Query hooks per resource
+│   │   ├── use-agents.ts
+│   │   ├── use-chat.ts
+│   │   ├── use-security.ts      # Repository security API hooks
+│   │   ├── use-sessions.ts
+│   │   ├── use-tasks.ts
+│   │   └── use-tools.ts
 │   ├── components/
 │   │   ├── ui/                  # shadcn/ui primitives
 │   │   ├── layout/              # Sidebar, header, root layout
-│   │   ├── tasks/               # Task list, detail, create form
+│   │   ├── tasks/               # Task list/detail, Kanban board, live agent grid
+│   │   ├── security/            # Repository scans, threat models, findings, patch proposals
 │   │   ├── sessions/            # Session list, detail, transcript
 │   │   ├── agents/              # Agent list, detail, create form
 │   │   ├── tools/               # Tool list, detail
 │   │   ├── chat/                # Chat interface
 │   │   └── dashboard/           # Overview, stats cards
 │   ├── routes/                  # File-based TanStack Router routes
+│   │   ├── index.tsx            # Dashboard
+│   │   ├── chat.tsx
+│   │   ├── kanban.tsx           # Board / Kanban
+│   │   ├── live.tsx             # Live agent grid
+│   │   ├── security/
+│   │   │   ├── index.tsx        # /security
+│   │   │   ├── new.tsx          # /security/new
+│   │   │   ├── $repoId.tsx      # /security/:repoId
+│   │   │   └── findings/
+│   │   │       └── $findingId.tsx # /security/findings/:findingId
+│   │   ├── tasks/
+│   │   ├── sessions/
+│   │   ├── agents/
+│   │   └── tools/
 │   └── test/                    # Test utilities and setup
 └── dist/                        # Vite build output (gitignored)
 ```
