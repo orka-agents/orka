@@ -40,6 +40,8 @@ type ServerConfig struct {
 	PlanStore                 store.PlanStore
 	MessageStore              store.MessageStore
 	ArtifactStore             store.ArtifactStore
+	MemoryStore               store.MemoryStore
+	MemoryProposalStore       store.MemoryProposalStore
 	SecurityStore             store.SecurityStore
 	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
@@ -47,21 +49,23 @@ type ServerConfig struct {
 
 // Server is the REST API server
 type Server struct {
-	app              *fiber.App
-	client           client.Client
-	config           ServerConfig
-	sessionManager   *controller.SessionManager
-	handlers         *Handlers
-	chatHandler      *ChatHandler
-	openaiHandler    *OpenAICompatHandler
-	anthropicHandler *AnthropicCompatHandler
-	internalHandlers *InternalHandlers
-	ResultStore      store.ResultStore
-	SessionStore     store.SessionStore
-	PlanStore        store.PlanStore
-	MessageStore     store.MessageStore
-	ArtifactStore    store.ArtifactStore
-	SecurityStore    store.SecurityStore
+	app                 *fiber.App
+	client              client.Client
+	config              ServerConfig
+	sessionManager      *controller.SessionManager
+	handlers            *Handlers
+	chatHandler         *ChatHandler
+	openaiHandler       *OpenAICompatHandler
+	anthropicHandler    *AnthropicCompatHandler
+	internalHandlers    *InternalHandlers
+	ResultStore         store.ResultStore
+	SessionStore        store.SessionStore
+	PlanStore           store.PlanStore
+	MessageStore        store.MessageStore
+	ArtifactStore       store.ArtifactStore
+	MemoryStore         store.MemoryStore
+	MemoryProposalStore store.MemoryProposalStore
+	SecurityStore       store.SecurityStore
 }
 
 // NewServer creates a new API server
@@ -73,16 +77,18 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	})
 
 	server := &Server{
-		app:            app,
-		client:         c,
-		config:         config,
-		sessionManager: sessionManager,
-		ResultStore:    config.ResultStore,
-		SessionStore:   config.SessionStore,
-		PlanStore:      config.PlanStore,
-		MessageStore:   config.MessageStore,
-		ArtifactStore:  config.ArtifactStore,
-		SecurityStore:  config.SecurityStore,
+		app:                 app,
+		client:              c,
+		config:              config,
+		sessionManager:      sessionManager,
+		ResultStore:         config.ResultStore,
+		SessionStore:        config.SessionStore,
+		PlanStore:           config.PlanStore,
+		MessageStore:        config.MessageStore,
+		ArtifactStore:       config.ArtifactStore,
+		MemoryStore:         config.MemoryStore,
+		MemoryProposalStore: config.MemoryProposalStore,
+		SecurityStore:       config.SecurityStore,
 	}
 
 	server.handlers = NewHandlers(HandlersConfig{
@@ -95,6 +101,8 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		KubeClient:                config.Clientset,
 		HealthChecker:             config.HealthChecker,
 		ArtifactStore:             config.ArtifactStore,
+		MemoryStore:               config.MemoryStore,
+		MemoryProposalStore:       config.MemoryProposalStore,
 		SecurityStore:             config.SecurityStore,
 	})
 	resolver := NewProviderResolver(c, config.Chat)
@@ -170,6 +178,20 @@ func (s *Server) setupRoutes() {
 	api.Get("/sessions/:id", s.handlers.GetSession)
 	api.Delete("/sessions/:id", s.handlers.DeleteSession)
 
+	// Memory endpoints
+	api.Get("/memories", s.handlers.ListMemories)
+	api.Post("/memories", s.handlers.CreateMemory)
+	api.Get("/memories/:id", s.handlers.GetMemory)
+	api.Put("/memories/:id", s.handlers.UpdateMemory)
+	api.Delete("/memories/:id", s.handlers.DeleteMemory)
+	api.Post("/memories/:id/disable", s.handlers.DisableMemory)
+	api.Post("/memories/:id/enable", s.handlers.EnableMemory)
+	api.Get("/memory-proposals", s.handlers.ListMemoryProposals)
+	api.Post("/memory-proposals", s.handlers.CreateMemoryProposal)
+	api.Get("/memory-proposals/:id", s.handlers.GetMemoryProposal)
+	api.Post("/memory-proposals/:id/review", s.handlers.ReviewMemoryProposal)
+	api.Post("/memory-proposals/:id/archive", s.handlers.ArchiveMemoryProposal)
+
 	// Tool endpoints
 	api.Get("/tools", s.handlers.ListTools)
 	api.Get("/tools/:name", s.handlers.GetTool)
@@ -235,24 +257,51 @@ func (s *Server) setupRoutes() {
 	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 
 	// Internal API for worker communication
-	if s.ResultStore != nil && s.SessionStore != nil {
-		s.internalHandlers = NewInternalHandlers(s.ResultStore, s.SessionStore, s.PlanStore, s.MessageStore, s.ArtifactStore)
+	if s.hasInternalStores() {
+		s.internalHandlers = NewInternalHandlers(
+			s.ResultStore,
+			s.SessionStore,
+			s.PlanStore,
+			s.MessageStore,
+			s.ArtifactStore,
+			InternalHandlersConfig{
+				MemoryStore:         s.MemoryStore,
+				MemoryProposalStore: s.MemoryProposalStore,
+			},
+		)
 		internal := s.app.Group("/internal/v1")
 		internal.Use(NewAuthMiddleware(s.client))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
+		internal.Get("/sessions/:namespace/search", s.internalHandlers.SearchTranscript)
 		internal.Get("/sessions/:namespace/:name/transcript", s.internalHandlers.GetSessionTranscript)
-		if s.PlanStore != nil {
-			internal.Post("/plans/:namespace/:taskName", s.internalHandlers.SubmitPlan)
-			internal.Get("/plans/:namespace/:taskName", s.internalHandlers.GetPlan)
-		}
-		if s.MessageStore != nil {
-			internal.Post("/messages/:namespace", s.internalHandlers.SendMessage)
-			internal.Get("/messages/:namespace/:taskName", s.internalHandlers.GetMessages)
-		}
-		if s.ArtifactStore != nil {
-			internal.Post("/artifacts/:namespace/:taskName/:filename", s.internalHandlers.UploadArtifact)
-		}
+		internal.Post("/plans/:namespace/:taskName", s.internalHandlers.SubmitPlan)
+		internal.Get("/plans/:namespace/:taskName", s.internalHandlers.GetPlan)
+		internal.Post("/messages/:namespace", s.internalHandlers.SendMessage)
+		internal.Get("/messages/:namespace/:taskName", s.internalHandlers.GetMessages)
+		internal.Post("/artifacts/:namespace/:taskName/:filename", s.internalHandlers.UploadArtifact)
+		internal.Get("/memories/:namespace", s.internalHandlers.ListMemories)
+		internal.Post("/memories/:namespace", s.internalHandlers.CreateMemory)
+		internal.Get("/memories/:namespace/:id", s.internalHandlers.GetMemory)
+		internal.Put("/memories/:namespace/:id", s.internalHandlers.UpdateMemory)
+		internal.Delete("/memories/:namespace/:id", s.internalHandlers.DeleteMemory)
+		internal.Post("/memories/:namespace/:id/disable", s.internalHandlers.DisableMemory)
+		internal.Post("/memories/:namespace/:id/enable", s.internalHandlers.EnableMemory)
+		internal.Get("/memory-proposals/:namespace", s.internalHandlers.ListMemoryProposals)
+		internal.Post("/memory-proposals/:namespace", s.internalHandlers.CreateMemoryProposal)
+		internal.Get("/memory-proposals/:namespace/:id", s.internalHandlers.GetMemoryProposal)
+		internal.Post("/memory-proposals/:namespace/:id/review", s.internalHandlers.ReviewMemoryProposal)
+		internal.Post("/memory-proposals/:namespace/:id/archive", s.internalHandlers.ArchiveMemoryProposal)
 	}
+}
+
+func (s *Server) hasInternalStores() bool {
+	return s.ResultStore != nil ||
+		s.SessionStore != nil ||
+		s.PlanStore != nil ||
+		s.MessageStore != nil ||
+		s.ArtifactStore != nil ||
+		s.MemoryStore != nil ||
+		s.MemoryProposalStore != nil
 }
 
 // Start starts the API server

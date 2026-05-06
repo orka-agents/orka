@@ -257,6 +257,9 @@ func (f *fakeSessionStore) AppendMessages(_ context.Context, _, _ string, _ []st
 func (f *fakeSessionStore) LoadTranscript(_ context.Context, _, _ string, _ int) ([]store.SessionMessage, error) {
 	return nil, nil
 }
+func (f *fakeSessionStore) SearchTranscript(_ context.Context, _ store.TranscriptSearchFilter) ([]store.TranscriptSearchResult, error) {
+	return nil, nil
+}
 func (f *fakeSessionStore) UpdateTokenCounts(_ context.Context, _, _ string, _, _ int) error {
 	return nil
 }

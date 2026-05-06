@@ -213,6 +213,10 @@ func RegisterCoordinationTools(k8sClient client.Client) {
 	DefaultRegistry.Register(NewCreateAgentTool(k8sClient))
 	DefaultRegistry.Register(NewDeleteAgentTool(k8sClient))
 	DefaultRegistry.Register(NewUpdatePlanTool())
+	DefaultRegistry.Register(NewRecallMemoryTool())
+	DefaultRegistry.Register(NewRememberMemoryTool())
+	DefaultRegistry.Register(NewProposeMemoryTool())
+	DefaultRegistry.Register(NewSearchTranscriptTool())
 }
 
 // RegisterChatTools registers the chat/management tools into the given registry.

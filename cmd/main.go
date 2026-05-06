@@ -376,6 +376,8 @@ func main() {
 		PlanStore:                 sqliteStore,
 		MessageStore:              sqliteStore,
 		ArtifactStore:             sqliteStore,
+		MemoryStore:               sqliteStore,
+		MemoryProposalStore:       sqliteStore,
 		SecurityStore:             sqliteStore,
 		HealthChecker:             sqliteStore,
 		Clientset:                 kubeClient,

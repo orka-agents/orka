@@ -298,6 +298,10 @@ func TestRegisterCoordinationTools(t *testing.T) {
 		"create_agent",
 		"delete_agent",
 		"update_plan",
+		"recall_memory",
+		"remember",
+		"propose_memory",
+		"search_transcript",
 	}
 	for _, name := range expectedTools {
 		if _, ok := DefaultRegistry.Get(name); !ok {

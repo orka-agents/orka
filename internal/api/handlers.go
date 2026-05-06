@@ -79,6 +79,8 @@ type Handlers struct {
 	planStore                 store.PlanStore
 	healthChecker             store.HealthChecker
 	artifactStore             store.ArtifactStore
+	memoryStore               store.MemoryStore
+	memoryProposalStore       store.MemoryProposalStore
 	securityStore             store.SecurityStore
 }
 
@@ -93,6 +95,8 @@ type HandlersConfig struct {
 	KubeClient                kubernetes.Interface
 	HealthChecker             store.HealthChecker
 	ArtifactStore             store.ArtifactStore
+	MemoryStore               store.MemoryStore
+	MemoryProposalStore       store.MemoryProposalStore
 	SecurityStore             store.SecurityStore
 }
 
@@ -108,6 +112,8 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		planStore:                 cfg.PlanStore,
 		healthChecker:             cfg.HealthChecker,
 		artifactStore:             cfg.ArtifactStore,
+		memoryStore:               cfg.MemoryStore,
+		memoryProposalStore:       cfg.MemoryProposalStore,
 		securityStore:             cfg.SecurityStore,
 	}
 }
