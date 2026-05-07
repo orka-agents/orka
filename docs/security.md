@@ -49,10 +49,12 @@ The controller runs with:
 
 ## Authentication
 
-- All API endpoints require a Kubernetes ServiceAccount bearer token
-- Token validation uses the Kubernetes TokenReview API
+- All API endpoints require authentication with either a Kubernetes ServiceAccount bearer token or, when configured, an OIDC JWT
+- ServiceAccount token validation uses the Kubernetes TokenReview API
+- OIDC token validation checks issuer, audience, time claims, and RS256 signatures using either the configured JWKS URL or issuer metadata discovery
+- OIDC-authenticated Task creation stamps the verified identity into immutable `spec.requestedBy`; client-supplied `requestedBy` fields are rejected
 - The `orka` CLI extracts tokens from kubeconfig for browser-based login
-- **Token caching**: Validated tokens are cached for 60 seconds using SHA256 hashes to avoid repeated TokenReview API calls. Token revocation has up to 60s propagation delay. The cache is in-memory only — not persistent across pod restarts
+- **Token caching**: Validated ServiceAccount tokens are cached for 60 seconds using SHA256 hashes to avoid repeated TokenReview API calls. Token revocation has up to 60s propagation delay. The cache is in-memory only — not persistent across pod restarts
 
 ## Secret Management
 

@@ -1,6 +1,21 @@
 # API Reference
 
-The controller exposes a REST API for programmatic access. All `/api/v1/*` endpoints require a ServiceAccount bearer token.
+The controller exposes a REST API for programmatic access. All `/api/v1/*` endpoints require authentication. By default Orka accepts Kubernetes ServiceAccount bearer tokens; when OIDC is configured, external callers can use a valid OIDC JWT instead.
+
+## Authentication
+
+Send credentials with the standard bearer token header:
+
+```http
+Authorization: Bearer <token>
+```
+
+Authentication modes:
+
+- **Kubernetes ServiceAccount token** — default mode. Tokens are validated with the Kubernetes TokenReview API.
+- **OIDC JWT** — enabled when the controller is configured with `--oidc-issuer` and `--oidc-audience` (or `ORKA_OIDC_ISSUER` / `ORKA_OIDC_AUDIENCE`). Tokens are validated against the issuer, audience, expiration, and RS256 signature. If `--oidc-jwks-url` is omitted, Orka discovers the JWKS URL from the issuer metadata.
+
+When a Task is created through OIDC authentication, Orka stamps the verified caller identity into `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Clients cannot provide or override `requestedBy`; requests containing top-level `requestedBy` or nested `spec.requestedBy` are rejected with `400`.
 
 ## Tasks
 

@@ -34,6 +34,7 @@ type ServerConfig struct {
 	MetricsPort               int
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
+	OIDC                      OIDCConfig
 	Chat                      ChatConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
@@ -131,7 +132,7 @@ func (s *Server) setupMiddleware() {
 	s.app.Use(cors.New(cors.Config{
 		AllowOrigins: origins,
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization"},
+		AllowHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization", "x-api-key"},
 	}))
 
 	// Logging middleware
@@ -147,11 +148,13 @@ func (s *Server) setupRoutes() {
 	s.app.Get("/healthz", s.handlers.Healthz)
 	s.app.Get("/readyz", s.handlers.Readyz)
 
+	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC})
+
 	// API v1 group
 	api := s.app.Group("/api/v1")
 
 	// Auth middleware for API endpoints
-	api.Use(NewAuthMiddleware(s.client))
+	api.Use(externalAuth)
 
 	// Task endpoints
 	api.Post("/tasks", s.handlers.CreateTask)
@@ -224,13 +227,13 @@ func (s *Server) setupRoutes() {
 	// OpenAI-compatible API (under /openai/v1, separate from /api/v1)
 	// This allows OpenAI-compatible clients to use Orka as a custom provider.
 	oai := s.app.Group("/openai/v1")
-	oai.Use(NewAuthMiddleware(s.client))
+	oai.Use(externalAuth)
 	oai.Post("/chat/completions", s.openaiHandler.HandleChatCompletions)
 	oai.Get("/models", s.openaiHandler.HandleListModels)
 
 	// Anthropic-compatible API
 	anthropic := s.app.Group("/anthropic/v1")
-	anthropic.Use(NewAuthMiddleware(s.client))
+	anthropic.Use(externalAuth)
 	anthropic.Post("/messages", s.anthropicHandler.HandleMessages)
 	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 

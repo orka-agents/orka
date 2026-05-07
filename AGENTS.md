@@ -30,6 +30,8 @@ Run after every change:
 make manifests generate          # After *_types.go or marker edits
 make lint-fix && make test       # After any *.go edits
 cd ui && bun run lint && bun run test  # After UI edits
+bash -n scripts/*.sh                  # After shell script edits
+go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/<workflow>.yml  # After workflow edits
 ```
 
 Single test: `go test ./internal/api/ -run TestHandlerName -v`
@@ -55,3 +57,4 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments.
 - AI worker truncates messages on context overflow — keeps system prompt + newest, drops middle atomically with structured metadata
 - `code_exec` timeout max is 60s — values above are ignored (30s default used)
 - Built-in AI worker tools: `web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`
+- Live GitHub OIDC E2E requires GitHub Actions `id-token: write` or `ORKA_GITHUB_OIDC_TOKEN`; redact JWTs and request tokens in logs

@@ -1401,6 +1401,35 @@ spec:
               prompt:
                 description: Prompt is the task-specific prompt (used with agentRef)
                 type: string
+              requestedBy:
+                description: |-
+                  RequestedBy records the verified OIDC identity that created the task.
+                  This field is populated by the API server and is immutable.
+                properties:
+                  email:
+                    description: Email is the email claim, if present.
+                    type: string
+                  groups:
+                    description: Groups are the OIDC groups claim values, if present.
+                    items:
+                      type: string
+                    type: array
+                  issuer:
+                    description: Issuer is the OIDC issuer that authenticated the
+                      requester.
+                    type: string
+                  roles:
+                    description: Roles are the OIDC roles claim values, if present.
+                    items:
+                      type: string
+                    type: array
+                  subject:
+                    description: Subject is the OIDC subject claim.
+                    type: string
+                  username:
+                    description: Username is the preferred username claim, if present.
+                    type: string
+                type: object
               resources:
                 description: Resources defines the compute resources for the task
                 properties:
@@ -1609,6 +1638,10 @@ spec:
             required:
             - type
             type: object
+            x-kubernetes-validations:
+            - message: requestedBy is immutable
+              rule: has(self.requestedBy) == has(oldSelf.requestedBy) && (!has(self.requestedBy)
+                || self.requestedBy == oldSelf.requestedBy)
           status:
             description: TaskStatus defines the observed state of Task
             properties:
