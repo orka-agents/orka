@@ -871,7 +871,7 @@ func (s *captureLogSink) String() string { return s.entries.String() }
 
 func TestCodeExecTool_AuditLogRedactsCodeAndOutput(t *testing.T) {
 	t.Setenv(codeExecLocalCPUSecondsEnv, "7")
-	t.Setenv(codeExecLocalMemoryKBEnv, "2048")
+	t.Setenv(codeExecLocalMemoryKBEnv, "65536")
 	t.Setenv(codeExecLocalMaxProcessesEnv, "512")
 
 	tmpDir := t.TempDir()
@@ -922,7 +922,7 @@ func TestCodeExecTool_AuditLogRedactsCodeAndOutput(t *testing.T) {
 		"cpu_seconds_limit",
 		"7",
 		"memory_kb_limit",
-		"2048",
+		"65536",
 		"max_processes",
 		"512",
 	} {
