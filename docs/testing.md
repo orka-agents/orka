@@ -82,6 +82,7 @@ End-to-end tests run against a dedicated Kind cluster:
 - `E2E_ANTHROPIC_API_KEY`: required for Anthropic-specific e2e cases
 - `E2E_GITHUB_TOKEN`: required for GitHub/Copilot and live Copilot runtime tests
 - `COPILOT_GITHUB_TOKEN`: required by the live `copilot-proxy` workflow for proxy auth
+- GitHub Actions `id-token: write` permission: required by the live GitHub OIDC workflow. For local/manual runs of `scripts/live-github-oidc-e2e.sh`, set `ORKA_GITHUB_OIDC_TOKEN` to a valid JWT instead.
 - `E2E_LIVE_COPILOT_PROXY_BASE_URL` (or `E2E_COPILOT_PROXY_BASE_URL` / `COPILOT_PROXY_BASE_URL`): enables the focused live copilot-proxy spec against a running proxy
 - `E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE`, `E2E_LIVE_COPILOT_PROXY_SERVICE_NAME`, `E2E_LIVE_COPILOT_PROXY_SERVICE_PORT`: optional overrides for how the live spec reaches the in-cluster proxy service for `/readyz` and `/v1/models` checks
 - Structural e2e tests (job/env/volume assertions) run without external model keys
@@ -100,6 +101,13 @@ This is an **Orka** live integration suite, not a deep `copilot-proxy` feature s
 - GPT, Claude, and Gemini model families are present
 
 It bootstraps a fresh Kind cluster, deploys the published multi-arch `docker.io/sozercan/copilot-proxy:latest` image, injects `COPILOT_GITHUB_TOKEN` for proxy auth, requires the live proxy to expose GPT/Claude/Gemini model families, maps that same secret to `E2E_GITHUB_TOKEN` for the Copilot runtime case, and then runs the focused live suites against the in-cluster proxy.
+
+The live GitHub OIDC workflow (`.github/workflows/live-github-oidc-e2e.yml`) runs `scripts/live-github-oidc-e2e.sh` in GitHub Actions with `id-token: write`. It builds the controller from the PR, deploys it to a fresh Kind cluster, configures `ORKA_OIDC_ISSUER=https://token.actions.githubusercontent.com` and the workflow audience, fetches a real GitHub Actions OIDC token, and validates:
+
+- unauthenticated API requests return `401`
+- OIDC-authenticated Task creation returns `201`
+- the created Task response and persisted CR contain `spec.requestedBy` with the GitHub OIDC issuer and a non-empty subject
+- top-level `requestedBy` and nested `spec.requestedBy` client tampering are rejected with `400`
 
 ### Frontend Tests
 

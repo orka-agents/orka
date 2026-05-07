@@ -187,6 +187,115 @@ func TestHandlers_CreateTask_DefaultNamespace(t *testing.T) {
 	}
 }
 
+func TestHandlers_CreateTask_StampsRequestedByFromOIDC(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	handlers, app := setupTestHandlers()
+	app.Use(NewAuthMiddleware(handlers.client, AuthConfig{OIDC: provider.config()}))
+	app.Post("/tasks", handlers.CreateTask)
+
+	token := provider.issueToken(t, testOIDCTokenOptions{
+		Subject:    "subject-456",
+		Username:   "alex",
+		Email:      "alex@example.test",
+		Groups:     []string{"developers", "operators"},
+		Roles:      []string{"creator"},
+		RealmRoles: []string{"approver"},
+	})
+	body := CreateTaskRequest{
+		Name:      "oidc-task",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeContainer,
+		Image:     "busybox",
+		Command:   []string{"echo", "hello"},
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+
+	created := &corev1alpha1.Task{}
+	if err := handlers.client.Get(context.Background(), types.NamespacedName{Name: "oidc-task", Namespace: "default"}, created); err != nil {
+		t.Fatalf("failed to fetch created task: %v", err)
+	}
+	if created.Spec.RequestedBy == nil {
+		t.Fatal("expected requestedBy to be stamped")
+	}
+	if created.Spec.RequestedBy.Subject != "subject-456" {
+		t.Fatalf("requestedBy.subject = %q, want %q", created.Spec.RequestedBy.Subject, "subject-456")
+	}
+	if created.Spec.RequestedBy.Issuer != provider.server.URL {
+		t.Fatalf("requestedBy.issuer = %q, want %q", created.Spec.RequestedBy.Issuer, provider.server.URL)
+	}
+	if created.Spec.RequestedBy.Username != "alex" {
+		t.Fatalf("requestedBy.username = %q, want %q", created.Spec.RequestedBy.Username, "alex")
+	}
+	if created.Spec.RequestedBy.Email != "alex@example.test" {
+		t.Fatalf("requestedBy.email = %q, want %q", created.Spec.RequestedBy.Email, "alex@example.test")
+	}
+	if strings.Join(created.Spec.RequestedBy.Groups, ",") != "developers,operators" {
+		t.Fatalf("requestedBy.groups = %#v, want [developers operators]", created.Spec.RequestedBy.Groups)
+	}
+	if strings.Join(created.Spec.RequestedBy.Roles, ",") != "creator,approver" {
+		t.Fatalf("requestedBy.roles = %#v, want [creator approver]", created.Spec.RequestedBy.Roles)
+	}
+}
+
+func TestHandlers_CreateTask_RejectsTopLevelRequestedBy(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/tasks", handlers.CreateTask)
+
+	body := map[string]any{
+		"name":        "tampered-task",
+		"namespace":   "default",
+		"type":        corev1alpha1.TaskTypeContainer,
+		"requestedBy": map[string]any{"subject": "spoofed"},
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestHandlers_CreateTask_RejectsNestedSpecRequestedBy(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/tasks", handlers.CreateTask)
+
+	body := map[string]any{
+		"name":      "tampered-task",
+		"namespace": "default",
+		"type":      corev1alpha1.TaskTypeContainer,
+		"spec": map[string]any{
+			"requestedBy": map[string]any{"subject": "spoofed"},
+		},
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
 func TestHandlers_CreateTask_NamespaceScoped(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)

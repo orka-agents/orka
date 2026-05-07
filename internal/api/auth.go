@@ -33,6 +33,12 @@ const (
 
 	// UserInfoContextKey is the context key for storing user info
 	UserInfoContextKey = "userInfo"
+
+	// AuthTypeTokenReview identifies Kubernetes TokenReview authentication.
+	AuthTypeTokenReview = "tokenReview"
+
+	// AuthTypeOIDC identifies OIDC JWT authentication.
+	AuthTypeOIDC = "oidc"
 )
 
 type tokenCacheEntry struct {
@@ -66,12 +72,35 @@ func getTokenHash(token string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// UserInfo contains information about the authenticated user
+// UserInfo contains information about the authenticated user.
 type UserInfo struct {
 	Username  string
 	UID       string
 	Groups    []string
 	Namespace string // Extracted from ServiceAccount username (system:serviceaccount:<ns>:<name>)
+
+	AuthType string
+	Subject  string
+	Email    string
+	Issuer   string
+	Roles    []string
+}
+
+// OIDCConfig holds OpenID Connect JWT validation settings.
+type OIDCConfig struct {
+	Issuer   string
+	Audience string
+	JWKSURL  string
+}
+
+// Enabled reports whether OIDC authentication is configured.
+func (c OIDCConfig) Enabled() bool {
+	return c.Issuer != "" && c.Audience != ""
+}
+
+// AuthConfig holds authentication middleware configuration.
+type AuthConfig struct {
+	OIDC OIDCConfig
 }
 
 // parseServiceAccountNamespace extracts the namespace from a ServiceAccount username.
@@ -89,8 +118,13 @@ func parseServiceAccountNamespace(username string) string {
 	return parts[0]
 }
 
-// NewAuthMiddleware creates a new authentication middleware
-func NewAuthMiddleware(c client.Client) fiber.Handler {
+// NewAuthMiddleware creates a new authentication middleware.
+func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
+	var cfg AuthConfig
+	if len(configs) > 0 {
+		cfg = configs[0]
+	}
+
 	return func(ctx fiber.Ctx) error {
 		// Extract token from Authorization header or x-api-key fallback
 		var token string
@@ -112,8 +146,7 @@ func NewAuthMiddleware(c client.Client) fiber.Handler {
 			return fiber.NewError(fiber.StatusUnauthorized, "missing authorization header")
 		}
 
-		// Validate the token using TokenReview
-		userInfo, err := validateToken(ctx.Context(), c, token)
+		userInfo, err := authenticateToken(ctx.Context(), c, token, cfg)
 		if err != nil {
 			log.Error(err, "token validation failed")
 			return fiber.NewError(fiber.StatusUnauthorized, "invalid token")
@@ -124,6 +157,13 @@ func NewAuthMiddleware(c client.Client) fiber.Handler {
 
 		return ctx.Next()
 	}
+}
+
+func authenticateToken(ctx context.Context, c client.Client, token string, cfg AuthConfig) (*UserInfo, error) {
+	if cfg.OIDC.Enabled() {
+		return validateOIDCToken(ctx, token, cfg.OIDC)
+	}
+	return validateToken(ctx, c, token)
 }
 
 // validateToken validates a ServiceAccount token using TokenReview with caching
@@ -164,6 +204,7 @@ func validateToken(ctx context.Context, c client.Client, token string) (*UserInf
 		UID:       review.Status.User.UID,
 		Groups:    review.Status.User.Groups,
 		Namespace: parseServiceAccountNamespace(review.Status.User.Username),
+		AuthType:  AuthTypeTokenReview,
 	}
 
 	// Cache the successful result

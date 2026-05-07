@@ -41,6 +41,22 @@ make test-e2e
 
 See [Testing](testing.md) for full test structure and patterns.
 
+### Live CI Validation
+
+The repository has two live GitHub Actions E2E workflows in addition to the normal test matrix:
+
+- `Live Copilot Proxy E2E` — exercises live model-backed Orka paths through the copilot-proxy harness.
+- `Live GitHub OIDC E2E` — builds the PR controller image, deploys it to Kind, authenticates to Orka with a real GitHub Actions OIDC token, verifies `spec.requestedBy` stamping, and rejects client tampering.
+
+Validate workflow/script edits locally before pushing:
+
+```bash
+bash -n scripts/live-github-oidc-e2e.sh
+go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-github-oidc-e2e.yml
+```
+
+The GitHub OIDC live script requires GitHub Actions `id-token: write` or a manual `ORKA_GITHUB_OIDC_TOKEN`; without either, it fails fast before creating a cluster.
+
 ## UI Development
 
 ```bash
