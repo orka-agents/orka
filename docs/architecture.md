@@ -19,7 +19,7 @@ Orka is a Kubernetes-native task execution platform where a controller manages J
 │                                                                      │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐   │
 │  │  Prometheus  │  │   Embedded   │  │   Auth Middleware        │   │
-│  │   Metrics    │  │   Web UI     │  │  (SA token validation)   │   │
+│  │   Metrics    │  │   Web UI     │  │   (SA/OIDC auth)        │   │
 │  └──────────────┘  └──────────────┘  └──────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────────┘
                               │
@@ -39,8 +39,26 @@ Orka is a Kubernetes-native task execution platform where a controller manages J
 
 The controller is the central component that runs as a Kubernetes Deployment. It contains:
 
-- **API Server**: REST endpoints for task CRUD operations, built on the Fiber framework
+- **API Server**: Fiber-based REST and compatibility endpoints for:
+  - task CRUD, results, logs, artifacts, plans, and children
+  - sessions
+  - memories and memory proposals
+  - tools
+  - agents
+  - skills
+  - repository security scanning
+  - chat
+  - OpenAI-compatible API
+  - Anthropic-compatible API
+  - internal worker APIs
 - **Task Reconciler**: Watches Task resources, creates/manages Jobs, handles lifecycle
+- **RepositoryScanReconciler**: Watches `RepositoryScan` resources and drives repository security scanning:
+  - schedules manual and cron scans
+  - creates AI tasks for threat-model generation and vulnerability discovery
+  - persists scan runs, threat models, findings, and patch proposals in SQLite
+  - reads scan artifacts from the artifact store
+  - auto-creates validation and patch proposal tasks when configured
+  - updates status with phase, last scan, commits, and finding counts
 - **Session Manager**: Manages session persistence (via SQLite store) for conversation continuity with serial execution enforcement
 - **Memory Store**: Persists durable memories, memory proposals, and transcript search data in SQLite for namespace-scoped agent context
 - **Priority Queue**: Schedules tasks based on priority (0-1000)
@@ -49,7 +67,7 @@ The controller is the central component that runs as a Kubernetes Deployment. It
 
 ### Custom Resource Definitions (`api/v1alpha1/`)
 
-Orka uses five CRDs:
+Orka uses six CRDs:
 
 | CRD | Purpose |
 |-----|---------|
@@ -58,13 +76,14 @@ Orka uses five CRDs:
 | **Tool** | Custom HTTP-based tool definitions for agents |
 | **Provider** | LLM provider configuration (Anthropic, OpenAI, Azure OpenAI) |
 | **Skill** | Reusable prompt content injected into agent system prompts |
+| **RepositoryScan** | Repository security scan configuration, scheduling, status, and finding counts |
 
 ### Worker Images (`workers/`)
 
 | Worker | Description |
 |--------|-------------|
 | **General Worker** (`workers/general/`) | Runs arbitrary container commands |
-| **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in tools (`web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`) and coordination tools (14 auto-injected when `coordination.enabled`, plus 4 opt-in GitHub triage tools via `spec.tools[]`) |
+| **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in core, coordination, GitHub, agent-management, planning, memory, transcript, chat, session, and task-management tools |
 | **Copilot Agent Worker** (`workers/agent/copilot/`) | Runs tasks via GitHub Copilot CLI using the Go SDK |
 | **Claude Agent Worker** (`workers/agent/claude/`) | Runs tasks via Claude Code CLI |
 | **Codex Agent Worker** (`workers/agent/codex/`) | Runs tasks via OpenAI Codex CLI |
@@ -77,11 +96,13 @@ Orka uses five CRDs:
 | **Session Storage** | SQLite (embedded) | Normalized schema with efficient querying and pagination. No size limit. |
 | **Plan Storage** | SQLite (embedded) | Persists autonomous coordination plan state across iterations. |
 | **Memory Storage** | SQLite (embedded) | Persists durable memories and reviewable memory proposals for namespace-scoped recall. |
-| **API Authentication** | Kubernetes ServiceAccount tokens | Native K8s auth with RBAC integration. |
+| **Artifact Storage** | SQLite stores artifact metadata and BLOB content, 10MB max per artifact. | Keeps worker outputs co-located with task/session state while bounding per-artifact size. |
+| **Security Scan Storage** | SQLite stores repository scan runs, threat models, findings, and patch proposals. | Provides durable repository-security history without an external database. |
+| **API Authentication** | Kubernetes ServiceAccount tokens plus optional OIDC JWT validation. | Native K8s auth by default; OIDC supports external API clients. |
 | **Task Queue** | Priority queuing (0-1000) | Higher priority tasks are scheduled first. |
 | **Secret Management** | Reference K8s Secrets in specs | Controller mounts secrets to worker pods. |
-| **Observability** | Prometheus metrics + structured logs | Standard K8s observability stack. |
-| **AI Tools** | Built-in + extensible via CRDs | Ship with `web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`. Extend via Tool CRDs. |
+| **Observability** | Prometheus metrics, structured logs, optional OpenTelemetry tracing. | Standard K8s metrics/logging with opt-in distributed tracing. |
+| **AI Tools** | Built-in + extensible via CRDs | Ship with categorized built-in tools and can be extended via Tool CRDs. |
 | **Failure Policy** | Configurable retry with backoff | `spec.retryPolicy` with max retries and exponential backoff. |
 | **Session Execution** | Serial per session | Tasks sharing a session run one-at-a-time to prevent race conditions. |
 | **Worker Security** | Hardened pods | Non-root, read-only rootfs, all capabilities dropped, seccomp RuntimeDefault. |
@@ -90,19 +111,19 @@ Orka uses five CRDs:
 
 ```
 orka/
-├── api/v1alpha1/           # CRD type definitions (Task, Agent, Tool, Provider, Skill)
+├── api/v1alpha1/           # CRD type definitions (Task, Agent, Tool, Provider, Skill, RepositoryScan)
 ├── cmd/
 │   ├── main.go                # Controller entrypoint
 │   ├── cli/                   # CLI tool (login, chat, agent, task, status)
 │   └── migrate/               # Database migration (ConfigMaps → SQLite)
 ├── internal/
-│   ├── api/                # REST API server, handlers, auth, chat endpoint
+│   ├── api/                # REST API server, handlers, auth, chat, compatibility APIs
 │   ├── controller/         # Reconcilers, job builder, session manager, priority queue
 │   ├── llm/                # LLM provider interface and implementations
 │   │   ├── anthropic/      # Anthropic Claude provider
 │   │   └── openai/         # OpenAI provider
 │   ├── store/              # Storage interfaces and SQLite implementation
-│   │   └── sqlite/         # SQLite backend (ResultStore + SessionStore + PlanStore)
+│   │   └── sqlite/         # SQLite backend for results, sessions, plans, artifacts, memory, security
 │   ├── tools/              # Built-in tool implementations
 │   ├── metrics/            # Prometheus metrics
 │   ├── worker/             # Tool executor for custom Tool CRDs
@@ -185,6 +206,12 @@ When an agent's coordination config has `autonomous: true`, the controller runs 
 
 Termination occurs when the LLM signals goal completion, max iterations are reached, or the task is suspended.
 
+## Repository Security Scanning
+
+`RepositoryScan` resources define repository URLs, branches, scan cadence, agents, validation policy, and patch-generation policy. The `RepositoryScanReconciler` starts with a threat-model task, then fans out discovery tasks across security scopes after the threat model succeeds. It ingests task artifacts from the artifact store, upserts threat models and findings into SQLite, updates scan-run status, and can automatically start validation or patch-proposal tasks based on scan policy.
+
+RepositoryScan status reports the current phase, last scan ID/task, last successful scan time, processed commits, and finding counts so API clients and the UI can display repository security posture without querying all findings.
+
 ## LLM Provider Architecture
 
 The AI worker uses a pluggable provider interface:
@@ -210,14 +237,8 @@ Orka supports extensible AI capabilities through a three-layer system:
 │  - Mounted at /workspace/.skills and injected into prompts       │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 2: Built-in Tools (in worker image)                      │
-│  - web_search, file_read, code_exec, web_fetch, file_write       │
-│  - delegate_task, wait_for_tasks, cancel_task, send_message,      │
-│    check_messages, create_pull_request, check_pull_request_ci,     │
-│    merge_pull_request, auto_merge_pull_request,                    │
-│    review_pull_request, post_review_comment, list_issues,          │
-│    list_pull_requests, get_issue, comment_on_issue, create_agent,  │
-│    delete_agent,                                                   │
-│    update_plan                                                     │
+│  - Core, coordination, GitHub, agent management, planning,       │
+│    memory, transcript, chat, session, and task management        │
 │  - Fast, no extra infrastructure                                │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 3: Custom Tools (Tool CRD + HTTP)                        │
@@ -226,6 +247,15 @@ Orka supports extensible AI capabilities through a three-layer system:
 │  - Header-based or body-based auth injection                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+Built-in tool categories:
+
+- **Core**: `web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`
+- **Coordination/task**: `delegate_task`, `wait_for_tasks`, `create_container_task`, `cancel_task`, `send_message`, `check_messages`
+- **GitHub**: `create_pull_request`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`
+- **Agent management**: `create_agent`, `delete_agent`, plus chat-management `update_agent`, `list_agents`
+- **Planning/memory/transcript**: `update_plan`, `recall_memory`, `remember`, `propose_memory`, `search_transcript`
+- **Chat/session/task management**: `create_ai_task`, `create_agent_task`, `check_task_progress`, `fetch_task_output`, `wait_for_task`, `list_tools`, `list_tasks`, `create_tool`, `delete_tool`, `delete_session`
 
 ## Session Management
 
@@ -255,10 +285,14 @@ Proposal review is intentionally separate from durable memory mutation. Acceptin
 
 - **Worker pods**: Non-root (uid 1000), read-only rootfs, all capabilities dropped, seccomp RuntimeDefault
 - **Controller**: Non-root (uid 65532), read-only rootfs, seccomp RuntimeDefault
-- **API auth**: ServiceAccount token validation via Kubernetes TokenReview API
+- **ServiceAccount TokenReview**: Default API authentication validates Kubernetes ServiceAccount bearer tokens via the TokenReview API.
+- **Optional OIDC JWT validation**: External API endpoints can validate OIDC JWTs when issuer/audience settings are configured.
+- **Internal worker endpoints**: `/internal/v1` endpoints require ServiceAccount authentication for worker result, plan, message, artifact, memory, and transcript calls.
 - **Secrets**: API keys referenced via `secretRef`, mounted as read-only volumes, never logged
-- **Chat endpoint**: Blocks operations in `kube-system` and `kube-public` namespaces
-- **Namespace scoping**: Configurable via `--watch-namespace` flag
+- **`--watch-namespace`**: Optionally scopes the controller and API to a single namespace.
+- **Namespace isolation**: `--enforce-namespace-isolation` restricts users to their ServiceAccount namespace.
+- **Cross-namespace references**: Cross-namespace Agent and Provider references are rejected when namespace isolation is enforced.
+- **Chat endpoint**: Blocks operations in `kube-system` and `kube-public` namespaces.
 
 ## Dependencies
 
@@ -287,6 +321,11 @@ All persistent data uses SQLite via `modernc.org/sqlite` (pure Go, no CGO depend
 | `plan_states` | `(namespace, task_name)` | Autonomous loop state: iteration, progress %, goal_complete flag |
 | `memories` | `id` | Durable namespace-scoped memories with provenance, tags, disabled/deleted flags, and recall counters |
 | `memory_proposals` | `id` | Reviewable memory/skill/policy/workflow proposals with status, reviewer, and review notes |
+| `artifacts` | `(namespace, task_name, filename)` | Artifact metadata and BLOB content, 10MB max per artifact |
+| `security_scan_runs` | `id` | Repository scan run lifecycle, mode, commits, timestamps, summary, and errors |
+| `security_threat_models` | `(namespace, repository_scan, version)` | Versioned repository threat models generated or edited for scans |
+| `security_findings` | `id` | Deduplicated findings with severity, confidence, validation, evidence, and PR linkage |
+| `security_patch_proposals` | `id` | Patch proposal tasks, branches, artifacts, status, and PR linkage for findings |
 
 ### Configuration
 
@@ -320,7 +359,7 @@ LLM calls use exponential backoff with jitter:
 - **Backoff**: `baseDelay × 2^attempt`, capped at 30s, with ±10% random jitter
 - **Retryable status codes**: 429, 500, 502, 503, 529
 - **Non-retryable**: 401, 403 (trigger fallback instead), context canceled/deadline exceeded (never retried)
-- **Stream retry**: Peeks at the first chunk to detect errors before consuming the stream
+- **Stream retry**: Peeks at the initial stream event to detect errors before consuming the stream
 
 ### Provider Cooldown
 
