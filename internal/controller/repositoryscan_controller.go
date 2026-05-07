@@ -1084,7 +1084,9 @@ func (r *RepositoryScanReconciler) refreshScanRunStatus(
 			s.Status.Phase = repositoryScanPhaseReady
 			s.Status.LastProcessedCommit = run.HeadCommit
 			if run.CompletedAt != nil {
-				s.Status.LastSuccessfulScanAt = &metav1.Time{Time: *run.CompletedAt}
+				t := &metav1.Time{Time: *run.CompletedAt}
+				s.Status.LastScanAt = t
+				s.Status.LastSuccessfulScanAt = t
 			}
 			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
 				Type:               "Ready",
@@ -1096,6 +1098,9 @@ func (r *RepositoryScanReconciler) refreshScanRunStatus(
 			})
 		default:
 			s.Status.Phase = repositoryScanPhaseError
+			if run.CompletedAt != nil {
+				s.Status.LastScanAt = &metav1.Time{Time: *run.CompletedAt}
+			}
 			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
 				Type:               "Ready",
 				Status:             metav1.ConditionFalse,
@@ -1434,32 +1439,42 @@ func (r *RepositoryScanReconciler) ingestCombinedScanTask(ctx context.Context, s
 			Low:      counts.Low,
 		}
 
-		if effectivePhase == corev1alpha1.TaskPhaseSucceeded {
-			s.Status.Phase = repositoryScanPhaseReady
-			s.Status.LastProcessedCommit = run.HeadCommit
-			if task.Status.CompletionTime != nil {
-				s.Status.LastSuccessfulScanAt = task.Status.CompletionTime
-			}
-			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
-				Type:               "Ready",
-				Status:             metav1.ConditionTrue,
-				Reason:             "ScanSucceeded",
-				Message:            repositoryScanConditionMessage(run.Summary, "scan completed successfully"),
-				LastTransitionTime: metav1.Now(),
-				ObservedGeneration: s.Generation,
-			})
-			return
-		}
+		applyCombinedScanPhaseStatus(s, effectivePhase, task, run)
+	})
+}
 
-		s.Status.Phase = repositoryScanPhaseError
+// applyCombinedScanPhaseStatus updates the CRD status phase, timestamps, and
+// conditions based on the effective phase of a combined scan task.
+func applyCombinedScanPhaseStatus(s *corev1alpha1.RepositoryScan, effectivePhase corev1alpha1.TaskPhase, task *corev1alpha1.Task, run *store.ScanRun) {
+	if effectivePhase == corev1alpha1.TaskPhaseSucceeded {
+		s.Status.Phase = repositoryScanPhaseReady
+		s.Status.LastProcessedCommit = run.HeadCommit
+		if task.Status.CompletionTime != nil {
+			s.Status.LastScanAt = task.Status.CompletionTime
+			s.Status.LastSuccessfulScanAt = task.Status.CompletionTime
+		}
 		meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
-			Status:             metav1.ConditionFalse,
-			Reason:             "ScanFailed",
-			Message:            repositoryScanConditionMessage(run.Summary, "scan failed"),
+			Status:             metav1.ConditionTrue,
+			Reason:             "ScanSucceeded",
+			Message:            repositoryScanConditionMessage(run.Summary, "scan completed successfully"),
 			LastTransitionTime: metav1.Now(),
 			ObservedGeneration: s.Generation,
 		})
+		return
+	}
+
+	s.Status.Phase = repositoryScanPhaseError
+	if task.Status.CompletionTime != nil {
+		s.Status.LastScanAt = task.Status.CompletionTime
+	}
+	meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		Reason:             "ScanFailed",
+		Message:            repositoryScanConditionMessage(run.Summary, "scan failed"),
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: s.Generation,
 	})
 }
 

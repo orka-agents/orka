@@ -33,6 +33,7 @@ export const repositoryScanStatusSchema = z.object({
   phase: z.string().optional(),
   lastScanID: z.string().optional(),
   lastScanTaskName: z.string().optional(),
+  lastScanAt: z.string().optional(),
   lastSuccessfulScanAt: z.string().optional(),
   lastObservedHeadSHA: z.string().optional(),
   lastProcessedCommit: z.string().optional(),

@@ -248,6 +248,11 @@ spec:
                 description: LastProcessedCommit is the latest commit fully processed
                   by a completed scan.
                 type: string
+              lastScanAt:
+                description: LastScanAt is the completion time of the most recent
+                  scan run, regardless of success or failure.
+                format: date-time
+                type: string
               lastScanID:
                 description: LastScanID is the most recent scan run identifier stored
                   in SQLite.

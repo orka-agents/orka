@@ -108,6 +108,10 @@ type RepositoryScanStatus struct {
 	// +optional
 	LastScanTaskName string `json:"lastScanTaskName,omitempty"`
 
+	// LastScanAt is the completion time of the most recent scan run, regardless of success or failure.
+	// +optional
+	LastScanAt *metav1.Time `json:"lastScanAt,omitempty"`
+
 	// LastSuccessfulScanAt is the completion time of the most recent successful scan.
 	// +optional
 	LastSuccessfulScanAt *metav1.Time `json:"lastSuccessfulScanAt,omitempty"`
