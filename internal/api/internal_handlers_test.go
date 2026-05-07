@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
@@ -26,7 +27,10 @@ import (
 func setupTestInternalHandlers() (*InternalHandlers, *fiber.App, *sqlite.Store) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	h := NewInternalHandlers(ss, ss, ss, ss, ss)
+	h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{
+		MemoryStore:         ss,
+		MemoryProposalStore: ss,
+	})
 	app := fiber.New()
 
 	// Inject a default UserInfo so verifyCallerNamespace passes
@@ -401,6 +405,96 @@ func TestGetSessionTranscript(t *testing.T) {
 	})
 }
 
+func TestSearchTranscript(t *testing.T) {
+	h, app, ss := setupTestInternalHandlers()
+	app.Get("/internal/v1/sessions/:namespace/search", h.SearchTranscript)
+
+	now := time.Now().UTC()
+	for i, name := range []string{"prior", "current"} {
+		err := ss.CreateSession(context.Background(), &store.SessionRecord{
+			Namespace:   "default",
+			Name:        name,
+			SessionType: "task",
+			CreatedAt:   now.Add(time.Duration(i) * time.Second),
+			UpdatedAt:   now.Add(time.Duration(i) * time.Second),
+		})
+		require.NoError(t, err)
+	}
+
+	priorLong := strings.Repeat("prefix ", 20) + "needle migration detail" + strings.Repeat(" suffix", 20)
+	require.NoError(t, ss.AppendMessages(context.Background(), "default", "prior", []store.SessionMessage{
+		{Role: "user", Content: "unrelated setup", Timestamp: now},
+		{Role: "assistant", Content: priorLong, Timestamp: now.Add(time.Second)},
+	}))
+	require.NoError(t, ss.AppendMessages(context.Background(), "default", "current", []store.SessionMessage{
+		{Role: "assistant", Content: "needle from current session should be excluded", Timestamp: now.Add(2 * time.Second)},
+	}))
+
+	t.Run("success", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/sessions/default/search?query=needle&excludeSessionName=current&limit=5&maxSnippetLength=80", nil)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var results []store.TranscriptSearchResult
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&results))
+		require.Len(t, results, 1)
+		require.Equal(t, "prior", results[0].SessionName)
+		require.Equal(t, "assistant", results[0].Role)
+		require.Contains(t, results[0].Snippet, "needle")
+	})
+
+	t.Run("missing query", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/sessions/default/search", nil)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	})
+
+	t.Run("blank query", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/sessions/default/search?query=%20%20", nil)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	})
+
+	t.Run("invalid limit", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/sessions/default/search?query=needle&limit=bad", nil)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	})
+
+	t.Run("negative max snippet length", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/sessions/default/search?query=needle&maxSnippetLength=-1", nil)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	})
+
+	t.Run("cross namespace denied", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/sessions/other/search?query=needle", nil)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	})
+
+	t.Run("nil session store returns not implemented", func(t *testing.T) {
+		hNil := NewInternalHandlers(nil, nil, nil, nil, nil)
+		appNil := fiber.New()
+		appNil.Use(func(c fiber.Ctx) error {
+			c.Locals(UserInfoContextKey, &UserInfo{Username: "system:serviceaccount:default:worker"})
+			return c.Next()
+		})
+		appNil.Get("/internal/v1/sessions/:namespace/search", hNil.SearchTranscript)
+
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/sessions/default/search?query=needle", nil)
+		resp, err := appNil.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusNotImplemented, resp.StatusCode)
+	})
+}
+
 func TestVerifyCallerNamespace(t *testing.T) {
 	h, _, _ := setupTestInternalHandlers()
 
@@ -522,7 +616,10 @@ func TestSendMessageAdditional(t *testing.T) {
 	})
 
 	t.Run("missing namespace", func(t *testing.T) {
-		h := NewInternalHandlers(ss, ss, ss, ss, ss)
+		h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{
+			MemoryStore:         ss,
+			MemoryProposalStore: ss,
+		})
 		app := fiber.New()
 		app.Use(func(c fiber.Ctx) error {
 			c.Locals(UserInfoContextKey, &UserInfo{Username: "system:serviceaccount:default:worker"})
@@ -544,7 +641,10 @@ func TestSendMessageAdditional(t *testing.T) {
 	})
 
 	t.Run("cross-namespace denied", func(t *testing.T) {
-		h := NewInternalHandlers(ss, ss, ss, ss, ss)
+		h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{
+			MemoryStore:         ss,
+			MemoryProposalStore: ss,
+		})
 		app := fiber.New()
 		app.Use(func(c fiber.Ctx) error {
 			c.Locals(UserInfoContextKey, &UserInfo{

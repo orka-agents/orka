@@ -283,13 +283,25 @@ func TestRegisterCoordinationTools(t *testing.T) {
 	RegisterCoordinationTools(k8sClient)
 
 	expectedTools := []string{
-		delegateTaskToolName, waitForTasksToolName, createContainerTaskToolName,
+		delegateTaskToolName,
+		waitForTasksToolName,
+		createContainerTaskToolName,
 		cancelTaskToolName,
-		"send_message",
+		sendMessageToolName,
 		checkMessagesToolName,
 		createPullRequestToolName,
-		checkPullRequestCIToolName, mergePullRequestToolName, autoMergePullRequestToolName, reviewPullRequestToolName, postReviewCommentToolName, createAgentToolName,
-		"delete_agent", updatePlanToolName,
+		checkPullRequestCIToolName,
+		mergePullRequestToolName,
+		autoMergePullRequestToolName,
+		reviewPullRequestToolName,
+		postReviewCommentToolName,
+		createAgentToolName,
+		deleteAgentToolName,
+		updatePlanToolName,
+		"recall_memory",
+		"remember",
+		"propose_memory",
+		"search_transcript",
 	}
 	for _, name := range expectedTools {
 		if _, ok := DefaultRegistry.Get(name); !ok {

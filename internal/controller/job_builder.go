@@ -584,7 +584,27 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 
 	// Auto-inject coordination tools when coordination is enabled
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
-		for _, ct := range []string{"delegate_task", "wait_for_tasks", "create_container_task", "cancel_task", "send_message", "check_messages", "create_pull_request", "check_pull_request_ci", "merge_pull_request", "auto_merge_pull_request", "review_pull_request", "post_review_comment", "create_agent", "delete_agent", "update_plan"} {
+		for _, ct := range []string{
+			"delegate_task",
+			"wait_for_tasks",
+			"create_container_task",
+			"cancel_task",
+			"send_message",
+			"check_messages",
+			"recall_memory",
+			"remember",
+			"propose_memory",
+			"search_transcript",
+			"create_pull_request",
+			"check_pull_request_ci",
+			"merge_pull_request",
+			"auto_merge_pull_request",
+			"review_pull_request",
+			"post_review_comment",
+			"create_agent",
+			"delete_agent",
+			"update_plan",
+		} {
 			if !slices.Contains(cfg.tools, ct) {
 				cfg.tools = append(cfg.tools, ct)
 			}

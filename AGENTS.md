@@ -49,6 +49,7 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments.
 
 - Structured logging: `log := log.FromContext(ctx); log.Info("msg", "key", val)`
 - LLM tool args for nested objects arrive as `map[string]any`, not strings — always type-switch
+- Memory features are governance-first: `remember` and `propose_memory` create review proposals, not durable memories
 
 ## Gotchas
 
@@ -57,4 +58,7 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments.
 - AI worker truncates messages on context overflow — keeps system prompt + newest, drops middle atomically with structured metadata
 - `code_exec` timeout max is 60s — values above are ignored (30s default used)
 - Built-in AI worker tools: `web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`
+- Coordination memory tools: `recall_memory`, `remember`, `propose_memory`, `search_transcript`
+- Do not store secrets, credentials, tokens, raw transcripts, or one-off task status in durable memory
+- Reviewing a memory proposal does not apply it; create durable memory explicitly via the API until an apply flow exists
 - Live GitHub OIDC E2E requires GitHub Actions `id-token: write` or `ORKA_GITHUB_OIDC_TOKEN`; redact JWTs and request tokens in logs

@@ -33,13 +33,13 @@ Tests use **Ginkgo + Gomega** (BDD style) for controller/integration tests and s
 
 | Package | Test Files | Coverage Areas |
 |---------|-----------|----------------|
-| `internal/api/` | `handlers_test.go`, `auth_test.go`, `middleware_test.go`, `pagination_test.go`, `server_test.go`, `openai_compat_test.go` | REST API handlers, authentication, middleware, pagination, OpenAI compatibility |
+| `internal/api/` | `handlers_test.go`, `internal_handlers_test.go`, `auth_test.go`, `middleware_test.go`, `pagination_test.go`, `server_test.go`, `openai_compat_test.go` | REST API handlers, internal API handlers, memory/session APIs, authentication, middleware, pagination, OpenAI compatibility |
 | `internal/controller/` | `task_controller_test.go`, `agent_controller_test.go`, `tool_controller_test.go`, `session_manager_test.go`, `job_builder_test.go`, `priority_queue_test.go`, `webhook_test.go` | Reconciliation logic, session management, job building, coordination enforcement |
 | `internal/llm/` | `provider_test.go` | Provider registry |
 | `internal/llm/anthropic/` | `provider_test.go` | Anthropic API integration |
 | `internal/llm/openai/` | `provider_test.go` | OpenAI API integration |
 | `internal/metrics/` | `metrics_test.go` | Prometheus metrics recording |
-| `internal/tools/` | `registry_test.go`, `web_search_test.go`, `code_exec_test.go`, `file_read_test.go`, `delegate_task_test.go`, `wait_for_tasks_test.go`, `create_pull_request_test.go`, `check_pull_request_ci_test.go`, `merge_pull_request_test.go`, `review_pull_request_test.go`, `post_review_comment_test.go`, `create_agent_test.go`, `delete_agent_test.go`, `integration_test.go` | Built-in tool implementations, coordination tools, PR tools, agent management tools |
+| `internal/tools/` | `registry_test.go`, memory tool tests, coordination tool tests, PR tool tests, agent-management tool tests, `integration_test.go` | Built-in tool implementations, memory tools, coordination tools, PR tools, agent management tools |
 | `internal/worker/` | `tool_executor_test.go` | Custom Tool CRD executor |
 | `workers/ai/` | `main_test.go` | AI worker functions |
 | `workers/general/` | `main_test.go` | General worker functions |
@@ -68,7 +68,7 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/agent_advanced_test.go` | Skills ConfigMap wiring, agent resource propagation, session maxMessages behavior |
 | `test/e2e/workspace_advanced_test.go` | Advanced workspace settings (`gitSecretRef`, `subPath`, `ref`, fork/PR env vars, session init container) |
 | `test/e2e/provider_advanced_test.go` | Provider rate-limit config coverage |
-| `test/e2e/live_copilot_proxy_test.go` | Live Orka Provider + `type: ai` path using copilot-proxy as the backend harness |
+| `test/e2e/live_copilot_proxy_test.go` | Live Orka Provider + `type: ai` path using copilot-proxy as the backend harness, including durable memory recall, proposal governance, and transcript search tool execution |
 | `test/e2e/live_chat_api_test.go` | Live chat SSE and JSON transport/session coverage using a proxy-backed Provider |
 | `test/e2e/live_anthropic_compat_test.go` | Live Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` coverage with default tools-enabled behavior |
 | `test/e2e/live_agent_runtime_matrix_test.go` | Live Orka runtime matrix: Codex+GPT, Claude Code+Claude, Copilot+Gemini |
@@ -89,7 +89,7 @@ End-to-end tests run against a dedicated Kind cluster:
 
 The live copilot-proxy E2E path runs in a separate workflow and executes the focused live suites for:
 
-- provider-backed `type: ai` tasks
+- provider-backed `type: ai` tasks, including durable memory/tool execution coverage
 - chat SSE/JSON flows via `/api/v1/chat`
 - Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` flows with the default Orka tool loop enabled
 - external agent runtimes across `codex` + GPT, `claude` + Claude, and `copilot` + Gemini

@@ -65,6 +65,37 @@ Retrieve the autonomous plan state for a task.
 | `/api/v1/sessions/:id` | GET | Get session transcript |
 | `/api/v1/sessions/:id` | DELETE | Delete session |
 
+
+## Memory
+
+Memory endpoints manage namespace-scoped durable memories and reviewable memory proposals. See [Memory](memory.md) for the full lifecycle, worker behavior, and examples.
+
+### Durable Memories
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/memories` | GET | List durable memories |
+| `/api/v1/memories` | POST | Create durable memory |
+| `/api/v1/memories/:id` | GET | Get durable memory |
+| `/api/v1/memories/:id` | PUT | Update durable memory |
+| `/api/v1/memories/:id` | DELETE | Soft-delete durable memory |
+| `/api/v1/memories/:id/disable` | POST | Disable memory for normal recall |
+| `/api/v1/memories/:id/enable` | POST | Re-enable memory for normal recall |
+
+Common list query parameters: `namespace`, `query`/`q`, `sessionName`, `agentName`, `taskName`, `parentTask`, `source`, `tags`, `ids`, `includeDisabled`, `includeDeleted`, and `limit`.
+
+### Memory Proposals
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/memory-proposals` | GET | List memory proposals |
+| `/api/v1/memory-proposals` | POST | Create a memory proposal |
+| `/api/v1/memory-proposals/:id` | GET | Get a memory proposal |
+| `/api/v1/memory-proposals/:id/review` | POST | Record a review decision without applying it |
+| `/api/v1/memory-proposals/:id/archive` | POST | Archive a proposal without applying it |
+
+Common list query parameters: `namespace`, `taskName`, `agentName`, `type`, `status`, `query`/`q`, and `limit`. Review and archive return `204 No Content`.
+
 ## Agents
 
 | Endpoint | Method | Description |
@@ -348,15 +379,20 @@ These tools are available to AI worker agents:
 
 These tools are injected into AI worker agents when the Agent has `coordination.enabled: true`. They are not returned by `GET /api/v1/tools`.
 
-The following 14 tools are **auto-injected** when coordination is enabled:
+The following tools are **auto-injected** when coordination is enabled:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
 | `delegate_task` | Delegate a subtask to another agent | `agent`, `prompt` (required); `namespace`, `priority`, `auto_retry`, `max_retries` |
 | `wait_for_tasks` | Wait for delegated tasks to complete | `tasks` (required), `timeout` (default 10m) |
+| `create_container_task` | Create a child container task | `name`, `image`, `command`/`args`, env/workspace fields |
 | `cancel_task` | Cancel a running child task | `task_name` (required); `namespace`, `reason` |
 | `send_message` | Send a message to a sibling task | `to_task` (required, or `*` to broadcast), `content` (required) |
 | `check_messages` | Check for messages from sibling tasks | `mark_read` (boolean, default true) |
+| `recall_memory` | Recall durable namespace-scoped memories | `query`, `tags`, `task_name`, `agent_name`, `source`, `limit`, `include_disabled` |
+| `remember` | Submit a durable memory proposal for review | `content` (required); `title`, `description`, `tags`, `agent_name` |
+| `propose_memory` | Submit a memory-adjacent governance proposal | `title` (required); `type`, `skill_name`, `description`, `content`, `patch`, `agent_name` |
+| `search_transcript` | Search prior session transcripts | `query` (required); `session_name`, `exclude_session_name`, `roles`, `limit`, `max_snippet_length` |
 | `create_pull_request` | Create a GitHub pull request | `task_name`, `head_branch`, `base_branch`, `title` (required); `body` |
 | `check_pull_request_ci` | Check GitHub CI status without merging | `pr_number` (required); `task_name`, `repo_url`, `wait_timeout`, `poll_interval` |
 | `merge_pull_request` | Merge a GitHub pull request | `task_name`, `pr_number` (required); `merge_method`, `commit_title`, `commit_message` |

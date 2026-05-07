@@ -14,11 +14,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/store"
 )
 
 const roleUser = "user"
@@ -280,6 +283,117 @@ func TestBuildLLMTools_NotFound(t *testing.T) {
 	// Tool should not be added if not found
 	if len(llmTools) != 0 {
 		t.Errorf("Expected 0 tools, got %d", len(llmTools))
+	}
+}
+
+func TestFormatDurableMemoryContext_BoundsEntriesAndChars(t *testing.T) {
+	createdAt := time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC)
+	memories := make([]store.Memory, 0, 6)
+	for i := 1; i <= 6; i++ {
+		memories = append(memories, store.Memory{
+			ID:        fmt.Sprintf("mem-%d", i),
+			Namespace: "default",
+			Source:    "task",
+			TaskName:  fmt.Sprintf("task-%d", i),
+			Content:   fmt.Sprintf("memory-%d durable guidance", i),
+			CreatedAt: createdAt,
+		})
+	}
+
+	got := formatDurableMemoryContext(memories, 1000)
+	if got == "" {
+		t.Fatal("expected memory context, got empty string")
+	}
+	if len(got) > 1000 {
+		t.Fatalf("context length = %d, want <= 1000", len(got))
+	}
+	if count := strings.Count(got, "durable guidance"); count != defaultMemoryContextLimit {
+		t.Fatalf("memory count = %d, want %d\n%s", count, defaultMemoryContextLimit, got)
+	}
+	if strings.Contains(got, "memory-6") {
+		t.Fatalf("context included memory beyond default limit: %s", got)
+	}
+
+	bounded := formatDurableMemoryContext(memories, 220)
+	if bounded == "" {
+		t.Fatal("expected bounded memory context, got empty string")
+	}
+	if len(bounded) > 220 {
+		t.Fatalf("bounded context length = %d, want <= 220\n%s", len(bounded), bounded)
+	}
+}
+
+func TestFormatDurableMemoryContext_TruncatesIndividualMemory(t *testing.T) {
+	longContent := strings.Repeat("x", memoryContextPerEntryMaxChars+500)
+	got := formatDurableMemoryContext([]store.Memory{
+		{
+			ID:        "mem-1",
+			Namespace: "default",
+			Source:    "task",
+			Content:   longContent,
+			CreatedAt: time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC),
+		},
+	}, 5000)
+
+	if got == "" {
+		t.Fatal("expected memory context, got empty string")
+	}
+	if !strings.Contains(got, "durable memory truncated") {
+		t.Fatalf("expected truncation marker in context: %s", got)
+	}
+	if strings.Contains(got, strings.Repeat("x", memoryContextPerEntryMaxChars+1)) {
+		t.Fatalf("memory content was not truncated to per-entry limit")
+	}
+}
+
+func TestAppendMemoryReflectionGuidance_IncludesRememberGuidance(t *testing.T) {
+	got := appendMemoryReflectionGuidance("base prompt")
+
+	for _, want := range []string{
+		"base prompt",
+		"## Durable Memory Reflection",
+		"remember",
+		"durable project facts",
+		"repository conventions",
+		"lessons learned",
+		"reusable procedures",
+		"Do not store secrets",
+		"raw transcripts",
+		"review-only",
+		"not automatically applied",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("reflection guidance missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestAutoEnableMemoryTools_WhenControllerConfigPresent(t *testing.T) {
+	t.Setenv("ORKA_CONTROLLER_URL", "http://controller.example")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAME", "task-1")
+
+	got := autoEnableMemoryTools([]string{"web_search", "recall_memory", " web_search "})
+	want := []string{"web_search", "recall_memory", "remember", "propose_memory", "search_transcript"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("autoEnableMemoryTools() = %#v, want %#v", got, want)
+	}
+}
+
+func TestAutoEnableMemoryTools_NoControllerConfigDoesNotMutateTools(t *testing.T) {
+	t.Setenv("ORKA_CONTROLLER_URL", "")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_TASK_NAME", "task-1")
+
+	got := autoEnableMemoryTools([]string{"web_search"})
+	want := []string{"web_search"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("autoEnableMemoryTools() = %#v, want %#v", got, want)
+	}
+	for _, toolName := range memoryToolNames {
+		if containsTool(got, toolName) {
+			t.Fatalf("autoEnableMemoryTools() added memory tool %q without controller config: %#v", toolName, got)
+		}
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
@@ -22,22 +23,35 @@ const maxResultSize = 10 << 20 // 10MB
 
 // InternalHandlers contains handlers for internal worker endpoints.
 type InternalHandlers struct {
-	resultStore   store.ResultStore
-	sessionStore  store.SessionStore
-	planStore     store.PlanStore
-	messageStore  store.MessageStore
-	artifactStore store.ArtifactStore
+	resultStore         store.ResultStore
+	sessionStore        store.SessionStore
+	planStore           store.PlanStore
+	messageStore        store.MessageStore
+	artifactStore       store.ArtifactStore
+	memoryStore         store.MemoryStore
+	memoryProposalStore store.MemoryProposalStore
+}
+
+// InternalHandlersConfig holds optional configuration for internal handlers.
+type InternalHandlersConfig struct {
+	MemoryStore         store.MemoryStore
+	MemoryProposalStore store.MemoryProposalStore
 }
 
 // NewInternalHandlers creates a new InternalHandlers instance.
-func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.PlanStore, ms store.MessageStore, as store.ArtifactStore) *InternalHandlers {
-	return &InternalHandlers{
+func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.PlanStore, ms store.MessageStore, as store.ArtifactStore, configs ...InternalHandlersConfig) *InternalHandlers {
+	h := &InternalHandlers{
 		resultStore:   rs,
 		sessionStore:  ss,
 		planStore:     ps,
 		messageStore:  ms,
 		artifactStore: as,
 	}
+	if len(configs) > 0 {
+		h.memoryStore = configs[0].MemoryStore
+		h.memoryProposalStore = configs[0].MemoryProposalStore
+	}
+	return h
 }
 
 // SubmitResult handles POST /internal/v1/results/{namespace}/{taskName}.
@@ -53,6 +67,10 @@ func (h *InternalHandlers) SubmitResult(c fiber.Ctx) error {
 	// Verify caller namespace matches the URL namespace
 	if err := verifyCallerNamespace(c, namespace); err != nil {
 		return err
+	}
+
+	if h.resultStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "result storage not enabled")
 	}
 
 	// Read body with size limit
@@ -156,6 +174,14 @@ func (h *InternalHandlers) GetSessionTranscript(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and name are required")
 	}
 
+	if err := verifyCallerNamespace(c, namespace); err != nil {
+		return err
+	}
+
+	if h.sessionStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "session storage not enabled")
+	}
+
 	ctx := c.Context()
 	messages, err := h.sessionStore.LoadTranscript(ctx, namespace, name, 0)
 	if err != nil {
@@ -179,6 +205,65 @@ func (h *InternalHandlers) GetSessionTranscript(c fiber.Ctx) error {
 	return c.SendString(sb.String())
 }
 
+// SearchTranscript handles GET /internal/v1/sessions/{namespace}/search.
+// It searches namespace-scoped session transcripts and returns compact snippets.
+func (h *InternalHandlers) SearchTranscript(c fiber.Ctx) error {
+	namespace := c.Params("namespace")
+	if namespace == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "namespace is required")
+	}
+
+	if err := verifyCallerNamespace(c, namespace); err != nil {
+		return err
+	}
+
+	if h.sessionStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "session storage not enabled")
+	}
+
+	query := strings.TrimSpace(c.Query("query", ""))
+	if query == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "query is required")
+	}
+
+	limit, err := parseOptionalLimit(c.Query("limit", ""))
+	if err != nil {
+		return err
+	}
+	maxSnippetLength, err := parseOptionalNonNegativeQueryInt(c.Query("maxSnippetLength", ""), "maxSnippetLength")
+	if err != nil {
+		return err
+	}
+
+	results, err := h.sessionStore.SearchTranscript(c.Context(), store.TranscriptSearchFilter{
+		Namespace:          namespace,
+		Query:              query,
+		SessionName:        strings.TrimSpace(c.Query("sessionName", "")),
+		ExcludeSessionName: strings.TrimSpace(c.Query("excludeSessionName", "")),
+		Roles:              splitCSV(c.Query("roles", "")),
+		Limit:              limit,
+		MaxSnippetLength:   maxSnippetLength,
+	})
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to search transcript: %v", err))
+	}
+	if results == nil {
+		results = []store.TranscriptSearchResult{}
+	}
+	return c.JSON(results)
+}
+
+func parseOptionalNonNegativeQueryInt(raw, name string) (int, error) {
+	if strings.TrimSpace(raw) == "" {
+		return 0, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return 0, fiber.NewError(fiber.StatusBadRequest, "invalid "+name)
+	}
+	return value, nil
+}
+
 // SubmitPlan handles POST /internal/v1/plans/{namespace}/{taskName}.
 // Workers call this to persist autonomous plan state.
 func (h *InternalHandlers) SubmitPlan(c fiber.Ctx) error {
@@ -191,6 +276,10 @@ func (h *InternalHandlers) SubmitPlan(c fiber.Ctx) error {
 
 	if err := verifyCallerNamespace(c, namespace); err != nil {
 		return err
+	}
+
+	if h.planStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "plan storage not enabled")
 	}
 
 	var plan struct {
@@ -230,6 +319,14 @@ func (h *InternalHandlers) GetPlan(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
 	}
 
+	if err := verifyCallerNamespace(c, namespace); err != nil {
+		return err
+	}
+
+	if h.planStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "plan storage not enabled")
+	}
+
 	ctx := c.Context()
 	plan, err := h.planStore.GetPlan(ctx, namespace, taskName)
 	if err != nil {
@@ -248,6 +345,16 @@ func verifyCallerNamespace(c fiber.Ctx, namespace string) error {
 	userInfo := GetUserInfo(c)
 	if userInfo == nil {
 		return fiber.NewError(fiber.StatusUnauthorized, "authentication required")
+	}
+
+	if userInfo.Namespace != "" && userInfo.Namespace != namespace {
+		log.Info("cross-namespace access denied",
+			"callerNamespace", userInfo.Namespace,
+			"targetNamespace", namespace,
+			"username", userInfo.Username,
+			"ip", c.IP(),
+		)
+		return fiber.NewError(fiber.StatusForbidden, "cross-namespace access denied")
 	}
 
 	// SA usernames follow the format: system:serviceaccount:<namespace>:<name>
@@ -270,10 +377,6 @@ func verifyCallerNamespace(c fiber.Ctx, namespace string) error {
 // SendMessage handles POST /internal/v1/messages/{namespace}.
 // Workers call this to send messages to sibling tasks.
 func (h *InternalHandlers) SendMessage(c fiber.Ctx) error {
-	if h.messageStore == nil {
-		return fiber.NewError(fiber.StatusNotImplemented, "messaging not enabled")
-	}
-
 	namespace := c.Params("namespace")
 	if namespace == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace is required")
@@ -281,6 +384,10 @@ func (h *InternalHandlers) SendMessage(c fiber.Ctx) error {
 
 	if err := verifyCallerNamespace(c, namespace); err != nil {
 		return err
+	}
+
+	if h.messageStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "messaging not enabled")
 	}
 
 	var req struct {
@@ -316,15 +423,19 @@ func (h *InternalHandlers) SendMessage(c fiber.Ctx) error {
 // GetMessages handles GET /internal/v1/messages/{namespace}/{taskName}.
 // Workers call this to check for messages from sibling tasks.
 func (h *InternalHandlers) GetMessages(c fiber.Ctx) error {
-	if h.messageStore == nil {
-		return fiber.NewError(fiber.StatusNotImplemented, "messaging not enabled")
-	}
-
 	namespace := c.Params("namespace")
 	taskName := c.Params("taskName")
 
 	if namespace == "" || taskName == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
+	}
+
+	if err := verifyCallerNamespace(c, namespace); err != nil {
+		return err
+	}
+
+	if h.messageStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "messaging not enabled")
 	}
 
 	parentTask := c.Query("parentTask")

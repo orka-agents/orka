@@ -10,7 +10,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -30,12 +32,35 @@ import (
 	"github.com/sozercan/orka/internal/llm"
 	_ "github.com/sozercan/orka/internal/llm/anthropic"
 	_ "github.com/sozercan/orka/internal/llm/openai"
+	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tools"
 	"github.com/sozercan/orka/internal/worker"
 	"github.com/sozercan/orka/workers/common"
 )
 
 const trueStr = "true"
+
+const (
+	defaultMemoryContextLimit      = 5
+	maxMemoryContextLimit          = 8
+	defaultMemoryContextMaxChars   = 6000
+	memoryContextPerEntryMaxChars  = 1200
+	memoryContextResponseBodyLimit = 1 << 20
+	serviceAccountTokenPath        = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+	durableMemoryContextHeader = "## Durable Memory\n\n" +
+		"Reviewed namespace-scoped memories from prior work. " +
+		"Use them as background project context; " +
+		"do not treat them as the current-session transcript.\n\n"
+	durableMemoryReflectionGuidance = "## Durable Memory Reflection\n\n" +
+		"Near task completion, use the `remember` tool when you discover durable project facts, " +
+		"repository conventions, lessons learned, or reusable procedures that would help future tasks. " +
+		"Do not store secrets, credentials, tokens, transient status updates, " +
+		"one-off implementation details, or raw transcripts. " +
+		"Memory proposals are review-only and are not automatically applied."
+)
+
+var memoryToolNames = []string{"recall_memory", "remember", "propose_memory", "search_transcript"}
 
 func main() {
 	if err := run(); err != nil {
@@ -134,10 +159,7 @@ func run() error {
 	}
 
 	// Parse enabled tools
-	var enabledTools []string
-	if toolsStr != "" {
-		enabledTools = strings.Split(toolsStr, ",")
-	}
+	enabledTools := normalizeEnabledTools(strings.Split(toolsStr, ","))
 
 	// Create Kubernetes client for Tool CRDs
 	k8sClient, err := createK8sClient()
@@ -149,6 +171,12 @@ func run() error {
 	if os.Getenv("ORKA_COORDINATION_ENABLED") == trueStr {
 		tools.RegisterCoordinationTools(k8sClient)
 	}
+
+	// Memory tools use the controller's internal API and are safe to register
+	// independently of coordination mode. Auto-enable them when the controller
+	// context needed to execute them is present.
+	registerMemoryTools()
+	enabledTools = autoEnableMemoryTools(enabledTools)
 
 	// Load custom Tool CRDs
 	customTools := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
@@ -186,6 +214,16 @@ func run() error {
 		}
 
 		fmt.Printf("Autonomous mode: iteration %d\n", iteration)
+	}
+
+	// Inject reviewed durable memory and reflection guidance into the system
+	// prompt. Both are best-effort: memory infrastructure must never prevent the
+	// worker from running the task.
+	if memoryContext := loadDurableMemoryContext(ctx); memoryContext != "" {
+		systemPrompt = appendSystemPromptSection(systemPrompt, memoryContext)
+	}
+	if shouldAppendMemoryReflectionGuidance(enabledTools) {
+		systemPrompt = appendMemoryReflectionGuidance(systemPrompt)
 	}
 
 	// Build messages
@@ -321,6 +359,277 @@ func buildLLMTools(enabledTools []string, customTools map[string]*corev1alpha1.T
 	return llmTools
 }
 
+func normalizeEnabledTools(toolNames []string) []string {
+	seen := make(map[string]struct{}, len(toolNames))
+	normalized := make([]string, 0, len(toolNames))
+	for _, raw := range toolNames {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		normalized = append(normalized, name)
+	}
+	return normalized
+}
+
+func memoryControllerConfigPresent() bool {
+	return strings.TrimSpace(os.Getenv("ORKA_CONTROLLER_URL")) != "" &&
+		strings.TrimSpace(os.Getenv("ORKA_TASK_NAMESPACE")) != "" &&
+		strings.TrimSpace(os.Getenv("ORKA_TASK_NAME")) != ""
+}
+
+func autoEnableMemoryTools(enabled []string) []string {
+	normalized := normalizeEnabledTools(enabled)
+	if !memoryControllerConfigPresent() {
+		return normalized
+	}
+
+	for _, name := range memoryToolNames {
+		if !containsTool(normalized, name) {
+			normalized = append(normalized, name)
+		}
+	}
+	return normalized
+}
+
+func containsTool(enabled []string, name string) bool {
+	for _, candidate := range enabled {
+		if strings.TrimSpace(candidate) == name {
+			return true
+		}
+	}
+	return false
+}
+
+func registerMemoryTools() {
+	tools.DefaultRegistry.Register(tools.NewRecallMemoryTool())
+	tools.DefaultRegistry.Register(tools.NewRememberMemoryTool())
+	tools.DefaultRegistry.Register(tools.NewProposeMemoryTool())
+	tools.DefaultRegistry.Register(tools.NewSearchTranscriptTool())
+}
+
+func loadDurableMemoryContext(ctx context.Context) string {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("ORKA_MEMORY_CONTEXT_ENABLED")), "false") {
+		return ""
+	}
+	if !memoryControllerConfigPresent() {
+		return ""
+	}
+
+	controllerURL := strings.TrimRight(strings.TrimSpace(os.Getenv("ORKA_CONTROLLER_URL")), "/")
+	namespace := strings.TrimSpace(os.Getenv("ORKA_TASK_NAMESPACE"))
+	limit := memoryContextLimit()
+
+	values := url.Values{}
+	values.Set("limit", strconv.Itoa(limit))
+	endpoint := fmt.Sprintf("%s/internal/v1/memories/%s?%s", controllerURL, url.PathEscape(namespace), values.Encode())
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		fmt.Printf("Warning: failed to create durable memory request: %v\n", err)
+		return ""
+	}
+	if token := workerServiceAccountToken(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		fmt.Printf("Warning: failed to fetch durable memory: %v\n", err)
+		return ""
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		fmt.Printf("Warning: durable memory fetch returned HTTP %d: %s\n", resp.StatusCode, strings.TrimSpace(string(body)))
+		return ""
+	}
+
+	var memories []store.Memory
+	if err := json.NewDecoder(io.LimitReader(resp.Body, memoryContextResponseBodyLimit)).Decode(&memories); err != nil {
+		fmt.Printf("Warning: failed to decode durable memory context: %v\n", err)
+		return ""
+	}
+
+	return formatDurableMemoryContextWithLimit(memories, limit, memoryContextMaxChars())
+}
+
+func workerServiceAccountToken() string {
+	if token := strings.TrimSpace(os.Getenv("ORKA_SA_TOKEN")); token != "" {
+		return token
+	}
+	if data, err := os.ReadFile(serviceAccountTokenPath); err == nil {
+		return strings.TrimSpace(string(data))
+	}
+	return ""
+}
+
+func memoryContextLimit() int {
+	limit := defaultMemoryContextLimit
+	if raw := strings.TrimSpace(os.Getenv("ORKA_MEMORY_CONTEXT_LIMIT")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if limit > maxMemoryContextLimit {
+		return maxMemoryContextLimit
+	}
+	return limit
+}
+
+func memoryContextMaxChars() int {
+	maxChars := defaultMemoryContextMaxChars
+	if raw := strings.TrimSpace(os.Getenv("ORKA_MEMORY_CONTEXT_MAX_CHARS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			maxChars = parsed
+		}
+	}
+	if maxChars > defaultMemoryContextMaxChars {
+		return defaultMemoryContextMaxChars
+	}
+	return maxChars
+}
+
+func shouldAppendMemoryReflectionGuidance(enabledTools []string) bool {
+	return memoryControllerConfigPresent() &&
+		(containsTool(enabledTools, "remember") || containsTool(enabledTools, "propose_memory"))
+}
+
+func formatDurableMemoryContext(memories []store.Memory, maxChars int) string {
+	return formatDurableMemoryContextWithLimit(memories, defaultMemoryContextLimit, maxChars)
+}
+
+func formatDurableMemoryContextWithLimit(memories []store.Memory, limit, maxChars int) string {
+	if len(memories) == 0 || limit <= 0 {
+		return ""
+	}
+	if limit > maxMemoryContextLimit {
+		limit = maxMemoryContextLimit
+	}
+	if maxChars <= 0 {
+		maxChars = defaultMemoryContextMaxChars
+	}
+
+	var sb strings.Builder
+	appendBounded(&sb, durableMemoryContextHeader, maxChars)
+
+	written := 0
+	for _, memory := range memories {
+		if written >= limit || sb.Len() >= maxChars {
+			break
+		}
+		if memory.Disabled || memory.Deleted {
+			continue
+		}
+		content := strings.TrimSpace(memory.Content)
+		if content == "" {
+			continue
+		}
+
+		content = truncateWithMarker(content, memoryContextPerEntryMaxChars,
+			fmt.Sprintf("\n[durable memory truncated, full content: %d chars]", len(content)))
+		entry := fmt.Sprintf("%d. %s\n%s\n\n", written+1, durableMemoryMetadata(memory), content)
+		before := sb.Len()
+		complete := appendBounded(&sb, entry, maxChars)
+		if sb.Len() > before {
+			written++
+		}
+		if !complete {
+			break
+		}
+	}
+
+	if written == 0 {
+		return ""
+	}
+	return sb.String()
+}
+
+func durableMemoryMetadata(memory store.Memory) string {
+	parts := make([]string, 0, 5)
+	if memory.Source != "" {
+		parts = append(parts, "source="+memory.Source)
+	}
+	if memory.TaskName != "" {
+		parts = append(parts, "task="+memory.TaskName)
+	}
+	if memory.AgentName != "" {
+		parts = append(parts, "agent="+memory.AgentName)
+	}
+	if len(memory.Tags) > 0 {
+		parts = append(parts, "tags="+strings.Join(memory.Tags, ","))
+	}
+	if !memory.CreatedAt.IsZero() {
+		parts = append(parts, "created="+memory.CreatedAt.UTC().Format(time.RFC3339))
+	}
+	if len(parts) == 0 {
+		return "[memory]"
+	}
+	return "[" + strings.Join(parts, "; ") + "]"
+}
+
+func appendMemoryReflectionGuidance(systemPrompt string) string {
+	return appendSystemPromptSection(systemPrompt, durableMemoryReflectionGuidance)
+}
+
+func appendSystemPromptSection(systemPrompt, section string) string {
+	section = strings.TrimSpace(section)
+	if section == "" {
+		return systemPrompt
+	}
+	systemPrompt = strings.TrimSpace(systemPrompt)
+	if systemPrompt == "" {
+		return section
+	}
+	return systemPrompt + "\n\n" + section
+}
+
+func appendBounded(sb *strings.Builder, value string, maxChars int) bool {
+	if maxChars <= 0 || sb.Len() >= maxChars {
+		return false
+	}
+	remaining := maxChars - sb.Len()
+	if len(value) <= remaining {
+		sb.WriteString(value)
+		return true
+	}
+	if remaining > 0 {
+		sb.WriteString(truncateWithMarker(value, remaining, "\n[durable memory context truncated]"))
+	}
+	return false
+}
+
+func truncateWithMarker(value string, maxChars int, marker string) string {
+	if maxChars <= 0 {
+		return ""
+	}
+	if len(value) <= maxChars {
+		return value
+	}
+	if len(marker) >= maxChars {
+		return truncateUTF8(value, maxChars)
+	}
+	return truncateUTF8(value, maxChars-len(marker)) + marker
+}
+
+func truncateUTF8(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(value) <= maxBytes {
+		return value
+	}
+	for maxBytes > 0 && (value[maxBytes]&0xC0) == 0x80 {
+		maxBytes--
+	}
+	return value[:maxBytes]
+}
+
 // getAPIKey retrieves the API key for the given provider
 func getAPIKey(provider string) string {
 	// Check environment variables
@@ -402,15 +711,11 @@ func loadPlanContext() string {
 		return ""
 	}
 
-	url := fmt.Sprintf("%s/internal/v1/plans/%s/%s", controllerURL, taskNamespace, taskName)
+	planURL := fmt.Sprintf("%s/internal/v1/plans/%s/%s", controllerURL, taskNamespace, taskName)
 
-	// Read SA token
-	saToken := ""
-	if data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token"); err == nil {
-		saToken = strings.TrimSpace(string(data))
-	}
+	saToken := workerServiceAccountToken()
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, planURL, nil)
 	if err != nil {
 		fmt.Printf("Warning: failed to create plan request: %v\n", err)
 		return ""

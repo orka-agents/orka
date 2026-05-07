@@ -334,13 +334,14 @@ if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Ena
 }
 ```
 
-The `delegate_task` and `wait_for_tasks` tools are automatically injected into the tools list when coordination is enabled.
+Coordination, memory, PR, dynamic-agent, and plan tools are automatically injected into the tools list when coordination is enabled. This includes `delegate_task`, `wait_for_tasks`, `create_container_task`, sibling messaging tools, memory tools (`recall_memory`, `remember`, `propose_memory`, `search_transcript`), PR workflow tools, dynamic agent management, and `update_plan`.
 
 ### AI Worker Wiring
 
 Located in `workers/ai/main.go`. When `ORKA_COORDINATION_ENABLED=true`:
 
 - Coordination tools are registered into `DefaultRegistry` via `tools.RegisterCoordinationTools(k8sClient)`
+- Memory tools are registered when controller context is present and can be used for durable recall, proposal creation, and transcript search
 - `maxIterations` is increased from 10 to 50 for coordinator agents
 
 ## RBAC
@@ -490,14 +491,14 @@ status:
 | `internal/controller/task_controller_test.go` | Tests for coordination enforcement |
 | `internal/controller/job_builder.go` | Coordination env vars for worker pods |
 | `internal/controller/job_builder_test.go` | Tests for coordination env vars |
-| `workers/ai/main.go` | Register coordination tools, increase maxIterations |
+| `workers/ai/main.go` | Register coordination and memory tools, increase maxIterations |
 | `config/rbac/worker_role.yaml` | Task create + ConfigMap list permissions |
 
 ## Testing
 
 1. **Unit tests** for `delegate_task` and `wait_for_tasks` tools using `sigs.k8s.io/controller-runtime/pkg/client/fake`
 2. **Controller tests** for coordination validation (depth, allowedAgents, concurrency) using envtest
-3. **Job builder tests** verifying coordination env vars are set correctly
+3. **Job builder tests** verifying coordination env vars and auto-injected memory tools are set correctly
 
 ## Self-Healing Coordination
 

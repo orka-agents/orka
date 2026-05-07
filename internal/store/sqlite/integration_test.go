@@ -126,7 +126,7 @@ func TestIntegration_LargeSessionTranscript(t *testing.T) {
 			idx := batch*batchSize + i
 			role := "user"
 			if idx%2 == 1 {
-				role = "assistant"
+				role = roleAssistant
 			}
 			msgs[i] = store.SessionMessage{
 				Role:      role,
@@ -349,7 +349,7 @@ func TestIntegration_FullTaskLifecycle(t *testing.T) {
 
 	// 6. Append assistant response
 	if err := s.AppendMessages(ctx, ns, sessionName, []store.SessionMessage{
-		{Role: "assistant", Content: "Task completed successfully", Timestamp: now.Add(time.Second)},
+		{Role: roleAssistant, Content: "Task completed successfully", Timestamp: now.Add(time.Second)},
 	}); err != nil {
 		t.Fatalf("AppendMessages assistant: %v", err)
 	}
@@ -373,7 +373,7 @@ func TestIntegration_FullTaskLifecycle(t *testing.T) {
 	if len(sess.Messages) != 2 {
 		t.Fatalf("Messages = %d, want 2", len(sess.Messages))
 	}
-	if sess.Messages[0].Role != "user" || sess.Messages[1].Role != "assistant" {
+	if sess.Messages[0].Role != "user" || sess.Messages[1].Role != roleAssistant {
 		t.Errorf("unexpected message roles: %s, %s", sess.Messages[0].Role, sess.Messages[1].Role)
 	}
 
