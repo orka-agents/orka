@@ -454,6 +454,9 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
 | `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
 | `--controller-url` | `""` | Base URL workers use to reach the controller API (e.g., `http://orka-api.orka-system.svc:8080`). Required for worker result callbacks and session transcript fetching |
+| `--oidc-issuer` | `ORKA_OIDC_ISSUER` env or `""` | OIDC issuer URL for external API bearer token validation. Requires `--oidc-audience` when set |
+| `--oidc-audience` | `ORKA_OIDC_AUDIENCE` env or `""` | Expected OIDC audience for external API bearer tokens. Requires `--oidc-issuer` when set |
+| `--oidc-jwks-url` | `ORKA_OIDC_JWKS_URL` env or `""` | Optional JWKS URL. When empty, Orka discovers it from the issuer metadata |
 | `--ai-worker-image` | `ghcr.io/sozercan/orka/ai-worker:latest` | AI worker container image |
 | `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Copilot agent worker image |
 | `--claude-worker-image` | `ghcr.io/sozercan/orka/agent-worker-claude:latest` | Claude agent worker image |
@@ -476,6 +479,26 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 | `--metrics-secure` | `true` | Serve metrics via HTTPS |
 | `--enable-http2` | `false` | Enable HTTP/2 for metrics and webhook servers |
 | `--enable-tracing` | `false` | Enable OpenTelemetry distributed tracing (requires `OTEL_EXPORTER_OTLP_ENDPOINT`) |
+
+### External API OIDC Authentication
+
+ServiceAccount bearer token authentication is always available. To allow external callers such as GitHub Actions to authenticate directly with OIDC JWTs, configure both issuer and audience:
+
+```bash
+--oidc-issuer=https://token.actions.githubusercontent.com
+--oidc-audience=orka-ci
+```
+
+The same settings can be supplied with environment variables:
+
+```bash
+ORKA_OIDC_ISSUER=https://token.actions.githubusercontent.com
+ORKA_OIDC_AUDIENCE=orka-ci
+# Optional; when omitted, Orka discovers the JWKS URL from the issuer metadata.
+ORKA_OIDC_JWKS_URL=https://token.actions.githubusercontent.com/.well-known/jwks
+```
+
+OIDC validation requires RS256-signed JWTs with matching `iss` and `aud`, valid time claims, and a non-empty `sub`. When an OIDC-authenticated caller creates a Task, Orka records the verified identity in `spec.requestedBy`. Clients cannot set `requestedBy` themselves.
 
 ## Prometheus Metrics
 
