@@ -42,6 +42,7 @@ The controller is the central component that runs as a Kubernetes Deployment. It
 - **API Server**: REST endpoints for task CRUD operations, built on the Fiber framework
 - **Task Reconciler**: Watches Task resources, creates/manages Jobs, handles lifecycle
 - **Session Manager**: Manages session persistence (via SQLite store) for conversation continuity with serial execution enforcement
+- **Memory Store**: Persists durable memories, memory proposals, and transcript search data in SQLite for namespace-scoped agent context
 - **Priority Queue**: Schedules tasks based on priority (0-1000)
 - **Webhook Notifier**: Delivers completion notifications via HTTP callbacks
 - **Embedded Web UI**: The React dashboard is compiled into the controller binary
@@ -75,6 +76,7 @@ Orka uses five CRDs:
 | **Result Storage** | SQLite (embedded) | No size limit, zero external dependencies, pure Go via `modernc.org/sqlite`. |
 | **Session Storage** | SQLite (embedded) | Normalized schema with efficient querying and pagination. No size limit. |
 | **Plan Storage** | SQLite (embedded) | Persists autonomous coordination plan state across iterations. |
+| **Memory Storage** | SQLite (embedded) | Persists durable memories and reviewable memory proposals for namespace-scoped recall. |
 | **API Authentication** | Kubernetes ServiceAccount tokens | Native K8s auth with RBAC integration. |
 | **Task Queue** | Priority queuing (0-1000) | Higher priority tasks are scheduled first. |
 | **Secret Management** | Reference K8s Secrets in specs | Controller mounts secrets to worker pods. |
@@ -236,6 +238,19 @@ Key behaviors:
 - **No size limit**: SQLite storage removes the old ConfigMap 1MB constraint
 - **Init container delivery**: Session transcripts are delivered to worker pods via an init container that fetches from the controller's internal API
 
+## Memory Model
+
+Durable memory is stored in SQLite and scoped by namespace. AI workers load a bounded set of reviewed durable memories through the controller internal API and append them to the system prompt as background context. Memory context is best-effort: task execution should continue even if memory recall is unavailable.
+
+Workers can also use memory tools for active recall and proposal creation:
+
+- `recall_memory` queries durable memories by text, tags, task, agent, source, and limit.
+- `search_transcript` searches prior session transcripts and returns compact snippets.
+- `remember` creates a durable-memory proposal for review.
+- `propose_memory` creates a memory-adjacent governance proposal.
+
+Proposal review is intentionally separate from durable memory mutation. Accepting or rejecting a proposal records governance state but does not automatically create durable memory. See [memory.md](memory.md) for API examples and validation details.
+
 ## Security Model
 
 - **Worker pods**: Non-root (uid 1000), read-only rootfs, all capabilities dropped, seccomp RuntimeDefault
@@ -270,6 +285,8 @@ All persistent data uses SQLite via `modernc.org/sqlite` (pure Go, no CGO depend
 | `session_messages` | `id` (FK → sessions) | Individual messages with role, content, tool_calls (JSON) |
 | `messages` | `id` + `namespace` + `parent_task` | Inter-agent messages, broadcast via `to_task='*'` |
 | `plan_states` | `(namespace, task_name)` | Autonomous loop state: iteration, progress %, goal_complete flag |
+| `memories` | `id` | Durable namespace-scoped memories with provenance, tags, disabled/deleted flags, and recall counters |
+| `memory_proposals` | `id` | Reviewable memory/skill/policy/workflow proposals with status, reviewer, and review notes |
 
 ### Configuration
 

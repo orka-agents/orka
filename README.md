@@ -38,6 +38,7 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 - 🛠️ **Agent Runtimes** — Delegate to Codex CLI, Claude Code CLI, or GitHub Copilot CLI for full autonomous coding
 - 🔀 **Multi-Agent Coordination** — Coordinators delegate to specialists with depth and concurrency controls
 - 💬 **Interactive Chat** — Agentic orchestrator with SSE streaming that creates and manages agents and tasks for you
+- 🧠 **Durable Memory** — Namespace-scoped recall, transcript search, and reviewable memory proposals for coordinated agents
 - 🛡️ **Repository Security Scanning** — Scheduled and incremental repository scans with threat models, validated findings, patch generation, and remediation PRs
 - 🖥️ **Web Dashboard** — Built-in React UI embedded in the controller binary — zero extra deployments
 - 📦 **Declarative CRDs** — Task, Agent, Tool, Provider, and Skill custom resources for GitOps workflows
@@ -100,6 +101,7 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Agent Runtimes](docs/agent-runtimes.md)                     | Codex CLI, Claude Code CLI, and Copilot CLI runtimes  |
 | [Interactive Chat](docs/chat.md)                             | Chat endpoint, tools, and SSE streaming               |
 | [Multi-Agent Coordination](docs/multi-agent-coordination.md) | Coordinator agents and task delegation                |
+| [Memory](docs/memory.md)                                   | Durable memory, proposals, transcript search, and validation |
 | [API Reference](docs/api-reference.md)                       | REST API endpoints and usage examples                 |
 | [OpenAI Compatibility](docs/openai-compat.md)                | OpenAI-compatible chat completions API                |
 | [Anthropic Compatibility](docs/anthropic-compat.md)          | Anthropic-compatible Messages API                     |
