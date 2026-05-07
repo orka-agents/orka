@@ -59,9 +59,12 @@ redact() {
 }
 
 cleanup_port_forward() {
-  if [[ -n "${api_pf_pid}" ]] && kill -0 "${api_pf_pid}" 2>/dev/null; then
-    kill "${api_pf_pid}" 2>/dev/null || true
+  if [[ -n "${api_pf_pid}" ]]; then
+    if kill -0 "${api_pf_pid}" 2>/dev/null; then
+      kill "${api_pf_pid}" 2>/dev/null || true
+    fi
     wait "${api_pf_pid}" 2>/dev/null || true
+    api_pf_pid=""
   fi
 }
 
@@ -146,12 +149,9 @@ wait_for_http() {
       return 0
     fi
     if [[ -n "${api_pf_pid}" ]] && ! kill -0 "${api_pf_pid}" 2>/dev/null; then
-      {
-        echo "port-forward process exited while waiting for ${description}"
-        echo
-        cat "${api_pf_log}" 2>/dev/null || true
-      } | redact >&2
-      die "${description} never became available at ${url}"
+      warn "API port-forward exited while waiting for ${description}; restarting"
+      wait "${api_pf_pid}" 2>/dev/null || true
+      api_pf_pid="$(start_api_port_forward)"
     fi
     attempts_remaining=$((attempts_remaining - 1))
     sleep 2
@@ -167,8 +167,12 @@ start_port_forward() {
   local remote_port="$4"
   local logfile="$5"
 
-  kubectl -n "${namespace_arg}" port-forward "${resource}" "${local_port}:${remote_port}" >"${logfile}" 2>&1 &
+  kubectl -n "${namespace_arg}" port-forward "${resource}" "${local_port}:${remote_port}" >>"${logfile}" 2>&1 &
   echo $!
+}
+
+start_api_port_forward() {
+  start_port_forward "${orka_namespace}" "svc/${orka_api_service}" "${orka_api_local_port}" "${orka_api_service_port}" "${api_pf_log}"
 }
 
 require_github_oidc_token_source() {
@@ -307,7 +311,7 @@ main() {
   run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
 
   log "Port-forwarding Orka API service"
-  api_pf_pid="$(start_port_forward "${orka_namespace}" "svc/${orka_api_service}" "${orka_api_local_port}" "${orka_api_service_port}" "${api_pf_log}")"
+  api_pf_pid="$(start_api_port_forward)"
 
   local api_base
   api_base="http://127.0.0.1:${orka_api_local_port}"
