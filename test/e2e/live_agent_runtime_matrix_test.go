@@ -34,8 +34,8 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		codexAgentName         = "e2e-live-runtime-codex-agent"
 		codexTaskWriteName     = "e2e-live-runtime-codex-write"
 		codexTaskReadName      = "e2e-live-runtime-codex-read"
-		codexMarker            = "CODEX_LIVE_RUNTIME_MARKER_1"
-		codexMarkerFile        = "codex-live-marker.txt"
+		codexMarker            = "ORKA_LIVE_RUNTIME_MARKER_1"
+		codexMarkerFile        = "live-runtime-marker.txt"
 		claudeSecretName       = "e2e-live-runtime-claude-secret"
 		claudeAgentName        = "e2e-live-runtime-claude-agent"
 		claudeTaskName         = "e2e-live-runtime-claude-task"
@@ -153,7 +153,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			codexTaskWriteName,
 			codexPriorAgentName,
-			fmt.Sprintf("Use the simplest possible edit to create %s in the repository root containing exactly %s followed by a newline. Reply with exactly CREATED and nothing else.", codexMarkerFile, codexMarker),
+			fmt.Sprintf("Add a new plain text file named %s in the repository root with exactly one line: %s. Reply with exactly CREATED and nothing else.", codexMarkerFile, codexMarker),
 			6,
 			boolPtr(true),
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
@@ -204,7 +204,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			codexTaskReadName,
 			codexAgentName,
-			fmt.Sprintf("Read %s from the repository root and reply with exactly %s and nothing else.", codexMarkerFile, codexMarker),
+			fmt.Sprintf("Open the plain text file named %s in the repository root and reply with only its single line.", codexMarkerFile),
 			3,
 			boolPtr(true),
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},

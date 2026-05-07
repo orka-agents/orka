@@ -19,8 +19,8 @@ import (
 
 func TestCreateContainerTaskTool_Name(t *testing.T) {
 	tool := &CreateContainerTaskTool{}
-	if got := tool.Name(); got != "create_container_task" {
-		t.Errorf("Name() = %v, want %v", got, "create_container_task")
+	if got := tool.Name(); got != createContainerTaskToolName {
+		t.Errorf("Name() = %v, want %v", got, createContainerTaskToolName)
 	}
 }
 
@@ -41,14 +41,14 @@ func TestCreateContainerTaskTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	for _, key := range []string{"name", "image", "command", "args", "workspace", "prior_task", "namespace", "timeout", "priority", "schedule"} {
+	for _, key := range []string{nameField, "image", "command", "args", workspaceField, priorTaskField, namespaceField, timeoutField, priorityField, scheduleField} {
 		if _, ok := props[key]; !ok {
 			t.Errorf("missing %s property", key)
 		}
@@ -59,13 +59,13 @@ func newCreateContainerTaskToolCtx(fc client.Client) context.Context {
 	taskCounter := 0
 	tc := &ToolContext{
 		Client:    fc,
-		Namespace: "default",
+		Namespace: defaultNamespace,
 		GenerateTaskName: func() string {
 			taskCounter++
-			return "container-task-1"
+			return testContainerTaskGeneratedName
 		},
 		TaskLabels: func() map[string]string {
-			return map[string]string{"orka.ai/managed": "true"}
+			return map[string]string{managedByLabelValue: trueStr}
 		},
 		CheckTaskLimit: func() *ChatToolError { return nil },
 		IncrementTasks: func() { taskCounter++ },
@@ -100,14 +100,14 @@ func expectContainerTaskCreated(t *testing.T, result string) {
 		t.Errorf("expected success, got error: %s", r.Error)
 	}
 	data := r.Data.(map[string]any)
-	if data["name"] != "container-task-1" {
-		t.Errorf("name = %v, want container-task-1", data["name"])
+	if data[nameField] != testContainerTaskGeneratedName {
+		t.Errorf("name = %v, want container-task-1", data[nameField])
 	}
-	if data["namespace"] != "default" {
-		t.Errorf("namespace = %v, want default", data["namespace"])
+	if data[namespaceField] != defaultNamespace {
+		t.Errorf("namespace = %v, want default", data[namespaceField])
 	}
-	if data["phase"] != "Pending" {
-		t.Errorf("phase = %v, want Pending", data["phase"])
+	if data[phaseField] != taskPhasePendingString {
+		t.Errorf("phase = %v, want Pending", data[phaseField])
 	}
 }
 
@@ -119,7 +119,7 @@ func expectContainerTaskScheduled(t *testing.T, result string) {
 		t.Errorf("expected success, got error: %s", r.Error)
 	}
 	data := r.Data.(map[string]any)
-	msg := data["message"].(string)
+	msg := data[messageField].(string)
 	if msg == "Task created" {
 		t.Error("expected scheduled message, got one-time message")
 	}
@@ -141,7 +141,7 @@ func expectContainerTaskWorkspace(t *testing.T, fc client.Client) {
 	t.Helper()
 
 	task := &corev1alpha1.Task{}
-	key := client.ObjectKey{Name: "container-task-1", Namespace: "default"}
+	key := client.ObjectKey{Name: testContainerTaskGeneratedName, Namespace: defaultNamespace}
 	if err := fc.Get(context.Background(), key, task); err != nil {
 		t.Fatalf("failed to get created task: %v", err)
 	}
@@ -157,7 +157,7 @@ func expectContainerTaskWorkspace(t *testing.T, fc client.Client) {
 	if task.Spec.Workspace.GitSecretRef == nil || task.Spec.Workspace.GitSecretRef.Name != testGitCredentialsSecret {
 		t.Fatalf("gitSecretRef = %#v", task.Spec.Workspace.GitSecretRef)
 	}
-	if task.Spec.PriorTaskRef == nil || task.Spec.PriorTaskRef.Name != "coder-task" {
+	if task.Spec.PriorTaskRef == nil || task.Spec.PriorTaskRef.Name != testCoderTaskName {
 		t.Fatalf("priorTaskRef = %#v", task.Spec.PriorTaskRef)
 	}
 }
@@ -195,7 +195,7 @@ func TestCreateContainerTaskTool_Execute(t *testing.T) {
 			args: json.RawMessage(`{"name":"validation","image":"golang:1.26","command":["sh","-lc"],"args":["go test ./..."],"workspace":{"gitRepo":"https://github.com/example/repo.git","branch":"feature","ref":"abc123","gitSecretRef":"git-credentials","subPath":"src"},"prior_task":"coder-task"}`),
 			objects: []client.Object{
 				&corev1alpha1.Task{
-					ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+					ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 					Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
 				},
 			},
@@ -210,27 +210,27 @@ func TestCreateContainerTaskTool_Execute(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid JSON args",
+			name: invalidJSONArgsCaseName,
 			args: json.RawMessage(`{bad json`),
 			checkResult: func(t *testing.T, result string) {
 				expectContainerTaskError(t, result, errTypeInvalidArgs)
 			},
 		},
 		{
-			name: "invalid timeout",
+			name: invalidTimeoutCaseName,
 			args: json.RawMessage(`{"name":"t","timeout":"xyz"}`),
 			checkResult: func(t *testing.T, result string) {
 				expectContainerTaskError(t, result, errTypeInvalidArgs)
 			},
 		},
 		{
-			name: "k8s already exists error",
+			name: k8sAlreadyExistsErrorCaseName,
 			args: json.RawMessage(`{"name":"existing"}`),
 			objects: []client.Object{
 				&corev1alpha1.Task{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "container-task-1",
-						Namespace: "default",
+						Name:      testContainerTaskGeneratedName,
+						Namespace: defaultNamespace,
 					},
 					Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 				},
@@ -274,7 +274,7 @@ func TestCreateContainerTaskTool_Execute_MissingContext(t *testing.T) {
 	if r.Success {
 		t.Error("expected failure for missing context")
 	}
-	if r.ErrorType != "internal_error" {
+	if r.ErrorType != internalErrorType {
 		t.Errorf("errorType = %v, want internal_error", r.ErrorType)
 	}
 }

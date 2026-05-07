@@ -82,7 +82,7 @@ func NewDelegateTaskTool(k8sClient client.Client) *DelegateTaskTool {
 
 // Name returns the tool name
 func (t *DelegateTaskTool) Name() string {
-	return "delegate_task"
+	return delegateTaskToolName
 }
 
 // Description returns the tool description
@@ -146,7 +146,7 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 				"description": "Maximum number of turns for the agent"
 			},
 			"allowBash": {
-				"type": "boolean",
+				"type": "` + jsonSchemaTypeBoolean + `",
 				"description": "Whether to allow bash execution in the agent"
 			},
 			"prior_task": {
@@ -158,7 +158,7 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 				"description": "Review feedback to prepend to the task prompt. Used with prior_task for iterative code review workflows."
 			},
 			"auto_retry": {
-				"type": "boolean",
+				"type": "` + jsonSchemaTypeBoolean + `",
 				"description": "Include structured retry metadata in failure reports. The coordinator decides whether to retry — wait_for_tasks does not auto-retry."
 			},
 			"max_retries": {
@@ -183,11 +183,11 @@ type delegationContext struct {
 
 // parseDelegateArgs parses and validates the delegation arguments and environment.
 func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawMessage) (*delegationContext, error) {
-	parentName := os.Getenv("ORKA_TASK_NAME")
-	parentNamespace := os.Getenv("ORKA_TASK_NAMESPACE")
-	depthStr := os.Getenv("ORKA_COORDINATION_DEPTH")
-	allowedAgents := os.Getenv("ORKA_COORDINATION_ALLOWED_AGENTS")
-	maxDepthStr := os.Getenv("ORKA_COORDINATION_MAX_DEPTH")
+	parentName := os.Getenv(envOrkaTaskName)
+	parentNamespace := os.Getenv(envOrkaTaskNamespace)
+	depthStr := os.Getenv(envOrkaCoordinationDepth)
+	allowedAgents := os.Getenv(envOrkaCoordinationAllowedAgents)
+	maxDepthStr := os.Getenv(envOrkaCoordinationMaxDepth)
 
 	var delegateArgs DelegateTaskArgs
 	if err := json.Unmarshal(args, &delegateArgs); err != nil {
@@ -361,7 +361,7 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 		childTask.OwnerReferences = []metav1.OwnerReference{
 			{
 				APIVersion:         corev1alpha1.GroupVersion.String(),
-				Kind:               "Task",
+				Kind:               taskKindString,
 				Name:               dc.parentTask.Name,
 				UID:                dc.parentTask.UID,
 				Controller:         &isController,
@@ -455,7 +455,7 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 
 	result := DelegateTaskResult{
 		TaskName: childTask.Name,
-		Status:   "created",
+		Status:   GitHubPullRequestStatusCreated,
 	}
 
 	output, err := json.Marshal(result)

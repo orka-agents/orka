@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	testCheckMessagesName = "check_messages"
+	testCheckMessagesName = checkMessagesToolName
 	queryValFalse         = "false"
 )
 
@@ -46,20 +46,20 @@ func TestCheckMessagesTool_Execute(t *testing.T) {
 		{
 			name: "no new messages",
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":      "worker-a",
-				"ORKA_TASK_NAMESPACE": "default",
-				"ORKA_PARENT_TASK":    "coordinator",
+				envOrkaTaskName:      testWorkerAName,
+				envOrkaTaskNamespace: defaultNamespace,
+				envOrkaParentTask:    testCoordinatorTaskName,
 			},
 			serverCode: http.StatusOK,
 			serverBody: `[]`,
-			wantMsg:    "No new messages",
+			wantMsg:    noNewMessagesText,
 		},
 		{
 			name: "has messages",
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":      "worker-a",
-				"ORKA_TASK_NAMESPACE": "default",
-				"ORKA_PARENT_TASK":    "coordinator",
+				envOrkaTaskName:      testWorkerAName,
+				envOrkaTaskNamespace: defaultNamespace,
+				envOrkaParentTask:    testCoordinatorTaskName,
 			},
 			serverCode: http.StatusOK,
 			serverBody: `[{"id":1,"fromTask":"worker-b","toTask":"worker-a","content":"found issue"}]`,
@@ -72,13 +72,13 @@ func TestCheckMessagesTool_Execute(t *testing.T) {
 				return &CheckMessagesArgs{MarkRead: &f}
 			}(),
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":      "worker-a",
-				"ORKA_TASK_NAMESPACE": "default",
-				"ORKA_PARENT_TASK":    "coordinator",
+				envOrkaTaskName:      testWorkerAName,
+				envOrkaTaskNamespace: defaultNamespace,
+				envOrkaParentTask:    testCoordinatorTaskName,
 			},
 			serverCode: http.StatusOK,
 			serverBody: `[]`,
-			wantMsg:    "No new messages",
+			wantMsg:    noNewMessagesText,
 		},
 		{
 			name:    "missing env vars",
@@ -86,11 +86,11 @@ func TestCheckMessagesTool_Execute(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "server error",
+			name: serverErrorMessage,
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":      "worker-a",
-				"ORKA_TASK_NAMESPACE": "default",
-				"ORKA_PARENT_TASK":    "coordinator",
+				envOrkaTaskName:      testWorkerAName,
+				envOrkaTaskNamespace: defaultNamespace,
+				envOrkaParentTask:    testCoordinatorTaskName,
 			},
 			serverCode: http.StatusInternalServerError,
 			serverBody: "internal error",
@@ -99,20 +99,20 @@ func TestCheckMessagesTool_Execute(t *testing.T) {
 		{
 			name: "nil args (defaults)",
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":      "worker-a",
-				"ORKA_TASK_NAMESPACE": "default",
-				"ORKA_PARENT_TASK":    "coordinator",
+				envOrkaTaskName:      testWorkerAName,
+				envOrkaTaskNamespace: defaultNamespace,
+				envOrkaParentTask:    testCoordinatorTaskName,
 			},
 			serverCode: http.StatusOK,
 			serverBody: `[]`,
-			wantMsg:    "No new messages",
+			wantMsg:    noNewMessagesText,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Clear env vars first
-			for _, k := range []string{"ORKA_TASK_NAME", "ORKA_TASK_NAMESPACE", "ORKA_PARENT_TASK", "ORKA_CONTROLLER_URL"} {
+			for _, k := range []string{envOrkaTaskName, envOrkaTaskNamespace, envOrkaParentTask, envOrkaControllerURL} {
 				t.Setenv(k, "")
 			}
 
@@ -131,7 +131,7 @@ func TestCheckMessagesTool_Execute(t *testing.T) {
 					w.Write([]byte(tt.serverBody)) //nolint:errcheck
 				}))
 				defer server.Close()
-				tt.envVars["ORKA_CONTROLLER_URL"] = server.URL
+				tt.envVars[envOrkaControllerURL] = server.URL
 			}
 
 			for k, v := range tt.envVars {
@@ -174,10 +174,10 @@ func TestCheckMessagesTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("schema type should be object")
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("schema missing properties")
 	}

@@ -19,30 +19,20 @@ import (
 // CreateToolCRDTool creates a Tool CRD with an HTTP endpoint.
 type CreateToolCRDTool struct{}
 
-func (t *CreateToolCRDTool) Name() string { return "create_tool" }
+func (t *CreateToolCRDTool) Name() string { return createToolCRDToolName }
 
 func (t *CreateToolCRDTool) Description() string {
 	return "Create a tool with an HTTP endpoint."
 }
 
 func (t *CreateToolCRDTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"name":        map[string]any{"type": "string", "description": "Tool name"},
-			"namespace":   map[string]any{"type": "string", "description": "Namespace"},
-			"description": map[string]any{"type": "string", "description": "Tool description"},
-			"url":         map[string]any{"type": "string", "description": "HTTP endpoint URL"},
-			"method":      map[string]any{"type": "string", "description": "HTTP method (default POST)"},
-		},
-		"required": []string{"name", "description", "url"},
-	})
+	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Tool name"}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, jsonSchemaDescriptionField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Tool description"}, urlField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "HTTP endpoint URL"}, methodField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "HTTP method (default POST)"}}, jsonSchemaRequiredField: []string{nameField, jsonSchemaDescriptionField, urlField}})
 }
 
 func (t *CreateToolCRDTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil {
-		return ChatToolErrorResult("internal_error", "missing tool context", "")
+		return ChatToolErrorResult(internalErrorType, "missing tool context", "")
 	}
 
 	var a map[string]any
@@ -50,27 +40,27 @@ func (t *CreateToolCRDTool) Execute(ctx context.Context, args json.RawMessage) (
 		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
 	}
 
-	name := chatGetStringArg(a, "name")
+	name := chatGetStringArg(a, nameField)
 	if name == "" {
 		return ChatToolErrorResult("invalid_arguments", "name is required", "Provide a name for the tool")
 	}
 
-	description := chatGetStringArg(a, "description")
+	description := chatGetStringArg(a, jsonSchemaDescriptionField)
 	if description == "" {
 		return ChatToolErrorResult("invalid_arguments", "description is required", "Provide a description for the tool")
 	}
 
-	url := chatGetStringArg(a, "url")
+	url := chatGetStringArg(a, urlField)
 	if url == "" {
 		return ChatToolErrorResult("invalid_arguments", "url is required", "Provide the HTTP endpoint URL")
 	}
 
-	namespace := chatGetStringArgDefault(a, "namespace", tc.Namespace)
+	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
 	if r, ok := checkChatNamespaceScope(tc, namespace); !ok {
 		return r, nil
 	}
 
-	method := chatGetStringArgDefault(a, "method", "POST")
+	method := chatGetStringArgDefault(a, methodField, httpMethodPostString)
 
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -90,9 +80,5 @@ func (t *CreateToolCRDTool) Execute(ctx context.Context, args json.RawMessage) (
 		return classifyChatK8sErr(err)
 	}
 
-	return ChatToolSuccess(map[string]any{
-		"name":      tool.Name,
-		"namespace": tool.Namespace,
-		"message":   "Tool created",
-	})
+	return ChatToolSuccess(map[string]any{nameField: tool.Name, namespaceField: tool.Namespace, messageField: "Tool created"})
 }

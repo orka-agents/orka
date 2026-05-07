@@ -45,11 +45,11 @@ func TestListPullRequestsTool_Metadata(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("failed to parse parameters schema: %v", err)
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("schema missing properties")
 	}
-	for _, field := range []string{"task_name", "repo_url", "per_page", "page"} {
+	for _, field := range []string{taskNameField, repoURLField, perPageField, pageField} {
 		if _, ok := props[field]; !ok {
 			t.Errorf("schema missing %s property", field)
 		}
@@ -106,8 +106,8 @@ func TestListPullRequestsTool_ListOpenPRs(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("ORKA_GIT_REPO", "https://github.com/sozercan/ayna")
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("ORKA_GIT_REPO", testSozercanAynaRepoURL)
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	args, _ := json.Marshal(ListPullRequestsArgs{})
 	result, err := tool.Execute(context.Background(), args)
@@ -133,7 +133,7 @@ func TestListPullRequestsTool_ListOpenPRs(t *testing.T) {
 	if pr.Author != "alice" {
 		t.Errorf("unexpected author: %s", pr.Author)
 	}
-	if pr.BaseBranch != "main" {
+	if pr.BaseBranch != testBranch {
 		t.Errorf("unexpected base branch: %s", pr.BaseBranch)
 	}
 	if pr.HeadBranch != "feature/search" {
@@ -171,7 +171,7 @@ func TestListPullRequestsTool_BodyTruncation(t *testing.T) {
 
 	tool := &ListPullRequestsTool{apiBaseURL: server.URL}
 	t.Setenv("ORKA_GIT_REPO", "https://github.com/o/r")
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	args, _ := json.Marshal(ListPullRequestsArgs{})
 	result, err := tool.Execute(context.Background(), args)
@@ -194,8 +194,8 @@ func TestListPullRequestsTool_BodyTruncation(t *testing.T) {
 
 func TestListPullRequestsTool_Pagination(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		perPage := r.URL.Query().Get("per_page")
-		page := r.URL.Query().Get("page")
+		perPage := r.URL.Query().Get(perPageField)
+		page := r.URL.Query().Get(pageField)
 		if perPage != "5" {
 			t.Errorf("expected per_page=5, got %s", perPage)
 		}
@@ -221,7 +221,7 @@ func TestListPullRequestsTool_Pagination(t *testing.T) {
 
 	tool := &ListPullRequestsTool{apiBaseURL: server.URL}
 	t.Setenv("ORKA_GIT_REPO", "https://github.com/o/r")
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	args, _ := json.Marshal(ListPullRequestsArgs{PerPage: 5, Page: 2})
 	result, err := tool.Execute(context.Background(), args)
@@ -275,7 +275,7 @@ func TestListPullRequestsTool_DraftPRs(t *testing.T) {
 
 	tool := &ListPullRequestsTool{apiBaseURL: server.URL}
 	t.Setenv("ORKA_GIT_REPO", "https://github.com/o/r")
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	args, _ := json.Marshal(ListPullRequestsArgs{})
 	result, err := tool.Execute(context.Background(), args)
@@ -307,7 +307,7 @@ func TestListPullRequestsTool_APIError404(t *testing.T) {
 
 	tool := &ListPullRequestsTool{apiBaseURL: server.URL}
 	t.Setenv("ORKA_GIT_REPO", "https://github.com/o/nonexistent")
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	args, _ := json.Marshal(ListPullRequestsArgs{})
 	_, err := tool.Execute(context.Background(), args)
@@ -324,7 +324,7 @@ func TestListPullRequestsTool_APIError404(t *testing.T) {
 
 func TestListPullRequestsTool_NoRepoURL(t *testing.T) {
 	t.Setenv("ORKA_GIT_REPO", "")
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &ListPullRequestsTool{}
 
@@ -361,10 +361,10 @@ func TestListPullRequestsTool_WithRepoURL(t *testing.T) {
 	defer server.Close()
 
 	tool := &ListPullRequestsTool{apiBaseURL: server.URL}
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	args, _ := json.Marshal(ListPullRequestsArgs{
-		RepoURL: "https://github.com/myorg/myrepo",
+		RepoURL: testMyOrgRepoURL,
 	})
 	result, err := tool.Execute(context.Background(), args)
 	if err != nil {
@@ -392,7 +392,7 @@ func TestListPullRequestsTool_EmptyResult(t *testing.T) {
 
 	tool := &ListPullRequestsTool{apiBaseURL: server.URL}
 	t.Setenv("ORKA_GIT_REPO", "https://github.com/o/r")
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	args, _ := json.Marshal(ListPullRequestsArgs{})
 	result, err := tool.Execute(context.Background(), args)
@@ -438,25 +438,23 @@ func TestListPullRequestsTool_WithTaskName(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 					GitSecretRef: &corev1.LocalObjectReference{
-						Name: "git-creds",
+						Name: testGitCredsSecretName,
 					},
 				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data: map[string][]byte{
-			"token": []byte("test-token"),
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -465,10 +463,10 @@ func TestListPullRequestsTool_WithTaskName(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(ListPullRequestsArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 	})
 	result, err := tool.Execute(context.Background(), args)
 	if err != nil {
@@ -510,7 +508,7 @@ func TestListPullRequestsTool_BodyTruncationMultiByteUTF8(t *testing.T) {
 
 	tool := &ListPullRequestsTool{apiBaseURL: server.URL}
 	t.Setenv("ORKA_GIT_REPO", "https://github.com/o/r")
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	args, _ := json.Marshal(ListPullRequestsArgs{})
 	result, err := tool.Execute(context.Background(), args)
@@ -542,7 +540,7 @@ func TestListPullRequestsTool_BodyTruncationMultiByteUTF8(t *testing.T) {
 
 func TestListPullRequestsTool_PerPageCap(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		perPage := r.URL.Query().Get("per_page")
+		perPage := r.URL.Query().Get(perPageField)
 		if perPage != "100" {
 			t.Errorf("expected per_page capped to 100, got %s", perPage)
 		}
@@ -553,7 +551,7 @@ func TestListPullRequestsTool_PerPageCap(t *testing.T) {
 
 	tool := &ListPullRequestsTool{apiBaseURL: server.URL}
 	t.Setenv("ORKA_GIT_REPO", "https://github.com/o/r")
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	args, _ := json.Marshal(ListPullRequestsArgs{PerPage: 200})
 	_, err := tool.Execute(context.Background(), args)

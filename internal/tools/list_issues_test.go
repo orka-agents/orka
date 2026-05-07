@@ -35,11 +35,11 @@ func TestListIssuesTool_Metadata(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("failed to parse parameters schema: %v", err)
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("schema missing properties")
 	}
-	for _, field := range []string{"task_name", "repo_url", "unassigned_only", "per_page", "page"} {
+	for _, field := range []string{taskNameField, repoURLField, "unassigned_only", perPageField, pageField} {
 		if _, ok := props[field]; !ok {
 			t.Errorf("schema missing %s property", field)
 		}
@@ -85,7 +85,7 @@ func TestListIssuesTool_DefaultUnassigned(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &ListIssuesTool{
 		k8sClient:  newFakeClient(),
@@ -93,7 +93,7 @@ func TestListIssuesTool_DefaultUnassigned(t *testing.T) {
 	}
 
 	args, _ := json.Marshal(ListIssuesArgs{
-		RepoURL: "https://github.com/testorg/testrepo",
+		RepoURL: testOrgTestRepoURL,
 	})
 
 	result, err := tool.Execute(context.Background(), args)
@@ -177,7 +177,7 @@ func TestListIssuesTool_FiltersPullRequests(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &ListIssuesTool{
 		k8sClient:  newFakeClient(),
@@ -185,7 +185,7 @@ func TestListIssuesTool_FiltersPullRequests(t *testing.T) {
 	}
 
 	args, _ := json.Marshal(ListIssuesArgs{
-		RepoURL: "https://github.com/testorg/testrepo",
+		RepoURL: testOrgTestRepoURL,
 	})
 
 	result, err := tool.Execute(context.Background(), args)
@@ -224,7 +224,7 @@ func TestListIssuesTool_UnassignedOnlyFalse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &ListIssuesTool{
 		k8sClient:  newFakeClient(),
@@ -233,7 +233,7 @@ func TestListIssuesTool_UnassignedOnlyFalse(t *testing.T) {
 
 	unassigned := false
 	args, _ := json.Marshal(ListIssuesArgs{
-		RepoURL:        "https://github.com/testorg/testrepo",
+		RepoURL:        testOrgTestRepoURL,
 		UnassignedOnly: &unassigned,
 	})
 
@@ -265,7 +265,7 @@ func TestListIssuesTool_BodyTruncation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &ListIssuesTool{
 		k8sClient:  newFakeClient(),
@@ -273,7 +273,7 @@ func TestListIssuesTool_BodyTruncation(t *testing.T) {
 	}
 
 	args, _ := json.Marshal(ListIssuesArgs{
-		RepoURL: "https://github.com/testorg/testrepo",
+		RepoURL: testOrgTestRepoURL,
 	})
 
 	result, err := tool.Execute(context.Background(), args)
@@ -304,7 +304,7 @@ func TestListIssuesTool_Pagination(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &ListIssuesTool{
 		k8sClient:  newFakeClient(),
@@ -312,7 +312,7 @@ func TestListIssuesTool_Pagination(t *testing.T) {
 	}
 
 	args, _ := json.Marshal(ListIssuesArgs{
-		RepoURL: "https://github.com/testorg/testrepo",
+		RepoURL: testOrgTestRepoURL,
 		PerPage: 50,
 		Page:    3,
 	})
@@ -339,7 +339,7 @@ func TestListIssuesTool_PerPageCappedAt100(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &ListIssuesTool{
 		k8sClient:  newFakeClient(),
@@ -347,7 +347,7 @@ func TestListIssuesTool_PerPageCappedAt100(t *testing.T) {
 	}
 
 	args, _ := json.Marshal(ListIssuesArgs{
-		RepoURL: "https://github.com/testorg/testrepo",
+		RepoURL: testOrgTestRepoURL,
 		PerPage: 200,
 	})
 
@@ -368,7 +368,7 @@ func TestListIssuesTool_GitHubAPI404(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &ListIssuesTool{
 		k8sClient:  newFakeClient(),
@@ -376,7 +376,7 @@ func TestListIssuesTool_GitHubAPI404(t *testing.T) {
 	}
 
 	args, _ := json.Marshal(ListIssuesArgs{
-		RepoURL: "https://github.com/testorg/testrepo",
+		RepoURL: testOrgTestRepoURL,
 	})
 
 	_, err := tool.Execute(context.Background(), args)
@@ -394,7 +394,7 @@ func TestListIssuesTool_GitHubAPI404(t *testing.T) {
 func TestListIssuesTool_NoRepoURL(t *testing.T) {
 	// Clear all repo sources
 	t.Setenv("ORKA_GIT_REPO", "")
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &ListIssuesTool{
 		k8sClient: newFakeClient(),
@@ -428,7 +428,7 @@ func TestListIssuesTool_WithRepoURL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &ListIssuesTool{
 		k8sClient:  newFakeClient(),
@@ -436,7 +436,7 @@ func TestListIssuesTool_WithRepoURL(t *testing.T) {
 	}
 
 	args, _ := json.Marshal(ListIssuesArgs{
-		RepoURL: "https://github.com/myorg/myrepo",
+		RepoURL: testMyOrgRepoURL,
 	})
 
 	result, err := tool.Execute(context.Background(), args)
@@ -476,7 +476,7 @@ func TestListIssuesTool_DefaultPagination(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &ListIssuesTool{
 		k8sClient:  newFakeClient(),
@@ -485,7 +485,7 @@ func TestListIssuesTool_DefaultPagination(t *testing.T) {
 
 	// No per_page or page specified — should default to 30 and 1
 	args, _ := json.Marshal(ListIssuesArgs{
-		RepoURL: "https://github.com/testorg/testrepo",
+		RepoURL: testOrgTestRepoURL,
 	})
 
 	_, err := tool.Execute(context.Background(), args)
@@ -516,7 +516,7 @@ func TestListIssuesTool_EmptyLabels(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &ListIssuesTool{
 		k8sClient:  newFakeClient(),
@@ -524,7 +524,7 @@ func TestListIssuesTool_EmptyLabels(t *testing.T) {
 	}
 
 	args, _ := json.Marshal(ListIssuesArgs{
-		RepoURL: "https://github.com/testorg/testrepo",
+		RepoURL: testOrgTestRepoURL,
 	})
 
 	result, err := tool.Execute(context.Background(), args)
@@ -553,7 +553,7 @@ func TestListIssuesTool_HasNextPageTrueWhenFullPage(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &ListIssuesTool{k8sClient: newFakeClient(), apiBaseURL: server.URL}
 
@@ -591,7 +591,7 @@ func TestListIssuesTool_HasNextPageFalseWhenPartialPage(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &ListIssuesTool{k8sClient: newFakeClient(), apiBaseURL: server.URL}
 
@@ -637,7 +637,7 @@ func TestListIssuesTool_BodyTruncationMultiByteUTF8(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &ListIssuesTool{
 		k8sClient:  newFakeClient(),
@@ -645,7 +645,7 @@ func TestListIssuesTool_BodyTruncationMultiByteUTF8(t *testing.T) {
 	}
 
 	args, _ := json.Marshal(ListIssuesArgs{
-		RepoURL: "https://github.com/testorg/testrepo",
+		RepoURL: testOrgTestRepoURL,
 	})
 
 	result, err := tool.Execute(context.Background(), args)

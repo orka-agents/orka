@@ -32,39 +32,25 @@ func NewCreateContainerTaskTool(k8sClient client.Client) *CreateContainerTaskToo
 	return &CreateContainerTaskTool{k8sClient: k8sClient}
 }
 
-func (t *CreateContainerTaskTool) Name() string { return "create_container_task" }
+func (t *CreateContainerTaskTool) Name() string { return createContainerTaskToolName }
 
 func (t *CreateContainerTaskTool) Description() string {
 	return "Create a container task to run commands. Use when the user needs to run a shell command, build code, or execute a container image. Do NOT use for LLM reasoning. Repository-dependent commands such as tests, builds, or git inspection must include workspace.gitRepo."
 }
 
 func (t *CreateContainerTaskTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"name":    map[string]any{"type": "string", "description": "Task name"},
-			"image":   map[string]any{"type": "string", "description": "Container image to run. Leave empty to use the default worker image which includes common tools (kubectl, sh) and writes results to a ConfigMap. Only set a custom image if you need a specific runtime not in the default worker."},
-			"command": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Command to execute"},
-			"args":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Arguments to the command"},
-			"workspace": map[string]any{
-				"type":        "object",
-				"description": "Git workspace for the command. Required when the command validates, builds, tests, or inspects repository files. Orka prepares /workspace before running the container and records workspace provenance in the result.",
-				"properties": map[string]any{
-					"gitRepo":      map[string]any{"type": "string", "description": "Git repository URL"},
-					"branch":       map[string]any{"type": "string", "description": "Git branch to clone from (must exist). Omit to use the default branch."},
-					"ref":          map[string]any{"type": "string", "description": "Exact git ref, commit SHA, or tag to checkout. Prefer this for validation."},
-					"gitSecretRef": map[string]any{"type": "string", "description": "Optional Secret name containing git credentials. Omit for public repositories. Container tasks do not auto-discover git credentials."},
-					"subPath":      map[string]any{"type": "string", "description": "Sub-path within the repo to run from"},
-					"pushBranch":   map[string]any{"type": "string", "description": "Branch name to push command-produced changes to. Omit for read-only validation."},
-				},
-			},
-			"prior_task": map[string]any{"type": "string", "description": "Optional prior task whose structured diff should be applied before running the container command."},
-			"namespace":  map[string]any{"type": "string", "description": "Namespace"},
-			"timeout":    map[string]any{"type": "string", "description": "Timeout duration, e.g. \"5m\""},
-			"priority":   map[string]any{"type": "integer", "description": "Priority 0-1000"},
-			"schedule":   map[string]any{"type": "string", "description": "Cron schedule for recurring tasks (e.g., '0 */6 * * *' for every 6 hours, '0 9 * * 1-5' for weekdays at 9am, '*/5 * * * *' for every 5 minutes). Leave empty for one-time tasks."},
+	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: taskNameDescription}, "image": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Container image to run. Leave empty to use the default worker image which includes common tools (kubectl, sh) and writes results to a ConfigMap. Only set a custom image if you need a specific runtime not in the default worker."},
+		"command": map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Command to execute"},
+		"args":    map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Arguments to the command"}, workspaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "Git workspace for the command. Required when the command validates, builds, tests, or inspects repository files. Orka prepares /workspace before running the container and records workspace provenance in the result.", jsonSchemaPropertiesField: map[string]any{
+			"gitRepo":      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Git repository URL"},
+			"branch":       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Git branch to clone from (must exist). Omit to use the default branch."},
+			"ref":          map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Exact git ref, commit SHA, or tag to checkout. Prefer this for validation."},
+			"gitSecretRef": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name containing git credentials. Omit for public repositories. Container tasks do not auto-discover git credentials."},
+			"subPath":      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo to run from"},
+			"pushBranch":   map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Branch name to push command-produced changes to. Omit for read-only validation."},
 		},
-		"required": []string{"name"},
+		}, priorTaskField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional prior task whose structured diff should be applied before running the container command."}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, priorityField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Priority 0-1000"}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription},
+	}, jsonSchemaRequiredField: []string{nameField},
 	})
 }
 
@@ -83,7 +69,7 @@ func (t *CreateContainerTaskTool) Execute(ctx context.Context, args json.RawMess
 		return ChatToolErrorResult(limitErr.Type, limitErr.Message, limitErr.Suggestion)
 	}
 
-	namespace := chatGetStringArgDefault(a, "namespace", tc.Namespace)
+	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
 	if r, ok := checkChatNamespaceScope(tc, namespace); !ok {
 		return r, nil
 	}
@@ -104,12 +90,12 @@ func (t *CreateContainerTaskTool) Execute(ctx context.Context, args json.RawMess
 		task.Spec.Timeout = &metav1.Duration{Duration: d}
 	}
 
-	if _, ok := a["priority"]; ok {
-		p := int32(chatGetIntArg(a, "priority", 500))
+	if _, ok := a[priorityField]; ok {
+		p := int32(chatGetIntArg(a, priorityField, 500))
 		task.Spec.Priority = &p
 	}
 
-	schedule := chatGetStringArg(a, "schedule")
+	schedule := chatGetStringArg(a, scheduleField)
 	if schedule != "" {
 		task.Spec.Schedule = schedule
 	}
@@ -119,17 +105,12 @@ func (t *CreateContainerTaskTool) Execute(ctx context.Context, args json.RawMess
 	}
 
 	tc.IncrementTasks()
-	return ChatToolSuccess(map[string]any{
-		"name":      task.Name,
-		"namespace": task.Namespace,
-		"phase":     "Pending",
-		"message":   taskCreatedMsg(schedule),
-	})
+	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(schedule)})
 }
 
 func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args json.RawMessage) (string, error) {
 	if t.k8sClient == nil {
-		return ChatToolErrorResult("internal_error", "missing tool context", "")
+		return ChatToolErrorResult(internalErrorType, "missing tool context", "")
 	}
 
 	var a map[string]any
@@ -137,13 +118,13 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
 	}
 
-	namespace := chatGetStringArgDefault(a, "namespace", os.Getenv("ORKA_TASK_NAMESPACE"))
+	namespace := chatGetStringArgDefault(a, namespaceField, os.Getenv(envOrkaTaskNamespace))
 	if namespace == "" {
 		namespace = defaultNamespace
 	}
-	parentName := os.Getenv("ORKA_TASK_NAME")
+	parentName := os.Getenv(envOrkaTaskName)
 	if parentName == "" {
-		return ChatToolErrorResult("internal_error", "ORKA_TASK_NAME is required for coordinator container tasks", "")
+		return ChatToolErrorResult(internalErrorType, "ORKA_TASK_NAME is required for coordinator container tasks", "")
 	}
 
 	parentTask := &corev1alpha1.Task{}
@@ -169,8 +150,8 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 	if parentTask.Spec.Priority != nil {
 		task.Spec.Priority = parentTask.Spec.Priority
 	}
-	if _, ok := a["priority"]; ok {
-		p := int32(chatGetIntArg(a, "priority", 500))
+	if _, ok := a[priorityField]; ok {
+		p := int32(chatGetIntArg(a, priorityField, 500))
 		task.Spec.Priority = &p
 	}
 	if d, errResult, ok := parseTimeoutArg(a); !ok {
@@ -178,7 +159,7 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 	} else if d > 0 {
 		task.Spec.Timeout = &metav1.Duration{Duration: d}
 	}
-	if schedule := chatGetStringArg(a, "schedule"); schedule != "" {
+	if schedule := chatGetStringArg(a, scheduleField); schedule != "" {
 		task.Spec.Schedule = schedule
 	}
 	if parentTask.UID != "" {
@@ -197,12 +178,7 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 	if err := t.k8sClient.Create(ctx, task); err != nil {
 		return classifyChatK8sErr(err)
 	}
-	return ChatToolSuccess(map[string]any{
-		"name":      task.Name,
-		"namespace": task.Namespace,
-		"phase":     "Pending",
-		"message":   taskCreatedMsg(task.Spec.Schedule),
-	})
+	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(task.Spec.Schedule)})
 }
 
 func validateContainerTaskWorkspace(task *corev1alpha1.Task) *ChatToolError {
@@ -254,7 +230,7 @@ func buildContainerTask(a map[string]any) *corev1alpha1.Task {
 		},
 	}
 
-	if ws, ok := a["workspace"]; ok {
+	if ws, ok := a[workspaceField]; ok {
 		if wsMap, ok := ws.(map[string]any); ok {
 			wsCfg := &corev1alpha1.WorkspaceConfig{}
 			if gitRepo := chatGetStringArg(wsMap, "gitRepo"); gitRepo != "" {
@@ -279,7 +255,7 @@ func buildContainerTask(a map[string]any) *corev1alpha1.Task {
 		}
 	}
 
-	if priorTask := chatGetStringArg(a, "prior_task"); priorTask != "" {
+	if priorTask := chatGetStringArg(a, priorTaskField); priorTask != "" {
 		task.Spec.PriorTaskRef = &corev1alpha1.PriorTaskReference{Name: strings.TrimSpace(priorTask)}
 	}
 	return task

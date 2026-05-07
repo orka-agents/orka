@@ -32,7 +32,7 @@ func NewCheckMessagesTool() *CheckMessagesTool {
 
 // Name returns the tool name
 func (t *CheckMessagesTool) Name() string {
-	return "check_messages"
+	return checkMessagesToolName
 }
 
 // Description returns the tool description
@@ -64,15 +64,15 @@ func (t *CheckMessagesTool) Execute(ctx context.Context, args json.RawMessage) (
 		}
 	}
 
-	markRead := "true"
+	markRead := trueStr
 	if a.MarkRead != nil && !*a.MarkRead {
-		markRead = "false"
+		markRead = falseStr
 	}
 
-	taskName := os.Getenv("ORKA_TASK_NAME")
-	namespace := os.Getenv("ORKA_TASK_NAMESPACE")
-	parentTask := os.Getenv("ORKA_PARENT_TASK")
-	controllerURL := strings.TrimRight(os.Getenv("ORKA_CONTROLLER_URL"), "/")
+	taskName := os.Getenv(envOrkaTaskName)
+	namespace := os.Getenv(envOrkaTaskNamespace)
+	parentTask := os.Getenv(envOrkaParentTask)
+	controllerURL := strings.TrimRight(os.Getenv(envOrkaControllerURL), "/")
 
 	if controllerURL == "" || taskName == "" || namespace == "" || parentTask == "" {
 		return "", fmt.Errorf("messaging requires ORKA_CONTROLLER_URL, ORKA_TASK_NAME, ORKA_TASK_NAMESPACE, and ORKA_PARENT_TASK")
@@ -114,7 +114,7 @@ func (t *CheckMessagesTool) Execute(ctx context.Context, args json.RawMessage) (
 	}
 
 	if len(messages) == 0 {
-		return "No new messages", nil
+		return noNewMessagesText, nil
 	}
 
 	return string(body), nil

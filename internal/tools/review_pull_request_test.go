@@ -33,7 +33,7 @@ func TestReviewPullRequestTool_Metadata(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewReviewPullRequestTool(k8sClient)
 
-	if tool.Name() != "review_pull_request" {
+	if tool.Name() != reviewPullRequestToolName {
 		t.Errorf("unexpected name: %s", tool.Name())
 	}
 	if tool.Description() == "" {
@@ -49,14 +49,14 @@ func TestReviewPullRequestTool_Metadata(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("failed to parse parameters schema: %v", err)
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("schema missing properties")
 	}
-	if _, ok := props["task_name"]; !ok {
+	if _, ok := props[taskNameField]; !ok {
 		t.Error("schema missing task_name property")
 	}
-	if _, ok := props["pr_number"]; !ok {
+	if _, ok := props[githubPRNumberField]; !ok {
 		t.Error("schema missing pr_number property")
 	}
 }
@@ -69,10 +69,10 @@ func TestReviewPullRequestTool_MissingTask(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewReviewPullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{
-		TaskName: "nonexistent",
+		TaskName: testNonexistentName,
 		PRNumber: 42,
 	})
 
@@ -91,15 +91,15 @@ func TestReviewPullRequestTool_MissingSecret(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 					GitSecretRef: &corev1.LocalObjectReference{
-						Name: "git-creds",
+						Name: testGitCredsSecretName,
 					},
 				},
 			},
@@ -109,10 +109,10 @@ func TestReviewPullRequestTool_MissingSecret(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewReviewPullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 	})
 
@@ -178,15 +178,15 @@ func TestReviewPullRequestTool_Success(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 					GitSecretRef: &corev1.LocalObjectReference{
-						Name: "git-creds",
+						Name: testGitCredsSecretName,
 					},
 				},
 			},
@@ -194,10 +194,8 @@ func TestReviewPullRequestTool_Success(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data: map[string][]byte{
-			"token": []byte("test-token"),
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -206,10 +204,10 @@ func TestReviewPullRequestTool_Success(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 	})
 
@@ -231,7 +229,7 @@ func TestReviewPullRequestTool_Success(t *testing.T) {
 	if reviewResult.PRAuthor != "testuser" {
 		t.Errorf("unexpected PR author: %s", reviewResult.PRAuthor)
 	}
-	if reviewResult.BaseBranch != "main" {
+	if reviewResult.BaseBranch != testBranch {
 		t.Errorf("unexpected base branch: %s", reviewResult.BaseBranch)
 	}
 	if reviewResult.HeadBranch != "feature/add-comment" {
@@ -276,15 +274,15 @@ func TestReviewPullRequestTool_Execute_APIError(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 					GitSecretRef: &corev1.LocalObjectReference{
-						Name: "git-creds",
+						Name: testGitCredsSecretName,
 					},
 				},
 			},
@@ -292,10 +290,8 @@ func TestReviewPullRequestTool_Execute_APIError(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data: map[string][]byte{
-			"token": []byte("test-token"),
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -304,10 +300,10 @@ func TestReviewPullRequestTool_Execute_APIError(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 	})
 
@@ -328,7 +324,7 @@ func TestReviewPullRequestTool_Execute_InvalidArgs(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewReviewPullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	// Missing both required fields (empty JSON object)
 	args := json.RawMessage(`{}`)
@@ -354,15 +350,15 @@ func TestReviewPullRequestTool_Execute_PRNotFound(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 					GitSecretRef: &corev1.LocalObjectReference{
-						Name: "git-creds",
+						Name: testGitCredsSecretName,
 					},
 				},
 			},
@@ -370,10 +366,8 @@ func TestReviewPullRequestTool_Execute_PRNotFound(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data: map[string][]byte{
-			"token": []byte("test-token"),
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -382,10 +376,10 @@ func TestReviewPullRequestTool_Execute_PRNotFound(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 9999,
 	})
 
@@ -436,15 +430,15 @@ func TestReviewPullRequestTool_Execute_EmptyDiff(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 					GitSecretRef: &corev1.LocalObjectReference{
-						Name: "git-creds",
+						Name: testGitCredsSecretName,
 					},
 				},
 			},
@@ -452,10 +446,8 @@ func TestReviewPullRequestTool_Execute_EmptyDiff(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data: map[string][]byte{
-			"token": []byte("test-token"),
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -464,10 +456,10 @@ func TestReviewPullRequestTool_Execute_EmptyDiff(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 	})
 
@@ -500,7 +492,7 @@ func TestReviewPullRequestTool_NoWorkspace(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 		},
@@ -509,9 +501,9 @@ func TestReviewPullRequestTool_NoWorkspace(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewReviewPullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
-	args, _ := json.Marshal(ReviewPullRequestArgs{TaskName: "coder-task", PRNumber: 42})
+	args, _ := json.Marshal(ReviewPullRequestArgs{TaskName: testCoderTaskName, PRNumber: 42})
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
 		t.Fatal("expected error for task without workspace")
@@ -527,12 +519,12 @@ func TestReviewPullRequestTool_NoGitRepo(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					Branch: "main",
+					Branch: testBranch,
 				},
 			},
 		},
@@ -541,9 +533,9 @@ func TestReviewPullRequestTool_NoGitRepo(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewReviewPullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
-	args, _ := json.Marshal(ReviewPullRequestArgs{TaskName: "coder-task", PRNumber: 42})
+	args, _ := json.Marshal(ReviewPullRequestArgs{TaskName: testCoderTaskName, PRNumber: 42})
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
 		t.Fatal("expected error for empty gitRepo")
@@ -559,13 +551,13 @@ func TestReviewPullRequestTool_NoGitSecretRef(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 				},
 			},
 		},
@@ -574,9 +566,9 @@ func TestReviewPullRequestTool_NoGitSecretRef(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewReviewPullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
-	args, _ := json.Marshal(ReviewPullRequestArgs{TaskName: "coder-task", PRNumber: 42})
+	args, _ := json.Marshal(ReviewPullRequestArgs{TaskName: testCoderTaskName, PRNumber: 42})
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
 		t.Fatal("expected error for no gitSecretRef")
@@ -592,29 +584,29 @@ func TestReviewPullRequestTool_EmptyToken(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      "https://github.com/sozercan/ayna",
-					Branch:       "main",
-					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+					GitRepo:      testSozercanAynaRepoURL,
+					Branch:       testBranch,
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
 				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data:       map[string][]byte{"other-key": []byte("value")},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{otherSecretKey: []byte("value")},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := NewReviewPullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
-	args, _ := json.Marshal(ReviewPullRequestArgs{TaskName: "coder-task", PRNumber: 42})
+	args, _ := json.Marshal(ReviewPullRequestArgs{TaskName: testCoderTaskName, PRNumber: 42})
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
 		t.Fatal("expected error for empty token")
@@ -650,29 +642,29 @@ func TestReviewPullRequestTool_PasswordKeyFallback(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      "https://github.com/sozercan/ayna",
-					Branch:       "main",
-					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+					GitRepo:      testSozercanAynaRepoURL,
+					Branch:       testBranch,
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
 				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data:       map[string][]byte{"password": []byte("my-password")},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{passwordKey: []byte("my-password")},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := &ReviewPullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
-	args, _ := json.Marshal(ReviewPullRequestArgs{TaskName: "coder-task", PRNumber: 42})
+	args, _ := json.Marshal(ReviewPullRequestArgs{TaskName: testCoderTaskName, PRNumber: 42})
 	result, err := tool.Execute(context.Background(), args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

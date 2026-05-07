@@ -52,7 +52,7 @@ func NewCreatePullRequestTool(k8sClient client.Client) *CreatePullRequestTool {
 
 // Name returns the tool name.
 func (t *CreatePullRequestTool) Name() string {
-	return "create_pull_request"
+	return createPullRequestToolName
 }
 
 // Description returns the tool description.
@@ -63,31 +63,9 @@ func (t *CreatePullRequestTool) Description() string {
 
 // Parameters returns the JSON schema for tool parameters.
 func (t *CreatePullRequestTool) Parameters() json.RawMessage {
-	schema := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"task_name": map[string]any{
-				"type":        "string",
-				"description": "Name of the completed child task whose workspace config has the repo and git credentials",
-			},
-			"head_branch": map[string]any{
-				"type":        "string",
-				"description": "The branch containing the changes (the pushBranch used by the coder)",
-			},
-			"base_branch": map[string]any{
-				"type":        "string",
-				"description": "The target branch to merge into (e.g. 'main')",
-			},
-			"title": map[string]any{
-				"type":        "string",
-				"description": "Pull request title",
-			},
-			"body": map[string]any{
-				"type":        "string",
-				"description": "Pull request body in Markdown format",
-			},
-		},
-		"required": []string{"task_name", "head_branch", "base_branch", "title"},
+	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Name of the completed child task whose workspace config has the repo and git credentials"}, "head_branch": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "The branch containing the changes (the pushBranch used by the coder)"},
+		"base_branch": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "The target branch to merge into (e.g. 'main')"}, titleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Pull request title"}, githubBodyField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Pull request body in Markdown format"},
+	}, jsonSchemaRequiredField: []string{taskNameField, "head_branch", "base_branch", titleField},
 	}
 	data, _ := json.Marshal(schema)
 	return data

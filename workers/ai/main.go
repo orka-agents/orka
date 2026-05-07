@@ -21,7 +21,9 @@ import (
 	"syscall"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -238,10 +240,17 @@ func run() error {
 	// Create tool executor for custom tools
 	toolExecutor := worker.NewToolExecutor()
 
+	baseToolCtx := &tools.ToolContext{
+		Client:    k8sClient,
+		Namespace: taskNamespace,
+		Tenant:    taskNamespace,
+		TaskID:    taskName,
+	}
+
 	// Execute the agent loop
 	result, err := executeAgentLoop(
 		ctx, llmProvider, messages, systemPrompt, model,
-		llmTools, customTools, toolExecutor,
+		llmTools, customTools, toolExecutor, baseToolCtx,
 	)
 	if err != nil {
 		return fmt.Errorf("agent execution failed: %w", err)
@@ -275,6 +284,12 @@ func createK8sClient() (client.Client, error) {
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("failed to add core scheme: %w", err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("failed to add batch scheme: %w", err)
+	}
+	if err := networkingv1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("failed to add networking scheme: %w", err)
 	}
 
 	k8sClient, err := client.New(config, client.Options{Scheme: scheme})
@@ -756,7 +771,13 @@ func executeAgentLoop(
 	llmTools []llm.Tool,
 	customTools map[string]*corev1alpha1.Tool,
 	toolExecutor *worker.ToolExecutor,
+	baseToolCtxOpt ...*tools.ToolContext,
 ) (string, error) {
+	var baseToolCtx *tools.ToolContext
+	if len(baseToolCtxOpt) > 0 {
+		baseToolCtx = baseToolCtxOpt[0]
+	}
+
 	maxIterations := 10
 	if os.Getenv("ORKA_COORDINATION_ENABLED") == trueStr {
 		maxIterations = 50
@@ -812,7 +833,16 @@ func executeAgentLoop(
 				result, execErr = toolExecutor.Execute(ctx, customTool, tc.Arguments)
 			} else {
 				// Fall back to built-in tools
-				result, execErr = tools.DefaultRegistry.Execute(ctx, tc.Name, tc.Arguments)
+				execCtx := ctx
+				if baseToolCtx != nil {
+					toolCtxCopy := *baseToolCtx
+					toolCtxCopy.ToolCallID = tc.ID
+					if toolCtxCopy.Tenant == "" {
+						toolCtxCopy.Tenant = toolCtxCopy.Namespace
+					}
+					execCtx = tools.WithToolContext(ctx, &toolCtxCopy)
+				}
+				result, execErr = tools.DefaultRegistry.Execute(execCtx, tc.Name, tc.Arguments)
 			}
 
 			if execErr != nil {

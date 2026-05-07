@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -44,6 +45,7 @@ const (
 // This allows OpenAI-compatible clients to use Orka as a custom provider.
 type OpenAICompatHandler struct {
 	client                    client.Client
+	kubeClient                kubernetes.Interface
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	config                    ChatConfig
@@ -52,9 +54,15 @@ type OpenAICompatHandler struct {
 }
 
 // NewOpenAICompatHandler creates an OpenAI-compatible API handler.
-func NewOpenAICompatHandler(c client.Client, watchNamespace string, enforceNS bool, config ChatConfig, resolver *ProviderResolver, rs store.ResultStore) *OpenAICompatHandler {
+func NewOpenAICompatHandler(c client.Client, watchNamespace string, enforceNS bool, config ChatConfig, resolver *ProviderResolver, rs store.ResultStore, kubeClientOpt ...kubernetes.Interface) *OpenAICompatHandler {
+	var kubeClient kubernetes.Interface
+	if len(kubeClientOpt) > 0 {
+		kubeClient = kubeClientOpt[0]
+	}
+
 	return &OpenAICompatHandler{
 		client:                    c,
+		kubeClient:                kubeClient,
 		watchNamespace:            watchNamespace,
 		enforceNamespaceIsolation: enforceNS,
 		config:                    config,
@@ -235,7 +243,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 
 	// Resolve provider and model from the request model field.
 	// Supports "provider/model" format (e.g., "anthropic/claude-sonnet-4") or plain model name.
-	provider, model, err := h.resolver.Resolve(ctx, ResolveOpts{
+	provider, model, providerInfo, err := h.resolver.ResolveWithInfo(ctx, ResolveOpts{
 		ModelStr:     req.Model,
 		Namespace:    namespace,
 		RequireModel: true,
@@ -339,7 +347,11 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		tasksCreated := 0
 		proxyToolCtx = &tools.ToolContext{
 			Client:                    h.client,
+			KubeClient:                h.kubeClient,
 			Namespace:                 namespace,
+			Tenant:                    namespace,
+			Provider:                  providerInfo.Name,
+			ProviderType:              providerInfo.Type,
 			WatchNamespace:            h.watchNamespace,
 			EnforceNamespaceIsolation: h.enforceNamespaceIsolation,
 			ResultStore:               h.resultStore,

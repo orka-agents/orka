@@ -233,7 +233,14 @@ func executeToolCall(ctx context.Context, tc llm.ToolCall, timeout time.Duration
 	defer cancel()
 
 	if toolCtxOpt != nil {
-		toolCtx = tools.WithToolContext(toolCtx, toolCtxOpt)
+		toolCtxCopy := *toolCtxOpt
+		if toolCtxCopy.ToolCallID == "" {
+			toolCtxCopy.ToolCallID = tc.ID
+		}
+		if toolCtxCopy.Tenant == "" {
+			toolCtxCopy.Tenant = toolCtxCopy.Namespace
+		}
+		toolCtx = tools.WithToolContext(toolCtx, &toolCtxCopy)
 	}
 
 	result, err := tools.DefaultRegistry.Execute(toolCtx, tc.Name, tc.Arguments)

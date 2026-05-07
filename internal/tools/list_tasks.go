@@ -21,27 +21,20 @@ import (
 // ListTasksTool lists Task CRDs with optional status filter.
 type ListTasksTool struct{}
 
-func (t *ListTasksTool) Name() string { return "list_tasks" }
+func (t *ListTasksTool) Name() string { return listTasksToolName }
 
 func (t *ListTasksTool) Description() string {
 	return "List tasks with optional status filter. Use to check what tasks exist or monitor multiple tasks."
 }
 
 func (t *ListTasksTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"namespace": map[string]any{"type": "string", "description": "Namespace"},
-			"status":    map[string]any{"type": "string", "description": "Filter by status: Pending, Running, Succeeded, Failed"},
-			"limit":     map[string]any{"type": "integer", "description": "Max results to return (default 20)"},
-		},
-	})
+	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, statusField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Filter by status: Pending, Running, Succeeded, Failed"}, limitField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Max results to return (default 20)"}}})
 }
 
 func (t *ListTasksTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil {
-		return ChatToolErrorResult("internal_error", "missing tool context", "")
+		return ChatToolErrorResult(internalErrorType, "missing tool context", "")
 	}
 
 	var a map[string]any
@@ -49,9 +42,9 @@ func (t *ListTasksTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
 	}
 
-	namespace := chatGetStringArgDefault(a, "namespace", tc.Namespace)
-	statusFilter := chatGetStringArg(a, "status")
-	limit := chatGetIntArg(a, "limit", 20)
+	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
+	statusFilter := chatGetStringArg(a, statusField)
+	limit := chatGetIntArg(a, limitField, 20)
 
 	taskList := &corev1alpha1.TaskList{}
 	if err := tc.Client.List(ctx, taskList, client.InNamespace(namespace)); err != nil {
@@ -66,12 +59,7 @@ func (t *ListTasksTool) Execute(ctx context.Context, args json.RawMessage) (stri
 
 		age := time.Since(task.CreationTimestamp.Time).Round(time.Second).String()
 
-		tasks = append(tasks, map[string]any{
-			"name":  task.Name,
-			"phase": string(task.Status.Phase),
-			"type":  string(task.Spec.Type),
-			"age":   age,
-		})
+		tasks = append(tasks, map[string]any{nameField: task.Name, phaseField: string(task.Status.Phase), jsonSchemaTypeField: string(task.Spec.Type), "age": age})
 
 		if len(tasks) >= limit {
 			break

@@ -86,7 +86,7 @@ func resolveRepoAndToken(ctx context.Context, k8sClient client.Client, taskName,
 // resolveFromTask looks up a Task CR in K8s and extracts owner/repo and token
 // from its workspace configuration and gitSecretRef.
 func resolveFromTask(ctx context.Context, k8sClient client.Client, taskName string) (owner, repo, token string, err error) {
-	ns := os.Getenv("ORKA_TASK_NAMESPACE")
+	ns := os.Getenv(envOrkaTaskNamespace)
 	if ns == "" {
 		ns = defaultNamespace
 	}
@@ -124,7 +124,7 @@ func resolveFromTask(ctx context.Context, k8sClient client.Client, taskName stri
 		return "", "", "", fmt.Errorf("failed to get git secret %s: %w", ws.GitSecretRef.Name, err)
 	}
 
-	for _, key := range []string{"token", "password"} {
+	for _, key := range []string{tokenKey, passwordKey} {
 		if v, ok := secret.Data[key]; ok {
 			token = strings.TrimSpace(string(v))
 			break

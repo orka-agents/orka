@@ -54,22 +54,22 @@ func TestNewRegistry(t *testing.T) {
 
 func TestRegistry_Register(t *testing.T) {
 	r := NewRegistry()
-	tool := &mockTool{name: "test_tool", description: "A test tool"}
+	tool := &mockTool{name: testToolName, description: testToolDescription}
 
 	r.Register(tool)
 
 	if len(r.tools) != 1 {
 		t.Errorf("expected 1 tool, got %d", len(r.tools))
 	}
-	if _, ok := r.tools["test_tool"]; !ok {
+	if _, ok := r.tools[testToolName]; !ok {
 		t.Error("tool not registered with correct name")
 	}
 }
 
 func TestRegistry_Register_Overwrite(t *testing.T) {
 	r := NewRegistry()
-	tool1 := &mockTool{name: "test_tool", description: "First tool"}
-	tool2 := &mockTool{name: "test_tool", description: "Second tool"}
+	tool1 := &mockTool{name: testToolName, description: "First tool"}
+	tool2 := &mockTool{name: testToolName, description: testSecondToolDescription}
 
 	r.Register(tool1)
 	r.Register(tool2)
@@ -77,7 +77,7 @@ func TestRegistry_Register_Overwrite(t *testing.T) {
 	if len(r.tools) != 1 {
 		t.Errorf("expected 1 tool, got %d", len(r.tools))
 	}
-	if r.tools["test_tool"].Description() != "Second tool" {
+	if r.tools[testToolName].Description() != testSecondToolDescription {
 		t.Error("tool was not overwritten")
 	}
 }
@@ -90,18 +90,18 @@ func TestRegistry_Get(t *testing.T) {
 	}{
 		{
 			name:      "found",
-			toolName:  "test_tool",
+			toolName:  testToolName,
 			wantFound: true,
 		},
 		{
-			name:      "not found",
-			toolName:  "nonexistent",
+			name:      notFoundMessage,
+			toolName:  testNonexistentName,
 			wantFound: false,
 		},
 	}
 
 	r := NewRegistry()
-	r.Register(&mockTool{name: "test_tool", description: "A test tool"})
+	r.Register(&mockTool{name: testToolName, description: testToolDescription})
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -133,15 +133,15 @@ func TestRegistry_List(t *testing.T) {
 		{
 			name: "one tool",
 			tools: []Tool{
-				&mockTool{name: "tool1"},
+				&mockTool{name: testTool1Name},
 			},
 			wantLen: 1,
 		},
 		{
 			name: "multiple tools",
 			tools: []Tool{
-				&mockTool{name: "tool1"},
-				&mockTool{name: "tool2"},
+				&mockTool{name: testTool1Name},
+				&mockTool{name: testTool2Name},
 				&mockTool{name: "tool3"},
 			},
 			wantLen: 3,
@@ -173,21 +173,21 @@ func TestRegistry_Execute(t *testing.T) {
 	}{
 		{
 			name:     "tool found",
-			toolName: "test_tool",
+			toolName: testToolName,
 			args:     json.RawMessage(`{"key": "value"}`),
 			wantErr:  false,
 			wantResp: "executed",
 		},
 		{
 			name:     "tool not found",
-			toolName: "nonexistent",
+			toolName: testNonexistentName,
 			args:     json.RawMessage(`{}`),
 			wantErr:  true,
 		},
 	}
 
 	r := NewRegistry()
-	r.Register(&mockTool{name: "test_tool"})
+	r.Register(&mockTool{name: testToolName})
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -213,31 +213,31 @@ func TestRegistry_ToLLMTools(t *testing.T) {
 		{
 			name: "all tools exist",
 			tools: []Tool{
-				&mockTool{name: "tool1", description: "Tool 1", parameters: json.RawMessage(`{"type": "object"}`)},
-				&mockTool{name: "tool2", description: "Tool 2", parameters: json.RawMessage(`{"type": "object"}`)},
+				&mockTool{name: testTool1Name, description: testTool1Description, parameters: json.RawMessage(`{"type": "object"}`)},
+				&mockTool{name: testTool2Name, description: "Tool 2", parameters: json.RawMessage(`{"type": "object"}`)},
 			},
-			names:   []string{"tool1", "tool2"},
+			names:   []string{testTool1Name, testTool2Name},
 			wantLen: 2,
 		},
 		{
 			name: "some tools don't exist",
 			tools: []Tool{
-				&mockTool{name: "tool1", description: "Tool 1", parameters: json.RawMessage(`{"type": "object"}`)},
+				&mockTool{name: testTool1Name, description: testTool1Description, parameters: json.RawMessage(`{"type": "object"}`)},
 			},
-			names:   []string{"tool1", "tool2", "tool3"},
+			names:   []string{testTool1Name, testTool2Name, "tool3"},
 			wantLen: 1,
 		},
 		{
 			name: "no tools exist",
 			tools: []Tool{
-				&mockTool{name: "tool1", description: "Tool 1", parameters: json.RawMessage(`{"type": "object"}`)},
+				&mockTool{name: testTool1Name, description: testTool1Description, parameters: json.RawMessage(`{"type": "object"}`)},
 			},
 			names:   []string{"nonexistent1", "nonexistent2"},
 			wantLen: 0,
 		},
 		{
 			name:    "empty names",
-			tools:   []Tool{&mockTool{name: "tool1"}},
+			tools:   []Tool{&mockTool{name: testTool1Name}},
 			names:   []string{},
 			wantLen: 0,
 		},
@@ -265,7 +265,7 @@ func TestDefaultRegistry(t *testing.T) {
 	}
 
 	// Check that built-in tools are registered
-	expectedTools := []string{"web_search", "code_exec", "file_read", "web_fetch", "file_write"}
+	expectedTools := []string{webSearchToolName, codeExecToolName, fileReadToolName, webFetchToolName, fileWriteToolName}
 	for _, name := range expectedTools {
 		if _, ok := DefaultRegistry.Get(name); !ok {
 			t.Errorf("expected built-in tool %q to be registered", name)
@@ -283,21 +283,21 @@ func TestRegisterCoordinationTools(t *testing.T) {
 	RegisterCoordinationTools(k8sClient)
 
 	expectedTools := []string{
-		"delegate_task",
-		"wait_for_tasks",
-		"create_container_task",
-		"cancel_task",
-		"send_message",
-		"check_messages",
-		"create_pull_request",
-		"check_pull_request_ci",
-		"merge_pull_request",
-		"auto_merge_pull_request",
-		"review_pull_request",
-		"post_review_comment",
-		"create_agent",
-		"delete_agent",
-		"update_plan",
+		delegateTaskToolName,
+		waitForTasksToolName,
+		createContainerTaskToolName,
+		cancelTaskToolName,
+		sendMessageToolName,
+		checkMessagesToolName,
+		createPullRequestToolName,
+		checkPullRequestCIToolName,
+		mergePullRequestToolName,
+		autoMergePullRequestToolName,
+		reviewPullRequestToolName,
+		postReviewCommentToolName,
+		createAgentToolName,
+		deleteAgentToolName,
+		updatePlanToolName,
 		"recall_memory",
 		"remember",
 		"propose_memory",
@@ -317,7 +317,7 @@ func TestRegisterBuiltinTools(t *testing.T) {
 
 	RegisterBuiltinTools()
 
-	expectedTools := []string{"web_search", "code_exec", "file_read"}
+	expectedTools := []string{webSearchToolName, codeExecToolName, fileReadToolName}
 	for _, name := range expectedTools {
 		if _, ok := DefaultRegistry.Get(name); !ok {
 			t.Errorf("expected built-in tool %q to be registered", name)

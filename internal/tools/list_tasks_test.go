@@ -18,8 +18,8 @@ import (
 
 func TestListTasksTool_Name(t *testing.T) {
 	tool := &ListTasksTool{}
-	if got := tool.Name(); got != "list_tasks" {
-		t.Errorf("Name() = %v, want %v", got, "list_tasks")
+	if got := tool.Name(); got != listTasksToolName {
+		t.Errorf("Name() = %v, want %v", got, listTasksToolName)
 	}
 }
 
@@ -40,14 +40,14 @@ func TestListTasksTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	for _, key := range []string{"namespace", "status", "limit"} {
+	for _, key := range []string{namespaceField, statusField, limitField} {
 		if _, ok := props[key]; !ok {
 			t.Errorf("missing %s property", key)
 		}
@@ -57,17 +57,17 @@ func TestListTasksTool_Parameters(t *testing.T) {
 func TestListTasksTool_Execute(t *testing.T) {
 	tasks := []corev1alpha1.Task{
 		{
-			ObjectMeta: metav1.ObjectMeta{Name: "task-1", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "task-1", Namespace: defaultNamespace},
 			Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 			Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 		},
 		{
-			ObjectMeta: metav1.ObjectMeta{Name: "task-2", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "task-2", Namespace: defaultNamespace},
 			Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 			Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
 		},
 		{
-			ObjectMeta: metav1.ObjectMeta{Name: "task-3", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "task-3", Namespace: defaultNamespace},
 			Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 			Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 		},
@@ -86,27 +86,27 @@ func TestListTasksTool_Execute(t *testing.T) {
 		},
 		{
 			name:      "filter by status Running",
-			args:      map[string]any{"status": "Running"},
+			args:      map[string]any{statusField: taskPhaseRunningString},
 			wantCount: 2,
 		},
 		{
 			name:      "filter by status Succeeded",
-			args:      map[string]any{"status": "Succeeded"},
+			args:      map[string]any{statusField: taskPhaseSucceededString},
 			wantCount: 1,
 		},
 		{
 			name:      "filter by status no match",
-			args:      map[string]any{"status": "Failed"},
+			args:      map[string]any{statusField: taskPhaseFailedString},
 			wantCount: 0,
 		},
 		{
 			name:      "limit results",
-			args:      map[string]any{"limit": 1},
+			args:      map[string]any{limitField: 1},
 			wantCount: 1,
 		},
 		{
 			name:      "case insensitive status filter",
-			args:      map[string]any{"status": "running"},
+			args:      map[string]any{statusField: "running"},
 			wantCount: 2,
 		},
 	}
@@ -114,7 +114,7 @@ func TestListTasksTool_Execute(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fc := newFakeClient(&tasks[0], &tasks[1], &tasks[2])
-			tc := &ToolContext{Client: fc, Namespace: "default"}
+			tc := &ToolContext{Client: fc, Namespace: defaultNamespace}
 			ctx := WithToolContext(context.Background(), tc)
 
 			argsJSON, _ := json.Marshal(tt.args)
@@ -160,11 +160,11 @@ func TestListTasksTool_Execute_MissingToolContext(t *testing.T) {
 
 func TestListTasksTool_Execute_InvalidJSON(t *testing.T) {
 	fc := newFakeClient()
-	tc := &ToolContext{Client: fc, Namespace: "default"}
+	tc := &ToolContext{Client: fc, Namespace: defaultNamespace}
 	ctx := WithToolContext(context.Background(), tc)
 
 	tool := &ListTasksTool{}
-	result, err := tool.Execute(ctx, json.RawMessage(`{invalid}`))
+	result, err := tool.Execute(ctx, json.RawMessage(invalidJSONText))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestListTasksTool_Execute_InvalidJSON(t *testing.T) {
 
 func TestListTasksTool_Execute_EmptyList(t *testing.T) {
 	fc := newFakeClient()
-	tc := &ToolContext{Client: fc, Namespace: "default"}
+	tc := &ToolContext{Client: fc, Namespace: defaultNamespace}
 	ctx := WithToolContext(context.Background(), tc)
 
 	tool := &ListTasksTool{}

@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -37,8 +38,11 @@ const taskCreatedMsg = "Task created"
 // Kubernetes resources (Tasks, Agents, Tools, Sessions).
 type ToolExecutor struct {
 	client                    client.Client
+	kubeClient                kubernetes.Interface
 	sessionManager            *controller.SessionManager
 	namespace                 string
+	provider                  string
+	providerType              string
 	sessionID                 string
 	taskSeq                   atomic.Int32
 	tasksCreated              int
@@ -51,11 +55,17 @@ type ToolExecutor struct {
 }
 
 // NewToolExecutor creates a new ToolExecutor.
-func NewToolExecutor(c client.Client, sm *controller.SessionManager, namespace, sessionID, watchNamespace string, enforceNS bool, maxTasks int, toolTimeout time.Duration, rs store.ResultStore) *ToolExecutor {
+func NewToolExecutor(c client.Client, sm *controller.SessionManager, namespace, sessionID, watchNamespace string, enforceNS bool, maxTasks int, toolTimeout time.Duration, rs store.ResultStore, kubeClientOpt ...kubernetes.Interface) *ToolExecutor {
+	var kubeClient kubernetes.Interface
+	if len(kubeClientOpt) > 0 {
+		kubeClient = kubeClientOpt[0]
+	}
+
 	reg := tools.NewRegistry()
 	tools.RegisterChatTools(reg)
 	return &ToolExecutor{
 		client:                    c,
+		kubeClient:                kubeClient,
 		sessionManager:            sm,
 		namespace:                 namespace,
 		sessionID:                 sessionID,
@@ -102,7 +112,13 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	// Set up ToolContext for registry-based tools
 	tc := &tools.ToolContext{
 		Client:                    e.client,
+		KubeClient:                e.kubeClient,
 		Namespace:                 e.namespace,
+		SessionID:                 e.sessionID,
+		ToolCallID:                toolCall.ID,
+		Tenant:                    e.namespace,
+		Provider:                  e.provider,
+		ProviderType:              e.providerType,
 		WatchNamespace:            e.watchNamespace,
 		EnforceNamespaceIsolation: e.enforceNamespaceIsolation,
 		ResultStore:               e.resultStore,

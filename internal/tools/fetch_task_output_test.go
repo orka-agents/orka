@@ -34,8 +34,8 @@ func (f *fakeResultStore) GetResult(_ context.Context, namespace, taskName strin
 
 func TestFetchTaskOutputTool_Name(t *testing.T) {
 	tool := &FetchTaskOutputTool{}
-	if got := tool.Name(); got != "fetch_task_output" {
-		t.Errorf("Name() = %q, want %q", got, "fetch_task_output")
+	if got := tool.Name(); got != fetchTaskOutputToolName {
+		t.Errorf("Name() = %q, want %q", got, fetchTaskOutputToolName)
 	}
 }
 
@@ -56,14 +56,14 @@ func TestFetchTaskOutputTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	if _, ok := props["name"]; !ok {
+	if _, ok := props[nameField]; !ok {
 		t.Error("missing name property")
 	}
-	if _, ok := props["namespace"]; !ok {
+	if _, ok := props[namespaceField]; !ok {
 		t.Error("missing namespace property")
 	}
 }
@@ -83,8 +83,8 @@ func TestFetchTaskOutputTool_Execute(t *testing.T) {
 			args: `{"name": "my-task"}`,
 			task: &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "my-task",
-					Namespace: "default",
+					Name:      testMyTaskName,
+					Namespace: defaultNamespace,
 				},
 				Status: corev1alpha1.TaskStatus{
 					Phase:     corev1alpha1.TaskPhaseSucceeded,
@@ -100,7 +100,7 @@ func TestFetchTaskOutputTool_Execute(t *testing.T) {
 			task: &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "big-task",
-					Namespace: "prod",
+					Namespace: testProdNamespace,
 				},
 				Status: corev1alpha1.TaskStatus{
 					Phase:     corev1alpha1.TaskPhaseSucceeded,
@@ -112,26 +112,26 @@ func TestFetchTaskOutputTool_Execute(t *testing.T) {
 		},
 		{
 			name:       "missing name argument",
-			args:       `{"namespace": "default"}`,
+			args:       `{"namespace": "` + defaultNamespace + `"}`,
 			wantErrStr: "name is required",
 		},
 		{
-			name:       "invalid JSON args",
-			args:       `{invalid}`,
-			wantErrStr: "failed to parse arguments",
+			name:       invalidJSONArgsCaseName,
+			args:       invalidJSONText,
+			wantErrStr: failedToParseArgumentsMessage,
 		},
 		{
-			name:       "task not found",
+			name:       taskNotFoundCaseName,
 			args:       `{"name": "nonexistent"}`,
-			wantErrStr: "not_found",
+			wantErrStr: errTypeNotFound,
 		},
 		{
 			name: "result not yet available",
 			args: `{"name": "running-task"}`,
 			task: &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "running-task",
-					Namespace: "default",
+					Name:      testRunningTaskName,
+					Namespace: defaultNamespace,
 				},
 				Status: corev1alpha1.TaskStatus{
 					Phase: corev1alpha1.TaskPhaseRunning,
@@ -145,7 +145,7 @@ func TestFetchTaskOutputTool_Execute(t *testing.T) {
 			task: &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "deleted-result",
-					Namespace: "default",
+					Namespace: defaultNamespace,
 				},
 				Status: corev1alpha1.TaskStatus{
 					Phase:     corev1alpha1.TaskPhaseSucceeded,
@@ -187,7 +187,7 @@ func TestFetchTaskOutputTool_Execute(t *testing.T) {
 			rs := &fakeResultStore{data: tt.storeData}
 			tc := &ToolContext{
 				Client:      fc,
-				Namespace:   "default",
+				Namespace:   defaultNamespace,
 				ResultStore: rs,
 			}
 			ctx := WithToolContext(context.Background(), tc)
@@ -227,8 +227,8 @@ func TestFetchTaskOutputTool_Execute_NilResultStore(t *testing.T) {
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "my-task",
-			Namespace: "default",
+			Name:      testMyTaskName,
+			Namespace: defaultNamespace,
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:     corev1alpha1.TaskPhaseSucceeded,
@@ -238,7 +238,7 @@ func TestFetchTaskOutputTool_Execute_NilResultStore(t *testing.T) {
 
 	tc := &ToolContext{
 		Client:      newFakeClient(task),
-		Namespace:   "default",
+		Namespace:   defaultNamespace,
 		ResultStore: nil,
 	}
 	ctx := WithToolContext(context.Background(), tc)

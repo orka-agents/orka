@@ -21,6 +21,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -104,6 +105,7 @@ type SSEEvent struct {
 // ChatHandler implements the orchestrator chat endpoints.
 type ChatHandler struct {
 	client                    client.Client
+	kubeClient                kubernetes.Interface
 	sessionManager            *controller.SessionManager
 	config                    ChatConfig
 	semaphore                 chan struct{}
@@ -116,9 +118,15 @@ type ChatHandler struct {
 }
 
 // NewChatHandler creates a new ChatHandler.
-func NewChatHandler(c client.Client, sm *controller.SessionManager, config ChatConfig, watchNamespace string, enforceNS bool, ss store.SessionStore, rs store.ResultStore, resolver *ProviderResolver) *ChatHandler {
+func NewChatHandler(c client.Client, sm *controller.SessionManager, config ChatConfig, watchNamespace string, enforceNS bool, ss store.SessionStore, rs store.ResultStore, resolver *ProviderResolver, kubeClientOpt ...kubernetes.Interface) *ChatHandler {
+	var kubeClient kubernetes.Interface
+	if len(kubeClientOpt) > 0 {
+		kubeClient = kubeClientOpt[0]
+	}
+
 	return &ChatHandler{
 		client:                    c,
+		kubeClient:                kubeClient,
 		sessionManager:            sm,
 		config:                    config,
 		semaphore:                 make(chan struct{}, config.MaxConcurrent),
@@ -184,7 +192,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	}
 
 	// Resolve LLM provider
-	provider, model, err := ch.resolver.Resolve(ctx, ResolveOpts{
+	provider, model, providerInfo, err := ch.resolver.ResolveWithInfo(ctx, ResolveOpts{
 		ProviderName: req.Provider,
 		Model:        req.Model,
 		AgentRef:     req.AgentRef,
@@ -268,7 +276,9 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	})
 
 	// Create tool executor (also creates the chat registry)
-	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout, ch.resultStore)
+	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout, ch.resultStore, ch.kubeClient)
+	executor.provider = providerInfo.Name
+	executor.providerType = providerInfo.Type
 
 	// Build tools from the chat registry
 	tools := executor.registry.ToLLMTools(chattools.ChatToolNames())

@@ -21,8 +21,8 @@ const testAITaskName = "ai-task-1"
 
 func TestCreateAITaskTool_Name(t *testing.T) {
 	tool := &CreateAITaskTool{}
-	if got := tool.Name(); got != "create_ai_task" {
-		t.Errorf("Name() = %v, want %v", got, "create_ai_task")
+	if got := tool.Name(); got != createAITaskToolName {
+		t.Errorf("Name() = %v, want %v", got, createAITaskToolName)
 	}
 }
 
@@ -43,14 +43,14 @@ func TestCreateAITaskTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	for _, key := range []string{"name", "prompt", "agentRef", "providerRef", "namespace", "timeout", "priority", "sessionRef", "schedule"} {
+	for _, key := range []string{nameField, promptField, agentRefField, providerRefField, namespaceField, timeoutField, priorityField, "sessionRef", scheduleField} {
 		if _, ok := props[key]; !ok {
 			t.Errorf("missing %s property", key)
 		}
@@ -69,7 +69,7 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 				return testAITaskName
 			},
 			TaskLabels: func() map[string]string {
-				return map[string]string{"orka.ai/managed": "true"}
+				return map[string]string{managedByLabelValue: trueStr}
 			},
 			CheckTaskLimit: func() *ChatToolError { return nil },
 			IncrementTasks: func() { taskCounter++ },
@@ -101,14 +101,14 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 				if !ok {
 					t.Fatal("data is not a map")
 				}
-				if data["name"] != testAITaskName {
-					t.Errorf("name = %v, want %s", data["name"], testAITaskName)
+				if data[nameField] != testAITaskName {
+					t.Errorf("name = %v, want %s", data[nameField], testAITaskName)
 				}
-				if data["namespace"] != defaultNamespace {
-					t.Errorf("namespace = %v, want default", data["namespace"])
+				if data[namespaceField] != defaultNamespace {
+					t.Errorf("namespace = %v, want default", data[namespaceField])
 				}
-				if data["phase"] != "Pending" {
-					t.Errorf("phase = %v, want Pending", data["phase"])
+				if data[phaseField] != taskPhasePendingString {
+					t.Errorf("phase = %v, want Pending", data[phaseField])
 				}
 			},
 		},
@@ -125,7 +125,7 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 					t.Errorf("expected success, got error: %s", r.Error)
 				}
 				data := r.Data.(map[string]any)
-				if msg, ok := data["message"].(string); !ok || msg == "" {
+				if msg, ok := data[messageField].(string); !ok || msg == "" {
 					t.Error("expected non-empty message for scheduled task")
 				}
 			},
@@ -147,8 +147,8 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 			},
 		},
 		{
-			name:    "invalid JSON args",
-			args:    json.RawMessage(`{invalid}`),
+			name:    invalidJSONArgsCaseName,
+			args:    json.RawMessage(invalidJSONText),
 			wantErr: false,
 			checkResult: func(t *testing.T, result string) {
 				var r ChatToolResult
@@ -164,7 +164,7 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid timeout",
+			name: invalidTimeoutCaseName,
 			args: json.RawMessage(`{"name":"my-ai-task","prompt":"do it","timeout":"notaduration"}`),
 			checkResult: func(t *testing.T, result string) {
 				var r ChatToolResult
@@ -180,7 +180,7 @@ func TestCreateAITaskTool_Execute(t *testing.T) {
 			},
 		},
 		{
-			name: "k8s already exists error",
+			name: k8sAlreadyExistsErrorCaseName,
 			args: json.RawMessage(`{"name":"existing-task","prompt":"do something"}`),
 			objects: []client.Object{
 				&corev1alpha1.Task{
@@ -235,7 +235,7 @@ func TestCreateAITaskTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 			return testAITaskName
 		},
 		TaskLabels: func() map[string]string {
-			return map[string]string{"orka.ai/managed": "true"}
+			return map[string]string{managedByLabelValue: trueStr}
 		},
 		CheckTaskLimit: func() *ChatToolError { return nil },
 		IncrementTasks: func() { taskCounter++ },
@@ -279,7 +279,7 @@ func TestCreateAITaskTool_Execute_ExplicitProviderRefPreserved(t *testing.T) {
 			return testAITaskName
 		},
 		TaskLabels: func() map[string]string {
-			return map[string]string{"orka.ai/managed": "true"}
+			return map[string]string{managedByLabelValue: trueStr}
 		},
 		CheckTaskLimit: func() *ChatToolError { return nil },
 		IncrementTasks: func() { taskCounter++ },
@@ -313,7 +313,7 @@ func TestCreateAITaskTool_Execute_ExplicitProviderRefPreserved(t *testing.T) {
 	if created.Spec.AI.ProviderRef == nil {
 		t.Fatal("AI.providerRef is nil, want openai")
 	}
-	if created.Spec.AI.ProviderRef.Name != "openai" {
+	if created.Spec.AI.ProviderRef.Name != providerOpenAI {
 		t.Fatalf("AI.providerRef.name = %q, want openai", created.Spec.AI.ProviderRef.Name)
 	}
 }
@@ -329,7 +329,7 @@ func TestCreateAITaskTool_Execute_SessionRefCreatesAndAppends(t *testing.T) {
 			return testAITaskName
 		},
 		TaskLabels: func() map[string]string {
-			return map[string]string{"orka.ai/managed": "true"}
+			return map[string]string{managedByLabelValue: trueStr}
 		},
 		CheckTaskLimit: func() *ChatToolError { return nil },
 		IncrementTasks: func() { taskCounter++ },
@@ -384,7 +384,7 @@ func TestCreateAITaskTool_Execute_MissingContext(t *testing.T) {
 	if r.Success {
 		t.Error("expected failure for missing context")
 	}
-	if r.ErrorType != "internal_error" {
+	if r.ErrorType != internalErrorType {
 		t.Errorf("errorType = %v, want internal_error", r.ErrorType)
 	}
 }

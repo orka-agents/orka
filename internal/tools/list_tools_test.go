@@ -19,8 +19,8 @@ import (
 
 func TestListToolsTool_Name(t *testing.T) {
 	tool := &ListToolsTool{}
-	if got := tool.Name(); got != "list_tools" {
-		t.Errorf("Name() = %q, want %q", got, "list_tools")
+	if got := tool.Name(); got != listToolsToolName {
+		t.Errorf("Name() = %q, want %q", got, listToolsToolName)
 	}
 }
 
@@ -41,11 +41,11 @@ func TestListToolsTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	if _, ok := props["namespace"]; !ok {
+	if _, ok := props[namespaceField]; !ok {
 		t.Error("missing namespace property")
 	}
 }
@@ -70,8 +70,8 @@ func TestListToolsTool_Execute(t *testing.T) {
 			tools: []*corev1alpha1.Tool{
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-tool",
-						Namespace: "default",
+						Name:      testMyToolName,
+						Namespace: defaultNamespace,
 					},
 					Spec: corev1alpha1.ToolSpec{
 						Description: "A custom tool for testing",
@@ -87,7 +87,7 @@ func TestListToolsTool_Execute(t *testing.T) {
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "tool-1",
-						Namespace: "default",
+						Namespace: defaultNamespace,
 					},
 					Spec: corev1alpha1.ToolSpec{
 						Description: "First tool",
@@ -96,17 +96,17 @@ func TestListToolsTool_Execute(t *testing.T) {
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "tool-2",
-						Namespace: "default",
+						Namespace: defaultNamespace,
 					},
 					Spec: corev1alpha1.ToolSpec{
-						Description: "Second tool",
+						Description: testSecondToolDescription,
 					},
 				},
 			},
 			wantCount: 2,
 		},
 		{
-			name: "custom namespace",
+			name: testCustomNamespaceCaseName,
 			args: `{"namespace": "staging"}`,
 			tools: []*corev1alpha1.Tool{
 				{
@@ -122,9 +122,9 @@ func TestListToolsTool_Execute(t *testing.T) {
 			wantCount: 1,
 		},
 		{
-			name:       "invalid JSON args",
-			args:       `{invalid}`,
-			wantErrStr: "failed to parse arguments",
+			name:       invalidJSONArgsCaseName,
+			args:       invalidJSONText,
+			wantErrStr: failedToParseArgumentsMessage,
 		},
 	}
 
@@ -139,7 +139,7 @@ func TestListToolsTool_Execute(t *testing.T) {
 
 			tc := &ToolContext{
 				Client:    fc,
-				Namespace: "default",
+				Namespace: defaultNamespace,
 			}
 			ctx := WithToolContext(context.Background(), tc)
 
@@ -174,11 +174,11 @@ func TestListToolsTool_Execute(t *testing.T) {
 			// Verify specific fields for single tool test
 			if tt.name == "single tool" && len(data) > 0 {
 				toolData := data[0].(map[string]any)
-				if toolData["name"] != "my-tool" {
-					t.Errorf("tool name = %q, want %q", toolData["name"], "my-tool")
+				if toolData[nameField] != testMyToolName {
+					t.Errorf("tool name = %q, want %q", toolData[nameField], testMyToolName)
 				}
-				if toolData["description"] != "A custom tool for testing" {
-					t.Errorf("tool description = %q, want %q", toolData["description"], "A custom tool for testing")
+				if toolData[jsonSchemaDescriptionField] != "A custom tool for testing" {
+					t.Errorf("tool description = %q, want %q", toolData[jsonSchemaDescriptionField], "A custom tool for testing")
 				}
 				if toolData["builtin"] != false {
 					t.Errorf("tool builtin = %v, want false", toolData["builtin"])

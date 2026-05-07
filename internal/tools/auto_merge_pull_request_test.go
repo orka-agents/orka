@@ -35,7 +35,7 @@ func TestAutoMergePullRequestTool_Metadata(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewAutoMergePullRequestTool(k8sClient)
 
-	if tool.Name() != "auto_merge_pull_request" {
+	if tool.Name() != autoMergePullRequestToolName {
 		t.Errorf("unexpected name: %s", tool.Name())
 	}
 	if tool.Description() == "" {
@@ -52,8 +52,8 @@ func TestAutoMergePullRequestTool_Metadata(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("failed to parse parameters: %v", err)
 	}
-	props := schema["properties"].(map[string]any)
-	for _, field := range []string{"task_name", "pr_number", "merge_method", "commit_title", "commit_message", "timeout"} {
+	props := schema[jsonSchemaPropertiesField].(map[string]any)
+	for _, field := range []string{taskNameField, githubPRNumberField, mergeMethodField, githubCommitTitleField, githubCommitMessageField, timeoutField} {
 		if _, ok := props[field]; !ok {
 			t.Errorf("parameters should contain %s", field)
 		}
@@ -90,30 +90,30 @@ func TestAutoMergePullRequestTool_CIPassesImmediately(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      "https://github.com/sozercan/ayna",
-					Branch:       "main",
-					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+					GitRepo:      testSozercanAynaRepoURL,
+					Branch:       testBranch,
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
 				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data:       map[string][]byte{"token": []byte("test-token")},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 		Timeout:  "1s",
 	})
@@ -136,7 +136,7 @@ func TestAutoMergePullRequestTool_CIPassesImmediately(t *testing.T) {
 	if res.SHA != "merged456" {
 		t.Errorf("unexpected SHA: %s", res.SHA)
 	}
-	if res.Outcome != "merged" {
+	if res.Outcome != mergedStatusString {
 		t.Errorf("unexpected outcome: %s", res.Outcome)
 	}
 	if !mergeCalled.Load() {
@@ -170,30 +170,30 @@ func TestAutoMergePullRequestTool_CIFails(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      "https://github.com/sozercan/ayna",
-					Branch:       "main",
-					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+					GitRepo:      testSozercanAynaRepoURL,
+					Branch:       testBranch,
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
 				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data:       map[string][]byte{"token": []byte("test-token")},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 		Timeout:  "1s",
 	})
@@ -241,30 +241,30 @@ func TestAutoMergePullRequestTool_Timeout(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      "https://github.com/sozercan/ayna",
-					Branch:       "main",
-					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+					GitRepo:      testSozercanAynaRepoURL,
+					Branch:       testBranch,
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
 				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data:       map[string][]byte{"token": []byte("test-token")},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 		Timeout:  "1s",
 	})
@@ -278,7 +278,7 @@ func TestAutoMergePullRequestTool_Timeout(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &res); err != nil {
 		t.Fatalf("failed to parse result: %v", err)
 	}
-	if res.Outcome != "timeout" {
+	if res.Outcome != timeoutField {
 		t.Errorf("expected outcome 'timeout', got: %s", res.Outcome)
 	}
 }
@@ -303,33 +303,33 @@ func TestAutoMergePullRequestTool_ContextCancelled(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      "https://github.com/sozercan/ayna",
-					Branch:       "main",
-					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+					GitRepo:      testSozercanAynaRepoURL,
+					Branch:       testBranch,
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
 				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data:       map[string][]byte{"token": []byte("test-token")},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 		Timeout:  "2m",
 	})
@@ -346,13 +346,13 @@ func TestAutoMergePullRequestTool_ContextCancelled(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &res); err != nil {
 		t.Fatalf("failed to parse result: %v", err)
 	}
-	if res.Outcome != "timeout" {
+	if res.Outcome != timeoutField {
 		t.Errorf("expected outcome 'timeout', got: %s", res.Outcome)
 	}
 }
 
 func TestAutoMergePullRequestTool_MergeMethods(t *testing.T) {
-	for _, method := range []string{"merge", "rebase"} {
+	for _, method := range []string{mergeMethodMerge, mergeMethodRebase} {
 		t.Run(method, func(t *testing.T) {
 			var capturedMethod string
 
@@ -367,7 +367,7 @@ func TestAutoMergePullRequestTool_MergeMethods(t *testing.T) {
 				case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/pulls/10/merge"):
 					var body map[string]any
 					_ = json.NewDecoder(r.Body).Decode(&body)
-					if mm, ok := body["merge_method"].(string); ok {
+					if mm, ok := body[mergeMethodField].(string); ok {
 						capturedMethod = mm
 					}
 					w.WriteHeader(200)
@@ -383,30 +383,30 @@ func TestAutoMergePullRequestTool_MergeMethods(t *testing.T) {
 			_ = corev1.AddToScheme(scheme)
 
 			task := &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 				Spec: corev1alpha1.TaskSpec{
 					Type: corev1alpha1.TaskTypeAgent,
 					AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 						Workspace: &corev1alpha1.WorkspaceConfig{
-							GitRepo:      "https://github.com/sozercan/ayna",
-							Branch:       "main",
-							GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+							GitRepo:      testSozercanAynaRepoURL,
+							Branch:       testBranch,
+							GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
 						},
 					},
 				},
 			}
 			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-				Data:       map[string][]byte{"token": []byte("test-token")},
+				ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+				Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 			}
 
 			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 			tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-			t.Setenv("ORKA_TASK_NAMESPACE", "default")
+			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 			args, _ := json.Marshal(AutoMergePullRequestArgs{
-				TaskName:    "coder-task",
+				TaskName:    testCoderTaskName,
 				PRNumber:    10,
 				MergeMethod: method,
 				Timeout:     "1s",
@@ -454,30 +454,30 @@ func TestAutoMergePullRequestTool_PRClosedExternally(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      "https://github.com/sozercan/ayna",
-					Branch:       "main",
-					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+					GitRepo:      testSozercanAynaRepoURL,
+					Branch:       testBranch,
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
 				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data:       map[string][]byte{"token": []byte("test-token")},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 		Timeout:  "1s",
 	})
@@ -524,30 +524,30 @@ func TestAutoMergePullRequestTool_PRAlreadyMerged(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      "https://github.com/sozercan/ayna",
-					Branch:       "main",
-					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+					GitRepo:      testSozercanAynaRepoURL,
+					Branch:       testBranch,
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
 				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data:       map[string][]byte{"token": []byte("test-token")},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 		Timeout:  "1s",
 	})
@@ -580,7 +580,7 @@ func TestAutoMergePullRequestTool_InvalidArgs(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewAutoMergePullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args := json.RawMessage(`{"bad": true}`)
 
@@ -601,10 +601,10 @@ func TestAutoMergePullRequestTool_MissingTask(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewAutoMergePullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
-		TaskName: "nonexistent",
+		TaskName: testNonexistentName,
 		PRNumber: 42,
 	})
 
@@ -632,7 +632,7 @@ func TestGetGitHubPRDetails(t *testing.T) {
 	}))
 	defer server.Close()
 
-	headSHA, state, merged, err := getGitHubPRDetails(context.Background(), "test-token", "sozercan", "ayna", 42, server.URL)
+	headSHA, state, merged, err := getGitHubPRDetails(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, 42, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -654,7 +654,7 @@ func TestGetGitHubPRDetails_APIError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, _, _, err := getGitHubPRDetails(context.Background(), "test-token", "sozercan", "ayna", 42, server.URL)
+	_, _, _, err := getGitHubPRDetails(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, 42, server.URL)
 	if err == nil {
 		t.Fatal("expected error for 500 response")
 	}
@@ -674,7 +674,7 @@ func TestCheckCIStatusDetailed_AllPassed(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -696,7 +696,7 @@ func TestCheckCIStatusDetailed_SomePending(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -721,7 +721,7 @@ func TestCheckCIStatusDetailed_SomeFailed(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -746,9 +746,9 @@ func TestIsTransientHTTPError(t *testing.T) {
 		expected bool
 	}{
 		{"429 rate limit", &githubAPIError{StatusCode: 429, Body: "rate limit"}, true},
-		{"500 server error", &githubAPIError{StatusCode: 500, Body: "server error"}, true},
+		{"500 server error", &githubAPIError{StatusCode: 500, Body: serverErrorMessage}, true},
 		{"503 unavailable", &githubAPIError{StatusCode: 503, Body: "unavailable"}, true},
-		{"404 not found", &githubAPIError{StatusCode: 404, Body: "not found"}, false},
+		{"404 not found", &githubAPIError{StatusCode: 404, Body: notFoundMessage}, false},
 		{"non-github error", fmt.Errorf("random error"), false},
 	}
 
@@ -783,7 +783,7 @@ func TestAutoMergePullRequestTool_ForcePushNewSHA(t *testing.T) {
 	}))
 	defer server.Close()
 
-	sha1, state1, merged1, err := getGitHubPRDetails(context.Background(), "test-token", "sozercan", "ayna", 42, server.URL)
+	sha1, state1, merged1, err := getGitHubPRDetails(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, 42, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -797,7 +797,7 @@ func TestAutoMergePullRequestTool_ForcePushNewSHA(t *testing.T) {
 		t.Error("expected merged to be false")
 	}
 
-	sha2, _, _, err := getGitHubPRDetails(context.Background(), "test-token", "sozercan", "ayna", 42, server.URL)
+	sha2, _, _, err := getGitHubPRDetails(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, 42, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -814,13 +814,13 @@ func TestGitHubAPIError_Error(t *testing.T) {
 	}{
 		{
 			name:       "contains status code",
-			err:        &githubAPIError{StatusCode: 404, Body: "not found"},
+			err:        &githubAPIError{StatusCode: 404, Body: notFoundMessage},
 			wantSubstr: "404",
 		},
 		{
 			name:       "contains body",
-			err:        &githubAPIError{StatusCode: 500, Body: "server error"},
-			wantSubstr: "server error",
+			err:        &githubAPIError{StatusCode: 500, Body: serverErrorMessage},
+			wantSubstr: serverErrorMessage,
 		},
 		{
 			name:       "empty body",
@@ -856,8 +856,8 @@ func TestPollOnce_TransientPRError(t *testing.T) {
 	defer server.Close()
 
 	pc := &pollContext{
-		token: "test-token", owner: "sozercan", repo: "ayna",
-		prNumber: 42, mergeMethod: "squash",
+		token: testGitHubToken, owner: testGitHubOwner, repo: testRepositoryName,
+		prNumber: 42, mergeMethod: defaultMergeMethod,
 		baseURL: server.URL, logger: logr.Discard(),
 	}
 
@@ -881,8 +881,8 @@ func TestPollOnce_NonTransientPRError(t *testing.T) {
 	defer server.Close()
 
 	pc := &pollContext{
-		token: "test-token", owner: "sozercan", repo: "ayna",
-		prNumber: 42, mergeMethod: "squash",
+		token: testGitHubToken, owner: testGitHubOwner, repo: testRepositoryName,
+		prNumber: 42, mergeMethod: defaultMergeMethod,
 		baseURL: server.URL, logger: logr.Discard(),
 	}
 
@@ -911,8 +911,8 @@ func TestPollOnce_TransientCIError(t *testing.T) {
 	defer server.Close()
 
 	pc := &pollContext{
-		token: "test-token", owner: "sozercan", repo: "ayna",
-		prNumber: 42, mergeMethod: "squash",
+		token: testGitHubToken, owner: testGitHubOwner, repo: testRepositoryName,
+		prNumber: 42, mergeMethod: defaultMergeMethod,
 		baseURL: server.URL, logger: logr.Discard(),
 	}
 
@@ -944,8 +944,8 @@ func TestPollOnce_NonTransientCIError(t *testing.T) {
 	defer server.Close()
 
 	pc := &pollContext{
-		token: "test-token", owner: "sozercan", repo: "ayna",
-		prNumber: 42, mergeMethod: "squash",
+		token: testGitHubToken, owner: testGitHubOwner, repo: testRepositoryName,
+		prNumber: 42, mergeMethod: defaultMergeMethod,
 		baseURL: server.URL, logger: logr.Discard(),
 	}
 
@@ -977,8 +977,8 @@ func TestPollOnce_MergeFailure(t *testing.T) {
 	defer server.Close()
 
 	pc := &pollContext{
-		token: "test-token", owner: "sozercan", repo: "ayna",
-		prNumber: 42, mergeMethod: "squash",
+		token: testGitHubToken, owner: testGitHubOwner, repo: testRepositoryName,
+		prNumber: 42, mergeMethod: defaultMergeMethod,
 		baseURL: server.URL, logger: logr.Discard(),
 	}
 
@@ -1007,8 +1007,8 @@ func TestPollOnce_CIPending(t *testing.T) {
 	defer server.Close()
 
 	pc := &pollContext{
-		token: "test-token", owner: "sozercan", repo: "ayna",
-		prNumber: 42, mergeMethod: "squash",
+		token: testGitHubToken, owner: testGitHubOwner, repo: testRepositoryName,
+		prNumber: 42, mergeMethod: defaultMergeMethod,
 		baseURL: server.URL, logger: logr.Discard(),
 	}
 
@@ -1031,7 +1031,7 @@ func TestCheckCIStatusDetailed_SkippedConclusion(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1047,14 +1047,14 @@ func TestCheckCIStatusDetailed_CancelledConclusion(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !result.Failed {
 		t.Error("expected Failed=true for cancelled conclusion")
 	}
-	if !strings.Contains(result.Details, "cancelled") {
+	if !strings.Contains(result.Details, cancelledStatusString) {
 		t.Errorf("expected details to mention 'cancelled', got: %s", result.Details)
 	}
 }
@@ -1066,7 +1066,7 @@ func TestCheckCIStatusDetailed_TimedOutConclusion(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1082,7 +1082,7 @@ func TestCheckCIStatusDetailed_ActionRequiredConclusion(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1098,7 +1098,7 @@ func TestCheckCIStatusDetailed_StaleConclusion(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1114,7 +1114,7 @@ func TestCheckCIStatusDetailed_UnknownConclusion(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
+	result, err := checkCIStatusDetailed(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, checkPullRequestCITestSHA, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1130,7 +1130,7 @@ func TestCheckCIStatusDetailed_APIError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := checkCIStatusDetailed(context.Background(), "test-token", "sozercan", "ayna", checkPullRequestCITestSHA, server.URL)
+	_, err := checkCIStatusDetailed(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, checkPullRequestCITestSHA, server.URL)
 	if err == nil {
 		t.Fatal("expected error for API error")
 	}
@@ -1142,30 +1142,30 @@ func TestAutoMergePullRequestTool_InvalidTimeout(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      "https://github.com/sozercan/ayna",
-					Branch:       "main",
-					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+					GitRepo:      testSozercanAynaRepoURL,
+					Branch:       testBranch,
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
 				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data:       map[string][]byte{"token": []byte("test-token")},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := NewAutoMergePullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 		Timeout:  "not-a-duration",
 	})
@@ -1174,7 +1174,7 @@ func TestAutoMergePullRequestTool_InvalidTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid timeout")
 	}
-	if !strings.Contains(err.Error(), "invalid timeout") {
+	if !strings.Contains(err.Error(), invalidTimeoutCaseName) {
 		t.Errorf("unexpected error: %s", err.Error())
 	}
 }
@@ -1185,7 +1185,7 @@ func TestAutoMergePullRequestTool_NoWorkspace(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 		},
@@ -1194,10 +1194,10 @@ func TestAutoMergePullRequestTool_NoWorkspace(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewAutoMergePullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 	})
 
@@ -1216,13 +1216,13 @@ func TestAutoMergePullRequestTool_NoGitSecretRef(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 				},
 			},
 		},
@@ -1231,10 +1231,10 @@ func TestAutoMergePullRequestTool_NoGitSecretRef(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewAutoMergePullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 	})
 
@@ -1253,30 +1253,30 @@ func TestAutoMergePullRequestTool_EmptyToken(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      "https://github.com/sozercan/ayna",
-					Branch:       "main",
-					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+					GitRepo:      testSozercanAynaRepoURL,
+					Branch:       testBranch,
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
 				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data:       map[string][]byte{"other-key": []byte("value")},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{otherSecretKey: []byte("value")},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := NewAutoMergePullRequestTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 	})
 
@@ -1312,30 +1312,30 @@ func TestAutoMergePullRequestTool_PasswordKey(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      "https://github.com/sozercan/ayna",
-					Branch:       "main",
-					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+					GitRepo:      testSozercanAynaRepoURL,
+					Branch:       testBranch,
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
 				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data:       map[string][]byte{"password": []byte("pwd-token")},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{passwordKey: []byte("pwd-token")},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := &AutoMergePullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
-		TaskName: "coder-task",
+		TaskName: testCoderTaskName,
 		PRNumber: 42,
 		Timeout:  "1s",
 	})
@@ -1375,7 +1375,7 @@ func TestAutoMergePullRequestTool_Transient5xx(t *testing.T) {
 	defer server.Close()
 
 	// First call: should return transient error
-	_, _, _, err := getGitHubPRDetails(context.Background(), "test-token", "sozercan", "ayna", 42, server.URL)
+	_, _, _, err := getGitHubPRDetails(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, 42, server.URL)
 	if err == nil {
 		t.Fatal("expected error on first call")
 	}
@@ -1384,7 +1384,7 @@ func TestAutoMergePullRequestTool_Transient5xx(t *testing.T) {
 	}
 
 	// Second call: should succeed
-	sha, state, merged, err := getGitHubPRDetails(context.Background(), "test-token", "sozercan", "ayna", 42, server.URL)
+	sha, state, merged, err := getGitHubPRDetails(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, 42, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error on retry: %v", err)
 	}
