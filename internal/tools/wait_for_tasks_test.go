@@ -27,8 +27,8 @@ const taskFailRetry = "task-fail-retry"
 
 func TestWaitForTasksTool_Name(t *testing.T) {
 	tool := NewWaitForTasksTool(nil)
-	if got := tool.Name(); got != "wait_for_tasks" {
-		t.Errorf("Name() = %v, want %v", got, "wait_for_tasks")
+	if got := tool.Name(); got != waitForTasksToolName {
+		t.Errorf("Name() = %v, want %v", got, waitForTasksToolName)
 	}
 }
 
@@ -50,7 +50,7 @@ func TestWaitForTasksTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Errorf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 }
@@ -69,7 +69,7 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 			name: "all tasks succeeded",
 			tasks: []corev1alpha1.Task{
 				{
-					ObjectMeta: metav1.ObjectMeta{Name: "task-a", Namespace: "test-ns"},
+					ObjectMeta: metav1.ObjectMeta{Name: testTaskAName, Namespace: testNamespace},
 					Spec: corev1alpha1.TaskSpec{
 						Type:     corev1alpha1.TaskTypeAI,
 						AgentRef: &corev1alpha1.AgentReference{Name: "agent-a"},
@@ -82,7 +82,7 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{Name: "task-b", Namespace: "test-ns"},
+					ObjectMeta: metav1.ObjectMeta{Name: testTaskBName, Namespace: testNamespace},
 					Spec: corev1alpha1.TaskSpec{
 						Type:     corev1alpha1.TaskTypeAI,
 						AgentRef: &corev1alpha1.AgentReference{Name: "agent-b"},
@@ -95,22 +95,19 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 					},
 				},
 			},
-			resultMap: map[string]string{
-				"task-a": "result from task-a",
-				"task-b": "result from task-b",
-			},
-			args:          WaitForTasksArgs{Tasks: []string{"task-a", "task-b"}, Timeout: "1s"},
+			resultMap:     map[string]string{testTaskAName: "result from task-a", testTaskBName: "result from task-b"},
+			args:          WaitForTasksArgs{Tasks: []string{testTaskAName, testTaskBName}, Timeout: "1s"},
 			wantCompleted: true,
 			wantResults: []TaskResultInfo{
-				{Task: "task-a", Agent: "agent-a", Phase: "Succeeded", Result: "result from task-a"},
-				{Task: "task-b", Agent: "agent-b", Phase: "Succeeded", Result: "result from task-b"},
+				{Task: testTaskAName, Agent: "agent-a", Phase: taskPhaseSucceededString, Result: "result from task-a"},
+				{Task: testTaskBName, Agent: "agent-b", Phase: taskPhaseSucceededString, Result: "result from task-b"},
 			},
 		},
 		{
 			name: "mixed results",
 			tasks: []corev1alpha1.Task{
 				{
-					ObjectMeta: metav1.ObjectMeta{Name: "task-ok", Namespace: "test-ns"},
+					ObjectMeta: metav1.ObjectMeta{Name: testTaskOKName, Namespace: testNamespace},
 					Spec: corev1alpha1.TaskSpec{
 						Type:     corev1alpha1.TaskTypeAI,
 						AgentRef: &corev1alpha1.AgentReference{Name: "agent-ok"},
@@ -123,7 +120,7 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{Name: "task-fail", Namespace: "test-ns"},
+					ObjectMeta: metav1.ObjectMeta{Name: testTaskFailName, Namespace: testNamespace},
 					Spec: corev1alpha1.TaskSpec{
 						Type:     corev1alpha1.TaskTypeAI,
 						AgentRef: &corev1alpha1.AgentReference{Name: "agent-fail"},
@@ -134,21 +131,19 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 					},
 				},
 			},
-			resultMap: map[string]string{
-				"task-ok": "success output",
-			},
-			args:          WaitForTasksArgs{Tasks: []string{"task-ok", "task-fail"}, Timeout: "1s"},
+			resultMap:     map[string]string{testTaskOKName: "success output"},
+			args:          WaitForTasksArgs{Tasks: []string{testTaskOKName, testTaskFailName}, Timeout: "1s"},
 			wantCompleted: true,
 			wantResults: []TaskResultInfo{
-				{Task: "task-ok", Agent: "agent-ok", Phase: "Succeeded", Result: "success output"},
-				{Task: "task-fail", Agent: "agent-fail", Phase: "Failed", Result: "error: out of memory"},
+				{Task: testTaskOKName, Agent: "agent-ok", Phase: taskPhaseSucceededString, Result: "success output"},
+				{Task: testTaskFailName, Agent: "agent-fail", Phase: taskPhaseFailedString, Result: "error: out of memory"},
 			},
 		},
 		{
 			name: "timeout with pending tasks",
 			tasks: []corev1alpha1.Task{
 				{
-					ObjectMeta: metav1.ObjectMeta{Name: "task-pending", Namespace: "test-ns"},
+					ObjectMeta: metav1.ObjectMeta{Name: testTaskPendingName, Namespace: testNamespace},
 					Spec: corev1alpha1.TaskSpec{
 						Type: corev1alpha1.TaskTypeAI,
 					},
@@ -157,26 +152,26 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 					},
 				},
 			},
-			args:          WaitForTasksArgs{Tasks: []string{"task-pending"}, Timeout: "100ms"},
+			args:          WaitForTasksArgs{Tasks: []string{testTaskPendingName}, Timeout: shortPollIntervalString},
 			wantCompleted: false,
 			wantResults: []TaskResultInfo{
-				{Task: "task-pending", Phase: "Running"},
+				{Task: testTaskPendingName, Phase: taskPhaseRunningString},
 			},
 		},
 		{
 			name:          "missing task",
 			tasks:         []corev1alpha1.Task{},
-			args:          WaitForTasksArgs{Tasks: []string{"nonexistent"}, Timeout: "100ms"},
+			args:          WaitForTasksArgs{Tasks: []string{testNonexistentName}, Timeout: shortPollIntervalString},
 			wantCompleted: true,
 			wantResults: []TaskResultInfo{
-				{Task: "nonexistent", Phase: "Error"},
+				{Task: testNonexistentName, Phase: taskPhaseErrorString},
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
+			t.Setenv(envOrkaTaskNamespace, testNamespace)
 
 			// Set up HTTP test server for result fetching
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -192,14 +187,14 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 					taskName := parts[3]
 					if result, ok := tt.resultMap[taskName]; ok {
 						w.Header().Set("Content-Type", "application/json")
-						json.NewEncoder(w).Encode(map[string]string{"result": result}) //nolint:errcheck
+						json.NewEncoder(w).Encode(map[string]string{resultField: result}) //nolint:errcheck
 						return
 					}
 				}
 				http.NotFound(w, r)
 			}))
 			defer srv.Close()
-			t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
+			t.Setenv(envOrkaControllerURL, srv.URL)
 
 			scheme := newTestScheme()
 			objs := make([]client.Object, 0, len(tt.tasks))
@@ -256,7 +251,7 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 					t.Errorf("Results[%d].Result = %q, want %q", i, gotR.Result, want.Result)
 				}
 				// For error cases, just check result is non-empty
-				if want.Phase == "Error" && gotR.Result == "" {
+				if want.Phase == taskPhaseErrorString && gotR.Result == "" {
 					t.Errorf("Results[%d].Result should contain error info", i)
 				}
 			}
@@ -286,7 +281,7 @@ func TestWaitForTasksTool_Execute_EmptyTasks(t *testing.T) {
 
 func TestWaitForTasksTool_Execute_InvalidJSON(t *testing.T) {
 	tool := NewWaitForTasksTool(nil)
-	args := json.RawMessage(`{invalid}`)
+	args := json.RawMessage(invalidJSONText)
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
 		t.Error("Execute() expected error for invalid JSON")
@@ -309,15 +304,15 @@ func TestWaitForTasksTool_Execute_TruncatesLongStructuredSummary(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"result": string(srJSON)}) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]string{resultField: string(srJSON)}) //nolint:errcheck
 	}))
 	defer server.Close()
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_CONTROLLER_URL", server.URL)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaControllerURL, server.URL)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "long-summary", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "long-summary", Namespace: defaultNamespace},
 		Status: corev1alpha1.TaskStatus{
 			Phase:     corev1alpha1.TaskPhaseSucceeded,
 			ResultRef: &corev1alpha1.ResultReference{Available: true},
@@ -356,7 +351,7 @@ func TestWaitForTasksTool_Execute_TruncatesLongStructuredSummary(t *testing.T) {
 }
 
 func TestWaitForTasksTool_Execute_MissingNamespace(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAMESPACE", "")
+	t.Setenv(envOrkaTaskNamespace, "")
 	tool := NewWaitForTasksTool(nil)
 	args := json.RawMessage(`{"tasks": ["t1"]}`)
 	_, err := tool.Execute(context.Background(), args)
@@ -381,24 +376,24 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 	// Mock server that returns the structured result
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"result": string(srJSON)}) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]string{resultField: string(srJSON)}) //nolint:errcheck
 	}))
 	defer server.Close()
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_CONTROLLER_URL", server.URL)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaControllerURL, server.URL)
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "child-task-1",
-			Namespace: "default",
+			Name:      testChildTaskName,
+			Namespace: defaultNamespace,
 			Labels: map[string]string{
 				labels.LabelIteration: "2",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
-			AgentRef: &corev1alpha1.AgentReference{Name: "coder"},
+			AgentRef: &corev1alpha1.AgentReference{Name: testCoderAgentName},
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:     corev1alpha1.TaskPhaseSucceeded,
@@ -416,7 +411,7 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 	tool := NewWaitForTasksTool(fakeClient)
 
 	args, _ := json.Marshal(WaitForTasksArgs{
-		Tasks:   []string{"child-task-1"},
+		Tasks:   []string{testChildTaskName},
 		Timeout: "5s",
 	})
 
@@ -465,27 +460,27 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 }
 
 func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
+	t.Setenv(envOrkaTaskNamespace, testNamespace)
 
 	// Create a failed task with auto-retry annotations
 	failedTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskFailRetry,
-			Namespace: "test-ns",
+			Namespace: testNamespace,
 			Annotations: map[string]string{
-				labels.AnnotationAutoRetry:      "true",
+				labels.AnnotationAutoRetry:      trueStr,
 				labels.AnnotationMaxRetries:     "2",
 				labels.AnnotationRetryCount:     "0",
 				labels.AnnotationOriginalPrompt: "Implement the feature",
 			},
 			Labels: map[string]string{
 				labels.LabelParentTask:     "parent",
-				labels.LabelDelegatedAgent: "coder",
+				labels.LabelDelegatedAgent: testCoderAgentName,
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAI,
-			AgentRef: &corev1alpha1.AgentReference{Name: "coder"},
+			AgentRef: &corev1alpha1.AgentReference{Name: testCoderAgentName},
 			Prompt:   "Implement the feature",
 		},
 		Status: corev1alpha1.TaskStatus{
@@ -498,7 +493,7 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer srv.Close()
-	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
+	t.Setenv(envOrkaControllerURL, srv.URL)
 
 	scheme := newTestScheme()
 	fakeClient := fake.NewClientBuilder().
@@ -537,7 +532,7 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 		t.Fatal("original task not found in results")
 	}
 
-	if originalResult.Phase != "Failed" {
+	if originalResult.Phase != taskPhaseFailedString {
 		t.Errorf("expected Phase=Failed, got %q", originalResult.Phase)
 	}
 	if originalResult.FailureDetails == nil {
@@ -564,15 +559,15 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 }
 
 func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
+	t.Setenv(envOrkaTaskNamespace, testNamespace)
 
 	// Task with retries already exhausted
 	failedTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "task-exhausted",
-			Namespace: "test-ns",
+			Namespace: testNamespace,
 			Annotations: map[string]string{
-				labels.AnnotationAutoRetry:      "true",
+				labels.AnnotationAutoRetry:      trueStr,
 				labels.AnnotationMaxRetries:     "2",
 				labels.AnnotationRetryCount:     "2",
 				labels.AnnotationOriginalPrompt: "Do something",
@@ -580,7 +575,7 @@ func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAI,
-			AgentRef: &corev1alpha1.AgentReference{Name: "coder"},
+			AgentRef: &corev1alpha1.AgentReference{Name: testCoderAgentName},
 			Prompt:   "Do something",
 		},
 		Status: corev1alpha1.TaskStatus{
@@ -593,7 +588,7 @@ func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer srv.Close()
-	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
+	t.Setenv(envOrkaControllerURL, srv.URL)
 
 	scheme := newTestScheme()
 	fakeClient := fake.NewClientBuilder().
@@ -627,7 +622,7 @@ func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
 	if r.Retried {
 		t.Error("expected Retried=false when retries exhausted")
 	}
-	if r.Phase != "Failed" {
+	if r.Phase != taskPhaseFailedString {
 		t.Errorf("expected Phase=Failed, got %q", r.Phase)
 	}
 	if r.FailureDetails == nil {
@@ -651,22 +646,22 @@ func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
 }
 
 func TestWaitForTasksTool_Execute_NoAutoRetryOnSuccess(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
+	t.Setenv(envOrkaTaskNamespace, testNamespace)
 
 	// Succeeded task with auto-retry — should NOT trigger retry
 	succeededTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "task-success",
-			Namespace: "test-ns",
+			Namespace: testNamespace,
 			Annotations: map[string]string{
-				labels.AnnotationAutoRetry:  "true",
+				labels.AnnotationAutoRetry:  trueStr,
 				labels.AnnotationMaxRetries: "2",
 				labels.AnnotationRetryCount: "0",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAI,
-			AgentRef: &corev1alpha1.AgentReference{Name: "coder"},
+			AgentRef: &corev1alpha1.AgentReference{Name: testCoderAgentName},
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:   corev1alpha1.TaskPhaseSucceeded,
@@ -678,7 +673,7 @@ func TestWaitForTasksTool_Execute_NoAutoRetryOnSuccess(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer srv.Close()
-	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
+	t.Setenv(envOrkaControllerURL, srv.URL)
 
 	scheme := newTestScheme()
 	fakeClient := fake.NewClientBuilder().
@@ -706,13 +701,13 @@ func TestWaitForTasksTool_Execute_NoAutoRetryOnSuccess(t *testing.T) {
 	if r.Retried {
 		t.Error("should not retry a succeeded task")
 	}
-	if r.Phase != "Succeeded" {
+	if r.Phase != taskPhaseSucceededString {
 		t.Errorf("expected Phase=Succeeded, got %q", r.Phase)
 	}
 }
 
 func TestWaitForTasksTool_Execute_FetchResultNon200(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
+	t.Setenv(envOrkaTaskNamespace, testNamespace)
 
 	// Server returns 500 for result fetch
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -720,10 +715,10 @@ func TestWaitForTasksTool_Execute_FetchResultNon200(t *testing.T) {
 		_, _ = w.Write([]byte("internal error"))
 	}))
 	defer srv.Close()
-	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
+	t.Setenv(envOrkaControllerURL, srv.URL)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "task-err", Namespace: "test-ns"},
+		ObjectMeta: metav1.ObjectMeta{Name: "task-err", Namespace: testNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAI,
 			AgentRef: &corev1alpha1.AgentReference{Name: "agent-err"},
@@ -761,7 +756,7 @@ func TestWaitForTasksTool_Execute_FetchResultNon200(t *testing.T) {
 }
 
 func TestWaitForTasksTool_Execute_FetchResultInvalidJSON(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
+	t.Setenv(envOrkaTaskNamespace, testNamespace)
 
 	// Server returns 200 but invalid JSON
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -769,10 +764,10 @@ func TestWaitForTasksTool_Execute_FetchResultInvalidJSON(t *testing.T) {
 		_, _ = w.Write([]byte("not-valid-json"))
 	}))
 	defer srv.Close()
-	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
+	t.Setenv(envOrkaControllerURL, srv.URL)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "task-bad-json", Namespace: "test-ns"},
+		ObjectMeta: metav1.ObjectMeta{Name: "task-bad-json", Namespace: testNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAI,
 			AgentRef: &corev1alpha1.AgentReference{Name: "agent-x"},
@@ -810,17 +805,17 @@ func TestWaitForTasksTool_Execute_FetchResultInvalidJSON(t *testing.T) {
 }
 
 func TestWaitForTasksTool_Execute_FallbackToMessage(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
+	t.Setenv(envOrkaTaskNamespace, testNamespace)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}))
 	defer srv.Close()
-	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
+	t.Setenv(envOrkaControllerURL, srv.URL)
 
 	// Task with no ResultRef but with a status message
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "task-msg", Namespace: "test-ns"},
+		ObjectMeta: metav1.ObjectMeta{Name: "task-msg", Namespace: testNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAI,
 			AgentRef: &corev1alpha1.AgentReference{Name: "agent-m"},

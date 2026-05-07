@@ -31,7 +31,7 @@ func TestPostReviewCommentTool_Metadata(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewPostReviewCommentTool(k8sClient)
 
-	if tool.Name() != "post_review_comment" {
+	if tool.Name() != postReviewCommentToolName {
 		t.Errorf("unexpected name: %s", tool.Name())
 	}
 	if tool.Description() == "" {
@@ -47,7 +47,7 @@ func TestPostReviewCommentTool_Metadata(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("failed to parse parameters schema: %v", err)
 	}
-	required, ok := schema["required"].([]any)
+	required, ok := schema[jsonSchemaRequiredField].([]any)
 	if !ok {
 		t.Fatal("schema missing required field")
 	}
@@ -55,7 +55,7 @@ func TestPostReviewCommentTool_Metadata(t *testing.T) {
 	for _, r := range required {
 		requiredSet[r.(string)] = true
 	}
-	for _, field := range []string{"task_name", "pr_number", "body", "event"} {
+	for _, field := range []string{taskNameField, githubPRNumberField, githubBodyField, githubReviewEventField} {
 		if !requiredSet[field] {
 			t.Errorf("expected %q in required fields", field)
 		}
@@ -76,11 +76,11 @@ func TestPostReviewCommentTool_Success(t *testing.T) {
 
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
-		if body["body"] != "Looks good overall" {
-			t.Errorf("unexpected body: %v", body["body"])
+		if body[githubBodyField] != "Looks good overall" {
+			t.Errorf("unexpected body: %v", body[githubBodyField])
 		}
-		if body["event"] != "APPROVE" {
-			t.Errorf("unexpected event: %v", body["event"])
+		if body[githubReviewEventField] != reviewEventApprove {
+			t.Errorf("unexpected event: %v", body[githubReviewEventField])
 		}
 		// Verify comments are present
 		comments, ok := body["comments"].([]any)
@@ -98,15 +98,15 @@ func TestPostReviewCommentTool_Success(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "review-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "review-task", Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 					GitSecretRef: &corev1.LocalObjectReference{
-						Name: "git-creds",
+						Name: testGitCredsSecretName,
 					},
 				},
 			},
@@ -114,10 +114,8 @@ func TestPostReviewCommentTool_Success(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data: map[string][]byte{
-			"token": []byte("test-token"),
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -126,13 +124,13 @@ func TestPostReviewCommentTool_Success(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
 		TaskName: "review-task",
 		PRNumber: 10,
 		Body:     "Looks good overall",
-		Event:    "APPROVE",
+		Event:    reviewEventApprove,
 		Comments: []ReviewComment{
 			{Path: "main.go", Line: 42, Body: "Nice refactor"},
 		},
@@ -167,8 +165,8 @@ func TestPostReviewCommentTool_WithoutComments(t *testing.T) {
 		if _, ok := body["comments"]; ok {
 			t.Error("expected comments to be omitted when empty")
 		}
-		if body["event"] != "COMMENT" {
-			t.Errorf("unexpected event: %v", body["event"])
+		if body[githubReviewEventField] != reviewEventComment {
+			t.Errorf("unexpected event: %v", body[githubReviewEventField])
 		}
 
 		w.WriteHeader(200)
@@ -181,15 +179,15 @@ func TestPostReviewCommentTool_WithoutComments(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "comment-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "comment-task", Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 					GitSecretRef: &corev1.LocalObjectReference{
-						Name: "git-creds",
+						Name: testGitCredsSecretName,
 					},
 				},
 			},
@@ -197,10 +195,8 @@ func TestPostReviewCommentTool_WithoutComments(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data: map[string][]byte{
-			"password": []byte("pw-token"),
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{passwordKey: []byte("pw-token")},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -209,13 +205,13 @@ func TestPostReviewCommentTool_WithoutComments(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
 		TaskName: "comment-task",
 		PRNumber: 5,
 		Body:     "General feedback",
-		Event:    "COMMENT",
+		Event:    reviewEventComment,
 	})
 
 	result, err := tool.Execute(context.Background(), args)
@@ -243,13 +239,13 @@ func TestPostReviewCommentTool_MissingTask(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewPostReviewCommentTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
-		TaskName: "nonexistent",
+		TaskName: testNonexistentName,
 		PRNumber: 1,
-		Body:     "review",
-		Event:    "COMMENT",
+		Body:     testReviewBody,
+		Event:    reviewEventComment,
 	})
 
 	_, err := tool.Execute(context.Background(), args)
@@ -269,12 +265,12 @@ func TestPostReviewCommentTool_InvalidEvent(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := NewPostReviewCommentTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
 		TaskName: "some-task",
 		PRNumber: 1,
-		Body:     "review",
+		Body:     testReviewBody,
 		Event:    "INVALID_EVENT",
 	})
 
@@ -293,7 +289,7 @@ func TestPostReviewCommentTool_NoWorkspace(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "no-ws-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testNoWorkspaceTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 		},
@@ -302,13 +298,13 @@ func TestPostReviewCommentTool_NoWorkspace(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewPostReviewCommentTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
-		TaskName: "no-ws-task",
+		TaskName: testNoWorkspaceTaskName,
 		PRNumber: 1,
-		Body:     "review",
-		Event:    "COMMENT",
+		Body:     testReviewBody,
+		Event:    reviewEventComment,
 	})
 
 	_, err := tool.Execute(context.Background(), args)
@@ -326,13 +322,13 @@ func TestPostReviewCommentTool_Execute_MissingSecret(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "secret-missing-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "secret-missing-task", Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 					GitSecretRef: &corev1.LocalObjectReference{
 						Name: "nonexistent-secret",
 					},
@@ -344,13 +340,13 @@ func TestPostReviewCommentTool_Execute_MissingSecret(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 	tool := NewPostReviewCommentTool(k8sClient)
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
 		TaskName: "secret-missing-task",
 		PRNumber: 1,
-		Body:     "review",
-		Event:    "COMMENT",
+		Body:     testReviewBody,
+		Event:    reviewEventComment,
 	})
 
 	_, err := tool.Execute(context.Background(), args)
@@ -374,15 +370,15 @@ func TestPostReviewCommentTool_Execute_APIError(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "api-error-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "api-error-task", Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/sozercan/ayna",
-					Branch:  "main",
+					GitRepo: testSozercanAynaRepoURL,
+					Branch:  testBranch,
 					GitSecretRef: &corev1.LocalObjectReference{
-						Name: "git-creds",
+						Name: testGitCredsSecretName,
 					},
 				},
 			},
@@ -390,10 +386,8 @@ func TestPostReviewCommentTool_Execute_APIError(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data: map[string][]byte{
-			"token": []byte("test-token"),
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -402,13 +396,13 @@ func TestPostReviewCommentTool_Execute_APIError(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
 		TaskName: "api-error-task",
 		PRNumber: 10,
 		Body:     "review body",
-		Event:    "COMMENT",
+		Event:    reviewEventComment,
 	})
 
 	_, err := tool.Execute(context.Background(), args)
@@ -425,9 +419,9 @@ func TestPostReviewCommentTool_Execute_AllEventTypes(t *testing.T) {
 		name  string
 		event string
 	}{
-		{name: "approve", event: "APPROVE"},
-		{name: "request_changes", event: "REQUEST_CHANGES"},
-		{name: "comment", event: "COMMENT"},
+		{name: "approve", event: reviewEventApprove},
+		{name: "request_changes", event: reviewEventRequestChanges},
+		{name: "comment", event: reviewEventComment},
 	}
 
 	for _, tc := range tests {
@@ -436,7 +430,7 @@ func TestPostReviewCommentTool_Execute_AllEventTypes(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var body map[string]any
 				json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
-				receivedEvent = body["event"].(string)
+				receivedEvent = body[githubReviewEventField].(string)
 
 				w.WriteHeader(200)
 				fmt.Fprintf(w, `{"id":200,"html_url":"https://github.com/sozercan/ayna/pull/3#pullrequestreview-200"}`) //nolint:errcheck
@@ -448,15 +442,15 @@ func TestPostReviewCommentTool_Execute_AllEventTypes(t *testing.T) {
 			_ = corev1.AddToScheme(scheme)
 
 			task := &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{Name: "event-task", Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: "event-task", Namespace: defaultNamespace},
 				Spec: corev1alpha1.TaskSpec{
 					Type: corev1alpha1.TaskTypeAgent,
 					AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 						Workspace: &corev1alpha1.WorkspaceConfig{
-							GitRepo: "https://github.com/sozercan/ayna",
-							Branch:  "main",
+							GitRepo: testSozercanAynaRepoURL,
+							Branch:  testBranch,
 							GitSecretRef: &corev1.LocalObjectReference{
-								Name: "git-creds",
+								Name: testGitCredsSecretName,
 							},
 						},
 					},
@@ -464,10 +458,8 @@ func TestPostReviewCommentTool_Execute_AllEventTypes(t *testing.T) {
 			}
 
 			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-				Data: map[string][]byte{
-					"token": []byte("test-token"),
-				},
+				ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+				Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 			}
 
 			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -476,7 +468,7 @@ func TestPostReviewCommentTool_Execute_AllEventTypes(t *testing.T) {
 				apiBaseURL: server.URL,
 			}
 
-			t.Setenv("ORKA_TASK_NAMESPACE", "default")
+			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 			args, _ := json.Marshal(PostReviewCommentArgs{
 				TaskName: "event-task",

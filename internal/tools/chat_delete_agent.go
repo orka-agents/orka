@@ -26,20 +26,13 @@ func (t *ChatDeleteAgentTool) Description() string {
 }
 
 func (t *ChatDeleteAgentTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"name":      map[string]any{"type": "string", "description": "Agent name"},
-			"namespace": map[string]any{"type": "string", "description": "Namespace"},
-		},
-		"required": []string{"name"},
-	})
+	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}}, jsonSchemaRequiredField: []string{nameField}})
 }
 
 func (t *ChatDeleteAgentTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil {
-		return ChatToolErrorResult("internal_error", "missing tool context", "")
+		return ChatToolErrorResult(internalErrorType, "missing tool context", "")
 	}
 
 	var a map[string]any
@@ -47,12 +40,12 @@ func (t *ChatDeleteAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
 	}
 
-	name := chatGetStringArg(a, "name")
+	name := chatGetStringArg(a, nameField)
 	if name == "" {
 		return ChatToolErrorResult("invalid_arguments", "name is required", "Provide the agent name")
 	}
 
-	namespace := chatGetStringArgDefault(a, "namespace", tc.Namespace)
+	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
 
 	agent := &corev1alpha1.Agent{}
 	if err := tc.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, agent); err != nil {
@@ -63,8 +56,5 @@ func (t *ChatDeleteAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		return classifyChatK8sErr(err)
 	}
 
-	return ChatToolSuccess(map[string]any{
-		"name":    agent.Name,
-		"message": "Agent deleted",
-	})
+	return ChatToolSuccess(map[string]any{nameField: agent.Name, messageField: "Agent deleted"})
 }

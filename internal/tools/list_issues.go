@@ -76,31 +76,7 @@ func (t *ListIssuesTool) Description() string {
 
 // Parameters returns the JSON schema for tool parameters.
 func (t *ListIssuesTool) Parameters() json.RawMessage {
-	schema := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"task_name": map[string]any{
-				"type":        "string",
-				"description": "Name of a task whose workspace config has the repo and git credentials",
-			},
-			"repo_url": map[string]any{
-				"type":        "string",
-				"description": "Direct GitHub repository URL (e.g. 'https://github.com/owner/repo'). Falls back to ORKA_GIT_REPO env var if not provided.",
-			},
-			"unassigned_only": map[string]any{
-				"type":        "boolean",
-				"description": "If true, only return issues with no assignee. Defaults to true.",
-			},
-			"per_page": map[string]any{
-				"type":        "integer",
-				"description": "Number of results per page (default: 30, max: 100)",
-			},
-			"page": map[string]any{
-				"type":        "integer",
-				"description": "Page number for pagination (default: 1)",
-			},
-		},
-	}
+	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: workspaceTaskDescription}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Direct GitHub repository URL (e.g. 'https://github.com/owner/repo'). Falls back to ORKA_GIT_REPO env var if not provided."}, "unassigned_only": map[string]any{jsonSchemaTypeField: jsonSchemaTypeBoolean, jsonSchemaDescriptionField: "If true, only return issues with no assignee. Defaults to true."}, perPageField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Number of results per page (default: 30, max: 100)"}, pageField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Page number for pagination (default: 1)"}}}
 	data, _ := json.Marshal(schema)
 	return data
 }

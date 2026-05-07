@@ -21,27 +21,20 @@ import (
 // FetchTaskOutputTool fetches the result/output of a completed task.
 type FetchTaskOutputTool struct{}
 
-func (t *FetchTaskOutputTool) Name() string { return "fetch_task_output" }
+func (t *FetchTaskOutputTool) Name() string { return fetchTaskOutputToolName }
 
 func (t *FetchTaskOutputTool) Description() string {
 	return "Get the result/output of a completed task from its ConfigMap. Returns the task result truncated to 2K characters if large. Do NOT use to check if a task is still running — use check_task_progress for that."
 }
 
 func (t *FetchTaskOutputTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"name":      map[string]any{"type": "string", "description": "Task name"},
-			"namespace": map[string]any{"type": "string", "description": "Namespace"},
-		},
-		"required": []string{"name"},
-	})
+	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: taskNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}}, jsonSchemaRequiredField: []string{nameField}})
 }
 
 func (t *FetchTaskOutputTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil {
-		return ChatToolErrorResult("internal_error", "missing tool context", "")
+		return ChatToolErrorResult(internalErrorType, "missing tool context", "")
 	}
 
 	var a map[string]any
@@ -49,11 +42,11 @@ func (t *FetchTaskOutputTool) Execute(ctx context.Context, args json.RawMessage)
 		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
 	}
 
-	name := chatGetStringArg(a, "name")
+	name := chatGetStringArg(a, nameField)
 	if name == "" {
 		return ChatToolErrorResult("invalid_arguments", "name is required", "Provide the task name")
 	}
-	namespace := chatGetStringArgDefault(a, "namespace", tc.Namespace)
+	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
 
 	task := &corev1alpha1.Task{}
 	if err := tc.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, task); err != nil {
@@ -61,19 +54,19 @@ func (t *FetchTaskOutputTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 
 	if task.Status.ResultRef == nil || !task.Status.ResultRef.Available {
-		return ChatToolErrorResult("not_found", "task has no result yet", "Wait for the task to complete, then try again")
+		return ChatToolErrorResult(errTypeNotFound, "task has no result yet", "Wait for the task to complete, then try again")
 	}
 
 	if tc.ResultStore == nil {
-		return ChatToolErrorResult("internal_error", "result store not configured", "")
+		return ChatToolErrorResult(internalErrorType, "result store not configured", "")
 	}
 
 	data, err := tc.ResultStore.GetResult(ctx, namespace, name)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return ChatToolErrorResult("not_found", "result not found in store", "The result may have been deleted")
+			return ChatToolErrorResult(errTypeNotFound, "result not found in store", "The result may have been deleted")
 		}
-		return ChatToolErrorResult("internal_error", fmt.Sprintf("failed to get result: %v", err), "")
+		return ChatToolErrorResult(internalErrorType, fmt.Sprintf("failed to get result: %v", err), "")
 	}
 
 	result := string(data)
@@ -82,9 +75,5 @@ func (t *FetchTaskOutputTool) Execute(ctx context.Context, args json.RawMessage)
 		result = result[:maxLen] + fmt.Sprintf(" [truncated, full output: %d chars]", len(data))
 	}
 
-	return ChatToolSuccess(map[string]any{
-		"name":   task.Name,
-		"phase":  string(task.Status.Phase),
-		"output": result,
-	})
+	return ChatToolSuccess(map[string]any{nameField: task.Name, phaseField: string(task.Status.Phase), "output": result})
 }

@@ -17,7 +17,7 @@ import (
 // classifyChatK8sErr returns a ChatToolResult for common K8s API errors.
 func classifyChatK8sErr(err error) (string, error) {
 	if apierrors.IsNotFound(err) {
-		return ChatToolErrorResult("not_found", err.Error(), "Check the resource name and namespace")
+		return ChatToolErrorResult(errTypeNotFound, err.Error(), "Check the resource name and namespace")
 	}
 	if apierrors.IsAlreadyExists(err) {
 		return ChatToolErrorResult("already_exists", err.Error(), "Use a different name or delete the existing resource first")
@@ -25,7 +25,7 @@ func classifyChatK8sErr(err error) (string, error) {
 	if apierrors.IsForbidden(err) {
 		return ChatToolErrorResult("permission_denied", err.Error(), "Check RBAC permissions")
 	}
-	return ChatToolErrorResult("internal_error", err.Error(), "")
+	return ChatToolErrorResult(internalErrorType, err.Error(), "")
 }
 
 // checkChatNamespaceScope validates namespace access using ToolContext.

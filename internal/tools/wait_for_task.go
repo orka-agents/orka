@@ -20,28 +20,20 @@ import (
 // WaitForTaskTool waits for a single task to complete.
 type WaitForTaskTool struct{}
 
-func (t *WaitForTaskTool) Name() string { return "wait_for_task" }
+func (t *WaitForTaskTool) Name() string { return waitForTaskToolName }
 
 func (t *WaitForTaskTool) Description() string {
 	return "Wait for a task to complete. Each call waits up to the specified timeout. If the task isn't done, you can call again or do other work. Use after creating a task."
 }
 
 func (t *WaitForTaskTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"name":      map[string]any{"type": "string", "description": "Task name"},
-			"namespace": map[string]any{"type": "string", "description": "Namespace"},
-			"timeout":   map[string]any{"type": "integer", "description": "Seconds to wait (max 60, default 30)"},
-		},
-		"required": []string{"name"},
-	})
+	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: taskNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Seconds to wait (max 60, default 30)"}}, jsonSchemaRequiredField: []string{nameField}})
 }
 
 func (t *WaitForTaskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil {
-		return ChatToolErrorResult("internal_error", "missing tool context", "")
+		return ChatToolErrorResult(internalErrorType, "missing tool context", "")
 	}
 
 	var a map[string]any
@@ -49,12 +41,12 @@ func (t *WaitForTaskTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
 	}
 
-	name := chatGetStringArg(a, "name")
+	name := chatGetStringArg(a, nameField)
 	if name == "" {
 		return ChatToolErrorResult("invalid_arguments", "name is required", "Provide the task name")
 	}
-	namespace := chatGetStringArgDefault(a, "namespace", tc.Namespace)
-	timeout := min(chatGetIntArg(a, "timeout", 30), 60)
+	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
+	timeout := min(chatGetIntArg(a, timeoutField, 30), 60)
 
 	task := &corev1alpha1.Task{}
 	if err := tc.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, task); err != nil {
@@ -91,11 +83,7 @@ func (t *WaitForTaskTool) Execute(ctx context.Context, args json.RawMessage) (st
 }
 
 func chatTaskStatusResult(task *corev1alpha1.Task) (string, error) {
-	data := map[string]any{
-		"name":    task.Name,
-		"phase":   string(task.Status.Phase),
-		"message": task.Status.Message,
-	}
+	data := map[string]any{nameField: task.Name, phaseField: string(task.Status.Phase), messageField: task.Status.Message}
 	if task.Status.StartTime != nil {
 		elapsed := time.Since(task.Status.StartTime.Time)
 		if task.Status.CompletionTime != nil {
@@ -107,11 +95,7 @@ func chatTaskStatusResult(task *corev1alpha1.Task) (string, error) {
 }
 
 func chatTaskTimeoutResult(task *corev1alpha1.Task) (string, error) {
-	data := map[string]any{
-		"name":    task.Name,
-		"phase":   string(task.Status.Phase),
-		"message": "Task is still running. Call wait_for_task again to continue waiting, or do other work in the meantime.",
-	}
+	data := map[string]any{nameField: task.Name, phaseField: string(task.Status.Phase), messageField: "Task is still running. Call wait_for_task again to continue waiting, or do other work in the meantime."}
 	if task.Status.StartTime != nil {
 		data["elapsed"] = time.Since(task.Status.StartTime.Time).Round(time.Second).String()
 	}

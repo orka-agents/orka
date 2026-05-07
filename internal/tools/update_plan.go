@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -24,7 +25,7 @@ func NewUpdatePlanTool() *UpdatePlanTool {
 }
 
 // Name returns the tool name.
-func (t *UpdatePlanTool) Name() string { return "update_plan" }
+func (t *UpdatePlanTool) Name() string { return updatePlanToolName }
 
 // Description returns the tool description for the LLM.
 func (t *UpdatePlanTool) Description() string {
@@ -81,13 +82,13 @@ func (t *UpdatePlanTool) Execute(ctx context.Context, args json.RawMessage) (str
 		return "", fmt.Errorf("plan_document is required")
 	}
 
-	controllerURL := os.Getenv("ORKA_CONTROLLER_URL")
-	taskName := os.Getenv("ORKA_TASK_NAME")
-	taskNamespace := os.Getenv("ORKA_TASK_NAMESPACE")
+	controllerURL := os.Getenv(envOrkaControllerURL)
+	taskName := os.Getenv(envOrkaTaskName)
+	taskNamespace := os.Getenv(envOrkaTaskNamespace)
 	saToken := os.Getenv("ORKA_SA_TOKEN")
 
 	if controllerURL == "" || taskName == "" || taskNamespace == "" {
-		return "", fmt.Errorf("ORKA_CONTROLLER_URL, ORKA_TASK_NAME, and ORKA_TASK_NAMESPACE are required")
+		return "", errors.New(missingControllerTaskEnvMessage)
 	}
 
 	// Read SA token from file if not in env

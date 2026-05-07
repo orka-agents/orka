@@ -43,22 +43,22 @@ type FileReadResult struct {
 func NewFileReadTool() *FileReadTool {
 	workDir := os.Getenv("ORKA_WORK_DIR")
 	if workDir == "" {
-		workDir = "/workspace"
+		workDir = defaultWorkspacePath
 	}
 
 	return &FileReadTool{
 		workDir:     workDir,
 		maxFileSize: 1024 * 1024, // 1MB max
 		allowedPaths: []string{
-			"/workspace",
-			"/tmp",
+			defaultWorkspacePath,
+			tempDirPath,
 		},
 	}
 }
 
 // Name returns the tool name
 func (t *FileReadTool) Name() string {
-	return "file_read"
+	return fileReadToolName
 }
 
 // Description returns the tool description

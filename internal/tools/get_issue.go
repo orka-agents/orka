@@ -76,24 +76,7 @@ func (t *GetIssueTool) Description() string {
 
 // Parameters returns the JSON schema for tool parameters.
 func (t *GetIssueTool) Parameters() json.RawMessage {
-	schema := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"task_name": map[string]any{
-				"type":        "string",
-				"description": "Name of a task whose workspace config has the repo and git credentials",
-			},
-			"repo_url": map[string]any{
-				"type":        "string",
-				"description": "Direct GitHub repository URL (e.g. 'https://github.com/owner/repo'). Falls back to ORKA_GIT_REPO env var if not provided",
-			},
-			"issue_number": map[string]any{
-				"type":        "integer",
-				"description": "GitHub issue number to fetch",
-			},
-		},
-		"required": []string{"issue_number"},
-	}
+	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: workspaceTaskDescription}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Direct GitHub repository URL (e.g. 'https://github.com/owner/repo'). Falls back to ORKA_GIT_REPO env var if not provided"}, githubIssueNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub issue number to fetch"}}, jsonSchemaRequiredField: []string{githubIssueNumberField}}
 	data, _ := json.Marshal(schema)
 	return data
 }

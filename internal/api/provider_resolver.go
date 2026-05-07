@@ -37,6 +37,13 @@ type ResolveOpts struct {
 	RequireModel bool // return error if model is empty after resolution
 }
 
+// ProviderResolutionInfo contains the Provider CRD metadata selected for a request.
+type ProviderResolutionInfo struct {
+	Name      string
+	Namespace string
+	Type      string
+}
+
 // NewProviderResolver creates a new ProviderResolver.
 func NewProviderResolver(c client.Client, config ChatConfig) *ProviderResolver {
 	return &ProviderResolver{client: c, config: config}
@@ -49,6 +56,13 @@ func NewProviderResolver(c client.Client, config ChatConfig) *ProviderResolver {
 // When AgentRef or ProviderName is set, provider lookups are fatal (errors are returned).
 // Otherwise, intermediate lookups are non-fatal and fall through to defaults.
 func (r *ProviderResolver) Resolve(ctx context.Context, opts ResolveOpts) (llm.Provider, string, error) {
+	provider, model, _, err := r.ResolveWithInfo(ctx, opts)
+	return provider, model, err
+}
+
+// ResolveWithInfo finds the appropriate LLM provider and model for a request,
+// and also returns the selected Provider CRD metadata.
+func (r *ProviderResolver) ResolveWithInfo(ctx context.Context, opts ResolveOpts) (llm.Provider, string, ProviderResolutionInfo, error) {
 	if opts.AgentRef != "" || opts.ProviderName != "" {
 		return r.resolveFromExplicit(ctx, opts)
 	}
@@ -57,14 +71,14 @@ func (r *ProviderResolver) Resolve(ctx context.Context, opts ResolveOpts) (llm.P
 
 // resolveFromExplicit handles the chat handler path with explicit provider names
 // and agent refs. Provider lookups by name are fatal.
-func (r *ProviderResolver) resolveFromExplicit(ctx context.Context, opts ResolveOpts) (llm.Provider, string, error) {
+func (r *ProviderResolver) resolveFromExplicit(ctx context.Context, opts ResolveOpts) (llm.Provider, string, ProviderResolutionInfo, error) {
 	var model string
 	var providerCRD *corev1alpha1.Provider
 
 	if opts.AgentRef != "" {
 		agent := &corev1alpha1.Agent{}
 		if err := r.client.Get(ctx, types.NamespacedName{Name: opts.AgentRef, Namespace: opts.Namespace}, agent); err != nil {
-			return nil, "", fmt.Errorf("agent %q not found: %w", opts.AgentRef, err)
+			return nil, "", ProviderResolutionInfo{}, fmt.Errorf("agent %q not found: %w", opts.AgentRef, err)
 		}
 		if agent.Spec.Model != nil && agent.Spec.Model.Name != "" {
 			model = agent.Spec.Model.Name
@@ -72,7 +86,7 @@ func (r *ProviderResolver) resolveFromExplicit(ctx context.Context, opts Resolve
 		if agent.Spec.ProviderRef != nil {
 			p, err := r.LookupProvider(ctx, agent.Spec.ProviderRef.Name, opts.Namespace)
 			if err != nil {
-				return nil, "", err
+				return nil, "", ProviderResolutionInfo{}, err
 			}
 			providerCRD = p
 		}
@@ -81,7 +95,7 @@ func (r *ProviderResolver) resolveFromExplicit(ctx context.Context, opts Resolve
 	if providerCRD == nil && opts.ProviderName != "" {
 		p, err := r.LookupProvider(ctx, opts.ProviderName, opts.Namespace)
 		if err != nil {
-			return nil, "", err
+			return nil, "", ProviderResolutionInfo{}, err
 		}
 		providerCRD = p
 	}
@@ -89,7 +103,7 @@ func (r *ProviderResolver) resolveFromExplicit(ctx context.Context, opts Resolve
 	if providerCRD == nil && r.config.Provider != "" {
 		p, err := r.LookupProvider(ctx, r.config.Provider, opts.Namespace)
 		if err != nil {
-			return nil, "", err
+			return nil, "", ProviderResolutionInfo{}, err
 		}
 		providerCRD = p
 	}
@@ -97,14 +111,14 @@ func (r *ProviderResolver) resolveFromExplicit(ctx context.Context, opts Resolve
 	if providerCRD == nil {
 		p, err := r.LookupProvider(ctx, "default", opts.Namespace)
 		if err != nil {
-			return nil, "", fmt.Errorf("no provider configured and no 'default' Provider CRD found: %w", err)
+			return nil, "", ProviderResolutionInfo{}, fmt.Errorf("no provider configured and no 'default' Provider CRD found: %w", err)
 		}
 		providerCRD = p
 	}
 
 	apiKey, err := r.ResolveAPIKey(ctx, providerCRD)
 	if err != nil {
-		return nil, "", err
+		return nil, "", ProviderResolutionInfo{}, err
 	}
 
 	// Model resolution priority: opts.Model > agent model > provider default > config model
@@ -118,12 +132,17 @@ func (r *ProviderResolver) resolveFromExplicit(ctx context.Context, opts Resolve
 		model = r.config.Model
 	}
 
-	return r.buildProvider(providerCRD, apiKey, model)
+	provider, resolvedModel, err := r.buildProvider(providerCRD, apiKey, model)
+	if err != nil {
+		return nil, "", ProviderResolutionInfo{}, err
+	}
+
+	return provider, resolvedModel, providerResolutionInfo(providerCRD), nil
 }
 
 // resolveFromModelStr handles the compat handler path with "provider/model" format
 // strings. Intermediate provider lookups are non-fatal (silently fall through).
-func (r *ProviderResolver) resolveFromModelStr(ctx context.Context, opts ResolveOpts) (llm.Provider, string, error) {
+func (r *ProviderResolver) resolveFromModelStr(ctx context.Context, opts ResolveOpts) (llm.Provider, string, ProviderResolutionInfo, error) {
 	var providerName, model string
 
 	if idx := strings.Index(opts.ModelStr, "/"); idx > 0 {
@@ -152,14 +171,14 @@ func (r *ProviderResolver) resolveFromModelStr(ctx context.Context, opts Resolve
 	if providerCRD == nil {
 		p := &corev1alpha1.Provider{}
 		if err := r.client.Get(ctx, types.NamespacedName{Name: "default", Namespace: opts.Namespace}, p); err != nil {
-			return nil, "", fmt.Errorf("no provider %q found and no 'default' Provider CRD exists", providerName)
+			return nil, "", ProviderResolutionInfo{}, fmt.Errorf("no provider %q found and no 'default' Provider CRD exists", providerName)
 		}
 		providerCRD = p
 	}
 
 	apiKey, err := r.ResolveAPIKey(ctx, providerCRD)
 	if err != nil {
-		return nil, "", err
+		return nil, "", ProviderResolutionInfo{}, err
 	}
 
 	if model == "" {
@@ -169,10 +188,27 @@ func (r *ProviderResolver) resolveFromModelStr(ctx context.Context, opts Resolve
 		model = r.config.Model
 	}
 	if opts.RequireModel && model == "" {
-		return nil, "", fmt.Errorf("no model specified and no default model configured")
+		return nil, "", ProviderResolutionInfo{}, fmt.Errorf("no model specified and no default model configured")
 	}
 
-	return r.buildProvider(providerCRD, apiKey, model)
+	provider, resolvedModel, err := r.buildProvider(providerCRD, apiKey, model)
+	if err != nil {
+		return nil, "", ProviderResolutionInfo{}, err
+	}
+
+	return provider, resolvedModel, providerResolutionInfo(providerCRD), nil
+}
+
+// providerResolutionInfo extracts stable metadata from a Provider CRD.
+func providerResolutionInfo(providerCRD *corev1alpha1.Provider) ProviderResolutionInfo {
+	if providerCRD == nil {
+		return ProviderResolutionInfo{}
+	}
+	return ProviderResolutionInfo{
+		Name:      providerCRD.Name,
+		Namespace: providerCRD.Namespace,
+		Type:      string(providerCRD.Spec.Type),
+	}
 }
 
 // buildProvider constructs an LLM provider from a Provider CRD, API key, and model.

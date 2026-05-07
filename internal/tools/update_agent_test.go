@@ -19,8 +19,8 @@ import (
 
 func TestUpdateAgentTool_Name(t *testing.T) {
 	tool := &UpdateAgentTool{}
-	if got := tool.Name(); got != "update_agent" {
-		t.Errorf("Name() = %v, want %v", got, "update_agent")
+	if got := tool.Name(); got != updateAgentToolName {
+		t.Errorf("Name() = %v, want %v", got, updateAgentToolName)
 	}
 }
 
@@ -41,14 +41,14 @@ func TestUpdateAgentTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != "object" {
+	if schema[jsonSchemaTypeField] != jsonSchemaTypeObject {
 		t.Error("Parameters schema should have type: object")
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	for _, key := range []string{"name", "namespace", "systemPrompt", "tools", "model"} {
+	for _, key := range []string{nameField, namespaceField, systemPromptField, toolsField, modelField} {
 		if _, ok := props[key]; !ok {
 			t.Errorf("missing %s property", key)
 		}
@@ -58,13 +58,13 @@ func TestUpdateAgentTool_Parameters(t *testing.T) {
 func TestUpdateAgentTool_Execute(t *testing.T) {
 	existingAgent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "my-agent",
-			Namespace: "default",
+			Name:      testMyAgentName,
+			Namespace: defaultNamespace,
 		},
 		Spec: corev1alpha1.AgentSpec{
 			Model: &corev1alpha1.ModelConfig{
-				Provider: "openai",
-				Name:     "gpt-4o",
+				Provider: providerOpenAI,
+				Name:     testGPT4OModel,
 			},
 		},
 	}
@@ -78,33 +78,33 @@ func TestUpdateAgentTool_Execute(t *testing.T) {
 	}{
 		{
 			name:  "update system prompt",
-			args:  map[string]any{"name": "my-agent", "systemPrompt": "You are helpful"},
+			args:  map[string]any{nameField: testMyAgentName, systemPromptField: "You are helpful"},
 			setup: func() *corev1alpha1.Agent { return existingAgent.DeepCopy() },
 		},
 		{
 			name:  "update model with provider/name format",
-			args:  map[string]any{"name": "my-agent", "model": "anthropic/claude-sonnet-4-20250514"},
+			args:  map[string]any{nameField: testMyAgentName, modelField: "anthropic/claude-sonnet-4-20250514"},
 			setup: func() *corev1alpha1.Agent { return existingAgent.DeepCopy() },
 		},
 		{
 			name:  "update model name only",
-			args:  map[string]any{"name": "my-agent", "model": "gpt-4o-mini"},
+			args:  map[string]any{nameField: testMyAgentName, modelField: "gpt-4o-mini"},
 			setup: func() *corev1alpha1.Agent { return existingAgent.DeepCopy() },
 		},
 		{
 			name:  "update tools list",
-			args:  map[string]any{"name": "my-agent", "tools": []any{"web_search", "code_exec"}},
+			args:  map[string]any{nameField: testMyAgentName, toolsField: []any{webSearchToolName, codeExecToolName}},
 			setup: func() *corev1alpha1.Agent { return existingAgent.DeepCopy() },
 		},
 		{
-			name:    "missing name",
+			name:    missingNameCaseName,
 			args:    map[string]any{},
 			setup:   func() *corev1alpha1.Agent { return existingAgent.DeepCopy() },
 			wantErr: true,
 		},
 		{
 			name:    "agent not found",
-			args:    map[string]any{"name": "nonexistent"},
+			args:    map[string]any{nameField: testNonexistentName},
 			setup:   func() *corev1alpha1.Agent { return nil },
 			wantErr: true,
 		},
@@ -117,7 +117,7 @@ func TestUpdateAgentTool_Execute(t *testing.T) {
 			if agent != nil {
 				fc = newFakeClient(agent)
 			}
-			tc := &ToolContext{Client: fc, Namespace: "default"}
+			tc := &ToolContext{Client: fc, Namespace: defaultNamespace}
 			ctx := WithToolContext(context.Background(), tc)
 
 			argsJSON, _ := json.Marshal(tt.args)
@@ -147,11 +147,11 @@ func TestUpdateAgentTool_Execute(t *testing.T) {
 			if !ok {
 				t.Fatalf("expected data to be map, got %T", res.Data)
 			}
-			if data["name"] != "my-agent" {
-				t.Errorf("expected name 'my-agent', got %v", data["name"])
+			if data[nameField] != testMyAgentName {
+				t.Errorf("expected name 'my-agent', got %v", data[nameField])
 			}
-			if data["message"] != "Agent updated" {
-				t.Errorf("expected message 'Agent updated', got %v", data["message"])
+			if data[messageField] != "Agent updated" {
+				t.Errorf("expected message 'Agent updated', got %v", data[messageField])
 			}
 		})
 	}
@@ -160,21 +160,17 @@ func TestUpdateAgentTool_Execute(t *testing.T) {
 func TestUpdateAgentTool_Execute_VerifyUpdatedFields(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "my-agent",
-			Namespace: "default",
+			Name:      testMyAgentName,
+			Namespace: defaultNamespace,
 		},
 		Spec: corev1alpha1.AgentSpec{},
 	}
 
 	fc := newFakeClient(agent)
-	tc := &ToolContext{Client: fc, Namespace: "default"}
+	tc := &ToolContext{Client: fc, Namespace: defaultNamespace}
 	ctx := WithToolContext(context.Background(), tc)
 
-	args := map[string]any{
-		"name":         "my-agent",
-		"systemPrompt": "Updated prompt",
-		"tools":        []any{"web_search"},
-	}
+	args := map[string]any{nameField: testMyAgentName, systemPromptField: "Updated prompt", toolsField: []any{webSearchToolName}}
 	argsJSON, _ := json.Marshal(args)
 
 	tool := &UpdateAgentTool{}
@@ -192,13 +188,13 @@ func TestUpdateAgentTool_Execute_VerifyUpdatedFields(t *testing.T) {
 
 	// Verify persisted changes
 	updated := &corev1alpha1.Agent{}
-	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: "my-agent", Namespace: "default"}, updated); err != nil {
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, updated); err != nil {
 		t.Fatalf("failed to get updated agent: %v", err)
 	}
 	if updated.Spec.SystemPrompt == nil || updated.Spec.SystemPrompt.Inline != "Updated prompt" {
 		t.Errorf("systemPrompt not updated, got %v", updated.Spec.SystemPrompt)
 	}
-	if len(updated.Spec.Tools) != 1 || updated.Spec.Tools[0].Name != "web_search" {
+	if len(updated.Spec.Tools) != 1 || updated.Spec.Tools[0].Name != webSearchToolName {
 		t.Errorf("tools not updated, got %v", updated.Spec.Tools)
 	}
 }
@@ -220,11 +216,11 @@ func TestUpdateAgentTool_Execute_MissingToolContext(t *testing.T) {
 
 func TestUpdateAgentTool_Execute_InvalidJSON(t *testing.T) {
 	fc := newFakeClient()
-	tc := &ToolContext{Client: fc, Namespace: "default"}
+	tc := &ToolContext{Client: fc, Namespace: defaultNamespace}
 	ctx := WithToolContext(context.Background(), tc)
 
 	tool := &UpdateAgentTool{}
-	result, err := tool.Execute(ctx, json.RawMessage(`{invalid}`))
+	result, err := tool.Execute(ctx, json.RawMessage(invalidJSONText))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

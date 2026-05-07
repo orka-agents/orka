@@ -19,42 +19,29 @@ import (
 // CreateAgentTaskTool creates an agent-runtime Task CR.
 type CreateAgentTaskTool struct{}
 
-func (t *CreateAgentTaskTool) Name() string { return "create_agent_task" }
+func (t *CreateAgentTaskTool) Name() string { return createAgentTaskToolName }
 
 func (t *CreateAgentTaskTool) Description() string {
 	return "Create a task using an external CLI runtime (Copilot, Claude Code, Codex) for code changes in a git repo. Do NOT use for simple container commands or direct LLM reasoning."
 }
 
 func (t *CreateAgentTaskTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"name":      map[string]any{"type": "string", "description": "Task name"},
-			"prompt":    map[string]any{"type": "string", "description": "The prompt/instruction for the agent"},
-			"agentRef":  map[string]any{"type": "string", "description": "Agent name with runtime configured"},
-			"namespace": map[string]any{"type": "string", "description": "Namespace"},
-			"timeout":   map[string]any{"type": "string", "description": "Timeout duration, e.g. \"5m\""},
-			"maxTurns":  map[string]any{"type": "integer", "description": "Maximum agent loop iterations"},
-			"workspace": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"gitRepo":      map[string]any{"type": "string", "description": "Git repository URL"},
-					"branch":       map[string]any{"type": "string", "description": "Git branch to clone from (must exist). Omit to use the default branch."},
-					"pushBranch":   map[string]any{"type": "string", "description": "Branch name to push changes to (will be created if it doesn't exist). Use this for new feature branches."},
-					"gitSecretRef": map[string]any{"type": "string", "description": "Optional secret name containing git credentials. Omit to auto-discover git credentials or reuse the Copilot agent secret when available."},
-					"subPath":      map[string]any{"type": "string", "description": "Sub-path within the repo"},
-				},
-			},
-			"schedule": map[string]any{"type": "string", "description": "Cron schedule for recurring tasks (e.g., '0 */6 * * *' for every 6 hours, '0 9 * * 1-5' for weekdays at 9am, '*/5 * * * *' for every 5 minutes). Leave empty for one-time tasks."},
-		},
-		"required": []string{"name", "prompt", "agentRef"},
+	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: taskNameDescription}, promptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "The prompt/instruction for the agent"}, agentRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Agent name with runtime configured"}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, "maxTurns": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Maximum agent loop iterations"}, workspaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
+		"gitRepo":      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Git repository URL"},
+		"branch":       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Git branch to clone from (must exist). Omit to use the default branch."},
+		"pushBranch":   map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Branch name to push changes to (will be created if it doesn't exist). Use this for new feature branches."},
+		"gitSecretRef": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional secret name containing git credentials. Omit to auto-discover git credentials or reuse the Copilot agent secret when available."},
+		"subPath":      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo"},
+	},
+	}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription},
+	}, jsonSchemaRequiredField: []string{nameField, promptField, agentRefField},
 	})
 }
 
 func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil {
-		return ChatToolErrorResult("internal_error", "missing tool context", "")
+		return ChatToolErrorResult(internalErrorType, "missing tool context", "")
 	}
 
 	var a map[string]any
@@ -66,17 +53,17 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		return ChatToolErrorResult(limitErr.Type, limitErr.Message, limitErr.Suggestion)
 	}
 
-	prompt := chatGetStringArg(a, "prompt")
+	prompt := chatGetStringArg(a, promptField)
 	if prompt == "" {
 		return ChatToolErrorResult("invalid_arguments", "prompt is required", "Provide a prompt for the agent task")
 	}
 
-	agentRef := chatGetStringArg(a, "agentRef")
+	agentRef := chatGetStringArg(a, agentRefField)
 	if agentRef == "" {
 		return ChatToolErrorResult("invalid_arguments", "agentRef is required", "Provide an agent reference for the agent task")
 	}
 
-	namespace := chatGetStringArgDefault(a, "namespace", tc.Namespace)
+	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
 	if r, ok := checkChatNamespaceScope(tc, namespace); !ok {
 		return r, nil
 	}
@@ -112,7 +99,7 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		agentRuntime.MaxTurns = &mt
 	}
 
-	if ws, ok := a["workspace"]; ok {
+	if ws, ok := a[workspaceField]; ok {
 		if wsMap, ok := ws.(map[string]any); ok {
 			if agentRuntime == nil {
 				agentRuntime = &corev1alpha1.AgentRuntimeSpec{}
@@ -132,12 +119,12 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 			}
 			agent, err := loadAgent(ctx, tc.Client, namespace, agentRef)
 			if err != nil {
-				result, _ := ChatToolErrorResult("internal_error", err.Error(), "")
+				result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
 				return result, nil
 			}
 			secretRef, err := resolveWorkspaceGitSecretRef(ctx, tc.Client, namespace, agent, chatGetStringArg(wsMap, "gitSecretRef"))
 			if err != nil {
-				result, _ := ChatToolErrorResult("internal_error", err.Error(), "")
+				result, _ := ChatToolErrorResult(internalErrorType, err.Error(), "")
 				return result, nil
 			}
 			wsCfg.GitSecretRef = secretRef
@@ -147,7 +134,7 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 
 	task.Spec.AgentRuntime = agentRuntime
 
-	schedule := chatGetStringArg(a, "schedule")
+	schedule := chatGetStringArg(a, scheduleField)
 	if schedule != "" {
 		task.Spec.Schedule = schedule
 	}
@@ -157,10 +144,5 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 
 	tc.IncrementTasks()
-	return ChatToolSuccess(map[string]any{
-		"name":      task.Name,
-		"namespace": task.Namespace,
-		"phase":     "Pending",
-		"message":   taskCreatedMsg(schedule),
-	})
+	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(schedule)})
 }

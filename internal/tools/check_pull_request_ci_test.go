@@ -29,7 +29,7 @@ const (
 func TestCheckPullRequestCITool_Metadata(t *testing.T) {
 	tool := NewCheckPullRequestCITool(newFakeClient())
 
-	if tool.Name() != "check_pull_request_ci" {
+	if tool.Name() != checkPullRequestCIToolName {
 		t.Errorf("unexpected name: %s", tool.Name())
 	}
 	if !strings.Contains(tool.Description(), "Check GitHub CI status") {
@@ -45,8 +45,8 @@ func TestCheckPullRequestCITool_Metadata(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("failed to parse parameters: %v", err)
 	}
-	props := schema["properties"].(map[string]any)
-	for _, field := range []string{"task_name", "repo_url", "pr_number", "wait_timeout", "poll_interval"} {
+	props := schema[jsonSchemaPropertiesField].(map[string]any)
+	for _, field := range []string{taskNameField, repoURLField, githubPRNumberField, "wait_timeout", "poll_interval"} {
 		if _, ok := props[field]; !ok {
 			t.Errorf("parameters should contain %s", field)
 		}
@@ -64,15 +64,15 @@ func TestCheckPullRequestCITool_CheckStatuses(t *testing.T) {
 		wantDetails   string
 	}{
 		{
-			name:          "passed",
+			name:          passedStatusString,
 			checkRunsJSON: `{"total_count":2,"check_runs":[{"name":"build","status":"completed","conclusion":"success"},{"name":"lint","status":"completed","conclusion":"success"}]}`,
-			wantStatus:    "passed",
+			wantStatus:    passedStatusString,
 			wantPassed:    true,
 		},
 		{
-			name:          "failed",
+			name:          failedStatusString,
 			checkRunsJSON: `{"total_count":2,"check_runs":[{"name":"build","status":"completed","conclusion":"success"},{"name":"lint","status":"completed","conclusion":"failure"}]}`,
-			wantStatus:    "failed",
+			wantStatus:    failedStatusString,
 			wantFailed:    true,
 			wantDetails:   "lint",
 		},
@@ -118,10 +118,10 @@ func TestCheckPullRequestCITool_CheckStatuses(t *testing.T) {
 				k8sClient:  newFakeClient(task, secret),
 				apiBaseURL: server.URL,
 			}
-			t.Setenv("ORKA_TASK_NAMESPACE", "default")
+			t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 			args, _ := json.Marshal(CheckPullRequestCIArgs{
-				TaskName: "coder-task",
+				TaskName: testCoderTaskName,
 				PRNumber: 42,
 			})
 
@@ -186,12 +186,12 @@ func TestCheckPullRequestCITool_WaitsUntilChecksPass(t *testing.T) {
 		k8sClient:  newFakeClient(task, secret),
 		apiBaseURL: server.URL,
 	}
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(CheckPullRequestCIArgs{
-		TaskName:     "coder-task",
+		TaskName:     testCoderTaskName,
 		PRNumber:     42,
-		WaitTimeout:  "100ms",
+		WaitTimeout:  shortPollIntervalString,
 		PollInterval: "1ms",
 	})
 
@@ -204,7 +204,7 @@ func TestCheckPullRequestCITool_WaitsUntilChecksPass(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &res); err != nil {
 		t.Fatalf("failed to parse result: %v", err)
 	}
-	if res.Status != "passed" {
+	if res.Status != passedStatusString {
 		t.Errorf("status = %q, want passed", res.Status)
 	}
 	if !res.ChecksPassed || res.ChecksPending || res.WaitTimedOut {
@@ -238,10 +238,10 @@ func TestCheckPullRequestCITool_WaitTimeoutPending(t *testing.T) {
 		k8sClient:  newFakeClient(task, secret),
 		apiBaseURL: server.URL,
 	}
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	args, _ := json.Marshal(CheckPullRequestCIArgs{
-		TaskName:     "coder-task",
+		TaskName:     testCoderTaskName,
 		PRNumber:     42,
 		WaitTimeout:  "5ms",
 		PollInterval: "1ms",
@@ -284,21 +284,21 @@ func TestCheckPullRequestCITool_InvalidArgs(t *testing.T) {
 
 func checkPullRequestCITestObjects() (*corev1alpha1.Task, *corev1.Secret) {
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "coder-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      "https://github.com/sozercan/ayna",
-					Branch:       "main",
-					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+					GitRepo:      testSozercanAynaRepoURL,
+					Branch:       testBranch,
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
 				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data:       map[string][]byte{"token": []byte("test-token")},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 	return task, secret
 }

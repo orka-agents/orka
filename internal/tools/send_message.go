@@ -76,10 +76,10 @@ func (t *SendMessageTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return "", fmt.Errorf("to_task and content are required")
 	}
 
-	taskName := os.Getenv("ORKA_TASK_NAME")
-	namespace := os.Getenv("ORKA_TASK_NAMESPACE")
-	parentTask := os.Getenv("ORKA_PARENT_TASK")
-	controllerURL := strings.TrimRight(os.Getenv("ORKA_CONTROLLER_URL"), "/")
+	taskName := os.Getenv(envOrkaTaskName)
+	namespace := os.Getenv(envOrkaTaskNamespace)
+	parentTask := os.Getenv(envOrkaParentTask)
+	controllerURL := strings.TrimRight(os.Getenv(envOrkaControllerURL), "/")
 
 	if controllerURL == "" || taskName == "" || namespace == "" || parentTask == "" {
 		return "", fmt.Errorf("messaging requires ORKA_CONTROLLER_URL, ORKA_TASK_NAME, ORKA_TASK_NAMESPACE, and ORKA_PARENT_TASK")

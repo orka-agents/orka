@@ -24,81 +24,40 @@ import (
 // ChatCreateAgentTool creates an Agent CRD from the chat context.
 type ChatCreateAgentTool struct{}
 
-func (t *ChatCreateAgentTool) Name() string { return "create_agent" }
+func (t *ChatCreateAgentTool) Name() string { return createAgentToolName }
 
 func (t *ChatCreateAgentTool) Description() string {
 	return "Create an agent with model, tools, and optional runtime and coordination configuration. Enable coordination to allow this agent to delegate tasks to other agents. Provide initialPrompt to also create and start a Task immediately."
 }
 
 func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"name":         map[string]any{"type": "string", "description": "Agent name"},
-			"namespace":    map[string]any{"type": "string", "description": "Namespace"},
-			"providerRef":  map[string]any{"type": "string", "description": "Optional Provider CRD reference name. Omit for runtime Agents; provide explicitly for AI/coordinator Agents when a specific provider is required."},
-			"systemPrompt": map[string]any{"type": "string", "description": "System prompt for the agent"},
-			"tools":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Tool names to attach"},
-			"resources": map[string]any{
-				"type":        "object",
-				"description": `Optional Kubernetes resource requests/limits for tasks using this agent, e.g. {requests:{cpu:"100m",memory:"512Mi"},limits:{cpu:"1",memory:"2Gi"}}`,
-				"properties": map[string]any{
-					"requests": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
-					"limits":   map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
-				},
-			},
-			"model": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"provider":    map[string]any{"type": "string", "description": "Model provider (e.g. anthropic, openai)"},
-					"name":        map[string]any{"type": "string", "description": "Model name"},
-					"temperature": map[string]any{"type": "number", "description": "Sampling temperature"},
-				},
-			},
-			"runtime": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"type":                map[string]any{"type": "string", "description": "Runtime type: copilot, claude, or codex"},
-					"defaultMaxTurns":     map[string]any{"type": "integer", "description": "Default max agent loop iterations"},
-					"defaultAllowedTools": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Default CLI tools allowed for tasks using this runtime agent"},
-					"defaultAllowBash":    map[string]any{"type": "boolean", "description": "Whether bash is allowed by default for tasks using this runtime agent"},
-					"secretRef":           map[string]any{"type": "string", "description": "Optional secret name containing runtime credentials. Omit to auto-discover the standard secret for this runtime."},
-				},
-			},
-			"initialPrompt": map[string]any{
-				"type":        "string",
-				"description": "When provided, automatically create and start a Task using this agent with this prompt. One tool call = agent + task. Leave empty to only create the agent config without running it.",
-			},
-			"coordination": map[string]any{
-				"type":        "object",
-				"description": "Enable multi-agent coordination so this agent can delegate tasks to other agents via delegate_task/wait_for_tasks tools",
-				"properties": map[string]any{
-					"enabled":               map[string]any{"type": "boolean", "description": "Enable coordination (delegate_task/wait_for_tasks tools)"},
-					"maxConcurrentChildren": map[string]any{"type": "integer", "description": "Max concurrent child tasks (default 5)"},
-					"maxDepth":              map[string]any{"type": "integer", "description": "Max delegation depth (default 3)"},
-					"allowedAgents": map[string]any{
-						"type":        "array",
-						"description": "List of agent names this agent can delegate to. If empty, can delegate to any agent.",
-						"items": map[string]any{
-							"type": "object",
-							"properties": map[string]any{
-								"name":      map[string]any{"type": "string", "description": "Agent name"},
-								"namespace": map[string]any{"type": "string", "description": "Agent namespace (defaults to same namespace)"},
-							},
-							"required": []string{"name"},
-						},
-					},
-				},
-			},
+	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, providerRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Provider CRD reference name. Omit for runtime Agents; provide explicitly for AI/coordinator Agents when a specific provider is required."}, systemPromptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "System prompt for the agent"}, toolsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Tool names to attach"}, "resources": map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: `Optional Kubernetes resource requests/limits for tasks using this agent, e.g. {requests:{cpu:"100m",memory:"512Mi"},limits:{cpu:"1",memory:"2Gi"}}`, jsonSchemaPropertiesField: map[string]any{
+		"requests": map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, "additionalProperties": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}},
+		"limits":   map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, "additionalProperties": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}},
+	},
+	}, modelField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
+		"provider": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model provider (e.g. anthropic, openai)"}, nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model name"}, "temperature": map[string]any{jsonSchemaTypeField: "number", jsonSchemaDescriptionField: "Sampling temperature"},
+	},
+	}, runtimeField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{jsonSchemaTypeField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Runtime type: copilot, claude, or codex"}, "defaultMaxTurns": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Default max agent loop iterations"},
+		"defaultAllowedTools": map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Default CLI tools allowed for tasks using this runtime agent"},
+		"defaultAllowBash":    map[string]any{jsonSchemaTypeField: jsonSchemaTypeBoolean, jsonSchemaDescriptionField: "Whether bash is allowed by default for tasks using this runtime agent"}, secretRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional secret name containing runtime credentials. Omit to auto-discover the standard secret for this runtime."},
+	},
+	}, "initialPrompt": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "When provided, automatically create and start a Task using this agent with this prompt. One tool call = agent + task. Leave empty to only create the agent config without running it."},
+		"coordination": map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "Enable multi-agent coordination so this agent can delegate tasks to other agents via delegate_task/wait_for_tasks tools", jsonSchemaPropertiesField: map[string]any{
+			enabledString:           map[string]any{jsonSchemaTypeField: jsonSchemaTypeBoolean, jsonSchemaDescriptionField: "Enable coordination (delegate_task/wait_for_tasks tools)"},
+			"maxConcurrentChildren": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Max concurrent child tasks (default 5)"},
+			"maxDepth":              map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Max delegation depth (default 3)"},
+			"allowedAgents":         map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, jsonSchemaDescriptionField: "List of agent names this agent can delegate to. If empty, can delegate to any agent.", itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Agent namespace (defaults to same namespace)"}}, jsonSchemaRequiredField: []string{nameField}}},
 		},
-		"required": []string{"name"},
+		},
+	}, jsonSchemaRequiredField: []string{nameField},
 	})
 }
 
 func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil {
-		return ChatToolErrorResult("internal_error", "missing tool context", "")
+		return ChatToolErrorResult(internalErrorType, "missing tool context", "")
 	}
 
 	var a map[string]any
@@ -106,12 +65,12 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
 	}
 
-	name := chatGetStringArg(a, "name")
+	name := chatGetStringArg(a, nameField)
 	if name == "" {
 		return ChatToolErrorResult("invalid_arguments", "name is required", "Provide a name for the agent")
 	}
 
-	namespace := chatGetStringArgDefault(a, "namespace", tc.Namespace)
+	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
 	if r, ok := checkChatNamespaceScope(tc, namespace); !ok {
 		return r, nil
 	}
@@ -130,11 +89,11 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 
 	// Model configuration
-	if modelObj, ok := a["model"]; ok {
+	if modelObj, ok := a[modelField]; ok {
 		switch m := modelObj.(type) {
 		case map[string]any:
 			agent.Spec.Model = &corev1alpha1.ModelConfig{
-				Name:     chatGetStringArg(m, "name"),
+				Name:     chatGetStringArg(m, nameField),
 				Provider: chatGetStringArg(m, "provider"),
 			}
 			if temp, ok := m["temperature"]; ok {
@@ -153,7 +112,7 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 
 	// Set providerRef only when explicitly provided. Runtime Agents clear it below.
-	if providerRefName := chatGetStringArg(a, "providerRef"); providerRefName != "" {
+	if providerRefName := chatGetStringArg(a, providerRefField); providerRefName != "" {
 		agent.Spec.ProviderRef = &corev1alpha1.ProviderReference{Name: providerRefName}
 	}
 
@@ -161,13 +120,13 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		agent.Spec.Model.Provider = ""
 	}
 
-	if systemPrompt := chatGetStringArg(a, "systemPrompt"); systemPrompt != "" {
+	if systemPrompt := chatGetStringArg(a, systemPromptField); systemPrompt != "" {
 		agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{
 			Inline: systemPrompt,
 		}
 	}
 
-	if toolNames := chatGetStringSliceArg(a, "tools"); len(toolNames) > 0 {
+	if toolNames := chatGetStringSliceArg(a, toolsField); len(toolNames) > 0 {
 		for _, tn := range toolNames {
 			agent.Spec.Tools = append(agent.Spec.Tools, corev1alpha1.ToolReference{Name: tn})
 		}
@@ -193,20 +152,12 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		return t.handleInitialPrompt(ctx, tc, agent, namespace, initialPrompt)
 	}
 
-	return ChatToolSuccess(map[string]any{
-		"name":      agent.Name,
-		"namespace": agent.Namespace,
-		"message":   "Agent created",
-	})
+	return ChatToolSuccess(map[string]any{nameField: agent.Name, namespaceField: agent.Namespace, messageField: "Agent created"})
 }
 
 func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolContext, agent *corev1alpha1.Agent, namespace, initialPrompt string) (string, error) {
 	if limitErr := tc.CheckTaskLimit(); limitErr != nil {
-		return ChatToolSuccess(map[string]any{
-			"name":      agent.Name,
-			"namespace": agent.Namespace,
-			"message":   "Agent created, but task creation skipped: task limit reached",
-		})
+		return ChatToolSuccess(map[string]any{nameField: agent.Name, namespaceField: agent.Namespace, messageField: "Agent created, but task creation skipped: task limit reached"})
 	}
 
 	taskType := corev1alpha1.TaskTypeAI
@@ -239,8 +190,7 @@ func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolC
 	if err := tc.Client.Create(ctx, task); err != nil {
 		return ChatToolSuccess(map[string]any{
 			"agentName":      agent.Name,
-			"agentNamespace": agent.Namespace,
-			"message":        fmt.Sprintf("Agent created, but task creation failed: %v", err),
+			"agentNamespace": agent.Namespace, messageField: fmt.Sprintf("Agent created, but task creation failed: %v", err),
 		})
 	}
 
@@ -249,8 +199,7 @@ func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolC
 		"agentName":      agent.Name,
 		"agentNamespace": agent.Namespace,
 		"taskName":       task.Name,
-		"taskNamespace":  task.Namespace,
-		"message":        "Agent created and task started",
+		"taskNamespace":  task.Namespace, messageField: "Agent created and task started",
 	})
 }
 
@@ -316,11 +265,11 @@ func parseResourceListArg(resourcesMap map[string]any, key string) (corev1.Resou
 // parseRuntimeConfig extracts runtime configuration from chat args into the agent spec.
 func parseRuntimeConfig(ctx context.Context, k8sClient client.Reader, namespace string, a map[string]any, agent *corev1alpha1.Agent) (string, bool) {
 	if coord, ok := a["coordination"].(map[string]any); ok {
-		if enabled, ok := coord["enabled"].(bool); ok && enabled {
+		if enabled, ok := coord[enabledString].(bool); ok && enabled {
 			return "", true
 		}
 	}
-	rt, ok := a["runtime"]
+	rt, ok := a[runtimeField]
 	if !ok {
 		return "", true
 	}
@@ -328,7 +277,7 @@ func parseRuntimeConfig(ctx context.Context, k8sClient client.Reader, namespace 
 	if !ok {
 		return "", true
 	}
-	runtimeType := chatGetStringArg(rtMap, "type")
+	runtimeType := chatGetStringArg(rtMap, jsonSchemaTypeField)
 	if runtimeType == "" {
 		return "", true
 	}
@@ -356,11 +305,11 @@ func parseRuntimeConfig(ctx context.Context, k8sClient client.Reader, namespace 
 }
 
 func chatGetRuntimeSecretRefArg(a map[string]any) string {
-	rt, ok := a["runtime"].(map[string]any)
+	rt, ok := a[runtimeField].(map[string]any)
 	if !ok {
 		return ""
 	}
-	return chatGetStringArg(rt, "secretRef")
+	return chatGetStringArg(rt, secretRefField)
 }
 
 // parseCoordinationConfig extracts coordination configuration from chat args into the agent spec.
@@ -374,7 +323,7 @@ func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) {
 		return
 	}
 	coordCfg := &corev1alpha1.CoordinationConfig{}
-	if enabled, ok := coordMap["enabled"].(bool); ok {
+	if enabled, ok := coordMap[enabledString].(bool); ok {
 		coordCfg.Enabled = enabled
 	}
 	if maxCC, ok := coordMap["maxConcurrentChildren"].(float64); ok {
@@ -390,8 +339,8 @@ func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) {
 				continue
 			}
 			aa := corev1alpha1.AllowedAgent{
-				Name:      chatGetStringArg(aMap, "name"),
-				Namespace: chatGetStringArg(aMap, "namespace"),
+				Name:      chatGetStringArg(aMap, nameField),
+				Namespace: chatGetStringArg(aMap, namespaceField),
 			}
 			if aa.Name != "" {
 				coordCfg.AllowedAgents = append(coordCfg.AllowedAgents, aa)

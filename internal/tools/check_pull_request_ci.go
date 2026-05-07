@@ -61,7 +61,7 @@ func NewCheckPullRequestCITool(k8sClient client.Client) *CheckPullRequestCITool 
 
 // Name returns the tool name.
 func (t *CheckPullRequestCITool) Name() string {
-	return "check_pull_request_ci"
+	return checkPullRequestCIToolName
 }
 
 // Description returns the tool description.
@@ -72,31 +72,9 @@ func (t *CheckPullRequestCITool) Description() string {
 
 // Parameters returns the JSON schema for tool parameters.
 func (t *CheckPullRequestCITool) Parameters() json.RawMessage {
-	schema := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"task_name": map[string]any{
-				"type":        "string",
-				"description": "Optional task whose workspace config has the repo and git credentials",
-			},
-			"repo_url": map[string]any{
-				"type":        "string",
-				"description": "Optional GitHub repository URL. Falls back to ORKA_GIT_REPO when task_name is empty",
-			},
-			"pr_number": map[string]any{
-				"type":        "integer",
-				"description": "GitHub pull request number to inspect",
-			},
-			"wait_timeout": map[string]any{
-				"type":        "string",
-				"description": "Optional maximum time to wait for pending checks (for example '30m'). Empty means one immediate check",
-			},
-			"poll_interval": map[string]any{
-				"type":        "string",
-				"description": "Optional delay between polls while waiting (for example '30s'). Defaults to '30s' when wait_timeout is set",
-			},
-		},
-		"required": []string{"pr_number"},
+	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional task whose workspace config has the repo and git credentials"}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional GitHub repository URL. Falls back to ORKA_GIT_REPO when task_name is empty"}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number to inspect"}, "wait_timeout": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional maximum time to wait for pending checks (for example '30m'). Empty means one immediate check"},
+		"poll_interval": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional delay between polls while waiting (for example '30s'). Defaults to '30s' when wait_timeout is set"},
+	}, jsonSchemaRequiredField: []string{githubPRNumberField},
 	}
 	data, _ := json.Marshal(schema)
 	return data
@@ -239,7 +217,7 @@ func checkPullRequestCIOnce(ctx context.Context, token, owner, repo string, prNu
 	}
 
 	if merged {
-		result.Status = "merged"
+		result.Status = mergedStatusString
 		result.Message = "pull request is already merged"
 		return result, true, nil
 	}
@@ -267,11 +245,11 @@ func checkPullRequestCIOnce(ctx context.Context, token, owner, repo string, prNu
 
 	switch {
 	case ciResult.Passed:
-		result.Status = "passed"
+		result.Status = passedStatusString
 		result.Message = "all CI checks passed"
 		return result, true, nil
 	case ciResult.Failed:
-		result.Status = "failed"
+		result.Status = failedStatusString
 		result.Message = "one or more CI checks failed"
 		return result, true, nil
 	case ciResult.Pending:

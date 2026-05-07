@@ -36,17 +36,17 @@ func TestGetIssueTool_Metadata(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("failed to parse parameters schema: %v", err)
 	}
-	props := schema["properties"].(map[string]any)
-	for _, field := range []string{"task_name", "repo_url", "issue_number"} {
+	props := schema[jsonSchemaPropertiesField].(map[string]any)
+	for _, field := range []string{taskNameField, repoURLField, githubIssueNumberField} {
 		if _, ok := props[field]; !ok {
 			t.Errorf("parameters should contain %s", field)
 		}
 	}
-	required, ok := schema["required"].([]any)
+	required, ok := schema[jsonSchemaRequiredField].([]any)
 	if !ok {
 		t.Fatal("schema missing required field")
 	}
-	if len(required) != 1 || required[0].(string) != "issue_number" {
+	if len(required) != 1 || required[0].(string) != githubIssueNumberField {
 		t.Errorf("expected required=[issue_number], got %v", required)
 	}
 }
@@ -75,8 +75,8 @@ func TestGetIssueTool_FullDetails(t *testing.T) {
 				"created_at": "2025-01-15T10:00:00Z"
 			}`)
 		case strings.HasSuffix(r.URL.Path, "/issues/42/comments"):
-			if r.URL.Query().Get("per_page") != "30" {
-				t.Errorf("expected per_page=30, got %s", r.URL.Query().Get("per_page"))
+			if r.URL.Query().Get(perPageField) != "30" {
+				t.Errorf("expected per_page=30, got %s", r.URL.Query().Get(perPageField))
 			}
 			_, _ = fmt.Fprint(w, `[
 				{"user": {"login": "dave"}, "body": "I can reproduce this.", "created_at": "2025-01-15T11:00:00Z"},
@@ -89,12 +89,12 @@ func TestGetIssueTool_FullDetails(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &GetIssueTool{apiBaseURL: server.URL}
 
 	args, _ := json.Marshal(GetIssueArgs{
-		RepoURL:     "https://github.com/testorg/testrepo",
+		RepoURL:     testOrgTestRepoURL,
 		IssueNumber: 42,
 	})
 
@@ -170,12 +170,12 @@ func TestGetIssueTool_NoComments(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &GetIssueTool{apiBaseURL: server.URL}
 
 	args, _ := json.Marshal(GetIssueArgs{
-		RepoURL:     "https://github.com/org/repo",
+		RepoURL:     testOrgRepoURL,
 		IssueNumber: 10,
 	})
 
@@ -214,7 +214,7 @@ func TestGetIssueTool_IssueNumberRequired(t *testing.T) {
 
 	// Test with issue_number = 0 (default)
 	args, _ := json.Marshal(GetIssueArgs{
-		RepoURL: "https://github.com/org/repo",
+		RepoURL: testOrgRepoURL,
 	})
 
 	_, err := tool.Execute(context.Background(), args)
@@ -227,7 +227,7 @@ func TestGetIssueTool_IssueNumberRequired(t *testing.T) {
 
 	// Test with negative issue_number
 	args, _ = json.Marshal(GetIssueArgs{
-		RepoURL:     "https://github.com/org/repo",
+		RepoURL:     testOrgRepoURL,
 		IssueNumber: -1,
 	})
 
@@ -247,12 +247,12 @@ func TestGetIssueTool_GitHub404(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &GetIssueTool{apiBaseURL: server.URL}
 
 	args, _ := json.Marshal(GetIssueArgs{
-		RepoURL:     "https://github.com/org/repo",
+		RepoURL:     testOrgRepoURL,
 		IssueNumber: 9999,
 	})
 
@@ -266,7 +266,7 @@ func TestGetIssueTool_GitHub404(t *testing.T) {
 }
 
 func TestGetIssueTool_NoRepoURL(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 	t.Setenv("ORKA_GIT_REPO", "")
 
 	tool := NewGetIssueTool(nil)
@@ -307,12 +307,12 @@ func TestGetIssueTool_WithRepoURL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &GetIssueTool{apiBaseURL: server.URL}
 
 	args, _ := json.Marshal(GetIssueArgs{
-		RepoURL:     "https://github.com/myorg/myrepo",
+		RepoURL:     testMyOrgRepoURL,
 		IssueNumber: 5,
 	})
 
@@ -352,12 +352,12 @@ func TestGetIssueTool_CommentsEndpointFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &GetIssueTool{apiBaseURL: server.URL}
 
 	args, _ := json.Marshal(GetIssueArgs{
-		RepoURL:     "https://github.com/org/repo",
+		RepoURL:     testOrgRepoURL,
 		IssueNumber: 7,
 	})
 
@@ -417,12 +417,12 @@ func TestGetIssueTool_LabelsAndAssignees(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	tool := &GetIssueTool{apiBaseURL: server.URL}
 
 	args, _ := json.Marshal(GetIssueArgs{
-		RepoURL:     "https://github.com/org/repo",
+		RepoURL:     testOrgRepoURL,
 		IssueNumber: 20,
 	})
 
@@ -482,7 +482,7 @@ func TestGetIssueTool_EnvVarRepoFallback(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", "test-token")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 	t.Setenv("ORKA_GIT_REPO", "https://github.com/envorg/envrepo")
 
 	tool := &GetIssueTool{apiBaseURL: server.URL}

@@ -27,7 +27,7 @@ func TestResolveRepoAndToken_DirectRepoURL_HTTPS(t *testing.T) {
 
 	owner, repo, token, baseURL, err := resolveRepoAndToken(
 		context.Background(), nil,
-		"", "https://github.com/myorg/myrepo", "",
+		"", testMyOrgRepoURL, "",
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -81,36 +81,33 @@ func TestResolveRepoAndToken_EnvVarFallback(t *testing.T) {
 }
 
 func TestResolveRepoAndToken_TaskName(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "my-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testMyTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
 					GitRepo:      "https://github.com/taskorg/taskrepo",
-					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
 				},
 			},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
-		Data: map[string][]byte{
-			"token": []byte("task-secret-token"),
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte("task-secret-token")},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 
 	owner, repo, token, baseURL, err := resolveRepoAndToken(
-		context.Background(), k8sClient,
-		"my-task", "", "",
+		context.Background(), k8sClient, testMyTaskName, "", "",
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -127,14 +124,14 @@ func TestResolveRepoAndToken_TaskName(t *testing.T) {
 }
 
 func TestResolveRepoAndToken_TaskName_PasswordKey(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "pw-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "pw-task", Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
@@ -146,10 +143,8 @@ func TestResolveRepoAndToken_TaskName_PasswordKey(t *testing.T) {
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-pw", Namespace: "default"},
-		Data: map[string][]byte{
-			"password": []byte("pw-token"),
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: "git-pw", Namespace: defaultNamespace},
+		Data:       map[string][]byte{passwordKey: []byte("pw-token")},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -169,7 +164,7 @@ func TestResolveRepoAndToken_TaskName_PasswordKey(t *testing.T) {
 func TestResolveRepoAndToken_TokenFromFile(t *testing.T) {
 	// Create a temp directory to simulate /secrets/git/token
 	tmpDir := t.TempDir()
-	tokenFile := filepath.Join(tmpDir, "token")
+	tokenFile := filepath.Join(tmpDir, tokenKey)
 	if err := os.WriteFile(tokenFile, []byte("file-token\n"), 0o600); err != nil {
 		t.Fatalf("failed to write token file: %v", err)
 	}
@@ -189,7 +184,7 @@ func TestResolveRepoAndToken_TokenFromEnvVar(t *testing.T) {
 
 	owner, repo, token, _, err := resolveRepoAndToken(
 		context.Background(), nil,
-		"", "https://github.com/testorg/testrepo", "",
+		"", testOrgTestRepoURL, "",
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -249,7 +244,7 @@ func TestResolveRepoAndToken_ErrorInvalidURL(t *testing.T) {
 }
 
 func TestResolveRepoAndToken_ErrorTaskNotFound(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -286,14 +281,14 @@ func TestResolveRepoAndToken_ErrorNoToken(t *testing.T) {
 }
 
 func TestResolveRepoAndToken_ErrorTaskNoWorkspace(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "no-ws-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testNoWorkspaceTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 		},
@@ -302,8 +297,7 @@ func TestResolveRepoAndToken_ErrorTaskNoWorkspace(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 
 	_, _, _, _, err := resolveRepoAndToken(
-		context.Background(), k8sClient,
-		"no-ws-task", "", "",
+		context.Background(), k8sClient, testNoWorkspaceTaskName, "", "",
 	)
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -314,19 +308,19 @@ func TestResolveRepoAndToken_ErrorTaskNoWorkspace(t *testing.T) {
 }
 
 func TestResolveRepoAndToken_ErrorTaskNoGitSecretRef(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "no-secret-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "no-secret-task", Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/org/repo",
+					GitRepo: testOrgRepoURL,
 				},
 			},
 		},

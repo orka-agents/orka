@@ -86,7 +86,7 @@ func (t *DeleteAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 
 	namespace := a.Namespace
 	if namespace == "" {
-		namespace = os.Getenv("ORKA_TASK_NAMESPACE")
+		namespace = os.Getenv(envOrkaTaskNamespace)
 	}
 	if namespace == "" {
 		namespace = defaultNamespace
@@ -102,7 +102,7 @@ func (t *DeleteAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	}
 
 	// Verify ownership - only allow deleting agents created by the current task
-	currentTask := os.Getenv("ORKA_TASK_NAME")
+	currentTask := os.Getenv(envOrkaTaskName)
 	if currentTask != "" {
 		ownerLabel := agent.Labels[labels.LabelCreatedBy]
 		if ownerLabel != "" && ownerLabel != currentTask {
@@ -117,7 +117,7 @@ func (t *DeleteAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 
 	result := DeleteAgentResult{
 		Name:   a.Name,
-		Status: "deleted",
+		Status: deletedStatusString,
 	}
 	resultJSON, err := json.Marshal(result)
 	if err != nil {

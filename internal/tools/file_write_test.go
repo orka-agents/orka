@@ -17,8 +17,8 @@ import (
 
 func TestFileWriteTool_Name(t *testing.T) {
 	tool := NewFileWriteTool()
-	if got := tool.Name(); got != "file_write" {
-		t.Errorf("Name() = %v, want %v", got, "file_write")
+	if got := tool.Name(); got != fileWriteToolName {
+		t.Errorf("Name() = %v, want %v", got, fileWriteToolName)
 	}
 }
 
@@ -39,7 +39,7 @@ func TestFileWriteTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Errorf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 }
@@ -161,9 +161,9 @@ func TestFileWriteTool_Execute_PathTraversal(t *testing.T) {
 
 func TestFileWriteTool_Execute_PathRestriction(t *testing.T) {
 	tool := &FileWriteTool{
-		workDir:      "/workspace",
+		workDir:      defaultWorkspacePath,
 		maxFileSize:  1024 * 1024,
-		allowedPaths: []string{"/workspace", "/tmp"},
+		allowedPaths: []string{defaultWorkspacePath, tempDirPath},
 	}
 
 	args := json.RawMessage(`{"path": "/etc/passwd", "content": "hack"}`)
@@ -212,7 +212,7 @@ func TestFileWriteTool_Execute_InvalidMode(t *testing.T) {
 
 func TestFileWriteTool_Execute_InvalidJSON(t *testing.T) {
 	tool := NewFileWriteTool()
-	args := json.RawMessage(`{invalid}`)
+	args := json.RawMessage(invalidJSONText)
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
 		t.Error("Execute() expected error for invalid JSON")

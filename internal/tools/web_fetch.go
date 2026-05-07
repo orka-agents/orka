@@ -61,7 +61,7 @@ func NewWebFetchTool() *WebFetchTool {
 
 // Name returns the tool name
 func (t *WebFetchTool) Name() string {
-	return "web_fetch"
+	return webFetchToolName
 }
 
 // Description returns the tool description

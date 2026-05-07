@@ -17,8 +17,8 @@ import (
 
 func TestUpdatePlanTool_Name(t *testing.T) {
 	tool := NewUpdatePlanTool()
-	if got := tool.Name(); got != "update_plan" {
-		t.Errorf("Name() = %q, want %q", got, "update_plan")
+	if got := tool.Name(); got != updatePlanToolName {
+		t.Errorf("Name() = %q, want %q", got, updatePlanToolName)
 	}
 }
 
@@ -41,11 +41,11 @@ func TestUpdatePlanTool_Parameters(t *testing.T) {
 		t.Fatalf("Parameters() should be valid JSON: %v", err)
 	}
 
-	if schema["type"] != "object" {
-		t.Errorf("schema type = %v, want object", schema["type"])
+	if schema[jsonSchemaTypeField] != jsonSchemaTypeObject {
+		t.Errorf("schema type = %v, want object", schema[jsonSchemaTypeField])
 	}
 
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("schema should have properties")
 	}
@@ -73,9 +73,9 @@ func TestUpdatePlanTool_Execute(t *testing.T) {
 		skipServer bool
 	}{
 		{
-			name:    "invalid JSON args",
-			args:    `{invalid}`,
-			wantErr: "invalid arguments",
+			name:    invalidJSONArgsCaseName,
+			args:    invalidJSONText,
+			wantErr: invalidArgumentsMessage,
 		},
 		{
 			name:    "empty summary",
@@ -89,60 +89,60 @@ func TestUpdatePlanTool_Execute(t *testing.T) {
 		},
 		{
 			name:       "missing all env vars",
-			args:       `{"summary":"test","plan_document":"# Plan"}`,
+			args:       testPlanJSON,
 			envURL:     "",
 			envTask:    "",
 			envNS:      "",
-			wantErr:    "ORKA_CONTROLLER_URL, ORKA_TASK_NAME, and ORKA_TASK_NAMESPACE are required",
+			wantErr:    missingControllerTaskEnvMessage,
 			skipServer: true,
 		},
 		{
 			name:       "missing ORKA_TASK_NAME",
-			args:       `{"summary":"test","plan_document":"# Plan"}`,
-			envURL:     "http://localhost",
+			args:       testPlanJSON,
+			envURL:     localhostURL,
 			envTask:    "",
-			envNS:      "default",
-			wantErr:    "ORKA_CONTROLLER_URL, ORKA_TASK_NAME, and ORKA_TASK_NAMESPACE are required",
+			envNS:      defaultNamespace,
+			wantErr:    missingControllerTaskEnvMessage,
 			skipServer: true,
 		},
 		{
 			name:       "missing ORKA_TASK_NAMESPACE",
-			args:       `{"summary":"test","plan_document":"# Plan"}`,
-			envURL:     "http://localhost",
-			envTask:    "my-task",
+			args:       testPlanJSON,
+			envURL:     localhostURL,
+			envTask:    testMyTaskName,
 			envNS:      "",
-			wantErr:    "ORKA_CONTROLLER_URL, ORKA_TASK_NAME, and ORKA_TASK_NAMESPACE are required",
+			wantErr:    missingControllerTaskEnvMessage,
 			skipServer: true,
 		},
 		{
 			name:       "successful update with 204",
 			args:       `{"summary":"phase 1 done","progress_pct":50,"goal_complete":false,"plan_document":"# Plan\n## Done"}`,
-			envTask:    "my-task",
-			envNS:      "default",
+			envTask:    testMyTaskName,
+			envNS:      defaultNamespace,
 			serverCode: http.StatusNoContent,
 			wantResult: "Plan updated: phase 1 done (progress: 50%)",
 		},
 		{
 			name:       "successful update with 200",
 			args:       `{"summary":"all done","progress_pct":100,"goal_complete":true,"plan_document":"# Complete"}`,
-			envTask:    "my-task",
-			envNS:      "default",
+			envTask:    testMyTaskName,
+			envNS:      defaultNamespace,
 			serverCode: http.StatusOK,
 			wantResult: "Plan updated: all done (progress: 100%, goal marked as COMPLETE)",
 		},
 		{
 			name:       "server error 500",
 			args:       `{"summary":"test","progress_pct":10,"plan_document":"# Plan"}`,
-			envTask:    "my-task",
-			envNS:      "default",
+			envTask:    testMyTaskName,
+			envNS:      defaultNamespace,
 			serverCode: http.StatusInternalServerError,
 			wantErr:    "failed to save plan: HTTP 500",
 		},
 		{
 			name:       "server error 403",
 			args:       `{"summary":"test","progress_pct":0,"plan_document":"# Plan"}`,
-			envTask:    "my-task",
-			envNS:      "default",
+			envTask:    testMyTaskName,
+			envNS:      defaultNamespace,
 			serverCode: http.StatusForbidden,
 			wantErr:    "failed to save plan: HTTP 403",
 		},
@@ -176,7 +176,7 @@ func TestUpdatePlanTool_Execute(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var serverURL string
-			if !tc.skipServer && tc.wantErr != "invalid arguments" && tc.wantErr != "summary is required" && tc.wantErr != "plan_document is required" {
+			if !tc.skipServer && tc.wantErr != invalidArgumentsMessage && tc.wantErr != "summary is required" && tc.wantErr != "plan_document is required" {
 				var receivedAuth string
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					receivedAuth = r.Header.Get("Authorization")
@@ -207,14 +207,14 @@ func TestUpdatePlanTool_Execute(t *testing.T) {
 			}
 
 			if serverURL != "" {
-				t.Setenv("ORKA_CONTROLLER_URL", serverURL)
+				t.Setenv(envOrkaControllerURL, serverURL)
 			} else if tc.envURL != "" {
-				t.Setenv("ORKA_CONTROLLER_URL", tc.envURL)
+				t.Setenv(envOrkaControllerURL, tc.envURL)
 			} else {
-				t.Setenv("ORKA_CONTROLLER_URL", "")
+				t.Setenv(envOrkaControllerURL, "")
 			}
-			t.Setenv("ORKA_TASK_NAME", tc.envTask)
-			t.Setenv("ORKA_TASK_NAMESPACE", tc.envNS)
+			t.Setenv(envOrkaTaskName, tc.envTask)
+			t.Setenv(envOrkaTaskNamespace, tc.envNS)
 			t.Setenv("ORKA_SA_TOKEN", tc.envToken)
 
 			result, err := tool.Execute(t.Context(), json.RawMessage(tc.args))
@@ -241,12 +241,12 @@ func TestUpdatePlanTool_Execute(t *testing.T) {
 
 func TestUpdatePlanTool_Execute_ConnectionRefused(t *testing.T) {
 	tool := NewUpdatePlanTool()
-	t.Setenv("ORKA_CONTROLLER_URL", "http://127.0.0.1:1")
-	t.Setenv("ORKA_TASK_NAME", "task")
-	t.Setenv("ORKA_TASK_NAMESPACE", "ns")
+	t.Setenv(envOrkaControllerURL, "http://127.0.0.1:1")
+	t.Setenv(envOrkaTaskName, "task")
+	t.Setenv(envOrkaTaskNamespace, "ns")
 	t.Setenv("ORKA_SA_TOKEN", "")
 
-	args := json.RawMessage(`{"summary":"test","plan_document":"# Plan"}`)
+	args := json.RawMessage(testPlanJSON)
 	_, err := tool.Execute(t.Context(), args)
 	if err == nil {
 		t.Fatal("expected error for connection refused")
@@ -265,12 +265,12 @@ func TestUpdatePlanTool_Execute_NoAuthHeaderWhenNoToken(t *testing.T) {
 	defer srv.Close()
 
 	tool := NewUpdatePlanTool()
-	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
-	t.Setenv("ORKA_TASK_NAME", "task")
-	t.Setenv("ORKA_TASK_NAMESPACE", "ns")
+	t.Setenv(envOrkaControllerURL, srv.URL)
+	t.Setenv(envOrkaTaskName, "task")
+	t.Setenv(envOrkaTaskNamespace, "ns")
 	t.Setenv("ORKA_SA_TOKEN", "")
 
-	args := json.RawMessage(`{"summary":"test","plan_document":"# Plan"}`)
+	args := json.RawMessage(testPlanJSON)
 	_, err := tool.Execute(t.Context(), args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -291,9 +291,9 @@ func TestUpdatePlanTool_Execute_RequestBodyValid(t *testing.T) {
 	defer srv.Close()
 
 	tool := NewUpdatePlanTool()
-	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
-	t.Setenv("ORKA_TASK_NAME", "task")
-	t.Setenv("ORKA_TASK_NAMESPACE", "ns")
+	t.Setenv(envOrkaControllerURL, srv.URL)
+	t.Setenv(envOrkaTaskName, "task")
+	t.Setenv(envOrkaTaskNamespace, "ns")
 	t.Setenv("ORKA_SA_TOKEN", "")
 
 	args := json.RawMessage(`{"summary":"my summary","progress_pct":75,"goal_complete":true,"plan_document":"# My Plan"}`)

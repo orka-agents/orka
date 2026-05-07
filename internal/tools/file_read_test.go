@@ -31,8 +31,8 @@ func resolvedTempDir(t *testing.T) string {
 
 func TestFileReadTool_Name(t *testing.T) {
 	tool := NewFileReadTool()
-	if got := tool.Name(); got != "file_read" {
-		t.Errorf("Name() = %v, want %v", got, "file_read")
+	if got := tool.Name(); got != fileReadToolName {
+		t.Errorf("Name() = %v, want %v", got, fileReadToolName)
 	}
 }
 
@@ -58,7 +58,7 @@ func TestFileReadTool_Parameters(t *testing.T) {
 	}
 
 	// Check required fields
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 }
@@ -198,7 +198,7 @@ func TestFileReadTool_Execute_EmptyPath(t *testing.T) {
 func TestFileReadTool_Execute_InvalidJSON(t *testing.T) {
 	tool := NewFileReadTool()
 
-	args := json.RawMessage(`{invalid}`)
+	args := json.RawMessage(invalidJSONText)
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
 		t.Error("Execute() expected error for invalid JSON")
@@ -332,7 +332,7 @@ func TestFileReadTool_Execute_LimitExceedsMax(t *testing.T) {
 
 func TestFileReadTool_isPathAllowed(t *testing.T) {
 	tool := &FileReadTool{
-		allowedPaths: []string{"/workspace", "/tmp"},
+		allowedPaths: []string{defaultWorkspacePath, tempDirPath},
 	}
 
 	tests := []struct {
@@ -455,7 +455,7 @@ func TestFileReadTool_Execute_LargeFileTruncated(t *testing.T) {
 func TestFileReadTool_Execute_OffsetBeyondEnd(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "small.txt")
-	if err := os.WriteFile(testFile, []byte("hello"), 0644); err != nil {
+	if err := os.WriteFile(testFile, []byte(testHelloText), 0644); err != nil {
 		t.Fatalf("failed to create test file: %v", err)
 	}
 

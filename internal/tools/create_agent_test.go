@@ -20,8 +20,6 @@ import (
 	"github.com/sozercan/orka/internal/labels"
 )
 
-const createAgentToolName = "create_agent"
-
 func TestCreateAgentTool_Name(t *testing.T) {
 	tool := NewCreateAgentTool(newFakeClient())
 	if got := tool.Name(); got != createAgentToolName {
@@ -47,7 +45,7 @@ func TestCreateAgentTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Errorf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 }
@@ -65,8 +63,8 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 		{
 			name: "success with all args",
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":      parentTaskName,
-				"ORKA_TASK_NAMESPACE": defaultNamespace,
+				envOrkaTaskName:      parentTaskName,
+				envOrkaTaskNamespace: defaultNamespace,
 			},
 			args: json.RawMessage(`{
 				"role": "coder",
@@ -79,31 +77,31 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 					"enabled": true,
 					"maxDepth": 2,
 					"maxConcurrentChildren": 3,
-					"allowedAgents": [{"name": "reviewer", "namespace": "default"}]
+					"allowedAgents": [{"name": "reviewer", "namespace": "` + defaultNamespace + `"}]
 				}
 			}`),
 			wantErr:     false,
 			checkResult: true,
-			wantStatus:  "created",
+			wantStatus:  GitHubPullRequestStatusCreated,
 		},
 		{
 			name: "success with minimal args inherited model/provider",
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":      parentTaskName,
-				"ORKA_TASK_NAMESPACE": defaultNamespace,
-				"ORKA_AI_PROVIDER":    "openai",
-				"ORKA_AI_MODEL":       "gpt-4o",
+				envOrkaTaskName:      parentTaskName,
+				envOrkaTaskNamespace: defaultNamespace,
+				"ORKA_AI_PROVIDER":   providerOpenAI,
+				"ORKA_AI_MODEL":      testGPT4OModel,
 			},
 			args:        json.RawMessage(`{"role": "reviewer", "systemPrompt": "You review code"}`),
 			wantErr:     false,
 			checkResult: true,
-			wantStatus:  "created",
+			wantStatus:  GitHubPullRequestStatusCreated,
 		},
 		{
 			name: "error when role is empty",
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":      parentTaskName,
-				"ORKA_TASK_NAMESPACE": defaultNamespace,
+				envOrkaTaskName:      parentTaskName,
+				envOrkaTaskNamespace: defaultNamespace,
 			},
 			args:       json.RawMessage(`{"role": "", "systemPrompt": "prompt"}`),
 			wantErr:    true,
@@ -112,22 +110,22 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 		{
 			name: "error when systemPrompt is empty",
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":      parentTaskName,
-				"ORKA_TASK_NAMESPACE": defaultNamespace,
+				envOrkaTaskName:      parentTaskName,
+				envOrkaTaskNamespace: defaultNamespace,
 			},
 			args:       json.RawMessage(`{"role": "coder", "systemPrompt": ""}`),
 			wantErr:    true,
 			wantErrMsg: "systemPrompt is required",
 		},
 		{
-			name: "invalid JSON args",
+			name: invalidJSONArgsCaseName,
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":      parentTaskName,
-				"ORKA_TASK_NAMESPACE": defaultNamespace,
+				envOrkaTaskName:      parentTaskName,
+				envOrkaTaskNamespace: defaultNamespace,
 			},
-			args:       json.RawMessage(`{invalid}`),
+			args:       json.RawMessage(invalidJSONText),
 			wantErr:    true,
-			wantErrMsg: "invalid arguments",
+			wantErrMsg: invalidArgumentsMessage,
 		},
 	}
 
@@ -174,8 +172,8 @@ func TestCreateAgentTool_Execute(t *testing.T) {
 }
 
 func TestCreateAgentTool_Execute_OwnerReference(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	k8sClient := newFakeClient(parentTask())
 	tool := NewCreateAgentTool(k8sClient)
@@ -210,7 +208,7 @@ func TestCreateAgentTool_Execute_OwnerReference(t *testing.T) {
 	if ownerRef.UID != apitypes.UID("parent-uid-1234") {
 		t.Errorf("ownerRef.UID = %q, want %q", ownerRef.UID, "parent-uid-1234")
 	}
-	if ownerRef.Kind != "Task" {
+	if ownerRef.Kind != taskKindString {
 		t.Errorf("ownerRef.Kind = %q, want %q", ownerRef.Kind, "Task")
 	}
 	if ownerRef.Controller == nil || !*ownerRef.Controller {
@@ -222,8 +220,8 @@ func TestCreateAgentTool_Execute_OwnerReference(t *testing.T) {
 }
 
 func TestCreateAgentTool_Execute_AutoNaming(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	k8sClient := newFakeClient(parentTask())
 	tool := NewCreateAgentTool(k8sClient)
@@ -256,8 +254,8 @@ func TestCreateAgentTool_Execute_AutoNaming(t *testing.T) {
 }
 
 func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	k8sClient := newFakeClient(parentTask())
 	tool := NewCreateAgentTool(k8sClient)
@@ -323,8 +321,8 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 	if agent.Spec.Tools[0].Name != webSearchToolName {
 		t.Errorf("tools[0].name = %q, want %q", agent.Spec.Tools[0].Name, webSearchToolName)
 	}
-	if agent.Spec.Tools[1].Name != "code_exec" {
-		t.Errorf("tools[1].name = %q, want %q", agent.Spec.Tools[1].Name, "code_exec")
+	if agent.Spec.Tools[1].Name != codeExecToolName {
+		t.Errorf("tools[1].name = %q, want %q", agent.Spec.Tools[1].Name, codeExecToolName)
 	}
 
 	// Verify skills
@@ -354,8 +352,8 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 	if agent.Spec.Coordination.AllowedAgents[0].Name != "reviewer" {
 		t.Errorf("allowedAgents[0].name = %q, want %q", agent.Spec.Coordination.AllowedAgents[0].Name, "reviewer")
 	}
-	if agent.Spec.Coordination.AllowedAgents[0].Namespace != "test-ns" {
-		t.Errorf("allowedAgents[0].namespace = %q, want %q", agent.Spec.Coordination.AllowedAgents[0].Namespace, "test-ns")
+	if agent.Spec.Coordination.AllowedAgents[0].Namespace != testNamespace {
+		t.Errorf("allowedAgents[0].namespace = %q, want %q", agent.Spec.Coordination.AllowedAgents[0].Namespace, testNamespace)
 	}
 
 	// Verify labels
@@ -365,8 +363,8 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 	if agent.Labels[labels.LabelCreatedBy] != createAgentToolName {
 		t.Errorf("label orka.ai/created-by = %q, want %q", agent.Labels[labels.LabelCreatedBy], createAgentToolName)
 	}
-	if agent.Labels[labels.LabelAgentRole] != "coder" {
-		t.Errorf("label orka.ai/agent-role = %q, want %q", agent.Labels[labels.LabelAgentRole], "coder")
+	if agent.Labels[labels.LabelAgentRole] != testCoderAgentName {
+		t.Errorf("label orka.ai/agent-role = %q, want %q", agent.Labels[labels.LabelAgentRole], testCoderAgentName)
 	}
 	if agent.Annotations[labels.AnnotationParentTaskName] != parentTaskName {
 		t.Errorf("annotation orka.ai/parent-task-name = %q, want %q", agent.Annotations[labels.AnnotationParentTaskName], parentTaskName)
@@ -374,10 +372,10 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 }
 
 func TestCreateAgentTool_Execute_InheritedModelProvider(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
-	t.Setenv("ORKA_AI_PROVIDER", "openai")
-	t.Setenv("ORKA_AI_MODEL", "gpt-4o")
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv("ORKA_AI_PROVIDER", providerOpenAI)
+	t.Setenv("ORKA_AI_MODEL", testGPT4OModel)
 
 	k8sClient := newFakeClient(parentTask())
 	tool := NewCreateAgentTool(k8sClient)
@@ -407,23 +405,23 @@ func TestCreateAgentTool_Execute_InheritedModelProvider(t *testing.T) {
 	if agent.Spec.Model.Provider != "" {
 		t.Errorf("model.provider = %q, want empty (cleared to avoid mismatch with providerRef)", agent.Spec.Model.Provider)
 	}
-	if agent.Spec.Model.Name != "gpt-4o" {
-		t.Errorf("model.name = %q, want %q (inherited)", agent.Spec.Model.Name, "gpt-4o")
+	if agent.Spec.Model.Name != testGPT4OModel {
+		t.Errorf("model.name = %q, want %q (inherited)", agent.Spec.Model.Name, testGPT4OModel)
 	}
 
 	// Verify provider ref was inherited
-	if agent.Spec.ProviderRef == nil || agent.Spec.ProviderRef.Name != "openai" {
+	if agent.Spec.ProviderRef == nil || agent.Spec.ProviderRef.Name != providerOpenAI {
 		t.Errorf("providerRef = %v, want openai (inherited)", agent.Spec.ProviderRef)
 	}
 }
 
 func TestCreateAgentTool_Execute_PreservesExplicitRuntimeSecretRef(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	k8sClient := newFakeClient(
 		parentTask(),
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "claude-credentials", Namespace: defaultNamespace}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: claudeCredentialsSecretName, Namespace: defaultNamespace}},
 	)
 	tool := NewCreateAgentTool(k8sClient)
 
@@ -457,24 +455,24 @@ func TestCreateAgentTool_Execute_PreservesExplicitRuntimeSecretRef(t *testing.T)
 	if agent.Spec.Runtime == nil {
 		t.Fatal("agent.Spec.Runtime is nil")
 	}
-	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType("claude") {
-		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, "claude")
+	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType(runtimeTypeClaude) {
+		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, runtimeTypeClaude)
 	}
 	if agent.Spec.SecretRef == nil {
 		t.Fatal("agent.Spec.SecretRef is nil")
 	}
-	if agent.Spec.SecretRef.Name != "claude-credentials" {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "claude-credentials")
+	if agent.Spec.SecretRef.Name != claudeCredentialsSecretName {
+		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, claudeCredentialsSecretName)
 	}
 }
 
 func TestCreateAgentTool_Execute_AutoDiscoversRuntimeSecretRefWhenOmitted(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	k8sClient := newFakeClient(
 		parentTask(),
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "claude-api-key", Namespace: defaultNamespace}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: claudeAPIKeySecretName, Namespace: defaultNamespace}},
 	)
 	tool := NewCreateAgentTool(k8sClient)
 
@@ -507,24 +505,24 @@ func TestCreateAgentTool_Execute_AutoDiscoversRuntimeSecretRefWhenOmitted(t *tes
 	if agent.Spec.Runtime == nil {
 		t.Fatal("agent.Spec.Runtime is nil")
 	}
-	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType("claude") {
-		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, "claude")
+	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType(runtimeTypeClaude) {
+		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, runtimeTypeClaude)
 	}
 	if agent.Spec.SecretRef == nil {
 		t.Fatal("agent.Spec.SecretRef is nil")
 	}
-	if agent.Spec.SecretRef.Name != "claude-api-key" {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "claude-api-key")
+	if agent.Spec.SecretRef.Name != claudeAPIKeySecretName {
+		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, claudeAPIKeySecretName)
 	}
 }
 
 func TestCreateAgentTool_Execute_AutoDiscoversCodexRuntimeSecretRefWhenOmitted(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	k8sClient := newFakeClient(
 		parentTask(),
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "codex-proxy-token", Namespace: defaultNamespace}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: codexProxyTokenSecretName, Namespace: defaultNamespace}},
 	)
 	tool := NewCreateAgentTool(k8sClient)
 
@@ -563,18 +561,18 @@ func TestCreateAgentTool_Execute_AutoDiscoversCodexRuntimeSecretRefWhenOmitted(t
 	if agent.Spec.SecretRef == nil {
 		t.Fatal("agent.Spec.SecretRef is nil")
 	}
-	if agent.Spec.SecretRef.Name != "codex-proxy-token" {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "codex-proxy-token")
+	if agent.Spec.SecretRef.Name != codexProxyTokenSecretName {
+		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, codexProxyTokenSecretName)
 	}
 }
 
 func TestCreateAgentTool_Execute_AcceptsCustomRuntimeSecretRef(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	k8sClient := newFakeClient(
 		parentTask(),
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "runtime-creds", Namespace: defaultNamespace}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testRuntimeCredsSecretName, Namespace: defaultNamespace}},
 	)
 	tool := NewCreateAgentTool(k8sClient)
 
@@ -607,14 +605,14 @@ func TestCreateAgentTool_Execute_AcceptsCustomRuntimeSecretRef(t *testing.T) {
 	if agent.Spec.SecretRef == nil {
 		t.Fatal("agent.Spec.SecretRef is nil")
 	}
-	if agent.Spec.SecretRef.Name != "runtime-creds" {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, "runtime-creds")
+	if agent.Spec.SecretRef.Name != testRuntimeCredsSecretName {
+		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, testRuntimeCredsSecretName)
 	}
 }
 
 func TestCreateAgentTool_Execute_RejectsMissingRuntimeSecretRef(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
-	t.Setenv("ORKA_TASK_NAMESPACE", defaultNamespace)
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	k8sClient := newFakeClient(parentTask())
 	tool := NewCreateAgentTool(k8sClient)
@@ -632,13 +630,13 @@ func TestCreateAgentTool_Execute_RejectsMissingRuntimeSecretRef(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "not found") {
+	if !strings.Contains(err.Error(), notFoundMessage) {
 		t.Fatalf("error = %v, want it to mention not found", err)
 	}
 }
 
 func TestCreateAgentTool_Execute_DefaultNamespace(t *testing.T) {
-	t.Setenv("ORKA_TASK_NAME", parentTaskName)
+	t.Setenv(envOrkaTaskName, parentTaskName)
 	// No ORKA_TASK_NAMESPACE set — should default to defaultNamespace
 
 	// Create parent task in defaultNamespace namespace

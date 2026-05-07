@@ -38,10 +38,10 @@ func TestSendMessageTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
@@ -65,13 +65,13 @@ func TestSendMessageTool_Execute(t *testing.T) {
 		{
 			name: "send to specific sibling",
 			args: SendMessageArgs{
-				ToTask:  "sibling-1",
+				ToTask:  testSiblingTaskName,
 				Content: "found a bug in auth module",
 			},
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":      "worker-a",
-				"ORKA_TASK_NAMESPACE": "default",
-				"ORKA_PARENT_TASK":    "coordinator",
+				envOrkaTaskName:      testWorkerAName,
+				envOrkaTaskNamespace: defaultNamespace,
+				envOrkaParentTask:    testCoordinatorTaskName,
 			},
 			serverCode: http.StatusNoContent,
 			wantMsg:    "Message sent to sibling-1",
@@ -83,9 +83,9 @@ func TestSendMessageTool_Execute(t *testing.T) {
 				Content: "phase 1 complete",
 			},
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":      "worker-a",
-				"ORKA_TASK_NAMESPACE": "default",
-				"ORKA_PARENT_TASK":    "coordinator",
+				envOrkaTaskName:      testWorkerAName,
+				envOrkaTaskNamespace: defaultNamespace,
+				envOrkaParentTask:    testCoordinatorTaskName,
 			},
 			serverCode: http.StatusNoContent,
 			wantMsg:    "Message sent to all siblings",
@@ -93,48 +93,48 @@ func TestSendMessageTool_Execute(t *testing.T) {
 		{
 			name: "missing to_task",
 			args: SendMessageArgs{
-				Content: "hello",
+				Content: testHelloText,
 			},
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":      "worker-a",
-				"ORKA_TASK_NAMESPACE": "default",
-				"ORKA_PARENT_TASK":    "coordinator",
-				"ORKA_CONTROLLER_URL": "http://localhost",
+				envOrkaTaskName:      testWorkerAName,
+				envOrkaTaskNamespace: defaultNamespace,
+				envOrkaParentTask:    testCoordinatorTaskName,
+				envOrkaControllerURL: localhostURL,
 			},
 			wantErr: true,
 		},
 		{
 			name: "missing content",
 			args: SendMessageArgs{
-				ToTask: "sibling-1",
+				ToTask: testSiblingTaskName,
 			},
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":      "worker-a",
-				"ORKA_TASK_NAMESPACE": "default",
-				"ORKA_PARENT_TASK":    "coordinator",
-				"ORKA_CONTROLLER_URL": "http://localhost",
+				envOrkaTaskName:      testWorkerAName,
+				envOrkaTaskNamespace: defaultNamespace,
+				envOrkaParentTask:    testCoordinatorTaskName,
+				envOrkaControllerURL: localhostURL,
 			},
 			wantErr: true,
 		},
 		{
 			name: "missing env vars",
 			args: SendMessageArgs{
-				ToTask:  "sibling-1",
-				Content: "hello",
+				ToTask:  testSiblingTaskName,
+				Content: testHelloText,
 			},
 			envVars: map[string]string{},
 			wantErr: true,
 		},
 		{
-			name: "server error",
+			name: serverErrorMessage,
 			args: SendMessageArgs{
-				ToTask:  "sibling-1",
-				Content: "hello",
+				ToTask:  testSiblingTaskName,
+				Content: testHelloText,
 			},
 			envVars: map[string]string{
-				"ORKA_TASK_NAME":      "worker-a",
-				"ORKA_TASK_NAMESPACE": "default",
-				"ORKA_PARENT_TASK":    "coordinator",
+				envOrkaTaskName:      testWorkerAName,
+				envOrkaTaskNamespace: defaultNamespace,
+				envOrkaParentTask:    testCoordinatorTaskName,
 			},
 			serverCode: http.StatusInternalServerError,
 			wantErr:    true,
@@ -144,7 +144,7 @@ func TestSendMessageTool_Execute(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Clear env vars first
-			for _, k := range []string{"ORKA_TASK_NAME", "ORKA_TASK_NAMESPACE", "ORKA_PARENT_TASK", "ORKA_CONTROLLER_URL"} {
+			for _, k := range []string{envOrkaTaskName, envOrkaTaskNamespace, envOrkaParentTask, envOrkaControllerURL} {
 				t.Setenv(k, "")
 			}
 
@@ -157,7 +157,7 @@ func TestSendMessageTool_Execute(t *testing.T) {
 					w.WriteHeader(tt.serverCode)
 				}))
 				defer server.Close()
-				tt.envVars["ORKA_CONTROLLER_URL"] = server.URL
+				tt.envVars[envOrkaControllerURL] = server.URL
 			}
 
 			for k, v := range tt.envVars {

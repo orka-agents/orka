@@ -20,8 +20,8 @@ import (
 func testAgent() *corev1alpha1.Agent {
 	return &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-agent",
-			Namespace: "default",
+			Name:      testAgentName,
+			Namespace: defaultNamespace,
 		},
 		Spec: corev1alpha1.AgentSpec{},
 	}
@@ -55,33 +55,33 @@ func TestDeleteAgentTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	if _, ok := props["name"]; !ok {
+	if _, ok := props[nameField]; !ok {
 		t.Error("missing name property")
 	}
-	if _, ok := props["namespace"]; !ok {
+	if _, ok := props[namespaceField]; !ok {
 		t.Error("missing namespace property")
 	}
 }
 
 func TestDeleteAgentTool_Execute_DefaultNamespace(t *testing.T) {
 	// Test that without env var and without explicit namespace, default namespace is used
-	t.Setenv("ORKA_TASK_NAMESPACE", "")
+	t.Setenv(envOrkaTaskNamespace, "")
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-agent",
-			Namespace: "default",
+			Name:      testAgentName,
+			Namespace: defaultNamespace,
 		},
 		Spec: corev1alpha1.AgentSpec{},
 	}
 	tool := NewDeleteAgentTool(newFakeClient(agent))
-	argsJSON, _ := json.Marshal(DeleteAgentArgs{Name: "test-agent"})
+	argsJSON, _ := json.Marshal(DeleteAgentArgs{Name: testAgentName})
 	result, err := tool.Execute(context.Background(), argsJSON)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -90,14 +90,14 @@ func TestDeleteAgentTool_Execute_DefaultNamespace(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &res); err != nil {
 		t.Fatalf("failed to unmarshal result: %v", err)
 	}
-	if res.Status != "deleted" {
+	if res.Status != deletedStatusString {
 		t.Errorf("expected status 'deleted', got %q", res.Status)
 	}
 }
 
 func TestDeleteAgentTool_Execute_InvalidJSON(t *testing.T) {
 	tool := NewDeleteAgentTool(newFakeClient())
-	_, err := tool.Execute(context.Background(), json.RawMessage(`{invalid}`))
+	_, err := tool.Execute(context.Background(), json.RawMessage(invalidJSONText))
 	if err == nil {
 		t.Error("expected error for invalid JSON")
 	}
@@ -114,7 +114,7 @@ func TestDeleteAgentTool_Execute(t *testing.T) {
 	}{
 		{
 			name: "success - agent exists and is deleted",
-			args: DeleteAgentArgs{Name: "test-agent", Namespace: "default"},
+			args: DeleteAgentArgs{Name: testAgentName, Namespace: defaultNamespace},
 			setup: func() *DeleteAgentTool {
 				return NewDeleteAgentTool(newFakeClient(testAgent()))
 			},
@@ -130,7 +130,7 @@ func TestDeleteAgentTool_Execute(t *testing.T) {
 		},
 		{
 			name: "error - agent not found",
-			args: DeleteAgentArgs{Name: "nonexistent", Namespace: "default"},
+			args: DeleteAgentArgs{Name: testNonexistentName, Namespace: defaultNamespace},
 			setup: func() *DeleteAgentTool {
 				return NewDeleteAgentTool(newFakeClient())
 			},
@@ -139,8 +139,8 @@ func TestDeleteAgentTool_Execute(t *testing.T) {
 		},
 		{
 			name:  "success - namespace from env var",
-			args:  DeleteAgentArgs{Name: "test-agent"},
-			envNS: "default",
+			args:  DeleteAgentArgs{Name: testAgentName},
+			envNS: defaultNamespace,
 			setup: func() *DeleteAgentTool {
 				return NewDeleteAgentTool(newFakeClient(testAgent()))
 			},
@@ -150,7 +150,7 @@ func TestDeleteAgentTool_Execute(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.envNS != "" {
-				t.Setenv("ORKA_TASK_NAMESPACE", tt.envNS)
+				t.Setenv(envOrkaTaskNamespace, tt.envNS)
 			}
 
 			tool := tt.setup()
@@ -178,7 +178,7 @@ func TestDeleteAgentTool_Execute(t *testing.T) {
 			if res.Name != tt.args.Name {
 				t.Errorf("expected name %q, got %q", tt.args.Name, res.Name)
 			}
-			if res.Status != "deleted" {
+			if res.Status != deletedStatusString {
 				t.Errorf("expected status 'deleted', got %q", res.Status)
 			}
 		})

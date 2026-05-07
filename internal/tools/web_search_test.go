@@ -16,8 +16,8 @@ import (
 
 func TestWebSearchTool_Name(t *testing.T) {
 	tool := NewWebSearchTool()
-	if got := tool.Name(); got != "web_search" {
-		t.Errorf("Name() = %v, want %v", got, "web_search")
+	if got := tool.Name(); got != webSearchToolName {
+		t.Errorf("Name() = %v, want %v", got, webSearchToolName)
 	}
 }
 
@@ -43,7 +43,7 @@ func TestWebSearchTool_Parameters(t *testing.T) {
 	}
 
 	// Check required fields
-	if schema["type"] != typeObject {
+	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 }
@@ -76,7 +76,7 @@ func TestWebSearchTool_Execute(t *testing.T) {
 		},
 		{
 			name:    "invalid JSON",
-			args:    json.RawMessage(`{invalid}`),
+			args:    json.RawMessage(invalidJSONText),
 			wantErr: true,
 		},
 		{

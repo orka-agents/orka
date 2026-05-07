@@ -19,8 +19,8 @@ import (
 
 func TestWaitForTaskTool_Name(t *testing.T) {
 	tool := &WaitForTaskTool{}
-	if got := tool.Name(); got != "wait_for_task" {
-		t.Errorf("Name() = %q, want %q", got, "wait_for_task")
+	if got := tool.Name(); got != waitForTaskToolName {
+		t.Errorf("Name() = %q, want %q", got, waitForTaskToolName)
 	}
 }
 
@@ -41,14 +41,14 @@ func TestWaitForTaskTool_Parameters(t *testing.T) {
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("Parameters() returned invalid JSON: %v", err)
 	}
-	props, ok := schema["properties"].(map[string]any)
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("missing properties")
 	}
-	if _, ok := props["name"]; !ok {
+	if _, ok := props[nameField]; !ok {
 		t.Error("missing name property")
 	}
-	if _, ok := props["timeout"]; !ok {
+	if _, ok := props[timeoutField]; !ok {
 		t.Error("missing timeout property")
 	}
 }
@@ -69,7 +69,7 @@ func TestWaitForTaskTool_Execute(t *testing.T) {
 			task: &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "done-task",
-					Namespace: "default",
+					Namespace: defaultNamespace,
 				},
 				Status: corev1alpha1.TaskStatus{
 					Phase:          corev1alpha1.TaskPhaseSucceeded,
@@ -77,7 +77,7 @@ func TestWaitForTaskTool_Execute(t *testing.T) {
 					CompletionTime: &now,
 				},
 			},
-			wantPhase: "Succeeded",
+			wantPhase: taskPhaseSucceededString,
 		},
 		{
 			name: "task already failed",
@@ -85,7 +85,7 @@ func TestWaitForTaskTool_Execute(t *testing.T) {
 			task: &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "failed-task",
-					Namespace: "default",
+					Namespace: defaultNamespace,
 				},
 				Status: corev1alpha1.TaskStatus{
 					Phase:          corev1alpha1.TaskPhaseFailed,
@@ -94,36 +94,36 @@ func TestWaitForTaskTool_Execute(t *testing.T) {
 					CompletionTime: &now,
 				},
 			},
-			wantPhase: "Failed",
+			wantPhase: taskPhaseFailedString,
 		},
 		{
 			name: "task still running — returns timeout result",
 			args: `{"name": "running-task", "timeout": 1}`,
 			task: &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "running-task",
-					Namespace: "default",
+					Name:      testRunningTaskName,
+					Namespace: defaultNamespace,
 				},
 				Status: corev1alpha1.TaskStatus{
 					Phase:     corev1alpha1.TaskPhaseRunning,
 					StartTime: &now,
 				},
 			},
-			wantPhase: "Running",
+			wantPhase: taskPhaseRunningString,
 		},
 		{
-			name: "custom namespace",
+			name: testCustomNamespaceCaseName,
 			args: `{"name": "ns-task", "namespace": "prod"}`,
 			task: &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "ns-task",
-					Namespace: "prod",
+					Namespace: testProdNamespace,
 				},
 				Status: corev1alpha1.TaskStatus{
 					Phase: corev1alpha1.TaskPhaseSucceeded,
 				},
 			},
-			wantPhase: "Succeeded",
+			wantPhase: taskPhaseSucceededString,
 		},
 		{
 			name:       "missing name argument",
@@ -131,14 +131,14 @@ func TestWaitForTaskTool_Execute(t *testing.T) {
 			wantErrStr: "name is required",
 		},
 		{
-			name:       "invalid JSON args",
+			name:       invalidJSONArgsCaseName,
 			args:       `{bad json}`,
-			wantErrStr: "failed to parse arguments",
+			wantErrStr: failedToParseArgumentsMessage,
 		},
 		{
-			name:       "task not found",
+			name:       taskNotFoundCaseName,
 			args:       `{"name": "nonexistent"}`,
-			wantErrStr: "not_found",
+			wantErrStr: errTypeNotFound,
 		},
 	}
 
@@ -153,7 +153,7 @@ func TestWaitForTaskTool_Execute(t *testing.T) {
 
 			tc := &ToolContext{
 				Client:    fc,
-				Namespace: "default",
+				Namespace: defaultNamespace,
 			}
 			ctx := WithToolContext(context.Background(), tc)
 
@@ -181,7 +181,7 @@ func TestWaitForTaskTool_Execute(t *testing.T) {
 			if !ok {
 				t.Fatalf("expected data map, got %T", res.Data)
 			}
-			if phase, _ := data["phase"].(string); phase != tt.wantPhase {
+			if phase, _ := data[phaseField].(string); phase != tt.wantPhase {
 				t.Errorf("phase = %q, want %q", phase, tt.wantPhase)
 			}
 		})
@@ -205,8 +205,8 @@ func TestWaitForTaskTool_Execute_ContextCancelled(t *testing.T) {
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "running-task",
-			Namespace: "default",
+			Name:      testRunningTaskName,
+			Namespace: defaultNamespace,
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:     corev1alpha1.TaskPhaseRunning,
@@ -216,7 +216,7 @@ func TestWaitForTaskTool_Execute_ContextCancelled(t *testing.T) {
 
 	tc := &ToolContext{
 		Client:    newFakeClient(task),
-		Namespace: "default",
+		Namespace: defaultNamespace,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

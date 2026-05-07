@@ -47,7 +47,7 @@ func NewCancelTaskTool(k8sClient client.Client) *CancelTaskTool {
 
 // Name returns the tool name
 func (t *CancelTaskTool) Name() string {
-	return "cancel_task"
+	return cancelTaskToolName
 }
 
 // Description returns the tool description
@@ -90,11 +90,11 @@ func (t *CancelTaskTool) Execute(ctx context.Context, args json.RawMessage) (str
 		return "", fmt.Errorf("task_name is required")
 	}
 
-	parentTaskName := os.Getenv("ORKA_TASK_NAME")
+	parentTaskName := os.Getenv(envOrkaTaskName)
 
 	namespace := a.Namespace
 	if namespace == "" {
-		namespace = os.Getenv("ORKA_TASK_NAMESPACE")
+		namespace = os.Getenv(envOrkaTaskNamespace)
 	}
 	if namespace == "" {
 		namespace = defaultNamespace
@@ -143,7 +143,7 @@ func (t *CancelTaskTool) Execute(ctx context.Context, args json.RawMessage) (str
 
 	result := CancelTaskResult{
 		TaskName: a.TaskName,
-		Status:   "cancelled",
+		Status:   cancelledStatusString,
 	}
 	data, _ := json.Marshal(result)
 	return string(data), nil

@@ -67,7 +67,7 @@ func NewReviewPullRequestTool(k8sClient client.Client) *ReviewPullRequestTool {
 
 // Name returns the tool name.
 func (t *ReviewPullRequestTool) Name() string {
-	return "review_pull_request"
+	return reviewPullRequestToolName
 }
 
 // Description returns the tool description.
@@ -79,20 +79,7 @@ func (t *ReviewPullRequestTool) Description() string {
 
 // Parameters returns the JSON schema for tool parameters.
 func (t *ReviewPullRequestTool) Parameters() json.RawMessage {
-	schema := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"task_name": map[string]any{
-				"type":        "string",
-				"description": "Name of the child task whose workspace config has the repo and git credentials",
-			},
-			"pr_number": map[string]any{
-				"type":        "integer",
-				"description": "GitHub pull request number to review",
-			},
-		},
-		"required": []string{"task_name", "pr_number"},
-	}
+	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: childWorkspaceTaskDescription}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number to review"}}, jsonSchemaRequiredField: []string{taskNameField, githubPRNumberField}}
 	data, _ := json.Marshal(schema)
 	return data
 }
@@ -109,7 +96,7 @@ func (t *ReviewPullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 	}
 
 	// Determine namespace from environment
-	ns := os.Getenv("ORKA_TASK_NAMESPACE")
+	ns := os.Getenv(envOrkaTaskNamespace)
 	if ns == "" {
 		ns = defaultNamespace
 	}
@@ -148,7 +135,7 @@ func (t *ReviewPullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 	}
 
 	token := ""
-	for _, key := range []string{"token", "password"} {
+	for _, key := range []string{tokenKey, passwordKey} {
 		if v, ok := secret.Data[key]; ok {
 			token = strings.TrimSpace(string(v))
 			break
