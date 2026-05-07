@@ -266,7 +266,6 @@ YAML
   jq -r '.data[].id' "${work_dir}/copilot-proxy-models.json" | redact >&2
 
   log "Running focused live copilot-proxy Go e2e specs"
-  CERT_MANAGER_INSTALL_SKIP=true \
   KIND_CLUSTER="${kind_cluster}" \
   E2E_GITHUB_TOKEN="${token_value}" \
   E2E_LIVE_COPILOT_PROXY_BASE_URL="http://${copilot_proxy_service}.${copilot_proxy_namespace}.svc.cluster.local:${copilot_proxy_service_port}/v1" \
