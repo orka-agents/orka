@@ -62,6 +62,7 @@ export function RepositoryList() {
 
 function RepositoryCard({ repo }: { repo: RepositoryScan }) {
   const runScan = useRunSecurityScan(repo.metadata.name)
+  const lastScanAt = repo.status?.lastScanAt ?? repo.status?.lastSuccessfulScanAt
 
   return (
     <Card className="transition-colors hover:border-primary/50">
@@ -83,7 +84,7 @@ function RepositoryCard({ repo }: { repo: RepositoryScan }) {
         <div className="text-sm text-muted-foreground">{repo.spec.repoURL}</div>
         <div className="grid gap-2 text-sm md:grid-cols-2">
           <div>Open findings: <span className="font-medium text-foreground">{repo.status?.findingCounts?.total ?? 0}</span></div>
-          <div>Last scan: <span className="font-medium text-foreground">{timeAgo(repo.status?.lastScanAt)}</span></div>
+          <div>Last scan: <span className="font-medium text-foreground">{timeAgo(lastScanAt)}</span></div>
         </div>
         <div className="flex flex-wrap gap-2 text-xs">
           <Badge variant="outline">Critical {repo.status?.findingCounts?.critical ?? 0}</Badge>

@@ -997,6 +997,35 @@ func TestIngestPatchTaskKeepsPatchPendingUntilResultExists(t *testing.T) {
 	assertPatchIngestState(t, fixture, scanRunPhasePending, findingStatePatchPending)
 }
 
+func TestApplyCombinedScanPhaseStatusUsesRunCompletion(t *testing.T) {
+	completed := mustParseTime(t, "2026-05-07T23:30:00Z")
+
+	succeeded := &corev1alpha1.RepositoryScan{}
+	applyCombinedScanPhaseStatus(succeeded, corev1alpha1.TaskPhaseSucceeded, &storepkg.ScanRun{
+		Phase:       scanRunPhaseSucceeded,
+		CompletedAt: &completed,
+		HeadCommit:  "abc123",
+	})
+	if succeeded.Status.LastScanAt == nil || !succeeded.Status.LastScanAt.Time.Equal(completed) {
+		t.Fatalf("succeeded LastScanAt = %v, want %v", succeeded.Status.LastScanAt, completed)
+	}
+	if succeeded.Status.LastSuccessfulScanAt == nil || !succeeded.Status.LastSuccessfulScanAt.Time.Equal(completed) {
+		t.Fatalf("succeeded LastSuccessfulScanAt = %v, want %v", succeeded.Status.LastSuccessfulScanAt, completed)
+	}
+
+	failed := &corev1alpha1.RepositoryScan{}
+	applyCombinedScanPhaseStatus(failed, corev1alpha1.TaskPhaseFailed, &storepkg.ScanRun{
+		Phase:       scanRunPhaseFailed,
+		CompletedAt: &completed,
+	})
+	if failed.Status.LastScanAt == nil || !failed.Status.LastScanAt.Time.Equal(completed) {
+		t.Fatalf("failed LastScanAt = %v, want %v", failed.Status.LastScanAt, completed)
+	}
+	if failed.Status.LastSuccessfulScanAt != nil {
+		t.Fatalf("failed LastSuccessfulScanAt = %v, want nil", failed.Status.LastSuccessfulScanAt)
+	}
+}
+
 func TestRefreshScanRunStatusSetsLastScanAtOnFailedRun(t *testing.T) {
 	ctx := context.Background()
 	secStore := setupControllerSQLiteStore(t)
