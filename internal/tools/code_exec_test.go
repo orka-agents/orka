@@ -61,6 +61,18 @@ func (e *recordingCodeExecutor) Execute(_ context.Context, req CodeExecutionRequ
 	return e.result
 }
 
+type recordingSandboxClient struct {
+	calls  int
+	req    SandboxRunRequest
+	result SandboxRunResult
+}
+
+func (c *recordingSandboxClient) Run(_ context.Context, req SandboxRunRequest) SandboxRunResult {
+	c.calls++
+	c.req = req
+	return c.result
+}
+
 func TestCodeExecTool_Name(t *testing.T) {
 	tool := NewCodeExecTool()
 	if got := tool.Name(); got != codeExecToolName {
@@ -796,6 +808,80 @@ func TestCodeExecTool_ExecuteUsesConfiguredExecutorWithoutScopedOverride(t *test
 	}
 	if execResult.Output != "from configured executor" || execResult.ExitCode != 23 {
 		t.Fatalf("result = %+v, want configured executor result", execResult)
+	}
+}
+
+func TestCodeExecTool_ExecuteUsesSandboxClient(t *testing.T) {
+	t.Setenv(codeExecBackendEnv, "")
+
+	executor := &recordingCodeExecutor{result: CodeExecResult{Output: "should not be used", ExitCode: 99}}
+	sandbox := &recordingSandboxClient{result: SandboxRunResult{
+		Output:          "from sandbox",
+		Error:           "sandbox stderr",
+		ExitCode:        42,
+		TimedOut:        true,
+		OutputTruncated: true,
+		ErrorTruncated:  true,
+	}}
+	workDir := t.TempDir()
+	tool := &CodeExecTool{
+		workDir:          workDir,
+		timeout:          30 * time.Second,
+		allowedLangs:     defaultCodeExecAllowedLangs(),
+		denyPatterns:     defaultDenyPatterns,
+		sandboxClient:    sandbox,
+		executor:         executor,
+		backend:          codeExecBackendKubernetes,
+		outputLimitBytes: 321,
+	}
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Tenant:       "tenant-a",
+		Provider:     "provider-a",
+		ProviderType: "provider-type-a",
+	})
+
+	result, err := tool.Execute(ctx, json.RawMessage(`{"language":"bash","code":"echo via sandbox","timeout":1}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if executor.calls != 0 {
+		t.Fatalf("configured executor calls = %d, want 0 when sandbox client is configured", executor.calls)
+	}
+	if sandbox.calls != 1 {
+		t.Fatalf("sandbox calls = %d, want 1", sandbox.calls)
+	}
+	if sandbox.req.Backend != codeExecBackendKubernetes {
+		t.Fatalf("sandbox backend = %q, want %q", sandbox.req.Backend, codeExecBackendKubernetes)
+	}
+	if sandbox.req.Language != codeLanguageBash || sandbox.req.Code != "echo via sandbox" {
+		t.Fatalf("unexpected sandbox request: %+v", sandbox.req)
+	}
+	if sandbox.req.Timeout != time.Second {
+		t.Fatalf("sandbox timeout = %s, want 1s", sandbox.req.Timeout)
+	}
+	if sandbox.req.WorkDir != workDir {
+		t.Fatalf("sandbox workDir = %q, want %q", sandbox.req.WorkDir, workDir)
+	}
+	if sandbox.req.OutputLimitBytes != 321 {
+		t.Fatalf("sandbox OutputLimitBytes = %d, want 321", sandbox.req.OutputLimitBytes)
+	}
+	if len(sandbox.req.DenyPatterns) == 0 {
+		t.Fatal("sandbox deny patterns are empty")
+	}
+	if sandbox.req.Tenant != "tenant-a" || sandbox.req.Provider != "provider-a" || sandbox.req.ProviderType != "provider-type-a" {
+		t.Fatalf("sandbox scope = tenant %q provider %q providerType %q", sandbox.req.Tenant, sandbox.req.Provider, sandbox.req.ProviderType)
+	}
+
+	var execResult CodeExecResult
+	if err := json.Unmarshal([]byte(result), &execResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if execResult.Output != "from sandbox" || execResult.Error != "sandbox stderr" || execResult.ExitCode != 42 {
+		t.Fatalf("result = %+v, want sandbox result", execResult)
+	}
+	if !execResult.TimedOut || !execResult.OutputTruncated || !execResult.ErrorTruncated {
+		t.Fatalf("result flags = timed_out:%t output_truncated:%t error_truncated:%t, want all true", execResult.TimedOut, execResult.OutputTruncated, execResult.ErrorTruncated)
 	}
 }
 

@@ -10,10 +10,12 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"os"
 	"path"
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -48,6 +50,24 @@ const (
 
 	// DefaultInitImage is the default image for init containers
 	DefaultInitImage = "busybox:1.37"
+
+	// AIWorkerServiceAccountName is the ServiceAccount for AI worker tasks.
+	AIWorkerServiceAccountName = "orka-ai-worker"
+
+	// VendorWorkerServiceAccountName is the ServiceAccount for vendor CLI agent worker tasks.
+	VendorWorkerServiceAccountName = "orka-vendor-worker"
+
+	// ContainerWorkerServiceAccountName is the ServiceAccount for container worker tasks.
+	ContainerWorkerServiceAccountName = "orka-container-worker"
+
+	// directProviderSecretsEnvVar restores legacy direct provider API key/base URL injection for agent/container pods.
+	directProviderSecretsEnvVar = "ORKA_AGENT_DIRECT_PROVIDER_SECRETS"
+
+	// directSecretMountsEnvVar restores legacy direct task/agent secret injection for agent/container pods.
+	directSecretMountsEnvVar = "ORKA_AGENT_DIRECT_SECRET_MOUNTS"
+
+	// directGitCredentialsEnvVar restores legacy direct Git credential mounts for agent/container pods.
+	directGitCredentialsEnvVar = "ORKA_AGENT_DIRECT_GIT_CREDENTIALS"
 
 	// ResultEndpointEnvVar is the env var for the result submission URL
 	ResultEndpointEnvVar = "ORKA_RESULT_ENDPOINT"
@@ -95,6 +115,93 @@ func NewJobBuilder(c client.Client) *JobBuilder {
 	}
 }
 
+func workerServiceAccountNameForTask(task *corev1alpha1.Task, agent *corev1alpha1.Agent) string {
+	if task == nil {
+		return ContainerWorkerServiceAccountName
+	}
+
+	switch task.Spec.Type {
+	case corev1alpha1.TaskTypeAI:
+		return AIWorkerServiceAccountName
+	case corev1alpha1.TaskTypeAgent:
+		if isVendorAgentTask(task, agent) {
+			return VendorWorkerServiceAccountName
+		}
+		return ContainerWorkerServiceAccountName
+	case corev1alpha1.TaskTypeContainer:
+		return ContainerWorkerServiceAccountName
+	default:
+		return ContainerWorkerServiceAccountName
+	}
+}
+
+func podShouldAutomountServiceAccountToken(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	if task == nil || !isUntrustedComputeTask(task, agent) {
+		return true
+	}
+	if task.Spec.SessionRef != nil {
+		return true
+	}
+
+	return false
+}
+
+func isVendorAgentTask(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent || agent == nil || agent.Spec.Runtime == nil {
+		return false
+	}
+
+	switch agent.Spec.Runtime.Type {
+	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot:
+		return true
+	default:
+		return false
+	}
+}
+
+func isUntrustedComputeTask(task *corev1alpha1.Task, _ *corev1alpha1.Agent) bool {
+	if task == nil {
+		return false
+	}
+
+	switch task.Spec.Type {
+	case corev1alpha1.TaskTypeAgent, corev1alpha1.TaskTypeContainer:
+		return true
+	default:
+		return false
+	}
+}
+
+func directProviderSecretsEnabled() bool {
+	return envFlagEnabled(directProviderSecretsEnvVar)
+}
+
+func directSecretMountsEnabled() bool {
+	return envFlagEnabled(directSecretMountsEnvVar)
+}
+
+func directGitCredentialsEnabled() bool {
+	return envFlagEnabled(directGitCredentialsEnvVar)
+}
+
+func envFlagEnabled(name string) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if enabled, err := strconv.ParseBool(value); err == nil {
+		return enabled
+	}
+
+	switch strings.ToLower(value) {
+	case "y", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func agentHasFallbackProviders(agent *corev1alpha1.Agent) bool {
+	return agent != nil && agent.Spec.Model != nil && len(agent.Spec.Model.Fallbacks) > 0
+}
+
 func buildTaskJobName(task *corev1alpha1.Task) string {
 	uidPrefix := string(task.UID)
 	if len(uidPrefix) > 8 {
@@ -138,9 +245,10 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 					},
 				},
 				Spec: corev1.PodSpec{
-					RestartPolicy:      corev1.RestartPolicyNever,
-					ServiceAccountName: "orka-worker",
-					SecurityContext:    b.buildPodSecurityContext(),
+					RestartPolicy:                corev1.RestartPolicyNever,
+					ServiceAccountName:           workerServiceAccountNameForTask(task, agent),
+					AutomountServiceAccountToken: ptr.To(podShouldAutomountServiceAccountToken(task, agent)),
+					SecurityContext:              b.buildPodSecurityContext(),
 					Containers: []corev1.Container{
 						b.buildContainer(ctx, task, agent, provider),
 					},
@@ -161,7 +269,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 
 	// Add workspace/home volumes for tasks that need a git workspace.
 	if taskNeedsWorkspace(task) {
-		b.addWorkspaceVolumes(job, task)
+		b.addWorkspaceVolumes(job, task, agent)
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer && effectiveWorkspace(task) != nil && task.Spec.Image != "" {
@@ -174,7 +282,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 	}
 
 	// Add secret volumes if needed
-	if task.Spec.SecretRef != nil || (agent != nil && agent.Spec.SecretRef != nil) || provider != nil {
+	if task.Spec.SecretRef != nil || (agent != nil && (agent.Spec.SecretRef != nil || agentHasFallbackProviders(agent))) || provider != nil {
 		b.addSecretVolumes(ctx, job, task, agent, provider)
 	}
 
@@ -683,8 +791,11 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 
 // addSecretVolumes adds secret volumes to the Job
 func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) {
+	allowDirectProviderSecrets := !isUntrustedComputeTask(task, agent) || directProviderSecretsEnabled()
+	allowDirectSecretMounts := !isUntrustedComputeTask(task, agent) || directSecretMountsEnabled()
+
 	// Add provider secret (mounted as environment variable source)
-	if provider != nil {
+	if allowDirectProviderSecrets && provider != nil {
 		secretName := provider.Spec.SecretRef.Name
 		secretKey := provider.Spec.SecretRef.Key
 		if secretKey == "" {
@@ -727,7 +838,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	// Add fallback provider secrets
-	if agent != nil && agent.Spec.Model != nil {
+	if allowDirectProviderSecrets && task != nil && agentHasFallbackProviders(agent) {
 		for i, fb := range agent.Spec.Model.Fallbacks {
 			fbProvider := &corev1alpha1.Provider{}
 			if err := b.Get(ctx, client.ObjectKey{
@@ -760,7 +871,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	// Add task secret
-	if task.Spec.SecretRef != nil {
+	if allowDirectSecretMounts && task != nil && task.Spec.SecretRef != nil {
 		secretName := task.Spec.SecretRef.Name
 		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 			Name: "task-secrets",
@@ -781,7 +892,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	// Add agent secret
-	if agent != nil && agent.Spec.SecretRef != nil {
+	if allowDirectSecretMounts && agent != nil && agent.Spec.SecretRef != nil {
 		secretName := agent.Spec.SecretRef.Name
 		// Inject all secret keys as environment variables
 		job.Spec.Template.Spec.Containers[0].EnvFrom = append(
@@ -1104,7 +1215,7 @@ func (b *JobBuilder) addAgentWorkspaceEnvVars(envVars []corev1.EnvVar, task *cor
 }
 
 // addWorkspaceVolumes adds workspace-specific volumes to the Job (workspace, home)
-func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Task) {
+func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent) {
 	// /workspace emptyDir for git clone target
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 		Name: "workspace",
@@ -1146,14 +1257,16 @@ func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Ta
 				},
 			},
 		})
-		job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
-			job.Spec.Template.Spec.Containers[0].VolumeMounts,
-			corev1.VolumeMount{
-				Name:      "git-credentials",
-				MountPath: "/secrets/git",
-				ReadOnly:  true,
-			},
-		)
+		if !isUntrustedComputeTask(task, agent) || directGitCredentialsEnabled() {
+			job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
+				job.Spec.Template.Spec.Containers[0].VolumeMounts,
+				corev1.VolumeMount{
+					Name:      "git-credentials",
+					MountPath: "/secrets/git",
+					ReadOnly:  true,
+				},
+			)
+		}
 	}
 }
 

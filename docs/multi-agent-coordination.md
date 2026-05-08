@@ -346,7 +346,7 @@ Located in `workers/ai/main.go`. When `ORKA_COORDINATION_ENABLED=true`:
 
 ## RBAC
 
-The worker ServiceAccount (`orka-worker`) ClusterRole in `config/rbac/worker_role.yaml` includes:
+The AI worker ServiceAccount (`orka-ai-worker`) ClusterRole in `config/rbac/worker_role.yaml` includes orchestration permissions for coordination and Kubernetes-backed tools. Vendor and container workers use narrower ServiceAccounts without these orchestration permissions:
 
 ```yaml
 - apiGroups: ["core.orka.ai"]

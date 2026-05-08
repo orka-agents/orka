@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	cron "github.com/robfig/cron/v3"
@@ -1367,22 +1369,62 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 const (
-	workerServiceAccountName = "orka-worker"
-	workerClusterRoleName    = "orka-orka-worker-role"
+	aiWorkerClusterRoleNameEnv        = "ORKA_AI_WORKER_CLUSTER_ROLE_NAME"
+	vendorWorkerClusterRoleNameEnv    = "ORKA_VENDOR_WORKER_CLUSTER_ROLE_NAME"
+	containerWorkerClusterRoleNameEnv = "ORKA_CONTAINER_WORKER_CLUSTER_ROLE_NAME"
+
+	defaultAIWorkerClusterRoleName        = "orka-ai-worker-role"
+	defaultVendorWorkerClusterRoleName    = "orka-vendor-worker-role"
+	defaultContainerWorkerClusterRoleName = "orka-container-worker-role"
 )
 
-// ensureWorkerRBAC ensures the orka-worker ServiceAccount and ClusterRoleBinding
-// exist in the given namespace so that task jobs have the correct permissions.
-func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string) error {
-	log := logf.FromContext(ctx)
+type workerRBACIdentity struct {
+	serviceAccountName string
+	clusterRoleName    string
+}
 
-	// Ensure ServiceAccount exists
+func configuredWorkerClusterRoleName(envName, defaultName string) string {
+	if value := strings.TrimSpace(os.Getenv(envName)); value != "" {
+		return value
+	}
+	return defaultName
+}
+
+func workerRBACIdentities() []workerRBACIdentity {
+	return []workerRBACIdentity{
+		{serviceAccountName: AIWorkerServiceAccountName, clusterRoleName: configuredWorkerClusterRoleName(aiWorkerClusterRoleNameEnv, defaultAIWorkerClusterRoleName)},
+		{serviceAccountName: VendorWorkerServiceAccountName, clusterRoleName: configuredWorkerClusterRoleName(vendorWorkerClusterRoleNameEnv, defaultVendorWorkerClusterRoleName)},
+		{serviceAccountName: ContainerWorkerServiceAccountName, clusterRoleName: configuredWorkerClusterRoleName(containerWorkerClusterRoleNameEnv, defaultContainerWorkerClusterRoleName)},
+	}
+}
+
+func workerClusterRoleBindingName(identity workerRBACIdentity, namespace string) string {
+	return fmt.Sprintf("%s-%s", identity.serviceAccountName, namespace)
+}
+
+// ensureWorkerRBAC ensures split worker ServiceAccounts and ClusterRoleBindings
+// exist in the given namespace so task jobs get task-type-specific permissions.
+func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string) error {
+	for _, identity := range workerRBACIdentities() {
+		if err := r.ensureWorkerServiceAccount(ctx, namespace, identity.serviceAccountName); err != nil {
+			return err
+		}
+		if err := r.ensureWorkerClusterRoleBinding(ctx, namespace, identity); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespace, name string) error {
+	log := logf.FromContext(ctx)
 	sa := &corev1.ServiceAccount{}
-	err := r.Get(ctx, types.NamespacedName{Name: workerServiceAccountName, Namespace: namespace}, sa)
+	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, sa)
 	if apierrors.IsNotFound(err) {
 		sa = &corev1.ServiceAccount{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      workerServiceAccountName,
+				Name:      name,
 				Namespace: namespace,
 				Labels: map[string]string{
 					"app.kubernetes.io/managed-by": "orka",
@@ -1390,17 +1432,25 @@ func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string)
 			},
 		}
 		if err := r.Create(ctx, sa); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("creating ServiceAccount: %w", err)
+			return fmt.Errorf("creating ServiceAccount %s/%s: %w", namespace, name, err)
 		}
-		log.Info("Created worker ServiceAccount", "namespace", namespace)
+		log.Info("Created worker ServiceAccount", "namespace", namespace, "serviceAccount", name)
 	} else if err != nil {
-		return fmt.Errorf("getting ServiceAccount: %w", err)
+		return fmt.Errorf("getting ServiceAccount %s/%s: %w", namespace, name, err)
 	}
 
-	// Ensure ClusterRoleBinding includes this namespace
-	bindingName := fmt.Sprintf("orka-worker-%s", namespace)
+	return nil
+}
+
+func (r *TaskReconciler) ensureWorkerClusterRoleBinding(
+	ctx context.Context,
+	namespace string,
+	identity workerRBACIdentity,
+) error {
+	log := logf.FromContext(ctx)
+	bindingName := workerClusterRoleBindingName(identity, namespace)
 	crb := &rbacv1.ClusterRoleBinding{}
-	err = r.Get(ctx, types.NamespacedName{Name: bindingName}, crb)
+	err := r.Get(ctx, types.NamespacedName{Name: bindingName}, crb)
 	if apierrors.IsNotFound(err) {
 		crb = &rbacv1.ClusterRoleBinding{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1412,22 +1462,27 @@ func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string)
 			RoleRef: rbacv1.RoleRef{
 				APIGroup: "rbac.authorization.k8s.io",
 				Kind:     "ClusterRole",
-				Name:     workerClusterRoleName,
+				Name:     identity.clusterRoleName,
 			},
 			Subjects: []rbacv1.Subject{
 				{
 					Kind:      "ServiceAccount",
-					Name:      workerServiceAccountName,
+					Name:      identity.serviceAccountName,
 					Namespace: namespace,
 				},
 			},
 		}
 		if err := r.Create(ctx, crb); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("creating ClusterRoleBinding: %w", err)
+			return fmt.Errorf("creating ClusterRoleBinding %s: %w", bindingName, err)
 		}
-		log.Info("Created worker ClusterRoleBinding", "namespace", namespace, "binding", bindingName)
+		log.Info("Created worker ClusterRoleBinding",
+			"namespace", namespace,
+			"binding", bindingName,
+			"serviceAccount", identity.serviceAccountName,
+			"clusterRole", identity.clusterRoleName,
+		)
 	} else if err != nil {
-		return fmt.Errorf("getting ClusterRoleBinding: %w", err)
+		return fmt.Errorf("getting ClusterRoleBinding %s: %w", bindingName, err)
 	}
 
 	return nil

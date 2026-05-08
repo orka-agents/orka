@@ -59,6 +59,13 @@ spec:
             {{- if gt (int .Values.controller.maxTasksPerNamespace) 0 }}
             - --max-tasks-per-namespace={{ .Values.controller.maxTasksPerNamespace }}
             {{- end }}
+          env:
+            - name: ORKA_AI_WORKER_CLUSTER_ROLE_NAME
+              value: {{ printf "%s-ai-worker-role" (include "orka.fullname" .) | quote }}
+            - name: ORKA_VENDOR_WORKER_CLUSTER_ROLE_NAME
+              value: {{ printf "%s-vendor-worker-role" (include "orka.fullname" .) | quote }}
+            - name: ORKA_CONTAINER_WORKER_CLUSTER_ROLE_NAME
+              value: {{ printf "%s-container-worker-role" (include "orka.fullname" .) | quote }}
           ports:
             - name: api
               containerPort: {{ .Values.controller.apiPort }}
