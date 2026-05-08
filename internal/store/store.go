@@ -58,6 +58,7 @@ type MemoryProposalStore interface {
 	GetMemoryProposal(ctx context.Context, namespace, id string) (*MemoryProposal, error)
 	ListMemoryProposals(ctx context.Context, filter MemoryProposalFilter) ([]MemoryProposal, error)
 	ReviewMemoryProposal(ctx context.Context, review MemoryProposalReview) error
+	ApplyMemoryProposal(ctx context.Context, apply MemoryProposalApply) (*Memory, error)
 	ArchiveMemoryProposal(ctx context.Context, namespace, id string) error
 }
 

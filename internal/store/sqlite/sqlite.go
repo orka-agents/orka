@@ -117,14 +117,15 @@ func migrate(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_results_namespace ON results(namespace)`,
 		`CREATE INDEX IF NOT EXISTS idx_plan_states_namespace ON plan_states(namespace)`,
 		`CREATE TABLE IF NOT EXISTS memories (
-			id               TEXT PRIMARY KEY,
-			namespace        TEXT NOT NULL,
-			session_name     TEXT NOT NULL DEFAULT '',
-			agent_name       TEXT NOT NULL DEFAULT '',
-			task_name        TEXT NOT NULL DEFAULT '',
-			parent_task      TEXT NOT NULL DEFAULT '',
-			source           TEXT NOT NULL DEFAULT '',
-			content          TEXT NOT NULL,
+			id                 TEXT PRIMARY KEY,
+			namespace          TEXT NOT NULL,
+			session_name       TEXT NOT NULL DEFAULT '',
+			agent_name         TEXT NOT NULL DEFAULT '',
+			task_name          TEXT NOT NULL DEFAULT '',
+			parent_task        TEXT NOT NULL DEFAULT '',
+			source             TEXT NOT NULL DEFAULT '',
+			source_proposal_id TEXT NOT NULL DEFAULT '',
+			content            TEXT NOT NULL,
 			tags_json        TEXT NOT NULL DEFAULT '[]',
 			disabled         BOOLEAN NOT NULL DEFAULT FALSE,
 			deleted          BOOLEAN NOT NULL DEFAULT FALSE,
@@ -148,12 +149,15 @@ func migrate(db *sql.DB) error {
 			description TEXT NOT NULL DEFAULT '',
 			content     TEXT NOT NULL DEFAULT '',
 			patch       TEXT NOT NULL DEFAULT '',
-			status      TEXT NOT NULL DEFAULT 'pending',
-			reviewer    TEXT NOT NULL DEFAULT '',
-			review_note TEXT NOT NULL DEFAULT '',
-			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			reviewed_at TIMESTAMP
+			status            TEXT NOT NULL DEFAULT 'pending',
+			reviewer          TEXT NOT NULL DEFAULT '',
+			review_note       TEXT NOT NULL DEFAULT '',
+			applied_memory_id TEXT NOT NULL DEFAULT '',
+			applied_by        TEXT NOT NULL DEFAULT '',
+			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			reviewed_at       TIMESTAMP,
+			applied_at        TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_proposals_status
 			ON memory_proposals(namespace, status, created_at DESC)`,
@@ -266,6 +270,61 @@ func migrate(db *sql.DB) error {
 		}
 	}
 
+	if err := ensureSQLiteColumns(db, "memories", []sqliteColumnMigration{
+		{Name: "source_proposal_id", Definition: "source_proposal_id TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumns(db, "memory_proposals", []sqliteColumnMigration{
+		{Name: "applied_memory_id", Definition: "applied_memory_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "applied_by", Definition: "applied_by TEXT NOT NULL DEFAULT ''"},
+		{Name: "applied_at", Definition: "applied_at TIMESTAMP"},
+	}); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_source_proposal
+		ON memories(namespace, source_proposal_id)
+		WHERE source_proposal_id <> ''`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+
+	return nil
+}
+
+type sqliteColumnMigration struct {
+	Name       string
+	Definition string
+}
+
+func ensureSQLiteColumns(db *sql.DB, table string, columns []sqliteColumnMigration) error {
+	existing := map[string]struct{}{}
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, pk int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return fmt.Errorf("migration failed: %w", err)
+		}
+		existing[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+
+	for _, column := range columns {
+		if _, ok := existing[column.Name]; ok {
+			continue
+		}
+		if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s", table, column.Definition)); err != nil {
+			return fmt.Errorf("migration failed: %w", err)
+		}
+	}
 	return nil
 }
 

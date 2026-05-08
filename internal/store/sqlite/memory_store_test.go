@@ -165,6 +165,110 @@ func TestMemoryProposalStore(t *testing.T) {
 	}
 }
 
+func TestApplyMemoryProposal(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	proposal := &store.MemoryProposal{
+		Namespace:   "ns-apply",
+		TaskName:    "task-a",
+		AgentName:   "agent-a",
+		Type:        "memory",
+		Title:       "Prefer explicit migrations",
+		Description: "Store migration guidance.\n\nTags: Storage, sqlite, storage",
+		Content:     "Keep SQLite memory migrations idempotent and covered by tests.",
+	}
+	if err := s.CreateMemoryProposal(ctx, proposal); err != nil {
+		t.Fatalf("CreateMemoryProposal: %v", err)
+	}
+	if err := s.ReviewMemoryProposal(ctx, store.MemoryProposalReview{
+		Namespace: "ns-apply",
+		ID:        proposal.ID,
+		Status:    "accepted",
+		Reviewer:  "maintainer",
+	}); err != nil {
+		t.Fatalf("ReviewMemoryProposal: %v", err)
+	}
+
+	memory, err := s.ApplyMemoryProposal(ctx, store.MemoryProposalApply{
+		Namespace: "ns-apply",
+		ID:        proposal.ID,
+		AppliedBy: "coordinator",
+	})
+	if err != nil {
+		t.Fatalf("ApplyMemoryProposal: %v", err)
+	}
+	if memory.ID == "" || memory.Source != "memory_proposal" || memory.SourceProposalID != proposal.ID {
+		t.Fatalf("unexpected applied memory provenance: %+v", memory)
+	}
+	if memory.Content != proposal.Content || memory.Namespace != "ns-apply" || memory.TaskName != "task-a" || memory.AgentName != "agent-a" {
+		t.Fatalf("unexpected applied memory: %+v", memory)
+	}
+	if got, want := strings.Join(memory.Tags, ","), "storage,sqlite"; got != want {
+		t.Fatalf("tags = %q, want %q", got, want)
+	}
+
+	updated, err := s.GetMemoryProposal(ctx, "ns-apply", proposal.ID)
+	if err != nil {
+		t.Fatalf("GetMemoryProposal: %v", err)
+	}
+	if updated.Status != "applied" || updated.AppliedMemoryID != memory.ID || updated.AppliedBy != "coordinator" || updated.AppliedAt == nil {
+		t.Fatalf("proposal apply metadata not persisted: %+v", updated)
+	}
+
+	again, err := s.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: "ns-apply", ID: proposal.ID, AppliedBy: "other"})
+	if err != nil {
+		t.Fatalf("ApplyMemoryProposal second call: %v", err)
+	}
+	if again.ID != memory.ID {
+		t.Fatalf("second apply memory id = %q, want %q", again.ID, memory.ID)
+	}
+	listed, err := s.ListMemories(ctx, store.MemoryFilter{Namespace: "ns-apply", Source: "memory_proposal"})
+	if err != nil {
+		t.Fatalf("ListMemories: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != memory.ID {
+		t.Fatalf("expected exactly one applied memory, got %+v", listed)
+	}
+	if err := s.ArchiveMemoryProposal(ctx, "ns-apply", proposal.ID); err == nil {
+		t.Fatalf("ArchiveMemoryProposal applied proposal succeeded, want error")
+	}
+}
+
+func TestApplyMemoryProposalValidation(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	pending := &store.MemoryProposal{
+		Namespace: "ns-apply-validation",
+		Type:      "memory",
+		Title:     "Pending memory",
+		Content:   "Only accepted proposals should apply.",
+	}
+	if err := s.CreateMemoryProposal(ctx, pending); err != nil {
+		t.Fatalf("CreateMemoryProposal pending: %v", err)
+	}
+	if _, err := s.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: pending.Namespace, ID: pending.ID}); err == nil || !strings.Contains(err.Error(), "cannot be applied") {
+		t.Fatalf("ApplyMemoryProposal pending error = %v, want cannot be applied", err)
+	}
+
+	skill := &store.MemoryProposal{
+		Namespace: "ns-apply-validation",
+		Type:      "skill",
+		Title:     "Skill proposal",
+		Content:   "Skill content should not become durable memory.",
+	}
+	if err := s.CreateMemoryProposal(ctx, skill); err != nil {
+		t.Fatalf("CreateMemoryProposal skill: %v", err)
+	}
+	if err := s.ReviewMemoryProposal(ctx, store.MemoryProposalReview{Namespace: skill.Namespace, ID: skill.ID, Status: "accepted"}); err != nil {
+		t.Fatalf("ReviewMemoryProposal skill: %v", err)
+	}
+	if _, err := s.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: skill.Namespace, ID: skill.ID}); err == nil || !strings.Contains(err.Error(), "cannot be applied as memory") {
+		t.Fatalf("ApplyMemoryProposal skill error = %v, want cannot be applied as memory", err)
+	}
+}
+
 func TestTranscriptSearch(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()

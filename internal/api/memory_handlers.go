@@ -270,6 +270,32 @@ func (h *Handlers) ArchiveMemoryProposal(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
+// ApplyMemoryProposal applies an accepted memory proposal into durable memory.
+func (h *Handlers) ApplyMemoryProposal(c fiber.Ctx) error {
+	if err := h.ensureMemoryProposalStore(); err != nil {
+		return err
+	}
+	apply, err := bindMemoryProposalApply(c, c.Query("namespace", ""), c.Params("id"))
+	if err != nil {
+		return err
+	}
+	namespace, err := h.resolveNamespace(c, apply.Namespace)
+	if err != nil {
+		return err
+	}
+	apply.Namespace = namespace
+	if apply.AppliedBy == "" {
+		if ui := GetUserInfo(c); ui != nil {
+			apply.AppliedBy = ui.Username
+		}
+	}
+	memory, err := h.memoryProposalStore.ApplyMemoryProposal(c.Context(), apply)
+	if err != nil {
+		return memoryStoreError("apply memory proposal", "memory proposal", err)
+	}
+	return c.JSON(memory)
+}
+
 func parseMemoryFilter(c fiber.Ctx, namespace string) (store.MemoryFilter, error) {
 	limit, err := parseOptionalLimit(c.Query("limit", ""))
 	if err != nil {
@@ -396,6 +422,26 @@ func bindMemoryProposalReview(c fiber.Ctx, fallbackNamespace, id string) (store.
 	}, nil
 }
 
+func bindMemoryProposalApply(c fiber.Ctx, fallbackNamespace, id string) (store.MemoryProposalApply, error) {
+	var req struct {
+		Namespace string `json:"namespace"`
+		AppliedBy string `json:"appliedBy"`
+	}
+	if strings.TrimSpace(string(c.Body())) != "" {
+		if err := c.Bind().JSON(&req); err != nil {
+			return store.MemoryProposalApply{}, fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+		}
+	}
+	if req.Namespace == "" {
+		req.Namespace = fallbackNamespace
+	}
+	return store.MemoryProposalApply{
+		Namespace: req.Namespace,
+		ID:        id,
+		AppliedBy: req.AppliedBy,
+	}, nil
+}
+
 func memoryStoreError(action, resource string, err error) error {
 	if errors.Is(err, store.ErrNotFound) {
 		return fiber.NewError(fiber.StatusNotFound, fmt.Sprintf("%s not found", resource))
@@ -408,5 +454,8 @@ func memoryStoreError(action, resource string, err error) error {
 
 func isStoreValidationError(err error) bool {
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "required") || strings.Contains(msg, "invalid")
+	return strings.Contains(msg, "required") ||
+		strings.Contains(msg, "invalid") ||
+		strings.Contains(msg, "must be") ||
+		strings.Contains(msg, "cannot")
 }

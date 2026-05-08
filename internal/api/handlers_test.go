@@ -2515,6 +2515,52 @@ func TestHandlers_DeleteTask_WatchNamespaceScoped(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 }
 
+func TestHandlers_ApplyMemoryProposal(t *testing.T) {
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	ss := sqlite.NewStore(db, ":memory:")
+	h := NewHandlers(HandlersConfig{MemoryStore: ss, MemoryProposalStore: ss})
+
+	app := fiber.New()
+	app.Post("/api/v1/memory-proposals/:id/apply", h.ApplyMemoryProposal)
+
+	proposal := &store.MemoryProposal{
+		Namespace:   "default",
+		Title:       "Remember project preference",
+		Type:        "memory",
+		Description: "Tags: preference, summary",
+		Content:     "User prefers compact task summaries.",
+	}
+	require.NoError(t, ss.CreateMemoryProposal(context.Background(), proposal))
+	require.NoError(t, ss.ReviewMemoryProposal(context.Background(), store.MemoryProposalReview{
+		Namespace: "default",
+		ID:        proposal.ID,
+		Status:    "accepted",
+		Reviewer:  "reviewer",
+	}))
+
+	body, _ := json.Marshal(map[string]any{"appliedBy": "api-user"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/memory-proposals/"+proposal.ID+"/apply?namespace=default", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var memory store.Memory
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&memory))
+	require.Equal(t, "default", memory.Namespace)
+	require.Equal(t, proposal.ID, memory.SourceProposalID)
+	require.Equal(t, "memory_proposal", memory.Source)
+	require.Equal(t, proposal.Content, memory.Content)
+	require.ElementsMatch(t, []string{"preference", "summary"}, memory.Tags)
+
+	updated, err := ss.GetMemoryProposal(context.Background(), "default", proposal.ID)
+	require.NoError(t, err)
+	require.Equal(t, memory.ID, updated.AppliedMemoryID)
+	require.Equal(t, "api-user", updated.AppliedBy)
+	require.False(t, updated.AppliedAt.IsZero())
+}
+
 // --- Tests: CreateAgent already exists (conflict) ---
 
 func TestHandlers_CreateAgent_Conflict(t *testing.T) {
