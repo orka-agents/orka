@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/sozercan/orka/internal/workerenv"
 	"io"
 	"os"
 	"os/exec"
@@ -18,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sozercan/orka/internal/workerenv"
 
 	"github.com/sozercan/orka/workers/common"
 )

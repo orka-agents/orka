@@ -9,7 +9,6 @@ package common
 import (
 	"context"
 	"fmt"
-	"github.com/sozercan/orka/internal/workerenv"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -17,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 // AgentConfig holds worker configuration from environment variables.

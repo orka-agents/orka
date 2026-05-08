@@ -10,11 +10,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/sozercan/orka/internal/workerenv"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 // FileReadTool implements file reading functionality

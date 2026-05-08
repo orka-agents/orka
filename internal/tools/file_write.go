@@ -10,10 +10,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/sozercan/orka/internal/workerenv"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (

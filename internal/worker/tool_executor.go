@@ -11,13 +11,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/sozercan/orka/internal/workerenv"
 	"io"
 	"net/http"
 	neturl "net/url"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/sozercan/orka/internal/workerenv"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"

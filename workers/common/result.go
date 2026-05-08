@@ -10,12 +10,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/sozercan/orka/internal/workerenv"
 	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (

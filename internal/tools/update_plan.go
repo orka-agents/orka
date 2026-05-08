@@ -12,9 +12,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/sozercan/orka/internal/workerenv"
 	"net/http"
 	"os"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 // UpdatePlanTool allows the LLM to update the autonomous plan state.

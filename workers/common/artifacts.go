@@ -9,7 +9,6 @@ package common
 import (
 	"bytes"
 	"fmt"
-	"github.com/sozercan/orka/internal/workerenv"
 	"io"
 	"net/http"
 	"net/url"
@@ -17,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (

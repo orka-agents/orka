@@ -12,7 +12,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"github.com/sozercan/orka/internal/workerenv"
 	"os"
 	"os/exec"
 	"regexp"
@@ -20,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sozercan/orka/internal/workerenv"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )

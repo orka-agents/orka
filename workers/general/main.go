@@ -10,13 +10,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/sozercan/orka/internal/workerenv"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/sozercan/orka/internal/workerenv"
 
 	"github.com/sozercan/orka/workers/common"
 )

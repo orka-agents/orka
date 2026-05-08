@@ -11,13 +11,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/sozercan/orka/internal/workerenv"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const internalMemoryToolBodyLimit = 1 << 20 // 1MB
