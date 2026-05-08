@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sozercan/orka/internal/workerenv"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -35,7 +37,7 @@ type ToolExecutor struct {
 
 // NewToolExecutor creates a new tool executor
 func NewToolExecutor() *ToolExecutor {
-	namespace := os.Getenv("ORKA_TASK_NAMESPACE")
+	namespace := os.Getenv(workerenv.TaskNamespace)
 	if namespace == "" {
 		namespace = "default"
 	}

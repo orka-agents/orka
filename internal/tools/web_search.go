@@ -17,6 +17,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 // WebSearchTool implements web search functionality
@@ -42,8 +44,8 @@ type WebSearchResult struct {
 // NewWebSearchTool creates a new web search tool
 func NewWebSearchTool() *WebSearchTool {
 	return &WebSearchTool{
-		apiKey:  os.Getenv("SEARCH_API_KEY"),
-		baseURL: os.Getenv("SEARCH_API_URL"),
+		apiKey:  os.Getenv(workerenv.SearchAPIKey),
+		baseURL: os.Getenv(workerenv.SearchAPIURL),
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},

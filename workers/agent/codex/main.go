@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/workers/common"
 )
 
@@ -167,7 +168,7 @@ func buildCodexArgsForMode(cfg *common.AgentConfig, outputPath, instructionsPath
 	if instructionsPath != "" {
 		args = append(args, "--config", "model_instructions_file="+instructionsPath)
 	}
-	if baseURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")); baseURL != "" {
+	if baseURL := strings.TrimSpace(os.Getenv(workerenv.OpenAIBaseURL)); baseURL != "" {
 		args = append(args, "--config", "openai_base_url="+baseURL)
 	}
 	if !bypassSandbox && sandboxMode == defaultCodexSandboxMode {
@@ -182,14 +183,14 @@ func buildCodexArgsForMode(cfg *common.AgentConfig, outputPath, instructionsPath
 }
 
 func codexAutoCompactTokenLimit() string {
-	if limit := strings.TrimSpace(os.Getenv("ORKA_CODEX_AUTO_COMPACT_TOKEN_LIMIT")); limit != "" {
+	if limit := strings.TrimSpace(os.Getenv(workerenv.CodexAutoCompactTokenLimit)); limit != "" {
 		return limit
 	}
 	return defaultAutoCompactLimit
 }
 
 func codexSandboxMode() string {
-	if mode := strings.TrimSpace(os.Getenv("ORKA_CODEX_SANDBOX_MODE")); mode != "" {
+	if mode := strings.TrimSpace(os.Getenv(workerenv.CodexSandboxMode)); mode != "" {
 		return mode
 	}
 	return defaultCodexSandboxMode
@@ -268,9 +269,9 @@ func buildCodexEnv() []string {
 	env := os.Environ()
 	env = setEnvVar(env, "HOME", "/home/worker")
 
-	if os.Getenv("CODEX_API_KEY") == "" {
-		if apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); apiKey != "" {
-			env = setEnvVar(env, "CODEX_API_KEY", apiKey)
+	if os.Getenv(workerenv.CodexAPIKey) == "" {
+		if apiKey := strings.TrimSpace(os.Getenv(workerenv.OpenAIAPIKey)); apiKey != "" {
+			env = setEnvVar(env, workerenv.CodexAPIKey, apiKey)
 		}
 	}
 
@@ -339,14 +340,14 @@ func readCodexResult(outputPath, fallback string) string {
 }
 
 func codexPath() string {
-	if p := os.Getenv("CODEX_CLI_PATH"); p != "" {
+	if p := os.Getenv(workerenv.CodexCLIPath); p != "" {
 		return p
 	}
 	return defaultCodexPath
 }
 
 func allowBashEnabled() bool {
-	return os.Getenv("ORKA_ALLOW_BASH") == "true"
+	return os.Getenv(workerenv.AllowBash) == "true"
 }
 
 func shouldRetryCodexWithoutSandbox(output string) bool {
@@ -368,7 +369,7 @@ func shouldRetryCodexWithoutSandbox(output string) bool {
 }
 
 func shouldStartCodexWithoutSandbox() bool {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("ORKA_CODEX_DISABLE_SANDBOX")), "true") {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv(workerenv.CodexDisableSandbox)), "true") {
 		return true
 	}
 	if codexSandboxMode() != defaultCodexSandboxMode {

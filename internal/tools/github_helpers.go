@@ -12,6 +12,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sozercan/orka/internal/workerenv"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -59,7 +61,7 @@ func resolveRepoAndToken(ctx context.Context, k8sClient client.Client, taskName,
 
 	default:
 		// Priority 3: ORKA_GIT_REPO env var
-		envRepo := os.Getenv("ORKA_GIT_REPO")
+		envRepo := os.Getenv(workerenv.GitRepo)
 		if envRepo == "" {
 			return "", "", "", "", fmt.Errorf("no repo_url, task_name, or ORKA_GIT_REPO provided")
 		}
@@ -150,5 +152,5 @@ func resolveToken() string {
 	}
 
 	// Fall back to GITHUB_TOKEN env var
-	return os.Getenv("GITHUB_TOKEN")
+	return os.Getenv(workerenv.GitHubToken)
 }
