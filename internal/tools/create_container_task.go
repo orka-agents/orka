@@ -124,7 +124,7 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 	}
 	parentName := os.Getenv(envOrkaTaskName)
 	if parentName == "" {
-		return ChatToolErrorResult(internalErrorType, "ORKA_TASK_NAME is required for coordinator container tasks", "")
+		return ChatToolErrorResult(internalErrorType, fmt.Sprintf("%s is required for coordinator container tasks", envOrkaTaskName), "")
 	}
 
 	parentTask := &corev1alpha1.Task{}

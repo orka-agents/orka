@@ -23,10 +23,10 @@ import (
 
 var _ = Describe("Agent Session Continuity", Ordered, func() {
 	const (
-		taskName1  = "e2e-session-task-1"
-		taskName2  = "e2e-session-task-2"
-		agentName  = "e2e-session-agent"
-		sessionID  = "e2e-test-session"
+		taskName1 = "e2e-session-task-1"
+		taskName2 = "e2e-session-task-2"
+		agentName = "e2e-session-agent"
+		sessionID = "e2e-test-session"
 	)
 
 	AfterAll(func() {

@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sozercan/orka/internal/workerenv"
+
 	"github.com/sozercan/orka/workers/common"
 )
 
@@ -119,7 +121,7 @@ func buildClaudeArgs(cfg *common.AgentConfig, prompt string) []string {
 	args = append(args, "--max-turns", strconv.Itoa(cfg.MaxTurns))
 
 	// Tool permissions
-	if os.Getenv("ORKA_ALLOW_BASH") == "true" {
+	if os.Getenv(workerenv.AllowBash) == "true" {
 		args = append(args, "--dangerously-skip-permissions")
 	}
 	for _, tool := range cfg.AllowedTools {
@@ -137,7 +139,7 @@ func buildClaudeArgs(cfg *common.AgentConfig, prompt string) []string {
 
 // claudePath returns the path to the claude CLI binary.
 func claudePath() string {
-	if p := os.Getenv("CLAUDE_CLI_PATH"); p != "" {
+	if p := os.Getenv(workerenv.ClaudeCLIPath); p != "" {
 		return p
 	}
 	return defaultClaudePath
