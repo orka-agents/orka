@@ -13,10 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 )
-
-const oidcHTTPTimeout = 5 * time.Second
 
 type stringList []string
 
@@ -127,7 +124,7 @@ func discoverOIDCJWKSURL(ctx context.Context, issuer string) (string, error) {
 }
 
 func getJSON(ctx context.Context, url string, out any) error {
-	ctx, cancel := context.WithTimeout(ctx, oidcHTTPTimeout)
+	ctx, cancel := context.WithTimeout(ctx, authHTTPTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

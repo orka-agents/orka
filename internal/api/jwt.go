@@ -56,11 +56,14 @@ func verifyJWT(ctx context.Context, raw string, cfg jwtVerificationConfig) (*ver
 	if !jwtSigningAlgorithmAllowed(parsed.Header.Algorithm, cfg.AllowedAlgorithms) {
 		return nil, fmt.Errorf("unsupported JWT signing algorithm %q", parsed.Header.Algorithm.String())
 	}
+	if strings.TrimSpace(cfg.JWKSURL) == "" {
+		return nil, errors.New("missing JWKS URL")
+	}
 
-	fetchCtx, cancel := context.WithTimeout(ctx, oidcHTTPTimeout)
+	fetchCtx, cancel := context.WithTimeout(ctx, authHTTPTimeout)
 	defer cancel()
 
-	keySet, err := jwk.Fetch(fetchCtx, cfg.JWKSURL, jwk.WithHTTPClient(&http.Client{Timeout: oidcHTTPTimeout}))
+	keySet, err := jwk.Fetch(fetchCtx, cfg.JWKSURL, jwk.WithHTTPClient(&http.Client{Timeout: authHTTPTimeout}))
 	if err != nil {
 		return nil, fmt.Errorf("fetch JWKS: %w", err)
 	}
@@ -180,6 +183,12 @@ func jwtClaimRequired(name string, required []string) bool {
 }
 
 func filterJWTSigningKeys(keySet jwk.Set, header jwtHeader) (jwk.Set, error) {
+	expectedKeyType, err := jwtSigningKeyType(header.Algorithm)
+	if err != nil {
+		return nil, err
+	}
+	expectedKeyTypeName := expectedKeyType.String()
+
 	filtered := jwk.NewSet()
 
 	for i := 0; i < keySet.Len(); i++ {
@@ -193,7 +202,7 @@ func filterJWTSigningKeys(keySet jwk.Set, header jwtHeader) (jwk.Set, error) {
 				continue
 			}
 		}
-		if key.KeyType().String() != jwa.RSA().String() {
+		if key.KeyType().String() != expectedKeyTypeName {
 			continue
 		}
 		if use, ok := key.KeyUsage(); ok && use != "" && use != string(jwk.ForSignature) {
@@ -219,11 +228,25 @@ func filterJWTSigningKeys(keySet jwk.Set, header jwtHeader) (jwk.Set, error) {
 
 	if filtered.Len() == 0 {
 		if header.KeyID != "" {
-			return nil, fmt.Errorf("no usable RSA signing key found for kid %q", header.KeyID)
+			return nil, fmt.Errorf("no usable %s signing key found for kid %q", expectedKeyTypeName, header.KeyID)
 		}
-		return nil, errors.New("no usable RSA signing key found")
+		return nil, fmt.Errorf("no usable %s signing key found", expectedKeyTypeName)
 	}
 	return filtered, nil
+}
+
+func jwtSigningKeyType(alg jwa.SignatureAlgorithm) (jwa.KeyType, error) {
+	switch alg.String() {
+	case jwa.RS256().String(), jwa.RS384().String(), jwa.RS512().String(),
+		jwa.PS256().String(), jwa.PS384().String(), jwa.PS512().String():
+		return jwa.RSA(), nil
+	case jwa.ES256().String(), jwa.ES256K().String(), jwa.ES384().String(), jwa.ES512().String():
+		return jwa.EC(), nil
+	case jwa.EdDSA().String(), jwa.EdDSAEd25519().String():
+		return jwa.OKP(), nil
+	default:
+		return jwa.InvalidKeyType(), fmt.Errorf("unsupported JWT signing algorithm %q", alg.String())
+	}
 }
 
 func normalizeJWTValidationError(err error) error {
