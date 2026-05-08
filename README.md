@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/images/orka-logo.png" alt="Orka" width="180" />
+<img src="docs/images/orka-logo.png" alt="Orka" width="400" />
 
 # Orka
 
