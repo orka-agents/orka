@@ -73,10 +73,7 @@ vet: ensure-ui-embed ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
-# TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
-# CertManager is installed by default; skip with:
-# - CERT_MANAGER_INSTALL_SKIP=true
+# The default e2e setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 KIND_CLUSTER ?= orka-test-e2e
 E2E_GO_TEST_TIMEOUT ?= 30m
 
