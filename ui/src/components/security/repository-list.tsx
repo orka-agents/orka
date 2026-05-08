@@ -87,10 +87,10 @@ function RepositoryCard({ repo }: { repo: RepositoryScan }) {
           <div>Last scan: <span className="font-medium text-foreground">{timeAgo(lastScanAt)}</span></div>
         </div>
         <div className="flex flex-wrap gap-2 text-xs">
-          <Badge variant="outline">Critical {repo.status?.findingCounts?.critical ?? 0}</Badge>
-          <Badge variant="outline">High {repo.status?.findingCounts?.high ?? 0}</Badge>
-          <Badge variant="outline">Medium {repo.status?.findingCounts?.medium ?? 0}</Badge>
-          <Badge variant="outline">Low {repo.status?.findingCounts?.low ?? 0}</Badge>
+          <Badge variant="destructive">{repo.status?.findingCounts?.critical ?? 0} critical</Badge>
+          <Badge variant="destructive">{repo.status?.findingCounts?.high ?? 0} high</Badge>
+          <Badge variant="secondary">{repo.status?.findingCounts?.medium ?? 0} medium</Badge>
+          <Badge variant="outline">{repo.status?.findingCounts?.low ?? 0} low</Badge>
         </div>
         <div className="flex items-center justify-between">
           <Link to="/security/$repoId" params={{ repoId: repo.metadata.name }}>
