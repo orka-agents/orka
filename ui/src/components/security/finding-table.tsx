@@ -27,7 +27,9 @@ function compareFindingsByKey(a: SecurityFinding, b: SecurityFinding, key: SortK
     case 'location': {
       const locA = a.filePath ?? ''
       const locB = b.filePath ?? ''
-      return locA.localeCompare(locB)
+      const fileCmp = locA.localeCompare(locB)
+      if (fileCmp !== 0) return fileCmp
+      return (a.line ?? 0) - (b.line ?? 0)
     }
     case 'title':
       return a.title.localeCompare(b.title)

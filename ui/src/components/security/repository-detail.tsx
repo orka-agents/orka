@@ -3,7 +3,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { useFindings, useRepositoryScan, useRunSecurityScan, useScanRuns } from '@/hooks/use-security'
+import { useAllFindings, useRepositoryScan, useRunSecurityScan, useScanRuns } from '@/hooks/use-security'
 import { ThreatModelEditor } from './threat-model-editor'
 import { RecommendedFindings } from './recommended-findings'
 import { FindingTable } from './finding-table'
@@ -19,7 +19,7 @@ function timeAgo(ts?: string) {
 
 export function RepositoryDetail({ repositoryName }: { repositoryName: string }) {
   const { data: repo, isLoading } = useRepositoryScan(repositoryName)
-  const findings = useFindings(repositoryName)
+  const findings = useAllFindings(repositoryName)
   const scanRuns = useScanRuns(repositoryName)
   const runScan = useRunSecurityScan(repositoryName)
 
