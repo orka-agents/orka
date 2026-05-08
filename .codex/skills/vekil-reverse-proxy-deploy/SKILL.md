@@ -23,15 +23,14 @@ Deploy Vekil as the single reverse-proxy endpoint for Claude/Anthropic, Gemini, 
      --providers-config /path/to/providers.yaml \
      --env-secret AZURE_OPENAI_API_KEY=azure-openai:key
    ```
-4. For non-interactive Copilot auth in Kubernetes, either wire an existing Secret or let the script create/update one from `COPILOT_GITHUB_TOKEN`; if that env var is unset, the script falls back to `gh auth token`. Prefer existing Secrets for production clusters that use a secret manager.
+4. For non-interactive Copilot auth in Kubernetes, either wire an existing Secret or let the script create/update one from an explicitly exported `COPILOT_GITHUB_TOKEN`. Prefer existing Secrets for production clusters that use a secret manager.
    ```bash
    # Existing Secret
    scripts/deploy_vekil_reverse_proxy.sh \
      --env-secret COPILOT_GITHUB_TOKEN=copilot-github-token:token
 
    # Script-created Secret; the token is not printed or embedded in the rendered workload.
-   # Uses COPILOT_GITHUB_TOKEN if set, otherwise `gh auth token`.
-   gh auth status
+   export COPILOT_GITHUB_TOKEN=...
    scripts/deploy_vekil_reverse_proxy.sh \
      --create-copilot-token-secret copilot-github-token:token
    ```
@@ -45,8 +44,8 @@ Deploy Vekil as the single reverse-proxy endpoint for Claude/Anthropic, Gemini, 
 
 ## Provider and Auth Notes
 
-- Zero-config mode uses Vekil's built-in GitHub Copilot upstream. In Kubernetes, device-code login can work from pod logs; use `--skip-wait`, watch `kubectl -n <namespace> logs deploy/<name>`, complete the login, then verify `/readyz`. `COPILOT_GITHUB_TOKEN` via `--env-secret` or `--create-copilot-token-secret` is better for non-interactive deployments; `--create-copilot-token-secret` uses local `COPILOT_GITHUB_TOKEN` when available and otherwise reads `gh auth token`. If the script-created Secret changes, the script restarts the Deployment so the Secret-backed env var is reloaded.
-- Explicit provider configs should use `api_key_env`, not inline `api_key`, because the bundled script stores the config as a ConfigMap and refuses inline API keys by default.
+- Zero-config mode uses Vekil's built-in GitHub Copilot upstream. In Kubernetes, device-code login can work from pod logs; use `--skip-wait`, watch `kubectl -n <namespace> logs deploy/<name>`, complete the login, then verify `/readyz`. `COPILOT_GITHUB_TOKEN` via `--env-secret` or `--create-copilot-token-secret` is better for non-interactive deployments; `--create-copilot-token-secret` requires local `COPILOT_GITHUB_TOKEN` and does not fall back to GitHub CLI OAuth tokens. If the script-created Secret changes, the script restarts the Deployment so the Secret-backed env var is reloaded.
+- Explicit provider configs should use `api_key_env`, not inline `api_key`, because the bundled script stores the config as a ConfigMap and refuses inline API keys by default. When the script creates or updates the providers ConfigMap, it restarts the Deployment so Vekil reloads provider routing read at startup.
 - OpenAI Codex providers need `auth.json` from `codex login`. If needed, mount an existing secret with `--codex-auth-secret <secret>[:auth.json]` and verify whether the deployment needs a writable token source for refresh behavior.
 - Vekil token cache defaults to an `emptyDir`; use `--token-pvc <claim>` if preserving Vekil-managed cached auth across pod restarts matters.
 
@@ -58,15 +57,7 @@ Render the manifest without applying:
 scripts/deploy_vekil_reverse_proxy.sh --print
 ```
 
-Create/update a Copilot token Secret from GitHub CLI auth and deploy:
-
-```bash
-gh auth status
-scripts/deploy_vekil_reverse_proxy.sh \
-  --create-copilot-token-secret copilot-github-token:token
-```
-
-Or force a specific token from the local environment:
+Create/update a Copilot token Secret from an explicit local environment token and deploy:
 
 ```bash
 export COPILOT_GITHUB_TOKEN=...

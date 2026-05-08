@@ -21,7 +21,6 @@ Options:
   --env-secret ENV=SECRET:KEY       add env var from an existing Secret (repeatable)
   --create-copilot-token-secret SECRET[:KEY]
                                     create/update Secret from COPILOT_GITHUB_TOKEN,
-                                    or from `gh auth token` if the env var is unset,
                                     inject it into the pod, and restart if changed
                                     (default key: token)
   --codex-auth-secret SECRET[:KEY]  mount an existing Secret key as CODEX_HOME/auth.json
@@ -42,8 +41,6 @@ Examples:
     --env-secret COPILOT_GITHUB_TOKEN=copilot-github-token:token
   COPILOT_GITHUB_TOKEN=ghu_xxx deploy_vekil_reverse_proxy.sh \
     --create-copilot-token-secret copilot-github-token:token
-  deploy_vekil_reverse_proxy.sh \
-    --create-copilot-token-secret copilot-github-token:token  # uses gh auth token
 USAGE
 }
 
@@ -106,6 +103,7 @@ copilot_token_key="token"
 codex_auth_secret=""
 codex_auth_key="auth.json"
 copilot_token_secret_changed="false"
+providers_configmap_changed="false"
 
 declare -a env_secret_envs=()
 declare -a env_secret_names=()
@@ -310,25 +308,16 @@ k() {
 
 create_copilot_token_secret() {
   local token_file
-  local token_source
   local apply_output
+
+  [[ -n "${COPILOT_GITHUB_TOKEN:-}" ]] || error "COPILOT_GITHUB_TOKEN must be set when using --create-copilot-token-secret"
 
   token_file="$(mktemp)"
   tmp_files+=("$token_file")
   chmod 600 "$token_file"
+  printf '%s' "$COPILOT_GITHUB_TOKEN" > "$token_file"
 
-  if [[ -n "${COPILOT_GITHUB_TOKEN:-}" ]]; then
-    printf '%s' "$COPILOT_GITHUB_TOKEN" > "$token_file"
-    token_source="COPILOT_GITHUB_TOKEN"
-  else
-    require_cmd gh
-    if ! gh auth token | tr -d '\r\n' > "$token_file"; then
-      error "Failed to read token from 'gh auth token'; run 'gh auth login' first or set COPILOT_GITHUB_TOKEN"
-    fi
-    token_source="gh auth token"
-  fi
-
-  [[ -s "$token_file" ]] || error "No token read from $token_source"
+  [[ -s "$token_file" ]] || error "No token read from COPILOT_GITHUB_TOKEN"
 
   apply_output="$(k -n "$namespace" create secret generic "$copilot_token_secret" \
     --from-file="${copilot_token_key}=${token_file}" \
@@ -336,6 +325,20 @@ create_copilot_token_secret() {
   echo "$apply_output"
   if [[ "$apply_output" != *" unchanged"* ]]; then
     copilot_token_secret_changed="true"
+  fi
+}
+
+apply_providers_configmap() {
+  local apply_output
+
+  apply_output="$(k -n "$namespace" create configmap "$providers_configmap" \
+    --from-file="${providers_config_key}=${providers_config}" \
+    --dry-run=client -o yaml | k apply -f -)"
+  echo "$apply_output"
+  # Vekil reads providers config at startup, so restart pods when the
+  # ConfigMap is created or updated underneath an otherwise unchanged template.
+  if [[ "$apply_output" == *" created"* || "$apply_output" == *" configured"* ]]; then
+    providers_configmap_changed="true"
   fi
 }
 
@@ -521,7 +524,7 @@ if [[ "$print_only" == "true" ]]; then
     echo "# NOTE: Providers ConfigMap '$providers_configmap' is created from '$providers_config' during apply and is not printed to avoid echoing config contents." >&2
   fi
   if [[ -n "$copilot_token_secret" ]]; then
-    echo "# NOTE: Copilot token Secret '$copilot_token_secret' is created from COPILOT_GITHUB_TOKEN or gh auth token during apply and is not printed." >&2
+    echo "# NOTE: Copilot token Secret '$copilot_token_secret' is created from COPILOT_GITHUB_TOKEN during apply and is not printed." >&2
   fi
   exit 0
 fi
@@ -537,14 +540,12 @@ if [[ -n "$copilot_token_secret" ]]; then
 fi
 
 if [[ -n "$providers_config" ]]; then
-  k -n "$namespace" create configmap "$providers_configmap" \
-    --from-file="${providers_config_key}=${providers_config}" \
-    --dry-run=client -o yaml | k apply -f -
+  apply_providers_configmap
 fi
 
 render_workload | k apply -f -
 
-if [[ "$copilot_token_secret_changed" == "true" ]]; then
+if [[ "$copilot_token_secret_changed" == "true" || "$providers_configmap_changed" == "true" ]]; then
   k -n "$namespace" rollout restart "deployment/$name"
 fi
 
