@@ -63,7 +63,15 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
         </Card>
         <Card>
           <CardHeader><CardTitle className="text-base">Open Findings</CardTitle></CardHeader>
-          <CardContent>{repo.status?.findingCounts?.total ?? 0}</CardContent>
+          <CardContent>
+            <div className="text-2xl font-bold">{repo.status?.findingCounts?.total ?? 0}</div>
+            <div className="mt-2 flex flex-wrap gap-2 text-xs">
+              <Badge variant="destructive">{repo.status?.findingCounts?.critical ?? 0} critical</Badge>
+              <Badge variant="destructive">{repo.status?.findingCounts?.high ?? 0} high</Badge>
+              <Badge variant="secondary">{repo.status?.findingCounts?.medium ?? 0} medium</Badge>
+              <Badge variant="outline">{repo.status?.findingCounts?.low ?? 0} low</Badge>
+            </div>
+          </CardContent>
         </Card>
         <Card>
           <CardHeader><CardTitle className="text-base">Last Successful Scan</CardTitle></CardHeader>

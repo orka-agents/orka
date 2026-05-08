@@ -111,7 +111,8 @@ spec:
             mountPath: /tmp
       volumes:
         - name: store
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: orka-store
         - name: tmp
           emptyDir: {}
       serviceAccountName: controller-manager
