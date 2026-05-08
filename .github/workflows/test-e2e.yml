@@ -2,7 +2,13 @@ name: E2E Tests
 
 on:
   push:
+    paths-ignore:
+      - ".codex/**"
+      - ".claude/**"
   pull_request:
+    paths-ignore:
+      - ".codex/**"
+      - ".claude/**"
 
 jobs:
   test-e2e:

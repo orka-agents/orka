@@ -2,7 +2,13 @@ name: Lint
 
 on:
   push:
+    paths-ignore:
+      - ".codex/**"
+      - ".claude/**"
   pull_request:
+    paths-ignore:
+      - ".codex/**"
+      - ".claude/**"
 
 jobs:
   lint:
