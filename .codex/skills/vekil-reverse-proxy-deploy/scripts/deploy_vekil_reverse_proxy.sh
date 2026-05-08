@@ -63,6 +63,10 @@ is_dns_label() {
   [[ "$1" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] && ((${#1} <= 63))
 }
 
+is_dns_subdomain() {
+  [[ "$1" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$ ]] && ((${#1} <= 253))
+}
+
 is_secret_key() {
   [[ "$1" =~ ^[-._A-Za-z0-9]+$ ]]
 }
@@ -71,8 +75,12 @@ is_env_name() {
   [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
 }
 
+is_nonnegative_int() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
 is_positive_int() {
-  [[ "$1" =~ ^[0-9]+$ ]] && ((10#$1 > 0))
+  is_nonnegative_int "$1" && ((10#$1 > 0))
 }
 
 context_name=""
@@ -118,7 +126,7 @@ add_env_secret_ref() {
   local i
 
   is_env_name "$env_name" || error "Invalid env var name in --env-secret: $env_name"
-  is_dns_label "$secret_name" || error "Invalid Secret name in --env-secret: $secret_name"
+  is_dns_subdomain "$secret_name" || error "Invalid Secret name in --env-secret: $secret_name"
   is_secret_key "$secret_key" || error "Invalid Secret key in --env-secret: $secret_key"
 
   for i in "${!env_secret_envs[@]}"; do
@@ -244,29 +252,33 @@ while [[ $# -gt 0 ]]; do
 done
 
 is_dns_label "$namespace" || error "Invalid namespace: $namespace"
+# --name is used for both the Deployment and Service, so keep it DNS-label safe.
 is_dns_label "$name" || error "Invalid name: $name"
 [[ "$image" != *$'\n'* && "$image" != *$'\t'* && "$image" != *' '* ]] || error "Image must not contain whitespace"
 case "$image_pull_policy" in Always|IfNotPresent|Never) ;; *) error "Invalid image pull policy: $image_pull_policy" ;; esac
-is_positive_int "$replicas" || error "Invalid replicas: $replicas"
+is_nonnegative_int "$replicas" || error "Invalid replicas: $replicas"
 is_positive_int "$port" || error "Invalid port: $port"
 ((10#$port <= 65535)) || error "Invalid port: $port"
 case "$service_type" in ClusterIP|NodePort|LoadBalancer) ;; *) error "Invalid service type: $service_type" ;; esac
 case "$log_level" in debug|info|error) ;; *) error "Invalid log level: $log_level" ;; esac
 if [[ -n "$providers_configmap" ]]; then
-  is_dns_label "$providers_configmap" || error "Invalid ConfigMap name: $providers_configmap"
+  is_dns_subdomain "$providers_configmap" || error "Invalid ConfigMap name: $providers_configmap"
 else
   providers_configmap="${name}-providers"
 fi
+if [[ -n "$providers_config" ]]; then
+  is_dns_subdomain "$providers_configmap" || error "Invalid ConfigMap name: $providers_configmap"
+fi
 if [[ -n "$token_pvc" ]]; then
-  is_dns_label "$token_pvc" || error "Invalid PVC name: $token_pvc"
+  is_dns_subdomain "$token_pvc" || error "Invalid PVC name: $token_pvc"
 fi
 if [[ -n "$copilot_token_secret" ]]; then
-  is_dns_label "$copilot_token_secret" || error "Invalid Copilot token Secret name: $copilot_token_secret"
+  is_dns_subdomain "$copilot_token_secret" || error "Invalid Copilot token Secret name: $copilot_token_secret"
   is_secret_key "$copilot_token_key" || error "Invalid Copilot token Secret key: $copilot_token_key"
   add_env_secret_ref "COPILOT_GITHUB_TOKEN" "$copilot_token_secret" "$copilot_token_key"
 fi
 if [[ -n "$codex_auth_secret" ]]; then
-  is_dns_label "$codex_auth_secret" || error "Invalid Codex auth Secret name: $codex_auth_secret"
+  is_dns_subdomain "$codex_auth_secret" || error "Invalid Codex auth Secret name: $codex_auth_secret"
   is_secret_key "$codex_auth_key" || error "Invalid Codex auth Secret key: $codex_auth_key"
 fi
 
