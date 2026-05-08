@@ -55,10 +55,23 @@ func TestPostReviewCommentTool_Metadata(t *testing.T) {
 	for _, r := range required {
 		requiredSet[r.(string)] = true
 	}
-	for _, field := range []string{taskNameField, githubPRNumberField, githubBodyField, githubReviewEventField} {
+	for _, field := range []string{githubPRNumberField, githubBodyField, githubReviewEventField} {
 		if !requiredSet[field] {
 			t.Errorf("expected %q in required fields", field)
 		}
+	}
+	if requiredSet[taskNameField] {
+		t.Errorf("did not expect %q in required fields", taskNameField)
+	}
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
+	if !ok {
+		t.Fatal("schema missing properties")
+	}
+	if _, ok := props[taskNameField]; !ok {
+		t.Error("schema missing task_name property")
+	}
+	if _, ok := props[repoURLField]; !ok {
+		t.Error("schema missing repo_url property")
 	}
 }
 
@@ -153,6 +166,65 @@ func TestPostReviewCommentTool_Success(t *testing.T) {
 	}
 	if reviewResult.HTMLURL != "https://github.com/sozercan/ayna/pull/10#pullrequestreview-101" {
 		t.Errorf("unexpected HTML URL: %s", reviewResult.HTMLURL)
+	}
+}
+
+func TestPostReviewCommentTool_WithRepoURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/repos/sozercan/ayna/pulls/6/reviews" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if auth := r.Header.Get("Authorization"); auth != testBearerToken {
+			t.Errorf("unexpected auth header: %s", auth)
+		}
+
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+		if body[githubBodyField] != "Repo URL review" {
+			t.Errorf("unexpected body: %v", body[githubBodyField])
+		}
+		if body[githubReviewEventField] != reviewEventComment {
+			t.Errorf("unexpected event: %v", body[githubReviewEventField])
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"id":106,"html_url":"https://github.com/sozercan/ayna/pull/6#pullrequestreview-106"}`)
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tool := &PostReviewCommentTool{k8sClient: k8sClient, apiBaseURL: server.URL}
+
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+
+	args, _ := json.Marshal(PostReviewCommentArgs{
+		RepoURL:  testSozercanAynaRepoURL,
+		PRNumber: 6,
+		Body:     "Repo URL review",
+		Event:    reviewEventComment,
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var reviewResult PostReviewCommentResult
+	if err := json.Unmarshal([]byte(result), &reviewResult); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if reviewResult.ReviewID != 106 {
+		t.Errorf("unexpected review ID: %d", reviewResult.ReviewID)
+	}
+	if reviewResult.Status != testReviewStatus {
+		t.Errorf("unexpected status: %s", reviewResult.Status)
 	}
 }
 

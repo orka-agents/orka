@@ -214,6 +214,7 @@ func RegisterCoordinationTools(k8sClient client.Client) {
 	DefaultRegistry.Register(NewAutoMergePullRequestTool(k8sClient))
 	DefaultRegistry.Register(NewReviewPullRequestTool(k8sClient))
 	DefaultRegistry.Register(NewPostReviewCommentTool(k8sClient))
+	DefaultRegistry.Register(NewCheckPRReviewMarkerTool(k8sClient))
 	DefaultRegistry.Register(NewListIssuesTool(k8sClient))
 	DefaultRegistry.Register(NewListPullRequestsTool(k8sClient))
 	DefaultRegistry.Register(NewGetIssueTool(k8sClient))
@@ -230,6 +231,7 @@ func RegisterCoordinationTools(k8sClient client.Client) {
 // RegisterChatTools registers the chat/management tools into the given registry.
 func RegisterChatTools(r *Registry) {
 	r.Register(&CreateAITaskTool{})
+	r.Register(&CreatePRMonitorTool{})
 	r.Register(&CreateContainerTaskTool{})
 	r.Register(&CreateAgentTaskTool{})
 	r.Register(&CheckTaskProgressTool{})
@@ -256,6 +258,7 @@ func RegisterChatToolsDefault() {
 func ChatToolNames() []string {
 	return []string{
 		createAITaskToolName,
+		createPRMonitorToolName,
 		createContainerTaskToolName,
 		createAgentTaskToolName,
 		checkTaskProgressToolName, fetchTaskOutputToolName, waitForTaskToolName, cancelTaskToolName, listAgentsToolName, listToolsToolName, listTasksToolName, createAgentToolName, updateAgentToolName, "delete_agent",

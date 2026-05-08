@@ -56,8 +56,25 @@ func TestReviewPullRequestTool_Metadata(t *testing.T) {
 	if _, ok := props[taskNameField]; !ok {
 		t.Error("schema missing task_name property")
 	}
+	if _, ok := props[repoURLField]; !ok {
+		t.Error("schema missing repo_url property")
+	}
 	if _, ok := props[githubPRNumberField]; !ok {
 		t.Error("schema missing pr_number property")
+	}
+	required, ok := schema[jsonSchemaRequiredField].([]any)
+	if !ok {
+		t.Fatal("schema missing required field")
+	}
+	requiredSet := make(map[string]bool)
+	for _, r := range required {
+		requiredSet[r.(string)] = true
+	}
+	if !requiredSet[githubPRNumberField] {
+		t.Errorf("expected %q in required fields", githubPRNumberField)
+	}
+	if requiredSet[taskNameField] {
+		t.Errorf("did not expect %q in required fields", taskNameField)
 	}
 }
 
@@ -262,6 +279,78 @@ func TestReviewPullRequestTool_Success(t *testing.T) {
 	}
 }
 
+func TestReviewPullRequestTool_WithRepoURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		if auth := r.Header.Get("Authorization"); auth != testBearerToken {
+			t.Errorf("unexpected auth header: %s", auth)
+		}
+
+		path := r.URL.Path
+		accept := r.Header.Get("Accept")
+		switch {
+		case path == "/repos/sozercan/ayna/pulls/7" && accept == testDiffAccept:
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = fmt.Fprint(w, "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n title\n+new line\n")
+		case path == "/repos/sozercan/ayna/pulls/7":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{
+				"title": "docs: update readme",
+				"body": "Updates docs",
+				"user": {"login": "docwriter"},
+				"base": {"ref": "main"},
+				"head": {"ref": "docs/update-readme"}
+			}`)
+		case path == "/repos/sozercan/ayna/pulls/7/files":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `[{
+				"filename": "README.md",
+				"status": "modified",
+				"additions": 1,
+				"deletions": 0,
+				"patch": "@@ -1 +1,2 @@\n title\n+new line"
+			}]`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tool := &ReviewPullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
+
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+
+	args, _ := json.Marshal(ReviewPullRequestArgs{
+		RepoURL:  testSozercanAynaRepoURL,
+		PRNumber: 7,
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var reviewResult ReviewPullRequestResult
+	if err := json.Unmarshal([]byte(result), &reviewResult); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if reviewResult.PRTitle != "docs: update readme" {
+		t.Errorf("unexpected PR title: %s", reviewResult.PRTitle)
+	}
+	if len(reviewResult.Files) != 1 || reviewResult.Files[0].Filename != "README.md" {
+		t.Fatalf("unexpected files: %+v", reviewResult.Files)
+	}
+	if reviewResult.Status != testFetched {
+		t.Errorf("unexpected status: %s", reviewResult.Status)
+	}
+}
+
 func TestReviewPullRequestTool_Execute_APIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -333,7 +422,7 @@ func TestReviewPullRequestTool_Execute_InvalidArgs(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing required fields")
 	}
-	if got := err.Error(); !strings.Contains(got, "task_name and pr_number are required") {
+	if got := err.Error(); !strings.Contains(got, "pr_number is required") {
 		t.Errorf("unexpected error: %s", got)
 	}
 }

@@ -12,15 +12,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 // ReviewPullRequestTool fetches a GitHub PR's diff and file changes for LLM review.
@@ -31,8 +25,10 @@ type ReviewPullRequestTool struct {
 
 // ReviewPullRequestArgs are the arguments for the review_pull_request tool.
 type ReviewPullRequestArgs struct {
-	// TaskName is the name of the child task to read workspace config from.
-	TaskName string `json:"task_name"`
+	// TaskName is an optional task to read workspace config and credentials from.
+	TaskName string `json:"task_name,omitempty"`
+	// RepoURL is an optional GitHub repository URL.
+	RepoURL string `json:"repo_url,omitempty"`
 	// PRNumber is the GitHub PR number to review.
 	PRNumber int `json:"pr_number"`
 }
@@ -79,7 +75,7 @@ func (t *ReviewPullRequestTool) Description() string {
 
 // Parameters returns the JSON schema for tool parameters.
 func (t *ReviewPullRequestTool) Parameters() json.RawMessage {
-	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: childWorkspaceTaskDescription}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number to review"}}, jsonSchemaRequiredField: []string{taskNameField, githubPRNumberField}}
+	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional task whose workspace config has the repo and git credentials"}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional GitHub repository URL. Falls back to ORKA_GIT_REPO when task_name is empty"}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number to review"}}, jsonSchemaRequiredField: []string{githubPRNumberField}}
 	data, _ := json.Marshal(schema)
 	return data
 }
@@ -91,63 +87,13 @@ func (t *ReviewPullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 		return "", fmt.Errorf("failed to parse arguments: %w", err)
 	}
 
-	if args.TaskName == "" || args.PRNumber == 0 {
-		return "", fmt.Errorf("task_name and pr_number are required")
+	if args.PRNumber == 0 {
+		return "", fmt.Errorf("pr_number is required")
 	}
 
-	// Determine namespace from environment
-	ns := os.Getenv(envOrkaTaskNamespace)
-	if ns == "" {
-		ns = defaultNamespace
-	}
-
-	// Look up the child task to get workspace config
-	var task corev1alpha1.Task
-	if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: args.TaskName, Namespace: ns}, &task); err != nil {
-		return "", fmt.Errorf("failed to get task %s: %w", args.TaskName, err)
-	}
-
-	// Extract repo URL and git secret from the task's workspace config
-	ws := taskWorkspace(&task)
-	if ws == nil {
-		return "", fmt.Errorf("task %s does not have workspace configuration", args.TaskName)
-	}
-
-	repoURL := ws.GitRepo
-	if repoURL == "" {
-		return "", fmt.Errorf("task %s workspace has no gitRepo configured", args.TaskName)
-	}
-
-	// Parse owner/repo from the git URL
-	owner, repo, err := parseGitHubRepo(repoURL)
+	owner, repo, token, baseURL, err := resolveRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse GitHub repo from %s: %w", repoURL, err)
-	}
-
-	// Get the git token from the referenced secret
-	if ws.GitSecretRef == nil {
-		return "", fmt.Errorf("task %s workspace has no gitSecretRef configured", args.TaskName)
-	}
-
-	var secret corev1.Secret
-	if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: ws.GitSecretRef.Name, Namespace: ns}, &secret); err != nil {
-		return "", fmt.Errorf("failed to get git secret %s: %w", ws.GitSecretRef.Name, err)
-	}
-
-	token := ""
-	for _, key := range []string{tokenKey, passwordKey} {
-		if v, ok := secret.Data[key]; ok {
-			token = strings.TrimSpace(string(v))
-			break
-		}
-	}
-	if token == "" {
-		return "", fmt.Errorf("git secret %s does not contain a 'token' or 'password' key", ws.GitSecretRef.Name)
-	}
-
-	baseURL := githubAPIBaseURL
-	if t.apiBaseURL != "" {
-		baseURL = t.apiBaseURL
+		return "", err
 	}
 
 	httpClient := &http.Client{Timeout: 30 * time.Second}

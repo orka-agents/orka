@@ -24,43 +24,40 @@ import (
 const githubPRStateClosed = "closed"
 
 // resolveRepoAndToken resolves GitHub owner/repo, auth token, and API base URL.
-// Resolution priority for owner/repo:
-//  1. repoURL arg → parse owner/repo directly
-//  2. taskName arg → look up that task's workspace config in K8s
-//  3. ORKA_GIT_REPO env var → parse owner/repo
+// Repository resolution prefers an explicit repoURL, then task workspace config,
+// then ORKA_GIT_REPO. If taskName is provided alongside repoURL, repoURL still
+// selects the repository while the task workspace can supply credentials.
 //
 // Token resolution (in order):
-//  1. If taskName used → read from that task's workspace gitSecretRef
+//  1. task workspace gitSecretRef, when taskName is provided
 //  2. /secrets/git/token file (mounted in pod)
 //  3. /secrets/git/password file (mounted in pod)
 //  4. GITHUB_TOKEN env var
 func resolveRepoAndToken(ctx context.Context, k8sClient client.Client, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
-	// --- Resolve base URL ---
 	baseURL = githubAPIBaseURL
 	if overrideBaseURL != "" {
 		baseURL = overrideBaseURL
 	}
 
-	// --- Resolve owner/repo ---
-	var tokenFromTask string
-
-	switch {
-	case repoURL != "":
-		// Priority 1: explicit repoURL arg
+	if repoURL != "" {
 		owner, repo, err = parseGitHubRepo(repoURL)
 		if err != nil {
 			return "", "", "", "", fmt.Errorf("failed to parse GitHub repo from %s: %w", repoURL, err)
 		}
+	}
 
-	case taskName != "":
-		// Priority 2: look up Task CR in K8s
-		owner, repo, tokenFromTask, err = resolveFromTask(ctx, k8sClient, taskName)
+	if taskName != "" {
+		taskOwner, taskRepo, taskToken, err := resolveFromTask(ctx, k8sClient, taskName)
 		if err != nil {
 			return "", "", "", "", err
 		}
+		if owner == "" || repo == "" {
+			owner, repo = taskOwner, taskRepo
+		}
+		token = taskToken
+	}
 
-	default:
-		// Priority 3: ORKA_GIT_REPO env var
+	if owner == "" || repo == "" {
 		envRepo := os.Getenv(workerenv.GitRepo)
 		if envRepo == "" {
 			return "", "", "", "", fmt.Errorf("no repo_url, task_name, or ORKA_GIT_REPO provided")
@@ -71,10 +68,7 @@ func resolveRepoAndToken(ctx context.Context, k8sClient client.Client, taskName,
 		}
 	}
 
-	// --- Resolve token ---
-	if tokenFromTask != "" {
-		token = tokenFromTask
-	} else {
+	if token == "" {
 		token = resolveToken()
 	}
 
