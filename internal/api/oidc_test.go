@@ -26,10 +26,11 @@ import (
 )
 
 type testOIDCProvider struct {
-	server *httptest.Server
-	key    *rsa.PrivateKey
-	kid    string
-	aud    string
+	server        *httptest.Server
+	key           *rsa.PrivateKey
+	kid           string
+	aud           string
+	extraJWKSKeys []testJWKKey
 
 	discoveryHits atomic.Int64
 	jwksHits      atomic.Int64
@@ -75,8 +76,9 @@ func newTestOIDCProvider(t *testing.T) *testOIDCProvider {
 			})
 		case "/jwks":
 			p.jwksHits.Add(1)
+			keys := append([]testJWKKey{testJWKFromPublicKey(&p.key.PublicKey, p.kid)}, p.extraJWKSKeys...)
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"keys": []jwkKey{testJWKFromPublicKey(&p.key.PublicKey, p.kid)},
+				"keys": keys,
 			})
 		default:
 			http.NotFound(w, r)
@@ -180,8 +182,18 @@ func mustBase64JSON(t *testing.T, v any) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-func testJWKFromPublicKey(key *rsa.PublicKey, kid string) jwkKey {
-	return jwkKey{
+type testJWKKey struct {
+	KeyType   string   `json:"kty"`
+	KeyUse    string   `json:"use,omitempty"`
+	KeyID     string   `json:"kid,omitempty"`
+	Algorithm string   `json:"alg,omitempty"`
+	N         string   `json:"n"`
+	E         string   `json:"e"`
+	X5C       []string `json:"x5c,omitempty"`
+}
+
+func testJWKFromPublicKey(key *rsa.PublicKey, kid string) testJWKKey {
+	return testJWKKey{
 		KeyType:   "RSA",
 		KeyUse:    "sig",
 		KeyID:     kid,
@@ -284,6 +296,31 @@ func TestValidateOIDCToken_TamperedSignature(t *testing.T) {
 	_, err := validateOIDCToken(context.Background(), token, provider.config())
 	if err == nil || !strings.Contains(err.Error(), "signature") {
 		t.Fatalf("validateOIDCToken error = %v, want signature error", err)
+	}
+}
+
+func TestValidateOIDCToken_UnknownKid(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	token := provider.issueToken(t, testOIDCTokenOptions{Kid: "unknown-key"})
+
+	_, err := validateOIDCToken(context.Background(), token, provider.config())
+	if err == nil || !strings.Contains(err.Error(), "kid") {
+		t.Fatalf("validateOIDCToken error = %v, want unknown kid error", err)
+	}
+}
+
+func TestValidateOIDCToken_KidSelectsMatchingJWKSKey(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	wrongKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate wrong RSA key: %v", err)
+	}
+	provider.extraJWKSKeys = []testJWKKey{testJWKFromPublicKey(&wrongKey.PublicKey, "wrong-key")}
+
+	token := provider.issueToken(t, testOIDCTokenOptions{Kid: "wrong-key"})
+	_, err = validateOIDCToken(context.Background(), token, provider.config())
+	if err == nil || !strings.Contains(err.Error(), "signature") {
+		t.Fatalf("validateOIDCToken error = %v, want signature error from matching wrong kid key", err)
 	}
 }
 
