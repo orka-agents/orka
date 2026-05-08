@@ -44,15 +44,17 @@ function SortableHead({ label, sortKey, currentSort, currentDir, onSort }: {
   onSort: (key: SortKey) => void
 }) {
   const Icon = currentSort === sortKey ? (currentDir === 'asc' ? ArrowUp : ArrowDown) : ArrowUpDown
+  const ariaSort = currentSort === sortKey ? (currentDir === 'asc' ? 'ascending' as const : 'descending' as const) : undefined
   return (
-    <TableHead
-      className="cursor-pointer select-none whitespace-nowrap"
-      onClick={() => onSort(sortKey)}
-    >
-      <span className="inline-flex items-center gap-1">
+    <TableHead aria-sort={ariaSort} className="whitespace-nowrap">
+      <button
+        type="button"
+        className="inline-flex w-full items-center gap-1 cursor-pointer select-none"
+        onClick={() => onSort(sortKey)}
+      >
         {label}
         <Icon className="h-3 w-3 text-muted-foreground" />
-      </span>
+      </button>
     </TableHead>
   )
 }
