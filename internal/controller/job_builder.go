@@ -28,6 +28,7 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/metrics"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
@@ -50,16 +51,16 @@ const (
 	DefaultInitImage = "busybox:1.37"
 
 	// ResultEndpointEnvVar is the env var for the result submission URL
-	ResultEndpointEnvVar = "ORKA_RESULT_ENDPOINT"
+	ResultEndpointEnvVar = workerenv.ResultEndpoint
 
 	// ControllerURLEnvVar is the env var for the controller base URL
-	ControllerURLEnvVar = "ORKA_CONTROLLER_URL"
+	ControllerURLEnvVar = workerenv.ControllerURL
 
 	// TaskNameEnvVar is the env var for the task name
-	TaskNameEnvVar = "ORKA_TASK_NAME"
+	TaskNameEnvVar = workerenv.TaskName
 
 	// TaskNamespaceEnvVar is the env var for the task namespace
-	TaskNamespaceEnvVar = "ORKA_TASK_NAMESPACE"
+	TaskNamespaceEnvVar = workerenv.TaskNamespace
 
 	// defaultSecretKey is the default key name in provider secrets
 	defaultSecretKey = "api-key"
@@ -373,24 +374,12 @@ func (b *JobBuilder) buildResources(task *corev1alpha1.Task, agent *corev1alpha1
 
 // buildEnvVars builds the environment variables for the container
 func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) []corev1.EnvVar {
-	envVars := []corev1.EnvVar{
-		{
-			Name:  TaskNameEnvVar,
-			Value: task.Name,
-		},
-		{
-			Name:  TaskNamespaceEnvVar,
-			Value: task.Namespace,
-		},
-		{
-			Name:  ResultEndpointEnvVar,
-			Value: fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name),
-		},
-		{
-			Name:  ControllerURLEnvVar,
-			Value: b.ControllerURL,
-		},
-	}
+	envVars := workerenv.BaseEnv{
+		TaskName:       task.Name,
+		TaskNamespace:  task.Namespace,
+		ResultEndpoint: fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name),
+		ControllerURL:  b.ControllerURL,
+	}.EnvVars()
 
 	// Add task-level env vars
 	envVars = append(envVars, task.Spec.Env...)
@@ -398,21 +387,21 @@ func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, 
 	// Add prior task env vars for iterative coordination
 	if task.Spec.PriorTaskRef != nil {
 		envVars = append(envVars,
-			corev1.EnvVar{Name: "ORKA_PRIOR_TASK", Value: task.Spec.PriorTaskRef.Name},
+			corev1.EnvVar{Name: workerenv.PriorTask, Value: task.Spec.PriorTaskRef.Name},
 		)
 		priorNS := task.Spec.PriorTaskRef.Namespace
 		if priorNS == "" {
 			priorNS = task.Namespace
 		}
 		envVars = append(envVars,
-			corev1.EnvVar{Name: "ORKA_PRIOR_TASK_NAMESPACE", Value: priorNS},
+			corev1.EnvVar{Name: workerenv.PriorTaskNamespace, Value: priorNS},
 		)
 	}
 
 	// Add parent task env var for inter-agent messaging
 	if parentTask := labels.ParentTaskName(task.Labels, task.Annotations); parentTask != "" {
 		envVars = append(envVars,
-			corev1.EnvVar{Name: "ORKA_PARENT_TASK", Value: parentTask},
+			corev1.EnvVar{Name: workerenv.ParentTask, Value: parentTask},
 		)
 	}
 
@@ -514,48 +503,27 @@ func resolveAIConfig(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provide
 
 // addCoordinationEnvVars appends coordination-related environment variables.
 func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent) []corev1.EnvVar {
-	envVars = append(envVars,
-		corev1.EnvVar{Name: "ORKA_COORDINATION_ENABLED", Value: "true"},
-		corev1.EnvVar{Name: "ORKA_COORDINATION_MAX_DEPTH",
-			Value: fmt.Sprintf("%d", agent.Spec.Coordination.MaxDepth)},
-		corev1.EnvVar{Name: "ORKA_COORDINATION_MAX_CHILDREN",
-			Value: fmt.Sprintf("%d", agent.Spec.Coordination.MaxConcurrentChildren)},
-	)
-
 	agentNames := make([]string, 0, len(agent.Spec.Coordination.AllowedAgents))
 	for _, a := range agent.Spec.Coordination.AllowedAgents {
 		agentNames = append(agentNames, a.Name)
 	}
-	envVars = append(envVars,
-		corev1.EnvVar{Name: "ORKA_COORDINATION_ALLOWED_AGENTS",
-			Value: strings.Join(agentNames, ",")},
-	)
 
 	// Current depth (0 for top-level coordinator)
 	depth := "0"
 	if d, ok := task.Annotations[labels.AnnotationCoordinationDepth]; ok {
 		depth = d
 	}
-	envVars = append(envVars,
-		corev1.EnvVar{Name: "ORKA_COORDINATION_DEPTH", Value: depth},
-	)
 
-	// Autonomous mode env vars
-	if agent.Spec.Coordination.Autonomous {
-		envVars = append(envVars,
-			corev1.EnvVar{Name: "ORKA_AUTONOMOUS_MODE", Value: "true"},
-			corev1.EnvVar{Name: "ORKA_AUTONOMOUS_ITERATION",
-				Value: fmt.Sprintf("%d", task.Status.Iteration)},
-		)
-		if agent.Spec.Coordination.MaxIterations > 0 {
-			envVars = append(envVars,
-				corev1.EnvVar{Name: "ORKA_AUTONOMOUS_MAX_ITERATIONS",
-					Value: fmt.Sprintf("%d", agent.Spec.Coordination.MaxIterations)},
-			)
-		}
-	}
-
-	return envVars
+	return append(envVars, workerenv.CoordinationEnv{
+		Enabled:                 true,
+		MaxDepth:                int(agent.Spec.Coordination.MaxDepth),
+		MaxChildren:             int(agent.Spec.Coordination.MaxConcurrentChildren),
+		AllowedAgents:           agentNames,
+		Depth:                   depth,
+		AutonomousMode:          agent.Spec.Coordination.Autonomous,
+		AutonomousIteration:     int(task.Status.Iteration),
+		AutonomousMaxIterations: int(agent.Spec.Coordination.MaxIterations),
+	}.EnvVars()...)
 }
 
 // addAIEnvVars adds AI-specific environment variables
@@ -568,19 +536,14 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		cfg.systemPrompt = b.resolveConfigMapValue(ctx, agent.Namespace, agent.Spec.SystemPrompt.ConfigMapRef)
 	}
 
-	envVars = append(envVars,
-		corev1.EnvVar{Name: "ORKA_AI_PROVIDER", Value: cfg.providerType},
-		corev1.EnvVar{Name: "ORKA_AI_MODEL", Value: cfg.model},
-		corev1.EnvVar{Name: "ORKA_AI_PROMPT", Value: cfg.prompt},
-		corev1.EnvVar{Name: "ORKA_AI_SYSTEM_PROMPT", Value: cfg.systemPrompt},
-	)
-
-	if cfg.baseURL != "" {
-		envVars = append(envVars, corev1.EnvVar{Name: "ORKA_AI_BASE_URL", Value: cfg.baseURL})
-	}
-	if cfg.azureAPIVersion != "" {
-		envVars = append(envVars, corev1.EnvVar{Name: "ORKA_AI_AZURE_API_VERSION", Value: cfg.azureAPIVersion})
-	}
+	envVars = append(envVars, workerenv.AIWorkerEnv{
+		Provider:        cfg.providerType,
+		Model:           cfg.model,
+		Prompt:          cfg.prompt,
+		SystemPrompt:    cfg.systemPrompt,
+		BaseURL:         cfg.baseURL,
+		AzureAPIVersion: cfg.azureAPIVersion,
+	}.EnvVars()...)
 
 	// Auto-inject coordination tools when coordination is enabled
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
@@ -623,7 +586,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	}
 
 	if len(cfg.tools) > 0 {
-		envVars = append(envVars, corev1.EnvVar{Name: "ORKA_AI_TOOLS", Value: strings.Join(cfg.tools, ",")})
+		envVars = append(envVars, corev1.EnvVar{Name: workerenv.AITools, Value: strings.Join(cfg.tools, ",")})
 	}
 
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
@@ -632,13 +595,13 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 
 	// Enable coordination in worker for child tasks so messaging tools are registered
 	if isChildTask && (agent == nil || agent.Spec.Coordination == nil || !agent.Spec.Coordination.Enabled) {
-		envVars = append(envVars, corev1.EnvVar{Name: "ORKA_COORDINATION_ENABLED", Value: "true"})
+		envVars = append(envVars, corev1.EnvVar{Name: workerenv.CoordinationEnabled, Value: "true"})
 	}
 
 	// Add fallback provider environment variables
 	if agent != nil && agent.Spec.Model != nil && len(agent.Spec.Model.Fallbacks) > 0 {
 		envVars = append(envVars, corev1.EnvVar{
-			Name:  "ORKA_AI_FALLBACK_COUNT",
+			Name:  workerenv.AIFallbackCount,
 			Value: fmt.Sprintf("%d", len(agent.Spec.Model.Fallbacks)),
 		})
 		for i, fb := range agent.Spec.Model.Fallbacks {
@@ -650,17 +613,16 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 			}, fbProvider); err != nil {
 				continue // skip unresolvable fallbacks
 			}
-			prefix := fmt.Sprintf("ORKA_AI_FALLBACK_%d", i)
-			envVars = append(envVars,
-				corev1.EnvVar{Name: prefix + "_PROVIDER", Value: string(fbProvider.Spec.Type)},
-				corev1.EnvVar{Name: prefix + "_MODEL", Value: fb.Model},
-			)
-			if fbProvider.Spec.BaseURL != "" {
-				envVars = append(envVars, corev1.EnvVar{Name: prefix + "_BASE_URL", Value: fbProvider.Spec.BaseURL})
+			fallbackEnv := workerenv.FallbackProviderEnv{
+				Provider: string(fbProvider.Spec.Type),
+				Model:    fb.Model,
+				BaseURL:  fbProvider.Spec.BaseURL,
 			}
 			if fbProvider.Spec.Azure != nil {
-				envVars = append(envVars, corev1.EnvVar{Name: prefix + "_AZURE_API_VERSION", Value: fbProvider.Spec.Azure.APIVersion})
+				fallbackEnv.AzureAPIVersion = fbProvider.Spec.Azure.APIVersion
 			}
+			envVars = append(envVars, fallbackEnv.EnvVars(i)...)
+
 		}
 	}
 
@@ -674,7 +636,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	}
 	if allowBash {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "ORKA_ALLOW_BASH", Value: "true",
+			Name: workerenv.AllowBash, Value: "true",
 		})
 	}
 
@@ -692,9 +654,9 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 		}
 
 		// Determine the env var name based on provider type
-		envVarName := "ANTHROPIC_API_KEY"
+		envVarName := workerenv.AnthropicAPIKey
 		if provider.Spec.Type == corev1alpha1.ProviderTypeOpenAI || provider.Spec.Type == corev1alpha1.ProviderTypeAzureOpenAI {
-			envVarName = "OPENAI_API_KEY"
+			envVarName = workerenv.OpenAIAPIKey
 		}
 
 		// Add API key as environment variable from secret
@@ -715,9 +677,9 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 
 		// Set base URL so agent CLIs route through the provider's upstream
 		if provider.Spec.BaseURL != "" {
-			baseURLEnvVar := "ANTHROPIC_BASE_URL"
+			baseURLEnvVar := workerenv.AnthropicBaseURL
 			if provider.Spec.Type == corev1alpha1.ProviderTypeOpenAI || provider.Spec.Type == corev1alpha1.ProviderTypeAzureOpenAI {
-				baseURLEnvVar = "OPENAI_BASE_URL"
+				baseURLEnvVar = workerenv.OpenAIBaseURL
 			}
 			job.Spec.Template.Spec.Containers[0].Env = append(
 				job.Spec.Template.Spec.Containers[0].Env,
@@ -741,7 +703,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 			if secretKey == "" {
 				secretKey = defaultSecretKey
 			}
-			envVarName := fmt.Sprintf("ORKA_AI_FALLBACK_%d_API_KEY", i)
+			envVarName := workerenv.FallbackAPIKeyKey(i)
 			job.Spec.Template.Spec.Containers[0].Env = append(
 				job.Spec.Template.Spec.Containers[0].Env,
 				corev1.EnvVar{
@@ -865,7 +827,7 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 	// Add session env vars
 	job.Spec.Template.Spec.Containers[0].Env = append(
 		job.Spec.Template.Spec.Containers[0].Env,
-		corev1.EnvVar{Name: "ORKA_SESSION_NAME", Value: sessionName},
+		corev1.EnvVar{Name: workerenv.SessionName, Value: sessionName},
 	)
 }
 
@@ -901,11 +863,11 @@ func isCodexAgent(agent *corev1alpha1.Agent) bool {
 
 // addCodexSandboxEnvVars injects controller-configured Codex sandbox mode when set.
 func (b *JobBuilder) addCodexSandboxEnvVars(envVars []corev1.EnvVar, agent *corev1alpha1.Agent) []corev1.EnvVar {
-	if b.CodexSandboxMode == "" || !isCodexAgent(agent) || envVarExists(envVars, "ORKA_CODEX_SANDBOX_MODE") {
+	if b.CodexSandboxMode == "" || !isCodexAgent(agent) || envVarExists(envVars, workerenv.CodexSandboxMode) {
 		return envVars
 	}
 
-	return append(envVars, corev1.EnvVar{Name: "ORKA_CODEX_SANDBOX_MODE", Value: b.CodexSandboxMode})
+	return append(envVars, corev1.EnvVar{Name: workerenv.CodexSandboxMode, Value: b.CodexSandboxMode})
 }
 
 // addAgentEnvVars adds agent-runtime-specific environment variables
@@ -915,7 +877,7 @@ func (b *JobBuilder) addAgentEnvVars(ctx context.Context, envVars []corev1.EnvVa
 	if prompt == "" && task.Spec.AI != nil {
 		prompt = task.Spec.AI.Prompt
 	}
-	envVars = append(envVars, corev1.EnvVar{Name: "ORKA_PROMPT", Value: prompt})
+	envVars = append(envVars, corev1.EnvVar{Name: workerenv.Prompt, Value: prompt})
 
 	envVars = b.addAgentModelEnvVars(ctx, envVars, agent)
 	envVars = b.addAgentToolsEnvVars(envVars, task, agent)
@@ -924,7 +886,7 @@ func (b *JobBuilder) addAgentEnvVars(ctx context.Context, envVars []corev1.EnvVa
 	// Timeout (task level)
 	if task.Spec.Timeout != nil {
 		envVars = append(envVars, corev1.EnvVar{
-			Name:  "ORKA_TIMEOUT_SECONDS",
+			Name:  workerenv.TimeoutSeconds,
 			Value: fmt.Sprintf("%d", int64(task.Spec.Timeout.Seconds())),
 		})
 	}
@@ -954,7 +916,7 @@ func (b *JobBuilder) addAgentModelEnvVars(ctx context.Context, envVars []corev1.
 
 	if model != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "ORKA_MODEL", Value: model,
+			Name: workerenv.Model, Value: model,
 		})
 	}
 
@@ -967,7 +929,7 @@ func (b *JobBuilder) addAgentModelEnvVars(ctx context.Context, envVars []corev1.
 		}
 		if systemPrompt != "" {
 			envVars = append(envVars, corev1.EnvVar{
-				Name: "ORKA_SYSTEM_PROMPT", Value: systemPrompt,
+				Name: workerenv.SystemPrompt, Value: systemPrompt,
 			})
 		}
 	}
@@ -1000,7 +962,7 @@ func (b *JobBuilder) addAgentToolsEnvVars(
 		maxTurns = *task.Spec.AgentRuntime.MaxTurns
 	}
 	envVars = append(envVars, corev1.EnvVar{
-		Name: "ORKA_MAX_TURNS", Value: fmt.Sprintf("%d", maxTurns),
+		Name: workerenv.MaxTurns, Value: fmt.Sprintf("%d", maxTurns),
 	})
 
 	// AllowedTools: task override > agent default
@@ -1013,14 +975,14 @@ func (b *JobBuilder) addAgentToolsEnvVars(
 	}
 	if len(allowedTools) > 0 {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "ORKA_ALLOWED_TOOLS", Value: joinStrings(allowedTools),
+			Name: workerenv.AllowedTools, Value: joinStrings(allowedTools),
 		})
 	}
 
 	// DisallowedTools (task only)
 	if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
 		envVars = append(envVars, corev1.EnvVar{
-			Name:  "ORKA_DISALLOWED_TOOLS",
+			Name:  workerenv.DisallowedTools,
 			Value: joinStrings(task.Spec.AgentRuntime.DisallowedTools),
 		})
 	}
@@ -1035,7 +997,7 @@ func (b *JobBuilder) addAgentToolsEnvVars(
 	}
 	if allowBash {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "ORKA_ALLOW_BASH", Value: "true",
+			Name: workerenv.AllowBash, Value: "true",
 		})
 	}
 
@@ -1053,45 +1015,45 @@ func (b *JobBuilder) addWorkspaceEnvVars(
 	}
 	if ws.GitRepo != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "ORKA_GIT_REPO", Value: ws.GitRepo,
+			Name: workerenv.GitRepo, Value: ws.GitRepo,
 		})
 	}
 	envVars = append(envVars,
-		corev1.EnvVar{Name: "GIT_CONFIG_COUNT", Value: "1"},
-		corev1.EnvVar{Name: "GIT_CONFIG_KEY_0", Value: "safe.directory"},
-		corev1.EnvVar{Name: "GIT_CONFIG_VALUE_0", Value: "/workspace"},
+		corev1.EnvVar{Name: workerenv.GitConfigCount, Value: "1"},
+		corev1.EnvVar{Name: workerenv.GitConfigKey0, Value: "safe.directory"},
+		corev1.EnvVar{Name: workerenv.GitConfigValue0, Value: "/workspace"},
 	)
 	if ws.Branch != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "ORKA_GIT_BRANCH", Value: ws.Branch,
+			Name: workerenv.GitBranch, Value: ws.Branch,
 		})
 	}
 	if ws.Ref != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "ORKA_GIT_REF", Value: ws.Ref,
+			Name: workerenv.GitRef, Value: ws.Ref,
 		})
 	}
 	if ws.SubPath != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "ORKA_WORKSPACE_SUBPATH", Value: ws.SubPath,
+			Name: workerenv.WorkspaceSubpath, Value: ws.SubPath,
 		})
 	}
 	if ws.ForkRepo != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "ORKA_FORK_REPO", Value: ws.ForkRepo,
+			Name: workerenv.ForkRepo, Value: ws.ForkRepo,
 		})
 	}
 	if ws.PRBaseBranch != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "ORKA_PR_BASE_BRANCH", Value: ws.PRBaseBranch,
+			Name: workerenv.PRBaseBranch, Value: ws.PRBaseBranch,
 		})
 	}
 	if ws.PushBranch != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "ORKA_PUSH_BRANCH", Value: ws.PushBranch,
+			Name: workerenv.PushBranch, Value: ws.PushBranch,
 		})
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "ORKA_REQUIRE_PUSH_BRANCH", Value: "true",
+			Name: workerenv.RequirePushBranch, Value: "true",
 		})
 	}
 	return envVars
@@ -1207,12 +1169,12 @@ func (b *JobBuilder) workspaceInitEnvVars(task *corev1alpha1.Task) []corev1.EnvV
 	}
 	envVars = append(envVars, task.Spec.Env...)
 	if task.Spec.PriorTaskRef != nil {
-		envVars = append(envVars, corev1.EnvVar{Name: "ORKA_PRIOR_TASK", Value: task.Spec.PriorTaskRef.Name})
+		envVars = append(envVars, corev1.EnvVar{Name: workerenv.PriorTask, Value: task.Spec.PriorTaskRef.Name})
 		priorNS := task.Spec.PriorTaskRef.Namespace
 		if priorNS == "" {
 			priorNS = task.Namespace
 		}
-		envVars = append(envVars, corev1.EnvVar{Name: "ORKA_PRIOR_TASK_NAMESPACE", Value: priorNS})
+		envVars = append(envVars, corev1.EnvVar{Name: workerenv.PriorTaskNamespace, Value: priorNS})
 	}
 	return b.addWorkspaceEnvVars(envVars, task)
 }

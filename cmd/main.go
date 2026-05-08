@@ -39,6 +39,7 @@ import (
 	_ "github.com/sozercan/orka/internal/metrics"
 	"github.com/sozercan/orka/internal/store/sqlite"
 	"github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/workerenv"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -292,7 +293,7 @@ func main() {
 	jobBuilder.ControllerURL = controllerURL
 	// Auto-discover controller URL from in-cluster service if not explicitly set
 	if jobBuilder.ControllerURL == "" {
-		ns := os.Getenv("POD_NAMESPACE")
+		ns := os.Getenv(workerenv.PodNamespace)
 		if ns == "" {
 			if data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
 				ns = strings.TrimSpace(string(data))

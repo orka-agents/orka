@@ -9,6 +9,7 @@ package common
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/sozercan/orka/internal/workerenv"
 	"io"
 	"net/http"
 	"os"
@@ -18,7 +19,7 @@ import (
 	"time"
 )
 
-const requirePushBranchEnvVar = "ORKA_REQUIRE_PUSH_BRANCH"
+const requirePushBranchEnvVar = workerenv.RequirePushBranch
 
 var waitForRemoteBranchVisibility = waitForRemoteBranchVisibilityWithGit
 
@@ -26,19 +27,19 @@ var waitForRemoteBranchVisibility = waitForRemoteBranchVisibilityWithGit
 // directory. It is called after git clone and before the LLM agent starts.
 // If ORKA_PRIOR_TASK is not set the function is a no-op.
 func PrepareWorkspace(workDir string) error {
-	priorTask := os.Getenv("ORKA_PRIOR_TASK")
+	priorTask := os.Getenv(workerenv.PriorTask)
 	if priorTask == "" {
 		return nil
 	}
 
-	ns := os.Getenv("ORKA_PRIOR_TASK_NAMESPACE")
+	ns := os.Getenv(workerenv.PriorTaskNamespace)
 	if ns == "" {
-		ns = os.Getenv("ORKA_TASK_NAMESPACE")
+		ns = os.Getenv(workerenv.TaskNamespace)
 	}
 
-	controllerURL := os.Getenv("ORKA_CONTROLLER_URL")
+	controllerURL := os.Getenv(workerenv.ControllerURL)
 	if controllerURL == "" {
-		return fmt.Errorf("ORKA_CONTROLLER_URL must be set when ORKA_PRIOR_TASK is specified")
+		return fmt.Errorf("%s must be set when %s is specified", workerenv.ControllerURL, workerenv.PriorTask)
 	}
 	controllerURL = strings.TrimRight(controllerURL, "/")
 
@@ -160,15 +161,15 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 	}
 
 	// Auto-push if ORKA_PUSH_BRANCH is set and there are changes.
-	pushBranch := os.Getenv("ORKA_PUSH_BRANCH")
+	pushBranch := os.Getenv(workerenv.PushBranch)
 	requirePushBranch := strings.EqualFold(os.Getenv(requirePushBranchEnvVar), "true")
 	if requirePushBranch && pushBranch == "" {
-		return nil, fmt.Errorf("%s is true but ORKA_PUSH_BRANCH is empty", requirePushBranchEnvVar)
+		return nil, fmt.Errorf("%s is true but %s is empty", requirePushBranchEnvVar, workerenv.PushBranch)
 	}
 	if pushBranch != "" {
 		if diff == "" {
 			if requirePushBranch {
-				return nil, fmt.Errorf("ORKA_PUSH_BRANCH=%s but no workspace diff was produced", pushBranch)
+				return nil, fmt.Errorf("%s=%s but no workspace diff was produced", workerenv.PushBranch, pushBranch)
 			}
 		} else if pushErr := pushChanges(workDir, pushBranch); pushErr != nil {
 			sr.PushError = pushErr.Error()

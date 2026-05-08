@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/sozercan/orka/internal/workerenv"
 	"net/http"
 	"os"
 )
@@ -85,7 +86,7 @@ func (t *UpdatePlanTool) Execute(ctx context.Context, args json.RawMessage) (str
 	controllerURL := os.Getenv(envOrkaControllerURL)
 	taskName := os.Getenv(envOrkaTaskName)
 	taskNamespace := os.Getenv(envOrkaTaskNamespace)
-	saToken := os.Getenv("ORKA_SA_TOKEN")
+	saToken := os.Getenv(workerenv.ServiceAccountToken)
 
 	if controllerURL == "" || taskName == "" || taskNamespace == "" {
 		return "", errors.New(missingControllerTaskEnvMessage)

@@ -20,6 +20,7 @@ import (
 	copilot "github.com/github/copilot-sdk/go"
 
 	"github.com/sozercan/orka/internal/security"
+	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/workers/common"
 )
 
@@ -126,10 +127,10 @@ func executeCopilot(ctx context.Context, cfg *common.AgentConfig) (string, error
 	opts := &copilot.ClientOptions{
 		Cwd: workspaceDir,
 	}
-	if p := os.Getenv("COPILOT_CLI_PATH"); p != "" {
+	if p := os.Getenv(workerenv.CopilotCLIPath); p != "" {
 		opts.CLIPath = p
 	}
-	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+	if token := os.Getenv(workerenv.GitHubToken); token != "" {
 		opts.GithubToken = token
 	}
 	client := copilot.NewClient(opts)

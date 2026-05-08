@@ -9,6 +9,7 @@ package common
 import (
 	"context"
 	"fmt"
+	"github.com/sozercan/orka/internal/workerenv"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -48,41 +49,41 @@ func LoadWorkspaceConfig() (*AgentConfig, error) {
 
 func loadConfig(defaultMaxTurns int, requirePrompt bool) (*AgentConfig, error) {
 	cfg := &AgentConfig{
-		TaskName:      os.Getenv("ORKA_TASK_NAME"),
-		TaskNamespace: os.Getenv("ORKA_TASK_NAMESPACE"),
-		Prompt:        os.Getenv("ORKA_PROMPT"),
-		Model:         os.Getenv("ORKA_MODEL"),
-		SystemPrompt:  os.Getenv("ORKA_SYSTEM_PROMPT"),
-		GitRepo:       os.Getenv("ORKA_GIT_REPO"),
-		GitBranch:     os.Getenv("ORKA_GIT_BRANCH"),
-		GitRef:        os.Getenv("ORKA_GIT_REF"),
-		SubPath:       os.Getenv("ORKA_WORKSPACE_SUBPATH"),
+		TaskName:      os.Getenv(workerenv.TaskName),
+		TaskNamespace: os.Getenv(workerenv.TaskNamespace),
+		Prompt:        os.Getenv(workerenv.Prompt),
+		Model:         os.Getenv(workerenv.Model),
+		SystemPrompt:  os.Getenv(workerenv.SystemPrompt),
+		GitRepo:       os.Getenv(workerenv.GitRepo),
+		GitBranch:     os.Getenv(workerenv.GitBranch),
+		GitRef:        os.Getenv(workerenv.GitRef),
+		SubPath:       os.Getenv(workerenv.WorkspaceSubpath),
 		MaxTurns:      defaultMaxTurns,
 	}
 
 	if requirePrompt && cfg.Prompt == "" {
-		return nil, fmt.Errorf("ORKA_PROMPT is required")
+		return nil, fmt.Errorf("%s is required", workerenv.Prompt)
 	}
 
-	if v := os.Getenv("ORKA_MAX_TURNS"); v != "" {
+	if v := os.Getenv(workerenv.MaxTurns); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("invalid ORKA_MAX_TURNS: %w", err)
+			return nil, fmt.Errorf("invalid %s: %w", workerenv.MaxTurns, err)
 		}
 		cfg.MaxTurns = n
 	}
 
-	if v := os.Getenv("ORKA_ALLOWED_TOOLS"); v != "" {
+	if v := os.Getenv(workerenv.AllowedTools); v != "" {
 		cfg.AllowedTools = strings.Split(v, ",")
 	}
-	if v := os.Getenv("ORKA_DISALLOWED_TOOLS"); v != "" {
+	if v := os.Getenv(workerenv.DisallowedTools); v != "" {
 		cfg.DisallowedTools = strings.Split(v, ",")
 	}
 
-	if v := os.Getenv("ORKA_TIMEOUT_SECONDS"); v != "" {
+	if v := os.Getenv(workerenv.TimeoutSeconds); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("invalid ORKA_TIMEOUT_SECONDS: %w", err)
+			return nil, fmt.Errorf("invalid %s: %w", workerenv.TimeoutSeconds, err)
 		}
 		cfg.TimeoutSeconds = n
 	}
@@ -91,7 +92,7 @@ func loadConfig(defaultMaxTurns int, requirePrompt bool) (*AgentConfig, error) {
 	if cfg.SubPath != "" {
 		cleaned := filepath.Clean(cfg.SubPath)
 		if filepath.IsAbs(cleaned) || strings.HasPrefix(cleaned, "..") {
-			return nil, fmt.Errorf("ORKA_WORKSPACE_SUBPATH %q contains path traversal", cfg.SubPath)
+			return nil, fmt.Errorf("%s %q contains path traversal", workerenv.WorkspaceSubpath, cfg.SubPath)
 		}
 		cfg.SubPath = cleaned
 	}
@@ -111,9 +112,9 @@ func SetupGitCredentials() {
 		if data, err := os.ReadFile(path); err == nil {
 			token := strings.TrimSpace(string(data))
 			if token != "" {
-				os.Setenv("GIT_TOKEN", token)               //nolint:errcheck
-				os.Setenv("GITHUB_TOKEN", token)            //nolint:errcheck
-				os.Setenv("GIT_ASKPASS", "/bin/echo-token") //nolint:errcheck
+				os.Setenv(workerenv.GitToken, token)               //nolint:errcheck
+				os.Setenv(workerenv.GitHubToken, token)            //nolint:errcheck
+				os.Setenv(workerenv.GitAskpass, "/bin/echo-token") //nolint:errcheck
 				break
 			}
 		}
@@ -121,7 +122,7 @@ func SetupGitCredentials() {
 	if data, err := os.ReadFile("/secrets/git/username"); err == nil {
 		username := strings.TrimSpace(string(data))
 		if username != "" {
-			os.Setenv("GIT_USERNAME", username) //nolint:errcheck
+			os.Setenv(workerenv.GitUsername, username) //nolint:errcheck
 		}
 	}
 }

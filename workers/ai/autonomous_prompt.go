@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 // autonomousSystemPromptSuffix returns additional system prompt instructions
@@ -139,11 +141,11 @@ When you have access to list_issues and list_pull_requests tools, follow this wo
 // inspecting the ORKA_AI_TOOLS env var for known tool names, or by checking
 // if ORKA_GIT_REPO is set (indicating a workspace tied to a GitHub repo).
 func hasGitHubTools() bool {
-	if os.Getenv("ORKA_GIT_REPO") != "" {
+	if os.Getenv(workerenv.GitRepo) != "" {
 		return true
 	}
 
-	toolsStr := os.Getenv("ORKA_AI_TOOLS")
+	toolsStr := os.Getenv(workerenv.AITools)
 	if toolsStr == "" {
 		return false
 	}

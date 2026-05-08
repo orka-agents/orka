@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/sozercan/orka/internal/workerenv"
 	"io"
 	"net/http"
 	neturl "net/url"
@@ -35,7 +36,7 @@ type ToolExecutor struct {
 
 // NewToolExecutor creates a new tool executor
 func NewToolExecutor() *ToolExecutor {
-	namespace := os.Getenv("ORKA_TASK_NAMESPACE")
+	namespace := os.Getenv(workerenv.TaskNamespace)
 	if namespace == "" {
 		namespace = "default"
 	}

@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/sozercan/orka/internal/workerenv"
 	"os"
 	"time"
 
@@ -218,7 +219,7 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		model.Name = a.Model.Name
 	}
 	if model.Name == "" {
-		model.Name = os.Getenv("ORKA_AI_MODEL")
+		model.Name = os.Getenv(workerenv.AIModel)
 	}
 
 	// Build provider ref — inherit from parent agent's providerRef for reliability,
@@ -240,7 +241,7 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		providerRefName = a.ProviderRef
 	}
 	if providerRefName == "" {
-		providerRefName = os.Getenv("ORKA_AI_PROVIDER")
+		providerRefName = os.Getenv(workerenv.AIProvider)
 	}
 	if providerRefName == "" {
 		providerRefName = defaultNamespace

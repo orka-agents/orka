@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/sozercan/orka/internal/workerenv"
 	"io"
 	"net/http"
 	"net/url"
@@ -547,14 +548,14 @@ type internalControllerConfig struct {
 
 func loadInternalControllerConfig() (internalControllerConfig, error) {
 	cfg := internalControllerConfig{
-		ControllerURL: strings.TrimRight(strings.TrimSpace(os.Getenv("ORKA_CONTROLLER_URL")), "/"),
-		Namespace:     strings.TrimSpace(os.Getenv("ORKA_TASK_NAMESPACE")),
-		TaskName:      strings.TrimSpace(os.Getenv("ORKA_TASK_NAME")),
-		AgentName:     strings.TrimSpace(os.Getenv("ORKA_AGENT_NAME")),
-		Token:         strings.TrimSpace(os.Getenv("ORKA_SA_TOKEN")),
+		ControllerURL: strings.TrimRight(strings.TrimSpace(os.Getenv(workerenv.ControllerURL)), "/"),
+		Namespace:     strings.TrimSpace(os.Getenv(workerenv.TaskNamespace)),
+		TaskName:      strings.TrimSpace(os.Getenv(workerenv.TaskName)),
+		AgentName:     strings.TrimSpace(os.Getenv(workerenv.AgentName)),
+		Token:         strings.TrimSpace(os.Getenv(workerenv.ServiceAccountToken)),
 	}
 	if cfg.ControllerURL == "" || cfg.Namespace == "" || cfg.TaskName == "" {
-		return cfg, fmt.Errorf("ORKA_CONTROLLER_URL, ORKA_TASK_NAME, and ORKA_TASK_NAMESPACE are required")
+		return cfg, fmt.Errorf("%s, %s, and %s are required", workerenv.ControllerURL, workerenv.TaskName, workerenv.TaskNamespace)
 	}
 	if cfg.Token == "" {
 		if data, err := os.ReadFile(saTokenPath); err == nil {
