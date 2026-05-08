@@ -997,6 +997,235 @@ func TestIngestPatchTaskKeepsPatchPendingUntilResultExists(t *testing.T) {
 	assertPatchIngestState(t, fixture, scanRunPhasePending, findingStatePatchPending)
 }
 
+func TestApplyCombinedScanPhaseStatusUsesRunCompletion(t *testing.T) {
+	completed := mustParseTime(t, "2026-05-07T23:30:00Z")
+
+	succeeded := &corev1alpha1.RepositoryScan{}
+	applyCombinedScanPhaseStatus(succeeded, corev1alpha1.TaskPhaseSucceeded, &storepkg.ScanRun{
+		Phase:       scanRunPhaseSucceeded,
+		CompletedAt: &completed,
+		HeadCommit:  "abc123",
+	})
+	if succeeded.Status.LastScanAt == nil || !succeeded.Status.LastScanAt.Time.Equal(completed) {
+		t.Fatalf("succeeded LastScanAt = %v, want %v", succeeded.Status.LastScanAt, completed)
+	}
+	if succeeded.Status.LastSuccessfulScanAt == nil || !succeeded.Status.LastSuccessfulScanAt.Time.Equal(completed) {
+		t.Fatalf("succeeded LastSuccessfulScanAt = %v, want %v", succeeded.Status.LastSuccessfulScanAt, completed)
+	}
+
+	failed := &corev1alpha1.RepositoryScan{}
+	applyCombinedScanPhaseStatus(failed, corev1alpha1.TaskPhaseFailed, &storepkg.ScanRun{
+		Phase:       scanRunPhaseFailed,
+		CompletedAt: &completed,
+	})
+	if failed.Status.LastScanAt == nil || !failed.Status.LastScanAt.Time.Equal(completed) {
+		t.Fatalf("failed LastScanAt = %v, want %v", failed.Status.LastScanAt, completed)
+	}
+	if failed.Status.LastSuccessfulScanAt != nil {
+		t.Fatalf("failed LastSuccessfulScanAt = %v, want nil", failed.Status.LastSuccessfulScanAt)
+	}
+}
+
+func TestRefreshScanRunStatusSetsLastScanAtOnFailedRun(t *testing.T) {
+	ctx := context.Background()
+	secStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	scan := &corev1alpha1.RepositoryScan{
+		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
+		ObjectMeta: metav1.ObjectMeta{Name: "ts-fail", Namespace: "default"},
+		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).Build()
+	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: secStore}
+
+	completed := mustParseTime(t, "2026-05-07T22:41:22Z")
+	run := &storepkg.ScanRun{ID: "scan_f", Namespace: "default", RepositoryScan: "ts-fail", TaskName: "t", Mode: "initial", Phase: scanRunPhaseFailed, StartedAt: completed, CompletedAt: &completed, ErrorMessage: "failed", HeadCommit: "abc"}
+	if err := secStore.CreateScanRun(ctx, run); err != nil {
+		t.Fatalf("CreateScanRun() error = %v", err)
+	}
+	if err := r.refreshScanRunStatus(ctx, scan, run, run.ID, true); err != nil {
+		t.Fatalf("refreshScanRunStatus() error = %v", err)
+	}
+
+	current := &corev1alpha1.RepositoryScan{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		t.Fatalf("cl.Get() error = %v", err)
+	}
+	if current.Status.LastScanAt == nil || !current.Status.LastScanAt.Time.Equal(completed) {
+		t.Fatalf("LastScanAt = %v, want %v", current.Status.LastScanAt, completed)
+	}
+	if current.Status.LastSuccessfulScanAt != nil {
+		t.Fatalf("LastSuccessfulScanAt = %v, want nil for failed scan", current.Status.LastSuccessfulScanAt)
+	}
+}
+
+func TestRefreshScanRunStatusSetsBothTimestampsOnSuccess(t *testing.T) {
+	ctx := context.Background()
+	secStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	scan := &corev1alpha1.RepositoryScan{
+		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
+		ObjectMeta: metav1.ObjectMeta{Name: "ts-ok", Namespace: "default"},
+		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).Build()
+	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: secStore}
+
+	completed := mustParseTime(t, "2026-05-07T23:00:00Z")
+	run := &storepkg.ScanRun{ID: "scan_s", Namespace: "default", RepositoryScan: "ts-ok", TaskName: "t", Mode: "initial", Phase: scanRunPhaseSucceeded, StartedAt: completed, CompletedAt: &completed, HeadCommit: "def"}
+	if err := secStore.CreateScanRun(ctx, run); err != nil {
+		t.Fatalf("CreateScanRun() error = %v", err)
+	}
+	if err := r.refreshScanRunStatus(ctx, scan, run, run.ID, true); err != nil {
+		t.Fatalf("refreshScanRunStatus() error = %v", err)
+	}
+
+	current := &corev1alpha1.RepositoryScan{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		t.Fatalf("cl.Get() error = %v", err)
+	}
+	if current.Status.LastScanAt == nil || !current.Status.LastScanAt.Time.Equal(completed) {
+		t.Fatalf("LastScanAt = %v, want %v", current.Status.LastScanAt, completed)
+	}
+	if current.Status.LastSuccessfulScanAt == nil || !current.Status.LastSuccessfulScanAt.Time.Equal(completed) {
+		t.Fatalf("LastSuccessfulScanAt = %v, want %v", current.Status.LastSuccessfulScanAt, completed)
+	}
+}
+
+func TestIngestCombinedScanTaskSetsLastScanAtOnFailure(t *testing.T) {
+	ctx := context.Background()
+	store := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	scan := &corev1alpha1.RepositoryScan{
+		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
+		ObjectMeta: metav1.ObjectMeta{Name: "combined-fail", Namespace: "default"},
+		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).Build()
+	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: store, ArtifactStore: store, ResultStore: store}
+
+	completedAt := metav1.NewTime(mustParseTime(t, "2026-05-08T01:00:00Z"))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "combined-fail-scan-1",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(mustParseTime(t, "2026-05-08T00:55:00Z")),
+			Labels: map[string]string{
+				labels.LabelSecurityTarget: "combined-fail",
+				labels.LabelSecurityScanID: "scan_combined_fail",
+				labels.LabelSecurityMode:   "initial",
+			},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:          corev1alpha1.TaskPhaseFailed,
+			CompletionTime: &completedAt,
+			Message:        "task failed",
+		},
+	}
+
+	if err := r.ingestScanTask(ctx, scan, task, true); err != nil {
+		t.Fatalf("ingestScanTask() error = %v", err)
+	}
+
+	current := &corev1alpha1.RepositoryScan{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		t.Fatalf("cl.Get() error = %v", err)
+	}
+	if current.Status.LastScanAt == nil || !current.Status.LastScanAt.Time.Equal(completedAt.Time) {
+		t.Fatalf("LastScanAt = %v, want %v", current.Status.LastScanAt, completedAt.Time)
+	}
+	if current.Status.LastSuccessfulScanAt != nil {
+		t.Fatalf("LastSuccessfulScanAt = %v, want nil for failed scan", current.Status.LastSuccessfulScanAt)
+	}
+}
+
+func TestIngestCombinedScanTaskSetsBothTimestampsOnSuccess(t *testing.T) {
+	ctx := context.Background()
+	store := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	scan := &corev1alpha1.RepositoryScan{
+		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
+		ObjectMeta: metav1.ObjectMeta{Name: "combined-ok", Namespace: "default"},
+		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).Build()
+	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: store, ArtifactStore: store, ResultStore: store}
+
+	completedAt := metav1.NewTime(mustParseTime(t, "2026-05-08T02:00:00Z"))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "combined-ok-scan-1",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(mustParseTime(t, "2026-05-08T01:55:00Z")),
+			Labels: map[string]string{
+				labels.LabelSecurityTarget: "combined-ok",
+				labels.LabelSecurityScanID: "scan_combined_ok",
+				labels.LabelSecurityMode:   "initial",
+			},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:          corev1alpha1.TaskPhaseSucceeded,
+			CompletionTime: &completedAt,
+		},
+	}
+
+	findings := security.FindingsArtifact{
+		Version: 1,
+		Repository: security.FindingsArtifactRepo{
+			RepoURL: "https://github.com/example/repo",
+			Branch:  "main",
+			HeadSHA: "abc123",
+			BaseSHA: "def456",
+		},
+		Scan: security.FindingsArtifactScan{
+			Mode:    "initial",
+			Summary: "No findings",
+		},
+		Findings: []security.FindingsArtifactFinding{},
+	}
+	findingsJSON, err := json.Marshal(findings)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactFindings, "application/json", findingsJSON); err != nil {
+		t.Fatalf("SaveArtifact(findings) error = %v", err)
+	}
+	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactThreatModel, "text/plain", []byte("threat model")); err != nil {
+		t.Fatalf("SaveArtifact(threat-model) error = %v", err)
+	}
+
+	if err := r.ingestScanTask(ctx, scan, task, true); err != nil {
+		t.Fatalf("ingestScanTask() error = %v", err)
+	}
+
+	current := &corev1alpha1.RepositoryScan{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		t.Fatalf("cl.Get() error = %v", err)
+	}
+	if current.Status.LastScanAt == nil || !current.Status.LastScanAt.Time.Equal(completedAt.Time) {
+		t.Fatalf("LastScanAt = %v, want %v", current.Status.LastScanAt, completedAt.Time)
+	}
+	if current.Status.LastSuccessfulScanAt == nil || !current.Status.LastSuccessfulScanAt.Time.Equal(completedAt.Time) {
+		t.Fatalf("LastSuccessfulScanAt = %v, want %v", current.Status.LastSuccessfulScanAt, completedAt.Time)
+	}
+}
+
 func setupControllerSQLiteStore(t *testing.T) *sqlitestore.Store {
 	t.Helper()
 
