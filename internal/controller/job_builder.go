@@ -50,6 +50,15 @@ const (
 	// DefaultInitImage is the default image for init containers
 	DefaultInitImage = "busybox:1.37"
 
+	// AIWorkerServiceAccount is the ServiceAccount used by trusted AI task workers.
+	AIWorkerServiceAccount = "orka-ai-worker"
+
+	// VendorWorkerServiceAccount is the ServiceAccount used by untrusted vendor/agent task workers.
+	VendorWorkerServiceAccount = "orka-vendor-worker"
+
+	// ContainerWorkerServiceAccount is the ServiceAccount used by untrusted container task workers.
+	ContainerWorkerServiceAccount = "orka-container-worker"
+
 	// ResultEndpointEnvVar is the env var for the result submission URL
 	ResultEndpointEnvVar = workerenv.ResultEndpoint
 
@@ -96,6 +105,41 @@ func NewJobBuilder(c client.Client) *JobBuilder {
 	}
 }
 
+func workerServiceAccountForTask(task *corev1alpha1.Task) string {
+	if task == nil {
+		return ContainerWorkerServiceAccount
+	}
+
+	switch task.Spec.Type {
+	case corev1alpha1.TaskTypeAI:
+		return AIWorkerServiceAccount
+	case corev1alpha1.TaskTypeAgent:
+		return VendorWorkerServiceAccount
+	case corev1alpha1.TaskTypeContainer:
+		return ContainerWorkerServiceAccount
+	default:
+		return ContainerWorkerServiceAccount
+	}
+}
+
+func workerAutomountServiceAccountToken(task *corev1alpha1.Task) *bool {
+	if task == nil {
+		return ptr.To(false)
+	}
+
+	switch task.Spec.Type {
+	case corev1alpha1.TaskTypeAI, corev1alpha1.TaskTypeAgent:
+		return nil
+	case corev1alpha1.TaskTypeContainer:
+		if task.Spec.Image == "" {
+			return nil
+		}
+		return ptr.To(false)
+	default:
+		return ptr.To(false)
+	}
+}
+
 func buildTaskJobName(task *corev1alpha1.Task) string {
 	uidPrefix := string(task.UID)
 	if len(uidPrefix) > 8 {
@@ -139,9 +183,10 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 					},
 				},
 				Spec: corev1.PodSpec{
-					RestartPolicy:      corev1.RestartPolicyNever,
-					ServiceAccountName: "orka-worker",
-					SecurityContext:    b.buildPodSecurityContext(),
+					RestartPolicy:                corev1.RestartPolicyNever,
+					ServiceAccountName:           workerServiceAccountForTask(task),
+					AutomountServiceAccountToken: workerAutomountServiceAccountToken(task),
+					SecurityContext:              b.buildPodSecurityContext(),
 					Containers: []corev1.Container{
 						b.buildContainer(ctx, task, agent, provider),
 					},
