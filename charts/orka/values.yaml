@@ -44,6 +44,15 @@ controller:
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
 
+  # OIDC/JWT authentication for external API requests
+  oidc:
+    # Issuer URL expected in bearer tokens. Requires audience when set.
+    issuer: ""
+    # Audience expected in bearer tokens. Requires issuer when set.
+    audience: ""
+    # Optional JWKS URL. When empty, Orka discovers it from issuer.
+    jwksUrl: ""
+
 # Worker configuration
 workers:
   ai:

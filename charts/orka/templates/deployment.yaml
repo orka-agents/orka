@@ -44,6 +44,17 @@ spec:
             {{- end }}
             - --leader-elect={{ .Values.controller.leaderElect }}
             - --zap-log-level={{ .Values.controller.logLevel }}
+            {{- with .Values.controller.oidc }}
+            {{- if .issuer }}
+            - {{ printf "--oidc-issuer=%s" .issuer | quote }}
+            {{- end }}
+            {{- if .audience }}
+            - {{ printf "--oidc-audience=%s" .audience | quote }}
+            {{- end }}
+            {{- if .jwksUrl }}
+            - {{ printf "--oidc-jwks-url=%s" .jwksUrl | quote }}
+            {{- end }}
+            {{- end }}
             - --store-backend=sqlite
             - --store-path={{ .Values.store.path }}
             - --ai-worker-image={{ .Values.workers.ai.image.repository }}:{{ .Values.workers.ai.image.tag }}
