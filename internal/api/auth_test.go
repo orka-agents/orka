@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -499,6 +500,138 @@ func TestNewAuthMiddleware_OIDCInvalidTokenFallsBackToTokenReview(t *testing.T) 
 	}
 	if capturedUserInfo.Namespace != "ns1" {
 		t.Fatalf("Namespace = %q, want ns1", capturedUserInfo.Namespace)
+	}
+}
+
+func TestNewAuthMiddleware_OIDCEnabledNonOIDCJWTUsesTokenReviewBeforeDiscovery(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	provider := newTestOIDCProvider(t)
+	token := provider.issueToken(t, testOIDCTokenOptions{Issuer: "https://kubernetes.default.svc"})
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	createCalls := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
+					createCalls++
+					if tr.Spec.Token != token {
+						t.Errorf("TokenReview token = %q, want original bearer token", tr.Spec.Token)
+					}
+					tr.Status.Authenticated = true
+					tr.Status.User = authenticationv1.UserInfo{
+						Username: "system:serviceaccount:ns1:worker",
+						UID:      "uid-worker",
+						Groups:   []string{"system:serviceaccounts", "system:serviceaccounts:ns1"},
+					}
+				}
+				return nil
+			},
+		}).
+		Build()
+
+	var capturedUserInfo *UserInfo
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{OIDC: provider.configWithoutJWKSURL()}))
+	app.Get("/test", func(ctx fiber.Ctx) error {
+		capturedUserInfo = GetUserInfo(ctx)
+		return ctx.SendString("OK")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if createCalls != 1 {
+		t.Fatalf("TokenReview Create calls = %d, want 1", createCalls)
+	}
+	if got := provider.discoveryHits.Load(); got != 0 {
+		t.Fatalf("OIDC discovery hits = %d, want 0", got)
+	}
+	if got := provider.jwksHits.Load(); got != 0 {
+		t.Fatalf("JWKS hits = %d, want 0", got)
+	}
+	if capturedUserInfo == nil || capturedUserInfo.AuthType != AuthTypeTokenReview {
+		t.Fatalf("captured user info = %#v, want TokenReview user", capturedUserInfo)
+	}
+	if capturedUserInfo.Namespace != "ns1" {
+		t.Fatalf("Namespace = %q, want ns1", capturedUserInfo.Namespace)
+	}
+}
+
+func TestNewAuthMiddleware_OIDCEnabledNonOIDCTokenUsesCacheBeforeDiscovery(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	provider := newTestOIDCProvider(t)
+	token := provider.issueToken(t, testOIDCTokenOptions{Issuer: "https://kubernetes.default.svc"})
+	hash := getTokenHash(token)
+	tokenCache.Store(hash, &tokenCacheEntry{
+		userInfo: &UserInfo{
+			Username:  "system:serviceaccount:ns1:cached-worker",
+			Namespace: "ns1",
+			AuthType:  AuthTypeTokenReview,
+		},
+		expiry: time.Now().Add(time.Minute),
+	})
+	t.Cleanup(func() { tokenCache.Delete(hash) })
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	createCalls := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				createCalls++
+				return errors.New("TokenReview should not be called for cached token")
+			},
+		}).
+		Build()
+
+	var capturedUserInfo *UserInfo
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{OIDC: provider.configWithoutJWKSURL()}))
+	app.Get("/test", func(ctx fiber.Ctx) error {
+		capturedUserInfo = GetUserInfo(ctx)
+		return ctx.SendString("OK")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if createCalls != 0 {
+		t.Fatalf("TokenReview Create calls = %d, want 0", createCalls)
+	}
+	if got := provider.discoveryHits.Load(); got != 0 {
+		t.Fatalf("OIDC discovery hits = %d, want 0", got)
+	}
+	if got := provider.jwksHits.Load(); got != 0 {
+		t.Fatalf("JWKS hits = %d, want 0", got)
+	}
+	if capturedUserInfo == nil || capturedUserInfo.Username != "system:serviceaccount:ns1:cached-worker" {
+		t.Fatalf("captured user info = %#v, want cached user", capturedUserInfo)
 	}
 }
 

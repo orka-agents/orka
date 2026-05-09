@@ -58,6 +58,14 @@ type oidcDiscoveryDocument struct {
 }
 
 func validateOIDCToken(ctx context.Context, token string, cfg OIDCConfig) (*UserInfo, error) {
+	parsed, err := parseOIDCTokenCandidate(token, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return validateParsedOIDCToken(ctx, parsed, cfg)
+}
+
+func validateParsedOIDCToken(ctx context.Context, parsed *parsedJWT, cfg OIDCConfig) (*UserInfo, error) {
 	jwksURL := cfg.JWKSURL
 	if jwksURL == "" {
 		discovered, err := discoverOIDCJWKSURL(ctx, cfg.Issuer)
@@ -67,7 +75,7 @@ func validateOIDCToken(ctx context.Context, token string, cfg OIDCConfig) (*User
 		jwksURL = discovered
 	}
 
-	verified, err := verifyJWT(ctx, token, jwtVerificationConfig{
+	verified, err := verifyParsedJWT(ctx, parsed, jwtVerificationConfig{
 		Issuer:   cfg.Issuer,
 		Audience: cfg.Audience,
 		JWKSURL:  jwksURL,
@@ -82,6 +90,32 @@ func validateOIDCToken(ctx context.Context, token string, cfg OIDCConfig) (*User
 	}
 
 	return userInfoFromOIDCClaims(claims), nil
+}
+
+func parseOIDCTokenCandidate(token string, cfg OIDCConfig) (*parsedJWT, error) {
+	parsed, err := parseCompactJWT(token)
+	if err != nil {
+		return nil, err
+	}
+
+	if !jwtSigningAlgorithmAllowed(parsed.Header.Algorithm, nil) {
+		return nil, fmt.Errorf("unsupported JWT signing algorithm %q", parsed.Header.Algorithm.String())
+	}
+
+	var claims struct {
+		Issuer string `json:"iss"`
+	}
+	if err := json.Unmarshal(parsed.RawClaims, &claims); err != nil {
+		return nil, fmt.Errorf("parse JWT claims: %w", err)
+	}
+	if claims.Issuer == "" {
+		return nil, errors.New("missing issuer")
+	}
+	if claims.Issuer != cfg.Issuer {
+		return nil, fmt.Errorf("invalid issuer: got %q, want %q", claims.Issuer, cfg.Issuer)
+	}
+
+	return parsed, nil
 }
 
 func userInfoFromOIDCClaims(claims oidcClaims) *UserInfo {

@@ -340,6 +340,37 @@ func TestValidateOIDCToken_DiscoveryJWKSURL(t *testing.T) {
 	}
 }
 
+func TestValidateOIDCToken_InvalidJWTSkipsDiscovery(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+
+	_, err := validateOIDCToken(context.Background(), "not-a-compact-jwt", provider.configWithoutJWKSURL())
+	if err == nil || !strings.Contains(err.Error(), "invalid JWT format") {
+		t.Fatalf("validateOIDCToken error = %v, want invalid JWT format", err)
+	}
+	if got := provider.discoveryHits.Load(); got != 0 {
+		t.Fatalf("OIDC discovery hits = %d, want 0", got)
+	}
+	if got := provider.jwksHits.Load(); got != 0 {
+		t.Fatalf("JWKS hits = %d, want 0", got)
+	}
+}
+
+func TestValidateOIDCToken_WrongIssuerSkipsDiscovery(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	token := provider.issueToken(t, testOIDCTokenOptions{Issuer: "https://kubernetes.default.svc"})
+
+	_, err := validateOIDCToken(context.Background(), token, provider.configWithoutJWKSURL())
+	if err == nil || !strings.Contains(err.Error(), "invalid issuer") {
+		t.Fatalf("validateOIDCToken error = %v, want invalid issuer", err)
+	}
+	if got := provider.discoveryHits.Load(); got != 0 {
+		t.Fatalf("OIDC discovery hits = %d, want 0", got)
+	}
+	if got := provider.jwksHits.Load(); got != 0 {
+		t.Fatalf("JWKS hits = %d, want 0", got)
+	}
+}
+
 func TestNewAuthMiddleware_OIDC_ValidToken(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	token := provider.issueToken(t, testOIDCTokenOptions{Username: "oidc-user"})

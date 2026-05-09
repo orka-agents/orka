@@ -164,9 +164,23 @@ func authenticateToken(ctx context.Context, c client.Client, token string, cfg A
 		return validateToken(ctx, c, token)
 	}
 
-	userInfo, oidcErr := validateOIDCToken(ctx, token, cfg.OIDC)
+	parsedOIDC, oidcErr := parseOIDCTokenCandidate(token, cfg.OIDC)
 	if oidcErr == nil {
-		return userInfo, nil
+		userInfo, oidcErr := validateParsedOIDCToken(ctx, parsedOIDC, cfg.OIDC)
+		if oidcErr == nil {
+			return userInfo, nil
+		}
+
+		if c == nil {
+			return nil, oidcErr
+		}
+
+		userInfo, tokenReviewErr := validateToken(ctx, c, token)
+		if tokenReviewErr == nil {
+			return userInfo, nil
+		}
+
+		return nil, fmt.Errorf("OIDC validation failed: %w; TokenReview validation failed: %v", oidcErr, tokenReviewErr)
 	}
 
 	if c == nil {
@@ -178,7 +192,7 @@ func authenticateToken(ctx context.Context, c client.Client, token string, cfg A
 		return userInfo, nil
 	}
 
-	return nil, fmt.Errorf("OIDC validation failed: %w; TokenReview validation failed: %v", oidcErr, tokenReviewErr)
+	return nil, fmt.Errorf("OIDC validation skipped: %w; TokenReview validation failed: %v", oidcErr, tokenReviewErr)
 }
 
 // validateToken validates a ServiceAccount token using TokenReview with caching

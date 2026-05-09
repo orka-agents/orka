@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/lestrrat-go/jwx/v3/jwa"
@@ -52,7 +53,10 @@ func verifyJWT(ctx context.Context, raw string, cfg jwtVerificationConfig) (*ver
 	if err != nil {
 		return nil, err
 	}
+	return verifyParsedJWT(ctx, parsed, cfg)
+}
 
+func verifyParsedJWT(ctx context.Context, parsed *parsedJWT, cfg jwtVerificationConfig) (*verifiedJWT, error) {
 	if !jwtSigningAlgorithmAllowed(parsed.Header.Algorithm, cfg.AllowedAlgorithms) {
 		return nil, fmt.Errorf("unsupported JWT signing algorithm %q", parsed.Header.Algorithm.String())
 	}
@@ -73,7 +77,7 @@ func verifyJWT(ctx context.Context, raw string, cfg jwtVerificationConfig) (*ver
 		return nil, err
 	}
 
-	tok, err := jwt.ParseString(raw,
+	tok, err := jwt.ParseString(parsed.Raw,
 		jwt.WithValidate(false),
 		jwt.WithKeySet(filteredSet, jws.WithUseDefault(true)),
 	)
@@ -174,12 +178,7 @@ func jwtRequiredClaims(required []string) []string {
 }
 
 func jwtClaimRequired(name string, required []string) bool {
-	for _, claim := range jwtRequiredClaims(required) {
-		if claim == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(jwtRequiredClaims(required), name)
 }
 
 func filterJWTSigningKeys(keySet jwk.Set, header jwtHeader) (jwk.Set, error) {
