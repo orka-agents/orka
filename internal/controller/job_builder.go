@@ -60,13 +60,13 @@ const (
 	// ContainerWorkerServiceAccountName is the ServiceAccount for container worker tasks.
 	ContainerWorkerServiceAccountName = "orka-container-worker"
 
-	// directProviderSecretsEnvVar restores legacy direct provider API key/base URL injection for agent/container pods.
+	// directProviderSecretsEnvVar restores legacy direct provider API key/base URL injection for untrusted container pods.
 	directProviderSecretsEnvVar = "ORKA_AGENT_DIRECT_PROVIDER_SECRETS"
 
-	// directSecretMountsEnvVar restores legacy direct task/agent secret injection for agent/container pods.
+	// directSecretMountsEnvVar restores legacy direct task/agent secret injection for untrusted container pods.
 	directSecretMountsEnvVar = "ORKA_AGENT_DIRECT_SECRET_MOUNTS"
 
-	// directGitCredentialsEnvVar restores legacy direct Git credential mounts for agent/container pods.
+	// directGitCredentialsEnvVar restores legacy direct Git credential mounts for untrusted custom container pods.
 	directGitCredentialsEnvVar = "ORKA_AGENT_DIRECT_GIT_CREDENTIALS"
 
 	// ResultEndpointEnvVar is the env var for the result submission URL
@@ -139,11 +139,26 @@ func podShouldAutomountServiceAccountToken(task *corev1alpha1.Task, agent *corev
 	if task == nil || !isUntrustedComputeTask(task, agent) {
 		return true
 	}
-	if task.Spec.SessionRef != nil {
+	if task.Spec.SessionRef != nil || taskUsesOrkaWorkerCallback(task) {
 		return true
 	}
 
 	return false
+}
+
+func taskUsesOrkaWorkerCallback(task *corev1alpha1.Task) bool {
+	if task == nil {
+		return false
+	}
+
+	switch task.Spec.Type {
+	case corev1alpha1.TaskTypeAI, corev1alpha1.TaskTypeAgent:
+		return true
+	case corev1alpha1.TaskTypeContainer:
+		return task.Spec.Image == ""
+	default:
+		return false
+	}
 }
 
 func isVendorAgentTask(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
@@ -182,6 +197,33 @@ func directSecretMountsEnabled() bool {
 
 func directGitCredentialsEnabled() bool {
 	return envFlagEnabled(directGitCredentialsEnvVar)
+}
+
+func directProviderSecretsAllowed(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	return !isUntrustedComputeTask(task, agent) || isVendorAgentTask(task, agent) || directProviderSecretsEnabled()
+}
+
+func directSecretMountsAllowed(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	return !isUntrustedComputeTask(task, agent) || isVendorAgentTask(task, agent) || directSecretMountsEnabled()
+}
+
+func mainContainerNeedsGitCredentials(task *corev1alpha1.Task) bool {
+	if task == nil {
+		return false
+	}
+
+	switch task.Spec.Type {
+	case corev1alpha1.TaskTypeAgent:
+		return true
+	case corev1alpha1.TaskTypeContainer:
+		return task.Spec.Image == ""
+	default:
+		return false
+	}
+}
+
+func directGitCredentialsAllowed(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	return !isUntrustedComputeTask(task, agent) || mainContainerNeedsGitCredentials(task) || directGitCredentialsEnabled()
 }
 
 func envFlagEnabled(name string) bool {
@@ -791,8 +833,8 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 
 // addSecretVolumes adds secret volumes to the Job
 func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) {
-	allowDirectProviderSecrets := !isUntrustedComputeTask(task, agent) || directProviderSecretsEnabled()
-	allowDirectSecretMounts := !isUntrustedComputeTask(task, agent) || directSecretMountsEnabled()
+	allowDirectProviderSecrets := directProviderSecretsAllowed(task, agent)
+	allowDirectSecretMounts := directSecretMountsAllowed(task, agent)
 
 	// Add provider secret (mounted as environment variable source)
 	if allowDirectProviderSecrets && provider != nil {
@@ -1257,7 +1299,7 @@ func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Ta
 				},
 			},
 		})
-		if !isUntrustedComputeTask(task, agent) || directGitCredentialsEnabled() {
+		if directGitCredentialsAllowed(task, agent) {
 			job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
 				job.Spec.Template.Spec.Containers[0].VolumeMounts,
 				corev1.VolumeMount{

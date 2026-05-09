@@ -332,7 +332,7 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 	It("should not grant ConfigMap write permissions to workers", func() {
 		By("checking the worker ClusterRole for ConfigMap permissions")
 		verifyWorkerRBAC := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "clusterrole", "orka-orka-ai-worker-role",
+			cmd := exec.Command("kubectl", "get", "clusterrole", "orka-ai-worker-role",
 				"-o", "jsonpath={.rules}", "--ignore-not-found")
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())

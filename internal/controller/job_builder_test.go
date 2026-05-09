@@ -129,6 +129,30 @@ func TestJobBuilder_Build_ContainerTask(t *testing.T) {
 	}
 }
 
+func TestJobBuilder_Build_GeneralContainerWorkerAutomountsTokenForCallback(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "general-container-task",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Command: []string{"echo"},
+			Args:    []string{"hello"},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, ContainerWorkerServiceAccountName)
+	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, true)
+}
+
 func TestJobBuilder_Build_AITask(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
@@ -1073,7 +1097,7 @@ func TestJobBuilder_Build_AgentTask_CopilotRuntime(t *testing.T) {
 	}
 
 	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, VendorWorkerServiceAccountName)
-	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, false)
+	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, true)
 
 	container := job.Spec.Template.Spec.Containers[0]
 	if container.Image != DefaultCopilotWorkerImage {
@@ -1114,7 +1138,7 @@ func TestJobBuilder_Build_AgentTask_ClaudeRuntime(t *testing.T) {
 	}
 
 	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, VendorWorkerServiceAccountName)
-	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, false)
+	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, true)
 
 	container := job.Spec.Template.Spec.Containers[0]
 	if container.Image != DefaultClaudeWorkerImage {
@@ -1149,7 +1173,7 @@ func TestJobBuilder_Build_AgentTask_CodexRuntime(t *testing.T) {
 	}
 
 	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, VendorWorkerServiceAccountName)
-	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, false)
+	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, true)
 
 	container := job.Spec.Template.Spec.Containers[0]
 	if container.Image != DefaultCodexWorkerImage {
@@ -1819,30 +1843,35 @@ func TestJobBuilder_Build_AgentTask_GitSecretVolume(t *testing.T) {
 		}
 	}
 
-	if hasVolumeMount(mounts, testGitCredentials) {
-		t.Fatal("git-credentials volume mount should not be present on untrusted main container by default")
+	mount, ok := findVolumeMount(mounts, testGitCredentials)
+	if !ok {
+		t.Fatal("agent main container should mount git credentials because it performs the clone")
+	}
+	if mount.MountPath != "/secrets/git" {
+		t.Errorf("git-credentials mountPath = %s, want /secrets/git", mount.MountPath)
+	}
+	if !mount.ReadOnly {
+		t.Error("git-credentials mount should be read-only")
 	}
 }
 
-func TestJobBuilder_Build_AgentTask_GitSecretVolume_DirectMountOptIn(t *testing.T) {
+func TestJobBuilder_Build_ContainerTask_GitSecretVolume_DirectMountOptIn(t *testing.T) {
 	t.Setenv(directGitCredentialsEnvVar, "true")
 
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "agent-task",
+			Name:      "container-task",
 			Namespace: defaultNS,
 			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
 		},
 		Spec: corev1alpha1.TaskSpec{
-			Type:   corev1alpha1.TaskTypeAgent,
-			Prompt: "Clone and fix",
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/example/repo",
-					GitSecretRef: &corev1.LocalObjectReference{
-						Name: "my-git-creds",
-					},
+			Type:  corev1alpha1.TaskTypeContainer,
+			Image: testBusyboxImage,
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/example/repo",
+				GitSecretRef: &corev1.LocalObjectReference{
+					Name: "my-git-creds",
 				},
 			},
 		},
@@ -1895,80 +1924,134 @@ func TestJobBuilder_Build_AgentTask_NoGitSecretVolume_WhenNotSpecified(t *testin
 	}
 }
 
-func TestJobBuilder_Build_UntrustedTask_DirectSecretsDisabledByDefault(t *testing.T) {
-	tests := []struct {
-		name     string
-		taskType corev1alpha1.TaskType
-	}{
-		{name: "agent", taskType: corev1alpha1.TaskTypeAgent},
-		{name: "container", taskType: corev1alpha1.TaskTypeContainer},
+func TestJobBuilder_Build_UntrustedContainerTask_DirectSecretsDisabledByDefault(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "container-task",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:      corev1alpha1.TaskTypeContainer,
+			Image:     testBusyboxImage,
+			Command:   []string{"echo"},
+			Args:      []string{"hello"},
+			SecretRef: &corev1alpha1.SecretReference{Name: "task-secret"},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-sec", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			SecretRef: &corev1.LocalObjectReference{Name: "agent-secret"},
+		},
+	}
+	provider := &corev1alpha1.Provider{
+		Spec: corev1alpha1.ProviderSpec{
+			Type: corev1alpha1.ProviderTypeOpenAI,
+			SecretRef: corev1alpha1.ProviderSecretRef{
+				Name: "provider-secret",
+				Key:  defaultSecretKey,
+			},
+			BaseURL: "https://api.example.test/v1",
+		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			builder := setupJobBuilder()
-			task := &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      tt.name + "-task",
-					Namespace: defaultNS,
-					UID:       types.UID("12345678-1234-1234-1234-123456789012"),
-				},
-				Spec: corev1alpha1.TaskSpec{
-					Type:      tt.taskType,
-					Prompt:    "Do something",
-					SecretRef: &corev1alpha1.SecretReference{Name: "task-secret"},
-				},
-			}
-			if tt.taskType == corev1alpha1.TaskTypeContainer {
-				task.Spec.Image = testBusyboxImage
-				task.Spec.Command = []string{"echo"}
-				task.Spec.Args = []string{"hello"}
-			}
-			agent := &corev1alpha1.Agent{
-				ObjectMeta: metav1.ObjectMeta{Name: "agent-sec", Namespace: defaultNS},
-				Spec: corev1alpha1.AgentSpec{
-					SecretRef: &corev1.LocalObjectReference{Name: "agent-secret"},
-				},
-			}
-			provider := &corev1alpha1.Provider{
-				Spec: corev1alpha1.ProviderSpec{
-					Type: corev1alpha1.ProviderTypeOpenAI,
-					SecretRef: corev1alpha1.ProviderSecretRef{
-						Name: "provider-secret",
-						Key:  "api-key",
-					},
-					BaseURL: "https://api.example.test/v1",
-				},
-			}
+	job, err := builder.Build(context.Background(), task, agent, provider)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
 
-			job, err := builder.Build(context.Background(), task, agent, provider)
-			if err != nil {
-				t.Fatalf("Build() error = %v", err)
-			}
+	container := job.Spec.Template.Spec.Containers[0]
+	if _, ok := findEnvVar(container.Env, testOpenAIAPIKey); ok {
+		t.Fatal("OPENAI_API_KEY should not be present on untrusted container task by default")
+	}
+	if _, ok := findEnvVar(container.Env, "OPENAI_BASE_URL"); ok {
+		t.Fatal("OPENAI_BASE_URL should not be present on untrusted container task by default")
+	}
+	if hasVolume(job.Spec.Template.Spec.Volumes, "task-secrets") {
+		t.Fatal("task-secrets volume should not be present on untrusted container task by default")
+	}
+	if hasVolumeMount(container.VolumeMounts, "task-secrets") {
+		t.Fatal("task-secrets volume mount should not be present on untrusted container task by default")
+	}
+	if hasVolume(job.Spec.Template.Spec.Volumes, "agent-secrets") {
+		t.Fatal("agent-secrets volume should not be present on untrusted container task by default")
+	}
+	if hasVolumeMount(container.VolumeMounts, "agent-secrets") {
+		t.Fatal("agent-secrets volume mount should not be present on untrusted container task by default")
+	}
+	if hasEnvFromSecret(container.EnvFrom, "agent-secret") {
+		t.Fatal("agent secret EnvFrom should not be present on untrusted container task by default")
+	}
+}
 
-			container := job.Spec.Template.Spec.Containers[0]
-			if _, ok := findEnvVar(container.Env, testOpenAIAPIKey); ok {
-				t.Fatal("OPENAI_API_KEY should not be present on untrusted task by default")
-			}
-			if _, ok := findEnvVar(container.Env, "OPENAI_BASE_URL"); ok {
-				t.Fatal("OPENAI_BASE_URL should not be present on untrusted task by default")
-			}
-			if hasVolume(job.Spec.Template.Spec.Volumes, "task-secrets") {
-				t.Fatal("task-secrets volume should not be present on untrusted task by default")
-			}
-			if hasVolumeMount(container.VolumeMounts, "task-secrets") {
-				t.Fatal("task-secrets volume mount should not be present on untrusted task by default")
-			}
-			if hasVolume(job.Spec.Template.Spec.Volumes, "agent-secrets") {
-				t.Fatal("agent-secrets volume should not be present on untrusted task by default")
-			}
-			if hasVolumeMount(container.VolumeMounts, "agent-secrets") {
-				t.Fatal("agent-secrets volume mount should not be present on untrusted task by default")
-			}
-			if hasEnvFromSecret(container.EnvFrom, "agent-secret") {
-				t.Fatal("agent secret EnvFrom should not be present on untrusted task by default")
-			}
-		})
+func TestJobBuilder_Build_VendorAgentTask_DirectCredentialsPreservedByDefault(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "agent-task",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:      corev1alpha1.TaskTypeAgent,
+			Prompt:    "Do something",
+			SecretRef: &corev1alpha1.SecretReference{Name: "task-secret"},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-sec", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime:   &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			SecretRef: &corev1.LocalObjectReference{Name: "agent-secret"},
+		},
+	}
+	provider := &corev1alpha1.Provider{
+		Spec: corev1alpha1.ProviderSpec{
+			Type: corev1alpha1.ProviderTypeOpenAI,
+			SecretRef: corev1alpha1.ProviderSecretRef{
+				Name: "provider-secret",
+				Key:  defaultSecretKey,
+			},
+			BaseURL: "https://api.example.test/v1",
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, agent, provider)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, VendorWorkerServiceAccountName)
+	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, true)
+
+	container := job.Spec.Template.Spec.Containers[0]
+	apiKey, ok := findEnvVar(container.Env, testOpenAIAPIKey)
+	if !ok {
+		t.Fatal("OPENAI_API_KEY should be present for built-in vendor agents by default")
+	}
+	if apiKey.ValueFrom == nil || apiKey.ValueFrom.SecretKeyRef == nil || apiKey.ValueFrom.SecretKeyRef.Name != "provider-secret" || apiKey.ValueFrom.SecretKeyRef.Key != defaultSecretKey {
+		t.Errorf("OPENAI_API_KEY secret ref = %#v, want provider-secret/api-key", apiKey.ValueFrom)
+	}
+	baseURL, ok := findEnvVar(container.Env, "OPENAI_BASE_URL")
+	if !ok || baseURL.Value != "https://api.example.test/v1" {
+		t.Fatalf("OPENAI_BASE_URL = %q, present %v; want https://api.example.test/v1", baseURL.Value, ok)
+	}
+	if !hasVolume(job.Spec.Template.Spec.Volumes, "task-secrets") {
+		t.Fatal("task-secrets volume should be present for built-in vendor agents")
+	}
+	if !hasVolumeMount(container.VolumeMounts, "task-secrets") {
+		t.Fatal("task-secrets volume mount should be present for built-in vendor agents")
+	}
+	if !hasVolume(job.Spec.Template.Spec.Volumes, "agent-secrets") {
+		t.Fatal("agent-secrets volume should be present for built-in vendor agents")
+	}
+	if !hasVolumeMount(container.VolumeMounts, "agent-secrets") {
+		t.Fatal("agent-secrets volume mount should be present for built-in vendor agents")
+	}
+	if !hasEnvFromSecret(container.EnvFrom, "agent-secret") {
+		t.Fatal("agent secret EnvFrom should be present for built-in vendor agents")
 	}
 }
 
@@ -2015,7 +2098,7 @@ func TestJobBuilder_Build_UntrustedTask_DirectSecretsOptIn(t *testing.T) {
 					Type: corev1alpha1.ProviderTypeOpenAI,
 					SecretRef: corev1alpha1.ProviderSecretRef{
 						Name: "provider-secret",
-						Key:  "api-key",
+						Key:  defaultSecretKey,
 					},
 					BaseURL: "https://api.example.test/v1",
 				},
@@ -2031,7 +2114,7 @@ func TestJobBuilder_Build_UntrustedTask_DirectSecretsOptIn(t *testing.T) {
 			if !ok {
 				t.Fatal("OPENAI_API_KEY should be present when direct provider secrets are enabled")
 			}
-			if apiKey.ValueFrom == nil || apiKey.ValueFrom.SecretKeyRef == nil || apiKey.ValueFrom.SecretKeyRef.Name != "provider-secret" || apiKey.ValueFrom.SecretKeyRef.Key != "api-key" {
+			if apiKey.ValueFrom == nil || apiKey.ValueFrom.SecretKeyRef == nil || apiKey.ValueFrom.SecretKeyRef.Name != "provider-secret" || apiKey.ValueFrom.SecretKeyRef.Key != defaultSecretKey {
 				t.Errorf("OPENAI_API_KEY secret ref = %#v, want provider-secret/api-key", apiKey.ValueFrom)
 			}
 			baseURL, ok := findEnvVar(container.Env, "OPENAI_BASE_URL")
@@ -2598,7 +2681,7 @@ func TestAddSecretVolumes_FallbackProvider(t *testing.T) {
 			Type: corev1alpha1.ProviderTypeOpenAI,
 			SecretRef: corev1alpha1.ProviderSecretRef{
 				Name: "fb-secret",
-				Key:  "api-key",
+				Key:  defaultSecretKey,
 			},
 		},
 	}
