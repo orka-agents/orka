@@ -695,12 +695,12 @@ func isReviewDecisionStatus(status string) bool {
 
 func tagsFromProposalDescription(description string) []string {
 	var tags []string
-	for _, line := range strings.Split(description, "\n") {
+	for line := range strings.SplitSeq(description, "\n") {
 		key, value, ok := strings.Cut(line, ":")
 		if !ok || !strings.EqualFold(strings.TrimSpace(key), "tags") {
 			continue
 		}
-		for _, tag := range strings.Split(value, ",") {
+		for tag := range strings.SplitSeq(value, ",") {
 			tags = append(tags, strings.TrimSpace(tag))
 		}
 	}
