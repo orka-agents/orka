@@ -49,12 +49,15 @@ func resolveRepoAndToken(ctx context.Context, k8sClient client.Client, taskName,
 	if taskName != "" {
 		taskOwner, taskRepo, taskToken, err := resolveFromTask(ctx, k8sClient, taskName)
 		if err != nil {
-			return "", "", "", "", err
+			if owner == "" || repo == "" {
+				return "", "", "", "", err
+			}
+		} else {
+			if owner == "" || repo == "" {
+				owner, repo = taskOwner, taskRepo
+			}
+			token = taskToken
 		}
-		if owner == "" || repo == "" {
-			owner, repo = taskOwner, taskRepo
-		}
-		token = taskToken
 	}
 
 	if owner == "" || repo == "" {

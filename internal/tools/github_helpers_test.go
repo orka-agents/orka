@@ -381,3 +381,27 @@ func TestResolveRepoAndToken_RepoURLTakesPriorityOverTaskName(t *testing.T) {
 		t.Errorf("got token=%q, want task-token", token)
 	}
 }
+
+func TestResolveRepoAndToken_RepoURLWithMissingTaskFallsBackToEnvToken(t *testing.T) {
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv("GITHUB_TOKEN", testEnvToken)
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	owner, repo, token, _, err := resolveRepoAndToken(
+		context.Background(), k8sClient,
+		"nonexistent-task", "https://github.com/url-org/url-repo", "",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if owner != "url-org" || repo != "url-repo" {
+		t.Errorf("got owner=%q repo=%q, want url-org/url-repo", owner, repo)
+	}
+	if token != testEnvToken {
+		t.Errorf("got token=%q, want %q", token, testEnvToken)
+	}
+}

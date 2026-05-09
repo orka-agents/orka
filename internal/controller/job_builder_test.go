@@ -816,7 +816,7 @@ func TestJobBuilder_buildEnvVars_WithCoordination(t *testing.T) {
 	if !found {
 		t.Fatal("Missing ORKA_AI_TOOLS")
 	}
-	for _, tool := range []string{"delegate_task", "wait_for_tasks", "create_container_task", "check_pull_request_ci"} {
+	for _, tool := range []string{"delegate_task", "wait_for_tasks", "create_container_task", "list_pull_requests", "check_pr_review_marker", "check_pull_request_ci"} {
 		if !strings.Contains(toolsEnv.Value, tool) {
 			t.Errorf("ORKA_AI_TOOLS = %s, want to contain %s", toolsEnv.Value, tool)
 		}
@@ -2604,8 +2604,10 @@ func TestAddAIEnvVars_CoordinationEnabled(t *testing.T) {
 		envMap[e.Name] = e.Value
 	}
 	tools := envMap["ORKA_AI_TOOLS"]
-	if !strings.Contains(tools, "delegate_task") {
-		t.Errorf("expected coordination tools, got %s", tools)
+	for _, tool := range []string{"delegate_task", "list_pull_requests", "check_pr_review_marker"} {
+		if !strings.Contains(tools, tool) {
+			t.Errorf("expected coordination tool %s, got %s", tool, tools)
+		}
 	}
 }
 

@@ -162,51 +162,61 @@ func findPRReviewMarker(ctx context.Context, token, owner, repo string, prNumber
 }
 
 func findPRReviewMarkerInIssueComments(ctx context.Context, token, owner, repo string, prNumber int, headSHA, baseURL string) (*prReviewMarkerMatch, error) {
-	endpoint := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments?per_page=100", baseURL, owner, repo, prNumber)
-	body, err := githubGet(ctx, token, endpoint)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list PR comments: %w", err)
-	}
-	var comments []struct {
-		Body    string `json:"body"`
-		HTMLURL string `json:"html_url"`
-		User    struct {
-			Login string `json:"login"`
-		} `json:"user"`
-	}
-	if err := json.Unmarshal(body, &comments); err != nil {
-		return nil, fmt.Errorf("failed to parse GitHub comments response: %w", err)
-	}
-	for _, c := range comments {
-		if containsPRReviewMarker(c.Body, headSHA) {
-			return &prReviewMarkerMatch{Source: "issue_comment", HTMLURL: c.HTMLURL, Author: c.User.Login}, nil
+	const perPage = 100
+	for page := 1; ; page++ {
+		endpoint := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments?per_page=%d&page=%d", baseURL, owner, repo, prNumber, perPage, page)
+		body, err := githubGet(ctx, token, endpoint)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list PR comments: %w", err)
+		}
+		var comments []struct {
+			Body    string `json:"body"`
+			HTMLURL string `json:"html_url"`
+			User    struct {
+				Login string `json:"login"`
+			} `json:"user"`
+		}
+		if err := json.Unmarshal(body, &comments); err != nil {
+			return nil, fmt.Errorf("failed to parse GitHub comments response: %w", err)
+		}
+		for _, c := range comments {
+			if containsPRReviewMarker(c.Body, headSHA) {
+				return &prReviewMarkerMatch{Source: "issue_comment", HTMLURL: c.HTMLURL, Author: c.User.Login}, nil
+			}
+		}
+		if len(comments) < perPage {
+			return nil, nil
 		}
 	}
-	return nil, nil
 }
 
 func findPRReviewMarkerInReviews(ctx context.Context, token, owner, repo string, prNumber int, headSHA, baseURL string) (*prReviewMarkerMatch, error) {
-	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=100", baseURL, owner, repo, prNumber)
-	body, err := githubGet(ctx, token, endpoint)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list PR reviews: %w", err)
-	}
-	var reviews []struct {
-		Body    string `json:"body"`
-		HTMLURL string `json:"html_url"`
-		User    struct {
-			Login string `json:"login"`
-		} `json:"user"`
-	}
-	if err := json.Unmarshal(body, &reviews); err != nil {
-		return nil, fmt.Errorf("failed to parse GitHub reviews response: %w", err)
-	}
-	for _, r := range reviews {
-		if containsPRReviewMarker(r.Body, headSHA) {
-			return &prReviewMarkerMatch{Source: "review", HTMLURL: r.HTMLURL, Author: r.User.Login}, nil
+	const perPage = 100
+	for page := 1; ; page++ {
+		endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=%d&page=%d", baseURL, owner, repo, prNumber, perPage, page)
+		body, err := githubGet(ctx, token, endpoint)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list PR reviews: %w", err)
+		}
+		var reviews []struct {
+			Body    string `json:"body"`
+			HTMLURL string `json:"html_url"`
+			User    struct {
+				Login string `json:"login"`
+			} `json:"user"`
+		}
+		if err := json.Unmarshal(body, &reviews); err != nil {
+			return nil, fmt.Errorf("failed to parse GitHub reviews response: %w", err)
+		}
+		for _, r := range reviews {
+			if containsPRReviewMarker(r.Body, headSHA) {
+				return &prReviewMarkerMatch{Source: "review", HTMLURL: r.HTMLURL, Author: r.User.Login}, nil
+			}
+		}
+		if len(reviews) < perPage {
+			return nil, nil
 		}
 	}
-	return nil, nil
 }
 
 func githubGet(ctx context.Context, token, endpoint string) ([]byte, error) {

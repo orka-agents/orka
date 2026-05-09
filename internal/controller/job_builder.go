@@ -559,6 +559,8 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 			"propose_memory",
 			"search_transcript",
 			"create_pull_request",
+			"list_pull_requests",
+			"check_pr_review_marker",
 			"check_pull_request_ci",
 			"merge_pull_request",
 			"auto_merge_pull_request",

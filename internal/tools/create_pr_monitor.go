@@ -12,13 +12,23 @@ import (
 	"fmt"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
 // CreatePRMonitorTool creates a scheduled AI task that monitors GitHub PRs.
 type CreatePRMonitorTool struct{}
+
+var prMonitorRequiredTools = []string{
+	listPullRequestsToolName,
+	checkPRReviewMarkerToolName,
+	checkPullRequestCIToolName,
+	reviewPullRequestToolName,
+	postReviewCommentToolName,
+}
 
 func (t *CreatePRMonitorTool) Name() string { return createPRMonitorToolName }
 
@@ -48,7 +58,7 @@ func (t *CreatePRMonitorTool) Parameters() json.RawMessage {
 			},
 			agentRefField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,
-				jsonSchemaDescriptionField: "Optional Agent name for the scheduled monitor task. The agent should have PR review tools available.",
+				jsonSchemaDescriptionField: "Agent name for the scheduled monitor task. The agent must have coordination enabled.",
 			},
 			providerRefField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,
@@ -67,7 +77,7 @@ func (t *CreatePRMonitorTool) Parameters() json.RawMessage {
 				jsonSchemaDescriptionField: "Optional additional instructions appended to the generated PR monitor prompt.",
 			},
 		},
-		jsonSchemaRequiredField: []string{nameField, scheduleField},
+		jsonSchemaRequiredField: []string{nameField, scheduleField, agentRefField},
 	})
 }
 
@@ -97,8 +107,26 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 	}
 
 	namespace := chatGetStringArgDefault(args, namespaceField, tc.Namespace)
+	if namespace == "" {
+		return ChatToolErrorResult("invalid_arguments", "namespace is required", "Provide namespace or set ORKA_TASK_NAMESPACE")
+	}
 	if r, ok := checkChatNamespaceScope(tc, namespace); !ok {
 		return r, nil
+	}
+
+	agentRef := chatGetStringArg(args, agentRefField)
+	if agentRef == "" {
+		return ChatToolErrorResult("invalid_arguments", "agent_ref is required", "Provide an Agent with coordination enabled")
+	}
+	var agent corev1alpha1.Agent
+	if err := tc.Client.Get(ctx, types.NamespacedName{Name: agentRef, Namespace: namespace}, &agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("agent %q not found in namespace %q", agentRef, namespace), "Create the Agent or provide a valid agent_ref")
+		}
+		return classifyChatK8sErr(err)
+	}
+	if agent.Spec.Coordination == nil || !agent.Spec.Coordination.Enabled {
+		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("agent %q must have coordination enabled", agentRef), "Enable coordination on the Agent before creating a PR monitor")
 	}
 
 	task := &corev1alpha1.Task{
@@ -114,14 +142,12 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 		},
 	}
 
-	if agentRef := chatGetStringArg(args, agentRefField); agentRef != "" {
-		task.Spec.AgentRef = &corev1alpha1.AgentReference{Name: agentRef}
+	task.Spec.AgentRef = &corev1alpha1.AgentReference{Name: agentRef}
+	task.Spec.AI = &corev1alpha1.AISpec{
+		Tools: append([]string(nil), prMonitorRequiredTools...),
 	}
-
 	if providerName := chatGetStringArg(args, providerRefField); providerName != "" {
-		task.Spec.AI = &corev1alpha1.AISpec{
-			ProviderRef: &corev1alpha1.ProviderReference{Name: providerName},
-		}
+		task.Spec.AI.ProviderRef = &corev1alpha1.ProviderReference{Name: providerName}
 	}
 
 	if err := tc.Client.Create(ctx, task); err != nil {

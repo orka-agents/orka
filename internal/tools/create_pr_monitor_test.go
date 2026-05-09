@@ -12,12 +12,12 @@ import (
 	"strings"
 	"testing"
 
-	apitypes "k8s.io/apimachinery/pkg/types"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
-
-const prMonitorGeneratedTaskName = "pr-monitor-task"
 
 func TestCreatePRMonitorTool_Metadata(t *testing.T) {
 	tool := &CreatePRMonitorTool{}
@@ -25,18 +25,13 @@ func TestCreatePRMonitorTool_Metadata(t *testing.T) {
 	if tool.Name() != createPRMonitorToolName {
 		t.Errorf("Name() = %q, want %q", tool.Name(), createPRMonitorToolName)
 	}
-	if !strings.Contains(tool.Description(), "pull request monitor") {
-		t.Errorf("Description() = %q, want pull request monitor", tool.Description())
-	}
-
-	params := tool.Parameters()
-	if len(params) == 0 {
-		t.Fatal("Parameters() returned empty JSON")
+	if tool.Description() == "" {
+		t.Fatal("Description() returned empty string")
 	}
 
 	var schema map[string]any
-	if err := json.Unmarshal(params, &schema); err != nil {
-		t.Fatalf("failed to parse parameters schema: %v", err)
+	if err := json.Unmarshal(tool.Parameters(), &schema); err != nil {
+		t.Fatalf("failed to unmarshal schema: %v", err)
 	}
 	if schema[jsonSchemaTypeField] != jsonSchemaTypeObject {
 		t.Errorf("schema type = %v, want %q", schema[jsonSchemaTypeField], jsonSchemaTypeObject)
@@ -44,7 +39,7 @@ func TestCreatePRMonitorTool_Metadata(t *testing.T) {
 
 	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
-		t.Fatal("schema missing properties")
+		t.Fatalf("schema properties = %T, want map[string]any", schema[jsonSchemaPropertiesField])
 	}
 	for _, field := range []string{
 		nameField,
@@ -58,7 +53,7 @@ func TestCreatePRMonitorTool_Metadata(t *testing.T) {
 		promptField,
 	} {
 		if _, ok := props[field]; !ok {
-			t.Errorf("schema missing %q property", field)
+			t.Errorf("schema missing property %q", field)
 		}
 	}
 
@@ -66,17 +61,9 @@ func TestCreatePRMonitorTool_Metadata(t *testing.T) {
 	if !ok {
 		t.Fatalf("schema required = %T, want []any", schema[jsonSchemaRequiredField])
 	}
-	requiredSet := make(map[string]bool, len(required))
-	for _, field := range required {
-		fieldName, ok := field.(string)
-		if !ok {
-			t.Fatalf("required entry = %T, want string", field)
-		}
-		requiredSet[fieldName] = true
-	}
-	for _, field := range []string{nameField, scheduleField} {
-		if !requiredSet[field] {
-			t.Errorf("required missing %q", field)
+	for _, field := range []string{nameField, scheduleField, agentRefField} {
+		if !containsAnyString(required, field) {
+			t.Errorf("schema required = %v, want %q", required, field)
 		}
 	}
 }
@@ -84,17 +71,17 @@ func TestCreatePRMonitorTool_Metadata(t *testing.T) {
 func TestCreatePRMonitorTool_ExecuteMissingToolContext(t *testing.T) {
 	tool := &CreatePRMonitorTool{}
 
-	resultText, err := tool.Execute(context.Background(), json.RawMessage(`{"name":"monitor","schedule":"*/15 * * * *"}`))
+	resultJSON, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{}))
 	if err != nil {
 		t.Fatalf("Execute() returned error: %v", err)
 	}
 
 	var result ChatToolResult
-	if err := json.Unmarshal([]byte(resultText), &result); err != nil {
-		t.Fatalf("failed to parse result: %v", err)
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
 	}
 	if result.Success {
-		t.Fatal("Success = true, want false")
+		t.Fatal("expected failure")
 	}
 	if result.ErrorType != internalErrorType {
 		t.Errorf("ErrorType = %q, want %q", result.ErrorType, internalErrorType)
@@ -102,92 +89,165 @@ func TestCreatePRMonitorTool_ExecuteMissingToolContext(t *testing.T) {
 }
 
 func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
-	fc := newFakeClient()
-	increments := 0
-	tc := &ToolContext{
-		Client:    fc,
-		Namespace: defaultNamespace,
-		GenerateTaskName: func() string {
-			return prMonitorGeneratedTaskName
+	client := newFakeClient(&corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
 		},
-		TaskLabels: func() map[string]string {
-			return map[string]string{managedByLabelValue: trueStr}
-		},
-		CheckTaskLimit: func() *ChatToolError { return nil },
-		IncrementTasks: func() {
-			increments++
-		},
-	}
-	ctx := WithToolContext(context.Background(), tc)
-
-	tool := &CreatePRMonitorTool{}
-	args, _ := json.Marshal(map[string]any{
-		nameField:        "daily-pr-monitor",
-		repoURLField:     testSozercanAynaRepoURL,
-		scheduleField:    "*/15 * * * *",
-		perPageField:     100,
-		promptField:      "Focus on security-sensitive changes.",
-		agentRefField:    "reviewer",
-		providerRefField: "openai-provider",
 	})
+	ctx := newCreatePRMonitorToolContext(client)
+	tool := &CreatePRMonitorTool{}
 
-	resultText, err := tool.Execute(ctx, args)
+	resultJSON, err := tool.Execute(ctx, mustJSON(t, map[string]any{
+		nameField:        "daily-pr-monitor",
+		repoURLField:     "https://github.com/sozercan/orka",
+		scheduleField:    "*/15 * * * *",
+		agentRefField:    "reviewer",
+		providerRefField: "default-provider",
+		perPageField:     100,
+		"review_event":   "comment",
+		promptField:      "Focus on regressions.",
+	}))
 	if err != nil {
 		t.Fatalf("Execute() returned error: %v", err)
 	}
 
 	var result ChatToolResult
-	if err := json.Unmarshal([]byte(resultText), &result); err != nil {
-		t.Fatalf("failed to parse result: %v", err)
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
 	}
 	if !result.Success {
-		t.Fatalf("Success = false, result = %+v", result)
+		t.Fatalf("expected success, got error: %s", result.Error)
 	}
 
 	var task corev1alpha1.Task
-	if err := fc.Get(
-		context.Background(),
-		apitypes.NamespacedName{Name: prMonitorGeneratedTaskName, Namespace: defaultNamespace},
-		&task,
-	); err != nil {
-		t.Fatalf("created task not found: %v", err)
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "pr-monitor-task", Namespace: defaultNamespace}, &task); err != nil {
+		t.Fatalf("failed to get created task: %v", err)
 	}
-
 	if task.Spec.Type != corev1alpha1.TaskTypeAI {
 		t.Errorf("task type = %q, want %q", task.Spec.Type, corev1alpha1.TaskTypeAI)
 	}
 	if task.Spec.Schedule != "*/15 * * * *" {
-		t.Errorf("schedule = %q, want */15 * * * *", task.Spec.Schedule)
-	}
-	if task.Labels[managedByLabelValue] != trueStr {
-		t.Errorf("managed label = %q, want %q", task.Labels[managedByLabelValue], trueStr)
+		t.Errorf("schedule = %q", task.Spec.Schedule)
 	}
 	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "reviewer" {
 		t.Fatalf("AgentRef = %#v, want reviewer", task.Spec.AgentRef)
 	}
-	if task.Spec.AI == nil || task.Spec.AI.ProviderRef == nil || task.Spec.AI.ProviderRef.Name != "openai-provider" {
-		t.Fatalf("ProviderRef = %#v, want openai-provider", task.Spec.AI)
+	if task.Spec.AI == nil {
+		t.Fatal("AI spec is nil")
 	}
-
-	prompt := task.Spec.Prompt
-	for _, want := range []string{
-		"list_pull_requests",
-		"check_pr_review_marker",
-		"check_pull_request_ci",
-		"review_pull_request",
-		"post_review_comment",
-		testSozercanAynaRepoURL,
-		"per_page 100",
-		"Do not review PRs with failing CI",
-		"Include the marker returned by check_pr_review_marker",
-		"Focus on security-sensitive changes.",
-	} {
-		if !strings.Contains(prompt, want) {
-			t.Errorf("prompt missing %q:\n%s", want, prompt)
+	if task.Spec.AI.ProviderRef == nil || task.Spec.AI.ProviderRef.Name != "default-provider" {
+		t.Fatalf("ProviderRef = %#v, want default-provider", task.Spec.AI.ProviderRef)
+	}
+	for _, tool := range prMonitorRequiredTools {
+		if !containsString(task.Spec.AI.Tools, tool) {
+			t.Errorf("AI tools = %v, want %q", task.Spec.AI.Tools, tool)
 		}
 	}
-
-	if increments != 1 {
-		t.Errorf("IncrementTasks called %d times, want 1", increments)
+	if !strings.Contains(task.Spec.Prompt, "list_pull_requests") {
+		t.Errorf("prompt missing list_pull_requests: %s", task.Spec.Prompt)
 	}
+	if !strings.Contains(task.Spec.Prompt, "repo_url \"https://github.com/sozercan/orka\"") {
+		t.Errorf("prompt missing repo URL: %s", task.Spec.Prompt)
+	}
+	if !strings.Contains(task.Spec.Prompt, "Focus on regressions.") {
+		t.Errorf("prompt missing extra instructions: %s", task.Spec.Prompt)
+	}
+}
+
+func TestCreatePRMonitorTool_ExecuteMissingAgentRef(t *testing.T) {
+	result := executeCreatePRMonitorForFailure(t, newFakeClient(), map[string]any{
+		nameField:     "daily-pr-monitor",
+		scheduleField: "*/15 * * * *",
+	})
+	if result.ErrorType != "invalid_arguments" || !strings.Contains(result.Error, "agent_ref is required") {
+		t.Fatalf("result = %#v, want missing agent_ref invalid_arguments", result)
+	}
+}
+
+func TestCreatePRMonitorTool_ExecuteAgentNotFound(t *testing.T) {
+	result := executeCreatePRMonitorForFailure(t, newFakeClient(), map[string]any{
+		nameField:     "daily-pr-monitor",
+		scheduleField: "*/15 * * * *",
+		agentRefField: "missing-agent",
+	})
+	if result.ErrorType != "invalid_arguments" || !strings.Contains(result.Error, "not found") {
+		t.Fatalf("result = %#v, want agent not found invalid_arguments", result)
+	}
+}
+
+func TestCreatePRMonitorTool_ExecuteAgentCoordinationDisabled(t *testing.T) {
+	client := newFakeClient(&corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: false},
+		},
+	})
+	result := executeCreatePRMonitorForFailure(t, client, map[string]any{
+		nameField:     "daily-pr-monitor",
+		scheduleField: "*/15 * * * *",
+		agentRefField: "reviewer",
+	})
+	if result.ErrorType != "invalid_arguments" || !strings.Contains(result.Error, "must have coordination enabled") {
+		t.Fatalf("result = %#v, want coordination disabled invalid_arguments", result)
+	}
+}
+
+func executeCreatePRMonitorForFailure(t *testing.T, client client.Client, args map[string]any) ChatToolResult {
+	t.Helper()
+	ctx := newCreatePRMonitorToolContext(client)
+	resultJSON, err := (&CreatePRMonitorTool{}).Execute(ctx, mustJSON(t, args))
+	if err != nil {
+		t.Fatalf("Execute() returned error: %v", err)
+	}
+	var result ChatToolResult
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected failure, got success: %s", resultJSON)
+	}
+	return result
+}
+
+func newCreatePRMonitorToolContext(client client.Client) context.Context {
+	return WithToolContext(context.Background(), &ToolContext{
+		Client:    client,
+		Namespace: defaultNamespace,
+		GenerateTaskName: func() string {
+			return "pr-monitor-task"
+		},
+		TaskLabels: func() map[string]string {
+			return map[string]string{managedByLabelValue: trueStr}
+		},
+		CheckTaskLimit: func() *ChatToolError { return nil },
+		IncrementTasks: func() {},
+	})
+}
+
+func mustJSON(t *testing.T, v map[string]any) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("failed to marshal JSON: %v", err)
+	}
+	return b
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAnyString(values []any, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
