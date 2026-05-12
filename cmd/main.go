@@ -89,6 +89,11 @@ func main() {
 	var oidcIssuer string
 	var oidcAudience string
 	var oidcJWKSURL string
+	var contextTokenProfile string
+	var contextTokenIssuer string
+	var contextTokenAudience string
+	var contextTokenJWKSURL string
+	var contextTokenHeaders string
 	var enableTracing bool
 	var tlsOpts []func(*tls.Config)
 
@@ -147,6 +152,18 @@ func main() {
 		"OIDC audience expected in external API bearer tokens. Requires --oidc-issuer when set.")
 	flag.StringVar(&oidcJWKSURL, "oidc-jwks-url", os.Getenv("ORKA_OIDC_JWKS_URL"),
 		"Optional OIDC JWKS URL. When empty, it is discovered from the issuer metadata.")
+	flag.StringVar(&contextTokenProfile, "context-token-profile", os.Getenv("ORKA_CONTEXT_TOKEN_PROFILE"),
+		"Context-token profile for external API requests (supported: kontxt).")
+	flag.StringVar(&contextTokenIssuer, "context-token-issuer", os.Getenv("ORKA_CONTEXT_TOKEN_ISSUER"),
+		"Context-token issuer URL. Requires --context-token-profile and --context-token-audience when set.")
+	flag.StringVar(&contextTokenAudience, "context-token-audience", os.Getenv("ORKA_CONTEXT_TOKEN_AUDIENCE"),
+		"Context-token audience expected in external API tokens. "+
+			"Requires --context-token-profile and --context-token-issuer when set.")
+	flag.StringVar(&contextTokenJWKSURL, "context-token-jwks-url", os.Getenv("ORKA_CONTEXT_TOKEN_JWKS_URL"),
+		"Optional context-token JWKS URL. When empty, it is discovered from issuer metadata.")
+	flag.StringVar(&contextTokenHeaders, "context-token-headers", os.Getenv("ORKA_CONTEXT_TOKEN_HEADERS"),
+		"Comma-separated context-token headers. Use Header for raw tokens or Header:Scheme for scheme-prefixed "+
+			"tokens (default for kontxt: Txn-Token; bearer opt-in: Txn-Token,Authorization:Bearer).")
 	flag.BoolVar(&enableTracing, "enable-tracing", false,
 		"Enable OpenTelemetry tracing. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
 
@@ -157,6 +174,18 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	contextTokenConfig, err := api.NewContextTokenConfig(
+		contextTokenProfile,
+		contextTokenIssuer,
+		contextTokenAudience,
+		contextTokenJWKSURL,
+		contextTokenHeaders,
+	)
+	if err != nil {
+		setupLog.Error(err, "invalid context token configuration")
+		os.Exit(1)
+	}
 
 	// Initialize OpenTelemetry tracing (noop when disabled)
 	tracingShutdown, err := tracing.Init("orka-controller", enableTracing)
@@ -386,6 +415,7 @@ func main() {
 			Audience: oidcAudience,
 			JWKSURL:  oidcJWKSURL,
 		},
+		ContextTokens:       contextTokenConfig,
 		ResultStore:         sqliteStore,
 		SessionStore:        sqliteStore,
 		PlanStore:           sqliteStore,

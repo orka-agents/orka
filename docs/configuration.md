@@ -457,6 +457,11 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 | `--oidc-issuer` | `ORKA_OIDC_ISSUER` env or `""` | OIDC issuer URL for external API bearer token validation. Requires `--oidc-audience` when set |
 | `--oidc-audience` | `ORKA_OIDC_AUDIENCE` env or `""` | Expected OIDC audience for external API bearer tokens. Requires `--oidc-issuer` when set |
 | `--oidc-jwks-url` | `ORKA_OIDC_JWKS_URL` env or `""` | Optional JWKS URL. When empty, Orka discovers it from the issuer metadata |
+| `--context-token-profile` | `ORKA_CONTEXT_TOKEN_PROFILE` env or `""` | Context-token profile for external API requests. Currently supports `kontxt` |
+| `--context-token-issuer` | `ORKA_CONTEXT_TOKEN_ISSUER` env or `""` | Context-token issuer URL. Requires `--context-token-profile` and `--context-token-audience` when set |
+| `--context-token-audience` | `ORKA_CONTEXT_TOKEN_AUDIENCE` env or `""` | Expected context-token audience. Requires `--context-token-profile` and `--context-token-issuer` when set |
+| `--context-token-jwks-url` | `ORKA_CONTEXT_TOKEN_JWKS_URL` env or `""` | Optional context-token JWKS URL. When empty, Orka discovers it from the issuer metadata |
+| `--context-token-headers` | `ORKA_CONTEXT_TOKEN_HEADERS` env or `""` | Comma-separated context-token header locations. Use `Header` for raw tokens or `Header:Scheme` for scheme-prefixed tokens. The `kontxt` default is `Txn-Token` |
 | `--ai-worker-image` | `ghcr.io/sozercan/orka/ai-worker:latest` | AI worker container image |
 | `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Copilot agent worker image |
 | `--claude-worker-image` | `ghcr.io/sozercan/orka/agent-worker-claude:latest` | Claude agent worker image |
@@ -499,6 +504,42 @@ ORKA_OIDC_JWKS_URL=https://token.actions.githubusercontent.com/.well-known/jwks
 ```
 
 OIDC validation requires RS256-signed JWTs with matching `iss` and `aud`, valid time claims, and a non-empty `sub`. When an OIDC-authenticated caller creates a Task, Orka records the verified identity in `spec.requestedBy`. Clients cannot set `requestedBy` themselves.
+
+### External API Context-Token Authentication
+
+Orka can also authenticate external API requests with generic transaction/context tokens. The built-in `kontxt` profile validates RS256-signed JWTs with JOSE header `typ: txntoken+jwt`, matching `iss` and `aud`, valid time claims, a non-empty `sub`, and the required `kontxt` claims `iat`, `txn`, `scope`, and `req_wl`.
+
+Enable the profile by configuring the profile, issuer, and audience:
+
+```bash
+--context-token-profile=kontxt
+--context-token-issuer=https://issuer.example.com
+--context-token-audience=orka-api
+```
+
+The same settings can be supplied with environment variables:
+
+```bash
+ORKA_CONTEXT_TOKEN_PROFILE=kontxt
+ORKA_CONTEXT_TOKEN_ISSUER=https://issuer.example.com
+ORKA_CONTEXT_TOKEN_AUDIENCE=orka-api
+# Optional; when omitted, Orka discovers the JWKS URL from the issuer metadata.
+ORKA_CONTEXT_TOKEN_JWKS_URL=https://issuer.example.com/.well-known/jwks
+```
+
+By default, the `kontxt` profile reads raw transaction tokens from the `Txn-Token` header:
+
+```bash
+curl -H "Txn-Token: $TXN_TOKEN" https://orka.example.com/api/v1/tasks
+```
+
+To customize token locations, set `--context-token-headers` or `ORKA_CONTEXT_TOKEN_HEADERS` to a comma-separated list. Use `Header` for raw token headers and `Header:Scheme` for scheme-prefixed headers. For example, keep the default `Txn-Token` header and explicitly opt in to `Authorization: Bearer` context-token support:
+
+```bash
+--context-token-headers=Txn-Token,Authorization:Bearer
+```
+
+`Authorization: Bearer` remains the default location for Kubernetes ServiceAccount and OIDC JWT authentication. Context-token bearer authentication is only attempted when `Authorization:Bearer` is explicitly configured and the bearer JWT has `typ: txntoken+jwt`; other bearer tokens continue through the standard OIDC or Kubernetes TokenReview flow. When an external context-token caller creates a Task, Orka records the verified subject and issuer in `spec.requestedBy`. Clients cannot set `requestedBy` themselves.
 
 ## Prometheus Metrics
 

@@ -81,11 +81,12 @@ type UserInfo struct {
 	Groups    []string
 	Namespace string // Extracted from ServiceAccount username (system:serviceaccount:<ns>:<name>)
 
-	AuthType string
-	Subject  string
-	Email    string
-	Issuer   string
-	Roles    []string
+	AuthType     string
+	Subject      string
+	Email        string
+	Issuer       string
+	Roles        []string
+	ContextToken *ContextToken
 }
 
 // OIDCConfig holds OpenID Connect JWT validation settings.
@@ -102,7 +103,8 @@ func (c OIDCConfig) Enabled() bool {
 
 // AuthConfig holds authentication middleware configuration.
 type AuthConfig struct {
-	OIDC OIDCConfig
+	OIDC          OIDCConfig
+	ContextTokens ContextTokenConfig
 
 	// TokenSources optionally overrides the ordered request headers used to
 	// extract authentication tokens. When empty, Authorization: Bearer is used
@@ -135,18 +137,38 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 	tokenExtractor := AuthTokenExtractor{Sources: cfg.TokenSources}
 
 	return func(ctx fiber.Ctx) error {
-		token, err := tokenExtractor.Extract(ctx)
+		contextToken, profile, ok, err := extractContextTokenCandidate(ctx, cfg.ContextTokens)
 		if err != nil {
-			if errors.Is(err, errInvalidAuthHeaderFormat) {
-				log.Info("authentication failed: invalid authorization header format", "ip", ctx.IP())
-				return fiber.NewError(fiber.StatusUnauthorized, "invalid authorization header format")
-			}
-
-			log.Info("authentication failed: missing authorization header", "ip", ctx.IP())
-			return fiber.NewError(fiber.StatusUnauthorized, "missing authorization header")
+			log.Info("authentication failed: invalid context token header format", "ip", ctx.IP())
+			return fiber.NewError(fiber.StatusUnauthorized, "invalid context token header format")
 		}
 
-		userInfo, err := authenticateToken(ctx.Context(), c, token, cfg)
+		var userInfo *UserInfo
+		if ok {
+			userInfo, err = authenticateContextToken(ctx.Context(), contextToken, profile)
+		} else {
+			if bearerContextToken, err := isUnconfiguredBearerContextToken(ctx, cfg.ContextTokens); err != nil {
+				log.Info("authentication failed: invalid authorization header format", "ip", ctx.IP())
+				return fiber.NewError(fiber.StatusUnauthorized, "invalid authorization header format")
+			} else if bearerContextToken {
+				log.Info("authentication failed: authorization bearer context token is not configured", "ip", ctx.IP())
+				return fiber.NewError(fiber.StatusUnauthorized, "invalid token")
+			}
+
+			var token string
+			token, err = tokenExtractor.Extract(ctx)
+			if err != nil {
+				if errors.Is(err, errInvalidAuthHeaderFormat) {
+					log.Info("authentication failed: invalid authorization header format", "ip", ctx.IP())
+					return fiber.NewError(fiber.StatusUnauthorized, "invalid authorization header format")
+				}
+
+				log.Info("authentication failed: missing authorization header", "ip", ctx.IP())
+				return fiber.NewError(fiber.StatusUnauthorized, "missing authorization header")
+			}
+
+			userInfo, err = authenticateToken(ctx.Context(), c, token, cfg)
+		}
 		if err != nil {
 			log.Error(err, "token validation failed")
 			return fiber.NewError(fiber.StatusUnauthorized, "invalid token")
@@ -193,6 +215,14 @@ func authenticateToken(ctx context.Context, c client.Client, token string, cfg A
 	}
 
 	return nil, fmt.Errorf("OIDC validation skipped: %w; TokenReview validation failed: %v", oidcErr, tokenReviewErr)
+}
+
+func authenticateContextToken(ctx context.Context, token string, profile ContextTokenProfileConfig) (*UserInfo, error) {
+	contextToken, err := validateContextToken(ctx, token, profile)
+	if err != nil {
+		return nil, err
+	}
+	return contextTokenToUserInfo(contextToken), nil
 }
 
 // validateToken validates a ServiceAccount token using TokenReview with caching

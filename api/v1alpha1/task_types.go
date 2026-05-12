@@ -48,17 +48,17 @@ const (
 	ForbidConcurrent ConcurrencyPolicy = "Forbid"
 )
 
-// RequestedBy records the verified OIDC identity that requested a task.
+// RequestedBy records the verified identity that requested a task.
 type RequestedBy struct {
-	// Subject is the OIDC subject claim.
+	// Subject is the verified subject claim.
 	// +optional
 	Subject string `json:"subject,omitempty"`
 
-	// Issuer is the OIDC issuer that authenticated the requester.
+	// Issuer authenticated the requester.
 	// +optional
 	Issuer string `json:"issuer,omitempty"`
 
-	// Username is the preferred username claim, if present.
+	// Username is the verified username, if present.
 	// +optional
 	Username string `json:"username,omitempty"`
 
@@ -66,11 +66,11 @@ type RequestedBy struct {
 	// +optional
 	Email string `json:"email,omitempty"`
 
-	// Groups are the OIDC groups claim values, if present.
+	// Groups are verified group values, if present.
 	// +optional
 	Groups []string `json:"groups,omitempty"`
 
-	// Roles are the OIDC roles claim values, if present.
+	// Roles are verified role or scope values, if present.
 	// +optional
 	Roles []string `json:"roles,omitempty"`
 }
@@ -198,7 +198,7 @@ type TaskSpec struct {
 	// +optional
 	PriorTaskRef *PriorTaskReference `json:"priorTaskRef,omitempty"`
 
-	// RequestedBy records the verified OIDC identity that created the task.
+	// RequestedBy records the verified identity that created the task.
 	// This field is populated by the API server and is immutable.
 	// +optional
 	RequestedBy *RequestedBy `json:"requestedBy,omitempty"`

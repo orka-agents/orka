@@ -35,6 +35,7 @@ type ServerConfig struct {
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
 	OIDC                      OIDCConfig
+	ContextTokens             ContextTokenConfig
 	Chat                      ChatConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
@@ -140,7 +141,7 @@ func (s *Server) setupMiddleware() {
 	s.app.Use(cors.New(cors.Config{
 		AllowOrigins: origins,
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization", "x-api-key"},
+		AllowHeaders: allowedCORSHeaders(s.config.ContextTokens),
 	}))
 
 	// Logging middleware
@@ -150,13 +151,35 @@ func (s *Server) setupMiddleware() {
 	s.app.Use(NewMetricsMiddleware())
 }
 
+func allowedCORSHeaders(contextTokens ContextTokenConfig) []string {
+	headers := []string{"Origin", "Content-Type", "Accept", AuthHeader, XAPIKeyHeader, KontxtHeaderName}
+	for _, profile := range contextTokens.Profiles {
+		for _, header := range profile.Headers {
+			if header.Name == "" {
+				continue
+			}
+			found := false
+			for _, existing := range headers {
+				if strings.EqualFold(existing, header.Name) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				headers = append(headers, header.Name)
+			}
+		}
+	}
+	return headers
+}
+
 // setupRoutes configures the API routes
 func (s *Server) setupRoutes() {
 	// Health endpoints
 	s.app.Get("/healthz", s.handlers.Healthz)
 	s.app.Get("/readyz", s.handlers.Readyz)
 
-	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC})
+	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC, ContextTokens: s.config.ContextTokens})
 
 	// API v1 group
 	api := s.app.Group("/api/v1")

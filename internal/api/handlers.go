@@ -335,7 +335,7 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		task.Spec.Execution = req.Execution.DeepCopy()
 	}
 
-	if ui := GetUserInfo(c); ui != nil && ui.AuthType == AuthTypeOIDC {
+	if ui := GetUserInfo(c); ui != nil && (ui.AuthType == AuthTypeOIDC || ui.AuthType == AuthTypeContextToken) {
 		task.Spec.RequestedBy = &corev1alpha1.RequestedBy{
 			Subject:  ui.Subject,
 			Issuer:   ui.Issuer,

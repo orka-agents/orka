@@ -1403,31 +1403,30 @@ spec:
                 type: string
               requestedBy:
                 description: |-
-                  RequestedBy records the verified OIDC identity that created the task.
+                  RequestedBy records the verified identity that created the task.
                   This field is populated by the API server and is immutable.
                 properties:
                   email:
                     description: Email is the email claim, if present.
                     type: string
                   groups:
-                    description: Groups are the OIDC groups claim values, if present.
+                    description: Groups are verified group values, if present.
                     items:
                       type: string
                     type: array
                   issuer:
-                    description: Issuer is the OIDC issuer that authenticated the
-                      requester.
+                    description: Issuer authenticated the requester.
                     type: string
                   roles:
-                    description: Roles are the OIDC roles claim values, if present.
+                    description: Roles are verified role or scope values, if present.
                     items:
                       type: string
                     type: array
                   subject:
-                    description: Subject is the OIDC subject claim.
+                    description: Subject is the verified subject claim.
                     type: string
                   username:
-                    description: Username is the preferred username claim, if present.
+                    description: Username is the verified username, if present.
                     type: string
                 type: object
               resources:

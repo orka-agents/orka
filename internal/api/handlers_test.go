@@ -248,6 +248,52 @@ func TestHandlers_CreateTask_StampsRequestedByFromOIDC(t *testing.T) {
 	}
 }
 
+func TestHandlers_CreateTask_StampsRequestedByFromContextToken(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	handlers, app := setupTestHandlers()
+	app.Use(NewAuthMiddleware(handlers.client, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Post("/tasks", handlers.CreateTask)
+
+	token := issueTestContextToken(t, provider, nil, nil)
+	body := CreateTaskRequest{
+		Name:      "context-token-task",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeContainer,
+		Image:     "busybox",
+		Command:   []string{"echo", "hello"},
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+
+	created := &corev1alpha1.Task{}
+	if err := handlers.client.Get(context.Background(), types.NamespacedName{Name: "context-token-task", Namespace: "default"}, created); err != nil {
+		t.Fatalf("failed to fetch created task: %v", err)
+	}
+	if created.Spec.RequestedBy == nil {
+		t.Fatal("expected requestedBy to be stamped")
+	}
+	if created.Spec.RequestedBy.Subject != "workload-subject" {
+		t.Fatalf("requestedBy.subject = %q, want %q", created.Spec.RequestedBy.Subject, "workload-subject")
+	}
+	if created.Spec.RequestedBy.Issuer != provider.server.URL {
+		t.Fatalf("requestedBy.issuer = %q, want %q", created.Spec.RequestedBy.Issuer, provider.server.URL)
+	}
+	if strings.Join(created.Spec.RequestedBy.Roles, ",") != "read,write" {
+		t.Fatalf("requestedBy.roles = %#v, want [read write]", created.Spec.RequestedBy.Roles)
+	}
+}
+
 func TestHandlers_CreateTask_RejectsTopLevelRequestedBy(t *testing.T) {
 	handlers, app := setupTestHandlers()
 	app.Post("/tasks", handlers.CreateTask)

@@ -49,10 +49,12 @@ The controller runs with:
 
 ## Authentication
 
-- All API endpoints require authentication with either a Kubernetes ServiceAccount bearer token or, when configured, an OIDC JWT
+- All API endpoints require authentication with a Kubernetes ServiceAccount bearer token or, when configured, an OIDC JWT or generic context token
 - ServiceAccount token validation uses the Kubernetes TokenReview API
 - OIDC token validation checks issuer, audience, time claims, and RS256 signatures using either the configured JWKS URL or issuer metadata discovery
-- OIDC-authenticated Task creation stamps the verified identity into immutable `spec.requestedBy`; client-supplied `requestedBy` fields are rejected
+- Context-token validation supports the built-in `kontxt` profile. `kontxt` tokens are RS256-signed JWTs with `typ: txntoken+jwt`, matching issuer and audience, valid time claims, a non-empty subject, and required `iat`, `txn`, `scope`, and `req_wl` claims
+- `kontxt` tokens are read from the raw `Txn-Token` header by default. `Authorization: Bearer` support is opt-in with `--context-token-headers=Txn-Token,Authorization:Bearer` (or `ORKA_CONTEXT_TOKEN_HEADERS`); when enabled, only bearer JWTs with `typ: txntoken+jwt` are handled as context tokens so normal OIDC and ServiceAccount bearer tokens can coexist
+- OIDC- and context-token-authenticated Task creation stamps the verified identity into immutable `spec.requestedBy`; client-supplied `requestedBy` fields are rejected
 - The `orka` CLI extracts tokens from kubeconfig for browser-based login
 - **Token caching**: Validated ServiceAccount tokens are cached for 60 seconds using SHA256 hashes to avoid repeated TokenReview API calls. Token revocation has up to 60s propagation delay. The cache is in-memory only — not persistent across pod restarts
 
