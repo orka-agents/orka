@@ -1535,7 +1535,7 @@ func TestJobBuilder_Build_AgentTask_AllowBash_AgentDefault(t *testing.T) {
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             corev1alpha1.AgentRuntimeClaude,
-				DefaultAllowBash: boolPtr(true),
+				DefaultAllowBash: new(true),
 			},
 		},
 	}
@@ -1571,7 +1571,7 @@ func TestJobBuilder_Build_AgentTask_AllowBash_NotSetWhenFalse(t *testing.T) {
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             corev1alpha1.AgentRuntimeClaude,
-				DefaultAllowBash: boolPtr(false),
+				DefaultAllowBash: new(false),
 			},
 		},
 	}

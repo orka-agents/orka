@@ -634,8 +634,8 @@ func TestEnforceHistoryLimits_CustomLimits(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default"},
 		Spec: corev1alpha1.TaskSpec{
 			Type:                       corev1alpha1.TaskTypeAI,
-			SuccessfulRunsHistoryLimit: ptr.To(int32(1)),
-			FailedRunsHistoryLimit:     ptr.To(int32(0)),
+			SuccessfulRunsHistoryLimit: new(int32(1)),
+			FailedRunsHistoryLimit:     new(int32(0)),
 		},
 	}
 
@@ -1235,7 +1235,7 @@ func TestHandleScheduled_Suspended(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeContainer,
 			Schedule: "*/5 * * * *",
-			Suspend:  ptr.To(true),
+			Suspend:  new(true),
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseScheduled},
 	}
@@ -1463,7 +1463,7 @@ func TestHandleCompleted_EnforcesScheduledTaskHistoryLimit(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "sched-parent", Namespace: "default"},
 		Spec: corev1alpha1.TaskSpec{
 			Type:                       corev1alpha1.TaskTypeContainer,
-			SuccessfulRunsHistoryLimit: ptr.To(int32(1)),
+			SuccessfulRunsHistoryLimit: new(int32(1)),
 		},
 	}
 	oldChild := &corev1alpha1.Task{
@@ -2182,7 +2182,7 @@ func TestHandleScheduled_MissedDeadline(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:            corev1alpha1.TaskPhaseScheduled,
-			LastScheduleTime: ptr.To(metav1.NewTime(time.Now().Add(-24 * time.Hour))),
+			LastScheduleTime: new(metav1.NewTime(time.Now().Add(-24 * time.Hour))),
 		},
 	}
 	r := newUnitReconciler(scheme, task)
@@ -2219,7 +2219,7 @@ func TestHandleScheduled_ConcurrencyForbid(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:            corev1alpha1.TaskPhaseScheduled,
-			LastScheduleTime: ptr.To(metav1.NewTime(time.Now().Add(-2 * time.Minute))),
+			LastScheduleTime: new(metav1.NewTime(time.Now().Add(-2 * time.Minute))),
 		},
 	}
 	r := newUnitReconciler(scheme, task, activeChild)
@@ -2249,7 +2249,7 @@ func TestHandleScheduled_CreateChildTask(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:            corev1alpha1.TaskPhaseScheduled,
-			LastScheduleTime: ptr.To(metav1.NewTime(time.Now().Add(-2 * time.Minute))),
+			LastScheduleTime: new(metav1.NewTime(time.Now().Add(-2 * time.Minute))),
 		},
 	}
 	r := newUnitReconciler(scheme, task)
@@ -2460,7 +2460,7 @@ func TestHandleAutonomousIteration_Suspended(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAI,
 			AgentRef: &corev1alpha1.AgentReference{Name: "auto-agent4"},
-			Suspend:  ptr.To(true),
+			Suspend:  new(true),
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:     corev1alpha1.TaskPhaseRunning,
@@ -2700,7 +2700,7 @@ func TestReconcile_ScheduledPhase(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeContainer,
 			Schedule: "0 0 1 1 *",
-			Suspend:  ptr.To(true),
+			Suspend:  new(true),
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseScheduled},
 	}

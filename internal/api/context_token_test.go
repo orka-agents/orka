@@ -20,8 +20,11 @@ import (
 	"testing"
 	"time"
 
+	kontxttoken "github.com/aramase/kontxt/pkg/token"
 	"github.com/gofiber/fiber/v3"
 )
+
+const testContextTokenSubject = "workload-subject"
 
 func issueTestContextToken(t *testing.T, provider *testOIDCProvider, headerOverrides, claimOverrides map[string]any) string {
 	t.Helper()
@@ -34,7 +37,7 @@ func issueTestContextToken(t *testing.T, provider *testOIDCProvider, headerOverr
 	}
 	claims := map[string]any{
 		"iss":    provider.server.URL,
-		"sub":    "workload-subject",
+		"sub":    testContextTokenSubject,
 		"aud":    provider.aud,
 		"exp":    now.Add(time.Hour).Unix(),
 		"iat":    now.Unix(),
@@ -85,6 +88,68 @@ func testContextTokenConfig(t *testing.T, provider *testOIDCProvider, headers st
 	return cfg
 }
 
+func TestContextToken_KontxtGeneratedTokenCompatibility(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	profile := testContextTokenConfig(t, provider, "").Profiles[0]
+
+	tokenString, err := kontxttoken.New(kontxttoken.Claims{
+		Issuer:             provider.server.URL,
+		Audience:           provider.aud,
+		Subject:            testContextTokenSubject,
+		Scope:              "read write",
+		RequestingWorkload: "spiffe://example.test/ns/default/sa/client",
+		TransactionContext: map[string]any{
+			"trace_id": "trace-123",
+		},
+		RequesterContext: map[string]any{
+			"user": "alice",
+		},
+	}, provider.key, provider.kid, time.Hour)
+	if err != nil {
+		t.Fatalf("kontxt token.New returned error: %v", err)
+	}
+
+	ctxToken, err := validateContextToken(context.Background(), tokenString, profile)
+	if err != nil {
+		t.Fatalf("validateContextToken returned error for kontxt-generated token: %v", err)
+	}
+	if ctxToken.Profile != ContextTokenProfileKontxt || ctxToken.Type != kontxttoken.TypeHeader {
+		t.Fatalf("unexpected profile/type: %#v", ctxToken)
+	}
+	if ctxToken.Subject != testContextTokenSubject ||
+		ctxToken.Scope != "read write" ||
+		ctxToken.RequestingWorkload != "spiffe://example.test/ns/default/sa/client" ||
+		ctxToken.TransactionID == "" {
+		t.Fatalf("unexpected context token claims: %#v", ctxToken)
+	}
+	if ctxToken.TransactionContext["trace_id"] != "trace-123" || ctxToken.RequesterContext["user"] != "alice" {
+		t.Fatalf("unexpected context/requester context: %#v", ctxToken)
+	}
+
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(nil, AuthConfig{ContextTokens: ContextTokenConfig{Profiles: []ContextTokenProfileConfig{profile}}}))
+	app.Get("/test", func(ctx fiber.Ctx) error {
+		userInfo := GetUserInfo(ctx)
+		if userInfo == nil || userInfo.ContextToken == nil {
+			return fiber.NewError(fiber.StatusInternalServerError, "missing context token user info")
+		}
+		if userInfo.AuthType != AuthTypeContextToken || userInfo.ContextToken.TransactionID != ctxToken.TransactionID {
+			return fiber.NewError(fiber.StatusInternalServerError, "unexpected context token user info")
+		}
+		return ctx.SendString("OK")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set(kontxttoken.HeaderName, tokenString)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
 func TestContextToken_KontxtValidViaTxnTokenHeader(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	cfg := testContextTokenConfig(t, provider, "")
@@ -100,7 +165,7 @@ func TestContextToken_KontxtValidViaTxnTokenHeader(t *testing.T) {
 		if userInfo.AuthType != AuthTypeContextToken {
 			return fiber.NewError(fiber.StatusInternalServerError, "unexpected auth type")
 		}
-		if userInfo.Subject != "workload-subject" || userInfo.ContextToken.TransactionID != "txn-123" {
+		if userInfo.Subject != testContextTokenSubject || userInfo.ContextToken.TransactionID != "txn-123" {
 			return fiber.NewError(fiber.StatusInternalServerError, "unexpected context token claims")
 		}
 		return ctx.SendString("OK")
