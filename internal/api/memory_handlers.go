@@ -446,6 +446,9 @@ func memoryStoreError(action, resource string, err error) error {
 	if errors.Is(err, store.ErrNotFound) {
 		return fiber.NewError(fiber.StatusNotFound, fmt.Sprintf("%s not found", resource))
 	}
+	if errors.Is(err, store.ErrConflict) {
+		return fiber.NewError(fiber.StatusConflict, err.Error())
+	}
 	if isStoreValidationError(err) {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}

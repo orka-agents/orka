@@ -332,6 +332,10 @@ func ensureSQLiteColumns(db *sql.DB, table string, columns []sqliteColumnMigrati
 type Store struct {
 	db     *sql.DB
 	dbPath string
+
+	// applyMemoryProposalAfterAcceptedRead is a test hook used to coordinate
+	// multi-connection proposal-apply races after an accepted proposal is read.
+	applyMemoryProposalAfterAcceptedRead func()
 }
 
 // NewStore creates a new Store backed by the given SQLite database.

@@ -3,7 +3,9 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -165,6 +167,21 @@ func TestMemoryProposalStore(t *testing.T) {
 	}
 }
 
+func setupDiskStorePair(t *testing.T) (*Store, *Store) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	openStore := func(label string) *Store {
+		t.Helper()
+		db, err := NewDB(dbPath)
+		if err != nil {
+			t.Fatalf("NewDB %s: %v", label, err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		return NewStore(db, dbPath)
+	}
+	return openStore("first"), openStore("second")
+}
+
 func TestApplyMemoryProposal(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -232,6 +249,197 @@ func TestApplyMemoryProposal(t *testing.T) {
 	}
 	if err := s.ArchiveMemoryProposal(ctx, "ns-apply", proposal.ID); err == nil {
 		t.Fatalf("ArchiveMemoryProposal applied proposal succeeded, want error")
+	}
+}
+
+func TestApplyMemoryProposalConcurrentIdempotent(t *testing.T) {
+	s1, s2 := setupDiskStorePair(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const ns = "ns-apply-concurrent"
+	proposal := &store.MemoryProposal{
+		Namespace: ns,
+		TaskName:  "task-concurrent",
+		Type:      "memory",
+		Title:     "Concurrent proposal",
+		Content:   "Only one durable memory should be created for concurrent applies.",
+	}
+	if err := s1.CreateMemoryProposal(ctx, proposal); err != nil {
+		t.Fatalf("CreateMemoryProposal: %v", err)
+	}
+	if err := s1.ReviewMemoryProposal(ctx, store.MemoryProposalReview{Namespace: ns, ID: proposal.ID, Status: "accepted"}); err != nil {
+		t.Fatalf("ReviewMemoryProposal: %v", err)
+	}
+
+	ready := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseAll)
+	installHook := func(s *Store) {
+		var once sync.Once
+		s.applyMemoryProposalAfterAcceptedRead = func() {
+			once.Do(func() {
+				select {
+				case ready <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				select {
+				case <-release:
+				case <-ctx.Done():
+				}
+			})
+		}
+	}
+	installHook(s1)
+	installHook(s2)
+
+	type applyResult struct {
+		name   string
+		memory *store.Memory
+		err    error
+	}
+	results := make(chan applyResult, 2)
+	var wg sync.WaitGroup
+	for name, s := range map[string]*Store{"first": s1, "second": s2} {
+		name, s := name, s
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			memory, err := s.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: ns, ID: proposal.ID, AppliedBy: name})
+			results <- applyResult{name: name, memory: memory, err: err}
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-ready:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("timed out waiting for apply %d to read accepted proposal", i+1)
+		}
+	}
+	releaseAll()
+	wg.Wait()
+	close(results)
+
+	var memoryID string
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("%s ApplyMemoryProposal: %v", result.name, result.err)
+		}
+		if result.memory == nil || result.memory.ID == "" {
+			t.Fatalf("%s returned empty memory: %+v", result.name, result.memory)
+		}
+		if memoryID == "" {
+			memoryID = result.memory.ID
+		} else if result.memory.ID != memoryID {
+			t.Fatalf("concurrent applies returned different memories: %q and %q", memoryID, result.memory.ID)
+		}
+	}
+
+	listed, err := s1.ListMemories(ctx, store.MemoryFilter{Namespace: ns, Source: "memory_proposal"})
+	if err != nil {
+		t.Fatalf("ListMemories: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != memoryID || listed[0].SourceProposalID != proposal.ID {
+		t.Fatalf("expected exactly one applied memory %q for proposal %q, got %+v", memoryID, proposal.ID, listed)
+	}
+	updated, err := s2.GetMemoryProposal(ctx, ns, proposal.ID)
+	if err != nil {
+		t.Fatalf("GetMemoryProposal: %v", err)
+	}
+	if updated.Status != "applied" || updated.AppliedMemoryID != memoryID {
+		t.Fatalf("proposal apply metadata = %+v, want status applied and memory %q", updated, memoryID)
+	}
+}
+
+func TestApplyMemoryProposalDoesNotOverwriteConcurrentStatusChange(t *testing.T) {
+	s1, s2 := setupDiskStorePair(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const ns = "ns-apply-stale-status"
+	proposal := &store.MemoryProposal{
+		Namespace: ns,
+		TaskName:  "task-stale",
+		Type:      "memory",
+		Title:     "Stale apply proposal",
+		Content:   "A stale apply must not overwrite an archived proposal status.",
+	}
+	if err := s1.CreateMemoryProposal(ctx, proposal); err != nil {
+		t.Fatalf("CreateMemoryProposal: %v", err)
+	}
+	if err := s1.ReviewMemoryProposal(ctx, store.MemoryProposalReview{Namespace: ns, ID: proposal.ID, Status: "accepted"}); err != nil {
+		t.Fatalf("ReviewMemoryProposal: %v", err)
+	}
+
+	ready := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseApply := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseApply)
+	var readyOnce sync.Once
+	s1.applyMemoryProposalAfterAcceptedRead = func() {
+		readyOnce.Do(func() {
+			close(ready)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		})
+	}
+
+	type applyResult struct {
+		memory *store.Memory
+		err    error
+	}
+	resultCh := make(chan applyResult, 1)
+	go func() {
+		memory, err := s1.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: ns, ID: proposal.ID, AppliedBy: "stale"})
+		resultCh <- applyResult{memory: memory, err: err}
+	}()
+	select {
+	case <-ready:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for apply to read accepted proposal")
+	}
+
+	if err := s2.ArchiveMemoryProposal(ctx, ns, proposal.ID); err != nil {
+		t.Fatalf("ArchiveMemoryProposal: %v", err)
+	}
+	releaseApply()
+
+	var result applyResult
+	select {
+	case result = <-resultCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for stale apply result")
+	}
+	if result.err == nil {
+		t.Fatalf("stale ApplyMemoryProposal returned memory %+v, want error", result.memory)
+	}
+	lowerErr := strings.ToLower(result.err.Error())
+	if strings.Contains(lowerErr, "database is locked") || strings.Contains(lowerErr, "sqlite_busy") || strings.Contains(lowerErr, "sqlite_locked") {
+		t.Fatalf("stale ApplyMemoryProposal returned raw SQLite concurrency error: %v", result.err)
+	}
+	if !errors.Is(result.err, store.ErrConflict) && !strings.Contains(result.err.Error(), "cannot be applied") {
+		t.Fatalf("stale ApplyMemoryProposal error = %v, want conflict or cannot be applied", result.err)
+	}
+
+	updated, err := s1.GetMemoryProposal(ctx, ns, proposal.ID)
+	if err != nil {
+		t.Fatalf("GetMemoryProposal: %v", err)
+	}
+	if updated.Status != "archived" || updated.AppliedMemoryID != "" {
+		t.Fatalf("proposal after stale apply = %+v, want archived with no applied memory", updated)
+	}
+	listed, err := s2.ListMemories(ctx, store.MemoryFilter{Namespace: ns, Source: "memory_proposal"})
+	if err != nil {
+		t.Fatalf("ListMemories: %v", err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("stale apply created memories: %+v", listed)
 	}
 }
 

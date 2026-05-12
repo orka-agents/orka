@@ -8,6 +8,9 @@ import (
 // ErrNotFound is returned when a requested resource does not exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrConflict is returned when a resource cannot be updated because it changed concurrently.
+var ErrConflict = errors.New("conflict")
+
 // HealthChecker can verify its underlying storage is reachable.
 type HealthChecker interface {
 	HealthCheck(ctx context.Context) error

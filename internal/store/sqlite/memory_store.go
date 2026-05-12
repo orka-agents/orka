@@ -14,6 +14,8 @@ import (
 
 	"github.com/sozercan/orka/internal/redact"
 	"github.com/sozercan/orka/internal/store"
+	moderncsqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 const (
@@ -456,6 +458,36 @@ func (s *Store) ApplyMemoryProposal(ctx context.Context, apply store.MemoryPropo
 	}
 	apply.AppliedBy = redact.SensitiveText(strings.TrimSpace(apply.AppliedBy))
 
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		memory, err := s.applyMemoryProposalOnce(ctx, apply)
+		if err == nil {
+			return memory, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if !isSQLiteRetryableError(err) {
+			return nil, err
+		}
+		lastErr = err
+		if attempt == maxAttempts-1 {
+			break
+		}
+		backoff := time.Duration(attempt+1) * 10 * time.Millisecond
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, lastErr
+}
+
+func (s *Store) applyMemoryProposalOnce(ctx context.Context, apply store.MemoryProposalApply) (*store.Memory, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -500,16 +532,23 @@ func (s *Store) ApplyMemoryProposal(ctx context.Context, apply store.MemoryPropo
 	if status != proposalStatusAccepted {
 		return nil, fmt.Errorf("proposal status %q cannot be applied", proposal.Status)
 	}
+	if hook := s.applyMemoryProposalAfterAcceptedRead; hook != nil {
+		hook()
+	}
 
 	existing, err := scanMemory(tx.QueryRowContext(ctx, selectMemorySQL()+` WHERE namespace = ? AND source_proposal_id = ?`, apply.Namespace, apply.ID))
 	if err == nil {
 		now := time.Now()
-		if _, err := tx.ExecContext(ctx,
+		res, err := tx.ExecContext(ctx,
 			`UPDATE memory_proposals
 			 SET status = ?, applied_memory_id = ?, applied_by = ?, applied_at = COALESCE(applied_at, ?), updated_at = ?
-			 WHERE namespace = ? AND id = ?`,
-			proposalStatusApplied, existing.ID, apply.AppliedBy, now, now, apply.Namespace, apply.ID,
-		); err != nil {
+			 WHERE namespace = ? AND id = ? AND status = ? AND (applied_memory_id = '' OR applied_memory_id = ?)`,
+			proposalStatusApplied, existing.ID, apply.AppliedBy, now, now, apply.Namespace, apply.ID, proposalStatusAccepted, existing.ID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if err := ensureRowsAffectedConflict(res); err != nil {
 			return nil, err
 		}
 		if err := tx.Commit(); err != nil {
@@ -551,14 +590,23 @@ func (s *Store) ApplyMemoryProposal(ctx context.Context, apply store.MemoryPropo
 		memory.Source, memory.SourceProposalID, memory.Content, tagsJSON, memory.Disabled, memory.Deleted, memory.CreatedAt,
 		memory.UpdatedAt, memory.LastRecalledAt, memory.RecalledCount,
 	); err != nil {
-		return nil, err
+		if !isSQLiteConstraintError(err) {
+			return nil, err
+		}
+		existing, lookupErr := scanMemory(tx.QueryRowContext(ctx, selectMemorySQL()+` WHERE namespace = ? AND source_proposal_id = ?`, apply.Namespace, apply.ID))
+		if lookupErr != nil {
+			return nil, err
+		}
+		if err := markMemoryProposalApplied(ctx, tx, apply, existing.ID, true); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		committed = true
+		return existing, nil
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE memory_proposals
-		 SET status = ?, applied_memory_id = ?, applied_by = ?, applied_at = ?, updated_at = ?
-		 WHERE namespace = ? AND id = ?`,
-		proposalStatusApplied, memory.ID, apply.AppliedBy, now, now, apply.Namespace, apply.ID,
-	); err != nil {
+	if err := markMemoryProposalApplied(ctx, tx, apply, memory.ID, false); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -566,6 +614,76 @@ func (s *Store) ApplyMemoryProposal(ctx context.Context, apply store.MemoryPropo
 	}
 	committed = true
 	return memory, nil
+}
+
+func markMemoryProposalApplied(ctx context.Context, tx *sql.Tx, apply store.MemoryProposalApply, memoryID string, allowExistingAppliedID bool) error {
+	now := time.Now()
+	query := `UPDATE memory_proposals
+		 SET status = ?, applied_memory_id = ?, applied_by = ?, applied_at = ?, updated_at = ?
+		 WHERE namespace = ? AND id = ? AND status = ? AND applied_memory_id = ''`
+	args := []any{proposalStatusApplied, memoryID, apply.AppliedBy, now, now, apply.Namespace, apply.ID, proposalStatusAccepted}
+	if allowExistingAppliedID {
+		query = `UPDATE memory_proposals
+		 SET status = ?, applied_memory_id = ?, applied_by = ?, applied_at = COALESCE(applied_at, ?), updated_at = ?
+		 WHERE namespace = ? AND id = ? AND status = ? AND (applied_memory_id = '' OR applied_memory_id = ?)`
+		args = append(args, memoryID)
+	}
+	res, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	return ensureRowsAffectedConflict(res)
+}
+
+func ensureRowsAffectedConflict(res sql.Result) error {
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("%w: memory proposal changed during apply", store.ErrConflict)
+	}
+	return nil
+}
+
+func isSQLiteRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if code, ok := sqliteErrorCode(err); ok {
+		switch primarySQLiteCode(code) {
+		case sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED:
+			return true
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked") ||
+		strings.Contains(msg, "sqlite_busy") ||
+		strings.Contains(msg, "sqlite_locked") ||
+		strings.Contains(msg, "busy snapshot")
+}
+
+func isSQLiteConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if code, ok := sqliteErrorCode(err); ok {
+		return primarySQLiteCode(code) == sqlite3.SQLITE_CONSTRAINT
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "constraint failed")
+}
+
+func sqliteErrorCode(err error) (int, bool) {
+	var sqliteErr *moderncsqlite.Error
+	if errors.As(err, &sqliteErr) {
+		return sqliteErr.Code(), true
+	}
+	return 0, false
+}
+
+func primarySQLiteCode(code int) int {
+	return code & 0xff
 }
 
 func selectMemorySQL() string {
