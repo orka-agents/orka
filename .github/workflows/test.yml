@@ -53,6 +53,9 @@ jobs:
           go mod tidy
           git diff --exit-code -- go.mod go.sum
 
+      - name: Create UI embed stub
+        run: make ensure-ui-embed
+
       - name: Run OIDC and context-token auth tests
         run: |
           go test ./internal/api -count=1 -v -run 'Test(ValidateOIDCToken|NewAuthMiddleware_OIDC|NewAuthMiddleware_OIDCPreservesServiceAccountFallback|Handlers_CreateTask_StampsRequestedByFromOIDC|ContextToken|ValidateContextToken|AllowedCORSHeadersIncludesContextTokenHeaders)'
