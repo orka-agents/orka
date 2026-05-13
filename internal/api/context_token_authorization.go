@@ -26,6 +26,12 @@ const (
 
 	// ContextTokenScopeTaskCreate authorizes context-token callers to create Orka Tasks.
 	ContextTokenScopeTaskCreate = "orka:tasks:create"
+	// ContextTokenScopeTaskGet authorizes context-token callers to read a Task and its related data.
+	ContextTokenScopeTaskGet = "orka:tasks:get"
+	// ContextTokenScopeTaskList authorizes context-token callers to list Tasks.
+	ContextTokenScopeTaskList = "orka:tasks:list"
+	// ContextTokenScopeTaskDelete authorizes context-token callers to delete Tasks.
+	ContextTokenScopeTaskDelete = "orka:tasks:delete"
 )
 
 // ContextTokenAuthorizationConfig controls optional authorization checks derived
@@ -33,10 +39,13 @@ const (
 type ContextTokenAuthorizationConfig struct {
 	Mode             string
 	TaskCreateScopes []string
+	TaskReadScopes   []string
+	TaskListScopes   []string
+	TaskDeleteScopes []string
 }
 
 // NewContextTokenAuthorizationConfig builds context-token authorization config.
-func NewContextTokenAuthorizationConfig(mode, taskCreateScopes string) (ContextTokenAuthorizationConfig, error) {
+func NewContextTokenAuthorizationConfig(mode, taskCreateScopes, taskReadScopes, taskListScopes, taskDeleteScopes string) (ContextTokenAuthorizationConfig, error) {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode == "" {
 		mode = ContextTokenAuthorizationModeOff
@@ -47,11 +56,17 @@ func NewContextTokenAuthorizationConfig(mode, taskCreateScopes string) (ContextT
 		return ContextTokenAuthorizationConfig{}, fmt.Errorf("unsupported context-token authorization mode %q", mode)
 	}
 
-	scopes := splitComma(taskCreateScopes)
-	if len(scopes) == 0 {
-		scopes = []string{ContextTokenScopeTaskCreate}
-	}
-	return ContextTokenAuthorizationConfig{Mode: mode, TaskCreateScopes: scopes}, nil
+	createScopes := defaultScopes(taskCreateScopes, ContextTokenScopeTaskCreate)
+	readScopes := defaultScopes(taskReadScopes, ContextTokenScopeTaskGet)
+	listScopes := defaultScopes(taskListScopes, ContextTokenScopeTaskList)
+	deleteScopes := defaultScopes(taskDeleteScopes, ContextTokenScopeTaskDelete)
+	return ContextTokenAuthorizationConfig{
+		Mode:             mode,
+		TaskCreateScopes: createScopes,
+		TaskReadScopes:   readScopes,
+		TaskListScopes:   listScopes,
+		TaskDeleteScopes: deleteScopes,
+	}, nil
 }
 
 // Enabled reports whether context-token authorization is configured.
@@ -61,6 +76,13 @@ func (c ContextTokenAuthorizationConfig) Enabled() bool {
 
 func (c ContextTokenAuthorizationConfig) enforcing() bool {
 	return c.Mode == ContextTokenAuthorizationModeEnforce
+}
+
+func defaultScopes(value, fallback string) []string {
+	if scopes := splitComma(value); len(scopes) > 0 {
+		return scopes
+	}
+	return []string{fallback}
 }
 
 func (h *Handlers) authorizeContextTokenTaskCreate(c fiber.Ctx, req CreateTaskRequest, namespace string) error {
@@ -77,16 +99,35 @@ func (h *Handlers) authorizeContextTokenTaskCreate(c fiber.Ctx, req CreateTaskRe
 		return nil
 	}
 
+	return h.handleContextTokenAuthorizationFailures(ui.ContextToken, "createTask", failures)
+}
+
+func (h *Handlers) authorizeContextTokenAction(c fiber.Ctx, action string, requiredScopes []string) error {
+	if !h.contextTokenAuthorization.Enabled() {
+		return nil
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return nil
+	}
+	if hasAnyScope(ui.ContextToken.Scopes, requiredScopes) {
+		return nil
+	}
+	failures := []string{fmt.Sprintf("missing one of required scopes %q", strings.Join(requiredScopes, ","))}
+	return h.handleContextTokenAuthorizationFailures(ui.ContextToken, action, failures)
+}
+
+func (h *Handlers) handleContextTokenAuthorizationFailures(token *ContextToken, action string, failures []string) error {
 	log.Info("context-token authorization failed",
 		"mode", h.contextTokenAuthorization.Mode,
-		"action", "createTask",
-		"transactionID", ui.ContextToken.TransactionID,
-		"subject", ui.ContextToken.Subject,
-		"issuer", ui.ContextToken.Issuer,
+		"action", action,
+		"transactionID", token.TransactionID,
+		"subject", token.Subject,
+		"issuer", token.Issuer,
 		"failures", strings.Join(failures, "; "),
 	)
 	if h.contextTokenAuthorization.enforcing() {
-		return fiber.NewError(fiber.StatusForbidden, "context token is not authorized to create task")
+		return fiber.NewError(fiber.StatusForbidden, "context token is not authorized for "+action)
 	}
 	return nil
 }

@@ -49,16 +49,16 @@ func setupTestHandlers() (*Handlers, *fiber.App) {
 	return handlers, app
 }
 
-func setupTestHandlersWithAuthz(t *testing.T, ctxTokenConfig ContextTokenConfig, mode string) *fiber.App {
+func setupTestHandlersWithAuthz(t *testing.T, ctxTokenConfig ContextTokenConfig, mode string, objs ...runtime.Object) *fiber.App {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	authz, err := NewContextTokenAuthorizationConfig(mode, "")
+	authz, err := NewContextTokenAuthorizationConfig(mode, "", "", "", "")
 	require.NoError(t, err)
 	handlers := NewHandlers(HandlersConfig{
 		Client:                    fakeClient,
@@ -70,6 +70,9 @@ func setupTestHandlersWithAuthz(t *testing.T, ctxTokenConfig ContextTokenConfig,
 	app := fiber.New()
 	app.Use(NewAuthMiddleware(handlers.client, AuthConfig{ContextTokens: ctxTokenConfig}))
 	app.Post("/tasks", handlers.CreateTask)
+	app.Get("/tasks", handlers.ListTasks)
+	app.Get("/tasks/:id", handlers.GetTask)
+	app.Delete("/tasks/:id", handlers.DeleteTask)
 	return app
 }
 
@@ -475,6 +478,46 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationAuditAllowsFailures(t *tes
 	}
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+}
+
+func TestHandlers_TaskActions_ContextTokenAuthorization(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		scope  string
+		want   int
+	}{
+		{name: "list allowed", method: http.MethodGet, path: "/tasks", scope: ContextTokenScopeTaskList, want: http.StatusOK},
+		{name: "list denied by read scope", method: http.MethodGet, path: "/tasks", scope: ContextTokenScopeTaskGet, want: http.StatusForbidden},
+		{name: "get allowed", method: http.MethodGet, path: "/tasks/authz-task", scope: ContextTokenScopeTaskGet, want: http.StatusOK},
+		{name: "get denied by list scope", method: http.MethodGet, path: "/tasks/authz-task", scope: ContextTokenScopeTaskList, want: http.StatusForbidden},
+		{name: "delete allowed", method: http.MethodDelete, path: "/tasks/authz-task", scope: ContextTokenScopeTaskDelete, want: http.StatusNoContent},
+		{name: "delete denied by read scope", method: http.MethodDelete, path: "/tasks/authz-task", scope: ContextTokenScopeTaskGet, want: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "authz-task", Namespace: "default"},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+			}
+			app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, task)
+			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.Header.Set(KontxtHeaderName, token)
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if resp.StatusCode != tt.want {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, tt.want)
+			}
+		})
 	}
 }
 

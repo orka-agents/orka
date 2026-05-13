@@ -405,6 +405,9 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 		return err
 	}
 	opts.Namespace = namespace
+	if err := h.authorizeContextTokenAction(c, "listTasks", h.contextTokenAuthorization.TaskListScopes); err != nil {
+		return err
+	}
 
 	// Apply pagination
 	pagination, err := ParsePagination(limit, continueToken)
@@ -436,6 +439,9 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "getTask", h.contextTokenAuthorization.TaskReadScopes); err != nil {
 		return err
 	}
 
@@ -484,6 +490,9 @@ func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "deleteTask", h.contextTokenAuthorization.TaskDeleteScopes); err != nil {
+		return err
+	}
 
 	task := &corev1alpha1.Task{}
 	ctx := c.Context()
@@ -506,6 +515,9 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "getTaskLogs", h.contextTokenAuthorization.TaskReadScopes); err != nil {
 		return err
 	}
 
@@ -614,6 +626,9 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "getTaskResult", h.contextTokenAuthorization.TaskReadScopes); err != nil {
+		return err
+	}
 
 	task := &corev1alpha1.Task{}
 	ctx := c.Context()
@@ -646,6 +661,9 @@ func (h *Handlers) GetTaskPlan(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "getTaskPlan", h.contextTokenAuthorization.TaskReadScopes); err != nil {
 		return err
 	}
 
@@ -1270,6 +1288,9 @@ func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "getTaskChildren", h.contextTokenAuthorization.TaskReadScopes); err != nil {
+		return err
+	}
 
 	var taskList corev1alpha1.TaskList
 	if err := h.client.List(c.Context(), &taskList,
@@ -1290,6 +1311,9 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "listTaskArtifacts", h.contextTokenAuthorization.TaskReadScopes); err != nil {
 		return err
 	}
 
@@ -1324,6 +1348,9 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 	filename := c.Params("filename")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "downloadTaskArtifact", h.contextTokenAuthorization.TaskReadScopes); err != nil {
 		return err
 	}
 

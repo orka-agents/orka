@@ -96,6 +96,9 @@ func main() {
 	var contextTokenHeaders string
 	var contextTokenAuthzMode string
 	var contextTokenTaskCreateScopes string
+	var contextTokenTaskReadScopes string
+	var contextTokenTaskListScopes string
+	var contextTokenTaskDeleteScopes string
 	var contextTokenTTSURL string
 	var contextTokenTTSAudience string
 	var contextTokenTTSTimeout string
@@ -177,6 +180,15 @@ func main() {
 	flag.StringVar(&contextTokenTaskCreateScopes, "context-token-task-create-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_TASK_CREATE_SCOPES"),
 		"Comma-separated context-token scopes that authorize Task creation. Defaults to orka:tasks:create.")
+	flag.StringVar(&contextTokenTaskReadScopes, "context-token-task-read-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_TASK_READ_SCOPES"),
+		"Comma-separated context-token scopes that authorize Task reads and related data. Defaults to orka:tasks:get.")
+	flag.StringVar(&contextTokenTaskListScopes, "context-token-task-list-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_TASK_LIST_SCOPES"),
+		"Comma-separated context-token scopes that authorize Task listing. Defaults to orka:tasks:list.")
+	flag.StringVar(&contextTokenTaskDeleteScopes, "context-token-task-delete-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_TASK_DELETE_SCOPES"),
+		"Comma-separated context-token scopes that authorize Task deletion. Defaults to orka:tasks:delete.")
 	flag.StringVar(&contextTokenTTSURL, "context-token-tts-url", os.Getenv("ORKA_CONTEXT_TOKEN_TTS_URL"),
 		"kontxt TTS base URL for optional token exchange/replacement.")
 	flag.StringVar(&contextTokenTTSAudience, "context-token-tts-audience", os.Getenv("ORKA_CONTEXT_TOKEN_TTS_AUDIENCE"),
@@ -217,6 +229,9 @@ func main() {
 	contextTokenAuthzConfig, err := api.NewContextTokenAuthorizationConfig(
 		contextTokenAuthzMode,
 		contextTokenTaskCreateScopes,
+		contextTokenTaskReadScopes,
+		contextTokenTaskListScopes,
+		contextTokenTaskDeleteScopes,
 	)
 	if err != nil {
 		setupLog.Error(err, "invalid context token authorization configuration")
