@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	orkaadmission "github.com/sozercan/orka/internal/admission"
 	"github.com/sozercan/orka/internal/api"
 	"github.com/sozercan/orka/internal/controller"
 	_ "github.com/sozercan/orka/internal/llm/anthropic"
@@ -60,6 +62,9 @@ func main() {
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
+	var taskProvenanceAdmissionEnabled bool
+	var taskProvenanceAdmissionTrustedUsers string
+	var taskProvenanceAdmissionTrustedServiceAccounts string
 	var enableLeaderElection bool
 	var probeAddr string
 	var secureMetrics bool
@@ -128,6 +133,19 @@ func main() {
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
 	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
+	flag.BoolVar(&taskProvenanceAdmissionEnabled, "task-provenance-admission-enabled",
+		envBool("ORKA_TASK_PROVENANCE_ADMISSION_ENABLED", false),
+		"Enable validating admission that rejects untrusted direct Task writes to Orka-managed "+
+			"provenance fields.")
+	flag.StringVar(&taskProvenanceAdmissionTrustedUsers, "task-provenance-admission-trusted-users",
+		os.Getenv("ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_USERS"),
+		"Comma-separated Kubernetes usernames trusted to set Orka-managed Task provenance fields. "+
+			"Defaults to the controller ServiceAccount usernames in the controller namespace.")
+	flag.StringVar(&taskProvenanceAdmissionTrustedServiceAccounts,
+		"task-provenance-admission-trusted-service-accounts",
+		os.Getenv("ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS"),
+		"Comma-separated ServiceAccount names trusted in the target Task namespace to set "+
+			"Orka-managed Task provenance fields. Defaults to orka-worker.")
 	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
 		"The directory that contains the metrics server certificate.")
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
@@ -383,6 +401,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	if taskProvenanceAdmissionEnabled {
+		admissionConfig := orkaadmission.NewTaskProvenanceConfig(
+			true,
+			taskProvenanceAdmissionTrustedUsers,
+			taskProvenanceAdmissionTrustedServiceAccounts,
+			currentPodNamespace(),
+		)
+		orkaadmission.RegisterTaskProvenanceWebhook(mgr.GetWebhookServer(), mgr.GetScheme(), admissionConfig)
+		setupLog.Info("enabled Task provenance validating admission",
+			"trustedUsers", strings.Join(admissionConfig.TrustedUsernames, ","),
+			"trustedServiceAccounts", strings.Join(admissionConfig.TrustedServiceAccountNames, ","),
+		)
+	}
+
 	// Create Kubernetes clientset for pod log reading
 	kubeClient, err := kubernetes.NewForConfig(mgr.GetConfig())
 	if err != nil {
@@ -560,4 +592,28 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func envBool(name string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid boolean %s=%q: %v\n", name, value, err)
+		os.Exit(1)
+	}
+	return parsed
+}
+
+func currentPodNamespace() string {
+	if namespace := strings.TrimSpace(os.Getenv(workerenv.PodNamespace)); namespace != "" {
+		return namespace
+	}
+	data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }

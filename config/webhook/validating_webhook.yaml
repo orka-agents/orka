@@ -1,0 +1,34 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: task-provenance-validating-webhook
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+webhooks:
+- name: taskprovenance.core.orka.ai
+  admissionReviewVersions:
+  - v1
+  sideEffects: None
+  failurePolicy: Fail
+  matchPolicy: Equivalent
+  timeoutSeconds: 10
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-core-orka-ai-v1alpha1-task-provenance
+      port: 443
+    # Set caBundle to the PEM CA bundle for webhook-server-cert, or configure
+    # your certificate manager to inject it before enabling this webhook.
+  rules:
+  - operations:
+    - CREATE
+    - UPDATE
+    apiGroups:
+    - core.orka.ai
+    apiVersions:
+    - v1alpha1
+    resources:
+    - tasks
+    scope: Namespaced
