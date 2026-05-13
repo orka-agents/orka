@@ -2,6 +2,9 @@ name: Live GitHub OIDC E2E
 
 on:
   workflow_dispatch:
+  schedule:
+    # Nightly at 09:17 UTC (~02:17 Pacific during daylight saving time).
+    - cron: "17 9 * * *"
   push:
     paths-ignore:
       - ".codex/**"

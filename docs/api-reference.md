@@ -20,7 +20,7 @@ Authentication modes:
 Txn-Token: <txntoken+jwt>
 ```
 
-When a Task is created through OIDC or context-token authentication, Orka stamps the verified caller identity into `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Clients cannot provide or override `requestedBy`; requests containing top-level `requestedBy` or nested `spec.requestedBy` are rejected with `400`.
+When a Task is created through OIDC or context-token authentication, Orka stamps the verified caller identity into immutable `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Context-token Task creation also stamps immutable `spec.transaction` plus transaction labels/annotations for audit correlation. Clients cannot provide or override `requestedBy` or `transaction`; requests containing top-level or nested `spec.requestedBy`/`spec.transaction` are rejected with `400`. See [Kontxt TxToken integration](kontxt.md) for scope/`tctx` authorization, TTS exchange, delegation, and audit behavior.
 
 ## Tasks
 

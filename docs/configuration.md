@@ -539,6 +539,8 @@ OIDC validation requires RS256-signed JWTs with matching `iss` and `aud`, valid 
 
 Orka can also authenticate external API requests with generic transaction/context tokens. The built-in `kontxt` profile validates RS256-signed JWTs with JOSE header `typ: txntoken+jwt`, matching `iss` and `aud`, valid time claims, a non-empty `sub`, and the required `kontxt` claims `iat`, `txn`, `scope`, and `req_wl`.
 
+For a newcomer-friendly setup and smoke test, see [Kontxt quickstart: installation and validation](kontxt-quickstart.md).
+
 Enable the profile by configuring the profile, issuer, and audience:
 
 ```bash
@@ -569,9 +571,15 @@ To customize token locations, set `--context-token-headers` or `ORKA_CONTEXT_TOK
 --context-token-headers=Txn-Token,Authorization:Bearer
 ```
 
-`Authorization: Bearer` remains the default location for Kubernetes ServiceAccount and OIDC JWT authentication. Context-token bearer authentication is only attempted when `Authorization:Bearer` is explicitly configured and the bearer JWT has `typ: txntoken+jwt`; other bearer tokens continue through the standard OIDC or Kubernetes TokenReview flow. When an external context-token caller creates a Task, Orka records the verified subject and issuer in `spec.requestedBy`. Clients cannot set `requestedBy` themselves.
+`Authorization: Bearer` remains the default location for Kubernetes ServiceAccount and OIDC JWT authentication. Context-token bearer authentication is only attempted when `Authorization:Bearer` is explicitly configured and the bearer JWT has `typ: txntoken+jwt`; other bearer tokens continue through the standard OIDC or Kubernetes TokenReview flow. When an external context-token caller creates a Task, Orka records the verified subject and issuer in immutable `spec.requestedBy` and records safe transaction metadata in immutable `spec.transaction`, transaction labels, and transaction annotations. Clients cannot set `requestedBy` or `transaction` themselves.
 
-Optional authorization is controlled by `--context-token-authz-mode` / `ORKA_CONTEXT_TOKEN_AUTHZ_MODE`. In `audit` mode, Orka logs safe authorization failures and allows the request. In `enforce` mode, Orka rejects context-token callers that lack the configured operation scope or violate signed `tctx` constraints. Chat, OpenAI-compatible, and Anthropic-compatible model calls require the provider-use scope (default `orka:providers:use`) and honor `tctx.namespace`, `tctx.provider`, `tctx.allowedProviders`, `tctx.model`, and `tctx.allowedModels`. When Orka-managed server-side tools are exposed to those endpoints, they also require the tool-use scope (default `orka:tools:use`) and honor `tctx.allowedTools`. Security scan read/list/get endpoints require the security-read scope (default `orka:security:read`), and security scan create/update/delete and mutation endpoints require the security-write scope (default `orka:security:write`). The raw TxToken is never logged or persisted.
+Optional authorization is controlled by `--context-token-authz-mode` / `ORKA_CONTEXT_TOKEN_AUTHZ_MODE`. In `audit` mode, Orka logs safe authorization failures and allows the request. In `enforce` mode, Orka rejects context-token callers that lack the configured operation scope or violate signed `tctx` constraints. Task creation can be constrained by `tctx.namespace`, `tctx.taskType`, `tctx.agent`, `tctx.allowedAgents`, workspace `tctx.repo`/`tctx.branch`/`tctx.ref`, and `tctx.allowedTools`. Chat, OpenAI-compatible, and Anthropic-compatible model calls require the provider-use scope (default `orka:providers:use`) and honor `tctx.namespace`, `tctx.provider`, `tctx.allowedProviders`, `tctx.model`, and `tctx.allowedModels`. When Orka-managed server-side tools are exposed to those endpoints, they also require the tool-use scope (default `orka:tools:use`) and honor `tctx.allowedTools`. Security scan read/list/get endpoints require the security-read scope (default `orka:security:read`), and security scan create/update/delete and mutation endpoints require the security-write scope (default `orka:security:write`). The raw TxToken is never logged or persisted in Task specs/status.
+
+### Kontxt TTS Exchange and Propagation
+
+Configure `--context-token-tts-url` / `ORKA_CONTEXT_TOKEN_TTS_URL` when workers should exchange a mounted subject token for child or outbound replacement TxTokens. Delegation tools require `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE` and `ORKA_CONTEXT_TOKEN_CHILD_SCOPE`; HTTP Tool calls can use `ORKA_CONTEXT_TOKEN_OUTBOUND_SCOPE` or fall back to the current transaction scope. Child scopes are fail-closed: Orka rejects a requested child scope that is not already present in the parent transaction scopes before it creates the child Task.
+
+Successful delegation exchanges store the raw child TxToken only in an owner-referenced Kubernetes Secret and annotate the child Task with the Secret name. The controller mounts that Secret into the child worker and sets `ORKA_TRANSACTION_TOKEN_FILE` / `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE` so deeper delegation and downstream Tool calls can continue the same transaction with configured child/outbound scopes.
 
 ### Task Provenance Admission Hardening
 

@@ -287,7 +287,7 @@ Proposal review is intentionally separate from durable memory mutation. Acceptin
 - **Controller**: Non-root (uid 65532), read-only rootfs, seccomp RuntimeDefault
 - **ServiceAccount TokenReview**: Default API authentication validates Kubernetes ServiceAccount bearer tokens via the TokenReview API.
 - **Optional OIDC JWT validation**: External API endpoints can validate OIDC JWTs when issuer/audience settings are configured.
-- **Optional context-token validation**: External API endpoints can validate generic context tokens, with built-in `kontxt` TxToken support via `Txn-Token` and profile-specific issuer/audience/JWKS settings.
+- **Optional context-token validation**: External API endpoints can validate generic context tokens, with built-in `kontxt` TxToken support via `Txn-Token` and profile-specific issuer/audience/JWKS settings. Orka can enforce operation scopes and signed `tctx` constraints, stamp immutable transaction metadata, and use kontxt TTS to narrow child/outbound tokens for delegated agents and downstream Tool calls.
 - **Internal worker endpoints**: `/internal/v1` endpoints require ServiceAccount authentication for worker result, plan, message, artifact, memory, and transcript calls.
 - **Secrets**: API keys referenced via `secretRef`, mounted as read-only volumes, never logged
 - **`--watch-namespace`**: Optionally scopes the controller and API to a single namespace.

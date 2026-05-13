@@ -1,20 +1,31 @@
 # Kontxt TxToken integration
 
-Orka can participate in `kontxt` transaction-token workflows without storing raw transaction tokens. The integration is intentionally staged so existing Kubernetes ServiceAccount and OIDC callers continue to work unless context-token authentication or authorization is explicitly configured.
+Orka can participate in `kontxt` transaction-token workflows without storing raw transaction tokens in Task specs/status, labels, annotations, logs, metrics, or durable memory. Delegated raw TxTokens are stored only in owner-referenced Kubernetes Secrets for worker handoff. The integration is intentionally staged so existing Kubernetes ServiceAccount and OIDC callers continue to work unless context-token authentication or authorization is explicitly configured.
 
-## Current capability status
+New to Kontxt or setting it up for the first time? Start with [Kontxt quickstart: installation and validation](kontxt-quickstart.md), then return here for detailed configuration and security guidance.
+
+## Capability summary
 
 | Capability | Status |
 |---|---|
 | Ingress TxToken verification | Enabled when `--context-token-profile=kontxt`, issuer, and audience are configured. Tokens are read from `Txn-Token` by default. |
+| Request-level authorization | Optional `off`, `audit`, or `enforce` mode. Scopes authorize API, chat, provider, tool, memory, session, skill, and security-scan operations. Selected signed `tctx` values constrain task, provider, model, workspace, and tool requests. |
 | Verified requester stamping | REST-created Tasks record verified identity in immutable `spec.requestedBy`. |
 | Safe transaction metadata | REST-created context-token Tasks record immutable `spec.transaction` plus safe transaction labels/annotations; Jobs, Pods, and worker environment receive the same safe metadata. |
-| Context-token authorization | Optional `off`, `audit`, or `enforce` mode. Scopes authorize API, chat, provider, tool, memory, session, skill, and security-scan operations. Selected signed `tctx` values constrain task, provider, model, and tool requests. |
-| Delegation and outbound TxTokens | Worker-side delegation and HTTP Tool calls can exchange or propagate TxTokens when worker environment and token files are configured. Child token Secrets are owner-scoped to the parent Task and mounted into child workers. |
+| Immutable delegation chains | Worker-side delegation can exchange a parent TxToken for a child TxToken through kontxt TTS. The requested child scope must be a subset of the parent transaction scopes before Orka creates the child Task. |
+| Downstream token propagation | Worker HTTP Tool calls can propagate a mounted TxToken or exchange it for an operation-scoped outbound TxToken before calling downstream services. |
 | Direct Kubernetes hardening | Optional Task provenance admission webhook rejects untrusted spoofing of Orka-managed provenance fields. |
-| Observability | Prometheus metrics cover context-token authentication, authorization decisions, and TTS exchange health. Logs use safe transaction fields and must not include raw tokens. |
+| Observability | Prometheus metrics cover context-token authentication, authorization decisions, and TTS exchange health. CLI task/audit commands can correlate work by transaction ID. Logs use safe transaction fields and must not include raw tokens. |
 
-Full end-to-end TTS-backed live CI is still a separate rollout step; do not treat verifier-only deployment as proof that every downstream service validates propagated TxTokens.
+Downstream services still need to validate incoming TxTokens themselves. Orka can verify, authorize, exchange, persist safe metadata, and propagate TxTokens inside its control-plane/worker model; it does not transparently enforce mesh-wide policy for arbitrary services.
+
+## How Orka maps to the kontxt model
+
+`kontxt` TxTokens are useful for three platform capabilities, all of which Orka supports when the relevant authz/TTS settings are enabled:
+
+1. **Request-level authorization across service boundaries** — Orka validates signed TxTokens, evaluates required operation scopes, and uses selected signed `tctx` fields such as namespace, task type, agent, workspace repo/branch/ref, provider, model, and allowed tools as request constraints.
+2. **Immutable delegation chains with non-expanding scope** — Orka preserves the transaction ID across parent/child Tasks, exchanges mounted subject tokens through kontxt TTS for child or outbound TxTokens, rejects requested child scopes that are not present in the parent transaction scopes, and stores raw child tokens only in owner-referenced Kubernetes Secrets.
+3. **End-to-end audit correlation** — Orka stamps safe transaction metadata onto Tasks, Jobs, Pods, worker environment, and CLI views so operators can follow one transaction ID without storing raw TxTokens or full `tctx`/`rctx` payloads.
 
 ## Ingress verification
 
@@ -125,7 +136,7 @@ Raw TxTokens are not stored in Task specs/status, labels, annotations, logs, or 
 Orka has two token-flow patterns:
 
 1. **Propagate an existing child token**: if a Task annotation references an Orka-owned transaction-token Secret, the controller mounts it into the worker and sets both `ORKA_TRANSACTION_TOKEN_FILE` and `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE` to the token path. HTTP Tool calls attach that token as `Txn-Token`.
-2. **Exchange a narrower token through TTS**: when worker environment includes a TTS URL, subject-token file, and requested child/outbound scope, worker-side delegation tools and HTTP Tool calls call kontxt TTS for a replacement token before creating child Tasks or calling downstream services.
+2. **Exchange a replacement token through TTS**: when worker environment includes a TTS URL, subject-token file, and requested child/outbound scope, worker-side delegation tools and HTTP Tool calls call kontxt TTS for a child or operation-scoped replacement token before creating child Tasks or calling downstream services.
 
 Worker-side exchange environment:
 
@@ -199,7 +210,7 @@ Do not use raw transaction IDs, subjects, repositories, task names, or token val
 
 ## Redaction rules
 
-Never commit, log, print, or persist raw TxTokens. Orka redaction covers `Txn-Token` and `Authorization` header values plus token-looking strings in worker/tool output. Keep downstream tools and custom scripts under the same rule: log transaction IDs and digests, not tokens.
+Never commit, log, print, or persist raw TxTokens in Task specs/status, labels, annotations, durable memory, artifacts, metrics, or docs. The only Orka-managed storage location for delegated raw TxTokens is an owner-referenced Kubernetes Secret used for worker handoff. Orka redaction covers `Txn-Token` and `Authorization` header values plus token-looking strings in worker/tool output. Keep downstream tools and custom scripts under the same rule: log transaction IDs and digests, not tokens.
 
 ## Example least-privilege Task token
 
