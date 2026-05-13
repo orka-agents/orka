@@ -30,6 +30,17 @@ const (
 	PriorTaskNamespace = "ORKA_PRIOR_TASK_NAMESPACE"
 	ParentTask         = "ORKA_PARENT_TASK"
 
+	// Transaction context env vars.
+	TransactionID                     = "ORKA_TRANSACTION_ID"
+	TransactionProfile                = "ORKA_TRANSACTION_PROFILE"
+	TransactionIssuer                 = "ORKA_TRANSACTION_ISSUER"
+	TransactionSubject                = "ORKA_TRANSACTION_SUBJECT"
+	TransactionRequestingWorkload     = "ORKA_TRANSACTION_REQUESTING_WORKLOAD"
+	TransactionScope                  = "ORKA_TRANSACTION_SCOPE"
+	TransactionScopes                 = "ORKA_TRANSACTION_SCOPES"
+	TransactionContextDigest          = "ORKA_TRANSACTION_CONTEXT_DIGEST"
+	TransactionRequesterContextDigest = "ORKA_TRANSACTION_REQUESTER_CONTEXT_DIGEST"
+
 	// AI worker env vars.
 	AIProvider        = "ORKA_AI_PROVIDER"
 	AIModel           = "ORKA_AI_MODEL"

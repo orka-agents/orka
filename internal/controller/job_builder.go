@@ -27,6 +27,7 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/metrics"
+	"github.com/sozercan/orka/internal/taskmeta"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -148,6 +149,9 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 			},
 		},
 	}
+
+	taskmeta.ApplyTransactionMetadata(&job.ObjectMeta, task.Spec.Transaction)
+	taskmeta.ApplyTransactionMetadata(&job.Spec.Template.ObjectMeta, task.Spec.Transaction)
 
 	applyExecution(job, execution)
 
@@ -382,6 +386,7 @@ func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, 
 
 	// Add task-level env vars
 	envVars = append(envVars, task.Spec.Env...)
+	envVars = addTransactionEnvVars(envVars, task.Spec.Transaction)
 
 	// Add prior task env vars for iterative coordination
 	if task.Spec.PriorTaskRef != nil {
@@ -419,6 +424,22 @@ func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, 
 		envVars = b.addWorkspaceEnvVars(envVars, task)
 	}
 
+	return envVars
+}
+
+func addTransactionEnvVars(envVars []corev1.EnvVar, tx *corev1alpha1.TaskTransaction) []corev1.EnvVar {
+	if tx == nil {
+		return envVars
+	}
+	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionID, tx.ID)
+	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionProfile, tx.Profile)
+	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionIssuer, tx.Issuer)
+	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionSubject, tx.Subject)
+	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionRequestingWorkload, tx.RequestingWorkload)
+	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionScope, tx.Scope)
+	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionScopes, workerenv.JoinCSV(tx.Scopes))
+	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionContextDigest, tx.ContextDigest)
+	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionRequesterContextDigest, tx.RequesterContextDigest)
 	return envVars
 }
 

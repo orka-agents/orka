@@ -75,8 +75,56 @@ type RequestedBy struct {
 	Roles []string `json:"roles,omitempty"`
 }
 
+// TaskTransaction records safe, verified transaction-token metadata for audit correlation.
+type TaskTransaction struct {
+	// Profile is the context-token profile that authenticated the request.
+	// +optional
+	Profile string `json:"profile,omitempty"`
+
+	// ID is the verified transaction identifier claim.
+	// +optional
+	ID string `json:"id,omitempty"`
+
+	// Issuer is the token issuer that authenticated the transaction.
+	// +optional
+	Issuer string `json:"issuer,omitempty"`
+
+	// Audience lists the verified token audience values.
+	// +optional
+	Audience []string `json:"audience,omitempty"`
+
+	// Subject is the verified subject claim.
+	// +optional
+	Subject string `json:"subject,omitempty"`
+
+	// RequestingWorkload is the verified workload that requested the transaction.
+	// +optional
+	RequestingWorkload string `json:"requestingWorkload,omitempty"`
+
+	// Scope is the original verified scope string.
+	// +optional
+	Scope string `json:"scope,omitempty"`
+
+	// Scopes lists parsed scope values from the verified scope string.
+	// +optional
+	Scopes []string `json:"scopes,omitempty"`
+
+	// ContextDigest is a SHA256 digest of the full transaction context.
+	// +optional
+	ContextDigest string `json:"contextDigest,omitempty"`
+
+	// RequesterContextDigest is a SHA256 digest of the full requester context.
+	// +optional
+	RequesterContextDigest string `json:"requesterContextDigest,omitempty"`
+
+	// Context contains allowlisted, non-sensitive transaction context fields for audit.
+	// +optional
+	Context map[string]string `json:"context,omitempty"`
+}
+
 // TaskSpec defines the desired state of Task
 // +kubebuilder:validation:XValidation:rule="has(self.requestedBy) == has(oldSelf.requestedBy) && (!has(self.requestedBy) || self.requestedBy == oldSelf.requestedBy)",message="requestedBy is immutable"
+// +kubebuilder:validation:XValidation:rule="has(self.transaction) == has(oldSelf.transaction) && (!has(self.transaction) || self.transaction == oldSelf.transaction)",message="transaction is immutable"
 type TaskSpec struct {
 	// Type specifies the task type: "container" or "ai"
 	// +kubebuilder:validation:Required
@@ -202,6 +250,11 @@ type TaskSpec struct {
 	// This field is populated by the API server and is immutable.
 	// +optional
 	RequestedBy *RequestedBy `json:"requestedBy,omitempty"`
+
+	// Transaction records verified transaction-token metadata for audit correlation.
+	// This field is populated by the API server and is immutable.
+	// +optional
+	Transaction *TaskTransaction `json:"transaction,omitempty"`
 }
 
 // RetryPolicy defines retry behavior for failed tasks

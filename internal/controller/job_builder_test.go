@@ -21,6 +21,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
@@ -34,6 +35,7 @@ const (
 	defaultNS              = "default"
 	envAIProviderKey       = "ORKA_AI_PROVIDER"
 	testCodexSandboxMode   = "danger-full-access"
+	testTransactionID      = "txn-123"
 	testNodeLabelKey       = "sandbox-runtime"
 	testNodeValueKata      = "kata"
 	testNodeValueGVisor    = "gvisor"
@@ -105,6 +107,76 @@ func TestJobBuilder_Build_ContainerTask(t *testing.T) {
 	}
 	if len(container.Args) != 1 || container.Args[0] != "hello" {
 		t.Errorf("Args = %v, want [hello]", container.Args)
+	}
+}
+
+func TestJobBuilder_Build_PropagatesTransactionMetadata(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: defaultNS,
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:  corev1alpha1.TaskTypeContainer,
+			Image: "busybox:latest",
+			Transaction: &corev1alpha1.TaskTransaction{
+				Profile:                "kontxt",
+				ID:                     testTransactionID,
+				Issuer:                 "https://issuer.example.test",
+				Subject:                "spiffe://example.test/ns/default/sa/client",
+				RequestingWorkload:     "spiffe://example.test/ns/default/sa/client",
+				Scope:                  "read write",
+				Scopes:                 []string{"read", "write"},
+				ContextDigest:          "sha256:context",
+				RequesterContextDigest: "sha256:requester",
+			},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	for name, meta := range map[string]metav1.ObjectMeta{
+		"job":          job.ObjectMeta,
+		"pod template": job.Spec.Template.ObjectMeta,
+	} {
+		if meta.Labels[labels.LabelTransactionID] != labels.SelectorValue(testTransactionID) {
+			t.Fatalf("%s transaction label = %q, want txn-123", name, meta.Labels[labels.LabelTransactionID])
+		}
+		if meta.Labels[labels.LabelAuthProfile] != "kontxt" {
+			t.Fatalf("%s auth profile label = %q, want kontxt", name, meta.Labels[labels.LabelAuthProfile])
+		}
+		if meta.Annotations[labels.AnnotationTransactionID] != testTransactionID {
+			t.Fatalf("%s transaction annotation = %q, want txn-123", name, meta.Annotations[labels.AnnotationTransactionID])
+		}
+		if meta.Annotations[labels.AnnotationTransactionContextDigest] != "sha256:context" {
+			t.Fatalf("%s context digest annotation = %q", name, meta.Annotations[labels.AnnotationTransactionContextDigest])
+		}
+	}
+
+	envVars := job.Spec.Template.Spec.Containers[0].Env
+	wantEnv := map[string]string{
+		workerenv.TransactionID:                     testTransactionID,
+		workerenv.TransactionProfile:                "kontxt",
+		workerenv.TransactionIssuer:                 "https://issuer.example.test",
+		workerenv.TransactionSubject:                "spiffe://example.test/ns/default/sa/client",
+		workerenv.TransactionRequestingWorkload:     "spiffe://example.test/ns/default/sa/client",
+		workerenv.TransactionScope:                  "read write",
+		workerenv.TransactionScopes:                 "read,write",
+		workerenv.TransactionContextDigest:          "sha256:context",
+		workerenv.TransactionRequesterContextDigest: "sha256:requester",
+	}
+	for name, want := range wantEnv {
+		env, ok := findEnvVar(envVars, name)
+		if !ok {
+			t.Fatalf("missing env var %s", name)
+		}
+		if env.Value != want {
+			t.Fatalf("%s = %q, want %q", name, env.Value, want)
+		}
 	}
 }
 

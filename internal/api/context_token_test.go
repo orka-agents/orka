@@ -24,7 +24,10 @@ import (
 	"github.com/gofiber/fiber/v3"
 )
 
-const testContextTokenSubject = "workload-subject"
+const (
+	testContextTokenSubject       = "workload-subject"
+	testContextTokenTransactionID = "txn-123"
+)
 
 func issueTestContextToken(t *testing.T, provider *testOIDCProvider, headerOverrides, claimOverrides map[string]any) string {
 	t.Helper()
@@ -41,7 +44,7 @@ func issueTestContextToken(t *testing.T, provider *testOIDCProvider, headerOverr
 		"aud":    provider.aud,
 		"exp":    now.Add(time.Hour).Unix(),
 		"iat":    now.Unix(),
-		"txn":    "txn-123",
+		"txn":    testContextTokenTransactionID,
 		"scope":  "read write",
 		"req_wl": "spiffe://example.test/ns/default/sa/client",
 		"tctx": map[string]any{
@@ -165,7 +168,7 @@ func TestContextToken_KontxtValidViaTxnTokenHeader(t *testing.T) {
 		if userInfo.AuthType != AuthTypeContextToken {
 			return fiber.NewError(fiber.StatusInternalServerError, "unexpected auth type")
 		}
-		if userInfo.Subject != testContextTokenSubject || userInfo.ContextToken.TransactionID != "txn-123" {
+		if userInfo.Subject != testContextTokenSubject || userInfo.ContextToken.TransactionID != testContextTokenTransactionID {
 			return fiber.NewError(fiber.StatusInternalServerError, "unexpected context token claims")
 		}
 		return ctx.SendString("OK")
@@ -265,7 +268,7 @@ func TestValidateContextToken_Kontxt(t *testing.T) {
 	if ctxToken.Profile != ContextTokenProfileKontxt || ctxToken.Type != KontxtJWTType {
 		t.Fatalf("unexpected profile/type: %#v", ctxToken)
 	}
-	if ctxToken.TransactionID != "txn-123" || ctxToken.Scope != "read write" || ctxToken.RequestingWorkload == "" {
+	if ctxToken.TransactionID != testContextTokenTransactionID || ctxToken.Scope != "read write" || ctxToken.RequestingWorkload == "" {
 		t.Fatalf("unexpected transaction claims: %#v", ctxToken)
 	}
 	if !slices.Contains(ctxToken.Scopes, "read") || !slices.Contains(ctxToken.Scopes, "write") {

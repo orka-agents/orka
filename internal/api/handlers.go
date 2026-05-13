@@ -27,6 +27,7 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/taskmeta"
 	"github.com/sozercan/orka/internal/tools"
 )
 
@@ -270,12 +271,18 @@ func rejectRequestedByTampering(body []byte) error {
 	if _, ok := topLevel["requestedBy"]; ok {
 		return fiber.NewError(fiber.StatusBadRequest, "requestedBy cannot be set by clients")
 	}
+	if _, ok := topLevel["transaction"]; ok {
+		return fiber.NewError(fiber.StatusBadRequest, "transaction cannot be set by clients")
+	}
 
 	if specRaw, ok := topLevel["spec"]; ok {
 		var spec map[string]json.RawMessage
 		if err := json.Unmarshal(specRaw, &spec); err == nil {
 			if _, ok := spec["requestedBy"]; ok {
 				return fiber.NewError(fiber.StatusBadRequest, "spec.requestedBy cannot be set by clients")
+			}
+			if _, ok := spec["transaction"]; ok {
+				return fiber.NewError(fiber.StatusBadRequest, "spec.transaction cannot be set by clients")
 			}
 		}
 	}
@@ -343,6 +350,10 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 			Email:    ui.Email,
 			Groups:   append([]string{}, ui.Groups...),
 			Roles:    append([]string{}, ui.Roles...),
+		}
+		if ui.AuthType == AuthTypeContextToken {
+			task.Spec.Transaction = taskTransactionFromContextToken(ui.ContextToken)
+			taskmeta.ApplyTransactionMetadata(&task.ObjectMeta, task.Spec.Transaction)
 		}
 	}
 

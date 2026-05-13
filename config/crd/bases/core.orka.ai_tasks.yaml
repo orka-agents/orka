@@ -1578,6 +1578,58 @@ spec:
               timeout:
                 description: Timeout is the maximum duration for the task
                 type: string
+              transaction:
+                description: |-
+                  Transaction records verified transaction-token metadata for audit correlation.
+                  This field is populated by the API server and is immutable.
+                properties:
+                  audience:
+                    description: Audience lists the verified token audience values.
+                    items:
+                      type: string
+                    type: array
+                  context:
+                    additionalProperties:
+                      type: string
+                    description: Context contains allowlisted, non-sensitive transaction
+                      context fields for audit.
+                    type: object
+                  contextDigest:
+                    description: ContextDigest is a SHA256 digest of the full transaction
+                      context.
+                    type: string
+                  id:
+                    description: ID is the verified transaction identifier claim.
+                    type: string
+                  issuer:
+                    description: Issuer is the token issuer that authenticated the
+                      transaction.
+                    type: string
+                  profile:
+                    description: Profile is the context-token profile that authenticated
+                      the request.
+                    type: string
+                  requesterContextDigest:
+                    description: RequesterContextDigest is a SHA256 digest of the
+                      full requester context.
+                    type: string
+                  requestingWorkload:
+                    description: RequestingWorkload is the verified workload that
+                      requested the transaction.
+                    type: string
+                  scope:
+                    description: Scope is the original verified scope string.
+                    type: string
+                  scopes:
+                    description: Scopes lists parsed scope values from the verified
+                      scope string.
+                    items:
+                      type: string
+                    type: array
+                  subject:
+                    description: Subject is the verified subject claim.
+                    type: string
+                type: object
               type:
                 description: 'Type specifies the task type: "container" or "ai"'
                 enum:
@@ -1642,6 +1694,9 @@ spec:
             - message: requestedBy is immutable
               rule: has(self.requestedBy) == has(oldSelf.requestedBy) && (!has(self.requestedBy)
                 || self.requestedBy == oldSelf.requestedBy)
+            - message: transaction is immutable
+              rule: has(self.transaction) == has(oldSelf.transaction) && (!has(self.transaction)
+                || self.transaction == oldSelf.transaction)
           status:
             description: TaskStatus defines the observed state of Task
             properties:

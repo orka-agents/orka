@@ -40,14 +40,24 @@ const (
 	LabelSecurityStage     = "orka.ai/security-stage"
 	LabelSecurityScope     = "orka.ai/security-scope"
 	LabelSecurityFindingID = "orka.ai/security-finding-id"
+	LabelTransactionID     = "orka.ai/transaction-id"
+	LabelAuthProfile       = "orka.ai/auth-profile"
 
 	// Annotations
-	AnnotationCoordinationDepth = "orka.ai/coordination-depth"
-	AnnotationAutoRetry         = "orka.ai/auto-retry"
-	AnnotationMaxRetries        = "orka.ai/max-retries"
-	AnnotationRetryCount        = "orka.ai/retry-count"
-	AnnotationOriginalPrompt    = "orka.ai/original-prompt"
-	AnnotationParentTaskName    = "orka.ai/parent-task-name"
+	AnnotationCoordinationDepth             = "orka.ai/coordination-depth"
+	AnnotationTransactionID                 = "orka.ai/transaction-id"
+	AnnotationContextTokenProfile           = "orka.ai/context-token-profile"
+	AnnotationTransactionIssuer             = "orka.ai/transaction-issuer"
+	AnnotationTransactionSubject            = "orka.ai/transaction-subject"
+	AnnotationTransactionRequestingWorkload = "orka.ai/transaction-requesting-workload"
+	AnnotationTransactionScope              = "orka.ai/transaction-scope"
+	AnnotationTransactionContextDigest      = "orka.ai/transaction-context-digest"
+	AnnotationRequesterContextDigest        = "orka.ai/requester-context-digest"
+	AnnotationAutoRetry                     = "orka.ai/auto-retry"
+	AnnotationMaxRetries                    = "orka.ai/max-retries"
+	AnnotationRetryCount                    = "orka.ai/retry-count"
+	AnnotationOriginalPrompt                = "orka.ai/original-prompt"
+	AnnotationParentTaskName                = "orka.ai/parent-task-name"
 )
 
 // SelectorValue returns a Kubernetes label-safe value derived from the input.

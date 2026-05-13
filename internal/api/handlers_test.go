@@ -292,6 +292,36 @@ func TestHandlers_CreateTask_StampsRequestedByFromContextToken(t *testing.T) {
 	if strings.Join(created.Spec.RequestedBy.Roles, ",") != "read,write" {
 		t.Fatalf("requestedBy.roles = %#v, want [read write]", created.Spec.RequestedBy.Roles)
 	}
+	if created.Spec.Transaction == nil {
+		t.Fatal("expected transaction metadata to be stamped")
+	}
+	if created.Spec.Transaction.Profile != ContextTokenProfileKontxt {
+		t.Fatalf("transaction.profile = %q, want %q", created.Spec.Transaction.Profile, ContextTokenProfileKontxt)
+	}
+	if created.Spec.Transaction.ID != testContextTokenTransactionID {
+		t.Fatalf("transaction.id = %q, want txn-123", created.Spec.Transaction.ID)
+	}
+	if created.Spec.Transaction.RequestingWorkload != "spiffe://example.test/ns/default/sa/client" {
+		t.Fatalf("transaction.requestingWorkload = %q", created.Spec.Transaction.RequestingWorkload)
+	}
+	if strings.Join(created.Spec.Transaction.Scopes, ",") != "read,write" {
+		t.Fatalf("transaction.scopes = %#v, want [read write]", created.Spec.Transaction.Scopes)
+	}
+	if !strings.HasPrefix(created.Spec.Transaction.ContextDigest, "sha256:") {
+		t.Fatalf("transaction.contextDigest = %q, want sha256 digest", created.Spec.Transaction.ContextDigest)
+	}
+	if !strings.HasPrefix(created.Spec.Transaction.RequesterContextDigest, "sha256:") {
+		t.Fatalf("transaction.requesterContextDigest = %q, want sha256 digest", created.Spec.Transaction.RequesterContextDigest)
+	}
+	if created.Spec.Transaction.Context["trace_id"] != "trace-123" {
+		t.Fatalf("transaction.context = %#v, want trace_id", created.Spec.Transaction.Context)
+	}
+	if created.Labels[labels.LabelTransactionID] != labels.SelectorValue(testContextTokenTransactionID) {
+		t.Fatalf("transaction label = %q, want txn-123", created.Labels[labels.LabelTransactionID])
+	}
+	if created.Annotations[labels.AnnotationTransactionID] != testContextTokenTransactionID {
+		t.Fatalf("transaction annotation = %q, want txn-123", created.Annotations[labels.AnnotationTransactionID])
+	}
 }
 
 func TestHandlers_CreateTask_RejectsTopLevelRequestedBy(t *testing.T) {
@@ -339,6 +369,52 @@ func TestHandlers_CreateTask_RejectsNestedSpecRequestedBy(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestHandlers_CreateTask_RejectsClientSuppliedTransaction(t *testing.T) {
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{
+			name: "top-level transaction",
+			body: map[string]any{
+				"name":        "tampered-transaction",
+				"namespace":   "default",
+				"type":        corev1alpha1.TaskTypeContainer,
+				"transaction": map[string]any{"id": "spoofed"},
+			},
+		},
+		{
+			name: "nested spec transaction",
+			body: map[string]any{
+				"name":      "tampered-spec-transaction",
+				"namespace": "default",
+				"type":      corev1alpha1.TaskTypeContainer,
+				"spec": map[string]any{
+					"transaction": map[string]any{"id": "spoofed"},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handlers, app := setupTestHandlers()
+			app.Post("/tasks", handlers.CreateTask)
+
+			bodyBytes, _ := json.Marshal(tt.body)
+			req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+			}
+		})
 	}
 }
 

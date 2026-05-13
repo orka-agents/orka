@@ -35,6 +35,7 @@ github_oidc_token="${ORKA_GITHUB_OIDC_TOKEN:-}"
 kontxt_issuer="${ORKA_KONTXT_ISSUER:-https://kontxt-live.test}"
 kontxt_audience="${ORKA_KONTXT_AUDIENCE:-orka-live-kontxt-e2e}"
 kontxt_subject="${ORKA_KONTXT_SUBJECT:-kontxt-workload-subject}"
+kontxt_requesting_workload="${ORKA_KONTXT_REQUESTING_WORKLOAD:-spiffe://example.test/ns/default/sa/live-kontxt-client}"
 kontxt_jwks_name="${ORKA_KONTXT_JWKS_NAME:-kontxt-jwks}"
 kontxt_jwks_port="${ORKA_KONTXT_JWKS_PORT:-8080}"
 kontxt_jwks_url="http://${kontxt_jwks_name}.default.svc.cluster.local:${kontxt_jwks_port}/.well-known/jwks.json"
@@ -240,6 +241,7 @@ func main() {
 	issuer := mustEnv("KONTXT_ISSUER")
 	audience := mustEnv("KONTXT_AUDIENCE")
 	subject := mustEnv("KONTXT_SUBJECT")
+	requestingWorkload := mustEnv("KONTXT_REQUESTING_WORKLOAD")
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -252,7 +254,7 @@ func main() {
 		Audience:           audience,
 		Subject:            subject,
 		Scope:              "read write",
-		RequestingWorkload: "spiffe://example.test/ns/default/sa/live-kontxt-client",
+		RequestingWorkload: requestingWorkload,
 		TransactionContext: map[string]any{
 			"e2e": "live-kind",
 		},
@@ -293,6 +295,7 @@ GO
     KONTXT_ISSUER="${kontxt_issuer}" \
     KONTXT_AUDIENCE="${kontxt_audience}" \
     KONTXT_SUBJECT="${kontxt_subject}" \
+    KONTXT_REQUESTING_WORKLOAD="${kontxt_requesting_workload}" \
     go run "${generator}"
   kontxt_token="$(<"${kontxt_token_file}")"
   [[ -n "${kontxt_token}" ]] || die "generated kontxt token was empty"
@@ -565,26 +568,50 @@ main() {
     --data @"${kontxt_payload}")"
   expect_http_status "${kontxt_status}" "201" "${kontxt_response}" "kontxt task creation"
 
-  jq -e --arg issuer "${kontxt_issuer}" --arg subject "${kontxt_subject}" '
+  jq -e --arg issuer "${kontxt_issuer}" --arg subject "${kontxt_subject}" --arg req_wl "${kontxt_requesting_workload}" '
     .spec.requestedBy.issuer == $issuer
     and .spec.requestedBy.subject == $subject
     and .spec.requestedBy.username == $subject
     and (.spec.requestedBy.roles == ["read", "write"])
+    and .spec.transaction.profile == "kontxt"
+    and ((.spec.transaction.id // "") != "")
+    and .spec.transaction.issuer == $issuer
+    and .spec.transaction.subject == $subject
+    and .spec.transaction.requestingWorkload == $req_wl
+    and .spec.transaction.scope == "read write"
+    and (.spec.transaction.scopes == ["read", "write"])
+    and (.spec.transaction.context.e2e == "live-kind")
+    and ((.spec.transaction.contextDigest // "") | startswith("sha256:"))
+    and ((.spec.transaction.requesterContextDigest // "") | startswith("sha256:"))
+    and .metadata.labels["orka.ai/transaction-id"] == .spec.transaction.id
+    and .metadata.annotations["orka.ai/transaction-id"] == .spec.transaction.id
   ' "${kontxt_response}" >/dev/null || {
     {
-      echo "created kontxt Task response did not contain expected spec.requestedBy"
+      echo "created kontxt Task response did not contain expected spec.requestedBy/spec.transaction"
       cat "${kontxt_response}"
     } | redact >&2
-    die "missing or invalid spec.requestedBy in kontxt task creation response"
+    die "missing or invalid spec.requestedBy/spec.transaction in kontxt task creation response"
   }
 
-  log "Verifying kontxt Task persisted requestedBy identity"
+  log "Verifying kontxt Task persisted requestedBy and transaction metadata"
   kubectl get task "${kontxt_task_name}" -n default -o json >"${work_dir}/created-kontxt-task-kube.json"
-  jq -e --arg issuer "${kontxt_issuer}" --arg subject "${kontxt_subject}" '
+  jq -e --arg issuer "${kontxt_issuer}" --arg subject "${kontxt_subject}" --arg req_wl "${kontxt_requesting_workload}" '
     .spec.requestedBy.issuer == $issuer
     and .spec.requestedBy.subject == $subject
     and .spec.requestedBy.username == $subject
     and (.spec.requestedBy.roles == ["read", "write"])
+    and .spec.transaction.profile == "kontxt"
+    and ((.spec.transaction.id // "") != "")
+    and .spec.transaction.issuer == $issuer
+    and .spec.transaction.subject == $subject
+    and .spec.transaction.requestingWorkload == $req_wl
+    and .spec.transaction.scope == "read write"
+    and (.spec.transaction.scopes == ["read", "write"])
+    and (.spec.transaction.context.e2e == "live-kind")
+    and ((.spec.transaction.contextDigest // "") | startswith("sha256:"))
+    and ((.spec.transaction.requesterContextDigest // "") | startswith("sha256:"))
+    and .metadata.labels["orka.ai/transaction-id"] == .spec.transaction.id
+    and .metadata.annotations["orka.ai/transaction-id"] == .spec.transaction.id
   ' "${work_dir}/created-kontxt-task-kube.json" >/dev/null
 
   log "Verifying tampered kontxt TxToken is rejected"
