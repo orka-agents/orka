@@ -87,6 +87,9 @@ func TestPrepareChildTransactionToken(t *testing.T) {
 	if string(secret.Data["token"]) != "child-tx-token" {
 		t.Fatalf("secret token = %q, want child-tx-token", string(secret.Data["token"]))
 	}
+	if len(secret.OwnerReferences) != 1 || secret.OwnerReferences[0].Name != parentTaskName {
+		t.Fatalf("ownerReferences = %#v, want parent task owner", secret.OwnerReferences)
+	}
 }
 
 func TestPrepareChildTransactionTokenRejectsScopeExpansion(t *testing.T) {

@@ -83,6 +83,7 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 			Annotations: map[string]string{
 				labels.AnnotationParentTaskName: parentTask.Name,
 			},
+			OwnerReferences: parentOwnerReference(parentTask),
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
@@ -93,6 +94,20 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 		return fmt.Errorf("creating child transaction token secret: %w", err)
 	}
 	return nil
+}
+
+func parentOwnerReference(parentTask *corev1alpha1.Task) []metav1.OwnerReference {
+	if parentTask == nil || parentTask.UID == "" {
+		return nil
+	}
+	blockOwnerDeletion := true
+	return []metav1.OwnerReference{{
+		APIVersion:         corev1alpha1.GroupVersion.String(),
+		Kind:               "Task",
+		Name:               parentTask.Name,
+		UID:                parentTask.UID,
+		BlockOwnerDeletion: &blockOwnerDeletion,
+	}}
 }
 
 func validateChildTransactionScope(parentTask *corev1alpha1.Task, childScope string) error {
