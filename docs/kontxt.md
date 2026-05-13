@@ -2,7 +2,7 @@
 
 Orka can participate in `kontxt` transaction-token workflows without storing raw transaction tokens in Task specs/status, labels, annotations, logs, metrics, or durable memory. Delegated raw TxTokens are stored only in owner-referenced Kubernetes Secrets for worker handoff. The integration is intentionally staged so existing Kubernetes ServiceAccount and OIDC callers continue to work unless context-token authentication or authorization is explicitly configured.
 
-New to Kontxt or setting it up for the first time? Start with [Kontxt quickstart: installation and validation](kontxt-quickstart.md), then return here for detailed configuration and security guidance.
+New to Kontxt or setting it up for the first time? Start with [Kontxt quickstart: GitHub OIDC to Orka TxTokens](kontxt-quickstart.md), then return here for detailed configuration and security guidance.
 
 ## Capability summary
 

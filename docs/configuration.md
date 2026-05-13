@@ -539,7 +539,7 @@ OIDC validation requires RS256-signed JWTs with matching `iss` and `aud`, valid 
 
 Orka can also authenticate external API requests with generic transaction/context tokens. The built-in `kontxt` profile validates RS256-signed JWTs with JOSE header `typ: txntoken+jwt`, matching `iss` and `aud`, valid time claims, a non-empty `sub`, and the required `kontxt` claims `iat`, `txn`, `scope`, and `req_wl`.
 
-For a newcomer-friendly setup and smoke test, see [Kontxt quickstart: installation and validation](kontxt-quickstart.md).
+For a newcomer-friendly setup and smoke test, see [Kontxt quickstart: GitHub OIDC to Orka TxTokens](kontxt-quickstart.md).
 
 Enable the profile by configuring the profile, issuer, and audience:
 
