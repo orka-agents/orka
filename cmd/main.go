@@ -121,6 +121,9 @@ func main() {
 	var contextTokenTTSAudience string
 	var contextTokenTTSTimeout string
 	var contextTokenTTSTokenSource string
+	var contextTokenSubjectTokenType string
+	var contextTokenChildScope string
+	var contextTokenOutboundScope string
 	var contextTokenChildTokenTTL string
 	var contextTokenToolTokenTTL string
 	var enableTracing bool
@@ -268,6 +271,14 @@ func main() {
 	flag.StringVar(&contextTokenTTSTokenSource, "context-token-tts-token-source",
 		os.Getenv("ORKA_CONTEXT_TOKEN_TTS_TOKEN_SOURCE"),
 		"Subject token source for kontxt TTS exchanges: serviceAccount, incoming, or none.")
+	flag.StringVar(&contextTokenSubjectTokenType, "context-token-subject-token-type",
+		os.Getenv("ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_TYPE"),
+		"Subject token type for worker-side kontxt TTS exchanges. Defaults to txn_token in workers when empty.")
+	flag.StringVar(&contextTokenChildScope, "context-token-child-scope", os.Getenv("ORKA_CONTEXT_TOKEN_CHILD_SCOPE"),
+		"Scope workers request for child delegated TxTokens when TTS is configured.")
+	flag.StringVar(&contextTokenOutboundScope, "context-token-outbound-scope",
+		os.Getenv("ORKA_CONTEXT_TOKEN_OUTBOUND_SCOPE"),
+		"Scope workers request for outbound HTTP Tool TxTokens when TTS is configured.")
 	flag.StringVar(&contextTokenChildTokenTTL, "context-token-child-token-ttl",
 		os.Getenv("ORKA_CONTEXT_TOKEN_CHILD_TOKEN_TTL"),
 		"Requested TTL for child delegation TxTokens. Defaults to 5m when TTS is enabled.")
@@ -471,6 +482,10 @@ func main() {
 	jobBuilder.CodexSandboxMode = codexSandboxMode
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
+	jobBuilder.ContextTokenTTSURL = contextTokenTTSConfig.URL
+	jobBuilder.ContextTokenSubjectTokenType = contextTokenSubjectTokenType
+	jobBuilder.ContextTokenChildScope = contextTokenChildScope
+	jobBuilder.ContextTokenOutboundScope = contextTokenOutboundScope
 	setupLog.Info("worker images configured",
 		"ai", aiWorkerImage,
 		"copilot", copilotWorkerImage,

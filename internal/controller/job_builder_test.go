@@ -182,6 +182,10 @@ func TestJobBuilder_Build_PropagatesTransactionMetadata(t *testing.T) {
 
 func TestJobBuilder_Build_MountsTransactionTokenSecret(t *testing.T) {
 	builder := setupJobBuilder()
+	builder.ContextTokenTTSURL = "https://tts.example.test"
+	builder.ContextTokenSubjectTokenType = "urn:ietf:params:oauth:token-type:txn_token"
+	builder.ContextTokenChildScope = "orka:agents:run"
+	builder.ContextTokenOutboundScope = "orka:tools:use"
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
@@ -216,6 +220,17 @@ func TestJobBuilder_Build_MountsTransactionTokenSecret(t *testing.T) {
 	}
 	if _, ok := findEnvVar(container.Env, workerenv.ContextTokenSubjectTokenFile); !ok {
 		t.Fatalf("missing %s env var", workerenv.ContextTokenSubjectTokenFile)
+	}
+	for name, want := range map[string]string{
+		workerenv.ContextTokenTTSURL:           "https://tts.example.test",
+		workerenv.ContextTokenSubjectTokenType: "urn:ietf:params:oauth:token-type:txn_token",
+		workerenv.ContextTokenChildScope:       "orka:agents:run",
+		workerenv.ContextTokenOutboundScope:    "orka:tools:use",
+	} {
+		got, ok := findEnvVar(container.Env, name)
+		if !ok || got.Value != want {
+			t.Fatalf("env %s = %#v, want %q", name, got, want)
+		}
 	}
 }
 

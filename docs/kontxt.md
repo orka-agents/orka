@@ -142,18 +142,21 @@ ORKA_CONTEXT_TOKEN_OUTBOUND_SCOPE=orka:tools:use
 
 Delegation scope is fail-closed: a requested child scope must be a subset of the parent Task transaction scopes. A successful child-token exchange stores the returned raw TxToken only in an owner-referenced Kubernetes Secret so the child worker can mount it; the Task stores only the Secret reference annotation and safe transaction metadata.
 
-Controller/API TTS flags are available for deployments that configure Orka-side exchange plumbing:
+Controller/API TTS flags are available for deployments that configure Orka-side exchange plumbing. When a child Task mounts an Orka-owned transaction-token Secret, the controller propagates the TTS URL and worker exchange scope settings into that child worker so deeper delegation can request narrower replacement tokens:
 
 ```bash
 ORKA_CONTEXT_TOKEN_TTS_URL=https://kontxt-tts.kontxt-system.svc
 ORKA_CONTEXT_TOKEN_TTS_AUDIENCE=orka
 ORKA_CONTEXT_TOKEN_TTS_TIMEOUT=5s
 ORKA_CONTEXT_TOKEN_TTS_TOKEN_SOURCE=serviceAccount
+ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_TYPE=urn:ietf:params:oauth:token-type:txn_token
+ORKA_CONTEXT_TOKEN_CHILD_SCOPE=orka:agents:run
+ORKA_CONTEXT_TOKEN_OUTBOUND_SCOPE=orka:tools:use
 ORKA_CONTEXT_TOKEN_CHILD_TOKEN_TTL=5m
 ORKA_CONTEXT_TOKEN_TOOL_TOKEN_TTL=2m
 ```
 
-These settings do not by themselves grant downstream access; workers still need an appropriate subject token file and narrow child/outbound scopes.
+These settings do not by themselves grant downstream access; workers still need an appropriate subject token file, which Orka provides automatically only for Tasks with an owner-referenced transaction-token Secret.
 
 ## Direct Kubernetes provenance hardening
 

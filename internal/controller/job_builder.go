@@ -73,14 +73,18 @@ const (
 // JobBuilder builds Kubernetes Jobs for Tasks
 type JobBuilder struct {
 	client.Client
-	AIWorkerImage      string
-	GeneralWorkerImage string
-	CopilotWorkerImage string
-	ClaudeWorkerImage  string
-	CodexWorkerImage   string
-	CodexSandboxMode   string
-	InitImage          string
-	ControllerURL      string // e.g. http://orka-controller.orka-system.svc:8080
+	AIWorkerImage                string
+	GeneralWorkerImage           string
+	CopilotWorkerImage           string
+	ClaudeWorkerImage            string
+	CodexWorkerImage             string
+	CodexSandboxMode             string
+	InitImage                    string
+	ControllerURL                string // e.g. http://orka-controller.orka-system.svc:8080
+	ContextTokenTTSURL           string
+	ContextTokenSubjectTokenType string
+	ContextTokenChildScope       string
+	ContextTokenOutboundScope    string
 }
 
 // NewJobBuilder creates a new JobBuilder
@@ -699,6 +703,14 @@ func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alp
 		corev1.EnvVar{Name: workerenv.TransactionTokenFile, Value: tokenPath},
 		corev1.EnvVar{Name: workerenv.ContextTokenSubjectTokenFile, Value: tokenPath},
 	)
+	job.Spec.Template.Spec.Containers[0].Env = workerenv.AppendIfSet(
+		job.Spec.Template.Spec.Containers[0].Env, workerenv.ContextTokenTTSURL, b.ContextTokenTTSURL)
+	job.Spec.Template.Spec.Containers[0].Env = workerenv.AppendIfSet(
+		job.Spec.Template.Spec.Containers[0].Env, workerenv.ContextTokenSubjectTokenType, b.ContextTokenSubjectTokenType)
+	job.Spec.Template.Spec.Containers[0].Env = workerenv.AppendIfSet(
+		job.Spec.Template.Spec.Containers[0].Env, workerenv.ContextTokenChildScope, b.ContextTokenChildScope)
+	job.Spec.Template.Spec.Containers[0].Env = workerenv.AppendIfSet(
+		job.Spec.Template.Spec.Containers[0].Env, workerenv.ContextTokenOutboundScope, b.ContextTokenOutboundScope)
 }
 
 // addSecretVolumes adds secret volumes to the Job
