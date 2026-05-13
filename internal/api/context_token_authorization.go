@@ -38,19 +38,25 @@ const (
 	ContextTokenScopeAgentsRead = "orka:agents:read"
 	// ContextTokenScopeAgentsWrite authorizes context-token callers to mutate Agent definitions.
 	ContextTokenScopeAgentsWrite = "orka:agents:write"
+	// ContextTokenScopeMemoryRead authorizes context-token callers to read memory resources.
+	ContextTokenScopeMemoryRead = "orka:memory:read"
+	// ContextTokenScopeMemoryWrite authorizes context-token callers to mutate memory resources.
+	ContextTokenScopeMemoryWrite = "orka:memory:write"
 )
 
 // ContextTokenAuthorizationConfig controls optional authorization checks derived
 // from verified context-token scope and transaction context claims.
 type ContextTokenAuthorizationConfig struct {
-	Mode             string
-	TaskCreateScopes []string
-	TaskReadScopes   []string
-	TaskListScopes   []string
-	TaskDeleteScopes []string
-	ToolReadScopes   []string
-	AgentReadScopes  []string
-	AgentWriteScopes []string
+	Mode              string
+	TaskCreateScopes  []string
+	TaskReadScopes    []string
+	TaskListScopes    []string
+	TaskDeleteScopes  []string
+	ToolReadScopes    []string
+	AgentReadScopes   []string
+	AgentWriteScopes  []string
+	MemoryReadScopes  []string
+	MemoryWriteScopes []string
 }
 
 // NewContextTokenAuthorizationConfig builds context-token authorization config.
@@ -62,7 +68,9 @@ func NewContextTokenAuthorizationConfig(
 	taskDeleteScopes,
 	toolReadScopes,
 	agentReadScopes,
-	agentWriteScopes string,
+	agentWriteScopes,
+	memoryReadScopes,
+	memoryWriteScopes string,
 ) (ContextTokenAuthorizationConfig, error) {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode == "" {
@@ -81,15 +89,19 @@ func NewContextTokenAuthorizationConfig(
 	toolRead := defaultScopes(toolReadScopes, ContextTokenScopeToolsRead)
 	agentRead := defaultScopes(agentReadScopes, ContextTokenScopeAgentsRead)
 	agentWrite := defaultScopes(agentWriteScopes, ContextTokenScopeAgentsWrite)
+	memoryRead := defaultScopes(memoryReadScopes, ContextTokenScopeMemoryRead)
+	memoryWrite := defaultScopes(memoryWriteScopes, ContextTokenScopeMemoryWrite)
 	return ContextTokenAuthorizationConfig{
-		Mode:             mode,
-		TaskCreateScopes: createScopes,
-		TaskReadScopes:   readScopes,
-		TaskListScopes:   listScopes,
-		TaskDeleteScopes: deleteScopes,
-		ToolReadScopes:   toolRead,
-		AgentReadScopes:  agentRead,
-		AgentWriteScopes: agentWrite,
+		Mode:              mode,
+		TaskCreateScopes:  createScopes,
+		TaskReadScopes:    readScopes,
+		TaskListScopes:    listScopes,
+		TaskDeleteScopes:  deleteScopes,
+		ToolReadScopes:    toolRead,
+		AgentReadScopes:   agentRead,
+		AgentWriteScopes:  agentWrite,
+		MemoryReadScopes:  memoryRead,
+		MemoryWriteScopes: memoryWrite,
 	}, nil
 }
 

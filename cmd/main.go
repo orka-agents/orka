@@ -102,6 +102,8 @@ func main() {
 	var contextTokenToolReadScopes string
 	var contextTokenAgentReadScopes string
 	var contextTokenAgentWriteScopes string
+	var contextTokenMemoryReadScopes string
+	var contextTokenMemoryWriteScopes string
 	var contextTokenTTSURL string
 	var contextTokenTTSAudience string
 	var contextTokenTTSTimeout string
@@ -201,6 +203,12 @@ func main() {
 	flag.StringVar(&contextTokenAgentWriteScopes, "context-token-agent-write-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_AGENT_WRITE_SCOPES"),
 		"Comma-separated context-token scopes that authorize Agent writes. Defaults to orka:agents:write.")
+	flag.StringVar(&contextTokenMemoryReadScopes, "context-token-memory-read-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_MEMORY_READ_SCOPES"),
+		"Comma-separated context-token scopes that authorize memory reads. Defaults to orka:memory:read.")
+	flag.StringVar(&contextTokenMemoryWriteScopes, "context-token-memory-write-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_MEMORY_WRITE_SCOPES"),
+		"Comma-separated context-token scopes that authorize memory writes. Defaults to orka:memory:write.")
 	flag.StringVar(&contextTokenTTSURL, "context-token-tts-url", os.Getenv("ORKA_CONTEXT_TOKEN_TTS_URL"),
 		"kontxt TTS base URL for optional token exchange/replacement.")
 	flag.StringVar(&contextTokenTTSAudience, "context-token-tts-audience", os.Getenv("ORKA_CONTEXT_TOKEN_TTS_AUDIENCE"),
@@ -247,6 +255,8 @@ func main() {
 		contextTokenToolReadScopes,
 		contextTokenAgentReadScopes,
 		contextTokenAgentWriteScopes,
+		contextTokenMemoryReadScopes,
+		contextTokenMemoryWriteScopes,
 	)
 	if err != nil {
 		setupLog.Error(err, "invalid context token authorization configuration")

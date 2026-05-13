@@ -58,12 +58,14 @@ func setupTestHandlersWithAuthz(t *testing.T, ctxTokenConfig ContextTokenConfig,
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	authz, err := NewContextTokenAuthorizationConfig(mode, "", "", "", "", "", "", "")
+	authz, err := NewContextTokenAuthorizationConfig(mode, "", "", "", "", "", "", "", "", "")
 	require.NoError(t, err)
 	handlers := NewHandlers(HandlersConfig{
 		Client:                    fakeClient,
 		SessionStore:              ss,
 		ResultStore:               ss,
+		MemoryStore:               ss,
+		MemoryProposalStore:       ss,
 		ContextTokenAuthorization: authz,
 	})
 
@@ -80,6 +82,11 @@ func setupTestHandlersWithAuthz(t *testing.T, ctxTokenConfig ContextTokenConfig,
 	app.Get("/agents/:name", handlers.GetAgent)
 	app.Put("/agents/:name", handlers.UpdateAgent)
 	app.Delete("/agents/:name", handlers.DeleteAgent)
+	app.Get("/memories", handlers.ListMemories)
+	app.Post("/memories", handlers.CreateMemory)
+	app.Get("/memories/:id", handlers.GetMemory)
+	app.Put("/memories/:id", handlers.UpdateMemory)
+	app.Delete("/memories/:id", handlers.DeleteMemory)
 	return app
 }
 
@@ -555,6 +562,42 @@ func TestHandlers_ToolAndAgentActions_ContextTokenAuthorization(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, agent.DeepCopyObject())
+			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if resp.StatusCode != tt.want {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandlers_MemoryActions_ContextTokenAuthorization(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		scope  string
+		want   int
+	}{
+		{name: "list memories allowed", method: http.MethodGet, path: "/memories", scope: ContextTokenScopeMemoryRead, want: http.StatusOK},
+		{name: "list memories denied", method: http.MethodGet, path: "/memories", scope: ContextTokenScopeMemoryWrite, want: http.StatusForbidden},
+		{name: "create memory allowed", method: http.MethodPost, path: "/memories", body: `{"namespace":"default","content":"remember this"}`, scope: ContextTokenScopeMemoryWrite, want: http.StatusCreated},
+		{name: "create memory denied", method: http.MethodPost, path: "/memories", body: `{"namespace":"default","content":"remember this"}`, scope: ContextTokenScopeMemoryRead, want: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
 			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			req.Header.Set(KontxtHeaderName, token)
