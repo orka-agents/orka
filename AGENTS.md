@@ -61,4 +61,4 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments.
 - Coordination memory tools: `recall_memory`, `remember`, `propose_memory`, `search_transcript`
 - Do not store secrets, credentials, tokens, raw transcripts, or one-off task status in durable memory
 - Reviewing a memory proposal does not apply it; create durable memory explicitly via the API until an apply flow exists
-- Live GitHub OIDC E2E requires GitHub Actions `id-token: write` or `ORKA_GITHUB_OIDC_TOKEN`; redact JWTs and request tokens in logs
+- Live GitHub OIDC/kontxt E2E requires GitHub Actions `id-token: write` or `ORKA_GITHUB_OIDC_TOKEN`; redact JWTs, TxTokens, and request tokens in logs

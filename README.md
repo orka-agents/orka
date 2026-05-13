@@ -54,7 +54,7 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 - 📦 **Declarative CRDs** — Task, Agent, Tool, Provider, and Skill custom resources for GitOps workflows
 - ⏰ **Scheduled Tasks** — Cron-based recurring execution with concurrency policies
 - 🔌 **REST & OpenAI-Compatible API** — Full CRUD + `/openai/v1/chat/completions` endpoint for Continue, Cursor, and any OpenAI-compatible client
-- 🔐 **Kubernetes & OIDC API Auth** — ServiceAccount bearer tokens by default, optional OIDC JWT validation for external callers, and verified requester stamping on Tasks
+- 🔐 **Kubernetes, OIDC & Context-Token API Auth** — ServiceAccount bearer tokens by default, optional OIDC JWT and `kontxt` TxToken validation for external callers, and verified requester stamping on Tasks
 - 🔮 **Anthropic-Compatible API** — `/anthropic/v1/messages` endpoint for Claude Code and other Anthropic-native clients
 - 📊 **Observability** — Prometheus metrics, structured logging, health probes
 - 🔒 **Hardened by Default** — Non-root containers, read-only rootfs, ServiceAccount token auth
