@@ -492,6 +492,8 @@ main() {
     ORKA_CONTEXT_TOKEN_ISSUER="${kontxt_issuer}" \
     ORKA_CONTEXT_TOKEN_AUDIENCE="${kontxt_audience}" \
     ORKA_CONTEXT_TOKEN_JWKS_URL="${kontxt_jwks_url}" \
+    ORKA_CONTEXT_TOKEN_AUTHZ_MODE=enforce \
+    ORKA_CONTEXT_TOKEN_TASK_CREATE_SCOPES=write \
     ORKA_CONTEXT_TOKEN_HEADERS-
   run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
 

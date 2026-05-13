@@ -36,6 +36,7 @@ type ServerConfig struct {
 	EnforceNamespaceIsolation bool
 	OIDC                      OIDCConfig
 	ContextTokens             ContextTokenConfig
+	ContextTokenAuthorization ContextTokenAuthorizationConfig
 	Chat                      ChatConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
@@ -97,6 +98,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		Client:                    c,
 		WatchNamespace:            config.WatchNamespace,
 		EnforceNamespaceIsolation: config.EnforceNamespaceIsolation,
+		ContextTokenAuthorization: config.ContextTokenAuthorization,
 		ResultStore:               config.ResultStore,
 		SessionStore:              config.SessionStore,
 		PlanStore:                 config.PlanStore,

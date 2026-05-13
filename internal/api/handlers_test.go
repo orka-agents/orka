@@ -49,6 +49,30 @@ func setupTestHandlers() (*Handlers, *fiber.App) {
 	return handlers, app
 }
 
+func setupTestHandlersWithAuthz(t *testing.T, ctxTokenConfig ContextTokenConfig, mode string) *fiber.App {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	authz, err := NewContextTokenAuthorizationConfig(mode, "")
+	require.NoError(t, err)
+	handlers := NewHandlers(HandlersConfig{
+		Client:                    fakeClient,
+		SessionStore:              ss,
+		ResultStore:               ss,
+		ContextTokenAuthorization: authz,
+	})
+
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(handlers.client, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Post("/tasks", handlers.CreateTask)
+	return app
+}
+
 func setupTestHandlersWithObjects(objs ...runtime.Object) (*Handlers, *fiber.App) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -321,6 +345,136 @@ func TestHandlers_CreateTask_StampsRequestedByFromContextToken(t *testing.T) {
 	}
 	if created.Annotations[labels.AnnotationTransactionID] != testContextTokenTransactionID {
 		t.Fatalf("transaction annotation = %q, want txn-123", created.Annotations[labels.AnnotationTransactionID])
+	}
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceAllowsMatchingToken(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate + " orka:agents:run",
+		"tctx": map[string]any{
+			"namespace":    "default",
+			"taskType":     "agent",
+			"agent":        "reviewer",
+			"repo":         "https://github.com/sozercan/orka.git",
+			"branch":       "kontxt",
+			"allowedTools": []string{"file_read", "code_exec"},
+		},
+	})
+	body := CreateTaskRequest{
+		Name:      "authorized-context-token-task",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeAgent,
+		AgentRef:  &corev1alpha1.AgentReference{Name: "reviewer"},
+		AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/sozercan/orka.git",
+				Branch:  "kontxt",
+			},
+			AllowedTools: []string{"file_read"},
+		},
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceRejectsMissingScope(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": "orka:tasks:get",
+	})
+	body := CreateTaskRequest{
+		Name:      "unauthorized-context-token-task",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeContainer,
+		Image:     "busybox",
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceRejectsContextMismatch(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace": "restricted",
+		},
+	})
+	body := CreateTaskRequest{
+		Name:      "context-mismatch-task",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeContainer,
+		Image:     "busybox",
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationAuditAllowsFailures(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeAudit)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": "orka:tasks:get",
+	})
+	body := CreateTaskRequest{
+		Name:      "audit-context-token-task",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeContainer,
+		Image:     "busybox",
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusCreated)
 	}
 }
 

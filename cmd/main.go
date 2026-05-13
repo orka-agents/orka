@@ -94,6 +94,8 @@ func main() {
 	var contextTokenAudience string
 	var contextTokenJWKSURL string
 	var contextTokenHeaders string
+	var contextTokenAuthzMode string
+	var contextTokenTaskCreateScopes string
 	var enableTracing bool
 	var tlsOpts []func(*tls.Config)
 
@@ -164,6 +166,11 @@ func main() {
 	flag.StringVar(&contextTokenHeaders, "context-token-headers", os.Getenv("ORKA_CONTEXT_TOKEN_HEADERS"),
 		"Comma-separated context-token headers. Use Header for raw tokens or Header:Scheme for scheme-prefixed "+
 			"tokens (default for kontxt: Txn-Token; bearer opt-in: Txn-Token,Authorization:Bearer).")
+	flag.StringVar(&contextTokenAuthzMode, "context-token-authz-mode", os.Getenv("ORKA_CONTEXT_TOKEN_AUTHZ_MODE"),
+		"Context-token authorization mode: off, audit, or enforce. Empty defaults to off.")
+	flag.StringVar(&contextTokenTaskCreateScopes, "context-token-task-create-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_TASK_CREATE_SCOPES"),
+		"Comma-separated context-token scopes that authorize Task creation. Defaults to orka:tasks:create.")
 	flag.BoolVar(&enableTracing, "enable-tracing", false,
 		"Enable OpenTelemetry tracing. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
 
@@ -184,6 +191,14 @@ func main() {
 	)
 	if err != nil {
 		setupLog.Error(err, "invalid context token configuration")
+		os.Exit(1)
+	}
+	contextTokenAuthzConfig, err := api.NewContextTokenAuthorizationConfig(
+		contextTokenAuthzMode,
+		contextTokenTaskCreateScopes,
+	)
+	if err != nil {
+		setupLog.Error(err, "invalid context token authorization configuration")
 		os.Exit(1)
 	}
 
@@ -415,17 +430,18 @@ func main() {
 			Audience: oidcAudience,
 			JWKSURL:  oidcJWKSURL,
 		},
-		ContextTokens:       contextTokenConfig,
-		ResultStore:         sqliteStore,
-		SessionStore:        sqliteStore,
-		PlanStore:           sqliteStore,
-		MessageStore:        sqliteStore,
-		ArtifactStore:       sqliteStore,
-		MemoryStore:         sqliteStore,
-		MemoryProposalStore: sqliteStore,
-		SecurityStore:       sqliteStore,
-		HealthChecker:       sqliteStore,
-		Clientset:           kubeClient,
+		ContextTokens:             contextTokenConfig,
+		ContextTokenAuthorization: contextTokenAuthzConfig,
+		ResultStore:               sqliteStore,
+		SessionStore:              sqliteStore,
+		PlanStore:                 sqliteStore,
+		MessageStore:              sqliteStore,
+		ArtifactStore:             sqliteStore,
+		MemoryStore:               sqliteStore,
+		MemoryProposalStore:       sqliteStore,
+		SecurityStore:             sqliteStore,
+		HealthChecker:             sqliteStore,
+		Clientset:                 kubeClient,
 		Chat: api.ChatConfig{
 			Enabled:         chatEnabled,
 			Provider:        chatProvider,

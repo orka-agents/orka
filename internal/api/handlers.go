@@ -75,6 +75,7 @@ type Handlers struct {
 	clientset                 kubernetes.Interface
 	watchNamespace            string
 	enforceNamespaceIsolation bool
+	contextTokenAuthorization ContextTokenAuthorizationConfig
 	resultStore               store.ResultStore
 	sessionStore              store.SessionStore
 	planStore                 store.PlanStore
@@ -90,6 +91,7 @@ type HandlersConfig struct {
 	Client                    client.Client
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
+	ContextTokenAuthorization ContextTokenAuthorizationConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
 	PlanStore                 store.PlanStore
@@ -108,6 +110,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		clientset:                 cfg.KubeClient,
 		watchNamespace:            cfg.WatchNamespace,
 		enforceNamespaceIsolation: cfg.EnforceNamespaceIsolation,
+		contextTokenAuthorization: cfg.ContextTokenAuthorization,
 		resultStore:               cfg.ResultStore,
 		sessionStore:              cfg.SessionStore,
 		planStore:                 cfg.PlanStore,
@@ -311,6 +314,9 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 
 	namespace, err := h.resolveNamespace(c, req.Namespace)
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenTaskCreate(c, req, namespace); err != nil {
 		return err
 	}
 
