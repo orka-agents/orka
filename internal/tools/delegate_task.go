@@ -450,8 +450,12 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	if err != nil {
 		return "", err
 	}
+	if err := prepareChildTransactionToken(ctx, t.k8sClient, dc.parentTask, childTask, "delegateTask", dc.args.Agent); err != nil {
+		return "", err
+	}
 
 	if err := t.k8sClient.Create(ctx, childTask); err != nil {
+		cleanupChildTransactionTokenSecret(ctx, t.k8sClient, childTask)
 		return "", fmt.Errorf("failed to create child task: %w", err)
 	}
 

@@ -163,6 +163,8 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 		},
 	})
 
+	b.addTransactionTokenSecret(job, task)
+
 	// Add workspace/home volumes for tasks that need a git workspace.
 	if taskNeedsWorkspace(task) {
 		b.addWorkspaceVolumes(job, task)
@@ -661,6 +663,42 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	}
 
 	return envVars
+}
+
+func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alpha1.Task) {
+	if task == nil || task.Annotations == nil {
+		return
+	}
+	secretName := strings.TrimSpace(task.Annotations[labels.AnnotationTransactionTokenSecret])
+	if secretName == "" {
+		return
+	}
+	const (
+		volumeName = "transaction-token"
+		mountPath  = "/var/run/orka/transaction-token"
+		tokenPath  = mountPath + "/token"
+	)
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: volumeName,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: secretName,
+				Items: []corev1.KeyToPath{{
+					Key:  "token",
+					Path: "token",
+				}},
+			},
+		},
+	})
+	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(job.Spec.Template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name:      volumeName,
+		MountPath: mountPath,
+		ReadOnly:  true,
+	})
+	job.Spec.Template.Spec.Containers[0].Env = append(job.Spec.Template.Spec.Containers[0].Env,
+		corev1.EnvVar{Name: workerenv.TransactionTokenFile, Value: tokenPath},
+		corev1.EnvVar{Name: workerenv.ContextTokenSubjectTokenFile, Value: tokenPath},
+	)
 }
 
 // addSecretVolumes adds secret volumes to the Job

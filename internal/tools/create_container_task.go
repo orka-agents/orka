@@ -176,7 +176,11 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 		}}
 	}
 
+	if err := prepareChildTransactionToken(ctx, t.k8sClient, parentTask, task, "createContainerTask", ""); err != nil {
+		return "", err
+	}
 	if err := t.k8sClient.Create(ctx, task); err != nil {
+		cleanupChildTransactionTokenSecret(ctx, t.k8sClient, task)
 		return classifyChatK8sErr(err)
 	}
 	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(task.Spec.Schedule)})

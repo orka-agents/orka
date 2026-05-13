@@ -180,6 +180,45 @@ func TestJobBuilder_Build_PropagatesTransactionMetadata(t *testing.T) {
 	}
 }
 
+func TestJobBuilder_Build_MountsTransactionTokenSecret(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: defaultNS,
+			Annotations: map[string]string{
+				labels.AnnotationTransactionTokenSecret: "child-tx-token",
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:  corev1alpha1.TaskTypeContainer,
+			Image: "busybox:latest",
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	var foundVolume bool
+	for _, volume := range job.Spec.Template.Spec.Volumes {
+		if volume.Name == "transaction-token" && volume.Secret != nil && volume.Secret.SecretName == "child-tx-token" {
+			foundVolume = true
+		}
+	}
+	if !foundVolume {
+		t.Fatalf("expected transaction-token secret volume, got %#v", job.Spec.Template.Spec.Volumes)
+	}
+	container := job.Spec.Template.Spec.Containers[0]
+	if _, ok := findEnvVar(container.Env, workerenv.TransactionTokenFile); !ok {
+		t.Fatalf("missing %s env var", workerenv.TransactionTokenFile)
+	}
+	if _, ok := findEnvVar(container.Env, workerenv.ContextTokenSubjectTokenFile); !ok {
+		t.Fatalf("missing %s env var", workerenv.ContextTokenSubjectTokenFile)
+	}
+}
+
 func TestJobBuilder_Build_AITask(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{

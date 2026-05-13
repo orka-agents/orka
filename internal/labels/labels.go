@@ -53,6 +53,7 @@ const (
 	AnnotationTransactionScope              = "orka.ai/transaction-scope"
 	AnnotationTransactionContextDigest      = "orka.ai/transaction-context-digest"
 	AnnotationRequesterContextDigest        = "orka.ai/requester-context-digest"
+	AnnotationTransactionTokenSecret        = "orka.ai/transaction-token-secret"
 	AnnotationAutoRetry                     = "orka.ai/auto-retry"
 	AnnotationMaxRetries                    = "orka.ai/max-retries"
 	AnnotationRetryCount                    = "orka.ai/retry-count"

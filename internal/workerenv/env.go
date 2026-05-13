@@ -45,6 +45,7 @@ const (
 	ContextTokenSubjectTokenFile      = "ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE"
 	ContextTokenSubjectTokenType      = "ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_TYPE"
 	ContextTokenOutboundScope         = "ORKA_CONTEXT_TOKEN_OUTBOUND_SCOPE"
+	ContextTokenChildScope            = "ORKA_CONTEXT_TOKEN_CHILD_SCOPE"
 
 	// AI worker env vars.
 	AIProvider        = "ORKA_AI_PROVIDER"
