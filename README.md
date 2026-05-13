@@ -118,7 +118,7 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Anthropic Compatibility](docs/anthropic-compat.md)          | Anthropic-compatible Messages API                     |
 | [Web Dashboard](docs/ui.md)                                  | Frontend architecture and pages                       |
 | [Security](docs/security.md)                                 | Security model and hardening                          |
-| [Kontxt Quickstart](docs/kontxt-quickstart.md)               | GitHub OIDC concepts, setup, and smoke-test validation |
+| [Kontxt Quickstart](docs/kontxt-quickstart.md)               | Use OIDC identity to call Orka without long-lived tokens |
 | [Kontxt TxToken Integration](docs/kontxt.md)                 | TxToken verification, authorization, TTS, and audit guidance |
 | [Repository Security Scanning](docs/repository-security-scanning.md) | Repository scan workflow, threat models, findings, and remediation |
 | [Development](docs/development.md)                           | Building, testing, and contributing                   |

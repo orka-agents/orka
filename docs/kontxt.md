@@ -2,7 +2,7 @@
 
 Orka can participate in `kontxt` transaction-token workflows without storing raw transaction tokens in Task specs/status, labels, annotations, logs, metrics, or durable memory. Delegated raw TxTokens are stored only in owner-referenced Kubernetes Secrets for worker handoff. The integration is intentionally staged so existing Kubernetes ServiceAccount and OIDC callers continue to work unless context-token authentication or authorization is explicitly configured.
 
-New to Kontxt or setting it up for the first time? Start with [Kontxt quickstart: GitHub OIDC to Orka TxTokens](kontxt-quickstart.md), then return here for detailed configuration and security guidance.
+New to Kontxt or setting it up for the first time? Start with [Kontxt quickstart: use OIDC identity to call Orka without long-lived tokens](kontxt-quickstart.md), then return here for detailed configuration and security guidance.
 
 ## Capability summary
 
@@ -26,6 +26,19 @@ Downstream services still need to validate incoming TxTokens themselves. Orka ca
 1. **Request-level authorization across service boundaries** — Orka validates signed TxTokens, evaluates required operation scopes, and uses selected signed `tctx` fields such as namespace, task type, agent, workspace repo/branch/ref, provider, model, and allowed tools as request constraints.
 2. **Immutable delegation chains with non-expanding scope** — Orka preserves the transaction ID across parent/child Tasks, exchanges mounted subject tokens through kontxt TTS for child or outbound TxTokens, rejects requested child scopes that are not present in the parent transaction scopes, and stores raw child tokens only in owner-referenced Kubernetes Secrets.
 3. **End-to-end audit correlation** — Orka stamps safe transaction metadata onto Tasks, Jobs, Pods, worker environment, and CLI views so operators can follow one transaction ID without storing raw TxTokens or full `tctx`/`rctx` payloads.
+
+## Subject-token sources for kontxt TTS
+
+Orka validates the resulting kontxt TxToken. The original identity token is validated by kontxt TTS before Orka sees the request. Common subject-token sources include:
+
+| Source | Use when | Notes |
+|---|---|---|
+| GitHub Actions OIDC | CI workflows need to call Orka without long-lived secrets. | Good smoke-test source because GitHub can mint short-lived OIDC JWTs for a workflow run. |
+| Microsoft Entra Agent ID / Workload ID | Enterprise-managed agents, services, or workloads need governed identity. | Use a TTS-specific audience and map stable Entra claims to allowed Orka scopes and signed `tctx`. |
+| Kubernetes projected ServiceAccount tokens | In-cluster workloads need TxTokens without an external OIDC issuer. | Kubernetes issues the subject JWT; kontxt TTS must trust the Kubernetes issuer/JWKS. Use bound, audience-scoped projected tokens rather than legacy long-lived ServiceAccount Secret tokens. |
+| Other OIDC/JWT issuers | Your organization already has a trusted issuer. | Works when kontxt TTS can validate issuer, audience, signing keys, and policy claims. |
+
+For Kubernetes, keep the distinction clear: direct ServiceAccount bearer authentication to Orka proves caller identity, but it does not provide kontxt transaction ID, signed `tctx`, scope narrowing, child TxTokens, or transaction audit correlation. The kontxt flow is `projected ServiceAccount token → kontxt TTS → TxToken → Orka`.
 
 ## Ingress verification
 
