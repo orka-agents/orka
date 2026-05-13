@@ -14,6 +14,8 @@ import (
 	"time"
 
 	sdktts "github.com/aramase/kontxt/sdk/tts"
+
+	"github.com/sozercan/orka/internal/metrics"
 )
 
 const (
@@ -133,14 +135,22 @@ func NewKontxtTTSClient(cfg ContextTokenTTSConfig) (*KontxtTTSClient, error) {
 
 // Exchange exchanges a subject token for a TxToken using kontxt TTS.
 func (c *KontxtTTSClient) Exchange(ctx context.Context, req ContextTokenExchangeRequest) (string, error) {
+	start := time.Now()
 	if c == nil || c.client == nil {
+		metrics.RecordContextTokenTTSExchange("failure", "not_configured", time.Since(start).Seconds())
 		return "", errors.New("context-token TTS client is not configured")
 	}
-	return c.client.Exchange(ctx, &sdktts.ExchangeRequest{
+	token, err := c.client.Exchange(ctx, &sdktts.ExchangeRequest{
 		SubjectToken:     req.SubjectToken,
 		SubjectTokenType: req.SubjectTokenType,
 		Scope:            req.Scope,
 		RequestDetails:   req.RequestDetails,
 		RequestContext:   req.RequestContext,
 	})
+	if err != nil {
+		metrics.RecordContextTokenTTSExchange("failure", "exchange_error", time.Since(start).Seconds())
+		return "", err
+	}
+	metrics.RecordContextTokenTTSExchange("success", "ok", time.Since(start).Seconds())
+	return token, nil
 }

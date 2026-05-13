@@ -22,6 +22,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/metrics"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -57,6 +58,7 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 	if parentTask.Spec.Transaction != nil && parentTask.Spec.Transaction.ID != "" {
 		requestDetails["txn"] = parentTask.Spec.Transaction.ID
 	}
+	start := time.Now()
 	token, err := sdktts.NewClient(ttsURL).Exchange(ctx, &sdktts.ExchangeRequest{
 		SubjectToken:     subjectToken,
 		SubjectTokenType: subjectTokenType,
@@ -64,8 +66,10 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 		RequestDetails:   requestDetails,
 	})
 	if err != nil {
+		metrics.RecordContextTokenTTSExchange("failure", "exchange_error", time.Since(start).Seconds())
 		return fmt.Errorf("exchanging child transaction token: %w", err)
 	}
+	metrics.RecordContextTokenTTSExchange("success", "ok", time.Since(start).Seconds())
 
 	secretName := childTransactionTokenSecretName(parentTask.Name)
 	if childTask.Annotations == nil {

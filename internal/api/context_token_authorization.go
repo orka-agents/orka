@@ -15,6 +15,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/metrics"
 )
 
 const (
@@ -181,6 +182,7 @@ func (h *Handlers) authorizeContextTokenTaskCreate(c fiber.Ctx, req CreateTaskRe
 
 	failures := contextTokenTaskCreateFailures(ui.ContextToken, h.contextTokenAuthorization, req, namespace)
 	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization("createTask", "allowed", "ok")
 		return nil
 	}
 
@@ -204,6 +206,7 @@ func authorizeContextTokenActionWithConfig(c fiber.Ctx, cfg ContextTokenAuthoriz
 		return nil
 	}
 	if hasAnyScope(ui.ContextToken.Scopes, requiredScopes) {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
 		return nil
 	}
 	failures := []string{fmt.Sprintf("missing one of required scopes %q", strings.Join(requiredScopes, ","))}
@@ -221,6 +224,7 @@ func authorizeContextTokenProviderUse(c fiber.Ctx, cfg ContextTokenAuthorization
 
 	failures := contextTokenProviderUseFailures(ui.ContextToken, cfg, namespace, provider, model)
 	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
 		return nil
 	}
 	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
@@ -243,12 +247,19 @@ func authorizeContextTokenToolUse(c fiber.Ctx, cfg ContextTokenAuthorizationConf
 		failures = append(failures, "one or more tools are not allowed by token context")
 	}
 	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
 		return nil
 	}
 	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
 }
 
 func handleContextTokenAuthorizationFailures(cfg ContextTokenAuthorizationConfig, token *ContextToken, action string, failures []string) error {
+	result := "audit"
+	if cfg.enforcing() {
+		result = "denied"
+	}
+	metrics.RecordContextTokenAuthorization(action, result, contextTokenAuthorizationFailureReason(failures))
+
 	log.Info("context-token authorization failed",
 		"mode", cfg.Mode,
 		"action", action,
@@ -261,6 +272,35 @@ func handleContextTokenAuthorizationFailures(cfg ContextTokenAuthorizationConfig
 		return fiber.NewError(fiber.StatusForbidden, "context token is not authorized for "+action)
 	}
 	return nil
+}
+
+func contextTokenAuthorizationFailureReason(failures []string) string {
+	if len(failures) == 0 {
+		return "unknown"
+	}
+	joined := strings.ToLower(strings.Join(failures, "; "))
+	switch {
+	case strings.Contains(joined, "missing one of required scopes"):
+		return "missing_scope"
+	case strings.Contains(joined, "namespace"):
+		return "namespace_mismatch"
+	case strings.Contains(joined, "agent"):
+		return "agent_mismatch"
+	case strings.Contains(joined, "workspace repo") || strings.Contains(joined, "repository"):
+		return "repo_mismatch"
+	case strings.Contains(joined, "workspace branch"):
+		return "branch_mismatch"
+	case strings.Contains(joined, "workspace ref"):
+		return "ref_mismatch"
+	case strings.Contains(joined, "provider"):
+		return "provider_mismatch"
+	case strings.Contains(joined, "model"):
+		return "model_mismatch"
+	case strings.Contains(joined, "tool"):
+		return "tool_not_allowed"
+	default:
+		return "context_violation"
+	}
 }
 
 func contextTokenProviderUseFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, namespace string, provider ProviderResolutionInfo, model string) []string {

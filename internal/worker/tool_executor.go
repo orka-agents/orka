@@ -19,15 +19,14 @@ import (
 	"time"
 
 	kontxttoken "github.com/aramase/kontxt/pkg/token"
-
-	"github.com/sozercan/orka/internal/workerenv"
-
 	sdktts "github.com/aramase/kontxt/sdk/tts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/metrics"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 // ToolExecutor handles execution of custom Tool CRDs via HTTP
@@ -241,12 +240,19 @@ func (e *ToolExecutor) outboundTransactionToken(ctx context.Context, tool *corev
 	if taskName := strings.TrimSpace(os.Getenv(workerenv.TaskName)); taskName != "" {
 		requestDetails["task"] = taskName
 	}
-	return sdktts.NewClient(ttsURL).Exchange(ctx, &sdktts.ExchangeRequest{
+	start := time.Now()
+	token, err := sdktts.NewClient(ttsURL).Exchange(ctx, &sdktts.ExchangeRequest{
 		SubjectToken:     subjectToken,
 		SubjectTokenType: subjectTokenType,
 		Scope:            scope,
 		RequestDetails:   requestDetails,
 	})
+	if err != nil {
+		metrics.RecordContextTokenTTSExchange("failure", "exchange_error", time.Since(start).Seconds())
+		return "", err
+	}
+	metrics.RecordContextTokenTTSExchange("success", "ok", time.Since(start).Seconds())
+	return token, nil
 }
 
 func readTokenFileEnv(envName, description string) (string, bool, error) {

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	kontxttoken "github.com/aramase/kontxt/pkg/token"
+
+	"github.com/sozercan/orka/internal/metrics"
 )
 
 func TestNewContextTokenTTSConfig(t *testing.T) {
@@ -50,6 +52,9 @@ func TestNewContextTokenTTSConfigDisabledByDefault(t *testing.T) {
 }
 
 func TestKontxtTTSClientExchange(t *testing.T) {
+	metrics.ContextTokenTTSExchangeTotal.Reset()
+	metrics.ContextTokenTTSExchangeDuration.Reset()
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/token_endpoint" {
 			t.Fatalf("path = %q, want /token_endpoint", r.URL.Path)
@@ -113,5 +118,8 @@ func TestKontxtTTSClientExchange(t *testing.T) {
 	}
 	if token != "tx-token" {
 		t.Fatalf("token = %q, want tx-token", token)
+	}
+	if count := testCounterValue(t, metrics.ContextTokenTTSExchangeTotal, "success", "ok"); count != 1 {
+		t.Fatalf("TTS exchange success metric = %v, want 1", count)
 	}
 }

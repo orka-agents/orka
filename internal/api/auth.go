@@ -21,6 +21,8 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/sozercan/orka/internal/metrics"
 )
 
 const (
@@ -220,8 +222,10 @@ func authenticateToken(ctx context.Context, c client.Client, token string, cfg A
 func authenticateContextToken(ctx context.Context, token string, profile ContextTokenProfileConfig) (*UserInfo, error) {
 	contextToken, err := validateContextToken(ctx, token, profile)
 	if err != nil {
+		metrics.RecordContextTokenAuth(profile.Name, "failure")
 		return nil, err
 	}
+	metrics.RecordContextTokenAuth(contextToken.Profile, "success")
 	return contextTokenToUserInfo(contextToken), nil
 }
 
