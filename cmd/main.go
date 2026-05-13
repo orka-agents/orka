@@ -160,7 +160,7 @@ func main() {
 		"Context-token audience expected in external API tokens. "+
 			"Requires --context-token-profile and --context-token-issuer when set.")
 	flag.StringVar(&contextTokenJWKSURL, "context-token-jwks-url", os.Getenv("ORKA_CONTEXT_TOKEN_JWKS_URL"),
-		"Optional context-token JWKS URL. When empty, it is discovered from issuer metadata.")
+		"Optional context-token JWKS URL. For kontxt, defaults to <issuer>/.well-known/jwks.json.")
 	flag.StringVar(&contextTokenHeaders, "context-token-headers", os.Getenv("ORKA_CONTEXT_TOKEN_HEADERS"),
 		"Comma-separated context-token headers. Use Header for raw tokens or Header:Scheme for scheme-prefixed "+
 			"tokens (default for kontxt: Txn-Token; bearer opt-in: Txn-Token,Authorization:Bearer).")

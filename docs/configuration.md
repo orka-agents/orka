@@ -460,7 +460,7 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 | `--context-token-profile` | `ORKA_CONTEXT_TOKEN_PROFILE` env or `""` | Context-token profile for external API requests. Currently supports `kontxt` |
 | `--context-token-issuer` | `ORKA_CONTEXT_TOKEN_ISSUER` env or `""` | Context-token issuer URL. Requires `--context-token-profile` and `--context-token-audience` when set |
 | `--context-token-audience` | `ORKA_CONTEXT_TOKEN_AUDIENCE` env or `""` | Expected context-token audience. Requires `--context-token-profile` and `--context-token-issuer` when set |
-| `--context-token-jwks-url` | `ORKA_CONTEXT_TOKEN_JWKS_URL` env or `""` | Optional context-token JWKS URL. When empty, Orka discovers it from the issuer metadata |
+| `--context-token-jwks-url` | `ORKA_CONTEXT_TOKEN_JWKS_URL` env or `""` | Optional context-token JWKS URL. For `kontxt`, defaults to `<issuer>/.well-known/jwks.json` |
 | `--context-token-headers` | `ORKA_CONTEXT_TOKEN_HEADERS` env or `""` | Comma-separated context-token header locations. Use `Header` for raw tokens or `Header:Scheme` for scheme-prefixed tokens. The `kontxt` default is `Txn-Token` |
 | `--ai-worker-image` | `ghcr.io/sozercan/orka/ai-worker:latest` | AI worker container image |
 | `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Copilot agent worker image |
@@ -523,8 +523,8 @@ The same settings can be supplied with environment variables:
 ORKA_CONTEXT_TOKEN_PROFILE=kontxt
 ORKA_CONTEXT_TOKEN_ISSUER=https://issuer.example.com
 ORKA_CONTEXT_TOKEN_AUDIENCE=orka-api
-# Optional; when omitted, Orka discovers the JWKS URL from the issuer metadata.
-ORKA_CONTEXT_TOKEN_JWKS_URL=https://issuer.example.com/.well-known/jwks
+# Optional for kontxt; when omitted, Orka uses <issuer>/.well-known/jwks.json.
+ORKA_CONTEXT_TOKEN_JWKS_URL=https://issuer.example.com/.well-known/jwks.json
 ```
 
 By default, the `kontxt` profile reads raw transaction tokens from the `Txn-Token` header:

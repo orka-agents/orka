@@ -273,6 +273,29 @@ func TestValidateContextToken_Kontxt(t *testing.T) {
 	}
 }
 
+func TestValidateContextToken_KontxtUsesDefaultJWKSURL(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	cfg, err := NewContextTokenConfig(ContextTokenProfileKontxt, provider.server.URL, provider.aud, "", "")
+	if err != nil {
+		t.Fatalf("NewContextTokenConfig returned error: %v", err)
+	}
+	profile := cfg.Profiles[0]
+	if profile.JWKSURL != provider.server.URL+"/.well-known/jwks.json" {
+		t.Fatalf("JWKSURL = %q, want kontxt default JWKS endpoint", profile.JWKSURL)
+	}
+
+	token := issueTestContextToken(t, provider, nil, nil)
+	if _, err := validateContextToken(context.Background(), token, profile); err != nil {
+		t.Fatalf("validateContextToken returned error: %v", err)
+	}
+	if provider.discoveryHits.Load() != 0 {
+		t.Fatalf("discoveryHits = %d, want 0 for kontxt default JWKS URL", provider.discoveryHits.Load())
+	}
+	if provider.jwksHits.Load() == 0 {
+		t.Fatal("expected kontxt default JWKS endpoint to be fetched")
+	}
+}
+
 func TestValidateContextToken_KontxtFailures(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	profile := testContextTokenConfig(t, provider, "").Profiles[0]

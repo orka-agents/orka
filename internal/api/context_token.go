@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 
+	kontxttoken "github.com/aramase/kontxt/pkg/token"
 	"github.com/gofiber/fiber/v3"
 )
 
@@ -27,10 +28,10 @@ const (
 	ContextTokenProfileKontxt = "kontxt"
 
 	// KontxtHeaderName is the default HTTP header used by kontxt transaction tokens.
-	KontxtHeaderName = "Txn-Token"
+	KontxtHeaderName = kontxttoken.HeaderName
 
 	// KontxtJWTType is the JWT typ header expected by kontxt transaction tokens.
-	KontxtJWTType = "txntoken+jwt"
+	KontxtJWTType = kontxttoken.TypeHeader
 )
 
 var kontxtRequiredClaims = []string{"iat", "txn", "scope", "req_wl"}
@@ -140,6 +141,9 @@ func NewContextTokenConfig(profile, issuer, audience, jwksURL, headers string) (
 	case ContextTokenProfileKontxt:
 		if len(headerCfg) == 0 {
 			headerCfg = []TokenHeaderConfig{{Name: KontxtHeaderName}}
+		}
+		if jwksURL == "" {
+			jwksURL = strings.TrimRight(issuer, "/") + "/.well-known/jwks.json"
 		}
 		return ContextTokenConfig{Profiles: []ContextTokenProfileConfig{{
 			Name:           ContextTokenProfileKontxt,
