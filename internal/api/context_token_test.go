@@ -339,10 +339,22 @@ func TestValidateContextToken_KontxtFailures(t *testing.T) {
 
 func TestAllowedCORSHeadersIncludesContextTokenHeaders(t *testing.T) {
 	provider := newTestOIDCProvider(t)
-	cfg := testContextTokenConfig(t, provider, "X-Txn-Token,Authorization:Bearer")
+	cfg := testContextTokenConfig(t, provider, "Txn-Token,X-Txn-Token,Authorization:Bearer")
 	headers := allowedCORSHeaders(cfg)
 
 	for _, want := range []string{KontxtHeaderName, AuthHeader, XAPIKeyHeader, "X-Txn-Token"} {
+		if !slices.Contains(headers, want) {
+			t.Fatalf("allowedCORSHeaders() = %#v, want %q", headers, want)
+		}
+	}
+}
+
+func TestAllowedCORSHeadersOmitsContextTokenHeadersWhenDisabled(t *testing.T) {
+	headers := allowedCORSHeaders(ContextTokenConfig{})
+	if slices.Contains(headers, KontxtHeaderName) {
+		t.Fatalf("allowedCORSHeaders() = %#v, did not want %q when context-token auth is disabled", headers, KontxtHeaderName)
+	}
+	for _, want := range []string{AuthHeader, XAPIKeyHeader} {
 		if !slices.Contains(headers, want) {
 			t.Fatalf("allowedCORSHeaders() = %#v, want %q", headers, want)
 		}

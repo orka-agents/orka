@@ -1415,7 +1415,8 @@ spec:
                       type: string
                     type: array
                   issuer:
-                    description: Issuer authenticated the requester.
+                    description: Issuer is the token issuer that authenticated the
+                      requester.
                     type: string
                   roles:
                     description: Roles are verified role or scope values, if present.

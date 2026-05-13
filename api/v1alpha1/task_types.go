@@ -54,7 +54,7 @@ type RequestedBy struct {
 	// +optional
 	Subject string `json:"subject,omitempty"`
 
-	// Issuer authenticated the requester.
+	// Issuer is the token issuer that authenticated the requester.
 	// +optional
 	Issuer string `json:"issuer,omitempty"`
 

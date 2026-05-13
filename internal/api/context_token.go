@@ -79,40 +79,18 @@ type ContextToken struct {
 	Claims             map[string]any
 }
 
-type contextTokenAudience []string
-
-func (a *contextTokenAudience) UnmarshalJSON(data []byte) error {
-	if string(data) == "null" {
-		*a = nil
-		return nil
-	}
-
-	var single string
-	if err := json.Unmarshal(data, &single); err == nil {
-		*a = []string{single}
-		return nil
-	}
-
-	var many []string
-	if err := json.Unmarshal(data, &many); err != nil {
-		return err
-	}
-	*a = many
-	return nil
-}
-
 type contextTokenClaims struct {
-	Issuer             string               `json:"iss"`
-	IssuedAt           json.Number          `json:"iat"`
-	Subject            string               `json:"sub"`
-	Audience           contextTokenAudience `json:"aud"`
-	Expiration         json.Number          `json:"exp"`
-	NotBefore          json.Number          `json:"nbf,omitempty"`
-	TransactionID      string               `json:"txn"`
-	Scope              string               `json:"scope"`
-	RequestingWorkload string               `json:"req_wl"`
-	TransactionContext map[string]any       `json:"tctx,omitempty"`
-	RequesterContext   map[string]any       `json:"rctx,omitempty"`
+	Issuer             string         `json:"iss"`
+	IssuedAt           json.Number    `json:"iat"`
+	Subject            string         `json:"sub"`
+	Audience           stringList     `json:"aud"`
+	Expiration         json.Number    `json:"exp"`
+	NotBefore          json.Number    `json:"nbf,omitempty"`
+	TransactionID      string         `json:"txn"`
+	Scope              string         `json:"scope"`
+	RequestingWorkload string         `json:"req_wl"`
+	TransactionContext map[string]any `json:"tctx,omitempty"`
+	RequesterContext   map[string]any `json:"rctx,omitempty"`
 }
 
 // NewContextTokenConfig builds context-token configuration for a named profile.

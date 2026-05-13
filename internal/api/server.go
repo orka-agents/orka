@@ -152,22 +152,22 @@ func (s *Server) setupMiddleware() {
 }
 
 func allowedCORSHeaders(contextTokens ContextTokenConfig) []string {
-	headers := []string{"Origin", "Content-Type", "Accept", AuthHeader, XAPIKeyHeader, KontxtHeaderName}
+	headers := []string{"Origin", "Content-Type", "Accept", AuthHeader, XAPIKeyHeader}
+	addHeader := func(name string) {
+		if name == "" {
+			return
+		}
+		for _, existing := range headers {
+			if strings.EqualFold(existing, name) {
+				return
+			}
+		}
+		headers = append(headers, name)
+	}
+
 	for _, profile := range contextTokens.Profiles {
 		for _, header := range profile.Headers {
-			if header.Name == "" {
-				continue
-			}
-			found := false
-			for _, existing := range headers {
-				if strings.EqualFold(existing, header.Name) {
-					found = true
-					break
-				}
-			}
-			if !found {
-				headers = append(headers, header.Name)
-			}
+			addHeader(header.Name)
 		}
 	}
 	return headers
