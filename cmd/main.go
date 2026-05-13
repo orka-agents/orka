@@ -96,6 +96,12 @@ func main() {
 	var contextTokenHeaders string
 	var contextTokenAuthzMode string
 	var contextTokenTaskCreateScopes string
+	var contextTokenTTSURL string
+	var contextTokenTTSAudience string
+	var contextTokenTTSTimeout string
+	var contextTokenTTSTokenSource string
+	var contextTokenChildTokenTTL string
+	var contextTokenToolTokenTTL string
 	var enableTracing bool
 	var tlsOpts []func(*tls.Config)
 
@@ -171,6 +177,21 @@ func main() {
 	flag.StringVar(&contextTokenTaskCreateScopes, "context-token-task-create-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_TASK_CREATE_SCOPES"),
 		"Comma-separated context-token scopes that authorize Task creation. Defaults to orka:tasks:create.")
+	flag.StringVar(&contextTokenTTSURL, "context-token-tts-url", os.Getenv("ORKA_CONTEXT_TOKEN_TTS_URL"),
+		"kontxt TTS base URL for optional token exchange/replacement.")
+	flag.StringVar(&contextTokenTTSAudience, "context-token-tts-audience", os.Getenv("ORKA_CONTEXT_TOKEN_TTS_AUDIENCE"),
+		"Audience to request from kontxt TTS exchanges.")
+	flag.StringVar(&contextTokenTTSTimeout, "context-token-tts-timeout", os.Getenv("ORKA_CONTEXT_TOKEN_TTS_TIMEOUT"),
+		"Timeout for kontxt TTS exchanges. Defaults to 5s when TTS is enabled.")
+	flag.StringVar(&contextTokenTTSTokenSource, "context-token-tts-token-source",
+		os.Getenv("ORKA_CONTEXT_TOKEN_TTS_TOKEN_SOURCE"),
+		"Subject token source for kontxt TTS exchanges: serviceAccount, incoming, or none.")
+	flag.StringVar(&contextTokenChildTokenTTL, "context-token-child-token-ttl",
+		os.Getenv("ORKA_CONTEXT_TOKEN_CHILD_TOKEN_TTL"),
+		"Requested TTL for child delegation TxTokens. Defaults to 5m when TTS is enabled.")
+	flag.StringVar(&contextTokenToolTokenTTL, "context-token-tool-token-ttl",
+		os.Getenv("ORKA_CONTEXT_TOKEN_TOOL_TOKEN_TTL"),
+		"Requested TTL for outbound tool TxTokens. Defaults to 2m when TTS is enabled.")
 	flag.BoolVar(&enableTracing, "enable-tracing", false,
 		"Enable OpenTelemetry tracing. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
 
@@ -199,6 +220,18 @@ func main() {
 	)
 	if err != nil {
 		setupLog.Error(err, "invalid context token authorization configuration")
+		os.Exit(1)
+	}
+	contextTokenTTSConfig, err := api.NewContextTokenTTSConfig(
+		contextTokenTTSURL,
+		contextTokenTTSAudience,
+		contextTokenTTSTimeout,
+		contextTokenTTSTokenSource,
+		contextTokenChildTokenTTL,
+		contextTokenToolTokenTTL,
+	)
+	if err != nil {
+		setupLog.Error(err, "invalid context token TTS configuration")
 		os.Exit(1)
 	}
 
@@ -432,6 +465,7 @@ func main() {
 		},
 		ContextTokens:             contextTokenConfig,
 		ContextTokenAuthorization: contextTokenAuthzConfig,
+		ContextTokenTTS:           contextTokenTTSConfig,
 		ResultStore:               sqliteStore,
 		SessionStore:              sqliteStore,
 		PlanStore:                 sqliteStore,
