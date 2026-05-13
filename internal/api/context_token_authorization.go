@@ -14,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/llm"
 )
 
 const (
@@ -34,6 +35,10 @@ const (
 	ContextTokenScopeTaskDelete = "orka:tasks:delete"
 	// ContextTokenScopeToolsRead authorizes context-token callers to read Tool definitions.
 	ContextTokenScopeToolsRead = "orka:tools:read"
+	// ContextTokenScopeToolsUse authorizes context-token callers to execute Orka-managed tools.
+	ContextTokenScopeToolsUse = "orka:tools:use"
+	// ContextTokenScopeProvidersUse authorizes context-token callers to use configured model providers.
+	ContextTokenScopeProvidersUse = "orka:providers:use"
 	// ContextTokenScopeAgentsRead authorizes context-token callers to read Agent definitions.
 	ContextTokenScopeAgentsRead = "orka:agents:read"
 	// ContextTokenScopeAgentsWrite authorizes context-token callers to mutate Agent definitions.
@@ -61,6 +66,8 @@ type ContextTokenAuthorizationConfig struct {
 	TaskListScopes     []string
 	TaskDeleteScopes   []string
 	ToolReadScopes     []string
+	ToolUseScopes      []string
+	ProviderUseScopes  []string
 	AgentReadScopes    []string
 	AgentWriteScopes   []string
 	MemoryReadScopes   []string
@@ -79,6 +86,8 @@ func NewContextTokenAuthorizationConfig(
 	taskListScopes,
 	taskDeleteScopes,
 	toolReadScopes,
+	toolUseScopes,
+	providerUseScopes,
 	agentReadScopes,
 	agentWriteScopes,
 	memoryReadScopes,
@@ -103,6 +112,8 @@ func NewContextTokenAuthorizationConfig(
 	listScopes := defaultScopes(taskListScopes, ContextTokenScopeTaskList)
 	deleteScopes := defaultScopes(taskDeleteScopes, ContextTokenScopeTaskDelete)
 	toolRead := defaultScopes(toolReadScopes, ContextTokenScopeToolsRead)
+	toolUse := defaultScopes(toolUseScopes, ContextTokenScopeToolsUse)
+	providerUse := defaultScopes(providerUseScopes, ContextTokenScopeProvidersUse)
 	agentRead := defaultScopes(agentReadScopes, ContextTokenScopeAgentsRead)
 	agentWrite := defaultScopes(agentWriteScopes, ContextTokenScopeAgentsWrite)
 	memoryRead := defaultScopes(memoryReadScopes, ContextTokenScopeMemoryRead)
@@ -118,6 +129,8 @@ func NewContextTokenAuthorizationConfig(
 		TaskListScopes:     listScopes,
 		TaskDeleteScopes:   deleteScopes,
 		ToolReadScopes:     toolRead,
+		ToolUseScopes:      toolUse,
+		ProviderUseScopes:  providerUse,
 		AgentReadScopes:    agentRead,
 		AgentWriteScopes:   agentWrite,
 		MemoryReadScopes:   memoryRead,
@@ -163,7 +176,15 @@ func (h *Handlers) authorizeContextTokenTaskCreate(c fiber.Ctx, req CreateTaskRe
 }
 
 func (h *Handlers) authorizeContextTokenAction(c fiber.Ctx, action string, requiredScopes []string) error {
-	if !h.contextTokenAuthorization.Enabled() {
+	return authorizeContextTokenActionWithConfig(c, h.contextTokenAuthorization, action, requiredScopes)
+}
+
+func (h *Handlers) handleContextTokenAuthorizationFailures(token *ContextToken, action string, failures []string) error {
+	return handleContextTokenAuthorizationFailures(h.contextTokenAuthorization, token, action, failures)
+}
+
+func authorizeContextTokenActionWithConfig(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, action string, requiredScopes []string) error {
+	if !cfg.Enabled() {
 		return nil
 	}
 	ui := GetUserInfo(c)
@@ -174,22 +195,85 @@ func (h *Handlers) authorizeContextTokenAction(c fiber.Ctx, action string, requi
 		return nil
 	}
 	failures := []string{fmt.Sprintf("missing one of required scopes %q", strings.Join(requiredScopes, ","))}
-	return h.handleContextTokenAuthorizationFailures(ui.ContextToken, action, failures)
+	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
 }
 
-func (h *Handlers) handleContextTokenAuthorizationFailures(token *ContextToken, action string, failures []string) error {
+func authorizeContextTokenProviderUse(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, action, namespace string, provider ProviderResolutionInfo, model string) error {
+	if !cfg.Enabled() {
+		return nil
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return nil
+	}
+
+	failures := contextTokenProviderUseFailures(ui.ContextToken, cfg, namespace, provider, model)
+	if len(failures) == 0 {
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+}
+
+func authorizeContextTokenToolUse(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, action string, toolNames []string) error {
+	if !cfg.Enabled() {
+		return nil
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return nil
+	}
+
+	failures := []string{}
+	if !hasAnyScope(ui.ContextToken.Scopes, cfg.ToolUseScopes) {
+		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.ToolUseScopes, ",")))
+	}
+	if allowed, ok := contextStringList(ui.ContextToken.TransactionContext, "allowedTools"); ok && !toolNamesAllowed(toolNames, allowed) {
+		failures = append(failures, "one or more tools are not allowed by token context")
+	}
+	if len(failures) == 0 {
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+}
+
+func handleContextTokenAuthorizationFailures(cfg ContextTokenAuthorizationConfig, token *ContextToken, action string, failures []string) error {
 	log.Info("context-token authorization failed",
-		"mode", h.contextTokenAuthorization.Mode,
+		"mode", cfg.Mode,
 		"action", action,
 		"transactionID", token.TransactionID,
 		"subject", token.Subject,
 		"issuer", token.Issuer,
 		"failures", strings.Join(failures, "; "),
 	)
-	if h.contextTokenAuthorization.enforcing() {
+	if cfg.enforcing() {
 		return fiber.NewError(fiber.StatusForbidden, "context token is not authorized for "+action)
 	}
 	return nil
+}
+
+func contextTokenProviderUseFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, namespace string, provider ProviderResolutionInfo, model string) []string {
+	failures := []string{}
+	if !hasAnyScope(token.Scopes, cfg.ProviderUseScopes) {
+		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.ProviderUseScopes, ",")))
+	}
+
+	if want, ok := contextString(token.TransactionContext, "namespace"); ok && namespace != want {
+		failures = append(failures, fmt.Sprintf("namespace %q does not match token context %q", namespace, want))
+	}
+	if want, ok := contextString(token.TransactionContext, "provider"); ok && !providerMatches(provider, want) {
+		failures = append(failures, fmt.Sprintf("provider %q is not allowed by token context", provider.Name))
+	}
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedProviders"); ok && !providerAllowed(provider, allowed) {
+		failures = append(failures, fmt.Sprintf("provider %q is not allowed by token context", provider.Name))
+	}
+	if want, ok := contextString(token.TransactionContext, "model"); ok && model != want {
+		failures = append(failures, fmt.Sprintf("model %q does not match token context %q", model, want))
+	}
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedModels"); ok && !modelAllowed(provider, model, allowed) {
+		failures = append(failures, fmt.Sprintf("model %q is not allowed by token context", model))
+	}
+
+	return failures
 }
 
 func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, req CreateTaskRequest, namespace string) []string {
@@ -239,6 +323,81 @@ func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthori
 	}
 
 	return failures
+}
+
+func completionToolNames(tools []llm.Tool) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if strings.TrimSpace(tool.Name) != "" {
+			names = append(names, tool.Name)
+		}
+	}
+	return names
+}
+
+func openAIContextTokenAuthorizationError(c fiber.Ctx, err error) error {
+	if err == nil {
+		return nil
+	}
+	if ferr, ok := err.(*fiber.Error); ok && ferr.Code == fiber.StatusForbidden {
+		return c.Status(fiber.StatusForbidden).JSON(OAIError{Error: OAIErrorDetail{
+			Message: ferr.Message,
+			Type:    "permission_error",
+		}})
+	}
+	return err
+}
+
+func anthropicContextTokenAuthorizationError(c fiber.Ctx, err error) error {
+	if err == nil {
+		return nil
+	}
+	if ferr, ok := err.(*fiber.Error); ok && ferr.Code == fiber.StatusForbidden {
+		return anthropicError(c, fiber.StatusForbidden, "permission_error", ferr.Message)
+	}
+	return err
+}
+
+func providerAllowed(provider ProviderResolutionInfo, allowed []string) bool {
+	for _, want := range allowed {
+		if providerMatches(provider, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func providerMatches(provider ProviderResolutionInfo, want string) bool {
+	want = strings.TrimSpace(want)
+	if want == "" {
+		return false
+	}
+	return provider.Name == want || provider.Type == want
+}
+
+func modelAllowed(provider ProviderResolutionInfo, model string, allowed []string) bool {
+	for _, want := range allowed {
+		want = strings.TrimSpace(want)
+		switch want {
+		case "":
+			continue
+		case model, provider.Name + "/" + model, provider.Type + "/" + model:
+			return true
+		}
+	}
+	return false
+}
+
+func toolNamesAllowed(tools []string, allowed []string) bool {
+	for _, tool := range tools {
+		if tool == "" {
+			continue
+		}
+		if !slices.Contains(allowed, tool) {
+			return false
+		}
+	}
+	return true
 }
 
 func hasAnyScope(actual, required []string) bool {

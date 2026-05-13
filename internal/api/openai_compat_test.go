@@ -991,3 +991,30 @@ func TestHandleChatCompletions_ProviderSlashModel(t *testing.T) {
 		t.Errorf("did not expect 400; provider/model split should have worked. body: %s", string(respBody))
 	}
 }
+
+func TestOpenAICompat_ContextTokenAuthorizationRequiresProviderScopeForModels(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	handler, app := setupTestOpenAIHandler()
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationModeEnforce, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+	if err != nil {
+		t.Fatalf("NewContextTokenAuthorizationConfig returned error: %v", err)
+	}
+	handler.contextTokenAuthorization = authz
+
+	app.Use(NewAuthMiddleware(handler.client, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Get("/openai/v1/models", handler.HandleListModels)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskList,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}

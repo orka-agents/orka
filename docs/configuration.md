@@ -462,6 +462,22 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 | `--context-token-audience` | `ORKA_CONTEXT_TOKEN_AUDIENCE` env or `""` | Expected context-token audience. Requires `--context-token-profile` and `--context-token-issuer` when set |
 | `--context-token-jwks-url` | `ORKA_CONTEXT_TOKEN_JWKS_URL` env or `""` | Optional context-token JWKS URL. For `kontxt`, defaults to `<issuer>/.well-known/jwks.json` |
 | `--context-token-headers` | `ORKA_CONTEXT_TOKEN_HEADERS` env or `""` | Comma-separated context-token header locations. Use `Header` for raw tokens or `Header:Scheme` for scheme-prefixed tokens. The `kontxt` default is `Txn-Token` |
+| `--context-token-authz-mode` | `ORKA_CONTEXT_TOKEN_AUTHZ_MODE` env or `""` | Context-token authorization mode: `off`, `audit`, or `enforce`. Empty defaults to `off` |
+| `--context-token-task-create-scopes` | `ORKA_CONTEXT_TOKEN_TASK_CREATE_SCOPES` env or `""` | Comma-separated scopes authorizing Task creation. Defaults to `orka:tasks:create` |
+| `--context-token-task-read-scopes` | `ORKA_CONTEXT_TOKEN_TASK_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Task reads and related data. Defaults to `orka:tasks:get` |
+| `--context-token-task-list-scopes` | `ORKA_CONTEXT_TOKEN_TASK_LIST_SCOPES` env or `""` | Comma-separated scopes authorizing Task listing. Defaults to `orka:tasks:list` |
+| `--context-token-task-delete-scopes` | `ORKA_CONTEXT_TOKEN_TASK_DELETE_SCOPES` env or `""` | Comma-separated scopes authorizing Task deletion. Defaults to `orka:tasks:delete` |
+| `--context-token-tool-read-scopes` | `ORKA_CONTEXT_TOKEN_TOOL_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Tool reads. Defaults to `orka:tools:read` |
+| `--context-token-tool-use-scopes` | `ORKA_CONTEXT_TOKEN_TOOL_USE_SCOPES` env or `""` | Comma-separated scopes authorizing Orka-managed chat/OpenAI/Anthropic tool execution. Defaults to `orka:tools:use` |
+| `--context-token-provider-use-scopes` | `ORKA_CONTEXT_TOKEN_PROVIDER_USE_SCOPES` env or `""` | Comma-separated scopes authorizing chat/OpenAI/Anthropic model-provider use and model listing. Defaults to `orka:providers:use` |
+| `--context-token-agent-read-scopes` | `ORKA_CONTEXT_TOKEN_AGENT_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Agent reads. Defaults to `orka:agents:read` |
+| `--context-token-agent-write-scopes` | `ORKA_CONTEXT_TOKEN_AGENT_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing Agent writes. Defaults to `orka:agents:write` |
+| `--context-token-memory-read-scopes` | `ORKA_CONTEXT_TOKEN_MEMORY_READ_SCOPES` env or `""` | Comma-separated scopes authorizing memory reads. Defaults to `orka:memory:read` |
+| `--context-token-memory-write-scopes` | `ORKA_CONTEXT_TOKEN_MEMORY_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing memory writes. Defaults to `orka:memory:write` |
+| `--context-token-session-read-scopes` | `ORKA_CONTEXT_TOKEN_SESSION_READ_SCOPES` env or `""` | Comma-separated scopes authorizing session reads. Defaults to `orka:sessions:read` |
+| `--context-token-session-write-scopes` | `ORKA_CONTEXT_TOKEN_SESSION_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing session writes/deletes. Defaults to `orka:sessions:write` |
+| `--context-token-skill-read-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Skill reads. Defaults to `orka:skills:read` |
+| `--context-token-skill-write-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing Skill writes. Defaults to `orka:skills:write` |
 | `--task-provenance-admission-enabled` | `ORKA_TASK_PROVENANCE_ADMISSION_ENABLED` env or `false` | Enable validating admission that rejects untrusted direct Kubernetes Task writes to Orka-managed provenance fields (`spec.requestedBy`, `spec.transaction`, and transaction metadata labels/annotations) |
 | `--task-provenance-admission-trusted-users` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_USERS` env or controller ServiceAccount usernames | Comma-separated Kubernetes usernames trusted to set Orka-managed Task provenance fields |
 | `--task-provenance-admission-trusted-service-accounts` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS` env or `orka-worker` | Comma-separated ServiceAccount names trusted in the target Task namespace to set Orka-managed Task provenance fields for child Task creation |
@@ -543,6 +559,8 @@ To customize token locations, set `--context-token-headers` or `ORKA_CONTEXT_TOK
 ```
 
 `Authorization: Bearer` remains the default location for Kubernetes ServiceAccount and OIDC JWT authentication. Context-token bearer authentication is only attempted when `Authorization:Bearer` is explicitly configured and the bearer JWT has `typ: txntoken+jwt`; other bearer tokens continue through the standard OIDC or Kubernetes TokenReview flow. When an external context-token caller creates a Task, Orka records the verified subject and issuer in `spec.requestedBy`. Clients cannot set `requestedBy` themselves.
+
+Optional authorization is controlled by `--context-token-authz-mode` / `ORKA_CONTEXT_TOKEN_AUTHZ_MODE`. In `audit` mode, Orka logs safe authorization failures and allows the request. In `enforce` mode, Orka rejects context-token callers that lack the configured operation scope or violate signed `tctx` constraints. Chat, OpenAI-compatible, and Anthropic-compatible model calls require the provider-use scope (default `orka:providers:use`) and honor `tctx.namespace`, `tctx.provider`, `tctx.allowedProviders`, `tctx.model`, and `tctx.allowedModels`. When Orka-managed server-side tools are exposed to those endpoints, they also require the tool-use scope (default `orka:tools:use`) and honor `tctx.allowedTools`. The raw TxToken is never logged or persisted.
 
 ### Task Provenance Admission Hardening
 

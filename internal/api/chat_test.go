@@ -1178,3 +1178,35 @@ func TestLoadChatSession_WithToolCalls(t *testing.T) {
 	assert.Equal(t, "call_1", msgs[2].ToolCallID)
 	assert.Equal(t, "search", msgs[2].Name)
 }
+
+func TestChatHandler_ContextTokenAuthorizationRejectsDisallowedModel(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	objs := providerCRD("default", "default", "openai", "gpt-4")
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithRuntimeObjects(objs...).Build()
+	ss := newTestSessionStore(t)
+	rs := newTestResultStore(t)
+	ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationModeEnforce, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+	require.NoError(t, err)
+	ch.contextTokenAuthorization = authz
+
+	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Post("/api/v1/chat", ch.HandleChat)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeProvidersUse + " " + ContextTokenScopeToolsUse,
+		"tctx": map[string]any{
+			"allowedModels": []string{"gpt-3.5-turbo"},
+		},
+	})
+	body, _ := json.Marshal(ChatRequest{Message: "hello", Model: "gpt-4"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}

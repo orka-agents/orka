@@ -1228,3 +1228,47 @@ func TestExecuteToolCall_Timeout(t *testing.T) {
 		t.Errorf("expected success=false, got %v", parsed["success"])
 	}
 }
+
+func TestAnthropicCompat_ContextTokenAuthorizationRejectsDisallowedProvider(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	llmProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeAnthropic,
+			DefaultModel: "claude-sonnet-4-20250514",
+			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "anthropic-secret", Key: "api-key"},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic-secret", Namespace: "default"},
+		Data:       map[string][]byte{"api-key": []byte("test-key")},
+	}
+	handler, app := setupTestAnthropicHandler(llmProvider, secret)
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationModeEnforce, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+	if err != nil {
+		t.Fatalf("NewContextTokenAuthorizationConfig returned error: %v", err)
+	}
+	handler.contextTokenAuthorization = authz
+
+	app.Use(NewAuthMiddleware(handler.client, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Post("/anthropic/v1/messages", handler.HandleMessages)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeProvidersUse + " " + ContextTokenScopeToolsUse,
+		"tctx": map[string]any{
+			"allowedProviders": []string{"openai"},
+		},
+	})
+	body := `{"model":"anthropic/claude-sonnet-4-20250514","messages":[{"role":"user","content":"hello"}],"max_tokens":100}`
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(body))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}

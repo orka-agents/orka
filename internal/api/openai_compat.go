@@ -51,6 +51,7 @@ type OpenAICompatHandler struct {
 	config                    ChatConfig
 	resolver                  *ProviderResolver
 	resultStore               store.ResultStore
+	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
 
 // NewOpenAICompatHandler creates an OpenAI-compatible API handler.
@@ -256,70 +257,13 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		}})
 	}
 
-	// Convert OpenAI messages to internal format
-	messages, systemPrompt := convertOAIMessages(req.Messages)
-
-	// Convert OpenAI tools to internal format
-	convertedTools := convertOAITools(req.Tools)
-
-	// Build completion request
-	compReq := &llm.CompletionRequest{
-		Model:        model,
-		Messages:     messages,
-		SystemPrompt: systemPrompt,
-		Tools:        convertedTools,
+	if err := authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "openAIChatCompletions", namespace, providerInfo, model); err != nil {
+		return openAIContextTokenAuthorizationError(c, err)
 	}
 
-	if req.Temperature != nil {
-		compReq.Temperature = *req.Temperature
-	}
-
-	maxTokens := 0
-	if req.MaxCompTokens != nil {
-		maxTokens = *req.MaxCompTokens
-	} else if req.MaxTokens != nil {
-		maxTokens = *req.MaxTokens
-	}
-	if maxTokens > 0 {
-		if maxTokens < 16 {
-			oaiLog.Info("max_tokens too small", oaiParamMaxTokens, maxTokens)
-			param := oaiParamMaxTokens
-			return c.Status(400).JSON(OAIError{Error: OAIErrorDetail{
-				Message: fmt.Sprintf("max_tokens must be at least 16, got %d", maxTokens),
-				Type:    "invalid_request_error",
-				Param:   &param,
-			}})
-		}
-		compReq.MaxTokens = maxTokens
-	}
-
-	// Convert stop sequences
-	if req.Stop != nil {
-		switch v := req.Stop.(type) {
-		case string:
-			compReq.StopSequences = []string{v}
-		case []any:
-			for _, s := range v {
-				if str, ok := s.(string); ok {
-					compReq.StopSequences = append(compReq.StopSequences, str)
-				}
-			}
-		}
-	}
-
-	// Convert response format
-	if req.ResponseFormat != nil {
-		compReq.ResponseFormat = &llm.ResponseFormat{
-			Type: req.ResponseFormat.Type,
-		}
-		if req.ResponseFormat.JSONSchema != nil {
-			compReq.ResponseFormat.JSONSchema = &llm.JSONSchemaFormat{
-				Name:        req.ResponseFormat.JSONSchema.Name,
-				Schema:      req.ResponseFormat.JSONSchema.Schema,
-				Strict:      req.ResponseFormat.JSONSchema.Strict,
-				Description: req.ResponseFormat.JSONSchema.Description,
-			}
-		}
+	compReq, errDetail := buildOpenAICompletionRequest(req, model)
+	if errDetail != nil {
+		return c.Status(400).JSON(OAIError{Error: *errDetail})
 	}
 
 	completionID := fmt.Sprintf("chatcmpl-%s", generateChatID())
@@ -333,6 +277,9 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		// Replace client tools with Orka's tools (builtin + coordinator)
 		compReq.Tools = nil
 		injectOrkaTools(ctx, h.client, compReq, namespace)
+		if err := authorizeContextTokenToolUse(c, h.contextTokenAuthorization, "openAITools", completionToolNames(compReq.Tools)); err != nil {
+			return openAIContextTokenAuthorizationError(c, err)
+		}
 
 		// Inject coordinator system prompt
 		compReq.SystemPrompt = coordinatorSystemPrompt(namespace) + "\n\n" + compReq.SystemPrompt
@@ -378,6 +325,65 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		return h.handleNonStreamingToolLoop(c, ctx, provider, compReq, completionID, model, now, proxyToolCtx)
 	}
 	return h.handleNonStreamingCompletion(c, ctx, provider, compReq, completionID, model, now)
+}
+func buildOpenAICompletionRequest(req OAIRequest, model string) (*llm.CompletionRequest, *OAIErrorDetail) {
+	messages, systemPrompt := convertOAIMessages(req.Messages)
+	compReq := &llm.CompletionRequest{
+		Model:        model,
+		Messages:     messages,
+		SystemPrompt: systemPrompt,
+		Tools:        convertOAITools(req.Tools),
+	}
+
+	if req.Temperature != nil {
+		compReq.Temperature = *req.Temperature
+	}
+
+	maxTokens := 0
+	if req.MaxCompTokens != nil {
+		maxTokens = *req.MaxCompTokens
+	} else if req.MaxTokens != nil {
+		maxTokens = *req.MaxTokens
+	}
+	if maxTokens > 0 {
+		if maxTokens < 16 {
+			oaiLog.Info("max_tokens too small", oaiParamMaxTokens, maxTokens)
+			param := oaiParamMaxTokens
+			return nil, &OAIErrorDetail{
+				Message: fmt.Sprintf("max_tokens must be at least 16, got %d", maxTokens),
+				Type:    "invalid_request_error",
+				Param:   &param,
+			}
+		}
+		compReq.MaxTokens = maxTokens
+	}
+
+	if req.Stop != nil {
+		switch v := req.Stop.(type) {
+		case string:
+			compReq.StopSequences = []string{v}
+		case []any:
+			for _, s := range v {
+				if str, ok := s.(string); ok {
+					compReq.StopSequences = append(compReq.StopSequences, str)
+				}
+			}
+		}
+	}
+
+	if req.ResponseFormat != nil {
+		compReq.ResponseFormat = &llm.ResponseFormat{Type: req.ResponseFormat.Type}
+		if req.ResponseFormat.JSONSchema != nil {
+			compReq.ResponseFormat.JSONSchema = &llm.JSONSchemaFormat{
+				Name:        req.ResponseFormat.JSONSchema.Name,
+				Schema:      req.ResponseFormat.JSONSchema.Schema,
+				Strict:      req.ResponseFormat.JSONSchema.Strict,
+				Description: req.ResponseFormat.JSONSchema.Description,
+			}
+		}
+	}
+
+	return compReq, nil
 }
 
 // handleNonStreamingCompletion handles a non-streaming chat completion request.
@@ -778,6 +784,10 @@ func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 	namespace := GetEffectiveNamespace(c, "")
 	if h.watchNamespace != "" {
 		namespace = h.watchNamespace
+	}
+
+	if err := authorizeContextTokenActionWithConfig(c, h.contextTokenAuthorization, "openAIListModels", h.contextTokenAuthorization.ProviderUseScopes); err != nil {
+		return openAIContextTokenAuthorizationError(c, err)
 	}
 
 	// List Provider CRDs to build a model list

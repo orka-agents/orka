@@ -113,6 +113,7 @@ type ChatHandler struct {
 	enforceNamespaceIsolation bool
 	sessionStore              store.SessionStore
 	resultStore               store.ResultStore
+	contextTokenAuthorization ContextTokenAuthorizationConfig
 	cooldownTracker           *llm.CooldownTracker
 	resolver                  *ProviderResolver
 }
@@ -201,6 +202,13 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	if err != nil {
 		chatLog.Error(err, "failed to resolve provider")
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("failed to resolve provider: %v", err))
+	}
+
+	if err := authorizeContextTokenProviderUse(c, ch.contextTokenAuthorization, "chat", namespace, providerInfo, model); err != nil {
+		return err
+	}
+	if err := authorizeContextTokenToolUse(c, ch.contextTokenAuthorization, "chatTools", chattools.ChatToolNames()); err != nil {
+		return err
 	}
 
 	// Wrap provider with retry and fallback

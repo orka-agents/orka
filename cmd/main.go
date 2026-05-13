@@ -105,6 +105,8 @@ func main() {
 	var contextTokenTaskListScopes string
 	var contextTokenTaskDeleteScopes string
 	var contextTokenToolReadScopes string
+	var contextTokenToolUseScopes string
+	var contextTokenProviderUseScopes string
 	var contextTokenAgentReadScopes string
 	var contextTokenAgentWriteScopes string
 	var contextTokenMemoryReadScopes string
@@ -219,6 +221,12 @@ func main() {
 	flag.StringVar(&contextTokenToolReadScopes, "context-token-tool-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_TOOL_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize Tool reads. Defaults to orka:tools:read.")
+	flag.StringVar(&contextTokenToolUseScopes, "context-token-tool-use-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_TOOL_USE_SCOPES"),
+		"Comma-separated context-token scopes that authorize Orka-managed tool execution. Defaults to orka:tools:use.")
+	flag.StringVar(&contextTokenProviderUseScopes, "context-token-provider-use-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_PROVIDER_USE_SCOPES"),
+		"Comma-separated context-token scopes that authorize model provider use and listing. Defaults to orka:providers:use.")
 	flag.StringVar(&contextTokenAgentReadScopes, "context-token-agent-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_AGENT_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize Agent reads. Defaults to orka:agents:read.")
@@ -287,6 +295,8 @@ func main() {
 		contextTokenTaskListScopes,
 		contextTokenTaskDeleteScopes,
 		contextTokenToolReadScopes,
+		contextTokenToolUseScopes,
+		contextTokenProviderUseScopes,
 		contextTokenAgentReadScopes,
 		contextTokenAgentWriteScopes,
 		contextTokenMemoryReadScopes,

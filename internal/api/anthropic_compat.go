@@ -37,6 +37,7 @@ type AnthropicCompatHandler struct {
 	config                    ChatConfig
 	resolver                  *ProviderResolver
 	resultStore               store.ResultStore
+	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
 
 // NewAnthropicCompatHandler creates an Anthropic-compatible API handler.
@@ -262,6 +263,10 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		return anthropicError(c, 400, "invalid_request_error", "failed to resolve provider: "+err.Error())
 	}
 
+	if err := authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "anthropicMessages", namespace, providerInfo, model); err != nil {
+		return anthropicContextTokenAuthorizationError(c, err)
+	}
+
 	messages, err := convertAnthropicMessages(req.Messages)
 	if err != nil {
 		return anthropicError(c, 400, "invalid_request_error", "failed to convert messages: "+err.Error())
@@ -296,6 +301,9 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		// not be visible to the LLM or it will call them and get "tool not found" errors.
 		compReq.Tools = nil
 		injectOrkaTools(ctx, h.client, compReq, namespace)
+		if err := authorizeContextTokenToolUse(c, h.contextTokenAuthorization, "anthropicTools", completionToolNames(compReq.Tools)); err != nil {
+			return anthropicContextTokenAuthorizationError(c, err)
+		}
 
 		// Inject coordinator instructions so the LLM knows how to use task management tools
 		compReq.SystemPrompt = coordinatorSystemPrompt(namespace) + "\n\n" + compReq.SystemPrompt
@@ -379,6 +387,10 @@ func (h *AnthropicCompatHandler) HandleListModels(c fiber.Ctx) error {
 	namespace := GetEffectiveNamespace(c, "")
 	if h.watchNamespace != "" {
 		namespace = h.watchNamespace
+	}
+
+	if err := authorizeContextTokenActionWithConfig(c, h.contextTokenAuthorization, "anthropicListModels", h.contextTokenAuthorization.ProviderUseScopes); err != nil {
+		return anthropicContextTokenAuthorizationError(c, err)
 	}
 
 	providerList := &corev1alpha1.ProviderList{}
