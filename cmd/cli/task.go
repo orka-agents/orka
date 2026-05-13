@@ -170,7 +170,9 @@ func newTaskListCmd() *cobra.Command {
 }
 
 func newTaskGetCmd() *cobra.Command {
-	return &cobra.Command{
+	var showTransaction bool
+
+	cmd := &cobra.Command{
 		Use:   "get <name>",
 		Short: "Get task details",
 		Args:  cobra.ExactArgs(1),
@@ -183,6 +185,20 @@ func newTaskGetCmd() *cobra.Command {
 				return err
 			}
 
+			if showTransaction {
+				transaction, ok := taskTransaction(*detail)
+				if !ok {
+					fmt.Println("No transaction metadata found.")
+					return nil
+				}
+				out, err := json.MarshalIndent(transaction, "", "  ")
+				if err != nil {
+					return fmt.Errorf("formatting transaction output: %w", err)
+				}
+				fmt.Println(string(out))
+				return nil
+			}
+
 			out, err := json.MarshalIndent(detail, "", "  ")
 			if err != nil {
 				return fmt.Errorf("formatting output: %w", err)
@@ -191,6 +207,21 @@ func newTaskGetCmd() *cobra.Command {
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&showTransaction, "show-transaction", false, "Show only transaction metadata")
+	return cmd
+}
+
+func taskTransaction(detail client.TaskDetail) (map[string]any, bool) {
+	spec, ok := detail["spec"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	transaction, ok := spec["transaction"].(map[string]any)
+	if !ok || len(transaction) == 0 {
+		return nil, false
+	}
+	return transaction, true
 }
 
 func newTaskLogsCmd() *cobra.Command {

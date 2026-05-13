@@ -191,6 +191,7 @@ Use logs and safe annotations for per-transaction tracing. The CLI can filter Ta
 
 ```bash
 orka task list --transaction txn-abc123
+orka task get my-task --show-transaction
 ```
 
 Do not use raw transaction IDs, subjects, repositories, task names, or token values as metric labels.

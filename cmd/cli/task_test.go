@@ -170,7 +170,13 @@ func taskAPIServer() *httptest.Server {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/my-task":
 			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 				"metadata": map[string]any{"name": "my-task"},
-				"status":   map[string]any{"phase": "Succeeded"},
+				"spec": map[string]any{
+					"transaction": map[string]any{
+						"id":      "txn-123",
+						"profile": "kontxt",
+					},
+				},
+				"status": map[string]any{"phase": "Succeeded"},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/my-task/logs":
 			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -290,6 +296,21 @@ func TestNewTaskGetCmd_Execute(t *testing.T) {
 
 	root := newRootCmd()
 	root.SetArgs([]string{"task", "get", "--server", srv.URL, "my-task"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+}
+
+func TestNewTaskGetCmd_ShowTransaction(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	srv := taskAPIServer()
+	defer srv.Close()
+
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "get", "--server", srv.URL, "--show-transaction", "my-task"})
 
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
