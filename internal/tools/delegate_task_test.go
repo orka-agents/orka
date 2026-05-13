@@ -9,22 +9,31 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/aramase/kontxt/pkg/keys"
+	kontxttoken "github.com/aramase/kontxt/pkg/token"
+	sdkverify "github.com/aramase/kontxt/sdk/verify"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
 	parentTaskName        = "parent-task"
 	parentTransactionID   = "txn-parent"
 	parentTransactionHash = "sha256:parent-context"
+	childTransactionScope = "orka:agents:run"
 )
 
 func researcherAgent() *corev1alpha1.Agent {
@@ -51,7 +60,7 @@ func parentTask() *corev1alpha1.Task {
 			RequestedBy: &corev1alpha1.RequestedBy{
 				Subject: "parent-subject",
 				Issuer:  "https://issuer.example.test",
-				Roles:   []string{"orka:agents:delegate", "orka:agents:run"},
+				Roles:   []string{"orka:agents:delegate", childTransactionScope},
 			},
 			Transaction: &corev1alpha1.TaskTransaction{
 				Profile:            "kontxt",
@@ -60,7 +69,7 @@ func parentTask() *corev1alpha1.Task {
 				Subject:            "parent-subject",
 				RequestingWorkload: "spiffe://example.test/ns/default/sa/parent",
 				Scope:              "orka:agents:delegate orka:agents:run",
-				Scopes:             []string{"orka:agents:delegate", "orka:agents:run"},
+				Scopes:             []string{"orka:agents:delegate", childTransactionScope},
 				ContextDigest:      parentTransactionHash,
 			},
 		},
@@ -265,6 +274,107 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDelegateTaskTool_Execute_WithTTSChildToken(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testResearcherAgentName)
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+	subjectPath := filepath.Join(t.TempDir(), "subject-token")
+	if err := os.WriteFile(subjectPath, []byte("parent-tx-token"), 0600); err != nil {
+		t.Fatalf("failed to write subject token fixture: %v", err)
+	}
+
+	keyManager, err := keys.NewManager(2048, time.Hour)
+	if err != nil {
+		t.Fatalf("failed to create kontxt key manager: %v", err)
+	}
+	jwksServer := httptest.NewServer(keyManager.JWKSHandler())
+	defer jwksServer.Close()
+	signingKey, kid := keyManager.SigningKey()
+	childToken, err := kontxttoken.New(kontxttoken.Claims{
+		Issuer:             "https://tts.example.test",
+		Audience:           "child.example.test",
+		TransactionID:      parentTransactionID,
+		Subject:            "spiffe://example.test/ns/default/sa/child",
+		Scope:              childTransactionScope,
+		RequestingWorkload: "spiffe://example.test/ns/default/sa/orka-worker",
+	}, signingKey, kid, time.Minute)
+	if err != nil {
+		t.Fatalf("failed to create child TxToken: %v", err)
+	}
+
+	var requestDetails map[string]any
+	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm() error = %v", err)
+		}
+		if got := r.FormValue("subject_token"); got != "parent-tx-token" {
+			t.Fatalf("subject_token = %q, want parent-tx-token", got)
+		}
+		if got := r.FormValue("scope"); got != childTransactionScope {
+			t.Fatalf("scope = %q, want orka:agents:run", got)
+		}
+		if err := json.Unmarshal([]byte(r.FormValue("request_details")), &requestDetails); err != nil {
+			t.Fatalf("request_details JSON error = %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"access_token":      childToken,
+			"issued_token_type": "urn:ietf:params:oauth:token-type:txn_token",
+			"token_type":        "N_A",
+		})
+	}))
+	defer ttsServer.Close()
+
+	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
+	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
+
+	k8sClient := newFakeClient(parentTask(), researcherAgent())
+	tool := NewDelegateTaskTool(k8sClient)
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"researcher","prompt":"Research with token"}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var delegateResult DelegateTaskResult
+	if err := json.Unmarshal([]byte(result), &delegateResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if delegateResult.TaskName == "" {
+		t.Fatal("Execute() returned empty task name")
+	}
+	if requestDetails["operation"] != "delegateTask" || requestDetails["agent"] != testResearcherAgentName || requestDetails["txn"] != parentTransactionID {
+		t.Fatalf("request_details = %#v", requestDetails)
+	}
+
+	childTask := &corev1alpha1.Task{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{Name: delegateResult.TaskName, Namespace: defaultNamespace}, childTask); err != nil {
+		t.Fatalf("failed to get child task: %v", err)
+	}
+	expectInheritedTaskProvenance(t, childTask)
+	secretName := childTask.Annotations[labels.AnnotationTransactionTokenSecret]
+	if secretName == "" {
+		t.Fatal("expected child transaction token secret annotation")
+	}
+	secret := &corev1.Secret{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{Name: secretName, Namespace: defaultNamespace}, secret); err != nil {
+		t.Fatalf("failed to get child token secret: %v", err)
+	}
+	claims, err := sdkverify.New(jwksServer.URL, "child.example.test").Verify(context.Background(), string(secret.Data["token"]))
+	if err != nil {
+		t.Fatalf("failed to verify child TxToken from secret: %v", err)
+	}
+	if claims.TransactionID != parentTransactionID {
+		t.Fatalf("child token txn = %q, want %q", claims.TransactionID, parentTransactionID)
+	}
+	if claims.Scope != childTransactionScope {
+		t.Fatalf("child token scope = %q, want orka:agents:run", claims.Scope)
 	}
 }
 
