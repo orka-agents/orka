@@ -37,7 +37,7 @@ kontxt_audience="${ORKA_KONTXT_AUDIENCE:-orka-live-kontxt-e2e}"
 kontxt_subject="${ORKA_KONTXT_SUBJECT:-kontxt-workload-subject}"
 kontxt_jwks_name="${ORKA_KONTXT_JWKS_NAME:-kontxt-jwks}"
 kontxt_jwks_port="${ORKA_KONTXT_JWKS_PORT:-8080}"
-kontxt_jwks_url="http://${kontxt_jwks_name}.default.svc.cluster.local:${kontxt_jwks_port}/jwks"
+kontxt_jwks_url="http://${kontxt_jwks_name}.default.svc.cluster.local:${kontxt_jwks_port}/.well-known/jwks.json"
 kontxt_token=""
 api_pf_pid=""
 task_name=""
@@ -302,7 +302,7 @@ deploy_kontxt_jwks() {
   log "Deploying in-cluster kontxt JWKS endpoint"
   kubectl create configmap "${kontxt_jwks_name}" \
     -n default \
-    --from-file=jwks="${kontxt_jwks_file}" \
+    --from-file=jwks.json="${kontxt_jwks_file}" \
     --dry-run=client \
     -o yaml | kubectl apply -f -
 
@@ -338,6 +338,9 @@ spec:
         - name: jwks
           configMap:
             name: ${kontxt_jwks_name}
+            items:
+              - key: jwks.json
+                path: .well-known/jwks.json
 YAML
 
   kubectl apply -f - <<YAML
