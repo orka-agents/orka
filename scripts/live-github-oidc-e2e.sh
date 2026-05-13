@@ -180,6 +180,30 @@ wait_for_http() {
   die "${description} never became available at ${url}"
 }
 
+wait_for_labeled_resource() {
+  local resource="$1"
+  local namespace="$2"
+  local selector="$3"
+  local output_file="$4"
+  local description="$5"
+  local attempts_remaining=90
+
+  while (( attempts_remaining > 0 )); do
+    if kubectl get "${resource}" -n "${namespace}" -l "${selector}" -o json >"${output_file}" 2>/dev/null && \
+      jq -e '(.items // []) | length > 0' "${output_file}" >/dev/null; then
+      return 0
+    fi
+    attempts_remaining=$((attempts_remaining - 1))
+    sleep 2
+  done
+
+  {
+    echo "Timed out waiting for ${description} with selector ${selector}"
+    kubectl get "${resource}" -n "${namespace}" -l "${selector}" -o wide 2>/dev/null || true
+  } | redact >&2
+  die "${description} was not created"
+}
+
 start_port_forward() {
   local namespace_arg="$1"
   local resource="$2"
@@ -615,6 +639,41 @@ main() {
     and .metadata.labels["orka.ai/transaction-id"] == .spec.transaction.id
     and .metadata.annotations["orka.ai/transaction-id"] == .spec.transaction.id
   ' "${work_dir}/created-kontxt-task-kube.json" >/dev/null
+
+  local kontxt_transaction_id
+  kontxt_transaction_id="$(jq -er '.spec.transaction.id' "${work_dir}/created-kontxt-task-kube.json")"
+
+  log "Verifying kontxt Job carries transaction metadata"
+  local kontxt_job_json
+  kontxt_job_json="${work_dir}/created-kontxt-job.json"
+  wait_for_labeled_resource jobs default "orka.ai/task=${kontxt_task_name}" "${kontxt_job_json}" "kontxt Job"
+  jq -e --arg txn "${kontxt_transaction_id}" '
+    .items[0].metadata.labels["orka.ai/transaction-id"] == $txn
+    and .items[0].metadata.annotations["orka.ai/transaction-id"] == $txn
+    and .items[0].spec.template.metadata.labels["orka.ai/transaction-id"] == $txn
+    and .items[0].spec.template.metadata.annotations["orka.ai/transaction-id"] == $txn
+  ' "${kontxt_job_json}" >/dev/null || {
+    {
+      echo "kontxt Job did not carry expected transaction metadata"
+      cat "${kontxt_job_json}"
+    } | redact >&2
+    die "missing transaction metadata on kontxt Job"
+  }
+
+  log "Verifying kontxt Pod carries transaction metadata"
+  local kontxt_pod_json
+  kontxt_pod_json="${work_dir}/created-kontxt-pod.json"
+  wait_for_labeled_resource pods default "orka.ai/task=${kontxt_task_name}" "${kontxt_pod_json}" "kontxt Pod"
+  jq -e --arg txn "${kontxt_transaction_id}" '
+    .items[0].metadata.labels["orka.ai/transaction-id"] == $txn
+    and .items[0].metadata.annotations["orka.ai/transaction-id"] == $txn
+  ' "${kontxt_pod_json}" >/dev/null || {
+    {
+      echo "kontxt Pod did not carry expected transaction metadata"
+      cat "${kontxt_pod_json}"
+    } | redact >&2
+    die "missing transaction metadata on kontxt Pod"
+  }
 
   log "Verifying tampered kontxt TxToken is rejected"
   local tampered_kontxt_token tampered_kontxt_payload tampered_kontxt_response tampered_kontxt_status
