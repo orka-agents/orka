@@ -17,13 +17,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aramase/kontxt/pkg/keys"
 	kontxttoken "github.com/aramase/kontxt/pkg/token"
-
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/workerenv"
+	sdkverify "github.com/aramase/kontxt/sdk/verify"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 func TestNewToolExecutor(t *testing.T) {
@@ -269,6 +271,29 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 		t.Fatalf("failed to write subject token fixture: %v", err)
 	}
 
+	keyManager, err := keys.NewManager(2048, time.Hour)
+	if err != nil {
+		t.Fatalf("failed to create kontxt key manager: %v", err)
+	}
+	jwksServer := httptest.NewServer(keyManager.JWKSHandler())
+	defer jwksServer.Close()
+	signingKey, kid := keyManager.SigningKey()
+	downstreamToken, err := kontxttoken.New(kontxttoken.Claims{
+		Issuer:             "https://tts.example.test",
+		Audience:           "downstream.example.test",
+		TransactionID:      "txn-downstream-123",
+		Subject:            "spiffe://example.test/ns/default/sa/orka-worker",
+		Scope:              "orka:tools:http",
+		RequestingWorkload: "spiffe://example.test/ns/default/sa/orka-worker",
+		TransactionContext: map[string]any{
+			"operation": "httpTool",
+			"tool":      "downstream",
+		},
+	}, signingKey, kid, time.Minute)
+	if err != nil {
+		t.Fatalf("failed to create downstream TxToken: %v", err)
+	}
+
 	var ttsScope string
 	var ttsSubjectToken string
 	var requestDetails map[string]any
@@ -285,7 +310,11 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 			t.Fatalf("request_details JSON error = %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"access_token":"downstream-tx-token","issued_token_type":"urn:ietf:params:oauth:token-type:txn_token","token_type":"N_A"}`))
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"access_token":      downstreamToken,
+			"issued_token_type": "urn:ietf:params:oauth:token-type:txn_token",
+			"token_type":        "N_A",
+		})
 	}))
 	defer ttsServer.Close()
 
@@ -294,9 +323,20 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 	t.Setenv(workerenv.ContextTokenOutboundScope, "orka:tools:http")
 	t.Setenv(workerenv.TaskName, "task-1")
 
+	verifier := sdkverify.New(jwksServer.URL, "downstream.example.test")
 	var receivedTxnToken string
+	var verifiedTransactionID string
+	var verifiedScope string
 	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedTxnToken = r.Header.Get(kontxttoken.HeaderName)
+		claims, err := verifier.Verify(r.Context(), receivedTxnToken)
+		if err != nil {
+			http.Error(w, "invalid TxToken", http.StatusUnauthorized)
+			t.Errorf("downstream verifier rejected propagated TxToken: %v", err)
+			return
+		}
+		verifiedTransactionID = claims.TransactionID
+		verifiedScope = claims.Scope
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer toolServer.Close()
@@ -321,8 +361,17 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 	if requestDetails["operation"] != "httpTool" || requestDetails["tool"] != "downstream" || requestDetails["task"] != "task-1" {
 		t.Fatalf("request_details = %#v", requestDetails)
 	}
-	if receivedTxnToken != "downstream-tx-token" {
-		t.Fatalf("%s = %q, want downstream-tx-token", kontxttoken.HeaderName, receivedTxnToken)
+	if receivedTxnToken == "" {
+		t.Fatalf("missing propagated %s header", kontxttoken.HeaderName)
+	}
+	if receivedTxnToken != downstreamToken {
+		t.Fatalf("%s did not contain token returned by TTS", kontxttoken.HeaderName)
+	}
+	if verifiedTransactionID != "txn-downstream-123" {
+		t.Fatalf("downstream verified txn = %q, want txn-downstream-123", verifiedTransactionID)
+	}
+	if verifiedScope != "orka:tools:http" {
+		t.Fatalf("downstream verified scope = %q, want orka:tools:http", verifiedScope)
 	}
 }
 
