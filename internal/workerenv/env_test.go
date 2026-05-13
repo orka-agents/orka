@@ -11,10 +11,12 @@ import "testing"
 func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	env := AIWorkerEnv{
 		BaseEnv: BaseEnv{
-			TaskName:       "task-1",
-			TaskNamespace:  "default",
-			ResultEndpoint: "http://controller/results/default/task-1",
-			ControllerURL:  "http://controller",
+			TaskName:           "task-1",
+			TaskNamespace:      "default",
+			ResultEndpoint:     "http://controller/results/default/task-1",
+			ControllerURL:      "http://controller",
+			TransactionID:      "txn-123",
+			TransactionProfile: "kontxt",
 		},
 		Provider:        "openai",
 		Model:           "gpt-5",
@@ -41,7 +43,7 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	if err := parsed.ValidateRequired(); err != nil {
 		t.Fatalf("ValidateRequired() returned error: %v", err)
 	}
-	if parsed.TaskName != env.TaskName || parsed.TaskNamespace != env.TaskNamespace || parsed.ControllerURL != env.ControllerURL {
+	if parsed.BaseEnv != env.BaseEnv {
 		t.Fatalf("base env mismatch: got %#v, want %#v", parsed.BaseEnv, env.BaseEnv)
 	}
 	if parsed.Provider != env.Provider || parsed.Model != env.Model || parsed.Prompt != env.Prompt {
@@ -113,5 +115,16 @@ func TestCoordinationEnvRenderAndParse(t *testing.T) {
 	}
 	if len(parsed.AllowedAgents) != 2 || parsed.AllowedAgents[0] != "builder" || parsed.AllowedAgents[1] != "reviewer" {
 		t.Fatalf("allowed agents = %#v", parsed.AllowedAgents)
+	}
+}
+
+func TestTransactionLogFields(t *testing.T) {
+	if got := TransactionLogFields("", ""); got != "" {
+		t.Fatalf("TransactionLogFields empty = %q, want empty", got)
+	}
+	got := TransactionLogFields("txn-123", "kontxt")
+	want := " transactionID=txn-123 contextTokenProfile=kontxt"
+	if got != want {
+		t.Fatalf("TransactionLogFields() = %q, want %q", got, want)
 	}
 }

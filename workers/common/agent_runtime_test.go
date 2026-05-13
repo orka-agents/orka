@@ -15,6 +15,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const executorResultDone = "done"
@@ -58,6 +60,8 @@ func TestLoadConfig_AllFields(t *testing.T) {
 	t.Setenv("ORKA_PROMPT", "refactor code")
 	t.Setenv("ORKA_TASK_NAME", "task1")
 	t.Setenv("ORKA_TASK_NAMESPACE", "ns1")
+	t.Setenv(workerenv.TransactionID, "txn-123")
+	t.Setenv(workerenv.TransactionProfile, "kontxt")
 	t.Setenv("ORKA_MODEL", "test-model")
 	t.Setenv("ORKA_SYSTEM_PROMPT", "Be helpful")
 	t.Setenv("ORKA_MAX_TURNS", "100")
@@ -78,6 +82,9 @@ func TestLoadConfig_AllFields(t *testing.T) {
 	}
 	if cfg.MaxTurns != 100 {
 		t.Errorf("MaxTurns = %d, want 100", cfg.MaxTurns)
+	}
+	if cfg.TransactionID != "txn-123" || cfg.TransactionProfile != "kontxt" {
+		t.Errorf("transaction fields = %q/%q, want txn-123/kontxt", cfg.TransactionID, cfg.TransactionProfile)
 	}
 	if len(cfg.AllowedTools) != 3 {
 		t.Errorf("AllowedTools len = %d, want 3", len(cfg.AllowedTools))

@@ -144,13 +144,40 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
+	if tx := task.Spec.Transaction; tx != nil {
+		values := []any{}
+		if tx.ID != "" {
+			values = append(values, "transactionID", tx.ID)
+		}
+		if tx.Profile != "" {
+			values = append(values, "contextTokenProfile", tx.Profile)
+		}
+		if tx.RequestingWorkload != "" {
+			values = append(values, "requestingWorkload", tx.RequestingWorkload)
+		}
+		if len(values) > 0 {
+			log = log.WithValues(values...)
+			ctx = logf.IntoContext(ctx, log)
+		}
+	}
+
+	spanAttributes := []attribute.KeyValue{
+		attribute.String("task.name", task.Name),
+		attribute.String("task.namespace", task.Namespace),
+		attribute.String("task.type", string(task.Spec.Type)),
+	}
+	if tx := task.Spec.Transaction; tx != nil {
+		if tx.ID != "" {
+			spanAttributes = append(spanAttributes, attribute.String("transaction.id", tx.ID))
+		}
+		if tx.Profile != "" {
+			spanAttributes = append(spanAttributes, attribute.String("context_token.profile", tx.Profile))
+		}
+	}
+
 	tracer := tracing.Tracer("orka.controller")
 	ctx, span := tracer.Start(ctx, "task.reconcile",
-		trace.WithAttributes(
-			attribute.String("task.name", task.Name),
-			attribute.String("task.namespace", task.Namespace),
-			attribute.String("task.type", string(task.Spec.Type)),
-		),
+		trace.WithAttributes(spanAttributes...),
 	)
 	defer span.End()
 

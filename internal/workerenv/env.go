@@ -190,30 +190,52 @@ func JoinCSV(values []string) string {
 
 // BaseEnv is the common env contract passed to all Orka worker containers.
 type BaseEnv struct {
-	TaskName       string
-	TaskNamespace  string
-	ResultEndpoint string
-	ControllerURL  string
+	TaskName           string
+	TaskNamespace      string
+	ResultEndpoint     string
+	ControllerURL      string
+	TransactionID      string
+	TransactionProfile string
 }
 
 // EnvVars renders the base worker environment.
 func (e BaseEnv) EnvVars() []corev1.EnvVar {
-	return []corev1.EnvVar{
+	envVars := []corev1.EnvVar{
 		Env(TaskName, e.TaskName),
 		Env(TaskNamespace, e.TaskNamespace),
 		Env(ResultEndpoint, e.ResultEndpoint),
 		Env(ControllerURL, e.ControllerURL),
 	}
+	envVars = AppendIfSet(envVars, TransactionID, e.TransactionID)
+	envVars = AppendIfSet(envVars, TransactionProfile, e.TransactionProfile)
+	return envVars
 }
 
 // ParseBaseEnv reads the common worker environment.
 func ParseBaseEnv(getenv func(string) string) BaseEnv {
 	return BaseEnv{
-		TaskName:       getenv(TaskName),
-		TaskNamespace:  getenv(TaskNamespace),
-		ResultEndpoint: getenv(ResultEndpoint),
-		ControllerURL:  getenv(ControllerURL),
+		TaskName:           getenv(TaskName),
+		TaskNamespace:      getenv(TaskNamespace),
+		ResultEndpoint:     getenv(ResultEndpoint),
+		ControllerURL:      getenv(ControllerURL),
+		TransactionID:      getenv(TransactionID),
+		TransactionProfile: getenv(TransactionProfile),
 	}
+}
+
+// TransactionLogFields returns safe key/value fragments for worker stdout logs.
+func TransactionLogFields(transactionID, profile string) string {
+	fields := []string{}
+	if transactionID != "" {
+		fields = append(fields, "transactionID="+transactionID)
+	}
+	if profile != "" {
+		fields = append(fields, "contextTokenProfile="+profile)
+	}
+	if len(fields) == 0 {
+		return ""
+	}
+	return " " + strings.Join(fields, " ")
 }
 
 // FallbackProviderEnv is one fallback provider entry from the AI worker env contract.
