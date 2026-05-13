@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -36,6 +37,9 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 	scope := strings.TrimSpace(os.Getenv(workerenv.ContextTokenChildScope))
 	if scope == "" {
 		return fmt.Errorf("%s is required when %s is set for child task tokens", workerenv.ContextTokenChildScope, workerenv.ContextTokenTTSURL)
+	}
+	if err := validateChildTransactionScope(parentTask, scope); err != nil {
+		return err
 	}
 	subjectTokenType := strings.TrimSpace(os.Getenv(workerenv.ContextTokenSubjectTokenType))
 	if subjectTokenType == "" {
@@ -89,6 +93,33 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 		return fmt.Errorf("creating child transaction token secret: %w", err)
 	}
 	return nil
+}
+
+func validateChildTransactionScope(parentTask *corev1alpha1.Task, childScope string) error {
+	childScopes := strings.Fields(childScope)
+	if len(childScopes) == 0 {
+		return fmt.Errorf("child transaction scope is required")
+	}
+	if parentTask == nil || parentTask.Spec.Transaction == nil {
+		return fmt.Errorf("parent transaction metadata is required for child token exchange")
+	}
+	parentScopes := parentTask.Spec.Transaction.Scopes
+	if len(parentScopes) == 0 {
+		parentScopes = strings.Fields(parentTask.Spec.Transaction.Scope)
+	}
+	if len(parentScopes) == 0 {
+		return fmt.Errorf("parent transaction scopes are required for child token exchange")
+	}
+	for _, child := range childScopes {
+		if !containsString(parentScopes, child) {
+			return fmt.Errorf("child transaction scope %q is not present in parent transaction scopes", child)
+		}
+	}
+	return nil
+}
+
+func containsString(values []string, want string) bool {
+	return slices.Contains(values, want)
 }
 
 func cleanupChildTransactionTokenSecret(ctx context.Context, k8sClient client.Client, childTask *corev1alpha1.Task) {

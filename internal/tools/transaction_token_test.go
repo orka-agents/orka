@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	kontxttoken "github.com/aramase/kontxt/pkg/token"
@@ -85,6 +86,26 @@ func TestPrepareChildTransactionToken(t *testing.T) {
 	}
 	if string(secret.Data["token"]) != "child-tx-token" {
 		t.Fatalf("secret token = %q, want child-tx-token", string(secret.Data["token"]))
+	}
+}
+
+func TestPrepareChildTransactionTokenRejectsScopeExpansion(t *testing.T) {
+	subjectPath := filepath.Join(t.TempDir(), "subject-token")
+	if err := os.WriteFile(subjectPath, []byte("parent-tx-token"), 0600); err != nil {
+		t.Fatalf("failed to write subject token: %v", err)
+	}
+	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("TTS should not be called when child scope exceeds parent")
+	}))
+	defer ttsServer.Close()
+	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
+	t.Setenv(workerenv.ContextTokenChildScope, "orka:admin")
+
+	child := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: defaultNamespace}}
+	err := prepareChildTransactionToken(context.Background(), newFakeClient(), parentTask(), child, "delegateTask", testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), "not present in parent") {
+		t.Fatalf("prepareChildTransactionToken() error = %v, want scope expansion error", err)
 	}
 }
 

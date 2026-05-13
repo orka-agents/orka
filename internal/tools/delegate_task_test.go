@@ -51,7 +51,7 @@ func parentTask() *corev1alpha1.Task {
 			RequestedBy: &corev1alpha1.RequestedBy{
 				Subject: "parent-subject",
 				Issuer:  "https://issuer.example.test",
-				Roles:   []string{"orka:agents:delegate"},
+				Roles:   []string{"orka:agents:delegate", "orka:agents:run"},
 			},
 			Transaction: &corev1alpha1.TaskTransaction{
 				Profile:            "kontxt",
@@ -59,8 +59,8 @@ func parentTask() *corev1alpha1.Task {
 				Issuer:             "https://issuer.example.test",
 				Subject:            "parent-subject",
 				RequestingWorkload: "spiffe://example.test/ns/default/sa/parent",
-				Scope:              "orka:agents:delegate",
-				Scopes:             []string{"orka:agents:delegate"},
+				Scope:              "orka:agents:delegate orka:agents:run",
+				Scopes:             []string{"orka:agents:delegate", "orka:agents:run"},
 				ContextDigest:      parentTransactionHash,
 			},
 		},
