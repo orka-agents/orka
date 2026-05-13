@@ -354,6 +354,8 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 		t.applyPriorTaskConfig(ctx, childTask, dc)
 	}
 
+	inheritTaskProvenance(childTask, dc.parentTask)
+
 	// Set owner reference if parent task exists
 	if dc.parentTask.UID != "" {
 		blockOwnerDeletion := true

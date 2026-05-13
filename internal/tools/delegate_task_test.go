@@ -22,7 +22,9 @@ import (
 )
 
 const (
-	parentTaskName = "parent-task"
+	parentTaskName        = "parent-task"
+	parentTransactionID   = "txn-parent"
+	parentTransactionHash = "sha256:parent-context"
 )
 
 func researcherAgent() *corev1alpha1.Agent {
@@ -46,7 +48,38 @@ func parentTask() *corev1alpha1.Task {
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAI,
 			Priority: &priority,
+			RequestedBy: &corev1alpha1.RequestedBy{
+				Subject: "parent-subject",
+				Issuer:  "https://issuer.example.test",
+				Roles:   []string{"orka:agents:delegate"},
+			},
+			Transaction: &corev1alpha1.TaskTransaction{
+				Profile:            "kontxt",
+				ID:                 parentTransactionID,
+				Issuer:             "https://issuer.example.test",
+				Subject:            "parent-subject",
+				RequestingWorkload: "spiffe://example.test/ns/default/sa/parent",
+				Scope:              "orka:agents:delegate",
+				Scopes:             []string{"orka:agents:delegate"},
+				ContextDigest:      parentTransactionHash,
+			},
 		},
+	}
+}
+
+func expectInheritedTaskProvenance(t *testing.T, task *corev1alpha1.Task) {
+	t.Helper()
+	if task.Spec.RequestedBy == nil || task.Spec.RequestedBy.Subject != "parent-subject" {
+		t.Fatalf("spec.requestedBy = %#v, want parent requester", task.Spec.RequestedBy)
+	}
+	if task.Spec.Transaction == nil || task.Spec.Transaction.ID != parentTransactionID {
+		t.Fatalf("spec.transaction = %#v, want parent transaction", task.Spec.Transaction)
+	}
+	if task.Labels[labels.LabelTransactionID] != labels.SelectorValue(parentTransactionID) {
+		t.Fatalf("transaction label = %q, want %q", task.Labels[labels.LabelTransactionID], labels.SelectorValue(parentTransactionID))
+	}
+	if task.Annotations[labels.AnnotationTransactionContextDigest] != parentTransactionHash {
+		t.Fatalf("transaction context digest annotation = %q, want %q", task.Annotations[labels.AnnotationTransactionContextDigest], parentTransactionHash)
 	}
 }
 
@@ -304,6 +337,7 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 	if childTask.Spec.Prompt != "Investigate this" {
 		t.Errorf("spec.prompt = %q, want %q", childTask.Spec.Prompt, "Investigate this")
 	}
+	expectInheritedTaskProvenance(t, childTask)
 
 	// Verify owner reference
 	if len(childTask.OwnerReferences) != 1 {

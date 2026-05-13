@@ -150,6 +150,7 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 	if parentTask.Spec.Priority != nil {
 		task.Spec.Priority = parentTask.Spec.Priority
 	}
+	inheritTaskProvenance(task, parentTask)
 	if _, ok := a[priorityField]; ok {
 		p := int32(chatGetIntArg(a, priorityField, 500))
 		task.Spec.Priority = &p

@@ -261,6 +261,35 @@ func TestCreateContainerTaskTool_Execute(t *testing.T) {
 	}
 }
 
+func TestCreateContainerTaskTool_ExecuteCoordination_InheritsParentProvenance(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+
+	fc := newFakeClient(parentTask())
+	tool := NewCreateContainerTaskTool(fc)
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"image":"busybox","command":["echo"],"args":["hello"]}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	expectContainerTaskSuccess(t, result)
+
+	taskList := &corev1alpha1.TaskList{}
+	if err := fc.List(context.Background(), taskList); err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	var child *corev1alpha1.Task
+	for i := range taskList.Items {
+		if taskList.Items[i].Name != parentTaskName {
+			child = &taskList.Items[i]
+			break
+		}
+	}
+	if child == nil {
+		t.Fatal("child task not found")
+	}
+	expectInheritedTaskProvenance(t, child)
+}
+
 func TestCreateContainerTaskTool_Execute_MissingContext(t *testing.T) {
 	tool := &CreateContainerTaskTool{}
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{"name":"t"}`))
