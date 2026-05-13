@@ -113,6 +113,8 @@ func main() {
 	var contextTokenMemoryWriteScopes string
 	var contextTokenSessionReadScopes string
 	var contextTokenSessionWriteScopes string
+	var contextTokenSecurityReadScopes string
+	var contextTokenSecurityWriteScopes string
 	var contextTokenSkillReadScopes string
 	var contextTokenSkillWriteScopes string
 	var contextTokenTTSURL string
@@ -245,6 +247,12 @@ func main() {
 	flag.StringVar(&contextTokenSessionWriteScopes, "context-token-session-write-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_SESSION_WRITE_SCOPES"),
 		"Comma-separated context-token scopes that authorize session writes. Defaults to orka:sessions:write.")
+	flag.StringVar(&contextTokenSecurityReadScopes, "context-token-security-read-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_SECURITY_READ_SCOPES"),
+		"Comma-separated context-token scopes that authorize security scan reads. Defaults to orka:security:read.")
+	flag.StringVar(&contextTokenSecurityWriteScopes, "context-token-security-write-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_SECURITY_WRITE_SCOPES"),
+		"Comma-separated context-token scopes that authorize security scan writes. Defaults to orka:security:write.")
 	flag.StringVar(&contextTokenSkillReadScopes, "context-token-skill-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_SKILL_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize Skill reads. Defaults to orka:skills:read.")
@@ -303,6 +311,8 @@ func main() {
 		contextTokenMemoryWriteScopes,
 		contextTokenSessionReadScopes,
 		contextTokenSessionWriteScopes,
+		contextTokenSecurityReadScopes,
+		contextTokenSecurityWriteScopes,
 		contextTokenSkillReadScopes,
 		contextTokenSkillWriteScopes,
 	)

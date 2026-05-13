@@ -1245,7 +1245,7 @@ func TestAnthropicCompat_ContextTokenAuthorizationRejectsDisallowedProvider(t *t
 		Data:       map[string][]byte{"api-key": []byte("test-key")},
 	}
 	handler, app := setupTestAnthropicHandler(llmProvider, secret)
-	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationModeEnforce, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationModeEnforce, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("NewContextTokenAuthorizationConfig returned error: %v", err)
 	}

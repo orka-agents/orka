@@ -996,7 +996,7 @@ func TestOpenAICompat_ContextTokenAuthorizationRequiresProviderScopeForModels(t 
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
 	handler, app := setupTestOpenAIHandler()
-	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationModeEnforce, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationModeEnforce, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("NewContextTokenAuthorizationConfig returned error: %v", err)
 	}

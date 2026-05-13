@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v3"
@@ -26,6 +27,100 @@ import (
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
 )
+
+func TestSecurityRepositoryActions_ContextTokenAuthorization(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	createBody := `{
+		"name":"scan-create",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":"https://github.com/sozercan/actions-test",
+			"analysisAgentRef":{"name":"analysis"}
+		}
+	}`
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		scope  string
+		want   int
+	}{
+		{
+			name:   "list allowed with security read scope",
+			method: http.MethodGet,
+			path:   "/security/repositories?namespace=demo",
+			scope:  ContextTokenScopeSecurityRead,
+			want:   http.StatusOK,
+		},
+		{
+			name:   "list denied without security read scope",
+			method: http.MethodGet,
+			path:   "/security/repositories?namespace=demo",
+			scope:  ContextTokenScopeSecurityWrite,
+			want:   http.StatusForbidden,
+		},
+		{
+			name:   "create allowed with security write scope",
+			method: http.MethodPost,
+			path:   "/security/repositories",
+			body:   createBody,
+			scope:  ContextTokenScopeSecurityWrite,
+			want:   http.StatusCreated,
+		},
+		{
+			name:   "create denied without security write scope",
+			method: http.MethodPost,
+			path:   "/security/repositories",
+			body:   createBody,
+			scope:  ContextTokenScopeSecurityRead,
+			want:   http.StatusForbidden,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := setupSecurityHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, resp.StatusCode)
+		})
+	}
+}
+
+func setupSecurityHandlersWithAuthz(t *testing.T, ctxTokenConfig ContextTokenConfig, mode string, objs ...runtime.Object) *fiber.App {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	securityStore := sqlite.NewStore(db, ":memory:")
+	authz, err := NewContextTokenAuthorizationConfig(mode, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+	require.NoError(t, err)
+
+	handlers := NewHandlers(HandlersConfig{
+		Client:                    fakeClient,
+		SecurityStore:             securityStore,
+		ContextTokenAuthorization: authz,
+	})
+
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(handlers.client, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Post("/security/repositories", handlers.CreateRepositoryScan)
+	app.Get("/security/repositories", handlers.ListRepositoryScans)
+	return app
+}
 
 func TestCreateSecurityPullRequest_ExistingPR(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

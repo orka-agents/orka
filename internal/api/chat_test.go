@@ -1187,7 +1187,7 @@ func TestChatHandler_ContextTokenAuthorizationRejectsDisallowedModel(t *testing.
 	ss := newTestSessionStore(t)
 	rs := newTestResultStore(t)
 	ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
-	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationModeEnforce, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationModeEnforce, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
 	require.NoError(t, err)
 	ch.contextTokenAuthorization = authz
 

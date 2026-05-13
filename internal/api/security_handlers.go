@@ -323,6 +323,9 @@ func (h *Handlers) ListRepositoryScans(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "listRepositoryScans", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
+		return err
+	}
 
 	limit := c.Query("limit", "100")
 	continueToken := c.Query("continue", "")
@@ -354,6 +357,9 @@ func (h *Handlers) GetRepositoryScan(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "getRepositoryScan", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
+		return err
+	}
 	scan, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name"))
 	if err != nil {
 		return err
@@ -379,6 +385,9 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 
 	namespace, err := h.resolveNamespace(c, req.Namespace)
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "createRepositoryScan", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
 		return err
 	}
 	h.normalizeRepositoryScanSpec(&req.Spec)
@@ -410,6 +419,9 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "updateRepositoryScan", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
+		return err
+	}
 	scan, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name"))
 	if err != nil {
 		return err
@@ -436,6 +448,9 @@ func (h *Handlers) DeleteRepositoryScan(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "deleteRepositoryScan", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
+		return err
+	}
 	scan, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name"))
 	if err != nil {
 		return err
@@ -453,6 +468,9 @@ func (h *Handlers) GetThreatModel(c fiber.Ctx) error {
 	}
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "getThreatModel", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
 		return err
 	}
 	if _, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name")); err != nil {
@@ -485,6 +503,9 @@ func (h *Handlers) UpdateThreatModel(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "updateThreatModel", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
+		return err
+	}
 	if _, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name")); err != nil {
 		return err
 	}
@@ -513,6 +534,9 @@ func (h *Handlers) ListSecurityScanRuns(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "listSecurityScanRuns", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
+		return err
+	}
 	if _, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name")); err != nil {
 		return err
 	}
@@ -532,6 +556,9 @@ func (h *Handlers) ListSecurityScanRuns(c fiber.Ctx) error {
 func (h *Handlers) CreateManualSecurityScan(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "createManualSecurityScan", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
 		return err
 	}
 	scan, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name"))
@@ -559,6 +586,9 @@ func (h *Handlers) ListSecurityFindings(c fiber.Ctx) error {
 	}
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "listSecurityFindings", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
 		return err
 	}
 	if _, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name")); err != nil {
@@ -604,6 +634,9 @@ func (h *Handlers) GetSecurityFinding(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "getSecurityFinding", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
+		return err
+	}
 	finding, err := h.securityStore.GetFinding(c.Context(), namespace, c.Params("id"))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -628,6 +661,9 @@ func (h *Handlers) DismissSecurityFinding(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "dismissSecurityFinding", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
+		return err
+	}
 	if err := h.securityStore.UpdateFindingState(c.Context(), namespace, c.Params("id"), "dismissed"); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "finding not found")
@@ -646,6 +682,9 @@ func (h *Handlers) ReopenSecurityFinding(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "reopenSecurityFinding", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
+		return err
+	}
 	if err := h.securityStore.UpdateFindingState(c.Context(), namespace, c.Params("id"), "open"); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "finding not found")
@@ -662,6 +701,9 @@ func (h *Handlers) ValidateSecurityFinding(c fiber.Ctx) error {
 	}
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "validateSecurityFinding", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
 		return err
 	}
 	finding, err := h.securityStore.GetFinding(c.Context(), namespace, c.Params("id"))
@@ -689,6 +731,9 @@ func (h *Handlers) GenerateSecurityPatch(c fiber.Ctx) error {
 	}
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "generateSecurityPatch", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
 		return err
 	}
 	finding, err := h.securityStore.GetFinding(c.Context(), namespace, c.Params("id"))
@@ -722,6 +767,9 @@ func (h *Handlers) ListSecurityPatchProposals(c fiber.Ctx) error {
 	}
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "listSecurityPatchProposals", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
 		return err
 	}
 	proposals, err := h.securityStore.ListPatchProposals(c.Context(), namespace, c.Params("id"))
@@ -760,6 +808,9 @@ func (h *Handlers) CreateSecurityPullRequest(c fiber.Ctx) error {
 	}
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "createSecurityPullRequest", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
 		return err
 	}
 	finding, err := h.securityStore.GetFinding(c.Context(), namespace, c.Params("id"))
