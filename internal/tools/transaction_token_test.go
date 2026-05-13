@@ -15,8 +15,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/aramase/kontxt/pkg/keys"
 	kontxttoken "github.com/aramase/kontxt/pkg/token"
+	sdkverify "github.com/aramase/kontxt/sdk/verify"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -30,6 +33,29 @@ func TestPrepareChildTransactionToken(t *testing.T) {
 	subjectPath := filepath.Join(t.TempDir(), "subject-token")
 	if err := os.WriteFile(subjectPath, []byte("parent-tx-token"), 0600); err != nil {
 		t.Fatalf("failed to write subject token: %v", err)
+	}
+
+	keyManager, err := keys.NewManager(2048, time.Hour)
+	if err != nil {
+		t.Fatalf("failed to create kontxt key manager: %v", err)
+	}
+	jwksServer := httptest.NewServer(keyManager.JWKSHandler())
+	defer jwksServer.Close()
+	signingKey, kid := keyManager.SigningKey()
+	childToken, err := kontxttoken.New(kontxttoken.Claims{
+		Issuer:             "https://tts.example.test",
+		Audience:           "child.example.test",
+		TransactionID:      parentTransactionID,
+		Subject:            "spiffe://example.test/ns/default/sa/child",
+		Scope:              "orka:agents:run",
+		RequestingWorkload: "spiffe://example.test/ns/default/sa/orka-worker",
+		TransactionContext: map[string]any{
+			"operation": "delegateTask",
+			"agent":     testResearcherAgentName,
+		},
+	}, signingKey, kid, time.Minute)
+	if err != nil {
+		t.Fatalf("failed to create child TxToken: %v", err)
 	}
 
 	var requestDetails map[string]any
@@ -51,7 +77,11 @@ func TestPrepareChildTransactionToken(t *testing.T) {
 			t.Fatalf("request_details JSON error = %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"access_token":"child-tx-token","issued_token_type":"urn:ietf:params:oauth:token-type:txn_token","token_type":"N_A"}`))
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"access_token":      childToken,
+			"issued_token_type": "urn:ietf:params:oauth:token-type:txn_token",
+			"token_type":        "N_A",
+		})
 	}))
 	defer ttsServer.Close()
 
@@ -84,8 +114,19 @@ func TestPrepareChildTransactionToken(t *testing.T) {
 	if err := fc.Get(context.Background(), client.ObjectKey{Name: secretName, Namespace: defaultNamespace}, secret); err != nil {
 		t.Fatalf("failed to get child transaction token secret: %v", err)
 	}
-	if string(secret.Data["token"]) != "child-tx-token" {
-		t.Fatalf("secret token = %q, want child-tx-token", string(secret.Data["token"]))
+	secretToken := string(secret.Data["token"])
+	if secretToken != childToken {
+		t.Fatalf("secret token did not contain child TxToken returned by TTS")
+	}
+	claims, err := sdkverify.New(jwksServer.URL, "child.example.test").Verify(context.Background(), secretToken)
+	if err != nil {
+		t.Fatalf("failed to verify child TxToken from secret: %v", err)
+	}
+	if claims.TransactionID != parentTransactionID {
+		t.Fatalf("child token txn = %q, want %q", claims.TransactionID, parentTransactionID)
+	}
+	if claims.Scope != "orka:agents:run" {
+		t.Fatalf("child token scope = %q, want orka:agents:run", claims.Scope)
 	}
 	if len(secret.OwnerReferences) != 1 || secret.OwnerReferences[0].Name != parentTaskName {
 		t.Fatalf("ownerReferences = %#v, want parent task owner", secret.OwnerReferences)
