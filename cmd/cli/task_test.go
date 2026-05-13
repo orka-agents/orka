@@ -150,6 +150,7 @@ func taskAPIServer() *httptest.Server {
 						"metadata": map[string]any{
 							"name": "t1", "namespace": "default",
 							"creationTimestamp": time.Now().Add(-5 * time.Minute).Format(time.RFC3339),
+							"labels":            map[string]any{"orka.ai/parent-task": "parent-task"},
 						},
 						"spec": map[string]any{
 							"type":        "ai",
