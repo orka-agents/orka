@@ -13,10 +13,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	kontxttoken "github.com/aramase/kontxt/pkg/token"
+
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/workerenv"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -223,6 +227,58 @@ func TestToolExecutor_Execute_AuthHeader(t *testing.T) {
 
 	if receivedAuth != "Bearer test-token" {
 		t.Errorf("Authorization = %s, want Bearer test-token", receivedAuth)
+	}
+}
+
+func TestToolExecutor_Execute_PropagatesTransactionTokenFile(t *testing.T) {
+	txnTokenPath := filepath.Join(t.TempDir(), "txn-token")
+	if err := os.WriteFile(txnTokenPath, []byte("tx-token"), 0600); err != nil {
+		t.Fatalf("failed to write transaction token fixture: %v", err)
+	}
+	t.Setenv(workerenv.TransactionTokenFile, txnTokenPath)
+
+	var receivedTxnToken string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedTxnToken = r.Header.Get(kontxttoken.HeaderName)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: corev1alpha1.HTTPExecution{URL: server.URL},
+		},
+	}
+
+	if _, err := executor.Execute(context.Background(), tool, nil); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if receivedTxnToken != "tx-token" {
+		t.Fatalf("%s = %q, want tx-token", kontxttoken.HeaderName, receivedTxnToken)
+	}
+}
+
+func TestToolExecutor_Execute_TransactionTokenFileMissingFails(t *testing.T) {
+	t.Setenv(workerenv.TransactionTokenFile, filepath.Join(t.TempDir(), "missing"))
+	executor := &ToolExecutor{
+		client:     http.DefaultClient,
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: corev1alpha1.HTTPExecution{URL: "http://127.0.0.1"},
+		},
+	}
+
+	_, err := executor.Execute(context.Background(), tool, nil)
+	if err == nil || !strings.Contains(err.Error(), "transaction token file") {
+		t.Fatalf("Execute() error = %v, want transaction token file error", err)
 	}
 }
 

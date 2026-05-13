@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	kontxttoken "github.com/aramase/kontxt/pkg/token"
+
 	"github.com/sozercan/orka/internal/workerenv"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -140,6 +142,13 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 	if authInject == "header" && authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+authToken)
 	}
+	transactionToken, err := outboundTransactionToken()
+	if err != nil {
+		return "", err
+	}
+	if transactionToken != "" {
+		req.Header.Set(kontxttoken.HeaderName, transactionToken)
+	}
 
 	// Configure timeout
 	httpClient := e.client
@@ -195,4 +204,20 @@ func (e *ToolExecutor) getSecretKey(ctx context.Context, secretName, key string)
 	}
 
 	return "", fmt.Errorf("secret %s/%s not found", secretName, key)
+}
+
+func outboundTransactionToken() (string, error) {
+	path := strings.TrimSpace(os.Getenv(workerenv.TransactionTokenFile))
+	if path == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read transaction token file: %w", err)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", fmt.Errorf("transaction token file %q is empty", path)
+	}
+	return token, nil
 }

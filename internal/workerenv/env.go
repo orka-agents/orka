@@ -40,6 +40,7 @@ const (
 	TransactionScopes                 = "ORKA_TRANSACTION_SCOPES"
 	TransactionContextDigest          = "ORKA_TRANSACTION_CONTEXT_DIGEST"
 	TransactionRequesterContextDigest = "ORKA_TRANSACTION_REQUESTER_CONTEXT_DIGEST"
+	TransactionTokenFile              = "ORKA_TRANSACTION_TOKEN_FILE"
 
 	// AI worker env vars.
 	AIProvider        = "ORKA_AI_PROVIDER"
