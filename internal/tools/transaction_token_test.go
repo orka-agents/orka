@@ -133,6 +133,32 @@ func TestPrepareChildTransactionToken(t *testing.T) {
 	}
 }
 
+func TestPrepareChildTransactionTokenFailsClosedOnTTSExchangeError(t *testing.T) {
+	subjectPath := filepath.Join(t.TempDir(), "subject-token")
+	if err := os.WriteFile(subjectPath, []byte("parent-tx-token"), 0600); err != nil {
+		t.Fatalf("failed to write subject token: %v", err)
+	}
+	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"temporarily_unavailable","error_description":"maintenance"}`))
+	}))
+	defer ttsServer.Close()
+
+	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
+	t.Setenv(workerenv.ContextTokenChildScope, "orka:agents:run")
+
+	child := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: defaultNamespace}}
+	err := prepareChildTransactionToken(context.Background(), newFakeClient(), parentTask(), child, "delegateTask", testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), "exchanging child transaction token") || !strings.Contains(err.Error(), "temporarily_unavailable") {
+		t.Fatalf("prepareChildTransactionToken() error = %v, want TTS exchange failure", err)
+	}
+	if child.Annotations[labels.AnnotationTransactionTokenSecret] != "" {
+		t.Fatalf("unexpected child transaction token secret annotation after failed exchange: %#v", child.Annotations)
+	}
+}
+
 func TestPrepareChildTransactionTokenRejectsScopeExpansion(t *testing.T) {
 	subjectPath := filepath.Join(t.TempDir(), "subject-token")
 	if err := os.WriteFile(subjectPath, []byte("parent-tx-token"), 0600); err != nil {

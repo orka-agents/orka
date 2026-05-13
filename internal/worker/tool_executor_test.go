@@ -375,6 +375,47 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 	}
 }
 
+func TestToolExecutor_Execute_FailsClosedWhenOutboundTTSExchangeFails(t *testing.T) {
+	subjectTokenPath := filepath.Join(t.TempDir(), "subject-token")
+	if err := os.WriteFile(subjectTokenPath, []byte("parent-tx-token"), 0600); err != nil {
+		t.Fatalf("failed to write subject token fixture: %v", err)
+	}
+
+	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"temporarily_unavailable","error_description":"maintenance"}`))
+	}))
+	defer ttsServer.Close()
+
+	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectTokenPath)
+	t.Setenv(workerenv.ContextTokenOutboundScope, "orka:tools:http")
+
+	calledDownstream := false
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calledDownstream = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer toolServer.Close()
+
+	executor := &ToolExecutor{client: toolServer.Client(), namespace: "default", secretPath: "/secrets/tools"}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "downstream"},
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: corev1alpha1.HTTPExecution{URL: toolServer.URL},
+		},
+	}
+
+	_, err := executor.Execute(context.Background(), tool, nil)
+	if err == nil || !strings.Contains(err.Error(), "token exchange failed") || !strings.Contains(err.Error(), "temporarily_unavailable") {
+		t.Fatalf("Execute() error = %v, want TTS exchange failure", err)
+	}
+	if calledDownstream {
+		t.Fatal("downstream tool should not be called when outbound TTS exchange fails")
+	}
+}
+
 func TestToolExecutor_Execute_TransactionTokenFileMissingFails(t *testing.T) {
 	t.Setenv(workerenv.TransactionTokenFile, filepath.Join(t.TempDir(), "missing"))
 	executor := &ToolExecutor{
