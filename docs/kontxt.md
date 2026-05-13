@@ -187,7 +187,13 @@ Context-token metrics use low-cardinality labels only:
 | `orka_context_token_tts_exchange_total` | `result`, `reason` | TTS exchange attempts. |
 | `orka_context_token_tts_exchange_duration_seconds` | `result`, `reason` | TTS exchange latency. |
 
-Use logs and safe annotations for per-transaction tracing. Do not use raw transaction IDs, subjects, repositories, task names, or token values as metric labels.
+Use logs and safe annotations for per-transaction tracing. The CLI can filter Task summaries by transaction ID:
+
+```bash
+orka task list --transaction txn-abc123
+```
+
+Do not use raw transaction IDs, subjects, repositories, task names, or token values as metric labels.
 
 ## Redaction rules
 

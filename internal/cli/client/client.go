@@ -307,12 +307,13 @@ type TaskDetail map[string]any
 
 // TaskSummary is a lightweight representation of a task for list display.
 type TaskSummary struct {
-	Name      string
-	Namespace string
-	Type      string
-	Phase     string
-	Age       string
-	Iteration int
+	Name          string
+	Namespace     string
+	Type          string
+	Phase         string
+	Age           string
+	Iteration     int
+	TransactionID string
 }
 
 // taskListResponse matches the API ListResponse shape.
@@ -827,11 +828,12 @@ func (c *Client) DownloadArtifact(ctx context.Context, taskName, filename string
 // extractTaskSummary pulls summary fields from the raw task JSON.
 func extractTaskSummary(item TaskDetail) TaskSummary {
 	s := TaskSummary{
-		Name:      StringField(item, "metadata", "name"),
-		Namespace: StringField(item, "metadata", "namespace"),
-		Type:      StringField(item, "spec", "type"),
-		Phase:     StringField(item, "status", "phase"),
-		Age:       StringField(item, "metadata", "creationTimestamp"),
+		Name:          StringField(item, "metadata", "name"),
+		Namespace:     StringField(item, "metadata", "namespace"),
+		Type:          StringField(item, "spec", "type"),
+		Phase:         StringField(item, "status", "phase"),
+		Age:           StringField(item, "metadata", "creationTimestamp"),
+		TransactionID: StringField(item, "spec", "transaction", "id"),
 	}
 	if status, ok := item["status"].(map[string]any); ok {
 		if v, ok := status["iteration"].(float64); ok {

@@ -110,6 +110,7 @@ func newTaskCreateCmd() *cobra.Command {
 
 func newTaskListCmd() *cobra.Command {
 	var status string
+	var transactionID string
 	var limit int
 
 	cmd := &cobra.Command{
@@ -136,6 +137,16 @@ func newTaskListCmd() *cobra.Command {
 				tasks = filtered
 			}
 
+			if transactionID != "" {
+				filtered := make([]client.TaskSummary, 0)
+				for _, t := range tasks {
+					if t.TransactionID == transactionID {
+						filtered = append(filtered, t)
+					}
+				}
+				tasks = filtered
+			}
+
 			if len(tasks) == 0 {
 				fmt.Println("No tasks found.")
 				return nil
@@ -152,6 +163,7 @@ func newTaskListCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status (Pending, Running, Succeeded, Failed)")
+	cmd.Flags().StringVar(&transactionID, "transaction", "", "Filter by kontxt transaction ID")
 	cmd.Flags().IntVar(&limit, "limit", 20, "Maximum number of results")
 
 	return cmd

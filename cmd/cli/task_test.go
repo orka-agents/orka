@@ -151,7 +151,10 @@ func taskAPIServer() *httptest.Server {
 							"name": "t1", "namespace": "default",
 							"creationTimestamp": time.Now().Add(-5 * time.Minute).Format(time.RFC3339),
 						},
-						"spec":   map[string]any{"type": "ai"},
+						"spec": map[string]any{
+							"type":        "ai",
+							"transaction": map[string]any{"id": "txn-123"},
+						},
 						"status": map[string]any{"phase": "Succeeded"},
 					},
 					{
@@ -240,6 +243,21 @@ func TestNewTaskListCmd_WithStatus(t *testing.T) {
 
 	root := newRootCmd()
 	root.SetArgs([]string{"task", "list", "--server", srv.URL, "--status", "Running"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+}
+
+func TestNewTaskListCmd_WithTransaction(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	srv := taskAPIServer()
+	defer srv.Close()
+
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "list", "--server", srv.URL, "--transaction", "txn-123"})
 
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)

@@ -245,8 +245,11 @@ func TestListTasks(t *testing.T) {
 				Items: []TaskDetail{
 					{
 						"metadata": map[string]any{"name": "t1", "namespace": "ns1", "creationTimestamp": "2024-01-01T00:00:00Z"},
-						"spec":     map[string]any{"type": "ai"},
-						"status":   map[string]any{"phase": "Running", "iteration": float64(2)},
+						"spec": map[string]any{
+							"type":        "ai",
+							"transaction": map[string]any{"id": "txn-123"},
+						},
+						"status": map[string]any{"phase": "Running", "iteration": float64(2)},
 					},
 				},
 			},
@@ -283,6 +286,9 @@ func TestListTasks(t *testing.T) {
 			if !tt.wantErr {
 				if len(tasks) != tt.wantLen {
 					t.Errorf("len(tasks) = %d, want %d", len(tasks), tt.wantLen)
+				}
+				if tt.name == "success with items" && tasks[0].TransactionID != "txn-123" {
+					t.Errorf("TransactionID = %q, want txn-123", tasks[0].TransactionID)
 				}
 				if tt.opts.Namespace != "" && !strings.Contains(capturedQuery, "namespace=ns1") {
 					t.Errorf("query %q missing namespace param", capturedQuery)
