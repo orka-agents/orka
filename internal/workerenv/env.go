@@ -41,6 +41,10 @@ const (
 	TransactionContextDigest          = "ORKA_TRANSACTION_CONTEXT_DIGEST"
 	TransactionRequesterContextDigest = "ORKA_TRANSACTION_REQUESTER_CONTEXT_DIGEST"
 	TransactionTokenFile              = "ORKA_TRANSACTION_TOKEN_FILE"
+	ContextTokenTTSURL                = "ORKA_CONTEXT_TOKEN_TTS_URL"
+	ContextTokenSubjectTokenFile      = "ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE"
+	ContextTokenSubjectTokenType      = "ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_TYPE"
+	ContextTokenOutboundScope         = "ORKA_CONTEXT_TOKEN_OUTBOUND_SCOPE"
 
 	// AI worker env vars.
 	AIProvider        = "ORKA_AI_PROVIDER"

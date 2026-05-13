@@ -263,6 +263,69 @@ func TestToolExecutor_Execute_PropagatesTransactionTokenFile(t *testing.T) {
 	}
 }
 
+func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testing.T) {
+	subjectTokenPath := filepath.Join(t.TempDir(), "subject-token")
+	if err := os.WriteFile(subjectTokenPath, []byte("parent-tx-token"), 0600); err != nil {
+		t.Fatalf("failed to write subject token fixture: %v", err)
+	}
+
+	var ttsScope string
+	var ttsSubjectToken string
+	var requestDetails map[string]any
+	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/token_endpoint" {
+			t.Fatalf("TTS path = %q, want /token_endpoint", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm() error = %v", err)
+		}
+		ttsSubjectToken = r.FormValue("subject_token")
+		ttsScope = r.FormValue("scope")
+		if err := json.Unmarshal([]byte(r.FormValue("request_details")), &requestDetails); err != nil {
+			t.Fatalf("request_details JSON error = %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"downstream-tx-token","issued_token_type":"urn:ietf:params:oauth:token-type:txn_token","token_type":"N_A"}`))
+	}))
+	defer ttsServer.Close()
+
+	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectTokenPath)
+	t.Setenv(workerenv.ContextTokenOutboundScope, "orka:tools:http")
+	t.Setenv(workerenv.TaskName, "task-1")
+
+	var receivedTxnToken string
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedTxnToken = r.Header.Get(kontxttoken.HeaderName)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer toolServer.Close()
+
+	executor := &ToolExecutor{client: toolServer.Client(), namespace: "default", secretPath: "/secrets/tools"}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "downstream"},
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: corev1alpha1.HTTPExecution{URL: toolServer.URL},
+		},
+	}
+
+	if _, err := executor.Execute(context.Background(), tool, nil); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if ttsSubjectToken != "parent-tx-token" {
+		t.Fatalf("TTS subject_token = %q, want parent-tx-token", ttsSubjectToken)
+	}
+	if ttsScope != "orka:tools:http" {
+		t.Fatalf("TTS scope = %q, want orka:tools:http", ttsScope)
+	}
+	if requestDetails["operation"] != "httpTool" || requestDetails["tool"] != "downstream" || requestDetails["task"] != "task-1" {
+		t.Fatalf("request_details = %#v", requestDetails)
+	}
+	if receivedTxnToken != "downstream-tx-token" {
+		t.Fatalf("%s = %q, want downstream-tx-token", kontxttoken.HeaderName, receivedTxnToken)
+	}
+}
+
 func TestToolExecutor_Execute_TransactionTokenFileMissingFails(t *testing.T) {
 	t.Setenv(workerenv.TransactionTokenFile, filepath.Join(t.TempDir(), "missing"))
 	executor := &ToolExecutor{

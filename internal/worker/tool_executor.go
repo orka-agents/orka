@@ -22,6 +22,7 @@ import (
 
 	"github.com/sozercan/orka/internal/workerenv"
 
+	sdktts "github.com/aramase/kontxt/sdk/tts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -142,7 +143,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 	if authInject == "header" && authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+authToken)
 	}
-	transactionToken, err := outboundTransactionToken()
+	transactionToken, err := e.outboundTransactionToken(ctx, tool)
 	if err != nil {
 		return "", err
 	}
@@ -206,18 +207,60 @@ func (e *ToolExecutor) getSecretKey(ctx context.Context, secretName, key string)
 	return "", fmt.Errorf("secret %s/%s not found", secretName, key)
 }
 
-func outboundTransactionToken() (string, error) {
-	path := strings.TrimSpace(os.Getenv(workerenv.TransactionTokenFile))
-	if path == "" {
+func (e *ToolExecutor) outboundTransactionToken(ctx context.Context, tool *corev1alpha1.Tool) (string, error) {
+	if token, ok, err := readTokenFileEnv(workerenv.TransactionTokenFile, "transaction token"); ok || err != nil {
+		return token, err
+	}
+	ttsURL := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSURL))
+	if ttsURL == "" {
 		return "", nil
+	}
+	subjectToken, ok, err := readTokenFileEnv(workerenv.ContextTokenSubjectTokenFile, "context token subject token")
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("%s is required when %s is set", workerenv.ContextTokenSubjectTokenFile, workerenv.ContextTokenTTSURL)
+	}
+	scope := strings.TrimSpace(os.Getenv(workerenv.ContextTokenOutboundScope))
+	if scope == "" {
+		scope = strings.TrimSpace(os.Getenv(workerenv.TransactionScope))
+	}
+	if scope == "" {
+		return "", fmt.Errorf("%s or %s is required when %s is set", workerenv.ContextTokenOutboundScope, workerenv.TransactionScope, workerenv.ContextTokenTTSURL)
+	}
+	subjectTokenType := strings.TrimSpace(os.Getenv(workerenv.ContextTokenSubjectTokenType))
+	if subjectTokenType == "" {
+		subjectTokenType = kontxttoken.SubjectTokenTypeTxnToken
+	}
+	requestDetails := map[string]any{
+		"operation": "httpTool",
+		"tool":      tool.Name,
+		"namespace": e.namespace,
+	}
+	if taskName := strings.TrimSpace(os.Getenv(workerenv.TaskName)); taskName != "" {
+		requestDetails["task"] = taskName
+	}
+	return sdktts.NewClient(ttsURL).Exchange(ctx, &sdktts.ExchangeRequest{
+		SubjectToken:     subjectToken,
+		SubjectTokenType: subjectTokenType,
+		Scope:            scope,
+		RequestDetails:   requestDetails,
+	})
+}
+
+func readTokenFileEnv(envName, description string) (string, bool, error) {
+	path := strings.TrimSpace(os.Getenv(envName))
+	if path == "" {
+		return "", false, nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("failed to read transaction token file: %w", err)
+		return "", true, fmt.Errorf("failed to read %s file: %w", description, err)
 	}
 	token := strings.TrimSpace(string(data))
 	if token == "" {
-		return "", fmt.Errorf("transaction token file %q is empty", path)
+		return "", true, fmt.Errorf("%s file %q is empty", description, path)
 	}
-	return token, nil
+	return token, true, nil
 }
