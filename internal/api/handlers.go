@@ -797,6 +797,9 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "listTools", h.contextTokenAuthorization.ToolReadScopes); err != nil {
+		return err
+	}
 	limit := c.Query("limit", "100")
 	continueToken := c.Query("continue", "")
 
@@ -849,6 +852,9 @@ func (h *Handlers) GetTool(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "getTool", h.contextTokenAuthorization.ToolReadScopes); err != nil {
+		return err
+	}
 
 	// Check if it's a built-in tool
 	if builtin, ok := builtinToolsMap[name]; ok {
@@ -872,6 +878,9 @@ func (h *Handlers) GetTool(c fiber.Ctx) error {
 func (h *Handlers) ListAgents(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "listAgents", h.contextTokenAuthorization.AgentReadScopes); err != nil {
 		return err
 	}
 	limit := c.Query("limit", "100")
@@ -909,6 +918,9 @@ func (h *Handlers) GetAgent(c fiber.Ctx) error {
 	name := c.Params("name")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "getAgent", h.contextTokenAuthorization.AgentReadScopes); err != nil {
 		return err
 	}
 
@@ -949,6 +961,9 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "createAgent", h.contextTokenAuthorization.AgentWriteScopes); err != nil {
+		return err
+	}
 
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
@@ -974,6 +989,9 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 	name := c.Params("name")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "updateAgent", h.contextTokenAuthorization.AgentWriteScopes); err != nil {
 		return err
 	}
 
@@ -1004,6 +1022,9 @@ func (h *Handlers) DeleteAgent(c fiber.Ctx) error {
 	name := c.Params("name")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "deleteAgent", h.contextTokenAuthorization.AgentWriteScopes); err != nil {
 		return err
 	}
 

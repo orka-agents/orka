@@ -32,6 +32,12 @@ const (
 	ContextTokenScopeTaskList = "orka:tasks:list"
 	// ContextTokenScopeTaskDelete authorizes context-token callers to delete Tasks.
 	ContextTokenScopeTaskDelete = "orka:tasks:delete"
+	// ContextTokenScopeToolsRead authorizes context-token callers to read Tool definitions.
+	ContextTokenScopeToolsRead = "orka:tools:read"
+	// ContextTokenScopeAgentsRead authorizes context-token callers to read Agent definitions.
+	ContextTokenScopeAgentsRead = "orka:agents:read"
+	// ContextTokenScopeAgentsWrite authorizes context-token callers to mutate Agent definitions.
+	ContextTokenScopeAgentsWrite = "orka:agents:write"
 )
 
 // ContextTokenAuthorizationConfig controls optional authorization checks derived
@@ -42,10 +48,22 @@ type ContextTokenAuthorizationConfig struct {
 	TaskReadScopes   []string
 	TaskListScopes   []string
 	TaskDeleteScopes []string
+	ToolReadScopes   []string
+	AgentReadScopes  []string
+	AgentWriteScopes []string
 }
 
 // NewContextTokenAuthorizationConfig builds context-token authorization config.
-func NewContextTokenAuthorizationConfig(mode, taskCreateScopes, taskReadScopes, taskListScopes, taskDeleteScopes string) (ContextTokenAuthorizationConfig, error) {
+func NewContextTokenAuthorizationConfig(
+	mode,
+	taskCreateScopes,
+	taskReadScopes,
+	taskListScopes,
+	taskDeleteScopes,
+	toolReadScopes,
+	agentReadScopes,
+	agentWriteScopes string,
+) (ContextTokenAuthorizationConfig, error) {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode == "" {
 		mode = ContextTokenAuthorizationModeOff
@@ -60,12 +78,18 @@ func NewContextTokenAuthorizationConfig(mode, taskCreateScopes, taskReadScopes, 
 	readScopes := defaultScopes(taskReadScopes, ContextTokenScopeTaskGet)
 	listScopes := defaultScopes(taskListScopes, ContextTokenScopeTaskList)
 	deleteScopes := defaultScopes(taskDeleteScopes, ContextTokenScopeTaskDelete)
+	toolRead := defaultScopes(toolReadScopes, ContextTokenScopeToolsRead)
+	agentRead := defaultScopes(agentReadScopes, ContextTokenScopeAgentsRead)
+	agentWrite := defaultScopes(agentWriteScopes, ContextTokenScopeAgentsWrite)
 	return ContextTokenAuthorizationConfig{
 		Mode:             mode,
 		TaskCreateScopes: createScopes,
 		TaskReadScopes:   readScopes,
 		TaskListScopes:   listScopes,
 		TaskDeleteScopes: deleteScopes,
+		ToolReadScopes:   toolRead,
+		AgentReadScopes:  agentRead,
+		AgentWriteScopes: agentWrite,
 	}, nil
 }
 

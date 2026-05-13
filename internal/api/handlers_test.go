@@ -58,7 +58,7 @@ func setupTestHandlersWithAuthz(t *testing.T, ctxTokenConfig ContextTokenConfig,
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	authz, err := NewContextTokenAuthorizationConfig(mode, "", "", "", "")
+	authz, err := NewContextTokenAuthorizationConfig(mode, "", "", "", "", "", "", "")
 	require.NoError(t, err)
 	handlers := NewHandlers(HandlersConfig{
 		Client:                    fakeClient,
@@ -73,6 +73,13 @@ func setupTestHandlersWithAuthz(t *testing.T, ctxTokenConfig ContextTokenConfig,
 	app.Get("/tasks", handlers.ListTasks)
 	app.Get("/tasks/:id", handlers.GetTask)
 	app.Delete("/tasks/:id", handlers.DeleteTask)
+	app.Get("/tools", handlers.ListTools)
+	app.Get("/tools/:name", handlers.GetTool)
+	app.Post("/agents", handlers.CreateAgent)
+	app.Get("/agents", handlers.ListAgents)
+	app.Get("/agents/:name", handlers.GetAgent)
+	app.Put("/agents/:name", handlers.UpdateAgent)
+	app.Delete("/agents/:name", handlers.DeleteAgent)
 	return app
 }
 
@@ -510,6 +517,48 @@ func TestHandlers_TaskActions_ContextTokenAuthorization(t *testing.T) {
 			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
 			req := httptest.NewRequest(tt.method, tt.path, nil)
 			req.Header.Set(KontxtHeaderName, token)
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if resp.StatusCode != tt.want {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandlers_ToolAndAgentActions_ContextTokenAuthorization(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "authz-agent", Namespace: "default"},
+		Spec:       corev1alpha1.AgentSpec{},
+	}
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		scope  string
+		want   int
+	}{
+		{name: "list tools allowed", method: http.MethodGet, path: "/tools", scope: ContextTokenScopeToolsRead, want: http.StatusOK},
+		{name: "list tools denied", method: http.MethodGet, path: "/tools", scope: ContextTokenScopeAgentsRead, want: http.StatusForbidden},
+		{name: "list agents allowed", method: http.MethodGet, path: "/agents", scope: ContextTokenScopeAgentsRead, want: http.StatusOK},
+		{name: "list agents denied", method: http.MethodGet, path: "/agents", scope: ContextTokenScopeToolsRead, want: http.StatusForbidden},
+		{name: "create agent allowed", method: http.MethodPost, path: "/agents", body: `{"name":"new-agent","spec":{}}`, scope: ContextTokenScopeAgentsWrite, want: http.StatusCreated},
+		{name: "create agent denied", method: http.MethodPost, path: "/agents", body: `{"name":"new-agent","spec":{}}`, scope: ContextTokenScopeAgentsRead, want: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, agent.DeepCopyObject())
+			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
 			if err != nil {
 				t.Fatalf("Test request failed: %v", err)
