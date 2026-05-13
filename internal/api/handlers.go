@@ -697,6 +697,9 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "listSessions", h.contextTokenAuthorization.SessionReadScopes); err != nil {
+		return err
+	}
 
 	ctx := c.Context()
 	sessions, err := h.sessionStore.ListSessions(ctx, namespace)
@@ -733,6 +736,9 @@ func (h *Handlers) GetSession(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "getSession", h.contextTokenAuthorization.SessionReadScopes); err != nil {
 		return err
 	}
 
@@ -777,6 +783,9 @@ func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "deleteSession", h.contextTokenAuthorization.SessionWriteScopes); err != nil {
 		return err
 	}
 
@@ -1063,6 +1072,9 @@ func (h *Handlers) ListSkills(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "listSkills", h.contextTokenAuthorization.SkillReadScopes); err != nil {
+		return err
+	}
 	limit := c.Query("limit", "100")
 	continueToken := c.Query("continue", "")
 
@@ -1113,6 +1125,9 @@ func (h *Handlers) GetSkill(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "getSkill", h.contextTokenAuthorization.SkillReadScopes); err != nil {
+		return err
+	}
 
 	skill := &corev1alpha1.Skill{}
 	ctx := c.Context()
@@ -1133,6 +1148,9 @@ func (h *Handlers) GetSkillContent(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "getSkillContent", h.contextTokenAuthorization.SkillReadScopes); err != nil {
+		return err
+	}
 
 	skill := &corev1alpha1.Skill{}
 	ctx := c.Context()
@@ -1149,6 +1167,10 @@ func (h *Handlers) GetSkillContent(c fiber.Ctx) error {
 
 // CreateSkill creates a new skill
 func (h *Handlers) CreateSkill(c fiber.Ctx) error {
+	if err := h.authorizeContextTokenAction(c, "createSkill", h.contextTokenAuthorization.SkillWriteScopes); err != nil {
+		return err
+	}
+
 	var req CreateSkillRequest
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
@@ -1197,6 +1219,9 @@ func (h *Handlers) UpdateSkill(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "updateSkill", h.contextTokenAuthorization.SkillWriteScopes); err != nil {
+		return err
+	}
 
 	skill := &corev1alpha1.Skill{}
 	ctx := c.Context()
@@ -1225,6 +1250,9 @@ func (h *Handlers) DeleteSkill(c fiber.Ctx) error {
 	name := c.Params("name")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "deleteSkill", h.contextTokenAuthorization.SkillWriteScopes); err != nil {
 		return err
 	}
 

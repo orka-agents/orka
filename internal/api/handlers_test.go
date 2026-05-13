@@ -51,6 +51,17 @@ func setupTestHandlers() (*Handlers, *fiber.App) {
 
 func setupTestHandlersWithAuthz(t *testing.T, ctxTokenConfig ContextTokenConfig, mode string, objs ...runtime.Object) *fiber.App {
 	t.Helper()
+	app, _ := setupTestHandlersWithAuthzStore(t, ctxTokenConfig, mode, objs...)
+	return app
+}
+
+func setupTestHandlersWithAuthzStore(
+	t *testing.T,
+	ctxTokenConfig ContextTokenConfig,
+	mode string,
+	objs ...runtime.Object,
+) (*fiber.App, *sqlite.Store) {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
@@ -58,7 +69,7 @@ func setupTestHandlersWithAuthz(t *testing.T, ctxTokenConfig ContextTokenConfig,
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	authz, err := NewContextTokenAuthorizationConfig(mode, "", "", "", "", "", "", "", "", "")
+	authz, err := NewContextTokenAuthorizationConfig(mode, "", "", "", "", "", "", "", "", "", "", "", "", "")
 	require.NoError(t, err)
 	handlers := NewHandlers(HandlersConfig{
 		Client:                    fakeClient,
@@ -87,7 +98,16 @@ func setupTestHandlersWithAuthz(t *testing.T, ctxTokenConfig ContextTokenConfig,
 	app.Get("/memories/:id", handlers.GetMemory)
 	app.Put("/memories/:id", handlers.UpdateMemory)
 	app.Delete("/memories/:id", handlers.DeleteMemory)
-	return app
+	app.Get("/sessions", handlers.ListSessions)
+	app.Get("/sessions/:id", handlers.GetSession)
+	app.Delete("/sessions/:id", handlers.DeleteSession)
+	app.Post("/skills", handlers.CreateSkill)
+	app.Get("/skills", handlers.ListSkills)
+	app.Get("/skills/:name", handlers.GetSkill)
+	app.Get("/skills/:name/content", handlers.GetSkillContent)
+	app.Put("/skills/:name", handlers.UpdateSkill)
+	app.Delete("/skills/:name", handlers.DeleteSkill)
+	return app, ss
 }
 
 func setupTestHandlersWithObjects(objs ...runtime.Object) (*Handlers, *fiber.App) {
@@ -609,6 +629,248 @@ func TestHandlers_MemoryActions_ContextTokenAuthorization(t *testing.T) {
 			if resp.StatusCode != tt.want {
 				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, tt.want)
 			}
+		})
+	}
+}
+
+func TestHandlers_SessionActions_ContextTokenAuthorization(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	const authzSessionName = "authz-session"
+	const authzSessionsPath = "/sessions"
+	authzSessionPath := authzSessionsPath + "/" + authzSessionName
+
+	tests := []struct {
+		name        string
+		mode        string
+		method      string
+		path        string
+		scope       string
+		seedSession bool
+		want        int
+	}{
+		{
+			name:        "session read denied without read scope",
+			mode:        ContextTokenAuthorizationModeEnforce,
+			method:      http.MethodGet,
+			path:        authzSessionPath,
+			scope:       ContextTokenScopeSkillsRead,
+			seedSession: true,
+			want:        http.StatusForbidden,
+		},
+		{
+			name:        "session read allowed with read scope",
+			mode:        ContextTokenAuthorizationModeEnforce,
+			method:      http.MethodGet,
+			path:        authzSessionPath,
+			scope:       ContextTokenScopeSessionsRead,
+			seedSession: true,
+			want:        http.StatusOK,
+		},
+		{
+			name:        "session delete denied without write scope",
+			mode:        ContextTokenAuthorizationModeEnforce,
+			method:      http.MethodDelete,
+			path:        authzSessionPath,
+			scope:       ContextTokenScopeSessionsRead,
+			seedSession: true,
+			want:        http.StatusForbidden,
+		},
+		{
+			name:        "session delete allowed with write scope",
+			mode:        ContextTokenAuthorizationModeEnforce,
+			method:      http.MethodDelete,
+			path:        authzSessionPath,
+			scope:       ContextTokenScopeSessionsWrite,
+			seedSession: true,
+			want:        http.StatusNoContent,
+		},
+		{
+			name:   "session audit mode allows missing scope",
+			mode:   ContextTokenAuthorizationModeAudit,
+			method: http.MethodGet,
+			path:   authzSessionsPath,
+			scope:  ContextTokenScopeSkillsRead,
+			want:   http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, ss := setupTestHandlersWithAuthzStore(t, ctxTokenConfig, tt.mode)
+			if tt.seedSession {
+				require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
+					Namespace:   "default",
+					Name:        authzSessionName,
+					SessionType: "task",
+				}))
+			}
+
+			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.Header.Set(KontxtHeaderName, token)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, resp.StatusCode)
+		})
+	}
+}
+
+func TestHandlers_SkillActions_ContextTokenAuthorization(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	const authzSkillName = "authz-skill"
+	const authzSkillsPath = "/skills"
+	authzSkillPath := authzSkillsPath + "/" + authzSkillName
+	writeBody := `{"name":"created-skill","spec":{"description":"create","content":{"inline":"# Create"}}}`
+	updateBody := `{"spec":{"description":"update","content":{"inline":"# Update"}}}`
+	seedSkill := func() *corev1alpha1.Skill {
+		return &corev1alpha1.Skill{
+			ObjectMeta: metav1.ObjectMeta{Name: authzSkillName, Namespace: "default"},
+			Spec: corev1alpha1.SkillSpec{
+				Description: "authz skill",
+				Content: corev1alpha1.SkillContent{
+					Inline: "# Authz",
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mode   string
+		method string
+		path   string
+		body   string
+		scope  string
+		seed   bool
+		want   int
+	}{
+		{
+			name:   "skill list denied without read scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodGet,
+			path:   authzSkillsPath,
+			scope:  ContextTokenScopeSkillsWrite,
+			want:   http.StatusForbidden,
+		},
+		{
+			name:   "skill list allowed with read scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodGet,
+			path:   authzSkillsPath,
+			scope:  ContextTokenScopeSkillsRead,
+			want:   http.StatusOK,
+		},
+		{
+			name:   "skill get allowed with read scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodGet,
+			path:   authzSkillPath,
+			scope:  ContextTokenScopeSkillsRead,
+			seed:   true,
+			want:   http.StatusOK,
+		},
+		{
+			name:   "skill content denied without read scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodGet,
+			path:   authzSkillPath + "/content",
+			scope:  ContextTokenScopeSkillsWrite,
+			seed:   true,
+			want:   http.StatusForbidden,
+		},
+		{
+			name:   "skill content allowed with read scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodGet,
+			path:   authzSkillPath + "/content",
+			scope:  ContextTokenScopeSkillsRead,
+			seed:   true,
+			want:   http.StatusOK,
+		},
+		{
+			name:   "skill create denied without write scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodPost,
+			path:   authzSkillsPath,
+			body:   writeBody,
+			scope:  ContextTokenScopeSkillsRead,
+			want:   http.StatusForbidden,
+		},
+		{
+			name:   "skill create allowed with write scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodPost,
+			path:   authzSkillsPath,
+			body:   writeBody,
+			scope:  ContextTokenScopeSkillsWrite,
+			want:   http.StatusCreated,
+		},
+		{
+			name:   "skill update denied without write scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodPut,
+			path:   authzSkillPath,
+			body:   updateBody,
+			scope:  ContextTokenScopeSkillsRead,
+			seed:   true,
+			want:   http.StatusForbidden,
+		},
+		{
+			name:   "skill update allowed with write scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodPut,
+			path:   authzSkillPath,
+			body:   updateBody,
+			scope:  ContextTokenScopeSkillsWrite,
+			seed:   true,
+			want:   http.StatusOK,
+		},
+		{
+			name:   "skill delete denied without write scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodDelete,
+			path:   authzSkillPath,
+			scope:  ContextTokenScopeSkillsRead,
+			seed:   true,
+			want:   http.StatusForbidden,
+		},
+		{
+			name:   "skill delete allowed with write scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodDelete,
+			path:   authzSkillPath,
+			scope:  ContextTokenScopeSkillsWrite,
+			seed:   true,
+			want:   http.StatusNoContent,
+		},
+		{
+			name:   "skill audit mode allows missing scope",
+			mode:   ContextTokenAuthorizationModeAudit,
+			method: http.MethodGet,
+			path:   authzSkillsPath,
+			scope:  ContextTokenScopeSessionsRead,
+			want:   http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objs := []runtime.Object{}
+			if tt.seed {
+				objs = append(objs, seedSkill())
+			}
+			app := setupTestHandlersWithAuthz(t, ctxTokenConfig, tt.mode, objs...)
+			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, resp.StatusCode)
 		})
 	}
 }

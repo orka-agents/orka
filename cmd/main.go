@@ -104,6 +104,10 @@ func main() {
 	var contextTokenAgentWriteScopes string
 	var contextTokenMemoryReadScopes string
 	var contextTokenMemoryWriteScopes string
+	var contextTokenSessionReadScopes string
+	var contextTokenSessionWriteScopes string
+	var contextTokenSkillReadScopes string
+	var contextTokenSkillWriteScopes string
 	var contextTokenTTSURL string
 	var contextTokenTTSAudience string
 	var contextTokenTTSTimeout string
@@ -209,6 +213,18 @@ func main() {
 	flag.StringVar(&contextTokenMemoryWriteScopes, "context-token-memory-write-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_MEMORY_WRITE_SCOPES"),
 		"Comma-separated context-token scopes that authorize memory writes. Defaults to orka:memory:write.")
+	flag.StringVar(&contextTokenSessionReadScopes, "context-token-session-read-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_SESSION_READ_SCOPES"),
+		"Comma-separated context-token scopes that authorize session reads. Defaults to orka:sessions:read.")
+	flag.StringVar(&contextTokenSessionWriteScopes, "context-token-session-write-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_SESSION_WRITE_SCOPES"),
+		"Comma-separated context-token scopes that authorize session writes. Defaults to orka:sessions:write.")
+	flag.StringVar(&contextTokenSkillReadScopes, "context-token-skill-read-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_SKILL_READ_SCOPES"),
+		"Comma-separated context-token scopes that authorize Skill reads. Defaults to orka:skills:read.")
+	flag.StringVar(&contextTokenSkillWriteScopes, "context-token-skill-write-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_SKILL_WRITE_SCOPES"),
+		"Comma-separated context-token scopes that authorize Skill writes. Defaults to orka:skills:write.")
 	flag.StringVar(&contextTokenTTSURL, "context-token-tts-url", os.Getenv("ORKA_CONTEXT_TOKEN_TTS_URL"),
 		"kontxt TTS base URL for optional token exchange/replacement.")
 	flag.StringVar(&contextTokenTTSAudience, "context-token-tts-audience", os.Getenv("ORKA_CONTEXT_TOKEN_TTS_AUDIENCE"),
@@ -257,6 +273,10 @@ func main() {
 		contextTokenAgentWriteScopes,
 		contextTokenMemoryReadScopes,
 		contextTokenMemoryWriteScopes,
+		contextTokenSessionReadScopes,
+		contextTokenSessionWriteScopes,
+		contextTokenSkillReadScopes,
+		contextTokenSkillWriteScopes,
 	)
 	if err != nil {
 		setupLog.Error(err, "invalid context token authorization configuration")
