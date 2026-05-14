@@ -2,7 +2,7 @@
 
 Orka can participate in `kontxt` transaction-token workflows without storing raw transaction tokens in Task specs/status, labels, annotations, logs, metrics, or durable memory. Delegated raw TxTokens are stored only in owner-referenced Kubernetes Secrets for worker handoff. The integration is intentionally staged so existing Kubernetes ServiceAccount and OIDC callers continue to work unless context-token authentication or authorization is explicitly configured.
 
-New to Kontxt or setting it up for the first time? Start with [Kontxt quickstart: use OIDC identity to call Orka without long-lived tokens](kontxt-quickstart.md), then return here for detailed configuration and security guidance.
+New to Kontxt or setting it up for the first time? Start with [Kontxt quickstart: use Kubernetes identity to call Orka without long-lived tokens](kontxt-quickstart.md), then return here for detailed configuration and security guidance.
 
 ## Capability summary
 
@@ -33,12 +33,24 @@ Orka validates the resulting kontxt TxToken. The original identity token is vali
 
 | Source | Use when | Notes |
 |---|---|---|
-| GitHub Actions OIDC | CI workflows need to call Orka without long-lived secrets. | Good smoke-test source because GitHub can mint short-lived OIDC JWTs for a workflow run. |
-| Microsoft Entra Agent ID / Workload ID | Enterprise-managed agents, services, or workloads need governed identity. | Use a TTS-specific audience and map stable Entra claims to allowed Orka scopes and signed `tctx`. |
 | Kubernetes projected ServiceAccount tokens | In-cluster workloads need TxTokens without an external OIDC issuer. | Kubernetes issues the subject JWT; kontxt TTS must trust the Kubernetes issuer/JWKS. Use bound, audience-scoped projected tokens rather than legacy long-lived ServiceAccount Secret tokens. |
+| GitHub Actions OIDC | CI workflows need to call Orka without long-lived secrets. | Configure kontxt TTS to trust the GitHub Actions OIDC issuer and exchange the short-lived workflow JWT for a TxToken. |
+| Microsoft Entra Agent ID / Workload ID | Enterprise-managed agents, services, or workloads need governed identity. | Use a TTS-specific audience and map stable Entra claims to allowed Orka scopes and signed `tctx`. |
 | Other OIDC/JWT issuers | Your organization already has a trusted issuer. | Works when kontxt TTS can validate issuer, audience, signing keys, and policy claims. |
 
 For Kubernetes, keep the distinction clear: direct ServiceAccount bearer authentication to Orka proves caller identity, but it does not provide kontxt transaction ID, signed `tctx`, scope narrowing, child TxTokens, or transaction audit correlation. The kontxt flow is `projected ServiceAccount token → kontxt TTS → TxToken → Orka`.
+
+### Kubernetes ServiceAccount token trust
+
+When Kubernetes projected ServiceAccount tokens are used as kontxt TTS subject tokens, TTS must validate the token issuer, audience, expiry, and signing key before issuing a TxToken. Use bound projected tokens with a TTS-specific audience and short expiration; do not rely on legacy long-lived ServiceAccount Secret tokens.
+
+The ServiceAccount issuer is the `iss` value from the cluster's OIDC discovery document, and TTS needs a reachable discovery/JWKS endpoint for that issuer. In public or centrally managed clusters, prefer a stable issuer URL whose JWKS endpoint is reachable from TTS and handles key rotation normally. In private clusters or AKS-style environments where the advertised issuer/JWKS is not reachable from the TTS Pod, use one of these production-safe approaches:
+
+- make the issuer/JWKS endpoint reachable with the correct CA trust;
+- expose a managed discovery proxy that preserves the real issuer value and refreshes JWKS as keys rotate;
+- configure equivalent static trust settings in TTS only when your operational process refreshes keys before rotation breaks validation.
+
+A static in-cluster mirror of the current discovery and JWKS documents can unblock smoke tests, but it snapshots signing keys. Refresh it after key rotation and avoid treating it as the production design.
 
 ## Ingress verification
 

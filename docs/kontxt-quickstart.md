@@ -1,11 +1,15 @@
-# Kontxt quickstart: use OIDC identity to call Orka without long-lived tokens
+# Kontxt quickstart: use Kubernetes identity to call Orka without long-lived tokens
 
-This guide shows one successful Orka + kontxt run. It uses GitHub Actions OIDC because it is easy to reproduce and matches Orka's live validation, but the pattern is not GitHub-specific.
+This guide shows one successful Orka + kontxt run using a Kubernetes projected ServiceAccount token as the caller identity. The caller runs inside the cluster, exchanges its bound ServiceAccount token for a short-lived kontxt TxToken, and calls Orka with `Txn-Token`.
+
+We are going to run through a basic example: clone a repository, verify its root `LICENSE` is MIT, and prove the worker received safe transaction metadata.
+
+It is only an example workload; replace it with your own build, policy, compliance, or agent task. The kontxt/Orka transaction-token flow is the important part.
 
 ## If you only remember one thing
 
 ```text
-GitHub / Entra / Kubernetes proves who the caller is.
+Kubernetes proves who the caller Pod is.
 kontxt signs why this request is allowed.
 Orka enforces and audits the signed transaction.
 ```
@@ -13,98 +17,213 @@ Orka enforces and audits the signed transaction.
 In this quickstart:
 
 ```text
-GitHub Actions OIDC token
+Initial caller Job Pod
+  → projected Kubernetes ServiceAccount token
   → kontxt TTS
   → kontxt TxToken
   → Orka API with Txn-Token
-  → Kubernetes Task / Job / Pod with transaction metadata
+  → Orka-created Task / Job / worker Pod with transaction metadata
 ```
 
-For deeper reference material, including Entra, Kubernetes projected ServiceAccount tokens, delegation, outbound propagation, and full scope/`tctx` behavior, see [Kontxt TxToken integration](kontxt.md).
-
-## The problem this solves
-
-CI systems, developer portals, and automation platforms often call Orka with a bearer token that proves **who** is calling, but not enough about **why this specific request is allowed**. Without transaction-scoped context, platforms tend to fall back to weak patterns:
-
-- long-lived API keys or broad ServiceAccount tokens shared across many jobs;
-- ad-hoc headers such as `X-Repo`, `X-Actor`, or `X-Workflow` that downstream services must trust blindly;
-- audit trails that require stitching together GitHub logs, Orka Tasks, Kubernetes Jobs/Pods, and downstream service logs by time and guesswork.
-
-That is risky for autonomous or delegated work. Identity alone is not enough; each hop also needs signed request context and a stable transaction ID.
-
-## How it works
-
-| Piece | Role in this guide |
-|---|---|
-| **Subject token** | Proves who the caller is. In this guide, it is a GitHub Actions OIDC JWT. |
-| **kontxt TTS** | A separate service from [`github.com/aramase/kontxt`](https://github.com/aramase/kontxt) that verifies the subject token and exchanges it for a TxToken. In Kubernetes it is usually a Deployment/Service with one or more Pods; Orka does not deploy it for you. |
-| **TxToken** | A short-lived transaction token sent to Orka in the `Txn-Token` header. |
-| **`scope`** | The permissions in the TxToken, such as `orka:tasks:create`. |
-| **`tctx`** | Signed request context, such as `namespace=default` and `taskType=container`. |
-| **`txn`** | The transaction ID used to correlate Orka Tasks, Jobs, Pods, and logs. |
-| **Orka** | Verifies the TxToken, enforces scope/`tctx`, and stamps safe transaction metadata. |
+This guide deliberately covers only the runnable Kubernetes ServiceAccount smoke-test path. For the broader model, alternate identity providers, authz modes, delegation, outbound propagation, and full `scope`/`tctx` behavior, see [Kontxt TxToken integration](kontxt.md).
 
 ## What you will validate
 
 You are done when:
 
-- the smoke workflow prints `unauthenticated status=401`;
-- the smoke workflow prints `create status=201`;
+- a low-privilege caller Job uses a projected ServiceAccount token rather than a long-lived secret;
+- the caller Job exchanges that subject token with kontxt TTS for a TxToken;
+- Orka creates a Task when called with the valid TxToken and returns `201`;
 - the response includes `spec.transaction.profile=kontxt`;
 - the response includes a transaction ID and safe transaction digests;
-- the smoke workflow prints `tampered status=401`;
-- optionally, the Kubernetes Task/Job/Pod carry `orka.ai/transaction-id`.
+- the Orka-created Task/Job/Pod carry `orka.ai/transaction-id`;
+- the worker Pod finishes successfully and its result proves the MIT license check ran with transaction metadata.
 
 ## Prerequisites
 
 You need:
 
 - a Kubernetes cluster with Orka installed;
-- kubeconfig access for Steps 1 and 2;
+- kubeconfig access for the setup and validation commands;
 - permission to install [`kontxt`](https://github.com/aramase/kontxt) TTS with Helm, or an existing kontxt TTS/issuer you can use;
-- an Orka API URL reachable from the GitHub Actions runner;
-- `helm`, `kubectl`, `curl`, and `jq`.
-
-For private clusters, use a self-hosted GitHub runner or run the Kubernetes validation step from your workstation.
+- a Kubernetes ServiceAccount token issuer/JWKS configuration that kontxt TTS can trust;
+- an Orka API Service reachable from the in-cluster caller Job;
+- worker Pod network access to the repository being checked, or an internal mirror you can set as `REPO_URL`;
+- `helm`, `kubectl`, `curl`, and `jq` on your workstation.
 
 > **kontxt TTS deployment note**
 >
 > kontxt TTS is separate from Orka. It is provided by [`github.com/aramase/kontxt`](https://github.com/aramase/kontxt); see the upstream [`cmd/tts`](https://github.com/aramase/kontxt/tree/main/cmd/tts) service and Kubernetes/Helm quick start in that repo. It can run in Kubernetes as a Deployment/Service/Pod, or it can run outside the cluster as a centralized service. Orka only needs the TTS/JWKS URLs for the kontxt service you operate.
 
-Fill in these values before starting:
+Fill in these values before starting. The defaults assume kontxt and Orka are exposed as in-cluster Services.
 
 ```bash
 export ORKA_NS=orka-system
 export ORKA_DEPLOY=orka-controller-manager
 export ORKA_API_SVC=orka-api
+export ORKA_API=http://orka-api.orka-system.svc:8080
 
 export KONTXT_NS=kontxt-system
 export KONTXT_RELEASE=kontxt
 export KONTXT_TRUST_DOMAIN=orka-api
-
-export ORKA_API=https://orka.example.test
 export KONTXT_TTS_URL=http://kontxt-tts.kontxt-system.svc
 export KONTXT_ISSUER=https://kontxt-tts.kontxt-system.svc
 export KONTXT_AUDIENCE=orka-api
 export KONTXT_JWKS_URL=http://kontxt-tts.kontxt-system.svc/.well-known/jwks.json
-export GITHUB_OIDC_AUDIENCE=orka-kontxt-smoke
-export KONTXT_REQUESTING_WORKLOAD=spiffe://example.test/ns/default/sa/orka-smoke-client
+
+export CALLER_NS=default
+export CALLER_SA=orka-kontxt-caller
+export KONTXT_SUBJECT_AUDIENCE=kontxt-tts
+export KONTXT_REQUESTING_WORKLOAD="spiffe://example.test/ns/${CALLER_NS}/sa/${CALLER_SA}"
 ```
 
 Token safety rules:
 
-- do not print GitHub OIDC tokens or TxTokens;
+- do not print Kubernetes projected ServiceAccount tokens or TxTokens;
 - do not use `set -x` in these scripts;
 - store tokens only in temporary files created with `umask 077` or mode `0600`;
 - log transaction IDs and digests, not tokens.
 
 Orka never stores raw TxTokens in Task specs/status, logs, labels, annotations, metrics, artifacts, or durable memory.
 
-## Step 1: Install kontxt TTS with Helm
+Before running the smoke test, make sure the installed Orka `Task` CRD is current. Older CRDs can silently prune `spec.transaction`, which makes the REST call appear to succeed while the persisted Task is missing transaction metadata.
 
-Run this step from a workstation or runner with kubeconfig access. If your platform team already operates kontxt TTS, skip this step and use their TTS/JWKS URLs.
+From the root of this repository, apply the current Task CRD:
 
-Create a Helm values file that configures kontxt TTS to issue Orka-scoped TxTokens and trust GitHub Actions OIDC as the subject-token issuer:
+```bash
+kubectl apply -f config/crd/bases/core.orka.ai_tasks.yaml
+```
+
+Expected result: `tasks.core.orka.ai` is configured or unchanged.
+
+## Step 1: Install kontxt TTS with Kubernetes ServiceAccount-token trust
+
+Run this step from a workstation with kubeconfig access. If your platform team already operates kontxt TTS, skip the install and use their TTS/JWKS URLs, but confirm that TTS trusts your Kubernetes ServiceAccount token issuer and `KONTXT_SUBJECT_AUDIENCE`.
+
+Discover the Kubernetes ServiceAccount token issuer advertised by your API server:
+
+```bash
+kubectl get --raw /.well-known/openid-configuration | jq '{issuer, jwks_uri}'
+
+export KUBERNETES_SERVICEACCOUNT_ISSUER="$(
+  kubectl get --raw /.well-known/openid-configuration | jq -r .issuer
+)"
+
+test -n "$KUBERNETES_SERVICEACCOUNT_ISSUER"
+```
+
+Expected result: `KUBERNETES_SERVICEACCOUNT_ISSUER` is the `iss` value that appears in projected ServiceAccount tokens for this cluster.
+
+By default, let kontxt TTS discover the issuer metadata from the issuer URL:
+
+```bash
+export KUBERNETES_SERVICEACCOUNT_DISCOVERY_URL="${KUBERNETES_SERVICEACCOUNT_ISSUER%/}/.well-known/openid-configuration"
+```
+
+If the issuer URL or its JWKS endpoint is not reachable from the kontxt TTS Pod, fix issuer/JWKS reachability or use the smoke-test mirror below. See [Kubernetes ServiceAccount token trust](kontxt.md#kubernetes-serviceaccount-token-trust) for the trust model and production options.
+
+> **Static discovery mirror is for smoke tests and dev clusters**
+>
+> The following mirror snapshots the current Kubernetes JWKS into a ConfigMap and serves it over an in-cluster Service. Use it only when you understand the JWKS rotation tradeoff described in the reference doc.
+
+```bash
+export KUBERNETES_SERVICEACCOUNT_DISCOVERY_URL="http://kubernetes-oidc-discovery.${KONTXT_NS}.svc/.well-known/openid-configuration"
+export KUBERNETES_SERVICEACCOUNT_JWKS_URL="http://kubernetes-oidc-discovery.${KONTXT_NS}.svc/openid/v1/jwks"
+
+kubectl create namespace "$KONTXT_NS" --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl get --raw /openid/v1/jwks > /tmp/kubernetes-sa-jwks.json
+jq -n \
+  --arg issuer "$KUBERNETES_SERVICEACCOUNT_ISSUER" \
+  --arg jwks_uri "$KUBERNETES_SERVICEACCOUNT_JWKS_URL" \
+  '{
+    issuer: $issuer,
+    jwks_uri: $jwks_uri,
+    response_types_supported: ["id_token"],
+    subject_types_supported: ["public"],
+    id_token_signing_alg_values_supported: ["RS256"]
+  }' > /tmp/kubernetes-sa-openid-configuration.json
+
+kubectl -n "$KONTXT_NS" create configmap kubernetes-oidc-discovery \
+  --from-file=openid-configuration=/tmp/kubernetes-sa-openid-configuration.json \
+  --from-file=jwks=/tmp/kubernetes-sa-jwks.json \
+  --dry-run=client -o yaml \
+  | kubectl apply -f -
+
+cat <<EOF_YAML | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubernetes-oidc-discovery
+  namespace: ${KONTXT_NS}
+  labels:
+    app.kubernetes.io/name: kubernetes-oidc-discovery
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubernetes-oidc-discovery
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kubernetes-oidc-discovery
+    spec:
+      containers:
+        - name: httpd
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "httpd -f -p 8080 -h /www"]
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /.well-known/openid-configuration
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: oidc-documents
+              mountPath: /www
+              readOnly: true
+      volumes:
+        - name: oidc-documents
+          configMap:
+            name: kubernetes-oidc-discovery
+            items:
+              - key: openid-configuration
+                path: .well-known/openid-configuration
+              - key: jwks
+                path: openid/v1/jwks
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubernetes-oidc-discovery
+  namespace: ${KONTXT_NS}
+  labels:
+    app.kubernetes.io/name: kubernetes-oidc-discovery
+spec:
+  selector:
+    app.kubernetes.io/name: kubernetes-oidc-discovery
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+EOF_YAML
+
+kubectl -n "$KONTXT_NS" rollout status deploy/kubernetes-oidc-discovery --timeout=2m
+```
+
+Create a Helm values file that configures kontxt TTS to issue Orka-scoped TxTokens and trust projected Kubernetes ServiceAccount tokens with the audience used later in this quickstart:
 
 ```bash
 cat >/tmp/kontxt-orka-values.yaml <<EOF_VALUES
@@ -116,9 +235,10 @@ tts:
     tokenLifetime: "15m"
     subjectTokens:
       - issuer:
-          url: "https://token.actions.githubusercontent.com"
+          url: "${KUBERNETES_SERVICEACCOUNT_ISSUER}"
+          discoveryURL: "${KUBERNETES_SERVICEACCOUNT_DISCOVERY_URL}"
           audiences:
-            - "${GITHUB_OIDC_AUDIENCE}"
+            - "${KONTXT_SUBJECT_AUDIENCE}"
         claimMappings:
           subject:
             claim: "sub"
@@ -134,20 +254,30 @@ helm upgrade --install "$KONTXT_RELEASE" oci://ghcr.io/aramase/charts/kontxt --v
   -f /tmp/kontxt-orka-values.yaml
 ```
 
-Wait for kontxt Pods to be ready:
+If you do not use the mirror and instead need TTS to trust the Kubernetes API server CA for HTTPS issuer discovery, patching the CA environment before the restart is an alternative:
 
 ```bash
+kubectl -n "$KONTXT_NS" set env deploy/kontxt-tts \
+  SSL_CERT_FILE=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+```
+
+Restart TTS so it reads the rendered configuration, then wait for each kontxt Deployment explicitly:
+
+```bash
+kubectl -n "$KONTXT_NS" rollout restart deploy/kontxt-tts
+
 kubectl -n "$KONTXT_NS" get pods,svc
-kubectl -n "$KONTXT_NS" rollout status deploy -l app.kubernetes.io/instance="$KONTXT_RELEASE" --timeout=5m
+kubectl -n "$KONTXT_NS" rollout status deploy/kontxt-tts --timeout=5m
+kubectl -n "$KONTXT_NS" rollout status deploy/kontxt-extauth --timeout=5m
+kubectl -n "$KONTXT_NS" rollout status deploy/kontxt-extauth-generate --timeout=5m
+kubectl -n "$KONTXT_NS" rollout status deploy/kontxt-controller --timeout=5m
 ```
 
 Expected result: the kontxt TTS Deployment rolls out and exposes a Service that matches `KONTXT_TTS_URL`.
 
-If you run the GitHub smoke test on a GitHub-hosted runner, expose kontxt TTS and Orka API through endpoints that runner can reach and set the workflow `KONTXT_TTS_URL` / `ORKA_API` to those external URLs. If you use a self-hosted runner in the cluster network, the in-cluster service URLs can be used directly.
-
 ## Step 2: Configure Orka to trust kontxt TxTokens
 
-Run this step from a workstation or runner with kubeconfig access.
+Run this step from a workstation with kubeconfig access.
 
 First confirm the Orka deployment and service names:
 
@@ -187,185 +317,244 @@ deployment "<orka controller>" successfully rolled out
 
 Kontxt TxTokens are read from `Txn-Token` by default. Keep that default for the first smoke test.
 
-## Step 3: Run the GitHub Actions smoke test
+## Step 3: Run the in-cluster caller Job end to end
 
-This step shows the GitHub Actions version of the generic flow. GitHub is not required for kontxt or Orka; it is used here because it is an easy way to demonstrate a real OIDC subject token without storing long-lived secrets.
+Create a low-privilege ServiceAccount for the initial caller. This ServiceAccount does not need Kubernetes API RBAC for this example because the Pod calls Orka and kontxt over HTTP, not the Kubernetes API.
 
-Create `.github/workflows/orka-kontxt-smoke.yml` in a test repository that is allowed to call your Orka and kontxt endpoints. Replace the placeholder `env` values or map them to repository/environment variables.
-
-```yaml
-name: Orka Kontxt Smoke Test
-
-on:
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  id-token: write
-
-jobs:
-  smoke:
-    runs-on: ubuntu-latest
-    env:
-      ORKA_API: https://orka.example.test
-      GITHUB_OIDC_AUDIENCE: orka-kontxt-smoke
-      KONTXT_TTS_URL: https://kontxt-tts.example.test
-      KONTXT_REQUESTING_WORKLOAD: spiffe://example.test/ns/default/sa/orka-smoke-client
-    steps:
-      - name: Install tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y jq
-          curl -fsSLO "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x kubectl
-          sudo mv kubectl /usr/local/bin/kubectl
-
-      - name: Exchange GitHub OIDC for TxToken
-        shell: bash
-        run: |
-          set -euo pipefail
-          umask 077
-
-          subject_token_file="$(mktemp)"
-          tx_token_file="$(mktemp)"
-
-          curl -fsS \
-            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${GITHUB_OIDC_AUDIENCE}" \
-            | jq -er '.value' > "${subject_token_file}"
-
-          request_details="$(jq -cn '{namespace:"default",taskType:"container"}')"
-          request_context="$(jq -cn '{purpose:"orka-kontxt-smoke",source:"github-actions"}')"
-
-          curl -fsS -X POST "${KONTXT_TTS_URL%/}/token_endpoint" \
-            -H "X-Kontxt-Workload: ${KONTXT_REQUESTING_WORKLOAD}" \
-            -H 'Content-Type: application/x-www-form-urlencoded' \
-            --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
-            --data-urlencode "subject_token@${subject_token_file}" \
-            --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:id_token' \
-            --data-urlencode 'requested_token_type=urn:ietf:params:oauth:token-type:txn_token' \
-            --data-urlencode 'scope=orka:tasks:create' \
-            --data-urlencode "request_details=${request_details}" \
-            --data-urlencode "request_context=${request_context}" \
-            | jq -er '.access_token' > "${tx_token_file}"
-
-          echo "TXN_TOKEN_FILE=${tx_token_file}" >> "${GITHUB_ENV}"
-
-      - name: Create Orka Task with TxToken
-        shell: bash
-        run: |
-          set -euo pipefail
-          umask 077
-
-          task_name="kontxt-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          task_manifest="$(mktemp).yaml"
-          task_request="$(mktemp).json"
-          tx_header_file="$(mktemp)"
-          response_file="$(mktemp).json"
-
-          cat > "${task_manifest}" <<EOF_TASK
-          apiVersion: core.orka.ai/v1alpha1
-          kind: Task
-          metadata:
-            name: ${task_name}
-            namespace: default
-          spec:
-            type: container
-            image: busybox:1.36
-            command:
-              - /bin/sh
-              - -c
-            args:
-              - echo kontxt-smoke
-          EOF_TASK
-
-          # Do not kubectl apply this manifest. Sending it through the Orka REST API
-          # is what validates Txn-Token and lets Orka stamp transaction metadata.
-          kubectl create --dry-run=client --validate=false -f "${task_manifest}" -o json \
-            | jq '{name: .metadata.name, namespace: .metadata.namespace} + .spec' \
-            > "${task_request}"
-
-          printf 'Txn-Token: %s\n' "$(cat "${TXN_TOKEN_FILE}")" > "${tx_header_file}"
-
-          unauth_status="$(curl -sS -o /tmp/orka-unauth.json -w '%{http_code}' \
-            "${ORKA_API%/}/api/v1/tasks?namespace=default")"
-          echo "unauthenticated status=${unauth_status}"
-          test "${unauth_status}" = 401
-
-          create_status="$(curl -sS -o "${response_file}" -w '%{http_code}' \
-            -X POST "${ORKA_API%/}/api/v1/tasks" \
-            -H "@${tx_header_file}" \
-            -H 'Content-Type: application/json' \
-            --data @"${task_request}")"
-          echo "create status=${create_status}"
-          test "${create_status}" = 201
-
-          jq -e '
-            (.spec.requestedBy.subject // "") != ""
-            and .spec.transaction.profile == "kontxt"
-            and (.spec.transaction.id // "") != ""
-            and (.spec.transaction.scope // "" | contains("orka:tasks:create"))
-            and (.spec.transaction.contextDigest // "" | startswith("sha256:"))
-            and (.spec.transaction.requesterContextDigest // "" | startswith("sha256:"))
-            and .metadata.labels["orka.ai/transaction-id"] == .spec.transaction.id
-            and .metadata.annotations["orka.ai/transaction-id"] == .spec.transaction.id
-          ' "${response_file}"
-
-          jq '{task: .metadata.name, transactionID: .spec.transaction.id, scope: .spec.transaction.scope}' "${response_file}"
-
-          bad_token_file="$(mktemp)"
-          bad_header_file="$(mktemp)"
-          cp "${TXN_TOKEN_FILE}" "${bad_token_file}"
-          printf 'tampered' >> "${bad_token_file}"
-          printf 'Txn-Token: %s\n' "$(cat "${bad_token_file}")" > "${bad_header_file}"
-
-          tampered_status="$(curl -sS -o /tmp/orka-tampered.json -w '%{http_code}' \
-            -X POST "${ORKA_API%/}/api/v1/tasks" \
-            -H "@${bad_header_file}" \
-            -H 'Content-Type: application/json' \
-            --data @"${task_request}")"
-          echo "tampered status=${tampered_status}"
-          test "${tampered_status}" = 401
+```bash
+kubectl -n "$CALLER_NS" create serviceaccount "$CALLER_SA" --dry-run=client -o yaml \
+  | kubectl apply -f -
 ```
 
-Expected status lines:
+If you rerun the example, remove the previous caller Job and MIT license check Task first:
+
+```bash
+kubectl -n "$CALLER_NS" delete job orka-kontxt-caller --ignore-not-found=true
+kubectl -n default delete task kontxt-mit-license-check --ignore-not-found=true
+```
+
+Create the one-shot caller Job. The Job is intentionally limited to the happy path so each step is visible:
+
+1. exchange the projected Kubernetes ServiceAccount token for a kontxt TxToken;
+2. call Orka with `Txn-Token` to create `kontxt-mit-license-check`;
+3. wait for the Orka worker and print the result.
+
+Step 4 performs the detailed metadata validation after the Task exists. Adjust `KONTXT_TTS_URL`, `ORKA_API`, `KONTXT_REQUESTING_WORKLOAD`, and `REPO_URL` in the manifest if your in-cluster service names, kontxt policy, or repository source use different values.
+
+```bash
+cat >/tmp/orka-kontxt-caller-job.yaml <<'EOF_YAML'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: orka-kontxt-caller
+  namespace: default
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orka-kontxt-caller
+    spec:
+      restartPolicy: Never
+      serviceAccountName: orka-kontxt-caller
+      automountServiceAccountToken: false
+      containers:
+        - name: caller
+          image: alpine:3.20
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KONTXT_TTS_URL
+              value: http://kontxt-tts.kontxt-system.svc
+            - name: ORKA_API
+              value: http://orka-api.orka-system.svc:8080
+            - name: KONTXT_REQUESTING_WORKLOAD
+              value: spiffe://example.test/ns/default/sa/orka-kontxt-caller
+            - name: TASK_NAMESPACE
+              value: default
+            - name: TASK_NAME
+              value: kontxt-mit-license-check
+            - name: REPO_URL
+              value: https://github.com/sozercan/orka.git
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              set -eu
+              umask 077
+
+              apk add --no-cache curl jq >/dev/null
+
+              subject_token_file=/var/run/secrets/kontxt/token
+              workdir="$(mktemp -d)"
+              trap 'rm -rf "${workdir}"' EXIT
+
+              tx_token_file="${workdir}/tx-token"
+              tx_header_file="${workdir}/tx-header"
+              worker_script="${workdir}/worker.sh"
+              task_request="${workdir}/task-request.json"
+              response_file="${workdir}/task-response.json"
+              task_status_file="${workdir}/task-status.json"
+              result_file="${workdir}/task-result.json"
+
+              request_details="$(jq -cn --arg ns "${TASK_NAMESPACE}" '{namespace:$ns,taskType:"container"}')"
+              request_context="$(jq -cn --arg repo "${REPO_URL}" '{purpose:"mit-license-check",source:"kubernetes-projected-service-account",repository:$repo}')"
+
+              echo "1/3 exchange projected ServiceAccount token for a kontxt TxToken"
+              curl -fsS -X POST "${KONTXT_TTS_URL%/}/token_endpoint" \
+                -H "X-Kontxt-Workload: ${KONTXT_REQUESTING_WORKLOAD}" \
+                -H 'Content-Type: application/x-www-form-urlencoded' \
+                --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+                --data-urlencode "subject_token@${subject_token_file}" \
+                --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:jwt' \
+                --data-urlencode 'requested_token_type=urn:ietf:params:oauth:token-type:txn_token' \
+                --data-urlencode 'scope=orka:tasks:create orka:tasks:get' \
+                --data-urlencode "request_details=${request_details}" \
+                --data-urlencode "request_context=${request_context}" \
+                | jq -er '.access_token' > "${tx_token_file}"
+              printf 'Txn-Token: %s\n' "$(cat "${tx_token_file}")" > "${tx_header_file}"
+
+              cat > "${worker_script}" <<'EOF_WORKER'
+              set -eu
+              : "${ORKA_TRANSACTION_ID:?missing transaction id}"
+              test "${ORKA_TRANSACTION_PROFILE:-}" = kontxt
+
+              repo="${REPO_URL:-https://github.com/sozercan/orka.git}"
+              export HOME=/tmp
+              workdir="$(mktemp -d)"
+              git clone --depth 1 "${repo}" "${workdir}" >/dev/null 2>&1
+
+              license="$(find "${workdir}" -maxdepth 1 -iname 'LICENSE*' -print -quit)"
+              test -n "${license}"
+              grep -Eq '^MIT License$' "${license}"
+              grep -q 'Permission is hereby granted, free of charge' "${license}"
+
+              printf 'MIT license check passed for %s in transaction %s\n' "${repo}" "${ORKA_TRANSACTION_ID}"
+              EOF_WORKER
+
+              jq -cn \
+                --arg name "${TASK_NAME}" \
+                --arg namespace "${TASK_NAMESPACE}" \
+                --arg image alpine/git:2.45.2 \
+                --arg repo "${REPO_URL}" \
+                --rawfile script "${worker_script}" \
+                '{
+                  name: $name,
+                  namespace: $namespace,
+                  type: "container",
+                  image: $image,
+                  command: ["/bin/sh", "-c"],
+                  args: [$script],
+                  env: [{name: "REPO_URL", value: $repo}]
+                }' > "${task_request}"
+
+              echo "2/3 create Orka Task ${TASK_NAME} through the Orka REST API"
+              create_status="$(curl -sS -o "${response_file}" -w '%{http_code}' \
+                -X POST "${ORKA_API%/}/api/v1/tasks" \
+                -H "@${tx_header_file}" \
+                -H 'Content-Type: application/json' \
+                --data @"${task_request}")"
+              echo "create status=${create_status}"
+              if [ "${create_status}" != 201 ]; then
+                cat "${response_file}"
+                exit 1
+              fi
+
+              task_name="$(jq -er '.metadata.name' "${response_file}")"
+              txn_id="$(jq -er '.spec.transaction.id' "${response_file}")"
+              echo "task=${task_name}"
+              echo "transactionID=${txn_id}"
+
+              echo "3/3 wait for the Orka worker and print its result"
+              phase=""
+              for _ in $(seq 1 90); do
+                get_status="$(curl -sS -o "${task_status_file}" -w '%{http_code}' \
+                  -H "@${tx_header_file}" \
+                  "${ORKA_API%/}/api/v1/tasks/${task_name}?namespace=${TASK_NAMESPACE}")"
+                if [ "${get_status}" != 200 ]; then
+                  cat "${task_status_file}"
+                  exit 1
+                fi
+
+                phase="$(jq -r '.status.phase // ""' "${task_status_file}")"
+                case "${phase}" in
+                  Succeeded) break ;;
+                  Failed|Cancelled)
+                    cat "${task_status_file}"
+                    exit 1
+                    ;;
+                esac
+                sleep 2
+              done
+
+              echo "task phase=${phase}"
+              test "${phase}" = Succeeded
+
+              curl -fsS \
+                -H "@${tx_header_file}" \
+                "${ORKA_API%/}/api/v1/tasks/${task_name}/result?namespace=${TASK_NAMESPACE}" \
+                > "${result_file}"
+              jq -er '.result | contains("MIT license check passed for") and contains("in transaction")' "${result_file}" >/dev/null
+              jq -r '.result' "${result_file}"
+          volumeMounts:
+            - name: kontxt-subject-token
+              mountPath: /var/run/secrets/kontxt
+              readOnly: true
+      volumes:
+        - name: kontxt-subject-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: kontxt-tts
+                  expirationSeconds: 600
+EOF_YAML
+
+kubectl apply -f /tmp/orka-kontxt-caller-job.yaml
+```
+
+Wait for the initial caller Job and inspect its logs:
+
+```bash
+kubectl -n default wait --for=condition=complete job/orka-kontxt-caller --timeout=5m
+kubectl -n default logs job/orka-kontxt-caller
+```
+
+Expected safe log lines include:
 
 ```text
-unauthenticated status=401
+1/3 exchange projected ServiceAccount token for a kontxt TxToken
+2/3 create Orka Task kontxt-mit-license-check through the Orka REST API
 create status=201
-tampered status=401
+task=kontxt-mit-license-check
+transactionID=txn-...
+3/3 wait for the Orka worker and print its result
+task phase=Succeeded
+MIT license check passed for https://github.com/sozercan/orka.git in transaction txn-...
 ```
 
-Expected safe summary shape:
+The caller Job Pod and worker Pod are separate:
 
-```json
-{
-  "task": "kontxt-smoke-...",
-  "transactionID": "txn-...",
-  "scope": "orka:tasks:create"
-}
+```text
+caller Job Pod: reads projected ServiceAccount token, exchanges it, calls Orka
+worker Pod: created by Orka for Task kontxt-mit-license-check, clones the repository, checks the MIT license, and receives safe transaction metadata
 ```
 
 ## Step 4: Validate Kubernetes transaction metadata
 
-This step is optional for the first green run, but it is the best proof that Orka made the TxToken Kubernetes-native. Run it from a self-hosted runner or workstation with kubeconfig access.
-
-Use the Task name and transaction ID printed by the workflow:
+The Task should persist safe transaction metadata. Extract the transaction ID from the Task and validate the Task fields:
 
 ```bash
-export TASK_NAME=kontxt-smoke-...
-export TXN_ID=txn-...
-```
+export TASK_NAME=kontxt-mit-license-check
+export TXN_ID="$(kubectl -n default get task "$TASK_NAME" -o jsonpath='{.spec.transaction.id}')"
+test -n "$TXN_ID"
 
-The Task should persist safe transaction metadata:
-
-```bash
 kubectl -n default get task "$TASK_NAME" -o json \
   | jq -e --arg txn "$TXN_ID" '
       .spec.transaction.profile == "kontxt"
       and .spec.transaction.id == $txn
+      and (.spec.transaction.contextDigest // "" | startswith("sha256:"))
+      and (.spec.transaction.requesterContextDigest // "" | startswith("sha256:"))
       and .metadata.labels["orka.ai/transaction-id"] == $txn
       and .metadata.annotations["orka.ai/transaction-id"] == $txn
     '
@@ -373,20 +562,25 @@ kubectl -n default get task "$TASK_NAME" -o json \
 
 Expected result: `jq` exits successfully and prints `true`.
 
-The Job and Pod should inherit the transaction ID:
+The Orka-created Job and Pod should inherit the transaction ID:
 
 ```bash
 kubectl -n default get jobs -l "orka.ai/task=${TASK_NAME}" -o json \
   | jq -e --arg txn "$TXN_ID" '
       .items[0].metadata.labels["orka.ai/transaction-id"] == $txn
+      and .items[0].metadata.annotations["orka.ai/transaction-id"] == $txn
       and .items[0].spec.template.metadata.labels["orka.ai/transaction-id"] == $txn
+      and .items[0].spec.template.metadata.annotations["orka.ai/transaction-id"] == $txn
     '
 
 kubectl -n default get pods -l "orka.ai/task=${TASK_NAME}" -o json \
   | jq -e --arg txn "$TXN_ID" '
       .items[0].metadata.labels["orka.ai/transaction-id"] == $txn
+      and .items[0].metadata.annotations["orka.ai/transaction-id"] == $txn
     '
 ```
+
+Expected result: both `jq` commands exit successfully and print `true`.
 
 If your Orka CLI is already authenticated with a normal ServiceAccount/OIDC token, you can also inspect the transaction metadata:
 
@@ -398,9 +592,9 @@ orka audit trace --server "$ORKA_API" "$TXN_ID"
 
 ## Optional: Validate enforce-mode `tctx` rejection
 
-After the happy path passes, switch Orka from `audit` to `enforce` and submit a request that violates the signed `tctx.namespace=default` constraint.
+After the happy path passes, switch Orka from `audit` to `enforce` and run a second in-cluster caller Job that intentionally violates the signed `tctx.namespace=default` constraint.
 
-In the smoke test, kontxt signs this request context:
+In the successful caller Job, kontxt signed this request context:
 
 ```json
 {
@@ -409,7 +603,7 @@ In the smoke test, kontxt signs this request context:
 }
 ```
 
-When Orka is in `enforce` mode, a request for namespace `not-default` should fail.
+When Orka is in `enforce` mode, a request for namespace `not-default` should fail even though the caller has a valid TxToken.
 
 ```bash
 kubectl -n "$ORKA_NS" set env deployment/"$ORKA_DEPLOY" \
@@ -417,82 +611,162 @@ kubectl -n "$ORKA_NS" set env deployment/"$ORKA_DEPLOY" \
 kubectl -n "$ORKA_NS" rollout status deployment/"$ORKA_DEPLOY" --timeout=5m
 ```
 
-Create a Kubernetes-style manifest that intentionally changes the namespace:
+Create and run the denial caller Job:
 
 ```bash
-cat >/tmp/orka-kontxt-denied-task.yaml <<EOF_YAML
-apiVersion: core.orka.ai/v1alpha1
-kind: Task
+kubectl -n default delete job orka-kontxt-denied-caller --ignore-not-found=true
+
+cat >/tmp/orka-kontxt-denied-caller-job.yaml <<'EOF_YAML'
+apiVersion: batch/v1
+kind: Job
 metadata:
-  name: kontxt-smoke-denied
-  namespace: not-default
+  name: orka-kontxt-denied-caller
+  namespace: default
 spec:
-  type: container
-  image: busybox:1.36
-  command:
-    - /bin/sh
-    - -c
-  args:
-    - echo should-not-run
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orka-kontxt-denied-caller
+    spec:
+      restartPolicy: Never
+      serviceAccountName: orka-kontxt-caller
+      automountServiceAccountToken: false
+      containers:
+        - name: caller
+          image: alpine:3.20
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KONTXT_TTS_URL
+              value: http://kontxt-tts.kontxt-system.svc
+            - name: ORKA_API
+              value: http://orka-api.orka-system.svc:8080
+            - name: KONTXT_REQUESTING_WORKLOAD
+              value: spiffe://example.test/ns/default/sa/orka-kontxt-caller
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              set -eu
+              umask 077
+              cleanup() {
+                rm -f \
+                  "${tx_token_file:-}" \
+                  "${tx_header_file:-}" \
+                  "${task_request:-}" \
+                  "${response_file:-}"
+              }
+              trap cleanup EXIT
+
+              apk add --no-cache curl jq >/dev/null
+
+              subject_token_file=/var/run/secrets/kontxt/token
+              tx_token_file="$(mktemp)"
+              tx_header_file="$(mktemp)"
+              task_request="$(mktemp).json"
+              response_file="$(mktemp).json"
+
+              request_details='{"namespace":"default","taskType":"container"}'
+              request_context='{"purpose":"kubernetes-projected-service-account-denied-smoke","source":"kubernetes-projected-service-account"}'
+
+              curl -fsS -X POST "${KONTXT_TTS_URL%/}/token_endpoint" \
+                -H "X-Kontxt-Workload: ${KONTXT_REQUESTING_WORKLOAD}" \
+                -H 'Content-Type: application/x-www-form-urlencoded' \
+                --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+                --data-urlencode "subject_token@${subject_token_file}" \
+                --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:jwt' \
+                --data-urlencode 'requested_token_type=urn:ietf:params:oauth:token-type:txn_token' \
+                --data-urlencode 'scope=orka:tasks:create' \
+                --data-urlencode "request_details=${request_details}" \
+                --data-urlencode "request_context=${request_context}" \
+                | jq -er '.access_token' > "${tx_token_file}"
+
+              printf 'Txn-Token: %s\n' "$(cat "${tx_token_file}")" > "${tx_header_file}"
+
+              cat > "${task_request}" <<'EOF_JSON'
+              {
+                "name": "kontxt-k8s-denied",
+                "namespace": "not-default",
+                "type": "container",
+                "image": "busybox:1.36",
+                "command": ["/bin/sh", "-c"],
+                "args": ["echo should-not-run"]
+              }
+              EOF_JSON
+
+              status="$(curl -sS -o "${response_file}" -w '%{http_code}' \
+                -X POST "${ORKA_API%/}/api/v1/tasks" \
+                -H "@${tx_header_file}" \
+                -H 'Content-Type: application/json' \
+                --data @"${task_request}")"
+              echo "denied status=${status}"
+              if [ "${status}" != 403 ]; then
+                cat "${response_file}"
+                exit 1
+              fi
+          volumeMounts:
+            - name: kontxt-subject-token
+              mountPath: /var/run/secrets/kontxt
+              readOnly: true
+      volumes:
+        - name: kontxt-subject-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: kontxt-tts
+                  expirationSeconds: 600
 EOF_YAML
 
-kubectl create --dry-run=client --validate=false -f /tmp/orka-kontxt-denied-task.yaml -o json \
-  | jq '{name: .metadata.name, namespace: .metadata.namespace} + .spec' \
-  >/tmp/orka-kontxt-denied-task-request.json
+kubectl apply -f /tmp/orka-kontxt-denied-caller-job.yaml
+kubectl -n default wait --for=condition=complete job/orka-kontxt-denied-caller --timeout=5m
+kubectl -n default logs job/orka-kontxt-denied-caller
 ```
 
-Build a temporary header file from the same TxToken used for the successful request, then submit the denied request:
+Expected safe log line:
 
-```bash
-export TXN_HEADER_FILE="${TXN_HEADER_FILE:-$(mktemp)}"
-chmod 600 "$TXN_HEADER_FILE"
-printf 'Txn-Token: %s\n' "$(cat "$TXN_TOKEN_FILE")" > "$TXN_HEADER_FILE"
-
-status="$(curl -sS -o /tmp/orka-kontxt-denied-response.json -w '%{http_code}' \
-  -X POST "${ORKA_API%/}/api/v1/tasks" \
-  -H "@${TXN_HEADER_FILE}" \
-  -H 'Content-Type: application/json' \
-  --data @/tmp/orka-kontxt-denied-task-request.json)"
-echo "$status"
-# expected: 403
-test "$status" = 403
+```text
+denied status=403
 ```
 
 If the denied request returns `201`, the token probably did not include a matching `tctx.namespace`, or Orka is still in `audit`/`off` mode.
 
-## Other identity sources
+If you enabled enforce mode only for this check, switch back to audit mode before continuing with other experiments:
 
-This quickstart uses GitHub Actions OIDC for the runnable smoke test. The same kontxt flow can use other subject-token sources:
+```bash
+kubectl -n "$ORKA_NS" set env deployment/"$ORKA_DEPLOY" \
+  ORKA_CONTEXT_TOKEN_AUTHZ_MODE=audit
+kubectl -n "$ORKA_NS" rollout status deployment/"$ORKA_DEPLOY" --timeout=5m
+```
 
-| Source | Use when |
-|---|---|
-| Microsoft Entra Agent ID / Workload ID | Enterprise-managed agents or services need governed identity. |
-| Kubernetes projected ServiceAccount tokens | In-cluster workloads need TxTokens without an external OIDC provider. |
-| Other OIDC/JWT issuers | Your organization already has a trusted issuer that kontxt TTS can validate. |
+## Other identity providers
 
-For all of these, only the subject-token acquisition and TTS trust policy change. Orka still validates the resulting kontxt TxToken from the `Txn-Token` header.
+This quickstart intentionally stays on the Kubernetes projected ServiceAccount path. For GitHub Actions OIDC, Microsoft Entra Workload ID, and other subject-token issuers, see [Subject-token sources for kontxt TTS](kontxt.md#subject-token-sources-for-kontxt-tts). The Orka side is unchanged: it validates the resulting TxToken from the `Txn-Token` header.
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Check |
+|Symptom|Likely cause|Check|
 |---|---|---|
-| GitHub OIDC request fails | Workflow is missing `permissions.id-token: write`, or the step is not running inside GitHub Actions. | Confirm the workflow permissions and the `ACTIONS_ID_TOKEN_REQUEST_*` environment variables. |
-| TTS exchange returns `401`/`403` | kontxt TTS does not trust the subject-token issuer/audience, the subject token expired, or the requested scope/context is not allowed. | Confirm TTS subject issuer/audience and the requested `GITHUB_OIDC_AUDIENCE`. |
-| Orka returns `401 Unauthorized` | Missing/invalid `Txn-Token`, wrong issuer/audience/JWKS, expired token, unknown `kid`, or missing `typ: txntoken+jwt`. | Confirm Orka env vars, JWKS reachability, and token claims with your kontxt tooling. |
-| Orka returns `403 Forbidden` | `enforce` mode denied missing scope or `tctx` mismatch. | Check controller logs for safe context-token authorization failure fields. |
-| Task created but no `spec.transaction` | Request authenticated as ServiceAccount/OIDC instead of context token. | Use the raw `Txn-Token` header. |
-| Job/Pod missing transaction labels | The controller may not have reconciled the Task yet, or the Task was created without transaction metadata. | Wait for the Job/Pod and inspect the Task first. |
+|Kubernetes issuer discovery fails|The API server does not expose OIDC discovery for ServiceAccount tokens, or your kubeconfig user cannot read the discovery endpoint.|Run `kubectl get --raw /.well-known/openid-configuration` and confirm the cluster's ServiceAccount issuer/JWKS setup.|
+|TTS exchange returns `401`/`403`|kontxt TTS does not trust the Kubernetes ServiceAccount issuer, the projected token audience does not match `KONTXT_SUBJECT_AUDIENCE`, the token expired, or the requested scope/context is not allowed.|Check the Job's projected token `audience`, TTS `subjectTokens` config, and TTS logs.|
+|Caller Job cannot reach TTS or Orka|The in-cluster Service DNS name, namespace, or port is different from the manifest.|From a debug Pod, curl `KONTXT_TTS_URL` and `ORKA_API`; update the Job env values.|
+|Orka returns `401 Unauthorized`|Missing/invalid `Txn-Token`, wrong issuer/audience/JWKS, expired token, unknown `kid`, or missing `typ: txntoken+jwt`.|Confirm Orka env vars, JWKS reachability, and token claims with your kontxt tooling.|
+|Orka returns `403 Forbidden`|`enforce` mode denied missing scope or `tctx` mismatch.|Check controller logs for safe context-token authorization failure fields.|
+|Task response has `spec.transaction`, but the stored Task does not|The installed `tasks.core.orka.ai` CRD is stale and pruned the new `spec.transaction` fields.|From the repo root, run `kubectl apply -f config/crd/bases/core.orka.ai_tasks.yaml`, delete the old Task, and rerun the caller Job.|
+|Task response has no `spec.transaction`|Request authenticated as a normal ServiceAccount/OIDC bearer request instead of a kontxt TxToken request.|Use the raw `Txn-Token` header against the Orka REST API. Do not `kubectl apply` the Task manifest directly for this smoke test.|
+|Job/Pod missing transaction labels|The controller may not have reconciled the Task yet, or the Task was created without transaction metadata.|Wait for the worker Job/Pod and inspect the Task first.|
 
 ## Cleanup
 
-Delete local token/header files when done:
+Delete the caller Jobs and ServiceAccount when you are done. Delete the Task too if you do not need to keep the audit object.
 
 ```bash
-rm -f "${TXN_TOKEN_FILE:-}" "${TXN_HEADER_FILE:-}" "${BAD_TOKEN_FILE:-}" "${BAD_HEADER_FILE:-}"
-```
-
-Delete the smoke Task if you do not want to keep it for audit examples:
-
-```bash
-kubectl -n default delete task "$TASK_NAME" --ignore-not-found=true
+kubectl -n default delete job orka-kontxt-caller --ignore-not-found=true
+kubectl -n default delete job orka-kontxt-denied-caller --ignore-not-found=true
+kubectl -n default delete serviceaccount orka-kontxt-caller --ignore-not-found=true
+# Optional: removes the Orka Task audit object and worker resources/result.
+kubectl -n default delete task kontxt-mit-license-check --ignore-not-found=true
+rm -f /tmp/kontxt-orka-values.yaml /tmp/orka-kontxt-caller-job.yaml /tmp/orka-kontxt-denied-caller-job.yaml \
+  /tmp/kubernetes-sa-jwks.json /tmp/kubernetes-sa-openid-configuration.json
 ```
