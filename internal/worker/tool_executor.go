@@ -207,14 +207,14 @@ func (e *ToolExecutor) getSecretKey(ctx context.Context, secretName, key string)
 }
 
 func (e *ToolExecutor) outboundTransactionToken(ctx context.Context, tool *corev1alpha1.Tool) (string, error) {
-	if token, ok, err := readTokenFileEnv(workerenv.TransactionTokenFile, "transaction token"); ok || err != nil {
+	if token, ok, err := workerenv.ReadTokenFileEnv(workerenv.TransactionTokenFile, "transaction token"); ok || err != nil {
 		return token, err
 	}
 	ttsURL := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSURL))
 	if ttsURL == "" {
 		return "", nil
 	}
-	subjectToken, ok, err := readTokenFileEnv(workerenv.ContextTokenSubjectTokenFile, "context token subject token")
+	subjectToken, ok, err := workerenv.ReadTokenFileEnv(workerenv.ContextTokenSubjectTokenFile, "context token subject token")
 	if err != nil {
 		return "", err
 	}
@@ -253,20 +253,4 @@ func (e *ToolExecutor) outboundTransactionToken(ctx context.Context, tool *corev
 	}
 	metrics.RecordContextTokenTTSExchange("success", "ok", time.Since(start).Seconds())
 	return token, nil
-}
-
-func readTokenFileEnv(envName, description string) (string, bool, error) {
-	path := strings.TrimSpace(os.Getenv(envName))
-	if path == "" {
-		return "", false, nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", true, fmt.Errorf("failed to read %s file: %w", description, err)
-	}
-	token := strings.TrimSpace(string(data))
-	if token == "" {
-		return "", true, fmt.Errorf("%s file %q is empty", description, path)
-	}
-	return token, true, nil
 }

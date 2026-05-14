@@ -326,6 +326,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	}
 	return h.handleNonStreamingCompletion(c, ctx, provider, compReq, completionID, model, now)
 }
+
 func buildOpenAICompletionRequest(req OAIRequest, model string) (*llm.CompletionRequest, *OAIErrorDetail) {
 	messages, systemPrompt := convertOAIMessages(req.Messages)
 	compReq := &llm.CompletionRequest{

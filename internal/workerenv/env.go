@@ -10,6 +10,7 @@ package workerenv
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -181,6 +182,38 @@ func SplitCSV(value string) []string {
 		}
 	}
 	return out
+}
+
+// ReadTokenFileEnv reads and trims a token file path referenced by envName.
+// It returns ok=false when envName is unset, and fails closed when a configured
+// path cannot be read or contains only whitespace.
+func ReadTokenFileEnv(envName, description string) (string, bool, error) {
+	path := strings.TrimSpace(os.Getenv(envName))
+	if path == "" {
+		return "", false, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", true, fmt.Errorf("failed to read %s file: %w", description, err)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", true, fmt.Errorf("%s file %q is empty", description, path)
+	}
+	return token, true, nil
+}
+
+// RequireTokenFileEnv reads a token file path referenced by envName and returns
+// an error when the env var is unset.
+func RequireTokenFileEnv(envName, description string) (string, error) {
+	token, ok, err := ReadTokenFileEnv(envName, description)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("%s is required", envName)
+	}
+	return token, nil
 }
 
 // JoinCSV joins values using the comma-separated format used by worker env vars.

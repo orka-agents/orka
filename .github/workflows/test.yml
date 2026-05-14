@@ -36,7 +36,6 @@ jobs:
           go mod tidy
           make test
 
-
   ui-test:
     name: UI Tests
     runs-on: ubuntu-latest

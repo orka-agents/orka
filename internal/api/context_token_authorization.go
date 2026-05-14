@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -16,6 +17,9 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/llm"
 	"github.com/sozercan/orka/internal/metrics"
+	"github.com/sozercan/orka/internal/workerenv"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 const (
@@ -164,8 +168,35 @@ func (c ContextTokenAuthorizationConfig) enforcing() bool {
 	return c.Mode == ContextTokenAuthorizationModeEnforce
 }
 
+func (c ContextTokenAuthorizationConfig) SecretReadScopes() []string {
+	scopes := []string{}
+	scopes = append(scopes, c.TaskReadScopes...)
+	scopes = append(scopes, c.TaskListScopes...)
+	scopes = append(scopes, c.ToolReadScopes...)
+	scopes = append(scopes, c.ProviderUseScopes...)
+	scopes = append(scopes, c.AgentReadScopes...)
+	scopes = append(scopes, c.MemoryReadScopes...)
+	scopes = append(scopes, c.SessionReadScopes...)
+	scopes = append(scopes, c.SecurityReadScopes...)
+	scopes = append(scopes, c.SkillReadScopes...)
+	return scopes
+}
+
+type contextTokenTaskCreateAuthorizationContext struct {
+	Request             CreateTaskRequest
+	Namespace           string
+	Agent               *corev1alpha1.Agent
+	AgentName           string
+	AgentNamespace      string
+	Provider            *corev1alpha1.Provider
+	EffectiveProvider   ProviderResolutionInfo
+	EffectiveModel      string
+	EffectiveAITools    []string
+	RuntimeAllowedTools []string
+}
+
 func defaultScopes(value, fallback string) []string {
-	if scopes := splitComma(value); len(scopes) > 0 {
+	if scopes := workerenv.SplitCSV(value); len(scopes) > 0 {
 		return scopes
 	}
 	return []string{fallback}
@@ -180,7 +211,12 @@ func (h *Handlers) authorizeContextTokenTaskCreate(c fiber.Ctx, req CreateTaskRe
 		return nil
 	}
 
-	failures := contextTokenTaskCreateFailures(ui.ContextToken, h.contextTokenAuthorization, req, namespace)
+	authzCtx, err := h.resolveContextTokenTaskCreateAuthorizationContext(c.Context(), req, namespace)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+
+	failures := contextTokenTaskCreateFailures(ui.ContextToken, h.contextTokenAuthorization, authzCtx)
 	if len(failures) == 0 {
 		metrics.RecordContextTokenAuthorization("createTask", "allowed", "ok")
 		return nil
@@ -205,11 +241,20 @@ func authorizeContextTokenActionWithConfig(c fiber.Ctx, cfg ContextTokenAuthoriz
 	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
 		return nil
 	}
-	if hasAnyScope(ui.ContextToken.Scopes, requiredScopes) {
+
+	failures := []string{}
+	if !hasAnyScope(ui.ContextToken.Scopes, requiredScopes) {
+		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(requiredScopes, ",")))
+	}
+	if want, ok := contextString(ui.ContextToken.TransactionContext, "namespace"); ok {
+		if got, ok := c.Locals(resolvedNamespaceLocalKey).(string); ok && strings.TrimSpace(got) != "" && got != want {
+			failures = append(failures, fmt.Sprintf("namespace %q does not match token context %q", got, want))
+		}
+	}
+	if len(failures) == 0 {
 		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
 		return nil
 	}
-	failures := []string{fmt.Sprintf("missing one of required scopes %q", strings.Join(requiredScopes, ","))}
 	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
 }
 
@@ -328,29 +373,173 @@ func contextTokenProviderUseFailures(token *ContextToken, cfg ContextTokenAuthor
 	return failures
 }
 
-func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, req CreateTaskRequest, namespace string) []string {
+func (h *Handlers) resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, req CreateTaskRequest, namespace string) (contextTokenTaskCreateAuthorizationContext, error) {
+	authzCtx := contextTokenTaskCreateAuthorizationContext{
+		Request:   req,
+		Namespace: namespace,
+	}
+
+	if req.AgentRef != nil {
+		authzCtx.AgentName = req.AgentRef.Name
+		authzCtx.AgentNamespace = req.AgentRef.Namespace
+		if authzCtx.AgentNamespace == "" {
+			authzCtx.AgentNamespace = namespace
+		}
+
+		if authzCtx.AgentName != "" {
+			agent := &corev1alpha1.Agent{}
+			key := types.NamespacedName{Name: authzCtx.AgentName, Namespace: authzCtx.AgentNamespace}
+			if err := h.client.Get(ctx, key, agent); err != nil {
+				if !apierrors.IsNotFound(err) {
+					return authzCtx, fmt.Errorf("resolve agent %q in namespace %q: %w", authzCtx.AgentName, authzCtx.AgentNamespace, err)
+				}
+			} else {
+				authzCtx.Agent = agent
+			}
+		}
+	}
+
+	providerRef := contextTokenTaskCreateProviderRef(req, authzCtx.Agent)
+	if providerRef != nil && strings.TrimSpace(providerRef.Name) != "" {
+		providerNamespace := providerRef.Namespace
+		if providerNamespace == "" {
+			providerNamespace = namespace
+		}
+		provider := &corev1alpha1.Provider{}
+		key := types.NamespacedName{Name: providerRef.Name, Namespace: providerNamespace}
+		if err := h.client.Get(ctx, key, provider); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return authzCtx, fmt.Errorf("resolve provider %q in namespace %q: %w", providerRef.Name, providerNamespace, err)
+			}
+		} else {
+			authzCtx.Provider = provider
+		}
+	}
+
+	authzCtx.EffectiveProvider, authzCtx.EffectiveModel = contextTokenTaskCreateEffectiveProviderModel(req, authzCtx.Agent, authzCtx.Provider)
+	authzCtx.EffectiveAITools = contextTokenTaskCreateEffectiveAITools(req, authzCtx.Agent)
+	authzCtx.RuntimeAllowedTools = contextTokenTaskCreateEffectiveRuntimeAllowedTools(req, authzCtx.Agent)
+
+	return authzCtx, nil
+}
+
+func contextTokenTaskCreateProviderRef(req CreateTaskRequest, agent *corev1alpha1.Agent) *corev1alpha1.ProviderReference {
+	if req.AI != nil && req.AI.ProviderRef != nil {
+		return req.AI.ProviderRef
+	}
+	if agent != nil && agent.Spec.ProviderRef != nil {
+		return agent.Spec.ProviderRef
+	}
+	return nil
+}
+
+func contextTokenTaskCreateEffectiveProviderModel(req CreateTaskRequest, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ProviderResolutionInfo, string) {
+	providerInfo := ProviderResolutionInfo{}
+	model := ""
+
+	if provider != nil {
+		providerInfo = providerResolutionInfo(provider)
+		model = provider.Spec.DefaultModel
+	}
+
+	if agent != nil && agent.Spec.Model != nil {
+		if strings.TrimSpace(agent.Spec.Model.Provider) != "" {
+			providerInfo = ProviderResolutionInfo{Type: agent.Spec.Model.Provider}
+		}
+		if strings.TrimSpace(agent.Spec.Model.Name) != "" {
+			model = agent.Spec.Model.Name
+		}
+	}
+
+	if req.AI != nil {
+		if strings.TrimSpace(req.AI.Provider) != "" {
+			providerInfo = ProviderResolutionInfo{Type: req.AI.Provider}
+		}
+		if strings.TrimSpace(req.AI.Model) != "" {
+			model = req.AI.Model
+		}
+	}
+
+	// Provider CRD type is authoritative when a ProviderRef resolves; direct provider
+	// strings on the task or agent must not override the loaded Provider type.
+	if provider != nil {
+		providerInfo = providerResolutionInfo(provider)
+	}
+
+	return providerInfo, model
+}
+
+func contextTokenTaskCreateEffectiveAITools(req CreateTaskRequest, agent *corev1alpha1.Agent) []string {
+	tools := []string{}
+	if agent != nil {
+		for _, tool := range agent.Spec.Tools {
+			if tool.Enabled != nil && !*tool.Enabled {
+				continue
+			}
+			if strings.TrimSpace(tool.Name) != "" {
+				tools = append(tools, tool.Name)
+			}
+		}
+	}
+	if req.AI != nil {
+		for _, tool := range req.AI.Tools {
+			if strings.TrimSpace(tool) != "" {
+				tools = append(tools, tool)
+			}
+		}
+	}
+	return tools
+}
+
+func contextTokenTaskCreateEffectiveRuntimeAllowedTools(req CreateTaskRequest, agent *corev1alpha1.Agent) []string {
+	if req.AgentRuntime != nil && len(req.AgentRuntime.AllowedTools) > 0 {
+		return append([]string{}, req.AgentRuntime.AllowedTools...)
+	}
+	if agent != nil && agent.Spec.Runtime != nil && len(agent.Spec.Runtime.DefaultAllowedTools) > 0 {
+		return append([]string{}, agent.Spec.Runtime.DefaultAllowedTools...)
+	}
+	return nil
+}
+
+func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, authzCtx contextTokenTaskCreateAuthorizationContext) []string {
 	failures := []string{}
+	req := authzCtx.Request
+	namespace := authzCtx.Namespace
+
 	if !hasAnyScope(token.Scopes, cfg.TaskCreateScopes) {
 		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.TaskCreateScopes, ",")))
 	}
 
-	if want, ok := contextString(token.TransactionContext, "namespace"); ok && namespace != want {
-		failures = append(failures, fmt.Sprintf("namespace %q does not match token context %q", namespace, want))
+	if want, ok := contextString(token.TransactionContext, "namespace"); ok {
+		if namespace != want {
+			failures = append(failures, fmt.Sprintf("namespace %q does not match token context %q", namespace, want))
+		}
+		if authzCtx.AgentName != "" && authzCtx.AgentNamespace != "" && authzCtx.AgentNamespace != want {
+			failures = append(failures, fmt.Sprintf("agent namespace %q does not match token context %q", authzCtx.AgentNamespace, want))
+		}
 	}
 	if want, ok := contextString(token.TransactionContext, "taskType"); ok && string(req.Type) != want {
 		failures = append(failures, fmt.Sprintf("task type %q does not match token context %q", req.Type, want))
 	}
 	if want, ok := contextString(token.TransactionContext, "agent"); ok {
-		got := ""
-		if req.AgentRef != nil {
-			got = req.AgentRef.Name
-		}
-		if got != want {
-			failures = append(failures, fmt.Sprintf("agent %q does not match token context %q", got, want))
+		if !agentMatches(authzCtx.AgentName, authzCtx.AgentNamespace, want) {
+			failures = append(failures, fmt.Sprintf("agent %q does not match token context %q", namespacedNameString(authzCtx.AgentNamespace, authzCtx.AgentName), want))
 		}
 	}
-	if allowed, ok := contextStringList(token.TransactionContext, "allowedAgents"); ok && req.AgentRef != nil && !slices.Contains(allowed, req.AgentRef.Name) {
-		failures = append(failures, fmt.Sprintf("agent %q is not allowed by token context", req.AgentRef.Name))
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedAgents"); ok && authzCtx.AgentName != "" && !agentAllowed(authzCtx.AgentName, authzCtx.AgentNamespace, allowed) {
+		failures = append(failures, fmt.Sprintf("agent %q is not allowed by token context", namespacedNameString(authzCtx.AgentNamespace, authzCtx.AgentName)))
+	}
+	if want, ok := contextString(token.TransactionContext, "provider"); ok && !providerMatches(authzCtx.EffectiveProvider, want) {
+		failures = append(failures, fmt.Sprintf("provider %q is not allowed by token context", providerDisplayName(authzCtx.EffectiveProvider)))
+	}
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedProviders"); ok && !providerAllowed(authzCtx.EffectiveProvider, allowed) {
+		failures = append(failures, fmt.Sprintf("provider %q is not allowed by token context", providerDisplayName(authzCtx.EffectiveProvider)))
+	}
+	if want, ok := contextString(token.TransactionContext, "model"); ok && authzCtx.EffectiveModel != want {
+		failures = append(failures, fmt.Sprintf("model %q does not match token context %q", authzCtx.EffectiveModel, want))
+	}
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedModels"); ok && !modelAllowed(authzCtx.EffectiveProvider, authzCtx.EffectiveModel, allowed) {
+		failures = append(failures, fmt.Sprintf("model %q is not allowed by token context", authzCtx.EffectiveModel))
 	}
 
 	workspace := taskRequestWorkspace(req)
@@ -366,8 +555,11 @@ func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthori
 			failures = append(failures, fmt.Sprintf("workspace %s %q does not match token context %q", constraint.key, constraint.got, want))
 		}
 	}
-	if allowed, ok := contextStringList(token.TransactionContext, "allowedTools"); ok && req.AgentRuntime != nil {
-		for _, tool := range req.AgentRuntime.AllowedTools {
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedTools"); ok {
+		for _, tool := range append(append([]string{}, authzCtx.EffectiveAITools...), authzCtx.RuntimeAllowedTools...) {
+			if strings.TrimSpace(tool) == "" {
+				continue
+			}
 			if !slices.Contains(allowed, tool) {
 				failures = append(failures, fmt.Sprintf("tool %q is not allowed by token context", tool))
 			}
@@ -410,6 +602,40 @@ func anthropicContextTokenAuthorizationError(c fiber.Ctx, err error) error {
 	return err
 }
 
+func agentAllowed(name, namespace string, allowed []string) bool {
+	for _, want := range allowed {
+		if agentMatches(name, namespace, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func agentMatches(name, namespace, want string) bool {
+	want = strings.TrimSpace(want)
+	if want == "" || strings.TrimSpace(name) == "" {
+		return false
+	}
+	return name == want || namespacedNameString(namespace, name) == want
+}
+
+func namespacedNameString(namespace, name string) string {
+	if namespace == "" {
+		return name
+	}
+	if name == "" {
+		return ""
+	}
+	return namespace + "/" + name
+}
+
+func providerDisplayName(provider ProviderResolutionInfo) string {
+	if provider.Name != "" {
+		return namespacedNameString(provider.Namespace, provider.Name)
+	}
+	return provider.Type
+}
+
 func providerAllowed(provider ProviderResolutionInfo, allowed []string) bool {
 	for _, want := range allowed {
 		if providerMatches(provider, want) {
@@ -424,7 +650,7 @@ func providerMatches(provider ProviderResolutionInfo, want string) bool {
 	if want == "" {
 		return false
 	}
-	return provider.Name == want || provider.Type == want
+	return provider.Name == want || namespacedNameString(provider.Namespace, provider.Name) == want || provider.Type == want
 }
 
 func modelAllowed(provider ProviderResolutionInfo, model string, allowed []string) bool {
@@ -433,7 +659,7 @@ func modelAllowed(provider ProviderResolutionInfo, model string, allowed []strin
 		switch want {
 		case "":
 			continue
-		case model, provider.Name + "/" + model, provider.Type + "/" + model:
+		case model, provider.Name + "/" + model, namespacedNameString(provider.Namespace, provider.Name) + "/" + model, provider.Type + "/" + model:
 			return true
 		}
 	}
@@ -492,22 +718,11 @@ func contextStringList(ctx map[string]any, name string) ([]string, bool) {
 		}
 		return out, len(out) > 0
 	case string:
-		out := splitComma(v)
+		out := workerenv.SplitCSV(v)
 		return out, len(out) > 0
 	default:
 		return nil, false
 	}
-}
-
-func splitComma(value string) []string {
-	parts := strings.Split(value, ",")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if trimmed := strings.TrimSpace(part); trimmed != "" {
-			out = append(out, trimmed)
-		}
-	}
-	return out
 }
 
 func taskRequestWorkspace(req CreateTaskRequest) *corev1alpha1.WorkspaceConfig {

@@ -7,10 +7,15 @@ MIT License - see LICENSE file for details.
 package tools
 
 import (
+	"context"
+	"fmt"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	apitypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
@@ -27,7 +32,21 @@ func newFakeClient(objs ...client.Object) client.Client {
 		WithScheme(newTestScheme()).
 		WithObjects(objs...).
 		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: assignFakeUIDOnCreate,
+		}).
 		Build()
+}
+
+func assignFakeUIDOnCreate(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+	if err := c.Create(ctx, obj, opts...); err != nil {
+		return err
+	}
+	if obj.GetUID() != "" {
+		return nil
+	}
+	obj.SetUID(apitypes.UID(fmt.Sprintf("test-uid-%s-%s", obj.GetNamespace(), obj.GetName())))
+	return c.Update(ctx, obj)
 }
 
 func newFakeClientWithAgents(agents []*corev1alpha1.Agent) client.Client {

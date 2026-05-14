@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -1339,7 +1340,7 @@ func (r *RepositoryScanReconciler) ingestCombinedScanTask(ctx context.Context, s
 	run.TaskName = task.Name
 	run.ErrorMessage = ""
 	if task.Status.CompletionTime != nil {
-		run.CompletedAt = new(task.Status.CompletionTime.Time)
+		run.CompletedAt = ptr.To(task.Status.CompletionTime.Time)
 	} else {
 		now := time.Now()
 		run.CompletedAt = &now

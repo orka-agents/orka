@@ -8,6 +8,8 @@ package tools
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"slices"
@@ -17,8 +19,10 @@ import (
 	kontxttoken "github.com/aramase/kontxt/pkg/token"
 	sdktts "github.com/aramase/kontxt/sdk/tts"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
@@ -31,7 +35,7 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 	if ttsURL == "" {
 		return nil
 	}
-	subjectToken, err := readWorkerTokenFile(workerenv.ContextTokenSubjectTokenFile, "context token subject token")
+	subjectToken, err := workerenv.RequireTokenFileEnv(workerenv.ContextTokenSubjectTokenFile, "context token subject token")
 	if err != nil {
 		return err
 	}
@@ -71,11 +75,10 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 	}
 	metrics.RecordContextTokenTTSExchange("success", "ok", time.Since(start).Seconds())
 
-	secretName := childTransactionTokenSecretName(parentTask.Name)
-	if childTask.Annotations == nil {
-		childTask.Annotations = map[string]string{}
+	secretName, err := childTransactionTokenSecretName(parentTask.Name)
+	if err != nil {
+		return err
 	}
-	childTask.Annotations[labels.AnnotationTransactionTokenSecret] = secretName
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -87,7 +90,6 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 			Annotations: map[string]string{
 				labels.AnnotationParentTaskName: parentTask.Name,
 			},
-			OwnerReferences: parentOwnerReference(parentTask),
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
@@ -97,21 +99,47 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 	if err := k8sClient.Create(ctx, secret); err != nil {
 		return fmt.Errorf("creating child transaction token secret: %w", err)
 	}
+	if childTask.Annotations == nil {
+		childTask.Annotations = map[string]string{}
+	}
+	childTask.Annotations[labels.AnnotationTransactionTokenSecret] = secretName
 	return nil
 }
 
-func parentOwnerReference(parentTask *corev1alpha1.Task) []metav1.OwnerReference {
-	if parentTask == nil || parentTask.UID == "" {
+func childOwnerReference(childTask *corev1alpha1.Task) []metav1.OwnerReference {
+	if childTask == nil || childTask.UID == "" {
 		return nil
 	}
 	blockOwnerDeletion := true
 	return []metav1.OwnerReference{{
 		APIVersion:         corev1alpha1.GroupVersion.String(),
 		Kind:               "Task",
-		Name:               parentTask.Name,
-		UID:                parentTask.UID,
+		Name:               childTask.Name,
+		UID:                childTask.UID,
 		BlockOwnerDeletion: &blockOwnerDeletion,
 	}}
+}
+
+func adoptChildTransactionTokenSecret(ctx context.Context, k8sClient client.Client, childTask *corev1alpha1.Task) error {
+	if childTask == nil || childTask.Annotations == nil {
+		return nil
+	}
+	secretName := strings.TrimSpace(childTask.Annotations[labels.AnnotationTransactionTokenSecret])
+	if secretName == "" {
+		return nil
+	}
+	if childTask.UID == "" {
+		return nil
+	}
+	secret := &corev1.Secret{}
+	if err := k8sClient.Get(ctx, client.ObjectKey{Name: secretName, Namespace: childTask.Namespace}, secret); err != nil {
+		return fmt.Errorf("getting child transaction token secret for adoption: %w", err)
+	}
+	secret.OwnerReferences = childOwnerReference(childTask)
+	if err := k8sClient.Update(ctx, secret); err != nil {
+		return fmt.Errorf("adopting child transaction token secret: %w", err)
+	}
+	return nil
 }
 
 func validateChildTransactionScope(parentTask *corev1alpha1.Task, childScope string) error {
@@ -130,15 +158,11 @@ func validateChildTransactionScope(parentTask *corev1alpha1.Task, childScope str
 		return fmt.Errorf("parent transaction scopes are required for child token exchange")
 	}
 	for _, child := range childScopes {
-		if !containsString(parentScopes, child) {
+		if !slices.Contains(parentScopes, child) {
 			return fmt.Errorf("child transaction scope %q is not present in parent transaction scopes", child)
 		}
 	}
 	return nil
-}
-
-func containsString(values []string, want string) bool {
-	return slices.Contains(values, want)
 }
 
 func cleanupChildTransactionTokenSecret(ctx context.Context, k8sClient client.Client, childTask *corev1alpha1.Task) {
@@ -149,29 +173,49 @@ func cleanupChildTransactionTokenSecret(ctx context.Context, k8sClient client.Cl
 	if secretName == "" {
 		return
 	}
-	_ = k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: childTask.Namespace}})
+	if err := k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: childTask.Namespace}}); err != nil && !apierrors.IsNotFound(err) {
+		log.FromContext(ctx).Error(err, "failed to cleanup child transaction token secret", "secret", secretName, "namespace", childTask.Namespace)
+	}
 }
 
-func childTransactionTokenSecretName(parentName string) string {
-	base := labels.SelectorValue(parentName)
-	if len(base) > 40 {
-		base = base[:40]
+func childTransactionTokenSecretName(parentName string) (string, error) {
+	timestamp := fmt.Sprintf("%x", time.Now().UnixNano())
+	randomBytes := make([]byte, 5)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", fmt.Errorf("generating child transaction token secret suffix: %w", err)
 	}
-	return fmt.Sprintf("%s-txn-%x", base, time.Now().UnixNano())
+	suffix := fmt.Sprintf("txn-%s-%s", timestamp, hex.EncodeToString(randomBytes))
+	base := dnsLabelPrefix(parentName)
+	maxBaseLen := 63 - len(suffix) - 1
+	if maxBaseLen < 1 {
+		return "", fmt.Errorf("child transaction token secret suffix exceeds DNS label length")
+	}
+	if len(base) > maxBaseLen {
+		base = strings.Trim(base[:maxBaseLen], "-")
+	}
+	if base == "" {
+		base = "task"
+	}
+	return base + "-" + suffix, nil
 }
 
-func readWorkerTokenFile(envName, description string) (string, error) {
-	path := strings.TrimSpace(os.Getenv(envName))
-	if path == "" {
-		return "", fmt.Errorf("%s is required", envName)
+func dnsLabelPrefix(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var out strings.Builder
+	out.Grow(len(value))
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			out.WriteRune(r)
+		case r == '-':
+			out.WriteRune(r)
+		default:
+			out.WriteRune('-')
+		}
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("failed to read %s file: %w", description, err)
+	result := strings.Trim(out.String(), "-")
+	if result == "" {
+		return "task"
 	}
-	token := strings.TrimSpace(string(data))
-	if token == "" {
-		return "", fmt.Errorf("%s file %q is empty", description, path)
-	}
-	return token, nil
+	return result
 }

@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -208,6 +209,12 @@ func TestJobBuilder_Build_MountsTransactionTokenSecret(t *testing.T) {
 	var foundVolume bool
 	for _, volume := range job.Spec.Template.Spec.Volumes {
 		if volume.Name == "transaction-token" && volume.Secret != nil && volume.Secret.SecretName == "child-tx-token" {
+			if volume.Secret.DefaultMode == nil {
+				t.Fatal("transaction-token secret volume DefaultMode is nil, want 0400")
+			}
+			if *volume.Secret.DefaultMode != int32(0400) {
+				t.Fatalf("transaction-token secret volume DefaultMode = %#o, want 0400", *volume.Secret.DefaultMode)
+			}
 			foundVolume = true
 		}
 	}
@@ -230,6 +237,50 @@ func TestJobBuilder_Build_MountsTransactionTokenSecret(t *testing.T) {
 		got, ok := findEnvVar(container.Env, name)
 		if !ok || got.Value != want {
 			t.Fatalf("env %s = %#v, want %q", name, got, want)
+		}
+	}
+}
+
+func TestJobBuilder_Build_InjectsContextTokenTTSConfigWithoutTransactionTokenSecret(t *testing.T) {
+	builder := setupJobBuilder()
+	builder.ContextTokenTTSURL = "https://tts.example.test"
+	builder.ContextTokenSubjectTokenType = "urn:ietf:params:oauth:token-type:txn_token"
+	builder.ContextTokenChildScope = "orka:agents:run"
+	builder.ContextTokenOutboundScope = "orka:tools:use"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: defaultNS,
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:  corev1alpha1.TaskTypeContainer,
+			Image: "busybox:latest",
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	container := job.Spec.Template.Spec.Containers[0]
+	for name, want := range map[string]string{
+		workerenv.ContextTokenTTSURL:           "https://tts.example.test",
+		workerenv.ContextTokenSubjectTokenType: "urn:ietf:params:oauth:token-type:txn_token",
+		workerenv.ContextTokenChildScope:       "orka:agents:run",
+		workerenv.ContextTokenOutboundScope:    "orka:tools:use",
+	} {
+		got, ok := findEnvVar(container.Env, name)
+		if !ok || got.Value != want {
+			t.Fatalf("env %s = %#v, want %q", name, got, want)
+		}
+	}
+	if hasVolume(job.Spec.Template.Spec.Volumes, "transaction-token") {
+		t.Fatalf("unexpected transaction-token volume without transaction token secret annotation: %#v", job.Spec.Template.Spec.Volumes)
+	}
+	for _, name := range []string{workerenv.TransactionTokenFile, workerenv.ContextTokenSubjectTokenFile} {
+		if got, ok := findEnvVar(container.Env, name); ok {
+			t.Fatalf("unexpected env %s without transaction token secret annotation: %#v", name, got)
 		}
 	}
 }
@@ -1661,7 +1712,7 @@ func TestJobBuilder_Build_AgentTask_AllowBash_AgentDefault(t *testing.T) {
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             corev1alpha1.AgentRuntimeClaude,
-				DefaultAllowBash: new(true),
+				DefaultAllowBash: ptr.To(true),
 			},
 		},
 	}
@@ -1697,7 +1748,7 @@ func TestJobBuilder_Build_AgentTask_AllowBash_NotSetWhenFalse(t *testing.T) {
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             corev1alpha1.AgentRuntimeClaude,
-				DefaultAllowBash: new(false),
+				DefaultAllowBash: ptr.To(false),
 			},
 		},
 	}

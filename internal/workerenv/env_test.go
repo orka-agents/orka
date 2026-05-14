@@ -6,7 +6,12 @@ MIT License - see LICENSE file for details.
 
 package workerenv
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	env := AIWorkerEnv{
@@ -65,6 +70,86 @@ func TestParseFallbacksInvalidCountPreservesLegacyBehavior(t *testing.T) {
 	fallbacks := ParseFallbacks(func(name string) string { return values[name] })
 	if len(fallbacks) != 0 {
 		t.Fatalf("fallbacks = %#v, want none", fallbacks)
+	}
+}
+
+
+func TestReadTokenFileEnv(t *testing.T) {
+	const envName = "TEST_TOKEN_FILE_ENV"
+
+	t.Run("unset", func(t *testing.T) {
+		t.Setenv(envName, "")
+		token, ok, err := ReadTokenFileEnv(envName, "test token")
+		if err != nil {
+			t.Fatalf("ReadTokenFileEnv() error = %v", err)
+		}
+		if ok {
+			t.Fatal("ReadTokenFileEnv() ok = true, want false")
+		}
+		if token != "" {
+			t.Fatalf("ReadTokenFileEnv() token = %q, want empty", token)
+		}
+	})
+
+	t.Run("trims token file content", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "token")
+		if err := os.WriteFile(path, []byte("  token\n"), 0600); err != nil {
+			t.Fatalf("failed to write token fixture: %v", err)
+		}
+		t.Setenv(envName, path)
+
+		token, ok, err := ReadTokenFileEnv(envName, "test token")
+		if err != nil {
+			t.Fatalf("ReadTokenFileEnv() error = %v", err)
+		}
+		if !ok {
+			t.Fatal("ReadTokenFileEnv() ok = false, want true")
+		}
+		if token != "token" {
+			t.Fatalf("ReadTokenFileEnv() token = %q, want token", token)
+		}
+	})
+
+	t.Run("whitespace only token file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "token")
+		if err := os.WriteFile(path, []byte(" \n\t "), 0600); err != nil {
+			t.Fatalf("failed to write token fixture: %v", err)
+		}
+		t.Setenv(envName, path)
+
+		_, ok, err := ReadTokenFileEnv(envName, "test token")
+		if err == nil || !strings.Contains(err.Error(), "empty") {
+			t.Fatalf("ReadTokenFileEnv() error = %v, want empty token error", err)
+		}
+		if !ok {
+			t.Fatal("ReadTokenFileEnv() ok = false, want true")
+		}
+	})
+
+	t.Run("missing token file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing-token")
+		t.Setenv(envName, path)
+
+		_, ok, err := ReadTokenFileEnv(envName, "test token")
+		if err == nil || !strings.Contains(err.Error(), "failed to read test token file") {
+			t.Fatalf("ReadTokenFileEnv() error = %v, want read error", err)
+		}
+		if !ok {
+			t.Fatal("ReadTokenFileEnv() ok = false, want true")
+		}
+	})
+}
+
+func TestRequireTokenFileEnvUnset(t *testing.T) {
+	const envName = "TEST_REQUIRED_TOKEN_FILE_ENV"
+	t.Setenv(envName, "")
+
+	_, err := RequireTokenFileEnv(envName, "required token")
+	if err == nil {
+		t.Fatal("RequireTokenFileEnv() error = nil, want required error")
+	}
+	if got, want := err.Error(), envName+" is required"; got != want {
+		t.Fatalf("RequireTokenFileEnv() error = %q, want %q", got, want)
 	}
 }
 

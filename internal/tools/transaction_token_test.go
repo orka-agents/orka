@@ -22,6 +22,7 @@ import (
 	sdkverify "github.com/aramase/kontxt/sdk/verify"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apitypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -128,8 +129,28 @@ func TestPrepareChildTransactionToken(t *testing.T) {
 	if claims.Scope != "orka:agents:run" {
 		t.Fatalf("child token scope = %q, want orka:agents:run", claims.Scope)
 	}
-	if len(secret.OwnerReferences) != 1 || secret.OwnerReferences[0].Name != parentTaskName {
-		t.Fatalf("ownerReferences = %#v, want parent task owner", secret.OwnerReferences)
+	if len(secret.OwnerReferences) != 0 {
+		t.Fatalf("ownerReferences = %#v, want no owner before child task adoption", secret.OwnerReferences)
+	}
+
+	child.Name = "child-task"
+	child.UID = apitypes.UID("child-uid-1234")
+	if err := adoptChildTransactionTokenSecret(context.Background(), fc, child); err != nil {
+		t.Fatalf("adoptChildTransactionTokenSecret() error = %v", err)
+	}
+	adoptedSecret := &corev1.Secret{}
+	if err := fc.Get(context.Background(), client.ObjectKey{Name: secretName, Namespace: defaultNamespace}, adoptedSecret); err != nil {
+		t.Fatalf("failed to get adopted child transaction token secret: %v", err)
+	}
+	if len(adoptedSecret.OwnerReferences) != 1 {
+		t.Fatalf("ownerReferences = %#v, want child task owner", adoptedSecret.OwnerReferences)
+	}
+	owner := adoptedSecret.OwnerReferences[0]
+	if owner.Name != child.Name || owner.UID != child.UID {
+		t.Fatalf("ownerReference = %#v, want child task name %q uid %q", owner, child.Name, child.UID)
+	}
+	if owner.Name == parentTaskName {
+		t.Fatalf("ownerReference = %#v, want child task owner not parent task", owner)
 	}
 }
 

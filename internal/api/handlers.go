@@ -164,6 +164,7 @@ func (h *Handlers) resolveNamespace(c fiber.Ctx, explicit string) (string, error
 		}
 	}
 
+	c.Locals(resolvedNamespaceLocalKey, ns)
 	return ns, nil
 }
 
@@ -1167,10 +1168,6 @@ func (h *Handlers) GetSkillContent(c fiber.Ctx) error {
 
 // CreateSkill creates a new skill
 func (h *Handlers) CreateSkill(c fiber.Ctx) error {
-	if err := h.authorizeContextTokenAction(c, "createSkill", h.contextTokenAuthorization.SkillWriteScopes); err != nil {
-		return err
-	}
-
 	var req CreateSkillRequest
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
@@ -1190,6 +1187,9 @@ func (h *Handlers) CreateSkill(c fiber.Ctx) error {
 	}
 	namespace, err := h.resolveNamespace(c, explicitNS)
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "createSkill", h.contextTokenAuthorization.SkillWriteScopes); err != nil {
 		return err
 	}
 
@@ -1283,6 +1283,9 @@ type SecretNameResponse struct {
 func (h *Handlers) ListSecretNames(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "listSecrets", h.contextTokenAuthorization.SecretReadScopes()); err != nil {
 		return err
 	}
 

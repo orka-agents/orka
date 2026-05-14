@@ -88,6 +88,7 @@ func setupTestHandlersWithAuthzStore(
 	app.Delete("/tasks/:id", handlers.DeleteTask)
 	app.Get("/tools", handlers.ListTools)
 	app.Get("/tools/:name", handlers.GetTool)
+	app.Get("/secrets", handlers.ListSecretNames)
 	app.Post("/agents", handlers.CreateAgent)
 	app.Get("/agents", handlers.ListAgents)
 	app.Get("/agents/:name", handlers.GetAgent)
@@ -515,6 +516,191 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationAuditAllowsFailures(t *tes
 	}
 }
 
+func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsProviderModelResolvedFromAgentProviderCRD(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	providerCRD := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic-main", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeAnthropic,
+			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "llm-key"},
+			DefaultModel: "claude-3-5-sonnet",
+		},
+	}
+	agent := testAgentFromJSON(t, `{
+		"metadata": {
+			"name": "reviewer",
+			"namespace": "default"
+		},
+		"spec": {
+			"providerRef": {
+				"name": "anthropic-main"
+			},
+			"model": {
+				"provider": "openai",
+				"name": "claude-3-opus"
+			}
+		}
+	}`)
+
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, providerCRD, agent)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace":        "default",
+			"provider":         "openai",
+			"model":            "claude-3-5-sonnet",
+			"allowedProviders": []string{"openai"},
+			"allowedModels":    []string{"openai/claude-3-5-sonnet"},
+		},
+	})
+
+	resp := postCreateTaskWithContextToken(t, app, token, CreateTaskRequest{
+		Name:      "agent-provider-model-denied",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeAgent,
+		AgentRef:  &corev1alpha1.AgentReference{Name: "reviewer"},
+		Prompt:    "review this change",
+	})
+
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsEffectiveAITools(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	agent := testAgentFromJSON(t, `{
+		"metadata": {
+			"name": "reviewer",
+			"namespace": "default"
+		},
+		"spec": {
+			"tools": [
+				{
+					"name": "web_search",
+					"enabled": true
+				},
+				{
+					"name": "disabled_tool",
+					"enabled": false
+				}
+			]
+		}
+	}`)
+
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, agent)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace":    "default",
+			"allowedTools": []string{"file_read"},
+		},
+	})
+
+	resp := postCreateTaskWithContextToken(t, app, token, CreateTaskRequest{
+		Name:      "ai-tools-denied",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeAI,
+		AgentRef:  &corev1alpha1.AgentReference{Name: "reviewer"},
+		Prompt:    "review this change",
+		AI: &corev1alpha1.AISpec{
+			Tools: []string{"file_write"},
+		},
+	})
+
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsCrossNamespaceAgentRef(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace": "default",
+		},
+	})
+
+	resp := postCreateTaskWithContextToken(t, app, token, CreateTaskRequest{
+		Name:      "cross-namespace-agent-denied",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeAgent,
+		AgentRef: &corev1alpha1.AgentReference{
+			Name:      "reviewer",
+			Namespace: "team-a",
+		},
+		Prompt: "review this change",
+	})
+
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsAgentRuntimeDefaultAllowedTools(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	agent := testAgentFromJSON(t, `{
+		"metadata": {
+			"name": "claude-agent",
+			"namespace": "default"
+		},
+		"spec": {
+			"runtime": {
+				"defaultAllowedTools": [
+					"bash"
+				]
+			}
+		}
+	}`)
+
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, agent)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace":    "default",
+			"allowedTools": []string{"file_read"},
+		},
+	})
+
+	resp := postCreateTaskWithContextToken(t, app, token, CreateTaskRequest{
+		Name:      "runtime-default-tool-denied",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeAgent,
+		AgentRef:  &corev1alpha1.AgentReference{Name: "claude-agent"},
+		Prompt:    "make a change",
+	})
+
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func postCreateTaskWithContextToken(t *testing.T, app *fiber.App, token string, body CreateTaskRequest) *http.Response {
+	t.Helper()
+
+	bodyBytes, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+
+	return resp
+}
+
+func testAgentFromJSON(t *testing.T, raw string) *corev1alpha1.Agent {
+	t.Helper()
+
+	agent := &corev1alpha1.Agent{}
+	require.NoError(t, json.Unmarshal([]byte(raw), agent))
+	return agent
+}
+
 func TestHandlers_TaskActions_ContextTokenAuthorization(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
@@ -551,6 +737,68 @@ func TestHandlers_TaskActions_ContextTokenAuthorization(t *testing.T) {
 			if resp.StatusCode != tt.want {
 				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, tt.want)
 			}
+		})
+	}
+}
+
+func TestHandlers_GenericActions_ContextTokenAuthorizationEnforceRejectsNamespaceMismatch(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		scope  string
+	}{
+		{
+			name:   "task list",
+			method: http.MethodGet,
+			path:   "/tasks?namespace=other",
+			scope:  ContextTokenScopeTaskList,
+		},
+		{
+			name:   "task get",
+			method: http.MethodGet,
+			path:   "/tasks/authz-task?namespace=other",
+			scope:  ContextTokenScopeTaskGet,
+		},
+		{
+			name:   "task delete",
+			method: http.MethodDelete,
+			path:   "/tasks/authz-task?namespace=other",
+			scope:  ContextTokenScopeTaskDelete,
+		},
+		{
+			name:   "agent create",
+			method: http.MethodPost,
+			path:   "/agents",
+			body:   `{"name":"created-agent","namespace":"other","spec":{}}`,
+			scope:  ContextTokenScopeAgentsWrite,
+		},
+		{
+			name:   "skill create",
+			method: http.MethodPost,
+			path:   "/skills",
+			body:   `{"name":"created-skill","namespace":"other","spec":{"description":"create","content":{"inline":"# Create"}}}`,
+			scope:  ContextTokenScopeSkillsWrite,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"scope": tt.scope,
+				"tctx":  map[string]any{"namespace": "default"},
+			})
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode)
 		})
 	}
 }
@@ -2709,6 +2957,69 @@ func TestHandlers_ListSecretNames_Empty(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
 	items := result["items"].([]any)
 	require.Len(t, items, 0)
+}
+
+func TestHandlers_ListSecretNames_ContextTokenAuthorizationEnforceAllowsReadScope(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-secret",
+			Namespace: "default",
+		},
+		Type: corev1.SecretTypeOpaque,
+	}
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, secret)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeProvidersUse,
+		"tctx": map[string]any{
+			"namespace": "default",
+		},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/secrets", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
+	items := result["items"].([]any)
+	require.Len(t, items, 1)
+}
+
+func TestHandlers_ListSecretNames_ContextTokenAuthorizationEnforceRejectsMissingReadScope(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/secrets", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestHandlers_ListSecretNames_ContextTokenAuthorizationEnforceRejectsNamespaceMismatch(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskList,
+		"tctx": map[string]any{
+			"namespace": "restricted",
+		},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/secrets?namespace=default", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
 // --- StreamPodLogs tests ---

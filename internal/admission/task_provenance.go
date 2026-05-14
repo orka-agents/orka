@@ -23,6 +23,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
@@ -66,11 +67,11 @@ type TaskProvenanceConfig struct {
 // NewTaskProvenanceConfig builds Task provenance admission config.
 func NewTaskProvenanceConfig(enabled bool, trustedUsernames, trustedServiceAccountNames, controllerNamespace string) TaskProvenanceConfig {
 	cfg := TaskProvenanceConfig{Enabled: enabled}
-	cfg.TrustedUsernames = splitComma(trustedUsernames)
+	cfg.TrustedUsernames = workerenv.SplitCSV(trustedUsernames)
 	if len(cfg.TrustedUsernames) == 0 {
 		cfg.TrustedUsernames = defaultControllerServiceAccountUsernames(controllerNamespace)
 	}
-	cfg.TrustedServiceAccountNames = splitComma(trustedServiceAccountNames)
+	cfg.TrustedServiceAccountNames = workerenv.SplitCSV(trustedServiceAccountNames)
 	if len(cfg.TrustedServiceAccountNames) == 0 {
 		cfg.TrustedServiceAccountNames = []string{defaultTrustedWorkerServiceAccount}
 	}
@@ -212,16 +213,4 @@ func defaultControllerServiceAccountUsernames(namespace string) []string {
 
 func serviceAccountUsername(namespace, name string) string {
 	return "system:serviceaccount:" + strings.TrimSpace(namespace) + ":" + strings.TrimSpace(name)
-}
-
-func splitComma(value string) []string {
-	parts := strings.Split(value, ",")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
 }

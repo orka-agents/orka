@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
@@ -366,6 +367,16 @@ func TestDelegateTaskTool_Execute_WithTTSChildToken(t *testing.T) {
 	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{Name: secretName, Namespace: defaultNamespace}, secret); err != nil {
 		t.Fatalf("failed to get child token secret: %v", err)
 	}
+	if len(secret.OwnerReferences) != 1 {
+		t.Fatalf("secret ownerReferences = %#v, want child task owner", secret.OwnerReferences)
+	}
+	owner := secret.OwnerReferences[0]
+	if owner.Name != childTask.Name {
+		t.Fatalf("secret owner name = %q, want child task name %q", owner.Name, childTask.Name)
+	}
+	if owner.UID != childTask.UID {
+		t.Fatalf("secret owner UID = %q, want child task UID %q", owner.UID, childTask.UID)
+	}
 	claims, err := sdkverify.New(jwksServer.URL, "child.example.test").Verify(context.Background(), string(secret.Data["token"]))
 	if err != nil {
 		t.Fatalf("failed to verify child TxToken from secret: %v", err)
@@ -490,7 +501,7 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             runtimeTypeClaude,
 				DefaultMaxTurns:  &maxTurns,
-				DefaultAllowBash: new(true),
+				DefaultAllowBash: ptr.To(true),
 			},
 		},
 	}
