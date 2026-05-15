@@ -229,7 +229,7 @@ func TestApplyMemoryProposal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetMemoryProposal: %v", err)
 	}
-	if updated.Status != "applied" || updated.AppliedMemoryID != memory.ID || updated.AppliedBy != "coordinator" || updated.AppliedAt == nil {
+	if updated.Status != proposalStatusApplied || updated.AppliedMemoryID != memory.ID || updated.AppliedBy != "coordinator" || updated.AppliedAt == nil {
 		t.Fatalf("proposal apply metadata not persisted: %+v", updated)
 	}
 
@@ -346,7 +346,7 @@ func TestApplyMemoryProposalConcurrentIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetMemoryProposal: %v", err)
 	}
-	if updated.Status != "applied" || updated.AppliedMemoryID != memoryID {
+	if updated.Status != proposalStatusApplied || updated.AppliedMemoryID != memoryID {
 		t.Fatalf("proposal apply metadata = %+v, want status applied and memory %q", updated, memoryID)
 	}
 }
@@ -516,7 +516,7 @@ func TestArchiveMemoryProposalDoesNotOverwriteConcurrentApply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetMemoryProposal: %v", err)
 	}
-	if updated.Status != "applied" || updated.AppliedMemoryID != memory.ID {
+	if updated.Status != proposalStatusApplied || updated.AppliedMemoryID != memory.ID {
 		t.Fatalf("proposal after stale archive = %+v, want applied with memory %q", updated, memory.ID)
 	}
 	listed, err := s2.ListMemories(ctx, store.MemoryFilter{Namespace: ns, Source: "memory_proposal"})
