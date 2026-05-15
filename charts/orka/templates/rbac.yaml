@@ -84,9 +84,12 @@ rules:
     resources: ["pods", "nodes"]
     verbs: ["get", "list"]
 
-  # RBAC permissions (for chat K8s tools)
+  # RBAC permissions (for chat K8s tools and managed worker bindings)
   - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+    resources: ["clusterroles", "roles", "rolebindings"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings"]
     verbs: ["get", "list", "watch", "create", "update"]
 
   # TokenReview for authentication
@@ -172,7 +175,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: orka-ai-worker-role
+  name: {{ include "orka.aiWorkerClusterRoleName" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 rules:
@@ -237,13 +240,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: orka-ai-worker-rolebinding
+  name: {{ include "orka.aiWorkerClusterRoleBindingName" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: orka-ai-worker-role
+  name: {{ include "orka.aiWorkerClusterRoleName" . }}
 subjects:
   - kind: ServiceAccount
     name: orka-ai-worker
@@ -253,7 +256,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: orka-vendor-worker-role
+  name: {{ include "orka.vendorWorkerClusterRoleName" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 rules:
@@ -306,82 +309,43 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: orka-vendor-worker-rolebinding
+  name: {{ include "orka.vendorWorkerClusterRoleBindingName" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: orka-vendor-worker-role
+  name: {{ include "orka.vendorWorkerClusterRoleName" . }}
 subjects:
   - kind: ServiceAccount
     name: orka-vendor-worker
     namespace: {{ .Release.Namespace }}
 ---
-# Container Worker Role (restricted worker for container tasks)
+# Container Worker Role (minimal worker for container tasks)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: orka-container-worker-role
+  name: {{ include "orka.containerWorkerClusterRoleName" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 rules:
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["core.orka.ai"]
-    resources: ["tools"]
-    verbs: ["get", "list"]
-  - apiGroups: ["core.orka.ai"]
-    resources: ["agents"]
-    verbs: ["get", "create", "update", "delete"]
+  # Minimal Task metadata only; results and artifacts are submitted through the
+  # controller HTTP API with the worker ServiceAccount token and do not require
+  # Kubernetes API resource permissions.
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks"]
-    verbs: ["get", "list", "watch", "create"]
-  - apiGroups: [""]
-    resources: ["pods", "pods/status", "nodes", "services", "endpoints", "events", "namespaces", "persistentvolumes", "persistentvolumeclaims", "replicationcontrollers", "serviceaccounts"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["pods/log"]
     verbs: ["get"]
-  - apiGroups: ["apps"]
-    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["batch"]
-    resources: ["jobs", "cronjobs"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["ingresses", "networkpolicies"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["autoscaling"]
-    resources: ["horizontalpodautoscalers"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["policy"]
-    resources: ["poddisruptionbudgets"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["storageclasses"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["events.k8s.io"]
-    resources: ["events"]
-    verbs: ["get", "list"]
-  - apiGroups: ["metrics.k8s.io"]
-    resources: ["pods", "nodes"]
-    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: orka-container-worker-rolebinding
+  name: {{ include "orka.containerWorkerClusterRoleBindingName" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: orka-container-worker-role
+  name: {{ include "orka.containerWorkerClusterRoleName" . }}
 subjects:
   - kind: ServiceAccount
     name: orka-container-worker

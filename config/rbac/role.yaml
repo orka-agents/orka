@@ -184,14 +184,21 @@ rules:
   - rbac.authorization.k8s.io
   resources:
   - clusterrolebindings
-  - clusterroles
-  - rolebindings
-  - roles
   verbs:
   - create
   - get
   - list
   - update
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterroles
+  - rolebindings
+  - roles
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - storage.k8s.io
