@@ -110,6 +110,7 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Architecture](docs/architecture.md)                         | System design, components, and data flow              |
 | [Configuration](docs/configuration.md)                       | CRD reference, Helm values, controller flags, metrics |
 | [Agent Runtimes](docs/agent-runtimes.md)                     | Codex CLI, Claude Code CLI, and Copilot CLI runtimes  |
+| [Agent Sandbox](docs/agent-sandbox.md)                       | Experimental durable workspace scaffolding for agent runtimes |
 | [Interactive Chat](docs/chat.md)                             | Chat endpoint, tools, and SSE streaming               |
 | [Multi-Agent Coordination](docs/multi-agent-coordination.md) | Coordinator agents and task delegation                |
 | [Memory](docs/memory.md)                                   | Durable memory, proposals, transcript search, and validation |

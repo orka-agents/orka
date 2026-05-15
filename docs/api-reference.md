@@ -32,6 +32,20 @@ When a Task is created through OIDC authentication, Orka stamps the verified cal
 | `/api/v1/tasks/:id/plan` | GET | Get task plan |
 | `/api/v1/tasks/:id/children` | GET | Get child tasks |
 
+### Task Execution Workspace Schema
+
+`POST /api/v1/tasks` accepts the Task CRD shape. Agent Tasks may include `spec.execution.workspace` as experimental, validation-only scaffolding for future durable agent-sandbox workspaces. Current worker Jobs are still created through Orka's normal Kubernetes Job path.
+
+| Path | Type | Values/default | Notes |
+|------|------|----------------|-------|
+| `spec.execution.workspace.enabled` | boolean | default `false` | Enables a durable workspace request. The controller rejects enabled requests unless agent sandbox validation is enabled. |
+| `spec.execution.workspace.templateRef.name` | string | controller default template, if configured | Workspace template name. Required when `enabled: true` and no controller default template is configured. |
+| `spec.execution.workspace.templateRef.namespace` | string | Task namespace | Namespace containing the workspace template. |
+| `spec.execution.workspace.reusePolicy` | string | `none`; allowed `none`, `session` | `session` derives the reuse key from `spec.sessionRef.name` and requires that field to be set. |
+| `spec.execution.workspace.cleanupPolicy` | string | controller default cleanup policy; allowed `delete`, `retain` | Cleanup behavior for future workspace lifecycle integration. |
+
+Workspace requests are only valid on `spec.type: agent` Tasks. See [Agent Sandbox Workspaces](agent-sandbox.md) for configuration, validation rules, and current limitations.
+
 ### Get Task Plan
 
 Retrieve the autonomous plan state for a task.
