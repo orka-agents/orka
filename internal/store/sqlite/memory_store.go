@@ -460,7 +460,7 @@ func (s *Store) ApplyMemoryProposal(ctx context.Context, apply store.MemoryPropo
 
 	const maxAttempts = 3
 	var lastErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		memory, err := s.applyMemoryProposalOnce(ctx, apply)
 		if err == nil {
 			return memory, nil

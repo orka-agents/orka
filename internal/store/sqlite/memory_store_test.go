@@ -304,15 +304,12 @@ func TestApplyMemoryProposalConcurrentIdempotent(t *testing.T) {
 	results := make(chan applyResult, 2)
 	var wg sync.WaitGroup
 	for name, s := range map[string]*Store{"first": s1, "second": s2} {
-		name, s := name, s
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			memory, err := s.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: ns, ID: proposal.ID, AppliedBy: name})
 			results <- applyResult{name: name, memory: memory, err: err}
-		}()
+		})
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		select {
 		case <-ready:
 		case <-time.After(3 * time.Second):
