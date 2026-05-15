@@ -336,6 +336,10 @@ type Store struct {
 	// applyMemoryProposalAfterAcceptedRead is a test hook used to coordinate
 	// multi-connection proposal-apply races after an accepted proposal is read.
 	applyMemoryProposalAfterAcceptedRead func()
+
+	// archiveMemoryProposalAfterActiveRead is a test hook used to coordinate
+	// multi-connection proposal-archive races after an active proposal is read.
+	archiveMemoryProposalAfterActiveRead func()
 }
 
 // NewStore creates a new Store backed by the given SQLite database.

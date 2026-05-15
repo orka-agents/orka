@@ -436,17 +436,26 @@ func (s *Store) ArchiveMemoryProposal(ctx context.Context, namespace, id string)
 	if normalizeProposalStatus(proposal.Status) == proposalStatusArchived {
 		return nil
 	}
+	if s.archiveMemoryProposalAfterActiveRead != nil {
+		s.archiveMemoryProposalAfterActiveRead()
+	}
 
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE memory_proposals
 		 SET status = ?, updated_at = CURRENT_TIMESTAMP
-		 WHERE namespace = ? AND id = ?`,
-		proposalStatusArchived, namespace, id,
+		 WHERE namespace = ? AND id = ? AND status != ? AND applied_memory_id = ''`,
+		proposalStatusArchived, namespace, id, proposalStatusApplied,
 	)
 	if err != nil {
 		return err
 	}
-	return ensureRowsAffected(res)
+	if err := ensureRowsAffected(res); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("%w: proposal changed before archive", store.ErrConflict)
+		}
+		return err
+	}
+	return nil
 }
 
 // ApplyMemoryProposal applies an accepted memory proposal into durable memories.

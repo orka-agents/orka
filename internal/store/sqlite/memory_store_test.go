@@ -440,6 +440,94 @@ func TestApplyMemoryProposalDoesNotOverwriteConcurrentStatusChange(t *testing.T)
 	}
 }
 
+func TestArchiveMemoryProposalDoesNotOverwriteConcurrentApply(t *testing.T) {
+	s1, s2 := setupDiskStorePair(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const ns = "ns-archive-stale-apply"
+	proposal := &store.MemoryProposal{
+		Namespace: ns,
+		TaskName:  "task-archive-stale",
+		Type:      "memory",
+		Title:     "Stale archive proposal",
+		Content:   "A stale archive must not overwrite an applied proposal status.",
+	}
+	if err := s1.CreateMemoryProposal(ctx, proposal); err != nil {
+		t.Fatalf("CreateMemoryProposal: %v", err)
+	}
+	if err := s1.ReviewMemoryProposal(ctx, store.MemoryProposalReview{Namespace: ns, ID: proposal.ID, Status: "accepted"}); err != nil {
+		t.Fatalf("ReviewMemoryProposal: %v", err)
+	}
+
+	ready := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseArchive := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseArchive)
+	var readyOnce sync.Once
+	s1.archiveMemoryProposalAfterActiveRead = func() {
+		readyOnce.Do(func() {
+			close(ready)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		})
+	}
+
+	archiveCh := make(chan error, 1)
+	go func() {
+		archiveCh <- s1.ArchiveMemoryProposal(ctx, ns, proposal.ID)
+	}()
+	select {
+	case <-ready:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for archive to read accepted proposal")
+	}
+
+	memory, err := s2.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: ns, ID: proposal.ID, AppliedBy: "winner"})
+	if err != nil {
+		t.Fatalf("ApplyMemoryProposal: %v", err)
+	}
+	if memory == nil || memory.ID == "" {
+		t.Fatalf("ApplyMemoryProposal returned empty memory: %+v", memory)
+	}
+	releaseArchive()
+
+	var archiveErr error
+	select {
+	case archiveErr = <-archiveCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for stale archive result")
+	}
+	if archiveErr == nil {
+		t.Fatalf("stale ArchiveMemoryProposal succeeded, want error")
+	}
+	lowerErr := strings.ToLower(archiveErr.Error())
+	if strings.Contains(lowerErr, "database is locked") || strings.Contains(lowerErr, "sqlite_busy") || strings.Contains(lowerErr, "sqlite_locked") {
+		t.Fatalf("stale ArchiveMemoryProposal returned raw SQLite concurrency error: %v", archiveErr)
+	}
+	if !errors.Is(archiveErr, store.ErrConflict) && !strings.Contains(lowerErr, "changed") {
+		t.Fatalf("stale ArchiveMemoryProposal error = %v, want conflict", archiveErr)
+	}
+
+	updated, err := s1.GetMemoryProposal(ctx, ns, proposal.ID)
+	if err != nil {
+		t.Fatalf("GetMemoryProposal: %v", err)
+	}
+	if updated.Status != "applied" || updated.AppliedMemoryID != memory.ID {
+		t.Fatalf("proposal after stale archive = %+v, want applied with memory %q", updated, memory.ID)
+	}
+	listed, err := s2.ListMemories(ctx, store.MemoryFilter{Namespace: ns, Source: "memory_proposal"})
+	if err != nil {
+		t.Fatalf("ListMemories: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != memory.ID || listed[0].SourceProposalID != proposal.ID {
+		t.Fatalf("expected exactly one applied memory %q for proposal %q, got %+v", memory.ID, proposal.ID, listed)
+	}
+}
+
 func TestApplyMemoryProposalValidation(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
