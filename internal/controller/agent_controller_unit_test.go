@@ -15,7 +15,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -290,7 +289,7 @@ func TestValidateTools(t *testing.T) {
 			name: "disabled tool skipped",
 			agent: func() *corev1alpha1.Agent {
 				a := baseAgent("disabled-tool")
-				a.Spec.Tools = []corev1alpha1.ToolReference{{Name: "nonexistent", Enabled: ptr.To(false)}}
+				a.Spec.Tools = []corev1alpha1.ToolReference{{Name: "nonexistent", Enabled: new(false)}}
 				return a
 			}(),
 		},
@@ -298,7 +297,7 @@ func TestValidateTools(t *testing.T) {
 			name: "enabled tool that exists",
 			agent: func() *corev1alpha1.Agent {
 				a := baseAgent("enabled-tool")
-				a.Spec.Tools = []corev1alpha1.ToolReference{{Name: "existing-tool", Enabled: ptr.To(true)}}
+				a.Spec.Tools = []corev1alpha1.ToolReference{{Name: "existing-tool", Enabled: new(true)}}
 				return a
 			}(),
 			objs: []runtime.Object{existingTool},

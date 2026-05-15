@@ -1085,8 +1085,9 @@ func deleteKubernetesCodeExecObject(ctx context.Context, c crclient.Client, obj 
 }
 
 //go:fix inline
+//go:fix inline
 func int64Ptr(value int64) *int64 {
-	return &value
+	return new(value)
 }
 
 var _ CodeExecutor = (*KubernetesJobCodeExecutor)(nil)

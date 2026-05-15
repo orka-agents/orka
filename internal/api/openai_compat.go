@@ -277,6 +277,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		// Replace client tools with Orka's tools (builtin + coordinator)
 		compReq.Tools = nil
 		injectOrkaTools(ctx, h.client, compReq, namespace)
+		compReq.Tools = filterCompletionToolsForContextToken(c, h.contextTokenAuthorization, compReq.Tools)
 		if err := authorizeContextTokenToolUse(c, h.contextTokenAuthorization, "openAITools", completionToolNames(compReq.Tools)); err != nil {
 			return openAIContextTokenAuthorizationError(c, err)
 		}

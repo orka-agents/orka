@@ -9,6 +9,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,7 +24,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
@@ -278,6 +280,70 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 	}
 }
 
+func TestDelegateTaskTool_Execute_CleansUpChildTaskWhenTokenSecretAdoptionFails(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testResearcherAgentName)
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+	subjectPath := filepath.Join(t.TempDir(), "subject-token")
+	if err := os.WriteFile(subjectPath, []byte("parent-tx-token"), 0600); err != nil {
+		t.Fatalf("failed to write subject token fixture: %v", err)
+	}
+	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"access_token":      "child-token",
+			"issued_token_type": "urn:ietf:params:oauth:token-type:txn_token",
+			"token_type":        "N_A",
+		})
+	}))
+	defer ttsServer.Close()
+
+	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
+	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
+
+	forcedErr := errors.New("forced secret adoption update failure")
+	k8sClient := newFakeClientWithInterceptorFuncs(interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*corev1.Secret); ok {
+				for _, owner := range obj.GetOwnerReferences() {
+					if owner.Name != parentTaskName {
+						return forcedErr
+					}
+				}
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	}, parentTask(), researcherAgent())
+	tool := NewDelegateTaskTool(k8sClient)
+
+	_, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"researcher","prompt":"Research with token"}`))
+	if err == nil || !strings.Contains(err.Error(), "adopting child transaction token secret") || !strings.Contains(err.Error(), forcedErr.Error()) {
+		t.Fatalf("Execute() error = %v, want forced secret adoption update failure", err)
+	}
+
+	tasks := &corev1alpha1.TaskList{}
+	if err := k8sClient.List(context.Background(), tasks, client.InNamespace(defaultNamespace)); err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	for _, task := range tasks.Items {
+		if task.Name != parentTaskName {
+			t.Fatalf("unexpected child task left after adoption failure: %#v", task)
+		}
+	}
+
+	secrets := &corev1.SecretList{}
+	if err := k8sClient.List(context.Background(), secrets, client.InNamespace(defaultNamespace)); err != nil {
+		t.Fatalf("failed to list secrets: %v", err)
+	}
+	if len(secrets.Items) != 0 {
+		t.Fatalf("unexpected child transaction token secrets after adoption failure cleanup: %#v", secrets.Items)
+	}
+}
+
 func TestDelegateTaskTool_Execute_WithTTSChildToken(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
@@ -501,7 +567,7 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             runtimeTypeClaude,
 				DefaultMaxTurns:  &maxTurns,
-				DefaultAllowBash: ptr.To(true),
+				DefaultAllowBash: new(true),
 			},
 		},
 	}

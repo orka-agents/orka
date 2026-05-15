@@ -184,7 +184,7 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 		return classifyChatK8sErr(err)
 	}
 	if err := adoptChildTransactionTokenSecret(ctx, t.k8sClient, task); err != nil {
-		cleanupChildTransactionTokenSecret(ctx, t.k8sClient, task)
+		cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, task)
 		return classifyChatK8sErr(err)
 	}
 	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(task.Spec.Schedule)})

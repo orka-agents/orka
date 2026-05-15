@@ -247,6 +247,50 @@ func TestHandleCancelChat(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	})
 
+	t.Run("context token without session write scope is forbidden", func(t *testing.T) {
+		ctx := context.Background()
+		ssAuthz := newTestSessionStore(t)
+		rsAuthz := newTestResultStore(t)
+		fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+		chAuthz := newTestChatHandler(t, fakeClient, ssAuthz, rsAuthz, cfg)
+		authz, err := NewContextTokenAuthorizationConfig(
+			ContextTokenAuthorizationModeEnforce,
+			"", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+		)
+		require.NoError(t, err)
+		chAuthz.contextTokenAuthorization = authz
+
+		now := time.Now()
+		err = ssAuthz.CreateSession(ctx, &store.SessionRecord{
+			Namespace:   "default",
+			Name:        "protected-session",
+			SessionType: "chat",
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		})
+		require.NoError(t, err)
+
+		appAuthz := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+		appAuthz.Use(func(c fiber.Ctx) error {
+			c.Locals(UserInfoContextKey, &UserInfo{
+				AuthType: AuthTypeContextToken,
+				ContextToken: &ContextToken{
+					Scopes: []string{ContextTokenScopeSessionsRead},
+				},
+			})
+			return c.Next()
+		})
+		appAuthz.Delete("/api/v1/chat/:sessionId", chAuthz.HandleCancelChat)
+
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/chat/protected-session", nil)
+		resp, err := appAuthz.Test(req)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+		_, err = ssAuthz.GetSession(ctx, "default", "protected-session")
+		require.NoError(t, err)
+	})
+
 	t.Run("existing session is deleted", func(t *testing.T) {
 		ctx := context.Background()
 		now := time.Now()
@@ -650,7 +694,8 @@ func TestWrapWithRetryAndFallback(t *testing.T) {
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
 		primary := &chatMockProvider{name: "primary"}
-		result := ch.wrapWithRetryAndFallback(context.Background(), primary, ChatRequest{}, "default")
+		result, err := ch.wrapWithRetryAndFallback(context.Background(), nil, primary, ChatRequest{}, "default")
+		require.NoError(t, err)
 		assert.NotNil(t, result)
 	})
 
@@ -665,7 +710,8 @@ func TestWrapWithRetryAndFallback(t *testing.T) {
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
 		primary := &chatMockProvider{name: "primary"}
-		result := ch.wrapWithRetryAndFallback(context.Background(), primary, ChatRequest{AgentRef: "no-fallback-agent"}, "default")
+		result, err := ch.wrapWithRetryAndFallback(context.Background(), nil, primary, ChatRequest{AgentRef: "no-fallback-agent"}, "default")
+		require.NoError(t, err)
 		assert.NotNil(t, result)
 	})
 
@@ -688,10 +734,65 @@ func TestWrapWithRetryAndFallback(t *testing.T) {
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
 		primary := &chatMockProvider{name: "primary"}
-		result := ch.wrapWithRetryAndFallback(context.Background(), primary, ChatRequest{AgentRef: "fb-agent"}, "default")
+		result, err := ch.wrapWithRetryAndFallback(context.Background(), nil, primary, ChatRequest{AgentRef: "fb-agent"}, "default")
+		require.NoError(t, err)
 		assert.NotNil(t, result)
 		// The result should be a FallbackProvider wrapping the primary
 		assert.NotEqual(t, "primary", result.Name())
+	})
+
+	t.Run("context token denies unauthorized fallback provider", func(t *testing.T) {
+		provObjs := providerCRD("fallback-provider", "default", "test-type", "fb-model")
+		agent := &corev1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: "fb-agent-denied", Namespace: "default"},
+			Spec: corev1alpha1.AgentSpec{
+				Model: &corev1alpha1.ModelConfig{
+					Fallbacks: []corev1alpha1.ModelFallback{
+						{ProviderRef: "fallback-provider", Model: "fb-model"},
+					},
+				},
+			},
+		}
+		allObjs := append(provObjs, agent)
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(allObjs...).Build()
+		ss := newTestSessionStore(t)
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+
+		authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationModeEnforce, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+		require.NoError(t, err)
+		ch.contextTokenAuthorization = authz
+
+		app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+		app.Get("/test", func(c fiber.Ctx) error {
+			c.Locals(UserInfoContextKey, &UserInfo{
+				AuthType: AuthTypeContextToken,
+				ContextToken: &ContextToken{
+					Scopes: []string{ContextTokenScopeProvidersUse},
+					TransactionContext: map[string]any{
+						"allowedProviders": []string{"primary-provider"},
+					},
+				},
+			})
+
+			primary := &chatMockProvider{name: "primary"}
+			_, err := ch.wrapWithRetryAndFallback(
+				context.Background(),
+				c,
+				primary,
+				ChatRequest{AgentRef: "fb-agent-denied"},
+				"default",
+			)
+			if err != nil {
+				return err
+			}
+			return c.SendStatus(http.StatusOK)
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 	})
 }
 

@@ -52,6 +52,7 @@ type ToolExecutor struct {
 	enforceNamespaceIsolation bool
 	resultStore               store.ResultStore
 	registry                  *tools.Registry
+	allowedToolNames          map[string]struct{}
 }
 
 // NewToolExecutor creates a new ToolExecutor.
@@ -78,6 +79,19 @@ func NewToolExecutor(c client.Client, sm *controller.SessionManager, namespace, 
 	}
 }
 
+// SetAllowedTools restricts execution to the tools exposed and authorized for
+// the current request. A nil allowlist means no restriction, preserving the
+// default behavior for non context-token callers.
+func (e *ToolExecutor) SetAllowedTools(allowedTools []llm.Tool) {
+	e.allowedToolNames = make(map[string]struct{}, len(allowedTools))
+	for _, tool := range allowedTools {
+		name := strings.TrimSpace(tool.Name)
+		if name != "" {
+			e.allowedToolNames[name] = struct{}{}
+		}
+	}
+}
+
 // ToolResult represents the result of a tool execution.
 type ToolResult struct {
 	Success    bool   `json:"success"`
@@ -97,6 +111,14 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		),
 	)
 	defer span.End()
+
+	if e.allowedToolNames != nil {
+		if _, ok := e.allowedToolNames[toolCall.Name]; !ok {
+			span.SetStatus(codes.Error, "unauthorized tool")
+			result := toolError("unauthorized_tool", fmt.Sprintf("tool %q is not authorized for this request", toolCall.Name), "Use one of the available tools")
+			return marshalResult(result)
+		}
+	}
 
 	var args map[string]any
 	if err := json.Unmarshal(toolCall.Arguments, &args); err != nil {

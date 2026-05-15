@@ -325,7 +325,7 @@ func applyExecution(job *batchv1.Job, execution *corev1alpha1.ExecutionSpec) {
 	}
 
 	if execution.RuntimeClassName != "" {
-		job.Spec.Template.Spec.RuntimeClassName = ptr.To(execution.RuntimeClassName)
+		job.Spec.Template.Spec.RuntimeClassName = new(execution.RuntimeClassName)
 	}
 	if len(execution.NodeSelector) > 0 {
 		job.Spec.Template.Spec.NodeSelector = copyNodeSelector(execution.NodeSelector)

@@ -207,12 +207,12 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	if err := authorizeContextTokenProviderUse(c, ch.contextTokenAuthorization, "chat", namespace, providerInfo, model); err != nil {
 		return err
 	}
-	if err := authorizeContextTokenToolUse(c, ch.contextTokenAuthorization, "chatTools", chattools.ChatToolNames()); err != nil {
-		return err
-	}
 
 	// Wrap provider with retry and fallback
-	provider = ch.wrapWithRetryAndFallback(ctx, provider, req, namespace)
+	provider, err = ch.wrapWithRetryAndFallback(ctx, c, provider, req, namespace)
+	if err != nil {
+		return err
+	}
 
 	// Wrap provider with tracing
 	provider = llm.NewTracingProvider(provider)
@@ -288,8 +288,13 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor.provider = providerInfo.Name
 	executor.providerType = providerInfo.Type
 
-	// Build tools from the chat registry
+	// Build tools from the chat registry and restrict execution to the exposed set.
 	tools := executor.registry.ToLLMTools(chattools.ChatToolNames())
+	tools = filterCompletionToolsForContextToken(c, ch.contextTokenAuthorization, tools)
+	if err := authorizeContextTokenToolUse(c, ch.contextTokenAuthorization, "chatTools", completionToolNames(tools)); err != nil {
+		return err
+	}
+	executor.SetAllowedTools(tools)
 
 	// Build completion request parameters
 	var temperature float64
@@ -781,19 +786,16 @@ func (ch *ChatHandler) HandleCancelChat(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "sessionId is required")
 	}
 
-	namespace := GetEffectiveNamespace(c, c.Query("namespace", ""))
-	if ch.watchNamespace != "" {
-		namespace = ch.watchNamespace
+	namespace, err := ResolveNamespace(c, c.Query("namespace", ""), ch.watchNamespace, ch.enforceNamespaceIsolation)
+	if err != nil {
+		return err
 	}
-	if ch.enforceNamespaceIsolation {
-		ui := GetUserInfo(c)
-		if ui != nil && ui.Namespace != "" && namespace != ui.Namespace {
-			return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("namespace %q not allowed", namespace))
-		}
+	if err := authorizeContextTokenActionWithConfig(c, ch.contextTokenAuthorization, "cancelChat", ch.contextTokenAuthorization.SessionWriteScopes); err != nil {
+		return err
 	}
 
 	ctx := c.Context()
-	_, err := ch.sessionStore.GetSession(ctx, namespace, sessionID)
+	_, err = ch.sessionStore.GetSession(ctx, namespace, sessionID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "chat session not found")
@@ -811,19 +813,19 @@ func (ch *ChatHandler) HandleCancelChat(c fiber.Ctx) error {
 
 // wrapWithRetryAndFallback wraps a provider with retry logic and adds fallback
 // providers if the agent has them configured.
-func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, provider llm.Provider, req ChatRequest, namespace string) llm.Provider {
+func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx, provider llm.Provider, req ChatRequest, namespace string) (llm.Provider, error) {
 	var resultProvider llm.Provider = llm.NewRetryProvider(provider, 0)
 
 	if req.AgentRef == "" {
-		return resultProvider
+		return resultProvider, nil
 	}
 
 	agent := &corev1alpha1.Agent{}
 	if err := ch.client.Get(ctx, types.NamespacedName{Name: req.AgentRef, Namespace: namespace}, agent); err != nil {
-		return resultProvider
+		return resultProvider, nil
 	}
 	if agent.Spec.Model == nil || len(agent.Spec.Model.Fallbacks) == 0 {
-		return resultProvider
+		return resultProvider, nil
 	}
 
 	fallbacks := make([]llm.FallbackEntry, 0, len(agent.Spec.Model.Fallbacks))
@@ -831,6 +833,11 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, provider ll
 		fbProviderCRD, err := ch.resolver.LookupProvider(ctx, fb.ProviderRef, namespace)
 		if err != nil {
 			continue
+		}
+
+		fbProviderInfo := providerResolutionInfo(fbProviderCRD)
+		if err := authorizeContextTokenProviderUse(c, ch.contextTokenAuthorization, "chatFallback", namespace, fbProviderInfo, fb.Model); err != nil {
+			return resultProvider, err
 		}
 
 		fbAPIKey, err := ch.resolver.ResolveAPIKey(ctx, fbProviderCRD)
@@ -864,7 +871,7 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, provider ll
 		resultProvider = fp
 	}
 
-	return resultProvider
+	return resultProvider, nil
 }
 
 // generateChatID returns 8 random hex characters.

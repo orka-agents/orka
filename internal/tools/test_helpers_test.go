@@ -28,13 +28,18 @@ func newTestScheme() *runtime.Scheme {
 }
 
 func newFakeClient(objs ...client.Object) client.Client {
+	return newFakeClientWithInterceptorFuncs(interceptor.Funcs{}, objs...)
+}
+
+func newFakeClientWithInterceptorFuncs(funcs interceptor.Funcs, objs ...client.Object) client.Client {
+	if funcs.Create == nil {
+		funcs.Create = assignFakeUIDOnCreate
+	}
 	return fake.NewClientBuilder().
 		WithScheme(newTestScheme()).
 		WithObjects(objs...).
 		WithStatusSubresource(&corev1alpha1.Task{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Create: assignFakeUIDOnCreate,
-		}).
+		WithInterceptorFuncs(funcs).
 		Build()
 }
 

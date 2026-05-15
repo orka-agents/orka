@@ -73,7 +73,6 @@ func TestParseFallbacksInvalidCountPreservesLegacyBehavior(t *testing.T) {
 	}
 }
 
-
 func TestReadTokenFileEnv(t *testing.T) {
 	const envName = "TEST_TOKEN_FILE_ENV"
 

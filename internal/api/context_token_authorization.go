@@ -569,6 +569,44 @@ func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthori
 	return failures
 }
 
+func filterCompletionToolsForContextToken(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, tools []llm.Tool) []llm.Tool {
+	if !cfg.Enabled() {
+		return tools
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return tools
+	}
+
+	allowed, ok := contextStringList(ui.ContextToken.TransactionContext, "allowedTools")
+	if !ok {
+		return tools
+	}
+	return filterCompletionToolsByName(tools, allowed)
+}
+
+func filterCompletionToolsByName(tools []llm.Tool, allowed []string) []llm.Tool {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			allowedSet[name] = struct{}{}
+		}
+	}
+
+	filtered := make([]llm.Tool, 0, len(tools))
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Name)
+		if name == "" {
+			continue
+		}
+		if _, ok := allowedSet[name]; ok {
+			filtered = append(filtered, tool)
+		}
+	}
+	return filtered
+}
+
 func completionToolNames(tools []llm.Tool) []string {
 	names := make([]string, 0, len(tools))
 	for _, tool := range tools {

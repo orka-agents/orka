@@ -301,6 +301,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		// not be visible to the LLM or it will call them and get "tool not found" errors.
 		compReq.Tools = nil
 		injectOrkaTools(ctx, h.client, compReq, namespace)
+		compReq.Tools = filterCompletionToolsForContextToken(c, h.contextTokenAuthorization, compReq.Tools)
 		if err := authorizeContextTokenToolUse(c, h.contextTokenAuthorization, "anthropicTools", completionToolNames(compReq.Tools)); err != nil {
 			return anthropicContextTokenAuthorizationError(c, err)
 		}

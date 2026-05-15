@@ -27,6 +27,7 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/metrics"
+	"github.com/sozercan/orka/internal/taskmeta"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -82,8 +83,9 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: childTask.Namespace,
+			Name:            secretName,
+			Namespace:       childTask.Namespace,
+			OwnerReferences: taskOwnerReference(parentTask),
 			Labels: map[string]string{
 				labels.LabelParentTask: labels.SelectorValue(parentTask.Name),
 			},
@@ -99,6 +101,7 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 	if err := k8sClient.Create(ctx, secret); err != nil {
 		return fmt.Errorf("creating child transaction token secret: %w", err)
 	}
+	stampChildTransactionScope(childTask, scope)
 	if childTask.Annotations == nil {
 		childTask.Annotations = map[string]string{}
 	}
@@ -106,18 +109,30 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 	return nil
 }
 
-func childOwnerReference(childTask *corev1alpha1.Task) []metav1.OwnerReference {
-	if childTask == nil || childTask.UID == "" {
+func taskOwnerReference(task *corev1alpha1.Task) []metav1.OwnerReference {
+	if task == nil || task.UID == "" {
 		return nil
 	}
-	blockOwnerDeletion := true
 	return []metav1.OwnerReference{{
-		APIVersion:         corev1alpha1.GroupVersion.String(),
-		Kind:               "Task",
-		Name:               childTask.Name,
-		UID:                childTask.UID,
-		BlockOwnerDeletion: &blockOwnerDeletion,
+		APIVersion: corev1alpha1.GroupVersion.String(),
+		Kind:       "Task",
+		Name:       task.Name,
+		UID:        task.UID,
 	}}
+}
+
+func childOwnerReference(childTask *corev1alpha1.Task) []metav1.OwnerReference {
+	return taskOwnerReference(childTask)
+}
+
+func stampChildTransactionScope(childTask *corev1alpha1.Task, scope string) {
+	if childTask == nil || childTask.Spec.Transaction == nil {
+		return
+	}
+	scope = strings.TrimSpace(scope)
+	childTask.Spec.Transaction.Scope = scope
+	childTask.Spec.Transaction.Scopes = strings.Fields(scope)
+	taskmeta.ApplyTransactionMetadata(&childTask.ObjectMeta, childTask.Spec.Transaction)
 }
 
 func adoptChildTransactionTokenSecret(ctx context.Context, k8sClient client.Client, childTask *corev1alpha1.Task) error {
@@ -176,6 +191,18 @@ func cleanupChildTransactionTokenSecret(ctx context.Context, k8sClient client.Cl
 	if err := k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: childTask.Namespace}}); err != nil && !apierrors.IsNotFound(err) {
 		log.FromContext(ctx).Error(err, "failed to cleanup child transaction token secret", "secret", secretName, "namespace", childTask.Namespace)
 	}
+}
+
+func cleanupChildTaskAfterTokenAdoptionFailure(ctx context.Context, k8sClient client.Client, childTask *corev1alpha1.Task) {
+	if childTask == nil || childTask.Name == "" {
+		cleanupChildTransactionTokenSecret(ctx, k8sClient, childTask)
+		return
+	}
+	err := k8sClient.Delete(ctx, &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: childTask.Name, Namespace: childTask.Namespace}})
+	if err != nil && !apierrors.IsNotFound(err) {
+		log.FromContext(ctx).Error(err, "failed to cleanup child task after transaction token secret adoption failure", "task", childTask.Name, "namespace", childTask.Namespace)
+	}
+	cleanupChildTransactionTokenSecret(ctx, k8sClient, childTask)
 }
 
 func childTransactionTokenSecretName(parentName string) (string, error) {

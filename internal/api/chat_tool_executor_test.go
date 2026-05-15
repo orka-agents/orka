@@ -630,6 +630,40 @@ func TestExecute_UnknownTool(t *testing.T) {
 	}
 }
 
+func TestExecute_AllowedToolsRejectsDisallowedToolBeforeDispatch(t *testing.T) {
+	e := newTestExecutor()
+	e.SetAllowedTools([]llm.Tool{{Name: "check_task_progress"}})
+
+	disallowed := llm.ToolCall{
+		ID:        "1",
+		Name:      "create_ai_task",
+		Arguments: json.RawMessage(`{invalid`),
+	}
+	result, err := e.Execute(context.Background(), disallowed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "unauthorized_tool") || !strings.Contains(result, "not authorized") {
+		t.Fatalf("expected unauthorized_tool error, got: %s", result)
+	}
+	if strings.Contains(result, "invalid_arguments") {
+		t.Fatalf("expected allowlist rejection before argument parsing, got: %s", result)
+	}
+
+	allowed := llm.ToolCall{
+		ID:        "2",
+		Name:      "check_task_progress",
+		Arguments: mustJSON(map[string]any{}),
+	}
+	result, err = e.Execute(context.Background(), allowed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "name is required") {
+		t.Fatalf("expected allowed tool to dispatch to validation, got: %s", result)
+	}
+}
+
 func TestExecute_Dispatch(t *testing.T) {
 	tests := []struct {
 		name     string
