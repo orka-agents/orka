@@ -45,14 +45,14 @@ type rowScanner interface {
 // CreateMemory inserts a durable memory record.
 func (s *Store) CreateMemory(ctx context.Context, memory *store.Memory) error {
 	if memory == nil {
-		return fmt.Errorf("memory is required")
+		return store.ValidationErrorf("memory is required")
 	}
 	if strings.TrimSpace(memory.Namespace) == "" {
-		return fmt.Errorf("namespace is required")
+		return store.ValidationErrorf("namespace is required")
 	}
 	memory.Content = redact.SensitiveText(memory.Content)
 	if strings.TrimSpace(memory.Content) == "" {
-		return fmt.Errorf("content is required")
+		return store.ValidationErrorf("content is required")
 	}
 	if memory.ID == "" {
 		memory.ID = "mem-" + uuid.NewString()
@@ -100,7 +100,7 @@ func (s *Store) GetMemory(ctx context.Context, namespace, id string) (*store.Mem
 // ListMemories lists memories matching the filter ordered for compact recall/governance.
 func (s *Store) ListMemories(ctx context.Context, filter store.MemoryFilter) ([]store.Memory, error) {
 	if strings.TrimSpace(filter.Namespace) == "" {
-		return nil, fmt.Errorf("namespace is required")
+		return nil, store.ValidationErrorf("namespace is required")
 	}
 
 	query := selectMemorySQL() + ` WHERE namespace = ?`
@@ -129,14 +129,14 @@ func (s *Store) ListMemories(ctx context.Context, filter store.MemoryFilter) ([]
 // UpdateMemory updates mutable memory fields.
 func (s *Store) UpdateMemory(ctx context.Context, memory *store.Memory) error {
 	if memory == nil {
-		return fmt.Errorf("memory is required")
+		return store.ValidationErrorf("memory is required")
 	}
 	if memory.Namespace == "" || memory.ID == "" {
-		return fmt.Errorf("namespace and id are required")
+		return store.ValidationErrorf("namespace and id are required")
 	}
 	memory.Content = redact.SensitiveText(memory.Content)
 	if strings.TrimSpace(memory.Content) == "" {
-		return fmt.Errorf("content is required")
+		return store.ValidationErrorf("content is required")
 	}
 	tagsJSON, err := marshalTags(memory.Tags)
 	if err != nil {
@@ -205,7 +205,7 @@ func (s *Store) MarkMemoriesRecalled(ctx context.Context, namespace string, ids 
 // SearchTranscript searches transcript content and returns compact snippets.
 func (s *Store) SearchTranscript(ctx context.Context, filter store.TranscriptSearchFilter) ([]store.TranscriptSearchResult, error) {
 	if strings.TrimSpace(filter.Namespace) == "" {
-		return nil, fmt.Errorf("namespace is required")
+		return nil, store.ValidationErrorf("namespace is required")
 	}
 
 	var query strings.Builder
@@ -268,10 +268,10 @@ func (s *Store) SearchTranscript(ctx context.Context, filter store.TranscriptSea
 // CreateMemoryProposal inserts a governance proposal.
 func (s *Store) CreateMemoryProposal(ctx context.Context, proposal *store.MemoryProposal) error {
 	if proposal == nil {
-		return fmt.Errorf("proposal is required")
+		return store.ValidationErrorf("proposal is required")
 	}
 	if strings.TrimSpace(proposal.Namespace) == "" {
-		return fmt.Errorf("namespace is required")
+		return store.ValidationErrorf("namespace is required")
 	}
 	proposal.Type = strings.ToLower(strings.TrimSpace(proposal.Type))
 	if proposal.Type == "" {
@@ -285,7 +285,7 @@ func (s *Store) CreateMemoryProposal(ctx context.Context, proposal *store.Memory
 	proposal.ReviewNote = redact.SensitiveText(proposal.ReviewNote)
 	proposal.AppliedBy = redact.SensitiveText(proposal.AppliedBy)
 	if strings.TrimSpace(proposal.Title) == "" {
-		return fmt.Errorf("title is required")
+		return store.ValidationErrorf("title is required")
 	}
 	if proposal.ID == "" {
 		proposal.ID = "mprop-" + uuid.NewString()
@@ -295,10 +295,10 @@ func (s *Store) CreateMemoryProposal(ctx context.Context, proposal *store.Memory
 		proposal.Status = proposalStatusPending
 	}
 	if !isKnownProposalStatus(proposal.Status) {
-		return fmt.Errorf("invalid proposal status %q", proposal.Status)
+		return store.ValidationErrorf("invalid proposal status %q", proposal.Status)
 	}
 	if proposal.Status == proposalStatusApplied && proposal.AppliedMemoryID == "" {
-		return fmt.Errorf("invalid applied proposal without applied memory id")
+		return store.ValidationErrorf("invalid applied proposal without applied memory id")
 	}
 	now := time.Now()
 	if proposal.CreatedAt.IsZero() {
@@ -336,7 +336,7 @@ func (s *Store) GetMemoryProposal(ctx context.Context, namespace, id string) (*s
 // ListMemoryProposals lists proposals for governance review.
 func (s *Store) ListMemoryProposals(ctx context.Context, filter store.MemoryProposalFilter) ([]store.MemoryProposal, error) {
 	if strings.TrimSpace(filter.Namespace) == "" {
-		return nil, fmt.Errorf("namespace is required")
+		return nil, store.ValidationErrorf("namespace is required")
 	}
 
 	query := selectMemoryProposalSQL() + ` WHERE namespace = ?`
@@ -387,11 +387,11 @@ func (s *Store) ReviewMemoryProposal(ctx context.Context, review store.MemoryPro
 	review.Namespace = strings.TrimSpace(review.Namespace)
 	review.ID = strings.TrimSpace(review.ID)
 	if review.Namespace == "" || review.ID == "" {
-		return fmt.Errorf("namespace and id are required")
+		return store.ValidationErrorf("namespace and id are required")
 	}
 	review.Status = normalizeProposalStatus(review.Status)
 	if !isReviewDecisionStatus(review.Status) {
-		return fmt.Errorf("proposal review status must be accepted or rejected")
+		return store.ValidationErrorf("proposal review status must be accepted or rejected")
 	}
 
 	proposal, err := s.GetMemoryProposal(ctx, review.Namespace, review.ID)
@@ -399,10 +399,10 @@ func (s *Store) ReviewMemoryProposal(ctx context.Context, review store.MemoryPro
 		return err
 	}
 	if normalizeProposalStatus(proposal.Status) != proposalStatusPending {
-		return fmt.Errorf("proposal status %q cannot be reviewed", proposal.Status)
+		return store.ValidationErrorf("proposal status %q cannot be reviewed", proposal.Status)
 	}
 	if proposal.AppliedMemoryID != "" {
-		return fmt.Errorf("applied proposal cannot be reviewed")
+		return store.ValidationErrorf("applied proposal cannot be reviewed")
 	}
 
 	review.Reviewer = redact.SensitiveText(review.Reviewer)
@@ -424,14 +424,14 @@ func (s *Store) ArchiveMemoryProposal(ctx context.Context, namespace, id string)
 	namespace = strings.TrimSpace(namespace)
 	id = strings.TrimSpace(id)
 	if namespace == "" || id == "" {
-		return fmt.Errorf("namespace and id are required")
+		return store.ValidationErrorf("namespace and id are required")
 	}
 	proposal, err := s.GetMemoryProposal(ctx, namespace, id)
 	if err != nil {
 		return err
 	}
 	if normalizeProposalStatus(proposal.Status) == proposalStatusApplied || proposal.AppliedMemoryID != "" {
-		return fmt.Errorf("applied proposal cannot be archived")
+		return store.ValidationErrorf("applied proposal cannot be archived")
 	}
 	if normalizeProposalStatus(proposal.Status) == proposalStatusArchived {
 		return nil
@@ -454,7 +454,7 @@ func (s *Store) ApplyMemoryProposal(ctx context.Context, apply store.MemoryPropo
 	apply.Namespace = strings.TrimSpace(apply.Namespace)
 	apply.ID = strings.TrimSpace(apply.ID)
 	if apply.Namespace == "" || apply.ID == "" {
-		return nil, fmt.Errorf("namespace and id are required")
+		return nil, store.ValidationErrorf("namespace and id are required")
 	}
 	apply.AppliedBy = redact.SensitiveText(strings.TrimSpace(apply.AppliedBy))
 
@@ -527,10 +527,10 @@ func (s *Store) applyMemoryProposalOnce(ctx context.Context, apply store.MemoryP
 	}
 
 	if strings.ToLower(strings.TrimSpace(proposal.Type)) != proposalTypeMemory {
-		return nil, fmt.Errorf("proposal type %q cannot be applied as memory", proposal.Type)
+		return nil, store.ValidationErrorf("proposal type %q cannot be applied as memory", proposal.Type)
 	}
 	if status != proposalStatusAccepted {
-		return nil, fmt.Errorf("proposal status %q cannot be applied", proposal.Status)
+		return nil, store.ValidationErrorf("proposal status %q cannot be applied", proposal.Status)
 	}
 	if hook := s.applyMemoryProposalAfterAcceptedRead; hook != nil {
 		hook()
@@ -575,7 +575,7 @@ func (s *Store) applyMemoryProposalOnce(ctx context.Context, apply store.MemoryP
 		UpdatedAt:        now,
 	}
 	if strings.TrimSpace(memory.Content) == "" {
-		return nil, fmt.Errorf("content is required")
+		return nil, store.ValidationErrorf("content is required")
 	}
 	tagsJSON, err := marshalTags(memory.Tags)
 	if err != nil {

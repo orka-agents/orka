@@ -2558,6 +2558,7 @@ func TestHandlers_ApplyMemoryProposal(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, memory.ID, updated.AppliedMemoryID)
 	require.Equal(t, "api-user", updated.AppliedBy)
+	require.NotNil(t, updated.AppliedAt)
 	require.False(t, updated.AppliedAt.IsZero())
 }
 

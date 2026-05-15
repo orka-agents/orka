@@ -456,9 +456,5 @@ func memoryStoreError(action, resource string, err error) error {
 }
 
 func isStoreValidationError(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "required") ||
-		strings.Contains(msg, "invalid") ||
-		strings.Contains(msg, "must be") ||
-		strings.Contains(msg, "cannot")
+	return errors.Is(err, store.ErrValidation)
 }
