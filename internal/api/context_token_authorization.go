@@ -189,6 +189,7 @@ type contextTokenTaskCreateAuthorizationContext struct {
 	AgentName           string
 	AgentNamespace      string
 	Provider            *corev1alpha1.Provider
+	ProviderRef         ProviderResolutionInfo
 	EffectiveProvider   ProviderResolutionInfo
 	EffectiveModel      string
 	EffectiveAITools    []string
@@ -354,19 +355,25 @@ func contextTokenProviderUseFailures(token *ContextToken, cfg ContextTokenAuthor
 		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.ProviderUseScopes, ",")))
 	}
 
-	if want, ok := contextString(token.TransactionContext, "namespace"); ok && namespace != want {
-		failures = append(failures, fmt.Sprintf("namespace %q does not match token context %q", namespace, want))
+	tokenNamespace, hasTokenNamespace := contextString(token.TransactionContext, "namespace")
+	if hasTokenNamespace {
+		if namespace != tokenNamespace {
+			failures = append(failures, fmt.Sprintf("namespace %q does not match token context %q", namespace, tokenNamespace))
+		}
+		if !providerNamespaceMatchesContext(provider, tokenNamespace, hasTokenNamespace) {
+			failures = append(failures, fmt.Sprintf("provider namespace %q does not match token context %q", provider.Namespace, tokenNamespace))
+		}
 	}
-	if want, ok := contextString(token.TransactionContext, "provider"); ok && !providerMatches(provider, want) {
+	if want, ok := contextString(token.TransactionContext, "provider"); ok && !providerMatches(provider, want, tokenNamespace, hasTokenNamespace) {
 		failures = append(failures, fmt.Sprintf("provider %q is not allowed by token context", provider.Name))
 	}
-	if allowed, ok := contextStringList(token.TransactionContext, "allowedProviders"); ok && !providerAllowed(provider, allowed) {
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedProviders"); ok && !providerAllowed(provider, allowed, tokenNamespace, hasTokenNamespace) {
 		failures = append(failures, fmt.Sprintf("provider %q is not allowed by token context", provider.Name))
 	}
 	if want, ok := contextString(token.TransactionContext, "model"); ok && model != want {
 		failures = append(failures, fmt.Sprintf("model %q does not match token context %q", model, want))
 	}
-	if allowed, ok := contextStringList(token.TransactionContext, "allowedModels"); ok && !modelAllowed(provider, model, allowed) {
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedModels"); ok && !modelAllowed(provider, model, allowed, tokenNamespace, hasTokenNamespace) {
 		failures = append(failures, fmt.Sprintf("model %q is not allowed by token context", model))
 	}
 
@@ -405,6 +412,7 @@ func (h *Handlers) resolveContextTokenTaskCreateAuthorizationContext(ctx context
 		if providerNamespace == "" {
 			providerNamespace = namespace
 		}
+		authzCtx.ProviderRef = ProviderResolutionInfo{Name: providerRef.Name, Namespace: providerNamespace}
 		provider := &corev1alpha1.Provider{}
 		key := types.NamespacedName{Name: providerRef.Name, Namespace: providerNamespace}
 		if err := h.client.Get(ctx, key, provider); err != nil {
@@ -504,19 +512,14 @@ func contextTokenTaskCreateEffectiveRuntimeAllowedTools(req CreateTaskRequest, a
 func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, authzCtx contextTokenTaskCreateAuthorizationContext) []string {
 	failures := []string{}
 	req := authzCtx.Request
-	namespace := authzCtx.Namespace
 
 	if !hasAnyScope(token.Scopes, cfg.TaskCreateScopes) {
 		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.TaskCreateScopes, ",")))
 	}
 
-	if want, ok := contextString(token.TransactionContext, "namespace"); ok {
-		if namespace != want {
-			failures = append(failures, fmt.Sprintf("namespace %q does not match token context %q", namespace, want))
-		}
-		if authzCtx.AgentName != "" && authzCtx.AgentNamespace != "" && authzCtx.AgentNamespace != want {
-			failures = append(failures, fmt.Sprintf("agent namespace %q does not match token context %q", authzCtx.AgentNamespace, want))
-		}
+	tokenNamespace, hasTokenNamespace := contextString(token.TransactionContext, "namespace")
+	if hasTokenNamespace {
+		failures = append(failures, contextTokenTaskCreateNamespaceFailures(authzCtx, tokenNamespace)...)
 	}
 	if want, ok := contextString(token.TransactionContext, "taskType"); ok && string(req.Type) != want {
 		failures = append(failures, fmt.Sprintf("task type %q does not match token context %q", req.Type, want))
@@ -529,16 +532,16 @@ func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthori
 	if allowed, ok := contextStringList(token.TransactionContext, "allowedAgents"); ok && authzCtx.AgentName != "" && !agentAllowed(authzCtx.AgentName, authzCtx.AgentNamespace, allowed) {
 		failures = append(failures, fmt.Sprintf("agent %q is not allowed by token context", namespacedNameString(authzCtx.AgentNamespace, authzCtx.AgentName)))
 	}
-	if want, ok := contextString(token.TransactionContext, "provider"); ok && !providerMatches(authzCtx.EffectiveProvider, want) {
+	if want, ok := contextString(token.TransactionContext, "provider"); ok && !providerMatches(authzCtx.EffectiveProvider, want, tokenNamespace, hasTokenNamespace) {
 		failures = append(failures, fmt.Sprintf("provider %q is not allowed by token context", providerDisplayName(authzCtx.EffectiveProvider)))
 	}
-	if allowed, ok := contextStringList(token.TransactionContext, "allowedProviders"); ok && !providerAllowed(authzCtx.EffectiveProvider, allowed) {
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedProviders"); ok && !providerAllowed(authzCtx.EffectiveProvider, allowed, tokenNamespace, hasTokenNamespace) {
 		failures = append(failures, fmt.Sprintf("provider %q is not allowed by token context", providerDisplayName(authzCtx.EffectiveProvider)))
 	}
 	if want, ok := contextString(token.TransactionContext, "model"); ok && authzCtx.EffectiveModel != want {
 		failures = append(failures, fmt.Sprintf("model %q does not match token context %q", authzCtx.EffectiveModel, want))
 	}
-	if allowed, ok := contextStringList(token.TransactionContext, "allowedModels"); ok && !modelAllowed(authzCtx.EffectiveProvider, authzCtx.EffectiveModel, allowed) {
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedModels"); ok && !modelAllowed(authzCtx.EffectiveProvider, authzCtx.EffectiveModel, allowed, tokenNamespace, hasTokenNamespace) {
 		failures = append(failures, fmt.Sprintf("model %q is not allowed by token context", authzCtx.EffectiveModel))
 	}
 
@@ -564,6 +567,26 @@ func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthori
 				failures = append(failures, fmt.Sprintf("tool %q is not allowed by token context", tool))
 			}
 		}
+	}
+
+	return failures
+}
+
+func contextTokenTaskCreateNamespaceFailures(authzCtx contextTokenTaskCreateAuthorizationContext, tokenNamespace string) []string {
+	failures := []string{}
+	if authzCtx.Namespace != tokenNamespace {
+		failures = append(failures, fmt.Sprintf("namespace %q does not match token context %q", authzCtx.Namespace, tokenNamespace))
+	}
+	if authzCtx.AgentName != "" && authzCtx.AgentNamespace != "" && authzCtx.AgentNamespace != tokenNamespace {
+		failures = append(failures, fmt.Sprintf("agent namespace %q does not match token context %q", authzCtx.AgentNamespace, tokenNamespace))
+	}
+
+	providerNamespaceInfo := authzCtx.EffectiveProvider
+	if authzCtx.ProviderRef.Name != "" {
+		providerNamespaceInfo = authzCtx.ProviderRef
+	}
+	if !providerNamespaceMatchesContext(providerNamespaceInfo, tokenNamespace, true) {
+		failures = append(failures, fmt.Sprintf("provider namespace %q does not match token context %q", providerNamespaceInfo.Namespace, tokenNamespace))
 	}
 
 	return failures
@@ -674,34 +697,63 @@ func providerDisplayName(provider ProviderResolutionInfo) string {
 	return provider.Type
 }
 
-func providerAllowed(provider ProviderResolutionInfo, allowed []string) bool {
+func providerAllowed(provider ProviderResolutionInfo, allowed []string, tokenNamespace string, hasTokenNamespace bool) bool {
 	for _, want := range allowed {
-		if providerMatches(provider, want) {
+		if providerMatches(provider, want, tokenNamespace, hasTokenNamespace) {
 			return true
 		}
 	}
 	return false
 }
 
-func providerMatches(provider ProviderResolutionInfo, want string) bool {
+func providerMatches(provider ProviderResolutionInfo, want string, tokenNamespace string, hasTokenNamespace bool) bool {
 	want = strings.TrimSpace(want)
 	if want == "" {
 		return false
 	}
-	return provider.Name == want || namespacedNameString(provider.Namespace, provider.Name) == want || provider.Type == want
+	if !providerNamespaceMatchesContext(provider, tokenNamespace, hasTokenNamespace) {
+		return false
+	}
+	if provider.Name != "" && namespacedNameString(provider.Namespace, provider.Name) == want {
+		return true
+	}
+	if provider.Name != "" && provider.Name == want {
+		return true
+	}
+	return provider.Type != "" && provider.Type == want
 }
 
-func modelAllowed(provider ProviderResolutionInfo, model string, allowed []string) bool {
+func modelAllowed(provider ProviderResolutionInfo, model string, allowed []string, tokenNamespace string, hasTokenNamespace bool) bool {
+	if !providerNamespaceMatchesContext(provider, tokenNamespace, hasTokenNamespace) {
+		return false
+	}
 	for _, want := range allowed {
 		want = strings.TrimSpace(want)
 		switch want {
 		case "":
 			continue
-		case model, provider.Name + "/" + model, namespacedNameString(provider.Namespace, provider.Name) + "/" + model, provider.Type + "/" + model:
+		case model:
+			return true
+		}
+		if provider.Name != "" && want == provider.Name+"/"+model {
+			return true
+		}
+		if provider.Name != "" && want == namespacedNameString(provider.Namespace, provider.Name)+"/"+model {
+			return true
+		}
+		if provider.Type != "" && want == provider.Type+"/"+model {
 			return true
 		}
 	}
 	return false
+}
+
+func providerNamespaceMatchesContext(provider ProviderResolutionInfo, tokenNamespace string, hasTokenNamespace bool) bool {
+	if !hasTokenNamespace {
+		return true
+	}
+	providerNamespace := strings.TrimSpace(provider.Namespace)
+	return providerNamespace == "" || providerNamespace == tokenNamespace
 }
 
 func toolNamesAllowed(tools []string, allowed []string) bool {

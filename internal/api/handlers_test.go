@@ -567,6 +567,109 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsProviderModelResolv
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
+func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsCrossNamespaceProviderRefMatches(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	privilegedProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "llm", Namespace: "privileged"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeOpenAI,
+			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "llm-key"},
+			DefaultModel: "gpt-4o-mini",
+		},
+	}
+	defaultProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "llm", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeOpenAI,
+			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "llm-key"},
+			DefaultModel: "gpt-4o-mini",
+		},
+	}
+
+	tests := []struct {
+		name               string
+		taskName           string
+		transactionContext map[string]any
+		providerRef        *corev1alpha1.ProviderReference
+		wantStatus         int
+	}{
+		{
+			name:     "denies cross-namespace providerRef despite bare allowed provider",
+			taskName: "cross-ns-provider-denied",
+			transactionContext: map[string]any{
+				"namespace":        "default",
+				"allowedProviders": []string{"llm"},
+			},
+			providerRef: &corev1alpha1.ProviderReference{
+				Name:      "llm",
+				Namespace: "privileged",
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:     "denies cross-namespace providerRef via ambiguous allowedModels",
+			taskName: "cross-ns-model-denied",
+			transactionContext: map[string]any{
+				"namespace":     "default",
+				"allowedModels": []string{"llm/gpt-4o-mini"},
+			},
+			providerRef: &corev1alpha1.ProviderReference{
+				Name:      "llm",
+				Namespace: "privileged",
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:     "denies unresolved cross-namespace providerRef",
+			taskName: "missing-cross-ns-provider-denied",
+			transactionContext: map[string]any{
+				"namespace": "default",
+			},
+			providerRef: &corev1alpha1.ProviderReference{
+				Name:      "missing-llm",
+				Namespace: "privileged",
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:     "allows bare provider match in token namespace",
+			taskName: "same-ns-provider-allowed",
+			transactionContext: map[string]any{
+				"namespace":        "default",
+				"allowedProviders": []string{"llm"},
+			},
+			providerRef: &corev1alpha1.ProviderReference{
+				Name: "llm",
+			},
+			wantStatus: http.StatusCreated,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, privilegedProvider.DeepCopyObject(), defaultProvider.DeepCopyObject())
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"scope": ContextTokenScopeTaskCreate,
+				"tctx":  tt.transactionContext,
+			})
+
+			resp := postCreateTaskWithContextToken(t, app, token, CreateTaskRequest{
+				Name:      tt.taskName,
+				Namespace: "default",
+				Type:      corev1alpha1.TaskTypeAI,
+				Prompt:    "review this change",
+				AI: &corev1alpha1.AISpec{
+					ProviderRef: tt.providerRef,
+				},
+			})
+
+			require.Equal(t, tt.wantStatus, resp.StatusCode)
+		})
+	}
+}
+
 func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsEffectiveAITools(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")

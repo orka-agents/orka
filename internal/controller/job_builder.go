@@ -21,7 +21,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -135,7 +134,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: ptr.To(int32(0)), // No retries at Job level, we handle retries in the controller
+			BackoffLimit: new(int32(0)), // No retries at Job level, we handle retries in the controller
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
@@ -206,10 +205,10 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 // buildPodSecurityContext builds a secure pod security context
 func (b *JobBuilder) buildPodSecurityContext() *corev1.PodSecurityContext {
 	return &corev1.PodSecurityContext{
-		RunAsNonRoot: ptr.To(true),
-		RunAsUser:    ptr.To(int64(1000)),
-		RunAsGroup:   ptr.To(int64(1000)),
-		FSGroup:      ptr.To(int64(1000)),
+		RunAsNonRoot: new(true),
+		RunAsUser:    new(int64(1000)),
+		RunAsGroup:   new(int64(1000)),
+		FSGroup:      new(int64(1000)),
 		SeccompProfile: &corev1.SeccompProfile{
 			Type: corev1.SeccompProfileTypeRuntimeDefault,
 		},
@@ -219,10 +218,10 @@ func (b *JobBuilder) buildPodSecurityContext() *corev1.PodSecurityContext {
 // buildContainerSecurityContext builds a secure container security context
 func (b *JobBuilder) buildContainerSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
-		AllowPrivilegeEscalation: ptr.To(false),
-		ReadOnlyRootFilesystem:   ptr.To(true),
-		RunAsNonRoot:             ptr.To(true),
-		RunAsUser:                ptr.To(int64(1000)),
+		AllowPrivilegeEscalation: new(false),
+		ReadOnlyRootFilesystem:   new(true),
+		RunAsNonRoot:             new(true),
+		RunAsUser:                new(int64(1000)),
 		Capabilities: &corev1.Capabilities{
 			Drop: []corev1.Capability{"ALL"},
 		},
