@@ -381,6 +381,42 @@ func TestJobBuilder_Build_TaskExecutionOverridesAgentExecution(t *testing.T) {
 	}
 }
 
+func TestResolveExecution_IgnoresWorkspace(t *testing.T) {
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{
+			Execution: &corev1alpha1.ExecutionSpec{
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					Enabled:     true,
+					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: "default"},
+				},
+			},
+		},
+	}
+
+	if execution := resolveExecution(task, nil); execution != nil {
+		t.Fatalf("resolveExecution() = %#v, want nil when only workspace is set", execution)
+	}
+
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Execution: &corev1alpha1.ExecutionSpec{
+				RuntimeClassName: testRuntimeClassKata,
+			},
+		},
+	}
+
+	execution := resolveExecution(task, agent)
+	if execution == nil {
+		t.Fatal("resolveExecution() returned nil, want agent execution")
+	}
+	if execution.RuntimeClassName != testRuntimeClassKata {
+		t.Fatalf("RuntimeClassName = %q, want %q", execution.RuntimeClassName, testRuntimeClassKata)
+	}
+	if execution.Workspace != nil {
+		t.Fatalf("Workspace = %#v, want nil", execution.Workspace)
+	}
+}
+
 func TestJobBuilder_buildPodSecurityContext(t *testing.T) {
 	builder := setupJobBuilder()
 	psc := builder.buildPodSecurityContext()

@@ -71,6 +71,8 @@ type TaskReconciler struct {
 	ArtifactStore             store.ArtifactStore
 	EnforceNamespaceIsolation bool
 	MaxTasksPerNamespace      int32
+	AgentSandboxEnabled       bool
+	AgentSandboxConfig        AgentSandboxConfig
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
@@ -335,6 +337,11 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	// Validate task-agent compatibility
 	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
 		log.Error(err, "task-agent compatibility validation failed")
+		return r.failTask(ctx, task, err.Error())
+	}
+
+	if err := r.validateExecutionWorkspace(task); err != nil {
+		log.Error(err, "execution workspace validation failed")
 		return r.failTask(ctx, task, err.Error())
 	}
 
@@ -1107,6 +1114,50 @@ func (r *TaskReconciler) resolveProviderRef(task *corev1alpha1.Task, agent *core
 	// Check agent-level provider ref
 	if agent != nil && agent.Spec.ProviderRef != nil {
 		return agent.Spec.ProviderRef
+	}
+
+	return nil
+}
+
+// validateExecutionWorkspace validates optional durable workspace settings.
+func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) error {
+	if task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil || !task.Spec.Execution.Workspace.Enabled {
+		return nil
+	}
+
+	ws := task.Spec.Execution.Workspace
+	cfg := r.AgentSandboxConfig.WithDefaults()
+
+	if !r.AgentSandboxEnabled {
+		return fmt.Errorf("execution workspace requires agent sandbox to be enabled")
+	}
+
+	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
+		return fmt.Errorf("execution workspace is only supported for type: agent tasks")
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+
+	if executionWorkspaceTemplateName(ws, cfg) == "" {
+		return fmt.Errorf("execution workspace templateRef.name is required when no agent sandbox default template is configured")
+	}
+
+	switch ws.ReusePolicy {
+	case "", corev1alpha1.WorkspaceReusePolicyNone, corev1alpha1.WorkspaceReusePolicySession:
+	default:
+		return fmt.Errorf("unsupported execution workspace reusePolicy %q", ws.ReusePolicy)
+	}
+
+	switch ws.CleanupPolicy {
+	case "", corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
+	default:
+		return fmt.Errorf("unsupported execution workspace cleanupPolicy %q", ws.CleanupPolicy)
+	}
+
+	if ws.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession && (task.Spec.SessionRef == nil || task.Spec.SessionRef.Name == "") {
+		return fmt.Errorf("execution workspace reusePolicy %q requires spec.sessionRef.name", ws.ReusePolicy)
 	}
 
 	return nil

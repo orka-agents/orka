@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -429,6 +430,202 @@ func TestValidateTaskAgentCompatibility_ContainerTask(t *testing.T) {
 	}
 	if err := r.validateTaskAgentCompatibility(task, nil); err != nil {
 		t.Errorf("expected no error for container task, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// validateExecutionWorkspace (pure logic)
+// ---------------------------------------------------------------------------
+
+func TestValidateExecutionWorkspace(t *testing.T) {
+	workspace := func(mutators ...func(*corev1alpha1.ExecutionWorkspaceSpec)) *corev1alpha1.ExecutionWorkspaceSpec {
+		ws := &corev1alpha1.ExecutionWorkspaceSpec{
+			Enabled:     true,
+			TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: "default"},
+		}
+		for _, mutate := range mutators {
+			mutate(ws)
+		}
+		return ws
+	}
+
+	tests := []struct {
+		name                string
+		agentSandboxEnabled bool
+		task                *corev1alpha1.Task
+		agentSandboxConfig  AgentSandboxConfig
+		wantErr             string
+	}{
+		{
+			name: "nil execution",
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+			}},
+		},
+		{
+			name: "workspace disabled",
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: false},
+				},
+			}},
+		},
+		{
+			name: "feature gate disabled",
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: workspace(),
+				},
+			}},
+			wantErr: "requires agent sandbox",
+		},
+		{
+			name:                "non-agent task",
+			agentSandboxEnabled: true,
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAI,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: workspace(),
+				},
+			}},
+			wantErr: "only supported for type: agent",
+		},
+		{
+			name:                "missing templateRef",
+			agentSandboxEnabled: true,
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.TemplateRef = nil }),
+				},
+			}},
+			wantErr: "templateRef.name is required",
+		},
+		{
+			name:                "missing templateRef name",
+			agentSandboxEnabled: true,
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.TemplateRef.Name = "" }),
+				},
+			}},
+			wantErr: "templateRef.name is required",
+		},
+		{
+			name:                "default template satisfies missing templateRef",
+			agentSandboxEnabled: true,
+			agentSandboxConfig:  AgentSandboxConfig{DefaultTemplate: "controller-default"},
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.TemplateRef = nil }),
+				},
+			}},
+		},
+		{
+			name:                "unsupported reusePolicy",
+			agentSandboxEnabled: true,
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicy("forever")
+					}),
+				},
+			}},
+			wantErr: "unsupported execution workspace reusePolicy",
+		},
+		{
+			name:                "unsupported cleanupPolicy",
+			agentSandboxEnabled: true,
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy("archive")
+					}),
+				},
+			}},
+			wantErr: "unsupported execution workspace cleanupPolicy",
+		},
+		{
+			name:                "session reuse without sessionRef",
+			agentSandboxEnabled: true,
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+					}),
+				},
+			}},
+			wantErr: "requires spec.sessionRef.name",
+		},
+		{
+			name:                "session reuse with empty sessionRef name",
+			agentSandboxEnabled: true,
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type:       corev1alpha1.TaskTypeAgent,
+				SessionRef: &corev1alpha1.SessionReference{Name: ""},
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+					}),
+				},
+			}},
+			wantErr: "requires spec.sessionRef.name",
+		},
+		{
+			name:                "valid defaults",
+			agentSandboxEnabled: true,
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: workspace(),
+				},
+			}},
+		},
+		{
+			name:                "valid session reuse",
+			agentSandboxEnabled: true,
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type:       corev1alpha1.TaskTypeAgent,
+				SessionRef: &corev1alpha1.SessionReference{Name: "session-1"},
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+						ws.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyRetain
+					}),
+				},
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &TaskReconciler{
+				AgentSandboxEnabled: tt.agentSandboxEnabled,
+				AgentSandboxConfig:  tt.agentSandboxConfig,
+			}
+
+			err := r.validateExecutionWorkspace(tt.task)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected no error, got %v", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %q", tt.wantErr, err.Error())
+			}
+		})
 	}
 }
 

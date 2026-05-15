@@ -1084,6 +1084,49 @@ spec:
                           type: string
                       type: object
                     type: array
+                  workspace:
+                    description: |-
+                      Workspace requests a durable execution workspace for agent sandbox runtimes.
+                      This field is validated by the Task controller when enabled, but is not
+                      currently wired into worker Job creation.
+                    properties:
+                      cleanupPolicy:
+                        description: |-
+                          CleanupPolicy controls whether the workspace is deleted or retained after use.
+                          Defaults to delete when omitted.
+                        enum:
+                        - delete
+                        - retain
+                        type: string
+                      enabled:
+                        default: false
+                        description: Enabled requests use of a durable workspace for
+                          the task execution.
+                        type: boolean
+                      reusePolicy:
+                        default: none
+                        description: |-
+                          ReusePolicy controls whether the workspace is fresh or session-scoped.
+                          Defaults to none when omitted.
+                        enum:
+                        - none
+                        - session
+                        type: string
+                      templateRef:
+                        description: |-
+                          TemplateRef references the workspace template to instantiate or reuse.
+                          The template name is required when enabled is true unless the controller
+                          is configured with a default agent sandbox template.
+                        properties:
+                          name:
+                            description: Name is the name of the workspace template.
+                            type: string
+                          namespace:
+                            description: Namespace is the namespace of the workspace
+                              template (defaults to Task namespace).
+                            type: string
+                        type: object
+                    type: object
                 type: object
               model:
                 description: |-

@@ -86,11 +86,17 @@ func main() {
 	var controllerURL string
 	var enforceNamespaceIsolation bool
 	var maxTasksPerNamespace int
+	var agentSandboxEnabled bool
+	var agentSandboxCleanupPolicy string
 	var oidcIssuer string
 	var oidcAudience string
 	var oidcJWKSURL string
 	var enableTracing bool
 	var tlsOpts []func(*tls.Config)
+
+	agentSandboxEnabled = strings.EqualFold(os.Getenv("ORKA_AGENT_SANDBOX_ENABLED"), "true")
+	agentSandboxConfig, agentSandboxConfigErr := controller.AgentSandboxConfigFromEnv(os.Getenv)
+	agentSandboxCleanupPolicy = string(agentSandboxConfig.CleanupPolicy)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -141,6 +147,27 @@ func main() {
 		"When true, restrict users to their ServiceAccount's namespace for all operations.")
 	flag.IntVar(&maxTasksPerNamespace, "max-tasks-per-namespace", 0,
 		"Maximum active tasks per namespace (0 = unlimited).")
+	flag.BoolVar(&agentSandboxEnabled, "agent-sandbox-enabled", agentSandboxEnabled,
+		"Enable experimental agent sandbox workspace validation.")
+	flag.StringVar(&agentSandboxConfig.RouterURL, "agent-sandbox-router-url", agentSandboxConfig.RouterURL,
+		"Agent sandbox router base URL for future workspace lifecycle integration.")
+	flag.StringVar(&agentSandboxConfig.DefaultTemplate, "agent-sandbox-default-template",
+		agentSandboxConfig.DefaultTemplate,
+		"Default execution workspace template name used when a Task omits execution.workspace.templateRef.name.")
+	flag.StringVar(&agentSandboxConfig.WarmPoolPolicy, "agent-sandbox-warm-pool-policy",
+		agentSandboxConfig.WarmPoolPolicy,
+		"Agent sandbox warm pool policy (disabled, template).")
+	flag.StringVar(&agentSandboxConfig.NamespaceStrategy, "agent-sandbox-namespace-strategy",
+		agentSandboxConfig.NamespaceStrategy,
+		"Agent sandbox namespace strategy (task, controller).")
+	flag.DurationVar(&agentSandboxConfig.ClaimTimeout, "agent-sandbox-claim-timeout",
+		agentSandboxConfig.ClaimTimeout,
+		"Timeout for future agent sandbox workspace claim operations.")
+	flag.DurationVar(&agentSandboxConfig.CommandTimeout, "agent-sandbox-command-timeout",
+		agentSandboxConfig.CommandTimeout,
+		"Timeout for future agent sandbox command execution operations.")
+	flag.StringVar(&agentSandboxCleanupPolicy, "agent-sandbox-cleanup-policy", agentSandboxCleanupPolicy,
+		"Default agent sandbox workspace cleanup policy (delete, retain).")
 	flag.StringVar(&oidcIssuer, "oidc-issuer", os.Getenv("ORKA_OIDC_ISSUER"),
 		"OIDC issuer URL for authenticating external API requests. Requires --oidc-audience when set.")
 	flag.StringVar(&oidcAudience, "oidc-audience", os.Getenv("ORKA_OIDC_AUDIENCE"),
@@ -157,6 +184,19 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	agentSandboxConfig.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy(agentSandboxCleanupPolicy)
+	agentSandboxConfig = agentSandboxConfig.WithDefaults()
+	if agentSandboxEnabled {
+		if agentSandboxConfigErr != nil {
+			setupLog.Error(agentSandboxConfigErr, "invalid agent sandbox configuration from environment")
+			os.Exit(1)
+		}
+		if err := agentSandboxConfig.Validate(); err != nil {
+			setupLog.Error(err, "invalid agent sandbox configuration")
+			os.Exit(1)
+		}
+	}
 
 	// Initialize OpenTelemetry tracing (noop when disabled)
 	tracingShutdown, err := tracing.Init("orka-controller", enableTracing)
@@ -318,6 +358,8 @@ func main() {
 		ArtifactStore:             sqliteStore,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 		MaxTasksPerNamespace:      int32(maxTasksPerNamespace), //nolint:gosec // validated non-negative by flag default
+		AgentSandboxEnabled:       agentSandboxEnabled,
+		AgentSandboxConfig:        agentSandboxConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)
