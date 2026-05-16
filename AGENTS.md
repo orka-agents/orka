@@ -7,6 +7,7 @@ Orka is a Kubernetes-native task execution platform that manages Jobs and Pods f
 - **No secrets** — never commit, log, or print API keys, tokens, or credentials. Use Kubernetes Secrets or env vars.
 - **No binaries in repo** — build artifacts go in `bin/` (gitignored) or CI release pipelines.
 - **Scope discipline** — implement exactly what's asked, nothing more.
+- **Git push discipline** — after making a change, push to the current branch when it is not `main`; never push directly to `main`.
 
 ## Build & Test
 
