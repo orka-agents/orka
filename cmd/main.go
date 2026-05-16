@@ -318,6 +318,7 @@ func main() {
 		}
 	}
 	// Setup Task controller with helper components
+	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // flag default is non-negative
 	if err := (&controller.TaskReconciler{
 		Client:                             mgr.GetClient(),
 		Scheme:                             mgr.GetScheme(),
@@ -330,7 +331,7 @@ func main() {
 		MessageStore:                       sqliteStore,
 		ArtifactStore:                      sqliteStore,
 		EnforceNamespaceIsolation:          enforceNamespaceIsolation,
-		MaxTasksPerNamespace:               int32(maxTasksPerNamespace), //nolint:gosec // validated non-negative by flag default
+		MaxTasksPerNamespace:               maxTasksPerNamespaceValue,
 		AIWorkerClusterRoleName:            aiWorkerClusterRoleName,
 		VendorWorkerClusterRoleName:        vendorWorkerClusterRoleName,
 		ContainerWorkerClusterRoleName:     containerWorkerClusterRoleName,

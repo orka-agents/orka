@@ -1041,7 +1041,7 @@ func TestEnsureWorkerRBAC_CreatesResources(t *testing.T) {
 	scheme := newTestScheme()
 	r := newUnitReconciler(scheme)
 
-	err := r.ensureWorkerRBAC(context.Background(), "test-ns")
+	err := r.ensureWorkerRBAC(context.Background(), testNS)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1061,7 +1061,7 @@ func TestEnsureWorkerRBAC_CreatesResources(t *testing.T) {
 			// Verify ServiceAccount was created.
 			sa := &corev1.ServiceAccount{}
 			if err := r.Get(context.Background(), types.NamespacedName{
-				Name: tt.serviceAccount, Namespace: "test-ns",
+				Name: tt.serviceAccount, Namespace: testNS,
 			}, sa); err != nil {
 				t.Fatalf("expected SA %s to exist: %v", tt.serviceAccount, err)
 			}
@@ -1080,7 +1080,7 @@ func TestEnsureWorkerRBAC_CreatesResources(t *testing.T) {
 				t.Fatalf("expected 1 subject, got %d", len(crb.Subjects))
 			}
 			subject := crb.Subjects[0]
-			if subject.Kind != rbacv1.ServiceAccountKind || subject.Name != tt.serviceAccount || subject.Namespace != "test-ns" {
+			if subject.Kind != rbacv1.ServiceAccountKind || subject.Name != tt.serviceAccount || subject.Namespace != testNS {
 				t.Errorf("unexpected subject: %#v", subject)
 			}
 		})
@@ -1093,7 +1093,7 @@ func TestEnsureWorkerRBAC_UsesClusterRoleBindingPrefix(t *testing.T) {
 	r.WorkerClusterRoleBindingNamePrefix = "orka-dev"
 	ctx := context.Background()
 
-	if err := r.ensureWorkerRBAC(ctx, "test-ns"); err != nil {
+	if err := r.ensureWorkerRBAC(ctx, testNS); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1120,7 +1120,7 @@ func TestEnsureWorkerRBAC_UsesClusterRoleBindingPrefix(t *testing.T) {
 				t.Fatalf("expected 1 subject, got %d", len(crb.Subjects))
 			}
 			subject := crb.Subjects[0]
-			if subject.Kind != rbacv1.ServiceAccountKind || subject.Name != tt.serviceAccount || subject.Namespace != "test-ns" {
+			if subject.Kind != rbacv1.ServiceAccountKind || subject.Name != tt.serviceAccount || subject.Namespace != testNS {
 				t.Fatalf("unexpected subject: %#v", subject)
 			}
 		})
@@ -1144,7 +1144,7 @@ func TestEnsureWorkerRBAC_Idempotent(t *testing.T) {
 	for _, tt := range expected {
 		objects = append(objects,
 			&corev1.ServiceAccount{
-				ObjectMeta: metav1.ObjectMeta{Name: tt.serviceAccount, Namespace: "test-ns"},
+				ObjectMeta: metav1.ObjectMeta{Name: tt.serviceAccount, Namespace: testNS},
 			},
 			&rbacv1.ClusterRoleBinding{
 				ObjectMeta: metav1.ObjectMeta{Name: tt.clusterRoleBinding},
@@ -1154,7 +1154,7 @@ func TestEnsureWorkerRBAC_Idempotent(t *testing.T) {
 					Name:     tt.clusterRole,
 				},
 				Subjects: []rbacv1.Subject{{
-					Kind: rbacv1.ServiceAccountKind, Name: tt.serviceAccount, Namespace: "test-ns",
+					Kind: rbacv1.ServiceAccountKind, Name: tt.serviceAccount, Namespace: testNS,
 				}},
 			},
 		)
@@ -1162,7 +1162,7 @@ func TestEnsureWorkerRBAC_Idempotent(t *testing.T) {
 	r := newUnitReconciler(scheme, objects...)
 
 	// Should not fail when resources already exist.
-	if err := r.ensureWorkerRBAC(context.Background(), "test-ns"); err != nil {
+	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
 		t.Fatalf("unexpected error on idempotent call: %v", err)
 	}
 }
@@ -1170,7 +1170,7 @@ func TestEnsureWorkerRBAC_Idempotent(t *testing.T) {
 func TestEnsureWorkerServiceAccountReconcilesManagedByLabel(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
-	namespace := "test-ns"
+	namespace := testNS
 	existing := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      AIWorkerServiceAccount,
