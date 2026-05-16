@@ -1087,6 +1087,46 @@ func TestEnsureWorkerRBAC_CreatesResources(t *testing.T) {
 	}
 }
 
+func TestEnsureWorkerRBAC_UsesClusterRoleBindingPrefix(t *testing.T) {
+	scheme := newTestScheme()
+	r := newUnitReconciler(scheme)
+	r.WorkerClusterRoleBindingNamePrefix = "orka-dev"
+	ctx := context.Background()
+
+	if err := r.ensureWorkerRBAC(ctx, "test-ns"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expected := []struct {
+		serviceAccount     string
+		clusterRoleBinding string
+		clusterRole        string
+	}{
+		{AIWorkerServiceAccount, "orka-dev-ai-worker-test-ns", DefaultAIWorkerClusterRoleName},
+		{VendorWorkerServiceAccount, "orka-dev-vendor-worker-test-ns", DefaultVendorWorkerClusterRoleName},
+		{ContainerWorkerServiceAccount, "orka-dev-container-worker-test-ns", DefaultContainerWorkerClusterRoleName},
+	}
+
+	for _, tt := range expected {
+		t.Run(tt.clusterRoleBinding, func(t *testing.T) {
+			crb := &rbacv1.ClusterRoleBinding{}
+			if err := r.Get(ctx, types.NamespacedName{Name: tt.clusterRoleBinding}, crb); err != nil {
+				t.Fatalf("expected prefixed CRB %s to exist: %v", tt.clusterRoleBinding, err)
+			}
+			if crb.RoleRef.Name != tt.clusterRole {
+				t.Fatalf("expected roleRef %s, got %s", tt.clusterRole, crb.RoleRef.Name)
+			}
+			if len(crb.Subjects) != 1 {
+				t.Fatalf("expected 1 subject, got %d", len(crb.Subjects))
+			}
+			subject := crb.Subjects[0]
+			if subject.Kind != rbacv1.ServiceAccountKind || subject.Name != tt.serviceAccount || subject.Namespace != "test-ns" {
+				t.Fatalf("unexpected subject: %#v", subject)
+			}
+		})
+	}
+}
+
 func TestEnsureWorkerRBAC_Idempotent(t *testing.T) {
 	scheme := newTestScheme()
 	// Pre-create all SAs and CRBs.

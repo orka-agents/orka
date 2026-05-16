@@ -196,6 +196,7 @@ rules:
   - clusterrolebindings
   verbs:
   - create
+  - delete
   - get
   - list
   - update

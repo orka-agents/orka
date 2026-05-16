@@ -355,9 +355,10 @@ kind: ClusterRole
 metadata:
   name: container-worker-role
 rules:
-# Minimal Task metadata only; results and artifacts are submitted through the
-# controller HTTP API with the worker ServiceAccount token and do not require
-# Kubernetes API resource permissions.
+# Minimal Task metadata for Orka-managed general-worker tasks, which submit
+# results/artifacts through the controller HTTP API using the worker ServiceAccount
+# token. Custom-image container tasks do not mount this token and have their
+# result collected from pod logs instead.
 - apiGroups:
   - core.orka.ai
   resources:
