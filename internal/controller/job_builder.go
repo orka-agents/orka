@@ -122,6 +122,10 @@ func workerServiceAccountForTask(task *corev1alpha1.Task) string {
 	}
 }
 
+// workerAutomountServiceAccountToken returns nil for Orka-managed worker images
+// that need their namespace worker ServiceAccount token to call Orka/Kubernetes
+// APIs and submit results. User-supplied container images run directly, so the
+// worker token is explicitly not mounted into those pods.
 func workerAutomountServiceAccountToken(task *corev1alpha1.Task) *bool {
 	if task == nil {
 		return ptr.To(false)

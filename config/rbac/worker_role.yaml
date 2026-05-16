@@ -93,7 +93,9 @@ rules:
   - pods/log
   verbs:
   - get
-# code_exec Kubernetes backend: per-job ServiceAccounts
+# code_exec Kubernetes backend: per-job ServiceAccounts. This ClusterRole is
+# bound through a ClusterRoleBinding, so these create/delete permissions are
+# cluster-wide and reserved for the AI worker trust tier.
 - apiGroups:
   - ""
   resources:

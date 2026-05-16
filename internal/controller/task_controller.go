@@ -54,6 +54,8 @@ const (
 	jobCreationVisibilityGracePeriod = 30 * time.Second
 
 	scheduledRunLabelValue = "true"
+
+	workerRBACReconcileFailedReason = "WorkerRBACReconcileFailed"
 )
 
 // TaskReconciler reconciles a Task object
@@ -88,7 +90,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;patch
-// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
@@ -563,6 +565,10 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// Ensure worker ServiceAccount and RBAC exist in the task namespace
 	if err := r.ensureWorkerRBAC(ctx, task.Namespace); err != nil {
 		log.Error(err, "failed to ensure worker RBAC")
+		if r.Recorder != nil {
+			r.Recorder.Eventf(task, corev1.EventTypeWarning, workerRBACReconcileFailedReason,
+				"failed to ensure worker RBAC in namespace %q: %v", task.Namespace, err)
+		}
 		// Non-fatal: continue with job creation, it may still work
 	}
 
@@ -1385,6 +1391,11 @@ type workerRBACSpec struct {
 	clusterRoleBindingName string
 }
 
+// workerRBACSpecs binds cluster-scoped worker roles into each task namespace.
+// The AI worker role is intentionally broader because code_exec's Kubernetes
+// backend creates per-job ServiceAccounts and Secrets; vendor and container
+// workers use separate, narrower roles so those cluster-wide capabilities are
+// not shared with less-trusted task types.
 func (r *TaskReconciler) workerRBACSpecs(namespace string) []workerRBACSpec {
 	return []workerRBACSpec{
 		{
@@ -1442,12 +1453,30 @@ func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespa
 				},
 			},
 		}
-		if err := r.Create(ctx, sa); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("creating worker ServiceAccount %s/%s: %w", namespace, name, err)
+		if err := r.Create(ctx, sa); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("creating worker ServiceAccount %s/%s: %w", namespace, name, err)
+			}
+			if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, sa); err != nil {
+				return fmt.Errorf("getting worker ServiceAccount %s/%s after create conflict: %w", namespace, name, err)
+			}
+		} else {
+			log.Info("Created worker ServiceAccount", "namespace", namespace, "serviceAccount", name)
+			return nil
 		}
-		log.Info("Created worker ServiceAccount", "namespace", namespace, "serviceAccount", name)
 	} else if err != nil {
 		return fmt.Errorf("getting worker ServiceAccount %s/%s: %w", namespace, name, err)
+	}
+
+	if sa.Labels == nil {
+		sa.Labels = map[string]string{}
+	}
+	if sa.Labels[managedByLabelKey] != managedByLabelValue {
+		sa.Labels[managedByLabelKey] = managedByLabelValue
+		if err := r.Update(ctx, sa); err != nil {
+			return fmt.Errorf("updating worker ServiceAccount %s/%s labels: %w", namespace, name, err)
+		}
+		log.Info("Updated worker ServiceAccount", "namespace", namespace, "serviceAccount", name)
 	}
 
 	return nil
@@ -1536,7 +1565,7 @@ func workerClusterRoleBinding(namespace string, spec workerRBACSpec) *rbacv1.Clu
 		},
 		Subjects: []rbacv1.Subject{
 			{
-				Kind:      "ServiceAccount",
+				Kind:      rbacv1.ServiceAccountKind,
 				Name:      spec.serviceAccountName,
 				Namespace: namespace,
 			},
@@ -1544,6 +1573,8 @@ func workerClusterRoleBinding(namespace string, spec workerRBACSpec) *rbacv1.Clu
 	}
 }
 
+// subjectsEqual is intentionally order-sensitive; desired worker bindings
+// currently contain exactly one subject.
 func subjectsEqual(a, b []rbacv1.Subject) bool {
 	if len(a) != len(b) {
 		return false
