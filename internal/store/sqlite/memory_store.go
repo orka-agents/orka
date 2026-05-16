@@ -467,7 +467,13 @@ func (s *Store) ApplyMemoryProposal(ctx context.Context, apply store.MemoryPropo
 	}
 	apply.AppliedBy = redact.SensitiveText(strings.TrimSpace(apply.AppliedBy))
 
-	const maxAttempts = 3
+	const maxAttempts = 5
+	retryBackoffs := [...]time.Duration{
+		50 * time.Millisecond,
+		150 * time.Millisecond,
+		400 * time.Millisecond,
+		800 * time.Millisecond,
+	}
 	var lastErr error
 	for attempt := range maxAttempts {
 		memory, err := s.applyMemoryProposalOnce(ctx, apply)
@@ -484,7 +490,7 @@ func (s *Store) ApplyMemoryProposal(ctx context.Context, apply store.MemoryPropo
 		if attempt == maxAttempts-1 {
 			break
 		}
-		backoff := time.Duration(attempt+1) * 10 * time.Millisecond
+		backoff := retryBackoffs[attempt]
 		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
@@ -664,6 +670,7 @@ func isSQLiteRetryableError(err error) bool {
 		case sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED:
 			return true
 		}
+		return false
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "database is locked") ||
@@ -821,17 +828,19 @@ func isReviewDecisionStatus(status string) bool {
 }
 
 func tagsFromProposalDescription(description string) []string {
-	var tags []string
 	for line := range strings.SplitSeq(description, "\n") {
 		key, value, ok := strings.Cut(line, ":")
 		if !ok || !strings.EqualFold(strings.TrimSpace(key), "tags") {
 			continue
 		}
+
+		var tags []string
 		for tag := range strings.SplitSeq(value, ",") {
 			tags = append(tags, strings.TrimSpace(tag))
 		}
+		return normalizeTags(tags)
 	}
-	return normalizeTags(tags)
+	return nil
 }
 
 func marshalTags(tags []string) (string, error) {

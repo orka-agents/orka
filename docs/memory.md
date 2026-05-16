@@ -12,6 +12,22 @@ The current model has three related concepts:
 
 Memory proposal review is **non-applying**. Reviewing a proposal as accepted or rejected records the decision only. Accepted proposals with `type: "memory"` can then be applied explicitly, which creates (or idempotently returns) durable memory linked back to the proposal.
 
+## Memory proposal lifecycle
+
+Memory proposals follow an explicit review/apply lifecycle:
+
+- New proposals start with `status: "pending"`.
+- Review decisions only apply to pending proposals and record either `status: "accepted"` or `status: "rejected"`; review does not create durable memory.
+- Accepted proposals with `type: "memory"` require an explicit apply request before they become durable memory.
+- Rejected or archived proposals cannot be applied.
+
+Accepted memory proposals can suggest durable memory tags by including a `Tags:` line in the proposal `description`. The apply step reads tags from the first `Tags:` line only, normalizes them, and ignores later `Tags:` lines. Example:
+
+```text
+Reusable release procedure discovered during task execution.
+Tags: release, testing
+```
+
 ## Worker behavior
 
 When an AI worker can reach the controller internal API, it loads reviewed durable memories before invoking the model. The durable memory section is appended to the system prompt as background project context, separate from the current session transcript.
@@ -130,7 +146,7 @@ curl -sS -X POST http://localhost:8080/api/v1/memory-proposals \
     "agentName": "release-agent",
     "type": "memory",
     "title": "Release validation command",
-    "description": "Reusable release procedure discovered during task execution.",
+    "description": "Reusable release procedure discovered during task execution.\nTags: release, testing",
     "content": "Run make lint-fix and make test before merging release PRs."
   }'
 ```
@@ -161,7 +177,7 @@ curl -sS -X POST "http://localhost:8080/api/v1/memory-proposals/mprop-example/ap
   }'
 ```
 
-Apply returns the durable memory as JSON. The created memory has `source: "memory_proposal"` and `sourceProposalId` set to the proposal ID, and the proposal is updated to `status: "applied"` with `appliedMemoryId`, `appliedBy`, and `appliedAt`. Repeating the apply request is idempotent and returns the same durable memory. Only accepted proposals with `type: "memory"` can be applied.
+Apply returns the durable memory as JSON. The created memory has `source: "memory_proposal"` and `sourceProposalId` set to the proposal ID, and the proposal is updated to `status: "applied"` with `appliedMemoryId`, `appliedBy`, and `appliedAt`. Repeating the apply request is idempotent and returns the same durable memory. Only accepted proposals with `type: "memory"` can be applied; rejected and archived proposals cannot be applied.
 
 ## Safety model
 

@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sozercan/orka/internal/store"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 func TestMemoryStore(t *testing.T) {
@@ -250,6 +253,54 @@ func TestApplyMemoryProposal(t *testing.T) {
 	if err := s.ArchiveMemoryProposal(ctx, "ns-apply", proposal.ID); err == nil {
 		t.Fatalf("ArchiveMemoryProposal applied proposal succeeded, want error")
 	}
+}
+
+func TestTagsFromProposalDescriptionUsesFirstTagsLine(t *testing.T) {
+	got := tagsFromProposalDescription("Intro\nTags: Alpha, beta, alpha\nMore\nTags: ignored")
+	if strings.Join(got, ",") != "alpha,beta" {
+		t.Fatalf("tags = %q, want alpha,beta", strings.Join(got, ","))
+	}
+}
+
+func TestIsSQLiteRetryableErrorUsesStructuredSQLiteCodesFirst(t *testing.T) {
+	err := sqliteConstraintError(t)
+	code, ok := sqliteErrorCode(err)
+	if !ok {
+		t.Fatalf("constraint error did not expose a structured sqlite code: %v", err)
+	}
+	if primarySQLiteCode(code) != sqlite3.SQLITE_CONSTRAINT {
+		t.Fatalf("sqlite code = %d, want SQLITE_CONSTRAINT", primarySQLiteCode(code))
+	}
+
+	wrapped := fmt.Errorf("database is locked: %w", err)
+	if isSQLiteRetryableError(wrapped) {
+		t.Fatalf("structured non-retryable sqlite errors should not use substring fallback")
+	}
+	if !isSQLiteRetryableError(errors.New("database is locked")) {
+		t.Fatalf("unstructured locked errors should use substring fallback")
+	}
+}
+
+func sqliteConstraintError(t *testing.T) error {
+	t.Helper()
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec("CREATE TABLE retry_code_test (id INTEGER PRIMARY KEY)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO retry_code_test (id) VALUES (1)"); err != nil {
+		t.Fatalf("insert row: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO retry_code_test (id) VALUES (1)")
+	if err == nil {
+		t.Fatalf("duplicate primary key insert succeeded, want constraint error")
+	}
+	return err
 }
 
 func TestApplyMemoryProposalConcurrentIdempotent(t *testing.T) {
