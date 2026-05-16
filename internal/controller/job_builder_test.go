@@ -183,6 +183,8 @@ func TestJobBuilder_Build_PropagatesTransactionMetadata(t *testing.T) {
 func TestJobBuilder_Build_MountsTransactionTokenSecret(t *testing.T) {
 	builder := setupJobBuilder()
 	builder.ContextTokenTTSURL = "https://tts.example.test"
+	builder.ContextTokenTTSAudience = "orka"
+	builder.ContextTokenTTSTimeout = "7s"
 	builder.ContextTokenSubjectTokenType = "urn:ietf:params:oauth:token-type:txn_token"
 	builder.ContextTokenChildScope = "orka:agents:run"
 	builder.ContextTokenOutboundScope = "orka:tools:use"
@@ -229,6 +231,8 @@ func TestJobBuilder_Build_MountsTransactionTokenSecret(t *testing.T) {
 	}
 	for name, want := range map[string]string{
 		workerenv.ContextTokenTTSURL:           "https://tts.example.test",
+		workerenv.ContextTokenTTSAudience:      "orka",
+		workerenv.ContextTokenTTSTimeout:       "7s",
 		workerenv.ContextTokenSubjectTokenType: "urn:ietf:params:oauth:token-type:txn_token",
 		workerenv.ContextTokenChildScope:       "orka:agents:run",
 		workerenv.ContextTokenOutboundScope:    "orka:tools:use",
@@ -243,6 +247,8 @@ func TestJobBuilder_Build_MountsTransactionTokenSecret(t *testing.T) {
 func TestJobBuilder_Build_InjectsContextTokenTTSConfigWithoutTransactionTokenSecret(t *testing.T) {
 	builder := setupJobBuilder()
 	builder.ContextTokenTTSURL = "https://tts.example.test"
+	builder.ContextTokenTTSAudience = "orka"
+	builder.ContextTokenTTSTimeout = "7s"
 	builder.ContextTokenSubjectTokenType = "urn:ietf:params:oauth:token-type:txn_token"
 	builder.ContextTokenChildScope = "orka:agents:run"
 	builder.ContextTokenOutboundScope = "orka:tools:use"
@@ -265,6 +271,8 @@ func TestJobBuilder_Build_InjectsContextTokenTTSConfigWithoutTransactionTokenSec
 	container := job.Spec.Template.Spec.Containers[0]
 	for name, want := range map[string]string{
 		workerenv.ContextTokenTTSURL:           "https://tts.example.test",
+		workerenv.ContextTokenTTSAudience:      "orka",
+		workerenv.ContextTokenTTSTimeout:       "7s",
 		workerenv.ContextTokenSubjectTokenType: "urn:ietf:params:oauth:token-type:txn_token",
 		workerenv.ContextTokenChildScope:       "orka:agents:run",
 		workerenv.ContextTokenOutboundScope:    "orka:tools:use",

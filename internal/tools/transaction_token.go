@@ -17,7 +17,6 @@ import (
 	"time"
 
 	kontxttoken "github.com/aramase/kontxt/pkg/token"
-	sdktts "github.com/aramase/kontxt/sdk/tts"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,8 +24,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/contexttoken"
 	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/metrics"
 	"github.com/sozercan/orka/internal/taskmeta"
 	"github.com/sozercan/orka/internal/workerenv"
 )
@@ -63,18 +62,30 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 	if parentTask.Spec.Transaction != nil && parentTask.Spec.Transaction.ID != "" {
 		requestDetails["txn"] = parentTask.Spec.Transaction.ID
 	}
-	start := time.Now()
-	token, err := sdktts.NewClient(ttsURL).Exchange(ctx, &sdktts.ExchangeRequest{
+	ttsConfig, err := contexttoken.NewTTSConfig(
+		ttsURL,
+		os.Getenv(workerenv.ContextTokenTTSAudience),
+		os.Getenv(workerenv.ContextTokenTTSTimeout),
+		contexttoken.TTSTokenSourceServiceAccount,
+		"",
+		"",
+	)
+	if err != nil {
+		return fmt.Errorf("configuring child transaction token exchange: %w", err)
+	}
+	ttsClient, err := contexttoken.NewKontxtTTSClient(ttsConfig)
+	if err != nil {
+		return fmt.Errorf("configuring child transaction token exchange: %w", err)
+	}
+	token, err := ttsClient.Exchange(ctx, contexttoken.ExchangeRequest{
 		SubjectToken:     subjectToken,
 		SubjectTokenType: subjectTokenType,
 		Scope:            scope,
 		RequestDetails:   requestDetails,
 	})
 	if err != nil {
-		metrics.RecordContextTokenTTSExchange("failure", "exchange_error", time.Since(start).Seconds())
 		return fmt.Errorf("exchanging child transaction token: %w", err)
 	}
-	metrics.RecordContextTokenTTSExchange("success", "ok", time.Since(start).Seconds())
 
 	secretName, err := childTransactionTokenSecretName(parentTask.Name)
 	if err != nil {

@@ -482,10 +482,16 @@ func main() {
 	jobBuilder.CodexSandboxMode = codexSandboxMode
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
-	jobBuilder.ContextTokenTTSURL = contextTokenTTSConfig.URL
-	jobBuilder.ContextTokenSubjectTokenType = contextTokenSubjectTokenType
-	jobBuilder.ContextTokenChildScope = contextTokenChildScope
-	jobBuilder.ContextTokenOutboundScope = contextTokenOutboundScope
+	if contextTokenTTSConfig.Enabled() {
+		jobBuilder.ContextTokenTTSURL = contextTokenTTSConfig.URL
+		jobBuilder.ContextTokenTTSAudience = contextTokenTTSConfig.Audience
+		if contextTokenTTSConfig.Timeout > 0 {
+			jobBuilder.ContextTokenTTSTimeout = contextTokenTTSConfig.Timeout.String()
+		}
+		jobBuilder.ContextTokenSubjectTokenType = contextTokenSubjectTokenType
+		jobBuilder.ContextTokenChildScope = contextTokenChildScope
+		jobBuilder.ContextTokenOutboundScope = contextTokenOutboundScope
+	}
 	setupLog.Info("worker images configured",
 		"ai", aiWorkerImage,
 		"copilot", copilotWorkerImage,

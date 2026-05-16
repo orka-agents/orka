@@ -77,6 +77,9 @@ func TestKontxtTTSClientExchange(t *testing.T) {
 		if got := r.FormValue("scope"); got != "orka:tasks:create" {
 			t.Fatalf("scope = %q", got)
 		}
+		if got := r.FormValue("audience"); got != "orka" {
+			t.Fatalf("audience = %q, want orka", got)
+		}
 
 		var details map[string]any
 		if err := json.Unmarshal([]byte(r.FormValue("request_details")), &details); err != nil {

@@ -82,6 +82,8 @@ type JobBuilder struct {
 	InitImage                    string
 	ControllerURL                string // e.g. http://orka-controller.orka-system.svc:8080
 	ContextTokenTTSURL           string
+	ContextTokenTTSAudience      string
+	ContextTokenTTSTimeout       string
 	ContextTokenSubjectTokenType string
 	ContextTokenChildScope       string
 	ContextTokenOutboundScope    string
@@ -675,6 +677,8 @@ func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alp
 	}
 	container := &job.Spec.Template.Spec.Containers[0]
 	container.Env = appendEnvIfSetMissing(container.Env, workerenv.ContextTokenTTSURL, b.ContextTokenTTSURL)
+	container.Env = appendEnvIfSetMissing(container.Env, workerenv.ContextTokenTTSAudience, b.ContextTokenTTSAudience)
+	container.Env = appendEnvIfSetMissing(container.Env, workerenv.ContextTokenTTSTimeout, b.ContextTokenTTSTimeout)
 	container.Env = appendEnvIfSetMissing(container.Env, workerenv.ContextTokenSubjectTokenType, b.ContextTokenSubjectTokenType)
 	container.Env = appendEnvIfSetMissing(container.Env, workerenv.ContextTokenChildScope, b.ContextTokenChildScope)
 	container.Env = appendEnvIfSetMissing(container.Env, workerenv.ContextTokenOutboundScope, b.ContextTokenOutboundScope)

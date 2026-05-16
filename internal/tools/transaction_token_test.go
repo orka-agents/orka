@@ -45,6 +45,7 @@ func TestPrepareChildTransactionToken(t *testing.T) {
 	defer ttsServer.Close()
 
 	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSAudience, "child.example.test")
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
 
@@ -73,6 +74,7 @@ func TestPrepareChildTransactionToken(t *testing.T) {
 
 type childTokenExchange struct {
 	requestDetails  map[string]any
+	audience        string
 	scope           string
 	subjectToken    string
 	subjectTokenTyp string
@@ -131,6 +133,7 @@ func startChildTransactionTokenServer(t *testing.T, childToken string, exchange 
 			t.Fatalf("ParseForm() error = %v", err)
 		}
 		exchange.subjectToken = r.FormValue("subject_token")
+		exchange.audience = r.FormValue("audience")
 		exchange.scope = r.FormValue("scope")
 		exchange.subjectTokenTyp = r.FormValue("subject_token_type")
 		if err := json.Unmarshal([]byte(r.FormValue("request_details")), &exchange.requestDetails); err != nil {
@@ -153,6 +156,9 @@ func requireChildTokenExchange(t *testing.T, exchange childTokenExchange) {
 	}
 	if exchange.scope != childTransactionScope {
 		t.Fatalf("scope = %q, want %q", exchange.scope, childTransactionScope)
+	}
+	if exchange.audience != "child.example.test" {
+		t.Fatalf("audience = %q, want child.example.test", exchange.audience)
 	}
 	if exchange.subjectTokenTyp != kontxttoken.SubjectTokenTypeTxnToken {
 		t.Fatalf("subject_token_type = %q", exchange.subjectTokenTyp)

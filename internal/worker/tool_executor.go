@@ -19,13 +19,12 @@ import (
 	"time"
 
 	kontxttoken "github.com/aramase/kontxt/pkg/token"
-	sdktts "github.com/aramase/kontxt/sdk/tts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/metrics"
+	"github.com/sozercan/orka/internal/contexttoken"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -240,17 +239,29 @@ func (e *ToolExecutor) outboundTransactionToken(ctx context.Context, tool *corev
 	if taskName := strings.TrimSpace(os.Getenv(workerenv.TaskName)); taskName != "" {
 		requestDetails["task"] = taskName
 	}
-	start := time.Now()
-	token, err := sdktts.NewClient(ttsURL).Exchange(ctx, &sdktts.ExchangeRequest{
+	ttsConfig, err := contexttoken.NewTTSConfig(
+		ttsURL,
+		os.Getenv(workerenv.ContextTokenTTSAudience),
+		os.Getenv(workerenv.ContextTokenTTSTimeout),
+		contexttoken.TTSTokenSourceServiceAccount,
+		"",
+		"",
+	)
+	if err != nil {
+		return "", err
+	}
+	ttsClient, err := contexttoken.NewKontxtTTSClient(ttsConfig)
+	if err != nil {
+		return "", err
+	}
+	token, err := ttsClient.Exchange(ctx, contexttoken.ExchangeRequest{
 		SubjectToken:     subjectToken,
 		SubjectTokenType: subjectTokenType,
 		Scope:            scope,
 		RequestDetails:   requestDetails,
 	})
 	if err != nil {
-		metrics.RecordContextTokenTTSExchange("failure", "exchange_error", time.Since(start).Seconds())
-		return "", err
+		return "", fmt.Errorf("token exchange failed: %w", err)
 	}
-	metrics.RecordContextTokenTTSExchange("success", "ok", time.Since(start).Seconds())
 	return token, nil
 }
