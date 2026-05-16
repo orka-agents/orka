@@ -30,7 +30,11 @@ import (
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
-const testOutboundToolScope = "orka:tools:http"
+const (
+	testOutboundToolScope      = "orka:tools:http"
+	testTokenEndpointPath      = "/token_endpoint"
+	testParentTransactionToken = "parent-tx-token"
+)
 
 func TestNewToolExecutor(t *testing.T) {
 	executor := NewToolExecutor()
@@ -313,7 +317,7 @@ func TestToolExecutor_Execute_FailsClosedOnConfiguredTransactionTokenHeader(t *t
 
 func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testing.T) {
 	subjectTokenPath := filepath.Join(t.TempDir(), "subject-token")
-	if err := os.WriteFile(subjectTokenPath, []byte("parent-tx-token"), 0600); err != nil {
+	if err := os.WriteFile(subjectTokenPath, []byte(testParentTransactionToken), 0600); err != nil {
 		t.Fatalf("failed to write subject token fixture: %v", err)
 	}
 
@@ -345,8 +349,8 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 	var ttsRequestedExpiresIn string
 	var requestDetails map[string]any
 	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/token_endpoint" {
-			t.Fatalf("TTS path = %q, want /token_endpoint", r.URL.Path)
+		if r.URL.Path != testTokenEndpointPath {
+			t.Fatalf("TTS path = %q, want %s", r.URL.Path, testTokenEndpointPath)
 		}
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("ParseForm() error = %v", err)
@@ -403,8 +407,8 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 	if _, err := executor.Execute(context.Background(), tool, nil); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if ttsSubjectToken != "parent-tx-token" {
-		t.Fatalf("TTS subject_token = %q, want parent-tx-token", ttsSubjectToken)
+	if ttsSubjectToken != testParentTransactionToken {
+		t.Fatalf("TTS subject_token = %q, want %s", ttsSubjectToken, testParentTransactionToken)
 	}
 	if ttsScope != testOutboundToolScope {
 		t.Fatalf("TTS scope = %q, want %s", ttsScope, testOutboundToolScope)
@@ -433,8 +437,8 @@ func TestToolExecutor_Execute_DefaultsOutboundTTSToServiceAccountSubjectToken(t 
 	var ttsCalled bool
 	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ttsCalled = true
-		if r.URL.Path != "/token_endpoint" {
-			t.Fatalf("TTS path = %q, want /token_endpoint", r.URL.Path)
+		if r.URL.Path != testTokenEndpointPath {
+			t.Fatalf("TTS path = %q, want %s", r.URL.Path, testTokenEndpointPath)
 		}
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("ParseForm() error = %v", err)
@@ -489,21 +493,21 @@ func TestToolExecutor_Execute_DefaultsOutboundTTSToServiceAccountSubjectToken(t 
 
 func TestToolExecutor_Execute_ReusesOutboundTTSClient(t *testing.T) {
 	subjectTokenPath := filepath.Join(t.TempDir(), "subject-token")
-	if err := os.WriteFile(subjectTokenPath, []byte("parent-tx-token"), 0600); err != nil {
+	if err := os.WriteFile(subjectTokenPath, []byte(testParentTransactionToken), 0600); err != nil {
 		t.Fatalf("failed to write subject token fixture: %v", err)
 	}
 
 	exchangeCount := 0
 	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		exchangeCount++
-		if r.URL.Path != "/token_endpoint" {
-			t.Fatalf("TTS path = %q, want /token_endpoint", r.URL.Path)
+		if r.URL.Path != testTokenEndpointPath {
+			t.Fatalf("TTS path = %q, want %s", r.URL.Path, testTokenEndpointPath)
 		}
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("ParseForm() error = %v", err)
 		}
-		if got := r.FormValue("subject_token"); got != "parent-tx-token" {
-			t.Fatalf("TTS subject_token = %q, want parent-tx-token", got)
+		if got := r.FormValue("subject_token"); got != testParentTransactionToken {
+			t.Fatalf("TTS subject_token = %q, want %s", got, testParentTransactionToken)
 		}
 		if got := r.FormValue("scope"); got != testOutboundToolScope {
 			t.Fatalf("TTS scope = %q, want %s", got, testOutboundToolScope)
@@ -565,7 +569,7 @@ func TestToolExecutor_Execute_ReusesOutboundTTSClient(t *testing.T) {
 
 func TestToolExecutor_Execute_FailsClosedWhenOutboundTTSExchangeFails(t *testing.T) {
 	subjectTokenPath := filepath.Join(t.TempDir(), "subject-token")
-	if err := os.WriteFile(subjectTokenPath, []byte("parent-tx-token"), 0600); err != nil {
+	if err := os.WriteFile(subjectTokenPath, []byte(testParentTransactionToken), 0600); err != nil {
 		t.Fatalf("failed to write subject token fixture: %v", err)
 	}
 

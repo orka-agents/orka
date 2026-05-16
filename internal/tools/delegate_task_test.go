@@ -26,7 +26,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apitypes "k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -37,10 +36,11 @@ import (
 )
 
 const (
-	parentTaskName        = "parent-task"
-	parentTransactionID   = "txn-parent"
-	parentTransactionHash = "sha256:parent-context"
-	childTransactionScope = "orka:agents:run"
+	parentTaskName         = "parent-task"
+	parentTransactionID    = "txn-parent"
+	parentTransactionHash  = "sha256:parent-context"
+	parentTransactionToken = "parent-tx-token"
+	childTransactionScope  = "orka:agents:run"
 )
 
 func researcherAgent() *corev1alpha1.Agent {
@@ -136,11 +136,11 @@ func TestDelegateTaskTool_Parameters(t *testing.T) {
 		t.Fatal("Parameters() returned nil")
 	}
 
-	var schema map[string]any
-	if err := json.Unmarshal(params, &schema); err != nil {
+	var parametersSchema map[string]any
+	if err := json.Unmarshal(params, &parametersSchema); err != nil {
 		t.Errorf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema[jsonSchemaTypeField] != typeObject {
+	if parametersSchema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 }
@@ -308,7 +308,7 @@ func TestDelegateTaskTool_Execute_CleansUpChildTaskWhenTokenSecretAdoptionFails(
 	t.Setenv(envOrkaCoordinationMaxDepth, "3")
 
 	subjectPath := filepath.Join(t.TempDir(), "subject-token")
-	if err := os.WriteFile(subjectPath, []byte("parent-tx-token"), 0600); err != nil {
+	if err := os.WriteFile(subjectPath, []byte(parentTransactionToken), 0600); err != nil {
 		t.Fatalf("failed to write subject token fixture: %v", err)
 	}
 	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -373,7 +373,7 @@ func TestDelegateTaskTool_Execute_WithTTSChildToken(t *testing.T) {
 	t.Setenv(envOrkaCoordinationMaxDepth, "3")
 
 	subjectPath := filepath.Join(t.TempDir(), "subject-token")
-	if err := os.WriteFile(subjectPath, []byte("parent-tx-token"), 0600); err != nil {
+	if err := os.WriteFile(subjectPath, []byte(parentTransactionToken), 0600); err != nil {
 		t.Fatalf("failed to write subject token fixture: %v", err)
 	}
 
@@ -401,8 +401,8 @@ func TestDelegateTaskTool_Execute_WithTTSChildToken(t *testing.T) {
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("ParseForm() error = %v", err)
 		}
-		if got := r.FormValue("subject_token"); got != "parent-tx-token" {
-			t.Fatalf("subject_token = %q, want parent-tx-token", got)
+		if got := r.FormValue("subject_token"); got != parentTransactionToken {
+			t.Fatalf("subject_token = %q, want %s", got, parentTransactionToken)
 		}
 		if got := r.FormValue("scope"); got != childTransactionScope {
 			t.Fatalf("scope = %q, want orka:agents:run", got)
@@ -488,7 +488,7 @@ func TestDelegateTaskTool_Execute_CleansUpPreparedChildTokenSecretOnTaskAlreadyE
 	t.Setenv(envOrkaCoordinationMaxDepth, "3")
 
 	subjectPath := filepath.Join(t.TempDir(), "subject-token")
-	if err := os.WriteFile(subjectPath, []byte("parent-tx-token"), 0600); err != nil {
+	if err := os.WriteFile(subjectPath, []byte(parentTransactionToken), 0600); err != nil {
 		t.Fatalf("failed to write subject token fixture: %v", err)
 	}
 	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -673,7 +673,7 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             runtimeTypeClaude,
 				DefaultMaxTurns:  &maxTurns,
-				DefaultAllowBash: ptr.To(true),
+				DefaultAllowBash: new(true),
 			},
 		},
 	}

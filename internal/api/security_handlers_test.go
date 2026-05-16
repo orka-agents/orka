@@ -29,18 +29,23 @@ import (
 	"github.com/sozercan/orka/internal/store/sqlite"
 )
 
+const (
+	securityTestRepoURL   = "https://github.com/sozercan/actions-test"
+	securityTestRepoPRURL = securityTestRepoURL + "/pull/99"
+)
+
 func TestSecurityRepositoryActions_ContextTokenAuthorization(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
 
-	createBody := `{
+	createBody := fmt.Sprintf(`{
 		"name":"scan-create",
 		"namespace":"demo",
 		"spec":{
-			"repoURL":"https://github.com/sozercan/actions-test",
+			"repoURL":%q,
 			"analysisAgentRef":{"name":"analysis"}
 		}
-	}`
+	}`, securityTestRepoURL)
 
 	tests := []struct {
 		name   string
@@ -144,7 +149,7 @@ func setupSecurityHandlersWithAuthzFixture(t *testing.T, ctxTokenConfig ContextT
 func TestGenerateSecurityPatch_ContextTokenTransactionContextAuthorization(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
-	repoURL := "https://github.com/sozercan/actions-test"
+	repoURL := securityTestRepoURL
 
 	tests := []struct {
 		name string
@@ -255,7 +260,7 @@ func TestGenerateSecurityPatch_ContextTokenTransactionContextAuthorization(t *te
 			require.NotEmpty(t, proposal.TaskName)
 
 			task := &corev1alpha1.Task{}
-			require.NoError(t, handlers.client.Get(ctx, clientObjectKey("demo", proposal.TaskName), task))
+			require.NoError(t, handlers.client.Get(ctx, clientObjectKey(proposal.TaskName), task))
 			require.NotNil(t, task.Spec.AgentRef)
 			require.Equal(t, "patch", task.Spec.AgentRef.Name)
 			require.NotNil(t, task.Spec.RequestedBy)
@@ -269,7 +274,7 @@ func TestGenerateSecurityPatch_ContextTokenTransactionContextAuthorization(t *te
 func TestCreateManualSecurityScan_ContextTokenTransactionContextAuthorizationDenials(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
-	repoURL := "https://github.com/sozercan/actions-test"
+	repoURL := securityTestRepoURL
 
 	tests := []struct {
 		name string
@@ -338,23 +343,23 @@ func TestCreateManualSecurityScan_ContextTokenTransactionContextAuthorizationDen
 func TestRepositoryScanMutations_ContextTokenTransactionContextAuthorizationDenials(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
-	repoURL := "https://github.com/sozercan/actions-test"
-	createBody := `{
+	repoURL := securityTestRepoURL
+	createBody := fmt.Sprintf(`{
 		"name":"scan-create",
 		"namespace":"demo",
 		"spec":{
-			"repoURL":"https://github.com/sozercan/actions-test",
+			"repoURL":%q,
 			"branch":"main",
 			"analysisAgentRef":{"name":"analysis"}
 		}
-	}`
-	updateBody := `{
+	}`, securityTestRepoURL)
+	updateBody := fmt.Sprintf(`{
 		"spec":{
-			"repoURL":"https://github.com/sozercan/actions-test",
+			"repoURL":%q,
 			"branch":"main",
 			"analysisAgentRef":{"name":"analysis"}
 		}
-	}`
+	}`, securityTestRepoURL)
 
 	tests := []struct {
 		name   string
@@ -410,7 +415,7 @@ func TestRepositoryScanMutations_ContextTokenTransactionContextAuthorizationDeni
 			require.Equal(t, http.StatusForbidden, resp.StatusCode)
 
 			var got corev1alpha1.RepositoryScan
-			err = handlers.client.Get(context.Background(), clientObjectKey("demo", "scan-create"), &got)
+			err = handlers.client.Get(context.Background(), clientObjectKey("scan-create"), &got)
 			require.Error(t, err)
 		})
 	}
@@ -425,7 +430,7 @@ func TestSecurityFindingMutations_ContextTokenTransactionContextAuthorizationDen
 			Namespace: "demo",
 		},
 		Spec: corev1alpha1.RepositoryScanSpec{
-			RepoURL:          "https://github.com/sozercan/actions-test",
+			RepoURL:          securityTestRepoURL,
 			Branch:           "main",
 			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
 		},
@@ -504,7 +509,7 @@ func TestCreateSecurityPullRequest_ContextTokenTransactionContextAuthorizationDe
 			Namespace: "demo",
 		},
 		Spec: corev1alpha1.RepositoryScanSpec{
-			RepoURL:          "https://github.com/sozercan/actions-test",
+			RepoURL:          securityTestRepoURL,
 			Branch:           "main",
 			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
 			PatchAgentRef:    &corev1alpha1.AgentReference{Name: "patch"},
@@ -555,7 +560,7 @@ func TestCreateManualSecurityScan_ContextTokenStampsTaskRequesterAndTransaction(
 			Namespace: "demo",
 		},
 		Spec: corev1alpha1.RepositoryScanSpec{
-			RepoURL:          "https://github.com/sozercan/actions-test",
+			RepoURL:          securityTestRepoURL,
 			Branch:           "main",
 			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
 		},
@@ -574,7 +579,7 @@ func TestCreateManualSecurityScan_ContextTokenStampsTaskRequesterAndTransaction(
 	require.NotEmpty(t, run.TaskName)
 
 	task := &corev1alpha1.Task{}
-	require.NoError(t, handlers.client.Get(context.Background(), clientObjectKey("demo", run.TaskName), task))
+	require.NoError(t, handlers.client.Get(context.Background(), clientObjectKey(run.TaskName), task))
 	require.NotNil(t, task.Spec.RequestedBy)
 	require.Equal(t, testContextTokenSubject, task.Spec.RequestedBy.Subject)
 	require.NotNil(t, task.Spec.Transaction)
@@ -593,7 +598,7 @@ func TestCreateSecurityPullRequest_ExistingPR(t *testing.T) {
 			require.Equal(t, "sozercan:orka/security/fnd-123", r.URL.Query().Get("head"))
 			require.Equal(t, "main", r.URL.Query().Get("base"))
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprint(w, `[{"html_url":"https://github.com/sozercan/actions-test/pull/99","number":99}]`) //nolint:errcheck
+			fmt.Fprintf(w, `[{"html_url":%q,"number":99}]`, securityTestRepoPRURL) //nolint:errcheck
 		default:
 			t.Fatalf("unexpected method: %s", r.Method)
 		}
@@ -616,7 +621,7 @@ func TestCreateSecurityPullRequest_ExistingPR(t *testing.T) {
 			Namespace: "demo",
 		},
 		Spec: corev1alpha1.RepositoryScanSpec{
-			RepoURL: "https://github.com/sozercan/actions-test",
+			RepoURL: securityTestRepoURL,
 			Branch:  "main",
 			GitSecretRef: &corev1.LocalObjectReference{
 				Name: "git-creds",
@@ -684,21 +689,21 @@ func TestCreateSecurityPullRequest_ExistingPR(t *testing.T) {
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
 	require.Equal(t, 99, result.PRNumber)
-	require.Equal(t, "https://github.com/sozercan/actions-test/pull/99", result.PRURL)
+	require.Equal(t, securityTestRepoPRURL, result.PRURL)
 	require.Equal(t, "existing", result.Status)
 
 	proposals, err := securityStore.ListPatchProposals(ctx, "demo", "finding-1")
 	require.NoError(t, err)
 	require.Len(t, proposals, 1)
 	require.Equal(t, "pr_opened", proposals[0].Status)
-	require.Equal(t, "https://github.com/sozercan/actions-test/pull/99", proposals[0].PRURL)
+	require.Equal(t, securityTestRepoPRURL, proposals[0].PRURL)
 	require.NotNil(t, proposals[0].PRNumber)
 	require.Equal(t, 99, *proposals[0].PRNumber)
 
 	finding, err := securityStore.GetFinding(ctx, "demo", "finding-1")
 	require.NoError(t, err)
 	require.Equal(t, "pr_open", finding.State)
-	require.Equal(t, "https://github.com/sozercan/actions-test/pull/99", finding.PRURL)
+	require.Equal(t, securityTestRepoPRURL, finding.PRURL)
 	require.NotNil(t, finding.PRNumber)
 	require.Equal(t, 99, *finding.PRNumber)
 }
@@ -713,7 +718,7 @@ func TestCreateSecurityPatchTaskRequiresPushedBranch(t *testing.T) {
 			Namespace: "demo",
 		},
 		Spec: corev1alpha1.RepositoryScanSpec{
-			RepoURL: "https://github.com/sozercan/actions-test",
+			RepoURL: securityTestRepoURL,
 			Branch:  "main",
 			GitSecretRef: &corev1.LocalObjectReference{
 				Name: "git-creds",
@@ -746,15 +751,15 @@ func TestCreateSecurityPatchTaskRequiresPushedBranch(t *testing.T) {
 	require.Regexp(t, `^orka/security/fnd-123-[a-f0-9]{12}$`, proposal.Branch)
 
 	task := &corev1alpha1.Task{}
-	require.NoError(t, fakeClient.Get(context.Background(), clientObjectKey("demo", proposal.TaskName), task))
+	require.NoError(t, fakeClient.Get(context.Background(), clientObjectKey(proposal.TaskName), task))
 	require.Equal(t, "true", envValue(task.Spec.Env, "ORKA_REQUIRE_PUSH_BRANCH"))
 	require.NotNil(t, task.Spec.AgentRuntime)
 	require.NotNil(t, task.Spec.AgentRuntime.Workspace)
 	require.Equal(t, proposal.Branch, task.Spec.AgentRuntime.Workspace.PushBranch)
 }
 
-func clientObjectKey(namespace, name string) client.ObjectKey {
-	return client.ObjectKey{Namespace: namespace, Name: name}
+func clientObjectKey(name string) client.ObjectKey {
+	return client.ObjectKey{Namespace: "demo", Name: name}
 }
 
 func envValue(envs []corev1.EnvVar, name string) string {
