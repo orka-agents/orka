@@ -222,6 +222,7 @@ func (s *Server) setupRoutes() {
 	api.Post("/memory-proposals", s.handlers.CreateMemoryProposal)
 	api.Get("/memory-proposals/:id", s.handlers.GetMemoryProposal)
 	api.Post("/memory-proposals/:id/review", s.handlers.ReviewMemoryProposal)
+	api.Post("/memory-proposals/:id/apply", s.handlers.ApplyMemoryProposal)
 	api.Post("/memory-proposals/:id/archive", s.handlers.ArchiveMemoryProposal)
 
 	// Tool endpoints
@@ -322,6 +323,7 @@ func (s *Server) setupRoutes() {
 		internal.Post("/memory-proposals/:namespace", s.internalHandlers.CreateMemoryProposal)
 		internal.Get("/memory-proposals/:namespace/:id", s.internalHandlers.GetMemoryProposal)
 		internal.Post("/memory-proposals/:namespace/:id/review", s.internalHandlers.ReviewMemoryProposal)
+		internal.Post("/memory-proposals/:namespace/:id/apply", s.internalHandlers.ApplyMemoryProposal)
 		internal.Post("/memory-proposals/:namespace/:id/archive", s.internalHandlers.ArchiveMemoryProposal)
 	}
 }
