@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
@@ -45,7 +47,7 @@ type FileWriteResult struct {
 
 // NewFileWriteTool creates a new file write tool
 func NewFileWriteTool() *FileWriteTool {
-	workDir := os.Getenv("ORKA_WORK_DIR")
+	workDir := os.Getenv(workerenv.WorkDir)
 	if workDir == "" {
 		workDir = defaultWorkspacePath
 	}

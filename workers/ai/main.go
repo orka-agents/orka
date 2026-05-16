@@ -35,10 +35,9 @@ import (
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tools"
 	"github.com/sozercan/orka/internal/worker"
+	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/workers/common"
 )
-
-const trueStr = "true"
 
 const (
 	defaultMemoryContextLimit      = 5
@@ -74,25 +73,19 @@ func run() error {
 	defer cancel()
 
 	// Get configuration from environment
-	taskName := os.Getenv("ORKA_TASK_NAME")
-	taskNamespace := os.Getenv("ORKA_TASK_NAMESPACE")
+	workerEnv := workerenv.ParseAIWorkerEnv(os.Getenv)
+	if err := workerEnv.ValidateRequired(); err != nil {
+		return err
+	}
 
-	provider := os.Getenv("ORKA_AI_PROVIDER")
-	model := os.Getenv("ORKA_AI_MODEL")
-	prompt := os.Getenv("ORKA_AI_PROMPT")
-	systemPrompt := os.Getenv("ORKA_AI_SYSTEM_PROMPT")
-	toolsStr := os.Getenv("ORKA_AI_TOOLS")
-	baseURL := os.Getenv("ORKA_AI_BASE_URL")
-
-	if provider == "" {
-		return fmt.Errorf("ORKA_AI_PROVIDER is required")
-	}
-	if model == "" {
-		return fmt.Errorf("ORKA_AI_MODEL is required")
-	}
-	if prompt == "" {
-		return fmt.Errorf("ORKA_AI_PROMPT is required")
-	}
+	taskName := workerEnv.TaskName
+	taskNamespace := workerEnv.TaskNamespace
+	provider := workerEnv.Provider
+	model := workerEnv.Model
+	prompt := workerEnv.Prompt
+	systemPrompt := workerEnv.SystemPrompt
+	baseURL := workerEnv.BaseURL
+	azureAPIVersion := workerEnv.AzureAPIVersion
 
 	// Get API key
 	apiKey := getAPIKey(provider)
@@ -101,7 +94,6 @@ func run() error {
 	}
 
 	// Create LLM provider
-	azureAPIVersion := os.Getenv("ORKA_AI_AZURE_API_VERSION")
 	llmProvider, err := llm.NewProvider(provider, llm.ProviderConfig{
 		APIKey:          apiKey,
 		BaseURL:         baseURL,
@@ -116,50 +108,39 @@ func run() error {
 	llmProvider = llm.NewRetryProvider(llmProvider, 0)
 
 	// Set up fallback providers if configured
-	fallbackCountStr := os.Getenv("ORKA_AI_FALLBACK_COUNT")
-	if fallbackCountStr != "" {
-		fallbackCount, _ := strconv.Atoi(fallbackCountStr)
-		if fallbackCount > 0 {
-			var fallbacks []llm.FallbackEntry
-			for i := range fallbackCount {
-				prefix := fmt.Sprintf("ORKA_AI_FALLBACK_%d", i)
-				fbProviderType := os.Getenv(prefix + "_PROVIDER")
-				fbAPIKey := os.Getenv(prefix + "_API_KEY")
-				fbModel := os.Getenv(prefix + "_MODEL")
-				fbBaseURL := os.Getenv(prefix + "_BASE_URL")
-				fbAzureAPIVersion := os.Getenv(prefix + "_AZURE_API_VERSION")
-
-				if fbProviderType == "" || fbAPIKey == "" {
-					fmt.Printf("Warning: skipping fallback %d: missing provider or API key\n", i)
-					continue
-				}
-
-				fbProvider, err := llm.NewProvider(fbProviderType, llm.ProviderConfig{
-					APIKey:          fbAPIKey,
-					BaseURL:         fbBaseURL,
-					ProviderType:    fbProviderType,
-					AzureAPIVersion: fbAzureAPIVersion,
-				})
-				if err != nil {
-					fmt.Printf("Warning: skipping fallback %d: %v\n", i, err)
-					continue
-				}
-
-				fallbacks = append(fallbacks, llm.FallbackEntry{
-					Provider: llm.NewRetryProvider(fbProvider, 0),
-					Model:    fbModel,
-				})
+	if len(workerEnv.Fallbacks) > 0 {
+		var fallbacks []llm.FallbackEntry
+		for i, fallbackEnv := range workerEnv.Fallbacks {
+			if fallbackEnv.Provider == "" || fallbackEnv.APIKey == "" {
+				fmt.Printf("Warning: skipping fallback %d: missing provider or API key\n", i)
+				continue
 			}
-			if len(fallbacks) > 0 {
-				fp := llm.NewFallbackProvider(llmProvider, fallbacks)
-				fp.SetCooldownTracker(llm.NewCooldownTracker())
-				llmProvider = fp
+
+			fbProvider, err := llm.NewProvider(fallbackEnv.Provider, llm.ProviderConfig{
+				APIKey:          fallbackEnv.APIKey,
+				BaseURL:         fallbackEnv.BaseURL,
+				ProviderType:    fallbackEnv.Provider,
+				AzureAPIVersion: fallbackEnv.AzureAPIVersion,
+			})
+			if err != nil {
+				fmt.Printf("Warning: skipping fallback %d: %v\n", i, err)
+				continue
 			}
+
+			fallbacks = append(fallbacks, llm.FallbackEntry{
+				Provider: llm.NewRetryProvider(fbProvider, 0),
+				Model:    fallbackEnv.Model,
+			})
+		}
+		if len(fallbacks) > 0 {
+			fp := llm.NewFallbackProvider(llmProvider, fallbacks)
+			fp.SetCooldownTracker(llm.NewCooldownTracker())
+			llmProvider = fp
 		}
 	}
 
 	// Parse enabled tools
-	enabledTools := normalizeEnabledTools(strings.Split(toolsStr, ","))
+	enabledTools := normalizeEnabledTools(workerEnv.Tools)
 
 	// Create Kubernetes client for Tool CRDs
 	k8sClient, err := createK8sClient()
@@ -167,8 +148,10 @@ func run() error {
 		return fmt.Errorf("failed to create k8s client: %w", err)
 	}
 
+	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
+
 	// Register coordination tools if enabled
-	if os.Getenv("ORKA_COORDINATION_ENABLED") == trueStr {
+	if coordinationEnv.Enabled {
 		tools.RegisterCoordinationTools(k8sClient)
 	}
 
@@ -190,19 +173,9 @@ func run() error {
 	}
 
 	// Autonomous mode: fetch plan state and augment system prompt
-	if os.Getenv("ORKA_AUTONOMOUS_MODE") == trueStr {
-		iteration := 0
-		if v := os.Getenv("ORKA_AUTONOMOUS_ITERATION"); v != "" {
-			if i, err := strconv.Atoi(v); err == nil {
-				iteration = i
-			}
-		}
-		maxIter := 0
-		if v := os.Getenv("ORKA_AUTONOMOUS_MAX_ITERATIONS"); v != "" {
-			if i, err := strconv.Atoi(v); err == nil {
-				maxIter = i
-			}
-		}
+	if coordinationEnv.AutonomousMode {
+		iteration := coordinationEnv.AutonomousIteration
+		maxIter := coordinationEnv.AutonomousMaxIterations
 
 		// Augment system prompt with autonomous instructions
 		systemPrompt += autonomousSystemPromptSuffix(iteration, maxIter)
@@ -377,9 +350,9 @@ func normalizeEnabledTools(toolNames []string) []string {
 }
 
 func memoryControllerConfigPresent() bool {
-	return strings.TrimSpace(os.Getenv("ORKA_CONTROLLER_URL")) != "" &&
-		strings.TrimSpace(os.Getenv("ORKA_TASK_NAMESPACE")) != "" &&
-		strings.TrimSpace(os.Getenv("ORKA_TASK_NAME")) != ""
+	return strings.TrimSpace(os.Getenv(workerenv.ControllerURL)) != "" &&
+		strings.TrimSpace(os.Getenv(workerenv.TaskNamespace)) != "" &&
+		strings.TrimSpace(os.Getenv(workerenv.TaskName)) != ""
 }
 
 func autoEnableMemoryTools(enabled []string) []string {
@@ -413,15 +386,15 @@ func registerMemoryTools() {
 }
 
 func loadDurableMemoryContext(ctx context.Context) string {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("ORKA_MEMORY_CONTEXT_ENABLED")), "false") {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv(workerenv.MemoryContextEnabled)), "false") {
 		return ""
 	}
 	if !memoryControllerConfigPresent() {
 		return ""
 	}
 
-	controllerURL := strings.TrimRight(strings.TrimSpace(os.Getenv("ORKA_CONTROLLER_URL")), "/")
-	namespace := strings.TrimSpace(os.Getenv("ORKA_TASK_NAMESPACE"))
+	controllerURL := strings.TrimRight(strings.TrimSpace(os.Getenv(workerenv.ControllerURL)), "/")
+	namespace := strings.TrimSpace(os.Getenv(workerenv.TaskNamespace))
 	limit := memoryContextLimit()
 
 	values := url.Values{}
@@ -460,7 +433,7 @@ func loadDurableMemoryContext(ctx context.Context) string {
 }
 
 func workerServiceAccountToken() string {
-	if token := strings.TrimSpace(os.Getenv("ORKA_SA_TOKEN")); token != "" {
+	if token := strings.TrimSpace(os.Getenv(workerenv.ServiceAccountToken)); token != "" {
 		return token
 	}
 	if data, err := os.ReadFile(serviceAccountTokenPath); err == nil {
@@ -471,7 +444,7 @@ func workerServiceAccountToken() string {
 
 func memoryContextLimit() int {
 	limit := defaultMemoryContextLimit
-	if raw := strings.TrimSpace(os.Getenv("ORKA_MEMORY_CONTEXT_LIMIT")); raw != "" {
+	if raw := strings.TrimSpace(os.Getenv(workerenv.MemoryContextLimit)); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
 			limit = parsed
 		}
@@ -484,7 +457,7 @@ func memoryContextLimit() int {
 
 func memoryContextMaxChars() int {
 	maxChars := defaultMemoryContextMaxChars
-	if raw := strings.TrimSpace(os.Getenv("ORKA_MEMORY_CONTEXT_MAX_CHARS")); raw != "" {
+	if raw := strings.TrimSpace(os.Getenv(workerenv.MemoryContextMaxChars)); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
 			maxChars = parsed
 		}
@@ -635,11 +608,11 @@ func getAPIKey(provider string) string {
 	// Check environment variables
 	switch provider {
 	case "anthropic":
-		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+		if key := os.Getenv(workerenv.AnthropicAPIKey); key != "" {
 			return key
 		}
 	case "openai", "azure-openai":
-		if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		if key := os.Getenv(workerenv.OpenAIAPIKey); key != "" {
 			return key
 		}
 	}
@@ -703,9 +676,9 @@ func loadSessionContext() []llm.Message {
 
 // loadPlanContext fetches the current plan state from the controller API.
 func loadPlanContext() string {
-	controllerURL := os.Getenv("ORKA_CONTROLLER_URL")
-	taskName := os.Getenv("ORKA_TASK_NAME")
-	taskNamespace := os.Getenv("ORKA_TASK_NAMESPACE")
+	controllerURL := os.Getenv(workerenv.ControllerURL)
+	taskName := os.Getenv(workerenv.TaskName)
+	taskNamespace := os.Getenv(workerenv.TaskNamespace)
 
 	if controllerURL == "" || taskName == "" || taskNamespace == "" {
 		return ""
@@ -778,11 +751,12 @@ func executeAgentLoop(
 		baseToolCtx = baseToolCtxOpt[0]
 	}
 
+	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
 	maxIterations := 10
-	if os.Getenv("ORKA_COORDINATION_ENABLED") == trueStr {
+	if coordinationEnv.Enabled {
 		maxIterations = 50
 	}
-	if os.Getenv("ORKA_AUTONOMOUS_MODE") == trueStr {
+	if coordinationEnv.AutonomousMode {
 		maxIterations = 100
 	}
 
@@ -869,7 +843,7 @@ func writeResult(result string) error {
 
 // loadSkillsFromVolume reads skill content from the mounted volume at /workspace/.skills/.
 func loadSkillsFromVolume() string {
-	skillsDir := os.Getenv("ORKA_SKILLS_DIR")
+	skillsDir := os.Getenv(workerenv.SkillsDir)
 	if skillsDir == "" {
 		skillsDir = "/workspace/.skills"
 	}

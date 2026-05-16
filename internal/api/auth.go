@@ -10,6 +10,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -101,6 +103,11 @@ func (c OIDCConfig) Enabled() bool {
 // AuthConfig holds authentication middleware configuration.
 type AuthConfig struct {
 	OIDC OIDCConfig
+
+	// TokenSources optionally overrides the ordered request headers used to
+	// extract authentication tokens. When empty, Authorization: Bearer is used
+	// first and x-api-key remains the fallback.
+	TokenSources []AuthTokenSource
 }
 
 // parseServiceAccountNamespace extracts the namespace from a ServiceAccount username.
@@ -125,23 +132,16 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 		cfg = configs[0]
 	}
 
+	tokenExtractor := AuthTokenExtractor{Sources: cfg.TokenSources}
+
 	return func(ctx fiber.Ctx) error {
-		// Extract token from Authorization header or x-api-key fallback
-		var token string
-		authHeader := ctx.Get(AuthHeader)
-		if authHeader != "" {
-			// Check for bearer token
-			if !strings.HasPrefix(authHeader, BearerPrefix) {
+		token, err := tokenExtractor.Extract(ctx)
+		if err != nil {
+			if errors.Is(err, errInvalidAuthHeaderFormat) {
 				log.Info("authentication failed: invalid authorization header format", "ip", ctx.IP())
 				return fiber.NewError(fiber.StatusUnauthorized, "invalid authorization header format")
 			}
-			token = strings.TrimPrefix(authHeader, BearerPrefix)
-		}
-		if token == "" {
-			// Fallback to x-api-key header (Anthropic convention)
-			token = ctx.Get(XAPIKeyHeader)
-		}
-		if token == "" {
+
 			log.Info("authentication failed: missing authorization header", "ip", ctx.IP())
 			return fiber.NewError(fiber.StatusUnauthorized, "missing authorization header")
 		}
@@ -160,10 +160,39 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 }
 
 func authenticateToken(ctx context.Context, c client.Client, token string, cfg AuthConfig) (*UserInfo, error) {
-	if cfg.OIDC.Enabled() {
-		return validateOIDCToken(ctx, token, cfg.OIDC)
+	if !cfg.OIDC.Enabled() {
+		return validateToken(ctx, c, token)
 	}
-	return validateToken(ctx, c, token)
+
+	parsedOIDC, oidcErr := parseOIDCTokenCandidate(token, cfg.OIDC)
+	if oidcErr == nil {
+		userInfo, oidcErr := validateParsedOIDCToken(ctx, parsedOIDC, cfg.OIDC)
+		if oidcErr == nil {
+			return userInfo, nil
+		}
+
+		if c == nil {
+			return nil, oidcErr
+		}
+
+		userInfo, tokenReviewErr := validateToken(ctx, c, token)
+		if tokenReviewErr == nil {
+			return userInfo, nil
+		}
+
+		return nil, fmt.Errorf("OIDC validation failed: %w; TokenReview validation failed: %v", oidcErr, tokenReviewErr)
+	}
+
+	if c == nil {
+		return nil, oidcErr
+	}
+
+	userInfo, tokenReviewErr := validateToken(ctx, c, token)
+	if tokenReviewErr == nil {
+		return userInfo, nil
+	}
+
+	return nil, fmt.Errorf("OIDC validation skipped: %w; TokenReview validation failed: %v", oidcErr, tokenReviewErr)
 }
 
 // validateToken validates a ServiceAccount token using TokenReview with caching

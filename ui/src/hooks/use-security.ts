@@ -8,6 +8,8 @@ interface ListResponse<T> {
   metadata?: { continue?: string }
 }
 
+const ALL_FINDINGS_PAGE_LIMIT = '100'
+
 export interface FindingsFilters {
   severity?: string
   validationStatus?: string
@@ -93,6 +95,32 @@ export function useFindings(name: string, filters: FindingsFilters = {}) {
   return useQuery({
     queryKey: ['security', 'findings', namespace, name, filters],
     queryFn: () => api.get<ListResponse<SecurityFinding>>(`/security/repositories/${name}/findings`, { namespace, ...filters }),
+    enabled: !!name,
+    refetchInterval: 10000,
+  })
+}
+
+export function useAllFindings(name: string, filters: Omit<FindingsFilters, 'limit' | 'cursor'> = {}) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['security', 'findings', 'all', namespace, name, filters],
+    queryFn: async () => {
+      const items: SecurityFinding[] = []
+      let cursor: string | undefined
+
+      do {
+        const page = await api.get<ListResponse<SecurityFinding>>(`/security/repositories/${name}/findings`, {
+          namespace,
+          ...filters,
+          limit: ALL_FINDINGS_PAGE_LIMIT,
+          ...(cursor ? { cursor } : {}),
+        })
+        items.push(...page.items)
+        cursor = page.metadata?.continue
+      } while (cursor)
+
+      return { items, metadata: {} } satisfies ListResponse<SecurityFinding>
+    },
     enabled: !!name,
     refetchInterval: 10000,
   })

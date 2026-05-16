@@ -131,7 +131,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 
 	ns := os.Getenv(envOrkaTaskNamespace)
 	if ns == "" {
-		return "", fmt.Errorf("ORKA_TASK_NAMESPACE environment variable is not set")
+		return "", fmt.Errorf("%s environment variable is not set", envOrkaTaskNamespace)
 	}
 
 	deadline := time.Now().Add(timeout)
@@ -291,7 +291,7 @@ const saTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 func fetchTaskResult(ctx context.Context, taskName string) (string, error) {
 	controllerURL := os.Getenv(envOrkaControllerURL)
 	if controllerURL == "" {
-		return "", fmt.Errorf("ORKA_CONTROLLER_URL is not set")
+		return "", fmt.Errorf("%s is not set", envOrkaControllerURL)
 	}
 
 	controllerURL = strings.TrimRight(controllerURL, "/")

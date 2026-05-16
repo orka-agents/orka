@@ -6,14 +6,16 @@ MIT License - see LICENSE file for details.
 
 package tools
 
+import "github.com/sozercan/orka/internal/workerenv"
+
 const (
-	envOrkaTaskName                  = "ORKA_TASK_NAME"
-	envOrkaTaskNamespace             = "ORKA_TASK_NAMESPACE"
-	envOrkaParentTask                = "ORKA_PARENT_TASK"
-	envOrkaControllerURL             = "ORKA_CONTROLLER_URL"
-	envOrkaCoordinationDepth         = "ORKA_COORDINATION_DEPTH"
-	envOrkaCoordinationAllowedAgents = "ORKA_COORDINATION_ALLOWED_AGENTS"
-	envOrkaCoordinationMaxDepth      = "ORKA_COORDINATION_MAX_DEPTH"
+	envOrkaTaskName                  = workerenv.TaskName
+	envOrkaTaskNamespace             = workerenv.TaskNamespace
+	envOrkaParentTask                = workerenv.ParentTask
+	envOrkaControllerURL             = workerenv.ControllerURL
+	envOrkaCoordinationDepth         = workerenv.CoordinationDepth
+	envOrkaCoordinationAllowedAgents = workerenv.CoordinationAllowedAgents
+	envOrkaCoordinationMaxDepth      = workerenv.CoordinationMaxDepth
 
 	noNewMessagesText               = "No new messages"
 	agentNameDescription            = "Agent name"
@@ -23,7 +25,7 @@ const (
 	workspaceTaskDescription        = "Name of a task whose workspace config has the repo and git credentials"
 	childWorkspaceTaskDescription   = "Name of the child task whose workspace config has the repo and git credentials"
 	timeoutDescription              = "Timeout duration, e.g. \"5m\""
-	missingControllerTaskEnvMessage = "ORKA_CONTROLLER_URL, ORKA_TASK_NAME, and ORKA_TASK_NAMESPACE are required"
+	missingControllerTaskEnvMessage = workerenv.ControllerURL + ", " + workerenv.TaskName + ", and " + workerenv.TaskNamespace + " are required"
 	shortPollIntervalString         = "100ms"
 	taskPhasePendingString          = "Pending"
 	taskPhaseRunningString          = "Running"

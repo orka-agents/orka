@@ -1,6 +1,16 @@
+<div align="center">
+
+<img src="docs/images/orka-logo.png" alt="Orka" width="400" />
+
 # Orka
 
 **Kubernetes-native AI agent orchestration.**
+
+[Getting Started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [API Reference](docs/api-reference.md) · [Documentation](#documentation)
+
+</div>
+
+---
 
 Orka turns your Kubernetes cluster into an AI-powered task execution platform. Spin up swarms of AI agents that write code, review PRs, research topics, or run containers — each as an isolated Kubernetes Job with full scheduling, retries, and observability. A coordinator agent dynamically decomposes complex tasks, spawns specialist agents to work in parallel, and synthesizes their results — no manual orchestration graphs required.
 

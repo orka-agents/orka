@@ -3,7 +3,13 @@ name: Live Copilot Proxy E2E
 on:
   workflow_dispatch:
   push:
+    paths-ignore:
+      - ".codex/**"
+      - ".claude/**"
   pull_request:
+    paths-ignore:
+      - ".codex/**"
+      - ".claude/**"
 
 permissions:
   contents: read
