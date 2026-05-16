@@ -140,7 +140,8 @@ func (t *ProposeMemoryTool) Name() string { return "propose_memory" }
 // Description returns the tool description.
 func (t *ProposeMemoryTool) Description() string {
 	return "Propose durable memory or reusable skill changes for coordinator review. " +
-		"Use this when you discover information that should persist beyond the current task but should be reviewed before becoming shared memory."
+		"Use this when you discover information that should persist beyond the current task but should be reviewed before becoming shared memory. " +
+		"Memory proposal descriptions may include an optional `Tags: tag-a, tag-b` line to suggest durable memory tags."
 }
 
 // Parameters returns the JSON Schema for the tool parameters.
@@ -162,7 +163,7 @@ func (t *ProposeMemoryTool) Parameters() json.RawMessage {
 			},
 			"description": {
 				"type": "string",
-				"description": "Why this should be remembered or changed"
+				"description": "Why this should be remembered or changed; memory proposals may include an optional Tags: tag-a, tag-b line"
 			},
 			"content": {
 				"type": "string",

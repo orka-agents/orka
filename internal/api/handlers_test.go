@@ -2515,6 +2515,154 @@ func TestHandlers_DeleteTask_WatchNamespaceScoped(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 }
 
+type conflictApplyMemoryProposalStore struct{}
+
+var _ store.MemoryProposalStore = conflictApplyMemoryProposalStore{}
+
+func (conflictApplyMemoryProposalStore) CreateMemoryProposal(context.Context, *store.MemoryProposal) error {
+	return nil
+}
+
+func (conflictApplyMemoryProposalStore) GetMemoryProposal(context.Context, string, string) (*store.MemoryProposal, error) {
+	return nil, store.ErrNotFound
+}
+
+func (conflictApplyMemoryProposalStore) ListMemoryProposals(context.Context, store.MemoryProposalFilter) ([]store.MemoryProposal, error) {
+	return nil, nil
+}
+
+func (conflictApplyMemoryProposalStore) ReviewMemoryProposal(context.Context, store.MemoryProposalReview) error {
+	return nil
+}
+
+func (conflictApplyMemoryProposalStore) ApplyMemoryProposal(context.Context, store.MemoryProposalApply) (*store.Memory, error) {
+	return nil, fmt.Errorf("%w: changed", store.ErrConflict)
+}
+
+func (conflictApplyMemoryProposalStore) ArchiveMemoryProposal(context.Context, string, string) error {
+	return nil
+}
+
+func TestHandlers_ApplyMemoryProposal(t *testing.T) {
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	ss := sqlite.NewStore(db, ":memory:")
+	h := NewHandlers(HandlersConfig{MemoryStore: ss, MemoryProposalStore: ss})
+
+	app := fiber.New()
+	app.Post("/api/v1/memory-proposals/:id/apply", h.ApplyMemoryProposal)
+
+	proposal := &store.MemoryProposal{
+		Namespace:   "default",
+		Title:       "Remember project preference",
+		Type:        "memory",
+		Description: "Tags: preference, summary",
+		Content:     "User prefers compact task summaries.",
+	}
+	require.NoError(t, ss.CreateMemoryProposal(context.Background(), proposal))
+	require.NoError(t, ss.ReviewMemoryProposal(context.Background(), store.MemoryProposalReview{
+		Namespace: "default",
+		ID:        proposal.ID,
+		Status:    "accepted",
+		Reviewer:  "reviewer",
+	}))
+
+	body, _ := json.Marshal(map[string]any{"appliedBy": "api-user"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/memory-proposals/"+proposal.ID+"/apply?namespace=default", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var memory store.Memory
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&memory))
+	require.Equal(t, "default", memory.Namespace)
+	require.Equal(t, proposal.ID, memory.SourceProposalID)
+	require.Equal(t, "memory_proposal", memory.Source)
+	require.Equal(t, proposal.Content, memory.Content)
+	require.ElementsMatch(t, []string{"preference", "summary"}, memory.Tags)
+
+	updated, err := ss.GetMemoryProposal(context.Background(), "default", proposal.ID)
+	require.NoError(t, err)
+	require.Equal(t, memory.ID, updated.AppliedMemoryID)
+	require.Equal(t, "api-user", updated.AppliedBy)
+	require.NotNil(t, updated.AppliedAt)
+	require.False(t, updated.AppliedAt.IsZero())
+}
+
+func TestHandlers_ApplyMemoryProposalConflict(t *testing.T) {
+	h := NewHandlers(HandlersConfig{MemoryProposalStore: conflictApplyMemoryProposalStore{}})
+
+	app := fiber.New()
+	app.Post("/api/v1/memory-proposals/:id/apply", h.ApplyMemoryProposal)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/memory-proposals/mprop-conflict/apply?namespace=default", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Contains(t, string(body), "changed")
+}
+
+func TestHandlers_ApplyMemoryProposalRejectedOrArchived(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(context.Context, *sqlite.Store, *store.MemoryProposal)
+	}{
+		{
+			name: "rejected",
+			prepare: func(ctx context.Context, ss *sqlite.Store, proposal *store.MemoryProposal) {
+				require.NoError(t, ss.ReviewMemoryProposal(ctx, store.MemoryProposalReview{
+					Namespace: proposal.Namespace,
+					ID:        proposal.ID,
+					Status:    "rejected",
+					Reviewer:  "reviewer",
+				}))
+			},
+		},
+		{
+			name: "archived",
+			prepare: func(ctx context.Context, ss *sqlite.Store, proposal *store.MemoryProposal) {
+				require.NoError(t, ss.ArchiveMemoryProposal(ctx, proposal.Namespace, proposal.ID))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, err := sqlite.NewDB(":memory:")
+			require.NoError(t, err)
+			ss := sqlite.NewStore(db, ":memory:")
+			h := NewHandlers(HandlersConfig{MemoryStore: ss, MemoryProposalStore: ss})
+
+			app := fiber.New()
+			app.Post("/api/v1/memory-proposals/:id/apply", h.ApplyMemoryProposal)
+
+			ctx := context.Background()
+			proposal := &store.MemoryProposal{
+				Namespace:   "default",
+				Title:       "Remember project preference",
+				Type:        "memory",
+				Description: "Reusable preference",
+				Content:     "User prefers compact task summaries.",
+			}
+			require.NoError(t, ss.CreateMemoryProposal(ctx, proposal))
+			tt.prepare(ctx, ss, proposal)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/memory-proposals/"+proposal.ID+"/apply?namespace=default", nil)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.Contains(t, string(body), "cannot be applied")
+		})
+	}
+}
+
 // --- Tests: CreateAgent already exists (conflict) ---
 
 func TestHandlers_CreateAgent_Conflict(t *testing.T) {

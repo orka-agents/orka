@@ -279,3 +279,31 @@ func (h *InternalHandlers) ArchiveMemoryProposal(c fiber.Ctx) error {
 	}
 	return c.SendStatus(fiber.StatusNoContent)
 }
+
+// ApplyMemoryProposal applies an accepted memory proposal into durable memory in the namespace in the internal route.
+func (h *InternalHandlers) ApplyMemoryProposal(c fiber.Ctx) error {
+	namespace, err := internalNamespace(c)
+	if err != nil {
+		return err
+	}
+	if err := h.ensureMemoryProposalStore(); err != nil {
+		return err
+	}
+	apply, err := bindMemoryProposalApply(c, namespace, c.Params("id"))
+	if err != nil {
+		return err
+	}
+	if apply.Namespace != namespace {
+		return fiber.NewError(fiber.StatusBadRequest, "memory proposal namespace mismatch")
+	}
+	if apply.AppliedBy == "" {
+		if ui := GetUserInfo(c); ui != nil {
+			apply.AppliedBy = ui.Username
+		}
+	}
+	memory, err := h.memoryProposalStore.ApplyMemoryProposal(c.Context(), apply)
+	if err != nil {
+		return memoryStoreError("apply memory proposal", "memory proposal", err)
+	}
+	return c.JSON(memory)
+}
