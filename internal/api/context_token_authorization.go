@@ -45,6 +45,8 @@ const (
 	ContextTokenScopeToolsUse = "orka:tools:use"
 	// ContextTokenScopeProvidersUse authorizes context-token callers to use configured model providers.
 	ContextTokenScopeProvidersUse = "orka:providers:use"
+	// ContextTokenScopeSecretsRead authorizes context-token callers to read Secret metadata.
+	ContextTokenScopeSecretsRead = "orka:secrets:read"
 	// ContextTokenScopeAgentsRead authorizes context-token callers to read Agent definitions.
 	ContextTokenScopeAgentsRead = "orka:agents:read"
 	// ContextTokenScopeAgentsWrite authorizes context-token callers to mutate Agent definitions.
@@ -78,6 +80,7 @@ type ContextTokenAuthorizationConfig struct {
 	ToolReadScopes      []string
 	ToolUseScopes       []string
 	ProviderUseScopes   []string
+	SecretReadScopeList []string
 	AgentReadScopes     []string
 	AgentWriteScopes    []string
 	MemoryReadScopes    []string
@@ -90,28 +93,33 @@ type ContextTokenAuthorizationConfig struct {
 	SkillWriteScopes    []string
 }
 
+// ContextTokenAuthorizationConfigOptions names the inputs used to build
+// context-token authorization config.
+type ContextTokenAuthorizationConfigOptions struct {
+	Mode                string
+	TaskCreateScopes    string
+	TaskReadScopes      string
+	TaskListScopes      string
+	TaskDeleteScopes    string
+	ToolReadScopes      string
+	ToolUseScopes       string
+	ProviderUseScopes   string
+	SecretReadScopes    string
+	AgentReadScopes     string
+	AgentWriteScopes    string
+	MemoryReadScopes    string
+	MemoryWriteScopes   string
+	SessionReadScopes   string
+	SessionWriteScopes  string
+	SecurityReadScopes  string
+	SecurityWriteScopes string
+	SkillReadScopes     string
+	SkillWriteScopes    string
+}
+
 // NewContextTokenAuthorizationConfig builds context-token authorization config.
-func NewContextTokenAuthorizationConfig(
-	mode,
-	taskCreateScopes,
-	taskReadScopes,
-	taskListScopes,
-	taskDeleteScopes,
-	toolReadScopes,
-	toolUseScopes,
-	providerUseScopes,
-	agentReadScopes,
-	agentWriteScopes,
-	memoryReadScopes,
-	memoryWriteScopes,
-	sessionReadScopes,
-	sessionWriteScopes,
-	securityReadScopes,
-	securityWriteScopes,
-	skillReadScopes,
-	skillWriteScopes string,
-) (ContextTokenAuthorizationConfig, error) {
-	mode = strings.ToLower(strings.TrimSpace(mode))
+func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOptions) (ContextTokenAuthorizationConfig, error) {
+	mode := strings.ToLower(strings.TrimSpace(opts.Mode))
 	if mode == "" {
 		mode = ContextTokenAuthorizationModeOff
 	}
@@ -121,23 +129,24 @@ func NewContextTokenAuthorizationConfig(
 		return ContextTokenAuthorizationConfig{}, fmt.Errorf("unsupported context-token authorization mode %q", mode)
 	}
 
-	createScopes := defaultScopes(taskCreateScopes, ContextTokenScopeTaskCreate)
-	readScopes := defaultScopes(taskReadScopes, ContextTokenScopeTaskGet)
-	listScopes := defaultScopes(taskListScopes, ContextTokenScopeTaskList)
-	deleteScopes := defaultScopes(taskDeleteScopes, ContextTokenScopeTaskDelete)
-	toolRead := defaultScopes(toolReadScopes, ContextTokenScopeToolsRead)
-	toolUse := defaultScopes(toolUseScopes, ContextTokenScopeToolsUse)
-	providerUse := defaultScopes(providerUseScopes, ContextTokenScopeProvidersUse)
-	agentRead := defaultScopes(agentReadScopes, ContextTokenScopeAgentsRead)
-	agentWrite := defaultScopes(agentWriteScopes, ContextTokenScopeAgentsWrite)
-	memoryRead := defaultScopes(memoryReadScopes, ContextTokenScopeMemoryRead)
-	memoryWrite := defaultScopes(memoryWriteScopes, ContextTokenScopeMemoryWrite)
-	sessionRead := defaultScopes(sessionReadScopes, ContextTokenScopeSessionsRead)
-	sessionWrite := defaultScopes(sessionWriteScopes, ContextTokenScopeSessionsWrite)
-	securityRead := defaultScopes(securityReadScopes, ContextTokenScopeSecurityRead)
-	securityWrite := defaultScopes(securityWriteScopes, ContextTokenScopeSecurityWrite)
-	skillRead := defaultScopes(skillReadScopes, ContextTokenScopeSkillsRead)
-	skillWrite := defaultScopes(skillWriteScopes, ContextTokenScopeSkillsWrite)
+	createScopes := defaultScopes(opts.TaskCreateScopes, ContextTokenScopeTaskCreate)
+	readScopes := defaultScopes(opts.TaskReadScopes, ContextTokenScopeTaskGet)
+	listScopes := defaultScopes(opts.TaskListScopes, ContextTokenScopeTaskList)
+	deleteScopes := defaultScopes(opts.TaskDeleteScopes, ContextTokenScopeTaskDelete)
+	toolRead := defaultScopes(opts.ToolReadScopes, ContextTokenScopeToolsRead)
+	toolUse := defaultScopes(opts.ToolUseScopes, ContextTokenScopeToolsUse)
+	providerUse := defaultScopes(opts.ProviderUseScopes, ContextTokenScopeProvidersUse)
+	secretRead := defaultScopes(opts.SecretReadScopes, ContextTokenScopeSecretsRead)
+	agentRead := defaultScopes(opts.AgentReadScopes, ContextTokenScopeAgentsRead)
+	agentWrite := defaultScopes(opts.AgentWriteScopes, ContextTokenScopeAgentsWrite)
+	memoryRead := defaultScopes(opts.MemoryReadScopes, ContextTokenScopeMemoryRead)
+	memoryWrite := defaultScopes(opts.MemoryWriteScopes, ContextTokenScopeMemoryWrite)
+	sessionRead := defaultScopes(opts.SessionReadScopes, ContextTokenScopeSessionsRead)
+	sessionWrite := defaultScopes(opts.SessionWriteScopes, ContextTokenScopeSessionsWrite)
+	securityRead := defaultScopes(opts.SecurityReadScopes, ContextTokenScopeSecurityRead)
+	securityWrite := defaultScopes(opts.SecurityWriteScopes, ContextTokenScopeSecurityWrite)
+	skillRead := defaultScopes(opts.SkillReadScopes, ContextTokenScopeSkillsRead)
+	skillWrite := defaultScopes(opts.SkillWriteScopes, ContextTokenScopeSkillsWrite)
 	return ContextTokenAuthorizationConfig{
 		Mode:                mode,
 		TaskCreateScopes:    createScopes,
@@ -147,6 +156,7 @@ func NewContextTokenAuthorizationConfig(
 		ToolReadScopes:      toolRead,
 		ToolUseScopes:       toolUse,
 		ProviderUseScopes:   providerUse,
+		SecretReadScopeList: secretRead,
 		AgentReadScopes:     agentRead,
 		AgentWriteScopes:    agentWrite,
 		MemoryReadScopes:    memoryRead,
@@ -170,17 +180,7 @@ func (c ContextTokenAuthorizationConfig) enforcing() bool {
 }
 
 func (c ContextTokenAuthorizationConfig) SecretReadScopes() []string {
-	scopes := []string{}
-	scopes = append(scopes, c.TaskReadScopes...)
-	scopes = append(scopes, c.TaskListScopes...)
-	scopes = append(scopes, c.ToolReadScopes...)
-	scopes = append(scopes, c.ProviderUseScopes...)
-	scopes = append(scopes, c.AgentReadScopes...)
-	scopes = append(scopes, c.MemoryReadScopes...)
-	scopes = append(scopes, c.SessionReadScopes...)
-	scopes = append(scopes, c.SecurityReadScopes...)
-	scopes = append(scopes, c.SkillReadScopes...)
-	return scopes
+	return c.SecretReadScopeList
 }
 
 type contextTokenTaskCreateAuthorizationContext struct {
@@ -275,6 +275,26 @@ func authorizeContextTokenProviderUse(c fiber.Ctx, cfg ContextTokenAuthorization
 		return nil
 	}
 	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+}
+
+func contextTokenAllowsListedProviderModel(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, action, namespace string, provider ProviderResolutionInfo, model string) bool {
+	if !cfg.Enabled() {
+		return true
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return true
+	}
+
+	failures := contextTokenProviderUseFailures(ui.ContextToken, cfg, namespace, provider, model)
+	if len(failures) == 0 {
+		return true
+	}
+	if cfg.enforcing() {
+		return false
+	}
+	_ = handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+	return true
 }
 
 func authorizeContextTokenToolUse(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, action string, toolNames []string) error {

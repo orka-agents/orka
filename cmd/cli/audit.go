@@ -32,19 +32,20 @@ func newAuditTraceCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			transactionID := args[0]
 			c := newClientFromCmd(cmd)
-			tasks, err := c.ListTasks(context.Background(), client.ListTasksOptions{
-				Namespace: c.Namespace,
-				Limit:     limit,
-			})
+			filtered, truncated, err := listFilteredTasks(
+				context.Background(),
+				c,
+				c.Namespace,
+				limit,
+				func(task client.TaskSummary) bool {
+					return task.TransactionID == transactionID
+				},
+			)
 			if err != nil {
 				return err
 			}
-
-			filtered := make([]client.TaskSummary, 0)
-			for _, task := range tasks {
-				if task.TransactionID == transactionID {
-					filtered = append(filtered, task)
-				}
+			if truncated {
+				warnFilteredTaskOutputLimited(limit)
 			}
 			if len(filtered) == 0 {
 				fmt.Printf("No tasks found for transaction %s.\n", transactionID)
@@ -61,7 +62,7 @@ func newAuditTraceCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().IntVar(&limit, "limit", 100, "Maximum number of tasks to inspect")
+	cmd.Flags().IntVar(&limit, "limit", 100, "Maximum number of matching tasks to show")
 	return cmd
 }
 

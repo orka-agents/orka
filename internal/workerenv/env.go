@@ -49,6 +49,8 @@ const (
 	ContextTokenSubjectTokenType      = "ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_TYPE"
 	ContextTokenOutboundScope         = "ORKA_CONTEXT_TOKEN_OUTBOUND_SCOPE"
 	ContextTokenChildScope            = "ORKA_CONTEXT_TOKEN_CHILD_SCOPE"
+	ContextTokenChildTokenTTL         = "ORKA_CONTEXT_TOKEN_CHILD_TOKEN_TTL"
+	ContextTokenToolTokenTTL          = "ORKA_CONTEXT_TOKEN_TOOL_TOKEN_TTL"
 
 	// AI worker env vars.
 	AIProvider        = "ORKA_AI_PROVIDER"
@@ -262,10 +264,10 @@ func ParseBaseEnv(getenv func(string) string) BaseEnv {
 func TransactionLogFields(transactionID, profile string) string {
 	fields := []string{}
 	if transactionID != "" {
-		fields = append(fields, "transactionID="+transactionID)
+		fields = append(fields, "transactionID="+strconv.Quote(transactionID))
 	}
 	if profile != "" {
-		fields = append(fields, "contextTokenProfile="+profile)
+		fields = append(fields, "contextTokenProfile="+strconv.Quote(profile))
 	}
 	if len(fields) == 0 {
 		return ""

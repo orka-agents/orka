@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -48,6 +49,7 @@ func TestPrepareChildTransactionToken(t *testing.T) {
 	t.Setenv(workerenv.ContextTokenTTSAudience, "child.example.test")
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
+	t.Setenv(workerenv.ContextTokenChildTokenTTL, "42s")
 
 	parent := parentTask()
 	child := &corev1alpha1.Task{
@@ -73,11 +75,12 @@ func TestPrepareChildTransactionToken(t *testing.T) {
 }
 
 type childTokenExchange struct {
-	requestDetails  map[string]any
-	audience        string
-	scope           string
-	subjectToken    string
-	subjectTokenTyp string
+	requestDetails     map[string]any
+	audience           string
+	scope              string
+	subjectToken       string
+	subjectTokenTyp    string
+	requestedExpiresIn string
 }
 
 func writeTestSubjectToken(t *testing.T) string {
@@ -136,6 +139,7 @@ func startChildTransactionTokenServer(t *testing.T, childToken string, exchange 
 		exchange.audience = r.FormValue("audience")
 		exchange.scope = r.FormValue("scope")
 		exchange.subjectTokenTyp = r.FormValue("subject_token_type")
+		exchange.requestedExpiresIn = r.FormValue("requested_expires_in")
 		if err := json.Unmarshal([]byte(r.FormValue("request_details")), &exchange.requestDetails); err != nil {
 			t.Fatalf("request_details JSON error = %v", err)
 		}
@@ -162,6 +166,9 @@ func requireChildTokenExchange(t *testing.T, exchange childTokenExchange) {
 	}
 	if exchange.subjectTokenTyp != kontxttoken.SubjectTokenTypeTxnToken {
 		t.Fatalf("subject_token_type = %q", exchange.subjectTokenTyp)
+	}
+	if exchange.requestedExpiresIn != "42" {
+		t.Fatalf("requested_expires_in = %q, want 42", exchange.requestedExpiresIn)
 	}
 	if exchange.requestDetails["operation"] != "delegateTask" || exchange.requestDetails["agent"] != testResearcherAgentName || exchange.requestDetails["txn"] != parentTransactionID {
 		t.Fatalf("request_details = %#v", exchange.requestDetails)
@@ -331,5 +338,58 @@ func TestPrepareChildTransactionTokenDisabledWithoutTTSURL(t *testing.T) {
 	}
 	if child.Annotations[labels.AnnotationTransactionTokenSecret] != "" {
 		t.Fatalf("unexpected transaction token secret annotation: %#v", child.Annotations)
+	}
+}
+
+func TestChildTransactionTokenSecretNameExtremeParentNames(t *testing.T) {
+	tests := []struct {
+		name       string
+		parentName string
+	}{
+		{
+			name:       "very long",
+			parentName: strings.Repeat("parent-task-name-", 20) + "tail",
+		},
+		{
+			name:       "sixty plus hyphens",
+			parentName: strings.Repeat("-", 64),
+		},
+		{
+			name:       "hyphen heavy",
+			parentName: "----" + strings.Repeat("parent-", 40) + "----",
+		},
+		{
+			name:       "all hyphen",
+			parentName: strings.Repeat("-", 120),
+		},
+		{
+			name:       "invalid chars uppercase unicode",
+			parentName: "Parent_Task 日本語 ☃ WITH/slashes.and spaces",
+		},
+		{
+			name:       "mixed long hyphen suffixed",
+			parentName: strings.Repeat("Parent_TASK---with.invalid_chars-", 8) + strings.Repeat("-", 24),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := childTransactionTokenSecretName(tt.parentName)
+			if err != nil {
+				t.Fatalf("childTransactionTokenSecretName(%q) error = %v", tt.parentName, err)
+			}
+			if got == "" {
+				t.Fatalf("childTransactionTokenSecretName(%q) returned an empty name", tt.parentName)
+			}
+			if len(got) > 63 {
+				t.Fatalf("childTransactionTokenSecretName(%q) = %q, length %d > 63", tt.parentName, got, len(got))
+			}
+			if errs := validation.IsDNS1123Label(got); len(errs) > 0 {
+				t.Fatalf("childTransactionTokenSecretName(%q) = %q, not DNS-1123 label: %v", tt.parentName, got, errs)
+			}
+			if strings.HasPrefix(got, "-") || strings.HasSuffix(got, "-") {
+				t.Fatalf("childTransactionTokenSecretName(%q) = %q, has leading or trailing hyphen", tt.parentName, got)
+			}
+		})
 	}
 }

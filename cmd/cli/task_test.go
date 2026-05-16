@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -138,12 +139,12 @@ func TestNewTaskLogsCmdFlags(t *testing.T) {
 func taskAPIServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks":
+		case r.Method == http.MethodPost && r.URL.Path == tasksAPIPath:
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 				"metadata": map[string]any{"name": "task-abc123", "namespace": "default"},
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks":
+		case r.Method == http.MethodGet && r.URL.Path == tasksAPIPath:
 			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 				"items": []map[string]any{
 					{
@@ -253,6 +254,73 @@ func TestNewTaskListCmd_WithStatus(t *testing.T) {
 
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
+	}
+}
+
+func TestNewTaskListCmd_WithStatusScansPaginatedResults(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != tasksAPIPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		requests = append(requests, r.URL.RawQuery)
+		if got := r.URL.Query().Get("limit"); got != "500" {
+			t.Errorf("limit query = %q, want 500 for filtered pagination", got)
+		}
+
+		switch r.URL.Query().Get("continue") {
+		case "":
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name":              "first-page-task",
+							"namespace":         "default",
+							"creationTimestamp": time.Now().Format(time.RFC3339),
+						},
+						"spec":   map[string]any{"type": "ai"},
+						"status": map[string]any{"phase": "Succeeded"},
+					},
+				},
+				"metadata": map[string]any{"continue": "next"},
+			})
+		case "next":
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name":              "matching-task",
+							"namespace":         "default",
+							"creationTimestamp": time.Now().Format(time.RFC3339),
+						},
+						"spec":   map[string]any{"type": "ai"},
+						"status": map[string]any{"phase": "Running"},
+					},
+				},
+			})
+		default:
+			t.Errorf("unexpected continue token %q", r.URL.Query().Get("continue"))
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "list", "--server", srv.URL, "--status", "Running"})
+
+	stdout, err := captureOutput(t, root.Execute)
+	if err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("requests = %d, want 2", len(requests))
+	}
+	if !strings.Contains(stdout, "matching-task") {
+		t.Fatalf("stdout = %q, want paginated matching task", stdout)
 	}
 }
 

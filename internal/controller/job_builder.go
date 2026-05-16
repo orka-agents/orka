@@ -87,6 +87,8 @@ type JobBuilder struct {
 	ContextTokenSubjectTokenType string
 	ContextTokenChildScope       string
 	ContextTokenOutboundScope    string
+	ContextTokenChildTokenTTL    string
+	ContextTokenToolTokenTTL     string
 }
 
 // NewJobBuilder creates a new JobBuilder
@@ -675,13 +677,19 @@ func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alp
 	if job == nil || len(job.Spec.Template.Spec.Containers) == 0 {
 		return
 	}
-	container := &job.Spec.Template.Spec.Containers[0]
-	container.Env = appendEnvIfSetMissing(container.Env, workerenv.ContextTokenTTSURL, b.ContextTokenTTSURL)
-	container.Env = appendEnvIfSetMissing(container.Env, workerenv.ContextTokenTTSAudience, b.ContextTokenTTSAudience)
-	container.Env = appendEnvIfSetMissing(container.Env, workerenv.ContextTokenTTSTimeout, b.ContextTokenTTSTimeout)
-	container.Env = appendEnvIfSetMissing(container.Env, workerenv.ContextTokenSubjectTokenType, b.ContextTokenSubjectTokenType)
-	container.Env = appendEnvIfSetMissing(container.Env, workerenv.ContextTokenChildScope, b.ContextTokenChildScope)
-	container.Env = appendEnvIfSetMissing(container.Env, workerenv.ContextTokenOutboundScope, b.ContextTokenOutboundScope)
+	for i := range job.Spec.Template.Spec.Containers {
+		container := &job.Spec.Template.Spec.Containers[i]
+		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSURL, b.ContextTokenTTSURL)
+		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSAudience, b.ContextTokenTTSAudience)
+		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSTimeout, b.ContextTokenTTSTimeout)
+		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenSubjectTokenType, b.ContextTokenSubjectTokenType)
+		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenChildScope, b.ContextTokenChildScope)
+		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenOutboundScope, b.ContextTokenOutboundScope)
+		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenChildTokenTTL, b.ContextTokenChildTokenTTL)
+		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenToolTokenTTL, b.ContextTokenToolTokenTTL)
+		container.Env = removeControllerEnv(container.Env, workerenv.TransactionTokenFile)
+		container.Env = removeControllerEnv(container.Env, workerenv.ContextTokenSubjectTokenFile)
+	}
 
 	if task == nil || task.Annotations == nil {
 		return
@@ -696,6 +704,9 @@ func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alp
 		tokenPath  = mountPath + "/token"
 	)
 	defaultMode := int32(0400)
+	// The child transaction token is delegation authority. Add the Secret as a
+	// pod volume and expose the mounted token-file path to every workload
+	// container in the pod so secondary containers can make TTS-mediated calls.
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 		Name: volumeName,
 		VolumeSource: corev1.VolumeSource{
@@ -709,13 +720,16 @@ func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alp
 			},
 		},
 	})
-	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-		Name:      volumeName,
-		MountPath: mountPath,
-		ReadOnly:  true,
-	})
-	container.Env = appendEnvIfMissing(container.Env, corev1.EnvVar{Name: workerenv.TransactionTokenFile, Value: tokenPath})
-	container.Env = appendEnvIfMissing(container.Env, corev1.EnvVar{Name: workerenv.ContextTokenSubjectTokenFile, Value: tokenPath})
+	for i := range job.Spec.Template.Spec.Containers {
+		container := &job.Spec.Template.Spec.Containers[i]
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:      volumeName,
+			MountPath: mountPath,
+			ReadOnly:  true,
+		})
+		container.Env = setControllerEnv(container.Env, workerenv.TransactionTokenFile, tokenPath)
+		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenSubjectTokenFile, tokenPath)
+	}
 }
 
 // addSecretVolumes adds secret volumes to the Job
@@ -923,18 +937,36 @@ func (b *JobBuilder) getAgentWorkerImage(agent *corev1alpha1.Agent) string {
 	}
 }
 
-func appendEnvIfSetMissing(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {
-	if value == "" || envVarExists(envVars, name) {
-		return envVars
+func setControllerEnv(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {
+	if value == "" {
+		return removeControllerEnv(envVars, name)
 	}
-	return append(envVars, corev1.EnvVar{Name: name, Value: value})
+	out := envVars[:0]
+	set := false
+	for _, envVar := range envVars {
+		if envVar.Name != name {
+			out = append(out, envVar)
+			continue
+		}
+		if !set {
+			out = append(out, corev1.EnvVar{Name: name, Value: value})
+			set = true
+		}
+	}
+	if !set {
+		out = append(out, corev1.EnvVar{Name: name, Value: value})
+	}
+	return out
 }
 
-func appendEnvIfMissing(envVars []corev1.EnvVar, envVar corev1.EnvVar) []corev1.EnvVar {
-	if envVarExists(envVars, envVar.Name) {
-		return envVars
+func removeControllerEnv(envVars []corev1.EnvVar, name string) []corev1.EnvVar {
+	out := envVars[:0]
+	for _, envVar := range envVars {
+		if envVar.Name != name {
+			out = append(out, envVar)
+		}
 	}
-	return append(envVars, envVar)
+	return out
 }
 
 func envVarExists(envVars []corev1.EnvVar, name string) bool {

@@ -30,6 +30,11 @@ import (
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
+// prepareChildTransactionToken exchanges the parent's transaction token for a
+// child-scoped TxToken and stores it in a Secret referenced by the child task.
+// The Secret is initially owned by the parent task because a newly delegated
+// child may not yet have a UID. After the child is created,
+// adoptChildTransactionTokenSecret rewrites the owner reference to the child.
 func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, parentTask, childTask *corev1alpha1.Task, operation, agent string) error {
 	ttsURL := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSURL))
 	if ttsURL == "" {
@@ -67,7 +72,7 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 		os.Getenv(workerenv.ContextTokenTTSAudience),
 		os.Getenv(workerenv.ContextTokenTTSTimeout),
 		contexttoken.TTSTokenSourceServiceAccount,
-		"",
+		os.Getenv(workerenv.ContextTokenChildTokenTTL),
 		"",
 	)
 	if err != nil {
@@ -81,6 +86,7 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 		SubjectToken:     subjectToken,
 		SubjectTokenType: subjectTokenType,
 		Scope:            scope,
+		RequestedTTL:     ttsConfig.ChildTokenTTL,
 		RequestDetails:   requestDetails,
 	})
 	if err != nil {

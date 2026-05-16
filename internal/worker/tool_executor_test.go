@@ -9,6 +9,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -27,6 +28,8 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/workerenv"
 )
+
+const testOutboundToolScope = "orka:tools:http"
 
 func TestNewToolExecutor(t *testing.T) {
 	executor := NewToolExecutor()
@@ -265,6 +268,48 @@ func TestToolExecutor_Execute_PropagatesTransactionTokenFile(t *testing.T) {
 	}
 }
 
+func TestToolExecutor_Execute_FailsClosedOnConfiguredTransactionTokenHeader(t *testing.T) {
+	txnTokenPath := filepath.Join(t.TempDir(), "txn-token")
+	if err := os.WriteFile(txnTokenPath, []byte("tx-token"), 0600); err != nil {
+		t.Fatalf("failed to write transaction token fixture: %v", err)
+	}
+	t.Setenv(workerenv.TransactionTokenFile, txnTokenPath)
+
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: corev1alpha1.HTTPExecution{
+				URL: server.URL,
+				Headers: map[string]string{
+					kontxttoken.HeaderName: "user-configured-token",
+				},
+			},
+		},
+	}
+
+	_, err := executor.Execute(context.Background(), tool, nil)
+	if err == nil {
+		t.Fatal("Execute() error = nil, want reserved header conflict")
+	}
+	if !strings.Contains(err.Error(), "reserved header") || !strings.Contains(err.Error(), kontxttoken.HeaderName) {
+		t.Fatalf("Execute() error = %q, want reserved %s header conflict", err, kontxttoken.HeaderName)
+	}
+	if called {
+		t.Fatal("server was called despite reserved TxToken header conflict")
+	}
+}
+
 func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testing.T) {
 	subjectTokenPath := filepath.Join(t.TempDir(), "subject-token")
 	if err := os.WriteFile(subjectTokenPath, []byte("parent-tx-token"), 0600); err != nil {
@@ -283,7 +328,7 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 		Audience:           "downstream.example.test",
 		TransactionID:      "txn-downstream-123",
 		Subject:            "spiffe://example.test/ns/default/sa/orka-worker",
-		Scope:              "orka:tools:http",
+		Scope:              testOutboundToolScope,
 		RequestingWorkload: "spiffe://example.test/ns/default/sa/orka-worker",
 		TransactionContext: map[string]any{
 			"operation": "httpTool",
@@ -296,6 +341,7 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 
 	var ttsScope string
 	var ttsSubjectToken string
+	var ttsRequestedExpiresIn string
 	var requestDetails map[string]any
 	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/token_endpoint" {
@@ -306,6 +352,7 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 		}
 		ttsSubjectToken = r.FormValue("subject_token")
 		ttsScope = r.FormValue("scope")
+		ttsRequestedExpiresIn = r.FormValue("requested_expires_in")
 		if err := json.Unmarshal([]byte(r.FormValue("request_details")), &requestDetails); err != nil {
 			t.Fatalf("request_details JSON error = %v", err)
 		}
@@ -319,8 +366,10 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 	defer ttsServer.Close()
 
 	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.TransactionTokenFile, subjectTokenPath)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectTokenPath)
-	t.Setenv(workerenv.ContextTokenOutboundScope, "orka:tools:http")
+	t.Setenv(workerenv.ContextTokenOutboundScope, testOutboundToolScope)
+	t.Setenv(workerenv.ContextTokenToolTokenTTL, "17s")
 	t.Setenv(workerenv.TaskName, "task-1")
 
 	verifier := sdkverify.New(jwksServer.URL, "downstream.example.test")
@@ -355,8 +404,11 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 	if ttsSubjectToken != "parent-tx-token" {
 		t.Fatalf("TTS subject_token = %q, want parent-tx-token", ttsSubjectToken)
 	}
-	if ttsScope != "orka:tools:http" {
-		t.Fatalf("TTS scope = %q, want orka:tools:http", ttsScope)
+	if ttsScope != testOutboundToolScope {
+		t.Fatalf("TTS scope = %q, want %s", ttsScope, testOutboundToolScope)
+	}
+	if ttsRequestedExpiresIn != "17" {
+		t.Fatalf("TTS requested_expires_in = %q, want 17", ttsRequestedExpiresIn)
 	}
 	if requestDetails["operation"] != "httpTool" || requestDetails["tool"] != "downstream" || requestDetails["task"] != "task-1" {
 		t.Fatalf("request_details = %#v", requestDetails)
@@ -370,8 +422,83 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 	if verifiedTransactionID != "txn-downstream-123" {
 		t.Fatalf("downstream verified txn = %q, want txn-downstream-123", verifiedTransactionID)
 	}
-	if verifiedScope != "orka:tools:http" {
-		t.Fatalf("downstream verified scope = %q, want orka:tools:http", verifiedScope)
+	if verifiedScope != testOutboundToolScope {
+		t.Fatalf("downstream verified scope = %q, want %s", verifiedScope, testOutboundToolScope)
+	}
+}
+
+func TestToolExecutor_Execute_ReusesOutboundTTSClient(t *testing.T) {
+	subjectTokenPath := filepath.Join(t.TempDir(), "subject-token")
+	if err := os.WriteFile(subjectTokenPath, []byte("parent-tx-token"), 0600); err != nil {
+		t.Fatalf("failed to write subject token fixture: %v", err)
+	}
+
+	exchangeCount := 0
+	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		exchangeCount++
+		if r.URL.Path != "/token_endpoint" {
+			t.Fatalf("TTS path = %q, want /token_endpoint", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm() error = %v", err)
+		}
+		if got := r.FormValue("subject_token"); got != "parent-tx-token" {
+			t.Fatalf("TTS subject_token = %q, want parent-tx-token", got)
+		}
+		if got := r.FormValue("scope"); got != testOutboundToolScope {
+			t.Fatalf("TTS scope = %q, want %s", got, testOutboundToolScope)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"access_token":      fmt.Sprintf("downstream-token-%d", exchangeCount),
+			"issued_token_type": "urn:ietf:params:oauth:token-type:txn_token",
+			"token_type":        "N_A",
+		})
+	}))
+	defer ttsServer.Close()
+
+	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.TransactionTokenFile, subjectTokenPath)
+	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectTokenPath)
+	t.Setenv(workerenv.ContextTokenOutboundScope, testOutboundToolScope)
+
+	var receivedTxnTokens []string
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedTxnTokens = append(receivedTxnTokens, r.Header.Get(kontxttoken.HeaderName))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer toolServer.Close()
+
+	executor := &ToolExecutor{client: toolServer.Client(), namespace: "default", secretPath: "/secrets/tools"}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "downstream"},
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: corev1alpha1.HTTPExecution{URL: toolServer.URL},
+		},
+	}
+
+	if _, err := executor.Execute(context.Background(), tool, nil); err != nil {
+		t.Fatalf("first Execute() error = %v", err)
+	}
+	firstClient := executor.ttsClient
+	if firstClient == nil {
+		t.Fatal("executor.ttsClient is nil after first TTS exchange")
+	}
+
+	if _, err := executor.Execute(context.Background(), tool, nil); err != nil {
+		t.Fatalf("second Execute() error = %v", err)
+	}
+	if executor.ttsClient != firstClient {
+		t.Fatal("executor did not reuse cached TTS client for matching config")
+	}
+	if exchangeCount != 2 {
+		t.Fatalf("TTS exchange count = %d, want 2", exchangeCount)
+	}
+	if len(receivedTxnTokens) != 2 {
+		t.Fatalf("downstream call count = %d, want 2", len(receivedTxnTokens))
+	}
+	if receivedTxnTokens[0] != "downstream-token-1" || receivedTxnTokens[1] != "downstream-token-2" {
+		t.Fatalf("propagated TxTokens = %v, want TTS responses", receivedTxnTokens)
 	}
 }
 
@@ -390,7 +517,7 @@ func TestToolExecutor_Execute_FailsClosedWhenOutboundTTSExchangeFails(t *testing
 
 	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectTokenPath)
-	t.Setenv(workerenv.ContextTokenOutboundScope, "orka:tools:http")
+	t.Setenv(workerenv.ContextTokenOutboundScope, testOutboundToolScope)
 
 	calledDownstream := false
 	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

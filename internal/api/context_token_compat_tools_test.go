@@ -30,7 +30,7 @@ func TestContextTokenAllowedToolsFiltersInjectedProxyTools(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
 	handler, app := setupTestOpenAIHandler()
-	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationModeEnforce, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
 	if err != nil {
 		t.Fatalf("NewContextTokenAuthorizationConfig returned error: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestOpenAICompat_ContextTokenAllowedToolsFiltersInjectedProxyTools(t *testi
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
 	handler, app := setupTestOpenAIHandler(llmProvider, secret)
-	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationModeEnforce, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
 	if err != nil {
 		t.Fatalf("NewContextTokenAuthorizationConfig returned error: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestAnthropicCompat_ContextTokenAllowedToolsFiltersInjectedProxyTools(t *te
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
 	handler, app := setupTestAnthropicHandler(llmProvider, secret)
-	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationModeEnforce, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
 	if err != nil {
 		t.Fatalf("NewContextTokenAuthorizationConfig returned error: %v", err)
 	}

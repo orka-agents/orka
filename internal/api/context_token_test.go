@@ -13,6 +13,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -27,6 +28,7 @@ import (
 const (
 	testContextTokenSubject       = "workload-subject"
 	testContextTokenTransactionID = "txn-123"
+	testContextTokenTraceID       = "trace-123"
 )
 
 func issueTestContextToken(t *testing.T, provider *testOIDCProvider, headerOverrides, claimOverrides map[string]any) string {
@@ -48,7 +50,7 @@ func issueTestContextToken(t *testing.T, provider *testOIDCProvider, headerOverr
 		"scope":  "read write",
 		"req_wl": "spiffe://example.test/ns/default/sa/client",
 		"tctx": map[string]any{
-			"trace_id": "trace-123",
+			"trace_id": testContextTokenTraceID,
 		},
 		"rctx": map[string]any{
 			"user": "alice",
@@ -102,7 +104,7 @@ func TestContextToken_KontxtGeneratedTokenCompatibility(t *testing.T) {
 		Scope:              "read write",
 		RequestingWorkload: "spiffe://example.test/ns/default/sa/client",
 		TransactionContext: map[string]any{
-			"trace_id": "trace-123",
+			"trace_id": testContextTokenTraceID,
 		},
 		RequesterContext: map[string]any{
 			"user": "alice",
@@ -125,7 +127,7 @@ func TestContextToken_KontxtGeneratedTokenCompatibility(t *testing.T) {
 		ctxToken.TransactionID == "" {
 		t.Fatalf("unexpected context token claims: %#v", ctxToken)
 	}
-	if ctxToken.TransactionContext["trace_id"] != "trace-123" || ctxToken.RequesterContext["user"] != "alice" {
+	if ctxToken.TransactionContext["trace_id"] != testContextTokenTraceID || ctxToken.RequesterContext["user"] != "alice" {
 		t.Fatalf("unexpected context/requester context: %#v", ctxToken)
 	}
 
@@ -227,6 +229,13 @@ func TestContextToken_BearerIgnoredWhenNotConfigured(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll response body: %v", err)
+	}
+	if !strings.Contains(string(body), "Txn-Token") || !strings.Contains(string(body), "Authorization:Bearer") {
+		t.Fatalf("response body = %q, want actionable context-token header guidance", string(body))
 	}
 }
 

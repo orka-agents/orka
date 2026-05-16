@@ -207,8 +207,19 @@ func TestTransactionLogFields(t *testing.T) {
 		t.Fatalf("TransactionLogFields empty = %q, want empty", got)
 	}
 	got := TransactionLogFields("txn-123", "kontxt")
-	want := " transactionID=txn-123 contextTokenProfile=kontxt"
+	want := ` transactionID="txn-123" contextTokenProfile="kontxt"`
 	if got != want {
 		t.Fatalf("TransactionLogFields() = %q, want %q", got, want)
+	}
+}
+
+func TestTransactionLogFields_EscapesLogForgingCharacters(t *testing.T) {
+	got := TransactionLogFields("txn 123", "kontxt\nforged=true")
+	want := ` transactionID="txn 123" contextTokenProfile="kontxt\nforged=true"`
+	if got != want {
+		t.Fatalf("TransactionLogFields() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "\n") {
+		t.Fatalf("TransactionLogFields() contains a literal newline: %q", got)
 	}
 }

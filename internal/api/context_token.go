@@ -173,6 +173,9 @@ func extractContextTokenCandidate(ctx fiber.Ctx, cfg ContextTokenConfig) (string
 			}
 			token, err := extractTokenFromHeaderValue(headerValue, header)
 			if err != nil {
+				if !strings.EqualFold(header.Name, AuthHeader) {
+					continue
+				}
 				return "", ContextTokenProfileConfig{}, false, err
 			}
 			if strings.EqualFold(header.Name, AuthHeader) && !shouldTreatBearerAsContextToken(token, profile) {

@@ -303,12 +303,13 @@ func TestContextStringSupportsStructuredMaps(t *testing.T) {
 
 func enforceContextTokenAuthorizationConfig() ContextTokenAuthorizationConfig {
 	return ContextTokenAuthorizationConfig{
-		Mode:              ContextTokenAuthorizationModeEnforce,
-		TaskCreateScopes:  []string{ContextTokenScopeTaskCreate},
-		TaskReadScopes:    []string{ContextTokenScopeTaskGet},
-		TaskListScopes:    []string{ContextTokenScopeTaskList},
-		ToolUseScopes:     []string{ContextTokenScopeToolsUse},
-		ProviderUseScopes: []string{ContextTokenScopeProvidersUse},
+		Mode:                ContextTokenAuthorizationModeEnforce,
+		TaskCreateScopes:    []string{ContextTokenScopeTaskCreate},
+		TaskReadScopes:      []string{ContextTokenScopeTaskGet},
+		TaskListScopes:      []string{ContextTokenScopeTaskList},
+		ToolUseScopes:       []string{ContextTokenScopeToolsUse},
+		ProviderUseScopes:   []string{ContextTokenScopeProvidersUse},
+		SecretReadScopeList: []string{ContextTokenScopeSecretsRead},
 	}
 }
 

@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
 )
@@ -96,17 +97,28 @@ func TestSecurityRepositoryActions_ContextTokenAuthorization(t *testing.T) {
 }
 
 func setupSecurityHandlersWithAuthz(t *testing.T, ctxTokenConfig ContextTokenConfig, mode string, objs ...runtime.Object) *fiber.App {
+	app, _ := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, mode, objs...)
+	return app
+}
+
+func setupSecurityHandlersWithAuthzFixture(t *testing.T, ctxTokenConfig ContextTokenConfig, mode string, objs ...runtime.Object) (*fiber.App, *Handlers) {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
+		WithRuntimeObjects(objs...).
+		Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	securityStore := sqlite.NewStore(db, ":memory:")
-	authz, err := NewContextTokenAuthorizationConfig(mode, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{
+		Mode: mode,
+	})
 	require.NoError(t, err)
 
 	handlers := NewHandlers(HandlersConfig{
@@ -119,7 +131,46 @@ func setupSecurityHandlersWithAuthz(t *testing.T, ctxTokenConfig ContextTokenCon
 	app.Use(NewAuthMiddleware(handlers.client, AuthConfig{ContextTokens: ctxTokenConfig}))
 	app.Post("/security/repositories", handlers.CreateRepositoryScan)
 	app.Get("/security/repositories", handlers.ListRepositoryScans)
-	return app
+	app.Post("/security/repositories/:name/scans", handlers.CreateManualSecurityScan)
+	return app, handlers
+}
+
+func TestCreateManualSecurityScan_ContextTokenStampsTaskRequesterAndTransaction(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "scan-1",
+			Namespace: "demo",
+		},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:          "https://github.com/sozercan/actions-test",
+			Branch:           "main",
+			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+		},
+	}
+	app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, scan)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite})
+	req := httptest.NewRequest(http.MethodPost, "/security/repositories/scan-1/scans?namespace=demo", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	var run store.ScanRun
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&run))
+	require.NotEmpty(t, run.TaskName)
+
+	task := &corev1alpha1.Task{}
+	require.NoError(t, handlers.client.Get(context.Background(), clientObjectKey("demo", run.TaskName), task))
+	require.NotNil(t, task.Spec.RequestedBy)
+	require.Equal(t, testContextTokenSubject, task.Spec.RequestedBy.Subject)
+	require.NotNil(t, task.Spec.Transaction)
+	require.Equal(t, testContextTokenTransactionID, task.Spec.Transaction.ID)
+	require.Equal(t, labels.SelectorValue(testContextTokenTransactionID), task.Labels[labels.LabelTransactionID])
+	require.Equal(t, testContextTokenTransactionID, task.Annotations[labels.AnnotationTransactionID])
 }
 
 func TestCreateSecurityPullRequest_ExistingPR(t *testing.T) {
@@ -280,7 +331,7 @@ func TestCreateSecurityPatchTaskRequiresPushedBranch(t *testing.T) {
 		Confidence: "high",
 	}
 
-	proposal, err := handlers.createSecurityPatchTask(context.Background(), scan, finding)
+	proposal, err := handlers.createSecurityPatchTask(context.Background(), nil, scan, finding)
 	require.NoError(t, err)
 	require.Regexp(t, `^orka/security/fnd-123-[a-f0-9]{12}$`, proposal.Branch)
 

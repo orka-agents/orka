@@ -333,6 +333,13 @@ type ListTasksOptions struct {
 	Continue  string
 }
 
+// ListTasksResult contains a page of task summaries and pagination metadata.
+type ListTasksResult struct {
+	Items              []TaskSummary
+	Continue           string
+	RemainingItemCount *int64
+}
+
 // TaskLogsResponse is the response for getting task logs.
 type TaskLogsResponse struct {
 	Logs    string `json:"logs,omitempty"`
@@ -385,6 +392,15 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (*TaskDe
 
 // ListTasks returns tasks from the API.
 func (c *Client) ListTasks(ctx context.Context, opts ListTasksOptions) ([]TaskSummary, error) {
+	result, err := c.ListTasksPage(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return result.Items, nil
+}
+
+// ListTasksPage returns one task page from the API, including pagination metadata.
+func (c *Client) ListTasksPage(ctx context.Context, opts ListTasksOptions) (*ListTasksResult, error) {
 	u, err := url.Parse(c.BaseURL + "/api/v1/tasks")
 	if err != nil {
 		return nil, fmt.Errorf("invalid base URL: %w", err)
@@ -415,7 +431,11 @@ func (c *Client) ListTasks(ctx context.Context, opts ListTasksOptions) ([]TaskSu
 	for _, item := range resp.Items {
 		summaries = append(summaries, extractTaskSummary(item))
 	}
-	return summaries, nil
+	return &ListTasksResult{
+		Items:              summaries,
+		Continue:           resp.Metadata.Continue,
+		RemainingItemCount: resp.Metadata.RemainingItemCount,
+	}, nil
 }
 
 // GetTask returns full details for a single task.

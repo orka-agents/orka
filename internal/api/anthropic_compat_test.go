@@ -904,6 +904,77 @@ func TestAnthropicHandleListModels_WithProviders(t *testing.T) {
 	}
 }
 
+func TestAnthropicCompat_ContextTokenAuthorizationFiltersListModels(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	allowedProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeAnthropic,
+			DefaultModel: "claude-sonnet-4-20250514",
+		},
+	}
+	disallowedModelProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic-haiku", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeAnthropic,
+			DefaultModel: "claude-3-5-haiku-20241022",
+		},
+	}
+	disallowedProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "openai", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeOpenAI,
+			DefaultModel: "gpt-4o",
+		},
+	}
+	handler, app := setupTestAnthropicHandler(allowedProvider, disallowedModelProvider, disallowedProvider)
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	if err != nil {
+		t.Fatalf("NewContextTokenAuthorizationConfig returned error: %v", err)
+	}
+	handler.contextTokenAuthorization = authz
+
+	app.Use(NewAuthMiddleware(handler.client, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Get("/anthropic/v1/models", handler.HandleListModels)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeProvidersUse,
+		"tctx": map[string]any{
+			"allowedProviders": []string{"anthropic", "anthropic-haiku"},
+			"allowedModels":    []string{"claude-sonnet-4-20250514"},
+		},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/anthropic/v1/models", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var models OAIModelList
+	if err := json.NewDecoder(resp.Body).Decode(&models); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	got := map[string]bool{}
+	for _, model := range models.Data {
+		got[model.ID] = true
+	}
+	for _, id := range []string{"anthropic/claude-sonnet-4-20250514", "claude-sonnet-4-20250514"} {
+		if !got[id] {
+			t.Fatalf("expected allowed model ID %q in response, got %#v", id, got)
+		}
+	}
+	for _, id := range []string{"anthropic-haiku/claude-3-5-haiku-20241022", "claude-3-5-haiku-20241022", "openai/gpt-4o", "gpt-4o"} {
+		if got[id] {
+			t.Fatalf("did not expect disallowed model ID %q in response: %#v", id, got)
+		}
+	}
+}
+
 // --- Mock provider for tool loop tests ---
 
 type mockAnthropicProvider struct {
@@ -1245,7 +1316,7 @@ func TestAnthropicCompat_ContextTokenAuthorizationRejectsDisallowedProvider(t *t
 		Data:       map[string][]byte{"api-key": []byte("test-key")},
 	}
 	handler, app := setupTestAnthropicHandler(llmProvider, secret)
-	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationModeEnforce, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
 	if err != nil {
 		t.Fatalf("NewContextTokenAuthorizationConfig returned error: %v", err)
 	}

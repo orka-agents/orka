@@ -253,10 +253,9 @@ func TestHandleCancelChat(t *testing.T) {
 		rsAuthz := newTestResultStore(t)
 		fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
 		chAuthz := newTestChatHandler(t, fakeClient, ssAuthz, rsAuthz, cfg)
-		authz, err := NewContextTokenAuthorizationConfig(
-			ContextTokenAuthorizationModeEnforce,
-			"", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-		)
+		authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{
+			Mode: ContextTokenAuthorizationModeEnforce,
+		})
 		require.NoError(t, err)
 		chAuthz.contextTokenAuthorization = authz
 
@@ -759,7 +758,7 @@ func TestWrapWithRetryAndFallback(t *testing.T) {
 		rs := newTestResultStore(t)
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
-		authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationModeEnforce, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+		authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
 		require.NoError(t, err)
 		ch.contextTokenAuthorization = authz
 
@@ -1288,7 +1287,7 @@ func TestChatHandler_ContextTokenAuthorizationRejectsDisallowedModel(t *testing.
 	ss := newTestSessionStore(t)
 	rs := newTestResultStore(t)
 	ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
-	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationModeEnforce, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
 	require.NoError(t, err)
 	ch.contextTokenAuthorization = authz
 

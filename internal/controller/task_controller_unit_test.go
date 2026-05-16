@@ -22,7 +22,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -2245,7 +2244,7 @@ func TestHandleScheduled_CreateChildTask(t *testing.T) {
 			Type:                    corev1alpha1.TaskTypeContainer,
 			Image:                   "busybox:latest",
 			Schedule:                "* * * * *",
-			StartingDeadlineSeconds: ptr.To[int64](300),
+			StartingDeadlineSeconds: new(int64(300)),
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:            corev1alpha1.TaskPhaseScheduled,
@@ -2279,7 +2278,7 @@ func TestHandleScheduled_ExistingChildTaskStillUpdatesScheduleStatus(t *testing.
 			Type:                    corev1alpha1.TaskTypeContainer,
 			Image:                   "busybox:latest",
 			Schedule:                "* * * * *",
-			StartingDeadlineSeconds: ptr.To[int64](300),
+			StartingDeadlineSeconds: new(int64(300)),
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:            corev1alpha1.TaskPhaseScheduled,

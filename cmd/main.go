@@ -107,6 +107,7 @@ func main() {
 	var contextTokenToolReadScopes string
 	var contextTokenToolUseScopes string
 	var contextTokenProviderUseScopes string
+	var contextTokenSecretReadScopes string
 	var contextTokenAgentReadScopes string
 	var contextTokenAgentWriteScopes string
 	var contextTokenMemoryReadScopes string
@@ -232,6 +233,9 @@ func main() {
 	flag.StringVar(&contextTokenProviderUseScopes, "context-token-provider-use-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_PROVIDER_USE_SCOPES"),
 		"Comma-separated context-token scopes that authorize model provider use and listing. Defaults to orka:providers:use.")
+	flag.StringVar(&contextTokenSecretReadScopes, "context-token-secret-read-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_SECRET_READ_SCOPES"),
+		"Comma-separated context-token scopes that authorize Secret metadata reads. Defaults to orka:secrets:read.")
 	flag.StringVar(&contextTokenAgentReadScopes, "context-token-agent-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_AGENT_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize Agent reads. Defaults to orka:agents:read.")
@@ -307,26 +311,27 @@ func main() {
 		setupLog.Error(err, "invalid context token configuration")
 		os.Exit(1)
 	}
-	contextTokenAuthzConfig, err := api.NewContextTokenAuthorizationConfig(
-		contextTokenAuthzMode,
-		contextTokenTaskCreateScopes,
-		contextTokenTaskReadScopes,
-		contextTokenTaskListScopes,
-		contextTokenTaskDeleteScopes,
-		contextTokenToolReadScopes,
-		contextTokenToolUseScopes,
-		contextTokenProviderUseScopes,
-		contextTokenAgentReadScopes,
-		contextTokenAgentWriteScopes,
-		contextTokenMemoryReadScopes,
-		contextTokenMemoryWriteScopes,
-		contextTokenSessionReadScopes,
-		contextTokenSessionWriteScopes,
-		contextTokenSecurityReadScopes,
-		contextTokenSecurityWriteScopes,
-		contextTokenSkillReadScopes,
-		contextTokenSkillWriteScopes,
-	)
+	contextTokenAuthzConfig, err := api.NewContextTokenAuthorizationConfig(api.ContextTokenAuthorizationConfigOptions{
+		Mode:                contextTokenAuthzMode,
+		TaskCreateScopes:    contextTokenTaskCreateScopes,
+		TaskReadScopes:      contextTokenTaskReadScopes,
+		TaskListScopes:      contextTokenTaskListScopes,
+		TaskDeleteScopes:    contextTokenTaskDeleteScopes,
+		ToolReadScopes:      contextTokenToolReadScopes,
+		ToolUseScopes:       contextTokenToolUseScopes,
+		ProviderUseScopes:   contextTokenProviderUseScopes,
+		SecretReadScopes:    contextTokenSecretReadScopes,
+		AgentReadScopes:     contextTokenAgentReadScopes,
+		AgentWriteScopes:    contextTokenAgentWriteScopes,
+		MemoryReadScopes:    contextTokenMemoryReadScopes,
+		MemoryWriteScopes:   contextTokenMemoryWriteScopes,
+		SessionReadScopes:   contextTokenSessionReadScopes,
+		SessionWriteScopes:  contextTokenSessionWriteScopes,
+		SecurityReadScopes:  contextTokenSecurityReadScopes,
+		SecurityWriteScopes: contextTokenSecurityWriteScopes,
+		SkillReadScopes:     contextTokenSkillReadScopes,
+		SkillWriteScopes:    contextTokenSkillWriteScopes,
+	})
 	if err != nil {
 		setupLog.Error(err, "invalid context token authorization configuration")
 		os.Exit(1)
@@ -487,6 +492,12 @@ func main() {
 		jobBuilder.ContextTokenTTSAudience = contextTokenTTSConfig.Audience
 		if contextTokenTTSConfig.Timeout > 0 {
 			jobBuilder.ContextTokenTTSTimeout = contextTokenTTSConfig.Timeout.String()
+		}
+		if contextTokenTTSConfig.ChildTokenTTL > 0 {
+			jobBuilder.ContextTokenChildTokenTTL = contextTokenTTSConfig.ChildTokenTTL.String()
+		}
+		if contextTokenTTSConfig.ToolTokenTTL > 0 {
+			jobBuilder.ContextTokenToolTokenTTL = contextTokenTTSConfig.ToolTokenTTL.String()
 		}
 		jobBuilder.ContextTokenSubjectTokenType = contextTokenSubjectTokenType
 		jobBuilder.ContextTokenChildScope = contextTokenChildScope

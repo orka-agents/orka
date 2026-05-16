@@ -69,7 +69,9 @@ func setupTestHandlersWithAuthzStore(
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
-	authz, err := NewContextTokenAuthorizationConfig(mode, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{
+		Mode: mode,
+	})
 	require.NoError(t, err)
 	handlers := NewHandlers(HandlersConfig{
 		Client:                    fakeClient,
@@ -3075,7 +3077,7 @@ func TestHandlers_ListSecretNames_ContextTokenAuthorizationEnforceAllowsReadScop
 	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, secret)
 
 	token := issueTestContextToken(t, provider, nil, map[string]any{
-		"scope": ContextTokenScopeProvidersUse,
+		"scope": ContextTokenScopeSecretsRead,
 		"tctx": map[string]any{
 			"namespace": "default",
 		},
@@ -3098,7 +3100,7 @@ func TestHandlers_ListSecretNames_ContextTokenAuthorizationEnforceRejectsMissing
 	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
 
 	token := issueTestContextToken(t, provider, nil, map[string]any{
-		"scope": ContextTokenScopeTaskCreate,
+		"scope": ContextTokenScopeProvidersUse,
 	})
 	req := httptest.NewRequest(http.MethodGet, "/secrets", nil)
 	req.Header.Set(KontxtHeaderName, token)
@@ -3113,7 +3115,7 @@ func TestHandlers_ListSecretNames_ContextTokenAuthorizationEnforceRejectsNamespa
 	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
 
 	token := issueTestContextToken(t, provider, nil, map[string]any{
-		"scope": ContextTokenScopeTaskList,
+		"scope": ContextTokenScopeSecretsRead,
 		"tctx": map[string]any{
 			"namespace": "restricted",
 		},

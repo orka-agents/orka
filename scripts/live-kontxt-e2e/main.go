@@ -154,7 +154,7 @@ func runTTSServer(args []string) error {
 		*trustDomain,
 		strings.TrimSpace(*replacementJWKSURL) != "",
 	)
-	return http.ListenAndServe(*addr, mux)
+	return serveHTTP(*addr, mux)
 }
 
 func runVerifyToken(args []string) error {
@@ -230,7 +230,19 @@ func runDownstreamVerifier(args []string) error {
 		_, _ = w.Write([]byte("ok"))
 	})
 	log.Printf("kontxt downstream verifier listening on %s", *addr)
-	return http.ListenAndServe(*addr, mux)
+	return serveHTTP(*addr, mux)
+}
+
+func serveHTTP(addr string, handler http.Handler) error {
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	return server.ListenAndServe()
 }
 
 func runDelegateChild(args []string) error {

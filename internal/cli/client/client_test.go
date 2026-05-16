@@ -304,6 +304,50 @@ func TestListTasks(t *testing.T) {
 	}
 }
 
+func TestListTasksPageReturnsPaginationMetadata(t *testing.T) {
+	remaining := int64(42)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("limit"); got != "10" {
+			t.Errorf("limit query = %q, want 10", got)
+		}
+		if got := r.URL.Query().Get("continue"); got != "abc" {
+			t.Errorf("continue query = %q, want abc", got)
+		}
+		json.NewEncoder(w).Encode(taskListResponse{ //nolint:errcheck
+			Items: []TaskDetail{
+				{
+					"metadata": map[string]any{"name": "t1", "namespace": "ns1"},
+					"spec":     map[string]any{"type": "ai"},
+					"status":   map[string]any{"phase": "Running"},
+				},
+			},
+			Metadata: struct {
+				Continue           string `json:"continue,omitempty"`
+				RemainingItemCount *int64 `json:"remainingItemCount,omitempty"`
+			}{
+				Continue:           "next",
+				RemainingItemCount: &remaining,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	page, err := c.ListTasksPage(context.Background(), ListTasksOptions{Limit: 10, Continue: "abc"})
+	if err != nil {
+		t.Fatalf("ListTasksPage() error = %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("len(Items) = %d, want 1", len(page.Items))
+	}
+	if page.Continue != "next" {
+		t.Fatalf("Continue = %q, want next", page.Continue)
+	}
+	if page.RemainingItemCount == nil || *page.RemainingItemCount != remaining {
+		t.Fatalf("RemainingItemCount = %v, want %d", page.RemainingItemCount, remaining)
+	}
+}
+
 func TestGetTask(t *testing.T) {
 	tests := []struct {
 		name    string

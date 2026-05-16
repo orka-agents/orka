@@ -443,6 +443,39 @@ Key configuration values for the Helm chart:
 | `client.create` | `true` | Create client ServiceAccount for API access |
 | `client.name` | `orka-client` | Client ServiceAccount name |
 
+Context-token flags can also be configured through Helm under
+`controller.contextToken`. For example:
+
+```yaml
+controller:
+  contextToken:
+    profile: kontxt
+    issuer: https://issuer.example.com
+    audience: orka
+    headers: Txn-Token
+    authzMode: enforce
+    scopes:
+      taskCreate: orka:tasks:create
+      providerUse: orka:providers:use
+      toolUse: orka:tools:use
+    tts:
+      url: https://tts.example.com
+      audience: orka-workers
+      timeout: 5s
+      tokenSource: serviceAccount
+      childScope: orka:tasks:create
+      outboundScope: orka:tools:use
+      childTokenTTL: 5m
+      toolTokenTTL: 2m
+```
+
+The Helm keys mirror the controller flags: for example,
+`controller.contextToken.jwksUrl` renders `--context-token-jwks-url`,
+`controller.contextToken.scopes.secretRead` renders
+`--context-token-secret-read-scopes`, and
+`controller.contextToken.tts.toolTokenTTL` renders
+`--context-token-tool-token-ttl`.
+
 See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 
 ## Controller Flags
@@ -470,6 +503,7 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 | `--context-token-tool-read-scopes` | `ORKA_CONTEXT_TOKEN_TOOL_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Tool reads. Defaults to `orka:tools:read` |
 | `--context-token-tool-use-scopes` | `ORKA_CONTEXT_TOKEN_TOOL_USE_SCOPES` env or `""` | Comma-separated scopes authorizing Orka-managed chat/OpenAI/Anthropic tool execution. Defaults to `orka:tools:use` |
 | `--context-token-provider-use-scopes` | `ORKA_CONTEXT_TOKEN_PROVIDER_USE_SCOPES` env or `""` | Comma-separated scopes authorizing chat/OpenAI/Anthropic model-provider use and model listing. Defaults to `orka:providers:use` |
+| `--context-token-secret-read-scopes` | `ORKA_CONTEXT_TOKEN_SECRET_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Secret metadata reads. Defaults to `orka:secrets:read` |
 | `--context-token-agent-read-scopes` | `ORKA_CONTEXT_TOKEN_AGENT_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Agent reads. Defaults to `orka:agents:read` |
 | `--context-token-agent-write-scopes` | `ORKA_CONTEXT_TOKEN_AGENT_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing Agent writes. Defaults to `orka:agents:write` |
 | `--context-token-memory-read-scopes` | `ORKA_CONTEXT_TOKEN_MEMORY_READ_SCOPES` env or `""` | Comma-separated scopes authorizing memory reads. Defaults to `orka:memory:read` |

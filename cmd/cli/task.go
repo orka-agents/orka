@@ -119,32 +119,40 @@ func newTaskListCmd() *cobra.Command {
 		Short:   "List tasks",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c := newClientFromCmd(cmd)
-			tasks, err := c.ListTasks(context.Background(), client.ListTasksOptions{
-				Namespace: c.Namespace,
-				Limit:     limit,
-			})
-			if err != nil {
-				return err
-			}
-
-			if status != "" {
-				filtered := make([]client.TaskSummary, 0)
-				for _, t := range tasks {
-					if strings.EqualFold(t.Phase, status) {
-						filtered = append(filtered, t)
-					}
+			var tasks []client.TaskSummary
+			if status != "" || transactionID != "" {
+				var truncated bool
+				var err error
+				tasks, truncated, err = listFilteredTasks(
+					context.Background(),
+					c,
+					c.Namespace,
+					limit,
+					func(t client.TaskSummary) bool {
+						if status != "" && !strings.EqualFold(t.Phase, status) {
+							return false
+						}
+						if transactionID != "" && t.TransactionID != transactionID {
+							return false
+						}
+						return true
+					},
+				)
+				if err != nil {
+					return err
 				}
-				tasks = filtered
-			}
-
-			if transactionID != "" {
-				filtered := make([]client.TaskSummary, 0)
-				for _, t := range tasks {
-					if t.TransactionID == transactionID {
-						filtered = append(filtered, t)
-					}
+				if truncated {
+					warnFilteredTaskOutputLimited(limit)
 				}
-				tasks = filtered
+			} else {
+				var err error
+				tasks, err = c.ListTasks(context.Background(), client.ListTasksOptions{
+					Namespace: c.Namespace,
+					Limit:     limit,
+				})
+				if err != nil {
+					return err
+				}
 			}
 
 			if len(tasks) == 0 {

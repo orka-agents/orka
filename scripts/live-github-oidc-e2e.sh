@@ -69,6 +69,9 @@ kontxt_tts_pf_log="${work_dir}/kontxt-tts-port-forward.log"
 kontxt_downstream_pf_log="${work_dir}/kontxt-downstream-port-forward.log"
 kontxt_jwks_file="${work_dir}/kontxt-jwks.json"
 kontxt_token_file="${work_dir}/kontxt-token.txt"
+kontxt_key_file="${work_dir}/kontxt-key.pem"
+kontxt_kid_file="${work_dir}/kontxt-kid.txt"
+kontxt_fixture_generator="${work_dir}/generate-kontxt-fixture.go"
 kontxt_tts_parent_token_file="${work_dir}/kontxt-tts-parent-token.txt"
 kontxt_child_token_file="${work_dir}/kontxt-child-token.txt"
 manager_kustomization="${repo_root}/config/manager/kustomization.yaml"
@@ -304,21 +307,21 @@ require_github_oidc_token_source() {
   die "GitHub OIDC token source is required: run in GitHub Actions with id-token: write or set ORKA_GITHUB_OIDC_TOKEN"
 }
 
-generate_kontxt_fixture() {
-  local generator
-  generator="${work_dir}/generate-kontxt-fixture.go"
-
-  cat >"${generator}" <<'GO'
+write_kontxt_fixture_generator() {
+  cat >"${kontxt_fixture_generator}" <<'GO'
 package main
 
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"math/big"
 	"os"
+	"strings"
 	"time"
 
 	kontxttoken "github.com/aramase/kontxt/pkg/token"
@@ -333,35 +336,26 @@ func mustEnv(name string) string {
 }
 
 func main() {
+	switch mode := mustEnv("KONTXT_FIXTURE_MODE"); mode {
+	case "jwks":
+		generateJWKSFixture()
+	case "token":
+		mintTokenFixture()
+	default:
+		panic(fmt.Sprintf("unsupported KONTXT_FIXTURE_MODE %q", mode))
+	}
+}
+
+func generateJWKSFixture() {
 	jwksPath := mustEnv("KONTXT_JWKS_FILE")
-	tokenPath := mustEnv("KONTXT_TOKEN_FILE")
-	issuer := mustEnv("KONTXT_ISSUER")
-	audience := mustEnv("KONTXT_AUDIENCE")
-	subject := mustEnv("KONTXT_SUBJECT")
-	requestingWorkload := mustEnv("KONTXT_REQUESTING_WORKLOAD")
+	keyPath := mustEnv("KONTXT_KEY_FILE")
+	kidPath := mustEnv("KONTXT_KID_FILE")
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		panic(err)
 	}
 	kid := fmt.Sprintf("kontxt-live-%d", time.Now().UnixNano())
-
-	token, err := kontxttoken.New(kontxttoken.Claims{
-		Issuer:             issuer,
-		Audience:           audience,
-		Subject:            subject,
-		Scope:              "read write",
-		RequestingWorkload: requestingWorkload,
-		TransactionContext: map[string]any{
-			"e2e": "live-kind",
-		},
-		RequesterContext: map[string]any{
-			"ci": "github-actions",
-		},
-	}, key, kid, 15*time.Minute)
-	if err != nil {
-		panic(err)
-	}
 
 	jwk := map[string]any{
 		"kty": "RSA",
@@ -380,20 +374,103 @@ func main() {
 	if err := os.WriteFile(jwksPath, jwksBytes, 0o600); err != nil {
 		panic(err)
 	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(kidPath, []byte(kid), 0o600); err != nil {
+		panic(err)
+	}
+}
+
+func mintTokenFixture() {
+	tokenPath := mustEnv("KONTXT_TOKEN_FILE")
+	keyPath := mustEnv("KONTXT_KEY_FILE")
+	kidPath := mustEnv("KONTXT_KID_FILE")
+	issuer := mustEnv("KONTXT_ISSUER")
+	audience := mustEnv("KONTXT_AUDIENCE")
+	subject := mustEnv("KONTXT_SUBJECT")
+	requestingWorkload := mustEnv("KONTXT_REQUESTING_WORKLOAD")
+
+	key := readPrivateKey(keyPath)
+	kidBytes, err := os.ReadFile(kidPath)
+	if err != nil {
+		panic(err)
+	}
+	kid := strings.TrimSpace(string(kidBytes))
+	if kid == "" {
+		panic("empty kontxt key id")
+	}
+
+	token, err := kontxttoken.New(kontxttoken.Claims{
+		Issuer:             issuer,
+		Audience:           audience,
+		Subject:            subject,
+		Scope:              "read write",
+		RequestingWorkload: requestingWorkload,
+		TransactionContext: map[string]any{
+			"e2e": "live-kind",
+		},
+		RequesterContext: map[string]any{
+			"ci": "github-actions",
+		},
+	}, key, kid, 4*time.Hour)
+	if err != nil {
+		panic(err)
+	}
+
 	if err := os.WriteFile(tokenPath, []byte(token), 0o600); err != nil {
 		panic(err)
 	}
 }
-GO
 
-  log "Generating kontxt TxToken and JWKS fixture"
-  KONTXT_JWKS_FILE="${kontxt_jwks_file}" \
+func readPrivateKey(path string) *rsa.PrivateKey {
+	keyPEM, err := os.ReadFile(path)
+	if err != nil {
+		panic(err)
+	}
+	block, _ := pem.Decode(keyPEM)
+	if block == nil {
+		panic("failed to decode RSA private key PEM")
+	}
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		panic(err)
+	}
+	return key
+}
+GO
+}
+
+generate_kontxt_jwks_fixture() {
+  write_kontxt_fixture_generator
+  log "Generating kontxt JWKS fixture"
+  KONTXT_FIXTURE_MODE="jwks" \
+    KONTXT_JWKS_FILE="${kontxt_jwks_file}" \
+    KONTXT_KEY_FILE="${kontxt_key_file}" \
+    KONTXT_KID_FILE="${kontxt_kid_file}" \
+    go run "${kontxt_fixture_generator}"
+  [[ -s "${kontxt_jwks_file}" ]] || die "generated kontxt JWKS was empty"
+  [[ -s "${kontxt_key_file}" ]] || die "generated kontxt private key was empty"
+  [[ -s "${kontxt_kid_file}" ]] || die "generated kontxt key id was empty"
+}
+
+mint_kontxt_token() {
+  log "Minting kontxt TxToken fixture"
+  [[ -s "${kontxt_key_file}" ]] || die "kontxt private key fixture is missing"
+  [[ -s "${kontxt_kid_file}" ]] || die "kontxt key id fixture is missing"
+  KONTXT_FIXTURE_MODE="token" \
     KONTXT_TOKEN_FILE="${kontxt_token_file}" \
+    KONTXT_KEY_FILE="${kontxt_key_file}" \
+    KONTXT_KID_FILE="${kontxt_kid_file}" \
     KONTXT_ISSUER="${kontxt_issuer}" \
     KONTXT_AUDIENCE="${kontxt_audience}" \
     KONTXT_SUBJECT="${kontxt_subject}" \
     KONTXT_REQUESTING_WORKLOAD="${kontxt_requesting_workload}" \
-    go run "${generator}"
+    go run "${kontxt_fixture_generator}"
   kontxt_token="$(<"${kontxt_token_file}")"
   [[ -n "${kontxt_token}" ]] || die "generated kontxt token was empty"
 }
@@ -970,7 +1047,7 @@ main() {
 
   trap 'status=$?; on_exit "${status}"; exit "${status}"' EXIT
 
-  generate_kontxt_fixture
+  generate_kontxt_jwks_fixture
 
   log "Creating or reusing Kind cluster ${kind_cluster}"
   run make setup-test-e2e KIND_CLUSTER="${kind_cluster}"
@@ -1095,6 +1172,7 @@ main() {
   expect_http_status "${tamper_spec_status}" "400" "${tamper_spec_response}" "nested spec.requestedBy tampering"
 
   exchange_github_oidc_for_kontxt_tts_token
+  mint_kontxt_token
 
   log "Creating Task with live kontxt TxToken"
   kontxt_task_name="kontxt-$(date +%s)-${RANDOM}"

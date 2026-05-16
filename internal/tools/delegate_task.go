@@ -358,16 +358,14 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 
 	// Set owner reference if parent task exists
 	if dc.parentTask.UID != "" {
-		blockOwnerDeletion := true
 		isController := true
 		childTask.OwnerReferences = []metav1.OwnerReference{
 			{
-				APIVersion:         corev1alpha1.GroupVersion.String(),
-				Kind:               taskKindString,
-				Name:               dc.parentTask.Name,
-				UID:                dc.parentTask.UID,
-				Controller:         &isController,
-				BlockOwnerDeletion: &blockOwnerDeletion,
+				APIVersion: corev1alpha1.GroupVersion.String(),
+				Kind:       taskKindString,
+				Name:       dc.parentTask.Name,
+				UID:        dc.parentTask.UID,
+				Controller: &isController,
 			},
 		}
 	}

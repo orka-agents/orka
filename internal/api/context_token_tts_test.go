@@ -80,6 +80,9 @@ func TestKontxtTTSClientExchange(t *testing.T) {
 		if got := r.FormValue("audience"); got != "orka" {
 			t.Fatalf("audience = %q, want orka", got)
 		}
+		if got := r.FormValue("requested_expires_in"); got != "8" {
+			t.Fatalf("requested_expires_in = %q, want 8", got)
+		}
 
 		var details map[string]any
 		if err := json.Unmarshal([]byte(r.FormValue("request_details")), &details); err != nil {
@@ -115,6 +118,7 @@ func TestKontxtTTSClientExchange(t *testing.T) {
 		Scope:            ContextTokenScopeTaskCreate,
 		RequestDetails:   map[string]any{"operation": "createTask"},
 		RequestContext:   map[string]any{"source": "test"},
+		RequestedTTL:     7500 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("Exchange returned error: %v", err)

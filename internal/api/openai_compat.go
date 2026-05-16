@@ -787,6 +787,7 @@ func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 	if h.watchNamespace != "" {
 		namespace = h.watchNamespace
 	}
+	c.Locals(resolvedNamespaceLocalKey, namespace)
 
 	if err := authorizeContextTokenActionWithConfig(c, h.contextTokenAuthorization, "openAIListModels", h.contextTokenAuthorization.ProviderUseScopes); err != nil {
 		return openAIContextTokenAuthorizationError(c, err)
@@ -812,6 +813,9 @@ func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 
 	for _, p := range providerList.Items {
 		if p.Spec.DefaultModel != "" {
+			if !contextTokenAllowsListedProviderModel(c, h.contextTokenAuthorization, "openAIListModels", namespace, providerResolutionInfo(&p), p.Spec.DefaultModel) {
+				continue
+			}
 			modelID := fmt.Sprintf("%s/%s", p.Name, p.Spec.DefaultModel)
 			if !seen[modelID] {
 				models = append(models, OAIModel{

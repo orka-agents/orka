@@ -14,6 +14,7 @@ import (
 	"strconv"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/taskmeta"
 )
 
 var safeTransactionContextKeys = []string{
@@ -30,6 +31,28 @@ var safeTransactionContextKeys = []string{
 	"allowedModels",
 	"e2e",
 	"trace_id",
+}
+
+const maxSafeTransactionContextValueLength = 1024
+
+func stampTaskRequesterFromUserInfo(task *corev1alpha1.Task, ui *UserInfo) {
+	if task == nil || ui == nil || (ui.AuthType != AuthTypeOIDC && ui.AuthType != AuthTypeContextToken) {
+		return
+	}
+
+	task.Spec.RequestedBy = &corev1alpha1.RequestedBy{
+		Subject:  ui.Subject,
+		Issuer:   ui.Issuer,
+		Username: ui.Username,
+		Email:    ui.Email,
+		Groups:   append([]string{}, ui.Groups...),
+		Roles:    append([]string{}, ui.Roles...),
+	}
+
+	if ui.AuthType == AuthTypeContextToken {
+		task.Spec.Transaction = taskTransactionFromContextToken(ui.ContextToken)
+		taskmeta.ApplyTransactionMetadata(&task.ObjectMeta, task.Spec.Transaction)
+	}
 }
 
 func taskTransactionFromContextToken(token *ContextToken) *corev1alpha1.TaskTransaction {
@@ -75,7 +98,7 @@ func safeTransactionContext(value map[string]any) map[string]string {
 		if !ok {
 			continue
 		}
-		if rendered, ok := renderSafeTransactionContextValue(raw); ok {
+		if rendered, ok := renderSafeTransactionContextValue(raw); ok && len(rendered) <= maxSafeTransactionContextValueLength {
 			out[key] = rendered
 		}
 	}

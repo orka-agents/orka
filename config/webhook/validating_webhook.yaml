@@ -10,7 +10,11 @@ webhooks:
   admissionReviewVersions:
   - v1
   sideEffects: None
-  failurePolicy: Fail
+  # This opt-in manifest defaults to Ignore so a webhook endpoint without an
+  # injected clientConfig.caBundle cannot block Task writes. Change this to Fail
+  # only after webhook-server-cert is provisioned and caBundle injection is
+  # configured for this ValidatingWebhookConfiguration.
+  failurePolicy: Ignore
   matchPolicy: Equivalent
   timeoutSeconds: 10
   clientConfig:

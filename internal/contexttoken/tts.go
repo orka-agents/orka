@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -115,6 +116,7 @@ type ExchangeRequest struct {
 	SubjectToken     string
 	SubjectTokenType string
 	Scope            string
+	RequestedTTL     time.Duration
 	RequestDetails   map[string]any
 	RequestContext   map[string]any
 }
@@ -185,6 +187,11 @@ func (c *KontxtTTSClient) exchange(ctx context.Context, req ExchangeRequest) (st
 	if c.audience != "" {
 		form.Set("audience", c.audience)
 	}
+	if req.RequestedTTL > 0 {
+		ttlSeconds := int64((req.RequestedTTL + time.Second - 1) / time.Second)
+		ttlSeconds = max(ttlSeconds, 1)
+		form.Set("requested_expires_in", strconv.FormatInt(ttlSeconds, 10))
+	}
 	if req.RequestDetails != nil {
 		data, err := json.Marshal(req.RequestDetails)
 		if err != nil {
@@ -211,7 +218,9 @@ func (c *KontxtTTSClient) exchange(ctx context.Context, req ExchangeRequest) (st
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

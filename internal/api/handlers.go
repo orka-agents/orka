@@ -27,7 +27,6 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
-	"github.com/sozercan/orka/internal/taskmeta"
 	"github.com/sozercan/orka/internal/tools"
 )
 
@@ -349,20 +348,7 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		task.Spec.Execution = req.Execution.DeepCopy()
 	}
 
-	if ui := GetUserInfo(c); ui != nil && (ui.AuthType == AuthTypeOIDC || ui.AuthType == AuthTypeContextToken) {
-		task.Spec.RequestedBy = &corev1alpha1.RequestedBy{
-			Subject:  ui.Subject,
-			Issuer:   ui.Issuer,
-			Username: ui.Username,
-			Email:    ui.Email,
-			Groups:   append([]string{}, ui.Groups...),
-			Roles:    append([]string{}, ui.Roles...),
-		}
-		if ui.AuthType == AuthTypeContextToken {
-			task.Spec.Transaction = taskTransactionFromContextToken(ui.ContextToken)
-			taskmeta.ApplyTransactionMetadata(&task.ObjectMeta, task.Spec.Transaction)
-		}
-	}
+	stampTaskRequesterFromUserInfo(task, GetUserInfo(c))
 
 	// Parse timeout if provided
 	if req.Timeout != "" {

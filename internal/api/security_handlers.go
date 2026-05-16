@@ -122,7 +122,7 @@ func (h *Handlers) updateRepositoryScanRunStatus(ctx context.Context, scan *core
 	return h.client.Status().Patch(ctx, patch, client.MergeFrom(scan))
 }
 
-func (h *Handlers) createSecurityScanRun(ctx context.Context, scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit string) (*store.ScanRun, error) {
+func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit string) (*store.ScanRun, error) {
 	if err := h.ensureSecurityStore(); err != nil {
 		return nil, err
 	}
@@ -171,6 +171,7 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, scan *corev1alpha1
 			},
 		},
 	}
+	stampTaskRequesterFromUserInfo(task, ui)
 	if err := h.client.Create(ctx, task); err != nil {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create scan task: %v", err))
 	}
@@ -195,7 +196,7 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, scan *corev1alpha1
 	return run, nil
 }
 
-func (h *Handlers) createSecurityValidationTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, finding *store.Finding) error {
+func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInfo, scan *corev1alpha1.RepositoryScan, finding *store.Finding) error {
 	timeout := metav1.Duration{Duration: 90 * time.Minute}
 	priority := int32(725)
 	taskName := security.ScanStageTaskName(scan.Name, "validation", security.StageValidation, finding.ID)
@@ -233,6 +234,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, scan *corev
 			},
 		},
 	}
+	stampTaskRequesterFromUserInfo(task, ui)
 	if err := h.client.Create(ctx, task); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create validation task: %v", err))
 	}
@@ -243,7 +245,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, scan *corev
 	return nil
 }
 
-func (h *Handlers) createSecurityPatchTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, finding *store.Finding) (*store.PatchProposal, error) {
+func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, scan *corev1alpha1.RepositoryScan, finding *store.Finding) (*store.PatchProposal, error) {
 	if err := h.ensureSecurityStore(); err != nil {
 		return nil, err
 	}
@@ -296,6 +298,7 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, scan *corev1alph
 			},
 		},
 	}
+	stampTaskRequesterFromUserInfo(task, ui)
 	if err := h.client.Create(ctx, task); err != nil {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create patch task: %v", err))
 	}
@@ -572,7 +575,7 @@ func (h *Handlers) CreateManualSecurityScan(c fiber.Ctx) error {
 	if active {
 		return fiber.NewError(fiber.StatusConflict, "a security scan is already running for this repository")
 	}
-	run, err := h.createSecurityScanRun(c.Context(), scan, "manual", scan.Status.LastProcessedCommit, "")
+	run, err := h.createSecurityScanRun(c.Context(), GetUserInfo(c), scan, "manual", scan.Status.LastProcessedCommit, "")
 	if err != nil {
 		return err
 	}
@@ -718,7 +721,7 @@ func (h *Handlers) ValidateSecurityFinding(c fiber.Ctx) error {
 		return err
 	}
 
-	if err := h.createSecurityValidationTask(c.Context(), scan, finding); err != nil {
+	if err := h.createSecurityValidationTask(c.Context(), GetUserInfo(c), scan, finding); err != nil {
 		return err
 	}
 	return c.SendStatus(fiber.StatusAccepted)
@@ -748,7 +751,7 @@ func (h *Handlers) GenerateSecurityPatch(c fiber.Ctx) error {
 		return err
 	}
 
-	proposal, err := h.createSecurityPatchTask(c.Context(), scan, finding)
+	proposal, err := h.createSecurityPatchTask(c.Context(), GetUserInfo(c), scan, finding)
 	if err != nil {
 		return err
 	}
