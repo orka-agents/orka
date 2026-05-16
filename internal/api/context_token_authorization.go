@@ -9,6 +9,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -777,20 +778,20 @@ func hasAnyScope(actual, required []string) bool {
 	return false
 }
 
-func contextString(ctx map[string]any, name string) (string, bool) {
-	value, ok := ctx[name]
+func contextString(ctx any, name string) (string, bool) {
+	value, ok := contextValue(ctx, name)
 	if !ok {
 		return "", false
 	}
-	s, ok := value.(string)
+	s, ok := contextValueString(value)
 	if !ok || strings.TrimSpace(s) == "" {
 		return "", false
 	}
 	return s, true
 }
 
-func contextStringList(ctx map[string]any, name string) ([]string, bool) {
-	value, ok := ctx[name]
+func contextStringList(ctx any, name string) ([]string, bool) {
+	value, ok := contextValue(ctx, name)
 	if !ok {
 		return nil, false
 	}
@@ -811,8 +812,61 @@ func contextStringList(ctx map[string]any, name string) ([]string, bool) {
 		out := workerenv.SplitCSV(v)
 		return out, len(out) > 0
 	default:
+		return contextValueStringSlice(value)
+	}
+}
+
+func contextValue(ctx any, name string) (any, bool) {
+	switch v := ctx.(type) {
+	case map[string]any:
+		value, ok := v[name]
+		return value, ok
+	case map[string]string:
+		value, ok := v[name]
+		return value, ok
+	}
+
+	rv := reflect.ValueOf(ctx)
+	if !rv.IsValid() || rv.Kind() != reflect.Map || rv.Type().Key().Kind() != reflect.String {
 		return nil, false
 	}
+
+	key := reflect.ValueOf(name)
+	if !key.Type().AssignableTo(rv.Type().Key()) {
+		if !key.Type().ConvertibleTo(rv.Type().Key()) {
+			return nil, false
+		}
+		key = key.Convert(rv.Type().Key())
+	}
+
+	value := rv.MapIndex(key)
+	if !value.IsValid() {
+		return nil, false
+	}
+	return value.Interface(), true
+}
+
+func contextValueString(value any) (string, bool) {
+	if s, ok := value.(string); ok {
+		return s, true
+	}
+	rv := reflect.ValueOf(value)
+	if !rv.IsValid() || rv.Kind() != reflect.String {
+		return "", false
+	}
+	return rv.String(), true
+}
+
+func contextValueStringSlice(value any) ([]string, bool) {
+	rv := reflect.ValueOf(value)
+	if !rv.IsValid() || rv.Kind() != reflect.Slice || rv.Type().Elem().Kind() != reflect.String {
+		return nil, false
+	}
+	out := make([]string, 0, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		out = append(out, rv.Index(i).String())
+	}
+	return out, len(out) > 0
 }
 
 func taskRequestWorkspace(req CreateTaskRequest) *corev1alpha1.WorkspaceConfig {
