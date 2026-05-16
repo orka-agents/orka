@@ -1,3 +1,7 @@
+---
+slug: /api-reference
+---
+
 # API Reference
 
 The controller exposes a REST API for programmatic access. All `/api/v1/*` endpoints require authentication. By default Orka accepts Kubernetes ServiceAccount bearer tokens; when OIDC is configured, external callers can use a valid OIDC JWT instead.
@@ -68,7 +72,7 @@ Retrieve the autonomous plan state for a task.
 
 ## Memory
 
-Memory endpoints manage namespace-scoped durable memories and reviewable memory proposals. See [Memory](memory.md) for the full lifecycle, worker behavior, and examples.
+Memory endpoints manage namespace-scoped durable memories and reviewable memory proposals. See [Memory](../concepts/memory.md) for the full lifecycle, worker behavior, and examples.
 
 ### Durable Memories
 
@@ -212,7 +216,7 @@ A typical remediation workflow is:
 | `/api/v1/chat/config` | GET | Get chat configuration and available tools |
 | `/api/v1/chat/:sessionId` | DELETE | Cancel a chat session |
 
-See [Interactive Chat](chat.md) for full chat documentation.
+See [Interactive Chat](../guides/chat.md) for full chat documentation.
 
 ## OpenAI-Compatible API
 

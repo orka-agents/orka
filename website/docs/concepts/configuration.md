@@ -1,3 +1,7 @@
+---
+slug: /configuration
+---
+
 # Configuration
 
 ## Custom Resources
@@ -443,7 +447,7 @@ Key configuration values for the Helm chart:
 | `client.create` | `true` | Create client ServiceAccount for API access |
 | `client.name` | `orka-client` | Client ServiceAccount name |
 
-See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
+See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/orka/values.yaml) for the full list.
 
 ## Controller Flags
 
@@ -586,7 +590,7 @@ Keep Agent `systemPrompt` content **minimal and requirement-focused**:
 
 - **Include only**: tooling commands (build/test/lint invocations), non-discoverable gotchas (e.g., "provider secret key defaults to `api-key`"), and hard constraints the agent cannot infer from source code.
 - **Avoid codebase overviews** — agents discover project structure efficiently on their own through file listing and search tools. Overviews add tokens without improving navigation speed.
-- **Don't duplicate** information already present in `docs/`, `README`, or inline code comments. Redundant instructions increase reasoning token usage (14–22% more) without improving outcomes.
+- **Don't duplicate** information already present in `website/docs/`, `README`, or inline code comments. Redundant instructions increase reasoning token usage (14–22% more) without improving outcomes.
 
 ### Writing Effective Skills
 

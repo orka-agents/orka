@@ -1,3 +1,7 @@
+---
+slug: /openai-compat
+---
+
 # OpenAI-Compatible API
 
 Orka exposes an **OpenAI-compatible API** at `/openai/v1/chat/completions` and `/openai/v1/models`, allowing any OpenAI-compatible client to use Orka as a provider. This includes tools like [Continue](https://continue.dev/), [Cursor](https://cursor.sh/), and others.

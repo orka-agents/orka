@@ -1,3 +1,7 @@
+---
+slug: /security
+---
+
 # Security
 
 ## Worker Pods

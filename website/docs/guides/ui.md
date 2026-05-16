@@ -1,3 +1,7 @@
+---
+slug: /ui
+---
+
 # Web Dashboard
 
 Orka includes a built-in React web dashboard embedded into the controller binary. No separate frontend deployment is needed.

@@ -197,7 +197,7 @@ curl http://localhost:8080/api/v1/tasks/code-review/result \
   -H "Authorization: Bearer $(kubectl create token orka-client)"
 ```
 
-See [Agent Runtimes](agent-runtimes.md) for full configuration reference.
+See [Agent Runtimes](concepts/agent-runtimes.md) for full configuration reference.
 
 ## Optional Runtime Isolation
 
@@ -219,7 +219,7 @@ spec:
       sandbox-runtime: gvisor
 ```
 
-Use `Agent.spec.execution` for defaults, then override it per task when needed. See [Configuration](configuration.md#execution), [Agent Runtimes](agent-runtimes.md#runtime-isolation), and [Security](security.md#runtime-isolation) for details.
+Use `Agent.spec.execution` for defaults, then override it per task when needed. See [Configuration](concepts/configuration.md#execution), [Agent Runtimes](concepts/agent-runtimes.md#runtime-isolation), and [Security](concepts/security.md#runtime-isolation) for details.
 
 ## Accessing the Dashboard
 
@@ -256,10 +256,10 @@ The CLI supports token extraction from bearer tokens, token files, exec-based au
 
 ## Next Steps
 
-- [Agent Runtimes](agent-runtimes.md) — Codex CLI, Claude Code CLI, and Copilot CLI configuration
-- [Interactive Chat](chat.md) — Chat endpoint with tool execution
-- [Multi-Agent Coordination](multi-agent-coordination.md) — Coordinator agents and delegation
-- [OpenAI Compatibility](openai-compat.md) — Use any OpenAI-compatible client via `/openai/v1/`
-- [Anthropic Compatibility](anthropic-compat.md) — Use Anthropic clients (Claude Code, etc.) via `/anthropic/v1/`
-- [API Reference](api-reference.md) — REST API endpoints
-- [Configuration](configuration.md) — Helm values, controller flags, and metrics
+- [Agent Runtimes](concepts/agent-runtimes.md) — Codex CLI, Claude Code CLI, and Copilot CLI configuration
+- [Interactive Chat](guides/chat.md) — Chat endpoint with tool execution
+- [Multi-Agent Coordination](guides/multi-agent-coordination.md) — Coordinator agents and delegation
+- [OpenAI Compatibility](reference/openai-compat.md) — Use any OpenAI-compatible client via `/openai/v1/`
+- [Anthropic Compatibility](reference/anthropic-compat.md) — Use Anthropic clients (Claude Code, etc.) via `/anthropic/v1/`
+- [API Reference](reference/api-reference.md) — REST API endpoints
+- [Configuration](concepts/configuration.md) — Helm values, controller flags, and metrics

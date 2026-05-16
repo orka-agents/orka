@@ -6,7 +6,6 @@ on:
       - ".codex/**"
       - ".claude/**"
       - '**.md'
-      - 'docs/**'
       - 'LICENSE'
       - '.gitignore'
   pull_request:
@@ -14,7 +13,6 @@ on:
       - ".codex/**"
       - ".claude/**"
       - '**.md'
-      - 'docs/**'
       - 'LICENSE'
       - '.gitignore'
 

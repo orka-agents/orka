@@ -1,12 +1,12 @@
 <div align="center">
 
-<img src="docs/images/orka-logo.png" alt="Orka" width="400" />
+<img src="website/static/img/orka-logo.png" alt="Orka" width="400" />
 
 # Orka
 
 **Kubernetes-native AI agent orchestration.**
 
-[Getting Started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [API Reference](docs/api-reference.md) · [Documentation](#documentation)
+[Getting Started](website/docs/getting-started.md) · [Architecture](website/docs/concepts/architecture.md) · [API Reference](website/docs/reference/api-reference.md) · [Documentation](#documentation)
 
 </div>
 
@@ -100,24 +100,24 @@ kubectl port-forward -n orka-system svc/orka-api 8080:8080
 open http://localhost:8080
 ```
 
-The built-in orchestrator creates agents, runs tasks, monitors progress, and returns results — all from natural language. See the [OpenAI Compatibility](docs/openai-compat.md) and [Anthropic Compatibility](docs/anthropic-compat.md) docs for proxy setup with your preferred client.
+The built-in orchestrator creates agents, runs tasks, monitors progress, and returns results — all from natural language. See the [OpenAI Compatibility](website/docs/reference/openai-compat.md) and [Anthropic Compatibility](website/docs/reference/anthropic-compat.md) docs for proxy setup with your preferred client.
 
 ## Documentation
 
 |                                                              |                                                       |
 | ------------------------------------------------------------ | ----------------------------------------------------- |
-| [Getting Started](docs/getting-started.md)                   | Installation, quick start, CLI setup                  |
-| [Architecture](docs/architecture.md)                         | System design, components, and data flow              |
-| [Configuration](docs/configuration.md)                       | CRD reference, Helm values, controller flags, metrics |
-| [Agent Runtimes](docs/agent-runtimes.md)                     | Codex CLI, Claude Code CLI, and Copilot CLI runtimes  |
-| [Interactive Chat](docs/chat.md)                             | Chat endpoint, tools, and SSE streaming               |
-| [Multi-Agent Coordination](docs/multi-agent-coordination.md) | Coordinator agents and task delegation                |
-| [Memory](docs/memory.md)                                   | Durable memory, proposals, transcript search, and validation |
-| [API Reference](docs/api-reference.md)                       | REST API endpoints and usage examples                 |
-| [OpenAI Compatibility](docs/openai-compat.md)                | OpenAI-compatible chat completions API                |
-| [Anthropic Compatibility](docs/anthropic-compat.md)          | Anthropic-compatible Messages API                     |
-| [Web Dashboard](docs/ui.md)                                  | Frontend architecture and pages                       |
-| [Security](docs/security.md)                                 | Security model and hardening                          |
-| [Repository Security Scanning](docs/repository-security-scanning.md) | Repository scan workflow, threat models, findings, and remediation |
-| [Development](docs/development.md)                           | Building, testing, and contributing                   |
-| [Testing](docs/testing.md)                                   | Test structure, patterns, and commands                |
+| [Getting Started](website/docs/getting-started.md)                   | Installation, quick start, CLI setup                  |
+| [Architecture](website/docs/concepts/architecture.md)                         | System design, components, and data flow              |
+| [Configuration](website/docs/concepts/configuration.md)                       | CRD reference, Helm values, controller flags, metrics |
+| [Agent Runtimes](website/docs/concepts/agent-runtimes.md)                     | Codex CLI, Claude Code CLI, and Copilot CLI runtimes  |
+| [Interactive Chat](website/docs/guides/chat.md)                             | Chat endpoint, tools, and SSE streaming               |
+| [Multi-Agent Coordination](website/docs/guides/multi-agent-coordination.md) | Coordinator agents and task delegation                |
+| [Memory](website/docs/concepts/memory.md)                                   | Durable memory, proposals, transcript search, and validation |
+| [API Reference](website/docs/reference/api-reference.md)                       | REST API endpoints and usage examples                 |
+| [OpenAI Compatibility](website/docs/reference/openai-compat.md)                | OpenAI-compatible chat completions API                |
+| [Anthropic Compatibility](website/docs/reference/anthropic-compat.md)          | Anthropic-compatible Messages API                     |
+| [Web Dashboard](website/docs/guides/ui.md)                                  | Frontend architecture and pages                       |
+| [Security](website/docs/concepts/security.md)                                 | Security model and hardening                          |
+| [Repository Security Scanning](website/docs/guides/repository-security-scanning.md) | Repository scan workflow, threat models, findings, and remediation |
+| [Development](website/docs/development/development.md)                           | Building, testing, and contributing                   |
+| [Testing](website/docs/development/testing.md)                                   | Test structure, patterns, and commands                |

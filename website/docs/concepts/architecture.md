@@ -1,3 +1,7 @@
+---
+slug: /architecture
+---
+
 # Architecture
 
 Orka is a Kubernetes-native task execution platform where a controller manages Jobs and Pods for incoming task requests, supporting container tasks, AI agent tasks with LLM integration, and external agent CLI runtimes.
@@ -139,7 +143,7 @@ orka/
 ├── ui/                     # React SPA (Vite + TanStack Router + shadcn/ui)
 ├── config/                 # Kustomize manifests (CRDs, RBAC, samples)
 ├── charts/orka/          # Helm chart
-├── docs/                   # Documentation
+├── website/docs/           # Documentation
 ├── examples/               # Example workflows
 └── test/                   # E2E tests
 ```
@@ -194,7 +198,7 @@ Coordinator Agent (depth 0)
 
 Child tasks use owner references for cascade deletion and labels (`orka.ai/parent-task`, `orka.ai/delegated-agent`) for querying.
 
-See [multi-agent-coordination.md](multi-agent-coordination.md) for full details.
+See [multi-agent-coordination.md](../guides/multi-agent-coordination.md) for full details.
 
 ### Autonomous Mode
 
