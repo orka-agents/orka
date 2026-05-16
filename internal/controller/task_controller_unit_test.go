@@ -2580,6 +2580,42 @@ func TestReconcile_CompletedPhase(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// handlePending — transaction token pending
+// ---------------------------------------------------------------------------
+
+func TestHandlePending_TransactionTokenPendingRequeuesWithoutJob(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pending-token",
+			Namespace: "default",
+			Annotations: map[string]string{
+				labels.AnnotationTransactionTokenPending: "true",
+			},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task)
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("expected 1s requeue while transaction token is pending, got %v", result.RequeueAfter)
+	}
+
+	jobs := &batchv1.JobList{}
+	if err := r.List(context.Background(), jobs, client.InNamespace(task.Namespace)); err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs.Items) != 0 {
+		t.Fatalf("expected no Job to be created while transaction token is pending, got %d", len(jobs.Items))
+	}
+}
+
+// ---------------------------------------------------------------------------
 // handlePending — namespace task limit
 // ---------------------------------------------------------------------------
 

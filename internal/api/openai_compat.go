@@ -783,11 +783,10 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 	ctx := c.Context()
 
-	namespace := GetEffectiveNamespace(c, "")
-	if h.watchNamespace != "" {
-		namespace = h.watchNamespace
+	namespace, err := ResolveNamespace(c, c.Query("namespace", ""), h.watchNamespace, h.enforceNamespaceIsolation)
+	if err != nil {
+		return openAIContextTokenAuthorizationError(c, err)
 	}
-	c.Locals(resolvedNamespaceLocalKey, namespace)
 
 	if err := authorizeContextTokenActionWithConfig(c, h.contextTokenAuthorization, "openAIListModels", h.contextTokenAuthorization.ProviderUseScopes); err != nil {
 		return openAIContextTokenAuthorizationError(c, err)

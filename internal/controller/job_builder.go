@@ -948,7 +948,7 @@ func setControllerEnv(envVars []corev1.EnvVar, name, value string) []corev1.EnvV
 	if value == "" {
 		return removeControllerEnv(envVars, name)
 	}
-	out := envVars[:0]
+	out := make([]corev1.EnvVar, 0, len(envVars)+1)
 	set := false
 	for _, envVar := range envVars {
 		if envVar.Name != name {
@@ -967,7 +967,7 @@ func setControllerEnv(envVars []corev1.EnvVar, name, value string) []corev1.EnvV
 }
 
 func removeControllerEnv(envVars []corev1.EnvVar, name string) []corev1.EnvVar {
-	out := envVars[:0]
+	out := make([]corev1.EnvVar, 0, len(envVars))
 	for _, envVar := range envVars {
 		if envVar.Name != name {
 			out = append(out, envVar)

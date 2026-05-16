@@ -36,24 +36,14 @@ import (
 // child may not yet have a UID. After the child is created,
 // adoptChildTransactionTokenSecret rewrites the owner reference to the child.
 func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, parentTask, childTask *corev1alpha1.Task, operation, agent string) error {
-	ttsURL := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSURL))
-	if ttsURL == "" {
-		return nil
-	}
-	ttsConfig, err := contexttoken.NewTTSConfig(
-		ttsURL,
-		os.Getenv(workerenv.ContextTokenTTSAudience),
-		os.Getenv(workerenv.ContextTokenTTSTimeout),
-		os.Getenv(workerenv.ContextTokenTTSTokenSource),
-		os.Getenv(workerenv.ContextTokenChildTokenTTL),
-		"",
-	)
+	ttsConfig, enabled, err := childTransactionTokenExchangeConfig()
 	if err != nil {
-		return fmt.Errorf("configuring child transaction token exchange: %w", err)
+		return err
 	}
-	if !ttsConfig.Enabled() {
+	if !enabled {
 		return nil
 	}
+
 	if parentTask == nil || parentTask.UID == "" {
 		return fmt.Errorf("parent task UID is required for child transaction token exchange")
 	}
@@ -130,6 +120,25 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 	}
 	childTask.Annotations[labels.AnnotationTransactionTokenSecret] = secretName
 	return nil
+}
+
+func childTransactionTokenExchangeConfig() (contexttoken.TTSConfig, bool, error) {
+	ttsURL := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSURL))
+	if ttsURL == "" {
+		return contexttoken.TTSConfig{}, false, nil
+	}
+	ttsConfig, err := contexttoken.NewTTSConfig(
+		ttsURL,
+		os.Getenv(workerenv.ContextTokenTTSAudience),
+		os.Getenv(workerenv.ContextTokenTTSTimeout),
+		os.Getenv(workerenv.ContextTokenTTSTokenSource),
+		os.Getenv(workerenv.ContextTokenChildTokenTTL),
+		"",
+	)
+	if err != nil {
+		return contexttoken.TTSConfig{}, false, fmt.Errorf("configuring child transaction token exchange: %w", err)
+	}
+	return ttsConfig, ttsConfig.Enabled(), nil
 }
 
 func childTransactionSubjectToken(tokenSource string) (string, error) {

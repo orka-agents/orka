@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -314,6 +315,11 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	if taskTransactionTokenPending(task) {
+		log.Info("task is waiting for delegated transaction token setup")
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
 	// If this is a scheduled task, validate cron and transition to Scheduled phase
 	if task.Spec.Schedule != "" {
 		return r.handleScheduledTask(ctx, task)
@@ -377,6 +383,14 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 
 	return r.createTaskJob(ctx, task, agent, provider)
+}
+
+func taskTransactionTokenPending(task *corev1alpha1.Task) bool {
+	if task == nil || task.Annotations == nil {
+		return false
+	}
+	pending, err := strconv.ParseBool(task.Annotations[labels.AnnotationTransactionTokenPending])
+	return err == nil && pending
 }
 
 // handleScheduledTask handles transition to Scheduled phase for cron-scheduled tasks.
@@ -1097,7 +1111,7 @@ func (r *TaskReconciler) readPodLogs(ctx context.Context, task *corev1alpha1.Tas
 
 	pod := podList.Items[len(podList.Items)-1]
 	req := r.KubeClient.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
-		LimitBytes: new(maxLogBytes),
+		LimitBytes: ptr.To(maxLogBytes),
 	})
 	stream, err := req.Stream(ctx)
 	if err != nil {

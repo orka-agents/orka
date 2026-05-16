@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -451,6 +452,9 @@ func TestDelegateTaskTool_Execute_WithTTSChildToken(t *testing.T) {
 	if secretName == "" {
 		t.Fatal("expected child transaction token secret annotation")
 	}
+	if _, ok := childTask.Annotations[labels.AnnotationTransactionTokenPending]; ok {
+		t.Fatalf("child transaction token pending annotation was not removed: %#v", childTask.Annotations)
+	}
 	secret := &corev1.Secret{}
 	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{Name: secretName, Namespace: defaultNamespace}, secret); err != nil {
 		t.Fatalf("failed to get child token secret: %v", err)
@@ -480,7 +484,7 @@ func TestDelegateTaskTool_Execute_WithTTSChildToken(t *testing.T) {
 	}
 }
 
-func TestDelegateTaskTool_Execute_CleansUpPreparedChildTokenSecretOnTaskAlreadyExists(t *testing.T) {
+func TestDelegateTaskTool_Execute_DoesNotExchangeChildTokenWhenTaskCreateFails(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 	t.Setenv(envOrkaCoordinationDepth, "0")
@@ -491,13 +495,10 @@ func TestDelegateTaskTool_Execute_CleansUpPreparedChildTokenSecretOnTaskAlreadyE
 	if err := os.WriteFile(subjectPath, []byte(parentTransactionToken), 0600); err != nil {
 		t.Fatalf("failed to write subject token fixture: %v", err)
 	}
+	var ttsCalled atomic.Bool
 	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"access_token":      "new-child-token",
-			"issued_token_type": "urn:ietf:params:oauth:token-type:txn_token",
-			"token_type":        "N_A",
-		})
+		ttsCalled.Store(true)
+		http.Error(w, "unexpected child token exchange", http.StatusInternalServerError)
 	}))
 	defer ttsServer.Close()
 
@@ -506,20 +507,7 @@ func TestDelegateTaskTool_Execute_CleansUpPreparedChildTokenSecretOnTaskAlreadyE
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
 
-	oldSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "existing-child-token",
-			Namespace: defaultNamespace,
-			Annotations: map[string]string{
-				labels.AnnotationParentTaskName: parentTaskName,
-			},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			"token": []byte("old-child-token"),
-		},
-	}
-	var preparedSecretName string
+	var secretCreateCalled atomic.Bool
 	k8sClient := newFakeClientWithInterceptorFuncs(interceptor.Funcs{
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 			switch typed := obj.(type) {
@@ -529,35 +517,32 @@ func TestDelegateTaskTool_Execute_CleansUpPreparedChildTokenSecretOnTaskAlreadyE
 					typed.GenerateName+"collision",
 				)
 			case *corev1.Secret:
-				preparedSecretName = typed.Name
-				return c.Create(ctx, obj, opts...)
+				secretCreateCalled.Store(true)
+				return c.Create(ctx, typed, opts...)
 			default:
 				return assignFakeUIDOnCreate(ctx, c, obj, opts...)
 			}
 		},
-	}, parentTask(), researcherAgent(), oldSecret)
+	}, parentTask(), researcherAgent())
 	tool := NewDelegateTaskTool(k8sClient)
 
 	_, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"researcher","prompt":"Research with token"}`))
 	if err == nil || !strings.Contains(err.Error(), "failed to create child task") || !apierrors.IsAlreadyExists(err) {
 		t.Fatalf("Execute() error = %v, want child task AlreadyExists", err)
 	}
-	if preparedSecretName == "" {
-		t.Fatal("expected prepared child token secret to be created before child task create failure")
+	if ttsCalled.Load() {
+		t.Fatal("child token exchange was attempted before child task create succeeded")
+	}
+	if secretCreateCalled.Load() {
+		t.Fatal("child token secret was created before child task create succeeded")
 	}
 
-	preparedSecret := &corev1.Secret{}
-	err = k8sClient.Get(context.Background(), apitypes.NamespacedName{Name: preparedSecretName, Namespace: defaultNamespace}, preparedSecret)
-	if !apierrors.IsNotFound(err) {
-		t.Fatalf("prepared child token secret lookup error = %v, want NotFound after cleanup", err)
+	secrets := &corev1.SecretList{}
+	if err := k8sClient.List(context.Background(), secrets, client.InNamespace(defaultNamespace)); err != nil {
+		t.Fatalf("list secrets: %v", err)
 	}
-
-	remainingOldSecret := &corev1.Secret{}
-	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{Name: oldSecret.Name, Namespace: defaultNamespace}, remainingOldSecret); err != nil {
-		t.Fatalf("existing child token secret was deleted: %v", err)
-	}
-	if got := string(remainingOldSecret.Data["token"]); got != "old-child-token" {
-		t.Fatalf("existing child token secret token = %q, want old-child-token", got)
+	if len(secrets.Items) != 0 {
+		t.Fatalf("expected no child token secrets to be created, got %d", len(secrets.Items))
 	}
 }
 

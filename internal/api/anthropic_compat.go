@@ -385,11 +385,10 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 func (h *AnthropicCompatHandler) HandleListModels(c fiber.Ctx) error {
 	ctx := c.Context()
 
-	namespace := GetEffectiveNamespace(c, "")
-	if h.watchNamespace != "" {
-		namespace = h.watchNamespace
+	namespace, err := ResolveNamespace(c, c.Query("namespace", ""), h.watchNamespace, h.enforceNamespaceIsolation)
+	if err != nil {
+		return anthropicContextTokenAuthorizationError(c, err)
 	}
-	c.Locals(resolvedNamespaceLocalKey, namespace)
 
 	if err := authorizeContextTokenActionWithConfig(c, h.contextTokenAuthorization, "anthropicListModels", h.contextTokenAuthorization.ProviderUseScopes); err != nil {
 		return anthropicContextTokenAuthorizationError(c, err)
