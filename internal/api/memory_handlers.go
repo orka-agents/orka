@@ -316,6 +316,9 @@ func (h *Handlers) ApplyMemoryProposal(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "applyMemoryProposal", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
+		return err
+	}
 	apply.Namespace = namespace
 	if apply.AppliedBy == "" {
 		if ui := GetUserInfo(c); ui != nil {

@@ -490,6 +490,7 @@ func main() {
 	if contextTokenTTSConfig.Enabled() {
 		jobBuilder.ContextTokenTTSURL = contextTokenTTSConfig.URL
 		jobBuilder.ContextTokenTTSAudience = contextTokenTTSConfig.Audience
+		jobBuilder.ContextTokenTTSTokenSource = contextTokenTTSConfig.TokenSource
 		if contextTokenTTSConfig.Timeout > 0 {
 			jobBuilder.ContextTokenTTSTimeout = contextTokenTTSConfig.Timeout.String()
 		}

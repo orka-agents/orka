@@ -51,6 +51,19 @@ func TestNewContextTokenTTSConfigDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestNewContextTokenTTSConfigDefaultsToServiceAccountWithURL(t *testing.T) {
+	cfg, err := NewContextTokenTTSConfig("https://tts.example.test", "", "", "", "", "")
+	if err != nil {
+		t.Fatalf("NewContextTokenTTSConfig returned error: %v", err)
+	}
+	if !cfg.Enabled() {
+		t.Fatalf("expected TTS config to be enabled: %#v", cfg)
+	}
+	if cfg.TokenSource != ContextTokenTTSTokenSourceServiceAccount {
+		t.Fatalf("TokenSource = %q, want %q", cfg.TokenSource, ContextTokenTTSTokenSourceServiceAccount)
+	}
+}
+
 func TestKontxtTTSClientExchange(t *testing.T) {
 	metrics.ContextTokenTTSExchangeTotal.Reset()
 	metrics.ContextTokenTTSExchangeDuration.Reset()

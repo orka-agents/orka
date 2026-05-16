@@ -26,6 +26,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/contexttoken"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -366,6 +367,7 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 	defer ttsServer.Close()
 
 	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.TransactionTokenFile, subjectTokenPath)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectTokenPath)
 	t.Setenv(workerenv.ContextTokenOutboundScope, testOutboundToolScope)
@@ -427,6 +429,64 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 	}
 }
 
+func TestToolExecutor_Execute_DefaultsOutboundTTSToServiceAccountSubjectToken(t *testing.T) {
+	var ttsCalled bool
+	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ttsCalled = true
+		if r.URL.Path != "/token_endpoint" {
+			t.Fatalf("TTS path = %q, want /token_endpoint", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm() error = %v", err)
+		}
+		if got := r.FormValue("subject_token"); got != "service-account-token" {
+			t.Fatalf("TTS subject_token = %q, want service-account-token", got)
+		}
+		if got := r.FormValue("subject_token_type"); got != kontxttoken.SubjectTokenTypeTxnToken {
+			t.Fatalf("TTS subject_token_type = %q, want %q", got, kontxttoken.SubjectTokenTypeTxnToken)
+		}
+		if got := r.FormValue("scope"); got != testOutboundToolScope {
+			t.Fatalf("TTS scope = %q, want %s", got, testOutboundToolScope)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"access_token":      "downstream-token",
+			"issued_token_type": "urn:ietf:params:oauth:token-type:txn_token",
+			"token_type":        "N_A",
+		})
+	}))
+	defer ttsServer.Close()
+
+	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenOutboundScope, testOutboundToolScope)
+	t.Setenv(workerenv.ServiceAccountToken, "service-account-token")
+
+	var receivedTxnToken string
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedTxnToken = r.Header.Get(kontxttoken.HeaderName)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer toolServer.Close()
+
+	executor := &ToolExecutor{client: toolServer.Client(), namespace: "default", secretPath: "/secrets/tools"}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "downstream"},
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: corev1alpha1.HTTPExecution{URL: toolServer.URL},
+		},
+	}
+
+	if _, err := executor.Execute(context.Background(), tool, nil); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !ttsCalled {
+		t.Fatal("expected outbound TTS exchange")
+	}
+	if receivedTxnToken != "downstream-token" {
+		t.Fatalf("%s = %q, want downstream-token", kontxttoken.HeaderName, receivedTxnToken)
+	}
+}
+
 func TestToolExecutor_Execute_ReusesOutboundTTSClient(t *testing.T) {
 	subjectTokenPath := filepath.Join(t.TempDir(), "subject-token")
 	if err := os.WriteFile(subjectTokenPath, []byte("parent-tx-token"), 0600); err != nil {
@@ -458,6 +518,7 @@ func TestToolExecutor_Execute_ReusesOutboundTTSClient(t *testing.T) {
 	defer ttsServer.Close()
 
 	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.TransactionTokenFile, subjectTokenPath)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectTokenPath)
 	t.Setenv(workerenv.ContextTokenOutboundScope, testOutboundToolScope)
@@ -516,6 +577,7 @@ func TestToolExecutor_Execute_FailsClosedWhenOutboundTTSExchangeFails(t *testing
 	defer ttsServer.Close()
 
 	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectTokenPath)
 	t.Setenv(workerenv.ContextTokenOutboundScope, testOutboundToolScope)
 

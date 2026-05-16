@@ -131,8 +131,418 @@ func setupSecurityHandlersWithAuthzFixture(t *testing.T, ctxTokenConfig ContextT
 	app.Use(NewAuthMiddleware(handlers.client, AuthConfig{ContextTokens: ctxTokenConfig}))
 	app.Post("/security/repositories", handlers.CreateRepositoryScan)
 	app.Get("/security/repositories", handlers.ListRepositoryScans)
+	app.Put("/security/repositories/:name", handlers.UpdateRepositoryScan)
 	app.Post("/security/repositories/:name/scans", handlers.CreateManualSecurityScan)
+	app.Post("/security/findings/:id/dismiss", handlers.DismissSecurityFinding)
+	app.Post("/security/findings/:id/reopen", handlers.ReopenSecurityFinding)
+	app.Post("/security/findings/:id/validate", handlers.ValidateSecurityFinding)
+	app.Post("/security/findings/:id/patch", handlers.GenerateSecurityPatch)
+	app.Post("/security/findings/:id/pull-request", handlers.CreateSecurityPullRequest)
 	return app, handlers
+}
+
+func TestGenerateSecurityPatch_ContextTokenTransactionContextAuthorization(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	repoURL := "https://github.com/sozercan/actions-test"
+
+	tests := []struct {
+		name string
+		tctx map[string]any
+		want int
+	}{
+		{
+			name: "matching repo branch and agent allowed",
+			tctx: map[string]any{
+				"namespace":     "demo",
+				"repo":          repoURL,
+				"branch":        "main",
+				"agent":         "demo/patch",
+				"allowedAgents": []any{"demo/patch"},
+			},
+			want: http.StatusCreated,
+		},
+		{
+			name: "mismatched repo denied",
+			tctx: map[string]any{
+				"namespace": "demo",
+				"repo":      "https://github.com/sozercan/other",
+				"branch":    "main",
+				"agent":     "demo/patch",
+			},
+			want: http.StatusForbidden,
+		},
+		{
+			name: "mismatched branch denied",
+			tctx: map[string]any{
+				"namespace": "demo",
+				"repo":      repoURL,
+				"branch":    "release",
+				"agent":     "demo/patch",
+			},
+			want: http.StatusForbidden,
+		},
+		{
+			name: "mismatched agent denied",
+			tctx: map[string]any{
+				"namespace": "demo",
+				"repo":      repoURL,
+				"branch":    "main",
+				"agent":     "demo/analysis",
+			},
+			want: http.StatusForbidden,
+		},
+		{
+			name: "disallowed allowed agents denied",
+			tctx: map[string]any{
+				"namespace":     "demo",
+				"repo":          repoURL,
+				"branch":        "main",
+				"allowedAgents": []any{"demo/analysis"},
+			},
+			want: http.StatusForbidden,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			patchAgent := corev1alpha1.AgentReference{Name: "patch"}
+			scan := &corev1alpha1.RepositoryScan{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "scan-1",
+					Namespace: "demo",
+				},
+				Spec: corev1alpha1.RepositoryScanSpec{
+					RepoURL:          repoURL,
+					Branch:           "main",
+					AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+					PatchAgentRef:    &patchAgent,
+				},
+			}
+			app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, scan)
+
+			ctx := context.Background()
+			require.NoError(t, handlers.securityStore.UpsertFinding(ctx, &store.Finding{
+				ID:             "finding-1",
+				Namespace:      "demo",
+				RepositoryScan: "scan-1",
+				ScanRunID:      "scan-run-1",
+				Fingerprint:    "fp-1",
+				Title:          "Command injection",
+				Summary:        "Unsanitized user input reaches shell execution.",
+				Severity:       "critical",
+				Confidence:     "high",
+				State:          "validated",
+				RootCause:      "Shell command arguments are concatenated directly.",
+				Remediation:    "Use argument arrays and validate inputs.",
+			}))
+
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"scope": ContextTokenScopeSecurityWrite,
+				"tctx":  tt.tctx,
+			})
+			req := httptest.NewRequest(http.MethodPost, "/security/findings/finding-1/patch?namespace=demo", nil)
+			req.Header.Set(KontxtHeaderName, token)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, resp.StatusCode)
+
+			if tt.want != http.StatusCreated {
+				return
+			}
+			var proposal store.PatchProposal
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&proposal))
+			require.NotEmpty(t, proposal.TaskName)
+
+			task := &corev1alpha1.Task{}
+			require.NoError(t, handlers.client.Get(ctx, clientObjectKey("demo", proposal.TaskName), task))
+			require.NotNil(t, task.Spec.AgentRef)
+			require.Equal(t, "patch", task.Spec.AgentRef.Name)
+			require.NotNil(t, task.Spec.RequestedBy)
+			require.Equal(t, testContextTokenSubject, task.Spec.RequestedBy.Subject)
+			require.NotNil(t, task.Spec.Transaction)
+			require.Equal(t, testContextTokenTransactionID, task.Spec.Transaction.ID)
+		})
+	}
+}
+
+func TestCreateManualSecurityScan_ContextTokenTransactionContextAuthorizationDenials(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	repoURL := "https://github.com/sozercan/actions-test"
+
+	tests := []struct {
+		name string
+		tctx map[string]any
+	}{
+		{
+			name: "mismatched repo denied",
+			tctx: map[string]any{
+				"namespace": "demo",
+				"repo":      "https://github.com/sozercan/other",
+				"branch":    "main",
+				"agent":     "demo/analysis",
+			},
+		},
+		{
+			name: "mismatched branch denied",
+			tctx: map[string]any{
+				"namespace": "demo",
+				"repo":      repoURL,
+				"branch":    "release",
+				"agent":     "demo/analysis",
+			},
+		},
+		{
+			name: "mismatched agent denied",
+			tctx: map[string]any{
+				"namespace": "demo",
+				"repo":      repoURL,
+				"branch":    "main",
+				"agent":     "demo/other",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scan := &corev1alpha1.RepositoryScan{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "scan-1",
+					Namespace: "demo",
+				},
+				Spec: corev1alpha1.RepositoryScanSpec{
+					RepoURL:          repoURL,
+					Branch:           "main",
+					AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+				},
+			}
+			app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, scan)
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"scope": ContextTokenScopeSecurityWrite,
+				"tctx":  tt.tctx,
+			})
+			req := httptest.NewRequest(http.MethodPost, "/security/repositories/scan-1/scans?namespace=demo", nil)
+			req.Header.Set(KontxtHeaderName, token)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+			var tasks corev1alpha1.TaskList
+			require.NoError(t, handlers.client.List(context.Background(), &tasks, client.InNamespace("demo")))
+			require.Empty(t, tasks.Items)
+		})
+	}
+}
+
+func TestRepositoryScanMutations_ContextTokenTransactionContextAuthorizationDenials(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	repoURL := "https://github.com/sozercan/actions-test"
+	createBody := `{
+		"name":"scan-create",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":"https://github.com/sozercan/actions-test",
+			"branch":"main",
+			"analysisAgentRef":{"name":"analysis"}
+		}
+	}`
+	updateBody := `{
+		"spec":{
+			"repoURL":"https://github.com/sozercan/actions-test",
+			"branch":"main",
+			"analysisAgentRef":{"name":"analysis"}
+		}
+	}`
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		objs   []runtime.Object
+	}{
+		{
+			name:   "create repository scan mismatched repo denied",
+			method: http.MethodPost,
+			path:   "/security/repositories",
+			body:   createBody,
+		},
+		{
+			name:   "update repository scan mismatched repo denied",
+			method: http.MethodPut,
+			path:   "/security/repositories/scan-1?namespace=demo",
+			body:   updateBody,
+			objs: []runtime.Object{
+				&corev1alpha1.RepositoryScan{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "scan-1",
+						Namespace: "demo",
+					},
+					Spec: corev1alpha1.RepositoryScanSpec{
+						RepoURL:          repoURL,
+						Branch:           "main",
+						AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, tt.objs...)
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"scope": ContextTokenScopeSecurityWrite,
+				"tctx": map[string]any{
+					"namespace": "demo",
+					"repo":      "https://github.com/sozercan/other",
+					"branch":    "main",
+					"agent":     "demo/analysis",
+				},
+			})
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+			var got corev1alpha1.RepositoryScan
+			err = handlers.client.Get(context.Background(), clientObjectKey("demo", "scan-create"), &got)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestSecurityFindingMutations_ContextTokenTransactionContextAuthorizationDenials(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "scan-1",
+			Namespace: "demo",
+		},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:          "https://github.com/sozercan/actions-test",
+			Branch:           "main",
+			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+		},
+	}
+
+	tests := []struct {
+		name    string
+		path    string
+		initial string
+	}{
+		{
+			name:    "dismiss finding mismatched repo denied",
+			path:    "/security/findings/finding-1/dismiss?namespace=demo",
+			initial: "open",
+		},
+		{
+			name:    "reopen finding mismatched repo denied",
+			path:    "/security/findings/finding-1/reopen?namespace=demo",
+			initial: "dismissed",
+		},
+		{
+			name:    "validate finding mismatched repo denied",
+			path:    "/security/findings/finding-1/validate?namespace=demo",
+			initial: "open",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, scan.DeepCopyObject())
+			ctx := context.Background()
+			require.NoError(t, handlers.securityStore.UpsertFinding(ctx, &store.Finding{
+				ID:             "finding-1",
+				Namespace:      "demo",
+				RepositoryScan: "scan-1",
+				ScanRunID:      "scan-run-1",
+				Fingerprint:    "fp-1",
+				Title:          "Command injection",
+				Summary:        "Unsanitized user input reaches shell execution.",
+				Severity:       "critical",
+				Confidence:     "high",
+				State:          tt.initial,
+			}))
+
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"scope": ContextTokenScopeSecurityWrite,
+				"tctx": map[string]any{
+					"namespace": "demo",
+					"repo":      "https://github.com/sozercan/other",
+					"branch":    "main",
+					"agent":     "demo/analysis",
+				},
+			})
+			req := httptest.NewRequest(http.MethodPost, tt.path, nil)
+			req.Header.Set(KontxtHeaderName, token)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+			finding, err := handlers.securityStore.GetFinding(ctx, "demo", "finding-1")
+			require.NoError(t, err)
+			require.Equal(t, tt.initial, finding.State)
+			var tasks corev1alpha1.TaskList
+			require.NoError(t, handlers.client.List(ctx, &tasks, client.InNamespace("demo")))
+			require.Empty(t, tasks.Items)
+		})
+	}
+}
+
+func TestCreateSecurityPullRequest_ContextTokenTransactionContextAuthorizationDenied(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "scan-1",
+			Namespace: "demo",
+		},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:          "https://github.com/sozercan/actions-test",
+			Branch:           "main",
+			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+			PatchAgentRef:    &corev1alpha1.AgentReference{Name: "patch"},
+		},
+	}
+	app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, scan)
+	ctx := context.Background()
+	require.NoError(t, handlers.securityStore.UpsertFinding(ctx, &store.Finding{
+		ID:             "finding-1",
+		Namespace:      "demo",
+		RepositoryScan: "scan-1",
+		ScanRunID:      "scan-run-1",
+		Fingerprint:    "fp-1",
+		Title:          "Command injection",
+		Summary:        "Unsanitized user input reaches shell execution.",
+		Severity:       "critical",
+		Confidence:     "high",
+		State:          "validated",
+	}))
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeSecurityWrite,
+		"tctx": map[string]any{
+			"namespace": "demo",
+			"repo":      "https://github.com/sozercan/other",
+			"branch":    "main",
+			"agent":     "demo/patch",
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/security/findings/finding-1/pull-request?namespace=demo", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	finding, err := handlers.securityStore.GetFinding(ctx, "demo", "finding-1")
+	require.NoError(t, err)
+	require.Equal(t, "validated", finding.State)
 }
 
 func TestCreateManualSecurityScan_ContextTokenStampsTaskRequesterAndTransaction(t *testing.T) {

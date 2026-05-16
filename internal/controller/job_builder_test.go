@@ -18,9 +18,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/contexttoken"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/workerenv"
 )
@@ -184,6 +186,7 @@ func TestJobBuilder_Build_PropagatesTransactionMetadata(t *testing.T) {
 func TestJobBuilder_Build_MountsTransactionTokenSecret(t *testing.T) {
 	builder := setupJobBuilder()
 	builder.ContextTokenTTSURL = "https://tts.example.test"
+	builder.ContextTokenTTSTokenSource = contexttoken.TTSTokenSourceIncoming
 	builder.ContextTokenTTSAudience = "orka"
 	builder.ContextTokenTTSTimeout = "7s"
 	builder.ContextTokenSubjectTokenType = "urn:ietf:params:oauth:token-type:txn_token"
@@ -234,6 +237,7 @@ func TestJobBuilder_Build_MountsTransactionTokenSecret(t *testing.T) {
 	}
 	for name, want := range map[string]string{
 		workerenv.ContextTokenTTSURL:           "https://tts.example.test",
+		workerenv.ContextTokenTTSTokenSource:   contexttoken.TTSTokenSourceIncoming,
 		workerenv.ContextTokenTTSAudience:      "orka",
 		workerenv.ContextTokenTTSTimeout:       "7s",
 		workerenv.ContextTokenSubjectTokenType: "urn:ietf:params:oauth:token-type:txn_token",
@@ -251,6 +255,7 @@ func TestJobBuilder_Build_MountsTransactionTokenSecret(t *testing.T) {
 
 func TestJobBuilder_AddTransactionTokenSecretExposesToAllContainers(t *testing.T) {
 	builder := setupJobBuilder()
+	builder.ContextTokenTTSTokenSource = contexttoken.TTSTokenSourceIncoming
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{
@@ -292,6 +297,7 @@ func TestJobBuilder_AddTransactionTokenSecretExposesToAllContainers(t *testing.T
 func TestJobBuilder_Build_InjectsContextTokenTTSConfigWithoutTransactionTokenSecret(t *testing.T) {
 	builder := setupJobBuilder()
 	builder.ContextTokenTTSURL = "https://tts.example.test"
+	builder.ContextTokenTTSTokenSource = contexttoken.TTSTokenSourceIncoming
 	builder.ContextTokenTTSAudience = "orka"
 	builder.ContextTokenTTSTimeout = "7s"
 	builder.ContextTokenSubjectTokenType = "urn:ietf:params:oauth:token-type:txn_token"
@@ -318,6 +324,7 @@ func TestJobBuilder_Build_InjectsContextTokenTTSConfigWithoutTransactionTokenSec
 	container := job.Spec.Template.Spec.Containers[0]
 	for name, want := range map[string]string{
 		workerenv.ContextTokenTTSURL:           "https://tts.example.test",
+		workerenv.ContextTokenTTSTokenSource:   contexttoken.TTSTokenSourceIncoming,
 		workerenv.ContextTokenTTSAudience:      "orka",
 		workerenv.ContextTokenTTSTimeout:       "7s",
 		workerenv.ContextTokenSubjectTokenType: "urn:ietf:params:oauth:token-type:txn_token",
@@ -1768,7 +1775,7 @@ func TestJobBuilder_Build_AgentTask_AllowBash_AgentDefault(t *testing.T) {
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             corev1alpha1.AgentRuntimeClaude,
-				DefaultAllowBash: new(true),
+				DefaultAllowBash: ptr.To(true),
 			},
 		},
 	}
@@ -1804,7 +1811,7 @@ func TestJobBuilder_Build_AgentTask_AllowBash_NotSetWhenFalse(t *testing.T) {
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             corev1alpha1.AgentRuntimeClaude,
-				DefaultAllowBash: new(false),
+				DefaultAllowBash: ptr.To(false),
 			},
 		},
 	}

@@ -45,6 +45,7 @@ const (
 	ContextTokenTTSURL                = "ORKA_CONTEXT_TOKEN_TTS_URL"
 	ContextTokenTTSAudience           = "ORKA_CONTEXT_TOKEN_TTS_AUDIENCE"
 	ContextTokenTTSTimeout            = "ORKA_CONTEXT_TOKEN_TTS_TIMEOUT"
+	ContextTokenTTSTokenSource        = "ORKA_CONTEXT_TOKEN_TTS_TOKEN_SOURCE"
 	ContextTokenSubjectTokenFile      = "ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE"
 	ContextTokenSubjectTokenType      = "ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_TYPE"
 	ContextTokenOutboundScope         = "ORKA_CONTEXT_TOKEN_OUTBOUND_SCOPE"
@@ -146,6 +147,8 @@ const (
 	MemoryContextLimit    = "ORKA_MEMORY_CONTEXT_LIMIT"
 	MemoryContextMaxChars = "ORKA_MEMORY_CONTEXT_MAX_CHARS"
 	ServiceAccountToken   = "ORKA_SA_TOKEN"
+
+	ServiceAccountTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 )
 
 const trueString = "true"
@@ -188,6 +191,21 @@ func SplitCSV(value string) []string {
 	return out
 }
 
+// ReadTokenFile reads and trims a token file. It fails closed when the
+// configured path cannot be read or contains only whitespace.
+func ReadTokenFile(path, description string) (string, error) {
+	path = strings.TrimSpace(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read %s file: %w", description, err)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", fmt.Errorf("%s file %q is empty", description, path)
+	}
+	return token, nil
+}
+
 // ReadTokenFileEnv reads and trims a token file path referenced by envName.
 // It returns ok=false when envName is unset, and fails closed when a configured
 // path cannot be read or contains only whitespace.
@@ -196,15 +214,8 @@ func ReadTokenFileEnv(envName, description string) (string, bool, error) {
 	if path == "" {
 		return "", false, nil
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", true, fmt.Errorf("failed to read %s file: %w", description, err)
-	}
-	token := strings.TrimSpace(string(data))
-	if token == "" {
-		return "", true, fmt.Errorf("%s file %q is empty", description, path)
-	}
-	return token, true, nil
+	token, err := ReadTokenFile(path, description)
+	return token, true, err
 }
 
 // RequireTokenFileEnv reads a token file path referenced by envName and returns

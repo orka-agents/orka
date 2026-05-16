@@ -216,23 +216,25 @@ func (e *ToolExecutor) getSecretKey(ctx context.Context, secretName, key string)
 func (e *ToolExecutor) outboundTransactionToken(ctx context.Context, tool *corev1alpha1.Tool) (string, error) {
 	ttsURL := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSURL))
 	if ttsURL == "" {
-		if token, ok, err := workerenv.ReadTokenFileEnv(workerenv.TransactionTokenFile, "transaction token"); ok || err != nil {
-			return token, err
-		}
-		return "", nil
+		return existingTransactionToken()
 	}
-	subjectToken, ok, err := workerenv.ReadTokenFileEnv(workerenv.ContextTokenSubjectTokenFile, "context token subject token")
+	ttsConfig, err := contexttoken.NewTTSConfig(
+		ttsURL,
+		os.Getenv(workerenv.ContextTokenTTSAudience),
+		os.Getenv(workerenv.ContextTokenTTSTimeout),
+		os.Getenv(workerenv.ContextTokenTTSTokenSource),
+		"",
+		os.Getenv(workerenv.ContextTokenToolTokenTTL),
+	)
 	if err != nil {
 		return "", err
 	}
-	if !ok {
-		subjectToken, ok, err = workerenv.ReadTokenFileEnv(workerenv.TransactionTokenFile, "transaction token")
-		if err != nil {
-			return "", err
-		}
-		if !ok {
-			return "", fmt.Errorf("%s or %s is required when %s is set", workerenv.ContextTokenSubjectTokenFile, workerenv.TransactionTokenFile, workerenv.ContextTokenTTSURL)
-		}
+	if !ttsConfig.Enabled() {
+		return existingTransactionToken()
+	}
+	subjectToken, err := outboundTTSSubjectToken(ttsConfig.TokenSource)
+	if err != nil {
+		return "", err
 	}
 	scope := strings.TrimSpace(os.Getenv(workerenv.ContextTokenOutboundScope))
 	if scope == "" {
@@ -253,17 +255,6 @@ func (e *ToolExecutor) outboundTransactionToken(ctx context.Context, tool *corev
 	if taskName := strings.TrimSpace(os.Getenv(workerenv.TaskName)); taskName != "" {
 		requestDetails["task"] = taskName
 	}
-	ttsConfig, err := contexttoken.NewTTSConfig(
-		ttsURL,
-		os.Getenv(workerenv.ContextTokenTTSAudience),
-		os.Getenv(workerenv.ContextTokenTTSTimeout),
-		contexttoken.TTSTokenSourceServiceAccount,
-		"",
-		os.Getenv(workerenv.ContextTokenToolTokenTTL),
-	)
-	if err != nil {
-		return "", err
-	}
 	ttsClient, err := e.outboundTTSClient(ttsConfig)
 	if err != nil {
 		return "", err
@@ -279,6 +270,39 @@ func (e *ToolExecutor) outboundTransactionToken(ctx context.Context, tool *corev
 		return "", fmt.Errorf("token exchange failed: %w", err)
 	}
 	return token, nil
+}
+
+func existingTransactionToken() (string, error) {
+	if token, ok, err := workerenv.ReadTokenFileEnv(workerenv.TransactionTokenFile, "transaction token"); ok || err != nil {
+		return token, err
+	}
+	return "", nil
+}
+
+func outboundTTSSubjectToken(tokenSource string) (string, error) {
+	switch tokenSource {
+	case contexttoken.TTSTokenSourceIncoming:
+		if token, ok, err := workerenv.ReadTokenFileEnv(workerenv.ContextTokenSubjectTokenFile, "context token subject token"); ok || err != nil {
+			return token, err
+		}
+		if token, ok, err := workerenv.ReadTokenFileEnv(workerenv.TransactionTokenFile, "transaction token"); ok || err != nil {
+			return token, err
+		}
+		return "", fmt.Errorf("%s or %s is required when %s uses %q", workerenv.ContextTokenSubjectTokenFile, workerenv.TransactionTokenFile, workerenv.ContextTokenTTSTokenSource, tokenSource)
+	case contexttoken.TTSTokenSourceServiceAccount:
+		return serviceAccountSubjectToken()
+	case contexttoken.TTSTokenSourceNone:
+		return "", fmt.Errorf("context token TTS token source %q does not provide a subject token", tokenSource)
+	default:
+		return "", fmt.Errorf("unsupported context token TTS token source %q", tokenSource)
+	}
+}
+
+func serviceAccountSubjectToken() (string, error) {
+	if token := strings.TrimSpace(os.Getenv(workerenv.ServiceAccountToken)); token != "" {
+		return token, nil
+	}
+	return workerenv.ReadTokenFile(workerenv.ServiceAccountTokenFile, "service account token")
 }
 
 func (e *ToolExecutor) outboundTTSClient(cfg contexttoken.TTSConfig) (*contexttoken.KontxtTTSClient, error) {

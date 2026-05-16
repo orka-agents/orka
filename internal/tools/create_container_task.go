@@ -165,12 +165,14 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 	}
 	if parentTask.UID != "" {
 		isController := true
+		blockOwnerDeletion := true
 		task.OwnerReferences = []metav1.OwnerReference{{
-			APIVersion: corev1alpha1.GroupVersion.String(),
-			Kind:       "Task",
-			Name:       parentTask.Name,
-			UID:        parentTask.UID,
-			Controller: &isController,
+			APIVersion:         corev1alpha1.GroupVersion.String(),
+			Kind:               "Task",
+			Name:               parentTask.Name,
+			UID:                parentTask.UID,
+			Controller:         &isController,
+			BlockOwnerDeletion: &blockOwnerDeletion,
 		}}
 	}
 

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/contexttoken"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/workerenv"
 )
@@ -46,6 +48,7 @@ func TestPrepareChildTransactionToken(t *testing.T) {
 	defer ttsServer.Close()
 
 	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenTTSAudience, "child.example.test")
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
@@ -72,6 +75,42 @@ func TestPrepareChildTransactionToken(t *testing.T) {
 		t.Fatalf("adoptChildTransactionTokenSecret() error = %v", err)
 	}
 	requireAdoptedChildTransactionTokenSecret(t, fc, child, secretName)
+}
+
+func TestPrepareChildTransactionTokenDefaultsToServiceAccountSubjectToken(t *testing.T) {
+	keyManager := newKontxtKeyManager(t)
+	jwksServer := httptest.NewServer(keyManager.JWKSHandler())
+	defer jwksServer.Close()
+	childToken := newChildTransactionToken(t, keyManager)
+
+	var exchange childTokenExchange
+	ttsServer := startChildTransactionTokenServer(t, childToken, &exchange)
+	defer ttsServer.Close()
+
+	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSAudience, "child.example.test")
+	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
+	t.Setenv(workerenv.ContextTokenChildTokenTTL, "42s")
+	t.Setenv(workerenv.ServiceAccountToken, "service-account-token")
+
+	parent := parentTask()
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: defaultNamespace},
+		Spec: corev1alpha1.TaskSpec{
+			Transaction: parent.Spec.Transaction.DeepCopy(),
+		},
+	}
+	fc := newFakeClient()
+	if err := prepareChildTransactionToken(context.Background(), fc, parent, child, "delegateTask", testResearcherAgentName); err != nil {
+		t.Fatalf("prepareChildTransactionToken() error = %v", err)
+	}
+
+	if exchange.subjectToken != "service-account-token" {
+		t.Fatalf("subject_token = %q, want service-account-token", exchange.subjectToken)
+	}
+	exchange.subjectToken = "parent-tx-token"
+	requireChildTokenExchange(t, exchange)
+	requirePreparedChildTransactionToken(t, fc, parent, child, childToken, jwksServer.URL)
 }
 
 type childTokenExchange struct {
@@ -251,6 +290,112 @@ func requireAdoptedChildTransactionTokenSecret(t *testing.T, fc client.Client, c
 	}
 }
 
+func TestPrepareChildTransactionTokenRequiresParentUID(t *testing.T) {
+	var called atomic.Bool
+	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called.Store(true)
+		http.Error(w, "unexpected TTS call", http.StatusInternalServerError)
+	}))
+	defer ttsServer.Close()
+
+	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+
+	parent := parentTask()
+	parent.UID = ""
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: defaultNamespace},
+		Spec: corev1alpha1.TaskSpec{
+			Transaction: parent.Spec.Transaction.DeepCopy(),
+		},
+	}
+	k8sClient := newFakeClient()
+
+	err := prepareChildTransactionToken(context.Background(), k8sClient, parent, child, "delegateTask", testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), "parent task UID is required") {
+		t.Fatalf("prepareChildTransactionToken() error = %v, want parent UID error", err)
+	}
+	if called.Load() {
+		t.Fatal("TTS was called despite missing parent UID")
+	}
+	if child.Annotations[labels.AnnotationTransactionTokenSecret] != "" {
+		t.Fatalf("unexpected child transaction token secret annotation: %#v", child.Annotations)
+	}
+	secrets := &corev1.SecretList{}
+	if err := k8sClient.List(context.Background(), secrets, client.InNamespace(defaultNamespace)); err != nil {
+		t.Fatalf("failed to list secrets: %v", err)
+	}
+	if len(secrets.Items) != 0 {
+		t.Fatalf("unexpected secrets created without parent UID: %#v", secrets.Items)
+	}
+}
+
+func TestAdoptChildTransactionTokenSecretRequiresChildUID(t *testing.T) {
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-task",
+			Namespace: defaultNamespace,
+			Annotations: map[string]string{
+				labels.AnnotationTransactionTokenSecret: "child-token-secret",
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-token-secret",
+			Namespace: defaultNamespace,
+		},
+	}
+	k8sClient := newFakeClient(secret)
+
+	err := adoptChildTransactionTokenSecret(context.Background(), k8sClient, child)
+	if err == nil || !strings.Contains(err.Error(), "child task UID is required") {
+		t.Fatalf("adoptChildTransactionTokenSecret() error = %v, want child UID error", err)
+	}
+	gotSecret := &corev1.Secret{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Name: secret.Name, Namespace: secret.Namespace}, gotSecret); err != nil {
+		t.Fatalf("failed to get secret: %v", err)
+	}
+	if len(gotSecret.OwnerReferences) != 0 {
+		t.Fatalf("secret ownerReferences = %#v, want unchanged empty refs", gotSecret.OwnerReferences)
+	}
+}
+
+func TestCleanupChildTransactionTokenSecretOnlyDeletesAnnotatedPreparedSecret(t *testing.T) {
+	existingSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-child-token-secret",
+			Namespace: defaultNamespace,
+		},
+	}
+	preparedSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "prepared-child-token-secret",
+			Namespace: defaultNamespace,
+		},
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-task",
+			Namespace: defaultNamespace,
+			Annotations: map[string]string{
+				labels.AnnotationTransactionTokenSecret: preparedSecret.Name,
+			},
+		},
+	}
+	k8sClient := newFakeClient(existingSecret, preparedSecret)
+
+	cleanupChildTaskAfterTokenAdoptionFailure(context.Background(), k8sClient, child)
+
+	gotExisting := &corev1.Secret{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Name: existingSecret.Name, Namespace: existingSecret.Namespace}, gotExisting); err != nil {
+		t.Fatalf("existing child transaction token secret was deleted: %v", err)
+	}
+	gotPrepared := &corev1.Secret{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Name: preparedSecret.Name, Namespace: preparedSecret.Namespace}, gotPrepared); err == nil {
+		t.Fatalf("prepared child transaction token secret still exists: %#v", gotPrepared)
+	}
+}
+
 func TestCleanupChildTaskAfterTokenAdoptionFailureAttemptsSecretCleanupWhenTaskDeleteFails(t *testing.T) {
 	forcedErr := errors.New("forced task delete failure")
 	child := &corev1alpha1.Task{
@@ -298,6 +443,7 @@ func TestPrepareChildTransactionTokenFailsClosedOnTTSExchangeError(t *testing.T)
 	defer ttsServer.Close()
 
 	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
 
@@ -321,6 +467,7 @@ func TestPrepareChildTransactionTokenRejectsScopeExpansion(t *testing.T) {
 	}))
 	defer ttsServer.Close()
 	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
 	t.Setenv(workerenv.ContextTokenChildScope, "orka:admin")
 

@@ -40,7 +40,24 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 	if ttsURL == "" {
 		return nil
 	}
-	subjectToken, err := workerenv.RequireTokenFileEnv(workerenv.ContextTokenSubjectTokenFile, "context token subject token")
+	ttsConfig, err := contexttoken.NewTTSConfig(
+		ttsURL,
+		os.Getenv(workerenv.ContextTokenTTSAudience),
+		os.Getenv(workerenv.ContextTokenTTSTimeout),
+		os.Getenv(workerenv.ContextTokenTTSTokenSource),
+		os.Getenv(workerenv.ContextTokenChildTokenTTL),
+		"",
+	)
+	if err != nil {
+		return fmt.Errorf("configuring child transaction token exchange: %w", err)
+	}
+	if !ttsConfig.Enabled() {
+		return nil
+	}
+	if parentTask == nil || parentTask.UID == "" {
+		return fmt.Errorf("parent task UID is required for child transaction token exchange")
+	}
+	subjectToken, err := childTransactionSubjectToken(ttsConfig.TokenSource)
 	if err != nil {
 		return err
 	}
@@ -66,17 +83,6 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 	}
 	if parentTask.Spec.Transaction != nil && parentTask.Spec.Transaction.ID != "" {
 		requestDetails["txn"] = parentTask.Spec.Transaction.ID
-	}
-	ttsConfig, err := contexttoken.NewTTSConfig(
-		ttsURL,
-		os.Getenv(workerenv.ContextTokenTTSAudience),
-		os.Getenv(workerenv.ContextTokenTTSTimeout),
-		contexttoken.TTSTokenSourceServiceAccount,
-		os.Getenv(workerenv.ContextTokenChildTokenTTL),
-		"",
-	)
-	if err != nil {
-		return fmt.Errorf("configuring child transaction token exchange: %w", err)
 	}
 	ttsClient, err := contexttoken.NewKontxtTTSClient(ttsConfig)
 	if err != nil {
@@ -126,6 +132,29 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 	return nil
 }
 
+func childTransactionSubjectToken(tokenSource string) (string, error) {
+	switch tokenSource {
+	case contexttoken.TTSTokenSourceIncoming:
+		if token, ok, err := workerenv.ReadTokenFileEnv(workerenv.ContextTokenSubjectTokenFile, "context token subject token"); ok || err != nil {
+			return token, err
+		}
+		return workerenv.RequireTokenFileEnv(workerenv.TransactionTokenFile, "transaction token")
+	case contexttoken.TTSTokenSourceServiceAccount:
+		return serviceAccountSubjectToken()
+	case contexttoken.TTSTokenSourceNone:
+		return "", fmt.Errorf("context token TTS token source %q does not provide a subject token", tokenSource)
+	default:
+		return "", fmt.Errorf("unsupported context token TTS token source %q", tokenSource)
+	}
+}
+
+func serviceAccountSubjectToken() (string, error) {
+	if token := strings.TrimSpace(os.Getenv(workerenv.ServiceAccountToken)); token != "" {
+		return token, nil
+	}
+	return workerenv.ReadTokenFile(workerenv.ServiceAccountTokenFile, "service account token")
+}
+
 func taskOwnerReference(task *corev1alpha1.Task) []metav1.OwnerReference {
 	if task == nil || task.UID == "" {
 		return nil
@@ -161,7 +190,7 @@ func adoptChildTransactionTokenSecret(ctx context.Context, k8sClient client.Clie
 		return nil
 	}
 	if childTask.UID == "" {
-		return nil
+		return fmt.Errorf("child task UID is required to adopt child transaction token secret %q", secretName)
 	}
 	secret := &corev1.Secret{}
 	if err := k8sClient.Get(ctx, client.ObjectKey{Name: secretName, Namespace: childTask.Namespace}, secret); err != nil {

@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -307,7 +308,7 @@ func (e *KubernetesJobCodeExecutor) buildResources(namespace string, req CodeExe
 					RestartPolicy:                 corev1.RestartPolicyNever,
 					ServiceAccountName:            serviceAccount.Name,
 					AutomountServiceAccountToken:  &automountServiceAccountToken,
-					TerminationGracePeriodSeconds: new(int64(1)),
+					TerminationGracePeriodSeconds: ptr.To(int64(1)),
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot:    &runAsNonRoot,
 						RunAsUser:       &runAsUser,

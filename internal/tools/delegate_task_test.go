@@ -22,12 +22,16 @@ import (
 	kontxttoken "github.com/aramase/kontxt/pkg/token"
 	sdkverify "github.com/aramase/kontxt/sdk/verify"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	apitypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/contexttoken"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/workerenv"
 )
@@ -92,6 +96,22 @@ func expectInheritedTaskProvenance(t *testing.T, task *corev1alpha1.Task) {
 	}
 	if task.Annotations[labels.AnnotationTransactionContextDigest] != parentTransactionHash {
 		t.Fatalf("transaction context digest annotation = %q, want %q", task.Annotations[labels.AnnotationTransactionContextDigest], parentTransactionHash)
+	}
+	if len(task.OwnerReferences) != 1 {
+		t.Fatalf("ownerReferences = %#v, want parent task owner", task.OwnerReferences)
+	}
+	ownerRef := task.OwnerReferences[0]
+	if ownerRef.Name != parentTaskName {
+		t.Fatalf("ownerRef.Name = %q, want %q", ownerRef.Name, parentTaskName)
+	}
+	if ownerRef.UID != apitypes.UID("parent-uid-1234") {
+		t.Fatalf("ownerRef.UID = %q, want %q", ownerRef.UID, apitypes.UID("parent-uid-1234"))
+	}
+	if ownerRef.Controller == nil || !*ownerRef.Controller {
+		t.Fatalf("ownerRef.Controller = %#v, want true", ownerRef.Controller)
+	}
+	if ownerRef.BlockOwnerDeletion == nil || !*ownerRef.BlockOwnerDeletion {
+		t.Fatalf("ownerRef.BlockOwnerDeletion = %#v, want true", ownerRef.BlockOwnerDeletion)
 	}
 }
 
@@ -302,6 +322,7 @@ func TestDelegateTaskTool_Execute_CleansUpChildTaskWhenTokenSecretAdoptionFails(
 	defer ttsServer.Close()
 
 	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
 
@@ -399,6 +420,7 @@ func TestDelegateTaskTool_Execute_WithTTSChildToken(t *testing.T) {
 	defer ttsServer.Close()
 
 	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
 
@@ -443,6 +465,9 @@ func TestDelegateTaskTool_Execute_WithTTSChildToken(t *testing.T) {
 	if owner.UID != childTask.UID {
 		t.Fatalf("secret owner UID = %q, want child task UID %q", owner.UID, childTask.UID)
 	}
+	if owner.BlockOwnerDeletion != nil {
+		t.Fatalf("secret owner BlockOwnerDeletion = %#v, want nil", owner.BlockOwnerDeletion)
+	}
 	claims, err := sdkverify.New(jwksServer.URL, "child.example.test").Verify(context.Background(), string(secret.Data["token"]))
 	if err != nil {
 		t.Fatalf("failed to verify child TxToken from secret: %v", err)
@@ -452,6 +477,87 @@ func TestDelegateTaskTool_Execute_WithTTSChildToken(t *testing.T) {
 	}
 	if claims.Scope != childTransactionScope {
 		t.Fatalf("child token scope = %q, want orka:agents:run", claims.Scope)
+	}
+}
+
+func TestDelegateTaskTool_Execute_CleansUpPreparedChildTokenSecretOnTaskAlreadyExists(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testResearcherAgentName)
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+	subjectPath := filepath.Join(t.TempDir(), "subject-token")
+	if err := os.WriteFile(subjectPath, []byte("parent-tx-token"), 0600); err != nil {
+		t.Fatalf("failed to write subject token fixture: %v", err)
+	}
+	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"access_token":      "new-child-token",
+			"issued_token_type": "urn:ietf:params:oauth:token-type:txn_token",
+			"token_type":        "N_A",
+		})
+	}))
+	defer ttsServer.Close()
+
+	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
+	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
+	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
+
+	oldSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-child-token",
+			Namespace: defaultNamespace,
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName: parentTaskName,
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"token": []byte("old-child-token"),
+		},
+	}
+	var preparedSecretName string
+	k8sClient := newFakeClientWithInterceptorFuncs(interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			switch typed := obj.(type) {
+			case *corev1alpha1.Task:
+				return apierrors.NewAlreadyExists(
+					schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "tasks"},
+					typed.GenerateName+"collision",
+				)
+			case *corev1.Secret:
+				preparedSecretName = typed.Name
+				return c.Create(ctx, obj, opts...)
+			default:
+				return assignFakeUIDOnCreate(ctx, c, obj, opts...)
+			}
+		},
+	}, parentTask(), researcherAgent(), oldSecret)
+	tool := NewDelegateTaskTool(k8sClient)
+
+	_, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"researcher","prompt":"Research with token"}`))
+	if err == nil || !strings.Contains(err.Error(), "failed to create child task") || !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("Execute() error = %v, want child task AlreadyExists", err)
+	}
+	if preparedSecretName == "" {
+		t.Fatal("expected prepared child token secret to be created before child task create failure")
+	}
+
+	preparedSecret := &corev1.Secret{}
+	err = k8sClient.Get(context.Background(), apitypes.NamespacedName{Name: preparedSecretName, Namespace: defaultNamespace}, preparedSecret)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("prepared child token secret lookup error = %v, want NotFound after cleanup", err)
+	}
+
+	remainingOldSecret := &corev1.Secret{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{Name: oldSecret.Name, Namespace: defaultNamespace}, remainingOldSecret); err != nil {
+		t.Fatalf("existing child token secret was deleted: %v", err)
+	}
+	if got := string(remainingOldSecret.Data["token"]); got != "old-child-token" {
+		t.Fatalf("existing child token secret token = %q, want old-child-token", got)
 	}
 }
 
@@ -540,8 +646,8 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 	if ownerRef.Controller == nil || !*ownerRef.Controller {
 		t.Error("ownerRef.Controller should be true")
 	}
-	if ownerRef.BlockOwnerDeletion != nil {
-		t.Errorf("ownerRef.BlockOwnerDeletion = %#v, want nil", ownerRef.BlockOwnerDeletion)
+	if ownerRef.BlockOwnerDeletion == nil || !*ownerRef.BlockOwnerDeletion {
+		t.Errorf("ownerRef.BlockOwnerDeletion = %#v, want true", ownerRef.BlockOwnerDeletion)
 	}
 
 	// Verify priority inherited from parent
@@ -567,7 +673,7 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             runtimeTypeClaude,
 				DefaultMaxTurns:  &maxTurns,
-				DefaultAllowBash: new(true),
+				DefaultAllowBash: ptr.To(true),
 			},
 		},
 	}

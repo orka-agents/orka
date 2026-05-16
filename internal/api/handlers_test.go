@@ -101,6 +101,7 @@ func setupTestHandlersWithAuthzStore(
 	app.Get("/memories/:id", handlers.GetMemory)
 	app.Put("/memories/:id", handlers.UpdateMemory)
 	app.Delete("/memories/:id", handlers.DeleteMemory)
+	app.Post("/memory-proposals/:id/apply", handlers.ApplyMemoryProposal)
 	app.Get("/sessions", handlers.ListSessions)
 	app.Get("/sessions/:id", handlers.GetSession)
 	app.Delete("/sessions/:id", handlers.DeleteSession)
@@ -3630,6 +3631,48 @@ func (conflictApplyMemoryProposalStore) ApplyMemoryProposal(context.Context, sto
 
 func (conflictApplyMemoryProposalStore) ArchiveMemoryProposal(context.Context, string, string) error {
 	return nil
+}
+
+func TestHandlers_ApplyMemoryProposal_ContextTokenAuthorization(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	tests := []struct {
+		name  string
+		scope string
+		want  int
+	}{
+		{name: "allowed with memory write", scope: ContextTokenScopeMemoryWrite, want: http.StatusOK},
+		{name: "denied with only memory read", scope: ContextTokenScopeMemoryRead, want: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, ss := setupTestHandlersWithAuthzStore(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+			proposal := &store.MemoryProposal{
+				Namespace: "default",
+				Title:     "Remember project preference",
+				Type:      "memory",
+				Content:   "User prefers compact task summaries.",
+			}
+			require.NoError(t, ss.CreateMemoryProposal(context.Background(), proposal))
+			require.NoError(t, ss.ReviewMemoryProposal(context.Background(), store.MemoryProposalReview{
+				Namespace: "default",
+				ID:        proposal.ID,
+				Status:    "accepted",
+				Reviewer:  "reviewer",
+			}))
+
+			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
+			body, _ := json.Marshal(map[string]any{"appliedBy": "api-user"})
+			req := httptest.NewRequest(http.MethodPost, "/memory-proposals/"+proposal.ID+"/apply?namespace=default", bytes.NewReader(body))
+			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, resp.StatusCode)
+		})
+	}
 }
 
 func TestHandlers_ApplyMemoryProposal(t *testing.T) {
