@@ -1195,6 +1195,67 @@ func TestEnsureWorkerClusterRoleBindingAlreadyExistsRaceUpdatesExistingBinding(t
 	}
 }
 
+func TestEnsureWorkerClusterRoleBindingRecreatesStaleRoleRef(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	namespace := "stale-ns"
+	spec := workerRBACSpec{
+		serviceAccountName:     AIWorkerServiceAccount,
+		clusterRoleName:        DefaultAIWorkerClusterRoleName,
+		clusterRoleBindingName: fmt.Sprintf("orka-ai-worker-%s", namespace),
+	}
+
+	stale := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: spec.clusterRoleBindingName,
+			Labels: map[string]string{
+				"stale": "true",
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     "stale-worker-role",
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      "ServiceAccount",
+			Name:      "stale-worker",
+			Namespace: "old-ns",
+		}},
+	}
+	r := newUnitReconciler(scheme, stale)
+
+	if err := r.ensureWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &rbacv1.ClusterRoleBinding{}
+	if err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName}, got); err != nil {
+		t.Fatalf("expected ClusterRoleBinding to exist after remediation: %v", err)
+	}
+	wantRoleRef := rbacv1.RoleRef{
+		APIGroup: rbacv1.GroupName,
+		Kind:     "ClusterRole",
+		Name:     spec.clusterRoleName,
+	}
+	if got.RoleRef != wantRoleRef {
+		t.Fatalf("expected stale RoleRef to be remediated to %#v, got %#v", wantRoleRef, got.RoleRef)
+	}
+	if got.Labels[managedByLabelKey] != managedByLabelValue {
+		t.Fatalf("expected managed-by label on remediated binding, got labels %#v", got.Labels)
+	}
+	if got.Labels["stale"] == "true" {
+		t.Fatalf("expected stale binding to be recreated, got stale labels %#v", got.Labels)
+	}
+	if len(got.Subjects) != 1 {
+		t.Fatalf("expected 1 subject, got %d", len(got.Subjects))
+	}
+	subject := got.Subjects[0]
+	if subject.Kind != "ServiceAccount" || subject.Name != spec.serviceAccountName || subject.Namespace != namespace {
+		t.Fatalf("expected desired subject to be reconciled, got %#v", subject)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // handleScheduledTask
 // ---------------------------------------------------------------------------

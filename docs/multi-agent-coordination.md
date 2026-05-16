@@ -346,7 +346,7 @@ Located in `workers/ai/main.go`. When `ORKA_COORDINATION_ENABLED=true`:
 
 ## RBAC
 
-Worker pods use trust-tiered ServiceAccounts and ClusterRoles defined in `config/rbac/worker_role.yaml`:
+Worker pods use trust-tiered ServiceAccounts and ClusterRoles defined in `config/rbac/worker_role.yaml`. The raw RBAC manifests use unprefixed names (`ai-worker`, `ai-worker-role`, etc.); the default install renders them through `config/default`, whose kustomize `namePrefix: orka-` produces the `orka-*` names shown below:
 
 - AI tasks use `orka-ai-worker` / `orka-ai-worker-role`.
 - Agent-provider tasks use `orka-vendor-worker` / `orka-vendor-worker-role`.

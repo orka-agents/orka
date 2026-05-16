@@ -328,11 +328,12 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 		Eventually(verifyTaskDeleted, 30*time.Second, time.Second).Should(Succeed())
 	})
 
-	// Test 7: Verify worker RBAC — workers should NOT have ConfigMap create/update permissions
+	// Test 7: Verify worker RBAC — workers should NOT have ConfigMap write permissions
 	It("should not grant ConfigMap write permissions to workers", func() {
 		By("checking the worker ClusterRoles for ConfigMap permissions")
 		verifyWorkerRBAC := func(g Gomega) {
 			workerRoles := []string{"orka-ai-worker-role", "orka-vendor-worker-role", "orka-container-worker-role"}
+			disallowedConfigMapVerbs := []string{"create", "update", "patch", "delete", "deletecollection", "*"}
 			type policyRule struct {
 				APIGroups []string `json:"apiGroups"`
 				Resources []string `json:"resources"`
@@ -355,13 +356,24 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 				g.Expect(err).NotTo(HaveOccurred())
 
 				for _, rule := range rules {
-					for _, resource := range rule.Resources {
-						if resource == "configmaps" {
-							// ConfigMap rules should only have read verbs
-							for _, verb := range rule.Verbs {
-								g.Expect(verb).NotTo(BeElementOf("create", "update", "patch"),
-									"Workers should NOT have ConfigMap write permissions")
+					ruleCoversConfigMaps := false
+					for _, apiGroup := range rule.APIGroups {
+						if apiGroup != "" && apiGroup != "*" {
+							continue
+						}
+						for _, resource := range rule.Resources {
+							if resource == "configmaps" || resource == "*" {
+								ruleCoversConfigMaps = true
+								break
 							}
+						}
+					}
+
+					if ruleCoversConfigMaps {
+						// ConfigMap rules should only have read verbs
+						for _, verb := range rule.Verbs {
+							g.Expect(disallowedConfigMapVerbs).NotTo(ContainElement(verb),
+								"Workers should NOT have ConfigMap write permissions")
 						}
 					}
 				}

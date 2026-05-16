@@ -1476,7 +1476,26 @@ func (r *TaskReconciler) ensureWorkerClusterRoleBinding(ctx context.Context, nam
 	}
 
 	if crb.RoleRef != desired.RoleRef {
-		return fmt.Errorf("worker ClusterRoleBinding %s has RoleRef %s/%s, want %s/%s", spec.clusterRoleBindingName, crb.RoleRef.Kind, crb.RoleRef.Name, desired.RoleRef.Kind, desired.RoleRef.Name)
+		log.Info("Recreating worker ClusterRoleBinding with stale RoleRef", "namespace", namespace, "binding", spec.clusterRoleBindingName, "currentKind", crb.RoleRef.Kind, "currentName", crb.RoleRef.Name, "desiredKind", desired.RoleRef.Kind, "desiredName", desired.RoleRef.Name)
+		if err := r.Delete(ctx, crb); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting worker ClusterRoleBinding %s with stale RoleRef %s/%s: %w", spec.clusterRoleBindingName, crb.RoleRef.Kind, crb.RoleRef.Name, err)
+		}
+		if err := r.Create(ctx, desired); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("recreating worker ClusterRoleBinding %s with RoleRef %s/%s: %w", spec.clusterRoleBindingName, desired.RoleRef.Kind, desired.RoleRef.Name, err)
+			}
+
+			crb = &rbacv1.ClusterRoleBinding{}
+			if err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName}, crb); err != nil {
+				return fmt.Errorf("getting worker ClusterRoleBinding %s after recreate conflict: %w", spec.clusterRoleBindingName, err)
+			}
+			if crb.RoleRef != desired.RoleRef {
+				return fmt.Errorf("worker ClusterRoleBinding %s still has RoleRef %s/%s after recreate conflict, want %s/%s", spec.clusterRoleBindingName, crb.RoleRef.Kind, crb.RoleRef.Name, desired.RoleRef.Kind, desired.RoleRef.Name)
+			}
+		} else {
+			log.Info("Recreated worker ClusterRoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
+			return nil
+		}
 	}
 
 	changed := false
