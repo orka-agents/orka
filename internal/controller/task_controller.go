@@ -91,6 +91,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
+// +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
@@ -213,7 +214,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 
 	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
 		// Clean up result data from store
-		if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
+		if task.Status.ResultRef != nil && task.Status.ResultRef.Available && r.ResultStore != nil {
 			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete result from store", "task", task.Name)
 				// Continue with finalizer removal anyway
@@ -569,8 +570,16 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		// Non-fatal: continue with job creation, it may still work
 	}
 
+	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(task)
+	if err != nil {
+		log.Error(err, "failed to resolve execution workspace")
+		return r.failTask(ctx, task, fmt.Sprintf("failed to resolve execution workspace: %v", err))
+	}
+
 	// Create the Job
-	job, err := r.JobBuilder.Build(ctx, task, agent, provider)
+	job, err := r.JobBuilder.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{
+		AgentSandboxWorkspace: workspaceRequest,
+	})
 	if err != nil {
 		log.Error(err, "failed to build Job")
 		return r.failTask(ctx, task, fmt.Sprintf("failed to build job: %v", err))
@@ -671,7 +680,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 				if child.Spec.AgentRef != nil {
 					cs.Agent = child.Spec.AgentRef.Name
 				}
-				if child.Status.ResultRef != nil && child.Status.ResultRef.Available {
+				if child.Status.ResultRef != nil && child.Status.ResultRef.Available && r.ResultStore != nil {
 					result, err := r.ResultStore.GetResult(ctx, child.Namespace, child.Name)
 					if err != nil {
 						log.Error(err, "failed to get child task result", "child", child.Name)
@@ -1025,6 +1034,10 @@ func (r *TaskReconciler) calculateRetryDelay(task *corev1alpha1.Task) time.Durat
 
 // collectResult collects the task result from the Job's output
 func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.Task) error {
+	if r.ResultStore == nil {
+		return nil
+	}
+
 	// Check if result already exists in store (written by worker via HTTP)
 	_, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
 	if err == nil {

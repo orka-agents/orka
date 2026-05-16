@@ -46,9 +46,9 @@ controller:
 
   # Experimental agent sandbox workspace support (disabled by default)
   agentSandbox:
-    # Enables validation of Task execution.workspace requests. This does not route jobs through sandboxes yet.
+    # Enables workspace-backed execution for agent Tasks that set Task execution.workspace.
     enabled: false
-    # Optional router base URL for future workspace lifecycle integration.
+    # Optional upstream agent-sandbox router base URL used for workspace claims.
     routerUrl: ""
     # Optional default execution workspace template name used when a Task omits execution.workspace.templateRef.name.
     defaultTemplate: ""
@@ -56,9 +56,9 @@ controller:
     warmPoolPolicy: disabled
     # Namespace strategy: task, controller.
     namespaceStrategy: task
-    # Timeout for future workspace claim operations.
+    # Timeout for workspace claim and readiness operations.
     claimTimeout: 2m
-    # Timeout for future sandbox command execution operations.
+    # Timeout for agent runtime execution inside the sandbox.
     commandTimeout: 30m
     # Default cleanup policy: delete, retain.
     cleanupPolicy: delete

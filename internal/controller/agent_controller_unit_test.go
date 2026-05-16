@@ -38,8 +38,6 @@ func setupAgentReconciler(objs ...runtime.Object) *AgentReconciler {
 	}
 }
 
-func boolPtr(b bool) *bool { return &b }
-
 func baseAgent(name string) *corev1alpha1.Agent {
 	return &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
@@ -291,7 +289,7 @@ func TestValidateTools(t *testing.T) {
 			name: "disabled tool skipped",
 			agent: func() *corev1alpha1.Agent {
 				a := baseAgent("disabled-tool")
-				a.Spec.Tools = []corev1alpha1.ToolReference{{Name: "nonexistent", Enabled: boolPtr(false)}}
+				a.Spec.Tools = []corev1alpha1.ToolReference{{Name: "nonexistent", Enabled: new(false)}}
 				return a
 			}(),
 		},
@@ -299,7 +297,7 @@ func TestValidateTools(t *testing.T) {
 			name: "enabled tool that exists",
 			agent: func() *corev1alpha1.Agent {
 				a := baseAgent("enabled-tool")
-				a.Spec.Tools = []corev1alpha1.ToolReference{{Name: "existing-tool", Enabled: boolPtr(true)}}
+				a.Spec.Tools = []corev1alpha1.ToolReference{{Name: "existing-tool", Enabled: new(true)}}
 				return a
 			}(),
 			objs: []runtime.Object{existingTool},

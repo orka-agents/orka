@@ -21,7 +21,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -115,8 +114,19 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 	return prefix + suffix
 }
 
-// Build creates a Job for the given Task
+// JobBuildOptions carries optional inputs that affect Job rendering while keeping
+// the historical Build signature stable.
+type JobBuildOptions struct {
+	AgentSandboxWorkspace *AgentSandboxWorkspaceRequest
+}
+
+// Build creates a Job for the given Task.
 func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (*batchv1.Job, error) {
+	return b.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{})
+}
+
+// BuildWithOptions creates a Job for the given Task using additional resolved options.
+func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) (*batchv1.Job, error) {
 	jobName := buildTaskJobName(task)
 	execution := resolveExecution(task, agent)
 
@@ -130,7 +140,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: ptr.To(int32(0)), // No retries at Job level, we handle retries in the controller
+			BackoffLimit: new(int32(0)), // No retries at Job level, we handle retries in the controller
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
@@ -143,7 +153,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 					ServiceAccountName: "orka-worker",
 					SecurityContext:    b.buildPodSecurityContext(),
 					Containers: []corev1.Container{
-						b.buildContainer(ctx, task, agent, provider),
+						b.buildContainerWithOptions(ctx, task, agent, provider, opts),
 					},
 				},
 			},
@@ -196,10 +206,10 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 // buildPodSecurityContext builds a secure pod security context
 func (b *JobBuilder) buildPodSecurityContext() *corev1.PodSecurityContext {
 	return &corev1.PodSecurityContext{
-		RunAsNonRoot: ptr.To(true),
-		RunAsUser:    ptr.To(int64(1000)),
-		RunAsGroup:   ptr.To(int64(1000)),
-		FSGroup:      ptr.To(int64(1000)),
+		RunAsNonRoot: new(true),
+		RunAsUser:    new(int64(1000)),
+		RunAsGroup:   new(int64(1000)),
+		FSGroup:      new(int64(1000)),
 		SeccompProfile: &corev1.SeccompProfile{
 			Type: corev1.SeccompProfileTypeRuntimeDefault,
 		},
@@ -209,10 +219,10 @@ func (b *JobBuilder) buildPodSecurityContext() *corev1.PodSecurityContext {
 // buildContainerSecurityContext builds a secure container security context
 func (b *JobBuilder) buildContainerSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
-		AllowPrivilegeEscalation: ptr.To(false),
-		ReadOnlyRootFilesystem:   ptr.To(true),
-		RunAsNonRoot:             ptr.To(true),
-		RunAsUser:                ptr.To(int64(1000)),
+		AllowPrivilegeEscalation: new(false),
+		ReadOnlyRootFilesystem:   new(true),
+		RunAsNonRoot:             new(true),
+		RunAsUser:                new(int64(1000)),
 		Capabilities: &corev1.Capabilities{
 			Drop: []corev1.Capability{"ALL"},
 		},
@@ -221,12 +231,17 @@ func (b *JobBuilder) buildContainerSecurityContext() *corev1.SecurityContext {
 
 // buildContainer builds the main container for the Job
 func (b *JobBuilder) buildContainer(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) corev1.Container {
+	return b.buildContainerWithOptions(ctx, task, agent, provider, JobBuildOptions{})
+}
+
+// buildContainerWithOptions builds the main container for the Job.
+func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) corev1.Container {
 	container := corev1.Container{
 		Name:            "worker",
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: b.buildContainerSecurityContext(),
 		Resources:       b.buildResources(task, agent),
-		Env:             b.buildEnvVars(ctx, task, agent, provider),
+		Env:             b.buildEnvVarsWithOptions(ctx, task, agent, provider, opts),
 		VolumeMounts:    []corev1.VolumeMount{},
 	}
 
@@ -315,7 +330,7 @@ func applyExecution(job *batchv1.Job, execution *corev1alpha1.ExecutionSpec) {
 	}
 
 	if execution.RuntimeClassName != "" {
-		job.Spec.Template.Spec.RuntimeClassName = ptr.To(execution.RuntimeClassName)
+		job.Spec.Template.Spec.RuntimeClassName = new(execution.RuntimeClassName)
 	}
 	if len(execution.NodeSelector) > 0 {
 		job.Spec.Template.Spec.NodeSelector = copyNodeSelector(execution.NodeSelector)
@@ -374,6 +389,11 @@ func (b *JobBuilder) buildResources(task *corev1alpha1.Task, agent *corev1alpha1
 
 // buildEnvVars builds the environment variables for the container
 func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) []corev1.EnvVar {
+	return b.buildEnvVarsWithOptions(ctx, task, agent, provider, JobBuildOptions{})
+}
+
+// buildEnvVarsWithOptions builds the environment variables for the container using additional options.
+func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) []corev1.EnvVar {
 	envVars := workerenv.BaseEnv{
 		TaskName:       task.Name,
 		TaskNamespace:  task.Namespace,
@@ -414,6 +434,7 @@ func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, 
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
 		envVars = b.addAgentEnvVars(ctx, envVars, task, agent)
 		envVars = b.addCodexSandboxEnvVars(envVars, agent)
+		envVars = b.addAgentSandboxWorkspaceEnvVars(envVars, opts.AgentSandboxWorkspace)
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
@@ -421,6 +442,27 @@ func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, 
 	}
 
 	return envVars
+}
+
+// addAgentSandboxWorkspaceEnvVars injects resolved sandbox workspace settings for agent tasks.
+func (b *JobBuilder) addAgentSandboxWorkspaceEnvVars(envVars []corev1.EnvVar, request *AgentSandboxWorkspaceRequest) []corev1.EnvVar {
+	if request == nil {
+		return envVars
+	}
+
+	return append(envVars, workerenv.AgentSandboxEnv{
+		Enabled:           true,
+		RouterURL:         request.RouterURL,
+		TemplateName:      request.TemplateName,
+		TemplateNamespace: request.TemplateNamespace,
+		ReusePolicy:       string(request.ReusePolicy),
+		ReuseKey:          request.ReuseKey,
+		CleanupPolicy:     string(request.CleanupPolicy),
+		WarmPoolPolicy:    request.WarmPoolPolicy,
+		NamespaceStrategy: request.NamespaceStrategy,
+		ClaimTimeout:      request.ClaimTimeout,
+		CommandTimeout:    request.CommandTimeout,
+	}.EnvVars()...)
 }
 
 // aiConfig holds resolved AI configuration from provider, agent, and task.

@@ -1,0 +1,697 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package workspace
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	sandbox "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+)
+
+func TestAgentSandboxExecutorReattachesClaimNameAcrossExecutorInstances(t *testing.T) {
+	store := newFakeAgentSandboxStore()
+	req := ClaimRequest{
+		Namespace: fakeTestNamespace,
+		Template:  TemplateRef{Name: "coding-agent"},
+	}
+
+	firstExecutor := NewAgentSandboxExecutor()
+	firstExecutor.newClient = store.newClient
+	created, err := firstExecutor.Claim(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first Claim() error = %v", err)
+	}
+	if !created.Created || created.Reused {
+		t.Fatalf("first Created/Reused = %v/%v, want true/false", created.Created, created.Reused)
+	}
+
+	secondExecutor := NewAgentSandboxExecutor()
+	secondExecutor.newClient = store.newClient
+	reuseReq := req
+	reuseReq.ClaimName = created.Ref.ClaimName
+	reuseReq.ReuseKey = "session-1"
+	reused, err := secondExecutor.Claim(context.Background(), reuseReq)
+	if err != nil {
+		t.Fatalf("second Claim() error = %v", err)
+	}
+	if reused.Created || !reused.Reused {
+		t.Fatalf("second Created/Reused = %v/%v, want false/true", reused.Created, reused.Reused)
+	}
+	if reused.Phase != PhaseReady {
+		t.Fatalf("second phase = %s, want %s", reused.Phase, PhaseReady)
+	}
+	if reused.Ref.Namespace != created.Ref.Namespace || reused.Ref.ClaimName != created.Ref.ClaimName || reused.Ref.SandboxName != created.Ref.SandboxName {
+		t.Fatalf("reattached ref = %#v, want same backend identity as %#v", reused.Ref, created.Ref)
+	}
+
+	desc, err := secondExecutor.Describe(context.Background(), DescribeRequest{Ref: reused.Ref})
+	if err != nil {
+		t.Fatalf("Describe() after reattach error = %v", err)
+	}
+	if desc.Phase != PhaseReady || desc.ReuseKey != "session-1" {
+		t.Fatalf("description after reattach = %#v, want ready with reuse key", desc)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.createCalls) != 1 {
+		t.Fatalf("CreateSandbox calls = %d, want 1", len(store.createCalls))
+	}
+	if len(store.getCalls) != 1 {
+		t.Fatalf("GetSandbox calls = %d, want 1", len(store.getCalls))
+	}
+	if call := store.getCalls[0]; call.claimName != created.Ref.ClaimName || call.namespace != fakeTestNamespace {
+		t.Fatalf("GetSandbox call = %#v, want claim %q namespace %s", call, created.Ref.ClaimName, fakeTestNamespace)
+	}
+	if len(store.clientOptions) != 2 {
+		t.Fatalf("client creations = %d, want 2", len(store.clientOptions))
+	}
+	if got := store.clientOptions[1].TemplateName; got != "coding-agent" {
+		t.Fatalf("reattach client TemplateName = %q, want coding-agent", got)
+	}
+}
+
+func TestAgentSandboxExecutorReattachCallsGetSandboxWithRequestedClaim(t *testing.T) {
+	store := newFakeAgentSandboxStore()
+	store.seed(fakeTestNamespace, "retained-claim", "retained-sandbox")
+
+	executor := NewAgentSandboxExecutor()
+	executor.newClient = store.newClient
+	claimed, err := executor.Claim(context.Background(), ClaimRequest{
+		Namespace: fakeTestNamespace,
+		ClaimName: "retained-claim",
+		Template:  TemplateRef{Name: "coding-agent"},
+	})
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	if claimed.Created || !claimed.Reused {
+		t.Fatalf("Created/Reused = %v/%v, want false/true", claimed.Created, claimed.Reused)
+	}
+	if claimed.Ref.ClaimName != "retained-claim" || claimed.Ref.SandboxName != "retained-sandbox" {
+		t.Fatalf("Claim() ref = %#v, want retained claim identity", claimed.Ref)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.getCalls) != 1 {
+		t.Fatalf("GetSandbox calls = %d, want 1", len(store.getCalls))
+	}
+	if call := store.getCalls[0]; call.claimName != "retained-claim" || call.namespace != fakeTestNamespace {
+		t.Fatalf("GetSandbox call = %#v, want retained-claim/%s", call, fakeTestNamespace)
+	}
+	if len(store.createCalls) != 0 {
+		t.Fatalf("CreateSandbox calls = %d, want 0 for explicit reattach", len(store.createCalls))
+	}
+}
+
+func TestAgentSandboxExecutorLocalClaimNameReuseSkipsGetSandbox(t *testing.T) {
+	store := newFakeAgentSandboxStore()
+	executor := NewAgentSandboxExecutor()
+	executor.newClient = store.newClient
+	req := ClaimRequest{
+		Namespace: fakeTestNamespace,
+		Template:  TemplateRef{Name: "coding-agent"},
+	}
+
+	created, err := executor.Claim(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first Claim() error = %v", err)
+	}
+	store.resetCalls()
+
+	reuseReq := req
+	reuseReq.ClaimName = created.Ref.ClaimName
+	reused, err := executor.Claim(context.Background(), reuseReq)
+	if err != nil {
+		t.Fatalf("second Claim() error = %v", err)
+	}
+	if reused.Created || !reused.Reused {
+		t.Fatalf("second Created/Reused = %v/%v, want false/true", reused.Created, reused.Reused)
+	}
+	if reused.Ref != created.Ref {
+		t.Fatalf("reused ref = %#v, want %#v", reused.Ref, created.Ref)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.getCalls) != 0 {
+		t.Fatalf("GetSandbox calls = %d, want 0 for local reuse", len(store.getCalls))
+	}
+	if len(store.createCalls) != 0 {
+		t.Fatalf("CreateSandbox calls = %d, want 0 for local reuse", len(store.createCalls))
+	}
+	if len(store.clientOptions) != 0 {
+		t.Fatalf("new client calls = %d, want 0 for local reuse", len(store.clientOptions))
+	}
+}
+
+func TestAgentSandboxExecutorClaimPropagatesTimeoutToSandboxOptions(t *testing.T) {
+	store := newFakeAgentSandboxStore()
+	executor := NewAgentSandboxExecutor()
+	executor.newClient = store.newClient
+
+	_, err := executor.Claim(context.Background(), ClaimRequest{
+		Namespace: fakeTestNamespace,
+		Template:  TemplateRef{Name: "coding-agent"},
+		Timeout:   17 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.clientOptions) != 1 {
+		t.Fatalf("client creations = %d, want 1", len(store.clientOptions))
+	}
+	opts := store.clientOptions[0]
+	if opts.RequestTimeout != 17*time.Second {
+		t.Errorf("RequestTimeout = %v, want 17s", opts.RequestTimeout)
+	}
+	if opts.PerAttemptTimeout != 17*time.Second {
+		t.Errorf("PerAttemptTimeout = %v, want 17s", opts.PerAttemptTimeout)
+	}
+}
+
+func TestAgentSandboxExecutorClaimUsesClaimNamespaceAndTemplateName(t *testing.T) {
+	store := newFakeAgentSandboxStore()
+	executor := NewAgentSandboxExecutor(WithAgentSandboxAPIURL("http://router.example"))
+	executor.newClient = store.newClient
+
+	_, err := executor.Claim(context.Background(), ClaimRequest{
+		Namespace: "task-ns",
+		Template:  TemplateRef{Namespace: "template-ns", Name: "coding-agent"},
+	})
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.createCalls) != 1 {
+		t.Fatalf("CreateSandbox calls = %d, want 1", len(store.createCalls))
+	}
+	if call := store.createCalls[0]; call.template != "coding-agent" || call.namespace != "task-ns" {
+		t.Fatalf("CreateSandbox call = %#v, want template coding-agent in claim namespace task-ns", call)
+	}
+	if len(store.clientOptions) != 1 {
+		t.Fatalf("client creations = %d, want 1", len(store.clientOptions))
+	}
+	if got := store.clientOptions[0].APIURL; got != "http://router.example" {
+		t.Fatalf("client APIURL = %q, want router URL", got)
+	}
+}
+
+func TestAgentSandboxCommandStringRendersDeterministicallyAndSafely(t *testing.T) {
+	command, err := agentSandboxCommandString(ExecRequest{
+		Command: []string{"sh", "-c", "printf '%s' \"$VALUE\""},
+		Env: map[string]string{
+			"VALUE": "quote ' and spaces",
+			"A":     "first",
+		},
+		WorkDir: "/workspace/dir with ' quote",
+	})
+	if err != nil {
+		t.Fatalf("agentSandboxCommandString() error = %v", err)
+	}
+
+	script := strings.Join([]string{
+		"cd",
+		shellQuote("/workspace/dir with ' quote"),
+		"&&",
+		"env",
+		shellQuote("A=first"),
+		shellQuote("VALUE=quote ' and spaces"),
+		shellQuote("sh"),
+		shellQuote("-c"),
+		shellQuote("printf '%s' \"$VALUE\""),
+	}, " ")
+	want := "sh -c " + shellQuote(script)
+	if command != want {
+		t.Fatalf("command = %q, want %q", command, want)
+	}
+}
+
+func TestAgentSandboxCommandStringRejectsUnsafeInputs(t *testing.T) {
+	tests := []struct {
+		name string
+		req  ExecRequest
+	}{
+		{name: "workdir nul", req: ExecRequest{WorkDir: "bad\x00dir", Command: []string{"echo"}}},
+		{name: "empty env name", req: ExecRequest{Command: []string{"echo"}, Env: map[string]string{"": "value"}}},
+		{name: "env contains equals", req: ExecRequest{Command: []string{"echo"}, Env: map[string]string{"A=B": "value"}}},
+		{name: "env value nul", req: ExecRequest{Command: []string{"echo"}, Env: map[string]string{"A": "bad\x00value"}}},
+		{name: "arg nul", req: ExecRequest{Command: []string{"bad\x00arg"}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := agentSandboxCommandString(tt.req); err == nil {
+				t.Fatal("agentSandboxCommandString() error = nil, want error")
+			}
+		})
+	}
+}
+
+func TestAgentSandboxExecutorExecRendersCommandAndMapsCommandFailure(t *testing.T) {
+	store := newFakeAgentSandboxStore()
+	executor := NewAgentSandboxExecutor()
+	executor.newClient = store.newClient
+	claim, err := executor.Claim(context.Background(), ClaimRequest{
+		Namespace: fakeTestNamespace,
+		Template:  TemplateRef{Name: "coding-agent"},
+	})
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	handle := store.mustHandle(t, claim.Ref.Namespace, claim.Ref.ClaimName)
+	handle.nextRun = &sandbox.ExecutionResult{Stdout: "abcdef", Stderr: "ghijkl", ExitCode: 2}
+
+	result, err := executor.Exec(context.Background(), ExecRequest{
+		Ref:            claim.Ref,
+		Command:        []string{"echo", "hello world"},
+		Env:            map[string]string{"B": "two", "A": "one"},
+		WorkDir:        "/workspace/repo",
+		MaxOutputBytes: 3,
+	})
+	if !IsKind(err, ErrorKindCommandFailed) {
+		t.Fatalf("Exec() error = %v, want kind %s", err, ErrorKindCommandFailed)
+	}
+	if result == nil || result.ExitCode != 2 {
+		t.Fatalf("Exec() result = %#v, want exit code 2", result)
+	}
+	if result.Stdout != "abc" || result.Stderr != "ghi" || !result.StdoutTruncated || !result.StderrTruncated {
+		t.Fatalf("Exec() truncated output = %#v", result)
+	}
+
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
+	if len(handle.runCommands) != 1 {
+		t.Fatalf("Run calls = %d, want 1", len(handle.runCommands))
+	}
+	script := strings.Join([]string{
+		"cd", shellQuote("/workspace/repo"), "&&", "env",
+		shellQuote("A=one"), shellQuote("B=two"),
+		shellQuote("echo"), shellQuote("hello world"),
+	}, " ")
+	wantCommand := "sh -c " + shellQuote(script)
+	if handle.runCommands[0] != wantCommand {
+		t.Fatalf("Run command = %q, want %q", handle.runCommands[0], wantCommand)
+	}
+}
+
+func TestAgentSandboxExecutorExecRejectsStdin(t *testing.T) {
+	executor := NewAgentSandboxExecutor()
+	_, err := executor.Exec(context.Background(), ExecRequest{Command: []string{"cat"}, Stdin: []byte("input")})
+	if !IsKind(err, ErrorKindInvalidArgument) {
+		t.Fatalf("Exec() error = %v, want kind %s", err, ErrorKindInvalidArgument)
+	}
+}
+
+func TestAgentSandboxExecutorUploadWritesPlainFilesAndRejectsNestedPaths(t *testing.T) {
+	store := newFakeAgentSandboxStore()
+	executor := NewAgentSandboxExecutor()
+	executor.newClient = store.newClient
+	claim, err := executor.Claim(context.Background(), ClaimRequest{
+		Namespace: fakeTestNamespace,
+		Template:  TemplateRef{Name: "coding-agent"},
+	})
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	handle := store.mustHandle(t, claim.Ref.Namespace, claim.Ref.ClaimName)
+
+	uploaded, err := executor.Upload(context.Background(), UploadRequest{
+		Ref:       claim.Ref,
+		Artifacts: []UploadArtifact{{Path: "out.txt", Data: []byte("hello")}},
+	})
+	if err != nil {
+		t.Fatalf("Upload() error = %v", err)
+	}
+	if len(uploaded.Artifacts) != 1 || uploaded.Artifacts[0].Path != "out.txt" {
+		t.Fatalf("Upload() artifacts = %#v", uploaded.Artifacts)
+	}
+
+	handle.mu.Lock()
+	got := string(handle.writes["out.txt"])
+	handle.mu.Unlock()
+	if got != "hello" {
+		t.Fatalf("written out.txt = %q, want hello", got)
+	}
+
+	_, err = executor.Upload(context.Background(), UploadRequest{
+		Ref:       claim.Ref,
+		Artifacts: []UploadArtifact{{Path: "logs/out.txt", Data: []byte("nested")}},
+	})
+	if !IsKind(err, ErrorKindInvalidArgument) {
+		t.Fatalf("Upload(nested) error = %v, want kind %s", err, ErrorKindInvalidArgument)
+	}
+}
+
+func TestAgentSandboxExecutorDownloadRecursivelyListsAndReadsFiles(t *testing.T) {
+	store := newFakeAgentSandboxStore()
+	executor := NewAgentSandboxExecutor()
+	executor.newClient = store.newClient
+	claim, err := executor.Claim(context.Background(), ClaimRequest{
+		Namespace: fakeTestNamespace,
+		Template:  TemplateRef{Name: "coding-agent"},
+	})
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	handle := store.mustHandle(t, claim.Ref.Namespace, claim.Ref.ClaimName)
+	handle.lists = map[string][]sandbox.FileEntry{
+		".": {
+			{Name: "root.txt", Type: sandbox.FileTypeFile, Size: 4, ModTime: 1700000000},
+			{Name: "dir", Type: sandbox.FileTypeDirectory},
+		},
+		"dir": {{Name: "child.txt", Type: sandbox.FileTypeFile, Size: 5, ModTime: 1700000001}},
+	}
+	handle.reads = map[string][]byte{
+		"root.txt":      []byte("root"),
+		"dir/child.txt": []byte("child"),
+	}
+
+	down, err := executor.Download(context.Background(), DownloadRequest{Ref: claim.Ref})
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	if len(down.Artifacts) != 2 {
+		t.Fatalf("Download() artifacts = %d, want 2: %#v", len(down.Artifacts), down.Artifacts)
+	}
+	if down.Artifacts[0].Path != "dir/child.txt" || string(down.Artifacts[0].Data) != "child" {
+		t.Fatalf("first artifact = %#v", down.Artifacts[0])
+	}
+	if down.Artifacts[1].Path != "root.txt" || string(down.Artifacts[1].Data) != "root" {
+		t.Fatalf("second artifact = %#v", down.Artifacts[1])
+	}
+}
+
+func TestAgentSandboxExecutorReleaseRetainsAndDeleteUsesClient(t *testing.T) {
+	store := newFakeAgentSandboxStore()
+	executor := NewAgentSandboxExecutor()
+	executor.newClient = store.newClient
+	claim, err := executor.Claim(context.Background(), ClaimRequest{
+		Namespace: fakeTestNamespace,
+		Template:  TemplateRef{Name: "coding-agent"},
+		ReuseKey:  "session-1",
+	})
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	handle := store.mustHandle(t, claim.Ref.Namespace, claim.Ref.ClaimName)
+
+	released, err := executor.Release(context.Background(), ReleaseRequest{
+		Ref:    claim.Ref,
+		Retain: true,
+		Reason: "debug",
+	})
+	if err != nil {
+		t.Fatalf("Release(retain) error = %v", err)
+	}
+	if !released.Retained || released.Phase != PhaseRetained || !strings.Contains(released.Message, "debug") {
+		t.Fatalf("Release(retain) = %#v", released)
+	}
+	handle.mu.Lock()
+	disconnected := handle.disconnected
+	closed := handle.closed
+	handle.mu.Unlock()
+	if !disconnected || closed {
+		t.Fatalf("disconnect/close = %v/%v, want true/false", disconnected, closed)
+	}
+
+	deleted, err := executor.Delete(context.Background(), DeleteRequest{Ref: claim.Ref, Reason: "done"})
+	if err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if !deleted.Deleted || deleted.Phase != PhaseDeleted {
+		t.Fatalf("Delete() = %#v", deleted)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.deleteCalls) != 1 {
+		t.Fatalf("DeleteSandbox calls = %d, want 1", len(store.deleteCalls))
+	}
+	if call := store.deleteCalls[0]; call.claimName != claim.Ref.ClaimName || call.namespace != fakeTestNamespace {
+		t.Fatalf("DeleteSandbox call = %#v, want claimed workspace/%s", call, fakeTestNamespace)
+	}
+}
+
+type fakeAgentSandboxStore struct {
+	mu sync.Mutex
+
+	nextClaim int
+	handles   map[string]*fakeAgentSandboxHandle
+
+	clientOptions []sandbox.Options
+	createCalls   []fakeAgentSandboxCreateCall
+	getCalls      []fakeAgentSandboxGetCall
+	deleteCalls   []fakeAgentSandboxDeleteCall
+}
+
+type fakeAgentSandboxCreateCall struct {
+	template  string
+	namespace string
+}
+
+type fakeAgentSandboxGetCall struct {
+	claimName string
+	namespace string
+}
+
+type fakeAgentSandboxDeleteCall struct {
+	claimName string
+	namespace string
+}
+
+func newFakeAgentSandboxStore() *fakeAgentSandboxStore {
+	return &fakeAgentSandboxStore{
+		handles: make(map[string]*fakeAgentSandboxHandle),
+	}
+}
+
+func (s *fakeAgentSandboxStore) newClient(_ context.Context, opts sandbox.Options) (agentSandboxClient, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clientOptions = append(s.clientOptions, opts)
+	return &fakeAgentSandboxClient{store: s}, nil
+}
+
+func (s *fakeAgentSandboxStore) seed(namespace, claimName, sandboxName string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.handles[fakeAgentSandboxKey(namespace, claimName)] = &fakeAgentSandboxHandle{
+		claimName:   claimName,
+		sandboxName: sandboxName,
+		podName:     sandboxName + "-pod",
+		ready:       true,
+		annotations: map[string]string{"seeded": "true"},
+	}
+}
+
+func (s *fakeAgentSandboxStore) mustHandle(t *testing.T, namespace, claimName string) *fakeAgentSandboxHandle {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	handle := s.handles[fakeAgentSandboxKey(namespace, claimName)]
+	if handle == nil {
+		t.Fatalf("missing fake handle for %s/%s", namespace, claimName)
+	}
+	return handle
+}
+
+func (s *fakeAgentSandboxStore) resetCalls() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clientOptions = nil
+	s.createCalls = nil
+	s.getCalls = nil
+	s.deleteCalls = nil
+}
+
+type fakeAgentSandboxClient struct {
+	store *fakeAgentSandboxStore
+}
+
+func (c *fakeAgentSandboxClient) CreateSandbox(_ context.Context, template, namespace string) (agentSandboxHandle, error) {
+	c.store.mu.Lock()
+	defer c.store.mu.Unlock()
+	c.store.createCalls = append(c.store.createCalls, fakeAgentSandboxCreateCall{template: template, namespace: namespace})
+	c.store.nextClaim++
+	claimName := fmt.Sprintf("claim-%d", c.store.nextClaim)
+	sandboxName := fmt.Sprintf("sandbox-%d", c.store.nextClaim)
+	handle := &fakeAgentSandboxHandle{
+		claimName:   claimName,
+		sandboxName: sandboxName,
+		podName:     sandboxName + "-pod",
+		ready:       true,
+		annotations: map[string]string{"template": template},
+	}
+	c.store.handles[fakeAgentSandboxKey(namespace, claimName)] = handle
+	return handle, nil
+}
+
+func (c *fakeAgentSandboxClient) GetSandbox(_ context.Context, claimName, namespace string) (agentSandboxHandle, error) {
+	c.store.mu.Lock()
+	defer c.store.mu.Unlock()
+	c.store.getCalls = append(c.store.getCalls, fakeAgentSandboxGetCall{claimName: claimName, namespace: namespace})
+	handle := c.store.handles[fakeAgentSandboxKey(namespace, claimName)]
+	if handle == nil {
+		return nil, sandbox.ErrClaimFailed
+	}
+	handle.ready = true
+	return handle, nil
+}
+
+func (c *fakeAgentSandboxClient) DeleteSandbox(_ context.Context, claimName, namespace string) error {
+	c.store.mu.Lock()
+	defer c.store.mu.Unlock()
+	c.store.deleteCalls = append(c.store.deleteCalls, fakeAgentSandboxDeleteCall{claimName: claimName, namespace: namespace})
+	delete(c.store.handles, fakeAgentSandboxKey(namespace, claimName))
+	return nil
+}
+
+func fakeAgentSandboxKey(namespace, claimName string) string {
+	return namespace + "/" + claimName
+}
+
+type fakeAgentSandboxHandle struct {
+	mu sync.Mutex
+
+	claimName   string
+	sandboxName string
+	podName     string
+	ready       bool
+	annotations map[string]string
+
+	runCommands   []string
+	writes        map[string][]byte
+	reads         map[string][]byte
+	lists         map[string][]sandbox.FileEntry
+	nextRun       *sandbox.ExecutionResult
+	runErr        error
+	writeErr      error
+	readErr       error
+	listErr       error
+	closeErr      error
+	disconnectErr error
+	closed        bool
+	disconnected  bool
+}
+
+func (h *fakeAgentSandboxHandle) Open(context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.ready = true
+	return nil
+}
+
+func (h *fakeAgentSandboxHandle) Close(context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closeErr != nil {
+		return h.closeErr
+	}
+	h.ready = false
+	h.closed = true
+	return nil
+}
+
+func (h *fakeAgentSandboxHandle) Disconnect(context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.disconnectErr != nil {
+		return h.disconnectErr
+	}
+	h.ready = false
+	h.disconnected = true
+	return nil
+}
+
+func (h *fakeAgentSandboxHandle) IsReady() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.ready
+}
+
+func (h *fakeAgentSandboxHandle) Run(_ context.Context, command string, _ ...sandbox.CallOption) (*sandbox.ExecutionResult, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.runCommands = append(h.runCommands, command)
+	if h.runErr != nil {
+		return nil, h.runErr
+	}
+	if h.nextRun != nil {
+		result := *h.nextRun
+		return &result, nil
+	}
+	return &sandbox.ExecutionResult{ExitCode: 0}, nil
+}
+
+func (h *fakeAgentSandboxHandle) Write(_ context.Context, path string, content []byte, _ ...sandbox.CallOption) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.writeErr != nil {
+		return h.writeErr
+	}
+	if h.writes == nil {
+		h.writes = make(map[string][]byte)
+	}
+	h.writes[path] = append([]byte(nil), content...)
+	return nil
+}
+
+func (h *fakeAgentSandboxHandle) Read(_ context.Context, path string, _ ...sandbox.CallOption) ([]byte, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.readErr != nil {
+		return nil, h.readErr
+	}
+	if data, ok := h.reads[path]; ok {
+		return append([]byte(nil), data...), nil
+	}
+	if data, ok := h.writes[path]; ok {
+		return append([]byte(nil), data...), nil
+	}
+	return nil, nil
+}
+
+func (h *fakeAgentSandboxHandle) List(_ context.Context, path string, _ ...sandbox.CallOption) ([]sandbox.FileEntry, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.listErr != nil {
+		return nil, h.listErr
+	}
+	entries := h.lists[path]
+	return append([]sandbox.FileEntry(nil), entries...), nil
+}
+
+func (h *fakeAgentSandboxHandle) Exists(context.Context, string, ...sandbox.CallOption) (bool, error) {
+	return false, nil
+}
+
+func (h *fakeAgentSandboxHandle) ClaimName() string {
+	return h.claimName
+}
+
+func (h *fakeAgentSandboxHandle) SandboxName() string {
+	return h.sandboxName
+}
+
+func (h *fakeAgentSandboxHandle) PodName() string {
+	return h.podName
+}
+
+func (h *fakeAgentSandboxHandle) Annotations() map[string]string {
+	return copyStringMap(h.annotations)
+}

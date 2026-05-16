@@ -15,9 +15,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/sozercan/orka/internal/workspace"
 )
 
 // AgentConfig holds worker configuration from environment variables.
@@ -204,6 +207,39 @@ func execGitContext(ctx context.Context, dir string, args ...string) error {
 // AgentExecutor is a function that runs the agent and returns its output.
 type AgentExecutor func(ctx context.Context, cfg *AgentConfig) (string, error)
 
+const (
+	agentSandboxWorkerUploadPath      = "orka-agent-worker"
+	agentSandboxWorkerExecPath        = "/app/" + agentSandboxWorkerUploadPath
+	agentSandboxSATokenUploadPath     = "orka-sa-token"
+	agentSandboxSATokenExecPath       = "/app/" + agentSandboxSATokenUploadPath
+	agentSandboxExecMaxOutputBytes    = 2000
+	agentSandboxExecDiagnosticMaxSize = int(agentSandboxExecMaxOutputBytes)
+)
+
+var (
+	agentSandboxWorkspaceExecutorMu sync.RWMutex
+	agentSandboxWorkspaceExecutor   workspace.WorkspaceExecutor = workspace.NewAgentSandboxExecutor()
+)
+
+func getAgentSandboxWorkspaceExecutor() workspace.WorkspaceExecutor {
+	agentSandboxWorkspaceExecutorMu.RLock()
+	defer agentSandboxWorkspaceExecutorMu.RUnlock()
+	return agentSandboxWorkspaceExecutor
+}
+
+func setAgentSandboxWorkspaceExecutorForTest(executor workspace.WorkspaceExecutor) func() {
+	agentSandboxWorkspaceExecutorMu.Lock()
+	previous := agentSandboxWorkspaceExecutor
+	agentSandboxWorkspaceExecutor = executor
+	agentSandboxWorkspaceExecutorMu.Unlock()
+
+	return func() {
+		agentSandboxWorkspaceExecutorMu.Lock()
+		agentSandboxWorkspaceExecutor = previous
+		agentSandboxWorkspaceExecutorMu.Unlock()
+	}
+}
+
 // RunAgent orchestrates the common agent worker lifecycle: signal handling,
 // config loading, git setup, workspace preparation, agent execution, and
 // result submission.
@@ -213,6 +249,10 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 		syscall.SIGTERM, syscall.SIGINT,
 	)
 	defer cancel()
+
+	if sandboxEnv := workerenv.ParseAgentSandboxEnv(os.Getenv); sandboxEnv.Enabled {
+		return runAgentInSandbox(ctx, name, workspaceDir, sandboxEnv)
+	}
 
 	cfg, err := LoadConfig(defaultMaxTurns)
 	if err != nil {
@@ -280,4 +320,209 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 
 	fmt.Printf("Task %s/%s completed successfully\n", cfg.TaskNamespace, cfg.TaskName)
 	return nil
+}
+
+func runAgentInSandbox(ctx context.Context, name, workspaceDir string, sandboxEnv workerenv.AgentSandboxEnv) error {
+	executor := getAgentSandboxWorkspaceExecutor()
+	if executor == nil {
+		return fmt.Errorf("agent sandbox workspace executor is not configured")
+	}
+
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve %s executable for sandbox: %w", name, err)
+	}
+	taskNamespace := os.Getenv(workerenv.TaskNamespace)
+	taskName := os.Getenv(workerenv.TaskName)
+	templateNamespace := sandboxEnv.TemplateNamespace
+	if templateNamespace == "" {
+		templateNamespace = taskNamespace
+	}
+
+	claim, err := executor.Claim(ctx, workspace.ClaimRequest{
+		Namespace: taskNamespace,
+		TaskName:  taskName,
+		Template: workspace.TemplateRef{
+			Namespace: templateNamespace,
+			Name:      sandboxEnv.TemplateName,
+		},
+		ReuseKey: sandboxEnv.ReuseKey,
+		Timeout:  sandboxEnv.ClaimTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("claim agent sandbox workspace: %w", err)
+	}
+	ref := claim.Ref
+	defer cleanupAgentSandboxWorkspace(ctx, executor, ref, sandboxEnv)
+
+	if _, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
+		Ref:     ref,
+		Timeout: sandboxEnv.ClaimTimeout,
+	}); err != nil {
+		return fmt.Errorf("wait for agent sandbox workspace: %w", err)
+	}
+
+	command, innerEnv, err := stageAgentSandboxExecutable(
+		ctx,
+		executor,
+		ref,
+		executable,
+		os.Args[1:],
+		agentSandboxInnerEnv(os.Environ()),
+		sandboxEnv.CommandTimeout,
+	)
+	if err != nil {
+		return err
+	}
+
+	execResult, err := executor.Exec(ctx, workspace.ExecRequest{
+		Ref:            ref,
+		Command:        command,
+		Env:            innerEnv,
+		WorkDir:        workspaceDir,
+		Timeout:        sandboxEnv.CommandTimeout,
+		MaxOutputBytes: agentSandboxExecMaxOutputBytes,
+	})
+	if err != nil {
+		return fmt.Errorf("%s sandbox execution failed: %w%s", name, err, formatSandboxExecOutput(execResult))
+	}
+	if execResult != nil && !execResult.Succeeded() {
+		return fmt.Errorf(
+			"%s sandbox execution failed: command exited with code %d%s",
+			name,
+			execResult.ExitCode,
+			formatSandboxExecOutput(execResult),
+		)
+	}
+
+	fmt.Printf("Task %s/%s completed in sandbox workspace %s\n", taskNamespace, taskName, ref.ClaimName)
+	return nil
+}
+
+func stageAgentSandboxExecutable(
+	ctx context.Context,
+	executor workspace.WorkspaceExecutor,
+	ref workspace.WorkspaceRef,
+	executable string,
+	args []string,
+	innerEnv map[string]string,
+	timeout time.Duration,
+) ([]string, map[string]string, error) {
+	data, err := os.ReadFile(executable)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read agent executable for sandbox: %w", err)
+	}
+
+	artifacts := []workspace.UploadArtifact{
+		{
+			Path: agentSandboxWorkerUploadPath,
+			Data: data,
+			Mode: 0o700,
+		},
+	}
+	if token := workerServiceAccountToken(); token != "" {
+		artifacts = append(artifacts, workspace.UploadArtifact{
+			Path: agentSandboxSATokenUploadPath,
+			Data: []byte(token),
+			Mode: 0o600,
+		})
+		innerEnv[workerenv.ServiceAccountTokenPath] = agentSandboxSATokenExecPath
+	}
+
+	if _, err := executor.Upload(ctx, workspace.UploadRequest{
+		Ref:       ref,
+		Artifacts: artifacts,
+		Timeout:   timeout,
+	}); err != nil {
+		return nil, nil, fmt.Errorf("stage agent executable in sandbox: %w", err)
+	}
+
+	command := []string{
+		"sh",
+		"-c",
+		"chmod 0700 " + agentSandboxWorkerExecPath + " && exec " + agentSandboxWorkerExecPath + " \"$@\"",
+		agentSandboxWorkerUploadPath,
+	}
+	command = append(command, args...)
+	return command, innerEnv, nil
+}
+
+func cleanupAgentSandboxWorkspace(
+	ctx context.Context,
+	executor workspace.WorkspaceExecutor,
+	ref workspace.WorkspaceRef,
+	sandboxEnv workerenv.AgentSandboxEnv,
+) {
+	if ref.IsZero() || executor == nil {
+		return
+	}
+
+	switch strings.TrimSpace(strings.ToLower(sandboxEnv.CleanupPolicy)) {
+	case "retain":
+		if _, err := executor.Release(ctx, workspace.ReleaseRequest{
+			Ref:     ref,
+			Retain:  true,
+			Reason:  "agent sandbox cleanup policy retain",
+			Timeout: sandboxEnv.ClaimTimeout,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to retain sandbox workspace: %v\n", err)
+		}
+	default:
+		if _, err := executor.Delete(ctx, workspace.DeleteRequest{
+			Ref:     ref,
+			Reason:  "agent sandbox cleanup policy delete",
+			Timeout: sandboxEnv.ClaimTimeout,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to delete sandbox workspace: %v\n", err)
+		}
+	}
+}
+
+func formatSandboxExecOutput(result *workspace.ExecResult) string {
+	if result == nil {
+		return ""
+	}
+
+	parts := []string{
+		"stdout=" + formatSandboxExecStream(result.Stdout, agentSandboxExecDiagnosticMaxSize),
+		fmt.Sprintf("stdout_truncated=%t", result.StdoutTruncated),
+		"stderr=" + formatSandboxExecStream(result.Stderr, agentSandboxExecDiagnosticMaxSize),
+		fmt.Sprintf("stderr_truncated=%t", result.StderrTruncated),
+	}
+	return " (" + strings.Join(parts, "; ") + ")"
+}
+
+func formatSandboxExecStream(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "<empty>"
+	}
+	return truncateForError(value, max)
+}
+
+func truncateForError(value string, max int) string {
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	return value[:max] + "...<truncated>"
+}
+
+func agentSandboxInnerEnv(environ []string) map[string]string {
+	env := environToMap(environ)
+	env[workerenv.AgentSandboxEnabled] = "false"
+	delete(env, workerenv.ServiceAccountToken)
+	delete(env, workerenv.ServiceAccountTokenPath)
+	return env
+}
+
+func environToMap(environ []string) map[string]string {
+	env := make(map[string]string, len(environ))
+	for _, item := range environ {
+		name, value, ok := strings.Cut(item, "=")
+		if !ok {
+			continue
+		}
+		env[name] = value
+	}
+	return env
 }

@@ -34,17 +34,17 @@ When a Task is created through OIDC authentication, Orka stamps the verified cal
 
 ### Task Execution Workspace Schema
 
-`POST /api/v1/tasks` accepts the Task CRD shape. Agent Tasks may include `spec.execution.workspace` as experimental, validation-only scaffolding for future durable agent-sandbox workspaces. Current worker Jobs are still created through Orka's normal Kubernetes Job path.
+`POST /api/v1/tasks` accepts the Task CRD shape. Agent Tasks may include `spec.execution.workspace` to request experimental workspace-backed execution through an upstream `agent-sandbox` installation. Orka still creates the outer Kubernetes worker Job, and the agent worker wrapper claims and executes inside the sandbox workspace.
 
 | Path | Type | Values/default | Notes |
 |------|------|----------------|-------|
-| `spec.execution.workspace.enabled` | boolean | default `false` | Enables a durable workspace request. The controller rejects enabled requests unless agent sandbox validation is enabled. |
+| `spec.execution.workspace.enabled` | boolean | default `false` | Enables workspace-backed execution for an agent Task. The controller rejects enabled requests unless agent sandbox support is enabled. |
 | `spec.execution.workspace.templateRef.name` | string | controller default template, if configured | Workspace template name. Required when `enabled: true` and no controller default template is configured. |
-| `spec.execution.workspace.templateRef.namespace` | string | Task namespace | Namespace containing the workspace template. |
-| `spec.execution.workspace.reusePolicy` | string | `none`; allowed `none`, `session` | `session` derives the reuse key from `spec.sessionRef.name` and requires that field to be set. |
-| `spec.execution.workspace.cleanupPolicy` | string | controller default cleanup policy; allowed `delete`, `retain` | Cleanup behavior for future workspace lifecycle integration. |
+| `spec.execution.workspace.templateRef.namespace` | string | Task namespace | Namespace containing the workspace template in Orka metadata. Current SDK-backed execution creates claims in the Task namespace and requires the template to be usable there. |
+| `spec.execution.workspace.reusePolicy` | string | `none`; allowed `none`, `session` | `session` derives the reuse key from `spec.sessionRef.name` and requires that field to be set. Automatic cross-Job reattach is limited until Orka persists sandbox claim identity. |
+| `spec.execution.workspace.cleanupPolicy` | string | controller default cleanup policy; allowed `delete`, `retain` | Cleanup behavior after the sandbox command exits. |
 
-Workspace requests are only valid on `spec.type: agent` Tasks. See [Agent Sandbox Workspaces](agent-sandbox.md) for configuration, validation rules, and current limitations.
+Workspace requests are only valid on `spec.type: agent` Tasks. See [Agent Sandbox Workspaces](agent-sandbox.md) for configuration, validation rules, live smoke-test steps, and current limitations.
 
 ### Get Task Plan
 

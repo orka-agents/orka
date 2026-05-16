@@ -45,8 +45,7 @@ func PrepareWorkspace(workDir string) error {
 	controllerURL = strings.TrimRight(controllerURL, "/")
 
 	// Read SA token for authentication.
-	token, _ := os.ReadFile(saTokenPath)
-	saToken := strings.TrimSpace(string(token))
+	saToken := workerServiceAccountToken()
 
 	// Fetch the prior task's result.
 	url := fmt.Sprintf("%s/api/v1/tasks/%s/result?namespace=%s", controllerURL, priorTask, ns)

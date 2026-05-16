@@ -116,7 +116,7 @@ func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.
 	}
 
 	// Try to get the response from the result store
-	if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
+	if resultStore != nil && task.Status.ResultRef != nil && task.Status.ResultRef.Available {
 		data, err := resultStore.GetResult(ctx, task.Namespace, task.Name)
 		if err == nil {
 			response = string(data)

@@ -26,9 +26,10 @@ type ExecutionSpec struct {
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
-	// Workspace requests a durable execution workspace for agent sandbox runtimes.
-	// This field is validated by the Task controller when enabled, but is not
-	// currently wired into worker Job creation.
+	// Workspace requests an upstream agent-sandbox execution workspace for agent Tasks.
+	// When enabled, the Task controller validates the request and propagates the
+	// resolved sandbox settings to the agent worker Job. The worker wrapper then
+	// claims the sandbox workspace and runs the configured agent runtime inside it.
 	// +optional
 	Workspace *ExecutionWorkspaceSpec `json:"workspace,omitempty"`
 }

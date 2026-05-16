@@ -162,7 +162,7 @@ spec:
 
 ### Execution
 
-Tasks and Agents both support `spec.execution` for worker pod runtime selection and placement. Agent Tasks can also set `Task.spec.execution.workspace` as an experimental, validation-only durable workspace request; see [Agent Sandbox Workspaces](agent-sandbox.md).
+Tasks and Agents both support `spec.execution` for worker pod runtime selection and placement. Agent Tasks can also set `Task.spec.execution.workspace` to request experimental workspace-backed execution through upstream `agent-sandbox`; see [Agent Sandbox Workspaces](agent-sandbox.md).
 
 ```yaml
 execution:
@@ -190,7 +190,7 @@ execution:
 | `nodeSelector` | map[string]string | Restricts worker pods to nodes with matching labels |
 | `tolerations` | list | Allows worker pods onto tainted runtime-specific node pools |
 | `affinity` | object | Adds Kubernetes affinity or anti-affinity rules for worker pods |
-| `workspace` | object | Experimental durable workspace request under `Task.spec.execution.workspace`; currently validated only and ignored by Job creation. Use only on `type: agent` Tasks. |
+| `workspace` | object | Experimental upstream `agent-sandbox` workspace request under `Task.spec.execution.workspace`. Use only on `type: agent` Tasks. |
 
 Resolution order:
 
@@ -201,9 +201,9 @@ Resolution order:
 
 #### Agent Sandbox Workspace Requests
 
-`Task.spec.execution.workspace` is alpha scaffolding for future durable, claimable agent workspaces. When `workspace.enabled: true`, the Task controller validates the request and resolves defaults, but worker Job creation still follows the normal Orka execution path. Orka does not yet claim, attach, reuse, or clean up upstream agent-sandbox workspaces.
+`Task.spec.execution.workspace` is alpha support for durable, claimable agent workspaces backed by an existing upstream `agent-sandbox` installation. When `workspace.enabled: true`, the Task controller validates the request, resolves defaults, and passes sandbox settings to the agent worker Job. Orka still creates the outer Kubernetes worker Job; the worker wrapper claims and waits for the upstream sandbox workspace, runs the configured agent runtime inside it, and then deletes or retains/releases the workspace according to `cleanupPolicy`.
 
-This field is distinct from `Task.spec.agentRuntime.workspace`, which configures the git checkout copied into the current worker pod's `/workspace` directory.
+This field is distinct from `Task.spec.agentRuntime.workspace`, which configures the git checkout prepared for the agent runtime inside the current execution environment.
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -230,13 +230,13 @@ spec:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | boolean | `false` | Enables the experimental workspace request. When false or omitted, the request is ignored. |
+| `enabled` | boolean | `false` | Enables experimental workspace-backed execution. When false or omitted, sandbox settings are not propagated. |
 | `templateRef.name` | string | Controller default template, if configured | Workspace template name. Required when enabled unless the controller has a default template. |
-| `templateRef.namespace` | string | Task namespace | Namespace containing the workspace template. |
+| `templateRef.namespace` | string | Task namespace | Namespace containing the workspace template. Orka propagates this value in its worker environment/request identity. |
 | `reusePolicy` | string | `none` | Reuse behavior: `none` or `session`. `session` requires `spec.sessionRef.name`. |
-| `cleanupPolicy` | string | Controller default cleanup policy, defaulting to `delete` | Cleanup behavior: `delete` or `retain`. |
+| `cleanupPolicy` | string | Controller default cleanup policy, defaulting to `delete` | Cleanup behavior after execution: `delete` or `retain`. |
 
-See [Agent Sandbox Workspaces](agent-sandbox.md) for validation rules, controller flags, and rollout status.
+See [Agent Sandbox Workspaces](agent-sandbox.md) for validation rules, controller flags, execution flow, and operational limitations.
 
 ### Provider Fallback Chain
 
@@ -474,13 +474,13 @@ Key configuration values for the Helm chart:
 | `controller.metricsPort` | `8081` | Metrics endpoint port |
 | `controller.healthPort` | `8082` | Health probe port |
 | `controller.logLevel` | `info` | Log level (debug/info/warn/error) |
-| `controller.agentSandbox.enabled` | `false` | Enable experimental validation of Task `execution.workspace` requests |
-| `controller.agentSandbox.routerUrl` | `""` | Optional router base URL for future workspace lifecycle integration |
+| `controller.agentSandbox.enabled` | `false` | Enable experimental workspace-backed execution for agent Tasks that set `execution.workspace` |
+| `controller.agentSandbox.routerUrl` | `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
 | `controller.agentSandbox.defaultTemplate` | `""` | Default execution workspace template when a Task omits `templateRef.name` |
-| `controller.agentSandbox.warmPoolPolicy` | `disabled` | Future warm pool policy: `disabled` or `template` |
-| `controller.agentSandbox.namespaceStrategy` | `task` | Future sandbox resource namespace strategy: `task` or `controller` |
-| `controller.agentSandbox.claimTimeout` | `2m` | Timeout for future workspace claim operations |
-| `controller.agentSandbox.commandTimeout` | `30m` | Timeout for future sandbox command execution |
+| `controller.agentSandbox.warmPoolPolicy` | `disabled` | Warm pool policy: `disabled` or `template` |
+| `controller.agentSandbox.namespaceStrategy` | `task` | Sandbox resource namespace strategy: `task` or `controller` |
+| `controller.agentSandbox.claimTimeout` | `2m` | Timeout for workspace claim and readiness operations |
+| `controller.agentSandbox.commandTimeout` | `30m` | Timeout for agent runtime execution inside the sandbox |
 | `controller.agentSandbox.cleanupPolicy` | `delete` | Default workspace cleanup policy: `delete` or `retain` |
 | `workers.ai.image.repository` | `ghcr.io/sozercan/orka/ai-worker` | AI worker image |
 | `workers.general.image.repository` | `ghcr.io/sozercan/orka/general-worker` | General worker image |
@@ -501,13 +501,13 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 | `--watch-namespace` | `""` | Namespace to watch (empty = all) |
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
 | `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
-| `--agent-sandbox-enabled` | `ORKA_AGENT_SANDBOX_ENABLED` env or `false` | Enable experimental validation of Task `execution.workspace` requests |
-| `--agent-sandbox-router-url` | `ORKA_AGENT_SANDBOX_ROUTER_URL` env or `""` | Optional router base URL for future workspace lifecycle integration |
+| `--agent-sandbox-enabled` | `ORKA_AGENT_SANDBOX_ENABLED` env or `false` | Enable experimental workspace-backed execution for agent Tasks that set `execution.workspace` |
+| `--agent-sandbox-router-url` | `ORKA_AGENT_SANDBOX_ROUTER_URL` env or `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
 | `--agent-sandbox-default-template` | `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` env or `""` | Default execution workspace template when a Task omits `templateRef.name` |
-| `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` env or `disabled` | Future warm pool policy: `disabled` or `template` |
-| `--agent-sandbox-namespace-strategy` | `ORKA_AGENT_SANDBOX_NAMESPACE_STRATEGY` env or `task` | Future sandbox resource namespace strategy: `task` or `controller` |
-| `--agent-sandbox-claim-timeout` | `ORKA_AGENT_SANDBOX_CLAIM_TIMEOUT` env or `2m` | Timeout for future workspace claim operations |
-| `--agent-sandbox-command-timeout` | `ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT` env or `30m` | Timeout for future sandbox command execution |
+| `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` env or `disabled` | Warm pool policy: `disabled` or `template` |
+| `--agent-sandbox-namespace-strategy` | `ORKA_AGENT_SANDBOX_NAMESPACE_STRATEGY` env or `task` | Sandbox resource namespace strategy: `task` or `controller` |
+| `--agent-sandbox-claim-timeout` | `ORKA_AGENT_SANDBOX_CLAIM_TIMEOUT` env or `2m` | Timeout for workspace claim and readiness operations |
+| `--agent-sandbox-command-timeout` | `ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT` env or `30m` | Timeout for agent runtime execution inside the sandbox |
 | `--agent-sandbox-cleanup-policy` | `ORKA_AGENT_SANDBOX_CLEANUP_POLICY` env or `delete` | Default workspace cleanup policy: `delete` or `retain` |
 | `--controller-url` | `""` | Base URL workers use to reach the controller API (e.g., `http://orka-api.orka-system.svc:8080`). Required for worker result callbacks and session transcript fetching |
 | `--oidc-issuer` | `ORKA_OIDC_ISSUER` env or `""` | OIDC issuer URL for external API bearer token validation. Requires `--oidc-audience` when set |
@@ -538,7 +538,7 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 
 ### Agent Sandbox Controller Settings
 
-Agent sandbox settings are disabled by default and currently only enable validation/defaulting for `Task.spec.execution.workspace`. They can be supplied as flags, environment variables, or Helm values:
+Agent sandbox settings are disabled by default. When enabled, the controller validates/defaults `Task.spec.execution.workspace`, injects the resolved settings into agent worker Jobs, and the worker wrapper owns upstream sandbox claim, execution, and cleanup. Settings can be supplied as flags, environment variables, or Helm values:
 
 | Flag | Environment variable | Helm value | Default |
 |------|----------------------|------------|---------|
@@ -551,7 +551,9 @@ Agent sandbox settings are disabled by default and currently only enable validat
 | `--agent-sandbox-command-timeout` | `ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT` | `controller.agentSandbox.commandTimeout` | `30m` |
 | `--agent-sandbox-cleanup-policy` | `ORKA_AGENT_SANDBOX_CLEANUP_POLICY` | `controller.agentSandbox.cleanupPolicy` | `delete` |
 
-Supported values are `disabled` or `template` for warm pool policy, `task` or `controller` for namespace strategy, and `delete` or `retain` for cleanup policy. See [Agent Sandbox Workspaces](agent-sandbox.md) for examples and limitations.
+Supported values are `disabled` or `template` for warm pool policy, `task` or `controller` for namespace strategy, and `delete` or `retain` for cleanup policy. The current alpha worker path still creates claims in the Task namespace; see [Agent Sandbox Workspaces](agent-sandbox.md) for examples, live smoke-test steps, and limitations.
+
+When this feature is enabled, worker pods need RBAC for the upstream sandbox API: create/delete/patch `sandboxclaims`, read `sandboxtemplates`, `sandboxwarmpools`, and `sandboxes`, create `pods/portforward`, and read `endpointslices`. The Helm chart and generated worker RBAC include these permissions; custom deployments must include equivalent rules for the worker ServiceAccount.
 
 ### External API OIDC Authentication
 

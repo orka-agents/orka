@@ -145,8 +145,7 @@ func UploadArtifacts() error {
 		return fmt.Errorf("failed to construct artifact endpoint: %w", err)
 	}
 
-	token, _ := os.ReadFile(saTokenPath)
-	saToken := strings.TrimSpace(string(token))
+	saToken := workerServiceAccountToken()
 
 	var uploadErrors []string
 	for _, e := range entries {

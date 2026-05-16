@@ -10,8 +10,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 func TestSubmitResult_Success(t *testing.T) {
@@ -130,6 +133,30 @@ func TestSubmitResult_BearerToken(t *testing.T) {
 	// Without the SA token file mounted, Authorization should be empty
 	if gotAuth != "" {
 		t.Logf("Authorization header present (SA token file may exist): %s", gotAuth)
+	}
+}
+
+func TestSubmitResult_BearerTokenFromConfiguredPath(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	tokenPath := t.TempDir() + "/token"
+	if err := os.WriteFile(tokenPath, []byte("path-token\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
+	t.Setenv(workerenv.ServiceAccountTokenPath, tokenPath)
+	t.Setenv(workerenv.ServiceAccountToken, "fallback-token")
+
+	if err := SubmitResult([]byte("with token path")); err != nil {
+		t.Fatalf("SubmitResult() error = %v", err)
+	}
+	if gotAuth != "Bearer path-token" {
+		t.Fatalf("Authorization = %q, want Bearer path-token", gotAuth)
 	}
 }
 

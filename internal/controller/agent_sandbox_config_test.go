@@ -176,7 +176,7 @@ func TestResolveExecutionWorkspaceRequest(t *testing.T) {
 	t.Run("disabled workspace returns nil and ignores disabled feature gate", func(t *testing.T) {
 		r := &TaskReconciler{}
 		task := &corev1alpha1.Task{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS},
 			Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
 				Execution: &corev1alpha1.ExecutionSpec{
@@ -206,7 +206,7 @@ func TestResolveExecutionWorkspaceRequest(t *testing.T) {
 			},
 		}
 		task := &corev1alpha1.Task{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS},
 			Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
 				Execution: &corev1alpha1.ExecutionSpec{
@@ -227,8 +227,8 @@ func TestResolveExecutionWorkspaceRequest(t *testing.T) {
 		if request.TemplateName != "default-template" {
 			t.Fatalf("TemplateName = %q, want default-template", request.TemplateName)
 		}
-		if request.TemplateNamespace != "default" {
-			t.Fatalf("TemplateNamespace = %q, want default", request.TemplateNamespace)
+		if request.TemplateNamespace != defaultNS {
+			t.Fatalf("TemplateNamespace = %q, want %s", request.TemplateNamespace, defaultNS)
 		}
 		if request.ReusePolicy != corev1alpha1.WorkspaceReusePolicyNone {
 			t.Fatalf("ReusePolicy = %q, want %q", request.ReusePolicy, corev1alpha1.WorkspaceReusePolicyNone)

@@ -346,7 +346,7 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             runtimeTypeClaude,
 				DefaultMaxTurns:  &maxTurns,
-				DefaultAllowBash: boolPtr(true),
+				DefaultAllowBash: new(true),
 			},
 		},
 	}
@@ -957,5 +957,3 @@ func TestDelegateTaskTool_Execute_NoAutoRetry(t *testing.T) {
 		t.Error("expected no auto-retry annotation when auto_retry is false")
 	}
 }
-
-func boolPtr(b bool) *bool { return &b }

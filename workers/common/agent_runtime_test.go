@@ -9,12 +9,20 @@ package common
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/sozercan/orka/internal/workspace"
 )
 
 const executorResultDone = "done"
@@ -443,6 +451,222 @@ func TestRunAgent_GitCloneFailure(t *testing.T) {
 	}
 }
 
+func TestRunAgent_AgentSandboxExecutesInnerWorkerAndDeletesWorkspace(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "delete")
+	t.Setenv("SANDBOX_TEST_ENV", "outer-value")
+	t.Setenv(workerenv.ServiceAccountToken, "outer-token")
+
+	recorder := newRecordingWorkspaceExecutor()
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	workspaceDir := "/sandbox/workspace"
+	err := RunAgent("test-agent", workspaceDir, 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		t.Fatal("outer agent executor should not run when agent sandbox is enabled")
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("RunAgent returned error: %v", err)
+	}
+
+	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "delete")
+	assertAgentSandboxClaimRequest(t, recorder)
+	assertAgentSandboxWaitReadyRequest(t, recorder)
+	assertAgentSandboxUploadRequest(t, recorder)
+	assertAgentSandboxExecRequest(t, recorder, workspaceDir)
+	assertAgentSandboxDeleteRequest(t, recorder)
+}
+
+func TestRunAgent_AgentSandboxRetainsWorkspace(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "retain")
+
+	recorder := newRecordingWorkspaceExecutor()
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	err := RunAgent("test-agent", "/sandbox/workspace", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		t.Fatal("outer agent executor should not run when agent sandbox is enabled")
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("RunAgent returned error: %v", err)
+	}
+
+	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "release")
+
+	releaseReqs := recorder.releaseRequests()
+	if len(releaseReqs) != 1 {
+		t.Fatalf("recorded %d release requests, want 1", len(releaseReqs))
+	}
+	if !releaseReqs[0].Retain {
+		t.Error("release request Retain = false, want true")
+	}
+	if releaseReqs[0].Timeout != 3*time.Second {
+		t.Errorf("release timeout = %v, want 3s", releaseReqs[0].Timeout)
+	}
+}
+
+func TestRunAgent_AgentSandboxDefaultsTemplateNamespaceToTaskNamespace(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "delete")
+	t.Setenv(workerenv.AgentSandboxTemplateNamespace, "")
+
+	recorder := newRecordingWorkspaceExecutor()
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	err := RunAgent("test-agent", "/sandbox/workspace", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		t.Fatal("outer agent executor should not run when agent sandbox is enabled")
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("RunAgent returned error: %v", err)
+	}
+
+	claimReqs := recorder.claimRequests()
+	if len(claimReqs) != 1 {
+		t.Fatalf("recorded %d claim requests, want 1", len(claimReqs))
+	}
+	if claimReqs[0].Template.Namespace != "task-ns" {
+		t.Errorf("claim template namespace = %q, want task-ns", claimReqs[0].Template.Namespace)
+	}
+}
+
+func TestRunAgent_AgentSandboxClaimFailure(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "delete")
+
+	recorder := newRecordingWorkspaceExecutor()
+	recorder.claimErr = fmt.Errorf("claim boom")
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	err := RunAgent("test-agent", "/sandbox/workspace", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		t.Fatal("outer agent executor should not run when agent sandbox is enabled")
+		return "", nil
+	})
+	if err == nil {
+		t.Fatal("expected claim error")
+	}
+	if !strings.Contains(err.Error(), "claim agent sandbox workspace") {
+		t.Errorf("error = %q, want claim context", err.Error())
+	}
+	if !strings.Contains(err.Error(), "claim boom") {
+		t.Errorf("error = %q, want original claim error", err.Error())
+	}
+	assertOperationOrder(t, recorder.operations(), "claim")
+}
+
+func TestRunAgent_AgentSandboxWaitReadyFailureDeletesWorkspace(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "delete")
+
+	recorder := newRecordingWorkspaceExecutor()
+	recorder.waitReadyErr = fmt.Errorf("not ready")
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	err := RunAgent("test-agent", "/sandbox/workspace", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		t.Fatal("outer agent executor should not run when agent sandbox is enabled")
+		return "", nil
+	})
+	if err == nil {
+		t.Fatal("expected wait-ready error")
+	}
+	if !strings.Contains(err.Error(), "wait for agent sandbox workspace") {
+		t.Errorf("error = %q, want wait-ready context", err.Error())
+	}
+	if !strings.Contains(err.Error(), "not ready") {
+		t.Errorf("error = %q, want original wait-ready error", err.Error())
+	}
+	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "delete")
+}
+
+func TestRunAgent_AgentSandboxUploadFailureDeletesWorkspace(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "delete")
+
+	recorder := newRecordingWorkspaceExecutor()
+	recorder.uploadErr = fmt.Errorf("upload boom")
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	err := RunAgent("test-agent", "/sandbox/workspace", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		t.Fatal("outer agent executor should not run when agent sandbox is enabled")
+		return "", nil
+	})
+	if err == nil {
+		t.Fatal("expected upload error")
+	}
+	if !strings.Contains(err.Error(), "stage agent executable in sandbox") {
+		t.Errorf("error = %q, want staging context", err.Error())
+	}
+	if !strings.Contains(err.Error(), "upload boom") {
+		t.Errorf("error = %q, want original upload error", err.Error())
+	}
+	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "delete")
+}
+
+func TestRunAgent_AgentSandboxCommandFailureCleansUpWithoutSubmittingResult(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "delete")
+
+	var resultRequests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resultRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	t.Setenv(workerenv.ResultEndpoint, server.URL)
+
+	recorder := newRecordingWorkspaceExecutor()
+	recorder.fake.EnqueueExecResult(workspace.ExecResult{
+		ExitCode: 42,
+		Stdout:   "inner stdout",
+		Stderr:   "inner stderr",
+	}, nil)
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	err := RunAgent("test-agent", "/sandbox/workspace", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		t.Fatal("outer agent executor should not run when agent sandbox is enabled")
+		return "", nil
+	})
+	if err == nil {
+		t.Fatal("expected sandbox command error")
+	}
+	if !strings.Contains(err.Error(), "test-agent sandbox execution failed") {
+		t.Errorf("error = %q, want sandbox execution context", err.Error())
+	}
+	if !strings.Contains(err.Error(), "command exited with code 42") {
+		t.Errorf("error = %q, want command exit code", err.Error())
+	}
+	if !strings.Contains(err.Error(), "stdout=inner stdout") || !strings.Contains(err.Error(), "stderr=inner stderr") {
+		t.Errorf("error = %q, want inner stdout/stderr", err.Error())
+	}
+	if !strings.Contains(err.Error(), "stdout_truncated=false") ||
+		!strings.Contains(err.Error(), "stderr_truncated=false") {
+		t.Errorf("error = %q, want stdout/stderr truncation flags", err.Error())
+	}
+	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "delete")
+	if got := resultRequests.Load(); got != 0 {
+		t.Fatalf("result endpoint received %d requests, want 0", got)
+	}
+}
+
+func TestRunAgent_AgentSandboxMissingWorkspaceExecutor(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "delete")
+
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(nil)
+	t.Cleanup(restoreExecutor)
+
+	err := RunAgent("test-agent", "/sandbox/workspace", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		t.Fatal("outer agent executor should not run when agent sandbox is enabled")
+		return "", nil
+	})
+	if err == nil {
+		t.Fatal("expected missing executor error")
+	}
+	if !strings.Contains(err.Error(), "agent sandbox workspace executor is not configured") {
+		t.Errorf("error = %q, want missing executor context", err.Error())
+	}
+}
+
 func runGitOutput(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
@@ -464,3 +688,390 @@ func runGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v failed: %v\n%s", args, err, out)
 	}
 }
+
+func assertAgentSandboxClaimRequest(t *testing.T, recorder *recordingWorkspaceExecutor) {
+	t.Helper()
+	claimReqs := recorder.claimRequests()
+	if len(claimReqs) != 1 {
+		t.Fatalf("recorded %d claim requests, want 1", len(claimReqs))
+	}
+	claimReq := claimReqs[0]
+	if claimReq.Namespace != "task-ns" {
+		t.Errorf("claim namespace = %q, want task-ns", claimReq.Namespace)
+	}
+	if claimReq.TaskName != "task-name" {
+		t.Errorf("claim task name = %q, want task-name", claimReq.TaskName)
+	}
+	if claimReq.Template.Namespace != "template-ns" {
+		t.Errorf("claim template namespace = %q, want template-ns", claimReq.Template.Namespace)
+	}
+	if claimReq.Template.Name != "agent-template" {
+		t.Errorf("claim template name = %q, want agent-template", claimReq.Template.Name)
+	}
+	if claimReq.ReuseKey != "reuse-key" {
+		t.Errorf("claim reuse key = %q, want reuse-key", claimReq.ReuseKey)
+	}
+	if claimReq.Timeout != 3*time.Second {
+		t.Errorf("claim timeout = %v, want 3s", claimReq.Timeout)
+	}
+}
+
+func assertAgentSandboxWaitReadyRequest(t *testing.T, recorder *recordingWorkspaceExecutor) {
+	t.Helper()
+	waitReadyReqs := recorder.waitReadyRequests()
+	if len(waitReadyReqs) != 1 {
+		t.Fatalf("recorded %d wait-ready requests, want 1", len(waitReadyReqs))
+	}
+	if waitReadyReqs[0].Timeout != 3*time.Second {
+		t.Errorf("wait-ready timeout = %v, want 3s", waitReadyReqs[0].Timeout)
+	}
+}
+
+func assertAgentSandboxUploadRequest(t *testing.T, recorder *recordingWorkspaceExecutor) {
+	t.Helper()
+	uploadReqs := recorder.uploadRequests()
+	if len(uploadReqs) != 1 {
+		t.Fatalf("recorded %d upload requests, want 1", len(uploadReqs))
+	}
+	uploadReq := uploadReqs[0]
+	if uploadReq.Timeout != 9*time.Second {
+		t.Errorf("upload timeout = %v, want 9s", uploadReq.Timeout)
+	}
+	if len(uploadReq.Artifacts) != 2 {
+		t.Fatalf("uploaded artifacts = %d, want 2", len(uploadReq.Artifacts))
+	}
+	artifactsByPath := make(map[string]workspace.UploadArtifact, len(uploadReq.Artifacts))
+	for _, artifact := range uploadReq.Artifacts {
+		artifactsByPath[artifact.Path] = artifact
+	}
+	assertAgentSandboxWorkerArtifact(t, artifactsByPath[agentSandboxWorkerUploadPath])
+	assertAgentSandboxTokenArtifact(t, artifactsByPath[agentSandboxSATokenUploadPath])
+}
+
+func assertAgentSandboxWorkerArtifact(t *testing.T, artifact workspace.UploadArtifact) {
+	t.Helper()
+	if artifact.Path != agentSandboxWorkerUploadPath {
+		t.Errorf("uploaded worker artifact path = %q, want %q", artifact.Path, agentSandboxWorkerUploadPath)
+	}
+	if artifact.Mode != 0o700 {
+		t.Errorf("uploaded worker artifact mode = %#o, want 0700", artifact.Mode)
+	}
+	if len(artifact.Data) == 0 {
+		t.Fatal("uploaded worker executable is empty")
+	}
+}
+
+func assertAgentSandboxTokenArtifact(t *testing.T, artifact workspace.UploadArtifact) {
+	t.Helper()
+	if artifact.Path != agentSandboxSATokenUploadPath {
+		t.Errorf("uploaded token artifact path = %q, want %q", artifact.Path, agentSandboxSATokenUploadPath)
+	}
+	if artifact.Mode != 0o600 {
+		t.Errorf("uploaded token artifact mode = %#o, want 0600", artifact.Mode)
+	}
+	if string(artifact.Data) != "outer-token" {
+		t.Fatal("uploaded token artifact data was not the configured token")
+	}
+}
+
+func assertAgentSandboxExecRequest(t *testing.T, recorder *recordingWorkspaceExecutor, workspaceDir string) {
+	t.Helper()
+	execReqs := recorder.execRequests()
+	if len(execReqs) != 1 {
+		t.Fatalf("recorded %d exec requests, want 1", len(execReqs))
+	}
+	execReq := execReqs[0]
+	if execReq.WorkDir != workspaceDir {
+		t.Errorf("exec workdir = %q, want %q", execReq.WorkDir, workspaceDir)
+	}
+	if execReq.Timeout != 9*time.Second {
+		t.Errorf("exec timeout = %v, want 9s", execReq.Timeout)
+	}
+	if execReq.MaxOutputBytes != agentSandboxExecMaxOutputBytes {
+		t.Errorf("exec max output bytes = %d, want %d", execReq.MaxOutputBytes, agentSandboxExecMaxOutputBytes)
+	}
+	assertAgentSandboxInnerEnv(t, execReq.Env)
+	assertAgentSandboxCommand(t, execReq.Command)
+}
+
+func assertAgentSandboxInnerEnv(t *testing.T, env map[string]string) {
+	t.Helper()
+	if env[workerenv.AgentSandboxEnabled] != "false" {
+		t.Errorf("%s in inner env = %q, want false", workerenv.AgentSandboxEnabled, env[workerenv.AgentSandboxEnabled])
+	}
+	if env["SANDBOX_TEST_ENV"] != "outer-value" {
+		t.Errorf("SANDBOX_TEST_ENV in inner env = %q, want outer-value", env["SANDBOX_TEST_ENV"])
+	}
+	if env[workerenv.ServiceAccountToken] != "" {
+		t.Fatalf("inner env unexpectedly contains raw service account token")
+	}
+	if env[workerenv.ServiceAccountTokenPath] != agentSandboxSATokenExecPath {
+		t.Errorf(
+			"%s in inner env = %q, want %q",
+			workerenv.ServiceAccountTokenPath,
+			env[workerenv.ServiceAccountTokenPath],
+			agentSandboxSATokenExecPath,
+		)
+	}
+}
+
+func assertAgentSandboxCommand(t *testing.T, got []string) {
+	t.Helper()
+	stagedCommand := []string{
+		"sh",
+		"-c",
+		"chmod 0700 " + agentSandboxWorkerExecPath + " && exec " + agentSandboxWorkerExecPath + " \"$@\"",
+		agentSandboxWorkerUploadPath,
+	}
+	wantCommand := append(stagedCommand, os.Args[1:]...)
+	if !reflect.DeepEqual(got, wantCommand) {
+		t.Errorf("exec command = %#v, want %#v", got, wantCommand)
+	}
+}
+
+func assertAgentSandboxDeleteRequest(t *testing.T, recorder *recordingWorkspaceExecutor) {
+	t.Helper()
+	deleteReqs := recorder.deleteRequests()
+	if len(deleteReqs) != 1 {
+		t.Fatalf("recorded %d delete requests, want 1", len(deleteReqs))
+	}
+	if deleteReqs[0].Timeout != 3*time.Second {
+		t.Errorf("delete timeout = %v, want 3s", deleteReqs[0].Timeout)
+	}
+}
+
+func setRequiredAgentSandboxEnv(t *testing.T, cleanupPolicy string) {
+	t.Helper()
+	t.Setenv(workerenv.AgentSandboxEnabled, "true")
+	t.Setenv(workerenv.AgentSandboxTemplateName, "agent-template")
+	t.Setenv(workerenv.AgentSandboxTemplateNamespace, "template-ns")
+	t.Setenv(workerenv.AgentSandboxReuseKey, "reuse-key")
+	t.Setenv(workerenv.AgentSandboxClaimTimeoutSeconds, "3")
+	t.Setenv(workerenv.AgentSandboxCommandTimeoutSeconds, "9")
+	t.Setenv(workerenv.AgentSandboxCleanupPolicy, cleanupPolicy)
+	t.Setenv(workerenv.TaskName, "task-name")
+	t.Setenv(workerenv.TaskNamespace, "task-ns")
+}
+
+func assertOperationOrder(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("operations = %#v, want %#v", got, want)
+	}
+}
+
+type recordingWorkspaceExecutor struct {
+	fake *workspace.FakeExecutor
+
+	mu            sync.Mutex
+	ops           []string
+	claimReqs     []workspace.ClaimRequest
+	waitReadyReqs []workspace.WaitReadyRequest
+	execReqs      []workspace.ExecRequest
+	releaseReqs   []workspace.ReleaseRequest
+	deleteReqs    []workspace.DeleteRequest
+	uploadReqs    []workspace.UploadRequest
+	downloadReqs  []workspace.DownloadRequest
+	describeReqs  []workspace.DescribeRequest
+	claimErr      error
+	waitReadyErr  error
+	execErr       error
+	releaseErr    error
+	deleteErr     error
+	uploadErr     error
+	downloadErr   error
+	describeErr   error
+}
+
+func newRecordingWorkspaceExecutor() *recordingWorkspaceExecutor {
+	return &recordingWorkspaceExecutor{
+		fake: workspace.NewFakeExecutor(),
+	}
+}
+
+func (r *recordingWorkspaceExecutor) Claim(
+	ctx context.Context,
+	req workspace.ClaimRequest,
+) (*workspace.ClaimResult, error) {
+	r.mu.Lock()
+	r.ops = append(r.ops, "claim")
+	r.claimReqs = append(r.claimReqs, req)
+	err := r.claimErr
+	r.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return r.fake.Claim(ctx, req)
+}
+
+func (r *recordingWorkspaceExecutor) WaitReady(
+	ctx context.Context,
+	req workspace.WaitReadyRequest,
+) (*workspace.ReadyResult, error) {
+	r.mu.Lock()
+	r.ops = append(r.ops, "waitReady")
+	r.waitReadyReqs = append(r.waitReadyReqs, req)
+	err := r.waitReadyErr
+	r.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return r.fake.WaitReady(ctx, req)
+}
+
+func (r *recordingWorkspaceExecutor) Exec(
+	ctx context.Context,
+	req workspace.ExecRequest,
+) (*workspace.ExecResult, error) {
+	r.mu.Lock()
+	r.ops = append(r.ops, "exec")
+	r.execReqs = append(r.execReqs, copyExecRequest(req))
+	err := r.execErr
+	r.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return r.fake.Exec(ctx, req)
+}
+
+func (r *recordingWorkspaceExecutor) Upload(
+	ctx context.Context,
+	req workspace.UploadRequest,
+) (*workspace.UploadResult, error) {
+	r.mu.Lock()
+	r.ops = append(r.ops, "upload")
+	r.uploadReqs = append(r.uploadReqs, req)
+	err := r.uploadErr
+	r.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return r.fake.Upload(ctx, req)
+}
+
+func (r *recordingWorkspaceExecutor) Download(
+	ctx context.Context,
+	req workspace.DownloadRequest,
+) (*workspace.DownloadResult, error) {
+	r.mu.Lock()
+	r.ops = append(r.ops, "download")
+	r.downloadReqs = append(r.downloadReqs, req)
+	err := r.downloadErr
+	r.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return r.fake.Download(ctx, req)
+}
+
+func (r *recordingWorkspaceExecutor) Release(
+	ctx context.Context,
+	req workspace.ReleaseRequest,
+) (*workspace.ReleaseResult, error) {
+	r.mu.Lock()
+	r.ops = append(r.ops, "release")
+	r.releaseReqs = append(r.releaseReqs, req)
+	err := r.releaseErr
+	r.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return r.fake.Release(ctx, req)
+}
+
+func (r *recordingWorkspaceExecutor) Delete(
+	ctx context.Context,
+	req workspace.DeleteRequest,
+) (*workspace.DeleteResult, error) {
+	r.mu.Lock()
+	r.ops = append(r.ops, "delete")
+	r.deleteReqs = append(r.deleteReqs, req)
+	err := r.deleteErr
+	r.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return r.fake.Delete(ctx, req)
+}
+
+func (r *recordingWorkspaceExecutor) Describe(
+	ctx context.Context,
+	req workspace.DescribeRequest,
+) (*workspace.Description, error) {
+	r.mu.Lock()
+	r.ops = append(r.ops, "describe")
+	r.describeReqs = append(r.describeReqs, req)
+	err := r.describeErr
+	r.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return r.fake.Describe(ctx, req)
+}
+
+func (r *recordingWorkspaceExecutor) operations() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.ops...)
+}
+
+func (r *recordingWorkspaceExecutor) claimRequests() []workspace.ClaimRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]workspace.ClaimRequest(nil), r.claimReqs...)
+}
+
+func (r *recordingWorkspaceExecutor) waitReadyRequests() []workspace.WaitReadyRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]workspace.WaitReadyRequest(nil), r.waitReadyReqs...)
+}
+
+func (r *recordingWorkspaceExecutor) execRequests() []workspace.ExecRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]workspace.ExecRequest, 0, len(r.execReqs))
+	for _, req := range r.execReqs {
+		out = append(out, copyExecRequest(req))
+	}
+	return out
+}
+
+func (r *recordingWorkspaceExecutor) uploadRequests() []workspace.UploadRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]workspace.UploadRequest, 0, len(r.uploadReqs))
+	for _, req := range r.uploadReqs {
+		req.Artifacts = append([]workspace.UploadArtifact(nil), req.Artifacts...)
+		for i := range req.Artifacts {
+			req.Artifacts[i].Data = append([]byte(nil), req.Artifacts[i].Data...)
+		}
+		out = append(out, req)
+	}
+	return out
+}
+
+func (r *recordingWorkspaceExecutor) releaseRequests() []workspace.ReleaseRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]workspace.ReleaseRequest(nil), r.releaseReqs...)
+}
+
+func (r *recordingWorkspaceExecutor) deleteRequests() []workspace.DeleteRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]workspace.DeleteRequest(nil), r.deleteReqs...)
+}
+
+func copyExecRequest(req workspace.ExecRequest) workspace.ExecRequest {
+	req.Command = append([]string(nil), req.Command...)
+	req.Stdin = append([]byte(nil), req.Stdin...)
+	if req.Env != nil {
+		env := make(map[string]string, len(req.Env))
+		maps.Copy(env, req.Env)
+		req.Env = env
+	}
+	return req
+}
+
+var _ workspace.WorkspaceExecutor = (*recordingWorkspaceExecutor)(nil)

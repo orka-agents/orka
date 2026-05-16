@@ -13,13 +13,15 @@ import (
 	"time"
 )
 
+const fakeTestNamespace = "default"
+
 func TestFakeExecutorClaimCreationAndReuse(t *testing.T) {
 	fixedNow := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
 	f := NewFakeExecutor(WithNow(func() time.Time { return fixedNow }))
 
 	labels := map[string]string{"orka.ai/task": "task-1"}
 	req := ClaimRequest{
-		Namespace: "default",
+		Namespace: fakeTestNamespace,
 		TaskName:  "task-1",
 		Template:  TemplateRef{Namespace: "templates", Name: "coding-agent"},
 		ReuseKey:  "session-1",
@@ -36,7 +38,7 @@ func TestFakeExecutorClaimCreationAndReuse(t *testing.T) {
 	if first.Phase != PhaseReady {
 		t.Fatalf("first phase = %s, want %s", first.Phase, PhaseReady)
 	}
-	if first.Ref.Namespace != "default" || first.Ref.ClaimName == "" || first.Ref.SandboxName == "" {
+	if first.Ref.Namespace != fakeTestNamespace || first.Ref.ClaimName == "" || first.Ref.SandboxName == "" {
 		t.Fatalf("unexpected first ref: %#v", first.Ref)
 	}
 	if !first.ClaimedAt.Equal(fixedNow) {
@@ -81,7 +83,7 @@ func TestFakeExecutorClaimCreationAndReuse(t *testing.T) {
 func TestFakeExecutorWaitReadyTimeoutAndMarkReady(t *testing.T) {
 	f := NewFakeExecutor(WithAutoReady(false), WithReadyPollInterval(time.Millisecond))
 	claim, err := f.Claim(context.Background(), ClaimRequest{
-		Namespace: "default",
+		Namespace: fakeTestNamespace,
 		Template:  TemplateRef{Name: "coding-agent"},
 	})
 	if err != nil {
@@ -111,7 +113,7 @@ func TestFakeExecutorWaitReadyTimeoutAndMarkReady(t *testing.T) {
 func TestFakeExecutorExecSuccessFailureAndCancellation(t *testing.T) {
 	f := NewFakeExecutor()
 	claim, err := f.Claim(context.Background(), ClaimRequest{
-		Namespace: "default",
+		Namespace: fakeTestNamespace,
 		Template:  TemplateRef{Name: "coding-agent"},
 	})
 	if err != nil {
@@ -181,7 +183,7 @@ func TestFakeExecutorExecSuccessFailureAndCancellation(t *testing.T) {
 func TestFakeExecutorArtifactUploadDownload(t *testing.T) {
 	f := NewFakeExecutor()
 	claim, err := f.Claim(context.Background(), ClaimRequest{
-		Namespace: "default",
+		Namespace: fakeTestNamespace,
 		Template:  TemplateRef{Name: "coding-agent"},
 	})
 	if err != nil {
@@ -232,7 +234,7 @@ func TestFakeExecutorArtifactUploadDownload(t *testing.T) {
 func TestFakeExecutorReleaseDeleteRetainBehavior(t *testing.T) {
 	f := NewFakeExecutor()
 	req := ClaimRequest{
-		Namespace: "default",
+		Namespace: fakeTestNamespace,
 		Template:  TemplateRef{Name: "coding-agent"},
 		ReuseKey:  "session-1",
 	}

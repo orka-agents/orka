@@ -21,6 +21,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
@@ -1014,6 +1015,179 @@ func hasVolumeMount(mounts []corev1.VolumeMount, name string) bool {
 	return false
 }
 
+func agentSandboxEnvNames() []string {
+	return []string{
+		workerenv.AgentSandboxEnabled,
+		workerenv.AgentSandboxRouterURL,
+		workerenv.AgentSandboxTemplateName,
+		workerenv.AgentSandboxTemplateNamespace,
+		workerenv.AgentSandboxReusePolicy,
+		workerenv.AgentSandboxReuseKey,
+		workerenv.AgentSandboxCleanupPolicy,
+		workerenv.AgentSandboxWarmPoolPolicy,
+		workerenv.AgentSandboxNamespaceStrategy,
+		workerenv.AgentSandboxClaimTimeoutSeconds,
+		workerenv.AgentSandboxCommandTimeoutSeconds,
+	}
+}
+
+func TestJobBuilder_BuildWithOptions_AgentTask_NoSandboxWorkspaceEnvWithoutRequest(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "agent-task-no-sandbox",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAgent,
+			Prompt: "Fix the bug",
+		},
+	}
+
+	job, err := builder.BuildWithOptions(context.Background(), task, nil, nil, JobBuildOptions{})
+	if err != nil {
+		t.Fatalf("BuildWithOptions() error = %v", err)
+	}
+
+	envVars := job.Spec.Template.Spec.Containers[0].Env
+	for _, name := range agentSandboxEnvNames() {
+		if _, found := findEnvVar(envVars, name); found {
+			t.Errorf("unexpected sandbox env var %s without workspace request", name)
+		}
+	}
+}
+
+func TestJobBuilder_BuildWithOptions_AgentTask_AddsSandboxWorkspaceEnv(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "agent-task-sandbox",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAgent,
+			Prompt: "Fix the bug",
+			Execution: &corev1alpha1.ExecutionSpec{
+				RuntimeClassName: testRuntimeClassKata,
+				NodeSelector: map[string]string{
+					testNodeLabelKey: testNodeValueKata,
+				},
+				Tolerations: []corev1.Toleration{
+					{
+						Key:      testNodeLabelKey,
+						Operator: corev1.TolerationOpEqual,
+						Value:    testNodeValueKata,
+						Effect:   corev1.TaintEffectNoSchedule,
+					},
+				},
+			},
+		},
+	}
+	request := &AgentSandboxWorkspaceRequest{
+		RouterURL:         "http://agent-sandbox-router.default.svc",
+		TemplateName:      "workspace-template",
+		TemplateNamespace: "sandbox-system",
+		ReusePolicy:       corev1alpha1.WorkspaceReusePolicySession,
+		ReuseKey:          "session-123",
+		CleanupPolicy:     corev1alpha1.WorkspaceCleanupPolicyRetain,
+		WarmPoolPolicy:    AgentSandboxWarmPoolPolicyTemplate,
+		NamespaceStrategy: AgentSandboxNamespaceStrategyController,
+		ClaimTimeout:      2 * time.Minute,
+		CommandTimeout:    30 * time.Minute,
+	}
+
+	job, err := builder.BuildWithOptions(context.Background(), task, nil, nil, JobBuildOptions{
+		AgentSandboxWorkspace: request,
+	})
+	if err != nil {
+		t.Fatalf("BuildWithOptions() error = %v", err)
+	}
+
+	envVars := job.Spec.Template.Spec.Containers[0].Env
+	expected := map[string]string{
+		workerenv.AgentSandboxEnabled:               "true",
+		workerenv.AgentSandboxRouterURL:             "http://agent-sandbox-router.default.svc",
+		workerenv.AgentSandboxTemplateName:          "workspace-template",
+		workerenv.AgentSandboxTemplateNamespace:     "sandbox-system",
+		workerenv.AgentSandboxReusePolicy:           "session",
+		workerenv.AgentSandboxReuseKey:              "session-123",
+		workerenv.AgentSandboxCleanupPolicy:         "retain",
+		workerenv.AgentSandboxWarmPoolPolicy:        "template",
+		workerenv.AgentSandboxNamespaceStrategy:     "controller",
+		workerenv.AgentSandboxClaimTimeoutSeconds:   "120",
+		workerenv.AgentSandboxCommandTimeoutSeconds: "1800",
+	}
+	for name, want := range expected {
+		ev, ok := findEnvVar(envVars, name)
+		if !ok {
+			t.Errorf("missing sandbox env var %s", name)
+			continue
+		}
+		if ev.Value != want {
+			t.Errorf("%s = %q, want %q", name, ev.Value, want)
+		}
+	}
+
+	podSpec := job.Spec.Template.Spec
+	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != testRuntimeClassKata {
+		t.Fatalf("RuntimeClassName = %v, want %s", podSpec.RuntimeClassName, testRuntimeClassKata)
+	}
+	if got := podSpec.NodeSelector[testNodeLabelKey]; got != testNodeValueKata {
+		t.Errorf("NodeSelector[%s] = %q, want %q", testNodeLabelKey, got, testNodeValueKata)
+	}
+	if len(podSpec.Tolerations) != 1 {
+		t.Fatalf("Tolerations len = %d, want 1", len(podSpec.Tolerations))
+	}
+	if podSpec.Tolerations[0].Value != testNodeValueKata {
+		t.Errorf("Tolerations[0].Value = %q, want %q", podSpec.Tolerations[0].Value, testNodeValueKata)
+	}
+}
+
+func TestJobBuilder_BuildWithOptions_NonAgentTask_IgnoresSandboxWorkspaceEnv(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "container-task-sandbox",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   "busybox:latest",
+			Command: []string{"sh", "-c"},
+			Args:    []string{"echo hello"},
+		},
+	}
+	request := &AgentSandboxWorkspaceRequest{
+		RouterURL:         "http://agent-sandbox-router.default.svc",
+		TemplateName:      "workspace-template",
+		TemplateNamespace: "sandbox-system",
+		ReusePolicy:       corev1alpha1.WorkspaceReusePolicySession,
+		ReuseKey:          "session-123",
+		CleanupPolicy:     corev1alpha1.WorkspaceCleanupPolicyRetain,
+		WarmPoolPolicy:    AgentSandboxWarmPoolPolicyTemplate,
+		NamespaceStrategy: AgentSandboxNamespaceStrategyController,
+		ClaimTimeout:      2 * time.Minute,
+		CommandTimeout:    30 * time.Minute,
+	}
+
+	job, err := builder.BuildWithOptions(context.Background(), task, nil, nil, JobBuildOptions{
+		AgentSandboxWorkspace: request,
+	})
+	if err != nil {
+		t.Fatalf("BuildWithOptions() error = %v", err)
+	}
+
+	envVars := job.Spec.Template.Spec.Containers[0].Env
+	for _, name := range agentSandboxEnvNames() {
+		if _, found := findEnvVar(envVars, name); found {
+			t.Errorf("unexpected sandbox env var %s for non-agent task", name)
+		}
+	}
+}
+
 func TestJobBuilder_Build_AgentTask_CopilotRuntime(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
@@ -1571,7 +1745,7 @@ func TestJobBuilder_Build_AgentTask_AllowBash_AgentDefault(t *testing.T) {
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             corev1alpha1.AgentRuntimeClaude,
-				DefaultAllowBash: boolPtr(true),
+				DefaultAllowBash: new(true),
 			},
 		},
 	}
@@ -1607,7 +1781,7 @@ func TestJobBuilder_Build_AgentTask_AllowBash_NotSetWhenFalse(t *testing.T) {
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             corev1alpha1.AgentRuntimeClaude,
-				DefaultAllowBash: boolPtr(false),
+				DefaultAllowBash: new(false),
 			},
 		},
 	}

@@ -40,27 +40,27 @@ const (
 )
 
 // AgentSandboxConfig holds disabled-by-default alpha configuration for agent sandbox workspace integration.
-// The controller only validates workspace requests while the feature gate is enabled; no lifecycle
-// execution is wired through this config yet.
+// The controller validates workspace requests and propagates resolved settings to agent worker Jobs;
+// the worker wrapper performs the upstream sandbox claim, execution, and cleanup lifecycle.
 type AgentSandboxConfig struct {
 	// RouterURL is the optional base URL for an agent-sandbox router service.
 	RouterURL string
 	// DefaultTemplate is used when an enabled execution workspace omits templateRef.name.
 	DefaultTemplate string
-	// WarmPoolPolicy selects whether future workspace claims may use warm pools.
+	// WarmPoolPolicy selects whether workspace claims may use warm pools.
 	WarmPoolPolicy string
-	// NamespaceStrategy selects where future sandbox lifecycle resources will be managed.
+	// NamespaceStrategy selects where sandbox lifecycle resources are managed.
 	NamespaceStrategy string
-	// ClaimTimeout bounds future workspace claim/attach operations.
+	// ClaimTimeout bounds workspace claim and readiness operations.
 	ClaimTimeout time.Duration
-	// CommandTimeout bounds future sandbox command execution operations.
+	// CommandTimeout bounds sandbox command execution operations.
 	CommandTimeout time.Duration
 	// CleanupPolicy is the controller default when a Task workspace omits cleanupPolicy.
 	CleanupPolicy corev1alpha1.WorkspaceCleanupPolicy
 }
 
-// DefaultAgentSandboxConfig returns safe alpha defaults. The empty RouterURL and DefaultTemplate keep
-// sandbox lifecycle integration inert until explicitly configured and enabled.
+// DefaultAgentSandboxConfig returns safe alpha defaults. Empty RouterURL and DefaultTemplate values
+// require callers to provide an upstream router/default template or set a template per Task before execution.
 func DefaultAgentSandboxConfig() AgentSandboxConfig {
 	return AgentSandboxConfig{
 		WarmPoolPolicy:    AgentSandboxWarmPoolPolicyDisabled,
@@ -162,8 +162,8 @@ func (c AgentSandboxConfig) Validate() error {
 }
 
 // AgentSandboxWorkspaceRequest is the controller's resolved, validated view of a Task execution
-// workspace request. It is scaffolding for future sandbox lifecycle execution and is intentionally
-// not consumed by JobBuilder yet.
+// workspace request. JobBuilder uses it to propagate sandbox workspace settings to agent workers;
+// the worker wrapper owns the sandbox claim, command execution, and cleanup lifecycle.
 type AgentSandboxWorkspaceRequest struct {
 	RouterURL         string
 	TemplateName      string

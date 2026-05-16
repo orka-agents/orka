@@ -148,9 +148,9 @@ func main() {
 	flag.IntVar(&maxTasksPerNamespace, "max-tasks-per-namespace", 0,
 		"Maximum active tasks per namespace (0 = unlimited).")
 	flag.BoolVar(&agentSandboxEnabled, "agent-sandbox-enabled", agentSandboxEnabled,
-		"Enable experimental agent sandbox workspace validation.")
+		"Enable experimental agent sandbox workspace execution for agent Tasks.")
 	flag.StringVar(&agentSandboxConfig.RouterURL, "agent-sandbox-router-url", agentSandboxConfig.RouterURL,
-		"Agent sandbox router base URL for future workspace lifecycle integration.")
+		"Agent sandbox router base URL used by worker Jobs for workspace claims.")
 	flag.StringVar(&agentSandboxConfig.DefaultTemplate, "agent-sandbox-default-template",
 		agentSandboxConfig.DefaultTemplate,
 		"Default execution workspace template name used when a Task omits execution.workspace.templateRef.name.")
@@ -162,10 +162,10 @@ func main() {
 		"Agent sandbox namespace strategy (task, controller).")
 	flag.DurationVar(&agentSandboxConfig.ClaimTimeout, "agent-sandbox-claim-timeout",
 		agentSandboxConfig.ClaimTimeout,
-		"Timeout for future agent sandbox workspace claim operations.")
+		"Timeout for agent sandbox workspace claim and readiness operations.")
 	flag.DurationVar(&agentSandboxConfig.CommandTimeout, "agent-sandbox-command-timeout",
 		agentSandboxConfig.CommandTimeout,
-		"Timeout for future agent sandbox command execution operations.")
+		"Timeout for agent runtime execution inside the sandbox.")
 	flag.StringVar(&agentSandboxCleanupPolicy, "agent-sandbox-cleanup-policy", agentSandboxCleanupPolicy,
 		"Default agent sandbox workspace cleanup policy (delete, retain).")
 	flag.StringVar(&oidcIssuer, "oidc-issuer", os.Getenv("ORKA_OIDC_ISSUER"),
