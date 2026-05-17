@@ -85,7 +85,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
 			liveCopilotProxyServicePort(),
-			[]string{"gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.4", "gpt-5.2"},
+			[]string{"gpt-5.3-codex", "gpt-5.2-codex", "gpt-5-mini", "gpt-4.1", "gpt-4o", "gpt-5.4", "gpt-5.2"},
 			"gpt-",
 		)
 		claudeModel = discoverPreferredProxyModelViaServiceProxy(
@@ -153,7 +153,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			codexTaskWriteName,
 			codexPriorAgentName,
-			fmt.Sprintf("Add a new plain text file named %s in the repository root with exactly one line: %s. Reply with exactly CREATED and nothing else.", codexMarkerFile, codexMarker),
+			fmt.Sprintf("Use bash to create a new plain text file named %s in the repository root with exactly one line: %s. Verify the file content with cat, then reply with exactly CREATED and nothing else.", codexMarkerFile, codexMarker),
 			6,
 			boolPtr(true),
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},

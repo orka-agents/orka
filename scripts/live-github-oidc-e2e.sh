@@ -817,6 +817,7 @@ delegate_live_tts_child() {
 
   log "Delegating child Task with real kontxt TTS child-token replacement"
   if ! ORKA_CONTEXT_TOKEN_TTS_URL="http://127.0.0.1:${kontxt_tts_local_port}" \
+    ORKA_CONTEXT_TOKEN_TTS_TOKEN_SOURCE=incoming \
     ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE="${kontxt_tts_parent_token_file}" \
     ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_TYPE=urn:ietf:params:oauth:token-type:txn_token \
     ORKA_CONTEXT_TOKEN_CHILD_SCOPE="${kontxt_tts_child_scope}" \
@@ -899,6 +900,7 @@ verify_scope_broadening_rejected() {
 
   log "Verifying Orka child-token helper rejects scope broadening before child creation"
   if ORKA_CONTEXT_TOKEN_TTS_URL="http://127.0.0.1:${kontxt_tts_local_port}" \
+    ORKA_CONTEXT_TOKEN_TTS_TOKEN_SOURCE=incoming \
     ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE="${kontxt_tts_parent_token_file}" \
     ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_TYPE=urn:ietf:params:oauth:token-type:txn_token \
     ORKA_CONTEXT_TOKEN_CHILD_SCOPE=orka:admin \

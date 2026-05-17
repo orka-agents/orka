@@ -75,6 +75,9 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(liveProxyModels.AllModelIDs).NotTo(BeEmpty(), "proxy should expose at least one model")
 		liveGPTModel = firstPreferredProxyModel(liveProxyModels, []string{
+			"gpt-5-mini",
+			"gpt-4.1",
+			"gpt-4o",
 			"gpt-5.4",
 			"gpt-5.2",
 			"gpt-5.4-mini",
