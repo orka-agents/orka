@@ -106,9 +106,10 @@ Common list query parameters: `namespace`, `query`/`q`, `sessionName`, `agentNam
 | `/api/v1/memory-proposals` | POST | Create a memory proposal |
 | `/api/v1/memory-proposals/:id` | GET | Get a memory proposal |
 | `/api/v1/memory-proposals/:id/review` | POST | Record a review decision without applying it |
+| `/api/v1/memory-proposals/:id/apply` | POST | Apply an accepted `memory` proposal into durable memory |
 | `/api/v1/memory-proposals/:id/archive` | POST | Archive a proposal without applying it |
 
-Common list query parameters: `namespace`, `taskName`, `agentName`, `type`, `status`, `query`/`q`, and `limit`. Review and archive return `204 No Content`.
+Common list query parameters: `namespace`, `taskName`, `agentName`, `type`, `status`, `query`/`q`, and `limit`. Review and archive return `204 No Content`. Apply accepts optional `appliedBy` and returns the linked durable memory JSON; repeated apply requests return the same memory.
 
 ## Agents
 
