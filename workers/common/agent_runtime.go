@@ -208,12 +208,11 @@ func execGitContext(ctx context.Context, dir string, args ...string) error {
 type AgentExecutor func(ctx context.Context, cfg *AgentConfig) (string, error)
 
 const (
-	agentSandboxWorkerUploadPath      = "orka-agent-worker"
-	agentSandboxWorkerExecPath        = "/app/" + agentSandboxWorkerUploadPath
-	agentSandboxSATokenUploadPath     = "orka-sa-token"
-	agentSandboxSATokenExecPath       = "/app/" + agentSandboxSATokenUploadPath
-	agentSandboxExecMaxOutputBytes    = 2000
-	agentSandboxExecDiagnosticMaxSize = int(agentSandboxExecMaxOutputBytes)
+	agentSandboxWorkerUploadPath   = "orka-agent-worker"
+	agentSandboxWorkerExecPath     = "/app/" + agentSandboxWorkerUploadPath
+	agentSandboxSATokenUploadPath  = "orka-sa-token"
+	agentSandboxSATokenExecPath    = "/app/" + agentSandboxSATokenUploadPath
+	agentSandboxExecMaxOutputBytes = 2000
 )
 
 var (
@@ -353,7 +352,11 @@ func runAgentInSandbox(ctx context.Context, name, workspaceDir string, sandboxEn
 		return fmt.Errorf("claim agent sandbox workspace: %w", err)
 	}
 	ref := claim.Ref
-	defer cleanupAgentSandboxWorkspace(ctx, executor, ref, sandboxEnv)
+	defer func() {
+		cleanupCtx, cleanupCancel := agentSandboxCleanupContext(sandboxEnv.ClaimTimeout)
+		defer cleanupCancel()
+		cleanupAgentSandboxWorkspace(cleanupCtx, executor, ref, sandboxEnv)
+	}()
 
 	if _, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
 		Ref:     ref,
@@ -459,22 +462,55 @@ func cleanupAgentSandboxWorkspace(
 
 	switch strings.TrimSpace(strings.ToLower(sandboxEnv.CleanupPolicy)) {
 	case "retain":
-		if _, err := executor.Release(ctx, workspace.ReleaseRequest{
-			Ref:     ref,
-			Retain:  true,
-			Reason:  "agent sandbox cleanup policy retain",
-			Timeout: sandboxEnv.ClaimTimeout,
-		}); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to retain sandbox workspace: %v\n", err)
-		}
+		retainAgentSandboxWorkspace(ctx, executor, ref, sandboxEnv, "agent sandbox cleanup policy retain")
+	case "", "delete":
+		deleteAgentSandboxWorkspace(ctx, executor, ref, sandboxEnv)
 	default:
-		if _, err := executor.Delete(ctx, workspace.DeleteRequest{
-			Ref:     ref,
-			Reason:  "agent sandbox cleanup policy delete",
-			Timeout: sandboxEnv.ClaimTimeout,
-		}); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to delete sandbox workspace: %v\n", err)
-		}
+		fmt.Fprintf(
+			os.Stderr,
+			"warning: unsupported sandbox cleanup policy %q; retaining workspace to avoid unintended deletion\n",
+			sandboxEnv.CleanupPolicy,
+		)
+		retainAgentSandboxWorkspace(ctx, executor, ref, sandboxEnv, "unsupported agent sandbox cleanup policy")
+	}
+}
+
+func agentSandboxCleanupContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(context.Background())
+	}
+	return context.WithTimeout(context.Background(), timeout)
+}
+
+func retainAgentSandboxWorkspace(
+	ctx context.Context,
+	executor workspace.WorkspaceExecutor,
+	ref workspace.WorkspaceRef,
+	sandboxEnv workerenv.AgentSandboxEnv,
+	reason string,
+) {
+	if _, err := executor.Release(ctx, workspace.ReleaseRequest{
+		Ref:     ref,
+		Retain:  true,
+		Reason:  reason,
+		Timeout: sandboxEnv.ClaimTimeout,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to retain sandbox workspace: %v\n", err)
+	}
+}
+
+func deleteAgentSandboxWorkspace(
+	ctx context.Context,
+	executor workspace.WorkspaceExecutor,
+	ref workspace.WorkspaceRef,
+	sandboxEnv workerenv.AgentSandboxEnv,
+) {
+	if _, err := executor.Delete(ctx, workspace.DeleteRequest{
+		Ref:     ref,
+		Reason:  "agent sandbox cleanup policy delete",
+		Timeout: sandboxEnv.ClaimTimeout,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to delete sandbox workspace: %v\n", err)
 	}
 }
 
@@ -484,9 +520,9 @@ func formatSandboxExecOutput(result *workspace.ExecResult) string {
 	}
 
 	parts := []string{
-		"stdout=" + formatSandboxExecStream(result.Stdout, agentSandboxExecDiagnosticMaxSize),
+		"stdout=" + formatSandboxExecStream(result.Stdout, agentSandboxExecMaxOutputBytes),
 		fmt.Sprintf("stdout_truncated=%t", result.StdoutTruncated),
-		"stderr=" + formatSandboxExecStream(result.Stderr, agentSandboxExecDiagnosticMaxSize),
+		"stderr=" + formatSandboxExecStream(result.Stderr, agentSandboxExecMaxOutputBytes),
 		fmt.Sprintf("stderr_truncated=%t", result.StderrTruncated),
 	}
 	return " (" + strings.Join(parts, "; ") + ")"

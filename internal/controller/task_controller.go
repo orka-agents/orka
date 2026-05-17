@@ -1195,6 +1195,9 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		if agent.Spec.Runtime == nil {
 			return fmt.Errorf("agent %q does not have a runtime configured (required for type: agent tasks)", agent.Name)
 		}
+		if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil && agent.Spec.Execution.Workspace.Enabled {
+			return fmt.Errorf("agent %q sets spec.execution.workspace, but execution workspace requests are only supported on Task.spec.execution.workspace", agent.Name)
+		}
 		// Agent with runtime must not have providerRef (mutually exclusive)
 		if agent.Spec.ProviderRef != nil {
 			return fmt.Errorf("agent %q has both runtime and providerRef set (mutually exclusive)", agent.Name)

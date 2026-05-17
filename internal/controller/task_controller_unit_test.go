@@ -361,6 +361,29 @@ func TestValidateTaskAgentCompatibility_AgentTaskRuntimeAndProvider(t *testing.T
 	}
 }
 
+func TestValidateTaskAgentCompatibility_AgentTaskAgentExecutionWorkspace(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: "copilot"},
+			Execution: &corev1alpha1.ExecutionSpec{
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true},
+			},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil {
+		t.Fatal("expected error when agent execution workspace is enabled")
+	}
+	if !strings.Contains(err.Error(), "Task.spec.execution.workspace") {
+		t.Fatalf("expected Task.spec.execution.workspace guidance, got %q", err.Error())
+	}
+}
+
 func TestValidateTaskAgentCompatibility_AgentTaskRuntimeAndModelProvider(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{

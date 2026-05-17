@@ -506,6 +506,66 @@ func TestRunAgent_AgentSandboxRetainsWorkspace(t *testing.T) {
 	}
 }
 
+func TestRunAgent_AgentSandboxUnknownCleanupPolicyRetainsWorkspace(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "archive")
+
+	recorder := newRecordingWorkspaceExecutor()
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	err := RunAgent("test-agent", "/sandbox/workspace", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		t.Fatal("outer agent executor should not run when agent sandbox is enabled")
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("RunAgent returned error: %v", err)
+	}
+
+	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "release")
+
+	releaseReqs := recorder.releaseRequests()
+	if len(releaseReqs) != 1 {
+		t.Fatalf("recorded %d release requests, want 1", len(releaseReqs))
+	}
+	if !releaseReqs[0].Retain {
+		t.Error("release request Retain = false, want true")
+	}
+	if releaseReqs[0].Reason != "unsupported agent sandbox cleanup policy" {
+		t.Errorf("release reason = %q, want unsupported policy reason", releaseReqs[0].Reason)
+	}
+}
+
+func TestRunAgent_AgentSandboxCleanupUsesFreshContextAfterCancellation(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "delete")
+
+	recorder := newRecordingWorkspaceExecutor()
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	recorder.afterExec = cancel
+
+	err := runAgentInSandbox(
+		ctx,
+		"test-agent",
+		"/sandbox/workspace",
+		workerenv.ParseAgentSandboxEnv(os.Getenv),
+	)
+	if err != nil {
+		t.Fatalf("runAgentInSandbox returned error: %v", err)
+	}
+
+	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "delete")
+
+	deleteCtxErrs := recorder.deleteContextErrors()
+	if len(deleteCtxErrs) != 1 {
+		t.Fatalf("recorded %d delete context errors, want 1", len(deleteCtxErrs))
+	}
+	if deleteCtxErrs[0] != nil {
+		t.Fatalf("delete context error = %v, want nil", deleteCtxErrs[0])
+	}
+}
+
 func TestRunAgent_AgentSandboxDefaultsTemplateNamespaceToTaskNamespace(t *testing.T) {
 	setRequiredAgentSandboxEnv(t, "delete")
 	t.Setenv(workerenv.AgentSandboxTemplateNamespace, "")
@@ -873,6 +933,8 @@ type recordingWorkspaceExecutor struct {
 	uploadReqs    []workspace.UploadRequest
 	downloadReqs  []workspace.DownloadRequest
 	describeReqs  []workspace.DescribeRequest
+	deleteCtxErrs []error
+	afterExec     func()
 	claimErr      error
 	waitReadyErr  error
 	execErr       error
@@ -927,11 +989,16 @@ func (r *recordingWorkspaceExecutor) Exec(
 	r.ops = append(r.ops, "exec")
 	r.execReqs = append(r.execReqs, copyExecRequest(req))
 	err := r.execErr
+	afterExec := r.afterExec
 	r.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	return r.fake.Exec(ctx, req)
+	result, fakeErr := r.fake.Exec(ctx, req)
+	if afterExec != nil {
+		afterExec()
+	}
+	return result, fakeErr
 }
 
 func (r *recordingWorkspaceExecutor) Upload(
@@ -986,6 +1053,7 @@ func (r *recordingWorkspaceExecutor) Delete(
 	r.mu.Lock()
 	r.ops = append(r.ops, "delete")
 	r.deleteReqs = append(r.deleteReqs, req)
+	r.deleteCtxErrs = append(r.deleteCtxErrs, ctx.Err())
 	err := r.deleteErr
 	r.mu.Unlock()
 	if err != nil {
@@ -1061,6 +1129,12 @@ func (r *recordingWorkspaceExecutor) deleteRequests() []workspace.DeleteRequest 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]workspace.DeleteRequest(nil), r.deleteReqs...)
+}
+
+func (r *recordingWorkspaceExecutor) deleteContextErrors() []error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]error(nil), r.deleteCtxErrs...)
 }
 
 func copyExecRequest(req workspace.ExecRequest) workspace.ExecRequest {
