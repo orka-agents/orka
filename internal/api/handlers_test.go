@@ -77,6 +77,8 @@ func setupTestHandlersWithAuthzStore(
 		Client:                    fakeClient,
 		SessionStore:              ss,
 		ResultStore:               ss,
+		PlanStore:                 ss,
+		ArtifactStore:             ss,
 		MemoryStore:               ss,
 		MemoryProposalStore:       ss,
 		ContextTokenAuthorization: authz,
@@ -87,6 +89,12 @@ func setupTestHandlersWithAuthzStore(
 	app.Post("/tasks", handlers.CreateTask)
 	app.Get("/tasks", handlers.ListTasks)
 	app.Get("/tasks/:id", handlers.GetTask)
+	app.Get("/tasks/:id/logs", handlers.GetTaskLogs)
+	app.Get("/tasks/:id/result", handlers.GetTaskResult)
+	app.Get("/tasks/:id/plan", handlers.GetTaskPlan)
+	app.Get("/tasks/:id/children", handlers.GetTaskChildren)
+	app.Get("/tasks/:id/artifacts", handlers.ListTaskArtifacts)
+	app.Get("/tasks/:id/artifacts/:filename", handlers.DownloadTaskArtifact)
 	app.Delete("/tasks/:id", handlers.DeleteTask)
 	app.Get("/tools", handlers.ListTools)
 	app.Get("/tools/:name", handlers.GetTool)
@@ -845,6 +853,323 @@ func TestHandlers_TaskActions_ContextTokenAuthorization(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHandlers_TaskReadActions_ContextTokenAuthorizationEnforcesTaskNameContext(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	const taskName = "authz-task"
+
+	tests := []struct {
+		name    string
+		path    string
+		prepare func(t *testing.T, ss *sqlite.Store)
+	}{
+		{
+			name: "get task",
+			path: "/tasks/" + taskName,
+		},
+		{
+			name: "get task logs",
+			path: "/tasks/" + taskName + "/logs",
+			prepare: func(t *testing.T, ss *sqlite.Store) {
+				t.Helper()
+				require.NoError(t, ss.SaveResult(context.Background(), "default", taskName, []byte("logs")))
+			},
+		},
+		{
+			name: "get task result",
+			path: "/tasks/" + taskName + "/result",
+			prepare: func(t *testing.T, ss *sqlite.Store) {
+				t.Helper()
+				require.NoError(t, ss.SaveResult(context.Background(), "default", taskName, []byte("result")))
+			},
+		},
+		{
+			name: "get task plan",
+			path: "/tasks/" + taskName + "/plan",
+			prepare: func(t *testing.T, ss *sqlite.Store) {
+				t.Helper()
+				require.NoError(t, ss.SavePlan(context.Background(), "default", taskName, &store.PlanState{
+					TaskName:    taskName,
+					Namespace:   "default",
+					Summary:     "in progress",
+					ProgressPct: 50,
+				}))
+			},
+		},
+		{
+			name: "get task children",
+			path: "/tasks/" + taskName + "/children",
+		},
+		{
+			name: "list task artifacts",
+			path: "/tasks/" + taskName + "/artifacts",
+		},
+		{
+			name: "download task artifact",
+			path: "/tasks/" + taskName + "/artifacts/report.txt",
+			prepare: func(t *testing.T, ss *sqlite.Store) {
+				t.Helper()
+				require.NoError(t, ss.SaveArtifact(context.Background(), "default", taskName, "report.txt", "text/plain", []byte("artifact")))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: "default"},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+				Status: corev1alpha1.TaskStatus{
+					ResultRef: &corev1alpha1.ResultReference{Available: true},
+				},
+			}
+			child := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "authz-child",
+					Namespace: "default",
+					Labels: map[string]string{
+						labels.LabelParentTask: labels.SelectorValue(taskName),
+					},
+				},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+			}
+
+			t.Run("allows matching taskName", func(t *testing.T) {
+				app, ss := setupTestHandlersWithAuthzStore(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, task.DeepCopyObject(), child.DeepCopyObject())
+				if tt.prepare != nil {
+					tt.prepare(t, ss)
+				}
+
+				token := issueTestContextToken(t, provider, nil, map[string]any{
+					"scope": ContextTokenScopeTaskGet,
+					"tctx": map[string]any{
+						"namespace": "default",
+						"taskName":  taskName,
+					},
+				})
+				req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+				req.Header.Set(KontxtHeaderName, token)
+				resp, err := app.Test(req)
+				require.NoError(t, err)
+				require.Equal(t, http.StatusOK, resp.StatusCode)
+			})
+
+			t.Run("denies mismatched taskName", func(t *testing.T) {
+				app, ss := setupTestHandlersWithAuthzStore(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, task.DeepCopyObject(), child.DeepCopyObject())
+				if tt.prepare != nil {
+					tt.prepare(t, ss)
+				}
+
+				token := issueTestContextToken(t, provider, nil, map[string]any{
+					"scope": ContextTokenScopeTaskGet,
+					"tctx": map[string]any{
+						"namespace": "default",
+						"taskName":  "other-task",
+					},
+				})
+				req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+				req.Header.Set(KontxtHeaderName, token)
+				resp, err := app.Test(req)
+				require.NoError(t, err)
+				require.Equal(t, http.StatusForbidden, resp.StatusCode)
+			})
+		})
+	}
+}
+
+func TestHandlers_GetTask_ContextTokenAuthorizationEnforcesLoadedTaskRepoContext(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "repo-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/acme/allowed.git",
+				},
+			},
+		},
+	}
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, task)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskGet,
+		"tctx": map[string]any{
+			"repo": "https://github.com/acme/other.git",
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks/repo-task", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestHandlers_ListTasks_ContextTokenAuthorizationFiltersLoadedTaskContext(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	allowedTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "allowed-repo-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/acme/allowed.git",
+				},
+			},
+		},
+	}
+	otherTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-repo-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/acme/other.git",
+				},
+			},
+		},
+	}
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, allowedTask, otherTask)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskList,
+		"tctx": map[string]any{
+			"repo":     "https://github.com/acme/allowed.git",
+			"agent":    "reviewer",
+			"taskType": string(corev1alpha1.TaskTypeAgent),
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var body struct {
+		Items []corev1alpha1.Task `json:"items"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Len(t, body.Items, 1)
+	require.Equal(t, "allowed-repo-task", body.Items[0].Name)
+}
+
+func TestHandlers_GetTaskChildren_ContextTokenAuthorizationFiltersLoadedTaskContext(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	parentTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/acme/allowed.git",
+				},
+			},
+		},
+	}
+	allowedChild := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "allowed-child",
+			Namespace: "default",
+			Labels: map[string]string{
+				labels.LabelParentTask: labels.SelectorValue("parent-task"),
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/acme/allowed.git",
+				},
+			},
+		},
+	}
+	otherChild := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other-child",
+			Namespace: "default",
+			Labels: map[string]string{
+				labels.LabelParentTask: labels.SelectorValue("parent-task"),
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/acme/other.git",
+				},
+			},
+		},
+	}
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, parentTask, allowedChild, otherChild)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskGet,
+		"tctx": map[string]any{
+			"namespace": "default",
+			"taskName":  "parent-task",
+			"repo":      "https://github.com/acme/allowed.git",
+			"agent":     "reviewer",
+			"taskType":  string(corev1alpha1.TaskTypeAgent),
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks/parent-task/children", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var body struct {
+		Items []corev1alpha1.Task `json:"items"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Len(t, body.Items, 1)
+	require.Equal(t, "allowed-child", body.Items[0].Name)
+}
+
+func TestHandlers_DeleteTask_ContextTokenAuthorizationEnforcesLoadedTaskRepoContext(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "repo-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/acme/allowed.git",
+				},
+			},
+		},
+	}
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, task)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskDelete,
+		"tctx": map[string]any{
+			"repo": "https://github.com/acme/other.git",
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/tasks/repo-task", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
 func TestHandlers_GenericActions_ContextTokenAuthorizationEnforceRejectsNamespaceMismatch(t *testing.T) {

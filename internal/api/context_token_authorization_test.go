@@ -75,6 +75,65 @@ func TestContextTokenTaskCreateFailures(t *testing.T) {
 	})
 }
 
+func TestContextTokenTaskReadFailures(t *testing.T) {
+	cfg := enforceContextTokenAuthorizationConfig()
+
+	t.Run("allows matching task name context", func(t *testing.T) {
+		token := &ContextToken{
+			Scopes: []string{ContextTokenScopeTaskGet},
+			TransactionContext: map[string]any{
+				"namespace": "team-a",
+				"taskName":  "task-1",
+			},
+		}
+
+		failures := contextTokenTaskReadFailures(token, cfg, "team-a", "task-1")
+		require.Empty(t, failures)
+	})
+
+	t.Run("allows matching namespaced task context", func(t *testing.T) {
+		token := &ContextToken{
+			Scopes: []string{ContextTokenScopeTaskGet},
+			TransactionContext: map[string]any{
+				"task": "team-a/task-1",
+			},
+		}
+
+		failures := contextTokenTaskReadFailures(token, cfg, "team-a", "task-1")
+		require.Empty(t, failures)
+	})
+
+	t.Run("allows matching bare task context", func(t *testing.T) {
+		token := &ContextToken{
+			Scopes: []string{ContextTokenScopeTaskGet},
+			TransactionContext: map[string]any{
+				"task": "task-1",
+			},
+		}
+
+		failures := contextTokenTaskReadFailures(token, cfg, "team-a", "task-1")
+		require.Empty(t, failures)
+	})
+
+	t.Run("reports scope namespace and task mismatches", func(t *testing.T) {
+		token := &ContextToken{
+			Scopes: []string{ContextTokenScopeTaskList},
+			TransactionContext: map[string]any{
+				"namespace": "team-b",
+				"taskName":  "task-2",
+				"task":      "team-b/task-2",
+			},
+		}
+
+		failures := contextTokenTaskReadFailures(token, cfg, "team-a", "task-1")
+		joined := strings.Join(failures, "\n")
+		require.Contains(t, joined, `missing one of required scopes "orka:tasks:get"`)
+		require.Contains(t, joined, `namespace "team-a" does not match token context "team-b"`)
+		require.Contains(t, joined, `task name "task-1" does not match token context "task-2"`)
+		require.Contains(t, joined, `task "team-a/task-1" does not match token context "team-b/task-2"`)
+	})
+}
+
 func TestContextTokenProviderUseFailures(t *testing.T) {
 	cfg := enforceContextTokenAuthorizationConfig()
 	provider := ProviderResolutionInfo{Name: "openai-prod", Namespace: "team-a", Type: "openai"}

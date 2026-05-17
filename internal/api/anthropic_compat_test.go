@@ -1294,7 +1294,7 @@ func TestRunNonStreamingToolLoop_RejectsToolNotExposedInRequest(t *testing.T) {
 
 	var toolResult string
 	for _, msg := range mock.requests[1].Messages {
-		if msg.Role == "tool" && msg.ToolCallID == "tc_1" {
+		if msg.Role == testRoleTool && msg.ToolCallID == "tc_1" {
 			toolResult = msg.Content
 			break
 		}

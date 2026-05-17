@@ -413,6 +413,19 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 	if err := h.client.List(ctx, taskList, opts); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tasks: %v", err))
 	}
+	if h.contextTokenAuthorization.Enabled() {
+		filtered := taskList.Items[:0]
+		for i := range taskList.Items {
+			allowed, err := h.contextTokenAllowsLoadedTask(c, "listTasks", &taskList.Items[i])
+			if err != nil {
+				return err
+			}
+			if allowed {
+				filtered = append(filtered, taskList.Items[i])
+			}
+		}
+		taskList.Items = filtered
+	}
 
 	response := ListResponse{
 		Items: taskList.Items,
@@ -432,7 +445,7 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenAction(c, "getTask", h.contextTokenAuthorization.TaskReadScopes); err != nil {
+	if err := h.authorizeContextTokenTaskRead(c, "getTask", namespace, id); err != nil {
 		return err
 	}
 
@@ -443,6 +456,9 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "task not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+	if err := h.authorizeContextTokenLoadedTask(c, "getTask", task); err != nil {
+		return err
 	}
 
 	// Build consistent response shape with optional plan data
@@ -493,6 +509,9 @@ func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
 	}
+	if err := h.authorizeContextTokenLoadedTask(c, "deleteTask", task); err != nil {
+		return err
+	}
 
 	if err := h.client.Delete(ctx, task); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to delete task: %v", err))
@@ -508,7 +527,7 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenAction(c, "getTaskLogs", h.contextTokenAuthorization.TaskReadScopes); err != nil {
+	if err := h.authorizeContextTokenTaskRead(c, "getTaskLogs", namespace, id); err != nil {
 		return err
 	}
 
@@ -519,6 +538,9 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "task not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+	if err := h.authorizeContextTokenLoadedTask(c, "getTaskLogs", task); err != nil {
+		return err
 	}
 
 	// For completed tasks with results available, serve from ResultStore
@@ -617,7 +639,7 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenAction(c, "getTaskResult", h.contextTokenAuthorization.TaskReadScopes); err != nil {
+	if err := h.authorizeContextTokenTaskRead(c, "getTaskResult", namespace, id); err != nil {
 		return err
 	}
 
@@ -628,6 +650,9 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "task not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+	if err := h.authorizeContextTokenLoadedTask(c, "getTaskResult", task); err != nil {
+		return err
 	}
 
 	if task.Status.ResultRef == nil || !task.Status.ResultRef.Available {
@@ -654,7 +679,7 @@ func (h *Handlers) GetTaskPlan(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenAction(c, "getTaskPlan", h.contextTokenAuthorization.TaskReadScopes); err != nil {
+	if err := h.authorizeContextTokenTaskRead(c, "getTaskPlan", namespace, id); err != nil {
 		return err
 	}
 
@@ -665,6 +690,9 @@ func (h *Handlers) GetTaskPlan(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "task not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+	if err := h.authorizeContextTokenLoadedTask(c, "getTaskPlan", task); err != nil {
+		return err
 	}
 
 	if h.planStore == nil {
@@ -1330,16 +1358,46 @@ func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenAction(c, "getTaskChildren", h.contextTokenAuthorization.TaskReadScopes); err != nil {
+	if err := h.authorizeContextTokenTaskRead(c, "getTaskChildren", namespace, taskName); err != nil {
 		return err
 	}
 
+	ctx := c.Context()
+	if h.contextTokenAuthorization.Enabled() {
+		ui := GetUserInfo(c)
+		if ui != nil && ui.AuthType == AuthTypeContextToken && ui.ContextToken != nil {
+			parentTask := &corev1alpha1.Task{}
+			if err := h.client.Get(ctx, types.NamespacedName{Name: taskName, Namespace: namespace}, parentTask); err != nil {
+				if apierrors.IsNotFound(err) {
+					return fiber.NewError(fiber.StatusNotFound, "task not found")
+				}
+				return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+			}
+			if err := h.authorizeContextTokenLoadedTask(c, "getTaskChildren", parentTask); err != nil {
+				return err
+			}
+		}
+	}
+
 	var taskList corev1alpha1.TaskList
-	if err := h.client.List(c.Context(), &taskList,
+	if err := h.client.List(ctx, &taskList,
 		client.InNamespace(namespace),
 		client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(taskName)},
 	); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list child tasks: %v", err))
+	}
+	if h.contextTokenAuthorization.Enabled() {
+		filtered := taskList.Items[:0]
+		for i := range taskList.Items {
+			allowed, err := h.contextTokenAllowsLoadedTaskWithIdentity(c, "getTaskChildren", &taskList.Items[i], false)
+			if err != nil {
+				return err
+			}
+			if allowed {
+				filtered = append(filtered, taskList.Items[i])
+			}
+		}
+		taskList.Items = filtered
 	}
 
 	return c.JSON(ListResponse{
@@ -1355,7 +1413,7 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenAction(c, "listTaskArtifacts", h.contextTokenAuthorization.TaskReadScopes); err != nil {
+	if err := h.authorizeContextTokenTaskRead(c, "listTaskArtifacts", namespace, id); err != nil {
 		return err
 	}
 
@@ -1366,6 +1424,9 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "task not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+	if err := h.authorizeContextTokenLoadedTask(c, "listTaskArtifacts", task); err != nil {
+		return err
 	}
 
 	if h.artifactStore == nil {
@@ -1392,7 +1453,7 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenAction(c, "downloadTaskArtifact", h.contextTokenAuthorization.TaskReadScopes); err != nil {
+	if err := h.authorizeContextTokenTaskRead(c, "downloadTaskArtifact", namespace, id); err != nil {
 		return err
 	}
 
@@ -1403,6 +1464,9 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "task not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+	if err := h.authorizeContextTokenLoadedTask(c, "downloadTaskArtifact", task); err != nil {
+		return err
 	}
 
 	if h.artifactStore == nil {

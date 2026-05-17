@@ -253,6 +253,76 @@ func authorizeContextTokenTaskCreateObject(ctx context.Context, k8sClient client
 	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
+func (h *Handlers) authorizeContextTokenLoadedTask(c fiber.Ctx, action string, task *corev1alpha1.Task) error {
+	return h.authorizeContextTokenLoadedTaskWithIdentity(c, action, task, true)
+}
+
+func (h *Handlers) authorizeContextTokenLoadedTaskWithIdentity(c fiber.Ctx, action string, task *corev1alpha1.Task, includeTaskIdentity bool) error {
+	if !h.contextTokenAuthorization.Enabled() {
+		return nil
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return nil
+	}
+
+	failures, err := h.contextTokenLoadedTaskContextFailures(c.Context(), ui.ContextToken, task, includeTaskIdentity)
+	if err != nil {
+		return err
+	}
+	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
+		return nil
+	}
+
+	return h.handleContextTokenAuthorizationFailures(ui.ContextToken, action, failures)
+}
+
+func (h *Handlers) contextTokenAllowsLoadedTask(c fiber.Ctx, action string, task *corev1alpha1.Task) (bool, error) {
+	return h.contextTokenAllowsLoadedTaskWithIdentity(c, action, task, true)
+}
+
+func (h *Handlers) contextTokenAllowsLoadedTaskWithIdentity(c fiber.Ctx, action string, task *corev1alpha1.Task, includeTaskIdentity bool) (bool, error) {
+	if !h.contextTokenAuthorization.Enabled() {
+		return true, nil
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return true, nil
+	}
+
+	failures, err := h.contextTokenLoadedTaskContextFailures(c.Context(), ui.ContextToken, task, includeTaskIdentity)
+	if err != nil {
+		return false, err
+	}
+	if len(failures) == 0 {
+		return true, nil
+	}
+	if h.contextTokenAuthorization.enforcing() {
+		return false, nil
+	}
+	return true, h.handleContextTokenAuthorizationFailures(ui.ContextToken, action, failures)
+}
+
+func (h *Handlers) contextTokenLoadedTaskContextFailures(ctx context.Context, token *ContextToken, task *corev1alpha1.Task, includeTaskIdentity bool) ([]string, error) {
+	if token == nil || task == nil {
+		return nil, nil
+	}
+
+	req := createTaskRequestFromTask(task)
+	namespace := task.Namespace
+	if namespace == "" {
+		namespace = req.Namespace
+	}
+
+	authzCtx, err := h.resolveContextTokenTaskCreateAuthorizationContext(ctx, req, namespace)
+	if err != nil {
+		return nil, fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+
+	return contextTokenTaskContextFailures(token, authzCtx, includeTaskIdentity), nil
+}
+
 func createTaskRequestFromTask(task *corev1alpha1.Task) CreateTaskRequest {
 	if task == nil {
 		return CreateTaskRequest{}
@@ -321,6 +391,57 @@ func authorizeContextTokenActionWithConfig(c fiber.Ctx, cfg ContextTokenAuthoriz
 		return nil
 	}
 	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+}
+
+func (h *Handlers) authorizeContextTokenTaskRead(c fiber.Ctx, action, namespace, taskName string) error {
+	return authorizeContextTokenTaskReadWithConfig(c, h.contextTokenAuthorization, action, namespace, taskName)
+}
+
+func authorizeContextTokenTaskReadWithConfig(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, action, namespace, taskName string) error {
+	if !cfg.Enabled() {
+		return nil
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return nil
+	}
+
+	failures := contextTokenTaskReadFailures(ui.ContextToken, cfg, namespace, taskName)
+	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+}
+
+func contextTokenTaskReadFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, namespace, taskName string) []string {
+	failures := []string{}
+	if !hasAnyScope(token.Scopes, cfg.TaskReadScopes) {
+		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.TaskReadScopes, ",")))
+	}
+	failures = append(failures, contextTokenTaskIdentityFailures(token, namespace, taskName)...)
+	return failures
+}
+
+func contextTokenTaskIdentityFailures(token *ContextToken, namespace, taskName string) []string {
+	failures := []string{}
+	if want, ok := contextString(token.TransactionContext, "namespace"); ok && strings.TrimSpace(namespace) != "" && namespace != want {
+		failures = append(failures, fmt.Sprintf("namespace %q does not match token context %q", namespace, want))
+	}
+	if want, ok := contextString(token.TransactionContext, "taskName"); ok && strings.TrimSpace(taskName) != "" && taskName != want {
+		failures = append(failures, fmt.Sprintf("task name %q does not match token context %q", taskName, want))
+	}
+	if want, ok := contextString(token.TransactionContext, "task"); ok && strings.TrimSpace(taskName) != "" && !taskMatchesContext(namespace, taskName, want) {
+		failures = append(failures, fmt.Sprintf("task %q does not match token context %q", namespacedNameString(namespace, taskName), want))
+	}
+	return failures
+}
+
+func taskMatchesContext(namespace, taskName, want string) bool {
+	if taskName == want {
+		return true
+	}
+	return strings.TrimSpace(namespace) != "" && namespacedNameString(namespace, taskName) == want
 }
 
 func authorizeContextTokenProviderUse(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, action, namespace string, provider ProviderResolutionInfo, model string) error {
@@ -414,6 +535,8 @@ func contextTokenAuthorizationFailureReason(failures []string) string {
 		return "missing_scope"
 	case strings.Contains(joined, "namespace"):
 		return "namespace_mismatch"
+	case strings.Contains(joined, "task name") || strings.Contains(joined, `task "`):
+		return "task_mismatch"
 	case strings.Contains(joined, "agent"):
 		return "agent_mismatch"
 	case strings.Contains(joined, "workspace repo") || strings.Contains(joined, "repository"):
@@ -600,16 +723,30 @@ func contextTokenTaskCreateEffectiveRuntimeAllowedTools(req CreateTaskRequest, a
 }
 
 func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, authzCtx contextTokenTaskCreateAuthorizationContext) []string {
+	failures := contextTokenTaskCreateScopeFailures(token, cfg)
+	failures = append(failures, contextTokenTaskContextFailures(token, authzCtx, false)...)
+	return failures
+}
+
+func contextTokenTaskCreateScopeFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig) []string {
+	if hasAnyScope(token.Scopes, cfg.TaskCreateScopes) {
+		return nil
+	}
+	return []string{fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.TaskCreateScopes, ","))}
+}
+
+func contextTokenTaskContextFailures(token *ContextToken, authzCtx contextTokenTaskCreateAuthorizationContext, includeTaskIdentity bool) []string {
 	failures := []string{}
 	req := authzCtx.Request
 
-	if !hasAnyScope(token.Scopes, cfg.TaskCreateScopes) {
-		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.TaskCreateScopes, ",")))
+	if includeTaskIdentity {
+		failures = append(failures, contextTokenTaskIdentityFailures(token, authzCtx.Namespace, req.Name)...)
 	}
-
 	tokenNamespace, hasTokenNamespace := contextString(token.TransactionContext, "namespace")
-	if hasTokenNamespace {
+	if hasTokenNamespace && !includeTaskIdentity {
 		failures = append(failures, contextTokenTaskCreateNamespaceFailures(authzCtx, tokenNamespace)...)
+	} else if hasTokenNamespace {
+		failures = append(failures, contextTokenTaskDependencyNamespaceFailures(authzCtx, tokenNamespace)...)
 	}
 	if want, ok := contextString(token.TransactionContext, "taskType"); ok && string(req.Type) != want {
 		failures = append(failures, fmt.Sprintf("task type %q does not match token context %q", req.Type, want))
@@ -667,6 +804,12 @@ func contextTokenTaskCreateNamespaceFailures(authzCtx contextTokenTaskCreateAuth
 	if authzCtx.Namespace != tokenNamespace {
 		failures = append(failures, fmt.Sprintf("namespace %q does not match token context %q", authzCtx.Namespace, tokenNamespace))
 	}
+	failures = append(failures, contextTokenTaskDependencyNamespaceFailures(authzCtx, tokenNamespace)...)
+	return failures
+}
+
+func contextTokenTaskDependencyNamespaceFailures(authzCtx contextTokenTaskCreateAuthorizationContext, tokenNamespace string) []string {
+	failures := []string{}
 	if authzCtx.AgentName != "" && authzCtx.AgentNamespace != "" && authzCtx.AgentNamespace != tokenNamespace {
 		failures = append(failures, fmt.Sprintf("agent namespace %q does not match token context %q", authzCtx.AgentNamespace, tokenNamespace))
 	}

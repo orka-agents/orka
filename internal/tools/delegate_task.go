@@ -501,7 +501,7 @@ func markChildTransactionTokenPending(childTask *corev1alpha1.Task) {
 }
 
 func patchPreparedChildTransactionToken(ctx context.Context, k8sClient client.Client, childTask *corev1alpha1.Task) error {
-	patch := []byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:null}}}`, labels.AnnotationTransactionTokenPending))
+	patch := fmt.Appendf(nil, `{"metadata":{"annotations":{%q:null}}}`, labels.AnnotationTransactionTokenPending)
 	target := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      childTask.Name,
