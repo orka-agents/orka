@@ -1127,6 +1127,22 @@ func TestEnsureWorkerRBAC_UsesClusterRoleBindingPrefix(t *testing.T) {
 	}
 }
 
+func TestWorkerClusterRoleBindingNameTruncatesLongNames(t *testing.T) {
+	prefix := strings.Repeat("p", 230)
+	namespace := strings.Repeat("n", 80)
+
+	got := workerClusterRoleBindingName(prefix, "container", namespace)
+	if len(got) != maxWorkerClusterRoleBindingNameLength {
+		t.Fatalf("expected name length %d, got %d", maxWorkerClusterRoleBindingNameLength, len(got))
+	}
+	if got != workerClusterRoleBindingName(prefix, "container", namespace) {
+		t.Fatal("expected truncated name to be stable")
+	}
+	if got == workerClusterRoleBindingName(prefix, "vendor", namespace) {
+		t.Fatal("expected hash suffix to distinguish names that share a truncated prefix")
+	}
+}
+
 func TestEnsureWorkerRBAC_Idempotent(t *testing.T) {
 	scheme := newTestScheme()
 	// Pre-create all SAs and CRBs.

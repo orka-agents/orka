@@ -8,6 +8,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -1386,6 +1388,9 @@ const (
 	DefaultVendorWorkerClusterRoleName    = "orka-vendor-worker-role"
 	DefaultContainerWorkerClusterRoleName = "orka-container-worker-role"
 
+	maxWorkerClusterRoleBindingNameLength = 253
+	workerClusterRoleBindingHashLength    = 10
+
 	managedByLabelKey   = "app.kubernetes.io/managed-by"
 	managedByLabelValue = "orka"
 )
@@ -1432,7 +1437,15 @@ func workerClusterRoleBindingName(prefix, tier, namespace string) string {
 	if prefix == "" {
 		prefix = "orka"
 	}
-	return fmt.Sprintf("%s-%s-worker-%s", prefix, tier, namespace)
+	name := fmt.Sprintf("%s-%s-worker-%s", prefix, tier, namespace)
+	if len(name) <= maxWorkerClusterRoleBindingNameLength {
+		return name
+	}
+
+	sum := sha256.Sum256([]byte(name))
+	suffix := hex.EncodeToString(sum[:])[:workerClusterRoleBindingHashLength]
+	prefixLength := maxWorkerClusterRoleBindingNameLength - workerClusterRoleBindingHashLength - 1
+	return fmt.Sprintf("%s-%s", name[:prefixLength], suffix)
 }
 
 // ensureWorkerRBAC ensures each worker ServiceAccount and ClusterRoleBinding
