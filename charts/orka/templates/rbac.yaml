@@ -84,10 +84,14 @@ rules:
     resources: ["pods", "nodes"]
     verbs: ["get", "list"]
 
-  # RBAC permissions for worker RBAC provisioning and chat K8s tools
+  # RBAC permissions for chat K8s tools
   - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
-    verbs: ["get", "list", "watch", "create", "update"]
+    resources: ["clusterroles", "roles", "rolebindings"]
+    verbs: ["get", "list", "watch"]
+  # RBAC permissions for worker ClusterRoleBinding provisioning
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings"]
+    verbs: ["get", "list", "watch", "create", "delete"]
 
   # TokenReview for authentication
   - apiGroups: ["authentication.k8s.io"]

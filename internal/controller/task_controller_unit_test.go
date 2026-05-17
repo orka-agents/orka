@@ -3474,6 +3474,44 @@ func TestEnsureWorkerRBAC_SAsExistButCRBsMissing(t *testing.T) {
 	assertWorkerRBACResources(t, r, "test-ns2")
 }
 
+func TestEnsureWorkerClusterRoleBinding_RecreatesDriftedBinding(t *testing.T) {
+	scheme := newTestScheme()
+	namespace := "test-ns3"
+	identity := workerRBACIdentities()[0]
+	bindingName := workerClusterRoleBindingName(identity, namespace)
+	drifted := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: bindingName},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     "stale-worker-role",
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      "stale-worker",
+				Namespace: namespace,
+			},
+		},
+	}
+	r := newUnitReconciler(scheme, drifted)
+
+	err := r.ensureWorkerClusterRoleBinding(context.Background(), namespace, identity)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &rbacv1.ClusterRoleBinding{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: bindingName}, got); err != nil {
+		t.Fatalf("expected ClusterRoleBinding %s to exist: %v", bindingName, err)
+	}
+	want := desiredWorkerClusterRoleBinding(identity, namespace)
+	if !workerClusterRoleBindingMatches(got, want) {
+		t.Fatalf("ClusterRoleBinding = roleRef %#v subjects %#v, want roleRef %#v subjects %#v",
+			got.RoleRef, got.Subjects, want.RoleRef, want.Subjects)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Verify existing Ginkgo tests are unaffected (build check only)
 // ---------------------------------------------------------------------------

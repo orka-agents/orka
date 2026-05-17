@@ -101,7 +101,8 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings;roles;rolebindings,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;roles;rolebindings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list
 // +kubebuilder:rbac:groups=metrics.k8s.io,resources=pods;nodes,verbs=get;list
@@ -1402,6 +1403,33 @@ func workerClusterRoleBindingName(identity workerRBACIdentity, namespace string)
 	return fmt.Sprintf("%s-%s", identity.serviceAccountName, namespace)
 }
 
+func desiredWorkerClusterRoleBinding(identity workerRBACIdentity, namespace string) *rbacv1.ClusterRoleBinding {
+	return &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: workerClusterRoleBindingName(identity, namespace),
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "orka",
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     identity.clusterRoleName,
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      identity.serviceAccountName,
+				Namespace: namespace,
+			},
+		},
+	}
+}
+
+func workerClusterRoleBindingMatches(existing, desired *rbacv1.ClusterRoleBinding) bool {
+	return existing.RoleRef == desired.RoleRef && slices.Equal(existing.Subjects, desired.Subjects)
+}
+
 // ensureWorkerRBAC ensures split worker ServiceAccounts and ClusterRoleBindings
 // exist in the given namespace so task jobs get task-type-specific permissions.
 func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string) error {
@@ -1448,31 +1476,12 @@ func (r *TaskReconciler) ensureWorkerClusterRoleBinding(
 	identity workerRBACIdentity,
 ) error {
 	log := logf.FromContext(ctx)
-	bindingName := workerClusterRoleBindingName(identity, namespace)
+	desired := desiredWorkerClusterRoleBinding(identity, namespace)
+	bindingName := desired.Name
 	crb := &rbacv1.ClusterRoleBinding{}
 	err := r.Get(ctx, types.NamespacedName{Name: bindingName}, crb)
 	if apierrors.IsNotFound(err) {
-		crb = &rbacv1.ClusterRoleBinding{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: bindingName,
-				Labels: map[string]string{
-					"app.kubernetes.io/managed-by": "orka",
-				},
-			},
-			RoleRef: rbacv1.RoleRef{
-				APIGroup: "rbac.authorization.k8s.io",
-				Kind:     "ClusterRole",
-				Name:     identity.clusterRoleName,
-			},
-			Subjects: []rbacv1.Subject{
-				{
-					Kind:      "ServiceAccount",
-					Name:      identity.serviceAccountName,
-					Namespace: namespace,
-				},
-			},
-		}
-		if err := r.Create(ctx, crb); err != nil && !apierrors.IsAlreadyExists(err) {
+		if err := r.Create(ctx, desired); err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("creating ClusterRoleBinding %s: %w", bindingName, err)
 		}
 		log.Info("Created worker ClusterRoleBinding",
@@ -1481,9 +1490,27 @@ func (r *TaskReconciler) ensureWorkerClusterRoleBinding(
 			"serviceAccount", identity.serviceAccountName,
 			"clusterRole", identity.clusterRoleName,
 		)
+		return nil
 	} else if err != nil {
 		return fmt.Errorf("getting ClusterRoleBinding %s: %w", bindingName, err)
 	}
+
+	if workerClusterRoleBindingMatches(crb, desired) {
+		return nil
+	}
+
+	if err := r.Delete(ctx, crb); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting drifted ClusterRoleBinding %s: %w", bindingName, err)
+	}
+	if err := r.Create(ctx, desired); err != nil {
+		return fmt.Errorf("recreating drifted ClusterRoleBinding %s: %w", bindingName, err)
+	}
+	log.Info("Recreated drifted worker ClusterRoleBinding",
+		"namespace", namespace,
+		"binding", bindingName,
+		"serviceAccount", identity.serviceAccountName,
+		"clusterRole", identity.clusterRoleName,
+	)
 
 	return nil
 }
