@@ -105,6 +105,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings;roles;rolebindings,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list
+// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=metrics.k8s.io,resources=pods;nodes,verbs=get;list
 
 // updateStatusWithRetry updates the task status with retry on conflict.
@@ -407,6 +408,10 @@ func (r *TaskReconciler) acquireSessionLock(ctx context.Context, task *corev1alp
 
 	if err := r.SessionManager.AcquireLock(ctx, task); err != nil {
 		log.Error(err, "failed to acquire session lock")
+		if errors.Is(err, store.ErrNotFound) {
+			result, failErr := r.failTask(ctx, task, err.Error())
+			return result, failErr, true
+		}
 		return ctrl.Result{}, err, true
 	}
 	return ctrl.Result{}, nil, false
@@ -570,7 +575,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		// Non-fatal: continue with job creation, it may still work
 	}
 
-	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(task)
+	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, task)
 	if err != nil {
 		log.Error(err, "failed to resolve execution workspace")
 		return r.failTask(ctx, task, fmt.Sprintf("failed to resolve execution workspace: %v", err))
@@ -1052,8 +1057,10 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 		return err
 	}
 
-	// No result yet — capture pod logs for container tasks
-	if task.Spec.Type != corev1alpha1.TaskTypeContainer || r.KubeClient == nil {
+	// No result yet — capture pod logs for container tasks that actually created a Job.
+	// Some validation failures happen before Job creation; those terminal tasks should
+	// not produce noisy best-effort log collection errors for a non-existent Job.
+	if task.Spec.Type != corev1alpha1.TaskTypeContainer || r.KubeClient == nil || task.Status.JobName == "" {
 		return nil
 	}
 

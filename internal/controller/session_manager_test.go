@@ -550,6 +550,28 @@ func TestSessionManager_AppendMessages_AppendFalse(t *testing.T) {
 	}
 }
 
+func TestSessionManager_AppendMessages_MissingSessionNoops(t *testing.T) {
+	sm, ss := setupSessionManager()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Prompt: "What is the answer?",
+			SessionRef: &corev1alpha1.SessionReference{
+				Name:   "missing-session",
+				Append: true,
+			},
+		},
+	}
+
+	err := sm.AppendMessages(context.Background(), task, ss)
+	if err != nil {
+		t.Fatalf("AppendMessages() error = %v", err)
+	}
+}
+
 func TestSessionManager_AppendMessages_WithPromptAndResult(t *testing.T) {
 	sm, ss := setupSessionManager()
 	ctx := context.Background()

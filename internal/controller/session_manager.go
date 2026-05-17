@@ -62,7 +62,7 @@ func (m *SessionManager) AcquireLock(ctx context.Context, task *corev1alpha1.Tas
 		if task.Spec.SessionRef.Create {
 			return m.createSession(ctx, task)
 		}
-		return fmt.Errorf("session %s not found and create=false", task.Spec.SessionRef.Name)
+		return fmt.Errorf("session %s not found and create=false: %w", task.Spec.SessionRef.Name, store.ErrNotFound)
 	}
 
 	return m.store.AcquireLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name)
@@ -105,6 +105,13 @@ func (m *SessionManager) createSession(ctx context.Context, task *corev1alpha1.T
 func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.Task, resultStore store.ResultStore) error {
 	if task.Spec.SessionRef == nil || !task.Spec.SessionRef.Append {
 		return nil
+	}
+
+	if _, err := m.store.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
 	}
 
 	var prompt, response string

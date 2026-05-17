@@ -22,8 +22,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -41,6 +43,7 @@ func newTestScheme() *runtime.Scheme {
 	_ = corev1.AddToScheme(s)
 	_ = batchv1.AddToScheme(s)
 	_ = rbacv1.AddToScheme(s)
+	_ = sandboxextv1alpha1.AddToScheme(s)
 	return s
 }
 
@@ -436,6 +439,82 @@ func TestValidateTaskAgentCompatibility_ContainerTask(t *testing.T) {
 // ---------------------------------------------------------------------------
 // validateExecutionWorkspace (pure logic)
 // ---------------------------------------------------------------------------
+
+func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testing.T) {
+	scheme := newTestScheme()
+
+	workspace := func(name string, namespace string) *corev1alpha1.ExecutionWorkspaceSpec {
+		ws := &corev1alpha1.ExecutionWorkspaceSpec{
+			Enabled: true,
+			TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
+				Name: name,
+			},
+		}
+		if namespace != "" {
+			ws.TemplateRef.Namespace = namespace
+		}
+		return ws
+	}
+
+	task := func(name string, ws *corev1alpha1.ExecutionWorkspaceSpec) *corev1alpha1.Task {
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: defaultNS},
+			Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: ws,
+				},
+			},
+		}
+	}
+
+	t.Run("existing template in task namespace is accepted", func(t *testing.T) {
+		template := &sandboxextv1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "task-template", Namespace: defaultNS},
+		}
+		r := newUnitReconciler(scheme, template)
+		r.AgentSandboxEnabled = true
+
+		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-ok", workspace("task-template", "")))
+		if err != nil {
+			t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
+		}
+		if request == nil || request.TemplateName != "task-template" {
+			t.Fatalf("request = %#v, want template task-template", request)
+		}
+	})
+
+	t.Run("missing template fails before job creation", func(t *testing.T) {
+		r := newUnitReconciler(scheme)
+		r.AgentSandboxEnabled = true
+
+		_, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-missing", workspace("missing-template", "")))
+		if err == nil {
+			t.Fatal("resolveExecutionWorkspaceRequest() error = nil, want missing template error")
+		}
+		want := `execution workspace template "missing-template" not found in namespace "default"`
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want substring %q", err.Error(), want)
+		}
+	})
+
+	t.Run("worker owned alpha validates template in task namespace", func(t *testing.T) {
+		template := &sandboxextv1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "shared-template", Namespace: "sandbox-templates"},
+		}
+		r := newUnitReconciler(scheme, template)
+		r.AgentSandboxEnabled = true
+
+		_, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-cross-ns", workspace("shared-template", "sandbox-templates")))
+		if err == nil {
+			t.Fatal("resolveExecutionWorkspaceRequest() error = nil, want task-namespace template error")
+		}
+		want := `execution workspace template "shared-template" not found in namespace "default"`
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want substring %q", err.Error(), want)
+		}
+	})
+}
 
 func TestValidateExecutionWorkspace(t *testing.T) {
 	workspace := func(mutators ...func(*corev1alpha1.ExecutionWorkspaceSpec)) *corev1alpha1.ExecutionWorkspaceSpec {
@@ -1387,6 +1466,25 @@ func TestCollectResult_NoResultNoKubeClient(t *testing.T) {
 	// No result and no kube client — should return nil
 }
 
+func TestCollectResult_ContainerWithoutJobDoesNotReadPodLogs(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "prejob-failure", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status:     corev1alpha1.TaskStatus{JobName: ""},
+	}
+	r := newUnitReconciler(scheme, task)
+	r.KubeClient = k8sfake.NewSimpleClientset()
+
+	err := r.collectResult(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.ResultRef != nil {
+		t.Fatalf("expected ResultRef to remain nil without a job, got %#v", task.Status.ResultRef)
+	}
+}
+
 func TestCollectResult_AITaskNoResult(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -2263,10 +2361,20 @@ func TestAcquireSessionLock_SessionNotExist_CreateFalse(t *testing.T) {
 	r := newUnitReconciler(scheme, task)
 	_, err, locked := r.acquireSessionLock(context.Background(), task)
 	if !locked {
-		t.Error("expected locked=true on error")
+		t.Error("expected locked=true after terminal failure")
 	}
-	if err == nil {
-		t.Error("expected error when session not found and create=false")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+	}
+	if !strings.Contains(updated.Status.Message, "session nonexist-sess not found and create=false") {
+		t.Fatalf("message = %q, want missing session failure", updated.Status.Message)
 	}
 }
 
@@ -3397,6 +3505,48 @@ func TestHandlePending_WithSessionRef(t *testing.T) {
 	}
 	if result.RequeueAfter != 5*time.Second {
 		t.Errorf("expected 5s requeue, got %v", result.RequeueAfter)
+	}
+}
+
+func TestHandlePending_WithMissingSessionCreateFalseFailsTask(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pend-missing-session",
+			Namespace: "default",
+			UID:       "12345678-abcd-efgh-ijkl-1234567890ac",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   "busybox:latest",
+			Command: []string{"echo", "hi"},
+			SessionRef: &corev1alpha1.SessionReference{
+				Name: "missing-session",
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task)
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Errorf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+	}
+	if updated.Status.JobName != "" {
+		t.Fatalf("JobName = %q, want no job", updated.Status.JobName)
+	}
+	if !strings.Contains(updated.Status.Message, "session missing-session not found and create=false") {
+		t.Fatalf("message = %q, want missing session failure", updated.Status.Message)
 	}
 }
 

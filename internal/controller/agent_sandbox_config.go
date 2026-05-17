@@ -7,8 +7,13 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
+	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
@@ -193,7 +198,7 @@ func executionWorkspaceTemplateNamespace(ws *corev1alpha1.ExecutionWorkspaceSpec
 
 // resolveExecutionWorkspaceRequest applies controller defaults to a Task execution workspace request.
 // It returns nil when the Task does not request an enabled execution workspace.
-func (r *TaskReconciler) resolveExecutionWorkspaceRequest(task *corev1alpha1.Task) (*AgentSandboxWorkspaceRequest, error) {
+func (r *TaskReconciler) resolveExecutionWorkspaceRequest(ctx context.Context, task *corev1alpha1.Task) (*AgentSandboxWorkspaceRequest, error) {
 	if task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil || !task.Spec.Execution.Workspace.Enabled {
 		return nil, nil
 	}
@@ -228,5 +233,45 @@ func (r *TaskReconciler) resolveExecutionWorkspaceRequest(task *corev1alpha1.Tas
 		request.ReuseKey = task.Spec.SessionRef.Name
 	}
 
+	if err := r.validateExecutionWorkspaceTemplateExists(ctx, task, request); err != nil {
+		return nil, err
+	}
+
 	return request, nil
+}
+
+func (r *TaskReconciler) validateExecutionWorkspaceTemplateExists(ctx context.Context, task *corev1alpha1.Task, request *AgentSandboxWorkspaceRequest) error {
+	if r == nil || r.Client == nil || request == nil || request.TemplateName == "" {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// The current worker-owned alpha path creates SandboxClaims in the Task namespace.
+	// The upstream agent-sandbox SDK accepts only template name plus claim namespace,
+	// so the effective SandboxTemplate lookup must succeed in the Task namespace.
+	lookupNamespace := task.Namespace
+	if lookupNamespace == "" {
+		lookupNamespace = request.TemplateNamespace
+	}
+
+	template := &sandboxextv1alpha1.SandboxTemplate{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: lookupNamespace, Name: request.TemplateName}, template)
+	if err == nil {
+		return nil
+	}
+	if apierrors.IsNotFound(err) {
+		return fmt.Errorf(
+			"execution workspace template %q not found in namespace %q",
+			request.TemplateName,
+			lookupNamespace,
+		)
+	}
+	return fmt.Errorf(
+		"failed to validate execution workspace template %q in namespace %q: %w",
+		request.TemplateName,
+		lookupNamespace,
+		err,
+	)
 }

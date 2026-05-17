@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -183,7 +184,7 @@ func TestResolveExecutionWorkspaceRequest(t *testing.T) {
 					Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: false},
 				},
 			}}
-		request, err := r.resolveExecutionWorkspaceRequest(task)
+		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task)
 		if err != nil {
 			t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
 		}
@@ -217,7 +218,7 @@ func TestResolveExecutionWorkspaceRequest(t *testing.T) {
 			},
 		}
 
-		request, err := r.resolveExecutionWorkspaceRequest(task)
+		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task)
 		if err != nil {
 			t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
 		}
@@ -263,7 +264,7 @@ func TestResolveExecutionWorkspaceRequest(t *testing.T) {
 			},
 		}}
 
-		request, err := r.resolveExecutionWorkspaceRequest(task)
+		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task)
 		if err != nil {
 			t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
 		}

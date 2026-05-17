@@ -40,6 +40,7 @@ import (
 	"github.com/sozercan/orka/internal/store/sqlite"
 	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
+	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -52,6 +53,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(corev1alpha1.AddToScheme(scheme))
+	utilruntime.Must(sandboxextv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
