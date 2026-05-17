@@ -3,10 +3,36 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // ErrNotFound is returned when a requested resource does not exist.
 var ErrNotFound = errors.New("not found")
+
+// ErrConflict is returned when a resource cannot be updated because it changed concurrently.
+var ErrConflict = errors.New("conflict")
+
+// ErrValidation is returned when supplied input fails store-level validation.
+var ErrValidation = errors.New("validation error")
+
+// ValidationError carries a client-safe validation message while remaining
+// comparable with ErrValidation via errors.Is.
+type ValidationError struct {
+	Message string
+}
+
+func (e ValidationError) Error() string {
+	return e.Message
+}
+
+func (e ValidationError) Unwrap() error {
+	return ErrValidation
+}
+
+// ValidationErrorf formats a store validation error.
+func ValidationErrorf(format string, args ...any) error {
+	return ValidationError{Message: fmt.Sprintf(format, args...)}
+}
 
 // HealthChecker can verify its underlying storage is reachable.
 type HealthChecker interface {
@@ -58,6 +84,7 @@ type MemoryProposalStore interface {
 	GetMemoryProposal(ctx context.Context, namespace, id string) (*MemoryProposal, error)
 	ListMemoryProposals(ctx context.Context, filter MemoryProposalFilter) ([]MemoryProposal, error)
 	ReviewMemoryProposal(ctx context.Context, review MemoryProposalReview) error
+	ApplyMemoryProposal(ctx context.Context, apply MemoryProposalApply) (*Memory, error)
 	ArchiveMemoryProposal(ctx context.Context, namespace, id string) error
 }
 

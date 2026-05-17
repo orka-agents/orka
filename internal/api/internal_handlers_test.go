@@ -667,6 +667,59 @@ func TestSendMessageAdditional(t *testing.T) {
 	})
 }
 
+func TestInternalApplyMemoryProposal(t *testing.T) {
+	h, app, ss := setupTestInternalHandlers()
+	app.Post("/internal/v1/memory-proposals/:namespace/:id/apply", h.ApplyMemoryProposal)
+
+	proposal := &store.MemoryProposal{
+		Namespace:   "default",
+		TaskName:    "task-a",
+		AgentName:   "agent-a",
+		Type:        "memory",
+		Title:       "Remember handler apply flow",
+		Description: "Apply via internal API.\n\nTags: api, memory",
+		Content:     "Accepted memory proposals can be applied explicitly.",
+	}
+	require.NoError(t, ss.CreateMemoryProposal(context.Background(), proposal))
+	require.NoError(t, ss.ReviewMemoryProposal(context.Background(), store.MemoryProposalReview{
+		Namespace: "default",
+		ID:        proposal.ID,
+		Status:    "accepted",
+		Reviewer:  "reviewer",
+	}))
+
+	body, _ := json.Marshal(map[string]string{"appliedBy": "coordinator"})
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/memory-proposals/default/"+proposal.ID+"/apply", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var memory store.Memory
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&memory))
+	require.Equal(t, proposal.ID, memory.SourceProposalID)
+	require.Equal(t, "memory_proposal", memory.Source)
+	require.Equal(t, []string{"api", "memory"}, memory.Tags)
+
+	updated, err := ss.GetMemoryProposal(context.Background(), "default", proposal.ID)
+	require.NoError(t, err)
+	require.Equal(t, "applied", updated.Status)
+	require.Equal(t, memory.ID, updated.AppliedMemoryID)
+	require.Equal(t, "coordinator", updated.AppliedBy)
+}
+
+func TestInternalApplyMemoryProposalRejectsNamespaceMismatch(t *testing.T) {
+	h, app, _ := setupTestInternalHandlers()
+	app.Post("/internal/v1/memory-proposals/:namespace/:id/apply", h.ApplyMemoryProposal)
+
+	body, _ := json.Marshal(map[string]string{"namespace": "other"})
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/memory-proposals/default/mprop-1/apply", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
 func TestGetPlanAdditional(t *testing.T) {
 	h, _, _ := setupTestInternalHandlers()
 
