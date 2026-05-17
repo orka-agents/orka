@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/controller"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/llm"
@@ -53,6 +54,7 @@ type ToolExecutor struct {
 	resultStore               store.ResultStore
 	registry                  *tools.Registry
 	allowedToolNames          map[string]struct{}
+	authorizeTaskCreate       func(context.Context, *corev1alpha1.Task) error
 }
 
 // NewToolExecutor creates a new ToolExecutor.
@@ -90,6 +92,11 @@ func (e *ToolExecutor) SetAllowedTools(allowedTools []llm.Tool) {
 			e.allowedToolNames[name] = struct{}{}
 		}
 	}
+}
+
+// SetTaskCreateAuthorizer installs an authorization hook for tools that create Tasks.
+func (e *ToolExecutor) SetTaskCreateAuthorizer(authorize func(context.Context, *corev1alpha1.Task) error) {
+	e.authorizeTaskCreate = authorize
 }
 
 // ToolResult represents the result of a tool execution.
@@ -147,6 +154,19 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		SessionDeleter:            e.sessionManager,
 		GenerateTaskName:          e.generateTaskName,
 		TaskLabels:                e.taskLabels,
+		AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
+			if e.authorizeTaskCreate == nil {
+				return nil
+			}
+			if err := e.authorizeTaskCreate(ctx, task); err != nil {
+				return &tools.ChatToolError{
+					Type:       "authorization_failed",
+					Message:    err.Error(),
+					Suggestion: "Use a task configuration authorized by the context token",
+				}
+			}
+			return nil
+		},
 		CheckTaskLimit: func() *tools.ChatToolError {
 			if e.tasksCreated >= e.maxTasks {
 				return &tools.ChatToolError{

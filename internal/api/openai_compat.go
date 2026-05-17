@@ -228,6 +228,12 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		}})
 	}
 
+	userInfo := GetUserInfo(c)
+	var contextToken *ContextToken
+	if userInfo != nil {
+		contextToken = userInfo.ContextToken
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
 	defer cancel()
 
@@ -236,8 +242,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		namespace = h.watchNamespace
 	}
 	if h.enforceNamespaceIsolation {
-		ui := GetUserInfo(c)
-		if ui != nil && ui.Namespace != "" && namespace != ui.Namespace {
+		if userInfo != nil && userInfo.Namespace != "" && namespace != userInfo.Namespace {
 			return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("namespace %q not allowed", namespace))
 		}
 	}
@@ -305,6 +310,16 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 			ResultStore:               h.resultStore,
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", generateChatID()) },
 			TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": "openai-proxy"} },
+			AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
+				if err := authorizeContextTokenTaskCreateObject(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolCreateTask", task); err != nil {
+					return &tools.ChatToolError{
+						Type:       "authorization_failed",
+						Message:    err.Error(),
+						Suggestion: "Use a task configuration authorized by the context token",
+					}
+				}
+				return nil
+			},
 			CheckTaskLimit: func() *tools.ChatToolError {
 				if tasksCreated >= 20 {
 					return &tools.ChatToolError{Type: "limit_reached", Message: "task creation limit reached (max 20)", Suggestion: "Wait for existing tasks to complete"}

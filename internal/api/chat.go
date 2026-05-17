@@ -157,6 +157,11 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "message is required")
 	}
 
+	var contextToken *ContextToken
+	if ui := GetUserInfo(c); ui != nil {
+		contextToken = ui.ContextToken
+	}
+
 	// Try to acquire semaphore (non-blocking)
 	select {
 	case ch.semaphore <- struct{}{}:
@@ -287,6 +292,9 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout, ch.resultStore, ch.kubeClient)
 	executor.provider = providerInfo.Name
 	executor.providerType = providerInfo.Type
+	executor.SetTaskCreateAuthorizer(func(ctx context.Context, task *corev1alpha1.Task) error {
+		return authorizeContextTokenTaskCreateObject(ctx, ch.client, contextToken, ch.contextTokenAuthorization, "chatToolCreateTask", task)
+	})
 
 	// Build tools from the chat registry and restrict execution to the exposed set.
 	tools := executor.registry.ToLLMTools(chattools.ChatToolNames())

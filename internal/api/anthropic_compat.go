@@ -239,6 +239,12 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		return anthropicError(c, 400, "invalid_request_error", "max_tokens is required and must be greater than 0")
 	}
 
+	userInfo := GetUserInfo(c)
+	var contextToken *ContextToken
+	if userInfo != nil {
+		contextToken = userInfo.ContextToken
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
 	defer cancel()
 
@@ -247,8 +253,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		namespace = h.watchNamespace
 	}
 	if h.enforceNamespaceIsolation {
-		ui := GetUserInfo(c)
-		if ui != nil && ui.Namespace != "" && namespace != ui.Namespace {
+		if userInfo != nil && userInfo.Namespace != "" && namespace != userInfo.Namespace {
 			return anthropicError(c, 403, "permission_error", fmt.Sprintf("namespace %q not allowed", namespace))
 		}
 	}
@@ -330,6 +335,16 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 			ResultStore:               h.resultStore,
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", uuid.New().String()[:8]) },
 			TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": "anthropic-proxy"} },
+			AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
+				if err := authorizeContextTokenTaskCreateObject(ctx, h.client, contextToken, h.contextTokenAuthorization, "anthropicToolCreateTask", task); err != nil {
+					return &tools.ChatToolError{
+						Type:       "authorization_failed",
+						Message:    err.Error(),
+						Suggestion: "Use a task configuration authorized by the context token",
+					}
+				}
+				return nil
+			},
 			CheckTaskLimit: func() *tools.ChatToolError {
 				if tasksCreated >= 20 {
 					return &tools.ChatToolError{Type: "limit_reached", Message: "task creation limit reached (max 20)", Suggestion: "Wait for existing tasks to complete"}

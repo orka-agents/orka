@@ -21,6 +21,7 @@ import (
 	"github.com/sozercan/orka/internal/workerenv"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -227,6 +228,68 @@ func (h *Handlers) authorizeContextTokenTaskCreate(c fiber.Ctx, req CreateTaskRe
 	return h.handleContextTokenAuthorizationFailures(ui.ContextToken, "createTask", failures)
 }
 
+func authorizeContextTokenTaskCreateObject(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, task *corev1alpha1.Task) error {
+	if !cfg.Enabled() || token == nil || task == nil {
+		return nil
+	}
+
+	req := createTaskRequestFromTask(task)
+	namespace := task.Namespace
+	if namespace == "" {
+		namespace = req.Namespace
+	}
+
+	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(ctx, k8sClient, req, namespace)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+
+	failures := contextTokenTaskCreateFailures(token, cfg, authzCtx)
+	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
+		return nil
+	}
+
+	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
+}
+
+func createTaskRequestFromTask(task *corev1alpha1.Task) CreateTaskRequest {
+	if task == nil {
+		return CreateTaskRequest{}
+	}
+
+	req := CreateTaskRequest{
+		Name:              task.Name,
+		Namespace:         task.Namespace,
+		Type:              task.Spec.Type,
+		Image:             task.Spec.Image,
+		Command:           task.Spec.Command,
+		Args:              task.Spec.Args,
+		Env:               task.Spec.Env,
+		Priority:          task.Spec.Priority,
+		RetryPolicy:       task.Spec.RetryPolicy,
+		WebhookURL:        task.Spec.WebhookURL,
+		SecretRef:         task.Spec.SecretRef,
+		SessionRef:        task.Spec.SessionRef,
+		AI:                task.Spec.AI,
+		AgentRef:          task.Spec.AgentRef,
+		Prompt:            task.Spec.Prompt,
+		AgentRuntime:      task.Spec.AgentRuntime,
+		Execution:         task.Spec.Execution,
+		Workspace:         task.Spec.Workspace,
+		PriorTaskRef:      task.Spec.PriorTaskRef,
+		Schedule:          task.Spec.Schedule,
+		TimeZone:          task.Spec.TimeZone,
+		ConcurrencyPolicy: string(task.Spec.ConcurrencyPolicy),
+		Suspend:           task.Spec.Suspend,
+	}
+	if task.Spec.Timeout != nil {
+		req.Timeout = task.Spec.Timeout.Duration.String()
+	}
+
+	return req
+}
+
 func (h *Handlers) authorizeContextTokenAction(c fiber.Ctx, action string, requiredScopes []string) error {
 	return authorizeContextTokenActionWithConfig(c, h.contextTokenAuthorization, action, requiredScopes)
 }
@@ -402,6 +465,10 @@ func contextTokenProviderUseFailures(token *ContextToken, cfg ContextTokenAuthor
 }
 
 func (h *Handlers) resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, req CreateTaskRequest, namespace string) (contextTokenTaskCreateAuthorizationContext, error) {
+	return resolveContextTokenTaskCreateAuthorizationContext(ctx, h.client, req, namespace)
+}
+
+func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, c client.Client, req CreateTaskRequest, namespace string) (contextTokenTaskCreateAuthorizationContext, error) {
 	authzCtx := contextTokenTaskCreateAuthorizationContext{
 		Request:   req,
 		Namespace: namespace,
@@ -414,10 +481,10 @@ func (h *Handlers) resolveContextTokenTaskCreateAuthorizationContext(ctx context
 			authzCtx.AgentNamespace = namespace
 		}
 
-		if authzCtx.AgentName != "" {
+		if authzCtx.AgentName != "" && c != nil {
 			agent := &corev1alpha1.Agent{}
 			key := types.NamespacedName{Name: authzCtx.AgentName, Namespace: authzCtx.AgentNamespace}
-			if err := h.client.Get(ctx, key, agent); err != nil {
+			if err := c.Get(ctx, key, agent); err != nil {
 				if !apierrors.IsNotFound(err) {
 					return authzCtx, fmt.Errorf("resolve agent %q in namespace %q: %w", authzCtx.AgentName, authzCtx.AgentNamespace, err)
 				}
@@ -434,14 +501,16 @@ func (h *Handlers) resolveContextTokenTaskCreateAuthorizationContext(ctx context
 			providerNamespace = namespace
 		}
 		authzCtx.ProviderRef = ProviderResolutionInfo{Name: providerRef.Name, Namespace: providerNamespace}
-		provider := &corev1alpha1.Provider{}
-		key := types.NamespacedName{Name: providerRef.Name, Namespace: providerNamespace}
-		if err := h.client.Get(ctx, key, provider); err != nil {
-			if !apierrors.IsNotFound(err) {
-				return authzCtx, fmt.Errorf("resolve provider %q in namespace %q: %w", providerRef.Name, providerNamespace, err)
+		if c != nil {
+			provider := &corev1alpha1.Provider{}
+			key := types.NamespacedName{Name: providerRef.Name, Namespace: providerNamespace}
+			if err := c.Get(ctx, key, provider); err != nil {
+				if !apierrors.IsNotFound(err) {
+					return authzCtx, fmt.Errorf("resolve provider %q in namespace %q: %w", providerRef.Name, providerNamespace, err)
+				}
+			} else {
+				authzCtx.Provider = provider
 			}
-		} else {
-			authzCtx.Provider = provider
 		}
 	}
 
@@ -901,6 +970,9 @@ func contextValueStringSlice(value any) ([]string, bool) {
 }
 
 func taskRequestWorkspace(req CreateTaskRequest) *corev1alpha1.WorkspaceConfig {
+	if req.Workspace != nil {
+		return req.Workspace
+	}
 	if req.AgentRuntime == nil {
 		return nil
 	}

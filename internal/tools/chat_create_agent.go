@@ -187,6 +187,9 @@ func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolC
 		task.Spec.AI.ProviderRef = agent.Spec.ProviderRef
 	}
 
+	if result, ok := authorizeTaskCreate(ctx, tc, task); !ok {
+		return result, nil
+	}
 	if err := tc.Client.Create(ctx, task); err != nil {
 		return ChatToolSuccess(map[string]any{
 			"agentName":      agent.Name,
