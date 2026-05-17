@@ -538,7 +538,7 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 
 ### Agent Sandbox Controller Settings
 
-Agent sandbox settings are disabled by default. When enabled, the controller validates/defaults `Task.spec.execution.workspace`, injects the resolved settings into agent worker Jobs, and the worker wrapper owns upstream sandbox claim, execution, and cleanup. Settings can be supplied as flags, environment variables, or Helm values:
+Agent sandbox settings are disabled by default. When enabled, the controller validates `Task.spec.execution.workspace`, resolves/defaults the effective `SandboxTemplate` and workspace settings, injects the resolved settings into agent worker Jobs, and the worker wrapper owns upstream sandbox claim, execution, and cleanup. Settings can be supplied as flags, environment variables, or Helm values:
 
 | Flag | Environment variable | Helm value | Default |
 |------|----------------------|------------|---------|

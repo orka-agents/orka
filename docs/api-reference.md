@@ -34,7 +34,7 @@ When a Task is created through OIDC authentication, Orka stamps the verified cal
 
 ### Task Execution Workspace Schema
 
-`POST /api/v1/tasks` accepts the Task CRD shape. Agent Tasks may include `spec.execution.workspace` to request experimental workspace-backed execution through an upstream `agent-sandbox` installation. Orka still creates the outer Kubernetes worker Job, and the agent worker wrapper claims and executes inside the sandbox workspace.
+`POST /api/v1/tasks` accepts the Task CRD shape. Agent Tasks may include `spec.execution.workspace` to request experimental workspace-backed execution through an upstream `agent-sandbox` installation. The controller validates the request, resolves/defaults the effective `SandboxTemplate` and workspace settings, and injects the resolved settings into the outer Kubernetes worker Job. The agent worker wrapper then claims and executes inside the sandbox workspace.
 
 | Path | Type | Values/default | Notes |
 |------|------|----------------|-------|

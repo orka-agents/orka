@@ -20,7 +20,7 @@ RuntimeClass and agent sandbox are complementary. `runtimeClassName` applies to 
 ## Current Status and Limitations
 
 - The feature is disabled by default.
-- When enabled, the Task controller validates `Task.spec.execution.workspace` requests for `type: agent` Tasks, resolves defaults, and passes those settings to the agent worker Job.
+- When enabled, the Task controller validates `Task.spec.execution.workspace` requests for `type: agent` Tasks, resolves/defaults the effective `SandboxTemplate` and workspace settings, and passes those settings to the agent worker Job.
 - The agent worker wrapper claims an upstream `agent-sandbox` workspace, waits for it to become ready, and re-executes the same worker binary inside the sandbox with recursive sandboxing disabled.
 - Orka uses the upstream `sigs.k8s.io/agent-sandbox` Go SDK. With the currently pinned SDK, the worker creates claims with `CreateSandbox(templateName, taskNamespace)`. The SDK does not expose a separate template namespace argument, so `templateRef.namespace` is propagated in Orka metadata/env but the template must be usable from the claim namespace in the upstream installation.
 - The current worker-as-client path always creates or reattaches claims in the Task namespace. `namespaceStrategy` is validated and propagated for compatibility with future policies, but the alpha worker path does not yet create claims in the controller namespace.
@@ -34,7 +34,7 @@ RuntimeClass and agent sandbox are complementary. `runtimeClassName` applies to 
 
 ## Execution Flow
 
-1. The Task controller validates the workspace request and applies controller defaults such as template name, cleanup policy, and timeouts.
+1. The Task controller validates the workspace request and resolves/defaults the effective `SandboxTemplate` and workspace settings, including template name/namespace, reuse policy, cleanup policy, claim timeout, and command timeout.
 2. The controller still creates an ordinary Orka worker Job. Any `runtimeClassName`, node selector, tolerations, and affinity settings apply to this outer worker pod.
 3. For `type: agent` Tasks, the Job includes environment variables that describe the resolved sandbox workspace request.
 4. The worker wrapper sees those variables, claims an upstream `agent-sandbox` workspace, waits for it to become ready, and executes the same worker command inside that workspace.
