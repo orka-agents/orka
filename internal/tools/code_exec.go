@@ -83,6 +83,8 @@ type SandboxRunRequest struct {
 	Tenant           string
 	Provider         string
 	ProviderType     string
+	RunID            string
+	InputHash        string
 }
 
 // SandboxRunResult represents the sandbox execution result.
@@ -114,6 +116,8 @@ type CodeExecutionRequest struct {
 	Tenant           string
 	Provider         string
 	ProviderType     string
+	RunID            string
+	InputHash        string
 }
 
 // CodeExecTool implements code execution functionality.
@@ -232,6 +236,8 @@ func sandboxRunRequestFromCodeExecutionRequest(req CodeExecutionRequest) Sandbox
 		Tenant:           req.Tenant,
 		Provider:         req.Provider,
 		ProviderType:     req.ProviderType,
+		RunID:            req.RunID,
+		InputHash:        req.InputHash,
 	}
 }
 
@@ -248,6 +254,8 @@ func codeExecutionRequestFromSandboxRunRequest(req SandboxRunRequest) CodeExecut
 		Tenant:           req.Tenant,
 		Provider:         req.Provider,
 		ProviderType:     req.ProviderType,
+		RunID:            req.RunID,
+		InputHash:        req.InputHash,
 	}
 }
 
@@ -266,6 +274,165 @@ func cloneCodeExecResourceAudit(values map[string]string) map[string]string {
 	clone := make(map[string]string, len(values))
 	maps.Copy(clone, values)
 	return clone
+}
+
+const codeExecRequestIdentityVersion = "code_exec_request_identity_v1"
+
+func populateCodeExecRequestIdentity(ctx context.Context, req *CodeExecutionRequest) error {
+	if req == nil {
+		return nil
+	}
+	if err := populateCodeExecRequestResourceAudit(req); err != nil {
+		return err
+	}
+	ensureCodeExecRequestInputHash(req)
+	req.RunID = strings.TrimSpace(req.RunID)
+	if req.RunID == "" {
+		req.RunID = codeExecRunIDForRequest(ctx, *req)
+	}
+	return nil
+}
+
+func populateCodeExecRequestResourceAudit(req *CodeExecutionRequest) error {
+	if req == nil {
+		return nil
+	}
+	if len(req.ResourceAudit) > 0 {
+		req.ResourceAudit = normalizeCodeExecResourceAuditMap(req.ResourceAudit)
+		return nil
+	}
+
+	var (
+		resourceAudit map[string]string
+		err           error
+	)
+	switch normalizeCodeExecBackend(req.Backend) {
+	case codeExecBackendInProcess:
+		resourceAudit = codeExecLocalResourceAuditForRequest(*req)
+	case codeExecBackendKubernetes:
+		resourceAudit, err = codeExecKubernetesResourceAuditForRequest(*req)
+	}
+	if err != nil {
+		return err
+	}
+	req.ResourceAudit = normalizeCodeExecResourceAuditMap(resourceAudit)
+	return nil
+}
+
+type codeExecResourceAuditEntry struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+func normalizeCodeExecResourceAuditMap(values map[string]string) map[string]string {
+	entries := normalizedCodeExecResourceAudit(values)
+	if len(entries) == 0 {
+		return nil
+	}
+	normalized := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		normalized[entry.Key] = entry.Value
+	}
+	return normalized
+}
+
+func normalizedCodeExecResourceAudit(values map[string]string) []codeExecResourceAuditEntry {
+	if len(values) == 0 {
+		return nil
+	}
+	entries := make([]codeExecResourceAuditEntry, 0, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		entries = append(entries, codeExecResourceAuditEntry{
+			Key:   key,
+			Value: strings.TrimSpace(value),
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Key != entries[j].Key {
+			return entries[i].Key < entries[j].Key
+		}
+		return entries[i].Value < entries[j].Value
+	})
+	return entries
+}
+
+func ensureCodeExecRequestInputHash(req *CodeExecutionRequest) {
+	if req == nil {
+		return
+	}
+	req.InputHash = strings.TrimSpace(req.InputHash)
+	if req.InputHash == "" {
+		req.InputHash = codeExecInputHashForRequest(*req)
+	}
+}
+
+func codeExecInputHashForRequest(req CodeExecutionRequest) string {
+	payload := struct {
+		Version          string                       `json:"version"`
+		Backend          string                       `json:"backend"`
+		Language         string                       `json:"language"`
+		Code             string                       `json:"code"`
+		TimeoutMillis    int64                        `json:"timeout_ms"`
+		WorkDir          string                       `json:"work_dir"`
+		OutputLimitBytes int64                        `json:"output_limit_bytes"`
+		ResourceAudit    []codeExecResourceAuditEntry `json:"resource_audit,omitempty"`
+		Tenant           string                       `json:"tenant"`
+		Provider         string                       `json:"provider"`
+		ProviderType     string                       `json:"provider_type"`
+	}{
+		Version:          codeExecRequestIdentityVersion,
+		Backend:          strings.TrimSpace(req.Backend),
+		Language:         strings.ToLower(strings.TrimSpace(req.Language)),
+		Code:             req.Code,
+		TimeoutMillis:    req.Timeout.Milliseconds(),
+		WorkDir:          strings.TrimSpace(req.WorkDir),
+		OutputLimitBytes: req.OutputLimitBytes,
+		ResourceAudit:    normalizedCodeExecResourceAudit(req.ResourceAudit),
+		Tenant:           strings.TrimSpace(req.Tenant),
+		Provider:         strings.TrimSpace(req.Provider),
+		ProviderType:     strings.TrimSpace(req.ProviderType),
+	}
+	return codeExecSHA256HexJSON(payload)
+}
+
+func codeExecRunIDForRequest(ctx context.Context, req CodeExecutionRequest) string {
+	payload := struct {
+		Version    string `json:"version"`
+		InputHash  string `json:"input_hash"`
+		SessionID  string `json:"session_id"`
+		TaskID     string `json:"task_id"`
+		ToolCallID string `json:"tool_call_id"`
+	}{
+		Version:   codeExecRequestIdentityVersion,
+		InputHash: strings.TrimSpace(req.InputHash),
+	}
+	if tc := GetToolContext(ctx); tc != nil {
+		payload.SessionID = strings.TrimSpace(tc.SessionID)
+		payload.TaskID = strings.TrimSpace(tc.TaskID)
+		payload.ToolCallID = strings.TrimSpace(tc.ToolCallID)
+	}
+	return "run-" + codeExecSHA256HexJSON(payload)[:32]
+}
+
+func codeExecSHA256HexJSON(value any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		data = []byte(fmt.Sprintf("%#v", value))
+	}
+	return codeExecSHA256HexBytes(data)
+}
+
+func codeExecSHA256HexString(value string) string {
+	return codeExecSHA256HexBytes([]byte(value))
+}
+
+func codeExecSHA256HexBytes(value []byte) string {
+	sum := sha256.Sum256(value)
+	return fmt.Sprintf("%x", sum)
 }
 
 func normalizeCodeExecBackend(backend string) string {
@@ -361,7 +528,7 @@ func (t *CodeExecTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	sandboxReq := sandboxRunRequestFromCodeExecutionRequest(CodeExecutionRequest{
+	execReq := CodeExecutionRequest{
 		Backend:          backend,
 		Language:         lang,
 		Code:             execArgs.Code,
@@ -372,7 +539,12 @@ func (t *CodeExecTool) Execute(ctx context.Context, args json.RawMessage) (strin
 		Tenant:           tenant,
 		Provider:         provider,
 		ProviderType:     providerType,
-	})
+	}
+	if err := populateCodeExecRequestIdentity(ctx, &execReq); err != nil {
+		return "", fmt.Errorf("failed to configure code execution identity: %w", err)
+	}
+
+	sandboxReq := sandboxRunRequestFromCodeExecutionRequest(execReq)
 	result := codeExecResultFromSandboxRunResult(sandboxClient.Run(ctx, sandboxReq))
 
 	output, err := json.MarshalIndent(result, "", "  ")
@@ -425,8 +597,8 @@ func (e *InProcessCodeExecutor) Execute(ctx context.Context, req CodeExecutionRe
 	if req.Backend == "" {
 		req.Backend = codeExecBackendInProcess
 	}
-	if len(req.ResourceAudit) == 0 {
-		req.ResourceAudit = codeExecLocalResourceAuditForRequest(req)
+	if err := populateCodeExecRequestResourceAudit(&req); err != nil {
+		return CodeExecResult{Error: fmt.Sprintf("failed to configure code execution resources: %v", err), ExitCode: -1}
 	}
 	if err := os.MkdirAll(req.WorkDir, 0755); err != nil {
 		return CodeExecResult{Error: fmt.Sprintf("failed to create work directory: %v", err), ExitCode: -1}
@@ -840,6 +1012,12 @@ func auditCodeExec(ctx context.Context, req CodeExecutionRequest, result CodeExe
 		"exit_code", result.ExitCode,
 		"timeout_ms", req.Timeout.Milliseconds(),
 		"timed_out", result.TimedOut,
+	}
+	if req.InputHash != "" {
+		keysAndValues = append(keysAndValues, "input_hash", req.InputHash)
+	}
+	if req.RunID != "" {
+		keysAndValues = append(keysAndValues, "run_id", req.RunID)
 	}
 
 	tenant := strings.TrimSpace(req.Tenant)

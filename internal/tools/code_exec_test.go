@@ -1338,6 +1338,230 @@ func TestKubernetesJobCodeExecutor_BuildResourcesAppArmorRuntimeDefaultOptIn(t *
 	}
 }
 
+func TestKubernetesJobCodeExecutor_BuildResourcesUsesRunIdentityAnnotations(t *testing.T) {
+	setKubernetesCodeExecTestEnv(t)
+
+	rawCode := "print('do not put raw code in annotations: raw-code-secret-123')"
+	req := CodeExecutionRequest{
+		Backend:          codeExecBackendKubernetes,
+		Language:         codeLanguagePython,
+		Code:             rawCode,
+		Timeout:          time.Second,
+		OutputLimitBytes: defaultCodeExecOutputLimitBytes,
+		RunID:            "session/task/tool-call-01",
+		InputHash:        "input-hash-abc123",
+	}
+	executor := &KubernetesJobCodeExecutor{randomSuffix: func() string { return "should-not-be-used" }}
+
+	resources, err := executor.buildResources(testNamespace, req)
+	if err != nil {
+		t.Fatalf("buildResources() error = %v", err)
+	}
+
+	wantName := codeExecKubernetesJobNameForRunID(req.RunID)
+	if resources.job.Name != wantName {
+		t.Fatalf("job name = %q, want stable run-derived name %q", resources.job.Name, wantName)
+	}
+	if strings.Contains(resources.job.Name, "should-not-be-used") {
+		t.Fatalf("job name %q used random suffix despite RunID", resources.job.Name)
+	}
+	if resources.networkPolicy == nil {
+		t.Fatal("networkPolicy = nil, want default deny NetworkPolicy")
+	}
+
+	objects := map[string]interface{ GetAnnotations() map[string]string }{
+		"secret":         resources.secret,
+		"serviceAccount": resources.serviceAccount,
+		"job":            resources.job,
+		"podTemplate":    &resources.job.Spec.Template,
+		"networkPolicy":  resources.networkPolicy,
+	}
+	for name, obj := range objects {
+		annotations := obj.GetAnnotations()
+		if annotations[codeExecKubernetesAnnotationRunID] != req.RunID {
+			t.Fatalf("%s run-id annotation = %q, want %q", name, annotations[codeExecKubernetesAnnotationRunID], req.RunID)
+		}
+		if annotations[codeExecKubernetesAnnotationInputHash] != req.InputHash {
+			t.Fatalf("%s input-hash annotation = %q, want %q", name, annotations[codeExecKubernetesAnnotationInputHash], req.InputHash)
+		}
+		for key, value := range annotations {
+			if strings.Contains(key, rawCode) || strings.Contains(value, rawCode) || strings.Contains(value, "raw-code-secret-123") {
+				t.Fatalf("%s annotation %q leaks raw code: %q", name, key, value)
+			}
+		}
+	}
+}
+
+func TestKubernetesJobCodeExecutor_CreateResourcesReusesOnlyMatchingRunIdentity(t *testing.T) {
+	setKubernetesCodeExecTestEnv(t)
+
+	ctx := context.Background()
+	fakeClient := newKubernetesCodeExecFakeClient(t)
+	executor := &KubernetesJobCodeExecutor{}
+	req := CodeExecutionRequest{
+		Backend:          codeExecBackendKubernetes,
+		Language:         codeLanguagePython,
+		Code:             "print('first')",
+		Timeout:          time.Second,
+		OutputLimitBytes: defaultCodeExecOutputLimitBytes,
+		RunID:            "reuse-run-identity",
+		InputHash:        "matching-input-hash",
+	}
+
+	resources, err := executor.buildResources(testNamespace, req)
+	if err != nil {
+		t.Fatalf("buildResources() error = %v", err)
+	}
+	created, err := executor.createResources(ctx, fakeClient, resources)
+	if err != nil {
+		t.Fatalf("first createResources() error = %v", err)
+	}
+	if created.job == nil || created.secret == nil || created.serviceAccount == nil || created.networkPolicy == nil {
+		t.Fatalf("first createResources() created = %+v, want all resources", created)
+	}
+
+	replayResources, err := executor.buildResources(testNamespace, req)
+	if err != nil {
+		t.Fatalf("second buildResources() error = %v", err)
+	}
+	reused, err := executor.createResources(ctx, fakeClient, replayResources)
+	if err != nil {
+		t.Fatalf("second createResources() error = %v, want matching identity reuse", err)
+	}
+	if reused.job != nil || reused.secret != nil || reused.serviceAccount != nil || reused.networkPolicy != nil {
+		t.Fatalf("second createResources() created = %+v, want no new resources for replay", reused)
+	}
+
+	mismatchReq := req
+	mismatchReq.InputHash = "different-input-hash"
+	mismatchResources, err := executor.buildResources(testNamespace, mismatchReq)
+	if err != nil {
+		t.Fatalf("mismatch buildResources() error = %v", err)
+	}
+	if _, err := executor.createResources(ctx, fakeClient, mismatchResources); err == nil {
+		t.Fatal("mismatched createResources() error = nil, want identity mismatch error")
+	} else if !strings.Contains(err.Error(), "mismatched") || !strings.Contains(err.Error(), codeExecKubernetesAnnotationInputHash) {
+		t.Fatalf("mismatched createResources() error = %v, want input-hash mismatch", err)
+	}
+}
+
+func TestKubernetesJobCodeExecutor_ExecutePersistsAndReplaysStoredResult(t *testing.T) {
+	setKubernetesCodeExecTestEnv(t)
+
+	fakeClient := newKubernetesCodeExecFakeClient(t)
+	namespace := testNamespace
+	runID := "persisted replay run"
+	jobName := codeExecKubernetesJobNameForRunID(runID)
+	podName := "pod-persisted-replay"
+	rawCode := "print('raw-code-secret-456')"
+	req := CodeExecutionRequest{
+		Backend:          codeExecBackendKubernetes,
+		Language:         codeLanguagePython,
+		Code:             rawCode,
+		Timeout:          2 * time.Second,
+		OutputLimitBytes: defaultCodeExecOutputLimitBytes,
+		RunID:            runID,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	errCh := finishFakeKubernetesCodeExecJob(ctx, fakeClient, namespace, jobName, podName, batchv1.JobStatus{
+		Succeeded: 1,
+		Conditions: []batchv1.JobCondition{
+			{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+		},
+	}, 0, nil)
+
+	executor := &KubernetesJobCodeExecutor{
+		resolveClients: func(context.Context) (kubernetesCodeExecClients, error) {
+			return kubernetesCodeExecClients{client: fakeClient, namespace: namespace}, nil
+		},
+		logStreamer:  fakePodLogStreamer{logs: map[string]string{podName: fakeKubernetesCodeExecLogs(jobName, "persisted output\n", "persisted stderr\n")}},
+		pollInterval: time.Millisecond,
+		randomSuffix: func() string { return "should-not-be-used" },
+	}
+
+	first := executor.Execute(ctx, req)
+	requireFakeKubernetesCompletion(t, errCh)
+	if first.Error != "persisted stderr\n" || first.ExitCode != 0 || first.Output != "persisted output\n" {
+		t.Fatalf("first result = %+v, want persisted successful result", first)
+	}
+
+	stored := &corev1.ConfigMap{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: jobName}, stored); err != nil {
+		t.Fatalf("stored result ConfigMap get error = %v", err)
+	}
+	if stored.Annotations[codeExecKubernetesAnnotationRunID] != runID {
+		t.Fatalf("stored run-id annotation = %q, want %q", stored.Annotations[codeExecKubernetesAnnotationRunID], runID)
+	}
+	if stored.Annotations[codeExecKubernetesAnnotationInputHash] == "" {
+		t.Fatal("stored input-hash annotation is empty")
+	}
+	if strings.Contains(stored.Data[codeExecKubernetesResultKey], rawCode) || strings.Contains(stored.Data[codeExecKubernetesResultKey], "raw-code-secret-456") {
+		t.Fatalf("stored result leaks raw code: %q", stored.Data[codeExecKubernetesResultKey])
+	}
+	assertFakeKubernetesCodeExecResourcesDeleted(t, fakeClient, namespace, jobName)
+
+	replayCtx, replayCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer replayCancel()
+	second := executor.Execute(replayCtx, req)
+	if second != first {
+		t.Fatalf("replayed result = %+v, want first result %+v", second, first)
+	}
+	assertFakeKubernetesCodeExecResourcesDeleted(t, fakeClient, namespace, jobName)
+}
+
+func TestKubernetesJobCodeExecutor_LoadStoredResultRequiresMatchingIdentity(t *testing.T) {
+	setKubernetesCodeExecTestEnv(t)
+
+	ctx := context.Background()
+	fakeClient := newKubernetesCodeExecFakeClient(t)
+	executor := &KubernetesJobCodeExecutor{}
+	req := CodeExecutionRequest{
+		Backend:          codeExecBackendKubernetes,
+		Language:         codeLanguagePython,
+		Code:             "print('result')",
+		Timeout:          time.Second,
+		OutputLimitBytes: defaultCodeExecOutputLimitBytes,
+		RunID:            "stored-identity-run",
+		InputHash:        "stored-identity-hash",
+	}
+	jobName := codeExecKubernetesJobNameForRunID(req.RunID)
+	want := CodeExecResult{Output: "cached\n", ExitCode: 0}
+	if err := executor.storeResult(fakeClient, testNamespace, jobName, req, want); err != nil {
+		t.Fatalf("storeResult() error = %v", err)
+	}
+
+	got, found, err := executor.loadStoredResult(ctx, fakeClient, testNamespace, jobName, req)
+	if err != nil || !found || got != want {
+		t.Fatalf("loadStoredResult() = (%+v, %v, %v), want cached result", got, found, err)
+	}
+
+	mismatched := req
+	mismatched.InputHash = "other-hash"
+	if got, found, err := executor.loadStoredResult(ctx, fakeClient, testNamespace, jobName, mismatched); err != nil || found || got != (CodeExecResult{}) {
+		t.Fatalf("mismatched loadStoredResult() = (%+v, %v, %v), want no replay and no error", got, found, err)
+	}
+
+	missingVersion := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName + "-missing-version",
+			Namespace: testNamespace,
+			Annotations: map[string]string{
+				codeExecKubernetesAnnotationRunID:     req.RunID,
+				codeExecKubernetesAnnotationInputHash: req.InputHash,
+			},
+		},
+		Data: map[string]string{codeExecKubernetesResultKey: storedKubernetesCodeExecResultJSON(t, req, want)},
+	}
+	if err := fakeClient.Create(ctx, missingVersion); err != nil {
+		t.Fatalf("failed to create missing-version ConfigMap: %v", err)
+	}
+	if got, found, err := executor.loadStoredResult(ctx, fakeClient, testNamespace, missingVersion.Name, req); err != nil || found || got != (CodeExecResult{}) {
+		t.Fatalf("missing-version loadStoredResult() = (%+v, %v, %v), want no replay and no error", got, found, err)
+	}
+}
+
 func TestParseKubernetesCodeExecLogsSplitsStreamsAndTruncation(t *testing.T) {
 	jobName := codeExecKubernetesJobPrefix + "parse"
 	markers := codeExecKubernetesLogMarkers(jobName)
@@ -1381,6 +1605,21 @@ func (s fakePodLogStreamer) Stream(_ context.Context, _, podName string, _ *core
 		return nil, s.err
 	}
 	return io.NopCloser(strings.NewReader(s.logs[podName])), nil
+}
+
+func storedKubernetesCodeExecResultJSON(t *testing.T, req CodeExecutionRequest, result CodeExecResult) string {
+	t.Helper()
+	stored := kubernetesCodeExecStoredResult{
+		Version:   codeExecKubernetesResultVersion,
+		RunID:     req.RunID,
+		InputHash: req.InputHash,
+		Result:    result,
+	}
+	data, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("failed to marshal stored result: %v", err)
+	}
+	return string(data)
 }
 
 func fakeKubernetesCodeExecLogs(jobName, stdout, stderr string) string {

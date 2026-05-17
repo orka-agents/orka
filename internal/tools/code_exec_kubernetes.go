@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -36,6 +37,12 @@ const (
 	codeExecKubernetesJobPrefix     = "orka-code-exec-"
 	codeExecKubernetesLabelTool     = "orka.ai/tool"
 	codeExecKubernetesLabelJob      = "orka.ai/code-exec-job"
+
+	codeExecKubernetesAnnotationRunID         = "orka.ai/code-exec-run-id"
+	codeExecKubernetesAnnotationInputHash     = "orka.ai/code-exec-input-hash"
+	codeExecKubernetesAnnotationResultVersion = "orka.ai/code-exec-result-version"
+	codeExecKubernetesResultVersion           = "code_exec_result_v1"
+	codeExecKubernetesResultKey               = "result.json"
 
 	codeExecKubernetesCodeVolumeName = "code"
 	codeExecKubernetesCodeMountPath  = "/orka-code"
@@ -100,6 +107,13 @@ type kubernetesCodeExecLogOutput struct {
 	stderrTruncated bool
 }
 
+type kubernetesCodeExecStoredResult struct {
+	Version   string         `json:"version"`
+	RunID     string         `json:"run_id"`
+	InputHash string         `json:"input_hash"`
+	Result    CodeExecResult `json:"result"`
+}
+
 type podLogStreamer interface {
 	Stream(ctx context.Context, namespace, podName string, opts *corev1.PodLogOptions) (io.ReadCloser, error)
 }
@@ -131,11 +145,11 @@ func (e *KubernetesJobCodeExecutor) Execute(ctx context.Context, req CodeExecuti
 	if req.OutputLimitBytes <= 0 {
 		req.OutputLimitBytes = defaultCodeExecOutputLimitBytes
 	}
-	if len(req.ResourceAudit) == 0 {
-		if resourceAudit, err := codeExecKubernetesResourceAuditForRequest(req); err == nil {
-			req.ResourceAudit = resourceAudit
-		}
+	if err := populateCodeExecRequestResourceAudit(&req); err != nil {
+		result.Error = fmt.Sprintf("failed to configure kubernetes code_exec resources: %v", err)
+		return result
 	}
+	ensureCodeExecRequestInputHash(&req)
 
 	execCtx, cancel := context.WithTimeout(ctx, req.Timeout)
 	defer cancel()
@@ -162,7 +176,16 @@ func (e *KubernetesJobCodeExecutor) Execute(ctx context.Context, req CodeExecuti
 		return result
 	}
 
-	resources, err := e.buildResources(clients.namespace, req)
+	jobName := e.jobNameForRequest(req)
+	if storedResult, found, err := e.loadStoredResult(ctx, clients.client, clients.namespace, jobName, req); err != nil {
+		result.Error = fmt.Sprintf("failed to read persisted kubernetes code_exec result: %v", err)
+		return result
+	} else if found {
+		result = storedResult
+		return result
+	}
+
+	resources, err := e.buildResourcesWithJobName(clients.namespace, req, jobName)
 	if err != nil {
 		result.Error = fmt.Sprintf("failed to configure kubernetes code_exec resources: %v", err)
 		return result
@@ -176,7 +199,11 @@ func (e *KubernetesJobCodeExecutor) Execute(ctx context.Context, req CodeExecuti
 	}
 	defer e.cleanupResources(clients.client, createdResources)
 
-	result = e.waitForJob(ctx, clients, resources.job.Name, req.OutputLimitBytes)
+	result = e.waitForJob(ctx, clients, resources.job.Name, req)
+	if err := e.storeResult(clients.client, clients.namespace, resources.job.Name, req, result); err != nil {
+		result.Error = appendCodeExecError(result.Error, fmt.Sprintf("failed to persist kubernetes code_exec result: %v", err))
+		result.ExitCode = -1
+	}
 	return result
 }
 
@@ -237,6 +264,10 @@ func (e *KubernetesJobCodeExecutor) kubernetesClients(ctx context.Context) (kube
 }
 
 func (e *KubernetesJobCodeExecutor) buildResources(namespace string, req CodeExecutionRequest) (*kubernetesCodeExecResources, error) {
+	return e.buildResourcesWithJobName(namespace, req, e.jobNameForRequest(req))
+}
+
+func (e *KubernetesJobCodeExecutor) buildResourcesWithJobName(namespace string, req CodeExecutionRequest, jobName string) (*kubernetesCodeExecResources, error) {
 	image, err := codeExecKubernetesImageForRequest(req)
 	if err != nil {
 		return nil, err
@@ -246,7 +277,9 @@ func (e *KubernetesJobCodeExecutor) buildResources(namespace string, req CodeExe
 		return nil, err
 	}
 
-	jobName := e.newJobName()
+	if strings.TrimSpace(jobName) == "" {
+		jobName = e.jobNameForRequest(req)
+	}
 	command, err := codeExecKubernetesCommand(req.Language, req.OutputLimitBytes, jobName)
 	if err != nil {
 		return nil, err
@@ -257,6 +290,7 @@ func (e *KubernetesJobCodeExecutor) buildResources(namespace string, req CodeExe
 		codeExecKubernetesLabelJob:     jobName,
 		"batch.kubernetes.io/job-name": jobName,
 	}
+	annotations := codeExecKubernetesIdentityAnnotations(req)
 
 	backoffLimit := int32(0)
 	deadlineSeconds := codeExecDeadlineSeconds(req.Timeout)
@@ -277,9 +311,10 @@ func (e *KubernetesJobCodeExecutor) buildResources(namespace string, req CodeExe
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: namespace,
-			Labels:    labels,
+			Name:        jobName,
+			Namespace:   namespace,
+			Labels:      cloneKubernetesCodeExecStringMap(labels),
+			Annotations: cloneKubernetesCodeExecStringMap(annotations),
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
@@ -289,25 +324,30 @@ func (e *KubernetesJobCodeExecutor) buildResources(namespace string, req CodeExe
 
 	serviceAccount := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: namespace,
-			Labels:    labels,
+			Name:        jobName,
+			Namespace:   namespace,
+			Labels:      cloneKubernetesCodeExecStringMap(labels),
+			Annotations: cloneKubernetesCodeExecStringMap(annotations),
 		},
 		AutomountServiceAccountToken: &automountServiceAccountToken,
 	}
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: namespace,
-			Labels:    labels,
+			Name:        jobName,
+			Namespace:   namespace,
+			Labels:      cloneKubernetesCodeExecStringMap(labels),
+			Annotations: cloneKubernetesCodeExecStringMap(annotations),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &backoffLimit,
 			ActiveDeadlineSeconds:   &deadlineSeconds,
 			TTLSecondsAfterFinished: &ttlSeconds,
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{
+					Labels:      cloneKubernetesCodeExecStringMap(labels),
+					Annotations: cloneKubernetesCodeExecStringMap(annotations),
+				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:                 corev1.RestartPolicyNever,
 					ServiceAccountName:            serviceAccount.Name,
@@ -390,18 +430,19 @@ func (e *KubernetesJobCodeExecutor) buildResources(namespace string, req CodeExe
 		serviceAccount: serviceAccount,
 	}
 	if codeExecKubernetesNetworkPolicyEnabledForRequest(req) {
-		resourcesToCreate.networkPolicy = buildKubernetesCodeExecNetworkPolicy(namespace, jobName, labels)
+		resourcesToCreate.networkPolicy = buildKubernetesCodeExecNetworkPolicy(namespace, jobName, labels, annotations)
 	}
 
 	return resourcesToCreate, nil
 }
 
-func buildKubernetesCodeExecNetworkPolicy(namespace, jobName string, labels map[string]string) *networkingv1.NetworkPolicy {
+func buildKubernetesCodeExecNetworkPolicy(namespace, jobName string, labels, annotations map[string]string) *networkingv1.NetworkPolicy {
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: namespace,
-			Labels:    labels,
+			Name:        jobName,
+			Namespace:   namespace,
+			Labels:      cloneKubernetesCodeExecStringMap(labels),
+			Annotations: cloneKubernetesCodeExecStringMap(annotations),
 		},
 		Spec: networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{codeExecKubernetesLabelJob: jobName}},
@@ -422,29 +463,270 @@ func (e *KubernetesJobCodeExecutor) createResources(ctx context.Context, c crcli
 		return created, fmt.Errorf("required Kubernetes resources are not configured")
 	}
 
-	if err := c.Create(ctx, resources.secret); err != nil {
+	if wasCreated, err := createKubernetesCodeExecObject(ctx, c, resources.secret); err != nil {
 		return created, fmt.Errorf("secret: %w", err)
+	} else if wasCreated {
+		created.secret = resources.secret
 	}
-	created.secret = resources.secret
 
-	if err := c.Create(ctx, resources.serviceAccount); err != nil {
+	if wasCreated, err := createKubernetesCodeExecObject(ctx, c, resources.serviceAccount); err != nil {
 		return created, fmt.Errorf("service account: %w", err)
+	} else if wasCreated {
+		created.serviceAccount = resources.serviceAccount
 	}
-	created.serviceAccount = resources.serviceAccount
 
 	if resources.networkPolicy != nil {
-		if err := c.Create(ctx, resources.networkPolicy); err != nil {
+		if wasCreated, err := createKubernetesCodeExecObject(ctx, c, resources.networkPolicy); err != nil {
 			return created, fmt.Errorf("network policy: %w", err)
+		} else if wasCreated {
+			created.networkPolicy = resources.networkPolicy
 		}
-		created.networkPolicy = resources.networkPolicy
 	}
 
-	if err := c.Create(ctx, resources.job); err != nil {
+	if wasCreated, err := createKubernetesCodeExecObject(ctx, c, resources.job); err != nil {
 		return created, fmt.Errorf("job: %w", err)
+	} else if wasCreated {
+		created.job = resources.job
 	}
-	created.job = resources.job
 
 	return created, nil
+}
+
+func createKubernetesCodeExecObject(ctx context.Context, c crclient.Client, obj crclient.Object) (bool, error) {
+	if c == nil {
+		return false, fmt.Errorf("kubernetes client is not configured")
+	}
+	if obj == nil {
+		return false, fmt.Errorf("kubernetes object is not configured")
+	}
+	if err := c.Create(ctx, obj); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return false, err
+		}
+		existing := newKubernetesCodeExecObjectLike(obj)
+		if existing == nil {
+			return false, fmt.Errorf("existing %T cannot be checked for code_exec reuse", obj)
+		}
+		if getErr := c.Get(ctx, crclient.ObjectKeyFromObject(obj), existing); getErr != nil {
+			return false, getErr
+		}
+		if err := validateKubernetesCodeExecReusableObject(obj, existing); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
+func newKubernetesCodeExecObjectLike(obj crclient.Object) crclient.Object {
+	switch obj.(type) {
+	case *corev1.Secret:
+		return &corev1.Secret{}
+	case *corev1.ServiceAccount:
+		return &corev1.ServiceAccount{}
+	case *corev1.ConfigMap:
+		return &corev1.ConfigMap{}
+	case *batchv1.Job:
+		return &batchv1.Job{}
+	case *networkingv1.NetworkPolicy:
+		return &networkingv1.NetworkPolicy{}
+	default:
+		if copied, ok := obj.DeepCopyObject().(crclient.Object); ok {
+			return copied
+		}
+		return nil
+	}
+}
+
+func validateKubernetesCodeExecReusableObject(expected, existing crclient.Object) error {
+	if expected == nil || existing == nil {
+		return fmt.Errorf("kubernetes object is not configured")
+	}
+	expectedAnnotations := expected.GetAnnotations()
+	expectedRunID := strings.TrimSpace(expectedAnnotations[codeExecKubernetesAnnotationRunID])
+	if expectedRunID == "" {
+		return fmt.Errorf("existing %T %s/%s cannot be reused without a code_exec run id annotation", existing, existing.GetNamespace(), existing.GetName())
+	}
+
+	actualAnnotations := existing.GetAnnotations()
+	for _, key := range []string{
+		codeExecKubernetesAnnotationRunID,
+		codeExecKubernetesAnnotationInputHash,
+		codeExecKubernetesAnnotationResultVersion,
+	} {
+		expectedValue := strings.TrimSpace(expectedAnnotations[key])
+		if expectedValue == "" {
+			continue
+		}
+		if strings.TrimSpace(actualAnnotations[key]) != expectedValue {
+			return fmt.Errorf("existing %T %s/%s has mismatched %s annotation", existing, existing.GetNamespace(), existing.GetName(), key)
+		}
+	}
+	return nil
+}
+
+func codeExecKubernetesIdentityAnnotations(req CodeExecutionRequest) map[string]string {
+	annotations := map[string]string{}
+	if runID := strings.TrimSpace(req.RunID); runID != "" {
+		annotations[codeExecKubernetesAnnotationRunID] = runID
+	}
+	if inputHash := strings.TrimSpace(req.InputHash); inputHash != "" {
+		annotations[codeExecKubernetesAnnotationInputHash] = inputHash
+	}
+	if len(annotations) == 0 {
+		return nil
+	}
+	return annotations
+}
+
+func cloneKubernetesCodeExecStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	clone := make(map[string]string, len(values))
+	for key, value := range values {
+		clone[key] = value
+	}
+	return clone
+}
+
+func codeExecKubernetesShouldPersistResult(req CodeExecutionRequest) bool {
+	return strings.TrimSpace(req.RunID) != "" && strings.TrimSpace(req.InputHash) != ""
+}
+
+func (e *KubernetesJobCodeExecutor) loadStoredResult(ctx context.Context, c crclient.Client, namespace, jobName string, req CodeExecutionRequest) (CodeExecResult, bool, error) {
+	if !codeExecKubernetesShouldPersistResult(req) {
+		return CodeExecResult{}, false, nil
+	}
+	if c == nil {
+		return CodeExecResult{}, false, fmt.Errorf("kubernetes client is not configured")
+	}
+	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(jobName) == "" {
+		return CodeExecResult{}, false, fmt.Errorf("namespace and job name are required")
+	}
+
+	stored := &corev1.ConfigMap{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: jobName}, stored); err != nil {
+		if apierrors.IsNotFound(err) {
+			return CodeExecResult{}, false, nil
+		}
+		return CodeExecResult{}, false, err
+	}
+	if !kubernetesCodeExecStoredResultMetadataMatches(stored, req) {
+		return CodeExecResult{}, false, nil
+	}
+
+	raw := stored.Data[codeExecKubernetesResultKey]
+	if raw == "" {
+		return CodeExecResult{}, false, fmt.Errorf("stored result %s/%s is missing %q", namespace, jobName, codeExecKubernetesResultKey)
+	}
+	var storedResult kubernetesCodeExecStoredResult
+	if err := json.Unmarshal([]byte(raw), &storedResult); err != nil {
+		return CodeExecResult{}, false, fmt.Errorf("stored result %s/%s is invalid: %w", namespace, jobName, err)
+	}
+	if storedResult.Version != codeExecKubernetesResultVersion {
+		return CodeExecResult{}, false, fmt.Errorf("stored result %s/%s has unsupported version %q", namespace, jobName, storedResult.Version)
+	}
+	if strings.TrimSpace(storedResult.RunID) != strings.TrimSpace(req.RunID) || strings.TrimSpace(storedResult.InputHash) != strings.TrimSpace(req.InputHash) {
+		return CodeExecResult{}, false, fmt.Errorf("stored result %s/%s does not match request identity", namespace, jobName)
+	}
+	return storedResult.Result, true, nil
+}
+
+func (e *KubernetesJobCodeExecutor) storeResult(c crclient.Client, namespace, jobName string, req CodeExecutionRequest, result CodeExecResult) error {
+	if !codeExecKubernetesShouldPersistResult(req) {
+		return nil
+	}
+	if c == nil {
+		return fmt.Errorf("kubernetes client is not configured")
+	}
+	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(jobName) == "" {
+		return fmt.Errorf("namespace and job name are required")
+	}
+
+	stored := kubernetesCodeExecStoredResult{
+		Version:   codeExecKubernetesResultVersion,
+		RunID:     strings.TrimSpace(req.RunID),
+		InputHash: strings.TrimSpace(req.InputHash),
+		Result:    result,
+	}
+	data, err := json.Marshal(stored)
+	if err != nil {
+		return err
+	}
+
+	annotations := codeExecKubernetesIdentityAnnotations(req)
+	annotations[codeExecKubernetesAnnotationResultVersion] = codeExecKubernetesResultVersion
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/name":    "orka",
+				codeExecKubernetesLabelTool: codeExecToolName,
+				codeExecKubernetesLabelJob:  jobName,
+			},
+			Annotations: annotations,
+		},
+		Data: map[string]string{codeExecKubernetesResultKey: string(data)},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	created, err := createKubernetesCodeExecObject(ctx, c, configMap)
+	if err != nil {
+		return err
+	}
+	if !created {
+		_, found, err := e.loadStoredResult(ctx, c, namespace, jobName, req)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("existing stored result %s/%s does not match request identity", namespace, jobName)
+		}
+	}
+	return nil
+}
+
+func kubernetesCodeExecStoredResultMetadataMatches(stored crclient.Object, req CodeExecutionRequest) bool {
+	if stored == nil || !codeExecKubernetesShouldPersistResult(req) {
+		return false
+	}
+	annotations := stored.GetAnnotations()
+	return strings.TrimSpace(annotations[codeExecKubernetesAnnotationRunID]) == strings.TrimSpace(req.RunID) &&
+		strings.TrimSpace(annotations[codeExecKubernetesAnnotationInputHash]) == strings.TrimSpace(req.InputHash) &&
+		strings.TrimSpace(annotations[codeExecKubernetesAnnotationResultVersion]) == codeExecKubernetesResultVersion
+}
+
+func (e *KubernetesJobCodeExecutor) jobNameForRequest(req CodeExecutionRequest) string {
+	runID := strings.TrimSpace(req.RunID)
+	if runID != "" {
+		return codeExecKubernetesJobNameForRunID(runID)
+	}
+	return e.newJobName()
+}
+
+func codeExecKubernetesJobNameForRunID(runID string) string {
+	suffix := strings.Trim(strings.ToLower(sanitizeKubernetesNamePart(runID)), "-")
+	if suffix == "" {
+		suffix = "run-" + codeExecSHA256HexString(runID)[:16]
+	}
+
+	maxSuffixLen := 63 - len(codeExecKubernetesJobPrefix)
+	if len(suffix) > maxSuffixLen {
+		digest := codeExecSHA256HexString(runID)[:16]
+		prefixLen := maxSuffixLen - len(digest) - 1
+		if prefixLen < 1 {
+			return codeExecKubernetesJobPrefix + digest[:maxSuffixLen]
+		}
+		suffix = strings.TrimRight(suffix[:prefixLen], "-") + "-" + digest
+	}
+	suffix = strings.Trim(suffix, "-")
+	if suffix == "" {
+		suffix = "run-" + codeExecSHA256HexString(runID)[:16]
+	}
+	return codeExecKubernetesJobPrefix + suffix
 }
 
 func (e *KubernetesJobCodeExecutor) newJobName() string {
@@ -862,7 +1144,7 @@ func defaultCodeExecNamespace() string {
 	return defaultNamespace
 }
 
-func (e *KubernetesJobCodeExecutor) waitForJob(ctx context.Context, clients kubernetesCodeExecClients, jobName string, outputLimitBytes int64) CodeExecResult {
+func (e *KubernetesJobCodeExecutor) waitForJob(ctx context.Context, clients kubernetesCodeExecClients, jobName string, req CodeExecutionRequest) CodeExecResult {
 	pollInterval := e.pollInterval
 	if pollInterval <= 0 {
 		pollInterval = 500 * time.Millisecond
@@ -871,23 +1153,29 @@ func (e *KubernetesJobCodeExecutor) waitForJob(ctx context.Context, clients kube
 	defer ticker.Stop()
 
 	for {
-		result, done := e.checkJob(ctx, clients, jobName, outputLimitBytes)
+		if storedResult, found, err := e.loadStoredResult(ctx, clients.client, clients.namespace, jobName, req); err != nil {
+			return CodeExecResult{Error: fmt.Sprintf("failed to read persisted kubernetes code_exec result: %v", err), ExitCode: -1}
+		} else if found {
+			return storedResult
+		}
+
+		result, done := e.checkJob(ctx, clients, jobName, req.OutputLimitBytes, codeExecKubernetesShouldPersistResult(req))
 		if done {
 			return result
 		}
 
 		select {
 		case <-ctx.Done():
-			return e.timeoutResult(clients, jobName, outputLimitBytes)
+			return e.timeoutResult(clients, jobName, req.OutputLimitBytes)
 		case <-ticker.C:
 		}
 	}
 }
 
-func (e *KubernetesJobCodeExecutor) checkJob(ctx context.Context, clients kubernetesCodeExecClients, jobName string, outputLimitBytes int64) (CodeExecResult, bool) {
+func (e *KubernetesJobCodeExecutor) checkJob(ctx context.Context, clients kubernetesCodeExecClients, jobName string, outputLimitBytes int64, allowMissing bool) (CodeExecResult, bool) {
 	job := &batchv1.Job{}
 	if err := clients.client.Get(ctx, types.NamespacedName{Namespace: clients.namespace, Name: jobName}, job); err != nil {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || (allowMissing && apierrors.IsNotFound(err)) {
 			return CodeExecResult{}, false
 		}
 		return CodeExecResult{Error: fmt.Sprintf("failed to get kubernetes code_exec job: %v", err), ExitCode: -1}, true
