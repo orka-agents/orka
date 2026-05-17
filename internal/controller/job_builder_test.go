@@ -42,6 +42,28 @@ const (
 	testRuntimeClassGVisor = "gvisor"
 )
 
+func TestEnvFlagEnabledAliases(t *testing.T) {
+	const name = "ORKA_TEST_FLAG"
+
+	for _, value := range []string{"1", "true", "TRUE", "t", "yes", "y", "on"} {
+		t.Run("true_"+value, func(t *testing.T) {
+			t.Setenv(name, value)
+			if !envFlagEnabled(name) {
+				t.Fatalf("envFlagEnabled(%q) = false, want true", value)
+			}
+		})
+	}
+
+	for _, value := range []string{"", "0", "false", "FALSE", "f", "no", "n", "off", "invalid"} {
+		t.Run("false_"+value, func(t *testing.T) {
+			t.Setenv(name, value)
+			if envFlagEnabled(name) {
+				t.Fatalf("envFlagEnabled(%q) = true, want false", value)
+			}
+		})
+	}
+}
+
 func setupJobBuilder() *JobBuilder {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)

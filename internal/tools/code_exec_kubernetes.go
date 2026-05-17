@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"sort"
 	"strconv"
@@ -43,6 +44,8 @@ const (
 	codeExecKubernetesAnnotationResultVersion = "orka.ai/code-exec-result-version"
 	codeExecKubernetesResultVersion           = "code_exec_result_v1"
 	codeExecKubernetesResultKey               = "result.json"
+	codeExecKubernetesStoreResultTimeout      = 15 * time.Second
+	codeExecKubernetesStoredResultRetention   = 24 * time.Hour
 
 	codeExecKubernetesCodeVolumeName = "code"
 	codeExecKubernetesCodeMountPath  = "/orka-code"
@@ -200,9 +203,8 @@ func (e *KubernetesJobCodeExecutor) Execute(ctx context.Context, req CodeExecuti
 	defer e.cleanupResources(clients.client, createdResources)
 
 	result = e.waitForJob(ctx, clients, resources.job.Name, req)
-	if err := e.storeResult(clients.client, clients.namespace, resources.job.Name, req, result); err != nil {
+	if err := e.storeResult(ctx, clients.client, clients.namespace, resources.job.Name, req, result); err != nil {
 		result.Error = appendCodeExecError(result.Error, fmt.Sprintf("failed to persist kubernetes code_exec result: %v", err))
-		result.ExitCode = -1
 	}
 	return result
 }
@@ -263,6 +265,7 @@ func (e *KubernetesJobCodeExecutor) kubernetesClients(ctx context.Context) (kube
 	return clients, nil
 }
 
+//nolint:unparam // Tests use a fixed namespace while keeping the helper explicit about resource scope.
 func (e *KubernetesJobCodeExecutor) buildResources(namespace string, req CodeExecutionRequest) (*kubernetesCodeExecResources, error) {
 	return e.buildResourcesWithJobName(namespace, req, e.jobNameForRequest(req))
 }
@@ -584,9 +587,7 @@ func cloneKubernetesCodeExecStringMap(values map[string]string) map[string]strin
 		return nil
 	}
 	clone := make(map[string]string, len(values))
-	for key, value := range values {
-		clone[key] = value
-	}
+	maps.Copy(clone, values)
 	return clone
 }
 
@@ -633,7 +634,7 @@ func (e *KubernetesJobCodeExecutor) loadStoredResult(ctx context.Context, c crcl
 	return storedResult.Result, true, nil
 }
 
-func (e *KubernetesJobCodeExecutor) storeResult(c crclient.Client, namespace, jobName string, req CodeExecutionRequest, result CodeExecResult) error {
+func (e *KubernetesJobCodeExecutor) storeResult(ctx context.Context, c crclient.Client, namespace, jobName string, req CodeExecutionRequest, result CodeExecResult) error {
 	if !codeExecKubernetesShouldPersistResult(req) {
 		return nil
 	}
@@ -671,10 +672,13 @@ func (e *KubernetesJobCodeExecutor) storeResult(c crclient.Client, namespace, jo
 		Data: map[string]string{codeExecKubernetesResultKey: string(data)},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), codeExecKubernetesStoreResultTimeout)
 	defer cancel()
 	created, err := createKubernetesCodeExecObject(ctx, c, configMap)
 	if err != nil {
+		if apierrors.IsForbidden(err) {
+			return nil
+		}
 		return err
 	}
 	if !created {
@@ -684,6 +688,49 @@ func (e *KubernetesJobCodeExecutor) storeResult(c crclient.Client, namespace, jo
 		}
 		if !found {
 			return fmt.Errorf("existing stored result %s/%s does not match request identity", namespace, jobName)
+		}
+		return nil
+	}
+	if err := e.cleanupExpiredStoredResults(ctx, c, namespace, time.Now()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (e *KubernetesJobCodeExecutor) cleanupExpiredStoredResults(ctx context.Context, c crclient.Client, namespace string, now time.Time) error {
+	if c == nil || strings.TrimSpace(namespace) == "" {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	cutoff := now.Add(-codeExecKubernetesStoredResultRetention)
+
+	var storedResults corev1.ConfigMapList
+	err := c.List(ctx, &storedResults,
+		crclient.InNamespace(namespace),
+		crclient.MatchingLabels{codeExecKubernetesLabelTool: codeExecToolName},
+	)
+	if err != nil {
+		if apierrors.IsForbidden(err) {
+			return nil
+		}
+		return fmt.Errorf("listing stored code_exec results: %w", err)
+	}
+
+	for i := range storedResults.Items {
+		configMap := &storedResults.Items[i]
+		if configMap.Labels[codeExecKubernetesLabelJob] == "" || configMap.CreationTimestamp.IsZero() {
+			continue
+		}
+		if !configMap.CreationTimestamp.Time.Before(cutoff) {
+			continue
+		}
+		if err := c.Delete(ctx, configMap); err != nil && !apierrors.IsNotFound(err) {
+			if apierrors.IsForbidden(err) {
+				return nil
+			}
+			return fmt.Errorf("deleting expired stored code_exec result %s/%s: %w", namespace, configMap.Name, err)
 		}
 	}
 	return nil
@@ -714,13 +761,21 @@ func codeExecKubernetesJobNameForRunID(runID string) string {
 	}
 
 	maxSuffixLen := 63 - len(codeExecKubernetesJobPrefix)
-	if len(suffix) > maxSuffixLen {
-		digest := codeExecSHA256HexString(runID)[:16]
-		prefixLen := maxSuffixLen - len(digest) - 1
-		if prefixLen < 1 {
-			return codeExecKubernetesJobPrefix + digest[:maxSuffixLen]
+	if maxSuffixLen < 1 {
+		name := strings.TrimRight(codeExecKubernetesJobPrefix[:min(len(codeExecKubernetesJobPrefix), 63)], "-")
+		if name == "" {
+			return "orka-code-exec"
 		}
-		suffix = strings.TrimRight(suffix[:prefixLen], "-") + "-" + digest
+		return name
+	}
+	if len(suffix) > maxSuffixLen {
+		digest := codeExecSHA256HexString(runID)
+		shortDigest := digest[:16]
+		prefixLen := maxSuffixLen - len(shortDigest) - 1
+		if prefixLen < 1 {
+			return codeExecKubernetesJobPrefix + digest[:min(maxSuffixLen, len(digest))]
+		}
+		suffix = strings.TrimRight(suffix[:prefixLen], "-") + "-" + shortDigest
 	}
 	suffix = strings.Trim(suffix, "-")
 	if suffix == "" {

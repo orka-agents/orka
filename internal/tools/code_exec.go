@@ -400,6 +400,11 @@ func codeExecInputHashForRequest(req CodeExecutionRequest) string {
 }
 
 func codeExecRunIDForRequest(ctx context.Context, req CodeExecutionRequest) string {
+	tc := GetToolContext(ctx)
+	if tc == nil {
+		return ""
+	}
+
 	payload := struct {
 		Version    string `json:"version"`
 		InputHash  string `json:"input_hash"`
@@ -410,18 +415,24 @@ func codeExecRunIDForRequest(ctx context.Context, req CodeExecutionRequest) stri
 		Version:   codeExecRequestIdentityVersion,
 		InputHash: strings.TrimSpace(req.InputHash),
 	}
-	if tc := GetToolContext(ctx); tc != nil {
-		payload.SessionID = strings.TrimSpace(tc.SessionID)
-		payload.TaskID = strings.TrimSpace(tc.TaskID)
-		payload.ToolCallID = strings.TrimSpace(tc.ToolCallID)
+	if payload.InputHash == "" {
+		return ""
 	}
+
+	payload.SessionID = strings.TrimSpace(tc.SessionID)
+	payload.TaskID = strings.TrimSpace(tc.TaskID)
+	payload.ToolCallID = strings.TrimSpace(tc.ToolCallID)
+	if payload.SessionID == "" && payload.TaskID == "" && payload.ToolCallID == "" {
+		return ""
+	}
+
 	return "run-" + codeExecSHA256HexJSON(payload)[:32]
 }
 
 func codeExecSHA256HexJSON(value any) string {
 	data, err := json.Marshal(value)
 	if err != nil {
-		data = []byte(fmt.Sprintf("%#v", value))
+		data = fmt.Appendf(nil, "%#v", value)
 	}
 	return codeExecSHA256HexBytes(data)
 }

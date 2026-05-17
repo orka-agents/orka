@@ -235,6 +235,8 @@ func envFlagEnabled(name string) bool {
 	switch strings.ToLower(value) {
 	case "y", "yes", "on":
 		return true
+	case "n", "no", "off":
+		return false
 	default:
 		return false
 	}
