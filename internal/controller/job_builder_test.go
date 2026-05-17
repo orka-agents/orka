@@ -18,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -1774,7 +1775,7 @@ func TestJobBuilder_Build_AgentTask_AllowBash_AgentDefault(t *testing.T) {
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             corev1alpha1.AgentRuntimeClaude,
-				DefaultAllowBash: new(true),
+				DefaultAllowBash: ptr.To(true),
 			},
 		},
 	}
@@ -1810,7 +1811,7 @@ func TestJobBuilder_Build_AgentTask_AllowBash_NotSetWhenFalse(t *testing.T) {
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             corev1alpha1.AgentRuntimeClaude,
-				DefaultAllowBash: new(false),
+				DefaultAllowBash: ptr.To(false),
 			},
 		},
 	}
