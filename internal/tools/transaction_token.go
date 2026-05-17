@@ -36,7 +36,7 @@ import (
 // child may not yet have a UID. After the child is created,
 // adoptChildTransactionTokenSecret rewrites the owner reference to the child.
 func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, parentTask, childTask *corev1alpha1.Task, operation, agent string) error {
-	ttsConfig, enabled, err := childTransactionTokenExchangeConfig()
+	ttsConfig, enabled, err := childTransactionTokenExchangeConfigForParent(parentTask)
 	if err != nil {
 		return err
 	}
@@ -44,7 +44,7 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 		return nil
 	}
 
-	if parentTask == nil || parentTask.UID == "" {
+	if parentTask.UID == "" {
 		return fmt.Errorf("parent task UID is required for child transaction token exchange")
 	}
 	subjectToken, err := childTransactionSubjectToken(ttsConfig.TokenSource)
@@ -139,6 +139,22 @@ func childTransactionTokenExchangeConfig() (contexttoken.TTSConfig, bool, error)
 		return contexttoken.TTSConfig{}, false, fmt.Errorf("configuring child transaction token exchange: %w", err)
 	}
 	return ttsConfig, ttsConfig.Enabled(), nil
+}
+
+func childTransactionTokenExchangeConfigForParent(parentTask *corev1alpha1.Task) (contexttoken.TTSConfig, bool, error) {
+	ttsConfig, enabled, err := childTransactionTokenExchangeConfig()
+	if err != nil {
+		return contexttoken.TTSConfig{}, false, err
+	}
+	if !enabled || parentTask == nil || parentTask.Spec.Transaction == nil {
+		return ttsConfig, false, nil
+	}
+	return ttsConfig, true, nil
+}
+
+func shouldPrepareChildTransactionToken(parentTask *corev1alpha1.Task) (bool, error) {
+	_, enabled, err := childTransactionTokenExchangeConfigForParent(parentTask)
+	return enabled, err
 }
 
 func childTransactionSubjectToken(tokenSource string) (string, error) {

@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -425,7 +426,23 @@ func TestDelegateTaskTool_Execute_WithTTSChildToken(t *testing.T) {
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
 
-	k8sClient := newFakeClient(parentTask(), researcherAgent())
+	var patchCalled atomic.Bool
+	k8sClient := newFakeClientWithInterceptorFuncs(interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			data, err := patch.Data(obj)
+			if err != nil {
+				t.Fatalf("patch.Data() error = %v", err)
+			}
+			patchCalled.Store(true)
+			if bytes.Contains(data, []byte(`"spec"`)) || bytes.Contains(data, []byte(`"transaction"`)) {
+				t.Fatalf("child token metadata patch unexpectedly includes spec/transaction: %s", data)
+			}
+			if !bytes.Contains(data, []byte(labels.AnnotationTransactionTokenPending)) {
+				t.Fatalf("child token metadata patch %s does not include pending annotation", data)
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	}, parentTask(), researcherAgent())
 	tool := NewDelegateTaskTool(k8sClient)
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"researcher","prompt":"Research with token"}`))
 	if err != nil {
@@ -438,6 +455,9 @@ func TestDelegateTaskTool_Execute_WithTTSChildToken(t *testing.T) {
 	}
 	if delegateResult.TaskName == "" {
 		t.Fatal("Execute() returned empty task name")
+	}
+	if !patchCalled.Load() {
+		t.Fatal("expected child token metadata patch to be called")
 	}
 	if requestDetails["operation"] != "delegateTask" || requestDetails["agent"] != testResearcherAgentName || requestDetails["txn"] != parentTransactionID {
 		t.Fatalf("request_details = %#v", requestDetails)
@@ -484,7 +504,7 @@ func TestDelegateTaskTool_Execute_WithTTSChildToken(t *testing.T) {
 	}
 }
 
-func TestDelegateTaskTool_Execute_DoesNotExchangeChildTokenWhenTaskCreateFails(t *testing.T) {
+func TestDelegateTaskTool_Execute_CleansUpPreparedChildTokenWhenTaskCreateFails(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 	t.Setenv(envOrkaCoordinationDepth, "0")
@@ -498,7 +518,12 @@ func TestDelegateTaskTool_Execute_DoesNotExchangeChildTokenWhenTaskCreateFails(t
 	var ttsCalled atomic.Bool
 	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ttsCalled.Store(true)
-		http.Error(w, "unexpected child token exchange", http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"access_token":      "child-token",
+			"issued_token_type": "urn:ietf:params:oauth:token-type:txn_token",
+			"token_type":        "N_A",
+		})
 	}))
 	defer ttsServer.Close()
 
@@ -530,11 +555,65 @@ func TestDelegateTaskTool_Execute_DoesNotExchangeChildTokenWhenTaskCreateFails(t
 	if err == nil || !strings.Contains(err.Error(), "failed to create child task") || !apierrors.IsAlreadyExists(err) {
 		t.Fatalf("Execute() error = %v, want child task AlreadyExists", err)
 	}
-	if ttsCalled.Load() {
-		t.Fatal("child token exchange was attempted before child task create succeeded")
+	if !ttsCalled.Load() {
+		t.Fatal("child token exchange was not attempted before child task create")
 	}
-	if secretCreateCalled.Load() {
-		t.Fatal("child token secret was created before child task create succeeded")
+	if !secretCreateCalled.Load() {
+		t.Fatal("child token secret was not prepared before child task create")
+	}
+
+	secrets := &corev1.SecretList{}
+	if err := k8sClient.List(context.Background(), secrets, client.InNamespace(defaultNamespace)); err != nil {
+		t.Fatalf("list secrets: %v", err)
+	}
+	if len(secrets.Items) != 0 {
+		t.Fatalf("expected prepared child token secret to be cleaned up, got %d secrets", len(secrets.Items))
+	}
+}
+
+func TestDelegateTaskTool_Execute_DoesNotExchangeChildTokenForNonTransactionalParent(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testResearcherAgentName)
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("TTS should not be called for non-transactional parent task")
+	}))
+	defer ttsServer.Close()
+
+	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
+	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
+
+	parent := parentTask()
+	parent.Spec.Transaction = nil
+	k8sClient := newFakeClient(parent, researcherAgent())
+	tool := NewDelegateTaskTool(k8sClient)
+
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"agent":"researcher","prompt":"Research without token"}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var delegateResult DelegateTaskResult
+	if err := json.Unmarshal([]byte(result), &delegateResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if delegateResult.TaskName == "" {
+		t.Fatal("Execute() returned empty task name")
+	}
+
+	childTask := &corev1alpha1.Task{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{Name: delegateResult.TaskName, Namespace: defaultNamespace}, childTask); err != nil {
+		t.Fatalf("failed to get child task: %v", err)
+	}
+	if _, ok := childTask.Annotations[labels.AnnotationTransactionTokenSecret]; ok {
+		t.Fatalf("unexpected child transaction token secret annotation: %#v", childTask.Annotations)
+	}
+	if _, ok := childTask.Annotations[labels.AnnotationTransactionTokenPending]; ok {
+		t.Fatalf("unexpected child transaction token pending annotation: %#v", childTask.Annotations)
 	}
 
 	secrets := &corev1.SecretList{}

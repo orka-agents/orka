@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"slices"
+	"sort"
 	"strconv"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -34,6 +35,13 @@ var safeTransactionContextKeys = []string{
 }
 
 const maxSafeTransactionContextValueLength = 1024
+
+var setValuedContextDigestKeys = map[string]struct{}{
+	"allowedAgents":    {},
+	"allowedModels":    {},
+	"allowedProviders": {},
+	"allowedTools":     {},
+}
 
 func stampTaskRequesterFromUserInfo(task *corev1alpha1.Task, ui *UserInfo) {
 	if task == nil || ui == nil || (ui.AuthType != AuthTypeOIDC && ui.AuthType != AuthTypeContextToken) {
@@ -79,12 +87,55 @@ func digestMap(value map[string]any) string {
 	if len(value) == 0 {
 		return ""
 	}
-	encoded, err := json.Marshal(value)
+	encoded, err := json.Marshal(canonicalizeContextDigestValue("", value))
 	if err != nil {
 		return ""
 	}
 	sum := sha256.Sum256(encoded)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func canonicalizeContextDigestValue(key string, value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for childKey, childValue := range v {
+			out[childKey] = canonicalizeContextDigestValue(childKey, childValue)
+		}
+		return out
+	case []any:
+		return canonicalizeContextDigestList(key, v)
+	case []string:
+		out := make([]any, 0, len(v))
+		for _, item := range v {
+			out = append(out, item)
+		}
+		return canonicalizeContextDigestList(key, out)
+	default:
+		return value
+	}
+}
+
+func canonicalizeContextDigestList(key string, values []any) []any {
+	out := make([]any, 0, len(values))
+	for _, value := range values {
+		out = append(out, canonicalizeContextDigestValue(key, value))
+	}
+	if _, ok := setValuedContextDigestKeys[key]; !ok {
+		return out
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return contextDigestSortKey(out[i]) < contextDigestSortKey(out[j])
+	})
+	return out
+}
+
+func contextDigestSortKey(value any) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
 }
 
 func safeTransactionContext(value map[string]any) map[string]string {

@@ -57,6 +57,7 @@ rules:
   - list
   - watch
   - create
+  - patch
   - delete
 # Broad read-only access to common cluster resources
 - apiGroups:

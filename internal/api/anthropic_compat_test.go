@@ -980,12 +980,19 @@ func TestAnthropicCompat_ContextTokenAuthorizationFiltersListModels(t *testing.T
 type mockAnthropicProvider struct {
 	responses []*llm.CompletionResponse
 	errors    []error
+	requests  []*llm.CompletionRequest
 	callIdx   int
 }
 
-func (m *mockAnthropicProvider) Complete(_ context.Context, _ *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+func (m *mockAnthropicProvider) Complete(_ context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	if m.callIdx >= len(m.responses) {
 		return nil, fmt.Errorf("unexpected call %d", m.callIdx)
+	}
+	if req != nil {
+		reqCopy := *req
+		reqCopy.Messages = append([]llm.Message(nil), req.Messages...)
+		reqCopy.Tools = append([]llm.Tool(nil), req.Tools...)
+		m.requests = append(m.requests, &reqCopy)
 	}
 	idx := m.callIdx
 	m.callIdx++
@@ -1255,6 +1262,57 @@ func TestRunNonStreamingToolLoop_ToolExecutionError(t *testing.T) {
 	}
 	if mock.callIdx != 2 {
 		t.Errorf("expected 2 LLM calls, got %d", mock.callIdx)
+	}
+}
+
+func TestRunNonStreamingToolLoop_RejectsToolNotExposedInRequest(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		responses: []*llm.CompletionResponse{
+			{
+				StopReason: oaiStopReasonToolUse,
+				ToolCalls:  []llm.ToolCall{{ID: "tc_1", Name: "disallowed_tool", Arguments: json.RawMessage(`{}`)}},
+			},
+			{Content: "done", StopReason: "end_turn"},
+		},
+	}
+	req := &llm.CompletionRequest{
+		Model:    "test-model",
+		Messages: []llm.Message{{Role: "user", Content: "Use a disallowed tool"}},
+		Tools:    []llm.Tool{{Name: "allowed_tool"}},
+	}
+
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Content != "done" {
+		t.Fatalf("content = %q, want final response", resp.Content)
+	}
+	if len(mock.requests) < 2 {
+		t.Fatalf("expected at least 2 LLM calls, got %d", len(mock.requests))
+	}
+
+	var toolResult string
+	for _, msg := range mock.requests[1].Messages {
+		if msg.Role == "tool" && msg.ToolCallID == "tc_1" {
+			toolResult = msg.Content
+			break
+		}
+	}
+	if toolResult == "" {
+		t.Fatal("expected disallowed tool result to be added to next request")
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(toolResult), &parsed); err != nil {
+		t.Fatalf("tool result is not valid JSON: %v", err)
+	}
+	if parsed["success"] != false {
+		t.Fatalf("expected success=false, got %v", parsed["success"])
+	}
+	errMsg, ok := parsed["error"].(string)
+	if !ok || !strings.Contains(errMsg, `tool "disallowed_tool" is not available in this request`) {
+		t.Fatalf("expected unavailable tool error, got %v", parsed["error"])
 	}
 }
 

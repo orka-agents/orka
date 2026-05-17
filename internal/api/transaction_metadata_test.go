@@ -11,6 +11,40 @@ import (
 	"testing"
 )
 
+func TestDigestMapNormalizesSetValuedContextClaimOrder(t *testing.T) {
+	first := map[string]any{
+		"allowedProviders": []any{"openai", "anthropic"},
+		"allowedTools":     []string{"web_search", "file_read"},
+		"nested": map[string]any{
+			"allowedModels": []any{"gpt-5.4", "claude-sonnet-4"},
+		},
+	}
+	second := map[string]any{
+		"nested": map[string]any{
+			"allowedModels": []any{"claude-sonnet-4", "gpt-5.4"},
+		},
+		"allowedTools":     []string{"file_read", "web_search"},
+		"allowedProviders": []any{"anthropic", "openai"},
+	}
+
+	firstDigest := digestMap(first)
+	secondDigest := digestMap(second)
+	if firstDigest == "" {
+		t.Fatalf("digestMap returned empty digest")
+	}
+	if firstDigest != secondDigest {
+		t.Fatalf("digestMap produced different digests for reordered set-valued claims: %q != %q", firstDigest, secondDigest)
+	}
+}
+
+func TestDigestMapPreservesOrderForNonSetLists(t *testing.T) {
+	first := digestMap(map[string]any{"sequence": []any{"first", "second"}})
+	second := digestMap(map[string]any{"sequence": []any{"second", "first"}})
+	if first == second {
+		t.Fatalf("digestMap treated non-set list order as interchangeable: %q", first)
+	}
+}
+
 func TestSafeTransactionContextOmitsLongAllowlistedValues(t *testing.T) {
 	ctx := map[string]any{
 		"purpose":  strings.Repeat("x", maxSafeTransactionContextValueLength+1),

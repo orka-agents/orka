@@ -488,6 +488,46 @@ func TestPrepareChildTransactionTokenDisabledWithoutTTSURL(t *testing.T) {
 	}
 }
 
+func TestPrepareChildTransactionTokenDisabledForNonTransactionalParent(t *testing.T) {
+	var called atomic.Bool
+	ttsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called.Store(true)
+		http.Error(w, "unexpected TTS call", http.StatusInternalServerError)
+	}))
+	defer ttsServer.Close()
+
+	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
+	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
+
+	parent := parentTask()
+	parent.Spec.Transaction = nil
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "child-task",
+			Namespace: defaultNamespace,
+		},
+	}
+	k8sClient := newFakeClient()
+
+	if err := prepareChildTransactionToken(context.Background(), k8sClient, parent, child, "delegateTask", testResearcherAgentName); err != nil {
+		t.Fatalf("prepareChildTransactionToken() error = %v", err)
+	}
+	if called.Load() {
+		t.Fatal("TTS was called for non-transactional parent task")
+	}
+	if child.Annotations[labels.AnnotationTransactionTokenSecret] != "" {
+		t.Fatalf("unexpected child transaction token secret annotation: %#v", child.Annotations)
+	}
+	secrets := &corev1.SecretList{}
+	if err := k8sClient.List(context.Background(), secrets, client.InNamespace(defaultNamespace)); err != nil {
+		t.Fatalf("failed to list secrets: %v", err)
+	}
+	if len(secrets.Items) != 0 {
+		t.Fatalf("unexpected child transaction token secrets: %#v", secrets.Items)
+	}
+}
+
 func TestChildTransactionTokenSecretNameExtremeParentNames(t *testing.T) {
 	tests := []struct {
 		name       string

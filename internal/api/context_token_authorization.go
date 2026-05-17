@@ -661,6 +661,17 @@ func completionToolNames(tools []llm.Tool) []string {
 	return names
 }
 
+func completionToolNameSet(tools []llm.Tool) map[string]struct{} {
+	names := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Name)
+		if name != "" {
+			names[name] = struct{}{}
+		}
+	}
+	return names
+}
+
 func openAIContextTokenAuthorizationError(c fiber.Ctx, err error) error {
 	if err == nil {
 		return nil
