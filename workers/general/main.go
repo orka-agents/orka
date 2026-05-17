@@ -17,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/sozercan/orka/internal/workerenv"
+
 	"github.com/sozercan/orka/workers/common"
 )
 
@@ -47,7 +49,7 @@ func run() error {
 	if len(os.Args) > 1 {
 		command = os.Args[1:]
 	} else {
-		cmdStr := os.Getenv("ORKA_COMMAND")
+		cmdStr := os.Getenv(workerenv.Command)
 		if cmdStr == "" {
 			return fmt.Errorf("no command specified")
 		}
@@ -95,7 +97,7 @@ func run() error {
 }
 
 func prepareWorkspaceIfConfigured(ctx context.Context) (string, error) {
-	if os.Getenv("ORKA_GIT_REPO") == "" {
+	if os.Getenv(workerenv.GitRepo) == "" {
 		return "", nil
 	}
 	if _, err := os.Stat(filepath.Join(workspaceDir, ".git")); err == nil {
@@ -131,14 +133,14 @@ func prepareWorkspace(ctx context.Context) error {
 }
 
 func workspaceRoot() string {
-	if subPath := os.Getenv("ORKA_WORKSPACE_SUBPATH"); subPath != "" {
+	if subPath := os.Getenv(workerenv.WorkspaceSubpath); subPath != "" {
 		return filepath.Join(workspaceDir, subPath)
 	}
 	return workspaceDir
 }
 
 func submitResult(workDir, output string) error {
-	if os.Getenv("ORKA_RESULT_ENDPOINT") == "" && os.Getenv("ORKA_CONTROLLER_URL") == "" {
+	if os.Getenv(workerenv.ResultEndpoint) == "" && os.Getenv(workerenv.ControllerURL) == "" {
 		return nil
 	}
 	resultDir := ""

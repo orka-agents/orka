@@ -9,13 +9,13 @@ metadata:
 rules:
   # Custom Resource permissions
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks", "tools", "agents", "providers", "repositoryscans", "skills"]
+    resources: ["tasks", "tools", "agents", "providers", "skills", "repositoryscans"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/status", "tools/status", "agents/status", "providers/status", "repositoryscans/status", "skills/status"]
+    resources: ["tasks/status", "tools/status", "agents/status", "providers/status", "skills/status", "repositoryscans/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "providers/finalizers", "repositoryscans/finalizers", "skills/finalizers"]
+    resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "providers/finalizers", "skills/finalizers", "repositoryscans/finalizers"]
     verbs: ["update"]
 
   # Job permissions

@@ -2,7 +2,21 @@ name: Tests
 
 on:
   push:
+    paths-ignore:
+      - ".codex/**"
+      - ".claude/**"
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
+    paths-ignore:
+      - ".codex/**"
+      - ".claude/**"
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
 
 jobs:
   test:

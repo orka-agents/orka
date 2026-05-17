@@ -21,6 +21,7 @@ import (
 	"github.com/sozercan/orka/internal/security"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tools"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 type CreateRepositoryScanRequest struct {
@@ -280,7 +281,7 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, scan *corev1alph
 			Timeout:  &timeout,
 			Priority: &priority,
 			Env: []corev1.EnvVar{
-				{Name: "ORKA_REQUIRE_PUSH_BRANCH", Value: "true"},
+				{Name: workerenv.RequirePushBranch, Value: "true"},
 			},
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
@@ -731,7 +732,7 @@ func (h *Handlers) ListSecurityPatchProposals(c fiber.Ctx) error {
 }
 
 func extractGitToken(secret *corev1.Secret) string {
-	for _, key := range []string{"token", "password", "GITHUB_TOKEN"} {
+	for _, key := range []string{"token", "password", workerenv.GitHubToken} {
 		if value, ok := secret.Data[key]; ok {
 			token := strings.TrimSpace(string(value))
 			if token != "" {

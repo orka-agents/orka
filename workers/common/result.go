@@ -15,6 +15,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
@@ -59,29 +61,29 @@ func SubmitResult(result []byte) error {
 
 func resultEndpoint() (string, error) {
 	// Prefer explicit endpoint
-	if ep := os.Getenv("ORKA_RESULT_ENDPOINT"); ep != "" {
+	if ep := os.Getenv(workerenv.ResultEndpoint); ep != "" {
 		return ep, nil
 	}
 
 	// Construct from controller URL + task identity
-	controllerURL := os.Getenv("ORKA_CONTROLLER_URL")
+	controllerURL := os.Getenv(workerenv.ControllerURL)
 	if controllerURL == "" {
-		return "", fmt.Errorf("ORKA_RESULT_ENDPOINT or ORKA_CONTROLLER_URL must be set")
+		return "", fmt.Errorf("%s or %s must be set", workerenv.ResultEndpoint, workerenv.ControllerURL)
 	}
 
-	namespace := os.Getenv("ORKA_TASK_NAMESPACE")
+	namespace := os.Getenv(workerenv.TaskNamespace)
 	if namespace == "" {
 		// Fall back to downward API namespace file
 		data, err := os.ReadFile(saNamespacePath)
 		if err != nil {
-			return "", fmt.Errorf("ORKA_TASK_NAMESPACE not set and cannot read namespace from SA: %w", err)
+			return "", fmt.Errorf("%s not set and cannot read namespace from SA: %w", workerenv.TaskNamespace, err)
 		}
 		namespace = strings.TrimSpace(string(data))
 	}
 
-	taskName := os.Getenv("ORKA_TASK_NAME")
+	taskName := os.Getenv(workerenv.TaskName)
 	if taskName == "" {
-		return "", fmt.Errorf("ORKA_TASK_NAME must be set")
+		return "", fmt.Errorf("%s must be set", workerenv.TaskName)
 	}
 
 	controllerURL = strings.TrimRight(controllerURL, "/")

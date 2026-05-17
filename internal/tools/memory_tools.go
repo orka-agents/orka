@@ -17,6 +17,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const internalMemoryToolBodyLimit = 1 << 20 // 1MB
@@ -138,7 +140,8 @@ func (t *ProposeMemoryTool) Name() string { return "propose_memory" }
 // Description returns the tool description.
 func (t *ProposeMemoryTool) Description() string {
 	return "Propose durable memory or reusable skill changes for coordinator review. " +
-		"Use this when you discover information that should persist beyond the current task but should be reviewed before becoming shared memory."
+		"Use this when you discover information that should persist beyond the current task but should be reviewed before becoming shared memory. " +
+		"Memory proposal descriptions may include an optional `Tags: tag-a, tag-b` line to suggest durable memory tags."
 }
 
 // Parameters returns the JSON Schema for the tool parameters.
@@ -160,7 +163,7 @@ func (t *ProposeMemoryTool) Parameters() json.RawMessage {
 			},
 			"description": {
 				"type": "string",
-				"description": "Why this should be remembered or changed"
+				"description": "Why this should be remembered or changed; memory proposals may include an optional Tags: tag-a, tag-b line"
 			},
 			"content": {
 				"type": "string",
@@ -547,14 +550,14 @@ type internalControllerConfig struct {
 
 func loadInternalControllerConfig() (internalControllerConfig, error) {
 	cfg := internalControllerConfig{
-		ControllerURL: strings.TrimRight(strings.TrimSpace(os.Getenv("ORKA_CONTROLLER_URL")), "/"),
-		Namespace:     strings.TrimSpace(os.Getenv("ORKA_TASK_NAMESPACE")),
-		TaskName:      strings.TrimSpace(os.Getenv("ORKA_TASK_NAME")),
-		AgentName:     strings.TrimSpace(os.Getenv("ORKA_AGENT_NAME")),
-		Token:         strings.TrimSpace(os.Getenv("ORKA_SA_TOKEN")),
+		ControllerURL: strings.TrimRight(strings.TrimSpace(os.Getenv(workerenv.ControllerURL)), "/"),
+		Namespace:     strings.TrimSpace(os.Getenv(workerenv.TaskNamespace)),
+		TaskName:      strings.TrimSpace(os.Getenv(workerenv.TaskName)),
+		AgentName:     strings.TrimSpace(os.Getenv(workerenv.AgentName)),
+		Token:         strings.TrimSpace(os.Getenv(workerenv.ServiceAccountToken)),
 	}
 	if cfg.ControllerURL == "" || cfg.Namespace == "" || cfg.TaskName == "" {
-		return cfg, fmt.Errorf("ORKA_CONTROLLER_URL, ORKA_TASK_NAME, and ORKA_TASK_NAMESPACE are required")
+		return cfg, fmt.Errorf("%s, %s, and %s are required", workerenv.ControllerURL, workerenv.TaskName, workerenv.TaskNamespace)
 	}
 	if cfg.Token == "" {
 		if data, err := os.ReadFile(saTokenPath); err == nil {

@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 // UpdatePlanTool allows the LLM to update the autonomous plan state.
@@ -85,7 +87,7 @@ func (t *UpdatePlanTool) Execute(ctx context.Context, args json.RawMessage) (str
 	controllerURL := os.Getenv(envOrkaControllerURL)
 	taskName := os.Getenv(envOrkaTaskName)
 	taskNamespace := os.Getenv(envOrkaTaskNamespace)
-	saToken := os.Getenv("ORKA_SA_TOKEN")
+	saToken := os.Getenv(workerenv.ServiceAccountToken)
 
 	if controllerURL == "" || taskName == "" || taskNamespace == "" {
 		return "", errors.New(missingControllerTaskEnvMessage)

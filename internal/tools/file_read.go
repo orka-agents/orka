@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 // FileReadTool implements file reading functionality
@@ -41,7 +43,7 @@ type FileReadResult struct {
 
 // NewFileReadTool creates a new file read tool
 func NewFileReadTool() *FileReadTool {
-	workDir := os.Getenv("ORKA_WORK_DIR")
+	workDir := os.Getenv(workerenv.WorkDir)
 	if workDir == "" {
 		workDir = defaultWorkspacePath
 	}

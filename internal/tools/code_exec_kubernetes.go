@@ -20,6 +20,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sozercan/orka/internal/workerenv"
+
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -51,18 +53,18 @@ const (
 	codeExecKubernetesCodeMountPath  = "/orka-code"
 	codeExecKubernetesCodePath       = codeExecKubernetesCodeMountPath + "/code"
 
-	codeExecKubernetesImageEnv       = "ORKA_CODE_EXEC_K8S_IMAGE"
-	codeExecKubernetesPythonImageEnv = "ORKA_CODE_EXEC_K8S_PYTHON_IMAGE"
-	codeExecKubernetesNodeImageEnv   = "ORKA_CODE_EXEC_K8S_NODE_IMAGE"
-	codeExecKubernetesBashImageEnv   = "ORKA_CODE_EXEC_K8S_BASH_IMAGE"
+	codeExecKubernetesImageEnv       = workerenv.CodeExecKubernetesImage
+	codeExecKubernetesPythonImageEnv = workerenv.CodeExecKubernetesPythonImage
+	codeExecKubernetesNodeImageEnv   = workerenv.CodeExecKubernetesNodeImage
+	codeExecKubernetesBashImageEnv   = workerenv.CodeExecKubernetesBashImage
 
-	codeExecKubernetesCPURequestEnv       = "ORKA_CODE_EXEC_K8S_CPU_REQUEST"
-	codeExecKubernetesCPULimitEnv         = "ORKA_CODE_EXEC_K8S_CPU_LIMIT"
-	codeExecKubernetesMemoryRequestEnv    = "ORKA_CODE_EXEC_K8S_MEMORY_REQUEST"
-	codeExecKubernetesMemoryLimitEnv      = "ORKA_CODE_EXEC_K8S_MEMORY_LIMIT"
-	codeExecKubernetesNetworkPolicyEnv    = "ORKA_CODE_EXEC_K8S_NETWORK_POLICY"
-	codeExecKubernetesRuntimeClassNameEnv = "ORKA_CODE_EXEC_K8S_RUNTIME_CLASS_NAME"
-	codeExecKubernetesAppArmorProfileEnv  = "ORKA_CODE_EXEC_K8S_APPARMOR_PROFILE"
+	codeExecKubernetesCPURequestEnv       = workerenv.CodeExecKubernetesCPURequest
+	codeExecKubernetesCPULimitEnv         = workerenv.CodeExecKubernetesCPULimit
+	codeExecKubernetesMemoryRequestEnv    = workerenv.CodeExecKubernetesMemoryRequest
+	codeExecKubernetesMemoryLimitEnv      = workerenv.CodeExecKubernetesMemoryLimit
+	codeExecKubernetesNetworkPolicyEnv    = workerenv.CodeExecKubernetesNetworkPolicy
+	codeExecKubernetesRuntimeClassNameEnv = workerenv.CodeExecKubernetesRuntimeClass
+	codeExecKubernetesAppArmorProfileEnv  = workerenv.CodeExecKubernetesAppArmor
 
 	// Keep completed Jobs long enough for the executor to observe status and stream logs.
 	// The executor still deletes all resources after each run; this TTL is only a
@@ -1186,7 +1188,7 @@ func codeExecQuantityForScope(envName, provider, tenant, fallback string) (resou
 }
 
 func defaultCodeExecNamespace() string {
-	for _, envName := range []string{"POD_NAMESPACE", "ORKA_NAMESPACE", "NAMESPACE"} {
+	for _, envName := range []string{workerenv.PodNamespace, workerenv.OrkaNamespace, workerenv.Namespace} {
 		if namespace := strings.TrimSpace(os.Getenv(envName)); namespace != "" {
 			return namespace
 		}

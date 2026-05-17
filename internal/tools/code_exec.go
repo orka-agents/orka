@@ -21,13 +21,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sozercan/orka/internal/workerenv"
+
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
 	codeExecToolName = "code_exec"
 
-	codeExecBackendEnv        = "ORKA_CODE_EXEC_BACKEND"
+	codeExecBackendEnv        = workerenv.CodeExecBackend
 	codeExecBackendInProcess  = "in-process"
 	codeExecBackendKubernetes = "kubernetes"
 
@@ -35,9 +37,9 @@ const (
 	maxCodeExecTimeoutSeconds       = 60
 	defaultCodeExecOutputLimitBytes = 64 * 1024
 
-	codeExecLocalCPUSecondsEnv   = "ORKA_CODE_EXEC_LOCAL_CPU_SECONDS"
-	codeExecLocalMemoryKBEnv     = "ORKA_CODE_EXEC_LOCAL_MEMORY_KB"
-	codeExecLocalMaxProcessesEnv = "ORKA_CODE_EXEC_LOCAL_MAX_PROCESSES"
+	codeExecLocalCPUSecondsEnv   = workerenv.CodeExecLocalCPUSeconds
+	codeExecLocalMemoryKBEnv     = workerenv.CodeExecLocalMemoryKB
+	codeExecLocalMaxProcessesEnv = workerenv.CodeExecLocalMaxProcesses
 
 	defaultCodeExecLocalCPUSeconds   = int64(maxCodeExecTimeoutSeconds)
 	defaultCodeExecLocalMemoryKB     = int64(4 * 1024 * 1024)
@@ -161,7 +163,7 @@ var _ SandboxClient = (*unsupportedCodeExecutor)(nil)
 
 // NewCodeExecTool creates a new code execution tool.
 func NewCodeExecTool() *CodeExecTool {
-	workDir := os.Getenv("ORKA_WORK_DIR")
+	workDir := os.Getenv(workerenv.WorkDir)
 	if workDir == "" {
 		workDir = "/tmp/orka-exec"
 	}
