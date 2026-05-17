@@ -1391,8 +1391,9 @@ const (
 	maxWorkerClusterRoleBindingNameLength = 253
 	workerClusterRoleBindingHashLength    = 10
 
-	managedByLabelKey   = "app.kubernetes.io/managed-by"
-	managedByLabelValue = "orka"
+	managedByLabelKey     = "app.kubernetes.io/managed-by"
+	managedByLabelValue   = "orka"
+	orkaManagedByLabelKey = "orka.ai/managed-by"
 )
 
 type workerRBACSpec struct {
@@ -1474,7 +1475,7 @@ func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespa
 				Name:      name,
 				Namespace: namespace,
 				Labels: map[string]string{
-					managedByLabelKey: managedByLabelValue,
+					orkaManagedByLabelKey: managedByLabelValue,
 				},
 			},
 		}
@@ -1496,8 +1497,8 @@ func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespa
 	if sa.Labels == nil {
 		sa.Labels = map[string]string{}
 	}
-	if sa.Labels[managedByLabelKey] != managedByLabelValue {
-		sa.Labels[managedByLabelKey] = managedByLabelValue
+	if sa.Labels[orkaManagedByLabelKey] != managedByLabelValue {
+		sa.Labels[orkaManagedByLabelKey] = managedByLabelValue
 		if err := r.Update(ctx, sa); err != nil {
 			return fmt.Errorf("updating worker ServiceAccount %s/%s labels: %w", namespace, name, err)
 		}

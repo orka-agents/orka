@@ -1183,16 +1183,18 @@ func TestEnsureWorkerRBAC_Idempotent(t *testing.T) {
 	}
 }
 
-func TestEnsureWorkerServiceAccountReconcilesManagedByLabel(t *testing.T) {
+func TestEnsureWorkerServiceAccountPreservesAppManagedByLabel(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
 	namespace := testNS
+	appManagedBy := "Helm"
 	existing := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      AIWorkerServiceAccount,
 			Namespace: namespace,
 			Labels: map[string]string{
-				"custom": "keep",
+				managedByLabelKey: appManagedBy,
+				"custom":          "keep",
 			},
 		},
 	}
@@ -1206,8 +1208,11 @@ func TestEnsureWorkerServiceAccountReconcilesManagedByLabel(t *testing.T) {
 	if err := r.Get(ctx, types.NamespacedName{Name: AIWorkerServiceAccount, Namespace: namespace}, got); err != nil {
 		t.Fatalf("getting ServiceAccount: %v", err)
 	}
-	if got.Labels[managedByLabelKey] != managedByLabelValue {
-		t.Fatalf("expected managed-by label to be reconciled, got labels %#v", got.Labels)
+	if got.Labels[managedByLabelKey] != appManagedBy {
+		t.Fatalf("expected app managed-by label to be preserved, got labels %#v", got.Labels)
+	}
+	if got.Labels[orkaManagedByLabelKey] != managedByLabelValue {
+		t.Fatalf("expected Orka managed-by label to be reconciled, got labels %#v", got.Labels)
 	}
 	if got.Labels["custom"] != "keep" {
 		t.Fatalf("expected existing labels to be preserved, got labels %#v", got.Labels)
