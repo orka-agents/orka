@@ -52,12 +52,22 @@ rules:
   - ""
   resources:
   - secrets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - serviceaccounts
   verbs:
   - create
   - delete
   - get
   - list
+  - update
   - watch
 - apiGroups:
   - apps
@@ -189,6 +199,7 @@ rules:
   - delete
   - get
   - list
+  - update
   - watch
 - apiGroups:
   - rbac.authorization.k8s.io

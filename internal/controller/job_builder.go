@@ -52,14 +52,14 @@ const (
 	// DefaultInitImage is the default image for init containers
 	DefaultInitImage = "busybox:1.37"
 
-	// AIWorkerServiceAccountName is the ServiceAccount for AI worker tasks.
-	AIWorkerServiceAccountName = "orka-ai-worker"
+	// AIWorkerServiceAccount is the ServiceAccount used by trusted AI task workers.
+	AIWorkerServiceAccount = "orka-ai-worker"
 
-	// VendorWorkerServiceAccountName is the ServiceAccount for vendor CLI agent worker tasks.
-	VendorWorkerServiceAccountName = "orka-vendor-worker"
+	// VendorWorkerServiceAccount is the ServiceAccount used by untrusted vendor/agent task workers.
+	VendorWorkerServiceAccount = "orka-vendor-worker"
 
-	// ContainerWorkerServiceAccountName is the ServiceAccount for container worker tasks.
-	ContainerWorkerServiceAccountName = "orka-container-worker"
+	// ContainerWorkerServiceAccount is the ServiceAccount used by untrusted container task workers.
+	ContainerWorkerServiceAccount = "orka-container-worker"
 
 	// directProviderSecretsEnvVar restores legacy direct provider API key/base URL injection for untrusted container pods.
 	directProviderSecretsEnvVar = "ORKA_AGENT_DIRECT_PROVIDER_SECRETS"
@@ -116,24 +116,25 @@ func NewJobBuilder(c client.Client) *JobBuilder {
 	}
 }
 
-func workerServiceAccountNameForTask(task *corev1alpha1.Task, agent *corev1alpha1.Agent) string {
+func workerServiceAccountForTask(task *corev1alpha1.Task, _ *corev1alpha1.Agent) string {
 	if task == nil {
-		return ContainerWorkerServiceAccountName
+		return ContainerWorkerServiceAccount
 	}
 
 	switch task.Spec.Type {
 	case corev1alpha1.TaskTypeAI:
-		return AIWorkerServiceAccountName
+		return AIWorkerServiceAccount
 	case corev1alpha1.TaskTypeAgent:
-		if isVendorAgentTask(task, agent) {
-			return VendorWorkerServiceAccountName
-		}
-		return ContainerWorkerServiceAccountName
+		return VendorWorkerServiceAccount
 	case corev1alpha1.TaskTypeContainer:
-		return ContainerWorkerServiceAccountName
+		return ContainerWorkerServiceAccount
 	default:
-		return ContainerWorkerServiceAccountName
+		return ContainerWorkerServiceAccount
 	}
+}
+
+func workerAutomountServiceAccountToken(task *corev1alpha1.Task, agent *corev1alpha1.Agent) *bool {
+	return ptr.To(podShouldAutomountServiceAccountToken(task, agent))
 }
 
 func podShouldAutomountServiceAccountToken(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
@@ -162,17 +163,8 @@ func taskUsesOrkaWorkerCallback(task *corev1alpha1.Task) bool {
 	}
 }
 
-func isVendorAgentTask(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
-	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent || agent == nil || agent.Spec.Runtime == nil {
-		return false
-	}
-
-	switch agent.Spec.Runtime.Type {
-	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot:
-		return true
-	default:
-		return false
-	}
+func isVendorAgentTask(task *corev1alpha1.Task, _ *corev1alpha1.Agent) bool {
+	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAgent
 }
 
 func isUntrustedComputeTask(task *corev1alpha1.Task, _ *corev1alpha1.Agent) bool {
@@ -291,8 +283,8 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:                corev1.RestartPolicyNever,
-					ServiceAccountName:           workerServiceAccountNameForTask(task, agent),
-					AutomountServiceAccountToken: ptr.To(podShouldAutomountServiceAccountToken(task, agent)),
+					ServiceAccountName:           workerServiceAccountForTask(task, agent),
+					AutomountServiceAccountToken: workerAutomountServiceAccountToken(task, agent),
 					SecurityContext:              b.buildPodSecurityContext(),
 					Containers: []corev1.Container{
 						b.buildContainer(ctx, task, agent, provider),

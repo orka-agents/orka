@@ -135,7 +135,7 @@ func TestJobBuilder_Build_ContainerTask(t *testing.T) {
 		t.Fatal("Build() returned nil job")
 	}
 
-	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, ContainerWorkerServiceAccountName)
+	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, ContainerWorkerServiceAccount)
 	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, false)
 
 	// Verify container settings
@@ -171,7 +171,7 @@ func TestJobBuilder_Build_GeneralContainerWorkerAutomountsTokenForCallback(t *te
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, ContainerWorkerServiceAccountName)
+	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, ContainerWorkerServiceAccount)
 	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, true)
 }
 
@@ -198,12 +198,93 @@ func TestJobBuilder_Build_AITask(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, AIWorkerServiceAccountName)
+	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, AIWorkerServiceAccount)
 	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, true)
 
 	container := job.Spec.Template.Spec.Containers[0]
 	if container.Image != DefaultAIWorkerImage {
 		t.Errorf("Image = %s, want %s", container.Image, DefaultAIWorkerImage)
+	}
+}
+
+func TestJobBuilder_Build_WorkerServiceAccountForTrustLevel(t *testing.T) {
+	trueValue := true
+	falseValue := false
+	tests := []struct {
+		name          string
+		taskType      corev1alpha1.TaskType
+		image         string
+		wantSA        string
+		wantAutomount *bool
+	}{
+		{
+			name:          "ai task keeps service account token",
+			taskType:      corev1alpha1.TaskTypeAI,
+			wantSA:        AIWorkerServiceAccount,
+			wantAutomount: &trueValue,
+		},
+		{
+			name:          "agent task keeps service account token",
+			taskType:      corev1alpha1.TaskTypeAgent,
+			wantSA:        VendorWorkerServiceAccount,
+			wantAutomount: &trueValue,
+		},
+		{
+			name:          "container task with general worker keeps service account token",
+			taskType:      corev1alpha1.TaskTypeContainer,
+			wantSA:        ContainerWorkerServiceAccount,
+			wantAutomount: &trueValue,
+		},
+		{
+			name:          "container task with custom image uses container service account without token",
+			taskType:      corev1alpha1.TaskTypeContainer,
+			image:         "busybox:latest",
+			wantSA:        ContainerWorkerServiceAccount,
+			wantAutomount: &falseValue,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := setupJobBuilder()
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      strings.ReplaceAll(tt.name, " ", "-"),
+					Namespace: defaultNS,
+					UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:   tt.taskType,
+					Image:  tt.image,
+					Prompt: "test prompt",
+					AI: &corev1alpha1.AISpec{
+						Prompt: "test prompt",
+					},
+				},
+			}
+
+			job, err := builder.Build(context.Background(), task, nil, nil)
+			if err != nil {
+				t.Fatalf("Build() error = %v", err)
+			}
+
+			if got := job.Spec.Template.Spec.ServiceAccountName; got != tt.wantSA {
+				t.Errorf("ServiceAccountName = %s, want %s", got, tt.wantSA)
+			}
+			gotAutomount := job.Spec.Template.Spec.AutomountServiceAccountToken
+			if tt.wantAutomount == nil {
+				if gotAutomount != nil {
+					t.Errorf("AutomountServiceAccountToken = %v, want nil", *gotAutomount)
+				}
+				return
+			}
+			if gotAutomount == nil {
+				t.Fatalf("AutomountServiceAccountToken = nil, want %v", *tt.wantAutomount)
+			}
+			if *gotAutomount != *tt.wantAutomount {
+				t.Errorf("AutomountServiceAccountToken = %v, want %v", *gotAutomount, *tt.wantAutomount)
+			}
+		})
 	}
 }
 
@@ -304,7 +385,7 @@ func TestJobBuilder_Build_AgentTask_WithSessionAutomountsToken(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, ContainerWorkerServiceAccountName)
+	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, VendorWorkerServiceAccount)
 	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, true)
 }
 
@@ -1118,7 +1199,7 @@ func TestJobBuilder_Build_AgentTask_CopilotRuntime(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, VendorWorkerServiceAccountName)
+	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, VendorWorkerServiceAccount)
 	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, true)
 
 	container := job.Spec.Template.Spec.Containers[0]
@@ -1159,7 +1240,7 @@ func TestJobBuilder_Build_AgentTask_ClaudeRuntime(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, VendorWorkerServiceAccountName)
+	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, VendorWorkerServiceAccount)
 	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, true)
 
 	container := job.Spec.Template.Spec.Containers[0]
@@ -1194,7 +1275,7 @@ func TestJobBuilder_Build_AgentTask_CodexRuntime(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, VendorWorkerServiceAccountName)
+	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, VendorWorkerServiceAccount)
 	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, true)
 
 	container := job.Spec.Template.Spec.Containers[0]
@@ -2045,7 +2126,7 @@ func TestJobBuilder_Build_VendorAgentTask_DirectCredentialsPreservedByDefault(t 
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, VendorWorkerServiceAccountName)
+	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, VendorWorkerServiceAccount)
 	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, true)
 
 	container := job.Spec.Template.Spec.Containers[0]
