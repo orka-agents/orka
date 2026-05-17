@@ -61,3 +61,33 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Create release-scoped worker ClusterRole names.
+*/}}
+{{- define "orka.aiWorkerClusterRoleName" -}}
+{{- printf "%s-ai-worker-role" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.vendorWorkerClusterRoleName" -}}
+{{- printf "%s-vendor-worker-role" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.containerWorkerClusterRoleName" -}}
+{{- printf "%s-container-worker-role" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Create release-scoped static worker ClusterRoleBinding names.
+*/}}
+{{- define "orka.aiWorkerClusterRoleBindingName" -}}
+{{- printf "%s-ai-worker-rolebinding" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.vendorWorkerClusterRoleBindingName" -}}
+{{- printf "%s-vendor-worker-rolebinding" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.containerWorkerClusterRoleBindingName" -}}
+{{- printf "%s-container-worker-rolebinding" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
+{{- end }}
