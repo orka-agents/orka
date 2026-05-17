@@ -1028,6 +1028,7 @@ func agentSandboxEnvNames() []string {
 		workerenv.AgentSandboxNamespaceStrategy,
 		workerenv.AgentSandboxClaimTimeoutSeconds,
 		workerenv.AgentSandboxCommandTimeoutSeconds,
+		workerenv.AgentSandboxDepth,
 	}
 }
 
@@ -1118,6 +1119,7 @@ func TestJobBuilder_BuildWithOptions_AgentTask_AddsSandboxWorkspaceEnv(t *testin
 		workerenv.AgentSandboxNamespaceStrategy:     "controller",
 		workerenv.AgentSandboxClaimTimeoutSeconds:   "120",
 		workerenv.AgentSandboxCommandTimeoutSeconds: "1800",
+		workerenv.AgentSandboxDepth:                 "0",
 	}
 	for name, want := range expected {
 		ev, ok := findEnvVar(envVars, name)

@@ -250,6 +250,9 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	defer cancel()
 
 	if sandboxEnv := workerenv.ParseAgentSandboxEnv(os.Getenv); sandboxEnv.Enabled {
+		if depth := agentSandboxDepth(os.Getenv(workerenv.AgentSandboxDepth)); depth > 0 {
+			return fmt.Errorf("agent sandbox recursion detected: %s=%d", workerenv.AgentSandboxDepth, depth)
+		}
 		return runAgentInSandbox(ctx, name, workspaceDir, sandboxEnv)
 	}
 
@@ -545,10 +548,20 @@ func truncateForError(value string, max int) string {
 
 func agentSandboxInnerEnv(environ []string) map[string]string {
 	env := environToMap(environ)
+	depth := agentSandboxDepth(env[workerenv.AgentSandboxDepth])
 	env[workerenv.AgentSandboxEnabled] = "false"
+	env[workerenv.AgentSandboxDepth] = strconv.Itoa(depth + 1)
 	delete(env, workerenv.ServiceAccountToken)
 	delete(env, workerenv.ServiceAccountTokenPath)
 	return env
+}
+
+func agentSandboxDepth(value string) int {
+	depth, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || depth < 0 {
+		return 0
+	}
+	return depth
 }
 
 func environToMap(environ []string) map[string]string {

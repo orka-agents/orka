@@ -566,6 +566,22 @@ func TestRunAgent_AgentSandboxCleanupUsesFreshContextAfterCancellation(t *testin
 	}
 }
 
+func TestRunAgent_AgentSandboxRecursionFailsFast(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "delete")
+	t.Setenv(workerenv.AgentSandboxDepth, "1")
+
+	err := RunAgent("test-agent", "/sandbox/workspace", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		t.Fatal("outer agent executor should not run when agent sandbox recursion is detected")
+		return "", nil
+	})
+	if err == nil {
+		t.Fatal("expected recursion error")
+	}
+	if !strings.Contains(err.Error(), "agent sandbox recursion detected") {
+		t.Fatalf("error = %q, want recursion context", err.Error())
+	}
+}
+
 func TestRunAgent_AgentSandboxDefaultsTemplateNamespaceToTaskNamespace(t *testing.T) {
 	setRequiredAgentSandboxEnv(t, "delete")
 	t.Setenv(workerenv.AgentSandboxTemplateNamespace, "")
@@ -858,6 +874,9 @@ func assertAgentSandboxInnerEnv(t *testing.T, env map[string]string) {
 	t.Helper()
 	if env[workerenv.AgentSandboxEnabled] != "false" {
 		t.Errorf("%s in inner env = %q, want false", workerenv.AgentSandboxEnabled, env[workerenv.AgentSandboxEnabled])
+	}
+	if env[workerenv.AgentSandboxDepth] != "1" {
+		t.Errorf("%s in inner env = %q, want 1", workerenv.AgentSandboxDepth, env[workerenv.AgentSandboxDepth])
 	}
 	if env["SANDBOX_TEST_ENV"] != "outer-value" {
 		t.Errorf("SANDBOX_TEST_ENV in inner env = %q, want outer-value", env["SANDBOX_TEST_ENV"])

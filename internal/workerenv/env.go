@@ -127,6 +127,7 @@ const (
 	AgentSandboxNamespaceStrategy     = "ORKA_AGENT_SANDBOX_NAMESPACE_STRATEGY"
 	AgentSandboxClaimTimeoutSeconds   = "ORKA_AGENT_SANDBOX_CLAIM_TIMEOUT_SECONDS"
 	AgentSandboxCommandTimeoutSeconds = "ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT_SECONDS"
+	AgentSandboxDepth                 = "ORKA_AGENT_SANDBOX_DEPTH"
 
 	// Git config env vars used to mark the prepared workspace as safe.
 	GitConfigCount  = "GIT_CONFIG_COUNT"
@@ -366,6 +367,10 @@ type AgentSandboxEnv struct {
 
 // EnvVars renders the agent sandbox workspace environment.
 func (e AgentSandboxEnv) EnvVars() []corev1.EnvVar {
+	if !e.Enabled {
+		return nil
+	}
+
 	return []corev1.EnvVar{
 		Env(AgentSandboxEnabled, strconv.FormatBool(e.Enabled)),
 		Env(AgentSandboxRouterURL, e.RouterURL),
@@ -378,6 +383,7 @@ func (e AgentSandboxEnv) EnvVars() []corev1.EnvVar {
 		Env(AgentSandboxNamespaceStrategy, e.NamespaceStrategy),
 		Env(AgentSandboxClaimTimeoutSeconds, strconv.FormatInt(int64(e.ClaimTimeout/time.Second), 10)),
 		Env(AgentSandboxCommandTimeoutSeconds, strconv.FormatInt(int64(e.CommandTimeout/time.Second), 10)),
+		Env(AgentSandboxDepth, "0"),
 	}
 }
 
