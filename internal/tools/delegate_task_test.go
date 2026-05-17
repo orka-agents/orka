@@ -28,7 +28,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apitypes "k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -738,7 +737,7 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 			Runtime: &corev1alpha1.AgentCLIRuntime{
 				Type:             runtimeTypeClaude,
 				DefaultMaxTurns:  &maxTurns,
-				DefaultAllowBash: ptr.To(true),
+				DefaultAllowBash: new(true),
 			},
 		},
 	}

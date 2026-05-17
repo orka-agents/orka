@@ -336,7 +336,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", uuid.New().String()[:8]) },
 			TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": "anthropic-proxy"} },
 			AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
-				if err := authorizeContextTokenTaskCreateObject(ctx, h.client, contextToken, h.contextTokenAuthorization, "anthropicToolCreateTask", task); err != nil {
+				if err := authorizeAndStampToolTaskCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "anthropicToolCreateTask", userInfo, task); err != nil {
 					return &tools.ChatToolError{
 						Type:       "authorization_failed",
 						Message:    err.Error(),

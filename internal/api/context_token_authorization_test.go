@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 )
 
 func TestContextTokenTaskCreateFailures(t *testing.T) {
@@ -358,6 +360,48 @@ func TestContextStringSupportsStructuredMaps(t *testing.T) {
 		_, ok = contextString(map[int]string{1: "team-a"}, "namespace")
 		require.False(t, ok)
 	})
+}
+
+func TestAuthorizeAndStampToolTaskCreateStampsContextTokenProvenance(t *testing.T) {
+	cfg := enforceContextTokenAuthorizationConfig()
+	token := &ContextToken{
+		Profile:            ContextTokenProfileKontxt,
+		Issuer:             "https://issuer.example.test",
+		Subject:            testContextTokenSubject,
+		Audience:           []string{"orka"},
+		TransactionID:      testContextTokenTransactionID,
+		Scope:              ContextTokenScopeTaskCreate,
+		Scopes:             []string{ContextTokenScopeTaskCreate},
+		RequestingWorkload: "spiffe://example.test/ns/default/sa/client",
+		TransactionContext: map[string]any{
+			"trace_id": testContextTokenTraceID,
+		},
+		RequesterContext: map[string]any{
+			"user": "alice",
+		},
+	}
+	ui := &UserInfo{
+		AuthType:     AuthTypeContextToken,
+		Subject:      token.Subject,
+		Issuer:       token.Issuer,
+		Roles:        token.Scopes,
+		ContextToken: token,
+	}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeContainer,
+		},
+	}
+
+	err := authorizeAndStampToolTaskCreate(context.Background(), nil, token, cfg, "chatToolCreateTask", ui, task)
+	require.NoError(t, err)
+	require.NotNil(t, task.Spec.RequestedBy)
+	require.Equal(t, testContextTokenSubject, task.Spec.RequestedBy.Subject)
+	require.NotNil(t, task.Spec.Transaction)
+	require.Equal(t, testContextTokenTransactionID, task.Spec.Transaction.ID)
+	require.Equal(t, ContextTokenScopeTaskCreate, task.Spec.Transaction.Scope)
+	require.Equal(t, labels.SelectorValue(testContextTokenTransactionID), task.Labels[labels.LabelTransactionID])
+	require.Equal(t, testContextTokenTransactionID, task.Annotations[labels.AnnotationTransactionID])
 }
 
 func enforceContextTokenAuthorizationConfig() ContextTokenAuthorizationConfig {

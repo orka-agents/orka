@@ -253,6 +253,14 @@ func authorizeContextTokenTaskCreateObject(ctx context.Context, k8sClient client
 	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
+func authorizeAndStampToolTaskCreate(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, ui *UserInfo, task *corev1alpha1.Task) error {
+	if err := authorizeContextTokenTaskCreateObject(ctx, k8sClient, token, cfg, action, task); err != nil {
+		return err
+	}
+	stampTaskRequesterFromUserInfo(task, ui)
+	return nil
+}
+
 func (h *Handlers) authorizeContextTokenLoadedTask(c fiber.Ctx, action string, task *corev1alpha1.Task) error {
 	return h.authorizeContextTokenLoadedTaskWithIdentity(c, action, task, true)
 }

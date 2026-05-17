@@ -157,9 +157,10 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "message is required")
 	}
 
+	userInfo := GetUserInfo(c)
 	var contextToken *ContextToken
-	if ui := GetUserInfo(c); ui != nil {
-		contextToken = ui.ContextToken
+	if userInfo != nil {
+		contextToken = userInfo.ContextToken
 	}
 
 	// Try to acquire semaphore (non-blocking)
@@ -293,7 +294,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor.provider = providerInfo.Name
 	executor.providerType = providerInfo.Type
 	executor.SetTaskCreateAuthorizer(func(ctx context.Context, task *corev1alpha1.Task) error {
-		return authorizeContextTokenTaskCreateObject(ctx, ch.client, contextToken, ch.contextTokenAuthorization, "chatToolCreateTask", task)
+		return authorizeAndStampToolTaskCreate(ctx, ch.client, contextToken, ch.contextTokenAuthorization, "chatToolCreateTask", userInfo, task)
 	})
 
 	// Build tools from the chat registry and restrict execution to the exposed set.

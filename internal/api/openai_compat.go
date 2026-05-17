@@ -311,7 +311,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", generateChatID()) },
 			TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": "openai-proxy"} },
 			AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
-				if err := authorizeContextTokenTaskCreateObject(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolCreateTask", task); err != nil {
+				if err := authorizeAndStampToolTaskCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolCreateTask", userInfo, task); err != nil {
 					return &tools.ChatToolError{
 						Type:       "authorization_failed",
 						Message:    err.Error(),

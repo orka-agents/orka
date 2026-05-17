@@ -16,7 +16,6 @@ import (
 	"testing"
 
 	"github.com/sozercan/orka/internal/llm"
-	"k8s.io/utils/ptr"
 )
 
 const (
@@ -633,7 +632,7 @@ func TestConvertResponsesTextFormat(t *testing.T) {
 				JSONSchema: &llm.JSONSchemaFormat{
 					Name:        "test_schema",
 					Schema:      map[string]any{"type": "object"},
-					Strict:      ptr.To(true),
+					Strict:      new(true),
 					Description: "A test schema",
 				},
 			},
@@ -671,7 +670,7 @@ func TestConvertChatResponseFormat(t *testing.T) {
 				JSONSchema: &llm.JSONSchemaFormat{
 					Name:        "test_schema",
 					Schema:      map[string]any{"type": "object"},
-					Strict:      ptr.To(true),
+					Strict:      new(true),
 					Description: "A test schema",
 				},
 			},
@@ -933,7 +932,7 @@ func TestComplete_ChatCompletions_WithResponseFormat(t *testing.T) {
 			JSONSchema: &llm.JSONSchemaFormat{
 				Name:        "test",
 				Schema:      map[string]any{"type": "object"},
-				Strict:      ptr.To(true),
+				Strict:      new(true),
 				Description: "test schema",
 			},
 		},
