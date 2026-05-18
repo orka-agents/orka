@@ -26,6 +26,7 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		liveChatSecretName   = "e2e-live-chat-secret"
 		liveChatExpectedText = "ORKA_LIVE_CHAT_OK"
 		controllerPFPort     = 18087
+		liveProxyProbePFPort = 18092
 	)
 
 	var (
@@ -74,16 +75,24 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(liveProxyModels.AllModelIDs).NotTo(BeEmpty(), "proxy should expose at least one model")
-		liveGPTModel = firstPreferredProxyModel(liveProxyModels, []string{
-			"gpt-5-mini",
-			"gpt-4o-mini",
-			"gpt-4o",
-			"gpt-4.1",
-			"gpt-5.4",
-			"gpt-5.2",
-			"gpt-5.4-mini",
-		}, "gpt-")
-		Expect(liveGPTModel).NotTo(BeEmpty(), "proxy should expose a GPT-family model")
+
+		By("discovering a live GPT-family model that works through the OpenAI provider path")
+		proxyBaseURL, cancelProxyPF, proxyPFCmd, err := startServicePortForward(
+			liveCopilotProxyServiceNamespace(),
+			liveCopilotProxyServiceName(),
+			liveProxyProbePFPort,
+			liveCopilotProxyServicePort(),
+		)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() {
+			stopPortForward(cancelProxyPF, proxyPFCmd)
+		})
+
+		liveGPTModel, err = firstUsableProxyOpenAIModel(proxyBaseURL, liveProxyModels, liveProxyOpenAIModelPreferences, "gpt-")
+		Expect(err).NotTo(HaveOccurred())
+		if liveGPTModel == "" {
+			Skip("Skipping live Chat API checks: no usable GPT OpenAI model exposed")
+		}
 
 		By("creating a dummy secret for the live provider")
 		err = createK8sSecret(liveChatSecretName, namespace, map[string]string{

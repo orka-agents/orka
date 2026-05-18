@@ -28,6 +28,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		expectedOutput        = "ORKA_LIVE_COPILOT_OK"
 		expectedCoordOutput   = "ORKA_LIVE_COPILOT_COORDINATION_OK"
 		memoryProposalMarker  = "orka-live-copilot-coordination-memory-e2e"
+		liveProxyProbePFPort  = 18091
 	)
 
 	var (
@@ -82,32 +83,43 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(catalog.DataModelIDs).NotTo(BeEmpty(), "proxy should expose models via the OpenAI data field")
 		Expect(catalog.AllModelIDs).NotTo(BeEmpty(), "proxy should expose at least one model")
-		discoveredModel = firstPreferredProxyModel(catalog, []string{
-			"gpt-5-mini",
-			"gpt-4o-mini",
-			"gpt-4o",
-			"gpt-4.1",
-			"gpt-5.4",
-			"gpt-5.2",
-			"gpt-5.4-mini",
-		}, "gpt-")
-		Expect(discoveredModel).To(BeElementOf(catalog.DataModelIDs))
-		Expect(discoveredModel).NotTo(BeEmpty(), "proxy should expose a GPT-family model")
+
+		By("discovering a GPT-family model that works through the OpenAI provider path")
+		proxyBaseURL, cancelProxyPF, proxyPFCmd, err := startServicePortForward(
+			liveCopilotProxyServiceNamespace(),
+			liveCopilotProxyServiceName(),
+			liveProxyProbePFPort,
+			liveCopilotProxyServicePort(),
+		)
+		Expect(err).NotTo(HaveOccurred())
+		defer stopPortForward(cancelProxyPF, proxyPFCmd)
+
+		discoveredModel, err = firstUsableProxyOpenAIModel(proxyBaseURL, catalog, liveProxyOpenAIModelPreferences, "gpt-")
+		Expect(err).NotTo(HaveOccurred())
+		if discoveredModel == "" {
+			Skip("Skipping live Copilot proxy OpenAI provider checks: no usable GPT OpenAI model exposed")
+		}
+		Expect(discoveredModel).To(BeElementOf(catalog.AllModelIDs))
 	})
 
 	It("should run a tiny AI task through the live copilot proxy and return the exact output", func() {
 		By("discovering a live GPT-family model from the proxy service")
 		model := discoveredModel
 		if model == "" {
-			model = discoverPreferredProxyModelViaServiceProxy(
+			var err error
+			model, err = discoverUsableProxyOpenAIModelViaServiceProxy(
 				liveCopilotProxyServiceNamespace(),
 				liveCopilotProxyServiceName(),
 				liveCopilotProxyServicePort(),
-				[]string{"gpt-5-mini", "gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-5.4", "gpt-5.2", "gpt-5.4-mini"},
+				liveProxyProbePFPort,
+				liveProxyOpenAIModelPreferences,
 				"gpt-",
 			)
+			Expect(err).NotTo(HaveOccurred())
 		}
-		Expect(model).NotTo(BeEmpty())
+		if model == "" {
+			Skip("Skipping live Copilot proxy OpenAI provider check: no usable GPT OpenAI model exposed")
+		}
 
 		By("creating a dummy secret for provider validation")
 		DeferCleanup(func() {
@@ -203,15 +215,20 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		By("discovering a live GPT-family model from the proxy service")
 		model := discoveredModel
 		if model == "" {
-			model = discoverPreferredProxyModelViaServiceProxy(
+			var err error
+			model, err = discoverUsableProxyOpenAIModelViaServiceProxy(
 				liveCopilotProxyServiceNamespace(),
 				liveCopilotProxyServiceName(),
 				liveCopilotProxyServicePort(),
-				[]string{"gpt-5-mini", "gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-5.4", "gpt-5.2", "gpt-5.4-mini"},
+				liveProxyProbePFPort,
+				liveProxyOpenAIModelPreferences,
 				"gpt-",
 			)
+			Expect(err).NotTo(HaveOccurred())
 		}
-		Expect(model).NotTo(BeEmpty())
+		if model == "" {
+			Skip("Skipping live Copilot proxy coordination check: no usable GPT OpenAI model exposed")
+		}
 
 		By("creating a dummy secret for provider validation")
 		DeferCleanup(func() {
