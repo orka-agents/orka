@@ -22,12 +22,14 @@ kind: ClusterRole
 metadata:
   name: ai-worker-role
 rules:
-# ConfigMaps: read-only (skills, secrets lookup)
+# ConfigMaps: skills/session lookup and namespace-scoped code_exec result persistence
 - apiGroups:
   - ""
   resources:
   - configmaps
   verbs:
+  - create
+  - delete
   - get
   - list
   - watch
@@ -374,38 +376,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: ai-worker-role
-subjects:
-- kind: ServiceAccount
-  name: ai-worker
-  namespace: system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: ai-worker-code-exec-results
-  namespace: system
-rules:
-# code_exec Kubernetes result persistence is namespace-scoped; the ClusterRole
-# remains read-only for ConfigMaps.
-- apiGroups:
-  - ""
-  resources:
-  - configmaps
-  verbs:
-  - get
-  - list
-  - create
-  - delete
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: ai-worker-code-exec-results
-  namespace: system
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: ai-worker-code-exec-results
 subjects:
 - kind: ServiceAccount
   name: ai-worker

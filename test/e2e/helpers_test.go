@@ -80,6 +80,42 @@ type proxyModelCatalog struct {
 	AllModelIDs   []string
 }
 
+var (
+	liveCopilotProxyGPTModelPreferences = []string{
+		"gpt-5-mini",
+		"gpt-5.2",
+		"gpt-5.5",
+	}
+	liveCopilotProxyGPTModelPrefixes = []string{
+		"gpt-",
+	}
+	liveCopilotProxyChatGPTModelPreferences = []string{
+		"gpt-4o",
+		"gpt-4o-2024-11-20",
+		"gpt-4o-2024-08-06",
+		"gpt-5-mini",
+		"gpt-5.2",
+		"gpt-5.5",
+		"gpt-4.1",
+		"gpt-4.1-2025-04-14",
+	}
+	liveCopilotProxyClaudeModelPreferences = []string{
+		"claude-sonnet-4.5",
+		"claude-opus-4.7",
+		"claude-opus-4.5",
+		"claude-haiku-4.5",
+	}
+	liveCopilotProxyClaudeModelPrefixes = []string{
+		"claude-",
+	}
+	liveCopilotProxyGeminiModelPreferences = []string{
+		"gemini-2.5-pro",
+	}
+	liveCopilotProxyGeminiModelPrefixes = []string{
+		"gemini-",
+	}
+)
+
 type apiTaskResultResponse struct {
 	Result string `json:"result"`
 }
@@ -510,9 +546,143 @@ func discoverPreferredProxyModelViaServiceProxy(serviceNamespace, serviceName st
 		catalog, err := fetchProxyModelCatalogViaServiceProxy(serviceNamespace, serviceName, servicePort)
 		g.Expect(err).NotTo(HaveOccurred())
 		modelID = firstPreferredProxyModel(catalog, preferredIDs, prefixes...)
-		g.Expect(modelID).NotTo(BeEmpty(), "proxy service should expose a preferred model matching %v", prefixes)
+		g.Expect(modelID).NotTo(BeEmpty(), "proxy service should expose a model from %v or matching %v", preferredIDs, prefixes)
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 	return modelID
+}
+
+func firstLiveCopilotProxyChatCompletionModel(proxyBaseURL string, catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) (string, string, error) {
+	candidates := orderedProxyModelCandidates(catalog, preferredIDs, prefixes...)
+	if len(candidates) == 0 {
+		return "", fmt.Sprintf("proxy catalog has no model from %v or matching %v", preferredIDs, prefixes), nil
+	}
+
+	var skipped []string
+	for _, modelID := range candidates {
+		statusCode, body, err := probeLiveCopilotProxyChatCompletion(proxyBaseURL, modelID)
+		if err != nil {
+			return "", "", err
+		}
+		if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
+			return modelID, "", nil
+		}
+		if statusCode >= http.StatusInternalServerError {
+			return "", "", fmt.Errorf("live Copilot proxy chat completion probe for %q returned %d: %s", modelID, statusCode, truncateForLog(body, 256))
+		}
+		skipped = append(skipped, fmt.Sprintf("%s=%d", modelID, statusCode))
+	}
+
+	return "", fmt.Sprintf("live Copilot proxy chat completions unavailable for candidate models (%s)", strings.Join(skipped, ", ")), nil
+}
+
+func orderedProxyModelCandidates(catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) []string {
+	var candidates []string
+	seen := map[string]struct{}{}
+	add := func(modelID string) {
+		modelID = strings.TrimSpace(modelID)
+		key := strings.ToLower(modelID)
+		if modelID == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, modelID)
+	}
+
+	for _, preferredID := range preferredIDs {
+		preferredID = strings.TrimSpace(preferredID)
+		if preferredID == "" {
+			continue
+		}
+		for _, modelID := range catalog.AllModelIDs {
+			if strings.EqualFold(strings.TrimSpace(modelID), preferredID) {
+				add(modelID)
+			}
+		}
+	}
+
+	for _, modelID := range catalog.AllModelIDs {
+		if modelMatchesAnyPrefix(modelID, prefixes...) {
+			add(modelID)
+		}
+	}
+
+	return candidates
+}
+
+func probeLiveCopilotProxyChatCompletion(proxyBaseURL, modelID string) (int, string, error) {
+	payload, err := json.Marshal(map[string]any{
+		"model": modelID,
+		"messages": []map[string]string{
+			{"role": "user", "content": "Reply with OK."},
+		},
+		"temperature":           0,
+		"max_completion_tokens": 1,
+	})
+	if err != nil {
+		return 0, "", err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(proxyBaseURL, "/")+"/v1/chat/completions", strings.NewReader(string(payload)))
+	if err != nil {
+		return 0, "", err
+	}
+	req.Header.Set("Authorization", "Bearer dummy-live-chat-probe-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	if readErr != nil {
+		return resp.StatusCode, "", readErr
+	}
+	return resp.StatusCode, string(body), nil
+}
+
+func truncateForLog(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "..."
+}
+
+func liveCopilotProxyChatModelPreferences() []string {
+	preferences := append([]string{}, liveCopilotProxyChatGPTModelPreferences...)
+	preferences = append(preferences, liveCopilotProxyClaudeModelPreferences...)
+	return preferences
+}
+
+func isLiveCopilotProxyForbiddenError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isLiveCopilotProxyForbiddenText(err.Error())
+}
+
+func isLiveCopilotProxyForbiddenText(value string) bool {
+	return strings.Contains(value, "copilot-proxy") && strings.Contains(value, "403 Forbidden")
+}
+
+func liveCopilotProxyTaskFailedWithForbidden(taskName string) bool {
+	task := fetchTaskSnapshot(taskName)
+	if strings.TrimSpace(task.Status.JobName) == "" {
+		return false
+	}
+
+	cmd := exec.Command("kubectl", "logs", "job/"+task.Status.JobName, "-n", namespace)
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return false
+	}
+	return isLiveCopilotProxyForbiddenText(output)
 }
 
 func firstProxyModelMatchingPrefixes(catalog proxyModelCatalog, prefixes ...string) string {

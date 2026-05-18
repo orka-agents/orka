@@ -101,6 +101,13 @@ type JobBuilder struct {
 	CodexSandboxMode   string
 	InitImage          string
 	ControllerURL      string // e.g. http://orka-controller.orka-system.svc:8080
+	directSecrets      directRuntimeSecretPolicy
+}
+
+type directRuntimeSecretPolicy struct {
+	providerSecrets bool
+	secretMounts    bool
+	gitCredentials  bool
 }
 
 // NewJobBuilder creates a new JobBuilder
@@ -113,6 +120,11 @@ func NewJobBuilder(c client.Client) *JobBuilder {
 		ClaudeWorkerImage:  DefaultClaudeWorkerImage,
 		CodexWorkerImage:   DefaultCodexWorkerImage,
 		InitImage:          DefaultInitImage,
+		directSecrets: directRuntimeSecretPolicy{
+			providerSecrets: envFlagEnabled(directProviderSecretsEnvVar),
+			secretMounts:    envFlagEnabled(directSecretMountsEnvVar),
+			gitCredentials:  envFlagEnabled(directGitCredentialsEnvVar),
+		},
 	}
 }
 
@@ -141,11 +153,8 @@ func podShouldAutomountServiceAccountToken(task *corev1alpha1.Task) bool {
 	if task == nil || !isUntrustedComputeTask(task) {
 		return true
 	}
-	if task.Spec.SessionRef != nil || taskUsesManagedOrkaWorker(task) {
-		return true
-	}
 
-	return false
+	return taskUsesManagedOrkaWorker(task)
 }
 
 func taskUsesManagedOrkaWorker(task *corev1alpha1.Task) bool {
@@ -180,24 +189,12 @@ func isUntrustedComputeTask(task *corev1alpha1.Task) bool {
 	}
 }
 
-func directProviderSecretsEnabled() bool {
-	return envFlagEnabled(directProviderSecretsEnvVar)
+func (b *JobBuilder) directProviderSecretsAllowed(task *corev1alpha1.Task) bool {
+	return taskAllowsDirectRuntimeSecrets(task) || (b != nil && b.directSecrets.providerSecrets)
 }
 
-func directSecretMountsEnabled() bool {
-	return envFlagEnabled(directSecretMountsEnvVar)
-}
-
-func directGitCredentialsEnabled() bool {
-	return envFlagEnabled(directGitCredentialsEnvVar)
-}
-
-func directProviderSecretsAllowed(task *corev1alpha1.Task) bool {
-	return taskAllowsDirectRuntimeSecrets(task) || directProviderSecretsEnabled()
-}
-
-func directSecretMountsAllowed(task *corev1alpha1.Task) bool {
-	return taskAllowsDirectRuntimeSecrets(task) || directSecretMountsEnabled()
+func (b *JobBuilder) directSecretMountsAllowed(task *corev1alpha1.Task) bool {
+	return taskAllowsDirectRuntimeSecrets(task) || (b != nil && b.directSecrets.secretMounts)
 }
 
 func taskAllowsDirectRuntimeSecrets(task *corev1alpha1.Task) bool {
@@ -208,8 +205,8 @@ func mainContainerNeedsGitCredentials(task *corev1alpha1.Task) bool {
 	return taskUsesManagedOrkaWorker(task)
 }
 
-func directGitCredentialsAllowed(task *corev1alpha1.Task) bool {
-	return !isUntrustedComputeTask(task) || mainContainerNeedsGitCredentials(task) || directGitCredentialsEnabled()
+func (b *JobBuilder) directGitCredentialsAllowed(task *corev1alpha1.Task) bool {
+	return !isUntrustedComputeTask(task) || mainContainerNeedsGitCredentials(task) || (b != nil && b.directSecrets.gitCredentials)
 }
 
 func envFlagEnabled(name string) bool {
@@ -230,6 +227,19 @@ func envFlagEnabled(name string) bool {
 
 func agentHasFallbackProviders(agent *corev1alpha1.Agent) bool {
 	return agent != nil && agent.Spec.Model != nil && len(agent.Spec.Model.Fallbacks) > 0
+}
+
+func (b *JobBuilder) needsSecretVolumes(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) bool {
+	if b.directSecretMountsAllowed(task) {
+		if task != nil && task.Spec.SecretRef != nil {
+			return true
+		}
+		if agent != nil && agent.Spec.SecretRef != nil {
+			return true
+		}
+	}
+
+	return b.directProviderSecretsAllowed(task) && (provider != nil || agentHasFallbackProviders(agent))
 }
 
 func buildTaskJobName(task *corev1alpha1.Task) string {
@@ -312,7 +322,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 	}
 
 	// Add secret volumes if needed
-	if task.Spec.SecretRef != nil || (agent != nil && (agent.Spec.SecretRef != nil || agentHasFallbackProviders(agent))) || provider != nil {
+	if b.needsSecretVolumes(task, agent, provider) {
 		b.addSecretVolumes(ctx, job, task, agent, provider)
 	}
 
@@ -782,8 +792,8 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 
 // addSecretVolumes adds secret volumes to the Job
 func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) {
-	allowDirectProviderSecrets := directProviderSecretsAllowed(task)
-	allowDirectSecretMounts := directSecretMountsAllowed(task)
+	allowDirectProviderSecrets := b.directProviderSecretsAllowed(task)
+	allowDirectSecretMounts := b.directSecretMountsAllowed(task)
 
 	// Add provider secret (mounted as environment variable source)
 	if allowDirectProviderSecrets && provider != nil {
@@ -942,6 +952,35 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 	transcriptURL := fmt.Sprintf("%s/internal/v1/sessions/%s/%s/transcript",
 		b.ControllerURL, task.Namespace, sessionName)
 
+	volumeMounts := []corev1.VolumeMount{
+		{
+			Name:      "session-data",
+			MountPath: "/session",
+		},
+	}
+	if !podShouldAutomountServiceAccountToken(task) {
+		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+			Name: "session-token",
+			VolumeSource: corev1.VolumeSource{
+				Projected: &corev1.ProjectedVolumeSource{
+					Sources: []corev1.VolumeProjection{
+						{
+							ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+								Path:              "token",
+								ExpirationSeconds: ptr.To(int64(3600)),
+							},
+						},
+					},
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "session-token",
+			MountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
+			ReadOnly:  true,
+		})
+	}
+
 	// Add init container that fetches the transcript via HTTP
 	initContainer := corev1.Container{
 		Name:            "fetch-session",
@@ -954,12 +993,7 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 				`touch /session/transcript.jsonl`,
 			transcriptURL,
 		)},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "session-data",
-				MountPath: "/session",
-			},
-		},
+		VolumeMounts: volumeMounts,
 	}
 
 	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, initContainer)
@@ -1248,7 +1282,7 @@ func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Ta
 				},
 			},
 		})
-		if directGitCredentialsAllowed(task) {
+		if b.directGitCredentialsAllowed(task) {
 			job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
 				job.Spec.Template.Spec.Containers[0].VolumeMounts,
 				corev1.VolumeMount{

@@ -17,7 +17,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
@@ -61,6 +63,31 @@ func TestEnvFlagEnabledAliases(t *testing.T) {
 				t.Fatalf("envFlagEnabled(%q) = true, want false", value)
 			}
 		})
+	}
+}
+
+func TestNewJobBuilderSnapshotsDirectRuntimeSecretPolicy(t *testing.T) {
+	t.Setenv(directProviderSecretsEnvVar, "true")
+	t.Setenv(directSecretMountsEnvVar, "true")
+	t.Setenv(directGitCredentialsEnvVar, "true")
+
+	builder := setupJobBuilder()
+	t.Setenv(directProviderSecretsEnvVar, "false")
+	t.Setenv(directSecretMountsEnvVar, "false")
+	t.Setenv(directGitCredentialsEnvVar, "false")
+
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+		Type:  corev1alpha1.TaskTypeContainer,
+		Image: testBusyboxImage,
+	}}
+	if !builder.directProviderSecretsAllowed(task) {
+		t.Fatal("provider secret policy should be captured when JobBuilder is constructed")
+	}
+	if !builder.directSecretMountsAllowed(task) {
+		t.Fatal("secret mount policy should be captured when JobBuilder is constructed")
+	}
+	if !builder.directGitCredentialsAllowed(task) {
+		t.Fatal("git credential policy should be captured when JobBuilder is constructed")
 	}
 }
 
@@ -387,6 +414,46 @@ func TestJobBuilder_Build_AgentTask_WithSessionAutomountsToken(t *testing.T) {
 
 	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, VendorWorkerServiceAccount)
 	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, true)
+}
+
+func TestJobBuilder_Build_CustomContainerWithSessionKeepsTokenOutOfMainContainer(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "container-session-task",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   testBusyboxImage,
+			Command: []string{"echo"},
+			Args:    []string{"hello"},
+			SessionRef: &corev1alpha1.SessionReference{
+				Name: "test-session",
+			},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, ContainerWorkerServiceAccount)
+	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, false)
+	if !hasVolume(job.Spec.Template.Spec.Volumes, "session-token") {
+		t.Fatal("session-token projected volume should be present for the fetch init container")
+	}
+	if hasVolumeMount(job.Spec.Template.Spec.Containers[0].VolumeMounts, "session-token") {
+		t.Fatal("main custom container should not mount the session token")
+	}
+	if len(job.Spec.Template.Spec.InitContainers) != 1 {
+		t.Fatalf("init container count = %d, want 1", len(job.Spec.Template.Spec.InitContainers))
+	}
+	if !hasVolumeMount(job.Spec.Template.Spec.InitContainers[0].VolumeMounts, "session-token") {
+		t.Fatal("fetch-session init container should mount the session token")
+	}
 }
 
 func TestJobBuilder_Build_AppliesAgentExecutionDefaults(t *testing.T) {
@@ -2817,6 +2884,62 @@ func TestAddSecretVolumes_FallbackProvider(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected fallback API key env var")
+	}
+}
+
+func TestJobBuilder_Build_UntrustedFallbackProvidersDoNotReadProviderSecretsByDefault(t *testing.T) {
+	t.Setenv(directProviderSecretsEnvVar, "false")
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	var providerGets int
+	fc := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1alpha1.Provider); ok {
+					providerGets++
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+	jb := NewJobBuilder(fc)
+	jb.ControllerURL = testControllerURL
+
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "fb-agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Provider: "openai",
+				Fallbacks: []corev1alpha1.ModelFallback{
+					{ProviderRef: "fb-prov", Model: "gpt-3.5"},
+				},
+			},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "uid-1234-5678"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   testBusyboxImage,
+			Command: []string{"echo"},
+			Args:    []string{"hello"},
+		},
+	}
+
+	job, err := jb.Build(context.Background(), task, agent, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if providerGets != 0 {
+		t.Fatalf("Provider Get count = %d, want 0", providerGets)
+	}
+	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
+		if strings.HasPrefix(env.Name, "ORKA_AI_FALLBACK_") && strings.HasSuffix(env.Name, "_API_KEY") {
+			t.Fatalf("unexpected fallback API key env var %s", env.Name)
+		}
 	}
 }
 

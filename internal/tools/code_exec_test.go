@@ -1704,6 +1704,56 @@ func TestKubernetesJobCodeExecutor_ExecutePersistsAndReplaysStoredResult(t *test
 	assertFakeKubernetesCodeExecResourcesDeleted(t, fakeClient, namespace, jobName)
 }
 
+func TestKubernetesJobCodeExecutor_CheckJobReplaysStoredResultWhenJobDisappears(t *testing.T) {
+	setKubernetesCodeExecTestEnv(t)
+
+	ctx := context.Background()
+	fakeClient := newKubernetesCodeExecFakeClient(t)
+	executor := &KubernetesJobCodeExecutor{}
+	req := CodeExecutionRequest{
+		Backend:          codeExecBackendKubernetes,
+		Language:         codeLanguagePython,
+		Code:             "print('result')",
+		Timeout:          time.Second,
+		OutputLimitBytes: defaultCodeExecOutputLimitBytes,
+		RunID:            "missing-job-replay-run",
+		InputHash:        "missing-job-replay-hash",
+	}
+	jobName := codeExecKubernetesJobNameForRunID(req.RunID)
+	want := CodeExecResult{Output: "cached\n", ExitCode: 0}
+	if err := executor.storeResult(ctx, fakeClient, testNamespace, jobName, req, want); err != nil {
+		t.Fatalf("storeResult() error = %v", err)
+	}
+
+	got, done, _ := executor.checkJob(ctx, kubernetesCodeExecClients{client: fakeClient, namespace: testNamespace}, jobName, req, false)
+	if !done || got != want {
+		t.Fatalf("checkJob() = (%+v, %v), want stored result and done", got, done)
+	}
+}
+
+func TestKubernetesJobCodeExecutor_CheckJobFailsWhenObservedJobDisappearsWithoutStoredResult(t *testing.T) {
+	setKubernetesCodeExecTestEnv(t)
+
+	ctx := context.Background()
+	fakeClient := newKubernetesCodeExecFakeClient(t)
+	executor := &KubernetesJobCodeExecutor{}
+	req := CodeExecutionRequest{
+		Backend:          codeExecBackendKubernetes,
+		Language:         codeLanguagePython,
+		Code:             "print('result')",
+		Timeout:          time.Second,
+		OutputLimitBytes: defaultCodeExecOutputLimitBytes,
+		RunID:            "missing-observed-job-run",
+		InputHash:        "missing-observed-job-hash",
+	}
+	jobName := codeExecKubernetesJobNameForRunID(req.RunID)
+
+	got, done, observed := executor.checkJob(ctx, kubernetesCodeExecClients{client: fakeClient, namespace: testNamespace}, jobName, req, true)
+	if !done || observed || got.ExitCode != -1 || !strings.Contains(got.Error, "disappeared before result was persisted") {
+		t.Fatalf("checkJob() = (%+v, %v, %v), want hard missing-job error", got, done, observed)
+	}
+}
+
 func TestKubernetesJobCodeExecutor_LoadStoredResultRequiresMatchingIdentity(t *testing.T) {
 	setKubernetesCodeExecTestEnv(t)
 
@@ -1735,6 +1785,9 @@ func TestKubernetesJobCodeExecutor_LoadStoredResultRequiresMatchingIdentity(t *t
 	if got, found, err := executor.loadStoredResult(ctx, fakeClient, testNamespace, jobName, mismatched); err != nil || found || got != (CodeExecResult{}) {
 		t.Fatalf("mismatched loadStoredResult() = (%+v, %v, %v), want no replay and no error", got, found, err)
 	}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: jobName}, &corev1.ConfigMap{}); err != nil {
+		t.Fatalf("mismatched loadStoredResult() deleted matching stored result: %v", err)
+	}
 
 	missingVersion := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1752,6 +1805,205 @@ func TestKubernetesJobCodeExecutor_LoadStoredResultRequiresMatchingIdentity(t *t
 	}
 	if got, found, err := executor.loadStoredResult(ctx, fakeClient, testNamespace, missingVersion.Name, req); err != nil || found || got != (CodeExecResult{}) {
 		t.Fatalf("missing-version loadStoredResult() = (%+v, %v, %v), want no replay and no error", got, found, err)
+	}
+	err = fakeClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: missingVersion.Name}, &corev1.ConfigMap{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("missing-version stored result get error = %v, want deleted", err)
+	}
+
+	matchingAnnotations := map[string]string{
+		codeExecKubernetesAnnotationRunID:         req.RunID,
+		codeExecKubernetesAnnotationInputHash:     req.InputHash,
+		codeExecKubernetesAnnotationResultVersion: codeExecKubernetesResultVersion,
+	}
+	bodyMismatchReq := req
+	bodyMismatchReq.InputHash = "body-hash"
+	unsupportedVersion, err := json.Marshal(kubernetesCodeExecStoredResult{
+		Version:   "v0",
+		RunID:     req.RunID,
+		InputHash: req.InputHash,
+		Result:    want,
+	})
+	if err != nil {
+		t.Fatalf("marshal unsupported version: %v", err)
+	}
+	bodyMismatch := storedKubernetesCodeExecResultJSON(t, bodyMismatchReq, want)
+	for _, tc := range []struct {
+		name string
+		data map[string]string
+	}{
+		{name: "missing-result-key", data: nil},
+		{name: "invalid-json", data: map[string]string{codeExecKubernetesResultKey: "not json"}},
+		{name: "unsupported-version", data: map[string]string{codeExecKubernetesResultKey: string(unsupportedVersion)}},
+		{name: "body-identity-mismatch", data: map[string]string{codeExecKubernetesResultKey: bodyMismatch}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stored := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        jobName + "-" + tc.name,
+					Namespace:   testNamespace,
+					Annotations: cloneKubernetesCodeExecStringMap(matchingAnnotations),
+				},
+				Data: tc.data,
+			}
+			if err := fakeClient.Create(ctx, stored); err != nil {
+				t.Fatalf("failed to create invalid ConfigMap: %v", err)
+			}
+			if got, found, err := executor.loadStoredResult(ctx, fakeClient, testNamespace, stored.Name, req); err != nil || found || got != (CodeExecResult{}) {
+				t.Fatalf("invalid loadStoredResult() = (%+v, %v, %v), want cache miss and no error", got, found, err)
+			}
+			err := fakeClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: stored.Name}, &corev1.ConfigMap{})
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("invalid stored result get error = %v, want deleted", err)
+			}
+		})
+	}
+}
+
+func TestKubernetesJobCodeExecutor_StoreResultReplacesInvalidStoredResult(t *testing.T) {
+	setKubernetesCodeExecTestEnv(t)
+
+	ctx := context.Background()
+	fakeClient := newKubernetesCodeExecFakeClient(t)
+	executor := &KubernetesJobCodeExecutor{}
+	req := CodeExecutionRequest{
+		Backend:          codeExecBackendKubernetes,
+		Language:         codeLanguagePython,
+		Code:             "print('result')",
+		Timeout:          time.Second,
+		OutputLimitBytes: defaultCodeExecOutputLimitBytes,
+		RunID:            "replace-invalid-run",
+		InputHash:        "replace-invalid-hash",
+	}
+	jobName := codeExecKubernetesJobNameForRunID(req.RunID)
+	invalid := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: testNamespace,
+			Annotations: map[string]string{
+				codeExecKubernetesAnnotationRunID:         req.RunID,
+				codeExecKubernetesAnnotationInputHash:     req.InputHash,
+				codeExecKubernetesAnnotationResultVersion: codeExecKubernetesResultVersion,
+			},
+			Labels: map[string]string{
+				codeExecKubernetesLabelTool: codeExecToolName,
+				codeExecKubernetesLabelJob:  jobName,
+			},
+		},
+		Data: map[string]string{codeExecKubernetesResultKey: "not json"},
+	}
+	if err := fakeClient.Create(ctx, invalid); err != nil {
+		t.Fatalf("failed to create invalid stored result: %v", err)
+	}
+
+	want := CodeExecResult{Output: "stored\n", ExitCode: 0}
+	if err := executor.storeResult(ctx, fakeClient, testNamespace, jobName, req, want); err != nil {
+		t.Fatalf("storeResult() error = %v", err)
+	}
+	if got, found, err := executor.loadStoredResult(ctx, fakeClient, testNamespace, jobName, req); err != nil || !found || got != want {
+		t.Fatalf("loadStoredResult() = (%+v, %v, %v), want replacement result", got, found, err)
+	}
+}
+
+func TestKubernetesJobCodeExecutor_StoreResultReplacesStaleVersionStoredResult(t *testing.T) {
+	setKubernetesCodeExecTestEnv(t)
+
+	ctx := context.Background()
+	fakeClient := newKubernetesCodeExecFakeClient(t)
+	executor := &KubernetesJobCodeExecutor{}
+	req := CodeExecutionRequest{
+		Backend:          codeExecBackendKubernetes,
+		Language:         codeLanguagePython,
+		Code:             "print('result')",
+		Timeout:          time.Second,
+		OutputLimitBytes: defaultCodeExecOutputLimitBytes,
+		RunID:            "replace-stale-version-run",
+		InputHash:        "replace-stale-version-hash",
+	}
+	jobName := codeExecKubernetesJobNameForRunID(req.RunID)
+	stale := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: testNamespace,
+			Annotations: map[string]string{
+				codeExecKubernetesAnnotationRunID:         req.RunID,
+				codeExecKubernetesAnnotationInputHash:     req.InputHash,
+				codeExecKubernetesAnnotationResultVersion: "old-result-version",
+			},
+			Labels: map[string]string{
+				codeExecKubernetesLabelTool: codeExecToolName,
+				codeExecKubernetesLabelJob:  jobName,
+			},
+		},
+		Data: map[string]string{codeExecKubernetesResultKey: storedKubernetesCodeExecResultJSON(t, req, CodeExecResult{Output: "stale\n", ExitCode: 0})},
+	}
+	if err := fakeClient.Create(ctx, stale); err != nil {
+		t.Fatalf("failed to create stale stored result: %v", err)
+	}
+
+	want := CodeExecResult{Output: "stored\n", ExitCode: 0}
+	if err := executor.storeResult(ctx, fakeClient, testNamespace, jobName, req, want); err != nil {
+		t.Fatalf("storeResult() error = %v", err)
+	}
+	if got, found, err := executor.loadStoredResult(ctx, fakeClient, testNamespace, jobName, req); err != nil || !found || got != want {
+		t.Fatalf("loadStoredResult() = (%+v, %v, %v), want replacement result", got, found, err)
+	}
+}
+
+func TestKubernetesJobCodeExecutor_StoreResultFailsWhenInvalidStoredResultCannotBeReplaced(t *testing.T) {
+	setKubernetesCodeExecTestEnv(t)
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add corev1 to scheme: %v", err)
+	}
+	fakeClient := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if _, ok := obj.(*corev1.ConfigMap); ok {
+					return nil
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	ctx := context.Background()
+	executor := &KubernetesJobCodeExecutor{}
+	req := CodeExecutionRequest{
+		Backend:          codeExecBackendKubernetes,
+		Language:         codeLanguagePython,
+		Code:             "print('result')",
+		Timeout:          time.Second,
+		OutputLimitBytes: defaultCodeExecOutputLimitBytes,
+		RunID:            "unreplaceable-invalid-run",
+		InputHash:        "unreplaceable-invalid-hash",
+	}
+	jobName := codeExecKubernetesJobNameForRunID(req.RunID)
+	invalid := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: testNamespace,
+			Annotations: map[string]string{
+				codeExecKubernetesAnnotationRunID:         req.RunID,
+				codeExecKubernetesAnnotationInputHash:     req.InputHash,
+				codeExecKubernetesAnnotationResultVersion: codeExecKubernetesResultVersion,
+			},
+			Labels: map[string]string{
+				codeExecKubernetesLabelTool: codeExecToolName,
+				codeExecKubernetesLabelJob:  jobName,
+			},
+		},
+		Data: map[string]string{codeExecKubernetesResultKey: "not json"},
+	}
+	if err := fakeClient.Create(ctx, invalid); err != nil {
+		t.Fatalf("failed to create invalid stored result: %v", err)
+	}
+
+	err := executor.storeResult(ctx, fakeClient, testNamespace, jobName, req, CodeExecResult{Output: "stored\n", ExitCode: 0})
+	if err == nil || !strings.Contains(err.Error(), "did not persist replacement") {
+		t.Fatalf("storeResult() error = %v, want replacement failure", err)
 	}
 }
 
@@ -1836,6 +2088,135 @@ func TestKubernetesJobCodeExecutor_CleanupExpiredStoredResults(t *testing.T) {
 		if err := fakeClient.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: name}, &corev1.ConfigMap{}); err != nil {
 			t.Fatalf("expected %s to remain: %v", name, err)
 		}
+	}
+}
+
+func TestKubernetesJobCodeExecutor_CleanupExpiredStoredResultsContinuesAfterDeleteError(t *testing.T) {
+	setKubernetesCodeExecTestEnv(t)
+
+	now := time.Now()
+	oldA := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "old-result-a",
+			Namespace:         testNamespace,
+			CreationTimestamp: metav1.NewTime(now.Add(-codeExecKubernetesStoredResultRetention - time.Hour)),
+			Labels: map[string]string{
+				codeExecKubernetesLabelTool: codeExecToolName,
+				codeExecKubernetesLabelJob:  "old-result-a",
+			},
+		},
+	}
+	oldB := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "old-result-b",
+			Namespace:         testNamespace,
+			CreationTimestamp: metav1.NewTime(now.Add(-codeExecKubernetesStoredResultRetention - time.Hour)),
+			Labels: map[string]string{
+				codeExecKubernetesLabelTool: codeExecToolName,
+				codeExecKubernetesLabelJob:  "old-result-b",
+			},
+		},
+	}
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(oldA, oldB).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if obj.GetName() == oldA.Name {
+					return fmt.Errorf("temporary delete failure")
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	executor := &KubernetesJobCodeExecutor{}
+
+	err := executor.cleanupExpiredStoredResults(context.Background(), fakeClient, testNamespace, now)
+	if err == nil || !strings.Contains(err.Error(), oldA.Name) {
+		t.Fatalf("cleanupExpiredStoredResults() error = %v, want %s delete error", err, oldA.Name)
+	}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: oldB.Name}, &corev1.ConfigMap{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("old result B get error = %v, want not found", err)
+	}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: oldA.Name}, &corev1.ConfigMap{}); err != nil {
+		t.Fatalf("old result A should remain after delete failure: %v", err)
+	}
+}
+
+func TestKubernetesJobCodeExecutor_CleanupExpiredStoredResultsIfDueRecordsAfterDeleteError(t *testing.T) {
+	setKubernetesCodeExecTestEnv(t)
+
+	now := time.Now()
+	oldResult := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "old-result-partial-error",
+			Namespace:         testNamespace,
+			CreationTimestamp: metav1.NewTime(now.Add(-codeExecKubernetesStoredResultRetention - time.Hour)),
+			Labels: map[string]string{
+				codeExecKubernetesLabelTool: codeExecToolName,
+				codeExecKubernetesLabelJob:  "old-result-partial-error",
+			},
+		},
+	}
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(oldResult).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				return fmt.Errorf("temporary delete failure")
+			},
+		}).
+		Build()
+	executor := &KubernetesJobCodeExecutor{}
+
+	err := executor.cleanupExpiredStoredResultsIfDue(context.Background(), fakeClient, testNamespace, now)
+	if err == nil || !strings.Contains(err.Error(), oldResult.Name) {
+		t.Fatalf("cleanupExpiredStoredResultsIfDue() error = %v, want %s delete error", err, oldResult.Name)
+	}
+	if executor.cleanupState.shouldRun(testNamespace, now.Add(time.Minute)) {
+		t.Fatal("cleanup state should throttle after a best-effort cleanup with partial delete errors")
+	}
+}
+
+func TestKubernetesCodeExecStoredResultCleanupStateRecordPrunesOldNamespaces(t *testing.T) {
+	var state kubernetesCodeExecStoredResultCleanupState
+	now := time.Now()
+
+	if !state.shouldRun("team-a", now) {
+		t.Fatal("first cleanup for namespace should run")
+	}
+	state.record("team-a", now)
+	if state.shouldRun("team-a", now.Add(time.Minute)) {
+		t.Fatal("recent cleanup should be throttled")
+	}
+	if !state.shouldRun("team-a", now.Add(codeExecKubernetesStoredResultCleanupMinInterval)) {
+		t.Fatal("stale cleanup entry should be pruned and allowed")
+	}
+	if len(state.lastByNamespace) != 1 {
+		t.Fatalf("cleanup state size = %d, want predicate not to mutate state", len(state.lastByNamespace))
+	}
+
+	state.record("team-b", now.Add(codeExecKubernetesStoredResultCleanupMinInterval))
+	if _, ok := state.lastByNamespace["team-a"]; !ok {
+		t.Fatal("namespace exactly one cleanup interval old should remain recorded")
+	}
+	if _, ok := state.lastByNamespace["team-b"]; !ok {
+		t.Fatal("new namespace should be recorded")
+	}
+
+	state.record("team-c", now.Add(2*codeExecKubernetesStoredResultCleanupMinInterval+time.Nanosecond))
+	if _, ok := state.lastByNamespace["team-a"]; ok {
+		t.Fatal("very old namespace should be pruned while recording cleanup state")
+	}
+	if _, ok := state.lastByNamespace["team-b"]; !ok {
+		t.Fatal("recent namespace should remain recorded")
+	}
+	if _, ok := state.lastByNamespace["team-c"]; !ok {
+		t.Fatal("new namespace should be recorded")
 	}
 }
 
