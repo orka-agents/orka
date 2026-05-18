@@ -79,27 +79,30 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		Expect(ready.Error).To(BeEmpty())
 
 		By("discovering live runtime models by family")
-		gptModel = discoverPreferredProxyModelViaServiceProxy(
+		runtimeCatalog, err := fetchProxyModelCatalogViaServiceProxy(
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
 			liveCopilotProxyServicePort(),
+		)
+		Expect(err).NotTo(HaveOccurred())
+		gptModel = firstPreferredProxyModelSupportingEndpoint(
+			runtimeCatalog,
+			"/responses",
 			liveCopilotProxyGPTModelPreferences,
 			liveCopilotProxyGPTModelPrefixes...,
 		)
-		claudeModel = discoverPreferredProxyModelViaServiceProxy(
-			liveCopilotProxyServiceNamespace(),
-			liveCopilotProxyServiceName(),
-			liveCopilotProxyServicePort(),
+		claudeModel = firstPreferredProxyModel(
+			runtimeCatalog,
 			liveCopilotProxyClaudeModelPreferences,
 			liveCopilotProxyClaudeModelPrefixes...,
 		)
-		geminiModel = discoverPreferredProxyModelViaServiceProxy(
-			liveCopilotProxyServiceNamespace(),
-			liveCopilotProxyServiceName(),
-			liveCopilotProxyServicePort(),
+		Expect(claudeModel).NotTo(BeEmpty(), "proxy service should expose a Claude-family model")
+		geminiModel = firstPreferredProxyModel(
+			runtimeCatalog,
 			liveCopilotProxyGeminiModelPreferences,
 			liveCopilotProxyGeminiModelPrefixes...,
 		)
+		Expect(geminiModel).NotTo(BeEmpty(), "proxy service should expose a Gemini-family model")
 
 		claudeSessionName = fmt.Sprintf("e2e-live-runtime-claude-%d", time.Now().UnixNano())
 	})
@@ -119,6 +122,10 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 	})
 
 	It("should let codex consume priorTaskRef state on a git workspace", func() {
+		if gptModel == "" {
+			Skip("Skipping Codex runtime live proxy check: no GPT model with /responses support exposed")
+		}
+
 		DeferCleanup(func() {
 			for _, resource := range []struct {
 				kind string

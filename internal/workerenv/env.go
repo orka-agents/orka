@@ -10,6 +10,7 @@ package workerenv
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,28 @@ const (
 	PriorTask          = "ORKA_PRIOR_TASK"
 	PriorTaskNamespace = "ORKA_PRIOR_TASK_NAMESPACE"
 	ParentTask         = "ORKA_PARENT_TASK"
+
+	// Transaction context env vars.
+	TransactionID                     = "ORKA_TRANSACTION_ID"
+	TransactionProfile                = "ORKA_TRANSACTION_PROFILE"
+	TransactionIssuer                 = "ORKA_TRANSACTION_ISSUER"
+	TransactionSubject                = "ORKA_TRANSACTION_SUBJECT"
+	TransactionRequestingWorkload     = "ORKA_TRANSACTION_REQUESTING_WORKLOAD"
+	TransactionScope                  = "ORKA_TRANSACTION_SCOPE"
+	TransactionScopes                 = "ORKA_TRANSACTION_SCOPES"
+	TransactionContextDigest          = "ORKA_TRANSACTION_CONTEXT_DIGEST"
+	TransactionRequesterContextDigest = "ORKA_TRANSACTION_REQUESTER_CONTEXT_DIGEST"
+	TransactionTokenFile              = "ORKA_TRANSACTION_TOKEN_FILE"
+	ContextTokenTTSURL                = "ORKA_CONTEXT_TOKEN_TTS_URL"
+	ContextTokenTTSAudience           = "ORKA_CONTEXT_TOKEN_TTS_AUDIENCE"
+	ContextTokenTTSTimeout            = "ORKA_CONTEXT_TOKEN_TTS_TIMEOUT"
+	ContextTokenTTSTokenSource        = "ORKA_CONTEXT_TOKEN_TTS_TOKEN_SOURCE"
+	ContextTokenSubjectTokenFile      = "ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE"
+	ContextTokenSubjectTokenType      = "ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_TYPE"
+	ContextTokenOutboundScope         = "ORKA_CONTEXT_TOKEN_OUTBOUND_SCOPE"
+	ContextTokenChildScope            = "ORKA_CONTEXT_TOKEN_CHILD_SCOPE"
+	ContextTokenChildTokenTTL         = "ORKA_CONTEXT_TOKEN_CHILD_TOKEN_TTL"
+	ContextTokenToolTokenTTL          = "ORKA_CONTEXT_TOKEN_TOOL_TOKEN_TTL"
 
 	// AI worker env vars.
 	AIProvider        = "ORKA_AI_PROVIDER"
@@ -140,6 +163,8 @@ const (
 	MemoryContextMaxChars   = "ORKA_MEMORY_CONTEXT_MAX_CHARS"
 	ServiceAccountToken     = "ORKA_SA_TOKEN"
 	ServiceAccountTokenPath = "ORKA_SA_TOKEN_PATH"
+
+	ServiceAccountTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 )
 
 const trueString = "true"
@@ -182,6 +207,49 @@ func SplitCSV(value string) []string {
 	return out
 }
 
+// ReadTokenFile reads and trims a token file. It fails closed when the
+// configured path cannot be read or contains only whitespace.
+func ReadTokenFile(path, description string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("%s file path is empty", description)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read %s file: %w", description, err)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", fmt.Errorf("%s file %q is empty", description, path)
+	}
+	return token, nil
+}
+
+// ReadTokenFileEnv reads and trims a token file path referenced by envName.
+// It returns ok=false when envName is unset, and fails closed when a configured
+// path cannot be read or contains only whitespace.
+func ReadTokenFileEnv(envName, description string) (string, bool, error) {
+	path := strings.TrimSpace(os.Getenv(envName))
+	if path == "" {
+		return "", false, nil
+	}
+	token, err := ReadTokenFile(path, description)
+	return token, true, err
+}
+
+// RequireTokenFileEnv reads a token file path referenced by envName and returns
+// an error when the env var is unset.
+func RequireTokenFileEnv(envName, description string) (string, error) {
+	token, ok, err := ReadTokenFileEnv(envName, description)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("%s is required", envName)
+	}
+	return token, nil
+}
+
 // JoinCSV joins values using the comma-separated format used by worker env vars.
 func JoinCSV(values []string) string {
 	return strings.Join(values, ",")
@@ -189,30 +257,52 @@ func JoinCSV(values []string) string {
 
 // BaseEnv is the common env contract passed to all Orka worker containers.
 type BaseEnv struct {
-	TaskName       string
-	TaskNamespace  string
-	ResultEndpoint string
-	ControllerURL  string
+	TaskName           string
+	TaskNamespace      string
+	ResultEndpoint     string
+	ControllerURL      string
+	TransactionID      string
+	TransactionProfile string
 }
 
 // EnvVars renders the base worker environment.
 func (e BaseEnv) EnvVars() []corev1.EnvVar {
-	return []corev1.EnvVar{
+	envVars := []corev1.EnvVar{
 		Env(TaskName, e.TaskName),
 		Env(TaskNamespace, e.TaskNamespace),
 		Env(ResultEndpoint, e.ResultEndpoint),
 		Env(ControllerURL, e.ControllerURL),
 	}
+	envVars = AppendIfSet(envVars, TransactionID, e.TransactionID)
+	envVars = AppendIfSet(envVars, TransactionProfile, e.TransactionProfile)
+	return envVars
 }
 
 // ParseBaseEnv reads the common worker environment.
 func ParseBaseEnv(getenv func(string) string) BaseEnv {
 	return BaseEnv{
-		TaskName:       getenv(TaskName),
-		TaskNamespace:  getenv(TaskNamespace),
-		ResultEndpoint: getenv(ResultEndpoint),
-		ControllerURL:  getenv(ControllerURL),
+		TaskName:           getenv(TaskName),
+		TaskNamespace:      getenv(TaskNamespace),
+		ResultEndpoint:     getenv(ResultEndpoint),
+		ControllerURL:      getenv(ControllerURL),
+		TransactionID:      getenv(TransactionID),
+		TransactionProfile: getenv(TransactionProfile),
 	}
+}
+
+// TransactionLogFields returns safe key/value fragments for worker stdout logs.
+func TransactionLogFields(transactionID, profile string) string {
+	fields := []string{}
+	if transactionID != "" {
+		fields = append(fields, "transactionID="+strconv.Quote(transactionID))
+	}
+	if profile != "" {
+		fields = append(fields, "contextTokenProfile="+strconv.Quote(profile))
+	}
+	if len(fields) == 0 {
+		return ""
+	}
+	return " " + strings.Join(fields, " ")
 }
 
 // FallbackProviderEnv is one fallback provider entry from the AI worker env contract.

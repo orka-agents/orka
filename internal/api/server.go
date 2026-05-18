@@ -35,6 +35,8 @@ type ServerConfig struct {
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
 	OIDC                      OIDCConfig
+	ContextTokens             ContextTokenConfig
+	ContextTokenAuthorization ContextTokenAuthorizationConfig
 	Chat                      ChatConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
@@ -96,6 +98,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		Client:                    c,
 		WatchNamespace:            config.WatchNamespace,
 		EnforceNamespaceIsolation: config.EnforceNamespaceIsolation,
+		ContextTokenAuthorization: config.ContextTokenAuthorization,
 		ResultStore:               config.ResultStore,
 		SessionStore:              config.SessionStore,
 		PlanStore:                 config.PlanStore,
@@ -108,8 +111,11 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	})
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
+	server.chatHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
+	server.openaiHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.anthropicHandler = NewAnthropicCompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
+	server.anthropicHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.setupMiddleware()
 	server.setupRoutes()
 	server.setupStaticFiles()
@@ -140,7 +146,7 @@ func (s *Server) setupMiddleware() {
 	s.app.Use(cors.New(cors.Config{
 		AllowOrigins: origins,
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization", "x-api-key"},
+		AllowHeaders: allowedCORSHeaders(s.config.ContextTokens),
 	}))
 
 	// Logging middleware
@@ -150,13 +156,35 @@ func (s *Server) setupMiddleware() {
 	s.app.Use(NewMetricsMiddleware())
 }
 
+func allowedCORSHeaders(contextTokens ContextTokenConfig) []string {
+	headers := []string{"Origin", "Content-Type", "Accept", AuthHeader, XAPIKeyHeader}
+	addHeader := func(name string) {
+		if name == "" {
+			return
+		}
+		for _, existing := range headers {
+			if strings.EqualFold(existing, name) {
+				return
+			}
+		}
+		headers = append(headers, name)
+	}
+
+	for _, profile := range contextTokens.Profiles {
+		for _, header := range profile.Headers {
+			addHeader(header.Name)
+		}
+	}
+	return headers
+}
+
 // setupRoutes configures the API routes
 func (s *Server) setupRoutes() {
 	// Health endpoints
 	s.app.Get("/healthz", s.handlers.Healthz)
 	s.app.Get("/readyz", s.handlers.Readyz)
 
-	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC})
+	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC, ContextTokens: s.config.ContextTokens})
 
 	// API v1 group
 	api := s.app.Group("/api/v1")

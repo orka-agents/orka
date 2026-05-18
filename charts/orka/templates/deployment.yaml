@@ -55,6 +55,111 @@ spec:
             - {{ printf "--oidc-jwks-url=%s" .jwksUrl | quote }}
             {{- end }}
             {{- end }}
+            {{- with .Values.controller.contextToken }}
+            {{- if .profile }}
+            - {{ printf "--context-token-profile=%s" .profile | quote }}
+            {{- end }}
+            {{- if .issuer }}
+            - {{ printf "--context-token-issuer=%s" .issuer | quote }}
+            {{- end }}
+            {{- if .audience }}
+            - {{ printf "--context-token-audience=%s" .audience | quote }}
+            {{- end }}
+            {{- if .jwksUrl }}
+            - {{ printf "--context-token-jwks-url=%s" .jwksUrl | quote }}
+            {{- end }}
+            {{- if .headers }}
+            - {{ printf "--context-token-headers=%s" .headers | quote }}
+            {{- end }}
+            {{- if .authzMode }}
+            - {{ printf "--context-token-authz-mode=%s" .authzMode | quote }}
+            {{- end }}
+            {{- with .scopes }}
+            {{- if .taskCreate }}
+            - {{ printf "--context-token-task-create-scopes=%s" .taskCreate | quote }}
+            {{- end }}
+            {{- if .taskRead }}
+            - {{ printf "--context-token-task-read-scopes=%s" .taskRead | quote }}
+            {{- end }}
+            {{- if .taskList }}
+            - {{ printf "--context-token-task-list-scopes=%s" .taskList | quote }}
+            {{- end }}
+            {{- if .taskDelete }}
+            - {{ printf "--context-token-task-delete-scopes=%s" .taskDelete | quote }}
+            {{- end }}
+            {{- if .toolRead }}
+            - {{ printf "--context-token-tool-read-scopes=%s" .toolRead | quote }}
+            {{- end }}
+            {{- if .toolUse }}
+            - {{ printf "--context-token-tool-use-scopes=%s" .toolUse | quote }}
+            {{- end }}
+            {{- if .providerUse }}
+            - {{ printf "--context-token-provider-use-scopes=%s" .providerUse | quote }}
+            {{- end }}
+            {{- if .secretRead }}
+            - {{ printf "--context-token-secret-read-scopes=%s" .secretRead | quote }}
+            {{- end }}
+            {{- if .agentRead }}
+            - {{ printf "--context-token-agent-read-scopes=%s" .agentRead | quote }}
+            {{- end }}
+            {{- if .agentWrite }}
+            - {{ printf "--context-token-agent-write-scopes=%s" .agentWrite | quote }}
+            {{- end }}
+            {{- if .memoryRead }}
+            - {{ printf "--context-token-memory-read-scopes=%s" .memoryRead | quote }}
+            {{- end }}
+            {{- if .memoryWrite }}
+            - {{ printf "--context-token-memory-write-scopes=%s" .memoryWrite | quote }}
+            {{- end }}
+            {{- if .sessionRead }}
+            - {{ printf "--context-token-session-read-scopes=%s" .sessionRead | quote }}
+            {{- end }}
+            {{- if .sessionWrite }}
+            - {{ printf "--context-token-session-write-scopes=%s" .sessionWrite | quote }}
+            {{- end }}
+            {{- if .securityRead }}
+            - {{ printf "--context-token-security-read-scopes=%s" .securityRead | quote }}
+            {{- end }}
+            {{- if .securityWrite }}
+            - {{ printf "--context-token-security-write-scopes=%s" .securityWrite | quote }}
+            {{- end }}
+            {{- if .skillRead }}
+            - {{ printf "--context-token-skill-read-scopes=%s" .skillRead | quote }}
+            {{- end }}
+            {{- if .skillWrite }}
+            - {{ printf "--context-token-skill-write-scopes=%s" .skillWrite | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .tts }}
+            {{- if .url }}
+            - {{ printf "--context-token-tts-url=%s" .url | quote }}
+            {{- end }}
+            {{- if .audience }}
+            - {{ printf "--context-token-tts-audience=%s" .audience | quote }}
+            {{- end }}
+            {{- if .timeout }}
+            - {{ printf "--context-token-tts-timeout=%s" .timeout | quote }}
+            {{- end }}
+            {{- if .tokenSource }}
+            - {{ printf "--context-token-tts-token-source=%s" .tokenSource | quote }}
+            {{- end }}
+            {{- if .subjectTokenType }}
+            - {{ printf "--context-token-subject-token-type=%s" .subjectTokenType | quote }}
+            {{- end }}
+            {{- if .childScope }}
+            - {{ printf "--context-token-child-scope=%s" .childScope | quote }}
+            {{- end }}
+            {{- if .outboundScope }}
+            - {{ printf "--context-token-outbound-scope=%s" .outboundScope | quote }}
+            {{- end }}
+            {{- if .childTokenTTL }}
+            - {{ printf "--context-token-child-token-ttl=%s" .childTokenTTL | quote }}
+            {{- end }}
+            {{- if .toolTokenTTL }}
+            - {{ printf "--context-token-tool-token-ttl=%s" .toolTokenTTL | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
             - --store-backend=sqlite
             - --store-path={{ .Values.store.path }}
             - --ai-worker-image={{ .Values.workers.ai.image.repository }}:{{ .Values.workers.ai.image.tag }}

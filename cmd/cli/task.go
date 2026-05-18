@@ -110,6 +110,7 @@ func newTaskCreateCmd() *cobra.Command {
 
 func newTaskListCmd() *cobra.Command {
 	var status string
+	var transactionID string
 	var limit int
 
 	cmd := &cobra.Command{
@@ -118,22 +119,40 @@ func newTaskListCmd() *cobra.Command {
 		Short:   "List tasks",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c := newClientFromCmd(cmd)
-			tasks, err := c.ListTasks(context.Background(), client.ListTasksOptions{
-				Namespace: c.Namespace,
-				Limit:     limit,
-			})
-			if err != nil {
-				return err
-			}
-
-			if status != "" {
-				filtered := make([]client.TaskSummary, 0)
-				for _, t := range tasks {
-					if strings.EqualFold(t.Phase, status) {
-						filtered = append(filtered, t)
-					}
+			var tasks []client.TaskSummary
+			if status != "" || transactionID != "" {
+				var truncated bool
+				var err error
+				tasks, truncated, err = listFilteredTasks(
+					context.Background(),
+					c,
+					c.Namespace,
+					limit,
+					func(t client.TaskSummary) bool {
+						if status != "" && !strings.EqualFold(t.Phase, status) {
+							return false
+						}
+						if transactionID != "" && t.TransactionID != transactionID {
+							return false
+						}
+						return true
+					},
+				)
+				if err != nil {
+					return err
 				}
-				tasks = filtered
+				if truncated {
+					warnFilteredTaskOutputLimited(limit)
+				}
+			} else {
+				var err error
+				tasks, err = c.ListTasks(context.Background(), client.ListTasksOptions{
+					Namespace: c.Namespace,
+					Limit:     limit,
+				})
+				if err != nil {
+					return err
+				}
 			}
 
 			if len(tasks) == 0 {
@@ -151,14 +170,17 @@ func newTaskListCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&status, "status", "", "Filter by status (Pending, Running, Succeeded, Failed)")
+	cmd.Flags().StringVar(&status, "status", "", "Filter by status (client-side scan; may page through many tasks)")
+	cmd.Flags().StringVar(&transactionID, "transaction", "", "Filter by kontxt transaction ID (client-side scan)")
 	cmd.Flags().IntVar(&limit, "limit", 20, "Maximum number of results")
 
 	return cmd
 }
 
 func newTaskGetCmd() *cobra.Command {
-	return &cobra.Command{
+	var showTransaction bool
+
+	cmd := &cobra.Command{
 		Use:   "get <name>",
 		Short: "Get task details",
 		Args:  cobra.ExactArgs(1),
@@ -171,6 +193,20 @@ func newTaskGetCmd() *cobra.Command {
 				return err
 			}
 
+			if showTransaction {
+				transaction, ok := taskTransaction(*detail)
+				if !ok {
+					fmt.Println("No transaction metadata found.")
+					return nil
+				}
+				out, err := json.MarshalIndent(transaction, "", "  ")
+				if err != nil {
+					return fmt.Errorf("formatting transaction output: %w", err)
+				}
+				fmt.Println(string(out))
+				return nil
+			}
+
 			out, err := json.MarshalIndent(detail, "", "  ")
 			if err != nil {
 				return fmt.Errorf("formatting output: %w", err)
@@ -179,6 +215,21 @@ func newTaskGetCmd() *cobra.Command {
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&showTransaction, "show-transaction", false, "Show only transaction metadata")
+	return cmd
+}
+
+func taskTransaction(detail client.TaskDetail) (map[string]any, bool) {
+	spec, ok := detail["spec"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	transaction, ok := spec["transaction"].(map[string]any)
+	if !ok || len(transaction) == 0 {
+		return nil, false
+	}
+	return transaction, true
 }
 
 func newTaskLogsCmd() *cobra.Command {

@@ -28,6 +28,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		expectedOutput        = "ORKA_LIVE_COPILOT_OK"
 		expectedCoordOutput   = "ORKA_LIVE_COPILOT_COORDINATION_OK"
 		memoryProposalMarker  = "orka-live-copilot-coordination-memory-e2e"
+		liveProxyProbePFPort  = 18091
 	)
 
 	var (
@@ -95,48 +96,39 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(catalog.DataModelIDs).NotTo(BeEmpty(), "proxy should expose models via the OpenAI data field")
 		Expect(catalog.AllModelIDs).NotTo(BeEmpty(), "proxy should expose at least one model")
-		var skipReason string
-		discoveredModel, skipReason, err = firstLiveCopilotProxyChatCompletionModel(
+
+		By("discovering a GPT-family model that works through the OpenAI provider path")
+		discoveredModel, err = firstUsableProxyOpenAIModel(
 			proxyBaseURL,
-			e2eGitHubToken,
 			catalog,
-			liveCopilotProxyChatModelPreferences(),
-			"gpt-",
-			"claude-",
+			liveProxyOpenAIModelPreferences,
+			liveCopilotProxyGPTModelPrefixes...,
 		)
 		Expect(err).NotTo(HaveOccurred())
 		if discoveredModel == "" {
-			Skip("Skipping: " + skipReason)
+			Skip("Skipping live Copilot proxy OpenAI provider checks: no usable GPT OpenAI model exposed")
 		}
 		Expect(discoveredModel).To(BeElementOf(catalog.AllModelIDs))
-		Expect(discoveredModel).NotTo(BeEmpty(), "proxy should expose an allowed chat-completions model")
 	})
 
 	It("should run a tiny AI task through the live copilot proxy and return the exact output", func() {
 		By("discovering a live chat-completions model from the proxy service")
 		model := discoveredModel
 		if model == "" {
-			catalog, err := fetchProxyModelCatalogViaServiceProxy(
+			var err error
+			model, err = discoverUsableProxyOpenAIModelViaServiceProxy(
 				liveCopilotProxyServiceNamespace(),
 				liveCopilotProxyServiceName(),
 				liveCopilotProxyServicePort(),
+				liveProxyProbePFPort,
+				liveProxyOpenAIModelPreferences,
+				liveCopilotProxyGPTModelPrefixes...,
 			)
 			Expect(err).NotTo(HaveOccurred())
-			var skipReason string
-			model, skipReason, err = firstLiveCopilotProxyChatCompletionModel(
-				proxyBaseURL,
-				e2eGitHubToken,
-				catalog,
-				liveCopilotProxyChatModelPreferences(),
-				"gpt-",
-				"claude-",
-			)
-			Expect(err).NotTo(HaveOccurred())
-			if model == "" {
-				Skip("Skipping: " + skipReason)
-			}
 		}
-		Expect(model).NotTo(BeEmpty())
+		if model == "" {
+			Skip("Skipping live Copilot proxy OpenAI provider check: no usable GPT OpenAI model exposed")
+		}
 
 		By("creating a dummy secret for provider validation")
 		DeferCleanup(func() {
@@ -144,7 +136,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 			_, _ = utils.Run(cmd)
 		})
 		err := createK8sSecret(liveProxySecretName, namespace, map[string]string{
-			"api-key": "dummy-live-copilot-proxy-key",
+			"api-key": liveProxyProbeAPIKey,
 		})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -188,7 +180,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 					},
 					"prompt": "Reply with exactly %s and nothing else.",
 					"temperature": 0,
-					"maxTokens": 8
+					"maxTokens": 16
 				}
 			}
 		}`, liveProxyTaskName, namespace, liveProxyProviderName, expectedOutput)
@@ -258,7 +250,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 			_, _ = utils.Run(cmd)
 		})
 		err = createK8sSecret(liveProxySecretName, namespace, map[string]string{
-			"api-key": "dummy-live-copilot-proxy-key",
+			"api-key": liveProxyProbeAPIKey,
 		})
 		Expect(err).NotTo(HaveOccurred())
 

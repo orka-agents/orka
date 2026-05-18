@@ -139,6 +139,9 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		task.Spec.Schedule = schedule
 	}
 
+	if result, ok := authorizeTaskCreate(ctx, tc, task); !ok {
+		return result, nil
+	}
 	if err := tc.Client.Create(ctx, task); err != nil {
 		return classifyChatK8sErr(err)
 	}

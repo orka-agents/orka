@@ -18,6 +18,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/metrics"
 	"github.com/sozercan/orka/internal/security"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tools"
@@ -122,7 +123,7 @@ func (h *Handlers) updateRepositoryScanRunStatus(ctx context.Context, scan *core
 	return h.client.Status().Patch(ctx, patch, client.MergeFrom(scan))
 }
 
-func (h *Handlers) createSecurityScanRun(ctx context.Context, scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit string) (*store.ScanRun, error) {
+func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit string) (*store.ScanRun, error) {
 	if err := h.ensureSecurityStore(); err != nil {
 		return nil, err
 	}
@@ -171,6 +172,9 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, scan *corev1alpha1
 			},
 		},
 	}
+	if err := authorizeAndStampTaskContext(ctx, h.client, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityScanTask", ui, task); err != nil {
+		return nil, err
+	}
 	if err := h.client.Create(ctx, task); err != nil {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create scan task: %v", err))
 	}
@@ -195,7 +199,7 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, scan *corev1alpha1
 	return run, nil
 }
 
-func (h *Handlers) createSecurityValidationTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, finding *store.Finding) error {
+func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInfo, scan *corev1alpha1.RepositoryScan, finding *store.Finding) error {
 	timeout := metav1.Duration{Duration: 90 * time.Minute}
 	priority := int32(725)
 	taskName := security.ScanStageTaskName(scan.Name, "validation", security.StageValidation, finding.ID)
@@ -233,6 +237,9 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, scan *corev
 			},
 		},
 	}
+	if err := authorizeAndStampTaskContext(ctx, h.client, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityValidationTask", ui, task); err != nil {
+		return err
+	}
 	if err := h.client.Create(ctx, task); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create validation task: %v", err))
 	}
@@ -243,15 +250,20 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, scan *corev
 	return nil
 }
 
-func (h *Handlers) createSecurityPatchTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, finding *store.Finding) (*store.PatchProposal, error) {
-	if err := h.ensureSecurityStore(); err != nil {
-		return nil, err
-	}
-
+func securityPatchAgentRef(scan *corev1alpha1.RepositoryScan) corev1alpha1.AgentReference {
 	agentRef := scan.Spec.AnalysisAgentRef
 	if scan.Spec.PatchAgentRef != nil {
 		agentRef = *scan.Spec.PatchAgentRef
 	}
+	return agentRef
+}
+
+func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, scan *corev1alpha1.RepositoryScan, finding *store.Finding) (*store.PatchProposal, error) {
+	if err := h.ensureSecurityStore(); err != nil {
+		return nil, err
+	}
+
+	agentRef := securityPatchAgentRef(scan)
 
 	taskName := security.PatchTaskName(scan.Name, finding.ID)
 	proposalID := security.PatchProposalID(taskName)
@@ -296,6 +308,9 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, scan *corev1alph
 			},
 		},
 	}
+	if err := authorizeAndStampTaskContext(ctx, h.client, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityPatchTask", ui, task); err != nil {
+		return nil, err
+	}
 	if err := h.client.Create(ctx, task); err != nil {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create patch task: %v", err))
 	}
@@ -323,6 +338,9 @@ func (h *Handlers) ListRepositoryScans(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "listRepositoryScans", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
+		return err
+	}
 
 	limit := c.Query("limit", "100")
 	continueToken := c.Query("continue", "")
@@ -339,11 +357,29 @@ func (h *Handlers) ListRepositoryScans(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list repository scans: %v", err))
 	}
 
+	items := list.Items
+	filteredList := false
+	if h.contextTokenAuthorization.Enabled() {
+		filtered := make([]corev1alpha1.RepositoryScan, 0, len(list.Items))
+		for i := range list.Items {
+			scan := &list.Items[i]
+			if h.contextTokenSecurityScanAllowed(c, scan, scan.Spec.AnalysisAgentRef) {
+				filtered = append(filtered, *scan)
+			}
+		}
+		filteredList = len(filtered) != len(list.Items)
+		items = filtered
+	}
+	remainingItemCount := list.RemainingItemCount
+	if filteredList {
+		remainingItemCount = nil
+	}
+
 	return c.JSON(ListResponse{
-		Items: list.Items,
+		Items: items,
 		Metadata: ListMeta{
 			Continue:           list.Continue,
-			RemainingItemCount: list.RemainingItemCount,
+			RemainingItemCount: remainingItemCount,
 		},
 	})
 }
@@ -354,8 +390,14 @@ func (h *Handlers) GetRepositoryScan(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "getRepositoryScan", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
+		return err
+	}
 	scan, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name"))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "getRepositoryScan", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
 	return c.JSON(scan)
@@ -381,6 +423,9 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "createRepositoryScan", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
+		return err
+	}
 	h.normalizeRepositoryScanSpec(&req.Spec)
 
 	scan := &corev1alpha1.RepositoryScan{
@@ -389,6 +434,9 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 			Namespace: namespace,
 		},
 		Spec: req.Spec,
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "createRepositoryScan", scan, scan.Spec.AnalysisAgentRef); err != nil {
+		return err
 	}
 	if err := h.client.Create(c.Context(), scan); err != nil {
 		if apierrors.IsAlreadyExists(err) {
@@ -410,8 +458,14 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "updateRepositoryScan", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
+		return err
+	}
 	scan, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name"))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "updateRepositoryScan", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
 
@@ -423,11 +477,15 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 	}
 
 	h.normalizeRepositoryScanSpec(&req.Spec)
-	scan.Spec = req.Spec
-	if err := h.client.Update(c.Context(), scan); err != nil {
+	updated := scan.DeepCopy()
+	updated.Spec = req.Spec
+	if err := h.authorizeContextTokenSecurityScanTask(c, "updateRepositoryScan", updated, updated.Spec.AnalysisAgentRef); err != nil {
+		return err
+	}
+	if err := h.client.Update(c.Context(), updated); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update repository scan: %v", err))
 	}
-	return c.JSON(scan)
+	return c.JSON(updated)
 }
 
 // DeleteRepositoryScan deletes a repository scan configuration.
@@ -436,8 +494,14 @@ func (h *Handlers) DeleteRepositoryScan(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "deleteRepositoryScan", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
+		return err
+	}
 	scan, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name"))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "deleteRepositoryScan", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
 	if err := h.client.Delete(c.Context(), scan); err != nil {
@@ -455,7 +519,14 @@ func (h *Handlers) GetThreatModel(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if _, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name")); err != nil {
+	if err := h.authorizeContextTokenAction(c, "getThreatModel", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
+		return err
+	}
+	scan, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name"))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "getThreatModel", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
 	model, err := h.securityStore.GetLatestThreatModel(c.Context(), namespace, c.Params("name"))
@@ -485,7 +556,14 @@ func (h *Handlers) UpdateThreatModel(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if _, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name")); err != nil {
+	if err := h.authorizeContextTokenAction(c, "updateThreatModel", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
+		return err
+	}
+	scan, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name"))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "updateThreatModel", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
 
@@ -513,7 +591,14 @@ func (h *Handlers) ListSecurityScanRuns(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if _, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name")); err != nil {
+	if err := h.authorizeContextTokenAction(c, "listSecurityScanRuns", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
+		return err
+	}
+	scan, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name"))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "listSecurityScanRuns", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
 
@@ -534,8 +619,14 @@ func (h *Handlers) CreateManualSecurityScan(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "createManualSecurityScan", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
+		return err
+	}
 	scan, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name"))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "createManualSecurityScan", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
 	active, err := h.hasActiveSecurityScanPipelineTask(c.Context(), scan)
@@ -545,7 +636,7 @@ func (h *Handlers) CreateManualSecurityScan(c fiber.Ctx) error {
 	if active {
 		return fiber.NewError(fiber.StatusConflict, "a security scan is already running for this repository")
 	}
-	run, err := h.createSecurityScanRun(c.Context(), scan, "manual", scan.Status.LastProcessedCommit, "")
+	run, err := h.createSecurityScanRun(c.Context(), GetUserInfo(c), scan, "manual", scan.Status.LastProcessedCommit, "")
 	if err != nil {
 		return err
 	}
@@ -561,7 +652,14 @@ func (h *Handlers) ListSecurityFindings(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if _, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name")); err != nil {
+	if err := h.authorizeContextTokenAction(c, "listSecurityFindings", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
+		return err
+	}
+	scan, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name"))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "listSecurityFindings", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
 
@@ -604,12 +702,22 @@ func (h *Handlers) GetSecurityFinding(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "getSecurityFinding", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
+		return err
+	}
 	finding, err := h.securityStore.GetFinding(c.Context(), namespace, c.Params("id"))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "finding not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get finding: %v", err))
+	}
+	scan, err := h.fetchRepositoryScan(c.Context(), namespace, finding.RepositoryScan)
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "getSecurityFinding", scan, scan.Spec.AnalysisAgentRef); err != nil {
+		return err
 	}
 	if finding.ScanRunID != "" {
 		if run, err := h.securityStore.GetScanRun(c.Context(), namespace, finding.ScanRunID); err == nil {
@@ -626,6 +734,23 @@ func (h *Handlers) DismissSecurityFinding(c fiber.Ctx) error {
 	}
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "dismissSecurityFinding", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
+		return err
+	}
+	finding, err := h.securityStore.GetFinding(c.Context(), namespace, c.Params("id"))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "finding not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get finding: %v", err))
+	}
+	scan, err := h.fetchRepositoryScan(c.Context(), namespace, finding.RepositoryScan)
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "dismissSecurityFinding", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
 	if err := h.securityStore.UpdateFindingState(c.Context(), namespace, c.Params("id"), "dismissed"); err != nil {
@@ -646,6 +771,23 @@ func (h *Handlers) ReopenSecurityFinding(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "reopenSecurityFinding", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
+		return err
+	}
+	finding, err := h.securityStore.GetFinding(c.Context(), namespace, c.Params("id"))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "finding not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get finding: %v", err))
+	}
+	scan, err := h.fetchRepositoryScan(c.Context(), namespace, finding.RepositoryScan)
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "reopenSecurityFinding", scan, scan.Spec.AnalysisAgentRef); err != nil {
+		return err
+	}
 	if err := h.securityStore.UpdateFindingState(c.Context(), namespace, c.Params("id"), "open"); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "finding not found")
@@ -664,6 +806,9 @@ func (h *Handlers) ValidateSecurityFinding(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "validateSecurityFinding", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
+		return err
+	}
 	finding, err := h.securityStore.GetFinding(c.Context(), namespace, c.Params("id"))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -675,8 +820,11 @@ func (h *Handlers) ValidateSecurityFinding(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "validateSecurityFinding", scan, scan.Spec.AnalysisAgentRef); err != nil {
+		return err
+	}
 
-	if err := h.createSecurityValidationTask(c.Context(), scan, finding); err != nil {
+	if err := h.createSecurityValidationTask(c.Context(), GetUserInfo(c), scan, finding); err != nil {
 		return err
 	}
 	return c.SendStatus(fiber.StatusAccepted)
@@ -691,6 +839,9 @@ func (h *Handlers) GenerateSecurityPatch(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "generateSecurityPatch", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
+		return err
+	}
 	finding, err := h.securityStore.GetFinding(c.Context(), namespace, c.Params("id"))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -702,8 +853,12 @@ func (h *Handlers) GenerateSecurityPatch(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	agentRef := securityPatchAgentRef(scan)
+	if err := h.authorizeContextTokenSecurityScanTask(c, "generateSecurityPatch", scan, agentRef); err != nil {
+		return err
+	}
 
-	proposal, err := h.createSecurityPatchTask(c.Context(), scan, finding)
+	proposal, err := h.createSecurityPatchTask(c.Context(), GetUserInfo(c), scan, finding)
 	if err != nil {
 		return err
 	}
@@ -724,11 +879,90 @@ func (h *Handlers) ListSecurityPatchProposals(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	proposals, err := h.securityStore.ListPatchProposals(c.Context(), namespace, c.Params("id"))
+	if err := h.authorizeContextTokenAction(c, "listSecurityPatchProposals", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
+		return err
+	}
+	finding, err := h.securityStore.GetFinding(c.Context(), namespace, c.Params("id"))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "finding not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get finding: %v", err))
+	}
+	scan, err := h.fetchRepositoryScan(c.Context(), namespace, finding.RepositoryScan)
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "listSecurityPatchProposals", scan, securityPatchAgentRef(scan)); err != nil {
+		return err
+	}
+	proposals, err := h.securityStore.ListPatchProposals(c.Context(), namespace, finding.ID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list patch proposals: %v", err))
 	}
 	return c.JSON(fiber.Map{"items": proposals})
+}
+
+func contextTokenSecurityScanFailures(token *ContextToken, scan *corev1alpha1.RepositoryScan, agentRef corev1alpha1.AgentReference) []string {
+	failures := []string{}
+	if want, ok := contextString(token.TransactionContext, "namespace"); ok && scan.Namespace != want {
+		failures = append(failures, fmt.Sprintf("namespace %q does not match token context %q", scan.Namespace, want))
+	}
+	if want, ok := contextString(token.TransactionContext, "repo"); ok && scan.Spec.RepoURL != want {
+		failures = append(failures, fmt.Sprintf("repository %q does not match token context %q", scan.Spec.RepoURL, want))
+	}
+	if want, ok := contextString(token.TransactionContext, "branch"); ok && security.EffectiveBranch(scan) != want {
+		failures = append(failures, fmt.Sprintf("workspace branch %q does not match token context %q", security.EffectiveBranch(scan), want))
+	}
+
+	agentNamespace := agentRef.Namespace
+	if agentNamespace == "" {
+		agentNamespace = scan.Namespace
+	}
+	if want, ok := contextString(token.TransactionContext, "agent"); ok && !agentMatches(agentRef.Name, agentNamespace, want) {
+		failures = append(failures, fmt.Sprintf("agent %q does not match token context %q", namespacedNameString(agentNamespace, agentRef.Name), want))
+	}
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedAgents"); ok && !agentAllowed(agentRef.Name, agentNamespace, allowed) {
+		failures = append(failures, fmt.Sprintf("agent %q is not allowed by token context", namespacedNameString(agentNamespace, agentRef.Name)))
+	}
+	return failures
+}
+
+func (h *Handlers) contextTokenSecurityScanAllowed(c fiber.Ctx, scan *corev1alpha1.RepositoryScan, agentRef corev1alpha1.AgentReference) bool {
+	if !h.contextTokenAuthorization.Enabled() {
+		return true
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return true
+	}
+	failures := contextTokenSecurityScanFailures(ui.ContextToken, scan, agentRef)
+	if len(failures) == 0 {
+		return true
+	}
+	if h.contextTokenAuthorization.enforcing() {
+		return false
+	}
+	_ = h.handleContextTokenAuthorizationFailures(ui.ContextToken, "listRepositoryScans", failures)
+	return true
+}
+
+func (h *Handlers) authorizeContextTokenSecurityScanTask(c fiber.Ctx, action string, scan *corev1alpha1.RepositoryScan, agentRef corev1alpha1.AgentReference) error {
+	if !h.contextTokenAuthorization.Enabled() {
+		return nil
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return nil
+	}
+
+	token := ui.ContextToken
+	failures := contextTokenSecurityScanFailures(token, scan, agentRef)
+	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
+		return nil
+	}
+	return h.handleContextTokenAuthorizationFailures(token, action, failures)
 }
 
 func extractGitToken(secret *corev1.Secret) string {
@@ -762,6 +996,9 @@ func (h *Handlers) CreateSecurityPullRequest(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "createSecurityPullRequest", h.contextTokenAuthorization.SecurityWriteScopes); err != nil {
+		return err
+	}
 	finding, err := h.securityStore.GetFinding(c.Context(), namespace, c.Params("id"))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -771,6 +1008,9 @@ func (h *Handlers) CreateSecurityPullRequest(c fiber.Ctx) error {
 	}
 	scan, err := h.fetchRepositoryScan(c.Context(), namespace, finding.RepositoryScan)
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "createSecurityPullRequest", scan, securityPatchAgentRef(scan)); err != nil {
 		return err
 	}
 

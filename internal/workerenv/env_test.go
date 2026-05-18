@@ -7,6 +7,9 @@ MIT License - see LICENSE file for details.
 package workerenv
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -14,10 +17,12 @@ import (
 func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	env := AIWorkerEnv{
 		BaseEnv: BaseEnv{
-			TaskName:       "task-1",
-			TaskNamespace:  "default",
-			ResultEndpoint: "http://controller/results/default/task-1",
-			ControllerURL:  "http://controller",
+			TaskName:           "task-1",
+			TaskNamespace:      "default",
+			ResultEndpoint:     "http://controller/results/default/task-1",
+			ControllerURL:      "http://controller",
+			TransactionID:      "txn-123",
+			TransactionProfile: "kontxt",
 		},
 		Provider:        "openai",
 		Model:           "gpt-5",
@@ -44,7 +49,7 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	if err := parsed.ValidateRequired(); err != nil {
 		t.Fatalf("ValidateRequired() returned error: %v", err)
 	}
-	if parsed.TaskName != env.TaskName || parsed.TaskNamespace != env.TaskNamespace || parsed.ControllerURL != env.ControllerURL {
+	if parsed.BaseEnv != env.BaseEnv {
 		t.Fatalf("base env mismatch: got %#v, want %#v", parsed.BaseEnv, env.BaseEnv)
 	}
 	if parsed.Provider != env.Provider || parsed.Model != env.Model || parsed.Prompt != env.Prompt {
@@ -66,6 +71,85 @@ func TestParseFallbacksInvalidCountPreservesLegacyBehavior(t *testing.T) {
 	fallbacks := ParseFallbacks(func(name string) string { return values[name] })
 	if len(fallbacks) != 0 {
 		t.Fatalf("fallbacks = %#v, want none", fallbacks)
+	}
+}
+
+func TestReadTokenFileEnv(t *testing.T) {
+	const envName = "TEST_TOKEN_FILE_ENV"
+
+	t.Run("unset", func(t *testing.T) {
+		t.Setenv(envName, "")
+		token, ok, err := ReadTokenFileEnv(envName, "test token")
+		if err != nil {
+			t.Fatalf("ReadTokenFileEnv() error = %v", err)
+		}
+		if ok {
+			t.Fatal("ReadTokenFileEnv() ok = true, want false")
+		}
+		if token != "" {
+			t.Fatalf("ReadTokenFileEnv() token = %q, want empty", token)
+		}
+	})
+
+	t.Run("trims token file content", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "token")
+		if err := os.WriteFile(path, []byte("  token\n"), 0600); err != nil {
+			t.Fatalf("failed to write token fixture: %v", err)
+		}
+		t.Setenv(envName, path)
+
+		token, ok, err := ReadTokenFileEnv(envName, "test token")
+		if err != nil {
+			t.Fatalf("ReadTokenFileEnv() error = %v", err)
+		}
+		if !ok {
+			t.Fatal("ReadTokenFileEnv() ok = false, want true")
+		}
+		if token != "token" {
+			t.Fatalf("ReadTokenFileEnv() token = %q, want token", token)
+		}
+	})
+
+	t.Run("whitespace only token file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "token")
+		if err := os.WriteFile(path, []byte(" \n\t "), 0600); err != nil {
+			t.Fatalf("failed to write token fixture: %v", err)
+		}
+		t.Setenv(envName, path)
+
+		_, ok, err := ReadTokenFileEnv(envName, "test token")
+		if err == nil || !strings.Contains(err.Error(), "empty") {
+			t.Fatalf("ReadTokenFileEnv() error = %v, want empty token error", err)
+		}
+		if !ok {
+			t.Fatal("ReadTokenFileEnv() ok = false, want true")
+		}
+	})
+
+	t.Run("missing token file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing-token")
+		t.Setenv(envName, path)
+
+		_, ok, err := ReadTokenFileEnv(envName, "test token")
+		if err == nil || !strings.Contains(err.Error(), "failed to read test token file") {
+			t.Fatalf("ReadTokenFileEnv() error = %v, want read error", err)
+		}
+		if !ok {
+			t.Fatal("ReadTokenFileEnv() ok = false, want true")
+		}
+	})
+}
+
+func TestRequireTokenFileEnvUnset(t *testing.T) {
+	const envName = "TEST_REQUIRED_TOKEN_FILE_ENV"
+	t.Setenv(envName, "")
+
+	_, err := RequireTokenFileEnv(envName, "required token")
+	if err == nil {
+		t.Fatal("RequireTokenFileEnv() error = nil, want required error")
+	}
+	if got, want := err.Error(), envName+" is required"; got != want {
+		t.Fatalf("RequireTokenFileEnv() error = %q, want %q", got, want)
 	}
 }
 
@@ -160,5 +244,27 @@ func TestCoordinationEnvRenderAndParse(t *testing.T) {
 	}
 	if len(parsed.AllowedAgents) != 2 || parsed.AllowedAgents[0] != "builder" || parsed.AllowedAgents[1] != "reviewer" {
 		t.Fatalf("allowed agents = %#v", parsed.AllowedAgents)
+	}
+}
+
+func TestTransactionLogFields(t *testing.T) {
+	if got := TransactionLogFields("", ""); got != "" {
+		t.Fatalf("TransactionLogFields empty = %q, want empty", got)
+	}
+	got := TransactionLogFields("txn-123", "kontxt")
+	want := ` transactionID="txn-123" contextTokenProfile="kontxt"`
+	if got != want {
+		t.Fatalf("TransactionLogFields() = %q, want %q", got, want)
+	}
+}
+
+func TestTransactionLogFields_EscapesLogForgingCharacters(t *testing.T) {
+	got := TransactionLogFields("txn 123", "kontxt\nforged=true")
+	want := ` transactionID="txn 123" contextTokenProfile="kontxt\nforged=true"`
+	if got != want {
+		t.Fatalf("TransactionLogFields() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "\n") {
+		t.Fatalf("TransactionLogFields() contains a literal newline: %q", got)
 	}
 }

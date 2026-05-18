@@ -104,6 +104,9 @@ func (t *CreateContainerTaskTool) Execute(ctx context.Context, args json.RawMess
 		task.Spec.Schedule = schedule
 	}
 
+	if result, ok := authorizeTaskCreate(ctx, tc, task); !ok {
+		return result, nil
+	}
 	if err := tc.Client.Create(ctx, task); err != nil {
 		return classifyChatK8sErr(err)
 	}
@@ -157,6 +160,7 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 	if parentTask.Spec.Priority != nil {
 		task.Spec.Priority = parentTask.Spec.Priority
 	}
+	inheritTaskProvenance(task, parentTask)
 	if _, ok := a[priorityField]; ok {
 		p := int32(chatGetIntArg(a, priorityField, 500))
 		task.Spec.Priority = &p
@@ -170,8 +174,8 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 		task.Spec.Schedule = schedule
 	}
 	if parentTask.UID != "" {
-		blockOwnerDeletion := true
 		isController := true
+		blockOwnerDeletion := true
 		task.OwnerReferences = []metav1.OwnerReference{{
 			APIVersion:         corev1alpha1.GroupVersion.String(),
 			Kind:               "Task",
@@ -181,9 +185,38 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 			BlockOwnerDeletion: &blockOwnerDeletion,
 		}}
 	}
+	if err := validateChildTaskAgainstParentTransaction(ctx, t.k8sClient, parentTask, task, ""); err != nil {
+		return "", err
+	}
 
+	childTokenExchangeEnabled, err := shouldPrepareChildTransactionToken(parentTask)
+	if err != nil {
+		return "", err
+	}
+	if childTokenExchangeEnabled {
+		if task.Spec.Schedule != "" {
+			return ChatToolErrorResult("unsupported_schedule", "scheduled child container tasks cannot inherit delegated transaction tokens", "Create an immediate child container task, or create scheduled work from a task that does not need delegated child tokens.")
+		}
+		markChildTransactionTokenPending(task)
+		if err := prepareChildTransactionToken(ctx, t.k8sClient, parentTask, task, "createContainerTask", ""); err != nil {
+			return "", err
+		}
+	}
 	if err := t.k8sClient.Create(ctx, task); err != nil {
+		if childTokenExchangeEnabled {
+			cleanupChildTransactionTokenSecret(ctx, t.k8sClient, task)
+		}
 		return classifyChatK8sErr(err)
+	}
+	if childTokenExchangeEnabled {
+		if err := adoptChildTransactionTokenSecret(ctx, t.k8sClient, task); err != nil {
+			cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, task)
+			return classifyChatK8sErr(err)
+		}
+		if err := patchPreparedChildTransactionToken(ctx, t.k8sClient, task); err != nil {
+			cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, task)
+			return classifyChatK8sErr(err)
+		}
 	}
 	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(task.Spec.Schedule)})
 }

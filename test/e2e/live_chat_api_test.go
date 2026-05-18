@@ -105,7 +105,7 @@ var _ = Describe("Live Chat API", Ordered, func() {
 
 		By("creating a dummy secret for the live provider")
 		err = createK8sSecret(liveChatSecretName, namespace, map[string]string{
-			"api-key": "dummy-live-chat-key",
+			"api-key": liveProxyProbeAPIKey,
 		})
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() {

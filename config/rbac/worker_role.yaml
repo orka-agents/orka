@@ -42,6 +42,7 @@ rules:
   - create
   - delete
   - get
+  - update
 # Orka Tool CRDs
 - apiGroups:
   - core.orka.ai
@@ -70,6 +71,8 @@ rules:
   - list
   - watch
   - create
+  - patch
+  - delete
 # Broad read-only access to common cluster resources
 - apiGroups:
   - ""
@@ -291,6 +294,8 @@ rules:
   - list
   - watch
   - create
+  - patch
+  - delete
 # Broad read-only access to common cluster resources
 - apiGroups:
   - ""

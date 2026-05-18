@@ -25,19 +25,21 @@ import (
 
 // AgentConfig holds worker configuration from environment variables.
 type AgentConfig struct {
-	TaskName        string
-	TaskNamespace   string
-	Prompt          string
-	Model           string
-	SystemPrompt    string
-	MaxTurns        int
-	AllowedTools    []string
-	DisallowedTools []string
-	GitRepo         string
-	GitBranch       string
-	GitRef          string
-	SubPath         string
-	TimeoutSeconds  int
+	TaskName           string
+	TaskNamespace      string
+	TransactionID      string
+	TransactionProfile string
+	Prompt             string
+	Model              string
+	SystemPrompt       string
+	MaxTurns           int
+	AllowedTools       []string
+	DisallowedTools    []string
+	GitRepo            string
+	GitBranch          string
+	GitRef             string
+	SubPath            string
+	TimeoutSeconds     int
 }
 
 // LoadConfig reads and validates agent configuration from environment variables.
@@ -53,16 +55,18 @@ func LoadWorkspaceConfig() (*AgentConfig, error) {
 
 func loadConfig(defaultMaxTurns int, requirePrompt bool) (*AgentConfig, error) {
 	cfg := &AgentConfig{
-		TaskName:      os.Getenv(workerenv.TaskName),
-		TaskNamespace: os.Getenv(workerenv.TaskNamespace),
-		Prompt:        os.Getenv(workerenv.Prompt),
-		Model:         os.Getenv(workerenv.Model),
-		SystemPrompt:  os.Getenv(workerenv.SystemPrompt),
-		GitRepo:       os.Getenv(workerenv.GitRepo),
-		GitBranch:     os.Getenv(workerenv.GitBranch),
-		GitRef:        os.Getenv(workerenv.GitRef),
-		SubPath:       os.Getenv(workerenv.WorkspaceSubpath),
-		MaxTurns:      defaultMaxTurns,
+		TaskName:           os.Getenv(workerenv.TaskName),
+		TaskNamespace:      os.Getenv(workerenv.TaskNamespace),
+		TransactionID:      os.Getenv(workerenv.TransactionID),
+		TransactionProfile: os.Getenv(workerenv.TransactionProfile),
+		Prompt:             os.Getenv(workerenv.Prompt),
+		Model:              os.Getenv(workerenv.Model),
+		SystemPrompt:       os.Getenv(workerenv.SystemPrompt),
+		GitRepo:            os.Getenv(workerenv.GitRepo),
+		GitBranch:          os.Getenv(workerenv.GitBranch),
+		GitRef:             os.Getenv(workerenv.GitRef),
+		SubPath:            os.Getenv(workerenv.WorkspaceSubpath),
+		MaxTurns:           defaultMaxTurns,
 	}
 
 	if requirePrompt && cfg.Prompt == "" {
@@ -261,6 +265,9 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
+	fmt.Printf("Worker %s started task=%s/%s%s\n",
+		name, cfg.TaskNamespace, cfg.TaskName, workerenv.TransactionLogFields(cfg.TransactionID, cfg.TransactionProfile))
+
 	// Configure git credentials globally (for both clone and agent push operations)
 	SetupGitCredentials()
 
@@ -320,7 +327,8 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 		fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", err)
 	}
 
-	fmt.Printf("Task %s/%s completed successfully\n", cfg.TaskNamespace, cfg.TaskName)
+	fmt.Printf("Task %s/%s completed successfully%s\n",
+		cfg.TaskNamespace, cfg.TaskName, workerenv.TransactionLogFields(cfg.TransactionID, cfg.TransactionProfile))
 	return nil
 }
 

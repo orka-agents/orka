@@ -50,6 +50,9 @@ func (t *ChatCancelTaskTool) Execute(ctx context.Context, args json.RawMessage) 
 	if err := tc.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, task); err != nil {
 		return classifyChatK8sErr(err)
 	}
+	if result, ok := authorizeTaskDelete(ctx, tc, task); !ok {
+		return result, nil
+	}
 
 	if err := tc.Client.Delete(ctx, task); err != nil {
 		return classifyChatK8sErr(err)

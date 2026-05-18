@@ -630,6 +630,143 @@ func TestExecute_UnknownTool(t *testing.T) {
 	}
 }
 
+func TestExecute_AllowedToolsRejectsDisallowedToolBeforeDispatch(t *testing.T) {
+	e := newTestExecutor()
+	e.SetAllowedTools([]llm.Tool{{Name: "check_task_progress"}})
+
+	disallowed := llm.ToolCall{
+		ID:        "1",
+		Name:      "create_ai_task",
+		Arguments: json.RawMessage(`{invalid`),
+	}
+	result, err := e.Execute(context.Background(), disallowed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "unauthorized_tool") || !strings.Contains(result, "not authorized") {
+		t.Fatalf("expected unauthorized_tool error, got: %s", result)
+	}
+	if strings.Contains(result, "invalid_arguments") {
+		t.Fatalf("expected allowlist rejection before argument parsing, got: %s", result)
+	}
+
+	allowed := llm.ToolCall{
+		ID:        "2",
+		Name:      "check_task_progress",
+		Arguments: mustJSON(map[string]any{}),
+	}
+	result, err = e.Execute(context.Background(), allowed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "name is required") {
+		t.Fatalf("expected allowed tool to dispatch to validation, got: %s", result)
+	}
+}
+
+func TestExecute_CreateAgentUsesAgentCreateAuthorizer(t *testing.T) {
+	e := newTestExecutor()
+	e.SetAgentCreateAuthorizer(func(context.Context, *corev1alpha1.Agent) error {
+		return errors.New("agent denied")
+	})
+
+	result, err := e.Execute(context.Background(), llm.ToolCall{
+		ID:        "1",
+		Name:      "create_agent",
+		Arguments: mustJSON(map[string]any{"name": "blocked-agent"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "authorization_failed") {
+		t.Fatalf("expected authorization_failed, got: %s", result)
+	}
+
+	var agent corev1alpha1.Agent
+	err = e.client.Get(context.Background(), apitypes.NamespacedName{Name: "blocked-agent", Namespace: "default"}, &agent)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("agent should not have been created, get err=%v", err)
+	}
+}
+
+func TestExecute_CancelTaskUsesTaskDeleteAuthorizer(t *testing.T) {
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "blocked-task", Namespace: "default"}}
+	e := newTestExecutor(task)
+	e.SetTaskDeleteAuthorizer(func(context.Context, *corev1alpha1.Task) error {
+		return errors.New("task delete denied")
+	})
+
+	result, err := e.Execute(context.Background(), llm.ToolCall{
+		ID:        "1",
+		Name:      "cancel_task",
+		Arguments: mustJSON(map[string]any{"name": "blocked-task"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "authorization_failed") {
+		t.Fatalf("expected authorization_failed, got: %s", result)
+	}
+
+	var remaining corev1alpha1.Task
+	if err := e.client.Get(context.Background(), apitypes.NamespacedName{Name: "blocked-task", Namespace: "default"}, &remaining); err != nil {
+		t.Fatalf("task should not have been deleted: %v", err)
+	}
+}
+
+func TestExecute_UpdateAgentUsesAgentUpdateAuthorizer(t *testing.T) {
+	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "blocked-agent", Namespace: "default"}}
+	e := newTestExecutor(agent)
+	e.SetAgentUpdateAuthorizer(func(context.Context, *corev1alpha1.Agent) error {
+		return errors.New("agent update denied")
+	})
+
+	result, err := e.Execute(context.Background(), llm.ToolCall{
+		ID:        "1",
+		Name:      "update_agent",
+		Arguments: mustJSON(map[string]any{"name": "blocked-agent", "systemPrompt": "blocked"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "authorization_failed") {
+		t.Fatalf("expected authorization_failed, got: %s", result)
+	}
+
+	var remaining corev1alpha1.Agent
+	if err := e.client.Get(context.Background(), apitypes.NamespacedName{Name: "blocked-agent", Namespace: "default"}, &remaining); err != nil {
+		t.Fatalf("agent should still exist: %v", err)
+	}
+	if remaining.Spec.SystemPrompt != nil {
+		t.Fatalf("agent update should not have been persisted: %#v", remaining.Spec.SystemPrompt)
+	}
+}
+
+func TestExecute_DeleteAgentUsesAgentDeleteAuthorizer(t *testing.T) {
+	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "blocked-agent", Namespace: "default"}}
+	e := newTestExecutor(agent)
+	e.SetAgentDeleteAuthorizer(func(context.Context, *corev1alpha1.Agent) error {
+		return errors.New("agent delete denied")
+	})
+
+	result, err := e.Execute(context.Background(), llm.ToolCall{
+		ID:        "1",
+		Name:      "delete_agent",
+		Arguments: mustJSON(map[string]any{"name": "blocked-agent"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "authorization_failed") {
+		t.Fatalf("expected authorization_failed, got: %s", result)
+	}
+
+	var remaining corev1alpha1.Agent
+	if err := e.client.Get(context.Background(), apitypes.NamespacedName{Name: "blocked-agent", Namespace: "default"}, &remaining); err != nil {
+		t.Fatalf("agent should not have been deleted: %v", err)
+	}
+}
+
 func TestExecute_Dispatch(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -27,8 +27,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/contexttoken"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/metrics"
+	"github.com/sozercan/orka/internal/taskmeta"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -92,15 +94,24 @@ const (
 // JobBuilder builds Kubernetes Jobs for Tasks
 type JobBuilder struct {
 	client.Client
-	AIWorkerImage      string
-	GeneralWorkerImage string
-	CopilotWorkerImage string
-	ClaudeWorkerImage  string
-	CodexWorkerImage   string
-	CodexSandboxMode   string
-	InitImage          string
-	ControllerURL      string // e.g. http://orka-controller.orka-system.svc:8080
-	directSecrets      directRuntimeSecretPolicy
+	AIWorkerImage                string
+	GeneralWorkerImage           string
+	CopilotWorkerImage           string
+	ClaudeWorkerImage            string
+	CodexWorkerImage             string
+	CodexSandboxMode             string
+	InitImage                    string
+	ControllerURL                string // e.g. http://orka-controller.orka-system.svc:8080
+	ContextTokenTTSURL           string
+	ContextTokenTTSAudience      string
+	ContextTokenTTSTimeout       string
+	ContextTokenTTSTokenSource   string
+	ContextTokenSubjectTokenType string
+	ContextTokenChildScope       string
+	ContextTokenOutboundScope    string
+	ContextTokenChildTokenTTL    string
+	ContextTokenToolTokenTTL     string
+	directSecrets                directRuntimeSecretPolicy
 }
 
 type directRuntimeSecretPolicy struct {
@@ -307,6 +318,9 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 		},
 	}
 
+	taskmeta.ApplyTransactionMetadata(&job.ObjectMeta, task.Spec.Transaction)
+	taskmeta.ApplyTransactionMetadata(&job.Spec.Template.ObjectMeta, task.Spec.Transaction)
+
 	applyExecution(job, execution)
 
 	// Always add tmp volume for read-only root filesystem
@@ -316,6 +330,8 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		},
 	})
+
+	b.addTransactionTokenSecret(job, task)
 
 	// Add workspace/home volumes for tasks that need a git workspace.
 	if taskNeedsWorkspace(task) {
@@ -550,6 +566,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 
 	// Add task-level env vars
 	envVars = append(envVars, task.Spec.Env...)
+	envVars = addTransactionEnvVars(envVars, task.Spec.Transaction)
 
 	// Add prior task env vars for iterative coordination
 	if task.Spec.PriorTaskRef != nil {
@@ -610,6 +627,22 @@ func (b *JobBuilder) addAgentSandboxWorkspaceEnvVars(envVars []corev1.EnvVar, re
 		ClaimTimeout:      request.ClaimTimeout,
 		CommandTimeout:    request.CommandTimeout,
 	}.EnvVars()...)
+}
+
+func addTransactionEnvVars(envVars []corev1.EnvVar, tx *corev1alpha1.TaskTransaction) []corev1.EnvVar {
+	if tx == nil {
+		return envVars
+	}
+	envVars = setControllerEnv(envVars, workerenv.TransactionID, tx.ID)
+	envVars = setControllerEnv(envVars, workerenv.TransactionProfile, tx.Profile)
+	envVars = setControllerEnv(envVars, workerenv.TransactionIssuer, tx.Issuer)
+	envVars = setControllerEnv(envVars, workerenv.TransactionSubject, tx.Subject)
+	envVars = setControllerEnv(envVars, workerenv.TransactionRequestingWorkload, tx.RequestingWorkload)
+	envVars = setControllerEnv(envVars, workerenv.TransactionScope, tx.Scope)
+	envVars = setControllerEnv(envVars, workerenv.TransactionScopes, workerenv.JoinCSV(tx.Scopes))
+	envVars = setControllerEnv(envVars, workerenv.TransactionContextDigest, tx.ContextDigest)
+	envVars = setControllerEnv(envVars, workerenv.TransactionRequesterContextDigest, tx.RequesterContextDigest)
+	return envVars
 }
 
 // aiConfig holds resolved AI configuration from provider, agent, and task.
@@ -830,6 +863,104 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	}
 
 	return envVars
+}
+
+func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alpha1.Task) {
+	if job == nil || len(job.Spec.Template.Spec.Containers) == 0 {
+		return
+	}
+	secretName := ""
+	if task != nil && task.Annotations != nil {
+		secretName = strings.TrimSpace(task.Annotations[labels.AnnotationTransactionTokenSecret])
+	}
+	injectTTS := b.shouldInjectContextTokenTTS(task, secretName)
+	for i := range job.Spec.Template.Spec.Containers {
+		container := &job.Spec.Template.Spec.Containers[i]
+		if injectTTS {
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSURL, b.ContextTokenTTSURL)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSAudience, b.ContextTokenTTSAudience)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSTimeout, b.ContextTokenTTSTimeout)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSTokenSource, b.ContextTokenTTSTokenSource)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenSubjectTokenType, b.ContextTokenSubjectTokenType)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenChildScope, b.ContextTokenChildScope)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenOutboundScope, b.ContextTokenOutboundScope)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenChildTokenTTL, b.ContextTokenChildTokenTTL)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenToolTokenTTL, b.ContextTokenToolTokenTTL)
+		} else {
+			for _, name := range contextTokenTTSEnvNames() {
+				container.Env = removeControllerEnv(container.Env, name)
+			}
+		}
+		container.Env = removeControllerEnv(container.Env, workerenv.TransactionTokenFile)
+		container.Env = removeControllerEnv(container.Env, workerenv.ContextTokenSubjectTokenFile)
+	}
+
+	if secretName == "" {
+		return
+	}
+	const (
+		volumeName = "transaction-token"
+		mountPath  = "/var/run/orka/transaction-token"
+		tokenPath  = mountPath + "/token"
+	)
+	defaultMode := int32(0400)
+	// The child transaction token is delegation authority. Add the Secret as a
+	// pod volume and expose the mounted token-file path to every workload
+	// container in the pod so secondary containers can make TTS-mediated calls.
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: volumeName,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName:  secretName,
+				DefaultMode: &defaultMode,
+				Items: []corev1.KeyToPath{{
+					Key:  "token",
+					Path: "token",
+				}},
+			},
+		},
+	})
+	for i := range job.Spec.Template.Spec.Containers {
+		container := &job.Spec.Template.Spec.Containers[i]
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:      volumeName,
+			MountPath: mountPath,
+			ReadOnly:  true,
+		})
+		container.Env = setControllerEnv(container.Env, workerenv.TransactionTokenFile, tokenPath)
+		if b.ContextTokenTTSTokenSource == contexttoken.TTSTokenSourceIncoming {
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenSubjectTokenFile, tokenPath)
+		} else {
+			container.Env = removeControllerEnv(container.Env, workerenv.ContextTokenSubjectTokenFile)
+		}
+	}
+}
+
+func (b *JobBuilder) shouldInjectContextTokenTTS(task *corev1alpha1.Task, secretName string) bool {
+	if b.ContextTokenTTSURL == "" {
+		return false
+	}
+	if secretName != "" {
+		return true
+	}
+	if task == nil || task.Spec.Transaction == nil {
+		return false
+	}
+	return b.ContextTokenTTSTokenSource != contexttoken.TTSTokenSourceIncoming
+}
+
+func contextTokenTTSEnvNames() []string {
+	return []string{
+		workerenv.ContextTokenTTSURL,
+		workerenv.ContextTokenTTSAudience,
+		workerenv.ContextTokenTTSTimeout,
+		workerenv.ContextTokenTTSTokenSource,
+		workerenv.ContextTokenSubjectTokenType,
+		workerenv.ContextTokenChildScope,
+		workerenv.ContextTokenOutboundScope,
+		workerenv.ContextTokenChildTokenTTL,
+		workerenv.ContextTokenToolTokenTTL,
+	}
 }
 
 // addSecretVolumes adds secret volumes to the Job
@@ -1062,6 +1193,38 @@ func (b *JobBuilder) getAgentWorkerImage(agent *corev1alpha1.Agent) string {
 	default:
 		return b.ClaudeWorkerImage
 	}
+}
+
+func setControllerEnv(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {
+	if value == "" {
+		return removeControllerEnv(envVars, name)
+	}
+	out := make([]corev1.EnvVar, 0, len(envVars)+1)
+	set := false
+	for _, envVar := range envVars {
+		if envVar.Name != name {
+			out = append(out, envVar)
+			continue
+		}
+		if !set {
+			out = append(out, corev1.EnvVar{Name: name, Value: value})
+			set = true
+		}
+	}
+	if !set {
+		out = append(out, corev1.EnvVar{Name: name, Value: value})
+	}
+	return out
+}
+
+func removeControllerEnv(envVars []corev1.EnvVar, name string) []corev1.EnvVar {
+	out := make([]corev1.EnvVar, 0, len(envVars))
+	for _, envVar := range envVars {
+		if envVar.Name != name {
+			out = append(out, envVar)
+		}
+	}
+	return out
 }
 
 func envVarExists(envVars []corev1.EnvVar, name string) bool {

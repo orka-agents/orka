@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/contexttoken"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/workerenv"
 )
@@ -38,11 +40,13 @@ const (
 	defaultNS              = "default"
 	envAIProviderKey       = "ORKA_AI_PROVIDER"
 	testCodexSandboxMode   = "danger-full-access"
+	testTransactionID      = "txn-123"
 	testNodeLabelKey       = "sandbox-runtime"
 	testNodeValueKata      = "kata"
 	testNodeValueGVisor    = "gvisor"
 	testRuntimeClassKata   = "kata-qemu"
 	testRuntimeClassGVisor = "gvisor"
+	testTTSAudience        = "tts-audience"
 )
 
 func TestEnvFlagEnabledAliases(t *testing.T) {
@@ -201,6 +205,253 @@ func TestJobBuilder_Build_GeneralContainerWorkerAutomountsTokenForCallback(t *te
 
 	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, ContainerWorkerServiceAccount)
 	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, true)
+}
+
+func TestJobBuilder_Build_PropagatesTransactionMetadata(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: defaultNS,
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:  corev1alpha1.TaskTypeContainer,
+			Image: "busybox:latest",
+			Env: []corev1.EnvVar{
+				{Name: workerenv.TransactionScope, Value: "spoofed"},
+				{Name: workerenv.TransactionScopes, Value: "spoofed"},
+			},
+			Transaction: &corev1alpha1.TaskTransaction{
+				Profile:                "kontxt",
+				ID:                     testTransactionID,
+				Issuer:                 "https://issuer.example.test",
+				Subject:                "spiffe://example.test/ns/default/sa/client",
+				RequestingWorkload:     "spiffe://example.test/ns/default/sa/client",
+				Scope:                  "read write",
+				Scopes:                 []string{"read", "write"},
+				ContextDigest:          "sha256:context",
+				RequesterContextDigest: "sha256:requester",
+			},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	for name, meta := range map[string]metav1.ObjectMeta{
+		"job":          job.ObjectMeta,
+		"pod template": job.Spec.Template.ObjectMeta,
+	} {
+		if meta.Labels[labels.LabelTransactionID] != labels.SelectorValue(testTransactionID) {
+			t.Fatalf("%s transaction label = %q, want txn-123", name, meta.Labels[labels.LabelTransactionID])
+		}
+		if meta.Labels[labels.LabelAuthProfile] != "kontxt" {
+			t.Fatalf("%s auth profile label = %q, want kontxt", name, meta.Labels[labels.LabelAuthProfile])
+		}
+		if meta.Annotations[labels.AnnotationTransactionID] != testTransactionID {
+			t.Fatalf("%s transaction annotation = %q, want txn-123", name, meta.Annotations[labels.AnnotationTransactionID])
+		}
+		if meta.Annotations[labels.AnnotationTransactionContextDigest] != "sha256:context" {
+			t.Fatalf("%s context digest annotation = %q", name, meta.Annotations[labels.AnnotationTransactionContextDigest])
+		}
+	}
+
+	envVars := job.Spec.Template.Spec.Containers[0].Env
+	wantEnv := map[string]string{
+		workerenv.TransactionID:                     testTransactionID,
+		workerenv.TransactionProfile:                "kontxt",
+		workerenv.TransactionIssuer:                 "https://issuer.example.test",
+		workerenv.TransactionSubject:                "spiffe://example.test/ns/default/sa/client",
+		workerenv.TransactionRequestingWorkload:     "spiffe://example.test/ns/default/sa/client",
+		workerenv.TransactionScope:                  "read write",
+		workerenv.TransactionScopes:                 "read,write",
+		workerenv.TransactionContextDigest:          "sha256:context",
+		workerenv.TransactionRequesterContextDigest: "sha256:requester",
+	}
+	for name, want := range wantEnv {
+		env, ok := findEnvVar(envVars, name)
+		if !ok {
+			t.Fatalf("missing env var %s", name)
+		}
+		if env.Value != want {
+			t.Fatalf("%s = %q, want %q", name, env.Value, want)
+		}
+		if count := countEnvVars(envVars, name); count != 1 {
+			t.Fatalf("%s appeared %d times, want exactly once", name, count)
+		}
+	}
+}
+
+func TestJobBuilder_Build_MountsTransactionTokenSecret(t *testing.T) {
+	builder := setupJobBuilder()
+	builder.ContextTokenTTSURL = "https://tts.example.test"
+	builder.ContextTokenTTSTokenSource = contexttoken.TTSTokenSourceIncoming
+	builder.ContextTokenTTSAudience = testTTSAudience
+	builder.ContextTokenTTSTimeout = "7s"
+	builder.ContextTokenSubjectTokenType = "urn:ietf:params:oauth:token-type:txn_token"
+	builder.ContextTokenChildScope = "orka:agents:run"
+	builder.ContextTokenOutboundScope = "orka:tools:use"
+	builder.ContextTokenChildTokenTTL = "3m"
+	builder.ContextTokenToolTokenTTL = "30s"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: defaultNS,
+			Annotations: map[string]string{
+				labels.AnnotationTransactionTokenSecret: "child-tx-token",
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:  corev1alpha1.TaskTypeContainer,
+			Image: "busybox:latest",
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	var foundVolume bool
+	for _, volume := range job.Spec.Template.Spec.Volumes {
+		if volume.Name == "transaction-token" && volume.Secret != nil && volume.Secret.SecretName == "child-tx-token" {
+			if volume.Secret.DefaultMode == nil {
+				t.Fatal("transaction-token secret volume DefaultMode is nil, want 0400")
+			}
+			if *volume.Secret.DefaultMode != int32(0400) {
+				t.Fatalf("transaction-token secret volume DefaultMode = %#o, want 0400", *volume.Secret.DefaultMode)
+			}
+			foundVolume = true
+		}
+	}
+	if !foundVolume {
+		t.Fatalf("expected transaction-token secret volume, got %#v", job.Spec.Template.Spec.Volumes)
+	}
+	container := job.Spec.Template.Spec.Containers[0]
+	if _, ok := findEnvVar(container.Env, workerenv.TransactionTokenFile); !ok {
+		t.Fatalf("missing %s env var", workerenv.TransactionTokenFile)
+	}
+	if _, ok := findEnvVar(container.Env, workerenv.ContextTokenSubjectTokenFile); !ok {
+		t.Fatalf("missing %s env var", workerenv.ContextTokenSubjectTokenFile)
+	}
+	for name, want := range map[string]string{
+		workerenv.ContextTokenTTSURL:           "https://tts.example.test",
+		workerenv.ContextTokenTTSTokenSource:   contexttoken.TTSTokenSourceIncoming,
+		workerenv.ContextTokenTTSAudience:      testTTSAudience,
+		workerenv.ContextTokenTTSTimeout:       "7s",
+		workerenv.ContextTokenSubjectTokenType: "urn:ietf:params:oauth:token-type:txn_token",
+		workerenv.ContextTokenChildScope:       "orka:agents:run",
+		workerenv.ContextTokenOutboundScope:    "orka:tools:use",
+		workerenv.ContextTokenChildTokenTTL:    "3m",
+		workerenv.ContextTokenToolTokenTTL:     "30s",
+	} {
+		got, ok := findEnvVar(container.Env, name)
+		if !ok || got.Value != want {
+			t.Fatalf("env %s = %#v, want %q", name, got, want)
+		}
+	}
+}
+
+func TestJobBuilder_AddTransactionTokenSecretExposesToAllContainers(t *testing.T) {
+	builder := setupJobBuilder()
+	builder.ContextTokenTTSTokenSource = contexttoken.TTSTokenSourceIncoming
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				labels.AnnotationTransactionTokenSecret: "child-tx-token",
+			},
+		},
+	}
+	job := &batchv1.Job{
+		Spec: batchv1.JobSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "worker"},
+						{Name: "sidecar"},
+					},
+				},
+			},
+		},
+	}
+
+	builder.addTransactionTokenSecret(job, task)
+
+	for _, container := range job.Spec.Template.Spec.Containers {
+		if !hasVolumeMount(container.VolumeMounts, "transaction-token") {
+			t.Fatalf("%s container missing transaction-token mount: %#v", container.Name, container.VolumeMounts)
+		}
+		for _, name := range []string{workerenv.TransactionTokenFile, workerenv.ContextTokenSubjectTokenFile} {
+			got, ok := findEnvVar(container.Env, name)
+			if !ok {
+				t.Fatalf("%s container missing %s env var", container.Name, name)
+			}
+			if got.Value != "/var/run/orka/transaction-token/token" {
+				t.Fatalf("%s container %s = %q, want token file path", container.Name, name, got.Value)
+			}
+		}
+	}
+}
+
+func TestJobBuilder_Build_InjectsContextTokenTTSConfigWithoutTransactionTokenSecret(t *testing.T) {
+	builder := setupJobBuilder()
+	builder.ContextTokenTTSURL = "https://tts.example.test"
+	builder.ContextTokenTTSTokenSource = contexttoken.TTSTokenSourceServiceAccount
+	builder.ContextTokenTTSAudience = testTTSAudience
+	builder.ContextTokenTTSTimeout = "7s"
+	builder.ContextTokenSubjectTokenType = "urn:ietf:params:oauth:token-type:txn_token"
+	builder.ContextTokenChildScope = "orka:agents:run"
+	builder.ContextTokenOutboundScope = "orka:tools:use"
+	builder.ContextTokenChildTokenTTL = "3m"
+	builder.ContextTokenToolTokenTTL = "30s"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: defaultNS,
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:  corev1alpha1.TaskTypeContainer,
+			Image: "busybox:latest",
+			Transaction: &corev1alpha1.TaskTransaction{
+				ID:     "txn-123",
+				Scope:  "orka:tools:use",
+				Scopes: []string{"orka:tools:use"},
+			},
+		},
+	}
+
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	container := job.Spec.Template.Spec.Containers[0]
+	for name, want := range map[string]string{
+		workerenv.ContextTokenTTSURL:           "https://tts.example.test",
+		workerenv.ContextTokenTTSTokenSource:   contexttoken.TTSTokenSourceServiceAccount,
+		workerenv.ContextTokenTTSAudience:      testTTSAudience,
+		workerenv.ContextTokenTTSTimeout:       "7s",
+		workerenv.ContextTokenSubjectTokenType: "urn:ietf:params:oauth:token-type:txn_token",
+		workerenv.ContextTokenChildScope:       "orka:agents:run",
+		workerenv.ContextTokenOutboundScope:    "orka:tools:use",
+		workerenv.ContextTokenChildTokenTTL:    "3m",
+		workerenv.ContextTokenToolTokenTTL:     "30s",
+	} {
+		got, ok := findEnvVar(container.Env, name)
+		if !ok || got.Value != want {
+			t.Fatalf("env %s = %#v, want %q", name, got, want)
+		}
+	}
+	if hasVolume(job.Spec.Template.Spec.Volumes, "transaction-token") {
+		t.Fatalf("unexpected transaction-token volume without transaction token secret annotation: %#v", job.Spec.Template.Spec.Volumes)
+	}
+	for _, name := range []string{workerenv.TransactionTokenFile, workerenv.ContextTokenSubjectTokenFile} {
+		if got, ok := findEnvVar(container.Env, name); ok {
+			t.Fatalf("unexpected env %s without transaction token secret annotation: %#v", name, got)
+		}
+	}
 }
 
 func TestJobBuilder_Build_AITask(t *testing.T) {
@@ -1239,6 +1490,16 @@ func findEnvVar(envVars []corev1.EnvVar, name string) (corev1.EnvVar, bool) {
 		}
 	}
 	return corev1.EnvVar{}, false
+}
+
+func countEnvVars(envVars []corev1.EnvVar, name string) int {
+	count := 0
+	for _, e := range envVars {
+		if e.Name == name {
+			count++
+		}
+	}
+	return count
 }
 
 // helper to check volume exists by name

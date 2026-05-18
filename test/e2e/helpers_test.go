@@ -25,12 +25,37 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/sozercan/orka/internal/llm"
+	openaiprovider "github.com/sozercan/orka/internal/llm/openai"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/test/utils"
 	workercommon "github.com/sozercan/orka/workers/common"
 )
 
-const controllerAPIService = "orka-api"
+const (
+	controllerAPIService = "orka-api"
+	liveProxyProbeAPIKey = "live-proxy-e2e-probe"
+)
+
+// Keep this to models that work through the OpenAI provider path; the live
+// catalog can include runtime-only GPT models rejected by the worker route.
+var liveProxyOpenAIModelPreferences = []string{
+	"gpt-5.5",
+	"gpt-5.2",
+	"gpt-5-mini",
+	"gpt-4.1",
+	"gpt-4.1-2025-04-14",
+	"gpt-4o",
+	"gpt-4o-2024-11-20",
+	"gpt-4o-2024-08-06",
+	"gpt-4o-2024-05-13",
+	"gpt-4o-mini",
+	"gpt-4o-mini-2024-07-18",
+	"gpt-4",
+	"gpt-4-0613",
+	"gpt-3.5-turbo",
+	"gpt-3.5-turbo-0613",
+}
 
 type statusConditionSnapshot struct {
 	Type    string `json:"type"`
@@ -74,10 +99,11 @@ type proxyReadyResponse struct {
 }
 
 type proxyModelCatalog struct {
-	FirstModelID  string
-	DataModelIDs  []string
-	ExtraModelIDs []string
-	AllModelIDs   []string
+	FirstModelID              string
+	DataModelIDs              []string
+	ExtraModelIDs             []string
+	AllModelIDs               []string
+	SupportedEndpointsByModel map[string][]string
 }
 
 var (
@@ -340,12 +366,13 @@ func firstModelFromPayload(payload map[string]any) string {
 }
 
 func allModelsFromPayload(payload map[string]any) proxyModelCatalog {
-	catalog := proxyModelCatalog{}
+	catalog := proxyModelCatalog{SupportedEndpointsByModel: map[string][]string{}}
 
 	if data, ok := payload["data"].([]any); ok {
 		for _, item := range data {
 			if model := firstModelFromItem(item); model != "" {
 				catalog.DataModelIDs = append(catalog.DataModelIDs, model)
+				catalog.recordSupportedEndpoints(model, supportedEndpointsFromItem(item))
 			}
 		}
 	}
@@ -354,6 +381,7 @@ func allModelsFromPayload(payload map[string]any) proxyModelCatalog {
 		for _, item := range models {
 			if model := firstModelFromItem(item); model != "" {
 				catalog.ExtraModelIDs = append(catalog.ExtraModelIDs, model)
+				catalog.recordSupportedEndpoints(model, supportedEndpointsFromItem(item))
 			}
 		}
 	}
@@ -364,6 +392,17 @@ func allModelsFromPayload(payload map[string]any) proxyModelCatalog {
 	}
 
 	return catalog
+}
+
+func (c *proxyModelCatalog) recordSupportedEndpoints(modelID string, endpoints []string) {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if modelID == "" || len(endpoints) == 0 {
+		return
+	}
+	if c.SupportedEndpointsByModel == nil {
+		c.SupportedEndpointsByModel = map[string][]string{}
+	}
+	c.SupportedEndpointsByModel[modelID] = uniqueStrings(append(c.SupportedEndpointsByModel[modelID], endpoints...))
 }
 
 func uniqueStrings(values []string) []string {
@@ -405,6 +444,29 @@ func firstModelFromItem(item any) string {
 	}
 
 	return ""
+}
+
+func supportedEndpointsFromItem(item any) []string {
+	v, ok := item.(map[string]any)
+	if !ok {
+		return nil
+	}
+	values, ok := v["supported_endpoints"].([]any)
+	if !ok {
+		return nil
+	}
+
+	endpoints := make([]string, 0, len(values))
+	for _, value := range values {
+		endpoint, ok := value.(string)
+		if !ok {
+			continue
+		}
+		if endpoint = strings.TrimSpace(endpoint); endpoint != "" {
+			endpoints = append(endpoints, endpoint)
+		}
+	}
+	return uniqueStrings(endpoints)
 }
 
 func startControllerAPIPortForward(localPort int) (string, context.CancelFunc, *exec.Cmd, error) {
@@ -548,6 +610,29 @@ func discoverPreferredProxyModelViaServiceProxy(serviceNamespace, serviceName st
 		g.Expect(modelID).NotTo(BeEmpty(), "proxy service should expose a model from %v or matching %v", preferredIDs, prefixes)
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 	return modelID
+}
+
+func discoverUsableProxyOpenAIModelViaServiceProxy(serviceNamespace, serviceName string, servicePort, localPort int, preferredIDs []string, prefixes ...string) (string, error) {
+	proxyBaseURL, cancelProxyPF, proxyPFCmd, err := startServicePortForward(serviceNamespace, serviceName, localPort, servicePort)
+	if err != nil {
+		return "", err
+	}
+	defer stopPortForward(cancelProxyPF, proxyPFCmd)
+
+	var modelID string
+	Eventually(func(g Gomega) {
+		catalog, err := fetchProxyModelCatalogViaServiceProxy(serviceNamespace, serviceName, servicePort)
+		g.Expect(err).NotTo(HaveOccurred())
+
+		modelID, err = firstUsableProxyOpenAIModel(proxyBaseURL, catalog, preferredIDs, prefixes...)
+		if modelID == "" && err == nil {
+			return
+		}
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(modelID).NotTo(BeEmpty(), "proxy service should expose a usable GPT-family OpenAI model")
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+	return modelID, nil
 }
 
 func firstLiveCopilotProxyChatCompletionModel(proxyBaseURL, proxyAuthToken string, catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) (string, string, error) {
@@ -696,6 +781,37 @@ func firstProxyModelMatchingPrefixes(catalog proxyModelCatalog, prefixes ...stri
 }
 
 func firstPreferredProxyModel(catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) string {
+	candidates := preferredProxyModelCandidates(catalog, preferredIDs, prefixes...)
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
+}
+
+func firstPreferredProxyModelSupportingEndpoint(catalog proxyModelCatalog, endpoint string, preferredIDs []string, prefixes ...string) string {
+	for _, modelID := range preferredProxyModelCandidates(catalog, preferredIDs, prefixes...) {
+		if catalog.modelSupportsEndpoint(modelID, endpoint) {
+			return modelID
+		}
+	}
+	return ""
+}
+
+func preferredProxyModelCandidates(catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) []string {
+	var candidates []string
+	addCandidate := func(modelID string) {
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" {
+			return
+		}
+		for _, existing := range candidates {
+			if strings.EqualFold(existing, modelID) {
+				return
+			}
+		}
+		candidates = append(candidates, modelID)
+	}
+
 	for _, preferredID := range preferredIDs {
 		preferredID = strings.ToLower(strings.TrimSpace(preferredID))
 		if preferredID == "" {
@@ -704,12 +820,143 @@ func firstPreferredProxyModel(catalog proxyModelCatalog, preferredIDs []string, 
 
 		for _, modelID := range catalog.AllModelIDs {
 			if strings.EqualFold(strings.TrimSpace(modelID), preferredID) {
-				return modelID
+				addCandidate(modelID)
 			}
 		}
 	}
 
-	return firstProxyModelMatchingPrefixes(catalog, prefixes...)
+	for _, modelID := range catalog.AllModelIDs {
+		if modelMatchesAnyPrefix(modelID, prefixes...) {
+			addCandidate(modelID)
+		}
+	}
+
+	return candidates
+}
+
+func firstUsableProxyOpenAIModel(baseURL string, catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) (string, error) {
+	var probeFailures []string
+
+	for _, modelID := range preferredProxyModelCandidates(catalog, preferredIDs, prefixes...) {
+		if !isProxyOpenAIProviderCandidate(modelID) {
+			continue
+		}
+		hasEndpointMetadata := catalog.modelHasEndpointMetadata(modelID)
+		supportsOpenAIProvider := catalog.modelSupportsEndpoint(modelID, "/responses") ||
+			catalog.modelSupportsEndpoint(modelID, "/chat/completions")
+		if hasEndpointMetadata && !supportsOpenAIProvider {
+			continue
+		}
+		if err := probeProxyOpenAIProviderModel(baseURL, modelID); err == nil {
+			return modelID, nil
+		} else {
+			_, _ = fmt.Fprintf(GinkgoWriter, "\nOpenAI provider probe for model %q failed: %v\n", modelID, err)
+			probeFailures = append(probeFailures, fmt.Sprintf("%s: %v", modelID, err))
+		}
+	}
+
+	if len(probeFailures) > 0 {
+		return "", fmt.Errorf("GPT OpenAI provider model probes failed: %s", strings.Join(probeFailures, "; "))
+	}
+
+	return "", nil
+}
+
+func isProxyOpenAIProviderCandidate(modelID string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if modelID == "" {
+		return false
+	}
+	// These aliases can be visible in the live catalog while still being
+	// rejected by the worker's copilot-language-server OpenAI provider route.
+	return !strings.Contains(modelID, "codex") &&
+		!strings.Contains(modelID, "copilot") &&
+		!strings.HasPrefix(modelID, "gpt-5.4")
+}
+
+func probeProxyOpenAIProviderModel(baseURL, modelID string) error {
+	if _, err := probeProxyOpenAIProviderCompletion(
+		baseURL,
+		modelID,
+		"Reply with exactly OK and nothing else.",
+		nil,
+	); err != nil {
+		return fmt.Errorf("completion probe failed: %w", err)
+	}
+
+	tools := []llm.Tool{
+		{
+			Name:        "noop_tool",
+			Description: "No-op probe tool for live proxy model selection.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+		},
+	}
+	resp, err := probeProxyOpenAIProviderCompletion(
+		baseURL,
+		modelID,
+		"Call noop_tool exactly once before answering.",
+		tools,
+	)
+	if err != nil {
+		return fmt.Errorf("tool completion probe failed: %w", err)
+	}
+	if len(resp.ToolCalls) == 0 {
+		return fmt.Errorf("tool completion probe returned no tool calls")
+	}
+	if resp.ToolCalls[0].Name != "noop_tool" {
+		return fmt.Errorf("tool completion probe returned tool %q", resp.ToolCalls[0].Name)
+	}
+
+	return nil
+}
+
+func probeProxyOpenAIProviderCompletion(baseURL, modelID, prompt string, tools []llm.Tool) (*llm.CompletionResponse, error) {
+	provider, err := openaiprovider.NewProvider(llm.ProviderConfig{
+		ProviderType: "openai",
+		APIKey:       liveProxyProbeAPIKey,
+		BaseURL:      strings.TrimRight(baseURL, "/") + "/v1",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	return provider.Complete(ctx, &llm.CompletionRequest{
+		Model: modelID,
+		Messages: []llm.Message{
+			{
+				Role:    "user",
+				Content: prompt,
+			},
+		},
+		MaxTokens: 16,
+		Tools:     tools,
+	})
+}
+
+func (c proxyModelCatalog) modelHasEndpointMetadata(modelID string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if modelID == "" {
+		return false
+	}
+	return len(c.SupportedEndpointsByModel[modelID]) > 0
+}
+
+func (c proxyModelCatalog) modelSupportsEndpoint(modelID, endpoint string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	endpoint = strings.TrimSpace(endpoint)
+	if modelID == "" || endpoint == "" {
+		return false
+	}
+
+	for _, supportedEndpoint := range c.SupportedEndpointsByModel[modelID] {
+		if strings.EqualFold(strings.TrimSpace(supportedEndpoint), endpoint) {
+			return true
+		}
+	}
+	return false
 }
 
 func modelMatchesAnyPrefix(modelID string, prefixes ...string) bool {

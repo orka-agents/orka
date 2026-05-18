@@ -15,6 +15,7 @@ import (
 	"io"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	cron "github.com/robfig/cron/v3"
@@ -44,6 +45,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
+
+const taskTransactionTokenPendingTimeout = 2 * time.Minute
 
 const (
 	// ConditionTypeComplete indicates the task has completed
@@ -94,7 +97,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;list;watch
@@ -174,13 +177,40 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
+	if tx := task.Spec.Transaction; tx != nil {
+		values := []any{}
+		if tx.ID != "" {
+			values = append(values, "transactionID", tx.ID)
+		}
+		if tx.Profile != "" {
+			values = append(values, "contextTokenProfile", tx.Profile)
+		}
+		if tx.RequestingWorkload != "" {
+			values = append(values, "requestingWorkload", tx.RequestingWorkload)
+		}
+		if len(values) > 0 {
+			log = log.WithValues(values...)
+			ctx = logf.IntoContext(ctx, log)
+		}
+	}
+
+	spanAttributes := []attribute.KeyValue{
+		attribute.String("task.name", task.Name),
+		attribute.String("task.namespace", task.Namespace),
+		attribute.String("task.type", string(task.Spec.Type)),
+	}
+	if tx := task.Spec.Transaction; tx != nil {
+		if tx.ID != "" {
+			spanAttributes = append(spanAttributes, attribute.String("transaction.id", tx.ID))
+		}
+		if tx.Profile != "" {
+			spanAttributes = append(spanAttributes, attribute.String("context_token.profile", tx.Profile))
+		}
+	}
+
 	tracer := tracing.Tracer("orka.controller")
 	ctx, span := tracer.Start(ctx, "task.reconcile",
-		trace.WithAttributes(
-			attribute.String("task.name", task.Name),
-			attribute.String("task.namespace", task.Namespace),
-			attribute.String("task.type", string(task.Spec.Type)),
-		),
+		trace.WithAttributes(spanAttributes...),
 	)
 	defer span.End()
 
@@ -318,6 +348,10 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	if taskTransactionTokenPending(task) {
+		return r.handleTransactionTokenPending(ctx, task)
+	}
+
 	// If this is a scheduled task, validate cron and transition to Scheduled phase
 	if task.Spec.Schedule != "" {
 		return r.handleScheduledTask(ctx, task)
@@ -386,6 +420,58 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 
 	return r.createTaskJob(ctx, task, agent, provider)
+}
+
+func taskTransactionTokenPending(task *corev1alpha1.Task) bool {
+	if task == nil || task.Annotations == nil {
+		return false
+	}
+	pending, err := strconv.ParseBool(task.Annotations[labels.AnnotationTransactionTokenPending])
+	return err == nil && pending
+}
+
+func (r *TaskReconciler) handleTransactionTokenPending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	now := time.Now()
+	since, err := transactionTokenPendingSince(task)
+	if err != nil {
+		patch := client.MergeFrom(task.DeepCopy())
+		if task.Annotations == nil {
+			task.Annotations = map[string]string{}
+		}
+		task.Annotations[labels.AnnotationTransactionTokenPendingSince] = now.Format(time.RFC3339Nano)
+		if updateErr := r.Patch(ctx, task, patch); updateErr != nil {
+			return ctrl.Result{}, updateErr
+		}
+		log.Info("task is waiting for delegated transaction token setup", "pendingSinceInitialized", true)
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
+	elapsed := now.Sub(since)
+	if elapsed >= taskTransactionTokenPendingTimeout {
+		msg := fmt.Sprintf("delegated transaction token setup timed out after %s", taskTransactionTokenPendingTimeout)
+		r.Recorder.Event(task, corev1.EventTypeWarning, "TransactionTokenPendingTimeout", msg)
+		return r.failTask(ctx, task, msg)
+	}
+
+	requeueAfter := min(taskTransactionTokenPendingTimeout-elapsed, time.Second)
+	log.Info("task is waiting for delegated transaction token setup", "pendingSince", since)
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+func transactionTokenPendingSince(task *corev1alpha1.Task) (time.Time, error) {
+	if task == nil || task.Annotations == nil {
+		return time.Time{}, fmt.Errorf("missing transaction token pending timestamp")
+	}
+	value := strings.TrimSpace(task.Annotations[labels.AnnotationTransactionTokenPendingSince])
+	if value == "" {
+		return time.Time{}, fmt.Errorf("missing transaction token pending timestamp")
+	}
+	since, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid transaction token pending timestamp: %w", err)
+	}
+	return since, nil
 }
 
 // handleScheduledTask handles transition to Scheduled phase for cron-scheduled tasks.
@@ -789,6 +875,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if job.Status.Failed > 0 {
+		if task.Spec.Timeout != nil && jobFailedDueToActiveDeadline(job) {
+			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+		}
 		// Job failed, check retry policy
 		if r.shouldRetry(task) {
 			log.Info("retrying task", "attempt", task.Status.Attempts)
@@ -841,6 +930,26 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 
 	// Job still running, requeue
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+func jobFailedDueToActiveDeadline(job *batchv1.Job) bool {
+	if job == nil {
+		return false
+	}
+
+	for _, condition := range job.Status.Conditions {
+		if condition.Status != corev1.ConditionTrue {
+			continue
+		}
+		if condition.Reason != batchv1.JobReasonDeadlineExceeded {
+			continue
+		}
+		if condition.Type == batchv1.JobFailed || condition.Type == batchv1.JobFailureTarget {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1alpha1.Task) bool {

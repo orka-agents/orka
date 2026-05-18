@@ -904,17 +904,95 @@ func TestAnthropicHandleListModels_WithProviders(t *testing.T) {
 	}
 }
 
+func TestAnthropicCompat_ContextTokenAuthorizationFiltersListModels(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	allowedProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeAnthropic,
+			DefaultModel: "claude-sonnet-4-20250514",
+		},
+	}
+	disallowedModelProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic-haiku", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeAnthropic,
+			DefaultModel: "claude-3-5-haiku-20241022",
+		},
+	}
+	disallowedProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "openai", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeOpenAI,
+			DefaultModel: "gpt-4o",
+		},
+	}
+	handler, app := setupTestAnthropicHandler(allowedProvider, disallowedModelProvider, disallowedProvider)
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	if err != nil {
+		t.Fatalf("NewContextTokenAuthorizationConfig returned error: %v", err)
+	}
+	handler.contextTokenAuthorization = authz
+
+	app.Use(NewAuthMiddleware(handler.client, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Get("/anthropic/v1/models", handler.HandleListModels)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeProvidersUse,
+		"tctx": map[string]any{
+			"allowedProviders": []string{"anthropic", "anthropic-haiku"},
+			"allowedModels":    []string{"claude-sonnet-4-20250514"},
+		},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/anthropic/v1/models", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var models OAIModelList
+	if err := json.NewDecoder(resp.Body).Decode(&models); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	got := map[string]bool{}
+	for _, model := range models.Data {
+		got[model.ID] = true
+	}
+	for _, id := range []string{"anthropic/claude-sonnet-4-20250514", "claude-sonnet-4-20250514"} {
+		if !got[id] {
+			t.Fatalf("expected allowed model ID %q in response, got %#v", id, got)
+		}
+	}
+	for _, id := range []string{"anthropic-haiku/claude-3-5-haiku-20241022", "claude-3-5-haiku-20241022", "openai/gpt-4o", "gpt-4o"} {
+		if got[id] {
+			t.Fatalf("did not expect disallowed model ID %q in response: %#v", id, got)
+		}
+	}
+}
+
 // --- Mock provider for tool loop tests ---
 
 type mockAnthropicProvider struct {
 	responses []*llm.CompletionResponse
 	errors    []error
+	requests  []*llm.CompletionRequest
 	callIdx   int
 }
 
-func (m *mockAnthropicProvider) Complete(_ context.Context, _ *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+func (m *mockAnthropicProvider) Complete(_ context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	if m.callIdx >= len(m.responses) {
 		return nil, fmt.Errorf("unexpected call %d", m.callIdx)
+	}
+	if req != nil {
+		reqCopy := *req
+		reqCopy.Messages = append([]llm.Message(nil), req.Messages...)
+		reqCopy.Tools = append([]llm.Tool(nil), req.Tools...)
+		m.requests = append(m.requests, &reqCopy)
 	}
 	idx := m.callIdx
 	m.callIdx++
@@ -1187,6 +1265,57 @@ func TestRunNonStreamingToolLoop_ToolExecutionError(t *testing.T) {
 	}
 }
 
+func TestRunNonStreamingToolLoop_RejectsToolNotExposedInRequest(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		responses: []*llm.CompletionResponse{
+			{
+				StopReason: oaiStopReasonToolUse,
+				ToolCalls:  []llm.ToolCall{{ID: "tc_1", Name: "disallowed_tool", Arguments: json.RawMessage(`{}`)}},
+			},
+			{Content: "done", StopReason: "end_turn"},
+		},
+	}
+	req := &llm.CompletionRequest{
+		Model:    "test-model",
+		Messages: []llm.Message{{Role: "user", Content: "Use a disallowed tool"}},
+		Tools:    []llm.Tool{{Name: "allowed_tool"}},
+	}
+
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Content != "done" {
+		t.Fatalf("content = %q, want final response", resp.Content)
+	}
+	if len(mock.requests) < 2 {
+		t.Fatalf("expected at least 2 LLM calls, got %d", len(mock.requests))
+	}
+
+	var toolResult string
+	for _, msg := range mock.requests[1].Messages {
+		if msg.Role == testRoleTool && msg.ToolCallID == "tc_1" {
+			toolResult = msg.Content
+			break
+		}
+	}
+	if toolResult == "" {
+		t.Fatal("expected disallowed tool result to be added to next request")
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(toolResult), &parsed); err != nil {
+		t.Fatalf("tool result is not valid JSON: %v", err)
+	}
+	if parsed["success"] != false {
+		t.Fatalf("expected success=false, got %v", parsed["success"])
+	}
+	errMsg, ok := parsed["error"].(string)
+	if !ok || !strings.Contains(errMsg, `tool "disallowed_tool" is not available in this request`) {
+		t.Fatalf("expected unavailable tool error, got %v", parsed["error"])
+	}
+}
+
 // --- Tests: executeToolCall ---
 
 func TestExecuteToolCall_UnknownTool(t *testing.T) {
@@ -1226,5 +1355,49 @@ func TestExecuteToolCall_Timeout(t *testing.T) {
 	}
 	if parsed["success"] != false {
 		t.Errorf("expected success=false, got %v", parsed["success"])
+	}
+}
+
+func TestAnthropicCompat_ContextTokenAuthorizationRejectsDisallowedProvider(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	llmProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeAnthropic,
+			DefaultModel: "claude-sonnet-4-20250514",
+			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "anthropic-secret", Key: "api-key"},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic-secret", Namespace: "default"},
+		Data:       map[string][]byte{"api-key": []byte("test-key")},
+	}
+	handler, app := setupTestAnthropicHandler(llmProvider, secret)
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	if err != nil {
+		t.Fatalf("NewContextTokenAuthorizationConfig returned error: %v", err)
+	}
+	handler.contextTokenAuthorization = authz
+
+	app.Use(NewAuthMiddleware(handler.client, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Post("/anthropic/v1/messages", handler.HandleMessages)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeProvidersUse + " " + ContextTokenScopeToolsUse,
+		"tctx": map[string]any{
+			"allowedProviders": []string{"openai"},
+		},
+	})
+	body := `{"model":"anthropic/claude-sonnet-4-20250514","messages":[{"role":"user","content":"hello"}],"max_tokens":100}`
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(body))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusForbidden)
 	}
 }

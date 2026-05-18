@@ -343,6 +343,7 @@ func (e *KubernetesJobCodeExecutor) buildResourcesWithJobName(namespace string, 
 	backoffLimit := int32(0)
 	deadlineSeconds := codeExecDeadlineSeconds(req.Timeout)
 	ttlSeconds := codeExecKubernetesFinishedTTLSeconds
+	terminationGracePeriodSeconds := int64(1)
 	runAsNonRoot := true
 	runAsUser := int64(65532)
 	allowPrivilegeEscalation := false
@@ -400,7 +401,7 @@ func (e *KubernetesJobCodeExecutor) buildResourcesWithJobName(namespace string, 
 					RestartPolicy:                 corev1.RestartPolicyNever,
 					ServiceAccountName:            serviceAccount.Name,
 					AutomountServiceAccountToken:  &automountServiceAccountToken,
-					TerminationGracePeriodSeconds: int64Ptr(1),
+					TerminationGracePeriodSeconds: &terminationGracePeriodSeconds,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot:    &runAsNonRoot,
 						RunAsUser:       &runAsUser,
@@ -1550,11 +1551,6 @@ func deleteKubernetesCodeExecObject(ctx context.Context, c crclient.Client, obj 
 	if err := c.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
 		return
 	}
-}
-
-//go:fix inline
-func int64Ptr(value int64) *int64 {
-	return new(value)
 }
 
 var _ CodeExecutor = (*KubernetesJobCodeExecutor)(nil)

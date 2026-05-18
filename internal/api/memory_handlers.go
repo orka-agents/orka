@@ -40,6 +40,9 @@ func (h *Handlers) ListMemories(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "listMemories", h.contextTokenAuthorization.MemoryReadScopes); err != nil {
+		return err
+	}
 	filter, err := parseMemoryFilter(c, namespace)
 	if err != nil {
 		return err
@@ -65,6 +68,9 @@ func (h *Handlers) CreateMemory(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "createMemory", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
+		return err
+	}
 	memory.Namespace = namespace
 	if strings.TrimSpace(memory.Content) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "content is required")
@@ -83,6 +89,9 @@ func (h *Handlers) GetMemory(c fiber.Ctx) error {
 	}
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "getMemory", h.contextTokenAuthorization.MemoryReadScopes); err != nil {
 		return err
 	}
 	memory, err := h.memoryStore.GetMemory(c.Context(), namespace, c.Params("id"))
@@ -107,6 +116,9 @@ func (h *Handlers) UpdateMemory(c fiber.Ctx) error {
 	}
 	namespace, err := h.resolveNamespace(c, explicitNamespace)
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "updateMemory", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
 		return err
 	}
 
@@ -140,6 +152,9 @@ func (h *Handlers) DeleteMemory(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "deleteMemory", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
+		return err
+	}
 	if err := h.memoryStore.DeleteMemory(c.Context(), namespace, c.Params("id")); err != nil {
 		return memoryStoreError("delete memory", "memory", err)
 	}
@@ -164,6 +179,9 @@ func (h *Handlers) setMemoryDisabled(c fiber.Ctx, disabled bool) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "setMemoryDisabled", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
+		return err
+	}
 	if err := h.memoryStore.SetMemoryDisabled(c.Context(), namespace, c.Params("id"), disabled); err != nil {
 		return memoryStoreError("update memory", "memory", err)
 	}
@@ -177,6 +195,9 @@ func (h *Handlers) ListMemoryProposals(c fiber.Ctx) error {
 	}
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "listMemoryProposals", h.contextTokenAuthorization.MemoryReadScopes); err != nil {
 		return err
 	}
 	filter, err := parseMemoryProposalFilter(c, namespace)
@@ -203,6 +224,9 @@ func (h *Handlers) CreateMemoryProposal(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "createMemoryProposal", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
+		return err
+	}
 	proposal.Namespace = namespace
 	if strings.TrimSpace(proposal.Title) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "title is required")
@@ -223,6 +247,9 @@ func (h *Handlers) GetMemoryProposal(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "getMemoryProposal", h.contextTokenAuthorization.MemoryReadScopes); err != nil {
+		return err
+	}
 	proposal, err := h.memoryProposalStore.GetMemoryProposal(c.Context(), namespace, c.Params("id"))
 	if err != nil {
 		return memoryStoreError("get memory proposal", "memory proposal", err)
@@ -241,6 +268,9 @@ func (h *Handlers) ReviewMemoryProposal(c fiber.Ctx) error {
 	}
 	namespace, err := h.resolveNamespace(c, review.Namespace)
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "reviewMemoryProposal", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
 		return err
 	}
 	review.Namespace = namespace
@@ -264,6 +294,9 @@ func (h *Handlers) ArchiveMemoryProposal(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "archiveMemoryProposal", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
+		return err
+	}
 	if err := h.memoryProposalStore.ArchiveMemoryProposal(c.Context(), namespace, c.Params("id")); err != nil {
 		return memoryStoreError("archive memory proposal", "memory proposal", err)
 	}
@@ -281,6 +314,9 @@ func (h *Handlers) ApplyMemoryProposal(c fiber.Ctx) error {
 	}
 	namespace, err := h.resolveNamespace(c, apply.Namespace)
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "applyMemoryProposal", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
 		return err
 	}
 	apply.Namespace = namespace

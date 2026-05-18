@@ -82,7 +82,7 @@ End-to-end tests run against a dedicated Kind cluster:
 - `E2E_ANTHROPIC_API_KEY`: required for Anthropic-specific e2e cases
 - `E2E_GITHUB_TOKEN`: required for GitHub/Copilot and live Copilot runtime tests
 - `COPILOT_GITHUB_TOKEN`: required by the live `copilot-proxy` workflow for proxy auth
-- GitHub Actions `id-token: write` permission: required by the live GitHub OIDC workflow. For local/manual runs of `scripts/live-github-oidc-e2e.sh`, set `ORKA_GITHUB_OIDC_TOKEN` to a valid JWT instead.
+- GitHub Actions `id-token: write` permission: required by the live GitHub OIDC workflow. For local/manual runs of `scripts/live-github-oidc-e2e.sh`, set `ORKA_GITHUB_OIDC_TOKEN` to a valid JWT instead. The same workflow also runs a self-contained `kontxt` TxToken check using an ephemeral key/JWKS fixture, so no external kontxt secret is required.
 - `E2E_LIVE_COPILOT_PROXY_BASE_URL` (or `E2E_COPILOT_PROXY_BASE_URL` / `COPILOT_PROXY_BASE_URL`): enables the focused live copilot-proxy spec against a running proxy
 - `E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE`, `E2E_LIVE_COPILOT_PROXY_SERVICE_NAME`, `E2E_LIVE_COPILOT_PROXY_SERVICE_PORT`: optional overrides for how the live spec reaches the in-cluster proxy service for `/readyz` and `/v1/models` checks
 - Structural e2e tests (job/env/volume assertions) run without external model keys
@@ -104,12 +104,14 @@ It bootstraps a fresh Kind cluster, deploys the published multi-arch `docker.io/
 
 Model selection is endpoint-specific. Provider-backed `type: ai` tasks and `/api/v1/chat` probe the live proxy before choosing an OpenAI-compatible Chat Completions model, because a model can appear in the catalog while still being rejected for that endpoint. The Codex runtime uses GPT models that work with the Responses API, while the Claude and Copilot runtime matrix cases use Claude and Gemini families respectively. Keep these preferences in `test/e2e/helpers_test.go` aligned with the live proxy's allowed models rather than assuming one model family works across every endpoint.
 
-The live GitHub OIDC workflow (`.github/workflows/live-github-oidc-e2e.yml`) runs `scripts/live-github-oidc-e2e.sh` in GitHub Actions with `id-token: write`. It builds the controller from the PR, deploys it to a fresh Kind cluster, configures `ORKA_OIDC_ISSUER=https://token.actions.githubusercontent.com` and the workflow audience, fetches a real GitHub Actions OIDC token, and validates:
+The live GitHub OIDC workflow (`.github/workflows/live-github-oidc-e2e.yml`) runs `scripts/live-github-oidc-e2e.sh` in GitHub Actions with `id-token: write`. It builds the controller from the PR, deploys it to a fresh Kind cluster, configures `ORKA_OIDC_ISSUER=https://token.actions.githubusercontent.com` and the workflow audience, fetches a real GitHub Actions OIDC token, generates a real `kontxt` TxToken against an in-cluster JWKS endpoint, and validates:
 
 - unauthenticated API requests return `401`
 - OIDC-authenticated Task creation returns `201`
-- the created Task response and persisted CR contain `spec.requestedBy` with the GitHub OIDC issuer and a non-empty subject
+- the OIDC-created Task response and persisted CR contain `spec.requestedBy` with the GitHub OIDC issuer and a non-empty subject
+- the `kontxt`-created Task response and persisted CR contain `spec.requestedBy` with the configured kontxt issuer, subject, and scope-derived roles
 - top-level `requestedBy` and nested `spec.requestedBy` client tampering are rejected with `400`
+- a tampered `kontxt` TxToken is rejected with `401`
 
 ### Frontend Tests
 
