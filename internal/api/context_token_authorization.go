@@ -194,8 +194,14 @@ type contextTokenTaskCreateAuthorizationContext struct {
 	ProviderRef         ProviderResolutionInfo
 	EffectiveProvider   ProviderResolutionInfo
 	EffectiveModel      string
+	Fallbacks           []contextTokenProviderModel
 	EffectiveAITools    []string
 	RuntimeAllowedTools []string
+}
+
+type contextTokenProviderModel struct {
+	Provider ProviderResolutionInfo
+	Model    string
 }
 
 func defaultScopes(value, fallback string) []string {
@@ -259,6 +265,42 @@ func authorizeAndStampToolTaskCreate(ctx context.Context, k8sClient client.Clien
 	}
 	stampTaskRequesterFromUserInfo(task, ui)
 	return nil
+}
+
+func authorizeAndStampTaskContext(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, ui *UserInfo, task *corev1alpha1.Task) error {
+	if err := authorizeContextTokenTaskContextObject(ctx, k8sClient, token, cfg, action, task); err != nil {
+		return err
+	}
+	stampTaskRequesterFromUserInfo(task, ui)
+	return nil
+}
+
+func authorizeContextTokenTaskContextObject(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, task *corev1alpha1.Task) error {
+	if !cfg.Enabled() || token == nil || task == nil {
+		return nil
+	}
+	req := createTaskRequestFromTask(task)
+	namespace := task.Namespace
+	if namespace == "" {
+		namespace = req.Namespace
+	}
+	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(ctx, k8sClient, req, namespace)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+	failures := contextTokenTaskContextFailures(token, authzCtx, true)
+	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
+}
+
+func contextTokenFromUserInfo(ui *UserInfo) *ContextToken {
+	if ui == nil || ui.AuthType != AuthTypeContextToken {
+		return nil
+	}
+	return ui.ContextToken
 }
 
 func (h *Handlers) authorizeContextTokenLoadedTask(c fiber.Ctx, action string, task *corev1alpha1.Task) error {
@@ -499,7 +541,7 @@ func authorizeContextTokenToolUse(c fiber.Ctx, cfg ContextTokenAuthorizationConf
 	}
 
 	failures := []string{}
-	if !hasAnyScope(ui.ContextToken.Scopes, cfg.ToolUseScopes) {
+	if len(toolNames) > 0 && !hasAnyScope(ui.ContextToken.Scopes, cfg.ToolUseScopes) {
 		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.ToolUseScopes, ",")))
 	}
 	if allowed, ok := contextStringList(ui.ContextToken.TransactionContext, "allowedTools"); ok && !toolNamesAllowed(toolNames, allowed) {
@@ -510,6 +552,95 @@ func authorizeContextTokenToolUse(c fiber.Ctx, cfg ContextTokenAuthorizationConf
 		return nil
 	}
 	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+}
+
+func authorizeContextTokenToolMetadata(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, action, toolName string) error {
+	if !cfg.Enabled() {
+		return nil
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return nil
+	}
+	failures := contextTokenToolMetadataFailures(ui.ContextToken, toolName)
+	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+}
+
+func contextTokenAllowsToolMetadata(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, action, toolName string) (bool, error) {
+	if !cfg.Enabled() {
+		return true, nil
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return true, nil
+	}
+	failures := contextTokenToolMetadataFailures(ui.ContextToken, toolName)
+	if len(failures) == 0 {
+		return true, nil
+	}
+	if cfg.enforcing() {
+		return false, nil
+	}
+	return true, handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+}
+
+func contextTokenToolMetadataFailures(token *ContextToken, toolName string) []string {
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedTools"); ok && !slices.Contains(allowed, toolName) {
+		return []string{fmt.Sprintf("tool %q is not allowed by token context", toolName)}
+	}
+	return nil
+}
+
+func authorizeContextTokenAgentContext(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, action, namespace, agentName string) error {
+	if !cfg.Enabled() {
+		return nil
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return nil
+	}
+	failures := contextTokenAgentContextFailures(ui.ContextToken, namespace, agentName)
+	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+}
+
+func contextTokenAllowsAgentContext(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, action, namespace, agentName string) (bool, error) {
+	if !cfg.Enabled() {
+		return true, nil
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return true, nil
+	}
+	failures := contextTokenAgentContextFailures(ui.ContextToken, namespace, agentName)
+	if len(failures) == 0 {
+		return true, nil
+	}
+	if cfg.enforcing() {
+		return false, nil
+	}
+	return true, handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+}
+
+func contextTokenAgentContextFailures(token *ContextToken, namespace, agentName string) []string {
+	failures := []string{}
+	if want, ok := contextString(token.TransactionContext, "namespace"); ok && namespace != want {
+		failures = append(failures, fmt.Sprintf("namespace %q does not match token context %q", namespace, want))
+	}
+	if want, ok := contextString(token.TransactionContext, "agent"); ok && !agentMatches(agentName, namespace, want) {
+		failures = append(failures, fmt.Sprintf("agent %q does not match token context %q", namespacedNameString(namespace, agentName), want))
+	}
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedAgents"); ok && !agentAllowed(agentName, namespace, allowed) {
+		failures = append(failures, fmt.Sprintf("agent %q is not allowed by token context", namespacedNameString(namespace, agentName)))
+	}
+	return failures
 }
 
 func handleContextTokenAuthorizationFailures(cfg ContextTokenAuthorizationConfig, token *ContextToken, action string, failures []string) error {
@@ -646,10 +777,36 @@ func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, c cl
 	}
 
 	authzCtx.EffectiveProvider, authzCtx.EffectiveModel = contextTokenTaskCreateEffectiveProviderModel(req, authzCtx.Agent, authzCtx.Provider)
+	authzCtx.Fallbacks = contextTokenTaskCreateFallbackProviderModels(ctx, c, namespace, authzCtx.Agent)
 	authzCtx.EffectiveAITools = contextTokenTaskCreateEffectiveAITools(req, authzCtx.Agent)
 	authzCtx.RuntimeAllowedTools = contextTokenTaskCreateEffectiveRuntimeAllowedTools(req, authzCtx.Agent)
 
 	return authzCtx, nil
+}
+
+func contextTokenTaskCreateFallbackProviderModels(ctx context.Context, c client.Client, namespace string, agent *corev1alpha1.Agent) []contextTokenProviderModel {
+	if c == nil || agent == nil || agent.Spec.Model == nil || len(agent.Spec.Model.Fallbacks) == 0 {
+		return nil
+	}
+	fallbacks := make([]contextTokenProviderModel, 0, len(agent.Spec.Model.Fallbacks))
+	for _, fb := range agent.Spec.Model.Fallbacks {
+		if strings.TrimSpace(fb.ProviderRef) == "" {
+			continue
+		}
+		provider := &corev1alpha1.Provider{}
+		if err := c.Get(ctx, types.NamespacedName{Name: fb.ProviderRef, Namespace: namespace}, provider); err != nil {
+			continue
+		}
+		model := strings.TrimSpace(fb.Model)
+		if model == "" {
+			model = provider.Spec.DefaultModel
+		}
+		fallbacks = append(fallbacks, contextTokenProviderModel{
+			Provider: providerResolutionInfo(provider),
+			Model:    model,
+		})
+	}
+	return fallbacks
 }
 
 func contextTokenTaskCreateProviderRef(req CreateTaskRequest, agent *corev1alpha1.Agent) *corev1alpha1.ProviderReference {
@@ -709,6 +866,13 @@ func contextTokenTaskCreateEffectiveAITools(req CreateTaskRequest, agent *corev1
 				tools = append(tools, tool.Name)
 			}
 		}
+		if agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
+			for _, tool := range coordinationToolNames() {
+				if !slices.Contains(tools, tool) {
+					tools = append(tools, tool)
+				}
+			}
+		}
 	}
 	if req.AI != nil {
 		for _, tool := range req.AI.Tools {
@@ -718,6 +882,30 @@ func contextTokenTaskCreateEffectiveAITools(req CreateTaskRequest, agent *corev1
 		}
 	}
 	return tools
+}
+
+func coordinationToolNames() []string {
+	return []string{
+		"delegate_task",
+		"wait_for_tasks",
+		"create_container_task",
+		"cancel_task",
+		"send_message",
+		"check_messages",
+		"recall_memory",
+		"remember",
+		"propose_memory",
+		"search_transcript",
+		"create_pull_request",
+		"check_pull_request_ci",
+		"merge_pull_request",
+		"auto_merge_pull_request",
+		"review_pull_request",
+		"post_review_comment",
+		"create_agent",
+		"delete_agent",
+		"update_plan",
+	}
 }
 
 func contextTokenTaskCreateEffectiveRuntimeAllowedTools(req CreateTaskRequest, agent *corev1alpha1.Agent) []string {
@@ -732,7 +920,7 @@ func contextTokenTaskCreateEffectiveRuntimeAllowedTools(req CreateTaskRequest, a
 
 func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, authzCtx contextTokenTaskCreateAuthorizationContext) []string {
 	failures := contextTokenTaskCreateScopeFailures(token, cfg)
-	failures = append(failures, contextTokenTaskContextFailures(token, authzCtx, false)...)
+	failures = append(failures, contextTokenTaskContextFailures(token, authzCtx, true)...)
 	return failures
 }
 
@@ -764,23 +952,43 @@ func contextTokenTaskContextFailures(token *ContextToken, authzCtx contextTokenT
 			failures = append(failures, fmt.Sprintf("agent %q does not match token context %q", namespacedNameString(authzCtx.AgentNamespace, authzCtx.AgentName), want))
 		}
 	}
-	if allowed, ok := contextStringList(token.TransactionContext, "allowedAgents"); ok && authzCtx.AgentName != "" && !agentAllowed(authzCtx.AgentName, authzCtx.AgentNamespace, allowed) {
-		failures = append(failures, fmt.Sprintf("agent %q is not allowed by token context", namespacedNameString(authzCtx.AgentNamespace, authzCtx.AgentName)))
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedAgents"); ok {
+		if authzCtx.AgentName == "" {
+			failures = append(failures, "task does not specify an agent allowed by token context")
+		} else if !agentAllowed(authzCtx.AgentName, authzCtx.AgentNamespace, allowed) {
+			failures = append(failures, fmt.Sprintf("agent %q is not allowed by token context", namespacedNameString(authzCtx.AgentNamespace, authzCtx.AgentName)))
+		}
 	}
-	if want, ok := contextString(token.TransactionContext, "provider"); ok && !providerMatches(authzCtx.EffectiveProvider, want, tokenNamespace, hasTokenNamespace) {
-		failures = append(failures, fmt.Sprintf("provider %q is not allowed by token context", providerDisplayName(authzCtx.EffectiveProvider)))
-	}
-	if allowed, ok := contextStringList(token.TransactionContext, "allowedProviders"); ok && !providerAllowed(authzCtx.EffectiveProvider, allowed, tokenNamespace, hasTokenNamespace) {
-		failures = append(failures, fmt.Sprintf("provider %q is not allowed by token context", providerDisplayName(authzCtx.EffectiveProvider)))
-	}
-	if want, ok := contextString(token.TransactionContext, "model"); ok && authzCtx.EffectiveModel != want {
-		failures = append(failures, fmt.Sprintf("model %q does not match token context %q", authzCtx.EffectiveModel, want))
-	}
-	if allowed, ok := contextStringList(token.TransactionContext, "allowedModels"); ok && !modelAllowed(authzCtx.EffectiveProvider, authzCtx.EffectiveModel, allowed, tokenNamespace, hasTokenNamespace) {
-		failures = append(failures, fmt.Sprintf("model %q is not allowed by token context", authzCtx.EffectiveModel))
+	failures = append(failures, contextTokenProviderModelConstraintFailures(token, authzCtx.EffectiveProvider, authzCtx.EffectiveModel, tokenNamespace, hasTokenNamespace, "")...)
+	for _, fb := range authzCtx.Fallbacks {
+		failures = append(failures, contextTokenProviderModelConstraintFailures(token, fb.Provider, fb.Model, tokenNamespace, hasTokenNamespace, "fallback ")...)
 	}
 
-	workspace := taskRequestWorkspace(req)
+	failures = append(failures, contextTokenWorkspaceFailures(token, taskRequestWorkspace(req))...)
+	failures = append(failures, contextTokenTaskToolFailures(token, authzCtx)...)
+
+	return failures
+}
+
+func contextTokenProviderModelConstraintFailures(token *ContextToken, provider ProviderResolutionInfo, model, tokenNamespace string, hasTokenNamespace bool, prefix string) []string {
+	failures := []string{}
+	if want, ok := contextString(token.TransactionContext, "provider"); ok && !providerMatches(provider, want, tokenNamespace, hasTokenNamespace) {
+		failures = append(failures, fmt.Sprintf("%sprovider %q is not allowed by token context", prefix, providerDisplayName(provider)))
+	}
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedProviders"); ok && !providerAllowed(provider, allowed, tokenNamespace, hasTokenNamespace) {
+		failures = append(failures, fmt.Sprintf("%sprovider %q is not allowed by token context", prefix, providerDisplayName(provider)))
+	}
+	if want, ok := contextString(token.TransactionContext, "model"); ok && model != want {
+		failures = append(failures, fmt.Sprintf("%smodel %q does not match token context %q", prefix, model, want))
+	}
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedModels"); ok && !modelAllowed(provider, model, allowed, tokenNamespace, hasTokenNamespace) {
+		failures = append(failures, fmt.Sprintf("%smodel %q is not allowed by token context", prefix, model))
+	}
+	return failures
+}
+
+func contextTokenWorkspaceFailures(token *ContextToken, workspace *corev1alpha1.WorkspaceConfig) []string {
+	failures := []string{}
 	for _, constraint := range []struct {
 		key string
 		got string
@@ -793,17 +1001,23 @@ func contextTokenTaskContextFailures(token *ContextToken, authzCtx contextTokenT
 			failures = append(failures, fmt.Sprintf("workspace %s %q does not match token context %q", constraint.key, constraint.got, want))
 		}
 	}
-	if allowed, ok := contextStringList(token.TransactionContext, "allowedTools"); ok {
-		for _, tool := range append(append([]string{}, authzCtx.EffectiveAITools...), authzCtx.RuntimeAllowedTools...) {
-			if strings.TrimSpace(tool) == "" {
-				continue
-			}
-			if !slices.Contains(allowed, tool) {
-				failures = append(failures, fmt.Sprintf("tool %q is not allowed by token context", tool))
-			}
+	return failures
+}
+
+func contextTokenTaskToolFailures(token *ContextToken, authzCtx contextTokenTaskCreateAuthorizationContext) []string {
+	allowed, ok := contextStringList(token.TransactionContext, "allowedTools")
+	if !ok {
+		return nil
+	}
+	failures := []string{}
+	for _, tool := range append(append([]string{}, authzCtx.EffectiveAITools...), authzCtx.RuntimeAllowedTools...) {
+		if strings.TrimSpace(tool) == "" {
+			continue
+		}
+		if !slices.Contains(allowed, tool) {
+			failures = append(failures, fmt.Sprintf("tool %q is not allowed by token context", tool))
 		}
 	}
-
 	return failures
 }
 
@@ -834,7 +1048,7 @@ func contextTokenTaskDependencyNamespaceFailures(authzCtx contextTokenTaskCreate
 }
 
 func filterCompletionToolsForContextToken(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, tools []llm.Tool) []llm.Tool {
-	if !cfg.Enabled() {
+	if !cfg.Enabled() || !cfg.enforcing() {
 		return tools
 	}
 	ui := GetUserInfo(c)
@@ -1048,7 +1262,7 @@ func contextStringList(ctx any, name string) ([]string, bool) {
 	}
 	switch v := value.(type) {
 	case []string:
-		return append([]string{}, v...), len(v) > 0
+		return append([]string{}, v...), true
 	case []any:
 		out := make([]string, 0, len(v))
 		for _, item := range v {
@@ -1058,7 +1272,7 @@ func contextStringList(ctx any, name string) ([]string, bool) {
 			}
 			out = append(out, s)
 		}
-		return out, len(out) > 0
+		return out, true
 	case string:
 		out := workerenv.SplitCSV(v)
 		return out, len(out) > 0
@@ -1117,7 +1331,7 @@ func contextValueStringSlice(value any) ([]string, bool) {
 	for i := 0; i < rv.Len(); i++ {
 		out = append(out, rv.Index(i).String())
 	}
-	return out, len(out) > 0
+	return out, true
 }
 
 func taskRequestWorkspace(req CreateTaskRequest) *corev1alpha1.WorkspaceConfig {

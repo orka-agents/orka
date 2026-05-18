@@ -149,12 +149,14 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 		if ok {
 			userInfo, err = authenticateContextToken(ctx.Context(), contextToken, profile)
 		} else {
-			if bearerContextToken, err := isUnconfiguredBearerContextToken(ctx, cfg.ContextTokens); err != nil {
+			bearerContextToken, bearerErr := isUnconfiguredBearerContextToken(ctx, cfg.ContextTokens)
+			if bearerErr != nil {
 				log.Info("authentication failed: invalid authorization header format", "ip", ctx.IP())
 				return fiber.NewError(fiber.StatusUnauthorized, "invalid authorization header format")
-			} else if bearerContextToken {
+			}
+			if bearerContextToken {
 				log.Info("authentication failed: authorization bearer context token is not configured", "ip", ctx.IP())
-				return fiber.NewError(fiber.StatusUnauthorized, "kontxt TxTokens must be sent via the Txn-Token header unless Authorization:Bearer is explicitly enabled")
+				return fiber.NewError(fiber.StatusUnauthorized, "kontxt TxTokens must be sent via the Txn-Token header unless Authorization: Bearer is explicitly enabled")
 			}
 
 			var token string

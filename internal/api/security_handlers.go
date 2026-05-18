@@ -172,7 +172,9 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 			},
 		},
 	}
-	stampTaskRequesterFromUserInfo(task, ui)
+	if err := authorizeAndStampTaskContext(ctx, h.client, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityScanTask", ui, task); err != nil {
+		return nil, err
+	}
 	if err := h.client.Create(ctx, task); err != nil {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create scan task: %v", err))
 	}
@@ -235,7 +237,9 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 			},
 		},
 	}
-	stampTaskRequesterFromUserInfo(task, ui)
+	if err := authorizeAndStampTaskContext(ctx, h.client, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityValidationTask", ui, task); err != nil {
+		return err
+	}
 	if err := h.client.Create(ctx, task); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create validation task: %v", err))
 	}
@@ -304,7 +308,9 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, sc
 			},
 		},
 	}
-	stampTaskRequesterFromUserInfo(task, ui)
+	if err := authorizeAndStampTaskContext(ctx, h.client, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityPatchTask", ui, task); err != nil {
+		return nil, err
+	}
 	if err := h.client.Create(ctx, task); err != nil {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create patch task: %v", err))
 	}
@@ -352,7 +358,8 @@ func (h *Handlers) ListRepositoryScans(c fiber.Ctx) error {
 	}
 
 	items := list.Items
-	if h.contextTokenAuthorization.enforcing() {
+	filteredList := false
+	if h.contextTokenAuthorization.Enabled() {
 		filtered := make([]corev1alpha1.RepositoryScan, 0, len(list.Items))
 		for i := range list.Items {
 			scan := &list.Items[i]
@@ -360,14 +367,19 @@ func (h *Handlers) ListRepositoryScans(c fiber.Ctx) error {
 				filtered = append(filtered, *scan)
 			}
 		}
+		filteredList = len(filtered) != len(list.Items)
 		items = filtered
+	}
+	remainingItemCount := list.RemainingItemCount
+	if filteredList {
+		remainingItemCount = nil
 	}
 
 	return c.JSON(ListResponse{
 		Items: items,
 		Metadata: ListMeta{
 			Continue:           list.Continue,
-			RemainingItemCount: list.RemainingItemCount,
+			RemainingItemCount: remainingItemCount,
 		},
 	})
 }
@@ -917,14 +929,22 @@ func contextTokenSecurityScanFailures(token *ContextToken, scan *corev1alpha1.Re
 }
 
 func (h *Handlers) contextTokenSecurityScanAllowed(c fiber.Ctx, scan *corev1alpha1.RepositoryScan, agentRef corev1alpha1.AgentReference) bool {
-	if !h.contextTokenAuthorization.enforcing() {
+	if !h.contextTokenAuthorization.Enabled() {
 		return true
 	}
 	ui := GetUserInfo(c)
 	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
 		return true
 	}
-	return len(contextTokenSecurityScanFailures(ui.ContextToken, scan, agentRef)) == 0
+	failures := contextTokenSecurityScanFailures(ui.ContextToken, scan, agentRef)
+	if len(failures) == 0 {
+		return true
+	}
+	if h.contextTokenAuthorization.enforcing() {
+		return false
+	}
+	_ = h.handleContextTokenAuthorizationFailures(ui.ContextToken, "listRepositoryScans", failures)
+	return true
 }
 
 func (h *Handlers) authorizeContextTokenSecurityScanTask(c fiber.Ctx, action string, scan *corev1alpha1.RepositoryScan, agentRef corev1alpha1.AgentReference) error {

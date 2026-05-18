@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	kontxttoken "github.com/aramase/kontxt/pkg/token"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -60,7 +59,7 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 	}
 	subjectTokenType := strings.TrimSpace(os.Getenv(workerenv.ContextTokenSubjectTokenType))
 	if subjectTokenType == "" {
-		subjectTokenType = kontxttoken.SubjectTokenTypeTxnToken
+		subjectTokenType = contexttoken.SubjectTokenTypeForSource(ttsConfig.TokenSource)
 	}
 
 	requestDetails := map[string]any{

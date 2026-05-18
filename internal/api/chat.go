@@ -845,7 +845,11 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 		}
 
 		fbProviderInfo := providerResolutionInfo(fbProviderCRD)
-		if err := authorizeContextTokenProviderUse(c, ch.contextTokenAuthorization, "chatFallback", namespace, fbProviderInfo, fb.Model); err != nil {
+		fbModel := strings.TrimSpace(fb.Model)
+		if fbModel == "" {
+			fbModel = fbProviderCRD.Spec.DefaultModel
+		}
+		if err := authorizeContextTokenProviderUse(c, ch.contextTokenAuthorization, "chatFallback", namespace, fbProviderInfo, fbModel); err != nil {
 			return resultProvider, err
 		}
 
@@ -870,7 +874,7 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 
 		fallbacks = append(fallbacks, llm.FallbackEntry{
 			Provider: llm.NewRetryProvider(fbProvider, 0),
-			Model:    fb.Model,
+			Model:    fbModel,
 		})
 	}
 

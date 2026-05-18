@@ -15,11 +15,11 @@ import (
 	"net/http"
 	neturl "net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	kontxttoken "github.com/aramase/kontxt/pkg/token"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -151,10 +151,10 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 		return "", err
 	}
 	if transactionToken != "" {
-		if values, ok := req.Header[http.CanonicalHeaderKey(kontxttoken.HeaderName)]; ok && len(values) > 0 {
-			return "", fmt.Errorf("tool configured reserved header %q while transaction token propagation is enabled", kontxttoken.HeaderName)
+		if values, ok := req.Header[http.CanonicalHeaderKey(contexttoken.HeaderName)]; ok && len(values) > 0 {
+			return "", fmt.Errorf("tool configured reserved header %q while transaction token propagation is enabled", contexttoken.HeaderName)
 		}
-		req.Header.Set(kontxttoken.HeaderName, transactionToken)
+		req.Header.Set(contexttoken.HeaderName, transactionToken)
 	}
 
 	// Configure timeout
@@ -243,9 +243,12 @@ func (e *ToolExecutor) outboundTransactionToken(ctx context.Context, tool *corev
 	if scope == "" {
 		return "", fmt.Errorf("%s or %s is required when %s is set", workerenv.ContextTokenOutboundScope, workerenv.TransactionScope, workerenv.ContextTokenTTSURL)
 	}
+	if err := validateOutboundTransactionScope(scope); err != nil {
+		return "", err
+	}
 	subjectTokenType := strings.TrimSpace(os.Getenv(workerenv.ContextTokenSubjectTokenType))
 	if subjectTokenType == "" {
-		subjectTokenType = kontxttoken.SubjectTokenTypeTxnToken
+		subjectTokenType = contexttoken.SubjectTokenTypeForSource(ttsConfig.TokenSource)
 	}
 	requestDetails := map[string]any{
 		"operation": "httpTool",
@@ -277,6 +280,27 @@ func existingTransactionToken() (string, error) {
 		return token, err
 	}
 	return "", nil
+}
+
+func validateOutboundTransactionScope(scope string) error {
+	requested := strings.Fields(scope)
+	if len(requested) == 0 {
+		return fmt.Errorf("outbound transaction scope is required")
+	}
+	parentScope := strings.TrimSpace(os.Getenv(workerenv.TransactionScopes))
+	if parentScope == "" {
+		parentScope = strings.TrimSpace(os.Getenv(workerenv.TransactionScope))
+	}
+	parent := strings.Fields(parentScope)
+	if len(parent) == 0 {
+		return fmt.Errorf("parent transaction scopes are required for outbound token exchange")
+	}
+	for _, child := range requested {
+		if !slices.Contains(parent, child) {
+			return fmt.Errorf("outbound transaction scope %q is not present in parent transaction scopes", child)
+		}
+	}
+	return nil
 }
 
 func outboundTTSSubjectToken(tokenSource string) (string, error) {

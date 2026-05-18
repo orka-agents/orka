@@ -728,25 +728,32 @@ func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alp
 	if job == nil || len(job.Spec.Template.Spec.Containers) == 0 {
 		return
 	}
+	secretName := ""
+	if task != nil && task.Annotations != nil {
+		secretName = strings.TrimSpace(task.Annotations[labels.AnnotationTransactionTokenSecret])
+	}
+	injectTTS := b.shouldInjectContextTokenTTS(task, secretName)
 	for i := range job.Spec.Template.Spec.Containers {
 		container := &job.Spec.Template.Spec.Containers[i]
-		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSURL, b.ContextTokenTTSURL)
-		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSAudience, b.ContextTokenTTSAudience)
-		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSTimeout, b.ContextTokenTTSTimeout)
-		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSTokenSource, b.ContextTokenTTSTokenSource)
-		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenSubjectTokenType, b.ContextTokenSubjectTokenType)
-		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenChildScope, b.ContextTokenChildScope)
-		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenOutboundScope, b.ContextTokenOutboundScope)
-		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenChildTokenTTL, b.ContextTokenChildTokenTTL)
-		container.Env = setControllerEnv(container.Env, workerenv.ContextTokenToolTokenTTL, b.ContextTokenToolTokenTTL)
+		if injectTTS {
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSURL, b.ContextTokenTTSURL)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSAudience, b.ContextTokenTTSAudience)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSTimeout, b.ContextTokenTTSTimeout)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSTokenSource, b.ContextTokenTTSTokenSource)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenSubjectTokenType, b.ContextTokenSubjectTokenType)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenChildScope, b.ContextTokenChildScope)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenOutboundScope, b.ContextTokenOutboundScope)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenChildTokenTTL, b.ContextTokenChildTokenTTL)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenToolTokenTTL, b.ContextTokenToolTokenTTL)
+		} else {
+			for _, name := range contextTokenTTSEnvNames() {
+				container.Env = removeControllerEnv(container.Env, name)
+			}
+		}
 		container.Env = removeControllerEnv(container.Env, workerenv.TransactionTokenFile)
 		container.Env = removeControllerEnv(container.Env, workerenv.ContextTokenSubjectTokenFile)
 	}
 
-	if task == nil || task.Annotations == nil {
-		return
-	}
-	secretName := strings.TrimSpace(task.Annotations[labels.AnnotationTransactionTokenSecret])
 	if secretName == "" {
 		return
 	}
@@ -785,6 +792,33 @@ func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alp
 		} else {
 			container.Env = removeControllerEnv(container.Env, workerenv.ContextTokenSubjectTokenFile)
 		}
+	}
+}
+
+func (b *JobBuilder) shouldInjectContextTokenTTS(task *corev1alpha1.Task, secretName string) bool {
+	if b.ContextTokenTTSURL == "" {
+		return false
+	}
+	if secretName != "" {
+		return true
+	}
+	if task == nil || task.Spec.Transaction == nil {
+		return false
+	}
+	return b.ContextTokenTTSTokenSource != contexttoken.TTSTokenSourceIncoming
+}
+
+func contextTokenTTSEnvNames() []string {
+	return []string{
+		workerenv.ContextTokenTTSURL,
+		workerenv.ContextTokenTTSAudience,
+		workerenv.ContextTokenTTSTimeout,
+		workerenv.ContextTokenTTSTokenSource,
+		workerenv.ContextTokenSubjectTokenType,
+		workerenv.ContextTokenChildScope,
+		workerenv.ContextTokenOutboundScope,
+		workerenv.ContextTokenChildTokenTTL,
+		workerenv.ContextTokenToolTokenTTL,
 	}
 }
 

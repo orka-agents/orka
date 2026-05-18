@@ -234,7 +234,7 @@ func TestContextToken_BearerIgnoredWhenNotConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadAll response body: %v", err)
 	}
-	if !strings.Contains(string(body), "Txn-Token") || !strings.Contains(string(body), "Authorization:Bearer") {
+	if !strings.Contains(string(body), "Txn-Token") || !strings.Contains(string(body), "Authorization: Bearer") {
 		t.Fatalf("response body = %q, want actionable context-token header guidance", string(body))
 	}
 }

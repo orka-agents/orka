@@ -178,17 +178,38 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 			BlockOwnerDeletion: &blockOwnerDeletion,
 		}}
 	}
-
-	if err := prepareChildTransactionToken(ctx, t.k8sClient, parentTask, task, "createContainerTask", ""); err != nil {
+	if err := validateChildTaskAgainstParentTransaction(parentTask, task, ""); err != nil {
 		return "", err
 	}
+
+	childTokenExchangeEnabled, err := shouldPrepareChildTransactionToken(parentTask)
+	if err != nil {
+		return "", err
+	}
+	if childTokenExchangeEnabled {
+		if task.Spec.Schedule != "" {
+			return ChatToolErrorResult("unsupported_schedule", "scheduled coordinator container tasks cannot receive delegated transaction tokens", "Create an immediate container task, or start a non-scheduled child that creates scheduled work itself.")
+		}
+		markChildTransactionTokenPending(task)
+		if err := prepareChildTransactionToken(ctx, t.k8sClient, parentTask, task, "createContainerTask", ""); err != nil {
+			return "", err
+		}
+	}
 	if err := t.k8sClient.Create(ctx, task); err != nil {
-		cleanupChildTransactionTokenSecret(ctx, t.k8sClient, task)
+		if childTokenExchangeEnabled {
+			cleanupChildTransactionTokenSecret(ctx, t.k8sClient, task)
+		}
 		return classifyChatK8sErr(err)
 	}
-	if err := adoptChildTransactionTokenSecret(ctx, t.k8sClient, task); err != nil {
-		cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, task)
-		return classifyChatK8sErr(err)
+	if childTokenExchangeEnabled {
+		if err := adoptChildTransactionTokenSecret(ctx, t.k8sClient, task); err != nil {
+			cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, task)
+			return classifyChatK8sErr(err)
+		}
+		if err := patchPreparedChildTransactionToken(ctx, t.k8sClient, task); err != nil {
+			cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, task)
+			return classifyChatK8sErr(err)
+		}
 	}
 	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(task.Spec.Schedule)})
 }

@@ -82,8 +82,8 @@ func NewToolExecutor(c client.Client, sm *controller.SessionManager, namespace, 
 }
 
 // SetAllowedTools restricts execution to the tools exposed and authorized for
-// the current request. A nil allowlist means no restriction, preserving the
-// default behavior for non context-token callers.
+// the current request. When SetAllowedTools is not called, execution is
+// unrestricted; an empty allowlist intentionally denies all tool calls.
 func (e *ToolExecutor) SetAllowedTools(allowedTools []llm.Tool) {
 	e.allowedToolNames = make(map[string]struct{}, len(allowedTools))
 	for _, tool := range allowedTools {

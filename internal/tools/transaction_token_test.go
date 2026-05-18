@@ -108,8 +108,12 @@ func TestPrepareChildTransactionTokenDefaultsToServiceAccountSubjectToken(t *tes
 	if exchange.subjectToken != "service-account-token" {
 		t.Fatalf("subject_token = %q, want service-account-token", exchange.subjectToken)
 	}
-	exchange.subjectToken = "parent-tx-token"
-	requireChildTokenExchange(t, exchange)
+	if exchange.subjectTokenTyp != kontxttoken.SubjectTokenTypeAccessToken {
+		t.Fatalf("subject_token_type = %q, want %q", exchange.subjectTokenTyp, kontxttoken.SubjectTokenTypeAccessToken)
+	}
+	if exchange.scope != childTransactionScope {
+		t.Fatalf("scope = %q, want %q", exchange.scope, childTransactionScope)
+	}
 	requirePreparedChildTransactionToken(t, fc, parent, child, childToken, jwksServer.URL)
 }
 

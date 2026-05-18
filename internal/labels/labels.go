@@ -55,6 +55,7 @@ const (
 	AnnotationRequesterContextDigest        = "orka.ai/requester-context-digest"
 	AnnotationTransactionTokenSecret        = "orka.ai/transaction-token-secret"
 	AnnotationTransactionTokenPending       = "orka.ai/transaction-token-pending"
+	AnnotationTransactionTokenPendingSince  = "orka.ai/transaction-token-pending-since"
 	AnnotationAutoRetry                     = "orka.ai/auto-retry"
 	AnnotationMaxRetries                    = "orka.ai/max-retries"
 	AnnotationRetryCount                    = "orka.ai/retry-count"

@@ -21,9 +21,13 @@ import (
 	kontxttoken "github.com/aramase/kontxt/pkg/token"
 
 	"github.com/sozercan/orka/internal/metrics"
+	"github.com/sozercan/orka/internal/redact"
 )
 
 const (
+	// HeaderName is the default HTTP header used by kontxt TxTokens.
+	HeaderName = kontxttoken.HeaderName
+
 	// TTSTokenSourceNone disables Orka-initiated token exchanges.
 	TTSTokenSourceNone = "none"
 	// TTSTokenSourceServiceAccount uses Orka's ServiceAccount identity for exchanges.
@@ -67,6 +71,9 @@ func NewTTSConfig(endpoint, audience, timeout, tokenSource, childTTL, toolTTL st
 		tokenSource = defaultTTSTokenSource
 	}
 	if endpoint == "" {
+		if tokenSource == TTSTokenSourceNone {
+			return TTSConfig{TokenSource: TTSTokenSourceNone}, nil
+		}
 		if audience != "" || timeout != "" || childTTL != "" || toolTTL != "" || tokenSource != defaultTTSTokenSource {
 			return TTSConfig{}, errors.New("context-token-tts-url is required when TTS settings are provided")
 		}
@@ -98,6 +105,17 @@ func NewTTSConfig(endpoint, audience, timeout, tokenSource, childTTL, toolTTL st
 		ChildTokenTTL: childTTLDuration,
 		ToolTokenTTL:  toolTTLDuration,
 	}, nil
+}
+
+// SubjectTokenTypeForSource returns the default RFC 8693 subject token type
+// for an Orka TTS token source.
+func SubjectTokenTypeForSource(tokenSource string) string {
+	switch tokenSource {
+	case TTSTokenSourceServiceAccount:
+		return kontxttoken.SubjectTokenTypeAccessToken
+	default:
+		return kontxttoken.SubjectTokenTypeTxnToken
+	}
 }
 
 func parseOptionalDuration(value string, fallback time.Duration, name string) (time.Duration, error) {
@@ -233,11 +251,11 @@ func (c *KontxtTTSClient) exchange(ctx context.Context, req ExchangeRequest) (st
 		}
 		if err := json.Unmarshal(body, &errorResp); err == nil && errorResp.Error != "" {
 			if errorResp.ErrorDescription != "" {
-				return "", fmt.Errorf("TTS error: %s - %s", errorResp.Error, errorResp.ErrorDescription)
+				return "", fmt.Errorf("TTS error: %s - %s", redact.SensitiveText(errorResp.Error), redact.SensitiveText(errorResp.ErrorDescription))
 			}
-			return "", fmt.Errorf("TTS error: %s", errorResp.Error)
+			return "", fmt.Errorf("TTS error: %s", redact.SensitiveText(errorResp.Error))
 		}
-		return "", fmt.Errorf("TTS exchange failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", fmt.Errorf("TTS exchange failed with status %d: %s", resp.StatusCode, redact.SensitiveText(strings.TrimSpace(string(body))))
 	}
 
 	var tokenResp struct {

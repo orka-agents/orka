@@ -297,7 +297,7 @@ func TestJobBuilder_AddTransactionTokenSecretExposesToAllContainers(t *testing.T
 func TestJobBuilder_Build_InjectsContextTokenTTSConfigWithoutTransactionTokenSecret(t *testing.T) {
 	builder := setupJobBuilder()
 	builder.ContextTokenTTSURL = "https://tts.example.test"
-	builder.ContextTokenTTSTokenSource = contexttoken.TTSTokenSourceIncoming
+	builder.ContextTokenTTSTokenSource = contexttoken.TTSTokenSourceServiceAccount
 	builder.ContextTokenTTSAudience = testTTSAudience
 	builder.ContextTokenTTSTimeout = "7s"
 	builder.ContextTokenSubjectTokenType = "urn:ietf:params:oauth:token-type:txn_token"
@@ -313,6 +313,11 @@ func TestJobBuilder_Build_InjectsContextTokenTTSConfigWithoutTransactionTokenSec
 		Spec: corev1alpha1.TaskSpec{
 			Type:  corev1alpha1.TaskTypeContainer,
 			Image: "busybox:latest",
+			Transaction: &corev1alpha1.TaskTransaction{
+				ID:     "txn-123",
+				Scope:  "orka:tools:use",
+				Scopes: []string{"orka:tools:use"},
+			},
 		},
 	}
 
@@ -324,7 +329,7 @@ func TestJobBuilder_Build_InjectsContextTokenTTSConfigWithoutTransactionTokenSec
 	container := job.Spec.Template.Spec.Containers[0]
 	for name, want := range map[string]string{
 		workerenv.ContextTokenTTSURL:           "https://tts.example.test",
-		workerenv.ContextTokenTTSTokenSource:   contexttoken.TTSTokenSourceIncoming,
+		workerenv.ContextTokenTTSTokenSource:   contexttoken.TTSTokenSourceServiceAccount,
 		workerenv.ContextTokenTTSAudience:      testTTSAudience,
 		workerenv.ContextTokenTTSTimeout:       "7s",
 		workerenv.ContextTokenSubjectTokenType: "urn:ietf:params:oauth:token-type:txn_token",

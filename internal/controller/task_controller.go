@@ -15,6 +15,7 @@ import (
 	"io"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	cron "github.com/robfig/cron/v3"
@@ -44,6 +45,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
+
+const taskTransactionTokenPendingTimeout = 2 * time.Minute
 
 const (
 	// ConditionTypeComplete indicates the task has completed
@@ -329,8 +332,7 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	log := logf.FromContext(ctx)
 
 	if taskTransactionTokenPending(task) {
-		log.Info("task is waiting for delegated transaction token setup")
-		return ctrl.Result{RequeueAfter: time.Second}, nil
+		return r.handleTransactionTokenPending(ctx, task)
 	}
 
 	// If this is a scheduled task, validate cron and transition to Scheduled phase
@@ -404,6 +406,49 @@ func taskTransactionTokenPending(task *corev1alpha1.Task) bool {
 	}
 	pending, err := strconv.ParseBool(task.Annotations[labels.AnnotationTransactionTokenPending])
 	return err == nil && pending
+}
+
+func (r *TaskReconciler) handleTransactionTokenPending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	now := time.Now()
+	since, err := transactionTokenPendingSince(task)
+	if err != nil {
+		if task.Annotations == nil {
+			task.Annotations = map[string]string{}
+		}
+		task.Annotations[labels.AnnotationTransactionTokenPendingSince] = now.Format(time.RFC3339Nano)
+		if updateErr := r.Update(ctx, task); updateErr != nil {
+			return ctrl.Result{}, updateErr
+		}
+		log.Info("task is waiting for delegated transaction token setup", "pendingSinceInitialized", true)
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
+	elapsed := now.Sub(since)
+	if elapsed >= taskTransactionTokenPendingTimeout {
+		msg := fmt.Sprintf("delegated transaction token setup timed out after %s", taskTransactionTokenPendingTimeout)
+		r.Recorder.Event(task, corev1.EventTypeWarning, "TransactionTokenPendingTimeout", msg)
+		return r.failTask(ctx, task, msg)
+	}
+
+	requeueAfter := min(taskTransactionTokenPendingTimeout-elapsed, time.Second)
+	log.Info("task is waiting for delegated transaction token setup", "pendingSince", since)
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+func transactionTokenPendingSince(task *corev1alpha1.Task) (time.Time, error) {
+	if task == nil || task.Annotations == nil {
+		return time.Time{}, fmt.Errorf("missing transaction token pending timestamp")
+	}
+	value := strings.TrimSpace(task.Annotations[labels.AnnotationTransactionTokenPendingSince])
+	if value == "" {
+		return time.Time{}, fmt.Errorf("missing transaction token pending timestamp")
+	}
+	since, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid transaction token pending timestamp: %w", err)
+	}
+	return since, nil
 }
 
 // handleScheduledTask handles transition to Scheduled phase for cron-scheduled tasks.

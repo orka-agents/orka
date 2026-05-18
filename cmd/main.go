@@ -290,7 +290,7 @@ func main() {
 		"Subject token source for kontxt TTS exchanges: serviceAccount, incoming, or none.")
 	flag.StringVar(&contextTokenSubjectTokenType, "context-token-subject-token-type",
 		os.Getenv("ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_TYPE"),
-		"Subject token type for worker-side kontxt TTS exchanges. Defaults to txn_token in workers when empty.")
+		"Subject token type for worker-side kontxt TTS exchanges. Defaults from token source when empty.")
 	flag.StringVar(&contextTokenChildScope, "context-token-child-scope", os.Getenv("ORKA_CONTEXT_TOKEN_CHILD_SCOPE"),
 		"Scope workers request for child delegated TxTokens when TTS is configured.")
 	flag.StringVar(&contextTokenOutboundScope, "context-token-outbound-scope",
@@ -628,7 +628,6 @@ func main() {
 		},
 		ContextTokens:             contextTokenConfig,
 		ContextTokenAuthorization: contextTokenAuthzConfig,
-		ContextTokenTTS:           contextTokenTTSConfig,
 		ResultStore:               sqliteStore,
 		SessionStore:              sqliteStore,
 		PlanStore:                 sqliteStore,

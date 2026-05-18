@@ -413,6 +413,7 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 	if err := h.client.List(ctx, taskList, opts); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tasks: %v", err))
 	}
+	filteredList := false
 	if h.contextTokenAuthorization.Enabled() {
 		filtered := taskList.Items[:0]
 		for i := range taskList.Items {
@@ -424,14 +425,19 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 				filtered = append(filtered, taskList.Items[i])
 			}
 		}
+		filteredList = len(filtered) != len(taskList.Items)
 		taskList.Items = filtered
+	}
+	remainingItemCount := taskList.RemainingItemCount
+	if filteredList {
+		remainingItemCount = nil
 	}
 
 	response := ListResponse{
 		Items: taskList.Items,
 		Metadata: ListMeta{
 			Continue:           taskList.Continue,
-			RemainingItemCount: taskList.RemainingItemCount,
+			RemainingItemCount: remainingItemCount,
 		},
 	}
 
@@ -849,9 +855,25 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 
 	// Add built-in tools to the response
 	toolItems := make([]fiber.Map, 0, len(toolList.Items)+len(builtinToolsList))
-	toolItems = append(toolItems, builtinToolsList...)
+	for _, tool := range builtinToolsList {
+		name, _ := tool["name"].(string)
+		allowed, err := contextTokenAllowsToolMetadata(c, h.contextTokenAuthorization, "listTools", name)
+		if err != nil {
+			return err
+		}
+		if allowed {
+			toolItems = append(toolItems, tool)
+		}
+	}
 
 	for _, tool := range toolList.Items {
+		allowed, err := contextTokenAllowsToolMetadata(c, h.contextTokenAuthorization, "listTools", tool.Name)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			continue
+		}
 		toolItems = append(toolItems, fiber.Map{
 			"name":        tool.Name,
 			"namespace":   tool.Namespace,
@@ -886,6 +908,9 @@ func (h *Handlers) GetTool(c fiber.Ctx) error {
 
 	// Check if it's a built-in tool
 	if builtin, ok := builtinToolsMap[name]; ok {
+		if err := authorizeContextTokenToolMetadata(c, h.contextTokenAuthorization, "getTool", name); err != nil {
+			return err
+		}
 		return c.JSON(builtin)
 	}
 
@@ -897,6 +922,9 @@ func (h *Handlers) GetTool(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "tool not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get tool: %v", err))
+	}
+	if err := authorizeContextTokenToolMetadata(c, h.contextTokenAuthorization, "getTool", tool.Name); err != nil {
+		return err
 	}
 
 	return c.JSON(tool)
@@ -929,6 +957,20 @@ func (h *Handlers) ListAgents(c fiber.Ctx) error {
 	if err := h.client.List(ctx, agentList, opts); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list agents: %v", err))
 	}
+	if h.contextTokenAuthorization.Enabled() {
+		filtered := agentList.Items[:0]
+		for i := range agentList.Items {
+			agent := &agentList.Items[i]
+			allowed, err := contextTokenAllowsAgentContext(c, h.contextTokenAuthorization, "listAgents", agent.Namespace, agent.Name)
+			if err != nil {
+				return err
+			}
+			if allowed {
+				filtered = append(filtered, *agent)
+			}
+		}
+		agentList.Items = filtered
+	}
 
 	response := ListResponse{
 		Items: agentList.Items,
@@ -959,6 +1001,9 @@ func (h *Handlers) GetAgent(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "agent not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent: %v", err))
+	}
+	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "getAgent", agent.Namespace, agent.Name); err != nil {
+		return err
 	}
 
 	return c.JSON(agent)
@@ -1000,6 +1045,9 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 		},
 		Spec: req.Spec,
 	}
+	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "createAgent", agent.Namespace, agent.Name); err != nil {
+		return err
+	}
 
 	ctx := c.Context()
 	if err := h.client.Create(ctx, agent); err != nil {
@@ -1030,6 +1078,9 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "agent not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent: %v", err))
+	}
+	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "updateAgent", agent.Namespace, agent.Name); err != nil {
+		return err
 	}
 
 	var req UpdateAgentRequest
@@ -1063,6 +1114,9 @@ func (h *Handlers) DeleteAgent(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "agent not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent: %v", err))
+	}
+	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "deleteAgent", agent.Namespace, agent.Name); err != nil {
+		return err
 	}
 
 	if err := h.client.Delete(ctx, agent); err != nil {

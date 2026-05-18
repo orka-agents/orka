@@ -37,7 +37,6 @@ type ServerConfig struct {
 	OIDC                      OIDCConfig
 	ContextTokens             ContextTokenConfig
 	ContextTokenAuthorization ContextTokenAuthorizationConfig
-	ContextTokenTTS           ContextTokenTTSConfig
 	Chat                      ChatConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore

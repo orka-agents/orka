@@ -195,6 +195,9 @@ func SplitCSV(value string) []string {
 // configured path cannot be read or contains only whitespace.
 func ReadTokenFile(path, description string) (string, error) {
 	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("%s file path is empty", description)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to read %s file: %w", description, err)

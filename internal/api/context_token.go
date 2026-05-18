@@ -152,12 +152,26 @@ func parseTokenHeaderConfigs(headers string) ([]TokenHeaderConfig, error) {
 		headerName, scheme, _ := strings.Cut(part, ":")
 		headerName = strings.TrimSpace(headerName)
 		scheme = strings.TrimSpace(scheme)
-		if headerName == "" {
+		if headerName == "" || !validHTTPHeaderName(headerName) {
 			return nil, fmt.Errorf("invalid context-token header %q", part)
 		}
 		configs = append(configs, TokenHeaderConfig{Name: headerName, Scheme: scheme})
 	}
 	return configs, nil
+}
+
+func validHTTPHeaderName(name string) bool {
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			continue
+		case r == '!', r == '#', r == '$', r == '%', r == '&', r == '\'', r == '*', r == '+', r == '-', r == '.', r == '^', r == '_', r == '`', r == '|', r == '~':
+			continue
+		default:
+			return false
+		}
+	}
+	return name != ""
 }
 
 func extractContextTokenCandidate(ctx fiber.Ctx, cfg ContextTokenConfig) (string, ContextTokenProfileConfig, bool, error) {

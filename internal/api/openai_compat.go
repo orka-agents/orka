@@ -237,14 +237,9 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
 	defer cancel()
 
-	namespace := GetEffectiveNamespace(c, "")
-	if h.watchNamespace != "" {
-		namespace = h.watchNamespace
-	}
-	if h.enforceNamespaceIsolation {
-		if userInfo != nil && userInfo.Namespace != "" && namespace != userInfo.Namespace {
-			return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("namespace %q not allowed", namespace))
-		}
+	namespace, err := ResolveNamespace(c, c.Query("namespace", ""), h.watchNamespace, h.enforceNamespaceIsolation)
+	if err != nil {
+		return openAIContextTokenAuthorizationError(c, err)
 	}
 
 	// Resolve provider and model from the request model field.

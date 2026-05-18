@@ -375,6 +375,7 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 	t.Setenv(workerenv.TransactionTokenFile, subjectTokenPath)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectTokenPath)
 	t.Setenv(workerenv.ContextTokenOutboundScope, testOutboundToolScope)
+	t.Setenv(workerenv.TransactionScopes, testOutboundToolScope)
 	t.Setenv(workerenv.ContextTokenToolTokenTTL, "17s")
 	t.Setenv(workerenv.TaskName, "task-1")
 
@@ -446,8 +447,8 @@ func TestToolExecutor_Execute_DefaultsOutboundTTSToServiceAccountSubjectToken(t 
 		if got := r.FormValue("subject_token"); got != "service-account-token" {
 			t.Fatalf("TTS subject_token = %q, want service-account-token", got)
 		}
-		if got := r.FormValue("subject_token_type"); got != kontxttoken.SubjectTokenTypeTxnToken {
-			t.Fatalf("TTS subject_token_type = %q, want %q", got, kontxttoken.SubjectTokenTypeTxnToken)
+		if got := r.FormValue("subject_token_type"); got != kontxttoken.SubjectTokenTypeAccessToken {
+			t.Fatalf("TTS subject_token_type = %q, want %q", got, kontxttoken.SubjectTokenTypeAccessToken)
 		}
 		if got := r.FormValue("scope"); got != testOutboundToolScope {
 			t.Fatalf("TTS scope = %q, want %s", got, testOutboundToolScope)
@@ -463,6 +464,7 @@ func TestToolExecutor_Execute_DefaultsOutboundTTSToServiceAccountSubjectToken(t 
 
 	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
 	t.Setenv(workerenv.ContextTokenOutboundScope, testOutboundToolScope)
+	t.Setenv(workerenv.TransactionScopes, testOutboundToolScope)
 	t.Setenv(workerenv.ServiceAccountToken, "service-account-token")
 
 	var receivedTxnToken string
@@ -526,6 +528,7 @@ func TestToolExecutor_Execute_ReusesOutboundTTSClient(t *testing.T) {
 	t.Setenv(workerenv.TransactionTokenFile, subjectTokenPath)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectTokenPath)
 	t.Setenv(workerenv.ContextTokenOutboundScope, testOutboundToolScope)
+	t.Setenv(workerenv.TransactionScopes, testOutboundToolScope)
 
 	var receivedTxnTokens []string
 	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -584,6 +587,7 @@ func TestToolExecutor_Execute_FailsClosedWhenOutboundTTSExchangeFails(t *testing
 	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectTokenPath)
 	t.Setenv(workerenv.ContextTokenOutboundScope, testOutboundToolScope)
+	t.Setenv(workerenv.TransactionScopes, testOutboundToolScope)
 
 	calledDownstream := false
 	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

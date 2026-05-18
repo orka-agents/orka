@@ -17,6 +17,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/sozercan/orka/internal/labels"
 )
 
 // Client is an HTTP client for the Orka API.
@@ -855,7 +857,10 @@ func extractTaskSummary(item TaskDetail) TaskSummary {
 		Phase:         StringField(item, "status", "phase"),
 		Age:           StringField(item, "metadata", "creationTimestamp"),
 		TransactionID: StringField(item, "spec", "transaction", "id"),
-		ParentTask:    StringField(item, "metadata", "labels", "orka.ai/parent-task"),
+		ParentTask:    StringField(item, "metadata", "annotations", labels.AnnotationParentTaskName),
+	}
+	if s.ParentTask == "" {
+		s.ParentTask = StringField(item, "metadata", "labels", labels.LabelParentTask)
 	}
 	if status, ok := item["status"].(map[string]any); ok {
 		if v, ok := status["iteration"].(float64); ok {

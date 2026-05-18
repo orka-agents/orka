@@ -450,6 +450,9 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	if err != nil {
 		return "", err
 	}
+	if err := validateChildTaskAgainstParentTransaction(dc.parentTask, childTask, dc.args.Agent); err != nil {
+		return "", err
+	}
 
 	childTokenExchangeEnabled, err := shouldPrepareChildTransactionToken(dc.parentTask)
 	if err != nil {
@@ -498,10 +501,21 @@ func markChildTransactionTokenPending(childTask *corev1alpha1.Task) {
 		childTask.Annotations = map[string]string{}
 	}
 	childTask.Annotations[labels.AnnotationTransactionTokenPending] = trueStr
+	childTask.Annotations[labels.AnnotationTransactionTokenPendingSince] = time.Now().Format(time.RFC3339Nano)
 }
 
 func patchPreparedChildTransactionToken(ctx context.Context, k8sClient client.Client, childTask *corev1alpha1.Task) error {
-	patch := fmt.Appendf(nil, `{"metadata":{"annotations":{%q:null}}}`, labels.AnnotationTransactionTokenPending)
+	patch, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"annotations": map[string]any{
+				labels.AnnotationTransactionTokenPending:      nil,
+				labels.AnnotationTransactionTokenPendingSince: nil,
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("encoding child task transaction token metadata patch: %w", err)
+	}
 	target := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      childTask.Name,
@@ -513,6 +527,7 @@ func patchPreparedChildTransactionToken(ctx context.Context, k8sClient client.Cl
 	}
 	if childTask.Annotations != nil {
 		delete(childTask.Annotations, labels.AnnotationTransactionTokenPending)
+		delete(childTask.Annotations, labels.AnnotationTransactionTokenPendingSince)
 	}
 	return nil
 }
