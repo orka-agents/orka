@@ -58,6 +58,10 @@ spec:
             - --store-backend=sqlite
             - --store-path={{ .Values.store.path }}
             - --ai-worker-image={{ .Values.workers.ai.image.repository }}:{{ .Values.workers.ai.image.tag }}
+            - --ai-worker-cluster-role-name={{ include "orka.aiWorkerClusterRoleName" . }}
+            - --vendor-worker-cluster-role-name={{ include "orka.vendorWorkerClusterRoleName" . }}
+            - --container-worker-cluster-role-name={{ include "orka.containerWorkerClusterRoleName" . }}
+            - --worker-cluster-role-binding-prefix={{ include "orka.fullname" . }}
             - --copilot-worker-image={{ .Values.workers.copilot.image.repository | default "ghcr.io/sozercan/orka/agent-worker-copilot" }}:{{ .Values.workers.copilot.image.tag | default "latest" }}
             - --claude-worker-image={{ .Values.workers.claude.image.repository | default "ghcr.io/sozercan/orka/agent-worker-claude" }}:{{ .Values.workers.claude.image.tag | default "latest" }}
             - --codex-worker-image={{ .Values.workers.codex.image.repository | default "ghcr.io/sozercan/orka/agent-worker-codex" }}:{{ .Values.workers.codex.image.tag | default "latest" }}
@@ -86,6 +90,13 @@ spec:
             - --agent-sandbox-cleanup-policy={{ .cleanupPolicy | default "delete" }}
             {{- end }}
             {{- end }}
+          env:
+            - name: ORKA_AI_WORKER_CLUSTER_ROLE_NAME
+              value: {{ include "orka.aiWorkerClusterRoleName" . | quote }}
+            - name: ORKA_VENDOR_WORKER_CLUSTER_ROLE_NAME
+              value: {{ include "orka.vendorWorkerClusterRoleName" . | quote }}
+            - name: ORKA_CONTAINER_WORKER_CLUSTER_ROLE_NAME
+              value: {{ include "orka.containerWorkerClusterRoleName" . | quote }}
           ports:
             - name: api
               containerPort: {{ .Values.controller.apiPort }}

@@ -328,35 +328,52 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 		Eventually(verifyTaskDeleted, 30*time.Second, time.Second).Should(Succeed())
 	})
 
-	// Test 7: Verify worker RBAC — workers should NOT have ConfigMap create/update permissions
-	It("should not grant ConfigMap write permissions to workers", func() {
-		By("checking the worker ClusterRole for ConfigMap permissions")
+	// Test 7: Verify non-AI worker RBAC - SQLite result storage should not
+	// require vendor or container workers to write ConfigMaps.
+	It("should not grant ConfigMap write permissions to non-AI workers", func() {
+		By("checking the non-AI worker ClusterRoles for ConfigMap permissions")
 		verifyWorkerRBAC := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "clusterrole", "orka-worker-role",
-				"-o", "jsonpath={.rules}", "--ignore-not-found")
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-
-			if strings.TrimSpace(output) == "" {
-				// Worker role might not exist in all deployments; skip
-				return
-			}
-
+			workerRoles := []string{"orka-vendor-worker-role", "orka-container-worker-role"}
+			disallowedConfigMapVerbs := []string{"create", "update", "patch", "delete", "deletecollection", "*"}
 			type policyRule struct {
 				APIGroups []string `json:"apiGroups"`
 				Resources []string `json:"resources"`
 				Verbs     []string `json:"verbs"`
 			}
-			var rules []policyRule
-			err = json.Unmarshal([]byte(output), &rules)
-			g.Expect(err).NotTo(HaveOccurred())
 
-			for _, rule := range rules {
-				for _, resource := range rule.Resources {
-					if resource == "configmaps" {
+			for _, workerRole := range workerRoles {
+				cmd := exec.Command("kubectl", "get", "clusterrole", workerRole,
+					"-o", "jsonpath={.rules}", "--ignore-not-found")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				if strings.TrimSpace(output) == "" {
+					// Worker role might not exist in all deployments; skip
+					continue
+				}
+
+				var rules []policyRule
+				err = json.Unmarshal([]byte(output), &rules)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				for _, rule := range rules {
+					ruleCoversConfigMaps := false
+					for _, apiGroup := range rule.APIGroups {
+						if apiGroup != "" && apiGroup != "*" {
+							continue
+						}
+						for _, resource := range rule.Resources {
+							if resource == "configmaps" || resource == "*" {
+								ruleCoversConfigMaps = true
+								break
+							}
+						}
+					}
+
+					if ruleCoversConfigMaps {
 						// ConfigMap rules should only have read verbs
 						for _, verb := range rule.Verbs {
-							g.Expect(verb).NotTo(BeElementOf("create", "update", "patch"),
+							g.Expect(disallowedConfigMapVerbs).NotTo(ContainElement(verb),
 								"Workers should NOT have ConfigMap write permissions")
 						}
 					}

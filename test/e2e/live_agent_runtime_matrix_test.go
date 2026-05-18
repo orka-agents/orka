@@ -83,19 +83,22 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
 			liveCopilotProxyServicePort(),
-			liveCopilotProxyCodexModelPreferences(),
+			liveCopilotProxyGPTModelPreferences,
+			liveCopilotProxyGPTModelPrefixes...,
 		)
 		claudeModel = discoverPreferredProxyModelViaServiceProxy(
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
 			liveCopilotProxyServicePort(),
-			liveCopilotProxyClaudeModelPreferences(),
+			liveCopilotProxyClaudeModelPreferences,
+			liveCopilotProxyClaudeModelPrefixes...,
 		)
 		geminiModel = discoverPreferredProxyModelViaServiceProxy(
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
 			liveCopilotProxyServicePort(),
-			liveCopilotProxyGeminiModelPreferences(),
+			liveCopilotProxyGeminiModelPreferences,
+			liveCopilotProxyGeminiModelPrefixes...,
 		)
 
 		claudeSessionName = fmt.Sprintf("e2e-live-runtime-claude-%d", time.Now().UnixNano())
@@ -132,7 +135,11 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		})
 
 		By("creating the prior task that writes the marker file into the pinned repository")
-		writeMarkerCommand := fmt.Sprintf("printf '%%s\n' '%s' > '%s' && echo CREATED", codexMarker, codexMarkerFile)
+		writeMarkerCommand := fmt.Sprintf(
+			"printf '%%s\\n' %s > %s && echo CREATED",
+			shellSingleQuote(codexMarker),
+			shellSingleQuote(codexMarkerFile),
+		)
 		err := applyManifestJSON(runtimeContainerTaskManifest(
 			codexTaskWriteName,
 			[]string{"sh", "-c"},
@@ -178,8 +185,8 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			codexTaskReadName,
 			codexAgentName,
-			fmt.Sprintf("Open the plain text file named %s in the repository root and reply with only its single line.", codexMarkerFile),
-			3,
+			fmt.Sprintf("The priorTaskRef workspace diff has already been applied to this checkout before you start. Do not run commands or inspect files. Reply with exactly %s and nothing else.", codexMarker),
+			1,
 			boolPtr(true),
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
 			codexTaskWriteName,
@@ -196,7 +203,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			codexWorkerImage,
 			map[string]string{
 				"ORKA_MODEL":                gptModel,
-				"ORKA_MAX_TURNS":            "3",
+				"ORKA_MAX_TURNS":            "1",
 				"ORKA_ALLOW_BASH":           "true",
 				"ORKA_GIT_REPO":             liveRuntimeRepoURL,
 				"ORKA_GIT_REF":              liveRuntimeRepoRef,
@@ -211,6 +218,15 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		By("waiting for the Codex task to return the exact marker from the prior diff")
 		Expect(waitForTaskCompletion(codexTaskReadName, liveRuntimeTimeout)).To(Equal("Succeeded"))
 		verifyResultAvailable(codexTaskReadName)
+		Eventually(func(g Gomega) {
+			task := fetchTaskSnapshot(codexTaskReadName)
+			g.Expect(task.Status.JobName).NotTo(BeEmpty())
+
+			cmd := exec.Command("kubectl", "logs", "job/"+task.Status.JobName, "-n", namespace)
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).To(ContainSubstring("successfully applied prior task diff from " + codexTaskWriteName))
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
 		Expect(strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, codexTaskReadName))).To(Equal(codexMarker))
 	})
 
@@ -331,6 +347,10 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		Expect(strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, copilotTaskName))).To(Equal(liveRuntimeRepoSentinel))
 	})
 })
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
 
 type runtimeWorkspaceConfig struct {
 	GitRepo string

@@ -372,11 +372,11 @@ Failed providers are temporarily cooled down to prevent repeated failures:
 
 The OpenAI provider automatically detects which API to use:
 1. Tries the **Responses API** first
-2. If the endpoint returns 403/404/405 or a known unsupported-API error code, switches to **Chat Completions API**
+2. If the endpoint returns 404/405 or a known unsupported-API error code, switches to **Chat Completions API**
 3. The API mode is stored as an `atomic.Int32` for thread-safe switching
 4. Once detected, the mode persists for the provider's lifetime
 
-Treating 403 as unsupported is intentional for OpenAI-compatible proxy deployments that expose Chat Completions but reject Responses API requests for the same credential or model catalog.
+Copilot-compatible Responses API 403s are handled as a scoped fallback to Chat Completions. Generic 403s still surface as provider errors instead of being treated as unsupported API signals.
 
 ### Anthropic Quirks
 

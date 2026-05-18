@@ -73,6 +73,10 @@ func main() {
 	var codexWorkerImage string
 	var codexSandboxMode string
 	var generalWorkerImage string
+	var aiWorkerClusterRoleName string
+	var vendorWorkerClusterRoleName string
+	var containerWorkerClusterRoleName string
+	var workerClusterRoleBindingNamePrefix string
 	var chatEnabled bool
 	var chatProvider string
 	var chatModel string
@@ -131,6 +135,15 @@ func main() {
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
 		controller.DefaultGeneralWorkerImage, "Container image for general worker.")
+	flag.StringVar(&aiWorkerClusterRoleName, "ai-worker-cluster-role-name",
+		controller.DefaultAIWorkerClusterRoleName, "ClusterRole name for AI worker tasks.")
+	flag.StringVar(&vendorWorkerClusterRoleName, "vendor-worker-cluster-role-name",
+		controller.DefaultVendorWorkerClusterRoleName, "ClusterRole name for vendor worker tasks.")
+	flag.StringVar(&containerWorkerClusterRoleName, "container-worker-cluster-role-name",
+		controller.DefaultContainerWorkerClusterRoleName, "ClusterRole name for container worker tasks.")
+	flag.StringVar(&workerClusterRoleBindingNamePrefix, "worker-cluster-role-binding-prefix",
+		os.Getenv("ORKA_WORKER_CLUSTER_ROLE_BINDING_PREFIX"),
+		"Prefix for per-namespace worker ClusterRoleBinding names. Empty uses the legacy 'orka' prefix.")
 	flag.BoolVar(&chatEnabled, "chat-enabled", true, "Enable the chat endpoint.")
 	flag.StringVar(&chatProvider, "chat-provider", "", "Default Provider CRD name for chat.")
 	flag.StringVar(&chatModel, "chat-model", "", "Default model for chat.")
@@ -347,21 +360,26 @@ func main() {
 		}
 	}
 	// Setup Task controller with helper components
+	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // flag default is non-negative
 	if err := (&controller.TaskReconciler{
-		Client:                    mgr.GetClient(),
-		Scheme:                    mgr.GetScheme(),
-		JobBuilder:                jobBuilder,
-		SessionManager:            sessionManager,
-		WebhookNotifier:           webhookNotifier,
-		KubeClient:                kubeClient,
-		ResultStore:               sqliteStore,
-		PlanStore:                 sqliteStore,
-		MessageStore:              sqliteStore,
-		ArtifactStore:             sqliteStore,
-		EnforceNamespaceIsolation: enforceNamespaceIsolation,
-		MaxTasksPerNamespace:      int32(maxTasksPerNamespace), //nolint:gosec // validated non-negative by flag default
-		AgentSandboxEnabled:       agentSandboxEnabled,
-		AgentSandboxConfig:        agentSandboxConfig,
+		Client:                             mgr.GetClient(),
+		Scheme:                             mgr.GetScheme(),
+		JobBuilder:                         jobBuilder,
+		SessionManager:                     sessionManager,
+		WebhookNotifier:                    webhookNotifier,
+		KubeClient:                         kubeClient,
+		ResultStore:                        sqliteStore,
+		PlanStore:                          sqliteStore,
+		MessageStore:                       sqliteStore,
+		ArtifactStore:                      sqliteStore,
+		EnforceNamespaceIsolation:          enforceNamespaceIsolation,
+		MaxTasksPerNamespace:               maxTasksPerNamespaceValue,
+		AgentSandboxEnabled:                agentSandboxEnabled,
+		AgentSandboxConfig:                 agentSandboxConfig,
+		AIWorkerClusterRoleName:            aiWorkerClusterRoleName,
+		VendorWorkerClusterRoleName:        vendorWorkerClusterRoleName,
+		ContainerWorkerClusterRoleName:     containerWorkerClusterRoleName,
+		WorkerClusterRoleBindingNamePrefix: workerClusterRoleBindingNamePrefix,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)

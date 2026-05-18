@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,8 +20,10 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
@@ -29,11 +32,17 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
+)
+
+const (
+	staleResourceLabelKey   = "stale"
+	staleResourceLabelValue = scheduledRunLabelValue
 )
 
 // newTestScheme creates a scheme with all types needed for unit tests.
@@ -1330,53 +1339,317 @@ func TestEnsureWorkerRBAC_CreatesResources(t *testing.T) {
 	scheme := newTestScheme()
 	r := newUnitReconciler(scheme)
 
-	err := r.ensureWorkerRBAC(context.Background(), "test-ns")
+	err := r.ensureWorkerRBAC(context.Background(), testNS)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify ServiceAccount was created
-	sa := &corev1.ServiceAccount{}
-	if err := r.Get(context.Background(), types.NamespacedName{
-		Name: workerServiceAccountName, Namespace: "test-ns",
-	}, sa); err != nil {
-		t.Errorf("expected SA to exist: %v", err)
+	expected := []struct {
+		serviceAccount     string
+		clusterRoleBinding string
+		clusterRole        string
+	}{
+		{AIWorkerServiceAccount, "orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName},
+		{VendorWorkerServiceAccount, "orka-vendor-worker-test-ns", DefaultVendorWorkerClusterRoleName},
+		{ContainerWorkerServiceAccount, "orka-container-worker-test-ns", DefaultContainerWorkerClusterRoleName},
 	}
 
-	// Verify ClusterRoleBinding was created
-	crb := &rbacv1.ClusterRoleBinding{}
-	if err := r.Get(context.Background(), types.NamespacedName{
-		Name: "orka-worker-test-ns",
-	}, crb); err != nil {
-		t.Errorf("expected CRB to exist: %v", err)
+	for _, tt := range expected {
+		t.Run(tt.serviceAccount, func(t *testing.T) {
+			// Verify ServiceAccount was created.
+			sa := &corev1.ServiceAccount{}
+			if err := r.Get(context.Background(), types.NamespacedName{
+				Name: tt.serviceAccount, Namespace: testNS,
+			}, sa); err != nil {
+				t.Fatalf("expected SA %s to exist: %v", tt.serviceAccount, err)
+			}
+
+			// Verify matching ClusterRoleBinding was created.
+			crb := &rbacv1.ClusterRoleBinding{}
+			if err := r.Get(context.Background(), types.NamespacedName{
+				Name: tt.clusterRoleBinding,
+			}, crb); err != nil {
+				t.Fatalf("expected CRB %s to exist: %v", tt.clusterRoleBinding, err)
+			}
+			if crb.RoleRef.Name != tt.clusterRole {
+				t.Errorf("expected roleRef %s, got %s", tt.clusterRole, crb.RoleRef.Name)
+			}
+			if len(crb.Subjects) != 1 {
+				t.Fatalf("expected 1 subject, got %d", len(crb.Subjects))
+			}
+			subject := crb.Subjects[0]
+			if subject.Kind != rbacv1.ServiceAccountKind || subject.Name != tt.serviceAccount || subject.Namespace != testNS {
+				t.Errorf("unexpected subject: %#v", subject)
+			}
+		})
 	}
-	if crb.RoleRef.Name != workerClusterRoleName {
-		t.Errorf("expected roleRef %s, got %s", workerClusterRoleName, crb.RoleRef.Name)
+}
+
+func TestEnsureWorkerRBAC_UsesClusterRoleBindingPrefix(t *testing.T) {
+	scheme := newTestScheme()
+	r := newUnitReconciler(scheme)
+	r.WorkerClusterRoleBindingNamePrefix = "orka-dev"
+	ctx := context.Background()
+
+	if err := r.ensureWorkerRBAC(ctx, testNS); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expected := []struct {
+		serviceAccount     string
+		clusterRoleBinding string
+		clusterRole        string
+	}{
+		{AIWorkerServiceAccount, "orka-dev-ai-worker-test-ns", DefaultAIWorkerClusterRoleName},
+		{VendorWorkerServiceAccount, "orka-dev-vendor-worker-test-ns", DefaultVendorWorkerClusterRoleName},
+		{ContainerWorkerServiceAccount, "orka-dev-container-worker-test-ns", DefaultContainerWorkerClusterRoleName},
+	}
+
+	for _, tt := range expected {
+		t.Run(tt.clusterRoleBinding, func(t *testing.T) {
+			crb := &rbacv1.ClusterRoleBinding{}
+			if err := r.Get(ctx, types.NamespacedName{Name: tt.clusterRoleBinding}, crb); err != nil {
+				t.Fatalf("expected prefixed CRB %s to exist: %v", tt.clusterRoleBinding, err)
+			}
+			if crb.RoleRef.Name != tt.clusterRole {
+				t.Fatalf("expected roleRef %s, got %s", tt.clusterRole, crb.RoleRef.Name)
+			}
+			if len(crb.Subjects) != 1 {
+				t.Fatalf("expected 1 subject, got %d", len(crb.Subjects))
+			}
+			subject := crb.Subjects[0]
+			if subject.Kind != rbacv1.ServiceAccountKind || subject.Name != tt.serviceAccount || subject.Namespace != testNS {
+				t.Fatalf("unexpected subject: %#v", subject)
+			}
+		})
+	}
+}
+
+func TestWorkerClusterRoleBindingNameTruncatesLongNames(t *testing.T) {
+	prefix := strings.Repeat("p", 230)
+	namespace := strings.Repeat("n", 80)
+
+	got := workerClusterRoleBindingName(prefix, "container", namespace)
+	if len(got) != maxWorkerClusterRoleBindingNameLength {
+		t.Fatalf("expected name length %d, got %d", maxWorkerClusterRoleBindingNameLength, len(got))
+	}
+	if got != workerClusterRoleBindingName(prefix, "container", namespace) {
+		t.Fatal("expected truncated name to be stable")
+	}
+	if got == workerClusterRoleBindingName(prefix, "vendor", namespace) {
+		t.Fatal("expected hash suffix to distinguish names that share a truncated prefix")
 	}
 }
 
 func TestEnsureWorkerRBAC_Idempotent(t *testing.T) {
 	scheme := newTestScheme()
-	// Pre-create the SA and CRB
-	sa := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{Name: workerServiceAccountName, Namespace: "test-ns"},
+	// Pre-create all SAs and CRBs.
+	expected := []struct {
+		serviceAccount     string
+		clusterRoleBinding string
+		clusterRole        string
+	}{
+		{AIWorkerServiceAccount, "orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName},
+		{VendorWorkerServiceAccount, "orka-vendor-worker-test-ns", DefaultVendorWorkerClusterRoleName},
+		{ContainerWorkerServiceAccount, "orka-container-worker-test-ns", DefaultContainerWorkerClusterRoleName},
 	}
-	crb := &rbacv1.ClusterRoleBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: "orka-worker-test-ns"},
+
+	objects := make([]client.Object, 0, len(expected)*2)
+	for _, tt := range expected {
+		objects = append(objects,
+			&corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{Name: tt.serviceAccount, Namespace: testNS},
+			},
+			&rbacv1.ClusterRoleBinding{
+				ObjectMeta: metav1.ObjectMeta{Name: tt.clusterRoleBinding},
+				RoleRef: rbacv1.RoleRef{
+					APIGroup: rbacv1.GroupName,
+					Kind:     "ClusterRole",
+					Name:     tt.clusterRole,
+				},
+				Subjects: []rbacv1.Subject{{
+					Kind: rbacv1.ServiceAccountKind, Name: tt.serviceAccount, Namespace: testNS,
+				}},
+			},
+		)
+	}
+	r := newUnitReconciler(scheme, objects...)
+
+	// Should not fail when resources already exist.
+	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
+		t.Fatalf("unexpected error on idempotent call: %v", err)
+	}
+}
+
+func TestEnsureWorkerServiceAccountPreservesAppManagedByLabel(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	namespace := testNS
+	appManagedBy := "Helm"
+	existing := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      AIWorkerServiceAccount,
+			Namespace: namespace,
+			Labels: map[string]string{
+				managedByLabelKey: appManagedBy,
+				"custom":          "keep",
+			},
+		},
+	}
+	r := newUnitReconciler(scheme, existing)
+
+	if err := r.ensureWorkerServiceAccount(ctx, namespace, AIWorkerServiceAccount); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &corev1.ServiceAccount{}
+	if err := r.Get(ctx, types.NamespacedName{Name: AIWorkerServiceAccount, Namespace: namespace}, got); err != nil {
+		t.Fatalf("getting ServiceAccount: %v", err)
+	}
+	if got.Labels[managedByLabelKey] != appManagedBy {
+		t.Fatalf("expected app managed-by label to be preserved, got labels %#v", got.Labels)
+	}
+	if got.Labels[orkaManagedByLabelKey] != managedByLabelValue {
+		t.Fatalf("expected Orka managed-by label to be reconciled, got labels %#v", got.Labels)
+	}
+	if got.Labels["custom"] != "keep" {
+		t.Fatalf("expected existing labels to be preserved, got labels %#v", got.Labels)
+	}
+}
+
+func TestEnsureWorkerClusterRoleBindingAlreadyExistsRaceUpdatesExistingBinding(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	namespace := "race-ns"
+	spec := workerRBACSpec{
+		serviceAccountName:     AIWorkerServiceAccount,
+		clusterRoleName:        DefaultAIWorkerClusterRoleName,
+		clusterRoleBindingName: fmt.Sprintf("orka-ai-worker-%s", namespace),
+	}
+
+	interceptedCreate := false
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if obj.GetName() != spec.clusterRoleBindingName {
+				return c.Create(ctx, obj, opts...)
+			}
+			if _, ok := obj.(*rbacv1.ClusterRoleBinding); !ok {
+				return c.Create(ctx, obj, opts...)
+			}
+
+			interceptedCreate = true
+			existing := &rbacv1.ClusterRoleBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   spec.clusterRoleBindingName,
+					Labels: map[string]string{staleResourceLabelKey: staleResourceLabelValue},
+				},
+				RoleRef: rbacv1.RoleRef{
+					APIGroup: rbacv1.GroupName,
+					Kind:     "ClusterRole",
+					Name:     spec.clusterRoleName,
+				},
+				Subjects: []rbacv1.Subject{{
+					Kind:      rbacv1.ServiceAccountKind,
+					Name:      "stale-worker",
+					Namespace: namespace,
+				}},
+			}
+			if err := c.Create(ctx, existing); err != nil {
+				t.Fatalf("creating raced ClusterRoleBinding fixture: %v", err)
+			}
+
+			return apierrors.NewAlreadyExists(
+				schema.GroupResource{Group: rbacv1.GroupName, Resource: "clusterrolebindings"},
+				spec.clusterRoleBindingName,
+			)
+		},
+	}).Build()
+
+	r := newUnitReconciler(scheme)
+	r.Client = fc
+	r.JobBuilder = NewJobBuilder(fc)
+
+	if err := r.ensureWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !interceptedCreate {
+		t.Fatal("expected create to be intercepted")
+	}
+
+	got := &rbacv1.ClusterRoleBinding{}
+	if err := fc.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName}, got); err != nil {
+		t.Fatalf("expected raced ClusterRoleBinding to exist: %v", err)
+	}
+	if got.Labels[managedByLabelKey] != managedByLabelValue {
+		t.Fatalf("expected managed-by label to be reconciled, got labels %#v", got.Labels)
+	}
+	if len(got.Subjects) != 1 {
+		t.Fatalf("expected 1 subject, got %d", len(got.Subjects))
+	}
+	subject := got.Subjects[0]
+	if subject.Kind != rbacv1.ServiceAccountKind || subject.Name != spec.serviceAccountName || subject.Namespace != namespace {
+		t.Fatalf("expected desired subject to be reconciled, got %#v", subject)
+	}
+}
+
+func TestEnsureWorkerClusterRoleBindingRecreatesStaleRoleRef(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	namespace := "stale-ns"
+	spec := workerRBACSpec{
+		serviceAccountName:     AIWorkerServiceAccount,
+		clusterRoleName:        DefaultAIWorkerClusterRoleName,
+		clusterRoleBindingName: fmt.Sprintf("orka-ai-worker-%s", namespace),
+	}
+
+	stale := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: spec.clusterRoleBindingName,
+			Labels: map[string]string{
+				staleResourceLabelKey: staleResourceLabelValue,
+			},
+		},
 		RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
+			APIGroup: rbacv1.GroupName,
 			Kind:     "ClusterRole",
-			Name:     workerClusterRoleName,
+			Name:     "stale-worker-role",
 		},
 		Subjects: []rbacv1.Subject{{
-			Kind: "ServiceAccount", Name: workerServiceAccountName, Namespace: "test-ns",
+			Kind:      rbacv1.ServiceAccountKind,
+			Name:      "stale-worker",
+			Namespace: "old-ns",
 		}},
 	}
-	r := newUnitReconciler(scheme, sa, crb)
+	r := newUnitReconciler(scheme, stale)
 
-	// Should not fail when resources already exist
-	if err := r.ensureWorkerRBAC(context.Background(), "test-ns"); err != nil {
-		t.Fatalf("unexpected error on idempotent call: %v", err)
+	if err := r.ensureWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &rbacv1.ClusterRoleBinding{}
+	if err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName}, got); err != nil {
+		t.Fatalf("expected ClusterRoleBinding to exist after remediation: %v", err)
+	}
+	wantRoleRef := rbacv1.RoleRef{
+		APIGroup: rbacv1.GroupName,
+		Kind:     "ClusterRole",
+		Name:     spec.clusterRoleName,
+	}
+	if got.RoleRef != wantRoleRef {
+		t.Fatalf("expected stale RoleRef to be remediated to %#v, got %#v", wantRoleRef, got.RoleRef)
+	}
+	if got.Labels[managedByLabelKey] != managedByLabelValue {
+		t.Fatalf("expected managed-by label on remediated binding, got labels %#v", got.Labels)
+	}
+	if got.Labels[staleResourceLabelKey] == staleResourceLabelValue {
+		t.Fatalf("expected stale binding to be recreated, got stale labels %#v", got.Labels)
+	}
+	if len(got.Subjects) != 1 {
+		t.Fatalf("expected 1 subject, got %d", len(got.Subjects))
+	}
+	subject := got.Subjects[0]
+	if subject.Kind != rbacv1.ServiceAccountKind || subject.Name != spec.serviceAccountName || subject.Namespace != namespace {
+		t.Fatalf("expected desired subject to be reconciled, got %#v", subject)
 	}
 }
 
@@ -2149,6 +2422,74 @@ func TestCreateTaskJob_AITaskWithAgent(t *testing.T) {
 	}
 	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
 		t.Errorf("expected phase Running, got %s", task.Status.Phase)
+	}
+}
+
+func TestCreateTaskJob_RBACReconcileFailureEmitsWarningAndContinues(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "create-rbac-warn",
+			Namespace: "default",
+			UID:       "12345678-abcd-efgh-ijkl-1234567890ab",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   "busybox:latest",
+			Command: []string{"echo", "hello"},
+		},
+	}
+
+	fc := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*corev1.ServiceAccount); ok {
+					return apierrors.NewForbidden(
+						schema.GroupResource{Resource: "serviceaccounts"},
+						obj.GetName(),
+						errors.New("injected serviceaccount create failure"),
+					)
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	recorder := record.NewFakeRecorder(100)
+	r := newUnitReconciler(scheme)
+	r.Client = fc
+	r.JobBuilder = NewJobBuilder(fc)
+	r.Recorder = recorder
+
+	result, err := r.createTaskJob(ctx, task, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Errorf("expected 5s requeue, got %v", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Errorf("expected phase Running, got %s", task.Status.Phase)
+	}
+	if task.Status.JobName == "" {
+		t.Error("expected JobName to be set")
+	}
+
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: task.Namespace}, job); err != nil {
+		t.Fatalf("expected Job to be created despite RBAC warning: %v", err)
+	}
+
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, corev1.EventTypeWarning) || !strings.Contains(event, workerRBACReconcileFailedReason) {
+			t.Fatalf("expected %s Warning event, got %q", workerRBACReconcileFailedReason, event)
+		}
+	default:
+		t.Fatalf("expected %s Warning event", workerRBACReconcileFailedReason)
 	}
 }
 
@@ -3932,19 +4273,27 @@ func TestResolveProvider_AgentFallback(t *testing.T) {
 func TestEnsureWorkerRBAC_SAExistsButCRBMissing(t *testing.T) {
 	scheme := newTestScheme()
 	sa := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{Name: workerServiceAccountName, Namespace: "test-ns2"},
+		ObjectMeta: metav1.ObjectMeta{Name: AIWorkerServiceAccount, Namespace: "test-ns2"},
 	}
 	r := newUnitReconciler(scheme, sa)
 	err := r.ensureWorkerRBAC(context.Background(), "test-ns2")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// CRB should be created
-	crb := &rbacv1.ClusterRoleBinding{}
-	if err := r.Get(context.Background(), types.NamespacedName{
-		Name: fmt.Sprintf("orka-worker-%s", "test-ns2"),
-	}, crb); err != nil {
-		t.Errorf("expected CRB to be created: %v", err)
+
+	expectedBindings := []string{
+		fmt.Sprintf("orka-ai-worker-%s", "test-ns2"),
+		fmt.Sprintf("orka-vendor-worker-%s", "test-ns2"),
+		fmt.Sprintf("orka-container-worker-%s", "test-ns2"),
+	}
+	for _, bindingName := range expectedBindings {
+		// CRB should be created.
+		crb := &rbacv1.ClusterRoleBinding{}
+		if err := r.Get(context.Background(), types.NamespacedName{
+			Name: bindingName,
+		}, crb); err != nil {
+			t.Errorf("expected CRB %s to be created: %v", bindingName, err)
+		}
 	}
 }
 
