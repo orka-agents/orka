@@ -102,6 +102,8 @@ This is an **Orka** live integration suite, not a deep `copilot-proxy` feature s
 
 It bootstraps a fresh Kind cluster, deploys the published multi-arch `docker.io/sozercan/copilot-proxy:latest` image, injects `COPILOT_GITHUB_TOKEN` for proxy auth, requires the live proxy to expose GPT/Claude/Gemini model families, maps that same secret to `E2E_GITHUB_TOKEN` for the Copilot runtime case, and then runs the focused live suites against the in-cluster proxy.
 
+Model selection is endpoint-specific. Provider-backed `type: ai` tasks and `/api/v1/chat` use a Claude-family model because the CI proxy allows those through the OpenAI-compatible Chat Completions path. The Codex runtime uses GPT models that work with the Responses API, while the Claude and Copilot runtime matrix cases use Claude and Gemini families respectively. Keep these preferences in `test/e2e/helpers_test.go` aligned with the live proxy's allowed models rather than assuming one model family works across every endpoint.
+
 The live GitHub OIDC workflow (`.github/workflows/live-github-oidc-e2e.yml`) runs `scripts/live-github-oidc-e2e.sh` in GitHub Actions with `id-token: write`. It builds the controller from the PR, deploys it to a fresh Kind cluster, configures `ORKA_OIDC_ISSUER=https://token.actions.githubusercontent.com` and the workflow audience, fetches a real GitHub Actions OIDC token, and validates:
 
 - unauthenticated API requests return `401`

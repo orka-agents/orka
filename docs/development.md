@@ -51,7 +51,9 @@ The repository has two live GitHub Actions E2E workflows in addition to the norm
 Validate workflow/script edits locally before pushing:
 
 ```bash
+bash -n scripts/live-copilot-proxy-e2e.sh
 bash -n scripts/live-github-oidc-e2e.sh
+go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-copilot-proxy-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-github-oidc-e2e.yml
 ```
 
