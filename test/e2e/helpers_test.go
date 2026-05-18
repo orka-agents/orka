@@ -74,10 +74,11 @@ type proxyReadyResponse struct {
 }
 
 type proxyModelCatalog struct {
-	FirstModelID  string
-	DataModelIDs  []string
-	ExtraModelIDs []string
-	AllModelIDs   []string
+	FirstModelID              string
+	DataModelIDs              []string
+	ExtraModelIDs             []string
+	AllModelIDs               []string
+	SupportedEndpointsByModel map[string][]string
 }
 
 type apiTaskResultResponse struct {
@@ -305,12 +306,13 @@ func firstModelFromPayload(payload map[string]any) string {
 }
 
 func allModelsFromPayload(payload map[string]any) proxyModelCatalog {
-	catalog := proxyModelCatalog{}
+	catalog := proxyModelCatalog{SupportedEndpointsByModel: map[string][]string{}}
 
 	if data, ok := payload["data"].([]any); ok {
 		for _, item := range data {
 			if model := firstModelFromItem(item); model != "" {
 				catalog.DataModelIDs = append(catalog.DataModelIDs, model)
+				catalog.recordSupportedEndpoints(model, supportedEndpointsFromItem(item))
 			}
 		}
 	}
@@ -319,6 +321,7 @@ func allModelsFromPayload(payload map[string]any) proxyModelCatalog {
 		for _, item := range models {
 			if model := firstModelFromItem(item); model != "" {
 				catalog.ExtraModelIDs = append(catalog.ExtraModelIDs, model)
+				catalog.recordSupportedEndpoints(model, supportedEndpointsFromItem(item))
 			}
 		}
 	}
@@ -329,6 +332,17 @@ func allModelsFromPayload(payload map[string]any) proxyModelCatalog {
 	}
 
 	return catalog
+}
+
+func (c *proxyModelCatalog) recordSupportedEndpoints(modelID string, endpoints []string) {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if modelID == "" || len(endpoints) == 0 {
+		return
+	}
+	if c.SupportedEndpointsByModel == nil {
+		c.SupportedEndpointsByModel = map[string][]string{}
+	}
+	c.SupportedEndpointsByModel[modelID] = uniqueStrings(append(c.SupportedEndpointsByModel[modelID], endpoints...))
 }
 
 func uniqueStrings(values []string) []string {
@@ -370,6 +384,29 @@ func firstModelFromItem(item any) string {
 	}
 
 	return ""
+}
+
+func supportedEndpointsFromItem(item any) []string {
+	v, ok := item.(map[string]any)
+	if !ok {
+		return nil
+	}
+	values, ok := v["supported_endpoints"].([]any)
+	if !ok {
+		return nil
+	}
+
+	endpoints := make([]string, 0, len(values))
+	for _, value := range values {
+		endpoint, ok := value.(string)
+		if !ok {
+			continue
+		}
+		if endpoint = strings.TrimSpace(endpoint); endpoint != "" {
+			endpoints = append(endpoints, endpoint)
+		}
+	}
+	return uniqueStrings(endpoints)
 }
 
 func startControllerAPIPortForward(localPort int) (string, context.CancelFunc, *exec.Cmd, error) {
@@ -539,6 +576,43 @@ func firstPreferredProxyModel(catalog proxyModelCatalog, preferredIDs []string, 
 	}
 
 	return firstProxyModelMatchingPrefixes(catalog, prefixes...)
+}
+
+func firstPreferredProxyModelSupportingEndpoint(catalog proxyModelCatalog, endpoint string, preferredIDs []string, prefixes ...string) string {
+	for _, preferredID := range preferredIDs {
+		preferredID = strings.ToLower(strings.TrimSpace(preferredID))
+		if preferredID == "" {
+			continue
+		}
+
+		for _, modelID := range catalog.AllModelIDs {
+			if strings.EqualFold(strings.TrimSpace(modelID), preferredID) && catalog.modelSupportsEndpoint(modelID, endpoint) {
+				return modelID
+			}
+		}
+	}
+
+	for _, modelID := range catalog.AllModelIDs {
+		if modelMatchesAnyPrefix(modelID, prefixes...) && catalog.modelSupportsEndpoint(modelID, endpoint) {
+			return modelID
+		}
+	}
+	return ""
+}
+
+func (c proxyModelCatalog) modelSupportsEndpoint(modelID, endpoint string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	endpoint = strings.TrimSpace(endpoint)
+	if modelID == "" || endpoint == "" {
+		return false
+	}
+
+	for _, supportedEndpoint := range c.SupportedEndpointsByModel[modelID] {
+		if strings.EqualFold(strings.TrimSpace(supportedEndpoint), endpoint) {
+			return true
+		}
+	}
+	return false
 }
 
 func modelMatchesAnyPrefix(modelID string, prefixes ...string) bool {

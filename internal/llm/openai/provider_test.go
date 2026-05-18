@@ -131,6 +131,9 @@ func TestIsUnsupportedAPIError(t *testing.T) {
 		want bool
 	}{
 		{"404 in message", fmt.Errorf("got 404 Not Found"), true},
+		{"403 unsupported responses message", fmt.Errorf("got 403 Forbidden: model does not support /responses"), true},
+		{"403 provider unsupported responses", &llm.ProviderError{Provider: testProviderOpenAI, StatusCode: http.StatusForbidden, Message: "model does not support /responses"}, true},
+		{"403 provider forbidden", &llm.ProviderError{Provider: testProviderOpenAI, StatusCode: http.StatusForbidden, Message: "forbidden"}, false},
 		{"Not Found in message", fmt.Errorf("Not Found"), true},
 		{"invalid_url in message", fmt.Errorf("invalid_url"), true},
 		{"unsupported_api_for_model in message", fmt.Errorf("unsupported_api_for_model"), true},
@@ -552,6 +555,53 @@ func TestComplete_AutoDetect_FallbackToChatCompletions(t *testing.T) {
 	}
 }
 
+func TestComplete_AutoDetect_FallbackToChatCompletions_OnUnsupported403(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == testResponsesPath {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"error":{"message":"model does not support /responses","type":"invalid_request_error"}}`) //nolint:errcheck
+			return
+		}
+
+		//nolint:errcheck // multiline test response
+		fmt.Fprint(w, `{
+			"id": "chatcmpl-403-fallback",
+			"object": "chat.completion",
+			"model": "gpt-4",
+			"choices": [{
+				"index": 0,
+				"message": {"role": "assistant", "content": "Fallback works!"},
+				"finish_reason": "stop"
+			}],
+			"usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}
+		}`) //nolint:errcheck
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(llm.ProviderConfig{
+		APIKey:  "test-key",
+		BaseURL: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+
+	resp, err := provider.Complete(context.Background(), &llm.CompletionRequest{
+		Model:    "gpt-4",
+		Messages: []llm.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if resp.Content != "Fallback works!" {
+		t.Errorf("expected content 'Fallback works!', got %q", resp.Content)
+	}
+	if apiMode(provider.mode.Load()) != apiModeChatCompletions {
+		t.Error("expected mode to be set to apiModeChatCompletions after unsupported Responses 403")
+	}
+}
+
 func TestStream_ChatCompletions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -873,6 +923,36 @@ func TestComplete_AutoDetect_NonRecoverableError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for rate limited request")
+	}
+}
+
+func TestComplete_AutoDetect_DoesNotFallbackOnForbidden(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"error":{"message":"forbidden","type":"permission_error"}}`) //nolint:errcheck
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(llm.ProviderConfig{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+
+	_, err = provider.Complete(context.Background(), &llm.CompletionRequest{
+		Model:    "gpt-4",
+		Messages: []llm.Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected error for forbidden request")
+	}
+	if requestCount != 1 {
+		t.Fatalf("expected only Responses request, got %d requests", requestCount)
+	}
+	if apiMode(provider.mode.Load()) != apiModeUnknown {
+		t.Error("expected mode to stay unknown after plain 403")
 	}
 }
 

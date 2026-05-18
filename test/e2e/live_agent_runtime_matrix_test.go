@@ -81,27 +81,30 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		Expect(ready.Error).To(BeEmpty())
 
 		By("discovering live runtime models by family")
-		gptModel = discoverPreferredProxyModelViaServiceProxy(
+		runtimeCatalog, err := fetchProxyModelCatalogViaServiceProxy(
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
 			liveCopilotProxyServicePort(),
-			[]string{"gpt-5.3-codex", "gpt-5.2-codex", "gpt-5-mini", "gpt-4.1", "gpt-4o", "gpt-5.4", "gpt-5.2"},
+		)
+		Expect(err).NotTo(HaveOccurred())
+		gptModel = firstPreferredProxyModelSupportingEndpoint(
+			runtimeCatalog,
+			"/responses",
+			[]string{"gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.1-codex", "gpt-5.2", "gpt-5-mini"},
 			"gpt-",
 		)
-		claudeModel = discoverPreferredProxyModelViaServiceProxy(
-			liveCopilotProxyServiceNamespace(),
-			liveCopilotProxyServiceName(),
-			liveCopilotProxyServicePort(),
+		claudeModel = firstPreferredProxyModel(
+			runtimeCatalog,
 			[]string{"claude-sonnet-4.5", "claude-haiku-4.5", "claude-opus-4.5", "claude-sonnet-4.6", "claude-sonnet-4"},
 			"claude-",
 		)
-		geminiModel = discoverPreferredProxyModelViaServiceProxy(
-			liveCopilotProxyServiceNamespace(),
-			liveCopilotProxyServiceName(),
-			liveCopilotProxyServicePort(),
+		Expect(claudeModel).NotTo(BeEmpty(), "proxy service should expose a Claude-family model")
+		geminiModel = firstPreferredProxyModel(
+			runtimeCatalog,
 			[]string{"gemini-2.5-pro", "gemini-3.1-pro-preview", "gemini-3-flash-preview"},
 			"gemini-",
 		)
+		Expect(geminiModel).NotTo(BeEmpty(), "proxy service should expose a Gemini-family model")
 
 		claudeSessionName = fmt.Sprintf("e2e-live-runtime-claude-%d", time.Now().UnixNano())
 	})
@@ -121,6 +124,10 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 	})
 
 	It("should let codex consume priorTaskRef state on a git workspace", func() {
+		if gptModel == "" {
+			Skip("Skipping Codex runtime live proxy check: no GPT model with /responses support exposed")
+		}
+
 		DeferCleanup(func() {
 			for _, resource := range []struct {
 				kind string

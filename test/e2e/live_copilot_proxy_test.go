@@ -83,10 +83,10 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		Expect(catalog.DataModelIDs).NotTo(BeEmpty(), "proxy should expose models via the OpenAI data field")
 		Expect(catalog.AllModelIDs).NotTo(BeEmpty(), "proxy should expose at least one model")
 		discoveredModel = firstPreferredProxyModel(catalog, []string{
-			"gpt-4.1",
-			"gpt-4o",
-			"gpt-4o-mini",
 			"gpt-5-mini",
+			"gpt-4o-mini",
+			"gpt-4o",
+			"gpt-4.1",
 			"gpt-5.4",
 			"gpt-5.2",
 			"gpt-5.4-mini",
@@ -103,7 +103,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 				liveCopilotProxyServiceNamespace(),
 				liveCopilotProxyServiceName(),
 				liveCopilotProxyServicePort(),
-				[]string{"gpt-4.1", "gpt-4o", "gpt-4o-mini", "gpt-5-mini", "gpt-5.4", "gpt-5.2", "gpt-5.4-mini"},
+				[]string{"gpt-5-mini", "gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-5.4", "gpt-5.2", "gpt-5.4-mini"},
 				"gpt-",
 			)
 		}
@@ -207,7 +207,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 				liveCopilotProxyServiceNamespace(),
 				liveCopilotProxyServiceName(),
 				liveCopilotProxyServicePort(),
-				[]string{"gpt-4.1", "gpt-4o", "gpt-4o-mini", "gpt-5-mini", "gpt-5.4", "gpt-5.2", "gpt-5.4-mini"},
+				[]string{"gpt-5-mini", "gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-5.4", "gpt-5.2", "gpt-5.4-mini"},
 				"gpt-",
 			)
 		}

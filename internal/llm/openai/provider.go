@@ -84,24 +84,50 @@ func (p *Provider) Name() string {
 }
 
 // isUnsupportedAPIError returns true when the error indicates the endpoint
-// does not support the Responses API (HTTP 404, 405, or known error codes).
+// does not support the Responses API. Some OpenAI-compatible gateways report
+// unsupported API surfaces as 403 instead of 404/405, but a plain 403 can also
+// mean auth or model entitlement failure.
 func isUnsupportedAPIError(err error) bool {
 	var apiErr *openai.Error
 	if errors.As(err, &apiErr) {
 		switch apiErr.StatusCode {
 		case 404, 405:
 			return true
+		case 403:
+			return isUnsupportedAPIMessage(apiErr.Code) || isUnsupportedAPIMessage(apiErr.Message)
 		}
-		if apiErr.Code == "unsupported_api" || apiErr.Code == "invalid_url" ||
-			apiErr.Code == "unsupported_api_for_model" {
+		if isUnsupportedAPIMessage(apiErr.Code) {
 			return true
+		}
+	}
+	var providerErr *llm.ProviderError
+	if errors.As(err, &providerErr) {
+		switch providerErr.StatusCode {
+		case 404, 405:
+			return true
+		case 403:
+			return isUnsupportedAPIMessage(providerErr.Message)
 		}
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "404") ||
 		strings.Contains(msg, "Not Found") ||
+		isUnsupportedAPIMessage(msg)
+}
+
+func isUnsupportedAPIMessage(msg string) bool {
+	msg = strings.ToLower(strings.TrimSpace(msg))
+	if msg == "" {
+		return false
+	}
+	return strings.Contains(msg, "unsupported_api") ||
 		strings.Contains(msg, "invalid_url") ||
-		strings.Contains(msg, "unsupported_api_for_model")
+		strings.Contains(msg, "unsupported_api_for_model") ||
+		strings.Contains(msg, "does not support /responses") ||
+		strings.Contains(msg, "does not support responses") ||
+		strings.Contains(msg, "responses api is not supported") ||
+		strings.Contains(msg, "unsupported responses") ||
+		strings.Contains(msg, "unsupported api surface")
 }
 
 // -------------------------------------------------------------------------
