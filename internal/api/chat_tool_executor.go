@@ -55,6 +55,7 @@ type ToolExecutor struct {
 	registry                  *tools.Registry
 	allowedToolNames          map[string]struct{}
 	authorizeTaskCreate       func(context.Context, *corev1alpha1.Task) error
+	authorizeAgentCreate      func(context.Context, *corev1alpha1.Agent) error
 }
 
 // NewToolExecutor creates a new ToolExecutor.
@@ -97,6 +98,11 @@ func (e *ToolExecutor) SetAllowedTools(allowedTools []llm.Tool) {
 // SetTaskCreateAuthorizer installs an authorization hook for tools that create Tasks.
 func (e *ToolExecutor) SetTaskCreateAuthorizer(authorize func(context.Context, *corev1alpha1.Task) error) {
 	e.authorizeTaskCreate = authorize
+}
+
+// SetAgentCreateAuthorizer installs an authorization hook for tools that create Agents.
+func (e *ToolExecutor) SetAgentCreateAuthorizer(authorize func(context.Context, *corev1alpha1.Agent) error) {
+	e.authorizeAgentCreate = authorize
 }
 
 // ToolResult represents the result of a tool execution.
@@ -163,6 +169,19 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 					Type:       "authorization_failed",
 					Message:    err.Error(),
 					Suggestion: "Use a task configuration authorized by the context token",
+				}
+			}
+			return nil
+		},
+		AuthorizeAgentCreate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
+			if e.authorizeAgentCreate == nil {
+				return nil
+			}
+			if err := e.authorizeAgentCreate(ctx, agent); err != nil {
+				return &tools.ChatToolError{
+					Type:       "authorization_failed",
+					Message:    err.Error(),
+					Suggestion: "Use an agent configuration authorized by the context token",
 				}
 			}
 			return nil

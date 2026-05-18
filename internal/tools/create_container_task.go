@@ -178,7 +178,7 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 			BlockOwnerDeletion: &blockOwnerDeletion,
 		}}
 	}
-	if err := validateChildTaskAgainstParentTransaction(parentTask, task, ""); err != nil {
+	if err := validateChildTaskAgainstParentTransaction(ctx, t.k8sClient, parentTask, task, ""); err != nil {
 		return "", err
 	}
 

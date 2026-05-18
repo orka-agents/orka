@@ -40,11 +40,12 @@ type ToolContext struct {
 		DeleteSession(ctx context.Context, namespace, sessionID string) error
 	}
 	// Task creation helpers provided by the chat executor
-	GenerateTaskName    func() string
-	TaskLabels          func() map[string]string
-	CheckTaskLimit      func() *ChatToolError
-	AuthorizeTaskCreate func(context.Context, *corev1alpha1.Task) *ChatToolError
-	IncrementTasks      func()
+	GenerateTaskName     func() string
+	TaskLabels           func() map[string]string
+	CheckTaskLimit       func() *ChatToolError
+	AuthorizeTaskCreate  func(context.Context, *corev1alpha1.Task) *ChatToolError
+	AuthorizeAgentCreate func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	IncrementTasks       func()
 }
 
 type toolContextKey struct{}

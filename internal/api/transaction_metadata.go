@@ -23,12 +23,15 @@ var safeTransactionContextKeys = []string{
 	"namespace",
 	"taskType",
 	"agent",
+	"allowedAgents",
 	"repo",
 	"branch",
 	"ref",
 	"maxDepth",
 	"allowedTools",
+	"provider",
 	"allowedProviders",
+	"model",
 	"allowedModels",
 	"e2e",
 	"trace_id",
@@ -149,7 +152,7 @@ func safeTransactionContext(value map[string]any) map[string]string {
 		if !ok {
 			continue
 		}
-		if rendered, ok := renderSafeTransactionContextValue(raw); ok && len(rendered) <= maxSafeTransactionContextValueLength {
+		if rendered, ok := renderSafeTransactionContextValue(key, raw); ok && len(rendered) <= maxSafeTransactionContextValueLength {
 			out[key] = rendered
 		}
 	}
@@ -159,7 +162,7 @@ func safeTransactionContext(value map[string]any) map[string]string {
 	return out
 }
 
-func renderSafeTransactionContextValue(value any) (string, bool) {
+func renderSafeTransactionContextValue(key string, value any) (string, bool) {
 	switch v := value.(type) {
 	case string:
 		if v == "" {
@@ -177,13 +180,19 @@ func renderSafeTransactionContextValue(value any) (string, bool) {
 	case int64:
 		return strconv.FormatInt(v, 10), true
 	case []string:
-		if len(v) == 0 {
+		if len(v) == 0 && !safeTransactionContextPreservesEmptyList(key) {
 			return "", false
 		}
 		encoded, err := json.Marshal(v)
 		return string(encoded), err == nil
 	case []any:
-		if len(v) == 0 || !safeScalarList(v) {
+		if len(v) == 0 {
+			if safeTransactionContextPreservesEmptyList(key) {
+				return "[]", true
+			}
+			return "", false
+		}
+		if !safeScalarList(v) {
 			return "", false
 		}
 		encoded, err := json.Marshal(v)
@@ -191,6 +200,11 @@ func renderSafeTransactionContextValue(value any) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func safeTransactionContextPreservesEmptyList(key string) bool {
+	_, ok := setValuedContextDigestKeys[key]
+	return ok
 }
 
 func safeScalarList(values []any) bool {

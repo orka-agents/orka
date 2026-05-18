@@ -275,6 +275,22 @@ func authorizeAndStampTaskContext(ctx context.Context, k8sClient client.Client, 
 	return nil
 }
 
+func authorizeContextTokenToolAgentCreate(_ context.Context, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, agent *corev1alpha1.Agent) error {
+	if !cfg.Enabled() || token == nil || agent == nil {
+		return nil
+	}
+	failures := []string{}
+	if !hasAnyScope(token.Scopes, cfg.AgentWriteScopes) {
+		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.AgentWriteScopes, ",")))
+	}
+	failures = append(failures, contextTokenAgentMutationFailures(token, agent.Namespace, agent.Name)...)
+	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
+}
+
 func authorizeContextTokenTaskContextObject(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, task *corev1alpha1.Task) error {
 	if !cfg.Enabled() || token == nil || task == nil {
 		return nil
@@ -639,6 +655,23 @@ func contextTokenAgentContextFailures(token *ContextToken, namespace, agentName 
 	}
 	if allowed, ok := contextStringList(token.TransactionContext, "allowedAgents"); ok && !agentAllowed(agentName, namespace, allowed) {
 		failures = append(failures, fmt.Sprintf("agent %q is not allowed by token context", namespacedNameString(namespace, agentName)))
+	}
+	return failures
+}
+
+func contextTokenAgentMutationFailures(token *ContextToken, namespace, agentName string) []string {
+	failures := []string{}
+	if want, ok := contextString(token.TransactionContext, "namespace"); ok && namespace != want {
+		failures = append(failures, fmt.Sprintf("namespace %q does not match token context %q", namespace, want))
+	}
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedAgents"); ok {
+		if !agentAllowed(agentName, namespace, allowed) {
+			failures = append(failures, fmt.Sprintf("agent %q is not allowed by token context", namespacedNameString(namespace, agentName)))
+		}
+		return failures
+	}
+	if want, ok := contextString(token.TransactionContext, "agent"); ok && !agentMatches(agentName, namespace, want) {
+		failures = append(failures, fmt.Sprintf("agent %q does not match token context %q", namespacedNameString(namespace, agentName), want))
 	}
 	return failures
 }

@@ -144,6 +144,9 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 	parseCoordinationConfig(a, agent)
 
+	if result, ok := authorizeAgentCreate(ctx, tc, agent); !ok {
+		return result, nil
+	}
 	if err := tc.Client.Create(ctx, agent); err != nil {
 		return classifyChatK8sErr(err)
 	}

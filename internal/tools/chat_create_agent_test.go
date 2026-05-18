@@ -101,6 +101,37 @@ func TestChatCreateAgentTool_Execute_RollsBackAgentWhenInitialTaskAuthorizationF
 	}
 }
 
+func TestChatCreateAgentTool_Execute_AuthorizesAgentBeforeCreate(t *testing.T) {
+	fc := newFakeClient()
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Client:    fc,
+		Namespace: defaultNamespace,
+		AuthorizeAgentCreate: func(context.Context, *corev1alpha1.Agent) *ChatToolError {
+			return &ChatToolError{Type: "authorization_failed", Message: "agent blocked by context token"}
+		},
+	})
+
+	tool := &ChatCreateAgentTool{}
+	result, err := tool.Execute(ctx, json.RawMessage(`{"name":"agent-blocked"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var r ChatToolResult
+	if err := json.Unmarshal([]byte(result), &r); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if r.Success {
+		t.Fatalf("expected authorization failure, got success: %#v", r)
+	}
+
+	var created corev1alpha1.Agent
+	err = fc.Get(context.Background(), client.ObjectKey{Name: "agent-blocked", Namespace: defaultNamespace}, &created)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("agent should not have been created, get err=%v", err)
+	}
+}
+
 func TestParseRuntimeConfig_ResolvesExplicitSecretRef(t *testing.T) {
 	fc := newFakeClient(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{

@@ -315,6 +315,16 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 				}
 				return nil
 			},
+			AuthorizeAgentCreate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
+				if err := authorizeContextTokenToolAgentCreate(ctx, contextToken, h.contextTokenAuthorization, "openAIToolCreateAgent", agent); err != nil {
+					return &tools.ChatToolError{
+						Type:       "authorization_failed",
+						Message:    err.Error(),
+						Suggestion: "Use an agent configuration authorized by the context token",
+					}
+				}
+				return nil
+			},
 			CheckTaskLimit: func() *tools.ChatToolError {
 				if tasksCreated >= 20 {
 					return &tools.ChatToolError{Type: "limit_reached", Message: "task creation limit reached (max 20)", Suggestion: "Wait for existing tasks to complete"}

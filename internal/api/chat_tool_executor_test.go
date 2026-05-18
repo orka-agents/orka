@@ -664,6 +664,31 @@ func TestExecute_AllowedToolsRejectsDisallowedToolBeforeDispatch(t *testing.T) {
 	}
 }
 
+func TestExecute_CreateAgentUsesAgentCreateAuthorizer(t *testing.T) {
+	e := newTestExecutor()
+	e.SetAgentCreateAuthorizer(func(context.Context, *corev1alpha1.Agent) error {
+		return errors.New("agent denied")
+	})
+
+	result, err := e.Execute(context.Background(), llm.ToolCall{
+		ID:        "1",
+		Name:      "create_agent",
+		Arguments: mustJSON(map[string]any{"name": "blocked-agent"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "authorization_failed") {
+		t.Fatalf("expected authorization_failed, got: %s", result)
+	}
+
+	var agent corev1alpha1.Agent
+	err = e.client.Get(context.Background(), apitypes.NamespacedName{Name: "blocked-agent", Namespace: "default"}, &agent)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("agent should not have been created, get err=%v", err)
+	}
+}
+
 func TestExecute_Dispatch(t *testing.T) {
 	tests := []struct {
 		name     string

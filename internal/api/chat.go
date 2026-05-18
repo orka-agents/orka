@@ -296,6 +296,9 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor.SetTaskCreateAuthorizer(func(ctx context.Context, task *corev1alpha1.Task) error {
 		return authorizeAndStampToolTaskCreate(ctx, ch.client, contextToken, ch.contextTokenAuthorization, "chatToolCreateTask", userInfo, task)
 	})
+	executor.SetAgentCreateAuthorizer(func(ctx context.Context, agent *corev1alpha1.Agent) error {
+		return authorizeContextTokenToolAgentCreate(ctx, contextToken, ch.contextTokenAuthorization, "chatToolCreateAgent", agent)
+	})
 
 	// Build tools from the chat registry and restrict execution to the exposed set.
 	tools := executor.registry.ToLLMTools(chattools.ChatToolNames())

@@ -69,3 +69,30 @@ func TestSafeTransactionContextOmitsLongRenderedLists(t *testing.T) {
 		t.Fatalf("safeTransactionContext() = %#v, want nil for overlong rendered list", safe)
 	}
 }
+
+func TestSafeTransactionContextPreservesAllowedAgentsAndEmptyAllowLists(t *testing.T) {
+	ctx := map[string]any{
+		"allowedAgents":    []any{"coordinator", "worker"},
+		"allowedTools":     []string{},
+		"provider":         "openai",
+		"allowedProviders": []any{},
+		"model":            "gpt-5.4",
+		"allowedModels":    []string{},
+	}
+
+	safe := safeTransactionContext(ctx)
+	if got := safe["allowedAgents"]; got != `["coordinator","worker"]` {
+		t.Fatalf("safeTransactionContext[allowedAgents] = %q", got)
+	}
+	if got := safe["provider"]; got != "openai" {
+		t.Fatalf("safeTransactionContext[provider] = %q", got)
+	}
+	if got := safe["model"]; got != "gpt-5.4" {
+		t.Fatalf("safeTransactionContext[model] = %q", got)
+	}
+	for _, key := range []string{"allowedTools", "allowedProviders", "allowedModels"} {
+		if got := safe[key]; got != "[]" {
+			t.Fatalf("safeTransactionContext[%s] = %q, want []", key, got)
+		}
+	}
+}

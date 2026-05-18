@@ -450,7 +450,7 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	if err != nil {
 		return "", err
 	}
-	if err := validateChildTaskAgainstParentTransaction(dc.parentTask, childTask, dc.args.Agent); err != nil {
+	if err := validateChildTaskAgainstParentTransaction(ctx, t.k8sClient, dc.parentTask, childTask, dc.args.Agent); err != nil {
 		return "", err
 	}
 
