@@ -82,20 +82,20 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(catalog.DataModelIDs).NotTo(BeEmpty(), "proxy should expose models via the OpenAI data field")
 		Expect(catalog.AllModelIDs).NotTo(BeEmpty(), "proxy should expose at least one model")
-		discoveredModel = firstPreferredProxyModel(catalog, liveCopilotProxyGPTModelPreferences())
+		discoveredModel = firstPreferredProxyModel(catalog, liveCopilotProxyChatCompletionModelPreferences())
 		Expect(discoveredModel).To(BeElementOf(catalog.DataModelIDs))
-		Expect(discoveredModel).NotTo(BeEmpty(), "proxy should expose an allowed GPT-family model")
+		Expect(discoveredModel).NotTo(BeEmpty(), "proxy should expose an allowed chat-completions model")
 	})
 
 	It("should run a tiny AI task through the live copilot proxy and return the exact output", func() {
-		By("discovering a live GPT-family model from the proxy service")
+		By("discovering a live chat-completions model from the proxy service")
 		model := discoveredModel
 		if model == "" {
 			model = discoverPreferredProxyModelViaServiceProxy(
 				liveCopilotProxyServiceNamespace(),
 				liveCopilotProxyServiceName(),
 				liveCopilotProxyServicePort(),
-				liveCopilotProxyGPTModelPreferences(),
+				liveCopilotProxyChatCompletionModelPreferences(),
 			)
 		}
 		Expect(model).NotTo(BeEmpty())
@@ -191,14 +191,14 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 	})
 
 	It("should auto-inject and execute coordination memory tools for a live copilot proxy Agent", func() {
-		By("discovering a live GPT-family model from the proxy service")
+		By("discovering a live chat-completions model from the proxy service")
 		model := discoveredModel
 		if model == "" {
 			model = discoverPreferredProxyModelViaServiceProxy(
 				liveCopilotProxyServiceNamespace(),
 				liveCopilotProxyServiceName(),
 				liveCopilotProxyServicePort(),
-				liveCopilotProxyGPTModelPreferences(),
+				liveCopilotProxyChatCompletionModelPreferences(),
 			)
 		}
 		Expect(model).NotTo(BeEmpty())

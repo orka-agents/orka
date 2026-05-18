@@ -33,7 +33,7 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		cancelPF        context.CancelFunc
 		portForwardCmd  *exec.Cmd
 		token           string
-		liveGPTModel    string
+		liveChatModel   string
 		liveProxyModels proxyModelCatalog
 	)
 
@@ -66,7 +66,7 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		Expect(ready.Status).To(Equal("ready"))
 		Expect(ready.Error).To(BeEmpty())
 
-		By("discovering a live GPT-family model from the proxy catalog")
+		By("discovering a live chat-completions model from the proxy catalog")
 		liveProxyModels, err = fetchProxyModelCatalogViaServiceProxy(
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
@@ -74,8 +74,8 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(liveProxyModels.AllModelIDs).NotTo(BeEmpty(), "proxy should expose at least one model")
-		liveGPTModel = firstPreferredProxyModel(liveProxyModels, liveCopilotProxyGPTModelPreferences())
-		Expect(liveGPTModel).NotTo(BeEmpty(), "proxy should expose an allowed GPT-family model")
+		liveChatModel = firstPreferredProxyModel(liveProxyModels, liveCopilotProxyChatCompletionModelPreferences())
+		Expect(liveChatModel).NotTo(BeEmpty(), "proxy should expose an allowed chat-completions model")
 
 		By("creating a dummy secret for the live provider")
 		err = createK8sSecret(liveChatSecretName, namespace, map[string]string{
@@ -88,7 +88,7 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		})
 
 		By("creating a Provider CRD backed by the live copilot proxy")
-		createProviderCRD(liveChatProviderName, "openai", liveChatSecretName, "api-key", e2eLiveCopilotProxyBaseURL, liveGPTModel)
+		createProviderCRD(liveChatProviderName, "openai", liveChatSecretName, "api-key", e2eLiveCopilotProxyBaseURL, liveChatModel)
 		DeferCleanup(func() {
 			cmd := exec.Command("kubectl", "delete", "provider", liveChatProviderName, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
@@ -101,7 +101,7 @@ var _ = Describe("Live Chat API", Ordered, func() {
 	})
 
 	It("should stream chat SSE and create a live session", func() {
-		sessionID, content, usage, events := postLiveChatSSE(apiBaseURL, token, liveChatProviderName, liveGPTModel, liveChatExpectedText)
+		sessionID, content, usage, events := postLiveChatSSE(apiBaseURL, token, liveChatProviderName, liveChatModel, liveChatExpectedText)
 
 		Expect(sessionID).NotTo(BeEmpty(), "SSE stream should include a sessionId")
 		Expect(events).To(ContainElement("status"))
@@ -119,7 +119,7 @@ var _ = Describe("Live Chat API", Ordered, func() {
 	})
 
 	It("should return JSON chat metadata and expose the created session", func() {
-		resp := postLiveChatJSON(apiBaseURL, token, liveChatProviderName, liveGPTModel, liveChatExpectedText)
+		resp := postLiveChatJSON(apiBaseURL, token, liveChatProviderName, liveChatModel, liveChatExpectedText)
 
 		Expect(resp.SessionID).NotTo(BeEmpty(), "JSON mode should return a sessionId")
 		Expect(resp.Usage.LLMCalls).To(BeNumerically(">=", 1), "JSON mode should record at least one LLM call")

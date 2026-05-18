@@ -541,13 +541,9 @@ func firstPreferredProxyModel(catalog proxyModelCatalog, preferredIDs []string, 
 	return firstProxyModelMatchingPrefixes(catalog, prefixes...)
 }
 
-func liveCopilotProxyGPTModelPreferences() []string {
-	// Prefer the Copilot default/fallback chat models for chat-completions coverage.
-	return []string{
-		"gpt-4.1",
-		"gpt-4o",
-		"gpt-4o-mini",
-	}
+func liveCopilotProxyChatCompletionModelPreferences() []string {
+	// Prefer models that are allowed through Copilot's OpenAI-compatible chat-completions endpoint in CI.
+	return liveCopilotProxyClaudeModelPreferences()
 }
 
 func liveCopilotProxyCodexModelPreferences() []string {
