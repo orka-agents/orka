@@ -828,6 +828,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if job.Status.Failed > 0 {
+		if task.Spec.Timeout != nil && jobFailedDueToActiveDeadline(job) {
+			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+		}
 		// Job failed, check retry policy
 		if r.shouldRetry(task) {
 			log.Info("retrying task", "attempt", task.Status.Attempts)
@@ -880,6 +883,26 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 
 	// Job still running, requeue
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+func jobFailedDueToActiveDeadline(job *batchv1.Job) bool {
+	if job == nil {
+		return false
+	}
+
+	for _, condition := range job.Status.Conditions {
+		if condition.Status != corev1.ConditionTrue {
+			continue
+		}
+		if condition.Reason != batchv1.JobReasonDeadlineExceeded {
+			continue
+		}
+		if condition.Type == batchv1.JobFailed || condition.Type == batchv1.JobFailureTarget {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1alpha1.Task) bool {
