@@ -37,14 +37,24 @@ const (
 	liveProxyProbeAPIKey = "live-proxy-e2e-probe"
 )
 
+// Keep this to models that work through the OpenAI provider path; the live
+// catalog can include runtime-only GPT models rejected by the worker route.
 var liveProxyOpenAIModelPreferences = []string{
-	"gpt-5-mini",
-	"gpt-4o-mini",
-	"gpt-4o",
-	"gpt-4.1",
-	"gpt-5.4",
+	"gpt-5.5",
 	"gpt-5.2",
-	"gpt-5.4-mini",
+	"gpt-5-mini",
+	"gpt-4.1",
+	"gpt-4.1-2025-04-14",
+	"gpt-4o",
+	"gpt-4o-2024-11-20",
+	"gpt-4o-2024-08-06",
+	"gpt-4o-2024-05-13",
+	"gpt-4o-mini",
+	"gpt-4o-mini-2024-07-18",
+	"gpt-4",
+	"gpt-4-0613",
+	"gpt-3.5-turbo",
+	"gpt-3.5-turbo-0613",
 }
 
 type statusConditionSnapshot struct {
@@ -657,6 +667,9 @@ func firstUsableProxyOpenAIModel(baseURL string, catalog proxyModelCatalog, pref
 	var probeFailures []string
 
 	for _, modelID := range preferredProxyModelCandidates(catalog, preferredIDs, prefixes...) {
+		if !isProxyOpenAIProviderCandidate(modelID) {
+			continue
+		}
 		hasEndpointMetadata := catalog.modelHasEndpointMetadata(modelID)
 		supportsOpenAIProvider := catalog.modelSupportsEndpoint(modelID, "/responses") ||
 			catalog.modelSupportsEndpoint(modelID, "/chat/completions")
@@ -676,6 +689,18 @@ func firstUsableProxyOpenAIModel(baseURL string, catalog proxyModelCatalog, pref
 	}
 
 	return "", nil
+}
+
+func isProxyOpenAIProviderCandidate(modelID string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if modelID == "" {
+		return false
+	}
+	// These aliases can be visible in the live catalog while still being
+	// rejected by the worker's copilot-language-server OpenAI provider route.
+	return !strings.Contains(modelID, "codex") &&
+		!strings.Contains(modelID, "copilot") &&
+		!strings.HasPrefix(modelID, "gpt-5.4")
 }
 
 func probeProxyOpenAIProviderModel(baseURL, modelID string) error {
