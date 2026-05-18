@@ -214,8 +214,10 @@ func (e *KubernetesJobCodeExecutor) Execute(ctx context.Context, req CodeExecuti
 	defer e.cleanupResources(clients.client, createdResources)
 
 	result = e.waitForJob(ctx, clients, resources.job.Name, req)
-	if err := e.storeResult(ctx, clients.client, clients.namespace, resources.job.Name, req, result); err != nil {
-		result.Error = appendCodeExecError(result.Error, fmt.Sprintf("failed to persist kubernetes code_exec result: %v", err))
+	if codeExecKubernetesShouldPersistObservedResult(result) {
+		if err := e.storeResult(ctx, clients.client, clients.namespace, resources.job.Name, req, result); err != nil {
+			result.Error = appendCodeExecError(result.Error, fmt.Sprintf("failed to persist kubernetes code_exec result: %v", err))
+		}
 	}
 	return result
 }
