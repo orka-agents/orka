@@ -188,7 +188,7 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 	}
 	if childTokenExchangeEnabled {
 		if task.Spec.Schedule != "" {
-			return ChatToolErrorResult("unsupported_schedule", "scheduled coordinator container tasks cannot receive delegated transaction tokens", "Create an immediate container task, or start a non-scheduled child that creates scheduled work itself.")
+			return ChatToolErrorResult("unsupported_schedule", "scheduled child container tasks cannot inherit delegated transaction tokens", "Create an immediate child container task, or create scheduled work from a task that does not need delegated child tokens.")
 		}
 		markChildTransactionTokenPending(task)
 		if err := prepareChildTransactionToken(ctx, t.k8sClient, parentTask, task, "createContainerTask", ""); err != nil {

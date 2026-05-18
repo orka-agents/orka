@@ -248,14 +248,9 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
 	defer cancel()
 
-	namespace := GetEffectiveNamespace(c, "")
-	if h.watchNamespace != "" {
-		namespace = h.watchNamespace
-	}
-	if h.enforceNamespaceIsolation {
-		if userInfo != nil && userInfo.Namespace != "" && namespace != userInfo.Namespace {
-			return anthropicError(c, 403, "permission_error", fmt.Sprintf("namespace %q not allowed", namespace))
-		}
+	namespace, err := ResolveNamespace(c, c.Query("namespace", ""), h.watchNamespace, h.enforceNamespaceIsolation)
+	if err != nil {
+		return anthropicContextTokenAuthorizationError(c, err)
 	}
 
 	provider, model, providerInfo, err := h.resolver.ResolveWithInfo(ctx, ResolveOpts{

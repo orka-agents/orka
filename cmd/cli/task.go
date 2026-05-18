@@ -170,8 +170,8 @@ func newTaskListCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&status, "status", "", "Filter by status (Pending, Running, Succeeded, Failed)")
-	cmd.Flags().StringVar(&transactionID, "transaction", "", "Filter by kontxt transaction ID")
+	cmd.Flags().StringVar(&status, "status", "", "Filter by status (client-side scan; may page through many tasks)")
+	cmd.Flags().StringVar(&transactionID, "transaction", "", "Filter by kontxt transaction ID (client-side scan)")
 	cmd.Flags().IntVar(&limit, "limit", 20, "Maximum number of results")
 
 	return cmd

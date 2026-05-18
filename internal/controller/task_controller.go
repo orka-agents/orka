@@ -413,11 +413,12 @@ func (r *TaskReconciler) handleTransactionTokenPending(ctx context.Context, task
 	now := time.Now()
 	since, err := transactionTokenPendingSince(task)
 	if err != nil {
+		patch := client.MergeFrom(task.DeepCopy())
 		if task.Annotations == nil {
 			task.Annotations = map[string]string{}
 		}
 		task.Annotations[labels.AnnotationTransactionTokenPendingSince] = now.Format(time.RFC3339Nano)
-		if updateErr := r.Update(ctx, task); updateErr != nil {
+		if updateErr := r.Patch(ctx, task, patch); updateErr != nil {
 			return ctrl.Result{}, updateErr
 		}
 		log.Info("task is waiting for delegated transaction token setup", "pendingSinceInitialized", true)
