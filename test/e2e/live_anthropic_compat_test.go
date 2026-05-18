@@ -70,8 +70,8 @@ var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
 			liveCopilotProxyServicePort(),
-			[]string{"claude-sonnet-4.6", "claude-sonnet-4.5", "claude-sonnet-4"},
-			"claude-",
+			liveCopilotProxyClaudeModelPreferences,
+			liveCopilotProxyClaudeModelPrefixes...,
 		)
 		Expect(liveClaudeModel).NotTo(BeEmpty(), "proxy should expose a Claude-family model")
 

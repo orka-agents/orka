@@ -21,11 +21,15 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
@@ -1895,6 +1899,129 @@ func TestHandlers_UpdateAgent_Success(t *testing.T) {
 	spec := result["spec"].(map[string]any)
 	model := spec["model"].(map[string]any)
 	require.Equal(t, "gpt-4", model["name"])
+}
+
+func TestHandlers_UpdateAgent_PatchesSpecWithoutFullObjectUpdate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-agent",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Name: "gpt-4o-mini",
+			},
+		},
+	}
+
+	updateCalled := false
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(agent).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				updateCalled = true
+				return fmt.Errorf("unexpected full object update")
+			},
+		}).
+		Build()
+
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
+	app := fiber.New()
+	app.Put("/agents/:name", handlers.UpdateAgent)
+
+	body := UpdateAgentRequest{
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Name: "gpt-4.1",
+			},
+		},
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/agents/test-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.False(t, updateCalled)
+
+	updated := &corev1alpha1.Agent{}
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-agent", Namespace: "default"}, updated)
+	require.NoError(t, err)
+	require.Equal(t, "gpt-4.1", updated.Spec.Model.Name)
+}
+
+func TestHandlers_UpdateAgent_RetriesConflict(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-agent",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Name: "gpt-4o-mini",
+			},
+		},
+	}
+
+	patchCalls := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(agent).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patchCalls++
+				if patchCalls == 1 {
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "agents"},
+						obj.GetName(),
+						fmt.Errorf("changed"),
+					)
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
+	app := fiber.New()
+	app.Put("/agents/:name", handlers.UpdateAgent)
+
+	body := UpdateAgentRequest{
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Name: "gpt-4.1",
+			},
+		},
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/agents/test-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, 2, patchCalls)
+
+	updated := &corev1alpha1.Agent{}
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-agent", Namespace: "default"}, updated)
+	require.NoError(t, err)
+	require.Equal(t, "gpt-4.1", updated.Spec.Model.Name)
 }
 
 func TestHandlers_UpdateAgent_NotFound(t *testing.T) {
