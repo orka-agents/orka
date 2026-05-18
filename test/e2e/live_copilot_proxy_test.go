@@ -221,6 +221,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		model, skipReason, err := firstLiveCopilotProxyChatCompletionModel(
 			proxyBaseURL,
+			e2eGitHubToken,
 			catalog,
 			liveCopilotProxyChatModelPreferences(),
 			"gpt-",

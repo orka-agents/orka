@@ -2145,6 +2145,58 @@ func TestKubernetesJobCodeExecutor_CleanupExpiredStoredResultsContinuesAfterDele
 	}
 }
 
+func TestKubernetesJobCodeExecutor_CleanupExpiredStoredResultsReturnsPriorDeleteErrorsBeforeForbidden(t *testing.T) {
+	setKubernetesCodeExecTestEnv(t)
+
+	now := time.Now()
+	oldA := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "a-old-result",
+			Namespace:         testNamespace,
+			CreationTimestamp: metav1.NewTime(now.Add(-codeExecKubernetesStoredResultRetention - time.Hour)),
+			Labels: map[string]string{
+				codeExecKubernetesLabelTool: codeExecToolName,
+				codeExecKubernetesLabelJob:  "a-old-result",
+			},
+		},
+	}
+	oldB := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "b-old-result",
+			Namespace:         testNamespace,
+			CreationTimestamp: metav1.NewTime(now.Add(-codeExecKubernetesStoredResultRetention - time.Hour)),
+			Labels: map[string]string{
+				codeExecKubernetesLabelTool: codeExecToolName,
+				codeExecKubernetesLabelJob:  "b-old-result",
+			},
+		},
+	}
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(oldA, oldB).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				switch obj.GetName() {
+				case oldA.Name:
+					return fmt.Errorf("temporary delete failure")
+				case oldB.Name:
+					return apierrors.NewForbidden(apischema.GroupResource{Resource: "configmaps"}, obj.GetName(), fmt.Errorf("cleanup disabled"))
+				default:
+					return c.Delete(ctx, obj, opts...)
+				}
+			},
+		}).
+		Build()
+	executor := &KubernetesJobCodeExecutor{}
+
+	err := executor.cleanupExpiredStoredResults(context.Background(), fakeClient, testNamespace, now)
+	if err == nil || !strings.Contains(err.Error(), oldA.Name) {
+		t.Fatalf("cleanupExpiredStoredResults() error = %v, want prior %s delete error", err, oldA.Name)
+	}
+}
+
 func TestKubernetesJobCodeExecutor_CleanupExpiredStoredResultsIfDueRecordsAfterDeleteError(t *testing.T) {
 	setKubernetesCodeExecTestEnv(t)
 

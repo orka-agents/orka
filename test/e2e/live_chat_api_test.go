@@ -92,6 +92,7 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		var skipReason string
 		liveChatModel, skipReason, err = firstLiveCopilotProxyChatCompletionModel(
 			proxyBaseURL,
+			e2eGitHubToken,
 			liveProxyModels,
 			liveCopilotProxyChatModelPreferences(),
 			"gpt-",

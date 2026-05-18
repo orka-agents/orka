@@ -839,7 +839,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	// Add fallback provider secrets
-	if allowDirectProviderSecrets && task != nil && agentHasFallbackProviders(agent) {
+	if allowDirectProviderSecrets && agentHasFallbackProviders(agent) {
 		for i, fb := range agent.Spec.Model.Fallbacks {
 			fbProvider := &corev1alpha1.Provider{}
 			if err := b.Get(ctx, client.ObjectKey{
@@ -872,7 +872,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	// Add task secret
-	if allowDirectSecretMounts && task != nil && task.Spec.SecretRef != nil {
+	if allowDirectSecretMounts && task.Spec.SecretRef != nil {
 		secretName := task.Spec.SecretRef.Name
 		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 			Name: "task-secrets",

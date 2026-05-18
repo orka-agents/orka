@@ -551,7 +551,7 @@ func discoverPreferredProxyModelViaServiceProxy(serviceNamespace, serviceName st
 	return modelID
 }
 
-func firstLiveCopilotProxyChatCompletionModel(proxyBaseURL string, catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) (string, string, error) {
+func firstLiveCopilotProxyChatCompletionModel(proxyBaseURL, proxyAuthToken string, catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) (string, string, error) {
 	candidates := orderedProxyModelCandidates(catalog, preferredIDs, prefixes...)
 	if len(candidates) == 0 {
 		return "", fmt.Sprintf("proxy catalog has no model from %v or matching %v", preferredIDs, prefixes), nil
@@ -559,7 +559,7 @@ func firstLiveCopilotProxyChatCompletionModel(proxyBaseURL string, catalog proxy
 
 	var skipped []string
 	for _, modelID := range candidates {
-		statusCode, body, err := probeLiveCopilotProxyChatCompletion(proxyBaseURL, modelID)
+		statusCode, body, err := probeLiveCopilotProxyChatCompletion(proxyBaseURL, proxyAuthToken, modelID)
 		if err != nil {
 			return "", "", err
 		}
@@ -612,7 +612,7 @@ func orderedProxyModelCandidates(catalog proxyModelCatalog, preferredIDs []strin
 	return candidates
 }
 
-func probeLiveCopilotProxyChatCompletion(proxyBaseURL, modelID string) (int, string, error) {
+func probeLiveCopilotProxyChatCompletion(proxyBaseURL, proxyAuthToken, modelID string) (int, string, error) {
 	payload, err := json.Marshal(map[string]any{
 		"model": modelID,
 		"messages": []map[string]string{
@@ -629,7 +629,9 @@ func probeLiveCopilotProxyChatCompletion(proxyBaseURL, modelID string) (int, str
 	if err != nil {
 		return 0, "", err
 	}
-	req.Header.Set("Authorization", "Bearer dummy-live-chat-probe-key")
+	if proxyAuthToken = strings.TrimSpace(proxyAuthToken); proxyAuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+proxyAuthToken)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: time.Minute}

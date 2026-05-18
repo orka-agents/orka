@@ -640,6 +640,7 @@ func codeExecKubernetesShouldPersistResult(req CodeExecutionRequest) bool {
 	return strings.TrimSpace(req.RunID) != "" && strings.TrimSpace(req.InputHash) != ""
 }
 
+// Container exit codes are non-negative; this executor reserves -1 for infrastructure failures.
 func codeExecKubernetesShouldPersistObservedResult(result CodeExecResult) bool {
 	return !result.TimedOut && result.ExitCode != -1
 }
@@ -830,7 +831,7 @@ func (e *KubernetesJobCodeExecutor) cleanupExpiredStoredResults(ctx context.Cont
 		}
 		if err := c.Delete(ctx, configMap); err != nil && !apierrors.IsNotFound(err) {
 			if apierrors.IsForbidden(err) {
-				return nil
+				return errors.Join(deleteErrs...)
 			}
 			deleteErrs = append(deleteErrs, fmt.Errorf("deleting expired stored code_exec result %s/%s: %w", namespace, configMap.Name, err))
 		}
