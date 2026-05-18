@@ -43,6 +43,7 @@ const (
 	testNodeValueGVisor    = "gvisor"
 	testRuntimeClassKata   = "kata-qemu"
 	testRuntimeClassGVisor = "gvisor"
+	testTTSAudience        = "tts-audience"
 )
 
 func setupJobBuilder() *JobBuilder {
@@ -186,7 +187,7 @@ func TestJobBuilder_Build_MountsTransactionTokenSecret(t *testing.T) {
 	builder := setupJobBuilder()
 	builder.ContextTokenTTSURL = "https://tts.example.test"
 	builder.ContextTokenTTSTokenSource = contexttoken.TTSTokenSourceIncoming
-	builder.ContextTokenTTSAudience = "orka"
+	builder.ContextTokenTTSAudience = testTTSAudience
 	builder.ContextTokenTTSTimeout = "7s"
 	builder.ContextTokenSubjectTokenType = "urn:ietf:params:oauth:token-type:txn_token"
 	builder.ContextTokenChildScope = "orka:agents:run"
@@ -237,7 +238,7 @@ func TestJobBuilder_Build_MountsTransactionTokenSecret(t *testing.T) {
 	for name, want := range map[string]string{
 		workerenv.ContextTokenTTSURL:           "https://tts.example.test",
 		workerenv.ContextTokenTTSTokenSource:   contexttoken.TTSTokenSourceIncoming,
-		workerenv.ContextTokenTTSAudience:      "orka",
+		workerenv.ContextTokenTTSAudience:      testTTSAudience,
 		workerenv.ContextTokenTTSTimeout:       "7s",
 		workerenv.ContextTokenSubjectTokenType: "urn:ietf:params:oauth:token-type:txn_token",
 		workerenv.ContextTokenChildScope:       "orka:agents:run",
@@ -297,7 +298,7 @@ func TestJobBuilder_Build_InjectsContextTokenTTSConfigWithoutTransactionTokenSec
 	builder := setupJobBuilder()
 	builder.ContextTokenTTSURL = "https://tts.example.test"
 	builder.ContextTokenTTSTokenSource = contexttoken.TTSTokenSourceIncoming
-	builder.ContextTokenTTSAudience = "orka"
+	builder.ContextTokenTTSAudience = testTTSAudience
 	builder.ContextTokenTTSTimeout = "7s"
 	builder.ContextTokenSubjectTokenType = "urn:ietf:params:oauth:token-type:txn_token"
 	builder.ContextTokenChildScope = "orka:agents:run"
@@ -324,7 +325,7 @@ func TestJobBuilder_Build_InjectsContextTokenTTSConfigWithoutTransactionTokenSec
 	for name, want := range map[string]string{
 		workerenv.ContextTokenTTSURL:           "https://tts.example.test",
 		workerenv.ContextTokenTTSTokenSource:   contexttoken.TTSTokenSourceIncoming,
-		workerenv.ContextTokenTTSAudience:      "orka",
+		workerenv.ContextTokenTTSAudience:      testTTSAudience,
 		workerenv.ContextTokenTTSTimeout:       "7s",
 		workerenv.ContextTokenSubjectTokenType: "urn:ietf:params:oauth:token-type:txn_token",
 		workerenv.ContextTokenChildScope:       "orka:agents:run",
@@ -373,6 +374,83 @@ func TestJobBuilder_Build_AITask(t *testing.T) {
 	container := job.Spec.Template.Spec.Containers[0]
 	if container.Image != DefaultAIWorkerImage {
 		t.Errorf("Image = %s, want %s", container.Image, DefaultAIWorkerImage)
+	}
+}
+
+func TestJobBuilder_Build_WorkerServiceAccountForTrustLevel(t *testing.T) {
+	falseValue := false
+	tests := []struct {
+		name          string
+		taskType      corev1alpha1.TaskType
+		image         string
+		wantSA        string
+		wantAutomount *bool
+	}{
+		{
+			name:     "ai task keeps default service account token",
+			taskType: corev1alpha1.TaskTypeAI,
+			wantSA:   AIWorkerServiceAccount,
+		},
+		{
+			name:     "agent task keeps default service account token",
+			taskType: corev1alpha1.TaskTypeAgent,
+			wantSA:   VendorWorkerServiceAccount,
+		},
+		{
+			name:     "container task with general worker keeps default service account token",
+			taskType: corev1alpha1.TaskTypeContainer,
+			wantSA:   ContainerWorkerServiceAccount,
+		},
+		{
+			name:          "container task with custom image uses container service account without token",
+			taskType:      corev1alpha1.TaskTypeContainer,
+			image:         "busybox:latest",
+			wantSA:        ContainerWorkerServiceAccount,
+			wantAutomount: &falseValue,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := setupJobBuilder()
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      strings.ReplaceAll(tt.name, " ", "-"),
+					Namespace: defaultNS,
+					UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:   tt.taskType,
+					Image:  tt.image,
+					Prompt: "test prompt",
+					AI: &corev1alpha1.AISpec{
+						Prompt: "test prompt",
+					},
+				},
+			}
+
+			job, err := builder.Build(context.Background(), task, nil, nil)
+			if err != nil {
+				t.Fatalf("Build() error = %v", err)
+			}
+
+			if got := job.Spec.Template.Spec.ServiceAccountName; got != tt.wantSA {
+				t.Errorf("ServiceAccountName = %s, want %s", got, tt.wantSA)
+			}
+			gotAutomount := job.Spec.Template.Spec.AutomountServiceAccountToken
+			if tt.wantAutomount == nil {
+				if gotAutomount != nil {
+					t.Errorf("AutomountServiceAccountToken = %v, want nil", *gotAutomount)
+				}
+				return
+			}
+			if gotAutomount == nil {
+				t.Fatalf("AutomountServiceAccountToken = nil, want %v", *tt.wantAutomount)
+			}
+			if *gotAutomount != *tt.wantAutomount {
+				t.Errorf("AutomountServiceAccountToken = %v, want %v", *gotAutomount, *tt.wantAutomount)
+			}
+		})
 	}
 }
 

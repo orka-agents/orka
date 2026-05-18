@@ -52,22 +52,13 @@ rules:
   - ""
   resources:
   - secrets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
   - serviceaccounts
   verbs:
   - create
   - delete
   - get
   - list
+  - update
   - watch
 - apiGroups:
   - apps
@@ -194,14 +185,22 @@ rules:
   - rbac.authorization.k8s.io
   resources:
   - clusterrolebindings
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
   - clusterroles
   - rolebindings
   - roles
   verbs:
-  - create
   - get
   - list
-  - update
   - watch
 - apiGroups:
   - storage.k8s.io

@@ -361,7 +361,15 @@ Located in `workers/ai/main.go`. When `ORKA_COORDINATION_ENABLED=true`:
 
 ## RBAC
 
-The worker ServiceAccount (`orka-worker`) ClusterRole in `config/rbac/worker_role.yaml` includes:
+Worker pods use trust-tiered ServiceAccounts and ClusterRoles defined in `config/rbac/worker_role.yaml`. The raw RBAC manifests use unprefixed names (`ai-worker`, `ai-worker-role`, etc.); the default install renders them through `config/default`, whose kustomize `namePrefix: orka-` produces the `orka-*` names shown below:
+
+- AI tasks use `orka-ai-worker` / `orka-ai-worker-role`.
+- Agent-provider tasks use `orka-vendor-worker` / `orka-vendor-worker-role`.
+- Container tasks use `orka-container-worker` / `orka-container-worker-role`.
+
+The controller ensures the worker ServiceAccounts and namespace-specific ClusterRoleBindings exist in each task namespace. General Orka worker images mount the ServiceAccount token so they can submit authenticated results to the controller; custom container images run with token automount disabled and are collected from pod logs instead.
+
+The worker ClusterRoles include the coordination permissions needed to delegate tasks and manage agents:
 
 ```yaml
 - apiGroups: ["core.orka.ai"]
