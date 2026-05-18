@@ -74,7 +74,7 @@ func newTestOIDCProvider(t *testing.T) *testOIDCProvider {
 				"issuer":   p.server.URL,
 				"jwks_uri": p.server.URL + "/jwks",
 			})
-		case "/jwks":
+		case "/jwks", "/.well-known/jwks.json":
 			p.jwksHits.Add(1)
 			keys := append([]testJWKKey{testJWKFromPublicKey(&p.key.PublicKey, p.kid)}, p.extraJWKSKeys...)
 			_ = json.NewEncoder(w).Encode(map[string]any{

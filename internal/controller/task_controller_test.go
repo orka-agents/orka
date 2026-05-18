@@ -599,6 +599,92 @@ var _ = Describe("Task Controller", func() {
 			Expect(task.Status.Message).To(Equal("task timed out"))
 		})
 
+		It("should report task timeout when the Job active deadline fails first", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-running-job-deadline-timeout"
+			jobName := taskName + "-job"
+			ns := defaultNS
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			timeout := metav1.Duration{Duration: 15 * time.Second}
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       taskName,
+					Namespace:  ns,
+					Finalizers: []string{labels.TaskFinalizer},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"sleep", "100"},
+					Timeout: &timeout,
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+
+			started := metav1.NewTime(time.Now())
+			task.Status.Phase = corev1alpha1.TaskPhaseRunning
+			task.Status.JobName = jobName
+			task.Status.StartTime = &started
+			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
+
+			activeDeadlineSeconds := int64(15)
+			job := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      jobName,
+					Namespace: ns,
+				},
+				Spec: batchv1.JobSpec{
+					ActiveDeadlineSeconds: &activeDeadlineSeconds,
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							RestartPolicy: corev1.RestartPolicyNever,
+							Containers: []corev1.Container{
+								{Name: "worker", Image: "alpine:latest"},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, job)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, job) }()
+
+			job.Status.StartTime = &started
+			job.Status.Failed = 1
+			job.Status.Conditions = []batchv1.JobCondition{
+				{
+					Type:    batchv1.JobFailureTarget,
+					Status:  corev1.ConditionTrue,
+					Reason:  batchv1.JobReasonDeadlineExceeded,
+					Message: "Job was active longer than specified deadline",
+				},
+				{
+					Type:    batchv1.JobFailed,
+					Status:  corev1.ConditionTrue,
+					Reason:  batchv1.JobReasonDeadlineExceeded,
+					Message: "Job was active longer than specified deadline",
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+			Eventually(func(g Gomega) {
+				observed := &batchv1.Job{}
+				g.Expect(r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: ns}, observed)).To(Succeed())
+				g.Expect(observed.Status.Failed).To(Equal(int32(1)))
+				g.Expect(observed.Status.Conditions).NotTo(BeEmpty())
+			}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+				g.Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+				g.Expect(task.Status.Message).To(Equal("task timed out"))
+			}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
+		})
+
 		It("should requeue when Job is still running", func() {
 			ctx := context.Background()
 			r := newReconciler()

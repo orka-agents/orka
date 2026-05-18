@@ -443,6 +443,39 @@ Key configuration values for the Helm chart:
 | `client.create` | `true` | Create client ServiceAccount for API access |
 | `client.name` | `orka-client` | Client ServiceAccount name |
 
+Context-token flags can also be configured through Helm under
+`controller.contextToken`. For example:
+
+```yaml
+controller:
+  contextToken:
+    profile: kontxt
+    issuer: https://issuer.example.com
+    audience: orka
+    headers: Txn-Token
+    authzMode: enforce
+    scopes:
+      taskCreate: orka:tasks:create
+      providerUse: orka:providers:use
+      toolUse: orka:tools:use
+    tts:
+      url: https://tts.example.com
+      audience: orka-workers
+      timeout: 5s
+      tokenSource: serviceAccount
+      childScope: orka:tasks:create
+      outboundScope: orka:tools:use
+      childTokenTTL: 5m
+      toolTokenTTL: 2m
+```
+
+The Helm keys mirror the controller flags: for example,
+`controller.contextToken.jwksUrl` renders `--context-token-jwks-url`,
+`controller.contextToken.scopes.secretRead` renders
+`--context-token-secret-read-scopes`, and
+`controller.contextToken.tts.toolTokenTTL` renders
+`--context-token-tool-token-ttl`.
+
 See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 
 ## Controller Flags
@@ -457,6 +490,42 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 | `--oidc-issuer` | `ORKA_OIDC_ISSUER` env or `""` | OIDC issuer URL for external API bearer token validation. Requires `--oidc-audience` when set |
 | `--oidc-audience` | `ORKA_OIDC_AUDIENCE` env or `""` | Expected OIDC audience for external API bearer tokens. Requires `--oidc-issuer` when set |
 | `--oidc-jwks-url` | `ORKA_OIDC_JWKS_URL` env or `""` | Optional JWKS URL. When empty, Orka discovers it from the issuer metadata |
+| `--context-token-profile` | `ORKA_CONTEXT_TOKEN_PROFILE` env or `""` | Context-token profile for external API requests. Currently supports `kontxt` |
+| `--context-token-issuer` | `ORKA_CONTEXT_TOKEN_ISSUER` env or `""` | Context-token issuer URL. Requires `--context-token-profile` and `--context-token-audience` when set |
+| `--context-token-audience` | `ORKA_CONTEXT_TOKEN_AUDIENCE` env or `""` | Expected context-token audience. Requires `--context-token-profile` and `--context-token-issuer` when set |
+| `--context-token-jwks-url` | `ORKA_CONTEXT_TOKEN_JWKS_URL` env or `""` | Optional context-token JWKS URL. For `kontxt`, defaults to `<issuer>/.well-known/jwks.json` |
+| `--context-token-headers` | `ORKA_CONTEXT_TOKEN_HEADERS` env or `""` | Comma-separated context-token header locations. Use `Header` for raw tokens or `Header:Scheme` for scheme-prefixed tokens. The `kontxt` default is `Txn-Token` |
+| `--context-token-authz-mode` | `ORKA_CONTEXT_TOKEN_AUTHZ_MODE` env or `""` | Context-token authorization mode: `off`, `audit`, or `enforce`. Empty defaults to `off` |
+| `--context-token-task-create-scopes` | `ORKA_CONTEXT_TOKEN_TASK_CREATE_SCOPES` env or `""` | Comma-separated scopes authorizing Task creation. Defaults to `orka:tasks:create` |
+| `--context-token-task-read-scopes` | `ORKA_CONTEXT_TOKEN_TASK_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Task reads and related data. Defaults to `orka:tasks:get` |
+| `--context-token-task-list-scopes` | `ORKA_CONTEXT_TOKEN_TASK_LIST_SCOPES` env or `""` | Comma-separated scopes authorizing Task listing. Defaults to `orka:tasks:list` |
+| `--context-token-task-delete-scopes` | `ORKA_CONTEXT_TOKEN_TASK_DELETE_SCOPES` env or `""` | Comma-separated scopes authorizing Task deletion. Defaults to `orka:tasks:delete` |
+| `--context-token-tool-read-scopes` | `ORKA_CONTEXT_TOKEN_TOOL_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Tool reads. Defaults to `orka:tools:read` |
+| `--context-token-tool-use-scopes` | `ORKA_CONTEXT_TOKEN_TOOL_USE_SCOPES` env or `""` | Comma-separated scopes authorizing Orka-managed chat/OpenAI/Anthropic tool execution. Defaults to `orka:tools:use` |
+| `--context-token-provider-use-scopes` | `ORKA_CONTEXT_TOKEN_PROVIDER_USE_SCOPES` env or `""` | Comma-separated scopes authorizing chat/OpenAI/Anthropic model-provider use and model listing. Defaults to `orka:providers:use` |
+| `--context-token-secret-read-scopes` | `ORKA_CONTEXT_TOKEN_SECRET_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Secret metadata reads. Defaults to `orka:secrets:read` |
+| `--context-token-agent-read-scopes` | `ORKA_CONTEXT_TOKEN_AGENT_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Agent reads. Defaults to `orka:agents:read` |
+| `--context-token-agent-write-scopes` | `ORKA_CONTEXT_TOKEN_AGENT_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing Agent writes. Defaults to `orka:agents:write` |
+| `--context-token-memory-read-scopes` | `ORKA_CONTEXT_TOKEN_MEMORY_READ_SCOPES` env or `""` | Comma-separated scopes authorizing memory reads. Defaults to `orka:memory:read` |
+| `--context-token-memory-write-scopes` | `ORKA_CONTEXT_TOKEN_MEMORY_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing memory writes. Defaults to `orka:memory:write` |
+| `--context-token-session-read-scopes` | `ORKA_CONTEXT_TOKEN_SESSION_READ_SCOPES` env or `""` | Comma-separated scopes authorizing session reads. Defaults to `orka:sessions:read` |
+| `--context-token-session-write-scopes` | `ORKA_CONTEXT_TOKEN_SESSION_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing session writes/deletes. Defaults to `orka:sessions:write` |
+| `--context-token-security-read-scopes` | `ORKA_CONTEXT_TOKEN_SECURITY_READ_SCOPES` env or `""` | Comma-separated scopes authorizing security scan reads. Defaults to `orka:security:read` |
+| `--context-token-security-write-scopes` | `ORKA_CONTEXT_TOKEN_SECURITY_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing security scan creates, updates, deletes, and other mutations. Defaults to `orka:security:write` |
+| `--context-token-skill-read-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Skill reads. Defaults to `orka:skills:read` |
+| `--context-token-skill-write-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing Skill writes. Defaults to `orka:skills:write` |
+| `--context-token-tts-url` | `ORKA_CONTEXT_TOKEN_TTS_URL` env or `""` | kontxt TTS base URL for optional token exchange/replacement |
+| `--context-token-tts-audience` | `ORKA_CONTEXT_TOKEN_TTS_AUDIENCE` env or `""` | Audience requested from kontxt TTS exchanges |
+| `--context-token-tts-timeout` | `ORKA_CONTEXT_TOKEN_TTS_TIMEOUT` env or `""` | Timeout for kontxt TTS exchanges. Defaults to `5s` when TTS is enabled |
+| `--context-token-tts-token-source` | `ORKA_CONTEXT_TOKEN_TTS_TOKEN_SOURCE` env or `""` | Subject token source for TTS exchanges: `serviceAccount`, `incoming`, or `none`. Defaults to `serviceAccount` when TTS is enabled |
+| `--context-token-subject-token-type` | `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_TYPE` env or `""` | Subject token type for worker-side TTS exchanges. Workers default to TxToken subject tokens when empty |
+| `--context-token-child-scope` | `ORKA_CONTEXT_TOKEN_CHILD_SCOPE` env or `""` | Scope workers request for child delegated TxTokens when TTS is configured |
+| `--context-token-outbound-scope` | `ORKA_CONTEXT_TOKEN_OUTBOUND_SCOPE` env or `""` | Scope workers request for outbound HTTP Tool TxTokens when TTS is configured |
+| `--context-token-child-token-ttl` | `ORKA_CONTEXT_TOKEN_CHILD_TOKEN_TTL` env or `""` | Requested TTL for child delegation TxTokens. Defaults to `5m` when TTS is enabled |
+| `--context-token-tool-token-ttl` | `ORKA_CONTEXT_TOKEN_TOOL_TOKEN_TTL` env or `""` | Requested TTL for outbound tool TxTokens. Defaults to `2m` when TTS is enabled |
+| `--task-provenance-admission-enabled` | `ORKA_TASK_PROVENANCE_ADMISSION_ENABLED` env or `false` | Enable validating admission that rejects untrusted direct Kubernetes Task writes to Orka-managed provenance fields (`spec.requestedBy`, `spec.transaction`, and transaction metadata labels/annotations) |
+| `--task-provenance-admission-trusted-users` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_USERS` env or controller ServiceAccount usernames | Comma-separated Kubernetes usernames trusted to set Orka-managed Task provenance fields |
+| `--task-provenance-admission-trusted-service-accounts` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS` env or `orka-ai-worker` | Comma-separated ServiceAccount names trusted in the target Task namespace to set Orka-managed Task provenance fields for child Task creation |
 | `--ai-worker-image` | `ghcr.io/sozercan/orka/ai-worker:latest` | AI worker container image |
 | `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Copilot agent worker image |
 | `--claude-worker-image` | `ghcr.io/sozercan/orka/agent-worker-claude:latest` | Claude agent worker image |
@@ -499,6 +568,64 @@ ORKA_OIDC_JWKS_URL=https://token.actions.githubusercontent.com/.well-known/jwks
 ```
 
 OIDC validation requires RS256-signed JWTs with matching `iss` and `aud`, valid time claims, and a non-empty `sub`. When an OIDC-authenticated caller creates a Task, Orka records the verified identity in `spec.requestedBy`. Clients cannot set `requestedBy` themselves.
+
+### External API Context-Token Authentication
+
+Orka can also authenticate external API requests with generic transaction/context tokens. The built-in `kontxt` profile validates RS256-signed JWTs with JOSE header `typ: txntoken+jwt`, matching `iss` and `aud`, valid time claims, a non-empty `sub`, and the required `kontxt` claims `iat`, `txn`, `scope`, and `req_wl`.
+
+For a newcomer-friendly setup and smoke test, see [Kontxt quickstart: use Kubernetes identity to call Orka without long-lived tokens](kontxt-quickstart.md).
+
+Enable the profile by configuring the profile, issuer, and audience:
+
+```bash
+--context-token-profile=kontxt
+--context-token-issuer=https://issuer.example.com
+--context-token-audience=orka-api
+```
+
+The same settings can be supplied with environment variables:
+
+```bash
+ORKA_CONTEXT_TOKEN_PROFILE=kontxt
+ORKA_CONTEXT_TOKEN_ISSUER=https://issuer.example.com
+ORKA_CONTEXT_TOKEN_AUDIENCE=orka-api
+# Optional for kontxt; when omitted, Orka uses <issuer>/.well-known/jwks.json.
+ORKA_CONTEXT_TOKEN_JWKS_URL=https://issuer.example.com/.well-known/jwks.json
+```
+
+By default, the `kontxt` profile reads raw transaction tokens from the `Txn-Token` header:
+
+```bash
+curl -H "Txn-Token: $TXN_TOKEN" https://orka.example.com/api/v1/tasks
+```
+
+To customize token locations, set `--context-token-headers` or `ORKA_CONTEXT_TOKEN_HEADERS` to a comma-separated list. Use `Header` for raw token headers and `Header:Scheme` for scheme-prefixed headers. For example, keep the default `Txn-Token` header and explicitly opt in to `Authorization: Bearer` context-token support:
+
+```bash
+--context-token-headers=Txn-Token,Authorization:Bearer
+```
+
+`Authorization: Bearer` remains the default location for Kubernetes ServiceAccount and OIDC JWT authentication. Context-token bearer authentication is only attempted when `Authorization:Bearer` is explicitly configured and the bearer JWT has `typ: txntoken+jwt`; other bearer tokens continue through the standard OIDC or Kubernetes TokenReview flow. When an external context-token caller creates a Task, Orka records the verified subject and issuer in immutable `spec.requestedBy` and records safe transaction metadata in immutable `spec.transaction`, transaction labels, and transaction annotations. Clients cannot set `requestedBy` or `transaction` themselves.
+
+Optional authorization is controlled by `--context-token-authz-mode` / `ORKA_CONTEXT_TOKEN_AUTHZ_MODE`. In `audit` mode, Orka logs safe authorization failures and allows the request. In `enforce` mode, Orka rejects context-token callers that lack the configured operation scope or violate signed `tctx` constraints. Task creation can be constrained by `tctx.namespace`, `tctx.taskType`, `tctx.agent`, `tctx.allowedAgents`, workspace `tctx.repo`/`tctx.branch`/`tctx.ref`, and `tctx.allowedTools`. Chat, OpenAI-compatible, and Anthropic-compatible model calls require the provider-use scope (default `orka:providers:use`) and honor `tctx.namespace`, `tctx.provider`, `tctx.allowedProviders`, `tctx.model`, and `tctx.allowedModels`. When Orka-managed server-side tools are exposed to those endpoints, they also require the tool-use scope (default `orka:tools:use`) and honor `tctx.allowedTools`. Security scan read/list/get endpoints require the security-read scope (default `orka:security:read`), and security scan create/update/delete and mutation endpoints require the security-write scope (default `orka:security:write`). The raw TxToken is never logged or persisted in Task specs/status.
+
+### Kontxt TTS Exchange and Propagation
+
+Configure `--context-token-tts-url` / `ORKA_CONTEXT_TOKEN_TTS_URL` when workers should exchange a mounted subject token for child or outbound replacement TxTokens. Delegation tools require `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE` and `ORKA_CONTEXT_TOKEN_CHILD_SCOPE`; HTTP Tool calls can use `ORKA_CONTEXT_TOKEN_OUTBOUND_SCOPE` or fall back to the current transaction scope. Child scopes are fail-closed: Orka rejects a requested child scope that is not already present in the parent transaction scopes before it creates the child Task.
+
+Successful delegation exchanges store the raw child TxToken only in an owner-referenced Kubernetes Secret and annotate the child Task with the Secret name. The controller mounts that Secret into the child worker and sets `ORKA_TRANSACTION_TOKEN_FILE` / `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE` so deeper delegation and downstream Tool calls can continue the same transaction with configured child/outbound scopes.
+
+### Task Provenance Admission Hardening
+
+The REST API rejects client-supplied `requestedBy` and `transaction` fields and stamps verified provenance itself. To also protect direct Kubernetes `Task` CRD writes, enable the optional validating admission webhook:
+
+```bash
+--task-provenance-admission-enabled=true
+```
+
+The webhook denies untrusted `CREATE` or `UPDATE` requests that set or modify Orka-managed provenance fields: `spec.requestedBy`, `spec.transaction`, `orka.ai/transaction-*` labels/annotations, `orka.ai/context-token-profile`, and the child token Secret annotation. By default, trusted writers are the Orka controller ServiceAccount usernames in the controller namespace and the `orka-ai-worker` ServiceAccount name in the target Task namespace; override them with `--task-provenance-admission-trusted-users` and `--task-provenance-admission-trusted-service-accounts`.
+
+Admission deployment is opt-in. To install the manifests, uncomment the `[WEBHOOK]` resource and patch in `config/default/kustomization.yaml`, provide a `webhook-server-cert` TLS Secret for the manager, and set the webhook `caBundle` (or configure certificate-manager CA injection) before applying the webhook configuration. The bundled webhook manifest defaults to `failurePolicy: Ignore`; switch it to `Fail` only after webhook TLS and availability are configured.
 
 ## Prometheus Metrics
 

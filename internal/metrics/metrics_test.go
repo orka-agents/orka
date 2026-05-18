@@ -104,11 +104,45 @@ func TestMetricsRegistered(t *testing.T) {
 		APIRequestsTotal,
 		APIRequestDuration,
 		SkillsLoaded,
+		ContextTokenAuthTotal,
+		ContextTokenAuthorizationTotal,
+		ContextTokenTTSExchangeTotal,
+		ContextTokenTTSExchangeDuration,
 	}
 
 	for i, m := range metrics {
 		if m == nil {
 			t.Errorf("metric %d is nil", i)
 		}
+	}
+}
+
+func TestRecordContextTokenMetrics(t *testing.T) {
+	ContextTokenAuthTotal.Reset()
+	ContextTokenAuthorizationTotal.Reset()
+	ContextTokenTTSExchangeTotal.Reset()
+	ContextTokenTTSExchangeDuration.Reset()
+
+	RecordContextTokenAuth("kontxt", "success")
+	if count := getCounterValue(ContextTokenAuthTotal, "kontxt", "success"); count != 1 {
+		t.Fatalf("ContextTokenAuthTotal = %v, want 1", count)
+	}
+
+	RecordContextTokenAuth("", "")
+	if count := getCounterValue(ContextTokenAuthTotal, "unknown", "unknown"); count != 1 {
+		t.Fatalf("ContextTokenAuthTotal unknown = %v, want 1", count)
+	}
+
+	RecordContextTokenAuthorization("createTask", "denied", "missing_scope")
+	if count := getCounterValue(ContextTokenAuthorizationTotal, "createTask", "denied", "missing_scope"); count != 1 {
+		t.Fatalf("ContextTokenAuthorizationTotal = %v, want 1", count)
+	}
+
+	RecordContextTokenTTSExchange("success", "ok", 0.25)
+	if count := getCounterValue(ContextTokenTTSExchangeTotal, "success", "ok"); count != 1 {
+		t.Fatalf("ContextTokenTTSExchangeTotal = %v, want 1", count)
+	}
+	if count := getHistogramCount(ContextTokenTTSExchangeDuration, "success", "ok"); count != 1 {
+		t.Fatalf("ContextTokenTTSExchangeDuration count = %v, want 1", count)
 	}
 }

@@ -91,6 +91,9 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return classifyChatK8sErr(err)
 	}
 	agent.ResourceVersion = latest.ResourceVersion
+	if result, ok := authorizeAgentUpdate(ctx, tc, agent); !ok {
+		return result, nil
+	}
 
 	if err := tc.Client.Update(ctx, agent); err != nil {
 		return classifyChatK8sErr(err)

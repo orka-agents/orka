@@ -51,6 +51,7 @@ type OpenAICompatHandler struct {
 	config                    ChatConfig
 	resolver                  *ProviderResolver
 	resultStore               store.ResultStore
+	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
 
 // NewOpenAICompatHandler creates an OpenAI-compatible API handler.
@@ -227,18 +228,18 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		}})
 	}
 
+	userInfo := GetUserInfo(c)
+	var contextToken *ContextToken
+	if userInfo != nil {
+		contextToken = userInfo.ContextToken
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
 	defer cancel()
 
-	namespace := GetEffectiveNamespace(c, "")
-	if h.watchNamespace != "" {
-		namespace = h.watchNamespace
-	}
-	if h.enforceNamespaceIsolation {
-		ui := GetUserInfo(c)
-		if ui != nil && ui.Namespace != "" && namespace != ui.Namespace {
-			return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("namespace %q not allowed", namespace))
-		}
+	namespace, err := ResolveNamespace(c, c.Query("namespace", ""), h.watchNamespace, h.enforceNamespaceIsolation)
+	if err != nil {
+		return openAIContextTokenAuthorizationError(c, err)
 	}
 
 	// Resolve provider and model from the request model field.
@@ -256,70 +257,13 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		}})
 	}
 
-	// Convert OpenAI messages to internal format
-	messages, systemPrompt := convertOAIMessages(req.Messages)
-
-	// Convert OpenAI tools to internal format
-	convertedTools := convertOAITools(req.Tools)
-
-	// Build completion request
-	compReq := &llm.CompletionRequest{
-		Model:        model,
-		Messages:     messages,
-		SystemPrompt: systemPrompt,
-		Tools:        convertedTools,
+	if err := authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "openAIChatCompletions", namespace, providerInfo, model); err != nil {
+		return openAIContextTokenAuthorizationError(c, err)
 	}
 
-	if req.Temperature != nil {
-		compReq.Temperature = *req.Temperature
-	}
-
-	maxTokens := 0
-	if req.MaxCompTokens != nil {
-		maxTokens = *req.MaxCompTokens
-	} else if req.MaxTokens != nil {
-		maxTokens = *req.MaxTokens
-	}
-	if maxTokens > 0 {
-		if maxTokens < 16 {
-			oaiLog.Info("max_tokens too small", oaiParamMaxTokens, maxTokens)
-			param := oaiParamMaxTokens
-			return c.Status(400).JSON(OAIError{Error: OAIErrorDetail{
-				Message: fmt.Sprintf("max_tokens must be at least 16, got %d", maxTokens),
-				Type:    "invalid_request_error",
-				Param:   &param,
-			}})
-		}
-		compReq.MaxTokens = maxTokens
-	}
-
-	// Convert stop sequences
-	if req.Stop != nil {
-		switch v := req.Stop.(type) {
-		case string:
-			compReq.StopSequences = []string{v}
-		case []any:
-			for _, s := range v {
-				if str, ok := s.(string); ok {
-					compReq.StopSequences = append(compReq.StopSequences, str)
-				}
-			}
-		}
-	}
-
-	// Convert response format
-	if req.ResponseFormat != nil {
-		compReq.ResponseFormat = &llm.ResponseFormat{
-			Type: req.ResponseFormat.Type,
-		}
-		if req.ResponseFormat.JSONSchema != nil {
-			compReq.ResponseFormat.JSONSchema = &llm.JSONSchemaFormat{
-				Name:        req.ResponseFormat.JSONSchema.Name,
-				Schema:      req.ResponseFormat.JSONSchema.Schema,
-				Strict:      req.ResponseFormat.JSONSchema.Strict,
-				Description: req.ResponseFormat.JSONSchema.Description,
-			}
-		}
+	compReq, errDetail := buildOpenAICompletionRequest(req, model)
+	if errDetail != nil {
+		return c.Status(400).JSON(OAIError{Error: *errDetail})
 	}
 
 	completionID := fmt.Sprintf("chatcmpl-%s", generateChatID())
@@ -333,6 +277,10 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		// Replace client tools with Orka's tools (builtin + coordinator)
 		compReq.Tools = nil
 		injectOrkaTools(ctx, h.client, compReq, namespace)
+		compReq.Tools = filterCompletionToolsForContextToken(c, h.contextTokenAuthorization, compReq.Tools)
+		if err := authorizeContextTokenToolUse(c, h.contextTokenAuthorization, "openAITools", completionToolNames(compReq.Tools)); err != nil {
+			return openAIContextTokenAuthorizationError(c, err)
+		}
 
 		// Inject coordinator system prompt
 		compReq.SystemPrompt = coordinatorSystemPrompt(namespace) + "\n\n" + compReq.SystemPrompt
@@ -357,6 +305,36 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 			ResultStore:               h.resultStore,
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", generateChatID()) },
 			TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": "openai-proxy"} },
+			AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
+				authorize := func(ctx context.Context, task *corev1alpha1.Task) error {
+					return authorizeAndStampToolTaskCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolCreateTask", userInfo, task)
+				}
+				return chatToolAuthorizationError(authorize, ctx, task, "Use a task configuration authorized by the context token")
+			},
+			AuthorizeTaskDelete: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
+				authorize := func(ctx context.Context, task *corev1alpha1.Task) error {
+					return authorizeContextTokenTaskDeleteObject(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolDeleteTask", task)
+				}
+				return chatToolAuthorizationError(authorize, ctx, task, "Use a task authorized by the context token")
+			},
+			AuthorizeAgentCreate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
+				authorize := func(ctx context.Context, agent *corev1alpha1.Agent) error {
+					return authorizeContextTokenToolAgentCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolCreateAgent", agent)
+				}
+				return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent configuration authorized by the context token")
+			},
+			AuthorizeAgentUpdate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
+				authorize := func(ctx context.Context, agent *corev1alpha1.Agent) error {
+					return authorizeContextTokenToolAgentUpdate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolUpdateAgent", agent)
+				}
+				return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent update authorized by the context token")
+			},
+			AuthorizeAgentDelete: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
+				authorize := func(ctx context.Context, agent *corev1alpha1.Agent) error {
+					return authorizeContextTokenToolAgentDelete(contextToken, h.contextTokenAuthorization, "openAIToolDeleteAgent", agent)
+				}
+				return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent authorized by the context token")
+			},
 			CheckTaskLimit: func() *tools.ChatToolError {
 				if tasksCreated >= 20 {
 					return &tools.ChatToolError{Type: "limit_reached", Message: "task creation limit reached (max 20)", Suggestion: "Wait for existing tasks to complete"}
@@ -378,6 +356,66 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		return h.handleNonStreamingToolLoop(c, ctx, provider, compReq, completionID, model, now, proxyToolCtx)
 	}
 	return h.handleNonStreamingCompletion(c, ctx, provider, compReq, completionID, model, now)
+}
+
+func buildOpenAICompletionRequest(req OAIRequest, model string) (*llm.CompletionRequest, *OAIErrorDetail) {
+	messages, systemPrompt := convertOAIMessages(req.Messages)
+	compReq := &llm.CompletionRequest{
+		Model:        model,
+		Messages:     messages,
+		SystemPrompt: systemPrompt,
+		Tools:        convertOAITools(req.Tools),
+	}
+
+	if req.Temperature != nil {
+		compReq.Temperature = *req.Temperature
+	}
+
+	maxTokens := 0
+	if req.MaxCompTokens != nil {
+		maxTokens = *req.MaxCompTokens
+	} else if req.MaxTokens != nil {
+		maxTokens = *req.MaxTokens
+	}
+	if maxTokens > 0 {
+		if maxTokens < 16 {
+			oaiLog.Info("max_tokens too small", oaiParamMaxTokens, maxTokens)
+			param := oaiParamMaxTokens
+			return nil, &OAIErrorDetail{
+				Message: fmt.Sprintf("max_tokens must be at least 16, got %d", maxTokens),
+				Type:    "invalid_request_error",
+				Param:   &param,
+			}
+		}
+		compReq.MaxTokens = maxTokens
+	}
+
+	if req.Stop != nil {
+		switch v := req.Stop.(type) {
+		case string:
+			compReq.StopSequences = []string{v}
+		case []any:
+			for _, s := range v {
+				if str, ok := s.(string); ok {
+					compReq.StopSequences = append(compReq.StopSequences, str)
+				}
+			}
+		}
+	}
+
+	if req.ResponseFormat != nil {
+		compReq.ResponseFormat = &llm.ResponseFormat{Type: req.ResponseFormat.Type}
+		if req.ResponseFormat.JSONSchema != nil {
+			compReq.ResponseFormat.JSONSchema = &llm.JSONSchemaFormat{
+				Name:        req.ResponseFormat.JSONSchema.Name,
+				Schema:      req.ResponseFormat.JSONSchema.Schema,
+				Strict:      req.ResponseFormat.JSONSchema.Strict,
+				Description: req.ResponseFormat.JSONSchema.Description,
+			}
+		}
+	}
+
+	return compReq, nil
 }
 
 // handleNonStreamingCompletion handles a non-streaming chat completion request.
@@ -775,9 +813,13 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 	ctx := c.Context()
 
-	namespace := GetEffectiveNamespace(c, "")
-	if h.watchNamespace != "" {
-		namespace = h.watchNamespace
+	namespace, err := ResolveNamespace(c, c.Query("namespace", ""), h.watchNamespace, h.enforceNamespaceIsolation)
+	if err != nil {
+		return openAIContextTokenAuthorizationError(c, err)
+	}
+
+	if err := authorizeContextTokenActionWithConfig(c, h.contextTokenAuthorization, "openAIListModels", h.contextTokenAuthorization.ProviderUseScopes); err != nil {
+		return openAIContextTokenAuthorizationError(c, err)
 	}
 
 	// List Provider CRDs to build a model list
@@ -800,6 +842,9 @@ func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 
 	for _, p := range providerList.Items {
 		if p.Spec.DefaultModel != "" {
+			if !contextTokenAllowsListedProviderModel(c, h.contextTokenAuthorization, "openAIListModels", namespace, providerResolutionInfo(&p), p.Spec.DefaultModel) {
+				continue
+			}
 			modelID := fmt.Sprintf("%s/%s", p.Name, p.Spec.DefaultModel)
 			if !seen[modelID] {
 				models = append(models, OAIModel{

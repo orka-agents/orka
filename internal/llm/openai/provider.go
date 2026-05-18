@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"strings"
 	"sync/atomic"
 
@@ -46,9 +47,10 @@ func init() {
 // It auto-detects whether the endpoint supports the Responses API and falls
 // back to Chat Completions if not.
 type Provider struct {
-	client  openai.Client
-	baseURL string
-	mode    atomic.Int32 // apiMode
+	client                              openai.Client
+	baseURL                             string
+	mode                                atomic.Int32 // apiMode
+	allowBareResponsesForbiddenFallback bool
 }
 
 // NewProvider creates a new OpenAI provider
@@ -75,8 +77,9 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 	client := openai.NewClient(opts...)
 
 	return &Provider{
-		client:  client,
-		baseURL: config.BaseURL,
+		client:                              client,
+		baseURL:                             config.BaseURL,
+		allowBareResponsesForbiddenFallback: isCustomOpenAIBaseURL(config.ProviderType, config.BaseURL),
 	}, nil
 }
 
@@ -86,16 +89,21 @@ func (p *Provider) Name() string {
 }
 
 // isUnsupportedAPIError returns true when the error indicates the endpoint
-// does not support the Responses API (HTTP 404, 405, or known error codes).
+// does not support the Responses API. Some OpenAI-compatible gateways report
+// unsupported API surfaces as 403 instead of 404/405, but a plain 403 can also
+// mean auth or model entitlement failure.
 func isUnsupportedAPIError(err error) bool {
 	var apiErr *openai.Error
 	if errors.As(err, &apiErr) {
 		switch apiErr.StatusCode {
 		case 404, 405:
 			return true
+		case 403:
+			if isUnsupportedAPIMessage(apiErr.Code) || isUnsupportedAPIMessage(apiErr.Message) {
+				return true
+			}
 		}
-		if apiErr.Code == "unsupported_api" || apiErr.Code == "invalid_url" ||
-			apiErr.Code == "unsupported_api_for_model" {
+		if isUnsupportedAPIMessage(apiErr.Code) {
 			return true
 		}
 		if apiErr.StatusCode != 0 {
@@ -107,8 +115,12 @@ func isUnsupportedAPIError(err error) bool {
 		switch providerErr.StatusCode {
 		case 404, 405:
 			return true
+		case 403:
+			if isUnsupportedAPIMessage(providerErr.Message) {
+				return true
+			}
 		}
-		if hasUnsupportedAPICode(providerErr.Message) {
+		if isUnsupportedAPIMessage(providerErr.Message) {
 			return true
 		}
 		if providerErr.StatusCode != 0 {
@@ -118,13 +130,95 @@ func isUnsupportedAPIError(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "404") ||
 		strings.Contains(msg, "Not Found") ||
-		hasUnsupportedAPICode(msg)
+		isUnsupportedAPIMessage(msg)
+}
+
+func isCustomOpenAIBaseURL(providerType, baseURL string) bool {
+	if providerType != "" && providerType != "openai" {
+		return false
+	}
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return false
+	}
+
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return true
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host != "" && host != "api.openai.com" && !strings.HasSuffix(host, ".api.openai.com")
+}
+
+func isBareResponsesForbiddenError(err error) bool {
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) {
+		if apiErr.StatusCode != 403 {
+			return false
+		}
+		if isUnsupportedAPIMessage(apiErr.Code) || isUnsupportedAPIMessage(apiErr.Message) {
+			return false
+		}
+		return isBareResponsesForbiddenMessage(apiErr.Error())
+	}
+
+	var providerErr *llm.ProviderError
+	if errors.As(err, &providerErr) {
+		if providerErr.StatusCode != 403 {
+			return false
+		}
+		if isUnsupportedAPIMessage(providerErr.Message) {
+			return false
+		}
+		return isBareResponsesForbiddenMessage(providerErr.Message)
+	}
+
+	return isBareResponsesForbiddenMessage(err.Error())
+}
+
+func isBareResponsesForbiddenMessage(msg string) bool {
+	msg = strings.ToLower(strings.TrimSpace(msg))
+	if msg == "" {
+		return false
+	}
+	if !strings.Contains(msg, "403") || !strings.Contains(msg, "forbidden") {
+		return false
+	}
+	if !strings.Contains(msg, "/responses") {
+		return false
+	}
+	return !strings.Contains(msg, `"message"`) &&
+		!strings.Contains(msg, "permission") &&
+		!strings.Contains(msg, "authorization") &&
+		!strings.Contains(msg, "authentication") &&
+		!strings.Contains(msg, "entitlement")
+}
+
+func (p *Provider) shouldFallbackToChatCompletions(err error) bool {
+	if isUnsupportedAPIError(err) {
+		return true
+	}
+	return p.allowBareResponsesForbiddenFallback && isBareResponsesForbiddenError(err)
+}
+
+func isUnsupportedAPIMessage(msg string) bool {
+	msg = strings.ToLower(strings.TrimSpace(msg))
+	if msg == "" {
+		return false
+	}
+	return hasUnsupportedAPICode(msg)
 }
 
 func hasUnsupportedAPICode(msg string) bool {
+	msg = strings.ToLower(strings.TrimSpace(msg))
 	return strings.Contains(msg, "unsupported_api") ||
 		strings.Contains(msg, "invalid_url") ||
-		strings.Contains(msg, "unsupported_api_for_model")
+		strings.Contains(msg, "unsupported_api_for_model") ||
+		strings.Contains(msg, "does not support /responses") ||
+		strings.Contains(msg, "does not support responses") ||
+		strings.Contains(msg, "responses api is not supported") ||
+		strings.Contains(msg, "unsupported responses") ||
+		strings.Contains(msg, "unsupported api surface")
 }
 
 func isForbiddenAPIError(err error) bool {
@@ -848,7 +942,7 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 		p.mode.Store(int32(apiModeResponses))
 		return resp, nil
 	}
-	if isUnsupportedAPIError(err) {
+	if p.shouldFallbackToChatCompletions(err) {
 		p.mode.Store(int32(apiModeChatCompletions))
 		return p.completeChatCompletions(ctx, req)
 	}
@@ -881,7 +975,7 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 		p.mode.Store(int32(apiModeResponses))
 		return p.streamResponses(ctx, req), nil
 	}
-	if isUnsupportedAPIError(err) {
+	if p.shouldFallbackToChatCompletions(err) {
 		p.mode.Store(int32(apiModeChatCompletions))
 		return p.streamChatCompletions(ctx, req), nil
 	}

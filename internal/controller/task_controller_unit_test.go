@@ -26,7 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -644,8 +643,8 @@ func TestEnforceHistoryLimits_CustomLimits(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default"},
 		Spec: corev1alpha1.TaskSpec{
 			Type:                       corev1alpha1.TaskTypeAI,
-			SuccessfulRunsHistoryLimit: ptr.To(int32(1)),
-			FailedRunsHistoryLimit:     ptr.To(int32(0)),
+			SuccessfulRunsHistoryLimit: new(int32(1)),
+			FailedRunsHistoryLimit:     new(int32(0)),
 		},
 	}
 
@@ -1509,7 +1508,7 @@ func TestHandleScheduled_Suspended(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeContainer,
 			Schedule: "*/5 * * * *",
-			Suspend:  ptr.To(true),
+			Suspend:  new(true),
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseScheduled},
 	}
@@ -1737,7 +1736,7 @@ func TestHandleCompleted_EnforcesScheduledTaskHistoryLimit(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "sched-parent", Namespace: "default"},
 		Spec: corev1alpha1.TaskSpec{
 			Type:                       corev1alpha1.TaskTypeContainer,
-			SuccessfulRunsHistoryLimit: ptr.To(int32(1)),
+			SuccessfulRunsHistoryLimit: new(int32(1)),
 		},
 	}
 	oldChild := &corev1alpha1.Task{
@@ -2524,7 +2523,7 @@ func TestHandleScheduled_MissedDeadline(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:            corev1alpha1.TaskPhaseScheduled,
-			LastScheduleTime: ptr.To(metav1.NewTime(time.Now().Add(-24 * time.Hour))),
+			LastScheduleTime: new(metav1.NewTime(time.Now().Add(-24 * time.Hour))),
 		},
 	}
 	r := newUnitReconciler(scheme, task)
@@ -2561,7 +2560,7 @@ func TestHandleScheduled_ConcurrencyForbid(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:            corev1alpha1.TaskPhaseScheduled,
-			LastScheduleTime: ptr.To(metav1.NewTime(time.Now().Add(-2 * time.Minute))),
+			LastScheduleTime: new(metav1.NewTime(time.Now().Add(-2 * time.Minute))),
 		},
 	}
 	r := newUnitReconciler(scheme, task, activeChild)
@@ -2587,11 +2586,11 @@ func TestHandleScheduled_CreateChildTask(t *testing.T) {
 			Type:                    corev1alpha1.TaskTypeContainer,
 			Image:                   "busybox:latest",
 			Schedule:                "* * * * *",
-			StartingDeadlineSeconds: ptr.To[int64](300),
+			StartingDeadlineSeconds: new(int64(300)),
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:            corev1alpha1.TaskPhaseScheduled,
-			LastScheduleTime: ptr.To(metav1.NewTime(time.Now().Add(-2 * time.Minute))),
+			LastScheduleTime: new(metav1.NewTime(time.Now().Add(-2 * time.Minute))),
 		},
 	}
 	r := newUnitReconciler(scheme, task)
@@ -2621,7 +2620,7 @@ func TestHandleScheduled_ExistingChildTaskStillUpdatesScheduleStatus(t *testing.
 			Type:                    corev1alpha1.TaskTypeContainer,
 			Image:                   "busybox:latest",
 			Schedule:                "* * * * *",
-			StartingDeadlineSeconds: ptr.To[int64](300),
+			StartingDeadlineSeconds: new(int64(300)),
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:            corev1alpha1.TaskPhaseScheduled,
@@ -2802,7 +2801,7 @@ func TestHandleAutonomousIteration_Suspended(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAI,
 			AgentRef: &corev1alpha1.AgentReference{Name: "auto-agent4"},
-			Suspend:  ptr.To(true),
+			Suspend:  new(true),
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:     corev1alpha1.TaskPhaseRunning,
@@ -2920,6 +2919,42 @@ func TestReconcile_CompletedPhase(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	_ = result
+}
+
+// ---------------------------------------------------------------------------
+// handlePending — transaction token pending
+// ---------------------------------------------------------------------------
+
+func TestHandlePending_TransactionTokenPendingRequeuesWithoutJob(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pending-token",
+			Namespace: "default",
+			Annotations: map[string]string{
+				labels.AnnotationTransactionTokenPending: "true",
+			},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task)
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("expected 1s requeue while transaction token is pending, got %v", result.RequeueAfter)
+	}
+
+	jobs := &batchv1.JobList{}
+	if err := r.List(context.Background(), jobs, client.InNamespace(task.Namespace)); err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs.Items) != 0 {
+		t.Fatalf("expected no Job to be created while transaction token is pending, got %d", len(jobs.Items))
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -3042,7 +3077,7 @@ func TestReconcile_ScheduledPhase(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeContainer,
 			Schedule: "0 0 1 1 *",
-			Suspend:  ptr.To(true),
+			Suspend:  new(true),
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseScheduled},
 	}

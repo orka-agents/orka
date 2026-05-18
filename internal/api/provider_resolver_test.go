@@ -128,10 +128,13 @@ func TestProviderResolver_ResolveAPIKey(t *testing.T) {
 }
 
 func TestProviderResolver_Resolve(t *testing.T) {
-	const ns = "default"
+	const (
+		ns                 = "default"
+		openaiProviderName = "openai"
+	)
 
 	// Shared objects
-	openaiProvider := makeProvider("openai", ns, corev1alpha1.ProviderTypeOpenAI, "openai-secret", "gpt-4")
+	openaiProvider := makeProvider(openaiProviderName, ns, corev1alpha1.ProviderTypeOpenAI, "openai-secret", "gpt-4")
 	openaiSecret := makeSecret("openai-secret", ns, "api-key", "sk-openai")
 	anthropicProvider := makeProvider("anthropic", ns, corev1alpha1.ProviderTypeAnthropic, "anthropic-secret", "claude-sonnet-4-20250514")
 	anthropicSecret := makeSecret("anthropic-secret", ns, "api-key", "sk-anthropic")
@@ -152,23 +155,23 @@ func TestProviderResolver_Resolve(t *testing.T) {
 			objects: []runtime.Object{openaiProvider, openaiSecret},
 			config:  DefaultChatConfig(),
 			opts: ResolveOpts{
-				ProviderName: "openai",
+				ProviderName: openaiProviderName,
 				Model:        "gpt-4o",
 				Namespace:    ns,
 			},
 			wantModel: "gpt-4o",
-			wantPType: "openai",
+			wantPType: openaiProviderName,
 		},
 		{
 			name:    "explicit provider uses default model from CRD",
 			objects: []runtime.Object{openaiProvider, openaiSecret},
 			config:  DefaultChatConfig(),
 			opts: ResolveOpts{
-				ProviderName: "openai",
+				ProviderName: openaiProviderName,
 				Namespace:    ns,
 			},
 			wantModel: "gpt-4",
-			wantPType: "openai",
+			wantPType: openaiProviderName,
 		},
 		{
 			name:    "model str provider/model format",
@@ -186,7 +189,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 			objects: []runtime.Object{openaiProvider, openaiSecret},
 			config: func() ChatConfig {
 				c := DefaultChatConfig()
-				c.Provider = "openai"
+				c.Provider = openaiProviderName
 				return c
 			}(),
 			opts: ResolveOpts{
@@ -194,7 +197,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 				Namespace: ns,
 			},
 			wantModel: "gpt-4o",
-			wantPType: "openai",
+			wantPType: openaiProviderName,
 		},
 		{
 			name:    "model str falls through to default provider CRD",
@@ -205,14 +208,14 @@ func TestProviderResolver_Resolve(t *testing.T) {
 				Namespace: ns,
 			},
 			wantModel: "some-model",
-			wantPType: "openai",
+			wantPType: openaiProviderName,
 		},
 		{
 			name: "agent ref with provider and model",
 			objects: []runtime.Object{
 				openaiProvider, openaiSecret,
 				makeAgent("my-agent", ns,
-					&corev1alpha1.ProviderReference{Name: "openai"},
+					&corev1alpha1.ProviderReference{Name: openaiProviderName},
 					&corev1alpha1.ModelConfig{Name: "gpt-4o"},
 				),
 			},
@@ -222,7 +225,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 				Namespace: ns,
 			},
 			wantModel: "gpt-4o",
-			wantPType: "openai",
+			wantPType: openaiProviderName,
 		},
 		{
 			name: "agent ref without provider falls to config provider",
@@ -232,7 +235,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 			},
 			config: func() ChatConfig {
 				c := DefaultChatConfig()
-				c.Provider = "openai"
+				c.Provider = openaiProviderName
 				return c
 			}(),
 			opts: ResolveOpts{
@@ -240,7 +243,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 				Namespace: ns,
 			},
 			wantModel: "gpt-4o",
-			wantPType: "openai",
+			wantPType: openaiProviderName,
 		},
 		{
 			name:    "agent not found",
@@ -276,7 +279,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 			objects: []runtime.Object{openaiProvider}, // no secret
 			config:  DefaultChatConfig(),
 			opts: ResolveOpts{
-				ProviderName: "openai",
+				ProviderName: openaiProviderName,
 				Namespace:    ns,
 			},
 			wantErr: "failed to get provider secret",
@@ -306,7 +309,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 				Namespace:    ns,
 			},
 			wantModel: "gpt-4",
-			wantPType: "openai", // azure-openai uses the openai provider internally
+			wantPType: openaiProviderName, // azure-openai uses the openai provider internally
 		},
 		{
 			name: "require model with empty model from provider CRD",
@@ -325,7 +328,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 				RequireModel: true,
 			},
 			wantModel: "fallback-model",
-			wantPType: "openai",
+			wantPType: openaiProviderName,
 		},
 		{
 			name: "require model with no model anywhere errors",
@@ -359,14 +362,14 @@ func TestProviderResolver_Resolve(t *testing.T) {
 				Namespace: ns,
 			},
 			wantModel: "some-model",
-			wantPType: "openai",
+			wantPType: openaiProviderName,
 		},
 		{
 			name: "opts.Model overrides agent model",
 			objects: []runtime.Object{
 				openaiProvider, openaiSecret,
 				makeAgent("override-agent", ns,
-					&corev1alpha1.ProviderReference{Name: "openai"},
+					&corev1alpha1.ProviderReference{Name: openaiProviderName},
 					&corev1alpha1.ModelConfig{Name: "agent-model"},
 				),
 			},
@@ -377,12 +380,12 @@ func TestProviderResolver_Resolve(t *testing.T) {
 				Namespace: ns,
 			},
 			wantModel: "explicit-model",
-			wantPType: "openai",
+			wantPType: openaiProviderName,
 		},
 		{
 			name: "config model used as last resort",
 			objects: []runtime.Object{
-				makeProvider("openai", ns, corev1alpha1.ProviderTypeOpenAI, "openai-secret", ""),
+				makeProvider(openaiProviderName, ns, corev1alpha1.ProviderTypeOpenAI, "openai-secret", ""),
 				openaiSecret,
 			},
 			config: func() ChatConfig {
@@ -391,11 +394,11 @@ func TestProviderResolver_Resolve(t *testing.T) {
 				return c
 			}(),
 			opts: ResolveOpts{
-				ProviderName: "openai",
+				ProviderName: openaiProviderName,
 				Namespace:    ns,
 			},
 			wantModel: "config-fallback-model",
-			wantPType: "openai",
+			wantPType: openaiProviderName,
 		},
 	}
 
