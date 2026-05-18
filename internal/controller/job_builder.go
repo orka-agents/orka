@@ -141,14 +141,14 @@ func podShouldAutomountServiceAccountToken(task *corev1alpha1.Task, agent *corev
 	if task == nil || !isUntrustedComputeTask(task, agent) {
 		return true
 	}
-	if task.Spec.SessionRef != nil || taskUsesOrkaWorkerCallback(task) {
+	if task.Spec.SessionRef != nil || taskUsesManagedOrkaWorker(task) {
 		return true
 	}
 
 	return false
 }
 
-func taskUsesOrkaWorkerCallback(task *corev1alpha1.Task) bool {
+func taskUsesManagedOrkaWorker(task *corev1alpha1.Task) bool {
 	if task == nil {
 		return false
 	}
@@ -193,26 +193,19 @@ func directGitCredentialsEnabled() bool {
 }
 
 func directProviderSecretsAllowed(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
-	return !isUntrustedComputeTask(task, agent) || isVendorAgentTask(task, agent) || directProviderSecretsEnabled()
+	return taskAllowsDirectRuntimeSecrets(task, agent) || directProviderSecretsEnabled()
 }
 
 func directSecretMountsAllowed(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
-	return !isUntrustedComputeTask(task, agent) || isVendorAgentTask(task, agent) || directSecretMountsEnabled()
+	return taskAllowsDirectRuntimeSecrets(task, agent) || directSecretMountsEnabled()
+}
+
+func taskAllowsDirectRuntimeSecrets(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	return !isUntrustedComputeTask(task, agent) || isVendorAgentTask(task, agent)
 }
 
 func mainContainerNeedsGitCredentials(task *corev1alpha1.Task) bool {
-	if task == nil {
-		return false
-	}
-
-	switch task.Spec.Type {
-	case corev1alpha1.TaskTypeAgent:
-		return true
-	case corev1alpha1.TaskTypeContainer:
-		return task.Spec.Image == ""
-	default:
-		return false
-	}
+	return taskUsesManagedOrkaWorker(task)
 }
 
 func directGitCredentialsAllowed(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {

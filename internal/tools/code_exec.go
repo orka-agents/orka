@@ -89,7 +89,8 @@ type SandboxRunRequest struct {
 	InputHash        string
 }
 
-// SandboxRunResult represents the sandbox execution result.
+// SandboxRunResult represents the sandbox execution result. Keep its fields
+// identical to CodeExecResult; conversion helpers rely on direct struct conversion.
 type SandboxRunResult struct {
 	Output          string `json:"output"`
 	Error           string `json:"error,omitempty"`
@@ -141,7 +142,8 @@ type CodeExecArgs struct {
 	Timeout  int    `json:"timeout,omitempty"` // Timeout in seconds
 }
 
-// CodeExecResult represents the execution result.
+// CodeExecResult represents the execution result. Keep its fields identical to
+// SandboxRunResult; conversion helpers rely on direct struct conversion.
 type CodeExecResult struct {
 	Output          string `json:"output"`
 	Error           string `json:"error,omitempty"`

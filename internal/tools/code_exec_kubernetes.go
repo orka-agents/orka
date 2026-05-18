@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sozercan/orka/internal/workerenv"
@@ -41,13 +42,14 @@ const (
 	codeExecKubernetesLabelTool     = "orka.ai/tool"
 	codeExecKubernetesLabelJob      = "orka.ai/code-exec-job"
 
-	codeExecKubernetesAnnotationRunID         = "orka.ai/code-exec-run-id"
-	codeExecKubernetesAnnotationInputHash     = "orka.ai/code-exec-input-hash"
-	codeExecKubernetesAnnotationResultVersion = "orka.ai/code-exec-result-version"
-	codeExecKubernetesResultVersion           = "code_exec_result_v1"
-	codeExecKubernetesResultKey               = "result.json"
-	codeExecKubernetesStoreResultTimeout      = 15 * time.Second
-	codeExecKubernetesStoredResultRetention   = 24 * time.Hour
+	codeExecKubernetesAnnotationRunID                = "orka.ai/code-exec-run-id"
+	codeExecKubernetesAnnotationInputHash            = "orka.ai/code-exec-input-hash"
+	codeExecKubernetesAnnotationResultVersion        = "orka.ai/code-exec-result-version"
+	codeExecKubernetesResultVersion                  = "code_exec_result_v1"
+	codeExecKubernetesResultKey                      = "result.json"
+	codeExecKubernetesStoreResultTimeout             = 15 * time.Second
+	codeExecKubernetesStoredResultRetention          = 24 * time.Hour
+	codeExecKubernetesStoredResultCleanupMinInterval = 10 * time.Minute
 
 	codeExecKubernetesCodeVolumeName = "code"
 	codeExecKubernetesCodeMountPath  = "/orka-code"
@@ -82,6 +84,13 @@ type KubernetesJobCodeExecutor struct {
 }
 
 var _ SandboxClient = (*KubernetesJobCodeExecutor)(nil)
+
+var codeExecKubernetesStoredResultCleanupState = struct {
+	sync.Mutex
+	lastByNamespace map[string]time.Time
+}{
+	lastByNamespace: map[string]time.Time{},
+}
 
 type kubernetesCodeExecClients struct {
 	client     crclient.Client
@@ -282,8 +291,9 @@ func (e *KubernetesJobCodeExecutor) buildResourcesWithJobName(namespace string, 
 		return nil, err
 	}
 
-	if strings.TrimSpace(jobName) == "" {
-		jobName = e.jobNameForRequest(req)
+	jobName = strings.TrimSpace(jobName)
+	if jobName == "" {
+		return nil, fmt.Errorf("kubernetes code_exec job name is required")
 	}
 	command, err := codeExecKubernetesCommand(req.Language, req.OutputLimitBytes, jobName)
 	if err != nil {
@@ -693,10 +703,30 @@ func (e *KubernetesJobCodeExecutor) storeResult(ctx context.Context, c crclient.
 		}
 		return nil
 	}
-	if err := e.cleanupExpiredStoredResults(ctx, c, namespace, time.Now()); err != nil {
+	if err := e.cleanupExpiredStoredResultsIfDue(ctx, c, namespace, time.Now()); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (e *KubernetesJobCodeExecutor) cleanupExpiredStoredResultsIfDue(ctx context.Context, c crclient.Client, namespace string, now time.Time) error {
+	if strings.TrimSpace(namespace) == "" {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	codeExecKubernetesStoredResultCleanupState.Lock()
+	last := codeExecKubernetesStoredResultCleanupState.lastByNamespace[namespace]
+	if !last.IsZero() && now.Sub(last) < codeExecKubernetesStoredResultCleanupMinInterval {
+		codeExecKubernetesStoredResultCleanupState.Unlock()
+		return nil
+	}
+	codeExecKubernetesStoredResultCleanupState.lastByNamespace[namespace] = now
+	codeExecKubernetesStoredResultCleanupState.Unlock()
+
+	return e.cleanupExpiredStoredResults(ctx, c, namespace, now)
 }
 
 func (e *KubernetesJobCodeExecutor) cleanupExpiredStoredResults(ctx context.Context, c crclient.Client, namespace string, now time.Time) error {
@@ -1210,12 +1240,6 @@ func (e *KubernetesJobCodeExecutor) waitForJob(ctx context.Context, clients kube
 	defer ticker.Stop()
 
 	for {
-		if storedResult, found, err := e.loadStoredResult(ctx, clients.client, clients.namespace, jobName, req); err != nil {
-			return CodeExecResult{Error: fmt.Sprintf("failed to read persisted kubernetes code_exec result: %v", err), ExitCode: -1}
-		} else if found {
-			return storedResult
-		}
-
 		result, done := e.checkJob(ctx, clients, jobName, req.OutputLimitBytes, codeExecKubernetesShouldPersistResult(req))
 		if done {
 			return result
