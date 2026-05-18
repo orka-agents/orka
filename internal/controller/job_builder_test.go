@@ -123,6 +123,10 @@ func TestJobBuilder_Build_PropagatesTransactionMetadata(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{
 			Type:  corev1alpha1.TaskTypeContainer,
 			Image: "busybox:latest",
+			Env: []corev1.EnvVar{
+				{Name: workerenv.TransactionScope, Value: "spoofed"},
+				{Name: workerenv.TransactionScopes, Value: "spoofed"},
+			},
 			Transaction: &corev1alpha1.TaskTransaction{
 				Profile:                "kontxt",
 				ID:                     testTransactionID,
@@ -179,6 +183,9 @@ func TestJobBuilder_Build_PropagatesTransactionMetadata(t *testing.T) {
 		}
 		if env.Value != want {
 			t.Fatalf("%s = %q, want %q", name, env.Value, want)
+		}
+		if count := countEnvVars(envVars, name); count != 1 {
+			t.Fatalf("%s appeared %d times, want exactly once", name, count)
 		}
 	}
 }
@@ -1278,6 +1285,16 @@ func findEnvVar(envVars []corev1.EnvVar, name string) (corev1.EnvVar, bool) {
 		}
 	}
 	return corev1.EnvVar{}, false
+}
+
+func countEnvVars(envVars []corev1.EnvVar, name string) int {
+	count := 0
+	for _, e := range envVars {
+		if e.Name == name {
+			count++
+		}
+	}
+	return count
 }
 
 // helper to check volume exists by name

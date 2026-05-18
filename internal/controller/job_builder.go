@@ -492,15 +492,15 @@ func addTransactionEnvVars(envVars []corev1.EnvVar, tx *corev1alpha1.TaskTransac
 	if tx == nil {
 		return envVars
 	}
-	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionID, tx.ID)
-	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionProfile, tx.Profile)
-	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionIssuer, tx.Issuer)
-	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionSubject, tx.Subject)
-	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionRequestingWorkload, tx.RequestingWorkload)
-	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionScope, tx.Scope)
-	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionScopes, workerenv.JoinCSV(tx.Scopes))
-	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionContextDigest, tx.ContextDigest)
-	envVars = workerenv.AppendIfSet(envVars, workerenv.TransactionRequesterContextDigest, tx.RequesterContextDigest)
+	envVars = setControllerEnv(envVars, workerenv.TransactionID, tx.ID)
+	envVars = setControllerEnv(envVars, workerenv.TransactionProfile, tx.Profile)
+	envVars = setControllerEnv(envVars, workerenv.TransactionIssuer, tx.Issuer)
+	envVars = setControllerEnv(envVars, workerenv.TransactionSubject, tx.Subject)
+	envVars = setControllerEnv(envVars, workerenv.TransactionRequestingWorkload, tx.RequestingWorkload)
+	envVars = setControllerEnv(envVars, workerenv.TransactionScope, tx.Scope)
+	envVars = setControllerEnv(envVars, workerenv.TransactionScopes, workerenv.JoinCSV(tx.Scopes))
+	envVars = setControllerEnv(envVars, workerenv.TransactionContextDigest, tx.ContextDigest)
+	envVars = setControllerEnv(envVars, workerenv.TransactionRequesterContextDigest, tx.RequesterContextDigest)
 	return envVars
 }
 
