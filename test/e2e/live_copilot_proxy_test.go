@@ -35,6 +35,9 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		apiBaseURL         string
 		cancelControllerPF context.CancelFunc
 		controllerPFCmd    *exec.Cmd
+		proxyBaseURL       string
+		cancelProxyPF      context.CancelFunc
+		proxyPFCmd         *exec.Cmd
 		discoveredModel    string
 		token              string
 	)
@@ -53,10 +56,20 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		token, err = serviceAccountToken()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(token).NotTo(BeEmpty())
+
+		By("setting up port-forward to the live copilot proxy")
+		proxyBaseURL, cancelProxyPF, proxyPFCmd, err = startServicePortForward(
+			liveCopilotProxyServiceNamespace(),
+			liveCopilotProxyServiceName(),
+			18189,
+			liveCopilotProxyServicePort(),
+		)
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	AfterAll(func() {
 		stopPortForward(cancelControllerPF, controllerPFCmd)
+		stopPortForward(cancelProxyPF, proxyPFCmd)
 	})
 
 	AfterEach(func() {
@@ -85,16 +98,12 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 		Expect(catalog.AllModelIDs).NotTo(BeEmpty(), "proxy should expose at least one model")
 
 		By("discovering a GPT-family model that works through the OpenAI provider path")
-		proxyBaseURL, cancelProxyPF, proxyPFCmd, err := startServicePortForward(
-			liveCopilotProxyServiceNamespace(),
-			liveCopilotProxyServiceName(),
-			liveProxyProbePFPort,
-			liveCopilotProxyServicePort(),
+		discoveredModel, err = firstUsableProxyOpenAIModel(
+			proxyBaseURL,
+			catalog,
+			liveProxyOpenAIModelPreferences,
+			liveCopilotProxyGPTModelPrefixes...,
 		)
-		Expect(err).NotTo(HaveOccurred())
-		defer stopPortForward(cancelProxyPF, proxyPFCmd)
-
-		discoveredModel, err = firstUsableProxyOpenAIModel(proxyBaseURL, catalog, liveProxyOpenAIModelPreferences, "gpt-")
 		Expect(err).NotTo(HaveOccurred())
 		if discoveredModel == "" {
 			Skip("Skipping live Copilot proxy OpenAI provider checks: no usable GPT OpenAI model exposed")
@@ -113,7 +122,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 				liveCopilotProxyServicePort(),
 				liveProxyProbePFPort,
 				liveProxyOpenAIModelPreferences,
-				"gpt-",
+				liveCopilotProxyGPTModelPrefixes...,
 			)
 			Expect(err).NotTo(HaveOccurred())
 		}
@@ -186,6 +195,9 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 
 		By("waiting for the AI task to complete")
 		phase := waitForTaskCompletion(liveProxyTaskName, 5*time.Minute)
+		if phase == "Failed" && liveCopilotProxyTaskFailedWithForbidden(liveProxyTaskName) {
+			Skip("Skipping: live Copilot proxy chat completions returned 403 for model " + model)
+		}
 		Expect(phase).To(Equal("Succeeded"), "Live copilot proxy AI task should succeed")
 
 		By("verifying the result is available")
@@ -212,22 +224,24 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 	})
 
 	It("should auto-inject and execute coordination memory tools for a live copilot proxy Agent", func() {
-		By("discovering a live GPT-family model from the proxy service")
-		model := discoveredModel
+		By("discovering a live chat-completions model from the proxy service")
+		catalog, err := fetchProxyModelCatalogViaServiceProxy(
+			liveCopilotProxyServiceNamespace(),
+			liveCopilotProxyServiceName(),
+			liveCopilotProxyServicePort(),
+		)
+		Expect(err).NotTo(HaveOccurred())
+		model, skipReason, err := firstLiveCopilotProxyChatCompletionModel(
+			proxyBaseURL,
+			e2eGitHubToken,
+			catalog,
+			liveCopilotProxyChatModelPreferences(),
+			"gpt-",
+			"claude-",
+		)
+		Expect(err).NotTo(HaveOccurred())
 		if model == "" {
-			var err error
-			model, err = discoverUsableProxyOpenAIModelViaServiceProxy(
-				liveCopilotProxyServiceNamespace(),
-				liveCopilotProxyServiceName(),
-				liveCopilotProxyServicePort(),
-				liveProxyProbePFPort,
-				liveProxyOpenAIModelPreferences,
-				"gpt-",
-			)
-			Expect(err).NotTo(HaveOccurred())
-		}
-		if model == "" {
-			Skip("Skipping live Copilot proxy coordination check: no usable GPT OpenAI model exposed")
+			Skip("Skipping: " + skipReason)
 		}
 
 		By("creating a dummy secret for provider validation")
@@ -235,7 +249,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 			cmd := exec.Command("kubectl", "delete", "secret", liveProxySecretName, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 		})
-		err := createK8sSecret(liveProxySecretName, namespace, map[string]string{
+		err = createK8sSecret(liveProxySecretName, namespace, map[string]string{
 			"api-key": liveProxyProbeAPIKey,
 		})
 		Expect(err).NotTo(HaveOccurred())
@@ -372,6 +386,9 @@ After the tools have been called, reply with exactly %[3]s and nothing else.`, p
 
 		By("waiting for the coordination AI task to complete")
 		phase := waitForTaskCompletion(liveProxyCoordTask, 8*time.Minute)
+		if phase == "Failed" && liveCopilotProxyTaskFailedWithForbidden(liveProxyCoordTask) {
+			Skip("Skipping: live Copilot proxy chat completions returned 403 for model " + model)
+		}
 		Expect(phase).To(Equal("Succeeded"), "Live copilot proxy coordination AI task should succeed")
 
 		By("verifying the worker logs show each memory tool was executed")

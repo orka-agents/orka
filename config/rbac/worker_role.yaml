@@ -22,12 +22,14 @@ kind: ClusterRole
 metadata:
   name: ai-worker-role
 rules:
-# ConfigMaps: read-only (skills, secrets lookup)
+# ConfigMaps: skills/session lookup and namespace-scoped code_exec result persistence
 - apiGroups:
   - ""
   resources:
   - configmaps
   verbs:
+  - create
+  - delete
   - get
   - list
   - watch

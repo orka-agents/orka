@@ -48,6 +48,7 @@ func init() {
 // back to Chat Completions if not.
 type Provider struct {
 	client                              openai.Client
+	baseURL                             string
 	mode                                atomic.Int32 // apiMode
 	allowBareResponsesForbiddenFallback bool
 }
@@ -77,6 +78,7 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 
 	return &Provider{
 		client:                              client,
+		baseURL:                             config.BaseURL,
 		allowBareResponsesForbiddenFallback: isCustomOpenAIBaseURL(config.ProviderType, config.BaseURL),
 	}, nil
 }
@@ -97,10 +99,15 @@ func isUnsupportedAPIError(err error) bool {
 		case 404, 405:
 			return true
 		case 403:
-			return isUnsupportedAPIMessage(apiErr.Code) || isUnsupportedAPIMessage(apiErr.Message)
+			if isUnsupportedAPIMessage(apiErr.Code) || isUnsupportedAPIMessage(apiErr.Message) {
+				return true
+			}
 		}
 		if isUnsupportedAPIMessage(apiErr.Code) {
 			return true
+		}
+		if apiErr.StatusCode != 0 {
+			return false
 		}
 	}
 	var providerErr *llm.ProviderError
@@ -109,7 +116,15 @@ func isUnsupportedAPIError(err error) bool {
 		case 404, 405:
 			return true
 		case 403:
-			return isUnsupportedAPIMessage(providerErr.Message)
+			if isUnsupportedAPIMessage(providerErr.Message) {
+				return true
+			}
+		}
+		if isUnsupportedAPIMessage(providerErr.Message) {
+			return true
+		}
+		if providerErr.StatusCode != 0 {
+			return false
 		}
 	}
 	msg := err.Error()
@@ -191,6 +206,11 @@ func isUnsupportedAPIMessage(msg string) bool {
 	if msg == "" {
 		return false
 	}
+	return hasUnsupportedAPICode(msg)
+}
+
+func hasUnsupportedAPICode(msg string) bool {
+	msg = strings.ToLower(strings.TrimSpace(msg))
 	return strings.Contains(msg, "unsupported_api") ||
 		strings.Contains(msg, "invalid_url") ||
 		strings.Contains(msg, "unsupported_api_for_model") ||
@@ -199,6 +219,42 @@ func isUnsupportedAPIMessage(msg string) bool {
 		strings.Contains(msg, "responses api is not supported") ||
 		strings.Contains(msg, "unsupported responses") ||
 		strings.Contains(msg, "unsupported api surface")
+}
+
+func isForbiddenAPIError(err error) bool {
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) && apiErr.StatusCode == 403 {
+		return true
+	}
+	var providerErr *llm.ProviderError
+	if errors.As(err, &providerErr) && providerErr.StatusCode == 403 {
+		return true
+	}
+	return strings.Contains(err.Error(), "403 Forbidden")
+}
+
+func isCopilotResponsesHost(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.Contains(value, "copilot") && strings.Contains(value, "responses")
+}
+
+func (p *Provider) isCopilotResponsesForbiddenError(err error) bool {
+	if !isForbiddenAPIError(err) {
+		return false
+	}
+	if isCopilotResponsesHost(p.baseURL + "/responses") {
+		return true
+	}
+
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) && apiErr.Request != nil && apiErr.Request.URL != nil {
+		requestURL := apiErr.Request.URL.String()
+		if isCopilotResponsesHost(requestURL) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // -------------------------------------------------------------------------
@@ -867,10 +923,17 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 
 	if mode == apiModeResponses {
 		resp, err := p.completeResponses(ctx, req)
-		if err != nil {
-			return nil, err
+		if err == nil {
+			return resp, nil
 		}
-		return resp, nil
+		if isUnsupportedAPIError(err) {
+			p.mode.Store(int32(apiModeChatCompletions))
+			return p.completeChatCompletions(ctx, req)
+		}
+		if p.isCopilotResponsesForbiddenError(err) {
+			return p.completeChatCompletions(ctx, req)
+		}
+		return nil, err
 	}
 
 	// Unknown — probe with responses.create
@@ -880,6 +943,10 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 		return resp, nil
 	}
 	if p.shouldFallbackToChatCompletions(err) {
+		p.mode.Store(int32(apiModeChatCompletions))
+		return p.completeChatCompletions(ctx, req)
+	}
+	if p.isCopilotResponsesForbiddenError(err) {
 		p.mode.Store(int32(apiModeChatCompletions))
 		return p.completeChatCompletions(ctx, req)
 	}
@@ -909,6 +976,10 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 		return p.streamResponses(ctx, req), nil
 	}
 	if p.shouldFallbackToChatCompletions(err) {
+		p.mode.Store(int32(apiModeChatCompletions))
+		return p.streamChatCompletions(ctx, req), nil
+	}
+	if p.isCopilotResponsesForbiddenError(err) {
 		p.mode.Store(int32(apiModeChatCompletions))
 		return p.streamChatCompletions(ctx, req), nil
 	}

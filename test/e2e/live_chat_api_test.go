@@ -26,16 +26,18 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		liveChatSecretName   = "e2e-live-chat-secret"
 		liveChatExpectedText = "ORKA_LIVE_CHAT_OK"
 		controllerPFPort     = 18087
-		liveProxyProbePFPort = 18092
 	)
 
 	var (
-		apiBaseURL      string
-		cancelPF        context.CancelFunc
-		portForwardCmd  *exec.Cmd
-		token           string
-		liveGPTModel    string
-		liveProxyModels proxyModelCatalog
+		apiBaseURL          string
+		cancelPF            context.CancelFunc
+		portForwardCmd      *exec.Cmd
+		proxyBaseURL        string
+		cancelProxyPF       context.CancelFunc
+		proxyPortForwardCmd *exec.Cmd
+		token               string
+		liveChatModel       string
+		liveProxyModels     proxyModelCatalog
 	)
 
 	BeforeAll(func() {
@@ -67,7 +69,19 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		Expect(ready.Status).To(Equal("ready"))
 		Expect(ready.Error).To(BeEmpty())
 
-		By("discovering a live GPT-family model from the proxy catalog")
+		By("setting up port-forward to the live copilot proxy")
+		proxyBaseURL, cancelProxyPF, proxyPortForwardCmd, err = startServicePortForward(
+			liveCopilotProxyServiceNamespace(),
+			liveCopilotProxyServiceName(),
+			18188,
+			liveCopilotProxyServicePort(),
+		)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() {
+			stopPortForward(cancelProxyPF, proxyPortForwardCmd)
+		})
+
+		By("discovering a live chat-completions model from the proxy catalog")
 		liveProxyModels, err = fetchProxyModelCatalogViaServiceProxy(
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
@@ -75,23 +89,18 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(liveProxyModels.AllModelIDs).NotTo(BeEmpty(), "proxy should expose at least one model")
-
-		By("discovering a live GPT-family model that works through the OpenAI provider path")
-		proxyBaseURL, cancelProxyPF, proxyPFCmd, err := startServicePortForward(
-			liveCopilotProxyServiceNamespace(),
-			liveCopilotProxyServiceName(),
-			liveProxyProbePFPort,
-			liveCopilotProxyServicePort(),
+		var skipReason string
+		liveChatModel, skipReason, err = firstLiveCopilotProxyChatCompletionModel(
+			proxyBaseURL,
+			e2eGitHubToken,
+			liveProxyModels,
+			liveCopilotProxyChatModelPreferences(),
+			"gpt-",
+			"claude-",
 		)
 		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func() {
-			stopPortForward(cancelProxyPF, proxyPFCmd)
-		})
-
-		liveGPTModel, err = firstUsableProxyOpenAIModel(proxyBaseURL, liveProxyModels, liveProxyOpenAIModelPreferences, "gpt-")
-		Expect(err).NotTo(HaveOccurred())
-		if liveGPTModel == "" {
-			Skip("Skipping live Chat API checks: no usable GPT OpenAI model exposed")
+		if liveChatModel == "" {
+			Skip("Skipping: " + skipReason)
 		}
 
 		By("creating a dummy secret for the live provider")
@@ -105,7 +114,7 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		})
 
 		By("creating a Provider CRD backed by the live copilot proxy")
-		createProviderCRD(liveChatProviderName, "openai", liveChatSecretName, "api-key", e2eLiveCopilotProxyBaseURL, liveGPTModel)
+		createProviderCRD(liveChatProviderName, "openai", liveChatSecretName, "api-key", e2eLiveCopilotProxyBaseURL, liveChatModel)
 		DeferCleanup(func() {
 			cmd := exec.Command("kubectl", "delete", "provider", liveChatProviderName, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
@@ -118,7 +127,11 @@ var _ = Describe("Live Chat API", Ordered, func() {
 	})
 
 	It("should stream chat SSE and create a live session", func() {
-		sessionID, content, usage, events := postLiveChatSSE(apiBaseURL, token, liveChatProviderName, liveGPTModel, liveChatExpectedText)
+		sessionID, content, usage, events, err := postLiveChatSSE(apiBaseURL, token, liveChatProviderName, liveChatModel, liveChatExpectedText)
+		if isLiveCopilotProxyForbiddenError(err) {
+			Skip("Skipping: live Copilot proxy chat completions returned 403 for model " + liveChatModel)
+		}
+		Expect(err).NotTo(HaveOccurred())
 
 		Expect(sessionID).NotTo(BeEmpty(), "SSE stream should include a sessionId")
 		Expect(events).To(ContainElement("status"))
@@ -136,7 +149,11 @@ var _ = Describe("Live Chat API", Ordered, func() {
 	})
 
 	It("should return JSON chat metadata and expose the created session", func() {
-		resp := postLiveChatJSON(apiBaseURL, token, liveChatProviderName, liveGPTModel, liveChatExpectedText)
+		resp, err := postLiveChatJSON(apiBaseURL, token, liveChatProviderName, liveChatModel, liveChatExpectedText)
+		if isLiveCopilotProxyForbiddenError(err) {
+			Skip("Skipping: live Copilot proxy chat completions returned 403 for model " + liveChatModel)
+		}
+		Expect(err).NotTo(HaveOccurred())
 
 		Expect(resp.SessionID).NotTo(BeEmpty(), "JSON mode should return a sessionId")
 		Expect(resp.Usage.LLMCalls).To(BeNumerically(">=", 1), "JSON mode should record at least one LLM call")
@@ -171,7 +188,7 @@ type liveChatUsage struct {
 	LLMCalls int `json:"llmCalls"`
 }
 
-func postLiveChatSSE(apiBaseURL, token, providerName, model, expectedText string) (string, string, liveChatUsage, []string) {
+func postLiveChatSSE(apiBaseURL, token, providerName, model, expectedText string) (string, string, liveChatUsage, []string, error) {
 	body := fmt.Sprintf(`{
 		"message": "Reply with exactly %s and nothing else.",
 		"provider": "%s",
@@ -181,25 +198,36 @@ func postLiveChatSSE(apiBaseURL, token, providerName, model, expectedText string
 	}`, expectedText, providerName, model)
 
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(apiBaseURL, "/")+"/api/v1/chat", strings.NewReader(body))
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return "", "", liveChatUsage{}, nil, err
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 
 	client := &http.Client{Timeout: 3 * time.Minute}
 	resp, err := client.Do(req)
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return "", "", liveChatUsage{}, nil, err
+	}
 	defer resp.Body.Close()
 
-	Expect(resp.StatusCode).To(Equal(http.StatusOK))
-	Expect(resp.Header.Get("Content-Type")).To(ContainSubstring("text/event-stream"))
+	if resp.StatusCode != http.StatusOK {
+		payload, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return "", "", liveChatUsage{}, nil, readErr
+		}
+		return "", "", liveChatUsage{}, nil, fmt.Errorf("live chat SSE returned %s: %s", resp.Status, strings.TrimSpace(string(payload)))
+	}
+	if contentType := resp.Header.Get("Content-Type"); !strings.Contains(contentType, "text/event-stream") {
+		return "", "", liveChatUsage{}, nil, fmt.Errorf("live chat SSE returned content-type %q", contentType)
+	}
 
 	sessionID, content, usage, events, err := parseLiveChatSSE(resp.Body)
-	Expect(err).NotTo(HaveOccurred())
-	return sessionID, strings.TrimSpace(content), usage, events
+	return sessionID, strings.TrimSpace(content), usage, events, err
 }
 
-func postLiveChatJSON(apiBaseURL, token, providerName, model, expectedText string) liveChatJSONResponse {
+func postLiveChatJSON(apiBaseURL, token, providerName, model, expectedText string) (liveChatJSONResponse, error) {
 	body := fmt.Sprintf(`{
 		"message": "Reply with exactly %s and nothing else.",
 		"provider": "%s",
@@ -209,25 +237,41 @@ func postLiveChatJSON(apiBaseURL, token, providerName, model, expectedText strin
 	}`, expectedText, providerName, model)
 
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(apiBaseURL, "/")+"/api/v1/chat", strings.NewReader(body))
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return liveChatJSONResponse{}, err
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
 	client := &http.Client{Timeout: 3 * time.Minute}
 	resp, err := client.Do(req)
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return liveChatJSONResponse{}, err
+	}
 	defer resp.Body.Close()
 
-	Expect(resp.StatusCode).To(Equal(http.StatusOK))
-	Expect(resp.Header.Get("Content-Type")).To(ContainSubstring("application/json"))
+	if resp.StatusCode != http.StatusOK {
+		payload, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return liveChatJSONResponse{}, readErr
+		}
+		return liveChatJSONResponse{}, fmt.Errorf("live chat JSON returned %s: %s", resp.Status, strings.TrimSpace(string(payload)))
+	}
+	if contentType := resp.Header.Get("Content-Type"); !strings.Contains(contentType, "application/json") {
+		return liveChatJSONResponse{}, fmt.Errorf("live chat JSON returned content-type %q", contentType)
+	}
 
 	payload, err := io.ReadAll(resp.Body)
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return liveChatJSONResponse{}, err
+	}
 
 	var chatResp liveChatJSONResponse
-	Expect(json.Unmarshal(payload, &chatResp)).To(Succeed())
-	return chatResp
+	if err := json.Unmarshal(payload, &chatResp); err != nil {
+		return liveChatJSONResponse{}, err
+	}
+	return chatResp, nil
 }
 
 func parseLiveChatSSE(body io.Reader) (string, string, liveChatUsage, []string, error) {

@@ -22,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -1074,28 +1075,48 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 		return err
 	}
 
-	agent := &corev1alpha1.Agent{}
-	ctx := c.Context()
-	if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, agent); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusNotFound, "agent not found")
-		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent: %v", err))
-	}
-	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "updateAgent", agent.Namespace, agent.Name); err != nil {
-		return err
-	}
-
+	// Namespace isolation is resolved before parsing the body so unauthorized
+	// namespace probes cannot learn whether the payload is syntactically valid.
 	var req UpdateAgentRequest
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
 
-	agent.Spec = req.Spec
-	if err := authorizeContextTokenAgentSpec(ctx, h.client, contextTokenFromUserInfo(GetUserInfo(c)), h.contextTokenAuthorization, "updateAgent", agent); err != nil {
-		return err
-	}
-	if err := h.client.Update(ctx, agent); err != nil {
+	ctx := c.Context()
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+
+	var agent *corev1alpha1.Agent
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Agent{}
+		if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, current); err != nil {
+			return err
+		}
+		if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "updateAgent", current.Namespace, current.Name); err != nil {
+			return err
+		}
+
+		patchBase := current.DeepCopy()
+		current.Spec = req.Spec
+		if err := authorizeContextTokenAgentSpec(ctx, h.client, token, h.contextTokenAuthorization, "updateAgent", current); err != nil {
+			return err
+		}
+		if err := h.client.Patch(ctx, current, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		agent = current
+		return nil
+	})
+	if err != nil {
+		var fiberErr *fiber.Error
+		if errors.As(err, &fiberErr) {
+			return err
+		}
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "agent not found")
+		}
+		if apierrors.IsConflict(err) {
+			return fiber.NewError(fiber.StatusConflict, "agent was modified concurrently")
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update agent: %v", err))
 	}
 

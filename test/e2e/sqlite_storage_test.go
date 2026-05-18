@@ -328,11 +328,12 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 		Eventually(verifyTaskDeleted, 30*time.Second, time.Second).Should(Succeed())
 	})
 
-	// Test 7: Verify worker RBAC — workers should NOT have ConfigMap write permissions
-	It("should not grant ConfigMap write permissions to workers", func() {
-		By("checking the worker ClusterRoles for ConfigMap permissions")
+	// Test 7: Verify non-AI worker RBAC - SQLite result storage should not
+	// require vendor or container workers to write ConfigMaps.
+	It("should not grant ConfigMap write permissions to non-AI workers", func() {
+		By("checking the non-AI worker ClusterRoles for ConfigMap permissions")
 		verifyWorkerRBAC := func(g Gomega) {
-			workerRoles := []string{"orka-ai-worker-role", "orka-vendor-worker-role", "orka-container-worker-role"}
+			workerRoles := []string{"orka-vendor-worker-role", "orka-container-worker-role"}
 			disallowedConfigMapVerbs := []string{"create", "update", "patch", "delete", "deletecollection", "*"}
 			type policyRule struct {
 				APIGroups []string `json:"apiGroups"`
