@@ -283,5 +283,5 @@ func TestNewTaskProvenanceConfigDefaults(t *testing.T) {
 	cfg := NewTaskProvenanceConfig(true, "", "", "orka-system")
 	require.True(t, cfg.Enabled)
 	require.Contains(t, cfg.TrustedUsernames, trustedControllerUser)
-	require.ElementsMatch(t, []string{"orka-ai-worker"}, cfg.TrustedServiceAccountNames)
+	require.ElementsMatch(t, []string{"orka-ai-worker", "orka-vendor-worker"}, cfg.TrustedServiceAccountNames)
 }

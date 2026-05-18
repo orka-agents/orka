@@ -44,7 +44,10 @@ type ToolContext struct {
 	TaskLabels           func() map[string]string
 	CheckTaskLimit       func() *ChatToolError
 	AuthorizeTaskCreate  func(context.Context, *corev1alpha1.Task) *ChatToolError
+	AuthorizeTaskDelete  func(context.Context, *corev1alpha1.Task) *ChatToolError
 	AuthorizeAgentCreate func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	AuthorizeAgentUpdate func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	AuthorizeAgentDelete func(context.Context, *corev1alpha1.Agent) *ChatToolError
 	IncrementTasks       func()
 }
 

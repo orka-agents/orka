@@ -306,24 +306,34 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", generateChatID()) },
 			TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": "openai-proxy"} },
 			AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
-				if err := authorizeAndStampToolTaskCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolCreateTask", userInfo, task); err != nil {
-					return &tools.ChatToolError{
-						Type:       "authorization_failed",
-						Message:    err.Error(),
-						Suggestion: "Use a task configuration authorized by the context token",
-					}
+				authorize := func(ctx context.Context, task *corev1alpha1.Task) error {
+					return authorizeAndStampToolTaskCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolCreateTask", userInfo, task)
 				}
-				return nil
+				return chatToolAuthorizationError(authorize, ctx, task, "Use a task configuration authorized by the context token")
+			},
+			AuthorizeTaskDelete: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
+				authorize := func(ctx context.Context, task *corev1alpha1.Task) error {
+					return authorizeContextTokenTaskDeleteObject(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolDeleteTask", task)
+				}
+				return chatToolAuthorizationError(authorize, ctx, task, "Use a task authorized by the context token")
 			},
 			AuthorizeAgentCreate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
-				if err := authorizeContextTokenToolAgentCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolCreateAgent", agent); err != nil {
-					return &tools.ChatToolError{
-						Type:       "authorization_failed",
-						Message:    err.Error(),
-						Suggestion: "Use an agent configuration authorized by the context token",
-					}
+				authorize := func(ctx context.Context, agent *corev1alpha1.Agent) error {
+					return authorizeContextTokenToolAgentCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolCreateAgent", agent)
 				}
-				return nil
+				return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent configuration authorized by the context token")
+			},
+			AuthorizeAgentUpdate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
+				authorize := func(ctx context.Context, agent *corev1alpha1.Agent) error {
+					return authorizeContextTokenToolAgentUpdate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolUpdateAgent", agent)
+				}
+				return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent update authorized by the context token")
+			},
+			AuthorizeAgentDelete: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
+				authorize := func(ctx context.Context, agent *corev1alpha1.Agent) error {
+					return authorizeContextTokenToolAgentDelete(contextToken, h.contextTokenAuthorization, "openAIToolDeleteAgent", agent)
+				}
+				return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent authorized by the context token")
 			},
 			CheckTaskLimit: func() *tools.ChatToolError {
 				if tasksCreated >= 20 {

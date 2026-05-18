@@ -343,6 +343,7 @@ func (e *KubernetesJobCodeExecutor) buildResourcesWithJobName(namespace string, 
 	backoffLimit := int32(0)
 	deadlineSeconds := codeExecDeadlineSeconds(req.Timeout)
 	ttlSeconds := codeExecKubernetesFinishedTTLSeconds
+	terminationGracePeriodSeconds := int64(1)
 	runAsNonRoot := true
 	runAsUser := int64(65532)
 	allowPrivilegeEscalation := false
@@ -400,7 +401,7 @@ func (e *KubernetesJobCodeExecutor) buildResourcesWithJobName(namespace string, 
 					RestartPolicy:                 corev1.RestartPolicyNever,
 					ServiceAccountName:            serviceAccount.Name,
 					AutomountServiceAccountToken:  &automountServiceAccountToken,
-					TerminationGracePeriodSeconds: new(int64(1)),
+					TerminationGracePeriodSeconds: &terminationGracePeriodSeconds,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot:    &runAsNonRoot,
 						RunAsUser:       &runAsUser,

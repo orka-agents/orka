@@ -29,3 +29,14 @@ func TestSensitiveTextRedactsJWT(t *testing.T) {
 		t.Fatalf("SensitiveText leaked JWT: %q", got)
 	}
 }
+
+func TestSensitiveTextRedactsURLUserInfoWithoutPassword(t *testing.T) {
+	input := `repo https://token@example.com/org/repo.git`
+	got := SensitiveText(input)
+	if strings.Contains(got, "token@example") {
+		t.Fatalf("SensitiveText leaked URL userinfo: %q", got)
+	}
+	if !strings.Contains(got, "https://"+redactedValue+"@example.com") {
+		t.Fatalf("SensitiveText() = %q, want redacted URL userinfo", got)
+	}
+}

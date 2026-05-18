@@ -39,6 +39,7 @@ const (
 var (
 	defaultTrustedWorkerServiceAccounts = []string{
 		"orka-ai-worker",
+		"orka-vendor-worker",
 	}
 
 	managedTransactionLabelKeys = []string{

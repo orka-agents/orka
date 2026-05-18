@@ -299,8 +299,17 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor.SetTaskCreateAuthorizer(func(ctx context.Context, task *corev1alpha1.Task) error {
 		return authorizeAndStampToolTaskCreate(ctx, ch.client, contextToken, ch.contextTokenAuthorization, "chatToolCreateTask", userInfo, task)
 	})
+	executor.SetTaskDeleteAuthorizer(func(ctx context.Context, task *corev1alpha1.Task) error {
+		return authorizeContextTokenTaskDeleteObject(ctx, ch.client, contextToken, ch.contextTokenAuthorization, "chatToolDeleteTask", task)
+	})
 	executor.SetAgentCreateAuthorizer(func(ctx context.Context, agent *corev1alpha1.Agent) error {
 		return authorizeContextTokenToolAgentCreate(ctx, ch.client, contextToken, ch.contextTokenAuthorization, "chatToolCreateAgent", agent)
+	})
+	executor.SetAgentUpdateAuthorizer(func(ctx context.Context, agent *corev1alpha1.Agent) error {
+		return authorizeContextTokenToolAgentUpdate(ctx, ch.client, contextToken, ch.contextTokenAuthorization, "chatToolUpdateAgent", agent)
+	})
+	executor.SetAgentDeleteAuthorizer(func(ctx context.Context, agent *corev1alpha1.Agent) error {
+		return authorizeContextTokenToolAgentDelete(contextToken, ch.contextTokenAuthorization, "chatToolDeleteAgent", agent)
 	})
 
 	// Build tools from the chat registry and restrict execution to the exposed set.

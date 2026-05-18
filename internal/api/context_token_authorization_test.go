@@ -546,3 +546,16 @@ func testTaskCreateAuthorizationContext() contextTokenTaskCreateAuthorizationCon
 		RuntimeAllowBash:    true,
 	}
 }
+
+func TestRedactedContextTokenAuthorizationFailuresRedactsRepositoryCredentials(t *testing.T) {
+	got := redactedContextTokenAuthorizationFailures([]string{
+		`workspace repo "https://user:embedded-secret@example.com/org/repo.git" does not match token context "https://github.com/org/repo"`,
+		`token ghp_abcdefghijklmnopqrstuvwxyz1234567890 should not leak`,
+	})
+	if strings.Contains(got, "embedded-secret") || strings.Contains(got, "ghp_abcdefghijklmnopqrstuvwxyz1234567890") {
+		t.Fatalf("redacted failures leaked secret material: %q", got)
+	}
+	if !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("redacted failures = %q, want redaction marker", got)
+	}
+}

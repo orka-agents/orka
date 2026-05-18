@@ -1339,7 +1339,8 @@ func (r *RepositoryScanReconciler) ingestCombinedScanTask(ctx context.Context, s
 	run.TaskName = task.Name
 	run.ErrorMessage = ""
 	if task.Status.CompletionTime != nil {
-		run.CompletedAt = new(task.Status.CompletionTime.Time)
+		completedAt := task.Status.CompletionTime.Time
+		run.CompletedAt = &completedAt
 	} else {
 		now := time.Now()
 		run.CompletedAt = &now

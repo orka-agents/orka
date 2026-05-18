@@ -55,7 +55,10 @@ type ToolExecutor struct {
 	registry                  *tools.Registry
 	allowedToolNames          map[string]struct{}
 	authorizeTaskCreate       func(context.Context, *corev1alpha1.Task) error
+	authorizeTaskDelete       func(context.Context, *corev1alpha1.Task) error
 	authorizeAgentCreate      func(context.Context, *corev1alpha1.Agent) error
+	authorizeAgentUpdate      func(context.Context, *corev1alpha1.Agent) error
+	authorizeAgentDelete      func(context.Context, *corev1alpha1.Agent) error
 }
 
 // NewToolExecutor creates a new ToolExecutor.
@@ -100,9 +103,24 @@ func (e *ToolExecutor) SetTaskCreateAuthorizer(authorize func(context.Context, *
 	e.authorizeTaskCreate = authorize
 }
 
+// SetTaskDeleteAuthorizer installs an authorization hook for tools that delete Tasks.
+func (e *ToolExecutor) SetTaskDeleteAuthorizer(authorize func(context.Context, *corev1alpha1.Task) error) {
+	e.authorizeTaskDelete = authorize
+}
+
 // SetAgentCreateAuthorizer installs an authorization hook for tools that create Agents.
 func (e *ToolExecutor) SetAgentCreateAuthorizer(authorize func(context.Context, *corev1alpha1.Agent) error) {
 	e.authorizeAgentCreate = authorize
+}
+
+// SetAgentUpdateAuthorizer installs an authorization hook for tools that update Agents.
+func (e *ToolExecutor) SetAgentUpdateAuthorizer(authorize func(context.Context, *corev1alpha1.Agent) error) {
+	e.authorizeAgentUpdate = authorize
+}
+
+// SetAgentDeleteAuthorizer installs an authorization hook for tools that delete Agents.
+func (e *ToolExecutor) SetAgentDeleteAuthorizer(authorize func(context.Context, *corev1alpha1.Agent) error) {
+	e.authorizeAgentDelete = authorize
 }
 
 // ToolResult represents the result of a tool execution.
@@ -161,30 +179,19 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		GenerateTaskName:          e.generateTaskName,
 		TaskLabels:                e.taskLabels,
 		AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
-			if e.authorizeTaskCreate == nil {
-				return nil
-			}
-			if err := e.authorizeTaskCreate(ctx, task); err != nil {
-				return &tools.ChatToolError{
-					Type:       "authorization_failed",
-					Message:    err.Error(),
-					Suggestion: "Use a task configuration authorized by the context token",
-				}
-			}
-			return nil
+			return chatToolAuthorizationError(e.authorizeTaskCreate, ctx, task, "Use a task configuration authorized by the context token")
+		},
+		AuthorizeTaskDelete: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
+			return chatToolAuthorizationError(e.authorizeTaskDelete, ctx, task, "Use a task authorized by the context token")
 		},
 		AuthorizeAgentCreate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
-			if e.authorizeAgentCreate == nil {
-				return nil
-			}
-			if err := e.authorizeAgentCreate(ctx, agent); err != nil {
-				return &tools.ChatToolError{
-					Type:       "authorization_failed",
-					Message:    err.Error(),
-					Suggestion: "Use an agent configuration authorized by the context token",
-				}
-			}
-			return nil
+			return chatToolAuthorizationError(e.authorizeAgentCreate, ctx, agent, "Use an agent configuration authorized by the context token")
+		},
+		AuthorizeAgentUpdate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
+			return chatToolAuthorizationError(e.authorizeAgentUpdate, ctx, agent, "Use an agent update authorized by the context token")
+		},
+		AuthorizeAgentDelete: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
+			return chatToolAuthorizationError(e.authorizeAgentDelete, ctx, agent, "Use an agent authorized by the context token")
 		},
 		CheckTaskLimit: func() *tools.ChatToolError {
 			if e.tasksCreated >= e.maxTasks {

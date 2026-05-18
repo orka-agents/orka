@@ -18,6 +18,7 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/llm"
 	"github.com/sozercan/orka/internal/metrics"
+	"github.com/sozercan/orka/internal/redact"
 	"github.com/sozercan/orka/internal/workerenv"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -343,6 +344,64 @@ func authorizeContextTokenTaskContextObject(ctx context.Context, k8sClient clien
 	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
+func authorizeContextTokenTaskDeleteObject(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, task *corev1alpha1.Task) error {
+	if !cfg.Enabled() || token == nil || task == nil {
+		return nil
+	}
+	failures := []string{}
+	if !hasAnyScope(token.Scopes, cfg.TaskDeleteScopes) {
+		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.TaskDeleteScopes, ",")))
+	}
+	contextFailures, err := contextTokenLoadedTaskContextFailures(ctx, k8sClient, token, task, true)
+	if err != nil {
+		return err
+	}
+	failures = append(failures, contextFailures...)
+	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
+}
+
+func authorizeContextTokenToolAgentUpdate(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, agent *corev1alpha1.Agent) error {
+	if !cfg.Enabled() || token == nil || agent == nil {
+		return nil
+	}
+	failures := contextTokenAgentWriteFailures(token, cfg, agent.Namespace, agent.Name)
+	specFailures, err := contextTokenAgentSpecFailures(ctx, k8sClient, token, agent)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+	failures = append(failures, specFailures...)
+	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
+}
+
+func authorizeContextTokenToolAgentDelete(token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, agent *corev1alpha1.Agent) error {
+	if !cfg.Enabled() || token == nil || agent == nil {
+		return nil
+	}
+	failures := contextTokenAgentWriteFailures(token, cfg, agent.Namespace, agent.Name)
+	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
+}
+
+func contextTokenAgentWriteFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, namespace, agentName string) []string {
+	failures := []string{}
+	if !hasAnyScope(token.Scopes, cfg.AgentWriteScopes) {
+		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.AgentWriteScopes, ",")))
+	}
+	failures = append(failures, contextTokenAgentMutationFailures(token, namespace, agentName)...)
+	return failures
+}
+
 func contextTokenFromUserInfo(ui *UserInfo) *ContextToken {
 	if ui == nil || ui.AuthType != AuthTypeContextToken {
 		return nil
@@ -402,6 +461,10 @@ func (h *Handlers) contextTokenAllowsLoadedTaskWithIdentity(c fiber.Ctx, action 
 }
 
 func (h *Handlers) contextTokenLoadedTaskContextFailures(ctx context.Context, token *ContextToken, task *corev1alpha1.Task, includeTaskIdentity bool) ([]string, error) {
+	return contextTokenLoadedTaskContextFailures(ctx, h.client, token, task, includeTaskIdentity)
+}
+
+func contextTokenLoadedTaskContextFailures(ctx context.Context, k8sClient client.Client, token *ContextToken, task *corev1alpha1.Task, includeTaskIdentity bool) ([]string, error) {
 	if token == nil || task == nil {
 		return nil, nil
 	}
@@ -412,7 +475,7 @@ func (h *Handlers) contextTokenLoadedTaskContextFailures(ctx context.Context, to
 		namespace = req.Namespace
 	}
 
-	authzCtx, err := h.resolveContextTokenTaskCreateAuthorizationContext(ctx, req, namespace)
+	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(ctx, k8sClient, req, namespace)
 	if err != nil {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
@@ -720,12 +783,16 @@ func handleContextTokenAuthorizationFailures(cfg ContextTokenAuthorizationConfig
 		"transactionID", token.TransactionID,
 		"subject", token.Subject,
 		"issuer", token.Issuer,
-		"failures", strings.Join(failures, "; "),
+		"failures", redactedContextTokenAuthorizationFailures(failures),
 	)
 	if cfg.enforcing() {
 		return fiber.NewError(fiber.StatusForbidden, "context token is not authorized for "+action)
 	}
 	return nil
+}
+
+func redactedContextTokenAuthorizationFailures(failures []string) string {
+	return redact.SensitiveText(strings.Join(failures, "; "))
 }
 
 func contextTokenAuthorizationFailureReason(failures []string) string {
