@@ -9,6 +9,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
@@ -75,6 +76,107 @@ func TestContextTokenTaskCreateFailures(t *testing.T) {
 		require.Contains(t, joined, `workspace ref "abc123" does not match token context "def456"`)
 		require.Contains(t, joined, `tool "Bash" is not allowed by token context`)
 	})
+
+	t.Run("rejects unrestricted agent runtime when token restricts tools", func(t *testing.T) {
+		token := &ContextToken{
+			Scopes: []string{ContextTokenScopeTaskCreate},
+			TransactionContext: map[string]any{
+				"allowedTools": []any{"Bash"},
+			},
+		}
+		authzCtx := testTaskCreateAuthorizationContext()
+		authzCtx.RuntimeAllowedTools = nil
+
+		failures := contextTokenTaskCreateFailures(token, cfg, authzCtx)
+		require.Contains(t, strings.Join(failures, "\n"), "agent runtime tools are unrestricted by task or agent while token context restricts allowedTools")
+	})
+
+	t.Run("rejects blank agent runtime allowlist when token restricts tools", func(t *testing.T) {
+		token := &ContextToken{
+			Scopes: []string{ContextTokenScopeTaskCreate},
+			TransactionContext: map[string]any{
+				"allowedTools": []any{"Bash"},
+			},
+		}
+		authzCtx := testTaskCreateAuthorizationContext()
+		authzCtx.RuntimeAllowedTools = []string{" "}
+
+		failures := contextTokenTaskCreateFailures(token, cfg, authzCtx)
+		require.Contains(t, strings.Join(failures, "\n"), "agent runtime tools are unrestricted by task or agent while token context restricts allowedTools")
+	})
+
+	t.Run("rejects enabled bash when token restricts tools", func(t *testing.T) {
+		token := &ContextToken{
+			Scopes: []string{ContextTokenScopeTaskCreate},
+			TransactionContext: map[string]any{
+				"allowedTools": []any{"Read"},
+			},
+		}
+		authzCtx := testTaskCreateAuthorizationContext()
+		authzCtx.RuntimeAllowedTools = []string{"Read"}
+		authzCtx.RuntimeAllowBash = true
+
+		failures := contextTokenTaskCreateFailures(token, cfg, authzCtx)
+		require.Contains(t, strings.Join(failures, "\n"), `tool "Bash" is not allowed by token context`)
+	})
+}
+
+func TestAuthorizeContextTokenToolAgentCreateRejectsSpecOutsideTokenConstraints(t *testing.T) {
+	cfg := enforceContextTokenAuthorizationConfig()
+	token := &ContextToken{
+		Scopes: []string{ContextTokenScopeAgentsWrite},
+		TransactionContext: map[string]any{
+			"namespace":        "team-a",
+			"allowedProviders": []any{"openai"},
+			"allowedModels":    []any{"openai/gpt-4o"},
+			"allowedTools":     []any{"Read"},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Provider: "anthropic",
+				Name:     "claude-3-5-sonnet",
+			},
+			Tools: []corev1alpha1.ToolReference{{Name: "web_search"}},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:                corev1alpha1.AgentRuntimeCodex,
+				DefaultAllowedTools: []string{"Read"},
+			},
+		},
+	}
+
+	err := authorizeContextTokenToolAgentCreate(context.Background(), nil, token, cfg, "chatToolCreateAgent", agent)
+	require.Error(t, err)
+	msg := err.Error()
+	require.Contains(t, msg, "context token is not authorized")
+
+	failures, failureErr := contextTokenAgentSpecFailures(context.Background(), nil, token, agent)
+	require.NoError(t, failureErr)
+	joined := strings.Join(failures, "\n")
+	require.Contains(t, joined, `agent provider "anthropic" is not allowed by token context`)
+	require.Contains(t, joined, `agent model "claude-3-5-sonnet" is not allowed by token context`)
+	require.Contains(t, joined, `agent tool "web_search" is not allowed by token context`)
+	require.Contains(t, joined, `agent tool "Bash" is not allowed by token context`)
+}
+
+func TestContextTokenAgentSpecFailuresRejectsCrossNamespaceProviderRef(t *testing.T) {
+	token := &ContextToken{
+		TransactionContext: map[string]any{
+			"namespace": "team-a",
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentSpec{
+			ProviderRef: &corev1alpha1.ProviderReference{Name: "llm", Namespace: "team-b"},
+		},
+	}
+
+	failures, err := contextTokenAgentSpecFailures(context.Background(), nil, token, agent)
+	require.NoError(t, err)
+	require.Contains(t, strings.Join(failures, "\n"), `agent provider namespace "team-b" does not match token context "team-a"`)
 }
 
 func TestContextTokenTaskReadFailures(t *testing.T) {
@@ -441,5 +543,6 @@ func testTaskCreateAuthorizationContext() contextTokenTaskCreateAuthorizationCon
 		EffectiveModel:      "gpt-4o",
 		EffectiveAITools:    []string{"search"},
 		RuntimeAllowedTools: []string{"Bash"},
+		RuntimeAllowBash:    true,
 	}
 }

@@ -178,10 +178,22 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 
 	// Check for HTTP errors
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("tool returned HTTP %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("tool returned HTTP %d: %s", resp.StatusCode, redactToolHTTPErrorBody(string(respBody), authToken, transactionToken))
 	}
 
 	return string(respBody), nil
+}
+
+func redactToolHTTPErrorBody(body string, secrets ...string) string {
+	redacted := body
+	for _, secret := range secrets {
+		secret = strings.TrimSpace(secret)
+		if secret == "" {
+			continue
+		}
+		redacted = strings.ReplaceAll(redacted, secret, "[REDACTED]")
+	}
+	return redacted
 }
 
 // getSecretKey reads a key from a secret (mounted path or Kubernetes API)

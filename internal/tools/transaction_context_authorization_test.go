@@ -23,7 +23,7 @@ func TestValidateChildTaskAgainstParentTransactionUsesAllowedAgentsForDelegation
 		"agent":         "coordinator",
 		"allowedAgents": `["coordinator","researcher"]`,
 	}
-	child := childTaskForAgent(testResearcherAgentName)
+	child := childTaskForResearcherAgent()
 
 	if err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(researcherAgent()), parent, child, testResearcherAgentName); err != nil {
 		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v", err)
@@ -37,7 +37,7 @@ func TestValidateChildTaskAgainstParentTransactionRejectsDisallowedAgent(t *test
 		"agent":         "coordinator",
 		"allowedAgents": `["coordinator"]`,
 	}
-	child := childTaskForAgent(testResearcherAgentName)
+	child := childTaskForResearcherAgent()
 
 	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(researcherAgent()), parent, child, testResearcherAgentName)
 	if err == nil || !strings.Contains(err.Error(), "is not allowed by transaction context") {
@@ -64,7 +64,7 @@ func TestValidateChildTaskAgainstParentTransactionRejectsDisallowedProviderModel
 	agent := researcherAgent()
 	agent.Spec.ProviderRef = &corev1alpha1.ProviderReference{Name: provider.Name}
 	agent.Spec.Tools = []corev1alpha1.ToolReference{{Name: "web_search"}}
-	child := childTaskForAgent(testResearcherAgentName)
+	child := childTaskForResearcherAgent()
 
 	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(provider, agent), parent, child, testResearcherAgentName)
 	if err == nil || !strings.Contains(err.Error(), "provider") {
@@ -79,13 +79,93 @@ func TestValidateChildTaskAgainstParentTransactionRejectsDisallowedProviderModel
 	}
 }
 
-func childTaskForAgent(agentName string) *corev1alpha1.Task {
+func TestValidateChildTaskAgainstParentTransactionRejectsProviderlessChildUnderProviderConstraints(t *testing.T) {
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace":        defaultNamespace,
+		"allowedProviders": `["approved-provider"]`,
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: defaultNamespace},
+		Spec: corev1alpha1.TaskSpec{
+			Type:  corev1alpha1.TaskTypeContainer,
+			Image: "alpine:3.20",
+		},
+	}
+
+	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(), parent, child, "")
+	if err == nil || !strings.Contains(err.Error(), "provider") {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want provider denial", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionRejectsUnrestrictedAgentRuntimeTools(t *testing.T) {
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace":     defaultNamespace,
+		"allowedAgents": `["researcher"]`,
+		"allowedTools":  `["Read"]`,
+	}
+	agent := researcherAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}
+	child := childTaskForResearcherAgent()
+	child.Spec.Type = corev1alpha1.TaskTypeAgent
+
+	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), "agent runtime tools are unrestricted") {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want unrestricted runtime tools denial", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionRejectsBlankAgentRuntimeTools(t *testing.T) {
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace":     defaultNamespace,
+		"allowedAgents": `["researcher"]`,
+		"allowedTools":  `["Read"]`,
+	}
+	agent := researcherAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		Type:                corev1alpha1.AgentRuntimeCodex,
+		DefaultAllowedTools: []string{" "},
+	}
+	child := childTaskForResearcherAgent()
+	child.Spec.Type = corev1alpha1.TaskTypeAgent
+
+	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), "agent runtime tools are unrestricted") {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want unrestricted runtime tools denial", err)
+	}
+}
+
+func TestValidateChildTaskAgainstParentTransactionRejectsEnabledBashOutsideAllowedTools(t *testing.T) {
+	parent := parentTask()
+	parent.Spec.Transaction.Context = map[string]string{
+		"namespace":     defaultNamespace,
+		"allowedAgents": `["researcher"]`,
+		"allowedTools":  `["Read"]`,
+	}
+	agent := researcherAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+		Type:                corev1alpha1.AgentRuntimeCodex,
+		DefaultAllowedTools: []string{"Read"},
+	}
+	child := childTaskForResearcherAgent()
+	child.Spec.Type = corev1alpha1.TaskTypeAgent
+
+	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName)
+	if err == nil || !strings.Contains(err.Error(), `tool "Bash"`) {
+		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want bash tool denial", err)
+	}
+}
+
+func childTaskForResearcherAgent() *corev1alpha1.Task {
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAI,
 			AgentRef: &corev1alpha1.AgentReference{
-				Name: agentName,
+				Name: testResearcherAgentName,
 			},
 		},
 	}

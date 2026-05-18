@@ -1048,6 +1048,9 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "createAgent", agent.Namespace, agent.Name); err != nil {
 		return err
 	}
+	if err := authorizeContextTokenAgentSpec(c.Context(), h.client, contextTokenFromUserInfo(GetUserInfo(c)), h.contextTokenAuthorization, "createAgent", agent); err != nil {
+		return err
+	}
 
 	ctx := c.Context()
 	if err := h.client.Create(ctx, agent); err != nil {
@@ -1089,6 +1092,9 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 	}
 
 	agent.Spec = req.Spec
+	if err := authorizeContextTokenAgentSpec(ctx, h.client, contextTokenFromUserInfo(GetUserInfo(c)), h.contextTokenAuthorization, "updateAgent", agent); err != nil {
+		return err
+	}
 	if err := h.client.Update(ctx, agent); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update agent: %v", err))
 	}

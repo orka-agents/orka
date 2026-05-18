@@ -157,7 +157,7 @@ func main() {
 		"task-provenance-admission-trusted-service-accounts",
 		os.Getenv("ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS"),
 		"Comma-separated ServiceAccount names trusted in the target Task namespace to set "+
-			"Orka-managed Task provenance fields. Defaults to orka-worker.")
+			"Orka-managed Task provenance fields. Defaults to orka-ai-worker.")
 	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
 		"The directory that contains the metrics server certificate.")
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")

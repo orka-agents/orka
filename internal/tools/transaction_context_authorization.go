@@ -22,6 +22,7 @@ type transactionProviderInfo struct {
 type childTransactionContext struct {
 	agentName      string
 	agentNamespace string
+	childType      corev1alpha1.TaskType
 	agent          *corev1alpha1.Agent
 	provider       *corev1alpha1.Provider
 	providerInfo   transactionProviderInfo
@@ -29,6 +30,7 @@ type childTransactionContext struct {
 	fallbacks      []transactionProviderModel
 	aiTools        []string
 	runtimeTools   []string
+	runtimeBash    bool
 }
 
 type transactionProviderModel struct {
@@ -95,6 +97,7 @@ func resolveChildTransactionContext(ctx context.Context, k8sClient client.Client
 	childCtx := childTransactionContext{
 		agentName:      agentName,
 		agentNamespace: child.Namespace,
+		childType:      child.Spec.Type,
 	}
 	if child.Spec.AgentRef != nil {
 		if childCtx.agentName == "" {
@@ -137,6 +140,7 @@ func resolveChildTransactionContext(ctx context.Context, k8sClient client.Client
 	childCtx.fallbacks = childTransactionFallbackProviderModels(ctx, k8sClient, child.Namespace, childCtx.agent)
 	childCtx.aiTools = childTransactionEffectiveAITools(child, childCtx.agent)
 	childCtx.runtimeTools = childTransactionEffectiveRuntimeAllowedTools(child, childCtx.agent)
+	childCtx.runtimeBash = childTransactionEffectiveRuntimeAllowBash(child, childCtx.agent)
 	return childCtx, nil
 }
 
@@ -219,9 +223,6 @@ func validateChildProviderModelConstraints(txCtx map[string]string, childCtx chi
 	if !childHasProviderModelConstraints(txCtx) {
 		return nil
 	}
-	if transactionProviderInfoEmpty(childCtx.providerInfo) && childCtx.model == "" && len(childCtx.fallbacks) == 0 {
-		return nil
-	}
 	tokenNamespace, hasTokenNamespace := txCtx["namespace"], strings.TrimSpace(txCtx["namespace"]) != ""
 	if err := validateChildProviderModel(txCtx, childCtx.providerInfo, childCtx.model, tokenNamespace, hasTokenNamespace, ""); err != nil {
 		return err
@@ -264,8 +265,13 @@ func validateChildToolConstraints(txCtx map[string]string, childCtx childTransac
 	if !ok {
 		return nil
 	}
-	for _, tool := range append(append([]string{}, childCtx.aiTools...), childCtx.runtimeTools...) {
-		if strings.TrimSpace(tool) == "" {
+	if childCtx.childType == corev1alpha1.TaskTypeAgent && !hasNonEmptyTransactionTools(childCtx.runtimeTools) {
+		return fmt.Errorf("child task agent runtime tools are unrestricted by task or agent while transaction context restricts allowedTools")
+	}
+	runtimeTools := childTransactionRuntimeToolConstraints(childCtx)
+	for _, tool := range append(append([]string{}, childCtx.aiTools...), runtimeTools...) {
+		tool = strings.TrimSpace(tool)
+		if tool == "" {
 			continue
 		}
 		if !slices.Contains(allowed, tool) {
@@ -273,6 +279,20 @@ func validateChildToolConstraints(txCtx map[string]string, childCtx childTransac
 		}
 	}
 	return nil
+}
+
+func childTransactionRuntimeToolConstraints(childCtx childTransactionContext) []string {
+	runtimeTools := append([]string{}, childCtx.runtimeTools...)
+	if childCtx.childType == corev1alpha1.TaskTypeAgent && childCtx.runtimeBash {
+		runtimeTools = append(runtimeTools, "Bash")
+	}
+	return runtimeTools
+}
+
+func hasNonEmptyTransactionTools(tools []string) bool {
+	return slices.ContainsFunc(tools, func(tool string) bool {
+		return strings.TrimSpace(tool) != ""
+	})
 }
 
 func childTransactionEffectiveAITools(child *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
@@ -312,6 +332,17 @@ func childTransactionEffectiveRuntimeAllowedTools(child *corev1alpha1.Task, agen
 		return append([]string{}, agent.Spec.Runtime.DefaultAllowedTools...)
 	}
 	return nil
+}
+
+func childTransactionEffectiveRuntimeAllowBash(child *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	allowBash := true
+	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultAllowBash != nil {
+		allowBash = *agent.Spec.Runtime.DefaultAllowBash
+	}
+	if child.Spec.AgentRuntime != nil && child.Spec.AgentRuntime.AllowBash != nil {
+		allowBash = *child.Spec.AgentRuntime.AllowBash
+	}
+	return allowBash
 }
 
 func transactionCoordinationToolNames() []string {
@@ -443,10 +474,6 @@ func transactionProviderDisplayName(provider transactionProviderInfo) string {
 		return namespacedToolName(provider.Namespace, provider.Name)
 	}
 	return provider.Type
-}
-
-func transactionProviderInfoEmpty(provider transactionProviderInfo) bool {
-	return provider.Name == "" && provider.Namespace == "" && provider.Type == ""
 }
 
 func workspaceGitRepo(workspace *corev1alpha1.WorkspaceConfig) string {

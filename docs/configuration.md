@@ -525,7 +525,7 @@ See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
 | `--context-token-tool-token-ttl` | `ORKA_CONTEXT_TOKEN_TOOL_TOKEN_TTL` env or `""` | Requested TTL for outbound tool TxTokens. Defaults to `2m` when TTS is enabled |
 | `--task-provenance-admission-enabled` | `ORKA_TASK_PROVENANCE_ADMISSION_ENABLED` env or `false` | Enable validating admission that rejects untrusted direct Kubernetes Task writes to Orka-managed provenance fields (`spec.requestedBy`, `spec.transaction`, and transaction metadata labels/annotations) |
 | `--task-provenance-admission-trusted-users` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_USERS` env or controller ServiceAccount usernames | Comma-separated Kubernetes usernames trusted to set Orka-managed Task provenance fields |
-| `--task-provenance-admission-trusted-service-accounts` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS` env or `orka-worker` | Comma-separated ServiceAccount names trusted in the target Task namespace to set Orka-managed Task provenance fields for child Task creation |
+| `--task-provenance-admission-trusted-service-accounts` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS` env or `orka-ai-worker` | Comma-separated ServiceAccount names trusted in the target Task namespace to set Orka-managed Task provenance fields for child Task creation |
 | `--ai-worker-image` | `ghcr.io/sozercan/orka/ai-worker:latest` | AI worker container image |
 | `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Copilot agent worker image |
 | `--claude-worker-image` | `ghcr.io/sozercan/orka/agent-worker-claude:latest` | Claude agent worker image |
@@ -623,7 +623,7 @@ The REST API rejects client-supplied `requestedBy` and `transaction` fields and 
 --task-provenance-admission-enabled=true
 ```
 
-The webhook denies untrusted `CREATE` or `UPDATE` requests that set or modify Orka-managed provenance fields: `spec.requestedBy`, `spec.transaction`, `orka.ai/transaction-*` labels/annotations, `orka.ai/context-token-profile`, and the child token Secret annotation. By default, trusted writers are the Orka controller ServiceAccount usernames in the controller namespace and the `orka-worker` ServiceAccount name in the target Task namespace; override them with `--task-provenance-admission-trusted-users` and `--task-provenance-admission-trusted-service-accounts`.
+The webhook denies untrusted `CREATE` or `UPDATE` requests that set or modify Orka-managed provenance fields: `spec.requestedBy`, `spec.transaction`, `orka.ai/transaction-*` labels/annotations, `orka.ai/context-token-profile`, and the child token Secret annotation. By default, trusted writers are the Orka controller ServiceAccount usernames in the controller namespace and the `orka-ai-worker` ServiceAccount name in the target Task namespace; override them with `--task-provenance-admission-trusted-users` and `--task-provenance-admission-trusted-service-accounts`.
 
 Admission deployment is opt-in. To install the manifests, uncomment the `[WEBHOOK]` resource and patch in `config/default/kustomization.yaml`, provide a `webhook-server-cert` TLS Secret for the manager, and set the webhook `caBundle` (or configure certificate-manager CA injection) before applying the webhook configuration. The bundled webhook manifest defaults to `failurePolicy: Ignore`; switch it to `Fail` only after webhook TLS and availability are configured.
 

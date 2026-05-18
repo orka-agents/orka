@@ -27,7 +27,7 @@ const (
 	admissionTestTaskName      = "admission-task"
 	untrustedUsername          = "system:serviceaccount:tenant-a:tenant-user"
 	trustedControllerUser      = "system:serviceaccount:orka-system:orka-controller-manager"
-	trustedWorkerUser          = "system:serviceaccount:tenant-a:orka-worker"
+	trustedWorkerUser          = "system:serviceaccount:tenant-a:orka-ai-worker"
 	admissionTestTransactionID = "txn-1"
 )
 
@@ -64,6 +64,12 @@ func TestTaskProvenanceValidator_Create(t *testing.T) {
 			user:     untrustedUsername,
 			task:     withTransactionMetadata(newAdmissionTestTask()),
 			contains: labels.LabelTransactionID,
+		},
+		{
+			name:     "untrusted create with transaction token pending annotation denied",
+			user:     untrustedUsername,
+			task:     withTransactionTokenPending(newAdmissionTestTask()),
+			contains: labels.AnnotationTransactionTokenPending,
 		},
 		{
 			name:    "trusted controller can create with provenance",
@@ -132,6 +138,13 @@ func TestTaskProvenanceValidator_Update(t *testing.T) {
 			oldTask:  oldWithProvenance,
 			newTask:  withTransactionAnnotation(oldWithProvenance.DeepCopy(), "txn-2"),
 			contains: labels.AnnotationTransactionID,
+		},
+		{
+			name:     "untrusted update adding transaction token pending annotation denied",
+			user:     untrustedUsername,
+			oldTask:  oldTask,
+			newTask:  withTransactionTokenPending(oldTask.DeepCopy()),
+			contains: labels.AnnotationTransactionTokenPending,
 		},
 		{
 			name:    "trusted controller can update provenance",
@@ -252,6 +265,15 @@ func withTransactionAnnotation(task *corev1alpha1.Task, id string) *corev1alpha1
 	return task
 }
 
+func withTransactionTokenPending(task *corev1alpha1.Task) *corev1alpha1.Task {
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[labels.AnnotationTransactionTokenPending] = "true"
+	task.Annotations[labels.AnnotationTransactionTokenPendingSince] = "2026-01-01T00:00:00Z"
+	return task
+}
+
 func withImage(task *corev1alpha1.Task, image string) *corev1alpha1.Task {
 	task.Spec.Image = image
 	return task
@@ -261,5 +283,5 @@ func TestNewTaskProvenanceConfigDefaults(t *testing.T) {
 	cfg := NewTaskProvenanceConfig(true, "", "", "orka-system")
 	require.True(t, cfg.Enabled)
 	require.Contains(t, cfg.TrustedUsernames, trustedControllerUser)
-	require.Contains(t, cfg.TrustedServiceAccountNames, defaultTrustedWorkerServiceAccount)
+	require.ElementsMatch(t, []string{"orka-ai-worker"}, cfg.TrustedServiceAccountNames)
 }

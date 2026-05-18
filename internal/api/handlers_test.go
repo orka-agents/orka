@@ -410,7 +410,7 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceAllowsMatchingToken
 			"agent":        "reviewer",
 			"repo":         "https://github.com/sozercan/orka.git",
 			"branch":       "kontxt",
-			"allowedTools": []string{"file_read", "code_exec"},
+			"allowedTools": []string{"file_read", "code_exec", "Bash"},
 		},
 	})
 	body := CreateTaskRequest{
@@ -3206,6 +3206,39 @@ func TestHandlers_CreateAgent_NamespaceForbidden(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
+func TestHandlers_CreateAgent_ContextTokenAuthorizationRejectsDisallowedAgentSpec(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeAgentsWrite,
+		"tctx": map[string]any{
+			"allowedProviders": []string{"openai"},
+			"allowedModels":    []string{"openai/gpt-4o"},
+			"allowedTools":     []string{"file_read"},
+		},
+	})
+
+	bodyBytes, _ := json.Marshal(CreateAgentRequest{
+		Name:      "test-agent",
+		Namespace: "default",
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Provider: "anthropic",
+				Name:     "claude-3-5-sonnet",
+			},
+			Tools: []corev1alpha1.ToolReference{{Name: "web_search"}},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/agents", bytes.NewReader(bodyBytes))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
 // --- UpdateAgent tests ---
 
 func TestHandlers_UpdateAgent_Success(t *testing.T) {
@@ -3247,6 +3280,40 @@ func TestHandlers_UpdateAgent_Success(t *testing.T) {
 	spec := result["spec"].(map[string]any)
 	model := spec["model"].(map[string]any)
 	require.Equal(t, "gpt-4", model["name"])
+}
+
+func TestHandlers_UpdateAgent_ContextTokenAuthorizationRejectsDisallowedAgentSpec(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"},
+		Spec:       corev1alpha1.AgentSpec{},
+	}
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, agent)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeAgentsWrite,
+		"tctx": map[string]any{
+			"allowedAgents":    []string{"test-agent"},
+			"allowedProviders": []string{"openai"},
+			"allowedModels":    []string{"openai/gpt-4o"},
+		},
+	})
+
+	bodyBytes, _ := json.Marshal(UpdateAgentRequest{
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Provider: "anthropic",
+				Name:     "claude-3-5-sonnet",
+			},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPut, "/agents/test-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
 func TestHandlers_UpdateAgent_NotFound(t *testing.T) {

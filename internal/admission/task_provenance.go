@@ -30,14 +30,17 @@ const (
 	// TaskProvenanceWebhookPath is the validating admission path for Task provenance fields.
 	TaskProvenanceWebhookPath = "/validate-core-orka-ai-v1alpha1-task-provenance"
 
-	defaultTrustedWorkerServiceAccount = "orka-worker"
-	fieldSpecRequestedBy               = "spec.requestedBy"
-	fieldSpecTransaction               = "spec.transaction"
-	fieldMetadataLabels                = "metadata.labels"
-	fieldMetadataAnnotations           = "metadata.annotations"
+	fieldSpecRequestedBy     = "spec.requestedBy"
+	fieldSpecTransaction     = "spec.transaction"
+	fieldMetadataLabels      = "metadata.labels"
+	fieldMetadataAnnotations = "metadata.annotations"
 )
 
 var (
+	defaultTrustedWorkerServiceAccounts = []string{
+		"orka-ai-worker",
+	}
+
 	managedTransactionLabelKeys = []string{
 		labels.LabelTransactionID,
 		labels.LabelAuthProfile,
@@ -53,6 +56,8 @@ var (
 		labels.AnnotationTransactionContextDigest,
 		labels.AnnotationRequesterContextDigest,
 		labels.AnnotationTransactionTokenSecret,
+		labels.AnnotationTransactionTokenPending,
+		labels.AnnotationTransactionTokenPendingSince,
 	}
 )
 
@@ -73,7 +78,7 @@ func NewTaskProvenanceConfig(enabled bool, trustedUsernames, trustedServiceAccou
 	}
 	cfg.TrustedServiceAccountNames = workerenv.SplitCSV(trustedServiceAccountNames)
 	if len(cfg.TrustedServiceAccountNames) == 0 {
-		cfg.TrustedServiceAccountNames = []string{defaultTrustedWorkerServiceAccount}
+		cfg.TrustedServiceAccountNames = append([]string{}, defaultTrustedWorkerServiceAccounts...)
 	}
 	return cfg
 }

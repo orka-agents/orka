@@ -46,6 +46,22 @@ var setValuedContextDigestKeys = map[string]struct{}{
 	"allowedTools":     {},
 }
 
+var authorizationTransactionContextKeys = map[string]struct{}{
+	"namespace":        {},
+	"taskType":         {},
+	"agent":            {},
+	"allowedAgents":    {},
+	"repo":             {},
+	"branch":           {},
+	"ref":              {},
+	"maxDepth":         {},
+	"allowedTools":     {},
+	"provider":         {},
+	"allowedProviders": {},
+	"model":            {},
+	"allowedModels":    {},
+}
+
 func stampTaskRequesterFromUserInfo(task *corev1alpha1.Task, ui *UserInfo) {
 	if task == nil || ui == nil || (ui.AuthType != AuthTypeOIDC && ui.AuthType != AuthTypeContextToken) {
 		return
@@ -152,7 +168,7 @@ func safeTransactionContext(value map[string]any) map[string]string {
 		if !ok {
 			continue
 		}
-		if rendered, ok := renderSafeTransactionContextValue(key, raw); ok && len(rendered) <= maxSafeTransactionContextValueLength {
+		if rendered, ok := renderSafeTransactionContextValue(key, raw); ok && safeTransactionContextValueAllowed(key, rendered) {
 			out[key] = rendered
 		}
 	}
@@ -204,6 +220,14 @@ func renderSafeTransactionContextValue(key string, value any) (string, bool) {
 
 func safeTransactionContextPreservesEmptyList(key string) bool {
 	_, ok := setValuedContextDigestKeys[key]
+	return ok
+}
+
+func safeTransactionContextValueAllowed(key, rendered string) bool {
+	if len(rendered) <= maxSafeTransactionContextValueLength {
+		return true
+	}
+	_, ok := authorizationTransactionContextKeys[key]
 	return ok
 }
 

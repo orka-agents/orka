@@ -191,6 +191,9 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	if blockedNamespaces[namespace] {
 		return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("namespace %q is not allowed for chat", namespace))
 	}
+	if err := authorizeContextTokenAgentContext(c, ch.contextTokenAuthorization, "chat", namespace, req.AgentRef); err != nil {
+		return err
+	}
 
 	// Resolve or create session ID
 	sessionID := req.SessionID
@@ -297,7 +300,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		return authorizeAndStampToolTaskCreate(ctx, ch.client, contextToken, ch.contextTokenAuthorization, "chatToolCreateTask", userInfo, task)
 	})
 	executor.SetAgentCreateAuthorizer(func(ctx context.Context, agent *corev1alpha1.Agent) error {
-		return authorizeContextTokenToolAgentCreate(ctx, contextToken, ch.contextTokenAuthorization, "chatToolCreateAgent", agent)
+		return authorizeContextTokenToolAgentCreate(ctx, ch.client, contextToken, ch.contextTokenAuthorization, "chatToolCreateAgent", agent)
 	})
 
 	// Build tools from the chat registry and restrict execution to the exposed set.

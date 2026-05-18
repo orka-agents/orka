@@ -197,6 +197,17 @@ type contextTokenTaskCreateAuthorizationContext struct {
 	Fallbacks           []contextTokenProviderModel
 	EffectiveAITools    []string
 	RuntimeAllowedTools []string
+	RuntimeAllowBash    bool
+}
+
+type contextTokenAgentSpecAuthorizationContext struct {
+	Agent               *corev1alpha1.Agent
+	EffectiveProvider   ProviderResolutionInfo
+	EffectiveModel      string
+	Fallbacks           []contextTokenProviderModel
+	EffectiveAITools    []string
+	RuntimeAllowedTools []string
+	RuntimeAllowBash    bool
 }
 
 type contextTokenProviderModel struct {
@@ -275,7 +286,7 @@ func authorizeAndStampTaskContext(ctx context.Context, k8sClient client.Client, 
 	return nil
 }
 
-func authorizeContextTokenToolAgentCreate(_ context.Context, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, agent *corev1alpha1.Agent) error {
+func authorizeContextTokenToolAgentCreate(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, agent *corev1alpha1.Agent) error {
 	if !cfg.Enabled() || token == nil || agent == nil {
 		return nil
 	}
@@ -284,6 +295,26 @@ func authorizeContextTokenToolAgentCreate(_ context.Context, token *ContextToken
 		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.AgentWriteScopes, ",")))
 	}
 	failures = append(failures, contextTokenAgentMutationFailures(token, agent.Namespace, agent.Name)...)
+	specFailures, err := contextTokenAgentSpecFailures(ctx, k8sClient, token, agent)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+	failures = append(failures, specFailures...)
+	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
+}
+
+func authorizeContextTokenAgentSpec(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, agent *corev1alpha1.Agent) error {
+	if !cfg.Enabled() || token == nil || agent == nil {
+		return nil
+	}
+	failures, err := contextTokenAgentSpecFailures(ctx, k8sClient, token, agent)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
 	if len(failures) == 0 {
 		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
 		return nil
@@ -759,6 +790,89 @@ func contextTokenProviderUseFailures(token *ContextToken, cfg ContextTokenAuthor
 	return failures
 }
 
+func contextTokenAgentSpecFailures(ctx context.Context, c client.Client, token *ContextToken, agent *corev1alpha1.Agent) ([]string, error) {
+	if token == nil || agent == nil {
+		return nil, nil
+	}
+	authzCtx, err := resolveContextTokenAgentSpecAuthorizationContext(ctx, c, agent)
+	if err != nil {
+		return nil, err
+	}
+	tokenNamespace, hasTokenNamespace := contextString(token.TransactionContext, "namespace")
+	failures := contextTokenAgentSpecNamespaceFailures(authzCtx.Agent, tokenNamespace, hasTokenNamespace)
+	failures = append(failures, contextTokenProviderModelConstraintFailures(token, authzCtx.EffectiveProvider, authzCtx.EffectiveModel, tokenNamespace, hasTokenNamespace, "agent ")...)
+	for _, fb := range authzCtx.Fallbacks {
+		failures = append(failures, contextTokenProviderModelConstraintFailures(token, fb.Provider, fb.Model, tokenNamespace, hasTokenNamespace, "agent fallback ")...)
+	}
+	failures = append(failures, contextTokenAgentSpecToolFailures(token, authzCtx)...)
+	return failures, nil
+}
+
+func contextTokenAgentSpecNamespaceFailures(agent *corev1alpha1.Agent, tokenNamespace string, hasTokenNamespace bool) []string {
+	if agent == nil || !hasTokenNamespace || agent.Spec.ProviderRef == nil {
+		return nil
+	}
+	providerNamespace := strings.TrimSpace(agent.Spec.ProviderRef.Namespace)
+	if providerNamespace == "" || providerNamespace == tokenNamespace {
+		return nil
+	}
+	return []string{fmt.Sprintf("agent provider namespace %q does not match token context %q", providerNamespace, tokenNamespace)}
+}
+
+func resolveContextTokenAgentSpecAuthorizationContext(ctx context.Context, c client.Client, agent *corev1alpha1.Agent) (contextTokenAgentSpecAuthorizationContext, error) {
+	authzCtx := contextTokenAgentSpecAuthorizationContext{
+		Agent: agent,
+	}
+	var provider *corev1alpha1.Provider
+	if agent != nil && agent.Spec.ProviderRef != nil && strings.TrimSpace(agent.Spec.ProviderRef.Name) != "" {
+		providerNamespace := agent.Spec.ProviderRef.Namespace
+		if providerNamespace == "" {
+			providerNamespace = agent.Namespace
+		}
+		if c != nil {
+			provider = &corev1alpha1.Provider{}
+			key := types.NamespacedName{Name: agent.Spec.ProviderRef.Name, Namespace: providerNamespace}
+			if err := c.Get(ctx, key, provider); err != nil {
+				if !apierrors.IsNotFound(err) {
+					return authzCtx, fmt.Errorf("resolve provider %q in namespace %q: %w", agent.Spec.ProviderRef.Name, providerNamespace, err)
+				}
+				provider = nil
+			}
+		}
+	}
+	authzCtx.EffectiveProvider, authzCtx.EffectiveModel = contextTokenTaskCreateEffectiveProviderModel(CreateTaskRequest{}, agent, provider)
+	authzCtx.Fallbacks = contextTokenTaskCreateFallbackProviderModels(ctx, c, agent.Namespace, agent)
+	authzCtx.EffectiveAITools = contextTokenTaskCreateEffectiveAITools(CreateTaskRequest{}, agent)
+	authzCtx.RuntimeAllowedTools = contextTokenTaskCreateEffectiveRuntimeAllowedTools(CreateTaskRequest{}, agent)
+	authzCtx.RuntimeAllowBash = contextTokenTaskCreateEffectiveRuntimeAllowBash(CreateTaskRequest{}, agent)
+	return authzCtx, nil
+}
+
+func contextTokenAgentSpecToolFailures(token *ContextToken, authzCtx contextTokenAgentSpecAuthorizationContext) []string {
+	allowed, ok := contextStringList(token.TransactionContext, "allowedTools")
+	if !ok {
+		return nil
+	}
+	failures := []string{}
+	if authzCtx.Agent != nil && authzCtx.Agent.Spec.Runtime != nil && !hasNonEmptyToolNames(authzCtx.RuntimeAllowedTools) {
+		failures = append(failures, "agent runtime default tools are unrestricted while token context restricts allowedTools")
+	}
+	runtimeTools := append([]string{}, authzCtx.RuntimeAllowedTools...)
+	if authzCtx.Agent != nil && authzCtx.Agent.Spec.Runtime != nil && authzCtx.RuntimeAllowBash {
+		runtimeTools = append(runtimeTools, "Bash")
+	}
+	for _, tool := range append(append([]string{}, authzCtx.EffectiveAITools...), runtimeTools...) {
+		tool = strings.TrimSpace(tool)
+		if tool == "" {
+			continue
+		}
+		if !slices.Contains(allowed, tool) {
+			failures = append(failures, fmt.Sprintf("agent tool %q is not allowed by token context", tool))
+		}
+	}
+	return failures
+}
+
 func (h *Handlers) resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, req CreateTaskRequest, namespace string) (contextTokenTaskCreateAuthorizationContext, error) {
 	return resolveContextTokenTaskCreateAuthorizationContext(ctx, h.client, req, namespace)
 }
@@ -813,6 +927,7 @@ func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, c cl
 	authzCtx.Fallbacks = contextTokenTaskCreateFallbackProviderModels(ctx, c, namespace, authzCtx.Agent)
 	authzCtx.EffectiveAITools = contextTokenTaskCreateEffectiveAITools(req, authzCtx.Agent)
 	authzCtx.RuntimeAllowedTools = contextTokenTaskCreateEffectiveRuntimeAllowedTools(req, authzCtx.Agent)
+	authzCtx.RuntimeAllowBash = contextTokenTaskCreateEffectiveRuntimeAllowBash(req, authzCtx.Agent)
 
 	return authzCtx, nil
 }
@@ -951,6 +1066,17 @@ func contextTokenTaskCreateEffectiveRuntimeAllowedTools(req CreateTaskRequest, a
 	return nil
 }
 
+func contextTokenTaskCreateEffectiveRuntimeAllowBash(req CreateTaskRequest, agent *corev1alpha1.Agent) bool {
+	allowBash := true
+	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultAllowBash != nil {
+		allowBash = *agent.Spec.Runtime.DefaultAllowBash
+	}
+	if req.AgentRuntime != nil && req.AgentRuntime.AllowBash != nil {
+		allowBash = *req.AgentRuntime.AllowBash
+	}
+	return allowBash
+}
+
 func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, authzCtx contextTokenTaskCreateAuthorizationContext) []string {
 	failures := contextTokenTaskCreateScopeFailures(token, cfg)
 	failures = append(failures, contextTokenTaskContextFailures(token, authzCtx, true)...)
@@ -1043,8 +1169,13 @@ func contextTokenTaskToolFailures(token *ContextToken, authzCtx contextTokenTask
 		return nil
 	}
 	failures := []string{}
-	for _, tool := range append(append([]string{}, authzCtx.EffectiveAITools...), authzCtx.RuntimeAllowedTools...) {
-		if strings.TrimSpace(tool) == "" {
+	if authzCtx.Request.Type == corev1alpha1.TaskTypeAgent && !hasNonEmptyToolNames(authzCtx.RuntimeAllowedTools) {
+		failures = append(failures, "agent runtime tools are unrestricted by task or agent while token context restricts allowedTools")
+	}
+	runtimeTools := contextTokenRuntimeToolConstraints(authzCtx)
+	for _, tool := range append(append([]string{}, authzCtx.EffectiveAITools...), runtimeTools...) {
+		tool = strings.TrimSpace(tool)
+		if tool == "" {
 			continue
 		}
 		if !slices.Contains(allowed, tool) {
@@ -1052,6 +1183,20 @@ func contextTokenTaskToolFailures(token *ContextToken, authzCtx contextTokenTask
 		}
 	}
 	return failures
+}
+
+func contextTokenRuntimeToolConstraints(authzCtx contextTokenTaskCreateAuthorizationContext) []string {
+	runtimeTools := append([]string{}, authzCtx.RuntimeAllowedTools...)
+	if authzCtx.Request.Type == corev1alpha1.TaskTypeAgent && authzCtx.RuntimeAllowBash {
+		runtimeTools = append(runtimeTools, "Bash")
+	}
+	return runtimeTools
+}
+
+func hasNonEmptyToolNames(tools []string) bool {
+	return slices.ContainsFunc(tools, func(tool string) bool {
+		return strings.TrimSpace(tool) != ""
+	})
 }
 
 func contextTokenTaskCreateNamespaceFailures(authzCtx contextTokenTaskCreateAuthorizationContext, tokenNamespace string) []string {

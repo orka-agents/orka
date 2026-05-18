@@ -316,7 +316,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 				return nil
 			},
 			AuthorizeAgentCreate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
-				if err := authorizeContextTokenToolAgentCreate(ctx, contextToken, h.contextTokenAuthorization, "openAIToolCreateAgent", agent); err != nil {
+				if err := authorizeContextTokenToolAgentCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolCreateAgent", agent); err != nil {
 					return &tools.ChatToolError{
 						Type:       "authorization_failed",
 						Message:    err.Error(),

@@ -739,6 +739,42 @@ func TestToolExecutor_Execute_HTTPError(t *testing.T) {
 	}
 }
 
+func TestToolExecutor_Execute_HTTPErrorRedactsPropagatedTransactionToken(t *testing.T) {
+	txnTokenPath := filepath.Join(t.TempDir(), "txn-token")
+	if err := os.WriteFile(txnTokenPath, []byte("tx-token-sensitive"), 0600); err != nil {
+		t.Fatalf("failed to write transaction token fixture: %v", err)
+	}
+	t.Setenv(workerenv.TransactionTokenFile, txnTokenPath)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("debug echoed " + r.Header.Get(kontxttoken.HeaderName)))
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: corev1alpha1.HTTPExecution{URL: server.URL},
+		},
+	}
+
+	_, err := executor.Execute(context.Background(), tool, nil)
+	if err == nil {
+		t.Fatal("Execute() error = nil, want HTTP error")
+	}
+	if strings.Contains(err.Error(), "tx-token-sensitive") {
+		t.Fatalf("Execute() error leaked transaction token: %v", err)
+	}
+	if !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Fatalf("Execute() error = %v, want redacted marker", err)
+	}
+}
+
 func TestToolExecutor_Execute_InvalidArgs(t *testing.T) {
 	executor := &ToolExecutor{
 		client:     &http.Client{},

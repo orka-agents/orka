@@ -341,7 +341,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 				return nil
 			},
 			AuthorizeAgentCreate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
-				if err := authorizeContextTokenToolAgentCreate(ctx, contextToken, h.contextTokenAuthorization, "anthropicToolCreateAgent", agent); err != nil {
+				if err := authorizeContextTokenToolAgentCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "anthropicToolCreateAgent", agent); err != nil {
 					return &tools.ChatToolError{
 						Type:       "authorization_failed",
 						Message:    err.Error(),

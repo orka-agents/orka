@@ -328,6 +328,7 @@ func TestValidateContextToken_KontxtFailures(t *testing.T) {
 		{name: "unknown kid", headerOverrides: map[string]any{"kid": "unknown"}, wantErr: "kid"},
 		{name: "missing typ", headerOverrides: map[string]any{"typ": nil}, wantErr: "typ"},
 		{name: "wrong typ", headerOverrides: map[string]any{"typ": "JWT"}, wantErr: "typ"},
+		{name: "missing exp", claimOverrides: map[string]any{"exp": nil}, wantErr: "exp"},
 		{name: "missing iat", claimOverrides: map[string]any{"iat": nil}, wantErr: "iat"},
 		{name: "missing txn", claimOverrides: map[string]any{"txn": nil}, wantErr: "txn"},
 		{name: "missing scope", claimOverrides: map[string]any{"scope": nil}, wantErr: "scope"},

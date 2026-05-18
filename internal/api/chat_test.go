@@ -1310,3 +1310,65 @@ func TestChatHandler_ContextTokenAuthorizationRejectsDisallowedModel(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
+
+func TestChatHandler_ContextTokenAuthorizationRejectsDisallowedAgentRef(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	ss := newTestSessionStore(t)
+	rs := newTestResultStore(t)
+	ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	require.NoError(t, err)
+	ch.contextTokenAuthorization = authz
+
+	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Post("/api/v1/chat", ch.HandleChat)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeProvidersUse,
+		"tctx": map[string]any{
+			"allowedAgents": []string{"allowed-agent"},
+		},
+	})
+	body, _ := json.Marshal(ChatRequest{Message: "hello", AgentRef: "other-agent"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestChatHandler_ContextTokenAuthorizationRejectsMissingAgentRefWhenTokenRequiresAgent(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	ss := newTestSessionStore(t)
+	rs := newTestResultStore(t)
+	ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	require.NoError(t, err)
+	ch.contextTokenAuthorization = authz
+
+	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Post("/api/v1/chat", ch.HandleChat)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeProvidersUse,
+		"tctx": map[string]any{
+			"allowedAgents": []string{"allowed-agent"},
+		},
+	})
+	body, _ := json.Marshal(ChatRequest{Message: "hello"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}

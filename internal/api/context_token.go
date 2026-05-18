@@ -34,7 +34,7 @@ const (
 	KontxtJWTType = kontxttoken.TypeHeader
 )
 
-var kontxtRequiredClaims = []string{"iat", "txn", "scope", "req_wl"}
+var kontxtRequiredClaims = []string{"sub", "exp", "iat", "txn", "scope", "req_wl"}
 
 // TokenHeaderConfig describes one HTTP header location from which a token can be extracted.
 type TokenHeaderConfig struct {
@@ -275,9 +275,10 @@ func validateContextToken(ctx context.Context, token string, profile ContextToke
 	}
 
 	verified, err := verifyParsedJWT(ctx, parsed, jwtVerificationConfig{
-		Issuer:   profile.Issuer,
-		Audience: profile.Audience,
-		JWKSURL:  jwksURL,
+		Issuer:         profile.Issuer,
+		Audience:       profile.Audience,
+		JWKSURL:        jwksURL,
+		RequiredClaims: profile.RequiredClaims,
 	})
 	if err != nil {
 		return nil, err

@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -60,13 +61,19 @@ func TestSafeTransactionContextOmitsLongAllowlistedValues(t *testing.T) {
 	}
 }
 
-func TestSafeTransactionContextOmitsLongRenderedLists(t *testing.T) {
+func TestSafeTransactionContextPreservesLongRenderedAuthorizationLists(t *testing.T) {
+	longTool := strings.Repeat("x", maxSafeTransactionContextValueLength)
 	ctx := map[string]any{
-		"allowedTools": []string{strings.Repeat("x", maxSafeTransactionContextValueLength)},
+		"allowedTools": []string{longTool},
 	}
 
-	if safe := safeTransactionContext(ctx); safe != nil {
-		t.Fatalf("safeTransactionContext() = %#v, want nil for overlong rendered list", safe)
+	wantBytes, err := json.Marshal([]string{longTool})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	safe := safeTransactionContext(ctx)
+	if got := safe["allowedTools"]; got != string(wantBytes) {
+		t.Fatalf("safeTransactionContext[allowedTools] = %q, want preserved signed constraint", got)
 	}
 }
 
