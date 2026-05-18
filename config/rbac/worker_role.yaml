@@ -380,6 +380,38 @@ subjects:
   namespace: system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ai-worker-code-exec-results
+  namespace: system
+rules:
+# code_exec Kubernetes result persistence is namespace-scoped; the ClusterRole
+# remains read-only for ConfigMaps.
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - create
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ai-worker-code-exec-results
+  namespace: system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ai-worker-code-exec-results
+subjects:
+- kind: ServiceAccount
+  name: ai-worker
+  namespace: system
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: vendor-worker-rolebinding
