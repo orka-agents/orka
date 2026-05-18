@@ -1174,6 +1174,70 @@ func TestKubernetesJobCodeExecutor_ExecutePreservesResultWhenStoreForbidden(t *t
 	assertFakeKubernetesCodeExecResourcesDeleted(t, fakeClient, namespace, jobName)
 }
 
+func TestKubernetesJobCodeExecutor_ExecutePreservesResultWhenStoredResultCleanupFails(t *testing.T) {
+	setKubernetesCodeExecTestEnv(t)
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = batchv1.AddToScheme(scheme)
+	_ = networkingv1.AddToScheme(scheme)
+	fakeClient := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&batchv1.Job{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*corev1.ConfigMapList); ok {
+					return fmt.Errorf("cleanup list failed")
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).
+		Build()
+	namespace := "store-cleanup-failure-ns"
+	runID := "store-cleanup-failure-run"
+	jobName := codeExecKubernetesJobNameForRunID(runID)
+	podName := "pod-store-cleanup-failure"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	errCh := finishFakeKubernetesCodeExecJob(ctx, fakeClient, namespace, jobName, podName, batchv1.JobStatus{
+		Succeeded: 1,
+		Conditions: []batchv1.JobCondition{
+			{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, Reason: "Completed"},
+		},
+	}, 0, nil)
+
+	executor := &KubernetesJobCodeExecutor{
+		resolveClients: func(context.Context) (kubernetesCodeExecClients, error) {
+			return kubernetesCodeExecClients{client: fakeClient, namespace: namespace}, nil
+		},
+		logStreamer:  fakePodLogStreamer{logs: map[string]string{podName: fakeKubernetesCodeExecLogs(jobName, "finished\n", "")}},
+		pollInterval: time.Millisecond,
+	}
+
+	result := executor.Execute(ctx, CodeExecutionRequest{
+		Backend:          codeExecBackendKubernetes,
+		Language:         codeLanguagePython,
+		Code:             "print('finished')",
+		Timeout:          time.Second,
+		DenyPatterns:     defaultDenyPatterns,
+		OutputLimitBytes: defaultCodeExecOutputLimitBytes,
+		RunID:            runID,
+		InputHash:        "store-cleanup-failure-input",
+	})
+	requireFakeKubernetesCompletion(t, errCh)
+
+	if result.ExitCode != 0 || result.Output != "finished\n" || result.Error != "" {
+		t.Fatalf("result = %+v, want successful execution despite stored result cleanup failure", result)
+	}
+	stored := &corev1.ConfigMap{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: jobName}, stored); err != nil {
+		t.Fatalf("expected stored result to exist despite cleanup failure: %v", err)
+	}
+	assertFakeKubernetesCodeExecResourcesDeleted(t, fakeClient, namespace, jobName)
+}
+
 func TestKubernetesJobCodeExecutor_ExecuteFailureWithFakeClient(t *testing.T) {
 	setKubernetesCodeExecTestEnv(t)
 
@@ -1269,6 +1333,51 @@ func TestKubernetesJobCodeExecutor_ExecuteTimeoutWithFakeClient(t *testing.T) {
 		t.Fatalf("error = %q, want timeout message", result.Error)
 	}
 
+	assertFakeKubernetesCodeExecResourcesDeleted(t, fakeClient, namespace, jobName)
+}
+
+func TestKubernetesJobCodeExecutor_ExecuteDoesNotPersistTimeoutResult(t *testing.T) {
+	setKubernetesCodeExecTestEnv(t)
+
+	fakeClient := newKubernetesCodeExecFakeClient(t)
+	namespace := "timeout-no-store-ns"
+	runID := "timeout-no-store-run"
+	jobName := codeExecKubernetesJobNameForRunID(runID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	executor := &KubernetesJobCodeExecutor{
+		resolveClients: func(context.Context) (kubernetesCodeExecClients, error) {
+			return kubernetesCodeExecClients{client: fakeClient, namespace: namespace}, nil
+		},
+		logStreamer:  fakePodLogStreamer{},
+		pollInterval: time.Millisecond,
+	}
+
+	result := executor.Execute(ctx, CodeExecutionRequest{
+		Backend:          codeExecBackendKubernetes,
+		Language:         codeLanguageNode,
+		Code:             "setTimeout(() => console.log('late'), 1000)",
+		Timeout:          time.Second,
+		DenyPatterns:     defaultDenyPatterns,
+		OutputLimitBytes: defaultCodeExecOutputLimitBytes,
+		RunID:            runID,
+		InputHash:        "timeout-no-store-input",
+	})
+
+	if !result.TimedOut {
+		t.Fatalf("timed_out = false, want true; result=%+v", result)
+	}
+	if result.ExitCode != -1 {
+		t.Fatalf("exit_code = %d, want -1", result.ExitCode)
+	}
+
+	stored := &corev1.ConfigMap{}
+	err := fakeClient.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: jobName}, stored)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("stored timeout result lookup error = %v, want not found", err)
+	}
 	assertFakeKubernetesCodeExecResourcesDeleted(t, fakeClient, namespace, jobName)
 }
 

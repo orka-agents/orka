@@ -607,6 +607,10 @@ func codeExecKubernetesShouldPersistResult(req CodeExecutionRequest) bool {
 	return strings.TrimSpace(req.RunID) != "" && strings.TrimSpace(req.InputHash) != ""
 }
 
+func codeExecKubernetesShouldPersistObservedResult(result CodeExecResult) bool {
+	return !result.TimedOut && result.ExitCode != -1
+}
+
 func (e *KubernetesJobCodeExecutor) loadStoredResult(ctx context.Context, c crclient.Client, namespace, jobName string, req CodeExecutionRequest) (CodeExecResult, bool, error) {
 	if !codeExecKubernetesShouldPersistResult(req) {
 		return CodeExecResult{}, false, nil
@@ -648,6 +652,9 @@ func (e *KubernetesJobCodeExecutor) loadStoredResult(ctx context.Context, c crcl
 
 func (e *KubernetesJobCodeExecutor) storeResult(ctx context.Context, c crclient.Client, namespace, jobName string, req CodeExecutionRequest, result CodeExecResult) error {
 	if !codeExecKubernetesShouldPersistResult(req) {
+		return nil
+	}
+	if !codeExecKubernetesShouldPersistObservedResult(result) {
 		return nil
 	}
 	if c == nil {
@@ -703,9 +710,9 @@ func (e *KubernetesJobCodeExecutor) storeResult(ctx context.Context, c crclient.
 		}
 		return nil
 	}
-	if err := e.cleanupExpiredStoredResultsIfDue(ctx, c, namespace, time.Now()); err != nil {
-		return err
-	}
+	// The result is already durable; cleanup must not turn a successful store
+	// into a failed execution result.
+	_ = e.cleanupExpiredStoredResultsIfDue(ctx, c, namespace, time.Now())
 	return nil
 }
 
