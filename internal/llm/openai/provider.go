@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"sync/atomic"
 
@@ -84,12 +85,11 @@ func (p *Provider) Name() string {
 }
 
 // isUnsupportedAPIError returns true when the error indicates the endpoint
-// does not support the Responses API (HTTP 404, 405, or known error codes).
+// does not support the Responses API.
 func isUnsupportedAPIError(err error) bool {
 	var apiErr *openai.Error
 	if errors.As(err, &apiErr) {
-		switch apiErr.StatusCode {
-		case 404, 405:
+		if isUnsupportedAPIStatus(apiErr.StatusCode) {
 			return true
 		}
 		if apiErr.Code == "unsupported_api" || apiErr.Code == "invalid_url" ||
@@ -97,11 +97,28 @@ func isUnsupportedAPIError(err error) bool {
 			return true
 		}
 	}
+
+	var providerErr *llm.ProviderError
+	if errors.As(err, &providerErr) && isUnsupportedAPIStatus(providerErr.StatusCode) {
+		return true
+	}
+
 	msg := err.Error()
 	return strings.Contains(msg, "404") ||
+		strings.Contains(msg, "403") ||
 		strings.Contains(msg, "Not Found") ||
+		strings.Contains(msg, "Forbidden") ||
 		strings.Contains(msg, "invalid_url") ||
 		strings.Contains(msg, "unsupported_api_for_model")
+}
+
+func isUnsupportedAPIStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusForbidden:
+		return true
+	default:
+		return false
+	}
 }
 
 // -------------------------------------------------------------------------

@@ -3498,6 +3498,54 @@ func TestCreateTaskJob_JobAlreadyExists(t *testing.T) {
 	_ = jobName
 }
 
+func TestCreateTaskJob_DoesNotOverwriteCancelledStatus(t *testing.T) {
+	scheme := newTestScheme()
+	current := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "create-cancelled",
+			Namespace: "default",
+			UID:       "12345678-abcd-efgh-ijkl-1234567890ab",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   "busybox:latest",
+			Command: []string{"sleep"},
+			Args:    []string{"600"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseCancelled,
+			Message: "cancelled by caller",
+		},
+	}
+	stale := current.DeepCopy()
+	stale.Status = corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending}
+
+	r := newUnitReconciler(scheme, current)
+	result, err := r.createTaskJob(context.Background(), stale, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue for cancelled task, got %v", result.RequeueAfter)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: current.Name, Namespace: current.Namespace}, updated); err != nil {
+		t.Fatalf("failed to get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseCancelled {
+		t.Fatalf("phase = %s, want Cancelled", updated.Status.Phase)
+	}
+
+	jobs := &batchv1.JobList{}
+	if err := r.List(context.Background(), jobs, client.InNamespace(current.Namespace)); err != nil {
+		t.Fatalf("failed to list jobs: %v", err)
+	}
+	if len(jobs.Items) != 0 {
+		t.Fatalf("expected no jobs to be created, got %d", len(jobs.Items))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // handlePending — with session ref
 // ---------------------------------------------------------------------------

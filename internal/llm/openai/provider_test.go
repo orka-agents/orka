@@ -552,6 +552,53 @@ func TestComplete_AutoDetect_FallbackToChatCompletions(t *testing.T) {
 	}
 }
 
+func TestComplete_AutoDetect_FallbackToChatCompletionsOnForbiddenResponses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == testResponsesPath {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"error":{"message":"Forbidden","type":"invalid_request_error"}}`) //nolint:errcheck
+			return
+		}
+
+		//nolint:errcheck // multiline test response
+		fmt.Fprint(w, `{
+			"id": "chatcmpl-forbidden-fallback",
+			"object": "chat.completion",
+			"model": "gpt-4",
+			"choices": [{
+				"index": 0,
+				"message": {"role": "assistant", "content": "Fallback after forbidden responses"},
+				"finish_reason": "stop"
+			}],
+			"usage": {"prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9}
+		}`) //nolint:errcheck
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(llm.ProviderConfig{
+		APIKey:  "test-key",
+		BaseURL: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+
+	resp, err := provider.Complete(context.Background(), &llm.CompletionRequest{
+		Model:    "gpt-4",
+		Messages: []llm.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if resp.Content != "Fallback after forbidden responses" {
+		t.Errorf("unexpected content %q", resp.Content)
+	}
+	if apiMode(provider.mode.Load()) != apiModeChatCompletions {
+		t.Error("expected mode to be set to apiModeChatCompletions after fallback")
+	}
+}
+
 func TestStream_ChatCompletions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1276,6 +1323,54 @@ func TestStream_AutoDetect_FallbackToChatCompletions(t *testing.T) {
 	}
 	if got := content.String(); got != "Fallback" {
 		t.Errorf("expected 'Fallback', got %q", got)
+	}
+	if apiMode(provider.mode.Load()) != apiModeChatCompletions {
+		t.Error("expected mode apiModeChatCompletions after fallback")
+	}
+}
+
+func TestStream_AutoDetect_FallbackToChatCompletionsOnForbiddenResponses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == testResponsesPath {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"error":{"message":"Forbidden","type":"invalid_request_error"}}`) //nolint:errcheck
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprint(w, "data: {\"id\":\"cc-forbidden\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Fallback forbidden\"},\"finish_reason\":null}]}\n\n") //nolint:errcheck
+		flusher.Flush()
+		fmt.Fprint(w, "data: {\"id\":\"cc-forbidden\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n") //nolint:errcheck
+		flusher.Flush()
+		fmt.Fprint(w, "data: [DONE]\n\n") //nolint:errcheck
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(llm.ProviderConfig{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+
+	ch, err := provider.Stream(context.Background(), &llm.CompletionRequest{
+		Model:    "gpt-4",
+		Messages: []llm.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+
+	var content strings.Builder
+	for chunk := range ch {
+		if chunk.Error != nil {
+			t.Fatalf("unexpected error: %v", chunk.Error)
+		}
+		content.WriteString(chunk.Content) //nolint:errcheck
+	}
+	if got := content.String(); got != "Fallback forbidden" {
+		t.Errorf("expected 'Fallback forbidden', got %q", got)
 	}
 	if apiMode(provider.mode.Load()) != apiModeChatCompletions {
 		t.Error("expected mode apiModeChatCompletions after fallback")

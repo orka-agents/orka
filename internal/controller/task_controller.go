@@ -133,6 +133,15 @@ func childTaskStatusesEqual(a, b []corev1alpha1.ChildTaskStatus) bool {
 	})
 }
 
+func canStartTaskJob(phase corev1alpha1.TaskPhase) bool {
+	switch phase {
+	case "", corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseScheduled:
+		return true
+	default:
+		return false
+	}
+}
+
 // Reconcile handles the reconciliation loop for Task resources
 func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -569,6 +578,16 @@ func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	latest := &corev1alpha1.Task{}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+		return ctrl.Result{}, err
+	}
+	if !canStartTaskJob(latest.Status.Phase) {
+		task.Status = latest.Status
+		log.Info("skipping job creation because task is no longer runnable", "phase", latest.Status.Phase)
+		return ctrl.Result{}, nil
+	}
+
 	// Ensure worker ServiceAccount and RBAC exist in the task namespace
 	if err := r.ensureWorkerRBAC(ctx, task.Namespace); err != nil {
 		log.Error(err, "failed to ensure worker RBAC")
@@ -624,6 +643,9 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	attempts := task.Status.Attempts
 	jobName := task.Status.JobName
 	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		if !canStartTaskJob(t.Status.Phase) {
+			return
+		}
 		t.Status.Phase = corev1alpha1.TaskPhaseRunning
 		t.Status.StartTime = &now
 		t.Status.Attempts = attempts
