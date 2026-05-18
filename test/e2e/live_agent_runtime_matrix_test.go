@@ -83,7 +83,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
 			liveCopilotProxyServicePort(),
-			liveCopilotProxyGPTModelPreferences(),
+			liveCopilotProxyCodexModelPreferences(),
 		)
 		claudeModel = discoverPreferredProxyModelViaServiceProxy(
 			liveCopilotProxyServiceNamespace(),
