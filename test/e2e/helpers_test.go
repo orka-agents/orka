@@ -544,12 +544,12 @@ func firstPreferredProxyModel(catalog proxyModelCatalog, preferredIDs []string, 
 func liveCopilotProxyGPTModelPreferences() []string {
 	// The proxy catalog can include models outside the active Copilot integrator's allowance.
 	return []string{
-		"gpt-5.2",
-		"gpt-4.1",
-		"gpt-4o",
-		"gpt-4o-mini",
-		"gpt-5.5",
 		"gpt-5-mini",
+		"gpt-4.1",
+		"gpt-4o-mini",
+		"gpt-4o",
+		"gpt-5.2",
+		"gpt-5.5",
 	}
 }
 
