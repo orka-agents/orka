@@ -32,7 +32,10 @@ import (
 	workercommon "github.com/sozercan/orka/workers/common"
 )
 
-const controllerAPIService = "orka-api"
+const (
+	controllerAPIService = "orka-api"
+	liveProxyProbeAPIKey = "live-proxy-e2e-probe"
+)
 
 var liveProxyOpenAIModelPreferences = []string{
 	"gpt-5-mini",
@@ -714,7 +717,7 @@ func probeProxyOpenAIProviderModel(baseURL, modelID string) error {
 func probeProxyOpenAIProviderCompletion(baseURL, modelID, prompt string, tools []llm.Tool) (*llm.CompletionResponse, error) {
 	provider, err := openaiprovider.NewProvider(llm.ProviderConfig{
 		ProviderType: "openai",
-		APIKey:       "live-proxy-e2e-probe",
+		APIKey:       liveProxyProbeAPIKey,
 		BaseURL:      strings.TrimRight(baseURL, "/") + "/v1",
 	})
 	if err != nil {

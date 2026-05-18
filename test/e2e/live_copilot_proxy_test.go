@@ -127,7 +127,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 			_, _ = utils.Run(cmd)
 		})
 		err := createK8sSecret(liveProxySecretName, namespace, map[string]string{
-			"api-key": "dummy-live-copilot-proxy-key",
+			"api-key": liveProxyProbeAPIKey,
 		})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -236,7 +236,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 			_, _ = utils.Run(cmd)
 		})
 		err := createK8sSecret(liveProxySecretName, namespace, map[string]string{
-			"api-key": "dummy-live-copilot-proxy-key",
+			"api-key": liveProxyProbeAPIKey,
 		})
 		Expect(err).NotTo(HaveOccurred())
 
