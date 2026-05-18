@@ -171,7 +171,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 					},
 					"prompt": "Reply with exactly %s and nothing else.",
 					"temperature": 0,
-					"maxTokens": 8
+					"maxTokens": 16
 				}
 			}
 		}`, liveProxyTaskName, namespace, liveProxyProviderName, expectedOutput)

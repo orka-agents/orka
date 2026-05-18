@@ -676,29 +676,65 @@ func firstUsableProxyOpenAIModel(baseURL string, catalog proxyModelCatalog, pref
 }
 
 func probeProxyOpenAIProviderModel(baseURL, modelID string) error {
+	if _, err := probeProxyOpenAIProviderCompletion(
+		baseURL,
+		modelID,
+		"Reply with exactly OK and nothing else.",
+		nil,
+	); err != nil {
+		return fmt.Errorf("completion probe failed: %w", err)
+	}
+
+	tools := []llm.Tool{
+		{
+			Name:        "noop_tool",
+			Description: "No-op probe tool for live proxy model selection.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+		},
+	}
+	resp, err := probeProxyOpenAIProviderCompletion(
+		baseURL,
+		modelID,
+		"Call noop_tool exactly once before answering.",
+		tools,
+	)
+	if err != nil {
+		return fmt.Errorf("tool completion probe failed: %w", err)
+	}
+	if len(resp.ToolCalls) == 0 {
+		return fmt.Errorf("tool completion probe returned no tool calls")
+	}
+	if resp.ToolCalls[0].Name != "noop_tool" {
+		return fmt.Errorf("tool completion probe returned tool %q", resp.ToolCalls[0].Name)
+	}
+
+	return nil
+}
+
+func probeProxyOpenAIProviderCompletion(baseURL, modelID, prompt string, tools []llm.Tool) (*llm.CompletionResponse, error) {
 	provider, err := openaiprovider.NewProvider(llm.ProviderConfig{
 		ProviderType: "openai",
 		APIKey:       "live-proxy-e2e-probe",
 		BaseURL:      strings.TrimRight(baseURL, "/") + "/v1",
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	_, err = provider.Complete(ctx, &llm.CompletionRequest{
+	return provider.Complete(ctx, &llm.CompletionRequest{
 		Model: modelID,
 		Messages: []llm.Message{
 			{
 				Role:    "user",
-				Content: "Reply with exactly OK and nothing else.",
+				Content: prompt,
 			},
 		},
-		MaxTokens: 4,
+		MaxTokens: 16,
+		Tools:     tools,
 	})
-	return err
 }
 
 func (c proxyModelCatalog) modelHasEndpointMetadata(modelID string) bool {
