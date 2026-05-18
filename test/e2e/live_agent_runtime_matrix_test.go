@@ -85,22 +85,19 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
 			liveCopilotProxyServicePort(),
-			[]string{"gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.4", "gpt-5.2"},
-			"gpt-",
+			liveCopilotProxyGPTModelPreferences(),
 		)
 		claudeModel = discoverPreferredProxyModelViaServiceProxy(
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
 			liveCopilotProxyServicePort(),
-			[]string{"claude-sonnet-4.6", "claude-sonnet-4.5", "claude-sonnet-4"},
-			"claude-",
+			liveCopilotProxyClaudeModelPreferences(),
 		)
 		geminiModel = discoverPreferredProxyModelViaServiceProxy(
 			liveCopilotProxyServiceNamespace(),
 			liveCopilotProxyServiceName(),
 			liveCopilotProxyServicePort(),
-			[]string{"gemini-2.5-pro", "gemini-3.1-pro-preview", "gemini-3-flash-preview"},
-			"gemini-",
+			liveCopilotProxyGeminiModelPreferences(),
 		)
 
 		claudeSessionName = fmt.Sprintf("e2e-live-runtime-claude-%d", time.Now().UnixNano())

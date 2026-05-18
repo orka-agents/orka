@@ -510,7 +510,7 @@ func discoverPreferredProxyModelViaServiceProxy(serviceNamespace, serviceName st
 		catalog, err := fetchProxyModelCatalogViaServiceProxy(serviceNamespace, serviceName, servicePort)
 		g.Expect(err).NotTo(HaveOccurred())
 		modelID = firstPreferredProxyModel(catalog, preferredIDs, prefixes...)
-		g.Expect(modelID).NotTo(BeEmpty(), "proxy service should expose a preferred model matching %v", prefixes)
+		g.Expect(modelID).NotTo(BeEmpty(), "proxy service should expose a preferred model from %v matching %v", preferredIDs, prefixes)
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 	return modelID
 }
@@ -539,6 +539,36 @@ func firstPreferredProxyModel(catalog proxyModelCatalog, preferredIDs []string, 
 	}
 
 	return firstProxyModelMatchingPrefixes(catalog, prefixes...)
+}
+
+func liveCopilotProxyGPTModelPreferences() []string {
+	// The proxy catalog can include models outside the active Copilot integrator's allowance.
+	return []string{
+		"gpt-5.2",
+		"gpt-4.1",
+		"gpt-4o",
+		"gpt-4o-mini",
+		"gpt-5.5",
+		"gpt-5-mini",
+	}
+}
+
+func liveCopilotProxyClaudeModelPreferences() []string {
+	// Keep catalog-only newer IDs out of the preferred set so live tests fail fast at discovery.
+	return []string{
+		"claude-sonnet-4.5",
+		"claude-opus-4.5",
+		"claude-haiku-4.5",
+		"claude-sonnet-4",
+	}
+}
+
+func liveCopilotProxyGeminiModelPreferences() []string {
+	return []string{
+		"gemini-2.5-pro",
+		"gemini-3.1-pro-preview",
+		"gemini-3-flash-preview",
+	}
 }
 
 func modelMatchesAnyPrefix(modelID string, prefixes ...string) bool {

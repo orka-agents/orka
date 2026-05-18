@@ -74,12 +74,8 @@ var _ = Describe("Live Chat API", Ordered, func() {
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(liveProxyModels.AllModelIDs).NotTo(BeEmpty(), "proxy should expose at least one model")
-		liveGPTModel = firstPreferredProxyModel(liveProxyModels, []string{
-			"gpt-5.4",
-			"gpt-5.2",
-			"gpt-5.4-mini",
-		}, "gpt-")
-		Expect(liveGPTModel).NotTo(BeEmpty(), "proxy should expose a GPT-family model")
+		liveGPTModel = firstPreferredProxyModel(liveProxyModels, liveCopilotProxyGPTModelPreferences())
+		Expect(liveGPTModel).NotTo(BeEmpty(), "proxy should expose an allowed GPT-family model")
 
 		By("creating a dummy secret for the live provider")
 		err = createK8sSecret(liveChatSecretName, namespace, map[string]string{
