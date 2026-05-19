@@ -44,6 +44,25 @@ controller:
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
 
+  # Experimental agent sandbox workspace support (disabled by default)
+  agentSandbox:
+    # Enables workspace-backed execution for agent Tasks that set Task execution.workspace.
+    enabled: false
+    # Optional upstream agent-sandbox router base URL used for workspace claims.
+    routerUrl: ""
+    # Optional default execution workspace template name used when a Task omits execution.workspace.templateRef.name.
+    defaultTemplate: ""
+    # Warm pool policy: disabled, template.
+    warmPoolPolicy: disabled
+    # Namespace strategy: task, controller.
+    namespaceStrategy: task
+    # Timeout for workspace claim and readiness operations.
+    claimTimeout: 2m
+    # Timeout for agent runtime execution inside the sandbox.
+    commandTimeout: 30m
+    # Default cleanup policy: delete, retain.
+    cleanupPolicy: delete
+
   # OIDC/JWT authentication for external API requests
   oidc:
     # Issuer URL expected in bearer tokens. Requires audience when set.

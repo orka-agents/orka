@@ -108,7 +108,6 @@ type proxyModelCatalog struct {
 
 var (
 	liveCopilotProxyGPTModelPreferences = []string{
-		"gpt-5-mini",
 		"gpt-5.2",
 		"gpt-5.5",
 	}

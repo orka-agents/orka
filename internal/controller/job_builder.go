@@ -271,8 +271,19 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 	return prefix + suffix
 }
 
-// Build creates a Job for the given Task
+// JobBuildOptions carries optional inputs that affect Job rendering while keeping
+// the historical Build signature stable.
+type JobBuildOptions struct {
+	AgentSandboxWorkspace *AgentSandboxWorkspaceRequest
+}
+
+// Build creates a Job for the given Task.
 func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (*batchv1.Job, error) {
+	return b.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{})
+}
+
+// BuildWithOptions creates a Job for the given Task using additional resolved options.
+func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) (*batchv1.Job, error) {
 	jobName := buildTaskJobName(task)
 	execution := resolveExecution(task, agent)
 
@@ -300,7 +311,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 					AutomountServiceAccountToken: workerAutomountServiceAccountToken(task),
 					SecurityContext:              b.buildPodSecurityContext(),
 					Containers: []corev1.Container{
-						b.buildContainer(ctx, task, agent, provider),
+						b.buildContainerWithOptions(ctx, task, agent, provider, opts),
 					},
 				},
 			},
@@ -383,12 +394,17 @@ func (b *JobBuilder) buildContainerSecurityContext() *corev1.SecurityContext {
 
 // buildContainer builds the main container for the Job
 func (b *JobBuilder) buildContainer(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) corev1.Container {
+	return b.buildContainerWithOptions(ctx, task, agent, provider, JobBuildOptions{})
+}
+
+// buildContainerWithOptions builds the main container for the Job.
+func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) corev1.Container {
 	container := corev1.Container{
 		Name:            "worker",
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: b.buildContainerSecurityContext(),
 		Resources:       b.buildResources(task, agent),
-		Env:             b.buildEnvVars(ctx, task, agent, provider),
+		Env:             b.buildEnvVarsWithOptions(ctx, task, agent, provider, opts),
 		VolumeMounts:    []corev1.VolumeMount{},
 	}
 
@@ -536,6 +552,11 @@ func (b *JobBuilder) buildResources(task *corev1alpha1.Task, agent *corev1alpha1
 
 // buildEnvVars builds the environment variables for the container
 func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) []corev1.EnvVar {
+	return b.buildEnvVarsWithOptions(ctx, task, agent, provider, JobBuildOptions{})
+}
+
+// buildEnvVarsWithOptions builds the environment variables for the container using additional options.
+func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) []corev1.EnvVar {
 	envVars := workerenv.BaseEnv{
 		TaskName:       task.Name,
 		TaskNamespace:  task.Namespace,
@@ -577,6 +598,7 @@ func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, 
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
 		envVars = b.addAgentEnvVars(ctx, envVars, task, agent)
 		envVars = b.addCodexSandboxEnvVars(envVars, agent)
+		envVars = b.addAgentSandboxWorkspaceEnvVars(envVars, opts.AgentSandboxWorkspace)
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
@@ -584,6 +606,28 @@ func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, 
 	}
 
 	return envVars
+}
+
+// addAgentSandboxWorkspaceEnvVars injects resolved sandbox workspace settings for agent tasks.
+func (b *JobBuilder) addAgentSandboxWorkspaceEnvVars(envVars []corev1.EnvVar, request *AgentSandboxWorkspaceRequest) []corev1.EnvVar {
+	if request == nil {
+		return envVars
+	}
+
+	return append(envVars, workerenv.AgentSandboxEnv{
+		Enabled:           true,
+		RouterURL:         request.RouterURL,
+		TemplateName:      request.TemplateName,
+		TemplateNamespace: request.TemplateNamespace,
+		ClaimNamespace:    request.ClaimNamespace,
+		ReusePolicy:       string(request.ReusePolicy),
+		ReuseKey:          request.ReuseKey,
+		CleanupPolicy:     string(request.CleanupPolicy),
+		WarmPoolPolicy:    request.WarmPoolPolicy,
+		NamespaceStrategy: request.NamespaceStrategy,
+		ClaimTimeout:      request.ClaimTimeout,
+		CommandTimeout:    request.CommandTimeout,
+	}.EnvVars()...)
 }
 
 func addTransactionEnvVars(envVars []corev1.EnvVar, tx *corev1alpha1.TaskTransaction) []corev1.EnvVar {

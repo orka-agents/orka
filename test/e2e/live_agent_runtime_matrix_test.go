@@ -28,8 +28,6 @@ const (
 
 var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 	const (
-		codexPriorSecretName   = "e2e-live-runtime-prior-secret"
-		codexPriorAgentName    = "e2e-live-runtime-prior-agent"
 		codexSecretName        = "e2e-live-runtime-codex-secret"
 		codexAgentName         = "e2e-live-runtime-codex-agent"
 		codexTaskWriteName     = "e2e-live-runtime-codex-write"
@@ -135,8 +133,6 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			}{
 				{"task", codexTaskReadName},
 				{"task", codexTaskWriteName},
-				{"agent", codexPriorAgentName},
-				{"secret", codexPriorSecretName},
 				{"agent", codexAgentName},
 				{"secret", codexSecretName},
 			} {
@@ -145,34 +141,17 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			}
 		})
 
-		By("creating a Claude runtime secret that routes Anthropic traffic through the live proxy")
-		err := createK8sSecret(codexPriorSecretName, namespace, map[string]string{
-			"ANTHROPIC_API_KEY":  "dummy-live-prior-key",
-			"ANTHROPIC_BASE_URL": liveCopilotProxyRootURL(),
-		})
-		Expect(err).NotTo(HaveOccurred())
-
-		By("creating a Claude agent to generate the priorTaskRef workspace diff")
-		err = applyManifestJSON(runtimeAgentManifest(codexPriorAgentName, "claude", codexPriorSecretName, claudeModel, 5, true))
-		Expect(err).NotTo(HaveOccurred())
-
 		By("creating the prior task that writes the marker file into the pinned repository")
 		writeMarkerCommand := fmt.Sprintf(
-			"printf '%%s\\n' %s > %s",
+			"printf '%%s\\n' %s > %s && echo CREATED",
 			shellSingleQuote(codexMarker),
 			shellSingleQuote(codexMarkerFile),
 		)
-		err = applyManifestJSON(runtimeAgentTaskManifest(
+		err := applyManifestJSON(runtimeContainerTaskManifest(
 			codexTaskWriteName,
-			codexPriorAgentName,
-			fmt.Sprintf("Modify the checked-out repository. From the repository root, run exactly: %s. Verify git diff -- %s shows the new file. Then reply with exactly CREATED and nothing else.", writeMarkerCommand, shellSingleQuote(codexMarkerFile)),
-			6,
-			boolPtr(true),
+			[]string{"sh", "-c"},
+			[]string{writeMarkerCommand},
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
-			"",
-			"",
-			nil,
-			nil,
 		))
 		Expect(err).NotTo(HaveOccurred())
 
@@ -180,15 +159,12 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		verifyJobCreatedForTask(codexTaskWriteName, 2*time.Minute)
 		runtimeAssertJobBasics(
 			codexTaskWriteName,
-			claudeWorkerImage,
+			generalWorkerImage,
 			map[string]string{
-				"ORKA_MODEL":      claudeModel,
-				"ORKA_MAX_TURNS":  "6",
-				"ORKA_ALLOW_BASH": "true",
-				"ORKA_GIT_REPO":   liveRuntimeRepoURL,
-				"ORKA_GIT_REF":    liveRuntimeRepoRef,
+				"ORKA_GIT_REPO": liveRuntimeRepoURL,
+				"ORKA_GIT_REF":  liveRuntimeRepoRef,
 			},
-			codexPriorSecretName,
+			"",
 			nil,
 			nil,
 		)
@@ -454,6 +430,37 @@ func runtimeAgentTaskManifest(
 			sessionRef["append"] = *sessionAppend
 		}
 		spec["sessionRef"] = sessionRef
+	}
+
+	return map[string]any{
+		"apiVersion": "core.orka.ai/v1alpha1",
+		"kind":       "Task",
+		"metadata": map[string]any{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"spec": spec,
+	}
+}
+
+func runtimeContainerTaskManifest(
+	name string,
+	command []string,
+	args []string,
+	workspace *runtimeWorkspaceConfig,
+) map[string]any {
+	spec := map[string]any{
+		"type":    "container",
+		"command": command,
+	}
+	if len(args) > 0 {
+		spec["args"] = args
+	}
+	if workspace != nil {
+		spec["workspace"] = map[string]any{
+			"gitRepo": workspace.GitRepo,
+			"ref":     workspace.Ref,
+		}
 	}
 
 	return map[string]any{

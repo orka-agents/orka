@@ -82,6 +82,8 @@ type TaskReconciler struct {
 	ArtifactStore                      store.ArtifactStore
 	EnforceNamespaceIsolation          bool
 	MaxTasksPerNamespace               int32
+	AgentSandboxEnabled                bool
+	AgentSandboxConfig                 AgentSandboxConfig
 	AIWorkerClusterRoleName            string
 	VendorWorkerClusterRoleName        string
 	ContainerWorkerClusterRoleName     string
@@ -104,6 +106,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
+// +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
@@ -118,6 +121,11 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list
+// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
+// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch
+// +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods/portforward,verbs=create
 // +kubebuilder:rbac:groups=metrics.k8s.io,resources=pods;nodes,verbs=get;list
 
 // updateStatusWithRetry updates the task status with retry on conflict.
@@ -143,6 +151,15 @@ func childTaskStatusesEqual(a, b []corev1alpha1.ChildTaskStatus) bool {
 			left.Phase == right.Phase &&
 			left.Result == right.Result
 	})
+}
+
+func canStartTaskJob(phase corev1alpha1.TaskPhase) bool {
+	switch phase {
+	case "", corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseScheduled:
+		return true
+	default:
+		return false
+	}
 }
 
 // Reconcile handles the reconciliation loop for Task resources
@@ -254,7 +271,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 
 	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
 		// Clean up result data from store
-		if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
+		if task.Status.ResultRef != nil && task.Status.ResultRef.Available && r.ResultStore != nil {
 			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete result from store", "task", task.Name)
 				// Continue with finalizer removal anyway
@@ -385,6 +402,11 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		return r.failTask(ctx, task, err.Error())
 	}
 
+	if err := r.validateExecutionWorkspace(task); err != nil {
+		log.Error(err, "execution workspace validation failed")
+		return r.failTask(ctx, task, err.Error())
+	}
+
 	// Validate coordination constraints for child tasks
 	if result, err, done := r.validateCoordinationConstraints(ctx, task); done {
 		return result, err
@@ -498,6 +520,10 @@ func (r *TaskReconciler) acquireSessionLock(ctx context.Context, task *corev1alp
 
 	if err := r.SessionManager.AcquireLock(ctx, task); err != nil {
 		log.Error(err, "failed to acquire session lock")
+		if errors.Is(err, store.ErrNotFound) {
+			result, failErr := r.failTask(ctx, task, err.Error())
+			return result, failErr, true
+		}
 		return ctrl.Result{}, err, true
 	}
 	return ctrl.Result{}, nil, false
@@ -655,6 +681,16 @@ func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	latest := &corev1alpha1.Task{}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+		return ctrl.Result{}, err
+	}
+	if !canStartTaskJob(latest.Status.Phase) {
+		task.Status = latest.Status
+		log.Info("skipping job creation because task is no longer runnable", "phase", latest.Status.Phase)
+		return ctrl.Result{}, nil
+	}
+
 	// Ensure worker ServiceAccount and RBAC exist in the task namespace
 	if err := r.ensureWorkerRBAC(ctx, task.Namespace); err != nil {
 		log.Error(err, "failed to ensure worker RBAC")
@@ -665,8 +701,16 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		// Non-fatal: continue with job creation, it may still work
 	}
 
+	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, task)
+	if err != nil {
+		log.Error(err, "failed to resolve execution workspace")
+		return r.failTask(ctx, task, fmt.Sprintf("failed to resolve execution workspace: %v", err))
+	}
+
 	// Create the Job
-	job, err := r.JobBuilder.Build(ctx, task, agent, provider)
+	job, err := r.JobBuilder.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{
+		AgentSandboxWorkspace: workspaceRequest,
+	})
 	if err != nil {
 		log.Error(err, "failed to build Job")
 		return r.failTask(ctx, task, fmt.Sprintf("failed to build job: %v", err))
@@ -706,6 +750,9 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	attempts := task.Status.Attempts
 	jobName := task.Status.JobName
 	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		if !canStartTaskJob(t.Status.Phase) {
+			return
+		}
 		t.Status.Phase = corev1alpha1.TaskPhaseRunning
 		t.Status.StartTime = &now
 		t.Status.Attempts = attempts
@@ -767,7 +814,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 				if child.Spec.AgentRef != nil {
 					cs.Agent = child.Spec.AgentRef.Name
 				}
-				if child.Status.ResultRef != nil && child.Status.ResultRef.Available {
+				if child.Status.ResultRef != nil && child.Status.ResultRef.Available && r.ResultStore != nil {
 					result, err := r.ResultStore.GetResult(ctx, child.Namespace, child.Name)
 					if err != nil {
 						log.Error(err, "failed to get child task result", "child", child.Name)
@@ -1144,6 +1191,10 @@ func (r *TaskReconciler) calculateRetryDelay(task *corev1alpha1.Task) time.Durat
 
 // collectResult collects the task result from the Job's output
 func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.Task) error {
+	if r.ResultStore == nil {
+		return nil
+	}
+
 	// Check if result already exists in store (written by worker via HTTP)
 	_, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
 	if err == nil {
@@ -1158,8 +1209,10 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 		return err
 	}
 
-	// No result yet — capture pod logs for container tasks
-	if task.Spec.Type != corev1alpha1.TaskTypeContainer || r.KubeClient == nil {
+	// No result yet — capture pod logs for container tasks that actually created a Job.
+	// Some validation failures happen before Job creation; those terminal tasks should
+	// not produce noisy best-effort log collection errors for a non-existent Job.
+	if task.Spec.Type != corev1alpha1.TaskTypeContainer || r.KubeClient == nil || task.Status.JobName == "" {
 		return nil
 	}
 
@@ -1238,6 +1291,50 @@ func (r *TaskReconciler) resolveProviderRef(task *corev1alpha1.Task, agent *core
 	return nil
 }
 
+// validateExecutionWorkspace validates optional durable workspace settings.
+func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) error {
+	if task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil || !task.Spec.Execution.Workspace.Enabled {
+		return nil
+	}
+
+	ws := task.Spec.Execution.Workspace
+	cfg := r.AgentSandboxConfig.WithDefaults()
+
+	if !r.AgentSandboxEnabled {
+		return fmt.Errorf("execution workspace requires agent sandbox to be enabled")
+	}
+
+	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
+		return fmt.Errorf("execution workspace is only supported for type: agent tasks")
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+
+	if executionWorkspaceTemplateName(ws, cfg) == "" {
+		return fmt.Errorf("execution workspace templateRef.name is required when no agent sandbox default template is configured")
+	}
+
+	switch ws.ReusePolicy {
+	case "", corev1alpha1.WorkspaceReusePolicyNone, corev1alpha1.WorkspaceReusePolicySession:
+	default:
+		return fmt.Errorf("unsupported execution workspace reusePolicy %q", ws.ReusePolicy)
+	}
+
+	switch ws.CleanupPolicy {
+	case "", corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
+	default:
+		return fmt.Errorf("unsupported execution workspace cleanupPolicy %q", ws.CleanupPolicy)
+	}
+
+	if ws.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession && (task.Spec.SessionRef == nil || task.Spec.SessionRef.Name == "") {
+		return fmt.Errorf("execution workspace reusePolicy %q requires spec.sessionRef.name", ws.ReusePolicy)
+	}
+
+	return nil
+}
+
 // validateTaskAgentCompatibility validates that the task type and agent configuration are compatible.
 func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
 	switch task.Spec.Type {
@@ -1249,6 +1346,9 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		// Agent must have runtime configured
 		if agent.Spec.Runtime == nil {
 			return fmt.Errorf("agent %q does not have a runtime configured (required for type: agent tasks)", agent.Name)
+		}
+		if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil && agent.Spec.Execution.Workspace.Enabled {
+			return fmt.Errorf("agent %q sets spec.execution.workspace, but execution workspace requests are only supported on Task.spec.execution.workspace", agent.Name)
 		}
 		// Agent with runtime must not have providerRef (mutually exclusive)
 		if agent.Spec.ProviderRef != nil {

@@ -314,6 +314,12 @@ spec:
 - `kata-qemu` uses the same API, but is best suited to `minikube` or production clusters with virtualization-capable nodes.
 - The controller itself can remain on the default runtime; only worker Jobs need the isolation runtime.
 
+### Durable Agent Sandbox Workspaces (Experimental)
+
+For durable or retained coding environments, agent Tasks can request `Task.spec.execution.workspace`. That request is separate from the git checkout settings in `Task.spec.agentRuntime.workspace` below. When the controller feature is enabled, Orka validates the request, passes the resolved sandbox settings to the agent worker Job, and the worker wrapper claims an upstream `agent-sandbox` workspace before running the configured agent runtime inside it. For `reusePolicy: session`, Orka derives a deterministic sandbox claim name so separate worker Jobs in the same namespaced session/template scope can reattach when the workspace is retained.
+
+See [Agent Sandbox Workspaces](agent-sandbox.md) for the supported fields, controller flags, Helm values, and current limitations.
+
 ## Workspace Management
 
 Agent tasks can clone a git repository into the worker pod's `/workspace` directory.

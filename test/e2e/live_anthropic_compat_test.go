@@ -73,7 +73,7 @@ var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 			liveCopilotProxyClaudeModelPreferences,
 			liveCopilotProxyClaudeModelPrefixes...,
 		)
-		Expect(liveClaudeModel).NotTo(BeEmpty(), "proxy should expose a Claude-family model")
+		Expect(liveClaudeModel).NotTo(BeEmpty(), "proxy should expose an allowed Claude-family model")
 
 		By("creating a dummy secret for the live provider")
 		err = createK8sSecret(liveAnthropicSecretName, namespace, map[string]string{

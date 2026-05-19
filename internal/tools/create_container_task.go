@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -49,7 +50,7 @@ func (t *CreateContainerTaskTool) Parameters() json.RawMessage {
 			"subPath":      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo to run from"},
 			"pushBranch":   map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Branch name to push command-produced changes to. Omit for read-only validation."},
 		},
-		}, priorTaskField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional prior task whose structured diff should be applied before running the container command."}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, priorityField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Priority 0-1000"}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription},
+		}, priorTaskField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional prior task whose structured diff should be applied before running the container command. If workspace is omitted, Orka copies the workspace from this prior task when available."}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, priorityField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Priority 0-1000"}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription},
 	}, jsonSchemaRequiredField: []string{nameField},
 	})
 }
@@ -75,6 +76,9 @@ func (t *CreateContainerTaskTool) Execute(ctx context.Context, args json.RawMess
 	}
 
 	task := buildContainerTask(a)
+	if err := applyContainerPriorTaskWorkspace(ctx, tc.Client, namespace, task); err != nil {
+		return classifyChatK8sErr(err)
+	}
 	if err := validateContainerTaskWorkspace(task); err != nil {
 		return ChatToolErrorResult(err.Type, err.Message, err.Suggestion)
 	}
@@ -136,6 +140,9 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 	}
 
 	task := buildContainerTask(a)
+	if err := applyContainerPriorTaskWorkspace(ctx, t.k8sClient, namespace, task); err != nil {
+		return classifyChatK8sErr(err)
+	}
 	if err := validateContainerTaskWorkspace(task); err != nil {
 		return ChatToolErrorResult(err.Type, err.Message, err.Suggestion)
 	}
@@ -214,6 +221,36 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(task.Spec.Schedule)})
 }
 
+func applyContainerPriorTaskWorkspace(ctx context.Context, k8sClient client.Reader, namespace string, task *corev1alpha1.Task) error {
+	if task == nil || task.Spec.PriorTaskRef == nil {
+		return nil
+	}
+	task.Spec.PriorTaskRef.Name = strings.TrimSpace(task.Spec.PriorTaskRef.Name)
+	if task.Spec.PriorTaskRef.Name == "" {
+		task.Spec.PriorTaskRef = nil
+		return nil
+	}
+	if task.Spec.PriorTaskRef.Namespace == "" {
+		task.Spec.PriorTaskRef.Namespace = namespace
+	}
+	if task.Spec.Workspace != nil || k8sClient == nil {
+		return nil
+	}
+
+	priorTask := &corev1alpha1.Task{}
+	key := types.NamespacedName{Name: task.Spec.PriorTaskRef.Name, Namespace: task.Spec.PriorTaskRef.Namespace}
+	if err := k8sClient.Get(ctx, key, priorTask); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if priorWorkspace := taskWorkspace(priorTask); priorWorkspace != nil {
+		task.Spec.Workspace = priorWorkspace.DeepCopy()
+	}
+	return nil
+}
+
 func validateContainerTaskWorkspace(task *corev1alpha1.Task) *ChatToolError {
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeContainer {
 		return nil
@@ -226,8 +263,8 @@ func validateContainerTaskWorkspace(task *corev1alpha1.Task) *ChatToolError {
 	}
 	return &ChatToolError{
 		Type:       "missing_workspace",
-		Message:    "container command appears to validate or inspect repository files, but no workspace.gitRepo was provided",
-		Suggestion: "Retry create_container_task with workspace.gitRepo, workspace.gitSecretRef when private, and workspace.ref or workspace.branch for the exact code under test.",
+		Message:    "container command appears to validate or inspect repository files, but no workspace.gitRepo was provided or inherited",
+		Suggestion: "Retry create_container_task with workspace.gitRepo, workspace.gitSecretRef when private, and workspace.ref or workspace.branch for the exact code under test. Alternatively provide prior_task for a task that already has a workspace.",
 	}
 }
 

@@ -73,6 +73,12 @@ spec:
           - --codex-worker-image=ghcr.io/sozercan/orka/agent-worker-codex:latest
           - --codex-sandbox-mode=danger-full-access
           - --general-worker-image=ghcr.io/sozercan/orka/general-worker:latest
+          - --agent-sandbox-enabled=false
+          - --agent-sandbox-warm-pool-policy=disabled
+          - --agent-sandbox-namespace-strategy=task
+          - --agent-sandbox-claim-timeout=2m
+          - --agent-sandbox-command-timeout=30m
+          - --agent-sandbox-cleanup-policy=delete
         image: controller:latest
         imagePullPolicy: IfNotPresent
         name: manager

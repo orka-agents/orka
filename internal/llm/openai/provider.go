@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -96,7 +97,7 @@ func isUnsupportedAPIError(err error) bool {
 	var apiErr *openai.Error
 	if errors.As(err, &apiErr) {
 		switch apiErr.StatusCode {
-		case 404, 405:
+		case http.StatusNotFound, http.StatusMethodNotAllowed:
 			return true
 		case 403:
 			if isUnsupportedAPIMessage(apiErr.Code) || isUnsupportedAPIMessage(apiErr.Message) {
@@ -110,10 +111,11 @@ func isUnsupportedAPIError(err error) bool {
 			return false
 		}
 	}
+
 	var providerErr *llm.ProviderError
 	if errors.As(err, &providerErr) {
 		switch providerErr.StatusCode {
-		case 404, 405:
+		case http.StatusNotFound, http.StatusMethodNotAllowed:
 			return true
 		case 403:
 			if isUnsupportedAPIMessage(providerErr.Message) {
@@ -127,6 +129,7 @@ func isUnsupportedAPIError(err error) bool {
 			return false
 		}
 	}
+
 	msg := err.Error()
 	return strings.Contains(msg, "404") ||
 		strings.Contains(msg, "Not Found") ||
@@ -223,11 +226,11 @@ func hasUnsupportedAPICode(msg string) bool {
 
 func isForbiddenAPIError(err error) bool {
 	var apiErr *openai.Error
-	if errors.As(err, &apiErr) && apiErr.StatusCode == 403 {
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden {
 		return true
 	}
 	var providerErr *llm.ProviderError
-	if errors.As(err, &providerErr) && providerErr.StatusCode == 403 {
+	if errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusForbidden {
 		return true
 	}
 	return strings.Contains(err.Error(), "403 Forbidden")

@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -137,16 +138,32 @@ const (
 	WorkDir           = "ORKA_WORK_DIR"
 	SkillsDir         = "ORKA_SKILLS_DIR"
 
+	// Agent sandbox workspace env vars used by agent-runtime workers.
+	AgentSandboxEnabled               = "ORKA_AGENT_SANDBOX_ENABLED"
+	AgentSandboxRouterURL             = "ORKA_AGENT_SANDBOX_ROUTER_URL"
+	AgentSandboxTemplateName          = "ORKA_AGENT_SANDBOX_TEMPLATE_NAME"
+	AgentSandboxTemplateNamespace     = "ORKA_AGENT_SANDBOX_TEMPLATE_NAMESPACE"
+	AgentSandboxClaimNamespace        = "ORKA_AGENT_SANDBOX_CLAIM_NAMESPACE"
+	AgentSandboxReusePolicy           = "ORKA_AGENT_SANDBOX_REUSE_POLICY"
+	AgentSandboxReuseKey              = "ORKA_AGENT_SANDBOX_REUSE_KEY"
+	AgentSandboxCleanupPolicy         = "ORKA_AGENT_SANDBOX_CLEANUP_POLICY"
+	AgentSandboxWarmPoolPolicy        = "ORKA_AGENT_SANDBOX_WARM_POOL_POLICY"
+	AgentSandboxNamespaceStrategy     = "ORKA_AGENT_SANDBOX_NAMESPACE_STRATEGY"
+	AgentSandboxClaimTimeoutSeconds   = "ORKA_AGENT_SANDBOX_CLAIM_TIMEOUT_SECONDS"
+	AgentSandboxCommandTimeoutSeconds = "ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT_SECONDS"
+	AgentSandboxDepth                 = "ORKA_AGENT_SANDBOX_DEPTH"
+
 	// Git config env vars used to mark the prepared workspace as safe.
 	GitConfigCount  = "GIT_CONFIG_COUNT"
 	GitConfigKey0   = "GIT_CONFIG_KEY_0"
 	GitConfigValue0 = "GIT_CONFIG_VALUE_0"
 
 	// Memory/controller context env vars used by AI worker memory integration.
-	MemoryContextEnabled  = "ORKA_MEMORY_CONTEXT_ENABLED"
-	MemoryContextLimit    = "ORKA_MEMORY_CONTEXT_LIMIT"
-	MemoryContextMaxChars = "ORKA_MEMORY_CONTEXT_MAX_CHARS"
-	ServiceAccountToken   = "ORKA_SA_TOKEN"
+	MemoryContextEnabled    = "ORKA_MEMORY_CONTEXT_ENABLED"
+	MemoryContextLimit      = "ORKA_MEMORY_CONTEXT_LIMIT"
+	MemoryContextMaxChars   = "ORKA_MEMORY_CONTEXT_MAX_CHARS"
+	ServiceAccountToken     = "ORKA_SA_TOKEN"
+	ServiceAccountTokenPath = "ORKA_SA_TOKEN_PATH"
 
 	ServiceAccountTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 )
@@ -421,6 +438,64 @@ func (e AIWorkerEnv) ValidateRequired() error {
 		return fmt.Errorf("%s is required", AIPrompt)
 	}
 	return nil
+}
+
+// AgentSandboxEnv is the resolved sandbox workspace env contract passed to
+// agent-runtime workers.
+type AgentSandboxEnv struct {
+	Enabled           bool
+	RouterURL         string
+	TemplateName      string
+	TemplateNamespace string
+	ClaimNamespace    string
+	ReusePolicy       string
+	ReuseKey          string
+	CleanupPolicy     string
+	WarmPoolPolicy    string
+	NamespaceStrategy string
+	ClaimTimeout      time.Duration
+	CommandTimeout    time.Duration
+}
+
+// EnvVars renders the agent sandbox workspace environment.
+func (e AgentSandboxEnv) EnvVars() []corev1.EnvVar {
+	if !e.Enabled {
+		return nil
+	}
+
+	return []corev1.EnvVar{
+		Env(AgentSandboxEnabled, strconv.FormatBool(e.Enabled)),
+		Env(AgentSandboxRouterURL, e.RouterURL),
+		Env(AgentSandboxTemplateName, e.TemplateName),
+		Env(AgentSandboxTemplateNamespace, e.TemplateNamespace),
+		Env(AgentSandboxClaimNamespace, e.ClaimNamespace),
+		Env(AgentSandboxReusePolicy, e.ReusePolicy),
+		Env(AgentSandboxReuseKey, e.ReuseKey),
+		Env(AgentSandboxCleanupPolicy, e.CleanupPolicy),
+		Env(AgentSandboxWarmPoolPolicy, e.WarmPoolPolicy),
+		Env(AgentSandboxNamespaceStrategy, e.NamespaceStrategy),
+		Env(AgentSandboxClaimTimeoutSeconds, strconv.FormatInt(int64(e.ClaimTimeout/time.Second), 10)),
+		Env(AgentSandboxCommandTimeoutSeconds, strconv.FormatInt(int64(e.CommandTimeout/time.Second), 10)),
+		Env(AgentSandboxDepth, "0"),
+	}
+}
+
+// ParseAgentSandboxEnv reads the agent sandbox workspace environment.
+func ParseAgentSandboxEnv(getenv func(string) string) AgentSandboxEnv {
+	return AgentSandboxEnv{
+		Enabled:           IsTrue(getenv(AgentSandboxEnabled)),
+		RouterURL:         getenv(AgentSandboxRouterURL),
+		TemplateName:      getenv(AgentSandboxTemplateName),
+		TemplateNamespace: getenv(AgentSandboxTemplateNamespace),
+		ClaimNamespace:    getenv(AgentSandboxClaimNamespace),
+		ReusePolicy:       getenv(AgentSandboxReusePolicy),
+		ReuseKey:          getenv(AgentSandboxReuseKey),
+		CleanupPolicy:     getenv(AgentSandboxCleanupPolicy),
+		WarmPoolPolicy:    getenv(AgentSandboxWarmPoolPolicy),
+		NamespaceStrategy: getenv(AgentSandboxNamespaceStrategy),
+		ClaimTimeout:      time.Duration(parsePositiveInt(getenv(AgentSandboxClaimTimeoutSeconds))) * time.Second,
+		CommandTimeout:    time.Duration(parsePositiveInt(getenv(AgentSandboxCommandTimeoutSeconds))) * time.Second,
+	}
 }
 
 // CoordinationEnv is the coordination/autonomous env contract used by AI tasks.

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAIWorkerEnvRoundTrip(t *testing.T) {
@@ -171,6 +172,54 @@ func TestAIWorkerEnvValidateRequired(t *testing.T) {
 				t.Fatalf("error = %q, want %q", err.Error(), tt.want+" is required")
 			}
 		})
+	}
+}
+
+func TestAgentSandboxEnvVarsDisabledReturnsEmpty(t *testing.T) {
+	if got := (AgentSandboxEnv{}).EnvVars(); len(got) != 0 {
+		t.Fatalf("disabled AgentSandboxEnv.EnvVars() length = %d, want 0", len(got))
+	}
+}
+
+func TestAgentSandboxEnvRenderAndParse(t *testing.T) {
+	env := AgentSandboxEnv{
+		Enabled:           true,
+		RouterURL:         "http://sandbox-router",
+		TemplateName:      "agent-template",
+		TemplateNamespace: "sandbox-system",
+		ClaimNamespace:    "sandbox-system",
+		ReusePolicy:       "session",
+		ReuseKey:          "session-1",
+		CleanupPolicy:     "retain",
+		WarmPoolPolicy:    "template",
+		NamespaceStrategy: "task",
+		ClaimTimeout:      2 * time.Minute,
+		CommandTimeout:    30 * time.Minute,
+	}
+
+	values := map[string]string{}
+	for _, envVar := range env.EnvVars() {
+		values[envVar.Name] = envVar.Value
+	}
+	if values[AgentSandboxDepth] != "0" {
+		t.Fatalf("%s = %q, want 0", AgentSandboxDepth, values[AgentSandboxDepth])
+	}
+
+	parsed := ParseAgentSandboxEnv(func(name string) string { return values[name] })
+	if !parsed.Enabled {
+		t.Fatal("parsed sandbox env is not enabled")
+	}
+	if parsed.TemplateName != env.TemplateName || parsed.TemplateNamespace != env.TemplateNamespace {
+		t.Fatalf("parsed template = %s/%s, want %s/%s", parsed.TemplateNamespace, parsed.TemplateName, env.TemplateNamespace, env.TemplateName)
+	}
+	if parsed.ClaimNamespace != env.ClaimNamespace {
+		t.Fatalf("parsed claim namespace = %q, want %q", parsed.ClaimNamespace, env.ClaimNamespace)
+	}
+	if parsed.CleanupPolicy != env.CleanupPolicy || parsed.ReusePolicy != env.ReusePolicy || parsed.ReuseKey != env.ReuseKey {
+		t.Fatalf("parsed policies = %#v, want %#v", parsed, env)
+	}
+	if parsed.ClaimTimeout != env.ClaimTimeout || parsed.CommandTimeout != env.CommandTimeout {
+		t.Fatalf("parsed timeouts = %s/%s, want %s/%s", parsed.ClaimTimeout, parsed.CommandTimeout, env.ClaimTimeout, env.CommandTimeout)
 	}
 }
 

@@ -112,7 +112,7 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 	})
 
 	It("should run a tiny AI task through the live copilot proxy and return the exact output", func() {
-		By("discovering a live GPT-family model from the proxy service")
+		By("discovering a live chat-completions model from the proxy service")
 		model := discoveredModel
 		if model == "" {
 			var err error

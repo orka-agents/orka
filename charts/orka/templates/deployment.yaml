@@ -179,13 +179,29 @@ spec:
             {{- if gt (int .Values.controller.maxTasksPerNamespace) 0 }}
             - --max-tasks-per-namespace={{ .Values.controller.maxTasksPerNamespace }}
             {{- end }}
+            {{- with .Values.controller.agentSandbox }}
+            {{- if .enabled }}
+            - --agent-sandbox-enabled=true
+            {{- if .routerUrl }}
+            - {{ printf "--agent-sandbox-router-url=%s" .routerUrl | quote }}
+            {{- end }}
+            {{- if .defaultTemplate }}
+            - {{ printf "--agent-sandbox-default-template=%s" .defaultTemplate | quote }}
+            {{- end }}
+            - --agent-sandbox-warm-pool-policy={{ .warmPoolPolicy | default "disabled" }}
+            - --agent-sandbox-namespace-strategy={{ .namespaceStrategy | default "task" }}
+            - --agent-sandbox-claim-timeout={{ .claimTimeout | default "2m" }}
+            - --agent-sandbox-command-timeout={{ .commandTimeout | default "30m" }}
+            - --agent-sandbox-cleanup-policy={{ .cleanupPolicy | default "delete" }}
+            {{- end }}
+            {{- end }}
           env:
             - name: ORKA_AI_WORKER_CLUSTER_ROLE_NAME
-              value: {{ printf "%s-ai-worker-role" (include "orka.fullname" .) | quote }}
+              value: {{ include "orka.aiWorkerClusterRoleName" . | quote }}
             - name: ORKA_VENDOR_WORKER_CLUSTER_ROLE_NAME
-              value: {{ printf "%s-vendor-worker-role" (include "orka.fullname" .) | quote }}
+              value: {{ include "orka.vendorWorkerClusterRoleName" . | quote }}
             - name: ORKA_CONTAINER_WORKER_CLUSTER_ROLE_NAME
-              value: {{ printf "%s-container-worker-role" (include "orka.fullname" .) | quote }}
+              value: {{ include "orka.containerWorkerClusterRoleName" . | quote }}
           ports:
             - name: api
               containerPort: {{ .Values.controller.apiPort }}

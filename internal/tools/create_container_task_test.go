@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -160,6 +161,40 @@ func expectContainerTaskWorkspace(t *testing.T, fc client.Client) {
 	if task.Spec.PriorTaskRef == nil || task.Spec.PriorTaskRef.Name != testCoderTaskName {
 		t.Fatalf("priorTaskRef = %#v", task.Spec.PriorTaskRef)
 	}
+	if task.Spec.PriorTaskRef.Namespace != defaultNamespace {
+		t.Fatalf("priorTaskRef namespace = %q, want %q", task.Spec.PriorTaskRef.Namespace, defaultNamespace)
+	}
+}
+
+func expectContainerTaskInheritedWorkspace(t *testing.T, fc client.Client) {
+	t.Helper()
+
+	task := &corev1alpha1.Task{}
+	key := client.ObjectKey{Name: testContainerTaskGeneratedName, Namespace: defaultNamespace}
+	if err := fc.Get(context.Background(), key, task); err != nil {
+		t.Fatalf("failed to get created task: %v", err)
+	}
+	if task.Spec.Workspace == nil {
+		t.Fatal("expected inherited workspace")
+	}
+	if task.Spec.Workspace.GitRepo != "https://github.com/example/prior.git" {
+		t.Errorf("gitRepo = %q", task.Spec.Workspace.GitRepo)
+	}
+	if task.Spec.Workspace.Ref != "prior-sha" {
+		t.Errorf("ref = %q", task.Spec.Workspace.Ref)
+	}
+	if task.Spec.Workspace.SubPath != "src" {
+		t.Errorf("subPath = %q", task.Spec.Workspace.SubPath)
+	}
+	if task.Spec.Workspace.GitSecretRef == nil || task.Spec.Workspace.GitSecretRef.Name != testGitCredentialsSecret {
+		t.Fatalf("gitSecretRef = %#v", task.Spec.Workspace.GitSecretRef)
+	}
+	if task.Spec.PriorTaskRef == nil || task.Spec.PriorTaskRef.Name != testCoderTaskName {
+		t.Fatalf("priorTaskRef = %#v", task.Spec.PriorTaskRef)
+	}
+	if task.Spec.PriorTaskRef.Namespace != defaultNamespace {
+		t.Fatalf("priorTaskRef namespace = %q, want %q", task.Spec.PriorTaskRef.Namespace, defaultNamespace)
+	}
 }
 
 func TestCreateContainerTaskTool_Execute(t *testing.T) {
@@ -208,6 +243,26 @@ func TestCreateContainerTaskTool_Execute(t *testing.T) {
 			checkResult: func(t *testing.T, result string) {
 				expectContainerTaskError(t, result, "missing_workspace")
 			},
+		},
+		{
+			name: "repo validation inherits workspace from prior task",
+			args: json.RawMessage(`{"name":"validation","image":"golang:1.26","command":["sh","-lc"],"args":["go test ./..."],"prior_task":"coder-task"}`),
+			objects: []client.Object{
+				&corev1alpha1.Task{
+					ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
+					Spec: corev1alpha1.TaskSpec{
+						Type: corev1alpha1.TaskTypeAgent,
+						Workspace: &corev1alpha1.WorkspaceConfig{
+							GitRepo:      "https://github.com/example/prior.git",
+							Ref:          "prior-sha",
+							SubPath:      "src",
+							GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredentialsSecret},
+						},
+					},
+				},
+			},
+			checkResult: expectContainerTaskSuccess,
+			checkClient: expectContainerTaskInheritedWorkspace,
 		},
 		{
 			name: invalidJSONArgsCaseName,
