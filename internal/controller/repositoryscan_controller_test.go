@@ -10,11 +10,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -167,6 +169,40 @@ func mustParseTime(t *testing.T, value string) time.Time {
 		t.Fatalf("time.Parse(%q): %v", value, err)
 	}
 	return parsed
+}
+
+func saveTestFindingsArtifact(
+	t *testing.T,
+	ctx context.Context,
+	store storepkg.ArtifactStore,
+	namespace string,
+	taskName string,
+	mode string,
+	headSHA string,
+) {
+	t.Helper()
+
+	findings := security.FindingsArtifact{
+		Version: 1,
+		Repository: security.FindingsArtifactRepo{
+			RepoURL: "https://github.com/example/repo",
+			Branch:  "main",
+			HeadSHA: headSHA,
+			BaseSHA: "base-" + headSHA,
+		},
+		Scan: security.FindingsArtifactScan{
+			Mode:    mode,
+			Summary: "No findings",
+		},
+		Findings: []security.FindingsArtifactFinding{},
+	}
+	data, err := json.Marshal(findings)
+	if err != nil {
+		t.Fatalf("json.Marshal(findings) error = %v", err)
+	}
+	if err := store.SaveArtifact(ctx, namespace, taskName, security.ArtifactFindings, "application/json", data); err != nil {
+		t.Fatalf("SaveArtifact(%s) error = %v", taskName, err)
+	}
 }
 
 func TestIngestScanTaskFailsSucceededTaskWithoutRequiredArtifacts(t *testing.T) {
@@ -1097,6 +1133,158 @@ func TestRefreshScanRunStatusSetsBothTimestampsOnSuccess(t *testing.T) {
 	}
 	if current.Status.LastSuccessfulScanAt == nil || !current.Status.LastSuccessfulScanAt.Time.Equal(completed) {
 		t.Fatalf("LastSuccessfulScanAt = %v, want %v", current.Status.LastSuccessfulScanAt, completed)
+	}
+}
+
+func TestRefreshScanRunStatusWaitsForAllDiscoveryScopes(t *testing.T) {
+	ctx := context.Background()
+	secStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	scan := &corev1alpha1.RepositoryScan{
+		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
+		ObjectMeta: metav1.ObjectMeta{Name: "split-pending", Namespace: "default"},
+		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
+	}
+	completed := metav1.NewTime(mustParseTime(t, "2026-05-09T10:00:00Z"))
+	threatTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "split-pending-threat",
+			Namespace: "default",
+			Labels: map[string]string{
+				labels.LabelSecurityTarget: "split-pending",
+				labels.LabelSecurityScanID: "scan_split_pending",
+				labels.LabelSecurityStage:  security.StageThreatModel,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, CompletionTime: &completed},
+	}
+	discoveryTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "split-pending-discovery-0",
+			Namespace: "default",
+			Labels: map[string]string{
+				labels.LabelSecurityTarget: "split-pending",
+				labels.LabelSecurityScanID: "scan_split_pending",
+				labels.LabelSecurityStage:  security.StageDiscovery,
+				labels.LabelSecurityScope:  security.DiscoveryScopes()[0].Name,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, CompletionTime: &completed},
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
+		WithObjects(scan, threatTask, discoveryTask).
+		Build()
+	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: secStore, ArtifactStore: secStore}
+
+	if err := secStore.SaveArtifact(ctx, threatTask.Namespace, threatTask.Name, security.ArtifactThreatModel, "text/markdown", []byte("# Threat Model")); err != nil {
+		t.Fatalf("SaveArtifact(threat model) error = %v", err)
+	}
+	saveTestFindingsArtifact(t, ctx, secStore, discoveryTask.Namespace, discoveryTask.Name, "initial", "head-0")
+
+	run := &storepkg.ScanRun{ID: "scan_split_pending", Namespace: "default", RepositoryScan: "split-pending", TaskName: threatTask.Name, Mode: "initial", Phase: scanRunPhaseRunning, StartedAt: completed.Time}
+	if err := secStore.CreateScanRun(ctx, run); err != nil {
+		t.Fatalf("CreateScanRun() error = %v", err)
+	}
+	if err := r.refreshScanRunStatus(ctx, scan, run, run.ID, true); err != nil {
+		t.Fatalf("refreshScanRunStatus() error = %v", err)
+	}
+
+	current := &corev1alpha1.RepositoryScan{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		t.Fatalf("cl.Get() error = %v", err)
+	}
+	if current.Status.Phase != repositoryScanPhaseScanning {
+		t.Fatalf("scan.Status.Phase = %q, want %q", current.Status.Phase, repositoryScanPhaseScanning)
+	}
+	if current.Status.LastSuccessfulScanAt != nil {
+		t.Fatalf("LastSuccessfulScanAt = %v, want nil while discovery scopes are pending", current.Status.LastSuccessfulScanAt)
+	}
+}
+
+func TestIngestOwnedTasksFailsSucceededDiscoveryWithoutFindingsArtifact(t *testing.T) {
+	ctx := context.Background()
+	secStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	scan := &corev1alpha1.RepositoryScan{
+		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
+		ObjectMeta: metav1.ObjectMeta{Name: "split-missing", Namespace: "default"},
+		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
+	}
+	completed := metav1.NewTime(mustParseTime(t, "2026-05-09T11:00:00Z"))
+	threatTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "split-missing-threat",
+			Namespace: "default",
+			Labels: map[string]string{
+				labels.LabelSecurityTarget: "split-missing",
+				labels.LabelSecurityScanID: "scan_split_missing",
+				labels.LabelSecurityStage:  security.StageThreatModel,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, CompletionTime: &completed},
+	}
+	objects := []client.Object{scan, threatTask}
+	missingScope := security.DiscoveryScopes()[len(security.DiscoveryScopes())-1].Name
+	for index, scope := range security.DiscoveryScopes() {
+		task := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("split-missing-discovery-%d", index),
+				Namespace: "default",
+				Labels: map[string]string{
+					labels.LabelSecurityTarget: "split-missing",
+					labels.LabelSecurityScanID: "scan_split_missing",
+					labels.LabelSecurityStage:  security.StageDiscovery,
+					labels.LabelSecurityScope:  scope.Name,
+				},
+			},
+			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, CompletionTime: &completed},
+		}
+		objects = append(objects, task)
+		if scope.Name != missingScope {
+			saveTestFindingsArtifact(t, ctx, secStore, task.Namespace, task.Name, "initial", fmt.Sprintf("head-%d", index))
+		}
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
+		WithObjects(objects...).
+		Build()
+	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: secStore, ArtifactStore: secStore}
+
+	if err := secStore.SaveArtifact(ctx, threatTask.Namespace, threatTask.Name, security.ArtifactThreatModel, "text/markdown", []byte("# Threat Model")); err != nil {
+		t.Fatalf("SaveArtifact(threat model) error = %v", err)
+	}
+
+	if err := r.ingestOwnedTasks(ctx, scan); err != nil {
+		t.Fatalf("ingestOwnedTasks() error = %v", err)
+	}
+
+	current := &corev1alpha1.RepositoryScan{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		t.Fatalf("cl.Get() error = %v", err)
+	}
+	if current.Status.Phase != repositoryScanPhaseError {
+		t.Fatalf("scan.Status.Phase = %q, want %q", current.Status.Phase, repositoryScanPhaseError)
+	}
+	condition := meta.FindStatusCondition(current.Status.Conditions, "Ready")
+	if condition == nil {
+		t.Fatal("Ready condition = nil, want failed condition")
+	}
+	if !strings.Contains(condition.Message, missingScope) || !strings.Contains(condition.Message, security.ArtifactFindings) {
+		t.Fatalf("condition.Message = %q, want missing scope and artifact", condition.Message)
+	}
+	if current.Status.LastSuccessfulScanAt != nil {
+		t.Fatalf("LastSuccessfulScanAt = %v, want nil for failed artifact validation", current.Status.LastSuccessfulScanAt)
 	}
 }
 
