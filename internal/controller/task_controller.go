@@ -924,12 +924,50 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 						return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
 					}
 				}
+				if msg, ok, err := r.failedMountEventMessage(ctx, pod); err != nil {
+					return ctrl.Result{}, err
+				} else if ok {
+					msg = fmt.Sprintf("pod stuck initializing for over 2 minutes: %s", msg)
+					log.Info("failing task due to failed pod mount", "message", msg)
+					return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
+				}
 			}
 		}
 	}
 
 	// Job still running, requeue
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+func (r *TaskReconciler) failedMountEventMessage(ctx context.Context, pod *corev1.Pod) (string, bool, error) {
+	if pod == nil {
+		return "", false, nil
+	}
+
+	var events corev1.EventList
+	if err := r.List(ctx, &events, client.InNamespace(pod.Namespace)); err != nil {
+		return "", false, err
+	}
+
+	for i := range events.Items {
+		event := &events.Items[i]
+		if event.Reason != "FailedMount" {
+			continue
+		}
+		ref := event.InvolvedObject
+		if ref.Kind != "Pod" || ref.Name != pod.Name {
+			continue
+		}
+		if ref.UID != "" && pod.UID != "" && ref.UID != pod.UID {
+			continue
+		}
+		message := strings.TrimSpace(event.Message)
+		if message == "" {
+			message = "pod volume mount failed"
+		}
+		return message, true, nil
+	}
+	return "", false, nil
 }
 
 func jobFailedDueToActiveDeadline(job *batchv1.Job) bool {

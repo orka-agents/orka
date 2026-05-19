@@ -2371,6 +2371,125 @@ func TestHandleRunning_JobFailed_WithRetry(t *testing.T) {
 	}
 }
 
+func TestHandleRunning_PodFailedMountFailsTask(t *testing.T) {
+	scheme := newTestScheme()
+	startTime := metav1.NewTime(time.Now().Add(-3 * time.Minute))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-failed-mount", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			StartTime: &startTime,
+			JobName:   "run-failed-mount-job",
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-failed-mount-job", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "run-failed-mount-pod",
+			Namespace: "default",
+			UID:       "pod-uid",
+			Labels: map[string]string{
+				labels.LabelTask: labels.SelectorValue(task.Name),
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			InitContainerStatuses: []corev1.ContainerStatus{{
+				Name: "prepare-workspace",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: "PodInitializing",
+				}},
+			}},
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "worker",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: "PodInitializing",
+				}},
+			}},
+		},
+	}
+	event := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{Name: "failed-mount", Namespace: "default"},
+		InvolvedObject: corev1.ObjectReference{
+			Kind: "Pod",
+			Name: pod.Name,
+			UID:  pod.UID,
+		},
+		Reason:  "FailedMount",
+		Message: `MountVolume.SetUp failed for volume "git-credentials": secret "missing" not found`,
+	}
+	r := newUnitReconciler(scheme, task, job, pod, event)
+
+	_, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("phase = %s, want Failed", task.Status.Phase)
+	}
+	if !strings.Contains(task.Status.Message, "secret") {
+		t.Fatalf("message = %q, want failed mount detail", task.Status.Message)
+	}
+}
+
+func TestHandleRunning_PodInitializingWithoutFailedMountRequeues(t *testing.T) {
+	scheme := newTestScheme()
+	startTime := metav1.NewTime(time.Now().Add(-3 * time.Minute))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-pod-initializing", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			StartTime: &startTime,
+			JobName:   "run-pod-initializing-job",
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-pod-initializing-job", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "run-pod-initializing-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				labels.LabelTask: labels.SelectorValue(task.Name),
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			InitContainerStatuses: []corev1.ContainerStatus{{
+				Name: "prepare-workspace",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: "PodInitializing",
+				}},
+			}},
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "worker",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: "PodInitializing",
+				}},
+			}},
+		},
+	}
+	r := newUnitReconciler(scheme, task, job, pod)
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Fatalf("phase = %s, want Running", task.Status.Phase)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("RequeueAfter = %s, want positive duration", result.RequeueAfter)
+	}
+}
+
 func TestHandleRunning_JobStillRunning(t *testing.T) {
 	scheme := newTestScheme()
 	job := &batchv1.Job{
