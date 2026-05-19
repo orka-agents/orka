@@ -316,7 +316,7 @@ spec:
 
 ### Durable Agent Sandbox Workspaces (Experimental)
 
-For durable or retained coding environments, agent Tasks can request `Task.spec.execution.workspace`. That request is separate from the git checkout settings in `Task.spec.agentRuntime.workspace` below. When the controller feature is enabled, Orka validates the request, passes the resolved sandbox settings to the agent worker Job, and the worker wrapper claims an upstream `agent-sandbox` workspace before running the configured agent runtime inside it. Automatic session reuse across separate worker Jobs is limited in the current alpha because Orka does not yet persist sandbox claim identity.
+For durable or retained coding environments, agent Tasks can request `Task.spec.execution.workspace`. That request is separate from the git checkout settings in `Task.spec.agentRuntime.workspace` below. When the controller feature is enabled, Orka validates the request, passes the resolved sandbox settings to the agent worker Job, and the worker wrapper claims an upstream `agent-sandbox` workspace before running the configured agent runtime inside it. For `reusePolicy: session`, Orka derives a deterministic sandbox claim name so separate worker Jobs in the same namespaced session/template scope can reattach when the workspace is retained.
 
 See [Agent Sandbox Workspaces](agent-sandbox.md) for the supported fields, controller flags, Helm values, and current limitations.
 

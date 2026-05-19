@@ -187,6 +187,7 @@ func TestAgentSandboxEnvRenderAndParse(t *testing.T) {
 		RouterURL:         "http://sandbox-router",
 		TemplateName:      "agent-template",
 		TemplateNamespace: "sandbox-system",
+		ClaimNamespace:    "sandbox-system",
 		ReusePolicy:       "session",
 		ReuseKey:          "session-1",
 		CleanupPolicy:     "retain",
@@ -210,6 +211,9 @@ func TestAgentSandboxEnvRenderAndParse(t *testing.T) {
 	}
 	if parsed.TemplateName != env.TemplateName || parsed.TemplateNamespace != env.TemplateNamespace {
 		t.Fatalf("parsed template = %s/%s, want %s/%s", parsed.TemplateNamespace, parsed.TemplateName, env.TemplateNamespace, env.TemplateName)
+	}
+	if parsed.ClaimNamespace != env.ClaimNamespace {
+		t.Fatalf("parsed claim namespace = %q, want %q", parsed.ClaimNamespace, env.ClaimNamespace)
 	}
 	if parsed.CleanupPolicy != env.CleanupPolicy || parsed.ReusePolicy != env.ReusePolicy || parsed.ReuseKey != env.ReuseKey {
 		t.Fatalf("parsed policies = %#v, want %#v", parsed, env)

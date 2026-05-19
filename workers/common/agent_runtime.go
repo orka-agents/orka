@@ -8,6 +8,8 @@ package common
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -212,16 +214,19 @@ func execGitContext(ctx context.Context, dir string, args ...string) error {
 type AgentExecutor func(ctx context.Context, cfg *AgentConfig) (string, error)
 
 const (
-	agentSandboxWorkerUploadPath   = "orka-agent-worker"
-	agentSandboxWorkerExecPath     = "/app/" + agentSandboxWorkerUploadPath
-	agentSandboxSATokenUploadPath  = "orka-sa-token"
-	agentSandboxSATokenExecPath    = "/app/" + agentSandboxSATokenUploadPath
-	agentSandboxExecMaxOutputBytes = 2000
+	agentSandboxWorkerUploadPath     = "orka-agent-worker"
+	agentSandboxWorkerExecPath       = "/app/" + agentSandboxWorkerUploadPath
+	agentSandboxSATokenUploadPath    = "orka-sa-token"
+	agentSandboxSATokenExecPath      = "/app/" + agentSandboxSATokenUploadPath
+	agentSandboxGitAskpassUploadPath = "orka-git-askpass"
+	agentSandboxGitAskpassExecPath   = "/app/" + agentSandboxGitAskpassUploadPath
+	agentSandboxExecMaxOutputBytes   = 2000
 )
 
 var (
 	agentSandboxWorkspaceExecutorMu sync.RWMutex
 	agentSandboxWorkspaceExecutor   workspace.WorkspaceExecutor = workspace.NewAgentSandboxExecutor()
+	setupGitCredentialsForRunAgent                              = SetupGitCredentials
 )
 
 func getAgentSandboxWorkspaceExecutor() workspace.WorkspaceExecutor {
@@ -253,6 +258,10 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	)
 	defer cancel()
 
+	// Populate git credential env vars before the sandbox handoff so the inner
+	// worker can clone private repositories without mounting the outer secret.
+	setupGitCredentialsForRunAgent()
+
 	if sandboxEnv := workerenv.ParseAgentSandboxEnv(os.Getenv); sandboxEnv.Enabled {
 		if depth := agentSandboxDepth(os.Getenv(workerenv.AgentSandboxDepth)); depth > 0 {
 			return fmt.Errorf("agent sandbox recursion detected: %s=%d", workerenv.AgentSandboxDepth, depth)
@@ -267,9 +276,6 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 
 	fmt.Printf("Worker %s started task=%s/%s%s\n",
 		name, cfg.TaskNamespace, cfg.TaskName, workerenv.TransactionLogFields(cfg.TransactionID, cfg.TransactionProfile))
-
-	// Configure git credentials globally (for both clone and agent push operations)
-	SetupGitCredentials()
 
 	// Clone git repo if configured
 	if cfg.GitRepo != "" {
@@ -344,14 +350,14 @@ func runAgentInSandbox(ctx context.Context, name, workspaceDir string, sandboxEn
 	}
 	taskNamespace := os.Getenv(workerenv.TaskNamespace)
 	taskName := os.Getenv(workerenv.TaskName)
-	templateNamespace := sandboxEnv.TemplateNamespace
-	if templateNamespace == "" {
-		templateNamespace = taskNamespace
-	}
+	templateNamespace := agentSandboxTemplateNamespace(sandboxEnv, taskNamespace)
+	claimNamespace := agentSandboxClaimNamespace(sandboxEnv, taskNamespace, templateNamespace)
 
 	claim, err := executor.Claim(ctx, workspace.ClaimRequest{
-		Namespace: taskNamespace,
-		TaskName:  taskName,
+		Namespace:       claimNamespace,
+		TaskName:        taskName,
+		ClaimName:       agentSandboxSessionClaimName(sandboxEnv, claimNamespace, taskNamespace, templateNamespace),
+		CreateIfMissing: true,
 		Template: workspace.TemplateRef{
 			Namespace: templateNamespace,
 			Name:      sandboxEnv.TemplateName,
@@ -427,6 +433,7 @@ func stageAgentSandboxExecutable(
 		return nil, nil, fmt.Errorf("read agent executable for sandbox: %w", err)
 	}
 
+	tokenUploaded := false
 	artifacts := []workspace.UploadArtifact{
 		{
 			Path: agentSandboxWorkerUploadPath,
@@ -435,12 +442,23 @@ func stageAgentSandboxExecutable(
 		},
 	}
 	if token := workerServiceAccountToken(); token != "" {
+		tokenUploaded = true
 		artifacts = append(artifacts, workspace.UploadArtifact{
 			Path: agentSandboxSATokenUploadPath,
 			Data: []byte(token),
 			Mode: 0o600,
 		})
 		innerEnv[workerenv.ServiceAccountTokenPath] = agentSandboxSATokenExecPath
+	}
+	gitAskpassUploaded := false
+	if strings.TrimSpace(innerEnv[workerenv.GitToken]) != "" {
+		gitAskpassUploaded = true
+		artifacts = append(artifacts, workspace.UploadArtifact{
+			Path: agentSandboxGitAskpassUploadPath,
+			Data: []byte("#!/bin/sh\nprintf '%s\n' \"$GIT_TOKEN\"\n"),
+			Mode: 0o700,
+		})
+		innerEnv[workerenv.GitAskpass] = agentSandboxGitAskpassExecPath
 	}
 
 	if _, err := executor.Upload(ctx, workspace.UploadRequest{
@@ -454,11 +472,69 @@ func stageAgentSandboxExecutable(
 	command := []string{
 		"sh",
 		"-c",
-		"chmod 0700 " + agentSandboxWorkerExecPath + " && exec " + agentSandboxWorkerExecPath + " \"$@\"",
+		agentSandboxWorkerCommand(tokenUploaded, gitAskpassUploaded),
 		agentSandboxWorkerUploadPath,
 	}
 	command = append(command, args...)
 	return command, innerEnv, nil
+}
+
+func agentSandboxWorkerCommand(tokenUploaded, gitAskpassUploaded bool) string {
+	chmodTargets := []string{agentSandboxWorkerExecPath}
+	if gitAskpassUploaded {
+		chmodTargets = append(chmodTargets, agentSandboxGitAskpassExecPath)
+	}
+	chmod := "chmod 0700 " + strings.Join(chmodTargets, " ")
+	if !tokenUploaded {
+		return chmod + " && exec " + agentSandboxWorkerExecPath + " \"$@\""
+	}
+	return strings.Join([]string{
+		chmod,
+		"&&",
+		agentSandboxWorkerExecPath + " \"$@\";",
+		"status=$?;",
+		"rm -f " + agentSandboxSATokenExecPath + ";",
+		"exit $status",
+	}, " ")
+}
+
+func agentSandboxTemplateNamespace(sandboxEnv workerenv.AgentSandboxEnv, taskNamespace string) string {
+	if ns := strings.TrimSpace(sandboxEnv.TemplateNamespace); ns != "" {
+		return ns
+	}
+	return taskNamespace
+}
+
+func agentSandboxClaimNamespace(sandboxEnv workerenv.AgentSandboxEnv, taskNamespace, templateNamespace string) string {
+	if ns := strings.TrimSpace(sandboxEnv.ClaimNamespace); ns != "" {
+		return ns
+	}
+	if strings.EqualFold(strings.TrimSpace(sandboxEnv.NamespaceStrategy), "controller") &&
+		strings.TrimSpace(templateNamespace) != "" {
+		return strings.TrimSpace(templateNamespace)
+	}
+	return taskNamespace
+}
+
+func agentSandboxSessionClaimName(
+	sandboxEnv workerenv.AgentSandboxEnv,
+	claimNamespace string,
+	taskNamespace string,
+	templateNamespace string,
+) string {
+	if !strings.EqualFold(strings.TrimSpace(sandboxEnv.ReusePolicy), "session") ||
+		strings.TrimSpace(sandboxEnv.ReuseKey) == "" {
+		return ""
+	}
+	parts := []string{
+		strings.TrimSpace(claimNamespace),
+		strings.TrimSpace(taskNamespace),
+		strings.TrimSpace(templateNamespace),
+		strings.TrimSpace(sandboxEnv.TemplateName),
+		strings.TrimSpace(sandboxEnv.ReuseKey),
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return "orka-session-" + hex.EncodeToString(sum[:])[:32]
 }
 
 func cleanupAgentSandboxWorkspace(
@@ -500,6 +576,7 @@ func retainAgentSandboxWorkspace(
 	sandboxEnv workerenv.AgentSandboxEnv,
 	reason string,
 ) {
+	scrubAgentSandboxServiceAccountToken(ctx, executor, ref, sandboxEnv)
 	if _, err := executor.Release(ctx, workspace.ReleaseRequest{
 		Ref:     ref,
 		Retain:  true,
@@ -507,6 +584,22 @@ func retainAgentSandboxWorkspace(
 		Timeout: sandboxEnv.ClaimTimeout,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to retain sandbox workspace: %v\n", err)
+	}
+}
+
+func scrubAgentSandboxServiceAccountToken(
+	ctx context.Context,
+	executor workspace.WorkspaceExecutor,
+	ref workspace.WorkspaceRef,
+	sandboxEnv workerenv.AgentSandboxEnv,
+) {
+	if _, err := executor.Exec(ctx, workspace.ExecRequest{
+		Ref:            ref,
+		Command:        []string{"rm", "-f", agentSandboxSATokenExecPath},
+		Timeout:        sandboxEnv.ClaimTimeout,
+		MaxOutputBytes: agentSandboxExecMaxOutputBytes,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to scrub sandbox service account token before retaining workspace: %v\n", err)
 	}
 }
 

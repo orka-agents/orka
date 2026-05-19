@@ -72,14 +72,17 @@ type TemplateRef struct {
 
 // ClaimRequest asks the executor to create or reuse a workspace claim.
 type ClaimRequest struct {
-	Namespace   string
-	TaskName    string
-	ClaimName   string
-	Template    TemplateRef
-	ReuseKey    string
-	Labels      map[string]string
-	Annotations map[string]string
-	Timeout     time.Duration
+	Namespace string
+	TaskName  string
+	ClaimName string
+	// CreateIfMissing allows executors that support named claims to create
+	// ClaimName when reattach misses.
+	CreateIfMissing bool
+	Template        TemplateRef
+	ReuseKey        string
+	Labels          map[string]string
+	Annotations     map[string]string
+	Timeout         time.Duration
 }
 
 // ClaimResult describes the outcome of claiming a workspace.

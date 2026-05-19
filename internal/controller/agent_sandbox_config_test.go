@@ -14,7 +14,12 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+const testSandboxTemplatesNamespace = "sandbox-templates"
 
 func TestDefaultAgentSandboxConfig(t *testing.T) {
 	cfg := DefaultAgentSandboxConfig()
@@ -165,7 +170,7 @@ func TestResolveExecutionWorkspaceRequest(t *testing.T) {
 			Enabled: true,
 			TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
 				Name:      "task-template",
-				Namespace: "sandbox-templates",
+				Namespace: testSandboxTemplatesNamespace,
 			},
 		}
 		for _, mutate := range mutators {
@@ -271,7 +276,7 @@ func TestResolveExecutionWorkspaceRequest(t *testing.T) {
 		if request.TemplateName != "task-template" {
 			t.Fatalf("TemplateName = %q, want task-template", request.TemplateName)
 		}
-		if request.TemplateNamespace != "sandbox-templates" {
+		if request.TemplateNamespace != testSandboxTemplatesNamespace {
 			t.Fatalf("TemplateNamespace = %q, want sandbox-templates", request.TemplateNamespace)
 		}
 		if request.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
@@ -284,4 +289,79 @@ func TestResolveExecutionWorkspaceRequest(t *testing.T) {
 			t.Fatalf("CleanupPolicy = %q, want %q", request.CleanupPolicy, corev1alpha1.WorkspaceCleanupPolicyRetain)
 		}
 	})
+}
+
+func TestResolveExecutionWorkspaceRequestValidatesResolvedTemplateNamespace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := sandboxextv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add sandbox scheme: %v", err)
+	}
+
+	r := &TaskReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(&sandboxextv1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "task-template", Namespace: testSandboxTemplatesNamespace},
+		}).Build(),
+		AgentSandboxEnabled: true,
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-task", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+				Enabled: true,
+				TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
+					Name:      "task-template",
+					Namespace: testSandboxTemplatesNamespace,
+				},
+			}},
+		},
+	}
+
+	request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task)
+	if err != nil {
+		t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
+	}
+	if request.TemplateNamespace != testSandboxTemplatesNamespace || request.ClaimNamespace != testSandboxTemplatesNamespace {
+		t.Fatalf("resolved namespaces = template %q claim %q, want sandbox-templates", request.TemplateNamespace, request.ClaimNamespace)
+	}
+}
+
+func TestResolveExecutionWorkspaceRequestControllerNamespaceDefault(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := sandboxextv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add sandbox scheme: %v", err)
+	}
+
+	r := &TaskReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(&sandboxextv1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "default-template", Namespace: "orka-system"},
+		}).Build(),
+		AgentSandboxEnabled: true,
+		AgentSandboxConfig: AgentSandboxConfig{
+			DefaultTemplate:     "default-template",
+			NamespaceStrategy:   AgentSandboxNamespaceStrategyController,
+			ControllerNamespace: "orka-system",
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-task", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:      corev1alpha1.TaskTypeAgent,
+			Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true}},
+		},
+	}
+
+	request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task)
+	if err != nil {
+		t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
+	}
+	if request.TemplateNamespace != "orka-system" || request.ClaimNamespace != "orka-system" {
+		t.Fatalf("resolved namespaces = template %q claim %q, want orka-system", request.TemplateNamespace, request.ClaimNamespace)
+	}
 }

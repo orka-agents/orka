@@ -143,6 +143,7 @@ const (
 	AgentSandboxRouterURL             = "ORKA_AGENT_SANDBOX_ROUTER_URL"
 	AgentSandboxTemplateName          = "ORKA_AGENT_SANDBOX_TEMPLATE_NAME"
 	AgentSandboxTemplateNamespace     = "ORKA_AGENT_SANDBOX_TEMPLATE_NAMESPACE"
+	AgentSandboxClaimNamespace        = "ORKA_AGENT_SANDBOX_CLAIM_NAMESPACE"
 	AgentSandboxReusePolicy           = "ORKA_AGENT_SANDBOX_REUSE_POLICY"
 	AgentSandboxReuseKey              = "ORKA_AGENT_SANDBOX_REUSE_KEY"
 	AgentSandboxCleanupPolicy         = "ORKA_AGENT_SANDBOX_CLEANUP_POLICY"
@@ -446,6 +447,7 @@ type AgentSandboxEnv struct {
 	RouterURL         string
 	TemplateName      string
 	TemplateNamespace string
+	ClaimNamespace    string
 	ReusePolicy       string
 	ReuseKey          string
 	CleanupPolicy     string
@@ -466,6 +468,7 @@ func (e AgentSandboxEnv) EnvVars() []corev1.EnvVar {
 		Env(AgentSandboxRouterURL, e.RouterURL),
 		Env(AgentSandboxTemplateName, e.TemplateName),
 		Env(AgentSandboxTemplateNamespace, e.TemplateNamespace),
+		Env(AgentSandboxClaimNamespace, e.ClaimNamespace),
 		Env(AgentSandboxReusePolicy, e.ReusePolicy),
 		Env(AgentSandboxReuseKey, e.ReuseKey),
 		Env(AgentSandboxCleanupPolicy, e.CleanupPolicy),
@@ -484,6 +487,7 @@ func ParseAgentSandboxEnv(getenv func(string) string) AgentSandboxEnv {
 		RouterURL:         getenv(AgentSandboxRouterURL),
 		TemplateName:      getenv(AgentSandboxTemplateName),
 		TemplateNamespace: getenv(AgentSandboxTemplateNamespace),
+		ClaimNamespace:    getenv(AgentSandboxClaimNamespace),
 		ReusePolicy:       getenv(AgentSandboxReusePolicy),
 		ReuseKey:          getenv(AgentSandboxReuseKey),
 		CleanupPolicy:     getenv(AgentSandboxCleanupPolicy),

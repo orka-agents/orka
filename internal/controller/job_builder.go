@@ -619,6 +619,7 @@ func (b *JobBuilder) addAgentSandboxWorkspaceEnvVars(envVars []corev1.EnvVar, re
 		RouterURL:         request.RouterURL,
 		TemplateName:      request.TemplateName,
 		TemplateNamespace: request.TemplateNamespace,
+		ClaimNamespace:    request.ClaimNamespace,
 		ReusePolicy:       string(request.ReusePolicy),
 		ReuseKey:          request.ReuseKey,
 		CleanupPolicy:     string(request.CleanupPolicy),

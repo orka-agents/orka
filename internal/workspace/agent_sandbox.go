@@ -20,13 +20,17 @@ import (
 	"time"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	sandbox "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
 
 const (
 	agentSandboxRouterURLEnv          = "ORKA_AGENT_SANDBOX_ROUTER_URL"
 	agentSandboxDefaultFileMode       = 0o644
 	agentSandboxDefaultRootList       = "."
+	agentSandboxEnvFilePrefix         = "orka-env-"
+	agentSandboxExecRoot              = "/app/"
 	agentSandboxWorkspaceIDPrefix     = "agent-sandbox:"
 	agentSandboxWorkspaceReadyMessage = "workspace ready"
 )
@@ -50,6 +54,7 @@ type agentSandboxHandle interface {
 
 type agentSandboxClient interface {
 	CreateSandbox(ctx context.Context, template, namespace string) (agentSandboxHandle, error)
+	CreateSandboxWithName(ctx context.Context, claimName, template, namespace string) (agentSandboxHandle, error)
 	GetSandbox(ctx context.Context, claimName, namespace string) (agentSandboxHandle, error)
 	DeleteSandbox(ctx context.Context, claimName, namespace string) error
 }
@@ -58,10 +63,50 @@ type agentSandboxClientFactory func(context.Context, sandbox.Options) (agentSand
 
 type agentSandboxSDKClient struct {
 	client *sandbox.Client
+	k8s    *sandbox.K8sHelper
 }
 
 func (c *agentSandboxSDKClient) CreateSandbox(ctx context.Context, template, namespace string) (agentSandboxHandle, error) {
 	return c.client.CreateSandbox(ctx, template, namespace)
+}
+
+func (c *agentSandboxSDKClient) CreateSandboxWithName(ctx context.Context, claimName, template, namespace string) (agentSandboxHandle, error) {
+	if strings.TrimSpace(claimName) == "" {
+		return c.CreateSandbox(ctx, template, namespace)
+	}
+	claim := &sandboxextv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claimName,
+			Namespace: namespace,
+		},
+		Spec: sandboxextv1alpha1.SandboxClaimSpec{
+			TemplateRef: sandboxextv1alpha1.SandboxTemplateRef{Name: template},
+		},
+	}
+	created := false
+	if _, err := c.k8s.ExtensionsClient.SandboxClaims(namespace).Create(ctx, claim, metav1.CreateOptions{}); err != nil {
+		if !k8serrors.IsAlreadyExists(err) {
+			return nil, err
+		}
+	} else {
+		created = true
+	}
+	handle, err := c.client.GetSandbox(ctx, claimName, namespace)
+	if err != nil && created {
+		agentSandboxDeleteCreatedClaim(c.k8s, claimName, namespace)
+	}
+	return handle, err
+}
+
+func agentSandboxDeleteCreatedClaim(k8s *sandbox.K8sHelper, claimName, namespace string) {
+	if k8s == nil || strings.TrimSpace(claimName) == "" {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := k8s.ExtensionsClient.SandboxClaims(namespace).Delete(cleanupCtx, claimName, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+		k8s.Log.Error(err, "failed to roll back named sandbox claim", "claim", claimName, "namespace", namespace)
+	}
 }
 
 func (c *agentSandboxSDKClient) GetSandbox(ctx context.Context, claimName, namespace string) (agentSandboxHandle, error) {
@@ -112,11 +157,20 @@ type agentSandboxWorkspace struct {
 func NewAgentSandboxExecutor(opts ...AgentSandboxOption) *AgentSandboxExecutor {
 	e := &AgentSandboxExecutor{
 		newClient: func(ctx context.Context, opts sandbox.Options) (agentSandboxClient, error) {
+			k8s := opts.K8sHelper
+			if k8s == nil {
+				var err error
+				k8s, err = sandbox.NewK8sHelper(opts.RestConfig, opts.Logger)
+				if err != nil {
+					return nil, err
+				}
+				opts.K8sHelper = k8s
+			}
 			client, err := sandbox.NewClient(ctx, opts)
 			if err != nil {
 				return nil, err
 			}
-			return &agentSandboxSDKClient{client: client}, nil
+			return &agentSandboxSDKClient{client: client, k8s: k8s}, nil
 		},
 		now:        time.Now,
 		workspaces: make(map[string]*agentSandboxWorkspace),
@@ -148,8 +202,12 @@ func (e *AgentSandboxExecutor) Claim(ctx context.Context, req ClaimRequest) (*Cl
 	}
 
 	if req.ReuseKey != "" || req.ClaimName != "" {
-		if result, err := e.tryReuseClaim(ctx, req); result != nil || err != nil {
-			return result, err
+		result, err := e.tryReuseClaim(ctx, req)
+		if result != nil {
+			return result, nil
+		}
+		if err != nil && (!req.CreateIfMissing || req.ClaimName == "" || !IsKind(err, ErrorKindNotFound)) {
+			return nil, err
 		}
 	}
 
@@ -157,7 +215,7 @@ func (e *AgentSandboxExecutor) Claim(ctx context.Context, req ClaimRequest) (*Cl
 	if err != nil {
 		return nil, agentSandboxError("claim", err)
 	}
-	handle, err := client.CreateSandbox(ctx, req.Template.Name, req.Namespace)
+	handle, err := e.createSandbox(ctx, client, req)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, contextError("claim", ctxErr)
@@ -210,6 +268,13 @@ func (e *AgentSandboxExecutor) Claim(ctx context.Context, req ClaimRequest) (*Cl
 	}, nil
 }
 
+func (e *AgentSandboxExecutor) createSandbox(ctx context.Context, client agentSandboxClient, req ClaimRequest) (agentSandboxHandle, error) {
+	if req.CreateIfMissing && strings.TrimSpace(req.ClaimName) != "" {
+		return client.CreateSandboxWithName(ctx, req.ClaimName, req.Template.Name, req.Namespace)
+	}
+	return client.CreateSandbox(ctx, req.Template.Name, req.Namespace)
+}
+
 // WaitReady reconnects when necessary and returns once the workspace can accept
 // SDK operations.
 func (e *AgentSandboxExecutor) WaitReady(ctx context.Context, req WaitReadyRequest) (*ReadyResult, error) {
@@ -250,7 +315,12 @@ func (e *AgentSandboxExecutor) Exec(ctx context.Context, req ExecRequest) (*Exec
 		return nil, NewError("exec", ErrorKindInvalidArgument, "stdin is not supported by agent-sandbox command execution", false, nil)
 	}
 
-	command, err := agentSandboxCommandString(req)
+	startedAt := e.now()
+	envFileName, envFilePath, envFileContent, err := agentSandboxEnvFile(startedAt, req.Env)
+	if err != nil {
+		return nil, NewError("exec", ErrorKindInvalidArgument, err.Error(), false, err)
+	}
+	command, err := agentSandboxCommandString(req, envFilePath)
 	if err != nil {
 		return nil, NewError("exec", ErrorKindInvalidArgument, err.Error(), false, err)
 	}
@@ -259,10 +329,18 @@ func (e *AgentSandboxExecutor) Exec(ctx context.Context, req ExecRequest) (*Exec
 	if err != nil {
 		return nil, err
 	}
+	if envFileName != "" {
+		if err := handle.Write(ctx, envFileName, envFileContent); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, contextError("exec", ctxErr)
+			}
+			return nil, agentSandboxError("exec", err)
+		}
+	}
 
-	startedAt := e.now()
 	result, err := handle.Run(ctx, command)
 	if err != nil {
+		e.cleanupAgentSandboxEnvFile(handle, envFileName)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, contextError("exec", ctxErr)
 		}
@@ -943,35 +1021,32 @@ func mergeAgentSandboxAnnotations(local, backend map[string]string) map[string]s
 	return out
 }
 
-func agentSandboxCommandString(req ExecRequest) (string, error) {
-	parts := make([]string, 0, len(req.Env)+len(req.Command)+4)
+func (e *AgentSandboxExecutor) cleanupAgentSandboxEnvFile(handle agentSandboxHandle, envFileName string) {
+	if handle == nil || strings.TrimSpace(envFileName) == "" {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, _ = handle.Run(cleanupCtx, "rm -f "+shellQuote(agentSandboxExecRoot+envFileName))
+}
+
+func agentSandboxCommandString(req ExecRequest, envFilePath string) (string, error) {
+	parts := make([]string, 0, len(req.Command)+6)
 	if strings.ContainsRune(req.WorkDir, '\x00') {
 		return "", fmt.Errorf("workdir contains NUL byte")
 	}
-	if strings.TrimSpace(req.WorkDir) != "" {
-		parts = append(parts, "cd", shellQuote(req.WorkDir), "&&")
+	if strings.ContainsRune(envFilePath, '\x00') {
+		return "", fmt.Errorf("env file path contains NUL byte")
+	}
+	if len(req.Env) > 0 && strings.TrimSpace(envFilePath) == "" {
+		return "", fmt.Errorf("env file path is required when environment variables are set")
 	}
 
-	if len(req.Env) > 0 {
-		parts = append(parts, "env")
-		keys := make([]string, 0, len(req.Env))
-		for key := range req.Env {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			value := req.Env[key]
-			if key == "" {
-				return "", fmt.Errorf("environment variable name is required")
-			}
-			if strings.Contains(key, "=") {
-				return "", fmt.Errorf("environment variable %q contains '='", key)
-			}
-			if strings.ContainsRune(key, '\x00') || strings.ContainsRune(value, '\x00') {
-				return "", fmt.Errorf("environment variable %q contains NUL byte", key)
-			}
-			parts = append(parts, shellQuote(key+"="+value))
-		}
+	if strings.TrimSpace(envFilePath) != "" {
+		parts = append(parts, agentSandboxEnvFilePrelude(envFilePath))
+	}
+	if strings.TrimSpace(req.WorkDir) != "" {
+		parts = append(parts, "cd", shellQuote(req.WorkDir), "&&")
 	}
 
 	for _, arg := range req.Command {
@@ -982,6 +1057,65 @@ func agentSandboxCommandString(req ExecRequest) (string, error) {
 	}
 	script := strings.Join(parts, " ")
 	return "sh -c " + shellQuote(script), nil
+}
+
+func agentSandboxEnvFile(startedAt time.Time, env map[string]string) (string, string, []byte, error) {
+	if len(env) == 0 {
+		return "", "", nil, nil
+	}
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var content strings.Builder
+	for _, key := range keys {
+		value := env[key]
+		if key == "" {
+			return "", "", nil, fmt.Errorf("environment variable name is required")
+		}
+		if strings.Contains(key, "=") {
+			return "", "", nil, fmt.Errorf("environment variable %q contains '='", key)
+		}
+		if !agentSandboxIsShellEnvName(key) {
+			return "", "", nil, fmt.Errorf("environment variable %q is not a shell-compatible name", key)
+		}
+		if strings.ContainsRune(key, '\x00') || strings.ContainsRune(value, '\x00') {
+			return "", "", nil, fmt.Errorf("environment variable %q contains NUL byte", key)
+		}
+		content.WriteString("export ")
+		content.WriteString(key)
+		content.WriteString("=")
+		content.WriteString(shellQuote(value))
+		content.WriteByte('\n')
+	}
+
+	stamp := startedAt.UnixNano()
+	if stamp < 0 {
+		stamp = -stamp
+	}
+	name := fmt.Sprintf("%s%d", agentSandboxEnvFilePrefix, stamp)
+	return name, agentSandboxExecRoot + name, []byte(content.String()), nil
+}
+
+func agentSandboxIsShellEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if r == '_' || ('A' <= r && r <= 'Z') || ('a' <= r && r <= 'z') || (i > 0 && '0' <= r && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func agentSandboxEnvFilePrelude(envFilePath string) string {
+	return "env_file=" + shellQuote(envFilePath) +
+		`; set -a; . "$env_file"; env_status=$?; set +a; rm -f "$env_file"; ` +
+		`if [ "$env_status" -ne 0 ]; then exit "$env_status"; fi;`
 }
 
 func shellQuote(value string) string {

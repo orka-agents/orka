@@ -87,7 +87,8 @@ type WorkspaceTemplateReference struct {
 	// +optional
 	Name string `json:"name,omitempty"`
 
-	// Namespace is the namespace of the workspace template (defaults to Task namespace).
+	// Namespace is the namespace of the workspace template and claim.
+	// It defaults to the Task namespace, or the controller namespace when configured.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 }

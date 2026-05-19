@@ -22,11 +22,11 @@ RuntimeClass and agent sandbox are complementary. `runtimeClassName` applies to 
 - The feature is disabled by default.
 - When enabled, the Task controller validates `Task.spec.execution.workspace` requests for `type: agent` Tasks, resolves/defaults the effective `SandboxTemplate` and workspace settings, and passes those settings to the agent worker Job.
 - The agent worker wrapper claims an upstream `agent-sandbox` workspace, waits for it to become ready, and re-executes the same worker binary inside the sandbox with recursive sandboxing disabled.
-- Orka uses the upstream `sigs.k8s.io/agent-sandbox` Go SDK. With the currently pinned SDK, the worker creates claims with `CreateSandbox(templateName, taskNamespace)`. The SDK does not expose a separate template namespace argument, so `templateRef.namespace` is propagated in Orka metadata/env but the template must be usable from the claim namespace in the upstream installation.
-- The current worker-as-client path always creates or reattaches claims in the Task namespace. `namespaceStrategy` is validated and propagated for compatibility with future policies, but the alpha worker path does not yet create claims in the controller namespace.
+- Orka uses the upstream `sigs.k8s.io/agent-sandbox` Go SDK. With the currently pinned SDK, the worker creates or reattaches claims with a template name plus claim namespace; Orka therefore treats `templateRef.namespace` as both the template namespace and claim namespace for explicit cross-namespace workspace requests.
+- `namespaceStrategy: task` defaults claims to the Task namespace when `templateRef.namespace` is omitted. `namespaceStrategy: controller` defaults claims to the controller namespace when it is discoverable, while an explicit `templateRef.namespace` still wins.
 - `cleanupPolicy: delete` deletes the workspace after execution. `cleanupPolicy: retain` disconnects from the sandbox and leaves the upstream claim/resource for operator inspection or external reattach.
-- `reusePolicy: session` derives and passes a session reuse key, and the adapter supports local in-process reuse plus explicit reattach by claim name. Orka does not yet persist sandbox claim identity on Task or Session status, so automatic reuse across separate worker Jobs is not first-class in this alpha.
-- The SDK command API accepts one shell command string. Orka safely renders argv/env/workdir into that string; stdin is not supported. Upstream command responses are capped by the SDK, and Orka applies its own configured output truncation where requested.
+- `reusePolicy: session` derives a deterministic claim name from the namespaced session/template inputs, allowing later worker Jobs to reattach when the prior workspace was retained.
+- The SDK command API accepts one shell command string. Orka renders argv/workdir into that string and passes environment variables through a temporary sandbox env file that is sourced and removed before the command runs; stdin is not supported. Upstream command responses are capped by the SDK, and Orka applies its own configured output truncation where requested.
 - The SDK file write API accepts plain filenames only. Orka's adapter rejects nested upload paths instead of flattening them; recursive download/list is supported for files visible through the SDK.
 - Orka does not install or manage upstream `agent-sandbox` CRDs, router services, templates, or warm pools. Install and operate those components separately before enabling workspace-backed Tasks.
 - Task status does not report sandbox claim, reuse, command, or cleanup state. Inspect worker logs and upstream `agent-sandbox` resources for sandbox lifecycle details.
@@ -81,8 +81,8 @@ Notes:
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enables workspace-backed execution for this agent Task. When omitted or false, the normal worker path is used without sandbox env propagation. |
 | `templateRef.name` | string | Controller default template, if configured | Workspace template name to instantiate or reuse. Required when `enabled: true` unless the controller has `--agent-sandbox-default-template`. |
-| `templateRef.namespace` | string | Task namespace | Namespace containing the workspace template in Orka metadata. Current SDK calls create claims with the Task namespace and template name, so the upstream template must be usable from that claim namespace. |
-| `reusePolicy` | string | `none` | Workspace reuse intent. Supported values: `none`, `session`; current automatic reuse is limited because claim identity is not persisted across worker Jobs. |
+| `templateRef.namespace` | string | Task namespace, or controller namespace with `namespaceStrategy: controller` | Namespace containing the workspace template and claim. Because the current SDK does not accept a separate template namespace, explicit cross-namespace requests create/reattach the `SandboxClaim` in this namespace. |
+| `reusePolicy` | string | `none` | Workspace reuse intent. Supported values: `none`, `session`. Session reuse derives a deterministic claim name from the namespaced session/template inputs so later worker Jobs can reattach when the workspace is retained. |
 | `cleanupPolicy` | string | Controller default cleanup policy, defaulting to `delete` | Cleanup behavior after use. Supported values: `delete`, `retain`. |
 
 ## Validation Rules

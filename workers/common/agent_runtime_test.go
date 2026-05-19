@@ -25,7 +25,10 @@ import (
 	"github.com/sozercan/orka/internal/workspace"
 )
 
-const executorResultDone = "done"
+const (
+	testAgentSandboxTemplateNamespace = "template-ns"
+	executorResultDone                = "done"
+)
 
 func TestLoadConfig_RequiredFields(t *testing.T) {
 	t.Setenv("ORKA_PROMPT", "")
@@ -497,7 +500,8 @@ func TestRunAgent_AgentSandboxRetainsWorkspace(t *testing.T) {
 		t.Fatalf("RunAgent returned error: %v", err)
 	}
 
-	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "release")
+	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "exec", "release")
+	assertAgentSandboxTokenScrubRequest(t, recorder)
 
 	releaseReqs := recorder.releaseRequests()
 	if len(releaseReqs) != 1 {
@@ -526,7 +530,8 @@ func TestRunAgent_AgentSandboxUnknownCleanupPolicyRetainsWorkspace(t *testing.T)
 		t.Fatalf("RunAgent returned error: %v", err)
 	}
 
-	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "release")
+	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "exec", "release")
+	assertAgentSandboxTokenScrubRequest(t, recorder)
 
 	releaseReqs := recorder.releaseRequests()
 	if len(releaseReqs) != 1 {
@@ -590,6 +595,7 @@ func TestRunAgent_AgentSandboxRecursionFailsFast(t *testing.T) {
 func TestRunAgent_AgentSandboxDefaultsTemplateNamespaceToTaskNamespace(t *testing.T) {
 	setRequiredAgentSandboxEnv(t, "delete")
 	t.Setenv(workerenv.AgentSandboxTemplateNamespace, "")
+	t.Setenv(workerenv.AgentSandboxClaimNamespace, "")
 
 	recorder := newRecordingWorkspaceExecutor()
 	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
@@ -607,9 +613,125 @@ func TestRunAgent_AgentSandboxDefaultsTemplateNamespaceToTaskNamespace(t *testin
 	if len(claimReqs) != 1 {
 		t.Fatalf("recorded %d claim requests, want 1", len(claimReqs))
 	}
+	if claimReqs[0].Namespace != "task-ns" {
+		t.Errorf("claim namespace = %q, want task-ns", claimReqs[0].Namespace)
+	}
 	if claimReqs[0].Template.Namespace != "task-ns" {
 		t.Errorf("claim template namespace = %q, want task-ns", claimReqs[0].Template.Namespace)
 	}
+}
+
+func TestRunAgent_AgentSandboxControllerStrategyUsesTemplateNamespaceForClaims(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "delete")
+	t.Setenv(workerenv.AgentSandboxClaimNamespace, "")
+	t.Setenv(workerenv.AgentSandboxNamespaceStrategy, "controller")
+
+	recorder := newRecordingWorkspaceExecutor()
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	err := RunAgent("test-agent", "/sandbox/workspace", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		t.Fatal("outer agent executor should not run when agent sandbox is enabled")
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("RunAgent returned error: %v", err)
+	}
+
+	claimReqs := recorder.claimRequests()
+	if len(claimReqs) != 1 {
+		t.Fatalf("recorded %d claim requests, want 1", len(claimReqs))
+	}
+	if claimReqs[0].Namespace != testAgentSandboxTemplateNamespace {
+		t.Errorf("claim namespace = %q, want template-ns", claimReqs[0].Namespace)
+	}
+}
+
+func TestRunAgent_AgentSandboxSessionUsesDeterministicClaimName(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "retain")
+	t.Setenv(workerenv.AgentSandboxReusePolicy, "session")
+
+	recorder := newRecordingWorkspaceExecutor()
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	err := RunAgent("test-agent", "/sandbox/workspace", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		t.Fatal("outer agent executor should not run when agent sandbox is enabled")
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("RunAgent returned error: %v", err)
+	}
+
+	claimReqs := recorder.claimRequests()
+	if len(claimReqs) != 1 {
+		t.Fatalf("recorded %d claim requests, want 1", len(claimReqs))
+	}
+	want := agentSandboxSessionClaimName(
+		workerenv.ParseAgentSandboxEnv(os.Getenv),
+		testAgentSandboxTemplateNamespace,
+		"task-ns",
+		testAgentSandboxTemplateNamespace,
+	)
+	if claimReqs[0].ClaimName != want || claimReqs[0].ClaimName == "" {
+		t.Fatalf("claim name = %q, want deterministic %q", claimReqs[0].ClaimName, want)
+	}
+	if !claimReqs[0].CreateIfMissing {
+		t.Fatal("CreateIfMissing = false, want true for deterministic session claim")
+	}
+}
+
+func TestRunAgent_AgentSandboxPreservesGitCredentialsBeforeHandoff(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "delete")
+	t.Setenv(workerenv.ServiceAccountToken, "outer-token")
+
+	previousSetup := setupGitCredentialsForRunAgent
+	previousGitToken, hadGitToken := os.LookupEnv(workerenv.GitToken)
+	previousGitHubToken, hadGitHubToken := os.LookupEnv(workerenv.GitHubToken)
+	previousGitAskpass, hadGitAskpass := os.LookupEnv(workerenv.GitAskpass)
+	setupGitCredentialsForRunAgent = func() {
+		_ = os.Setenv(workerenv.GitToken, "git-token")
+		_ = os.Setenv(workerenv.GitHubToken, "github-token")
+		_ = os.Setenv(workerenv.GitAskpass, "/bin/echo-token")
+	}
+	t.Cleanup(func() {
+		setupGitCredentialsForRunAgent = previousSetup
+		restoreEnv(workerenv.GitToken, previousGitToken, hadGitToken)
+		restoreEnv(workerenv.GitHubToken, previousGitHubToken, hadGitHubToken)
+		restoreEnv(workerenv.GitAskpass, previousGitAskpass, hadGitAskpass)
+	})
+
+	recorder := newRecordingWorkspaceExecutor()
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	err := RunAgent("test-agent", "/sandbox/workspace", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		t.Fatal("outer agent executor should not run when agent sandbox is enabled")
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("RunAgent returned error: %v", err)
+	}
+
+	execReqs := recorder.execRequests()
+	if len(execReqs) != 1 {
+		t.Fatalf("recorded %d exec requests, want 1", len(execReqs))
+	}
+	if execReqs[0].Env[workerenv.GitToken] != "git-token" {
+		t.Fatalf("inner %s = %q, want populated git token", workerenv.GitToken, execReqs[0].Env[workerenv.GitToken])
+	}
+	if execReqs[0].Env[workerenv.GitHubToken] != "github-token" ||
+		execReqs[0].Env[workerenv.GitAskpass] != agentSandboxGitAskpassExecPath {
+		t.Fatalf("inner git credential env not preserved: %#v", execReqs[0].Env)
+	}
+	wantCommand := []string{"sh", "-c", agentSandboxWorkerCommand(true, true), agentSandboxWorkerUploadPath}
+	wantCommand = append(wantCommand, os.Args[1:]...)
+	if !reflect.DeepEqual(execReqs[0].Command, wantCommand) {
+		t.Fatalf("inner worker command = %#v, want %#v", execReqs[0].Command, wantCommand)
+	}
+
+	artifacts := artifactsByPath(t, recorder)
+	assertAgentSandboxGitAskpassArtifact(t, artifacts[agentSandboxGitAskpassUploadPath])
 }
 
 func TestRunAgent_AgentSandboxClaimFailure(t *testing.T) {
@@ -777,13 +899,13 @@ func assertAgentSandboxClaimRequest(t *testing.T, recorder *recordingWorkspaceEx
 		t.Fatalf("recorded %d claim requests, want 1", len(claimReqs))
 	}
 	claimReq := claimReqs[0]
-	if claimReq.Namespace != "task-ns" {
-		t.Errorf("claim namespace = %q, want task-ns", claimReq.Namespace)
+	if claimReq.Namespace != testAgentSandboxTemplateNamespace {
+		t.Errorf("claim namespace = %q, want template-ns", claimReq.Namespace)
 	}
 	if claimReq.TaskName != "task-name" {
 		t.Errorf("claim task name = %q, want task-name", claimReq.TaskName)
 	}
-	if claimReq.Template.Namespace != "template-ns" {
+	if claimReq.Template.Namespace != testAgentSandboxTemplateNamespace {
 		t.Errorf("claim template namespace = %q, want template-ns", claimReq.Template.Namespace)
 	}
 	if claimReq.Template.Name != "agent-template" {
@@ -821,12 +943,22 @@ func assertAgentSandboxUploadRequest(t *testing.T, recorder *recordingWorkspaceE
 	if len(uploadReq.Artifacts) != 2 {
 		t.Fatalf("uploaded artifacts = %d, want 2", len(uploadReq.Artifacts))
 	}
-	artifactsByPath := make(map[string]workspace.UploadArtifact, len(uploadReq.Artifacts))
-	for _, artifact := range uploadReq.Artifacts {
-		artifactsByPath[artifact.Path] = artifact
+	artifacts := artifactsByPath(t, recorder)
+	assertAgentSandboxWorkerArtifact(t, artifacts[agentSandboxWorkerUploadPath])
+	assertAgentSandboxTokenArtifact(t, artifacts[agentSandboxSATokenUploadPath])
+}
+
+func artifactsByPath(t *testing.T, recorder *recordingWorkspaceExecutor) map[string]workspace.UploadArtifact {
+	t.Helper()
+	uploadReqs := recorder.uploadRequests()
+	if len(uploadReqs) != 1 {
+		t.Fatalf("recorded %d upload requests, want 1", len(uploadReqs))
 	}
-	assertAgentSandboxWorkerArtifact(t, artifactsByPath[agentSandboxWorkerUploadPath])
-	assertAgentSandboxTokenArtifact(t, artifactsByPath[agentSandboxSATokenUploadPath])
+	artifacts := make(map[string]workspace.UploadArtifact, len(uploadReqs[0].Artifacts))
+	for _, artifact := range uploadReqs[0].Artifacts {
+		artifacts[artifact.Path] = artifact
+	}
+	return artifacts
 }
 
 func assertAgentSandboxWorkerArtifact(t *testing.T, artifact workspace.UploadArtifact) {
@@ -852,6 +984,19 @@ func assertAgentSandboxTokenArtifact(t *testing.T, artifact workspace.UploadArti
 	}
 	if string(artifact.Data) != "outer-token" {
 		t.Fatal("uploaded token artifact data was not the configured token")
+	}
+}
+
+func assertAgentSandboxGitAskpassArtifact(t *testing.T, artifact workspace.UploadArtifact) {
+	t.Helper()
+	if artifact.Path != agentSandboxGitAskpassUploadPath {
+		t.Errorf("uploaded git askpass artifact path = %q, want %q", artifact.Path, agentSandboxGitAskpassUploadPath)
+	}
+	if artifact.Mode != 0o700 {
+		t.Errorf("uploaded git askpass artifact mode = %#o, want 0700", artifact.Mode)
+	}
+	if string(artifact.Data) != "#!/bin/sh\nprintf '%s\n' \"$GIT_TOKEN\"\n" {
+		t.Fatalf("uploaded git askpass script = %q", string(artifact.Data))
 	}
 }
 
@@ -904,12 +1049,28 @@ func assertAgentSandboxCommand(t *testing.T, got []string) {
 	stagedCommand := []string{
 		"sh",
 		"-c",
-		"chmod 0700 " + agentSandboxWorkerExecPath + " && exec " + agentSandboxWorkerExecPath + " \"$@\"",
+		agentSandboxWorkerCommand(true, false),
 		agentSandboxWorkerUploadPath,
 	}
 	wantCommand := append(stagedCommand, os.Args[1:]...)
 	if !reflect.DeepEqual(got, wantCommand) {
 		t.Errorf("exec command = %#v, want %#v", got, wantCommand)
+	}
+}
+
+func assertAgentSandboxTokenScrubRequest(t *testing.T, recorder *recordingWorkspaceExecutor) {
+	t.Helper()
+	execReqs := recorder.execRequests()
+	if len(execReqs) != 2 {
+		t.Fatalf("recorded %d exec requests, want inner worker plus token scrub", len(execReqs))
+	}
+	scrub := execReqs[1]
+	want := []string{"rm", "-f", agentSandboxSATokenExecPath}
+	if !reflect.DeepEqual(scrub.Command, want) {
+		t.Fatalf("scrub command = %#v, want %#v", scrub.Command, want)
+	}
+	if scrub.Timeout != 3*time.Second {
+		t.Errorf("scrub timeout = %v, want 3s", scrub.Timeout)
 	}
 }
 
@@ -924,11 +1085,20 @@ func assertAgentSandboxDeleteRequest(t *testing.T, recorder *recordingWorkspaceE
 	}
 }
 
+func restoreEnv(name, value string, hadValue bool) {
+	if hadValue {
+		_ = os.Setenv(name, value)
+		return
+	}
+	_ = os.Unsetenv(name)
+}
+
 func setRequiredAgentSandboxEnv(t *testing.T, cleanupPolicy string) {
 	t.Helper()
 	t.Setenv(workerenv.AgentSandboxEnabled, "true")
 	t.Setenv(workerenv.AgentSandboxTemplateName, "agent-template")
-	t.Setenv(workerenv.AgentSandboxTemplateNamespace, "template-ns")
+	t.Setenv(workerenv.AgentSandboxTemplateNamespace, testAgentSandboxTemplateNamespace)
+	t.Setenv(workerenv.AgentSandboxClaimNamespace, testAgentSandboxTemplateNamespace)
 	t.Setenv(workerenv.AgentSandboxReuseKey, "reuse-key")
 	t.Setenv(workerenv.AgentSandboxClaimTimeoutSeconds, "3")
 	t.Setenv(workerenv.AgentSandboxCommandTimeoutSeconds, "9")

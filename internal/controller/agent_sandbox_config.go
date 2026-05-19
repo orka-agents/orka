@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -56,6 +57,8 @@ type AgentSandboxConfig struct {
 	WarmPoolPolicy string
 	// NamespaceStrategy selects where sandbox lifecycle resources are managed.
 	NamespaceStrategy string
+	// ControllerNamespace is the namespace used for controller-scoped sandbox lifecycle resources.
+	ControllerNamespace string
 	// ClaimTimeout bounds workspace claim and readiness operations.
 	ClaimTimeout time.Duration
 	// CommandTimeout bounds sandbox command execution operations.
@@ -173,6 +176,7 @@ type AgentSandboxWorkspaceRequest struct {
 	RouterURL         string
 	TemplateName      string
 	TemplateNamespace string
+	ClaimNamespace    string
 	ReusePolicy       corev1alpha1.WorkspaceReusePolicy
 	ReuseKey          string
 	CleanupPolicy     corev1alpha1.WorkspaceCleanupPolicy
@@ -189,9 +193,13 @@ func executionWorkspaceTemplateName(ws *corev1alpha1.ExecutionWorkspaceSpec, cfg
 	return cfg.WithDefaults().DefaultTemplate
 }
 
-func executionWorkspaceTemplateNamespace(ws *corev1alpha1.ExecutionWorkspaceSpec, taskNamespace string) string {
-	if ws != nil && ws.TemplateRef != nil && ws.TemplateRef.Namespace != "" {
-		return ws.TemplateRef.Namespace
+func executionWorkspaceTemplateNamespace(ws *corev1alpha1.ExecutionWorkspaceSpec, taskNamespace string, cfg AgentSandboxConfig) string {
+	if ws != nil && ws.TemplateRef != nil && strings.TrimSpace(ws.TemplateRef.Namespace) != "" {
+		return strings.TrimSpace(ws.TemplateRef.Namespace)
+	}
+	cfg = cfg.WithDefaults()
+	if cfg.NamespaceStrategy == AgentSandboxNamespaceStrategyController && strings.TrimSpace(cfg.ControllerNamespace) != "" {
+		return strings.TrimSpace(cfg.ControllerNamespace)
 	}
 	return taskNamespace
 }
@@ -218,10 +226,12 @@ func (r *TaskReconciler) resolveExecutionWorkspaceRequest(ctx context.Context, t
 		cleanupPolicy = cfg.CleanupPolicy
 	}
 
+	templateNamespace := executionWorkspaceTemplateNamespace(ws, task.Namespace, cfg)
 	request := &AgentSandboxWorkspaceRequest{
 		RouterURL:         cfg.RouterURL,
 		TemplateName:      executionWorkspaceTemplateName(ws, cfg),
-		TemplateNamespace: executionWorkspaceTemplateNamespace(ws, task.Namespace),
+		TemplateNamespace: templateNamespace,
+		ClaimNamespace:    templateNamespace,
 		ReusePolicy:       reusePolicy,
 		CleanupPolicy:     cleanupPolicy,
 		WarmPoolPolicy:    cfg.WarmPoolPolicy,
@@ -248,12 +258,14 @@ func (r *TaskReconciler) validateExecutionWorkspaceTemplateExists(ctx context.Co
 		ctx = context.Background()
 	}
 
-	// The current worker-owned alpha path creates SandboxClaims in the Task namespace.
 	// The upstream agent-sandbox SDK accepts only template name plus claim namespace,
-	// so the effective SandboxTemplate lookup must succeed in the Task namespace.
-	lookupNamespace := task.Namespace
-	if lookupNamespace == "" {
+	// so validate the effective namespace where the SandboxClaim will be created.
+	lookupNamespace := request.ClaimNamespace
+	if strings.TrimSpace(lookupNamespace) == "" {
 		lookupNamespace = request.TemplateNamespace
+	}
+	if strings.TrimSpace(lookupNamespace) == "" {
+		lookupNamespace = task.Namespace
 	}
 
 	template := &sandboxextv1alpha1.SandboxTemplate{}

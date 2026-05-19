@@ -529,20 +529,19 @@ func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testi
 		}
 	})
 
-	t.Run("worker owned alpha validates template in task namespace", func(t *testing.T) {
+	t.Run("explicit template namespace is accepted as claim namespace", func(t *testing.T) {
 		template := &sandboxextv1alpha1.SandboxTemplate{
 			ObjectMeta: metav1.ObjectMeta{Name: "shared-template", Namespace: "sandbox-templates"},
 		}
 		r := newUnitReconciler(scheme, template)
 		r.AgentSandboxEnabled = true
 
-		_, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-cross-ns", workspace("shared-template", "sandbox-templates")))
-		if err == nil {
-			t.Fatal("resolveExecutionWorkspaceRequest() error = nil, want task-namespace template error")
+		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-cross-ns", workspace("shared-template", "sandbox-templates")))
+		if err != nil {
+			t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
 		}
-		want := `execution workspace template "shared-template" not found in namespace "default"`
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error = %q, want substring %q", err.Error(), want)
+		if request.ClaimNamespace != "sandbox-templates" {
+			t.Fatalf("ClaimNamespace = %q, want sandbox-templates", request.ClaimNamespace)
 		}
 	})
 }

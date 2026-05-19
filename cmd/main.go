@@ -581,6 +581,11 @@ func main() {
 			setupLog.Info("auto-discovered controller URL", "url", jobBuilder.ControllerURL)
 		}
 	}
+	if agentSandboxConfig.NamespaceStrategy == controller.AgentSandboxNamespaceStrategyController &&
+		agentSandboxConfig.ControllerNamespace == "" {
+		agentSandboxConfig.ControllerNamespace = currentPodNamespace()
+	}
+
 	// Setup Task controller with helper components
 	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // flag default is non-negative
 	if err := (&controller.TaskReconciler{

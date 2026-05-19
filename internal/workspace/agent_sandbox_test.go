@@ -14,14 +14,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	sandbox "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+	fakeextensions "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/fake"
 )
+
+const fakeCodingAgentTemplate = "coding-agent"
 
 func TestAgentSandboxExecutorReattachesClaimNameAcrossExecutorInstances(t *testing.T) {
 	store := newFakeAgentSandboxStore()
 	req := ClaimRequest{
 		Namespace: fakeTestNamespace,
-		Template:  TemplateRef{Name: "coding-agent"},
+		Template:  TemplateRef{Name: fakeCodingAgentTemplate},
 	}
 
 	firstExecutor := NewAgentSandboxExecutor()
@@ -75,7 +81,7 @@ func TestAgentSandboxExecutorReattachesClaimNameAcrossExecutorInstances(t *testi
 	if len(store.clientOptions) != 2 {
 		t.Fatalf("client creations = %d, want 2", len(store.clientOptions))
 	}
-	if got := store.clientOptions[1].TemplateName; got != "coding-agent" {
+	if got := store.clientOptions[1].TemplateName; got != fakeCodingAgentTemplate {
 		t.Fatalf("reattach client TemplateName = %q, want coding-agent", got)
 	}
 }
@@ -89,7 +95,7 @@ func TestAgentSandboxExecutorReattachCallsGetSandboxWithRequestedClaim(t *testin
 	claimed, err := executor.Claim(context.Background(), ClaimRequest{
 		Namespace: fakeTestNamespace,
 		ClaimName: "retained-claim",
-		Template:  TemplateRef{Name: "coding-agent"},
+		Template:  TemplateRef{Name: fakeCodingAgentTemplate},
 	})
 	if err != nil {
 		t.Fatalf("Claim() error = %v", err)
@@ -114,13 +120,83 @@ func TestAgentSandboxExecutorReattachCallsGetSandboxWithRequestedClaim(t *testin
 	}
 }
 
+func TestAgentSandboxExecutorCreatesNamedClaimWhenReattachMisses(t *testing.T) {
+	store := newFakeAgentSandboxStore()
+	executor := NewAgentSandboxExecutor()
+	executor.newClient = store.newClient
+
+	claimed, err := executor.Claim(context.Background(), ClaimRequest{
+		Namespace:       fakeTestNamespace,
+		ClaimName:       "orka-session-fixed",
+		CreateIfMissing: true,
+		Template:        TemplateRef{Name: fakeCodingAgentTemplate},
+		ReuseKey:        "session-1",
+	})
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	if !claimed.Created || claimed.Reused {
+		t.Fatalf("Created/Reused = %v/%v, want true/false", claimed.Created, claimed.Reused)
+	}
+	if claimed.Ref.ClaimName != "orka-session-fixed" {
+		t.Fatalf("claim name = %q, want deterministic name", claimed.Ref.ClaimName)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.getCalls) != 1 {
+		t.Fatalf("GetSandbox calls = %d, want 1 before named create", len(store.getCalls))
+	}
+	if len(store.createCalls) != 1 {
+		t.Fatalf("CreateSandbox calls = %d, want 1", len(store.createCalls))
+	}
+	if call := store.createCalls[0]; call.claimName != "orka-session-fixed" || call.template != fakeCodingAgentTemplate || call.namespace != fakeTestNamespace {
+		t.Fatalf("CreateSandboxWithName call = %#v, want named session claim", call)
+	}
+}
+
+func TestAgentSandboxSDKClientRollsBackCreatedNamedClaimWhenAttachFails(t *testing.T) {
+	extensionsClient := fakeextensions.NewSimpleClientset() //nolint:staticcheck // generated fake clientset still uses deprecated testing package helpers
+	k8sHelper := &sandbox.K8sHelper{
+		ExtensionsClient: extensionsClient.ExtensionsV1alpha1(),
+		Log:              logr.Discard(),
+	}
+	sdkClient, err := sandbox.NewClient(context.Background(), sandbox.Options{
+		TemplateName:        fakeCodingAgentTemplate,
+		Namespace:           fakeTestNamespace,
+		APIURL:              "http://localhost:65535",
+		SandboxReadyTimeout: 5 * time.Millisecond,
+		RequestTimeout:      5 * time.Millisecond,
+		PerAttemptTimeout:   5 * time.Millisecond,
+		Quiet:               true,
+		K8sHelper:           k8sHelper,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	client := &agentSandboxSDKClient{client: sdkClient, k8s: k8sHelper}
+
+	_, err = client.CreateSandboxWithName(context.Background(), "rollback-claim", fakeCodingAgentTemplate, fakeTestNamespace)
+	if err == nil {
+		t.Fatal("CreateSandboxWithName() error = nil, want attach failure")
+	}
+	_, getErr := extensionsClient.ExtensionsV1alpha1().SandboxClaims(fakeTestNamespace).Get(
+		context.Background(),
+		"rollback-claim",
+		metav1.GetOptions{},
+	)
+	if !k8serrors.IsNotFound(getErr) {
+		t.Fatalf("rollback claim Get() error = %v, want not found", getErr)
+	}
+}
+
 func TestAgentSandboxExecutorLocalClaimNameReuseSkipsGetSandbox(t *testing.T) {
 	store := newFakeAgentSandboxStore()
 	executor := NewAgentSandboxExecutor()
 	executor.newClient = store.newClient
 	req := ClaimRequest{
 		Namespace: fakeTestNamespace,
-		Template:  TemplateRef{Name: "coding-agent"},
+		Template:  TemplateRef{Name: fakeCodingAgentTemplate},
 	}
 
 	created, err := executor.Claim(context.Background(), req)
@@ -162,7 +238,7 @@ func TestAgentSandboxExecutorClaimPropagatesTimeoutToSandboxOptions(t *testing.T
 
 	_, err := executor.Claim(context.Background(), ClaimRequest{
 		Namespace: fakeTestNamespace,
-		Template:  TemplateRef{Name: "coding-agent"},
+		Template:  TemplateRef{Name: fakeCodingAgentTemplate},
 		Timeout:   17 * time.Second,
 	})
 	if err != nil {
@@ -190,7 +266,7 @@ func TestAgentSandboxExecutorClaimUsesClaimNamespaceAndTemplateName(t *testing.T
 
 	_, err := executor.Claim(context.Background(), ClaimRequest{
 		Namespace: "task-ns",
-		Template:  TemplateRef{Namespace: "template-ns", Name: "coding-agent"},
+		Template:  TemplateRef{Namespace: "template-ns", Name: fakeCodingAgentTemplate},
 	})
 	if err != nil {
 		t.Fatalf("Claim() error = %v", err)
@@ -201,7 +277,7 @@ func TestAgentSandboxExecutorClaimUsesClaimNamespaceAndTemplateName(t *testing.T
 	if len(store.createCalls) != 1 {
 		t.Fatalf("CreateSandbox calls = %d, want 1", len(store.createCalls))
 	}
-	if call := store.createCalls[0]; call.template != "coding-agent" || call.namespace != "task-ns" {
+	if call := store.createCalls[0]; call.template != fakeCodingAgentTemplate || call.namespace != "task-ns" {
 		t.Fatalf("CreateSandbox call = %#v, want template coding-agent in claim namespace task-ns", call)
 	}
 	if len(store.clientOptions) != 1 {
@@ -213,25 +289,32 @@ func TestAgentSandboxExecutorClaimUsesClaimNamespaceAndTemplateName(t *testing.T
 }
 
 func TestAgentSandboxCommandStringRendersDeterministicallyAndSafely(t *testing.T) {
+	env := map[string]string{
+		"VALUE": "quote ' and spaces",
+		"A":     "first",
+	}
+	_, envFilePath, envContent, err := agentSandboxEnvFile(time.Unix(0, 123), env)
+	if err != nil {
+		t.Fatalf("agentSandboxEnvFile() error = %v", err)
+	}
+	if string(envContent) != "export A='first'\nexport VALUE='quote '\"'\"' and spaces'\n" {
+		t.Fatalf("env file content = %q", string(envContent))
+	}
+
 	command, err := agentSandboxCommandString(ExecRequest{
 		Command: []string{"sh", "-c", "printf '%s' \"$VALUE\""},
-		Env: map[string]string{
-			"VALUE": "quote ' and spaces",
-			"A":     "first",
-		},
+		Env:     env,
 		WorkDir: "/workspace/dir with ' quote",
-	})
+	}, envFilePath)
 	if err != nil {
 		t.Fatalf("agentSandboxCommandString() error = %v", err)
 	}
 
 	script := strings.Join([]string{
+		agentSandboxEnvFilePrelude(envFilePath),
 		"cd",
 		shellQuote("/workspace/dir with ' quote"),
 		"&&",
-		"env",
-		shellQuote("A=first"),
-		shellQuote("VALUE=quote ' and spaces"),
 		shellQuote("sh"),
 		shellQuote("-c"),
 		shellQuote("printf '%s' \"$VALUE\""),
@@ -239,6 +322,9 @@ func TestAgentSandboxCommandStringRendersDeterministicallyAndSafely(t *testing.T
 	want := "sh -c " + shellQuote(script)
 	if command != want {
 		t.Fatalf("command = %q, want %q", command, want)
+	}
+	if strings.Contains(command, "A=first") || strings.Contains(command, "VALUE=quote") {
+		t.Fatalf("command leaked env assignments: %q", command)
 	}
 }
 
@@ -250,13 +336,20 @@ func TestAgentSandboxCommandStringRejectsUnsafeInputs(t *testing.T) {
 		{name: "workdir nul", req: ExecRequest{WorkDir: "bad\x00dir", Command: []string{"echo"}}},
 		{name: "empty env name", req: ExecRequest{Command: []string{"echo"}, Env: map[string]string{"": "value"}}},
 		{name: "env contains equals", req: ExecRequest{Command: []string{"echo"}, Env: map[string]string{"A=B": "value"}}},
+		{name: "env invalid shell name", req: ExecRequest{Command: []string{"echo"}, Env: map[string]string{"1BAD": "value"}}},
 		{name: "env value nul", req: ExecRequest{Command: []string{"echo"}, Env: map[string]string{"A": "bad\x00value"}}},
 		{name: "arg nul", req: ExecRequest{Command: []string{"bad\x00arg"}}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := agentSandboxCommandString(tt.req); err == nil {
+			if len(tt.req.Env) > 0 {
+				if _, _, _, err := agentSandboxEnvFile(time.Unix(0, 1), tt.req.Env); err == nil {
+					t.Fatal("agentSandboxEnvFile() error = nil, want error")
+				}
+				return
+			}
+			if _, err := agentSandboxCommandString(tt.req, ""); err == nil {
 				t.Fatal("agentSandboxCommandString() error = nil, want error")
 			}
 		})
@@ -269,7 +362,7 @@ func TestAgentSandboxExecutorExecRendersCommandAndMapsCommandFailure(t *testing.
 	executor.newClient = store.newClient
 	claim, err := executor.Claim(context.Background(), ClaimRequest{
 		Namespace: fakeTestNamespace,
-		Template:  TemplateRef{Name: "coding-agent"},
+		Template:  TemplateRef{Name: fakeCodingAgentTemplate},
 	})
 	if err != nil {
 		t.Fatalf("Claim() error = %v", err)
@@ -296,17 +389,77 @@ func TestAgentSandboxExecutorExecRendersCommandAndMapsCommandFailure(t *testing.
 
 	handle.mu.Lock()
 	defer handle.mu.Unlock()
+	if len(handle.writes) != 1 {
+		t.Fatalf("env file writes = %d, want 1", len(handle.writes))
+	}
+	var envFileName string
+	var envFileContent []byte
+	for name, content := range handle.writes {
+		envFileName = name
+		envFileContent = content
+	}
+	if !strings.HasPrefix(envFileName, agentSandboxEnvFilePrefix) {
+		t.Fatalf("env file name = %q, want prefix %q", envFileName, agentSandboxEnvFilePrefix)
+	}
+	if string(envFileContent) != "export A='one'\nexport B='two'\n" {
+		t.Fatalf("env file content = %q", string(envFileContent))
+	}
 	if len(handle.runCommands) != 1 {
 		t.Fatalf("Run calls = %d, want 1", len(handle.runCommands))
 	}
+	envFilePath := agentSandboxExecRoot + envFileName
 	script := strings.Join([]string{
-		"cd", shellQuote("/workspace/repo"), "&&", "env",
-		shellQuote("A=one"), shellQuote("B=two"),
+		agentSandboxEnvFilePrelude(envFilePath),
+		"cd", shellQuote("/workspace/repo"), "&&",
 		shellQuote("echo"), shellQuote("hello world"),
 	}, " ")
 	wantCommand := "sh -c " + shellQuote(script)
 	if handle.runCommands[0] != wantCommand {
 		t.Fatalf("Run command = %q, want %q", handle.runCommands[0], wantCommand)
+	}
+	if strings.Contains(handle.runCommands[0], "A=one") || strings.Contains(handle.runCommands[0], "B=two") {
+		t.Fatalf("Run command leaked env assignments: %q", handle.runCommands[0])
+	}
+}
+
+func TestAgentSandboxExecutorExecRemovesEnvFileWhenRunFails(t *testing.T) {
+	store := newFakeAgentSandboxStore()
+	executor := NewAgentSandboxExecutor()
+	executor.newClient = store.newClient
+	claim, err := executor.Claim(context.Background(), ClaimRequest{
+		Namespace: fakeTestNamespace,
+		Template:  TemplateRef{Name: fakeCodingAgentTemplate},
+	})
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	handle := store.mustHandle(t, claim.Ref.Namespace, claim.Ref.ClaimName)
+	handle.runErr = fmt.Errorf("transport failed before shell started")
+
+	_, err = executor.Exec(context.Background(), ExecRequest{
+		Ref:     claim.Ref,
+		Command: []string{"echo", "hello"},
+		Env:     map[string]string{"GIT_TOKEN": "secret-token"},
+	})
+	if err == nil {
+		t.Fatal("Exec() error = nil, want run failure")
+	}
+
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
+	if len(handle.writes) != 1 {
+		t.Fatalf("env file writes = %d, want 1", len(handle.writes))
+	}
+	var envFileName string
+	for name := range handle.writes {
+		envFileName = name
+	}
+	if len(handle.runCommands) != 2 {
+		t.Fatalf("Run commands = %#v, want command plus env cleanup", handle.runCommands)
+	}
+	wantCleanup := "rm -f " + shellQuote(agentSandboxExecRoot+envFileName)
+	if handle.runCommands[1] != wantCleanup {
+		t.Fatalf("cleanup command = %q, want %q", handle.runCommands[1], wantCleanup)
 	}
 }
 
@@ -324,7 +477,7 @@ func TestAgentSandboxExecutorUploadWritesPlainFilesAndRejectsNestedPaths(t *test
 	executor.newClient = store.newClient
 	claim, err := executor.Claim(context.Background(), ClaimRequest{
 		Namespace: fakeTestNamespace,
-		Template:  TemplateRef{Name: "coding-agent"},
+		Template:  TemplateRef{Name: fakeCodingAgentTemplate},
 	})
 	if err != nil {
 		t.Fatalf("Claim() error = %v", err)
@@ -364,7 +517,7 @@ func TestAgentSandboxExecutorDownloadRecursivelyListsAndReadsFiles(t *testing.T)
 	executor.newClient = store.newClient
 	claim, err := executor.Claim(context.Background(), ClaimRequest{
 		Namespace: fakeTestNamespace,
-		Template:  TemplateRef{Name: "coding-agent"},
+		Template:  TemplateRef{Name: fakeCodingAgentTemplate},
 	})
 	if err != nil {
 		t.Fatalf("Claim() error = %v", err)
@@ -403,7 +556,7 @@ func TestAgentSandboxExecutorReleaseRetainsAndDeleteUsesClient(t *testing.T) {
 	executor.newClient = store.newClient
 	claim, err := executor.Claim(context.Background(), ClaimRequest{
 		Namespace: fakeTestNamespace,
-		Template:  TemplateRef{Name: "coding-agent"},
+		Template:  TemplateRef{Name: fakeCodingAgentTemplate},
 		ReuseKey:  "session-1",
 	})
 	if err != nil {
@@ -460,6 +613,7 @@ type fakeAgentSandboxStore struct {
 }
 
 type fakeAgentSandboxCreateCall struct {
+	claimName string
 	template  string
 	namespace string
 }
@@ -499,6 +653,18 @@ func (s *fakeAgentSandboxStore) seed(namespace, claimName, sandboxName string) {
 	}
 }
 
+func (s *fakeAgentSandboxStore) createHandleLocked(namespace, claimName, sandboxName, template string) *fakeAgentSandboxHandle {
+	handle := &fakeAgentSandboxHandle{
+		claimName:   claimName,
+		sandboxName: sandboxName,
+		podName:     sandboxName + "-pod",
+		ready:       true,
+		annotations: map[string]string{"template": template},
+	}
+	s.handles[fakeAgentSandboxKey(namespace, claimName)] = handle
+	return handle
+}
+
 func (s *fakeAgentSandboxStore) mustHandle(t *testing.T, namespace, claimName string) *fakeAgentSandboxHandle {
 	t.Helper()
 	s.mu.Lock()
@@ -526,19 +692,18 @@ type fakeAgentSandboxClient struct {
 func (c *fakeAgentSandboxClient) CreateSandbox(_ context.Context, template, namespace string) (agentSandboxHandle, error) {
 	c.store.mu.Lock()
 	defer c.store.mu.Unlock()
-	c.store.createCalls = append(c.store.createCalls, fakeAgentSandboxCreateCall{template: template, namespace: namespace})
 	c.store.nextClaim++
 	claimName := fmt.Sprintf("claim-%d", c.store.nextClaim)
 	sandboxName := fmt.Sprintf("sandbox-%d", c.store.nextClaim)
-	handle := &fakeAgentSandboxHandle{
-		claimName:   claimName,
-		sandboxName: sandboxName,
-		podName:     sandboxName + "-pod",
-		ready:       true,
-		annotations: map[string]string{"template": template},
-	}
-	c.store.handles[fakeAgentSandboxKey(namespace, claimName)] = handle
-	return handle, nil
+	c.store.createCalls = append(c.store.createCalls, fakeAgentSandboxCreateCall{template: template, namespace: namespace})
+	return c.store.createHandleLocked(namespace, claimName, sandboxName, template), nil
+}
+
+func (c *fakeAgentSandboxClient) CreateSandboxWithName(_ context.Context, claimName, template, namespace string) (agentSandboxHandle, error) {
+	c.store.mu.Lock()
+	defer c.store.mu.Unlock()
+	c.store.createCalls = append(c.store.createCalls, fakeAgentSandboxCreateCall{claimName: claimName, template: template, namespace: namespace})
+	return c.store.createHandleLocked(namespace, claimName, claimName+"-sandbox", template), nil
 }
 
 func (c *fakeAgentSandboxClient) GetSandbox(_ context.Context, claimName, namespace string) (agentSandboxHandle, error) {
@@ -547,7 +712,7 @@ func (c *fakeAgentSandboxClient) GetSandbox(_ context.Context, claimName, namesp
 	c.store.getCalls = append(c.store.getCalls, fakeAgentSandboxGetCall{claimName: claimName, namespace: namespace})
 	handle := c.store.handles[fakeAgentSandboxKey(namespace, claimName)]
 	if handle == nil {
-		return nil, sandbox.ErrClaimFailed
+		return nil, NewError("claim", ErrorKindNotFound, "fake claim not found", false, nil)
 	}
 	handle.ready = true
 	return handle, nil
