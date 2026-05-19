@@ -57,6 +57,7 @@ wait_timeout="${ORKA_AGENT_SANDBOX_WAIT_TIMEOUT:-8m}"
 api_pf_pid=""
 router_namespace=""
 created_kind_cluster="0"
+agent_sandbox_module_cache=""
 work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/live-agent-sandbox-e2e.XXXXXX")"
 kind_config="${ORKA_AGENT_SANDBOX_KIND_CONFIG:-${work_dir}/kind-config.yaml}"
 fake_dockerfile="${work_dir}/Dockerfile.fake-claude"
@@ -212,6 +213,38 @@ wait_for_http() {
   done
 
   die "${description} never became available at ${url}"
+}
+
+duration_to_seconds() {
+  local value="$1"
+  local rest="$1"
+  local total=0
+  local number unit amount
+
+  if [[ "${value}" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "${value}"
+    return
+  fi
+
+  while [[ -n "${rest}" ]]; do
+    if [[ ! "${rest}" =~ ^([0-9]+)([hms])(.*)$ ]]; then
+      die "unsupported duration ${value}; use digits with h, m, or s units"
+    fi
+
+    number="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+    rest="${BASH_REMATCH[3]}"
+    amount=$((10#${number}))
+
+    case "${unit}" in
+      h) total=$((total + amount * 3600)) ;;
+      m) total=$((total + amount * 60)) ;;
+      s) total=$((total + amount)) ;;
+    esac
+  done
+
+  [[ "${total}" -gt 0 ]] || die "duration ${value} must be positive"
+  printf '%s\n' "${total}"
 }
 
 write_fake_claude_dockerfile() {
@@ -462,7 +495,23 @@ install_agent_sandbox() {
 }
 
 agent_sandbox_module_dir() {
-  go list -m -f '{{.Dir}}' sigs.k8s.io/agent-sandbox
+  local module_dir
+
+  if [[ -n "${agent_sandbox_module_cache}" ]]; then
+    printf '%s\n' "${agent_sandbox_module_cache}"
+    return
+  fi
+
+  module_dir="$(go list -m -f '{{.Dir}}' sigs.k8s.io/agent-sandbox)"
+  if [[ -z "${module_dir}" ]]; then
+    log "Downloading agent-sandbox module source"
+    run go mod download sigs.k8s.io/agent-sandbox
+    module_dir="$(go list -m -f '{{.Dir}}' sigs.k8s.io/agent-sandbox)"
+  fi
+
+  [[ -n "${module_dir}" ]] || die "failed to resolve agent-sandbox module directory"
+  agent_sandbox_module_cache="${module_dir}"
+  printf '%s\n' "${module_dir}"
 }
 
 build_sandbox_router_image() {
@@ -635,10 +684,12 @@ YAML
 
 wait_for_task_succeeded() {
   local task_name="$1"
-  local phase message
+  local phase message timeout_seconds deadline
   log "Waiting for Task/${task_name} to succeed"
+  timeout_seconds="$(duration_to_seconds "${wait_timeout}")"
+  deadline=$((SECONDS + timeout_seconds))
 
-  for _ in $(seq 1 240); do
+  while (( SECONDS < deadline )); do
     phase="$(kubectl -n "${orka_namespace}" get task "${task_name}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
     case "${phase}" in
       Succeeded)
