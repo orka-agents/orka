@@ -909,7 +909,6 @@ func pipelineTaskDisplayName(task *corev1alpha1.Task) string {
 }
 
 type scanRunProgress struct {
-	hasPipelineTask     bool
 	hasActive           bool
 	hasThreatModelReady bool
 	hasDiscovery        bool
@@ -939,7 +938,6 @@ func (r *RepositoryScanReconciler) collectScanRunProgress(
 		if !isScanPipelineStage(stage) {
 			continue
 		}
-		progress.hasPipelineTask = true
 		if isActiveTaskPhase(task.Status.Phase) {
 			progress.hasActive = true
 		}
@@ -988,11 +986,7 @@ func applyScanRunProgress(run *store.ScanRun, progress scanRunProgress) {
 		return
 	}
 
-	storedFailureMessage := ""
-	if !progress.hasPipelineTask {
-		storedFailureMessage = run.ErrorMessage
-	}
-	if progress.failureMessage != "" || run.ErrorMessage != "" || storedFailureMessage != "" || len(progress.failedStages) > 0 {
+	if progress.failureMessage != "" || run.ErrorMessage != "" || len(progress.failedStages) > 0 {
 		run.Phase = scanRunPhaseFailed
 		if progress.latestCompletion != nil {
 			run.CompletedAt = progress.latestCompletion
