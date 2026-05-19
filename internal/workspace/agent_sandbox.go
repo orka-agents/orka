@@ -21,18 +21,22 @@ import (
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandbox "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
 
 const (
-	agentSandboxRouterURLEnv          = "ORKA_AGENT_SANDBOX_ROUTER_URL"
-	agentSandboxDefaultFileMode       = 0o644
-	agentSandboxDefaultRootList       = "."
-	agentSandboxEnvFilePrefix         = "orka-env-"
-	agentSandboxExecRoot              = "/app/"
-	agentSandboxWorkspaceIDPrefix     = "agent-sandbox:"
-	agentSandboxWorkspaceReadyMessage = "workspace ready"
+	agentSandboxRouterURLEnv             = "ORKA_AGENT_SANDBOX_ROUTER_URL"
+	agentSandboxDefaultFileMode          = 0o644
+	agentSandboxDefaultRootList          = "."
+	agentSandboxEnvFilePrefix            = "orka-env-"
+	agentSandboxExecRoot                 = "/app/"
+	agentSandboxReadyMaxPollInterval     = time.Second
+	agentSandboxReadyInitialPollInterval = 10 * time.Millisecond
+	agentSandboxSDKReadyTimeout          = 180 * time.Second
+	agentSandboxWorkspaceIDPrefix        = "agent-sandbox:"
+	agentSandboxWorkspaceReadyMessage    = "workspace ready"
 )
 
 // AgentSandboxOption configures an AgentSandboxExecutor.
@@ -53,8 +57,8 @@ type agentSandboxHandle interface {
 }
 
 type agentSandboxClient interface {
-	CreateSandbox(ctx context.Context, template, namespace string) (agentSandboxHandle, error)
-	CreateSandboxWithName(ctx context.Context, claimName, template, namespace string) (agentSandboxHandle, error)
+	CreateSandbox(ctx context.Context, template, namespace, warmPoolPolicy string) (agentSandboxHandle, error)
+	CreateSandboxWithName(ctx context.Context, claimName, template, namespace, warmPoolPolicy string) (agentSandboxHandle, error)
 	GetSandbox(ctx context.Context, claimName, namespace string) (agentSandboxHandle, error)
 	DeleteSandbox(ctx context.Context, claimName, namespace string) error
 }
@@ -62,18 +66,141 @@ type agentSandboxClient interface {
 type agentSandboxClientFactory func(context.Context, sandbox.Options) (agentSandboxClient, error)
 
 type agentSandboxSDKClient struct {
-	client *sandbox.Client
-	k8s    *sandbox.K8sHelper
+	client       *sandbox.Client
+	k8s          *sandbox.K8sHelper
+	readyTimeout time.Duration
 }
 
-func (c *agentSandboxSDKClient) CreateSandbox(ctx context.Context, template, namespace string) (agentSandboxHandle, error) {
-	return c.client.CreateSandbox(ctx, template, namespace)
-}
-
-func (c *agentSandboxSDKClient) CreateSandboxWithName(ctx context.Context, claimName, template, namespace string) (agentSandboxHandle, error) {
-	if strings.TrimSpace(claimName) == "" {
-		return c.CreateSandbox(ctx, template, namespace)
+func (c *agentSandboxSDKClient) CreateSandbox(ctx context.Context, template, namespace, warmPoolPolicy string) (agentSandboxHandle, error) {
+	claim, err := c.createSandboxClaim(ctx, "", template, namespace, warmPoolPolicy)
+	if err != nil {
+		return nil, err
 	}
+	return c.openCreatedSandbox(ctx, claim.Name, namespace)
+}
+
+func (c *agentSandboxSDKClient) CreateSandboxWithName(ctx context.Context, claimName, template, namespace, warmPoolPolicy string) (agentSandboxHandle, error) {
+	if strings.TrimSpace(claimName) == "" {
+		return c.CreateSandbox(ctx, template, namespace, warmPoolPolicy)
+	}
+	created := false
+	if _, err := c.createSandboxClaim(ctx, claimName, template, namespace, warmPoolPolicy); err != nil {
+		if !k8serrors.IsAlreadyExists(err) {
+			return nil, err
+		}
+	} else {
+		created = true
+	}
+	if created {
+		return c.openCreatedSandbox(ctx, claimName, namespace)
+	}
+	return c.client.GetSandbox(ctx, claimName, namespace)
+}
+
+func (c *agentSandboxSDKClient) openCreatedSandbox(ctx context.Context, claimName, namespace string) (agentSandboxHandle, error) {
+	if err := c.waitCreatedSandboxReady(ctx, claimName, namespace); err != nil {
+		agentSandboxDeleteCreatedClaim(c.k8s, claimName, namespace)
+		return nil, err
+	}
+	handle, err := c.client.GetSandbox(ctx, claimName, namespace)
+	if err != nil {
+		agentSandboxDeleteCreatedClaim(c.k8s, claimName, namespace)
+	}
+	return handle, err
+}
+
+func (c *agentSandboxSDKClient) waitCreatedSandboxReady(ctx context.Context, claimName, namespace string) error {
+	ctx, cancel := agentSandboxReadyContext(ctx, c.readyTimeout)
+	defer cancel()
+
+	sandboxName, err := c.waitClaimSandboxName(ctx, claimName, namespace)
+	if err != nil {
+		return err
+	}
+	return c.waitSandboxReady(ctx, sandboxName, namespace)
+}
+
+func (c *agentSandboxSDKClient) waitClaimSandboxName(ctx context.Context, claimName, namespace string) (string, error) {
+	if c.k8s == nil || c.k8s.ExtensionsClient == nil {
+		return "", fmt.Errorf("agent sandbox extensions client is not configured")
+	}
+	backoff := agentSandboxReadyInitialPollInterval
+	var lastErr error
+	for {
+		claim, err := c.k8s.ExtensionsClient.SandboxClaims(namespace).Get(ctx, claimName, metav1.GetOptions{})
+		if err == nil {
+			lastErr = nil
+			if name := strings.TrimSpace(claim.Status.SandboxStatus.Name); name != "" {
+				return name, nil
+			}
+		} else if k8serrors.IsNotFound(err) {
+			return "", fmt.Errorf("%w: claim %s deleted before sandbox name was resolved", sandbox.ErrSandboxDeleted, claimName)
+		} else {
+			lastErr = err
+		}
+		if err := sleepContext(ctx, backoff); err != nil {
+			if lastErr != nil {
+				return "", fmt.Errorf("%w: sandbox name not resolved for claim %s: %w", sandbox.ErrTimeout, claimName, lastErr)
+			}
+			return "", fmt.Errorf("%w: sandbox name not resolved for claim %s: %w", sandbox.ErrTimeout, claimName, err)
+		}
+		backoff = agentSandboxNextReadyBackoff(backoff)
+	}
+}
+
+func (c *agentSandboxSDKClient) waitSandboxReady(ctx context.Context, sandboxName, namespace string) error {
+	if c.k8s == nil || c.k8s.AgentsClient == nil {
+		return fmt.Errorf("agent sandbox agents client is not configured")
+	}
+	backoff := agentSandboxReadyInitialPollInterval
+	var lastErr error
+	for {
+		sb, err := c.k8s.AgentsClient.Sandboxes(namespace).Get(ctx, sandboxName, metav1.GetOptions{})
+		if err == nil {
+			lastErr = nil
+			if agentSandboxReady(sb.Status.Conditions) {
+				return nil
+			}
+		} else if k8serrors.IsNotFound(err) {
+			return fmt.Errorf("%w: sandbox %s deleted before becoming ready", sandbox.ErrSandboxDeleted, sandboxName)
+		} else {
+			lastErr = err
+		}
+		if err := sleepContext(ctx, backoff); err != nil {
+			if lastErr != nil {
+				return fmt.Errorf("%w: sandbox %s did not become ready: %w", sandbox.ErrTimeout, sandboxName, lastErr)
+			}
+			return fmt.Errorf("%w: sandbox %s did not become ready: %w", sandbox.ErrTimeout, sandboxName, err)
+		}
+		backoff = agentSandboxNextReadyBackoff(backoff)
+	}
+}
+
+func agentSandboxNextReadyBackoff(current time.Duration) time.Duration {
+	next := current * 2
+	if next <= 0 {
+		return agentSandboxReadyInitialPollInterval
+	}
+	return min(next, agentSandboxReadyMaxPollInterval)
+}
+
+func agentSandboxReady(conditions []metav1.Condition) bool {
+	for _, cond := range conditions {
+		if cond.Type == string(sandboxv1alpha1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+func agentSandboxReadyContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		timeout = agentSandboxSDKReadyTimeout
+	}
+	return contextWithTimeout(ctx, timeout)
+}
+
+func (c *agentSandboxSDKClient) createSandboxClaim(ctx context.Context, claimName, template, namespace, warmPoolPolicy string) (*sandboxextv1alpha1.SandboxClaim, error) {
 	claim := &sandboxextv1alpha1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      claimName,
@@ -81,21 +208,26 @@ func (c *agentSandboxSDKClient) CreateSandboxWithName(ctx context.Context, claim
 		},
 		Spec: sandboxextv1alpha1.SandboxClaimSpec{
 			TemplateRef: sandboxextv1alpha1.SandboxTemplateRef{Name: template},
+			WarmPool:    agentSandboxWarmPoolPolicy(warmPoolPolicy),
 		},
 	}
-	created := false
-	if _, err := c.k8s.ExtensionsClient.SandboxClaims(namespace).Create(ctx, claim, metav1.CreateOptions{}); err != nil {
-		if !k8serrors.IsAlreadyExists(err) {
-			return nil, err
-		}
-	} else {
-		created = true
+	if strings.TrimSpace(claimName) == "" {
+		claim.GenerateName = "sandbox-claim-"
 	}
-	handle, err := c.client.GetSandbox(ctx, claimName, namespace)
-	if err != nil && created {
-		agentSandboxDeleteCreatedClaim(c.k8s, claimName, namespace)
+	created, err := c.k8s.ExtensionsClient.SandboxClaims(namespace).Create(ctx, claim, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("%w: template=%s namespace=%s: %w", sandbox.ErrClaimFailed, template, namespace, err)
 	}
-	return handle, err
+	return created, nil
+}
+
+func agentSandboxWarmPoolPolicy(policy string) *sandboxextv1alpha1.WarmPoolPolicy {
+	policy = strings.TrimSpace(policy)
+	if policy == "" {
+		return nil
+	}
+	warmPoolPolicy := sandboxextv1alpha1.WarmPoolPolicy(policy)
+	return &warmPoolPolicy
 }
 
 func agentSandboxDeleteCreatedClaim(k8s *sandbox.K8sHelper, claimName, namespace string) {
@@ -105,7 +237,7 @@ func agentSandboxDeleteCreatedClaim(k8s *sandbox.K8sHelper, claimName, namespace
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := k8s.ExtensionsClient.SandboxClaims(namespace).Delete(cleanupCtx, claimName, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-		k8s.Log.Error(err, "failed to roll back named sandbox claim", "claim", claimName, "namespace", namespace)
+		k8s.Log.Error(err, "failed to roll back sandbox claim", "claim", claimName, "namespace", namespace)
 	}
 }
 
@@ -170,7 +302,7 @@ func NewAgentSandboxExecutor(opts ...AgentSandboxOption) *AgentSandboxExecutor {
 			if err != nil {
 				return nil, err
 			}
-			return &agentSandboxSDKClient{client: client, k8s: k8s}, nil
+			return &agentSandboxSDKClient{client: client, k8s: k8s, readyTimeout: opts.SandboxReadyTimeout}, nil
 		},
 		now:        time.Now,
 		workspaces: make(map[string]*agentSandboxWorkspace),
@@ -270,9 +402,9 @@ func (e *AgentSandboxExecutor) Claim(ctx context.Context, req ClaimRequest) (*Cl
 
 func (e *AgentSandboxExecutor) createSandbox(ctx context.Context, client agentSandboxClient, req ClaimRequest) (agentSandboxHandle, error) {
 	if req.CreateIfMissing && strings.TrimSpace(req.ClaimName) != "" {
-		return client.CreateSandboxWithName(ctx, req.ClaimName, req.Template.Name, req.Namespace)
+		return client.CreateSandboxWithName(ctx, req.ClaimName, req.Template.Name, req.Namespace, req.WarmPoolPolicy)
 	}
-	return client.CreateSandbox(ctx, req.Template.Name, req.Namespace)
+	return client.CreateSandbox(ctx, req.Template.Name, req.Namespace, req.WarmPoolPolicy)
 }
 
 // WaitReady reconnects when necessary and returns once the workspace can accept

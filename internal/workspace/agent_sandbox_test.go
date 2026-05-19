@@ -17,8 +17,13 @@ import (
 	"github.com/go-logr/logr"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
+	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandbox "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+	fakeagents "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
 	fakeextensions "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/fake"
+	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
 
 const fakeCodingAgentTemplate = "coding-agent"
@@ -174,9 +179,9 @@ func TestAgentSandboxSDKClientRollsBackCreatedNamedClaimWhenAttachFails(t *testi
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
-	client := &agentSandboxSDKClient{client: sdkClient, k8s: k8sHelper}
+	client := &agentSandboxSDKClient{client: sdkClient, k8s: k8sHelper, readyTimeout: 5 * time.Millisecond}
 
-	_, err = client.CreateSandboxWithName(context.Background(), "rollback-claim", fakeCodingAgentTemplate, fakeTestNamespace)
+	_, err = client.CreateSandboxWithName(context.Background(), "rollback-claim", fakeCodingAgentTemplate, fakeTestNamespace, string(sandboxextv1alpha1.WarmPoolPolicyNone))
 	if err == nil {
 		t.Fatal("CreateSandboxWithName() error = nil, want attach failure")
 	}
@@ -187,6 +192,101 @@ func TestAgentSandboxSDKClientRollsBackCreatedNamedClaimWhenAttachFails(t *testi
 	)
 	if !k8serrors.IsNotFound(getErr) {
 		t.Fatalf("rollback claim Get() error = %v, want not found", getErr)
+	}
+}
+
+func TestAgentSandboxSDKClientCreateSandboxWithNameSetsWarmPoolPolicy(t *testing.T) {
+	extensionsClient := fakeextensions.NewSimpleClientset() //nolint:staticcheck // generated fake clientset still uses deprecated testing package helpers
+	var gotWarmPool *sandboxextv1alpha1.WarmPoolPolicy
+	extensionsClient.PrependReactor("create", "sandboxclaims", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		createAction, ok := action.(k8stesting.CreateAction)
+		if !ok {
+			t.Fatalf("create reactor action = %T, want CreateAction", action)
+		}
+		claim, ok := createAction.GetObject().(*sandboxextv1alpha1.SandboxClaim)
+		if !ok {
+			t.Fatalf("created object = %T, want SandboxClaim", createAction.GetObject())
+		}
+		if claim.Spec.WarmPool != nil {
+			warmPool := *claim.Spec.WarmPool
+			gotWarmPool = &warmPool
+		}
+		return false, nil, nil
+	})
+	k8sHelper := &sandbox.K8sHelper{
+		ExtensionsClient: extensionsClient.ExtensionsV1alpha1(),
+		Log:              logr.Discard(),
+	}
+	sdkClient, err := sandbox.NewClient(context.Background(), sandbox.Options{
+		TemplateName:        fakeCodingAgentTemplate,
+		Namespace:           fakeTestNamespace,
+		APIURL:              "http://localhost:65535",
+		SandboxReadyTimeout: 5 * time.Millisecond,
+		RequestTimeout:      5 * time.Millisecond,
+		PerAttemptTimeout:   5 * time.Millisecond,
+		Quiet:               true,
+		K8sHelper:           k8sHelper,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	client := &agentSandboxSDKClient{client: sdkClient, k8s: k8sHelper, readyTimeout: 5 * time.Millisecond}
+
+	_, err = client.CreateSandboxWithName(
+		context.Background(),
+		"warm-pool-claim",
+		fakeCodingAgentTemplate,
+		fakeTestNamespace,
+		string(sandboxextv1alpha1.WarmPoolPolicyNone),
+	)
+	if err == nil {
+		t.Fatal("CreateSandboxWithName() error = nil, want attach failure")
+	}
+	if gotWarmPool == nil || *gotWarmPool != sandboxextv1alpha1.WarmPoolPolicyNone {
+		t.Fatalf("created claim warm pool policy = %v, want %q", gotWarmPool, sandboxextv1alpha1.WarmPoolPolicyNone)
+	}
+}
+
+func TestAgentSandboxSDKClientWaitsForCreatedSandboxReady(t *testing.T) {
+	extensionsClient := fakeextensions.NewSimpleClientset( //nolint:staticcheck // generated fake clientset still uses deprecated testing package helpers
+		&sandboxextv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "ready-claim", Namespace: fakeTestNamespace},
+			Status: sandboxextv1alpha1.SandboxClaimStatus{
+				SandboxStatus: sandboxextv1alpha1.SandboxStatus{Name: "warm-sandbox"},
+			},
+		})
+	agentsClient := fakeagents.NewSimpleClientset() //nolint:staticcheck // generated fake clientset still uses deprecated testing package helpers
+	getCount := 0
+	agentsClient.PrependReactor("get", "sandboxes", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		getCount++
+		status := metav1.ConditionFalse
+		if getCount >= 2 {
+			status = metav1.ConditionTrue
+		}
+		return true, &sandboxv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: "warm-sandbox", Namespace: fakeTestNamespace},
+			Status: sandboxv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{{
+					Type:   string(sandboxv1alpha1.SandboxConditionReady),
+					Status: status,
+				}},
+			},
+		}, nil
+	})
+	client := &agentSandboxSDKClient{
+		k8s: &sandbox.K8sHelper{
+			AgentsClient:     agentsClient.AgentsV1alpha1(),
+			ExtensionsClient: extensionsClient.ExtensionsV1alpha1(),
+			Log:              logr.Discard(),
+		},
+		readyTimeout: time.Second,
+	}
+
+	if err := client.waitCreatedSandboxReady(context.Background(), "ready-claim", fakeTestNamespace); err != nil {
+		t.Fatalf("waitCreatedSandboxReady() error = %v", err)
+	}
+	if getCount < 2 {
+		t.Fatalf("sandbox readiness checks = %d, want at least 2", getCount)
 	}
 }
 
@@ -256,6 +356,30 @@ func TestAgentSandboxExecutorClaimPropagatesTimeoutToSandboxOptions(t *testing.T
 	}
 	if opts.PerAttemptTimeout != 17*time.Second {
 		t.Errorf("PerAttemptTimeout = %v, want 17s", opts.PerAttemptTimeout)
+	}
+}
+
+func TestAgentSandboxExecutorClaimPassesWarmPoolPolicy(t *testing.T) {
+	store := newFakeAgentSandboxStore()
+	executor := NewAgentSandboxExecutor()
+	executor.newClient = store.newClient
+
+	_, err := executor.Claim(context.Background(), ClaimRequest{
+		Namespace:      fakeTestNamespace,
+		Template:       TemplateRef{Name: fakeCodingAgentTemplate},
+		WarmPoolPolicy: string(sandboxextv1alpha1.WarmPoolPolicyNone),
+	})
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.createCalls) != 1 {
+		t.Fatalf("CreateSandbox calls = %d, want 1", len(store.createCalls))
+	}
+	if got := store.createCalls[0].warmPoolPolicy; got != string(sandboxextv1alpha1.WarmPoolPolicyNone) {
+		t.Fatalf("warm pool policy = %q, want %q", got, sandboxextv1alpha1.WarmPoolPolicyNone)
 	}
 }
 
@@ -613,9 +737,10 @@ type fakeAgentSandboxStore struct {
 }
 
 type fakeAgentSandboxCreateCall struct {
-	claimName string
-	template  string
-	namespace string
+	claimName      string
+	template       string
+	namespace      string
+	warmPoolPolicy string
 }
 
 type fakeAgentSandboxGetCall struct {
@@ -689,20 +814,20 @@ type fakeAgentSandboxClient struct {
 	store *fakeAgentSandboxStore
 }
 
-func (c *fakeAgentSandboxClient) CreateSandbox(_ context.Context, template, namespace string) (agentSandboxHandle, error) {
+func (c *fakeAgentSandboxClient) CreateSandbox(_ context.Context, template, namespace, warmPoolPolicy string) (agentSandboxHandle, error) {
 	c.store.mu.Lock()
 	defer c.store.mu.Unlock()
 	c.store.nextClaim++
 	claimName := fmt.Sprintf("claim-%d", c.store.nextClaim)
 	sandboxName := fmt.Sprintf("sandbox-%d", c.store.nextClaim)
-	c.store.createCalls = append(c.store.createCalls, fakeAgentSandboxCreateCall{template: template, namespace: namespace})
+	c.store.createCalls = append(c.store.createCalls, fakeAgentSandboxCreateCall{template: template, namespace: namespace, warmPoolPolicy: warmPoolPolicy})
 	return c.store.createHandleLocked(namespace, claimName, sandboxName, template), nil
 }
 
-func (c *fakeAgentSandboxClient) CreateSandboxWithName(_ context.Context, claimName, template, namespace string) (agentSandboxHandle, error) {
+func (c *fakeAgentSandboxClient) CreateSandboxWithName(_ context.Context, claimName, template, namespace, warmPoolPolicy string) (agentSandboxHandle, error) {
 	c.store.mu.Lock()
 	defer c.store.mu.Unlock()
-	c.store.createCalls = append(c.store.createCalls, fakeAgentSandboxCreateCall{claimName: claimName, template: template, namespace: namespace})
+	c.store.createCalls = append(c.store.createCalls, fakeAgentSandboxCreateCall{claimName: claimName, template: template, namespace: namespace, warmPoolPolicy: warmPoolPolicy})
 	return c.store.createHandleLocked(namespace, claimName, claimName+"-sandbox", template), nil
 }
 

@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -214,13 +215,17 @@ func execGitContext(ctx context.Context, dir string, args ...string) error {
 type AgentExecutor func(ctx context.Context, cfg *AgentConfig) (string, error)
 
 const (
-	agentSandboxWorkerUploadPath     = "orka-agent-worker"
-	agentSandboxWorkerExecPath       = "/app/" + agentSandboxWorkerUploadPath
-	agentSandboxSATokenUploadPath    = "orka-sa-token"
-	agentSandboxSATokenExecPath      = "/app/" + agentSandboxSATokenUploadPath
-	agentSandboxGitAskpassUploadPath = "orka-git-askpass"
-	agentSandboxGitAskpassExecPath   = "/app/" + agentSandboxGitAskpassUploadPath
-	agentSandboxExecMaxOutputBytes   = 2000
+	agentSandboxWorkerUploadPath              = "orka-agent-worker"
+	agentSandboxWorkerExecPath                = "/app/" + agentSandboxWorkerUploadPath
+	agentSandboxSATokenUploadPath             = "orka-sa-token"
+	agentSandboxSATokenExecPath               = "/app/" + agentSandboxSATokenUploadPath
+	agentSandboxTransactionTokenUploadPath    = "orka-transaction-token"
+	agentSandboxTransactionTokenExecPath      = "/app/" + agentSandboxTransactionTokenUploadPath
+	agentSandboxContextSubjectTokenUploadPath = "orka-context-subject-token"
+	agentSandboxContextSubjectTokenExecPath   = "/app/" + agentSandboxContextSubjectTokenUploadPath
+	agentSandboxGitAskpassUploadPath          = "orka-git-askpass"
+	agentSandboxGitAskpassExecPath            = "/app/" + agentSandboxGitAskpassUploadPath
+	agentSandboxExecMaxOutputBytes            = 2000
 )
 
 var (
@@ -362,8 +367,9 @@ func runAgentInSandbox(ctx context.Context, name, workspaceDir string, sandboxEn
 			Namespace: templateNamespace,
 			Name:      sandboxEnv.TemplateName,
 		},
-		ReuseKey: sandboxEnv.ReuseKey,
-		Timeout:  sandboxEnv.ClaimTimeout,
+		ReuseKey:       sandboxEnv.ReuseKey,
+		WarmPoolPolicy: agentSandboxClaimWarmPoolPolicy(sandboxEnv.WarmPoolPolicy),
+		Timeout:        sandboxEnv.ClaimTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("claim agent sandbox workspace: %w", err)
@@ -434,6 +440,7 @@ func stageAgentSandboxExecutable(
 	}
 
 	tokenUploaded := false
+	tokenCleanupPaths := make([]string, 0, 3)
 	artifacts := []workspace.UploadArtifact{
 		{
 			Path: agentSandboxWorkerUploadPath,
@@ -449,13 +456,20 @@ func stageAgentSandboxExecutable(
 			Mode: 0o600,
 		})
 		innerEnv[workerenv.ServiceAccountTokenPath] = agentSandboxSATokenExecPath
+		tokenCleanupPaths = append(tokenCleanupPaths, agentSandboxSATokenExecPath)
 	}
+	transactionArtifacts, transactionCleanupPaths, err := agentSandboxTransactionTokenArtifacts(innerEnv)
+	if err != nil {
+		return nil, nil, err
+	}
+	artifacts = append(artifacts, transactionArtifacts...)
+	tokenCleanupPaths = append(tokenCleanupPaths, transactionCleanupPaths...)
 	gitAskpassUploaded := false
 	if strings.TrimSpace(innerEnv[workerenv.GitToken]) != "" {
 		gitAskpassUploaded = true
 		artifacts = append(artifacts, workspace.UploadArtifact{
 			Path: agentSandboxGitAskpassUploadPath,
-			Data: []byte("#!/bin/sh\nprintf '%s\n' \"$GIT_TOKEN\"\n"),
+			Data: []byte("#!/bin/sh\nprintf '%s\\n' \"$GIT_TOKEN\"\n"),
 			Mode: 0o700,
 		})
 		innerEnv[workerenv.GitAskpass] = agentSandboxGitAskpassExecPath
@@ -472,30 +486,104 @@ func stageAgentSandboxExecutable(
 	command := []string{
 		"sh",
 		"-c",
-		agentSandboxWorkerCommand(tokenUploaded, gitAskpassUploaded),
+		agentSandboxWorkerCommand(tokenUploaded, gitAskpassUploaded, tokenCleanupPaths...),
 		agentSandboxWorkerUploadPath,
 	}
 	command = append(command, args...)
 	return command, innerEnv, nil
 }
 
-func agentSandboxWorkerCommand(tokenUploaded, gitAskpassUploaded bool) string {
+func agentSandboxWorkerCommand(tokenUploaded, gitAskpassUploaded bool, tokenCleanupPaths ...string) string {
 	chmodTargets := []string{agentSandboxWorkerExecPath}
 	if gitAskpassUploaded {
 		chmodTargets = append(chmodTargets, agentSandboxGitAskpassExecPath)
 	}
-	chmod := "chmod 0700 " + strings.Join(chmodTargets, " ")
-	if !tokenUploaded {
-		return chmod + " && exec " + agentSandboxWorkerExecPath + " \"$@\""
+	setup := "chmod 0700 " + strings.Join(chmodTargets, " ")
+	cleanupPaths := append([]string(nil), tokenCleanupPaths...)
+	if tokenUploaded {
+		cleanupPaths = appendUniqueString(cleanupPaths, agentSandboxSATokenExecPath)
+	}
+	if len(cleanupPaths) > 0 {
+		setup += " && chmod 0600 " + strings.Join(cleanupPaths, " ")
+	}
+	if len(cleanupPaths) == 0 {
+		return setup + " && exec " + agentSandboxWorkerExecPath + " \"$@\""
 	}
 	return strings.Join([]string{
-		chmod,
+		setup,
 		"&&",
 		agentSandboxWorkerExecPath + " \"$@\";",
 		"status=$?;",
-		"rm -f " + agentSandboxSATokenExecPath + ";",
+		"rm -f " + strings.Join(cleanupPaths, " ") + ";",
 		"exit $status",
 	}, " ")
+}
+
+func agentSandboxTransactionTokenArtifacts(innerEnv map[string]string) ([]workspace.UploadArtifact, []string, error) {
+	tokenFiles := []struct {
+		envName     string
+		description string
+		uploadPath  string
+		execPath    string
+	}{
+		{
+			envName:     workerenv.TransactionTokenFile,
+			description: "transaction token",
+			uploadPath:  agentSandboxTransactionTokenUploadPath,
+			execPath:    agentSandboxTransactionTokenExecPath,
+		},
+		{
+			envName:     workerenv.ContextTokenSubjectTokenFile,
+			description: "context token subject token",
+			uploadPath:  agentSandboxContextSubjectTokenUploadPath,
+			execPath:    agentSandboxContextSubjectTokenExecPath,
+		},
+	}
+
+	artifacts := make([]workspace.UploadArtifact, 0, len(tokenFiles))
+	cleanupPaths := make([]string, 0, len(tokenFiles))
+	stagedBySourcePath := make(map[string]string, len(tokenFiles))
+	for _, tokenFile := range tokenFiles {
+		outerPath := strings.TrimSpace(innerEnv[tokenFile.envName])
+		if outerPath == "" {
+			continue
+		}
+		if stagedPath := stagedBySourcePath[outerPath]; stagedPath != "" {
+			innerEnv[tokenFile.envName] = stagedPath
+			continue
+		}
+		token, err := workerenv.ReadTokenFile(outerPath, tokenFile.description)
+		if err != nil {
+			return nil, nil, err
+		}
+		artifacts = append(artifacts, workspace.UploadArtifact{
+			Path: tokenFile.uploadPath,
+			Data: []byte(token),
+			Mode: 0o600,
+		})
+		innerEnv[tokenFile.envName] = tokenFile.execPath
+		stagedBySourcePath[outerPath] = tokenFile.execPath
+		cleanupPaths = append(cleanupPaths, tokenFile.execPath)
+	}
+	return artifacts, cleanupPaths, nil
+}
+
+func appendUniqueString(values []string, value string) []string {
+	if slices.Contains(values, value) {
+		return values
+	}
+	return append(values, value)
+}
+
+func agentSandboxClaimWarmPoolPolicy(policy string) string {
+	switch strings.TrimSpace(strings.ToLower(policy)) {
+	case "", "disabled":
+		return "none"
+	case "template":
+		return "default"
+	default:
+		return "none"
+	}
 }
 
 func agentSandboxTemplateNamespace(sandboxEnv workerenv.AgentSandboxEnv, taskNamespace string) string {
@@ -594,12 +682,18 @@ func scrubAgentSandboxServiceAccountToken(
 	sandboxEnv workerenv.AgentSandboxEnv,
 ) {
 	if _, err := executor.Exec(ctx, workspace.ExecRequest{
-		Ref:            ref,
-		Command:        []string{"rm", "-f", agentSandboxSATokenExecPath},
+		Ref: ref,
+		Command: []string{
+			"rm",
+			"-f",
+			agentSandboxSATokenExecPath,
+			agentSandboxTransactionTokenExecPath,
+			agentSandboxContextSubjectTokenExecPath,
+		},
 		Timeout:        sandboxEnv.ClaimTimeout,
 		MaxOutputBytes: agentSandboxExecMaxOutputBytes,
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to scrub sandbox service account token before retaining workspace: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: failed to scrub sandbox token files before retaining workspace: %v\n", err)
 	}
 }
 

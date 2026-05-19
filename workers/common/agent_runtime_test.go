@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -647,6 +648,47 @@ func TestRunAgent_AgentSandboxControllerStrategyUsesTemplateNamespaceForClaims(t
 	}
 }
 
+func TestRunAgent_AgentSandboxPassesWarmPoolPolicy(t *testing.T) {
+	tests := []struct {
+		name      string
+		envPolicy string
+		want      string
+	}{
+		{name: "default disabled", want: "none"},
+		{name: "explicit disabled", envPolicy: "disabled", want: "none"},
+		{name: "template", envPolicy: "template", want: "default"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredAgentSandboxEnv(t, "delete")
+			if tt.envPolicy != "" {
+				t.Setenv(workerenv.AgentSandboxWarmPoolPolicy, tt.envPolicy)
+			}
+
+			recorder := newRecordingWorkspaceExecutor()
+			restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+			t.Cleanup(restoreExecutor)
+
+			err := RunAgent("test-agent", "/sandbox/workspace", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+				t.Fatal("outer agent executor should not run when agent sandbox is enabled")
+				return "", nil
+			})
+			if err != nil {
+				t.Fatalf("RunAgent returned error: %v", err)
+			}
+
+			claimReqs := recorder.claimRequests()
+			if len(claimReqs) != 1 {
+				t.Fatalf("recorded %d claim requests, want 1", len(claimReqs))
+			}
+			if claimReqs[0].WarmPoolPolicy != tt.want {
+				t.Fatalf("claim warm pool policy = %q, want %q", claimReqs[0].WarmPoolPolicy, tt.want)
+			}
+		})
+	}
+}
+
 func TestRunAgent_AgentSandboxSessionUsesDeterministicClaimName(t *testing.T) {
 	setRequiredAgentSandboxEnv(t, "retain")
 	t.Setenv(workerenv.AgentSandboxReusePolicy, "session")
@@ -732,6 +774,66 @@ func TestRunAgent_AgentSandboxPreservesGitCredentialsBeforeHandoff(t *testing.T)
 
 	artifacts := artifactsByPath(t, recorder)
 	assertAgentSandboxGitAskpassArtifact(t, artifacts[agentSandboxGitAskpassUploadPath])
+}
+
+func TestRunAgent_AgentSandboxStagesSharedTransactionTokenFile(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "delete")
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte(" transaction-token \n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	t.Setenv(workerenv.TransactionTokenFile, tokenPath)
+	t.Setenv(workerenv.ContextTokenSubjectTokenFile, tokenPath)
+
+	recorder := newRecordingWorkspaceExecutor()
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	err := RunAgent("test-agent", "/sandbox/workspace", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		t.Fatal("outer agent executor should not run when agent sandbox is enabled")
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("RunAgent returned error: %v", err)
+	}
+
+	execReqs := recorder.execRequests()
+	if len(execReqs) != 1 {
+		t.Fatalf("recorded %d exec requests, want 1", len(execReqs))
+	}
+	if execReqs[0].Env[workerenv.TransactionTokenFile] != agentSandboxTransactionTokenExecPath {
+		t.Fatalf(
+			"inner %s = %q, want %q",
+			workerenv.TransactionTokenFile,
+			execReqs[0].Env[workerenv.TransactionTokenFile],
+			agentSandboxTransactionTokenExecPath,
+		)
+	}
+	if execReqs[0].Env[workerenv.ContextTokenSubjectTokenFile] != agentSandboxTransactionTokenExecPath {
+		t.Fatalf(
+			"inner %s = %q, want shared %q",
+			workerenv.ContextTokenSubjectTokenFile,
+			execReqs[0].Env[workerenv.ContextTokenSubjectTokenFile],
+			agentSandboxTransactionTokenExecPath,
+		)
+	}
+	wantCommand := []string{
+		"sh",
+		"-c",
+		agentSandboxWorkerCommand(false, false, agentSandboxTransactionTokenExecPath),
+		agentSandboxWorkerUploadPath,
+	}
+	wantCommand = append(wantCommand, os.Args[1:]...)
+	if !reflect.DeepEqual(execReqs[0].Command, wantCommand) {
+		t.Fatalf("inner worker command = %#v, want %#v", execReqs[0].Command, wantCommand)
+	}
+
+	artifacts := artifactsByPath(t, recorder)
+	assertAgentSandboxWorkerArtifact(t, artifacts[agentSandboxWorkerUploadPath])
+	assertAgentSandboxTransactionTokenArtifact(t, artifacts[agentSandboxTransactionTokenUploadPath], "transaction-token")
+	if _, ok := artifacts[agentSandboxContextSubjectTokenUploadPath]; ok {
+		t.Fatalf("uploaded duplicate context subject token artifact for shared source path")
+	}
 }
 
 func TestRunAgent_AgentSandboxClaimFailure(t *testing.T) {
@@ -987,6 +1089,23 @@ func assertAgentSandboxTokenArtifact(t *testing.T, artifact workspace.UploadArti
 	}
 }
 
+func assertAgentSandboxTransactionTokenArtifact(t *testing.T, artifact workspace.UploadArtifact, wantData string) {
+	t.Helper()
+	if artifact.Path != agentSandboxTransactionTokenUploadPath {
+		t.Errorf(
+			"uploaded transaction token artifact path = %q, want %q",
+			artifact.Path,
+			agentSandboxTransactionTokenUploadPath,
+		)
+	}
+	if artifact.Mode != 0o600 {
+		t.Errorf("uploaded transaction token artifact mode = %#o, want 0600", artifact.Mode)
+	}
+	if string(artifact.Data) != wantData {
+		t.Fatal("uploaded transaction token artifact data was not the trimmed token")
+	}
+}
+
 func assertAgentSandboxGitAskpassArtifact(t *testing.T, artifact workspace.UploadArtifact) {
 	t.Helper()
 	if artifact.Path != agentSandboxGitAskpassUploadPath {
@@ -995,7 +1114,7 @@ func assertAgentSandboxGitAskpassArtifact(t *testing.T, artifact workspace.Uploa
 	if artifact.Mode != 0o700 {
 		t.Errorf("uploaded git askpass artifact mode = %#o, want 0700", artifact.Mode)
 	}
-	if string(artifact.Data) != "#!/bin/sh\nprintf '%s\n' \"$GIT_TOKEN\"\n" {
+	if string(artifact.Data) != "#!/bin/sh\nprintf '%s\\n' \"$GIT_TOKEN\"\n" {
 		t.Fatalf("uploaded git askpass script = %q", string(artifact.Data))
 	}
 }
@@ -1065,7 +1184,13 @@ func assertAgentSandboxTokenScrubRequest(t *testing.T, recorder *recordingWorksp
 		t.Fatalf("recorded %d exec requests, want inner worker plus token scrub", len(execReqs))
 	}
 	scrub := execReqs[1]
-	want := []string{"rm", "-f", agentSandboxSATokenExecPath}
+	want := []string{
+		"rm",
+		"-f",
+		agentSandboxSATokenExecPath,
+		agentSandboxTransactionTokenExecPath,
+		agentSandboxContextSubjectTokenExecPath,
+	}
 	if !reflect.DeepEqual(scrub.Command, want) {
 		t.Fatalf("scrub command = %#v, want %#v", scrub.Command, want)
 	}

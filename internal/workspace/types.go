@@ -80,9 +80,13 @@ type ClaimRequest struct {
 	CreateIfMissing bool
 	Template        TemplateRef
 	ReuseKey        string
-	Labels          map[string]string
-	Annotations     map[string]string
-	Timeout         time.Duration
+	// WarmPoolPolicy is the backend-native warm-pool selector. Agent-sandbox
+	// accepts "none" to force a cold claim and "default" to allow matching warm
+	// pools.
+	WarmPoolPolicy string
+	Labels         map[string]string
+	Annotations    map[string]string
+	Timeout        time.Duration
 }
 
 // ClaimResult describes the outcome of claiming a workspace.
