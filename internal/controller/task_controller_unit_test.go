@@ -2085,6 +2085,84 @@ func TestHandleCompleted_WebhookAlreadyDelivered(t *testing.T) {
 	}
 }
 
+func TestHandleCompleted_CancelledDeletesJob(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "cancel-job", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "cancel-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseCancelled,
+			JobName: "cancel-job",
+		},
+	}
+	r := newUnitReconciler(scheme, task, job)
+
+	_, err := r.handleCompleted(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "cancel-job", Namespace: "default"}, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected cancelled task Job to be deleted, got %v", err)
+	}
+}
+
+func TestHandleCompleted_FailedActiveJobDeletesJob(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "failed-active-job", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "failed-active-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseFailed,
+			JobName: "failed-active-job",
+		},
+	}
+	r := newUnitReconciler(scheme, task, job)
+
+	_, err := r.handleCompleted(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "failed-active-job", Namespace: "default"}, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected active failed task Job to be deleted, got %v", err)
+	}
+}
+
+func TestHandleCompleted_FailedInactiveJobRetainsJob(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "failed-inactive-job", Namespace: "default"},
+		Status:     batchv1.JobStatus{Failed: 1},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "failed-inactive-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseFailed,
+			JobName: "failed-inactive-job",
+		},
+	}
+	r := newUnitReconciler(scheme, task, job)
+
+	_, err := r.handleCompleted(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "failed-inactive-job", Namespace: "default"}, &batchv1.Job{}); err != nil {
+		t.Fatalf("expected inactive failed task Job to be retained, got %v", err)
+	}
+}
+
 func TestHandleCompleted_EnforcesScheduledTaskHistoryLimit(t *testing.T) {
 	scheme := newTestScheme()
 	parent := &corev1alpha1.Task{

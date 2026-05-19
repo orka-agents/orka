@@ -963,6 +963,11 @@ func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1al
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	if err := r.cleanupTerminalTaskJob(ctx, task); err != nil {
+		log.Error(err, "failed to clean up terminal task Job")
+		return ctrl.Result{}, err
+	}
+
 	// Send webhook if configured and not already sent
 	if task.Spec.WebhookURL != "" && !task.Status.WebhookDelivered {
 		if err := r.WebhookNotifier.Notify(ctx, task); err != nil {
@@ -982,6 +987,33 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func (r *TaskReconciler) cleanupTerminalTaskJob(ctx context.Context, task *corev1alpha1.Task) error {
+	if task.Status.JobName == "" {
+		return nil
+	}
+
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: task.Namespace}, job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("getting terminal task Job %q: %w", task.Status.JobName, err)
+	}
+
+	deleteJob := task.Status.Phase == corev1alpha1.TaskPhaseCancelled ||
+		(task.Status.Phase == corev1alpha1.TaskPhaseFailed && job.Status.Active > 0)
+	if !deleteJob {
+		return nil
+	}
+
+	propagationPolicy := metav1.DeletePropagationBackground
+	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting terminal task Job %q: %w", task.Status.JobName, err)
+	}
+
+	return nil
 }
 
 func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, task *corev1alpha1.Task) error {
