@@ -23,6 +23,11 @@
 !ui/public/**
 !ui/src/
 !ui/src/**
+ui/node_modules
+ui/node_modules/**
+ui/dist
+ui/dist/**
+ui/tsconfig.tsbuildinfo
 
 # Re-include pre-built UI assets for embed
 !internal/uiembed/dist/
