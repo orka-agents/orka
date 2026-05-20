@@ -1287,6 +1287,44 @@ func (r *RepositoryScanReconciler) enqueueAutoValidationTasks(ctx context.Contex
 	return nil
 }
 
+func clearRunError(run *store.ScanRun) {
+	if run == nil {
+		return
+	}
+	if run.Summary == run.ErrorMessage {
+		run.Summary = ""
+	}
+	run.ErrorMessage = ""
+}
+
+func clearThreatModelRunError(run *store.ScanRun) {
+	if run == nil || run.ErrorMessage == "" {
+		return
+	}
+	if strings.Contains(run.ErrorMessage, security.ArtifactThreatModel) ||
+		strings.Contains(run.ErrorMessage, "threat model stage failed") {
+		clearRunError(run)
+	}
+}
+
+func clearDiscoveryRunError(run *store.ScanRun, scope string) {
+	if run == nil || run.ErrorMessage == "" {
+		return
+	}
+	if scope != "" {
+		if strings.Contains(run.ErrorMessage, fmt.Sprintf("scope %s:", scope)) {
+			clearRunError(run)
+		}
+		if strings.Contains(run.ErrorMessage, "scope ") {
+			return
+		}
+	}
+	if strings.Contains(run.ErrorMessage, security.ArtifactFindings) ||
+		strings.Contains(run.ErrorMessage, "discovery stage failed") {
+		clearRunError(run)
+	}
+}
+
 func (r *RepositoryScanReconciler) ingestThreatModelTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, run *store.ScanRun, updateStatus bool) error {
 	run.TaskName = task.Name
 	if mode := task.Labels[labels.LabelSecurityMode]; mode != "" {
@@ -1304,6 +1342,7 @@ func (r *RepositoryScanReconciler) ingestThreatModelTask(ctx context.Context, sc
 			if err := r.persistThreatModelIfChanged(ctx, scan, run.ID, run.StartedAt, threatModel); err != nil {
 				return err
 			}
+			clearThreatModelRunError(run)
 			run.Summary = scanSummaryThreatModelPending
 		}
 	} else {
@@ -1311,7 +1350,7 @@ func (r *RepositoryScanReconciler) ingestThreatModelTask(ctx context.Context, sc
 	}
 
 	if !updateStatus {
-		return r.SecurityStore.UpdateScanRun(ctx, run)
+		return r.refreshScanRunStatus(ctx, scan, run, run.ID, false)
 	}
 	return r.refreshScanRunStatus(ctx, scan, run, run.ID, updateStatus)
 }
@@ -1330,6 +1369,7 @@ func (r *RepositoryScanReconciler) ingestDiscoveryTask(ctx context.Context, scan
 				run.ErrorMessage = validationProblem
 			}
 		} else if findingsArtifact != nil {
+			clearDiscoveryRunError(run, strings.TrimSpace(task.Labels[labels.LabelSecurityScope]))
 			if findingsArtifact.Scan.Mode != "" {
 				run.Mode = findingsArtifact.Scan.Mode
 			}
@@ -1379,7 +1419,7 @@ func (r *RepositoryScanReconciler) ingestDiscoveryTask(ctx context.Context, scan
 	}
 
 	if !updateStatus {
-		return r.SecurityStore.UpdateScanRun(ctx, run)
+		return r.refreshScanRunStatus(ctx, scan, run, run.ID, false)
 	}
 	return r.refreshScanRunStatus(ctx, scan, run, run.ID, updateStatus)
 }
@@ -1529,23 +1569,10 @@ func applyCombinedScanPhaseStatus(s *corev1alpha1.RepositoryScan, effectivePhase
 	})
 }
 
-func isTerminalScanRun(run *store.ScanRun) bool {
-	if run == nil || run.CompletedAt == nil {
-		return false
-	}
-	return run.Phase == scanRunPhaseSucceeded || run.Phase == scanRunPhaseFailed
-}
-
 func (r *RepositoryScanReconciler) ingestScanTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, updateStatus bool) error {
 	run, err := r.getOrCreateScanRun(ctx, scan, task)
 	if err != nil {
 		return err
-	}
-	if isTerminalScanRun(run) {
-		if updateStatus {
-			return r.refreshScanRunStatus(ctx, scan, run, run.ID, true)
-		}
-		return nil
 	}
 
 	switch taskSecurityStage(task) {

@@ -47,6 +47,7 @@ import (
 )
 
 const taskTransactionTokenPendingTimeout = 2 * time.Minute
+const failedMountEventStaleAfter = 2 * time.Minute
 
 const (
 	// ConditionTypeComplete indicates the task has completed
@@ -924,7 +925,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 						return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
 					}
 				}
-				if msg, ok, err := r.failedMountEventMessage(ctx, pod); err != nil {
+				if msg, ok, err := r.failedMountEventMessage(ctx, pod, task.Status.StartTime.Time); err != nil {
 					return ctrl.Result{}, err
 				} else if ok {
 					msg = fmt.Sprintf("pod stuck initializing for over 2 minutes: %s", msg)
@@ -939,8 +940,45 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
-func (r *TaskReconciler) failedMountEventMessage(ctx context.Context, pod *corev1.Pod) (string, bool, error) {
+func podWaitingForMountInitialization(pod *corev1.Pod) bool {
 	if pod == nil {
+		return false
+	}
+	for _, statuses := range [][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
+		for _, cs := range statuses {
+			if cs.State.Waiting == nil {
+				continue
+			}
+			switch cs.State.Waiting.Reason {
+			case "ContainerCreating", "PodInitializing":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func eventObservedAt(event *corev1.Event) time.Time {
+	if event == nil {
+		return time.Time{}
+	}
+	if !event.EventTime.IsZero() {
+		return event.EventTime.Time
+	}
+	if !event.LastTimestamp.IsZero() {
+		return event.LastTimestamp.Time
+	}
+	if !event.FirstTimestamp.IsZero() {
+		return event.FirstTimestamp.Time
+	}
+	if !event.CreationTimestamp.IsZero() {
+		return event.CreationTimestamp.Time
+	}
+	return time.Time{}
+}
+
+func (r *TaskReconciler) failedMountEventMessage(ctx context.Context, pod *corev1.Pod, since time.Time) (string, bool, error) {
+	if pod == nil || !podWaitingForMountInitialization(pod) {
 		return "", false, nil
 	}
 
@@ -949,6 +987,7 @@ func (r *TaskReconciler) failedMountEventMessage(ctx context.Context, pod *corev
 		return "", false, err
 	}
 
+	now := time.Now()
 	for i := range events.Items {
 		event := &events.Items[i]
 		if event.Reason != "FailedMount" {
@@ -959,6 +998,13 @@ func (r *TaskReconciler) failedMountEventMessage(ctx context.Context, pod *corev
 			continue
 		}
 		if ref.UID != "" && pod.UID != "" && ref.UID != pod.UID {
+			continue
+		}
+		observedAt := eventObservedAt(event)
+		if observedAt.IsZero() || (!since.IsZero() && observedAt.Before(since)) {
+			continue
+		}
+		if now.Sub(observedAt) > failedMountEventStaleAfter {
 			continue
 		}
 		message := strings.TrimSpace(event.Message)
