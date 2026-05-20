@@ -170,7 +170,7 @@ YAML
 EOF
 }
 
-require_demo_provider() {
+verify_provider() {
   local provider_ref="${1:-${DEMO_PROVIDER_REF:-}}"
   local namespace="${2:-${DEMO_NAMESPACE:-}}"
   local output ready message
@@ -204,7 +204,7 @@ require_demo_provider() {
   return 1
 }
 
-require_demo_secret() {
+verify_secret() {
   local secret_name="${1:-}"
   local description="${2:-Secret}"
   local namespace="${3:-${DEMO_NAMESPACE:-}}"
@@ -267,6 +267,11 @@ EOF
   esac
   return 1
 }
+
+# Back-compat aliases. Off-camera callers (reset.sh, older scripts) may keep
+# the require_* names; on-camera pe lines should use verify_*.
+require_demo_provider() { verify_provider "$@"; }
+require_demo_secret()   { verify_secret "$@"; }
 
 resolve_demo_magic_path() {
   if [[ -n "${DEMO_MAGIC_PATH:-}" ]]; then
@@ -1287,6 +1292,179 @@ wait_for_security_pull_request() {
     cat "${body_file}" >&2
   fi
   return 1
+}
+
+# ---------------------------------------------------------------------------
+# Narration-friendly helpers
+#
+# The functions below are short, single-pipeline wrappers used inside `pe`
+# lines in the scenario scripts. They keep typed-out commands readable
+# (one terminal row) and they make capture-then-export side effects visible
+# by printing what they captured.
+# ---------------------------------------------------------------------------
+
+print_anthropic_target() {
+  printf 'client=%s\nendpoint=%s\nmodel=%s\norchestration=server-side Orka task workflow\n' \
+    "${DEMO_CLAUDE_BIN:-claude}" \
+    "$(demo_anthropic_base_url)" \
+    "$(demo_anthropic_model)"
+}
+
+chat_request_key_lines() {
+  local file="${1:-${DEMO_WORKDIR}/chat-request.txt}"
+  grep -E '^(Start exactly one|Create the Agents|After all four|Do not use create_agent initialPrompt)' "${file}"
+}
+
+list_chat_agents() {
+  kubectl get agents -n "${DEMO_NAMESPACE}" \
+    "${DEMO_PR_COORDINATOR_NAME}" \
+    "${DEMO_CODER_AGENT_NAME}" \
+    "${DEMO_SECURITY_REVIEWER_NAME}" \
+    "${DEMO_QUALITY_REVIEWER_NAME}"
+}
+
+list_scheduled_children() {
+  kubectl get tasks -n "${DEMO_NAMESPACE}" \
+    -l "orka.ai/parent-task=${DEMO_CRON_TASK_NAME},orka.ai/scheduled-run=true"
+}
+
+task_overview() {
+  local task_name="$1"
+  kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" -o json \
+    | jq '{
+        name:    .metadata.name,
+        source:  .metadata.labels["orka.ai/source"],
+        session: .spec.sessionRef.name,
+        type:    .spec.type,
+        agent:   .spec.agentRef.name,
+        phase:   .status.phase,
+        jobName: .status.jobName
+      }'
+}
+
+task_children_summary() {
+  local task_name="$1"
+  orka_api GET "/api/v1/tasks/${task_name}/children?namespace=${DEMO_NAMESPACE}" \
+    | jq '.items | map({name: .metadata.name, agent: .spec.agentRef.name, phase: .status.phase})'
+}
+
+task_result_summary() {
+  local task_name="$1"
+  orka_api GET "/api/v1/tasks/${task_name}/result?namespace=${DEMO_NAMESPACE}" \
+    | jq '{result: .result}'
+}
+
+repository_scan_overview() {
+  local scan_name="${1:-${DEMO_SECURITY_SCAN_NAME}}"
+  orka_api GET "/api/v1/security/repositories/${scan_name}?namespace=${DEMO_NAMESPACE}" \
+    | jq '{name: .metadata.name, phase: .status.phase, findings: .status.findingCounts}'
+}
+
+repository_findings_summary() {
+  local scan_name="${1:-${DEMO_SECURITY_SCAN_NAME}}"
+  local limit="${2:-5}"
+  orka_api GET "/api/v1/security/repositories/${scan_name}/findings?namespace=${DEMO_NAMESPACE}&state=open&limit=${limit}" \
+    | jq '.items | map({id, severity, title, validationStatus, state})'
+}
+
+patch_summary() {
+  local finding_id="${1:-${DEMO_FINDING_ID:-}}"
+  [[ -n "${finding_id}" ]] || { printf 'error: patch_summary requires a finding id\n' >&2; return 1; }
+  orka_api GET "/api/v1/security/findings/${finding_id}/patches?namespace=${DEMO_NAMESPACE}" \
+    | jq '.items | map({id, status, branch, taskName})'
+}
+
+request_finding_patch() {
+  local finding_id="${1:-${DEMO_FINDING_ID:-}}"
+  [[ -n "${finding_id}" ]] || { printf 'error: request_finding_patch requires a finding id\n' >&2; return 1; }
+  orka_api POST "/api/v1/security/findings/${finding_id}/patch?namespace=${DEMO_NAMESPACE}" \
+    | jq '{id, status, branch}'
+}
+
+open_security_pull_request() {
+  local finding_id="${1:-${DEMO_FINDING_ID:-}}"
+  local timeout_seconds="${2:-${DEMO_SECURITY_PR_TIMEOUT:-180}}"
+  local pr_file="${3:-${DEMO_WORKDIR}/security-pr.json}"
+  [[ -n "${finding_id}" ]] || { printf 'error: open_security_pull_request requires a finding id\n' >&2; return 1; }
+  wait_for_security_pull_request "${finding_id}" "${timeout_seconds}" \
+    | tee "${pr_file}" \
+    | jq '{status, number: (.prNumber // .number), html_url: (.prURL // .html_url)}'
+}
+
+# Per-scenario reset wrappers. Each folds the previous above-clear cleanup
+# block into one verb so the scenario script can `pe` it visibly below
+# `clear` instead of running it silently.
+
+demo_chat_reset() {
+  delete_chat_session_tasks
+  delete_agent_if_exists "${DEMO_PR_COORDINATOR_NAME}"
+  delete_agent_if_exists "${DEMO_CODER_AGENT_NAME}"
+  delete_agent_if_exists "${DEMO_SECURITY_REVIEWER_NAME}"
+  delete_agent_if_exists "${DEMO_QUALITY_REVIEWER_NAME}"
+  orka_api DELETE "/api/v1/chat/${DEMO_CHAT_SESSION}?namespace=${DEMO_NAMESPACE}" >/dev/null 2>&1 || true
+  printf 'chat session reset: %s\n' "${DEMO_CHAT_SESSION}"
+}
+
+demo_manual_reset() {
+  delete_task_if_exists "${DEMO_MANUAL_TASK_NAME}"
+  printf 'manual task reset: %s\n' "${DEMO_MANUAL_TASK_NAME}"
+}
+
+demo_cron_reset() {
+  delete_task_if_exists "${DEMO_CRON_TASK_NAME}"
+  kubectl delete tasks -n "${DEMO_NAMESPACE}" \
+    -l "orka.ai/parent-task=${DEMO_CRON_TASK_NAME},orka.ai/scheduled-run=true" \
+    --ignore-not-found >/dev/null 2>&1 || true
+  printf 'cron parent and scheduled children reset: %s\n' "${DEMO_CRON_TASK_NAME}"
+}
+
+demo_security_reset() {
+  delete_repository_scan_if_exists "${DEMO_SECURITY_SCAN_NAME}"
+  printf 'repository scan reset: %s\n' "${DEMO_SECURITY_SCAN_NAME}"
+}
+
+# Capture-then-export wrappers. Each prints the captured value so the
+# audience can see what `pe` just bound; later `pe` lines reference the
+# exported variable directly (e.g. `wait_for_task_succeeded \$DEMO_CHAT_PARENT_TASK`).
+
+demo_chat_send_request() {
+  local request_file="${1:-${DEMO_WORKDIR}/chat-request.txt}"
+  local output_file="${2:-${DEMO_WORKDIR}/chat-client-result.json}"
+  export DEMO_CHAT_STARTED_AT
+  DEMO_CHAT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'chat request started at: %s\n' "${DEMO_CHAT_STARTED_AT}"
+  run_demo_chat_request_file "${request_file}" "${output_file}"
+}
+
+demo_chat_discover_parent_task() {
+  local name
+  name="$(wait_for_chat_parent_task "${DEMO_CHAT_PARENT_TIMEOUT:-120}" "${DEMO_CHAT_STARTED_AT:-}")" \
+    || { printf 'error: no coordinator task discovered\n' >&2; return 1; }
+  export DEMO_CHAT_PARENT_TASK="${name}"
+  printf 'coordinator task: %s\n' "${name}"
+}
+
+demo_cron_discover_first_child() {
+  local name
+  name="$(wait_for_first_scheduled_child "${DEMO_CRON_READY_TIMEOUT:-240}")" \
+    || { printf 'error: no scheduled child task discovered\n' >&2; return 1; }
+  export DEMO_CRON_CHILD_TASK="${name}"
+  printf 'scheduled child: %s\n' "${name}"
+}
+
+demo_security_discover_first_finding() {
+  local id
+  if [[ -n "${DEMO_SECURITY_FINDING_ID:-}" ]]; then
+    id="${DEMO_SECURITY_FINDING_ID}"
+  else
+    id="$(first_security_finding_id)"
+    if [[ -z "${id}" ]]; then
+      id="$(wait_for_first_security_finding "${DEMO_SECURITY_FINDING_TIMEOUT:-1800}")" \
+        || { printf 'error: no open security finding discovered\n' >&2; return 1; }
+    fi
+  fi
+  export DEMO_FINDING_ID="${id}"
+  printf 'security finding: %s\n' "${id}"
 }
 
 require_demo_base() {

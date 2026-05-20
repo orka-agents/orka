@@ -227,6 +227,15 @@ hack/demos/30-cron-workflow.sh
 hack/demos/40-security-scanning.sh
 ```
 
+## Demo durations
+
+The scripts wait for real work to finish; they do not bound or tame the waits.
+Plan recording time accordingly:
+
+- `10-chat-pr.sh` and `20-manual-workflow.sh`: **5–20 min** each, depending on model latency and how much validation/review/CI repair the workflow needs.
+- `30-cron-workflow.sh`: **5–25 min**, dominated by the cron schedule. The default `DEMO_CRON_SCHEDULE` is `*/2 * * * *`; set `*/1 * * * *` to halve the wait or a longer interval to show the gap.
+- `40-security-scanning.sh`: **20–35 min on a cold scan**, **&lt;5 min warm** (re-running against the same `DEMO_SECURITY_SCAN_NAME` reuses cached findings; set `DEMO_SECURITY_FINDING_ID=<id>` to skip directly to a known finding).
+
 ## Presenter Flow
 
 Each demo uses the same rhythm:
