@@ -680,6 +680,9 @@ func (h *Handlers) ListSecurityFindings(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list findings: %v", err))
 	}
+	if findings == nil {
+		findings = []store.Finding{}
+	}
 
 	for i := range findings {
 		if findings[i].ScanRunID == "" {

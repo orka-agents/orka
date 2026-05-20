@@ -689,6 +689,31 @@ func TestSecurityScanRunAndFindingLists_ContextTokenRepositoryScanAuthorizationD
 	}
 }
 
+func TestListSecurityFindingsReturnsEmptyItemsArray(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app, _ := setupSecurityHandlersWithAuthzFixture(
+		t,
+		ctxTokenConfig,
+		ContextTokenAuthorizationModeEnforce,
+		securityAuthzTestRepositoryScan("scan-1", securityTestRepoURL),
+	)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeSecurityRead,
+		"tctx":  securityAuthzTestTctx(securityTestRepoURL),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/security/repositories/scan-1/findings?namespace=demo", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var body map[string]json.RawMessage
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.JSONEq(t, "[]", string(body["items"]))
+}
+
 func TestGetSecurityFinding_ContextTokenAuthorizesFindingRepositoryScan(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
