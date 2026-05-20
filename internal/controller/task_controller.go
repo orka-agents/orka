@@ -46,7 +46,13 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const taskTransactionTokenPendingTimeout = 2 * time.Minute
+const (
+	taskTransactionTokenPendingTimeout = 2 * time.Minute
+	failedMountEventStaleAfter         = 2 * time.Minute
+
+	eventInvolvedObjectNameField = "involvedObject.name"
+	eventReasonField             = "reason"
+)
 
 const (
 	// ConditionTypeComplete indicates the task has completed
@@ -924,12 +930,120 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 						return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
 					}
 				}
+				if msg, ok, err := r.failedMountEventMessage(ctx, pod, task.Status.StartTime.Time); err != nil {
+					return ctrl.Result{}, err
+				} else if ok {
+					msg = fmt.Sprintf("pod stuck initializing for over 2 minutes: %s", msg)
+					log.Info("failing task due to failed pod mount", "message", msg)
+					return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
+				}
 			}
 		}
 	}
 
 	// Job still running, requeue
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+func podWaitingForMountInitialization(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	for _, statuses := range [][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
+		for _, cs := range statuses {
+			if cs.State.Waiting == nil {
+				continue
+			}
+			switch cs.State.Waiting.Reason {
+			case "ContainerCreating", "PodInitializing":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func eventObservedAt(event *corev1.Event) time.Time {
+	if event == nil {
+		return time.Time{}
+	}
+	if event.Series != nil && !event.Series.LastObservedTime.IsZero() {
+		return event.Series.LastObservedTime.Time
+	}
+	if !event.EventTime.IsZero() {
+		return event.EventTime.Time
+	}
+	if !event.LastTimestamp.IsZero() {
+		return event.LastTimestamp.Time
+	}
+	if !event.FirstTimestamp.IsZero() {
+		return event.FirstTimestamp.Time
+	}
+	if !event.CreationTimestamp.IsZero() {
+		return event.CreationTimestamp.Time
+	}
+	return time.Time{}
+}
+
+func eventInvolvedObjectNameIndex(obj client.Object) []string {
+	event, ok := obj.(*corev1.Event)
+	if !ok || event.InvolvedObject.Name == "" {
+		return nil
+	}
+	return []string{event.InvolvedObject.Name}
+}
+
+func eventReasonIndex(obj client.Object) []string {
+	event, ok := obj.(*corev1.Event)
+	if !ok || event.Reason == "" {
+		return nil
+	}
+	return []string{event.Reason}
+}
+
+func (r *TaskReconciler) failedMountEventMessage(ctx context.Context, pod *corev1.Pod, since time.Time) (string, bool, error) {
+	if pod == nil || !podWaitingForMountInitialization(pod) {
+		return "", false, nil
+	}
+
+	var events corev1.EventList
+	if err := r.List(ctx, &events,
+		client.InNamespace(pod.Namespace),
+		client.MatchingFields{
+			eventInvolvedObjectNameField: pod.Name,
+			eventReasonField:             "FailedMount",
+		},
+	); err != nil {
+		return "", false, err
+	}
+
+	now := time.Now()
+	for i := range events.Items {
+		event := &events.Items[i]
+		if event.Reason != "FailedMount" {
+			continue
+		}
+		ref := event.InvolvedObject
+		if ref.Kind != "Pod" || ref.Name != pod.Name {
+			continue
+		}
+		if ref.UID != "" && pod.UID != "" && ref.UID != pod.UID {
+			continue
+		}
+		observedAt := eventObservedAt(event)
+		if observedAt.IsZero() || (!since.IsZero() && observedAt.Before(since)) {
+			continue
+		}
+		if now.Sub(observedAt) > failedMountEventStaleAfter {
+			continue
+		}
+		message := strings.TrimSpace(event.Message)
+		if message == "" {
+			message = "pod volume mount failed"
+		}
+		return message, true, nil
+	}
+	return "", false, nil
 }
 
 func jobFailedDueToActiveDeadline(job *batchv1.Job) bool {
@@ -963,6 +1077,11 @@ func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1al
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	if err := r.cleanupTerminalTaskJob(ctx, task); err != nil {
+		log.Error(err, "failed to clean up terminal task Job")
+		return ctrl.Result{}, err
+	}
+
 	// Send webhook if configured and not already sent
 	if task.Spec.WebhookURL != "" && !task.Status.WebhookDelivered {
 		if err := r.WebhookNotifier.Notify(ctx, task); err != nil {
@@ -982,6 +1101,33 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func (r *TaskReconciler) cleanupTerminalTaskJob(ctx context.Context, task *corev1alpha1.Task) error {
+	if task.Status.JobName == "" {
+		return nil
+	}
+
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: task.Namespace}, job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("getting terminal task Job %q: %w", task.Status.JobName, err)
+	}
+
+	deleteJob := task.Status.Phase == corev1alpha1.TaskPhaseCancelled ||
+		(task.Status.Phase == corev1alpha1.TaskPhaseFailed && job.Status.Active > 0)
+	if !deleteJob {
+		return nil
+	}
+
+	propagationPolicy := metav1.DeletePropagationBackground
+	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting terminal task Job %q: %w", task.Status.JobName, err)
+	}
+
+	return nil
 }
 
 func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, task *corev1alpha1.Task) error {
@@ -1584,6 +1730,12 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 // SetupWithManager sets up the controller with the Manager.
 func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Recorder = mgr.GetEventRecorderFor("task-controller") //nolint:staticcheck
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Event{}, eventInvolvedObjectNameField, eventInvolvedObjectNameIndex); err != nil {
+		return err
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Event{}, eventReasonField, eventReasonIndex); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Task{}).
 		Owns(&batchv1.Job{}).
