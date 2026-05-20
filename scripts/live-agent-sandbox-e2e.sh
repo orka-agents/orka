@@ -62,6 +62,8 @@ work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/live-agent-sandbox-e2e.XX
 kind_config="${ORKA_AGENT_SANDBOX_KIND_CONFIG:-${work_dir}/kind-config.yaml}"
 fake_dockerfile="${work_dir}/Dockerfile.fake-claude"
 api_pf_log="${work_dir}/api-port-forward.log"
+manager_kustomization="${repo_root}/config/manager/kustomization.yaml"
+manager_kustomization_backup="${work_dir}/manager-kustomization.yaml.bak"
 
 if [[ "${agent_sandbox_version}" != "v0.4.6" ]]; then
   die "this e2e is pinned to agent-sandbox v0.4.6 to match go.mod"
@@ -80,6 +82,12 @@ cleanup_one_port_forward() {
 cleanup_port_forward() {
   cleanup_one_port_forward "${api_pf_pid}"
   api_pf_pid=""
+}
+
+restore_manager_kustomization() {
+  if [[ -f "${manager_kustomization_backup}" ]]; then
+    cp "${manager_kustomization_backup}" "${manager_kustomization}" || true
+  fi
 }
 
 dump_diagnostics() {
@@ -137,6 +145,7 @@ on_exit() {
   fi
 
   cleanup_port_forward
+  restore_manager_kustomization
   if [[ "${created_kind_cluster}" == "1" ]]; then
     kind delete cluster --name "${kind_cluster}" >/dev/null 2>&1 || true
   fi
@@ -245,6 +254,12 @@ duration_to_seconds() {
 
   [[ "${total}" -gt 0 ]] || die "duration ${value} must be positive"
   printf '%s\n' "${total}"
+}
+
+api_token_duration() {
+  local timeout_seconds
+  timeout_seconds="$(duration_to_seconds "${wait_timeout}")"
+  printf '%ss\n' "$((timeout_seconds * 4 + 600))"
 }
 
 write_fake_claude_dockerfile() {
@@ -801,6 +816,32 @@ verify_retained_claim_reused() {
   kubectl -n "${orka_namespace}" get sandbox "${sandbox}" >/dev/null
 }
 
+reset_e2e_resources() {
+  local session_claim
+  session_claim="$(session_claim_name)"
+
+  log "Resetting fixed-name agent-sandbox e2e resources"
+  run kubectl -n "${orka_namespace}" delete task \
+    "${delete_task_name}" \
+    "${retain_task_one}" \
+    "${retain_task_two}" \
+    --ignore-not-found=true \
+    --wait=true \
+    --timeout=2m
+  run kubectl -n "${orka_namespace}" delete sandboxclaim "${session_claim}" \
+    --ignore-not-found=true \
+    --wait=true \
+    --timeout=2m
+  run kubectl -n "${orka_namespace}" delete agent "${agent_name}" \
+    --ignore-not-found=true \
+    --wait=true \
+    --timeout=2m
+  run kubectl -n "${orka_namespace}" delete sandboxtemplate "${sandbox_template_name}" \
+    --ignore-not-found=true \
+    --wait=true \
+    --timeout=2m
+}
+
 main() {
   require_cmd make
   require_cmd go
@@ -812,6 +853,9 @@ main() {
   require_sha256
 
   cd "${repo_root}"
+  [[ -f "${manager_kustomization}" ]] || die "missing ${manager_kustomization}"
+  cp "${manager_kustomization}" "${manager_kustomization_backup}"
+
   trap 'status=$?; on_exit "${status}"; exit "${status}"' EXIT
 
   setup_kind_cluster
@@ -838,6 +882,7 @@ main() {
   deploy_sandbox_router
   patch_controller_for_agent_sandbox
 
+  reset_e2e_resources
   apply_sandbox_template
   apply_agent
 
@@ -846,7 +891,7 @@ main() {
   local api_base token
   api_base="http://127.0.0.1:${orka_api_local_port}"
   wait_for_http "${api_base}/readyz" "Orka API /readyz"
-  token="$(kubectl -n "${orka_namespace}" create token orka-controller-manager --duration=20m)"
+  token="$(kubectl -n "${orka_namespace}" create token orka-controller-manager --duration="$(api_token_duration)")"
   [[ -n "${token}" ]] || die "failed to create Orka API token"
 
   log "Running delete-policy sandbox smoke task"
