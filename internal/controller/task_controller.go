@@ -967,6 +967,9 @@ func eventObservedAt(event *corev1.Event) time.Time {
 	if event == nil {
 		return time.Time{}
 	}
+	if event.Series != nil && !event.Series.LastObservedTime.IsZero() {
+		return event.Series.LastObservedTime.Time
+	}
 	if !event.EventTime.IsZero() {
 		return event.EventTime.Time
 	}

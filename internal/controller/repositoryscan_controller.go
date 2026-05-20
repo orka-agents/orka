@@ -1354,9 +1354,6 @@ func (r *RepositoryScanReconciler) ingestThreatModelTask(ctx context.Context, sc
 		run.ErrorMessage = r.pipelineTaskSummary(ctx, task, "threat model stage failed")
 	}
 
-	if !updateStatus {
-		return r.refreshScanRunStatus(ctx, scan, run, run.ID, false)
-	}
 	return r.refreshScanRunStatus(ctx, scan, run, run.ID, updateStatus)
 }
 
@@ -1423,9 +1420,6 @@ func (r *RepositoryScanReconciler) ingestDiscoveryTask(ctx context.Context, scan
 		run.ErrorMessage = r.pipelineTaskSummary(ctx, task, "discovery stage failed")
 	}
 
-	if !updateStatus {
-		return r.refreshScanRunStatus(ctx, scan, run, run.ID, false)
-	}
 	return r.refreshScanRunStatus(ctx, scan, run, run.ID, updateStatus)
 }
 

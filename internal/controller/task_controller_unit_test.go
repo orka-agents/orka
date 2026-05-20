@@ -2503,6 +2503,72 @@ func TestHandleRunning_StalePodFailedMountEventRequeues(t *testing.T) {
 	}
 }
 
+func TestHandleRunning_PodFailedMountSeriesFailsTask(t *testing.T) {
+	scheme := newTestScheme()
+	now := time.Now()
+	startTime := metav1.NewTime(now.Add(-4 * time.Minute))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-series-failed-mount", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			StartTime: &startTime,
+			JobName:   "run-series-failed-mount-job",
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-series-failed-mount-job", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "run-series-failed-mount-pod",
+			Namespace: "default",
+			UID:       "pod-uid",
+			Labels: map[string]string{
+				labels.LabelTask: labels.SelectorValue(task.Name),
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "worker",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: "PodInitializing",
+				}},
+			}},
+		},
+	}
+	event := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{Name: "series-failed-mount", Namespace: "default"},
+		InvolvedObject: corev1.ObjectReference{
+			Kind: "Pod",
+			Name: pod.Name,
+			UID:  pod.UID,
+		},
+		Reason:         "FailedMount",
+		Message:        `MountVolume.SetUp failed for volume "git-credentials": secret "missing" not found`,
+		LastTimestamp:  metav1.NewTime(now.Add(-3 * time.Minute)),
+		FirstTimestamp: metav1.NewTime(now.Add(-4 * time.Minute)),
+		Series: &corev1.EventSeries{
+			Count:            3,
+			LastObservedTime: metav1.MicroTime{Time: now.Add(-30 * time.Second)},
+		},
+	}
+	r := newUnitReconciler(scheme, task, job, pod, event)
+
+	_, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("phase = %s, want Failed", task.Status.Phase)
+	}
+	if !strings.Contains(task.Status.Message, "secret") {
+		t.Fatalf("message = %q, want failed mount detail", task.Status.Message)
+	}
+}
+
 func TestHandleRunning_PodInitializingWithoutFailedMountRequeues(t *testing.T) {
 	scheme := newTestScheme()
 	startTime := metav1.NewTime(time.Now().Add(-3 * time.Minute))
