@@ -34,6 +34,10 @@ sha256_hex() {
   shasum -a 256 | awk '{print $1}'
 }
 
+sanitize_image_tag() {
+  printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '-'
+}
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
@@ -44,9 +48,10 @@ orka_controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manage
 orka_api_service="${ORKA_API_SERVICE:-orka-api}"
 orka_api_service_port="${ORKA_API_SERVICE_PORT:-8080}"
 orka_api_local_port="${ORKA_API_LOCAL_PORT:-18084}"
-manager_image="${ORKA_MANAGER_IMAGE:-orka-controller:live-agent-sandbox-e2e}"
-fake_claude_image="${ORKA_FAKE_CLAUDE_WORKER_IMAGE:-orka-agent-sandbox-fake-claude:live-agent-sandbox-e2e}"
-sandbox_router_image="${ORKA_AGENT_SANDBOX_ROUTER_IMAGE:-orka-agent-sandbox-router:live-agent-sandbox-e2e}"
+e2e_run_id="$(sanitize_image_tag "${ORKA_AGENT_SANDBOX_RUN_ID:-${GITHUB_RUN_ID:-manual}-$(date -u +%Y%m%d%H%M%S)}")"
+manager_image="${ORKA_MANAGER_IMAGE:-orka-controller:live-agent-sandbox-e2e-${e2e_run_id}}"
+fake_claude_image="${ORKA_FAKE_CLAUDE_WORKER_IMAGE:-orka-agent-sandbox-fake-claude:live-agent-sandbox-e2e-${e2e_run_id}}"
+sandbox_router_image="${ORKA_AGENT_SANDBOX_ROUTER_IMAGE:-orka-agent-sandbox-router:live-agent-sandbox-e2e-${e2e_run_id}}"
 sandbox_template_name="${ORKA_AGENT_SANDBOX_TEMPLATE:-orka-agent-sandbox-e2e-template}"
 agent_name="${ORKA_AGENT_SANDBOX_AGENT:-orka-agent-sandbox-e2e-agent}"
 delete_task_name="${ORKA_AGENT_SANDBOX_DELETE_TASK:-orka-agent-sandbox-delete-smoke}"
@@ -553,14 +558,16 @@ deploy_sandbox_router() {
 }
 
 patch_controller_for_agent_sandbox() {
-  local router_url
+  local router_url rollout_id
   router_url="http://sandbox-router-svc.${router_namespace}.svc.cluster.local:8080"
+  rollout_id="${e2e_run_id}"
 
   log "Configuring Orka controller for agent-sandbox"
   kubectl -n "${orka_namespace}" get deployment "${orka_controller_deployment}" -o json |
     jq \
       --arg claudeImage "${fake_claude_image}" \
       --arg routerURL "${router_url}" \
+      --arg rolloutID "${rollout_id}" \
       --arg template "${sandbox_template_name}" '
       def upsert_arg($name; $value):
         . as $args
@@ -569,6 +576,10 @@ patch_controller_for_agent_sandbox() {
           else
             $args + [$name + "=" + $value]
           end;
+      .spec.template.metadata.annotations = ((.spec.template.metadata.annotations // {}) + {
+        "orka.ai/live-agent-sandbox-e2e-run": $rolloutID
+      })
+      |
       .spec.template.spec.containers |= map(
         if .name == "manager" then
           .imagePullPolicy = "IfNotPresent"
