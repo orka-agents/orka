@@ -419,6 +419,91 @@ func TestIngestOwnedTasksReingestsTerminalRunWhenArtifactsArrive(t *testing.T) {
 	}
 }
 
+func TestIngestOwnedTasksPreservesLatestCombinedScanSummary(t *testing.T) {
+	ctx := context.Background()
+	secStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	scanName := "combined-latest-summary"
+	scanID := "scan_combined_latest_summary"
+	scan := &corev1alpha1.RepositoryScan{
+		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
+		ObjectMeta: metav1.ObjectMeta{Name: scanName, Namespace: "default"},
+		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
+	}
+	completed := metav1.NewTime(mustParseTime(t, "2026-05-10T12:00:00Z"))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "combined-latest-summary-task",
+			Namespace: "default",
+			Labels: map[string]string{
+				labels.LabelSecurityTarget: scanName,
+				labels.LabelSecurityScanID: scanID,
+				labels.LabelSecurityMode:   "initial",
+			},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:          corev1alpha1.TaskPhaseSucceeded,
+			CompletionTime: &completed,
+		},
+	}
+	findings := security.FindingsArtifact{
+		Version: 1,
+		Repository: security.FindingsArtifactRepo{
+			RepoURL: "https://github.com/example/repo",
+			Branch:  "main",
+			HeadSHA: "head-combined",
+			BaseSHA: "base-combined",
+		},
+		Scan: security.FindingsArtifactScan{
+			Mode:        "initial",
+			CommitCount: 7,
+			Summary:     "Rich combined scan summary from findings artifact",
+		},
+		Findings: []security.FindingsArtifactFinding{},
+	}
+	findingsJSON, err := json.Marshal(findings)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if err := secStore.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactFindings, "application/json", findingsJSON); err != nil {
+		t.Fatalf("SaveArtifact(findings) error = %v", err)
+	}
+	if err := secStore.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactThreatModel, "text/markdown", []byte("# Threat Model")); err != nil {
+		t.Fatalf("SaveArtifact(threat model) error = %v", err)
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
+		WithObjects(scan, task).
+		Build()
+	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: secStore, ArtifactStore: secStore}
+
+	if err := r.ingestOwnedTasks(ctx, scan); err != nil {
+		t.Fatalf("ingestOwnedTasks() error = %v", err)
+	}
+
+	run, err := secStore.GetScanRun(ctx, scan.Namespace, scanID)
+	if err != nil {
+		t.Fatalf("GetScanRun() error = %v", err)
+	}
+	if run.Summary != findings.Scan.Summary {
+		t.Fatalf("run.Summary = %q, want %q", run.Summary, findings.Scan.Summary)
+	}
+	current := &corev1alpha1.RepositoryScan{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		t.Fatalf("cl.Get() error = %v", err)
+	}
+	condition := meta.FindStatusCondition(current.Status.Conditions, "Ready")
+	if condition == nil || condition.Message != findings.Scan.Summary {
+		t.Fatalf("Ready condition = %#v, want message %q", condition, findings.Scan.Summary)
+	}
+}
+
 func TestIngestScanTaskFailsSucceededTaskWithoutRequiredArtifacts(t *testing.T) {
 	ctx := context.Background()
 	store := setupControllerSQLiteStore(t)

@@ -592,10 +592,15 @@ func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *c
 			continue
 		}
 
+		updateStatus := false
 		if latestScanRunID != "" && scanTaskRunID(task) == latestScanRunID {
-			refreshLatestScanRun = true
+			if stage == security.StageCombined {
+				updateStatus = true
+			} else {
+				refreshLatestScanRun = true
+			}
 		}
-		if err := r.ingestScanTask(ctx, scan, task, false); err != nil {
+		if err := r.ingestScanTask(ctx, scan, task, updateStatus); err != nil {
 			return err
 		}
 	}

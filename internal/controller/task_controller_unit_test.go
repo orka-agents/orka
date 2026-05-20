@@ -57,7 +57,11 @@ func newTestScheme() *runtime.Scheme {
 
 // newUnitReconciler builds a TaskReconciler backed by a fake client.
 func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskReconciler {
-	fb := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{})
+	fb := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithIndex(&corev1.Event{}, eventInvolvedObjectNameField, eventInvolvedObjectNameIndex).
+		WithIndex(&corev1.Event{}, eventReasonField, eventReasonIndex)
 	if len(objs) > 0 {
 		fb = fb.WithObjects(objs...)
 	}

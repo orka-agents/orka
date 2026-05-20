@@ -46,8 +46,13 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const taskTransactionTokenPendingTimeout = 2 * time.Minute
-const failedMountEventStaleAfter = 2 * time.Minute
+const (
+	taskTransactionTokenPendingTimeout = 2 * time.Minute
+	failedMountEventStaleAfter         = 2 * time.Minute
+
+	eventInvolvedObjectNameField = "involvedObject.name"
+	eventReasonField             = "reason"
+)
 
 const (
 	// ConditionTypeComplete indicates the task has completed
@@ -977,13 +982,35 @@ func eventObservedAt(event *corev1.Event) time.Time {
 	return time.Time{}
 }
 
+func eventInvolvedObjectNameIndex(obj client.Object) []string {
+	event, ok := obj.(*corev1.Event)
+	if !ok || event.InvolvedObject.Name == "" {
+		return nil
+	}
+	return []string{event.InvolvedObject.Name}
+}
+
+func eventReasonIndex(obj client.Object) []string {
+	event, ok := obj.(*corev1.Event)
+	if !ok || event.Reason == "" {
+		return nil
+	}
+	return []string{event.Reason}
+}
+
 func (r *TaskReconciler) failedMountEventMessage(ctx context.Context, pod *corev1.Pod, since time.Time) (string, bool, error) {
 	if pod == nil || !podWaitingForMountInitialization(pod) {
 		return "", false, nil
 	}
 
 	var events corev1.EventList
-	if err := r.List(ctx, &events, client.InNamespace(pod.Namespace)); err != nil {
+	if err := r.List(ctx, &events,
+		client.InNamespace(pod.Namespace),
+		client.MatchingFields{
+			eventInvolvedObjectNameField: pod.Name,
+			eventReasonField:             "FailedMount",
+		},
+	); err != nil {
 		return "", false, err
 	}
 
@@ -1700,6 +1727,12 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 // SetupWithManager sets up the controller with the Manager.
 func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Recorder = mgr.GetEventRecorderFor("task-controller") //nolint:staticcheck
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Event{}, eventInvolvedObjectNameField, eventInvolvedObjectNameIndex); err != nil {
+		return err
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Event{}, eventReasonField, eventReasonIndex); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Task{}).
 		Owns(&batchv1.Job{}).
