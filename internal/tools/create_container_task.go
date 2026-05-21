@@ -57,7 +57,10 @@ func (t *CreateContainerTaskTool) Parameters() json.RawMessage {
 
 func (t *CreateContainerTaskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	tc := GetToolContext(ctx)
-	if tc == nil {
+	// Route to the coordinator path when the chat-executor hooks are absent.
+	// Worker-side ToolContexts only set Client/Namespace/Tenant/TaskID and
+	// leave the chat-only function fields nil; calling them would panic.
+	if tc == nil || tc.CheckTaskLimit == nil || tc.GenerateTaskName == nil || tc.TaskLabels == nil {
 		return t.executeCoordination(ctx, args)
 	}
 

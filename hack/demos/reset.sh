@@ -26,6 +26,26 @@ log "Cleaning up demo security resources"
 kubectl delete repositoryscans -n "${DEMO_NAMESPACE}" -l "$(demo_label_selector)" --ignore-not-found >/dev/null 2>&1 || true
 delete_repository_scans_by_name_prefix "${DEMO_SECURITY_SCAN_PREFIX}"
 
+log "Cleaning up kontxt demo resources"
+kubectl delete sa,jobs -n "${DEMO_KONTXT_NAMESPACE:-default}" \
+  -l 'orka.ai/demo in (kontxt)' --ignore-not-found >/dev/null 2>&1 || true
+kubectl delete tasks   -n "${DEMO_NAMESPACE}" \
+  -l 'orka.ai/demo in (kontxt)' --ignore-not-found >/dev/null 2>&1 || true
+
+log "Cleaning up agent-sandbox demo resources"
+kubectl delete tasks,sandboxclaims -n "${DEMO_NAMESPACE}" \
+  -l 'orka.ai/demo in (sandbox)' --ignore-not-found >/dev/null 2>&1 || true
+kubectl delete agents -n "${DEMO_NAMESPACE}" \
+  -l 'orka.ai/demo in (sandbox)' --ignore-not-found >/dev/null 2>&1 || true
+# Session claims are named orka-session-<sha256> by the worker and don't
+# carry the orka.ai/demo label; sweep them by name prefix.
+for stale_claim in $(kubectl get sandboxclaims -n "${DEMO_NAMESPACE}" \
+    -o jsonpath='{range .items[?(@.metadata.name)]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+    | grep -E '^orka-session-' || true); do
+  kubectl delete sandboxclaim -n "${DEMO_NAMESPACE}" "${stale_claim}" \
+    --ignore-not-found >/dev/null 2>&1 || true
+done
+
 prepare_api_env >/dev/null 2>&1 || true
 orka_api DELETE "/api/v1/chat/${DEMO_CHAT_SESSION}?namespace=${DEMO_NAMESPACE}" >/dev/null 2>&1 || true
 

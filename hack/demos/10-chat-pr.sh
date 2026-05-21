@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+# Demo 10 — Chat to PR
+#
+# One chat turn through Orka's Anthropic-compatible endpoint becomes a
+# coordinator Task, specialist child Tasks, validation, review, CI, and a
+# real GitHub pull request.
+#
+# Pacing is controlled by DEMO_RECORD_PROFILE (presenter|docs|social|hero).
+# Set DEMO_REQUEST_PRESET=quiet-flag|readme-fix|vekil-metrics to pick the
+# chat request body (default: quiet-flag — short, real, fits on screen).
+#
+# Run live:        ./hack/demos/10-chat-pr.sh
+# Record (asciinema):
+#   asciinema rec --idle-time-limit 1.5 --cols 110 --rows 30 \
+#     -c "DEMO_RECORD_PROFILE=docs ./hack/demos/10-chat-pr.sh" /tmp/10.cast
 
 set -Eeuo pipefail
 
@@ -9,6 +23,10 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=hack/demos/lib/manifests.sh
 . "${script_dir}/lib/manifests.sh"
 
+# ---------------------------------------------------------------------------
+# Setup (silent — these print via the legacy log() to stderr so the cast
+# only captures the narrated chapters below).
+# ---------------------------------------------------------------------------
 require_demo_base
 require_pr_demo_env
 require_chat_client
@@ -18,8 +36,8 @@ ensure_demo_workdir
 prepare_api_env
 
 render_pr_agents_manifest > "${DEMO_WORKDIR}/pr-agents.yaml"
-render_chat_request_file > "${DEMO_WORKDIR}/chat-request.txt"
-render_chat_story_file > "${DEMO_WORKDIR}/chat-story.txt"
+render_chat_request_file  > "${DEMO_WORKDIR}/chat-request.txt"
+render_chat_story_file    > "${DEMO_WORKDIR}/chat-story.txt"
 
 delete_chat_session_tasks
 delete_agent_if_exists "${DEMO_PR_COORDINATOR_NAME}"
@@ -28,60 +46,60 @@ delete_agent_if_exists "${DEMO_SECURITY_REVIEWER_NAME}"
 delete_agent_if_exists "${DEMO_QUALITY_REVIEWER_NAME}"
 orka_api DELETE "/api/v1/chat/${DEMO_CHAT_SESSION}?namespace=${DEMO_NAMESPACE}" >/dev/null 2>&1 || true
 
+# ---------------------------------------------------------------------------
+# Narrated walkthrough.
+# ---------------------------------------------------------------------------
+DEMO_CHAPTER_TOTAL=6
 clear
+banner "Chat to PR"
 
-p "# Demo 10: Chat-to-PR"
+# Chapter 1 ------------------------------------------------------------------
+narrate "One chat turn becomes a coordinator, specialists, review, CI, PR."
+chapter "A maintainer asks for one repo change" "🧑"
+log_info "Connecting to $(demo_anthropic_base_url) as $(demo_anthropic_model)"
+log_info "Client: ${DEMO_CLAUDE_BIN} (${DEMO_CHAT_CLIENT})"
+log_info "Request preset: ${DEMO_REQUEST_PRESET}"
+demo_show "${DEMO_WORKDIR}/chat-story.txt"
 
-p "Brief: a maintainer asks for a repo change, and Orka turns one chat request into implementation, validation, review, CI, and a PR."
+# Chapter 2 ------------------------------------------------------------------
+narrate "The same wire format your Claude client already speaks."
+chapter "Send the request through Orka's Anthropic API" "📨"
 export ANTHROPIC_BASE_URL="$(demo_anthropic_base_url)"
 export ANTHROPIC_MODEL="$(demo_anthropic_model)"
-pe "printf 'client=%s\\nendpoint=%s\\nmodel=%s\\norchestration=%s\\n' \"\$DEMO_CLAUDE_BIN\" \"\$ANTHROPIC_BASE_URL\" \"\$ANTHROPIC_MODEL\" 'server-side Orka task workflow'"
-
-p "Show: the chat request will create the coordinator and specialist Agents through Orka's create_agent tool path."
-pe "grep -E '^(Start exactly one|Create the Agents|After all four|Do not use create_agent initialPrompt)' ${DEMO_WORKDIR}/chat-request.txt"
-
-p "Show: the visible brief includes the exact live request and repository details."
-pe "cat ${DEMO_WORKDIR}/chat-story.txt"
-if [[ "${DEMO_SHOW_FULL_PROMPT}" == "1" ]]; then
-  p "Show: transparency mode prints the full operational chat prompt before it is sent. Set DEMO_SHOW_FULL_PROMPT=0 to collapse this during rehearsals."
-  pe "cat ${DEMO_WORKDIR}/chat-request.txt"
-else
-  p "Tell: the full operational prompt is rendered for audit but collapsed for this run."
-  pe "printf 'Full chat prompt: %s\n' ${DEMO_WORKDIR}/chat-request.txt"
-fi
-
-p "Run: send the request through Orka's Anthropic-compatible endpoint."
-pe "require_orka_api_reachable"
+demo_pe "require_orka_api_reachable"
 DEMO_CHAT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-pe 'run_demo_chat_request_file "${DEMO_WORKDIR}/chat-request.txt" "${DEMO_WORKDIR}/chat-client-result.json"'
+demo_pe 'run_demo_chat_request_file "${DEMO_WORKDIR}/chat-request.txt" "${DEMO_WORKDIR}/chat-client-result.json"'
 
-p "Follow: find the coordinator Task that Orka created for this chat session."
-DEMO_CHAT_PARENT_TASK="$(wait_for_chat_parent_task "${DEMO_CHAT_PARENT_TIMEOUT:-120}" "${DEMO_CHAT_STARTED_AT}")" || die "failed to discover the Anthropic-proxy-created coordinator task"
-pe "printf 'coordinator task: %s\\n' ${DEMO_CHAT_PARENT_TASK}"
+# Chapter 3 ------------------------------------------------------------------
+narrate "The chat turn creates a real coordinator Task in Kubernetes."
+chapter "Orka spawns the coordinator" "🎬"
+log_info "Watching for the coordinator task to appear..."
+DEMO_CHAT_PARENT_TASK="$(wait_for_chat_parent_task "${DEMO_CHAT_PARENT_TIMEOUT:-120}" "${DEMO_CHAT_STARTED_AT}")" \
+  || die "failed to discover the Anthropic-proxy-created coordinator task"
+log_success "coordinator task: ${DEMO_CHAT_PARENT_TASK}"
 
-p "Follow: wait until the coordinator Task succeeds."
-pe "wait_for_task_succeeded ${DEMO_CHAT_PARENT_TASK} ${DEMO_CHAT_TASK_TIMEOUT:-10800}"
+# Chapter 4 ------------------------------------------------------------------
+narrate "Four named Agents created via create_agent: coder, two reviewers, coordinator."
+chapter "Watch the coordinator delegate" "🪄"
+demo_pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/source=anthropic-proxy"
+demo_pe "kubectl get agents -n ${DEMO_NAMESPACE} ${DEMO_PR_COORDINATOR_NAME} ${DEMO_CODER_AGENT_NAME} ${DEMO_SECURITY_REVIEWER_NAME} ${DEMO_QUALITY_REVIEWER_NAME}"
 
-p "Follow: wait until the workflow has a stored result."
-pe "wait_for_task_result_available ${DEMO_CHAT_PARENT_TASK} ${DEMO_CHAT_RESULT_TIMEOUT:-120}"
+# Chapter 5 ------------------------------------------------------------------
+narrate "Implementation, validation, parallel review, CI — silently, in the background."
+chapter "Coordinator runs to completion" "⏳"
+log_info "Waiting for the coordinator to finish (timeout ${DEMO_CHAT_TASK_TIMEOUT:-10800}s)..."
+wait_for_task_succeeded            "${DEMO_CHAT_PARENT_TASK}" "${DEMO_CHAT_TASK_TIMEOUT:-10800}" >/dev/null
+wait_for_task_result_available     "${DEMO_CHAT_PARENT_TASK}" "${DEMO_CHAT_RESULT_TIMEOUT:-120}"  >/dev/null
+log_success "coordinator succeeded"
 
-p "Inspect: Orka persisted the chat request as Kubernetes resources."
-pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/source=anthropic-proxy"
+# Chapter 6 ------------------------------------------------------------------
+narrate "Real PR. Real CI. Real review. Reproducible from one chat turn."
+chapter "The pull request" "🚢"
+assert_real_pr_result "${DEMO_CHAT_PARENT_TASK}"
+payoff_card_pr        "${DEMO_CHAT_PARENT_TASK}"
 
-p "Inspect: the chat-created Agents are the roles used by the coordinator."
-pe "kubectl get agents -n ${DEMO_NAMESPACE} ${DEMO_PR_COORDINATOR_NAME} ${DEMO_CODER_AGENT_NAME} ${DEMO_SECURITY_REVIEWER_NAME} ${DEMO_QUALITY_REVIEWER_NAME}"
-
-p "Inspect: the parent Task records session, agent, phase, and backing Job."
-pe "kubectl get task ${DEMO_CHAT_PARENT_TASK} -n ${DEMO_NAMESPACE} -o json | jq '{name: .metadata.name, source: .metadata.labels[\"orka.ai/source\"], session: .spec.sessionRef.name, type: .spec.type, agent: .spec.agentRef.name, phase: .status.phase, jobName: .status.jobName}'"
-
-p "Inspect: child Tasks show implementation and review delegation."
-pe "orka_api GET \"/api/v1/tasks/${DEMO_CHAT_PARENT_TASK}/children?namespace=${DEMO_NAMESPACE}\" | jq '.items | map({name: .metadata.name, agent: .spec.agentRef.name, phase: .status.phase})'"
-
-p "Show: the final result is the pull request handoff."
-pe "orka_api GET \"/api/v1/tasks/${DEMO_CHAT_PARENT_TASK}/result?namespace=${DEMO_NAMESPACE}\" | jq '{result: .result}'"
-
-p "Verify: fail fast unless the final result contains a real PR URL and no unrecovered child failures."
-pe "assert_real_pr_result ${DEMO_CHAT_PARENT_TASK}"
-
-p "Summary: one chat turn created named Agents, then became a coordinator Task, specialist child Tasks, review, and a PR result."
-pe "summarize_task_run ${DEMO_CHAT_PARENT_TASK} chat-to-pr"
+# Presenter only: keep the structured JSON for the audit-trail audience.
+if demo_profile_is presenter; then
+  printf '\n%bAudit JSON%b\n' "${DIM}" "${COLOR_RESET}"
+  summarize_task_run "${DEMO_CHAT_PARENT_TASK}" chat-to-pr
+fi

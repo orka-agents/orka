@@ -1,0 +1,8 @@
+The scout's plan is in the previous task result and the sandbox workspace.
+Implement the smallest viable /metrics endpoint:
+  - Mount /metrics on the existing HTTP server.
+  - Wire one request counter and one in-flight gauge.
+  - Add or update one focused test.
+Commit on a new branch demo/sandbox-metrics, push it, and open a pull
+request using gh inside the sandbox. The sandbox workspace is reused
+across turns — your scout's notes are already present.

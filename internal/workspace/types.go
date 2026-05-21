@@ -87,6 +87,13 @@ type ClaimRequest struct {
 	Labels         map[string]string
 	Annotations    map[string]string
 	Timeout        time.Duration
+	// MaxRequestTimeout is the longest expected single SDK request against
+	// the claim's HTTP transport (e.g. a long-running Exec call). Executors
+	// that build a per-claim HTTP client may use this to widen transport
+	// timeouts (RequestTimeout / PerAttemptTimeout / ResponseHeaderTimeout)
+	// while keeping Timeout as the deadline for the claim operation itself.
+	// When zero, executors fall back to Timeout.
+	MaxRequestTimeout time.Duration
 }
 
 // ClaimResult describes the outcome of claiming a workspace.

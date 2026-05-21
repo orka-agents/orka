@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# Demo 20 — Manual Workflow
+#
+# A declarative YAML Task drives the same coordinator/coder/reviewer pipeline
+# as the chat demo. Same agents, same review gates, same PR — just a kubectl
+# apply instead of an Anthropic chat turn.
+#
+# Pacing is controlled by DEMO_RECORD_PROFILE (presenter|docs|social|hero).
 
 set -Eeuo pipefail
 
@@ -9,6 +16,9 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=hack/demos/lib/manifests.sh
 . "${script_dir}/lib/manifests.sh"
 
+# ---------------------------------------------------------------------------
+# Setup (silent — uses legacy log() so prep doesn't bleed into the cast).
+# ---------------------------------------------------------------------------
 require_demo_base
 require_pr_demo_env
 source_demo_magic "$@"
@@ -16,52 +26,57 @@ configure_demo_magic
 ensure_demo_workdir
 prepare_api_env
 
-render_pr_agents_manifest > "${DEMO_WORKDIR}/pr-agents.yaml"
-render_manual_task_manifest > "${DEMO_WORKDIR}/manual-task.yaml"
-render_manual_story_file > "${DEMO_WORKDIR}/manual-story.txt"
+render_pr_agents_manifest    > "${DEMO_WORKDIR}/pr-agents.yaml"
+render_manual_task_manifest  > "${DEMO_WORKDIR}/manual-task.yaml"
+render_manual_story_file     > "${DEMO_WORKDIR}/manual-story.txt"
 
 delete_task_if_exists "${DEMO_MANUAL_TASK_NAME}"
 
+# ---------------------------------------------------------------------------
+# Narrated walkthrough.
+# ---------------------------------------------------------------------------
+DEMO_CHAPTER_TOTAL=5
 clear
+banner "Manual Workflow"
 
-p "# Demo 20: Manual Workflow"
+# Chapter 1 ------------------------------------------------------------------
+narrate "Declarative YAML drives the same coordinator + specialists as chat."
+chapter "Apply the named Agents" "📜"
+log_info "Request preset: ${DEMO_REQUEST_PRESET}"
+demo_pe "kubectl apply -f ${DEMO_WORKDIR}/pr-agents.yaml"
+demo_pe "kubectl get agents -n ${DEMO_NAMESPACE} ${DEMO_PR_COORDINATOR_NAME} ${DEMO_CODER_AGENT_NAME} ${DEMO_SECURITY_REVIEWER_NAME} ${DEMO_QUALITY_REVIEWER_NAME}"
 
-p "Brief: run a repo-change workflow from declarative Kubernetes YAML, using the exact rendered prompt as the source of truth."
+# Chapter 2 ------------------------------------------------------------------
+narrate "The Task manifest is the source of truth — same prompt as the chat path."
+chapter "Inspect the Task manifest" "📄"
+demo_show "${DEMO_WORKDIR}/manual-story.txt"
+log_info "Full Task manifest: ${DEMO_WORKDIR}/manual-task.yaml"
+demo_show "${DEMO_WORKDIR}/manual-task.yaml"
 
-p "Show: apply the named coordinator, coder, and reviewer Agents."
-pe "kubectl apply -f ${DEMO_WORKDIR}/pr-agents.yaml"
+# Chapter 3 ------------------------------------------------------------------
+narrate "kubectl apply creates the coordinator Task — Orka reconciles it."
+chapter "Create the coordinator Task" "🚀"
+demo_pe "kubectl apply -f ${DEMO_WORKDIR}/manual-task.yaml"
+demo_pe "kubectl get task ${DEMO_MANUAL_TASK_NAME} -n ${DEMO_NAMESPACE}"
 
-p "Show: the visible brief includes the exact live request and repository details."
-pe "cat ${DEMO_WORKDIR}/manual-story.txt"
-if [[ "${DEMO_SHOW_FULL_MANIFEST}" == "1" ]]; then
-  p "Show: transparency mode prints the full Task manifest, including the prompt that kubectl applies. Set DEMO_SHOW_FULL_MANIFEST=0 to collapse this during rehearsals."
-  pe "cat ${DEMO_WORKDIR}/manual-task.yaml"
-else
-  p "Tell: the full Task manifest is rendered for audit but collapsed for this run."
-  pe "sed -n '1,20p' ${DEMO_WORKDIR}/manual-task.yaml"
-  pe "printf 'Full Task manifest with prompt: %s\n' ${DEMO_WORKDIR}/manual-task.yaml"
+# Chapter 4 ------------------------------------------------------------------
+narrate "Implementation, validation, parallel review, CI — silently, in the background."
+chapter "Coordinator runs to completion" "⏳"
+demo_pe "require_orka_api_reachable"
+log_info "Waiting for the coordinator to finish (timeout ${DEMO_MANUAL_TASK_TIMEOUT:-10800}s)..."
+wait_for_task_succeeded            "${DEMO_MANUAL_TASK_NAME}" "${DEMO_MANUAL_TASK_TIMEOUT:-10800}" >/dev/null
+wait_for_task_result_available     "${DEMO_MANUAL_TASK_NAME}" "${DEMO_MANUAL_RESULT_TIMEOUT:-120}"  >/dev/null
+log_success "coordinator succeeded"
+demo_pe "orka_api GET \"/api/v1/tasks/${DEMO_MANUAL_TASK_NAME}/children?namespace=${DEMO_NAMESPACE}\" | jq '.items | map({name: .metadata.name, agent: .spec.agentRef.name, phase: .status.phase})'"
+
+# Chapter 5 ------------------------------------------------------------------
+narrate "Same PR. Same agents. Just YAML."
+chapter "The pull request" "🚢"
+assert_real_pr_result "${DEMO_MANUAL_TASK_NAME}"
+payoff_card_pr        "${DEMO_MANUAL_TASK_NAME}"
+
+# Presenter only: keep the structured JSON for the audit-trail audience.
+if demo_profile_is presenter; then
+  printf '\n%bAudit JSON%b\n' "${DIM}" "${COLOR_RESET}"
+  summarize_task_run "${DEMO_MANUAL_TASK_NAME}" manual-yaml-workflow
 fi
-
-p "Run: create the Task CR. Orka reconciles it into a Job and Pod."
-pe "kubectl apply -f ${DEMO_WORKDIR}/manual-task.yaml"
-pe "kubectl get task ${DEMO_MANUAL_TASK_NAME} -n ${DEMO_NAMESPACE} -o json | jq '{name: .metadata.name, type: .spec.type, agent: .spec.agentRef.name, phase: .status.phase, jobName: .status.jobName}'"
-
-p "Follow: stream the runtime Pod logs until the coordinator run exits."
-pe "follow_task_logs_when_ready ${DEMO_MANUAL_TASK_NAME}"
-
-p "Follow: wait until the coordinator Task succeeds and Orka stores the final result."
-pe "require_orka_api_reachable"
-pe "wait_for_task_succeeded ${DEMO_MANUAL_TASK_NAME} ${DEMO_MANUAL_TASK_TIMEOUT:-10800}"
-pe "wait_for_task_result_available ${DEMO_MANUAL_TASK_NAME}"
-
-p "Inspect: delegated child Tasks show implementation and review work."
-pe "orka_api GET \"/api/v1/tasks/${DEMO_MANUAL_TASK_NAME}/children?namespace=${DEMO_NAMESPACE}\" | jq '.items | map({name: .metadata.name, agent: .spec.agentRef.name, phase: .status.phase})'"
-
-p "Show: the final result is the pull request handoff."
-pe "orka_api GET \"/api/v1/tasks/${DEMO_MANUAL_TASK_NAME}/result?namespace=${DEMO_NAMESPACE}\" | jq '{result: .result}'"
-
-p "Verify: fail fast unless the final result contains a real PR URL and no unrecovered child failures."
-pe "assert_real_pr_result ${DEMO_MANUAL_TASK_NAME}"
-
-p "Summary: YAML launched the same auditable coordinator workflow as chat."
-pe "summarize_task_run ${DEMO_MANUAL_TASK_NAME} manual-yaml-workflow"

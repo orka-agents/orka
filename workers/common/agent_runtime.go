@@ -139,7 +139,47 @@ func SetupGitCredentials() {
 }
 
 // CloneRepo clones the configured git repository into the workspace directory.
+//
+// When the workspace already contains a git repository (e.g. a sandbox
+// workspace reused across turns of the same session), CloneRepo skips the
+// clone and instead refreshes the working tree against the latest remote
+// branch head so subsequent turns see fresh commits without losing local
+// state captured during the prior turn (the worker decides separately
+// whether to reset hard versus preserve in-progress edits — see the branch
+// refresh logic below).
 func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error {
+	// Detect a reused workspace: if <workspaceDir>/.git exists we already
+	// have a clone (sandbox session reuse). Re-running `git clone` would
+	// fail with "destination path already exists". Refresh in place instead.
+	if info, err := os.Stat(filepath.Join(workspaceDir, ".git")); err == nil && (info.IsDir() || info.Mode().IsRegular()) {
+		fmt.Printf("Reusing existing git repo at %s (sandbox workspace reuse)\n", workspaceDir)
+		if cfg.GitBranch != "" && cfg.GitRef == "" {
+			// Best-effort refresh: fetch the branch and fast-forward the
+			// working tree. Failures here are non-fatal — the existing
+			// checkout is still usable for the agent.
+			if fetchErr := execGitContext(ctx, workspaceDir, "fetch", "--depth=1", "origin", cfg.GitBranch); fetchErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: git fetch on reused workspace failed: %v\n", fetchErr)
+			}
+		}
+		if cfg.GitRef != "" {
+			fetchErr := execGitContext(ctx, workspaceDir, "fetch", "origin", cfg.GitRef)
+			if fetchErr != nil {
+				fetchErr = execGitContext(ctx, workspaceDir, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*")
+			}
+			if fetchErr != nil {
+				return fmt.Errorf("git fetch ref failed: %w", fetchErr)
+			}
+			if err := execGitContext(ctx, workspaceDir, "checkout", cfg.GitRef); err != nil {
+				if fbErr := execGitContext(ctx, workspaceDir, "checkout", "FETCH_HEAD"); fbErr != nil {
+					if branchErr := execGitContext(ctx, workspaceDir, "checkout", "origin/"+cfg.GitRef); branchErr != nil {
+						return fmt.Errorf("git checkout ref failed: %w", err)
+					}
+				}
+			}
+		}
+		return nil
+	}
+
 	fmt.Printf("Cloning %s into %s\n", cfg.GitRepo, workspaceDir)
 
 	args := []string{"clone"}
@@ -370,6 +410,12 @@ func runAgentInSandbox(ctx context.Context, name, workspaceDir string, sandboxEn
 		ReuseKey:       sandboxEnv.ReuseKey,
 		WarmPoolPolicy: agentSandboxClaimWarmPoolPolicy(sandboxEnv.WarmPoolPolicy),
 		Timeout:        sandboxEnv.ClaimTimeout,
+		// The same HTTP client built during Claim will be reused for the
+		// subsequent Exec call, which can run for up to CommandTimeout.
+		// Surface the larger budget so the SDK's transport-level timeouts
+		// (PerAttemptTimeout / ResponseHeaderTimeout) are sized for the
+		// longest expected request, not just the claim handshake.
+		MaxRequestTimeout: sandboxEnv.CommandTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("claim agent sandbox workspace: %w", err)

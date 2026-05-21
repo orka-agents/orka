@@ -6,6 +6,9 @@ demo_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 demo_dir="$(cd "${demo_lib_dir}/.." && pwd)"
 repo_root="$(cd "${demo_dir}/../.." && pwd)"
 
+# shellcheck source=hack/demos/lib/style.sh
+. "${demo_lib_dir}/style.sh"
+
 : "${ORKA_NAMESPACE:=orka-system}"
 : "${DEMO_NAMESPACE:=demo-magic}"
 : "${ORKA_TOKEN_NAMESPACE:=default}"
@@ -73,18 +76,66 @@ repo_root="$(cd "${demo_dir}/../.." && pwd)"
 : "${DEMO_SECURITY_SCAN_NAME:=${DEMO_SECURITY_SCAN_PREFIX}-${DEMO_RUN_ID}}"
 : "${DEMO_SECURITY_SCHEDULE:=}"
 
-: "${DEMO_SECURITY_GIT_REPO:=https://github.com/sozercan/actions-test.git}"
-: "${DEMO_SECURITY_GIT_BRANCH:=demo/security-python-command-injection}"
+: "${DEMO_SECURITY_GIT_REPO:=https://github.com/sozercan/nodejs-goof.git}"
+: "${DEMO_SECURITY_GIT_BRANCH:=main}"
 : "${DEMO_SECURITY_GIT_SECRET_REF:=${DEMO_GIT_SECRET_REF:-}}"
+# nodejs-goof IS the fork — leave DEMO_SECURITY_GIT_FORK_REPO unset by default.
 : "${DEMO_SECURITY_GIT_FORK_REPO:=${DEMO_GIT_FORK_REPO:-}}"
 : "${DEMO_SECURITY_PR_BASE_BRANCH:=${DEMO_SECURITY_GIT_BRANCH}}"
 : "${DEMO_SECURITY_GIT_SUB_PATH:=${DEMO_GIT_SUB_PATH:-}}"
 
 : "${DEMO_VEKIL_METRICS_REQUEST:=Implement GitHub issue sozercan/vekil#77: add a Prometheus-compatible /metrics endpoint for Vekil. Mount /metrics on the existing server and keep it enabled by default, with a --metrics/--no-metrics flag or the closest existing flag style. Use github.com/prometheus/client_golang/prometheus and promhttp. Instrument the chat, responses, messages, and Gemini handler paths where applicable with bounded labels: provider, public_model, endpoint, status, direction, reason, and code as appropriate. Include vekil_requests_total, vekil_request_duration_seconds, vekil_tokens_total for prompt/completion usage, vekil_retries_total, vekil_upstream_errors_total, vekil_inflight_requests, vekil_build_info from the existing version ldflags, and standard Go runtime metrics. Treat vekil_endpoint_healthy as optional if endpoint health state is not available yet, and document any defer. Add focused tests, document histogram buckets and the metrics flag in docs/configuration.md, and add an example Grafana dashboard JSON under docs/ or assets/. Acceptance: curl localhost:1337/metrics returns valid Prometheus exposition after a request, handlers increment the relevant counters with correct labels, no user or key labels are added, and no secrets are logged or exposed. Do not implement OpenTelemetry, Pushgateway support, virtual-key dimensions, or unrelated selector work. Keep the diff focused and easy to review.}"
 : "${DEMO_VEKIL_METRICS_SLICE_REQUEST:=Implement GitHub issue sozercan/vekil#77. Important: for Gemini countTokens fallback handling, do not remove or bypass metrics observation for the first probe wholesale. Filter only the expected max_completion_tokens fallback 400; preserve vekil_retries_total and vekil_upstream_errors_total for real first-probe 429/5xx/timeout outcomes, and add regression coverage for a 429-then-success countTokens flow.}"
-: "${DEMO_CHAT_REQUEST:=${DEMO_VEKIL_METRICS_SLICE_REQUEST}}"
-: "${DEMO_MANUAL_REQUEST:=${DEMO_VEKIL_METRICS_SLICE_REQUEST}}"
+
+# ---------------------------------------------------------------------------
+# Demo request presets.
+#
+# DEMO_REQUEST_PRESET selects the chat/manual prompt. Default is `quiet-flag`
+# because it's short, real, fits on screen, and finishes in under a minute —
+# ideal for recordings. The longer presets stay available for live demos
+# where the full audit story matters.
+#
+# An explicitly-set DEMO_CHAT_REQUEST / DEMO_MANUAL_REQUEST env var or
+# DEMO_CHAT_REQUEST_FILE / DEMO_MANUAL_REQUEST_FILE always wins.
+# ---------------------------------------------------------------------------
+: "${DEMO_QUIET_FLAG_REQUEST:=Add a --quiet flag to vekil that suppresses non-error output when set. Add a test that exercises the flag.}"
+: "${DEMO_README_FIX_REQUEST:=Fix the broken link to docs/configuration.md in the README.}"
+
+: "${DEMO_REQUEST_PRESET:=quiet-flag}"
+case "${DEMO_REQUEST_PRESET}" in
+  quiet-flag)    __DEMO_PRESET_REQUEST="${DEMO_QUIET_FLAG_REQUEST}" ;;
+  readme-fix)    __DEMO_PRESET_REQUEST="${DEMO_README_FIX_REQUEST}" ;;
+  vekil-metrics) __DEMO_PRESET_REQUEST="${DEMO_VEKIL_METRICS_REQUEST}" ;;
+  vekil-metrics-slice) __DEMO_PRESET_REQUEST="${DEMO_VEKIL_METRICS_SLICE_REQUEST}" ;;
+  *)
+    printf 'error: DEMO_REQUEST_PRESET=%s is not one of quiet-flag|readme-fix|vekil-metrics|vekil-metrics-slice\n' \
+      "${DEMO_REQUEST_PRESET}" >&2
+    exit 1
+    ;;
+esac
+
+: "${DEMO_CHAT_REQUEST:=${__DEMO_PRESET_REQUEST}}"
+: "${DEMO_MANUAL_REQUEST:=${__DEMO_PRESET_REQUEST}}"
 : "${DEMO_CRON_REQUEST:=Produce a short repository heartbeat report with the current HEAD commit, a count of Markdown files, and a brief summary of the repo purpose. Do not modify files, commit, or push.}"
+
+# ---------------------------------------------------------------------------
+# Recording profile.
+#
+# Controls pacing/verbosity of the visual helpers in lib/style.sh:
+#   presenter (default) — full transparency, typewriter on
+#   docs                — typewriter off, narration cues printed
+#   social              — typewriter off, chapters 1..3 only
+#   hero                — typewriter off, no chapters
+# ---------------------------------------------------------------------------
+: "${DEMO_RECORD_PROFILE:=presenter}"
+case "${DEMO_RECORD_PROFILE}" in
+  presenter|docs|social|hero) ;;
+  *)
+    printf 'error: DEMO_RECORD_PROFILE=%s is not one of presenter|docs|social|hero\n' \
+      "${DEMO_RECORD_PROFILE}" >&2
+    exit 1
+    ;;
+esac
 
 if [[ -n "${DEMO_CHAT_REQUEST_FILE}" ]]; then
   [[ -f "${DEMO_CHAT_REQUEST_FILE}" ]] || { printf 'error: DEMO_CHAT_REQUEST_FILE does not exist: %s\n' "${DEMO_CHAT_REQUEST_FILE}" >&2; exit 1; }
@@ -500,8 +551,40 @@ create_orka_service_account_token() {
 
 get_orka_token() {
   if [[ -n "${ORKA_TOKEN:-}" && "${ORKA_TOKEN_MANAGED:-0}" != "1" ]]; then
-    printf '%s' "${ORKA_TOKEN}"
-    return 0
+    # Defend against a stale ORKA_TOKEN carried over from a previous shell
+    # session (e.g., a token minted against a different cluster). We probe
+    # the API once per process; on rejection we forget the pre-set token
+    # and fall through to fresh minting.
+    if [[ "${ORKA_TOKEN_VALIDATED:-0}" != "1" ]]; then
+      local probe_url="${ORKA_SERVER:-${ORKA_API_BASE}}"
+      local probe_code
+      probe_code="$(curl -sS -o /dev/null -w '%{http_code}' \
+        --max-time "${DEMO_API_CHECK_TIMEOUT:-3}" \
+        -H "Authorization: Bearer ${ORKA_TOKEN}" \
+        "${probe_url}/api/v1/version" 2>/dev/null || printf '000')"
+      case "${probe_code}" in
+        2*|3*)
+          export ORKA_TOKEN_VALIDATED=1
+          printf '%s' "${ORKA_TOKEN}"
+          return 0
+          ;;
+        401|403)
+          printf 'warning: pre-set ORKA_TOKEN rejected by %s (HTTP %s); minting a fresh token\n' \
+            "${probe_url}" "${probe_code}" >&2
+          unset ORKA_TOKEN
+          ;;
+        *)
+          # Network error / API down — trust the caller's token and let
+          # downstream callers surface the real failure.
+          export ORKA_TOKEN_VALIDATED=1
+          printf '%s' "${ORKA_TOKEN}"
+          return 0
+          ;;
+      esac
+    else
+      printf '%s' "${ORKA_TOKEN}"
+      return 0
+    fi
   fi
   if [[ -z "${ORKA_TOKEN_CACHE:-}" ]]; then
     if [[ -n "${ORKA_TOKEN_COMMAND:-}" ]]; then
@@ -811,10 +894,14 @@ assert_real_pr_result() {
     #   Final status:
     #   - Validation: PASSED
     #   - Review: APPROVED ...
-    #   - CI: PASSED
+    #   - CI: PASSED | NO_CHECKS | NOT_APPLICABLE | NONE
+    #
+    # CI may legitimately report no checks if the target repo's CI workflow is
+    # absent or hasn't run yet — that doesn't invalidate a Validation/Review
+    # pass, so accept the NO_CHECKS family as final-pass evidence too.
     if printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?Validation([[:space:]]+status)?):[[:space:]]*PASS(ED)?([^[:alnum:]_]|$)' \
       && printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?Review([[:space:]]+status)?):[[:space:]]*APPROVED([^[:alnum:]_]|$)' \
-      && printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?CI([[:space:]]+status)?):[[:space:]]*PASS(ED)?([^[:alnum:]_]|$)'; then
+      && printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?CI([[:space:]]+status)?):[[:space:]]*(PASS(ED)?|NO_CHECKS|NOT_APPLICABLE|NONE)([^[:alnum:]_]|$)'; then
       printf 'note: task %s had recovered intermediate child failures:\n%s\n' "${task_name}" "${failed_children}" >&2
     else
       printf 'error: task %s has failed child tasks without final pass evidence; refusing to treat result as demo success:\n%s\n' "${task_name}" "${failed_children}" >&2

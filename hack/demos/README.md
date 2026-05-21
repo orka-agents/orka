@@ -1,11 +1,13 @@
 # Demo Magic Scenarios
 
-This directory contains a small `demo-magic` kit for showing Orka in four ways:
+This directory contains a small `demo-magic` kit for showing Orka in six ways:
 
 - `10-chat-pr.sh`: Claude Code -> Orka's Anthropic-compatible API -> prepared coordinator -> coder/reviewer/CI loops -> PR
 - `20-manual-workflow.sh`: explicit coordinator Task CR for a focused Vekil metrics first-PR workflow
 - `30-cron-workflow.sh`: scheduled runtime task with recurring child runs
 - `40-security-scanning.sh`: repository scan -> findings -> patch -> PR
+- `50-kontxt.sh`: workload SA token -> in-cluster TTS -> request-scoped TxToken -> Orka API call (one identity, two outcomes)
+- `60-agent-sandbox.sh`: three turns share a single SandboxClaim via `sessionRef` (scout -> builder -> CI fixup, same workspace)
 
 There is also:
 
@@ -225,7 +227,59 @@ hack/demos/10-chat-pr.sh
 hack/demos/20-manual-workflow.sh
 hack/demos/30-cron-workflow.sh
 hack/demos/40-security-scanning.sh
+hack/demos/50-kontxt.sh           # requires hack/demos/cluster/install-kontxt.sh
+hack/demos/60-agent-sandbox.sh    # requires hack/demos/cluster/install-agent-sandbox.sh
 ```
+
+## Recording
+
+The demo scripts are recording-ready: they pace themselves via the
+`DEMO_RECORD_PROFILE` env var rather than a wrapper. To capture an
+asciicast, point asciinema at the script directly:
+
+```bash
+asciinema rec --idle-time-limit 1.5 --cols 110 --rows 30 \
+  -c "DEMO_RECORD_PROFILE=docs ./hack/demos/10-chat-pr.sh" \
+  /tmp/10.cast
+```
+
+### `DEMO_RECORD_PROFILE` (default `presenter`)
+
+| Profile     | Typewriter | Chapters       | Best for                                  |
+|-------------|------------|----------------|-------------------------------------------|
+| `presenter` | on         | all + audit JSON | live audience, full transparency        |
+| `docs`      | off        | all + narration cues | embedded GIFs / docs              |
+| `social`    | off        | 1–3 only       | short clips, social media                 |
+| `hero`      | off        | suppressed     | ≤60s hero loops, minimal text             |
+
+### `DEMO_REQUEST_PRESET` (default `quiet-flag`)
+
+Selects the chat / manual request body so recordings finish quickly:
+
+| Preset                | What it asks for                                          |
+|-----------------------|-----------------------------------------------------------|
+| `quiet-flag`          | Add a `--quiet` flag to vekil + a test (short, default)   |
+| `readme-fix`          | Fix one broken link in the README                         |
+| `vekil-metrics`       | Full `/metrics` endpoint implementation (long-form story) |
+| `vekil-metrics-slice` | Focused regression fix on the metrics path                |
+
+An explicit `DEMO_CHAT_REQUEST` / `DEMO_MANUAL_REQUEST` env var or
+`*_REQUEST_FILE` always wins over the preset.
+
+### Bootstrapping a demo cluster
+
+For Demos 50 / 60 (and a clean rerun of 10–40) you can spin up a dedicated
+kind cluster:
+
+```bash
+make demo-cluster-up      # kind + Orka + kontxt + agent-sandbox
+make demo-images          # build + load the kontxt-caller image
+# ... run demos ...
+make demo-cluster-down
+```
+
+See `RECORDING.md` for the full design (visual style §5, helper API §5.5,
+per-script tightening §6, new-scenario storyboards §7, work order §11.5).
 
 ## Presenter Flow
 

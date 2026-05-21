@@ -126,6 +126,27 @@ lint-fix: ensure-ui-embed golangci-lint ## Run golangci-lint linter and perform 
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	"$(GOLANGCI_LINT)" config verify
 
+##@ Demos
+
+.PHONY: demo-cluster-up
+demo-cluster-up: ## Bootstrap a kind cluster with Orka + kontxt + agent-sandbox
+	hack/demos/cluster/cluster-up.sh
+	hack/demos/cluster/install-kontxt.sh
+	hack/demos/cluster/install-agent-sandbox.sh
+
+.PHONY: demo-cluster-down
+demo-cluster-down: ## Tear down the kind demo cluster
+	hack/demos/cluster/cluster-down.sh
+
+.PHONY: demo-images
+demo-images: ## Build + kind-load demo-only images (currently: kontxt-caller)
+	docker build -t orka-kontxt-caller:demo hack/demos/images/kontxt-caller
+	kind load docker-image orka-kontxt-caller:demo --name $${ORKA_DEMO_CLUSTER:-orka-demo}
+
+.PHONY: demo-test
+demo-test: ## Run hack/demos smoke tests (style helpers, profile dispatch, payoff cards)
+	bash hack/demos/lib/test/run-all.sh
+
 ##@ UI
 
 .PHONY: ui-install

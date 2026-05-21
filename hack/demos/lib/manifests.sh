@@ -530,3 +530,270 @@ EOF
 EOF
   fi
 }
+
+# ---------------------------------------------------------------------------
+# Demo 50 (kontxt) — manifests
+#
+# A ServiceAccount + Job that mints a Transaction Token (TxToken) via the
+# in-cluster TTS endpoint and uses it to call the Orka API. The "allowed"
+# job asks for namespace=${DEMO_NAMESPACE} (typically demo-magic); the
+# "denied" job asks for namespace=not-default so policy can reject it.
+#
+# IMPORTANT: caller.sh redacts JWT prefixes from its own stdout. Helpers
+# here MUST NOT log raw Txn-Token values, subject-token contents, or
+# anything matching eyJ[A-Za-z0-9_=-]{20,}. The kontxt-caller image is
+# expected to enforce that contract.
+# ---------------------------------------------------------------------------
+
+: "${DEMO_KONTXT_NAMESPACE:=default}"
+: "${DEMO_KONTXT_SA_NAME:=orka-kontxt-caller}"
+: "${DEMO_KONTXT_JOB_NAME:=orka-kontxt-caller}"
+: "${DEMO_KONTXT_DENIED_JOB_NAME:=orka-kontxt-caller-denied}"
+: "${DEMO_KONTXT_CALLER_IMAGE:=orka-kontxt-caller:demo}"
+: "${DEMO_KONTXT_TTS_AUDIENCE:=kontxt-tts}"
+: "${DEMO_KONTXT_DENIED_NAMESPACE:=not-default}"
+: "${DEMO_KONTXT_TTS_URL:=http://kontxt-tts.default.svc.cluster.local:8080}"
+: "${DEMO_KONTXT_ORKA_API_URL:=http://orka-api.orka-system.svc.cluster.local:8080}"
+
+render_kontxt_caller_sa() {
+  cat <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ${DEMO_KONTXT_SA_NAME}
+  namespace: ${DEMO_KONTXT_NAMESPACE}
+  labels:
+    orka.ai/demo: kontxt
+automountServiceAccountToken: true
+EOF
+}
+
+render_kontxt_caller_job() {
+  local job_name="${1:-${DEMO_KONTXT_JOB_NAME}}"
+  local target_ns="${2:-${DEMO_NAMESPACE}}"
+  local backoff="${3:-0}"
+  local requested_scope="${4:-orka:tasks:list orka:tasks:get}"
+  cat <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${job_name}
+  namespace: ${DEMO_KONTXT_NAMESPACE}
+  labels:
+    orka.ai/demo: kontxt
+spec:
+  backoffLimit: ${backoff}
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        orka.ai/demo: kontxt
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ${DEMO_KONTXT_SA_NAME}
+      containers:
+        - name: caller
+          image: ${DEMO_KONTXT_CALLER_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SUBJECT_TOKEN_PATH
+              value: /var/run/orka/token
+            - name: ORKA_CONTEXT_TOKEN_TTS_URL
+              value: ${DEMO_KONTXT_TTS_URL}
+            - name: ORKA_API_URL
+              value: ${DEMO_KONTXT_ORKA_API_URL}
+            - name: TARGET_NAMESPACE
+              value: ${target_ns}
+            - name: KONTXT_TTS_PARENT_SCOPE
+              value: "${requested_scope}"
+          volumeMounts:
+            - name: kontxt-token
+              mountPath: /var/run/orka
+              readOnly: true
+      volumes:
+        - name: kontxt-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: ${DEMO_KONTXT_TTS_AUDIENCE}
+                  expirationSeconds: 3600
+                  path: token
+EOF
+}
+
+render_kontxt_denied_caller_job() {
+  # Same identity, but ask the TTS for a TxToken with the wrong scope.
+  # The API rejects /tasks list calls without orka:tasks:list, demonstrating
+  # request-scoped authorization on top of SA-token authentication.
+  render_kontxt_caller_job \
+    "${DEMO_KONTXT_DENIED_JOB_NAME}" \
+    "${DEMO_NAMESPACE}" \
+    "0" \
+    "orka:secrets:read"
+}
+
+# ---------------------------------------------------------------------------
+# Demo 60 (agent sandbox) — manifests
+#
+# A scout agent (read-only tools) and a builder agent (file write + code exec)
+# share a single SandboxClaim across three Task turns via sessionRef. Turn 1
+# creates the session; turns 2 and 3 reuse it. The payoff helper asserts that
+# all three turns landed on the SAME claim.
+# ---------------------------------------------------------------------------
+
+: "${DEMO_SANDBOX_SESSION:=vekil-metrics-77}"
+: "${DEMO_SANDBOX_SCOUT_AGENT:=demo-sandbox-scout}"
+: "${DEMO_SANDBOX_BUILDER_AGENT:=demo-sandbox-builder}"
+: "${DEMO_SANDBOX_TEMPLATE_REF:=orka-live-template}"
+: "${DEMO_SANDBOX_TURN1_TASK:=demo-sandbox-turn-1-scout}"
+: "${DEMO_SANDBOX_TURN2_TASK:=demo-sandbox-turn-2-builder}"
+: "${DEMO_SANDBOX_TURN3_TASK:=demo-sandbox-turn-3-fixup}"
+
+render_sandbox_scout_agent() {
+  cat <<EOF
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: ${DEMO_SANDBOX_SCOUT_AGENT}
+  namespace: ${DEMO_NAMESPACE}
+  labels:
+    orka.ai/demo: sandbox
+    demo.orka.ai/scenario: sandbox
+spec:
+  runtime:
+    type: ${DEMO_RUNTIME_TYPE}
+    defaultMaxTurns: 30
+    # Codex CLI always requires shell execution; setting false makes the
+    # worker refuse to start. We keep the scout's "read-only" intent in
+    # the system prompt + Bash is gated by the allowed-tools list below.
+    defaultAllowBash: true
+    defaultAllowedTools:
+      - Read
+      - Grep
+      - Glob
+      - WebSearch
+      - Bash
+  model:
+    name: ${DEMO_RUNTIME_MODEL}
+  systemPrompt:
+    inline: |
+      You are the scout for a live Orka sandbox demo.
+      The repository is checked out in the sandbox workspace.
+      Read files, search the web for relevant context, and produce a short
+      plan in the task result. Do NOT modify, commit, or push anything —
+      no git add/commit/push, no file edits, no network writes.
+  resources:
+    requests:
+      cpu: ${DEMO_AGENT_CPU_REQUEST}
+      memory: ${DEMO_AGENT_MEMORY_REQUEST}
+    limits:
+      cpu: ${DEMO_AGENT_CPU_LIMIT}
+      memory: ${DEMO_AGENT_MEMORY_LIMIT}
+  secretRef:
+    name: ${DEMO_RUNTIME_SECRET_REF}
+EOF
+}
+
+render_sandbox_builder_agent() {
+  cat <<EOF
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: ${DEMO_SANDBOX_BUILDER_AGENT}
+  namespace: ${DEMO_NAMESPACE}
+  labels:
+    orka.ai/demo: sandbox
+    demo.orka.ai/scenario: sandbox
+spec:
+  runtime:
+    type: ${DEMO_RUNTIME_TYPE}
+    defaultMaxTurns: 80
+    defaultAllowBash: true
+    defaultAllowedTools:
+      - Read
+      - Write
+      - Edit
+      - Bash
+      - Grep
+      - Glob
+  model:
+    name: ${DEMO_RUNTIME_MODEL}
+  systemPrompt:
+    inline: |
+      You are the builder for a live Orka sandbox demo.
+      The sandbox workspace is reused across turns — the scout's notes and
+      any earlier edits are already present.
+      Implement the requested change, run the smallest validation you can,
+      then use git + gh inside the sandbox to push a branch and open a PR.
+      Note: open_pr is NOT a built-in tool; use git/gh from Bash.
+  resources:
+    requests:
+      cpu: ${DEMO_AGENT_CPU_REQUEST}
+      memory: ${DEMO_AGENT_MEMORY_REQUEST}
+    limits:
+      cpu: ${DEMO_AGENT_CPU_LIMIT}
+      memory: ${DEMO_AGENT_MEMORY_LIMIT}
+  secretRef:
+    name: ${DEMO_RUNTIME_SECRET_REF}
+EOF
+}
+
+# render_sandbox_turn_task <name> <agent> <prompt-file> [--create-session]
+render_sandbox_turn_task() {
+  local name="$1"
+  local agent="$2"
+  local prompt_file="$3"
+  local create_session="false"
+  if [[ "${4:-}" == "--create-session" ]]; then
+    create_session="true"
+  fi
+  if [[ ! -f "${prompt_file}" ]]; then
+    printf 'render_sandbox_turn_task: prompt file not found: %s\n' "${prompt_file}" >&2
+    return 1
+  fi
+  local prompt_body
+  prompt_body="$(cat "${prompt_file}")"
+  cat <<EOF
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: ${name}
+  namespace: ${DEMO_NAMESPACE}
+  labels:
+    orka.ai/demo: sandbox
+    orka.ai/session: ${DEMO_SANDBOX_SESSION}
+    demo.orka.ai/scenario: sandbox
+spec:
+  type: agent
+  agentRef:
+    name: ${agent}
+  sessionRef:
+    name: ${DEMO_SANDBOX_SESSION}
+    create: ${create_session}
+  timeout: 60m
+  prompt: |
+EOF
+  emit_block "    " "${prompt_body}"
+  printf '\n'
+  cat <<EOF
+  agentRuntime:
+    workspace:
+      gitRepo: ${DEMO_GIT_REPO}
+      branch: ${DEMO_GIT_BRANCH}
+EOF
+  if [[ -n "${DEMO_GIT_SECRET_REF:-}" ]]; then
+    cat <<EOF
+      gitSecretRef:
+        name: ${DEMO_GIT_SECRET_REF}
+EOF
+  fi
+  cat <<EOF
+  execution:
+    workspace:
+      enabled: true
+      templateRef:
+        name: ${DEMO_SANDBOX_TEMPLATE_REF}
+      reusePolicy: session
+      cleanupPolicy: retain
+EOF
+}
