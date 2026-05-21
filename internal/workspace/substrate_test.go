@@ -508,9 +508,11 @@ func TestSubstrateDeleteSkipScrubDeletesRunningActor(t *testing.T) {
 	}
 }
 
-func TestSubstrateDeleteFailsClosedWhenRunningScrubFails(t *testing.T) {
+func TestSubstrateDeleteContinuesWhenRunningScrubFails(t *testing.T) {
+	var scrubbed bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == substrateTestScrubPath {
+			scrubbed = true
 			http.Error(w, "scrub failed", http.StatusInternalServerError)
 			return
 		}
@@ -530,21 +532,24 @@ func TestSubstrateDeleteFailsClosedWhenRunningScrubFails(t *testing.T) {
 		now:            time.Now,
 	}
 
-	_, err := executor.Delete(t.Context(), DeleteRequest{
+	got, err := executor.Delete(t.Context(), DeleteRequest{
 		Ref:     WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
 		Timeout: time.Second,
 	})
-	if err == nil {
-		t.Fatal("Delete() error = nil, want scrub failure")
+	if err != nil {
+		t.Fatalf("Delete() error = %v", err)
 	}
-	if !IsKind(err, ErrorKindFailedPrecondition) {
-		t.Fatalf("Delete() error kind = %s, want %s", KindOf(err), ErrorKindFailedPrecondition)
+	if !scrubbed {
+		t.Fatal("Delete() did not attempt scrub before fallback delete")
 	}
-	if control.suspendCalls != 0 {
-		t.Fatalf("SuspendActor calls = %d, want 0 after scrub failure", control.suspendCalls)
+	if control.suspendCalls != 1 {
+		t.Fatalf("SuspendActor calls = %d, want 1 after scrub failure", control.suspendCalls)
 	}
-	if control.deleted {
-		t.Fatal("DeleteActor was called after scrub failure")
+	if !control.deleted {
+		t.Fatal("DeleteActor was not called after scrub failure")
+	}
+	if !got.Deleted || got.Phase != PhaseDeleted {
+		t.Fatalf("Delete() = %#v, want deleted phase", got)
 	}
 }
 

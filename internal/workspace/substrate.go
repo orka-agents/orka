@@ -471,11 +471,13 @@ func (e *SubstrateWorkspaceExecutor) Delete(ctx context.Context, req DeleteReque
 		return nil, err
 	}
 	scrubbed := false
+	var scrubErr error
 	if actor.Status == substrateStatusRunning && !req.SkipScrub {
 		if err := e.scrubDaemon(ctx, actorID); err != nil {
-			return nil, NewError("delete", ErrorKindFailedPrecondition, "failed to scrub workspace before delete", false, err)
+			scrubErr = err
+		} else {
+			scrubbed = true
 		}
-		scrubbed = true
 	}
 	if actor.Status != substrateStatusSuspended {
 		if actor, err = e.suspendActorAndWait(ctx, actorID); err != nil {
@@ -490,10 +492,28 @@ func (e *SubstrateWorkspaceExecutor) Delete(ctx context.Context, req DeleteReque
 					)
 				}
 			}
+			if scrubErr != nil {
+				return nil, NewError(
+					"delete",
+					ErrorKindFailedPrecondition,
+					"failed to delete workspace after scrub failed",
+					true,
+					errors.Join(scrubErr, err),
+				)
+			}
 			return nil, err
 		}
 	}
 	if err := e.control.DeleteActor(ctx, actorID); err != nil {
+		if scrubErr != nil {
+			return nil, NewError(
+				"delete",
+				ErrorKindFailedPrecondition,
+				"failed to delete workspace after scrub failed",
+				true,
+				errors.Join(scrubErr, err),
+			)
+		}
 		return nil, err
 	}
 	return &DeleteResult{Ref: substrateRef(req.Ref.Namespace, actor), Deleted: true, Phase: PhaseDeleted, Message: releaseMessage(req.Reason, "workspace deleted")}, nil
