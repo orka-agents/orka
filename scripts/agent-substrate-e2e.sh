@@ -30,6 +30,8 @@ redact() {
     -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]+/\1[REDACTED]/Ig' \
     -e 's/([Tt]xn-[Tt]oken:[[:space:]]*)[^[:space:]]+/\1[REDACTED]/g' \
     -e 's/([Tt]oken["'\'']?[=:][[:space:]]*["'\'']?)[A-Za-z0-9._~+\/=-]+/\1[REDACTED]/g' \
+    -e 's/("name":"ORKA_WORKSPACE_BOOTSTRAP_TOKEN","value":")[^"]+/\1[REDACTED]/g' \
+    -e 's/("name":"ORKA_WORKSPACE_HANDOFF_TOKEN","value":")[^"]+/\1[REDACTED]/g' \
     -e 's/(ORKA_WORKSPACE_HANDOFF_TOKEN=)[^[:space:]]+/\1[REDACTED]/g' \
     -e 's/(ORKA_WORKSPACE_BOOTSTRAP_TOKEN=)[^[:space:]]+/\1[REDACTED]/g'
 }
@@ -306,10 +308,7 @@ spec:
       - name: ORKA_WORKSPACE_HANDOFF_TOKEN_FILE
         value: /app/orka-workspace-handoff-token
       - name: ORKA_WORKSPACE_BOOTSTRAP_TOKEN
-        valueFrom:
-          secretKeyRef:
-            name: ${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME}
-            key: ${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY}
+        value: ${SUBSTRATE_BOOTSTRAP_TOKEN}
     ports:
       - containerPort: 80
   workerPoolRef:
