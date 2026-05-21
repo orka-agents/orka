@@ -350,6 +350,7 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-task", Namespace: "default", UID: taskUID},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status:     corev1alpha1.TaskStatus{JobName: "my-task-job"},
 	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -380,10 +381,39 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 			}},
 		},
 	}
+	oldJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-task-old-job",
+			Namespace: "default",
+			UID:       types.UID("old-job-uid"),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(),
+				Kind:       "Task",
+				Name:       "my-task",
+				UID:        taskUID,
+			}},
+		},
+	}
+	oldPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-task-old-pod",
+			Namespace: "default",
+			UID:       types.UID("old-pod-uid"),
+			Labels: map[string]string{
+				labels.LabelTask: labels.SelectorValue("my-task"),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: batchv1.SchemeGroupVersion.String(),
+				Kind:       "Job",
+				Name:       "my-task-old-job",
+				UID:        types.UID("old-job-uid"),
+			}},
+		},
+	}
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.Task{}).
-		WithObjects(task, job, pod).
+		WithObjects(task, job, pod, oldJob, oldPod).
 		Build()
 	h := NewInternalHandlers(nil, nil, nil, nil, nil, InternalHandlersConfig{Client: k8sClient})
 	app := fiber.New()
@@ -425,6 +455,37 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 	require.Equal(t, corev1alpha1.WorkspaceProviderSubstrate, updated.Status.ExecutionWorkspace.Provider)
 	require.Equal(t, corev1alpha1.ExecutionWorkspacePhaseReady, updated.Status.ExecutionWorkspace.Phase)
 	require.True(t, updated.Status.ExecutionWorkspace.Reused)
+
+	appOldWorker := fiber.New()
+	appOldWorker.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username: "system:serviceaccount:default:worker",
+			AuthType: AuthTypeTokenReview,
+			Extra: map[string]authenticationv1.ExtraValue{
+				"authentication.kubernetes.io/pod-name": {"my-task-old-pod"},
+				"authentication.kubernetes.io/pod-uid":  {"old-pod-uid"},
+			},
+		})
+		return c.Next()
+	})
+	appOldWorker.Post("/internal/v1/tasks/:namespace/:taskName/execution-workspace/status", h.UpdateExecutionWorkspaceStatus)
+	staleBody := map[string]any{
+		"provider": "substrate",
+		"phase":    "Failed",
+		"reason":   "WorkspaceCommandFailed",
+		"message":  "stale worker update",
+	}
+	staleBodyBytes, err := json.Marshal(staleBody)
+	require.NoError(t, err)
+	staleReq := httptest.NewRequest(http.MethodPost, "/internal/v1/tasks/default/my-task/execution-workspace/status", bytes.NewReader(staleBodyBytes))
+	staleReq.Header.Set("Content-Type", "application/json")
+	staleResp, err := appOldWorker.Test(staleReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, staleResp.StatusCode)
+
+	afterStale := &corev1alpha1.Task{}
+	require.NoError(t, k8sClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "my-task"}, afterStale))
+	require.Equal(t, corev1alpha1.ExecutionWorkspacePhaseReady, afterStale.Status.ExecutionWorkspace.Phase)
 
 	appForbidden := fiber.New()
 	appForbidden.Use(func(c fiber.Ctx) error {

@@ -102,6 +102,72 @@ func TestSubstrateClaimReattachesAfterConcurrentCreateAlreadyExists(t *testing.T
 	}
 }
 
+func TestSubstrateClaimRejectsReattachedActorTemplateMismatch(t *testing.T) {
+	tests := []struct {
+		name            string
+		getErrs         []error
+		createErr       error
+		wantGetCalls    int
+		wantCreateCalls int
+	}{
+		{
+			name:         "direct reattach",
+			wantGetCalls: 1,
+		},
+		{
+			name: "concurrent create already exists",
+			getErrs: []error{
+				NewError("get actor", ErrorKindNotFound, "actor not found", false, nil),
+				nil,
+			},
+			createErr:       NewError("create actor", ErrorKindAlreadyExists, "actor already exists", false, nil),
+			wantGetCalls:    2,
+			wantCreateCalls: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			control := &recordingSubstrateControlClient{
+				getErrs:      tt.getErrs,
+				createErr:    tt.createErr,
+				templateName: "other-template",
+			}
+			executor := &SubstrateWorkspaceExecutor{
+				control:        control,
+				httpClient:     http.DefaultClient,
+				routerURL:      "http://router.test",
+				actorDNSSuffix: "actors.test",
+				now:            time.Now,
+				retained:       map[string]bool{},
+			}
+
+			_, err := executor.Claim(t.Context(), ClaimRequest{
+				Namespace:       "ate-demo",
+				ClaimName:       "actor-1",
+				CreateIfMissing: true,
+				Template:        TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"},
+				Timeout:         time.Second,
+			})
+			if err == nil {
+				t.Fatal("Claim() error = nil, want template mismatch")
+			}
+			if !IsKind(err, ErrorKindFailedPrecondition) {
+				t.Fatalf("Claim() error kind = %s, want %s", KindOf(err), ErrorKindFailedPrecondition)
+			}
+			if !strings.Contains(err.Error(), "existing Substrate actor uses template ate-demo/other-template") {
+				t.Fatalf("Claim() error = %q, want template mismatch context", err.Error())
+			}
+			if control.getCalls != tt.wantGetCalls {
+				t.Fatalf("GetActor calls = %d, want %d", control.getCalls, tt.wantGetCalls)
+			}
+			if control.createCalls != tt.wantCreateCalls {
+				t.Fatalf("CreateActor calls = %d, want %d", control.createCalls, tt.wantCreateCalls)
+			}
+		})
+	}
+}
+
 func TestSubstrateExecUsesDetachedPolling(t *testing.T) {
 	var sawDetached bool
 	var polls int
@@ -687,17 +753,19 @@ func TestDefaultSubstrateScrubPathsIncludesStagedWorker(t *testing.T) {
 }
 
 type recordingSubstrateControlClient struct {
-	getStatuses   []string
-	getErrs       []error
-	getCalls      int
-	createErr     error
-	createCalls   int
-	resumeErr     error
-	resumeCalls   int
-	suspendStatus string
-	suspendErr    error
-	suspendCalls  int
-	deleted       bool
+	getStatuses       []string
+	getErrs           []error
+	getCalls          int
+	createErr         error
+	createCalls       int
+	resumeErr         error
+	resumeCalls       int
+	suspendStatus     string
+	suspendErr        error
+	suspendCalls      int
+	templateName      string
+	templateNamespace string
+	deleted           bool
 }
 
 func (c *recordingSubstrateControlClient) GetActor(ctx context.Context, actorID string) (*substrateActor, error) {
@@ -713,10 +781,18 @@ func (c *recordingSubstrateControlClient) GetActor(ctx context.Context, actorID 
 	if call < len(c.getStatuses) {
 		status = c.getStatuses[call]
 	}
+	templateNamespace := c.templateNamespace
+	if templateNamespace == "" {
+		templateNamespace = "ate-demo"
+	}
+	templateName := c.templateName
+	if templateName == "" {
+		templateName = "orka-codex-ci"
+	}
 	return &substrateActor{
 		ActorID:           actorID,
-		TemplateNamespace: "ate-demo",
-		TemplateName:      "orka-codex-ci",
+		TemplateNamespace: templateNamespace,
+		TemplateName:      templateName,
 		Status:            status,
 		PodIP:             "10.244.0.10",
 	}, nil

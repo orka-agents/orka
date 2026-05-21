@@ -171,14 +171,7 @@ func (e *SubstrateWorkspaceExecutor) Claim(ctx context.Context, req ClaimRequest
 
 	actor, err := e.control.GetActor(ctx, actorID)
 	if err == nil {
-		return &ClaimResult{
-			Ref:      substrateRef(req.Template.Namespace, actor),
-			Template: req.Template,
-			ReuseKey: req.ReuseKey,
-			Reused:   true,
-			Phase:    substratePhase(actor, e.actorRetained(actorID)),
-			Message:  "workspace actor reattached",
-		}, nil
+		return e.reattachedSubstrateClaimResult(req, actorID, actor)
 	}
 	if !IsKind(err, ErrorKindNotFound) {
 		return nil, err
@@ -195,14 +188,7 @@ func (e *SubstrateWorkspaceExecutor) Claim(ctx context.Context, req ClaimRequest
 		if IsKind(err, ErrorKindAlreadyExists) {
 			actor, err = e.control.GetActor(ctx, actorID)
 			if err == nil {
-				return &ClaimResult{
-					Ref:      substrateRef(req.Template.Namespace, actor),
-					Template: req.Template,
-					ReuseKey: req.ReuseKey,
-					Reused:   true,
-					Phase:    substratePhase(actor, e.actorRetained(actorID)),
-					Message:  "workspace actor reattached",
-				}, nil
+				return e.reattachedSubstrateClaimResult(req, actorID, actor)
 			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, contextError("claim", ctxErr)
@@ -220,6 +206,50 @@ func (e *SubstrateWorkspaceExecutor) Claim(ctx context.Context, req ClaimRequest
 		Message:   "workspace actor created",
 		ClaimedAt: now,
 	}, nil
+}
+
+func (e *SubstrateWorkspaceExecutor) reattachedSubstrateClaimResult(
+	req ClaimRequest,
+	actorID string,
+	actor *substrateActor,
+) (*ClaimResult, error) {
+	if err := validateSubstrateActorTemplate(actor, req.Template); err != nil {
+		return nil, err
+	}
+	return &ClaimResult{
+		Ref:      substrateRef(req.Template.Namespace, actor),
+		Template: req.Template,
+		ReuseKey: req.ReuseKey,
+		Reused:   true,
+		Phase:    substratePhase(actor, e.actorRetained(actorID)),
+		Message:  "workspace actor reattached",
+	}, nil
+}
+
+func validateSubstrateActorTemplate(actor *substrateActor, template TemplateRef) error {
+	if actor == nil {
+		return NewError("claim", ErrorKindFailedPrecondition, "Substrate actor lookup returned no actor", false, nil)
+	}
+	actualNamespace := strings.TrimSpace(actor.TemplateNamespace)
+	actualName := strings.TrimSpace(actor.TemplateName)
+	wantNamespace := strings.TrimSpace(template.Namespace)
+	wantName := strings.TrimSpace(template.Name)
+	if actualNamespace == wantNamespace && actualName == wantName {
+		return nil
+	}
+	return NewError(
+		"claim",
+		ErrorKindFailedPrecondition,
+		fmt.Sprintf(
+			"existing Substrate actor uses template %s/%s, want %s/%s",
+			actualNamespace,
+			actualName,
+			wantNamespace,
+			wantName,
+		),
+		false,
+		nil,
+	)
 }
 
 func (e *SubstrateWorkspaceExecutor) WaitReady(ctx context.Context, req WaitReadyRequest) (*ReadyResult, error) {

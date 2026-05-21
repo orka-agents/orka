@@ -549,9 +549,16 @@ func verifyCallerOwnsTaskWorker(ctx context.Context, c client.Client, userInfo *
 	if pod.Labels[labels.LabelTask] != labels.SelectorValue(task.Name) {
 		return fiber.NewError(fiber.StatusForbidden, "caller pod does not belong to task")
 	}
+	currentJobName := strings.TrimSpace(task.Status.JobName)
+	if currentJobName == "" {
+		return fiber.NewError(fiber.StatusForbidden, "task has no active worker job")
+	}
 
 	for _, owner := range pod.OwnerReferences {
 		if owner.Kind != "Job" || owner.Name == "" {
+			continue
+		}
+		if owner.Name != currentJobName {
 			continue
 		}
 		job := &batchv1.Job{}
@@ -567,7 +574,7 @@ func verifyCallerOwnsTaskWorker(ctx context.Context, c client.Client, userInfo *
 			}
 		}
 	}
-	return fiber.NewError(fiber.StatusForbidden, "caller is not a worker for this task")
+	return fiber.NewError(fiber.StatusForbidden, "caller is not the current worker for this task")
 }
 
 func firstUserExtra(userInfo *UserInfo, key string) string {
