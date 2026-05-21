@@ -214,6 +214,42 @@ func TestWorkspaceAgentBootstrapDefaultUploadHonorsConfiguredTokenFile(t *testin
 	}
 }
 
+func TestWorkspaceAgentRejectsHandoffBootstrapWithoutBearerProof(t *testing.T) {
+	dir := t.TempDir()
+	previousAllowedRoots := allowedRoots
+	allowedRoots = []string{dir}
+	t.Cleanup(func() {
+		allowedRoots = previousAllowedRoots
+	})
+	tokenFile := filepath.Join(dir, "handoff-token")
+	resp := exerciseHandoffBootstrapWithBearer(t, tokenFile, tokenFile, "")
+
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusUnauthorized, resp.Body.String())
+	}
+	if _, err := os.Stat(tokenFile); !os.IsNotExist(err) {
+		t.Fatalf("unauthorized bootstrap wrote token file: %v", err)
+	}
+}
+
+func TestWorkspaceAgentRejectsHandoffBootstrapBearerMismatch(t *testing.T) {
+	dir := t.TempDir()
+	previousAllowedRoots := allowedRoots
+	allowedRoots = []string{dir}
+	t.Cleanup(func() {
+		allowedRoots = previousAllowedRoots
+	})
+	tokenFile := filepath.Join(dir, "handoff-token")
+	resp := exerciseHandoffBootstrapWithBearer(t, tokenFile, tokenFile, "different")
+
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusUnauthorized, resp.Body.String())
+	}
+	if _, err := os.Stat(tokenFile); !os.IsNotExist(err) {
+		t.Fatalf("mismatched bootstrap wrote token file: %v", err)
+	}
+}
+
 func TestHandoffTokenFilePathNormalizesRelativeEnv(t *testing.T) {
 	t.Setenv(envHandoffTokenFile, "custom-handoff-token")
 
@@ -223,6 +259,11 @@ func TestHandoffTokenFilePathNormalizesRelativeEnv(t *testing.T) {
 }
 
 func exerciseHandoffBootstrap(t *testing.T, tokenFile, uploadPath string) *httptest.ResponseRecorder {
+	t.Helper()
+	return exerciseHandoffBootstrapWithBearer(t, tokenFile, uploadPath, "secret")
+}
+
+func exerciseHandoffBootstrapWithBearer(t *testing.T, tokenFile, uploadPath, bearer string) *httptest.ResponseRecorder {
 	t.Helper()
 	t.Setenv(envHandoffTokenFile, tokenFile)
 	server := newWorkspaceAgentServer()
@@ -235,6 +276,9 @@ func exerciseHandoffBootstrap(t *testing.T, tokenFile, uploadPath string) *httpt
 		t.Fatalf("marshal request: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodPut, "/v1/files", bytes.NewReader(body))
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	resp := httptest.NewRecorder()
 
 	server.routes().ServeHTTP(resp, req)

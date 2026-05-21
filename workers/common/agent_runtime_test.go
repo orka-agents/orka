@@ -707,6 +707,35 @@ func TestRunAgent_SubstratePreHandoffRetainFailureDeletesWorkspace(t *testing.T)
 	}
 }
 
+func TestExecutionWorkspaceCompletionMessageOmitsSubstrateActorID(t *testing.T) {
+	got := executionWorkspaceCompletionMessage(
+		"task-ns",
+		"task-name",
+		workerenv.ExecutionWorkspaceEnv{Provider: string(corev1alpha1.WorkspaceProviderSubstrate)},
+		workspace.WorkspaceRef{ClaimName: "actor-1", ID: "actor-1"},
+	)
+
+	if strings.Contains(got, "actor-1") {
+		t.Fatalf("message = %q, want no Substrate actor ID", got)
+	}
+	if got != "Task task-ns/task-name completed in substrate workspace" {
+		t.Fatalf("message = %q, want sanitized substrate completion", got)
+	}
+}
+
+func TestExecutionWorkspaceCompletionMessageKeepsAgentSandboxClaimName(t *testing.T) {
+	got := executionWorkspaceCompletionMessage(
+		"task-ns",
+		"task-name",
+		workerenv.ExecutionWorkspaceEnv{Provider: string(corev1alpha1.WorkspaceProviderAgentSandbox)},
+		workspace.WorkspaceRef{ClaimName: "claim-1"},
+	)
+
+	if got != "Task task-ns/task-name completed in agent-sandbox workspace claim-1" {
+		t.Fatalf("message = %q, want legacy claim name", got)
+	}
+}
+
 func TestRunAgent_AgentSandboxRecursionFailsFast(t *testing.T) {
 	setRequiredAgentSandboxEnv(t, "delete")
 	t.Setenv(workerenv.AgentSandboxDepth, "1")

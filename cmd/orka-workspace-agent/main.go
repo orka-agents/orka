@@ -144,10 +144,16 @@ func (s *workspaceAgentServer) allowHandoffBootstrap(w http.ResponseWriter, r *h
 		http.Error(w, "invalid handoff bootstrap path", http.StatusUnauthorized)
 		return false, true
 	}
-	if strings.TrimSpace(string(req.Files[0].Data)) == "" {
+	tokenValue := strings.TrimSpace(string(req.Files[0].Data))
+	if tokenValue == "" {
 		http.Error(w, "empty handoff bootstrap token", http.StatusBadRequest)
 		return false, true
 	}
+	if !validHandoffBearer(r.Header.Get("Authorization"), tokenValue) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false, true
+	}
+	req.Files[0].Data = []byte(tokenValue)
 	req.Files[0].Path = tokenPath
 	data, err = json.Marshal(req)
 	if err != nil {
@@ -198,13 +204,24 @@ func normalizeAgentPath(value string) (string, error) {
 }
 
 func validHandoffBearer(header, token string) bool {
-	got := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
+	got, ok := bearerToken(header)
+	if !ok {
+		return false
+	}
 	if got == "" || strings.TrimSpace(token) == "" {
 		return false
 	}
 	gotHash := sha256.Sum256([]byte(got))
 	tokenHash := sha256.Sum256([]byte(token))
 	return subtle.ConstantTimeCompare(gotHash[:], tokenHash[:]) == 1
+}
+
+func bearerToken(header string) (string, bool) {
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return "", false
+	}
+	return strings.TrimSpace(strings.TrimPrefix(header, prefix)), true
 }
 
 func (s *workspaceAgentServer) handleExec(w http.ResponseWriter, r *http.Request) {

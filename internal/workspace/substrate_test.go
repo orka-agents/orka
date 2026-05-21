@@ -251,6 +251,47 @@ func TestSubstrateDeleteWaitsWhenSuspendReturnsAfterStartingTransition(t *testin
 	}
 }
 
+func TestSubstrateDeleteFailsClosedWhenRunningScrubFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == substrateTestScrubPath {
+			http.Error(w, "scrub failed", http.StatusInternalServerError)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	control := &recordingSubstrateControlClient{
+		getStatuses: []string{substrateStatusRunning},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     server.Client(),
+		routerURL:      server.URL,
+		actorDNSSuffix: "actors.test",
+		handoffToken:   "token",
+		now:            time.Now,
+		retained:       map[string]bool{},
+	}
+
+	_, err := executor.Delete(t.Context(), DeleteRequest{
+		Ref:     WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
+		Timeout: time.Second,
+	})
+	if err == nil {
+		t.Fatal("Delete() error = nil, want scrub failure")
+	}
+	if !IsKind(err, ErrorKindFailedPrecondition) {
+		t.Fatalf("Delete() error kind = %s, want %s", KindOf(err), ErrorKindFailedPrecondition)
+	}
+	if control.suspendCalls != 0 {
+		t.Fatalf("SuspendActor calls = %d, want 0 after scrub failure", control.suspendCalls)
+	}
+	if control.deleted {
+		t.Fatal("DeleteActor was called after scrub failure")
+	}
+}
+
 func TestSubstrateReleaseRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testing.T) {
 	var scrubbed bool
 	var restored bool

@@ -589,14 +589,27 @@ func runAgentInWorkspace(
 	}
 	cleaned = true
 
-	fmt.Printf(
-		"Task %s/%s completed in %s workspace %s\n",
-		taskNamespace,
-		taskName,
-		workspaceEnv.Provider,
-		ref.ClaimName,
-	)
+	fmt.Println(executionWorkspaceCompletionMessage(taskNamespace, taskName, workspaceEnv, ref))
 	return nil
+}
+
+func executionWorkspaceCompletionMessage(
+	taskNamespace string,
+	taskName string,
+	workspaceEnv workerenv.ExecutionWorkspaceEnv,
+	ref workspace.WorkspaceRef,
+) string {
+	provider := strings.TrimSpace(workspaceEnv.Provider)
+	if provider == "" {
+		provider = string(corev1alpha1.WorkspaceProviderAgentSandbox)
+	}
+	if provider == string(corev1alpha1.WorkspaceProviderSubstrate) {
+		return fmt.Sprintf("Task %s/%s completed in %s workspace", taskNamespace, taskName, provider)
+	}
+	if claimName := strings.TrimSpace(ref.ClaimName); claimName != "" {
+		return fmt.Sprintf("Task %s/%s completed in %s workspace %s", taskNamespace, taskName, provider, claimName)
+	}
+	return fmt.Sprintf("Task %s/%s completed in %s workspace", taskNamespace, taskName, provider)
 }
 
 func preTerminalExecutionWorkspaceCleanupEnv(

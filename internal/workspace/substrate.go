@@ -404,7 +404,9 @@ func (e *SubstrateWorkspaceExecutor) Delete(ctx context.Context, req DeleteReque
 		return nil, err
 	}
 	if actor.Status == substrateStatusRunning {
-		_ = e.scrubDaemon(ctx, actorID)
+		if err := e.scrubDaemon(ctx, actorID); err != nil {
+			return nil, NewError("delete", ErrorKindFailedPrecondition, "failed to scrub workspace before delete", false, err)
+		}
 	}
 	if actor.Status != substrateStatusSuspended {
 		if actor, err = e.suspendActorAndWait(ctx, actorID); err != nil {
