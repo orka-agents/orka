@@ -352,7 +352,7 @@ func (e *SubstrateWorkspaceExecutor) Release(ctx context.Context, req ReleaseReq
 	if err := e.scrubDaemon(ctx, actorID); err != nil {
 		return nil, NewError("release", ErrorKindFailedPrecondition, "failed to scrub workspace before release", false, err)
 	}
-	actor, err := e.control.SuspendActor(ctx, actorID)
+	actor, err := e.suspendActorAndWait(ctx, actorID)
 	if err != nil {
 		return nil, err
 	}
@@ -382,7 +382,7 @@ func (e *SubstrateWorkspaceExecutor) Delete(ctx context.Context, req DeleteReque
 		_ = e.scrubDaemon(ctx, actorID)
 	}
 	if actor.Status != substrateStatusSuspended {
-		if actor, err = e.control.SuspendActor(ctx, actorID); err != nil {
+		if actor, err = e.suspendActorAndWait(ctx, actorID); err != nil {
 			return nil, err
 		}
 	}
@@ -391,6 +391,58 @@ func (e *SubstrateWorkspaceExecutor) Delete(ctx context.Context, req DeleteReque
 	}
 	e.setActorRetained(actorID, false)
 	return &DeleteResult{Ref: substrateRef(req.Ref.Namespace, actor), Deleted: true, Phase: PhaseDeleted, Message: releaseMessage(req.Reason, "workspace deleted")}, nil
+}
+
+func (e *SubstrateWorkspaceExecutor) suspendActorAndWait(ctx context.Context, actorID string) (*substrateActor, error) {
+	actor, err := e.control.SuspendActor(ctx, actorID)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, contextError("suspend actor", ctxErr)
+		}
+		observed, getErr := e.control.GetActor(ctx, actorID)
+		if getErr != nil || !substrateActorSuspendingOrSuspended(observed) {
+			return nil, err
+		}
+		actor = observed
+	}
+	if actor.Status == substrateStatusSuspended {
+		return actor, nil
+	}
+	return e.waitActorStatus(ctx, actorID, substrateStatusSuspended)
+}
+
+func (e *SubstrateWorkspaceExecutor) waitActorStatus(
+	ctx context.Context,
+	actorID string,
+	expected string,
+) (*substrateActor, error) {
+	backoff := substrateReadyInitialPollInterval
+	for {
+		actor, err := e.control.GetActor(ctx, actorID)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, contextError("wait actor status", ctxErr)
+			}
+			return nil, err
+		}
+		if actor.Status == expected {
+			return actor, nil
+		}
+		if err := sleepContext(ctx, backoff); err != nil {
+			return nil, contextError("wait actor status", err)
+		}
+		backoff = min(backoff*2, substrateReadyMaxPollInterval)
+		if backoff <= 0 {
+			backoff = substrateReadyInitialPollInterval
+		}
+	}
+}
+
+func substrateActorSuspendingOrSuspended(actor *substrateActor) bool {
+	if actor == nil {
+		return false
+	}
+	return actor.Status == substrateStatusSuspending || actor.Status == substrateStatusSuspended
 }
 
 func (e *SubstrateWorkspaceExecutor) Describe(ctx context.Context, req DescribeRequest) (*Description, error) {
