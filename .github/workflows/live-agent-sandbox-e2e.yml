@@ -1,0 +1,48 @@
+name: Live Agent Sandbox E2E
+
+on:
+  workflow_dispatch:
+  push:
+    paths-ignore:
+      - ".codex/**"
+      - ".claude/**"
+  pull_request:
+    paths-ignore:
+      - ".codex/**"
+      - ".claude/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-agent-sandbox-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-agent-sandbox-e2e:
+    name: Live Agent Sandbox E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      KIND_CLUSTER: orka-live-agent-sandbox-e2e
+      KIND_VERSION: v0.31.0
+    steps:
+      - name: Clone Orka
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install kind
+        run: |
+          curl -fsSL -o ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-$(go env GOARCH)"
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Verify kind installation
+        run: kind version
+
+      - name: Run live agent sandbox e2e
+        run: bash scripts/live-agent-sandbox-e2e.sh
