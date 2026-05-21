@@ -23,9 +23,10 @@ COPY --from=builder /out/orka-workspace-agent /orka-workspace-agent
 
 USER 1000:1000
 WORKDIR /workspace
-# Standalone image default matches EXPOSE; ActorTemplates should still set this
-# env explicitly so controller validation can compare it to the daemon port.
-ENV ORKA_WORKSPACE_AGENT_LISTEN_ADDR=:80
-EXPOSE 80
+# Standalone image default matches the binary default and avoids privileged ports.
+# ActorTemplates should still set this env explicitly so controller validation can
+# compare it to the daemon port.
+ENV ORKA_WORKSPACE_AGENT_LISTEN_ADDR=:8080
+EXPOSE 8080
 
 ENTRYPOINT ["/orka-workspace-agent"]

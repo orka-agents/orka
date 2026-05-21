@@ -19,7 +19,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	ateapipb "github.com/sozercan/orka/internal/substratepb"
@@ -120,13 +119,10 @@ func NewSubstrateExecutor(cfg SubstrateConfig, opts ...SubstrateOption) (*Substr
 		handoffToken:   cfg.HandoffToken,
 		bootstrapToken: cfg.BootstrapToken,
 		now:            time.Now,
-		retained:       make(map[string]bool),
 	}, nil
 }
 
 type SubstrateWorkspaceExecutor struct {
-	mu sync.Mutex
-
 	control        substrateControlClient
 	httpClient     *http.Client
 	routerURL      string
@@ -134,7 +130,6 @@ type SubstrateWorkspaceExecutor struct {
 	handoffToken   string
 	bootstrapToken string
 	now            func() time.Time
-	retained       map[string]bool
 }
 
 var _ WorkspaceExecutor = (*SubstrateWorkspaceExecutor)(nil)
@@ -171,7 +166,7 @@ func (e *SubstrateWorkspaceExecutor) Claim(ctx context.Context, req ClaimRequest
 
 	actor, err := e.control.GetActor(ctx, actorID)
 	if err == nil {
-		return e.reattachedSubstrateClaimResult(req, actorID, actor)
+		return e.reattachedSubstrateClaimResult(req, actor)
 	}
 	if !IsKind(err, ErrorKindNotFound) {
 		return nil, err
@@ -188,7 +183,7 @@ func (e *SubstrateWorkspaceExecutor) Claim(ctx context.Context, req ClaimRequest
 		if IsKind(err, ErrorKindAlreadyExists) {
 			actor, err = e.control.GetActor(ctx, actorID)
 			if err == nil {
-				return e.reattachedSubstrateClaimResult(req, actorID, actor)
+				return e.reattachedSubstrateClaimResult(req, actor)
 			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, contextError("claim", ctxErr)
@@ -210,7 +205,6 @@ func (e *SubstrateWorkspaceExecutor) Claim(ctx context.Context, req ClaimRequest
 
 func (e *SubstrateWorkspaceExecutor) reattachedSubstrateClaimResult(
 	req ClaimRequest,
-	actorID string,
 	actor *substrateActor,
 ) (*ClaimResult, error) {
 	if err := validateSubstrateActorTemplate(actor, req.Template); err != nil {
@@ -221,7 +215,7 @@ func (e *SubstrateWorkspaceExecutor) reattachedSubstrateClaimResult(
 		Template: req.Template,
 		ReuseKey: req.ReuseKey,
 		Reused:   true,
-		Phase:    substratePhase(actor, e.actorRetained(actorID)),
+		Phase:    substratePhase(actor),
 		Message:  "workspace actor reattached",
 	}, nil
 }
@@ -455,7 +449,6 @@ func (e *SubstrateWorkspaceExecutor) Release(ctx context.Context, req ReleaseReq
 		}
 		return nil, err
 	}
-	e.setActorRetained(actorID, req.Retain)
 	if req.Retain {
 		return &ReleaseResult{Ref: substrateRef(req.Ref.Namespace, actor), Retained: true, Phase: PhaseRetained, Message: releaseMessage(req.Reason, "workspace retained")}, nil
 	}
@@ -503,7 +496,6 @@ func (e *SubstrateWorkspaceExecutor) Delete(ctx context.Context, req DeleteReque
 	if err := e.control.DeleteActor(ctx, actorID); err != nil {
 		return nil, err
 	}
-	e.setActorRetained(actorID, false)
 	return &DeleteResult{Ref: substrateRef(req.Ref.Namespace, actor), Deleted: true, Phase: PhaseDeleted, Message: releaseMessage(req.Reason, "workspace deleted")}, nil
 }
 
@@ -574,11 +566,11 @@ func (e *SubstrateWorkspaceExecutor) Describe(ctx context.Context, req DescribeR
 		}
 		return nil, err
 	}
-	retained := e.actorRetained(actorID)
+	retained := substrateActorRetained(actor)
 	return &Description{
 		Ref:      substrateRef(req.Ref.Namespace, actor),
 		Template: TemplateRef{Namespace: actor.TemplateNamespace, Name: actor.TemplateName},
-		Phase:    substratePhase(actor, retained),
+		Phase:    substratePhase(actor),
 		Retained: retained,
 		Message:  "workspace described",
 	}, nil
@@ -700,22 +692,6 @@ func (e *SubstrateWorkspaceExecutor) daemonURL(path string) (string, error) {
 	return base.String(), nil
 }
 
-func (e *SubstrateWorkspaceExecutor) actorRetained(actorID string) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.retained[actorID]
-}
-
-func (e *SubstrateWorkspaceExecutor) setActorRetained(actorID string, retained bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if retained {
-		e.retained[actorID] = true
-		return
-	}
-	delete(e.retained, actorID)
-}
-
 func substrateActorID(ref WorkspaceRef) string {
 	if strings.TrimSpace(ref.ID) != "" {
 		return strings.TrimSpace(ref.ID)
@@ -734,7 +710,11 @@ func substrateRef(namespace string, actor *substrateActor) WorkspaceRef {
 	}
 }
 
-func substratePhase(actor *substrateActor, retained bool) Phase {
+func substrateActorRetained(actor *substrateActor) bool {
+	return actor != nil && actor.Status == substrateStatusSuspended
+}
+
+func substratePhase(actor *substrateActor) Phase {
 	if actor == nil {
 		return PhaseDeleted
 	}
@@ -746,10 +726,7 @@ func substratePhase(actor *substrateActor, retained bool) Phase {
 	case substrateStatusSuspending:
 		return PhaseReleased
 	case substrateStatusSuspended:
-		if retained {
-			return PhaseRetained
-		}
-		return PhaseReleased
+		return PhaseRetained
 	default:
 		return PhaseFailed
 	}

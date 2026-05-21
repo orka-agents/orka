@@ -204,23 +204,24 @@ metadata:
     orka.ai/workspace-provider: substrate
   annotations:
     orka.ai/workspace-protocol: http-json-v1
-    orka.ai/workspace-daemon-port: "80"
+    orka.ai/workspace-daemon-port: "8080"
     orka.ai/workspace-staging-root: /app
     orka.ai/agent-runtimes: codex
 ```
 
 The daemon port must match the daemon container's literal
 `ORKA_WORKSPACE_AGENT_LISTEN_ADDR` value, or the daemon default `:8080` when
-that environment variable is omitted. The staging root is currently required to
-be `/app`, because the worker handoff stages the inner worker binary and secret
-scrub paths under that directory.
+that environment variable is omitted. Use an unprivileged port such as `8080`
+because the Orka workspace-agent image runs as a non-root user. The staging root
+is currently required to be `/app`, because the worker handoff stages the inner
+worker binary and secret scrub paths under that directory.
 Use the Orka agent worker image for the runtime, not the daemon-only image; the
 ActorTemplate container must include `/orka-workspace-agent`, the selected CLI,
 and normal workspace tools such as `git`.
 The controller also validates that the workspace-daemon ActorTemplate container
-defines `ORKA_WORKSPACE_BOOTSTRAP_TOKEN` with either a non-empty literal value
-or a `valueFrom.secretKeyRef` matching the configured bootstrap Secret name and
-key.
+defines `ORKA_WORKSPACE_BOOTSTRAP_TOKEN` with a `valueFrom.secretKeyRef` matching
+the configured bootstrap Secret name and key. Literal values are accepted only
+when the controller is not configured with a bootstrap Secret.
 
 Example shape:
 
@@ -244,7 +245,7 @@ metadata:
     orka.ai/workspace-provider: substrate
   annotations:
     orka.ai/agent-runtimes: codex
-    orka.ai/workspace-daemon-port: "80"
+    orka.ai/workspace-daemon-port: "8080"
     orka.ai/workspace-protocol: http-json-v1
     orka.ai/workspace-staging-root: /app
 spec:
@@ -256,7 +257,7 @@ spec:
         - /orka-workspace-agent
       env:
         - name: ORKA_WORKSPACE_AGENT_LISTEN_ADDR
-          value: ":80"
+          value: ":8080"
         - name: ORKA_WORKSPACE_HANDOFF_TOKEN_FILE
           value: /app/orka-workspace-handoff-token
         - name: ORKA_WORKSPACE_BOOTSTRAP_TOKEN
@@ -265,7 +266,7 @@ spec:
               name: orka-substrate-bootstrap
               key: token
       ports:
-        - containerPort: 80
+        - containerPort: 8080
   workerPoolRef:
     name: orka-workers
     namespace: ate-demo

@@ -292,7 +292,7 @@ metadata:
     orka.ai/workspace-provider: substrate
   annotations:
     orka.ai/agent-runtimes: codex
-    orka.ai/workspace-daemon-port: "80"
+    orka.ai/workspace-daemon-port: "8080"
     orka.ai/workspace-protocol: http-json-v1
     orka.ai/workspace-staging-root: /app
 spec:
@@ -304,13 +304,16 @@ spec:
       - /orka-workspace-agent
     env:
       - name: ORKA_WORKSPACE_AGENT_LISTEN_ADDR
-        value: ":80"
+        value: ":8080"
       - name: ORKA_WORKSPACE_HANDOFF_TOKEN_FILE
         value: /app/orka-workspace-handoff-token
       - name: ORKA_WORKSPACE_BOOTSTRAP_TOKEN
-        value: ${SUBSTRATE_BOOTSTRAP_TOKEN}
+        valueFrom:
+          secretKeyRef:
+            name: ${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME}
+            key: ${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY}
     ports:
-      - containerPort: 80
+      - containerPort: 8080
   workerPoolRef:
     name: orka-workers
     namespace: ate-demo

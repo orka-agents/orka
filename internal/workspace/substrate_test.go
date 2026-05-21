@@ -74,7 +74,6 @@ func TestSubstrateClaimReattachesAfterConcurrentCreateAlreadyExists(t *testing.T
 		routerURL:      "http://router.test",
 		actorDNSSuffix: "actors.test",
 		now:            time.Now,
-		retained:       map[string]bool{},
 	}
 
 	got, err := executor.Claim(t.Context(), ClaimRequest{
@@ -139,7 +138,6 @@ func TestSubstrateClaimRejectsReattachedActorTemplateMismatch(t *testing.T) {
 				routerURL:      "http://router.test",
 				actorDNSSuffix: "actors.test",
 				now:            time.Now,
-				retained:       map[string]bool{},
 			}
 
 			_, err := executor.Claim(t.Context(), ClaimRequest{
@@ -165,6 +163,33 @@ func TestSubstrateClaimRejectsReattachedActorTemplateMismatch(t *testing.T) {
 				t.Fatalf("CreateActor calls = %d, want %d", control.createCalls, tt.wantCreateCalls)
 			}
 		})
+	}
+}
+
+func TestSubstrateClaimDerivesRetainedPhaseFromSuspendedActor(t *testing.T) {
+	control := &recordingSubstrateControlClient{
+		getStatuses: []string{substrateStatusSuspended},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     http.DefaultClient,
+		routerURL:      "http://router.test",
+		actorDNSSuffix: "actors.test",
+		now:            time.Now,
+	}
+
+	got, err := executor.Claim(t.Context(), ClaimRequest{
+		Namespace:       "ate-demo",
+		ClaimName:       "actor-1",
+		CreateIfMissing: true,
+		Template:        TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"},
+		Timeout:         time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	if !got.Reused || got.Phase != PhaseRetained {
+		t.Fatalf("Claim() reused=%t phase=%s, want reused retained actor", got.Reused, got.Phase)
 	}
 }
 
@@ -368,7 +393,6 @@ func TestSubstrateDeleteWaitsForSuspendedAfterSuspend(t *testing.T) {
 		actorDNSSuffix: "actors.test",
 		handoffToken:   substrateTestToken,
 		now:            time.Now,
-		retained:       map[string]bool{},
 	}
 
 	got, err := executor.Delete(t.Context(), DeleteRequest{
@@ -415,7 +439,6 @@ func TestSubstrateDeleteWaitsWhenSuspendReturnsAfterStartingTransition(t *testin
 		actorDNSSuffix: "actors.test",
 		handoffToken:   substrateTestToken,
 		now:            time.Now,
-		retained:       map[string]bool{},
 	}
 
 	got, err := executor.Delete(t.Context(), DeleteRequest{
@@ -461,7 +484,6 @@ func TestSubstrateDeleteSkipScrubDeletesRunningActor(t *testing.T) {
 		actorDNSSuffix: "actors.test",
 		handoffToken:   substrateTestToken,
 		now:            time.Now,
-		retained:       map[string]bool{},
 	}
 
 	got, err := executor.Delete(t.Context(), DeleteRequest{
@@ -506,7 +528,6 @@ func TestSubstrateDeleteFailsClosedWhenRunningScrubFails(t *testing.T) {
 		actorDNSSuffix: "actors.test",
 		handoffToken:   substrateTestToken,
 		now:            time.Now,
-		retained:       map[string]bool{},
 	}
 
 	_, err := executor.Delete(t.Context(), DeleteRequest{
@@ -577,7 +598,6 @@ func TestSubstrateDeleteRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testin
 		handoffToken:   substrateTestToken,
 		bootstrapToken: "bootstrap-token",
 		now:            time.Now,
-		retained:       map[string]bool{},
 	}
 
 	_, err := executor.Delete(t.Context(), DeleteRequest{
@@ -647,7 +667,6 @@ func TestSubstrateReleaseRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testi
 		handoffToken:   substrateTestToken,
 		bootstrapToken: "bootstrap-token",
 		now:            time.Now,
-		retained:       map[string]bool{},
 	}
 
 	_, err := executor.Release(t.Context(), ReleaseRequest{
@@ -686,7 +705,6 @@ func TestSubstrateReleaseWaitsForSuspendedAfterSuspend(t *testing.T) {
 		routerURL:      server.URL,
 		actorDNSSuffix: "actors.test",
 		now:            time.Now,
-		retained:       map[string]bool{},
 	}
 
 	got, err := executor.Release(t.Context(), ReleaseRequest{
@@ -725,7 +743,6 @@ func TestSubstrateReleaseWaitsWhenSuspendReturnsAfterStartingTransition(t *testi
 		routerURL:      server.URL,
 		actorDNSSuffix: "actors.test",
 		now:            time.Now,
-		retained:       map[string]bool{},
 	}
 
 	got, err := executor.Release(t.Context(), ReleaseRequest{
@@ -741,6 +758,29 @@ func TestSubstrateReleaseWaitsWhenSuspendReturnsAfterStartingTransition(t *testi
 	}
 	if !got.Retained || got.Phase != PhaseRetained {
 		t.Fatalf("Release() = %#v, want retained phase", got)
+	}
+}
+
+func TestSubstrateDescribeDerivesRetainedFromSuspendedActor(t *testing.T) {
+	control := &recordingSubstrateControlClient{
+		getStatuses: []string{substrateStatusSuspended},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     http.DefaultClient,
+		routerURL:      "http://router.test",
+		actorDNSSuffix: "actors.test",
+		now:            time.Now,
+	}
+
+	got, err := executor.Describe(t.Context(), DescribeRequest{
+		Ref: WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
+	})
+	if err != nil {
+		t.Fatalf("Describe() error = %v", err)
+	}
+	if !got.Retained || got.Phase != PhaseRetained {
+		t.Fatalf("Describe() = %#v, want retained phase derived from suspended actor", got)
 	}
 }
 

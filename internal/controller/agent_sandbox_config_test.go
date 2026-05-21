@@ -204,7 +204,7 @@ func TestValidateSubstrateWorkspaceTemplateRequiresAppStagingRoot(t *testing.T) 
 	})
 	template.SetAnnotations(map[string]string{
 		"orka.ai/workspace-protocol":     "http-json-v1",
-		"orka.ai/workspace-daemon-port":  "80",
+		"orka.ai/workspace-daemon-port":  "8080",
 		"orka.ai/workspace-staging-root": "/workspace",
 	})
 
@@ -242,7 +242,7 @@ func TestValidateSubstrateWorkspaceTemplateRequiresReadyPhase(t *testing.T) {
 	})
 	template.SetAnnotations(map[string]string{
 		"orka.ai/workspace-protocol":     "http-json-v1",
-		"orka.ai/workspace-daemon-port":  "80",
+		"orka.ai/workspace-daemon-port":  "8080",
 		"orka.ai/workspace-staging-root": "/app",
 	})
 
@@ -302,7 +302,10 @@ func TestValidateSubstrateWorkspaceTemplateAcceptsLiteralBootstrapTokenEnv(t *te
 	})
 	r := substrateTemplateValidatorForTest(t, template)
 
-	if err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest()); err != nil {
+	request := substrateTemplateRequestForTest()
+	request.SubstrateBootstrapSecretName = ""
+	request.SubstrateBootstrapSecretKey = ""
+	if err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, request); err != nil {
 		t.Fatalf("validateSubstrateWorkspaceTemplate() error = %v", err)
 	}
 }
@@ -320,6 +323,9 @@ func TestValidateSubstrateWorkspaceTemplateRejectsDaemonPortMismatch(t *testing.
 			},
 		},
 	})
+	annotations := template.GetAnnotations()
+	annotations["orka.ai/workspace-daemon-port"] = "80"
+	template.SetAnnotations(annotations)
 	r := substrateTemplateValidatorForTest(t, template)
 
 	err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest())
@@ -374,8 +380,13 @@ func TestValidateSubstrateWorkspaceTemplateAcceptsBootstrapTokenOnDaemonContaine
 			"env": []any{
 				substrateWorkspaceDaemonListenEnvForTest(),
 				map[string]any{
-					"name":  workerenv.WorkspaceBootstrapToken,
-					"value": "bootstrap-token",
+					"name": workerenv.WorkspaceBootstrapToken,
+					"valueFrom": map[string]any{
+						"secretKeyRef": map[string]any{
+							"name": testSubstrateBootstrapSecretName,
+							"key":  testSubstrateBootstrapSecretKey,
+						},
+					},
 				},
 			},
 		},
@@ -433,6 +444,24 @@ func TestValidateSubstrateWorkspaceTemplateRejectsMismatchedBootstrapSecretRef(t
 	}
 	if !strings.Contains(err.Error(), "configured bootstrap Secret") {
 		t.Fatalf("error = %q, want configured secret context", err.Error())
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateRejectsLiteralBootstrapTokenWhenSecretConfigured(t *testing.T) {
+	template := readySubstrateActorTemplateForTest([]any{
+		map[string]any{
+			"name":  workerenv.WorkspaceBootstrapToken,
+			"value": "bootstrap-token",
+		},
+	})
+	r := substrateTemplateValidatorForTest(t, template)
+
+	err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest())
+	if err == nil {
+		t.Fatal("validateSubstrateWorkspaceTemplate() error = nil, want literal bootstrap token error")
+	}
+	if !strings.Contains(err.Error(), "must use valueFrom.secretKeyRef for configured bootstrap Secret") {
+		t.Fatalf("error = %q, want configured secret literal rejection context", err.Error())
 	}
 }
 
@@ -733,7 +762,7 @@ func readySubstrateActorTemplateForTest(env []any) *unstructured.Unstructured {
 func substrateWorkspaceDaemonListenEnvForTest() map[string]any {
 	return map[string]any{
 		"name":  substrateWorkspaceDaemonListenEnv,
-		"value": ":80",
+		"value": ":8080",
 	}
 }
 
@@ -750,7 +779,7 @@ func readySubstrateActorTemplateWithContainersForTest(containers []any) *unstruc
 			},
 			"annotations": map[string]any{
 				"orka.ai/workspace-protocol":     "http-json-v1",
-				"orka.ai/workspace-daemon-port":  "80",
+				"orka.ai/workspace-daemon-port":  "8080",
 				"orka.ai/workspace-staging-root": "/app",
 			},
 		},
