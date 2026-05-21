@@ -9,6 +9,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,6 +50,8 @@ const (
 	defaultAgentSandboxCommandTimeout = 30 * time.Minute
 	substrateWorkspaceStagingRoot     = "/app"
 	substrateWorkspaceDaemonCommand   = "orka-workspace-agent"
+	substrateWorkspaceDaemonListenEnv = "ORKA_WORKSPACE_AGENT_LISTEN_ADDR"
+	substrateWorkspaceDaemonListen    = ":8080"
 )
 
 // AgentSandboxConfig holds disabled-by-default alpha configuration for agent sandbox workspace integration.
@@ -410,11 +414,124 @@ func (r *TaskReconciler) validateSubstrateWorkspaceTemplate(ctx context.Context,
 		}
 		return fmt.Errorf("substrate ActorTemplate %q in namespace %q is not Ready: phase=%s", request.TemplateName, request.TemplateNamespace, phase)
 	}
+	if err := validateSubstrateWorkspaceTemplateDaemonPort(template, annotations["orka.ai/workspace-daemon-port"]); err != nil {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q %w", request.TemplateName, request.TemplateNamespace, err)
+	}
 	if err := validateSubstrateWorkspaceTemplateBootstrapEnv(template, request); err != nil {
 		return fmt.Errorf("substrate ActorTemplate %q in namespace %q %w", request.TemplateName, request.TemplateNamespace, err)
 	}
 	_ = task
 	return nil
+}
+
+func validateSubstrateWorkspaceTemplateDaemonPort(template *unstructured.Unstructured, annotatedPort string) error {
+	port, err := parseSubstrateWorkspaceDaemonPort(annotatedPort)
+	if err != nil {
+		return fmt.Errorf("has invalid annotation orka.ai/workspace-daemon-port: %w", err)
+	}
+	containers, found, err := unstructured.NestedSlice(template.Object, "spec", "containers")
+	if err != nil {
+		return fmt.Errorf("has invalid spec.containers: %w", err)
+	}
+	if !found || len(containers) == 0 {
+		return fmt.Errorf("must define a workspace daemon container")
+	}
+
+	daemonContainers, err := substrateWorkspaceDaemonContainers(containers)
+	if err != nil {
+		return err
+	}
+	for _, container := range daemonContainers {
+		listenPort, err := substrateWorkspaceDaemonListenPort(container)
+		if err != nil {
+			return substrateWorkspaceDaemonContainerError(container, err)
+		}
+		if listenPort != port {
+			return substrateWorkspaceDaemonContainerError(
+				container,
+				fmt.Errorf(
+					"listen port %d must match annotation orka.ai/workspace-daemon-port=%d",
+					listenPort,
+					port,
+				),
+			)
+		}
+	}
+	return nil
+}
+
+func substrateWorkspaceDaemonContainerError(container map[string]any, err error) error {
+	name, _, _ := unstructured.NestedString(container, "name")
+	if strings.TrimSpace(name) != "" {
+		return fmt.Errorf("workspace daemon container %q %w", name, err)
+	}
+	return fmt.Errorf("workspace daemon container %w", err)
+}
+
+func parseSubstrateWorkspaceDaemonPort(value string) (int, error) {
+	value = strings.TrimSpace(value)
+	port, err := strconv.ParseUint(value, 10, 16)
+	if err != nil || port == 0 {
+		return 0, fmt.Errorf("must be a TCP port number from 1 to 65535")
+	}
+	return int(port), nil
+}
+
+func substrateWorkspaceDaemonListenPort(container map[string]any) (int, error) {
+	listenAddr := substrateWorkspaceDaemonListen
+	env, found, err := substrateContainerEnv(container)
+	if err != nil {
+		return 0, err
+	}
+	if found {
+		if value, ok, err := substrateContainerLiteralEnv(env, substrateWorkspaceDaemonListenEnv); err != nil {
+			return 0, err
+		} else if ok {
+			listenAddr = value
+		}
+	}
+	_, port, err := net.SplitHostPort(strings.TrimSpace(listenAddr))
+	if err != nil {
+		return 0, fmt.Errorf("env %s must be a listen address with a port", substrateWorkspaceDaemonListenEnv)
+	}
+	return parseSubstrateWorkspaceDaemonPort(port)
+}
+
+func substrateContainerEnv(container map[string]any) ([]any, bool, error) {
+	envValue, found, err := unstructured.NestedFieldNoCopy(container, "env")
+	if err != nil {
+		return nil, false, fmt.Errorf("has invalid container env: %w", err)
+	}
+	if !found || envValue == nil {
+		return nil, false, nil
+	}
+	env, ok := envValue.([]any)
+	if !ok {
+		return nil, false, fmt.Errorf("has invalid container env")
+	}
+	return env, true, nil
+}
+
+func substrateContainerLiteralEnv(env []any, name string) (string, bool, error) {
+	for _, envItem := range env {
+		envVar, ok := envItem.(map[string]any)
+		if !ok {
+			return "", false, fmt.Errorf("has invalid container env entry")
+		}
+		envName, _, _ := unstructured.NestedString(envVar, "name")
+		if envName != name {
+			continue
+		}
+		value, found, err := unstructured.NestedString(envVar, "value")
+		if err != nil {
+			return "", false, fmt.Errorf("env %s has invalid value", name)
+		}
+		if !found {
+			return "", false, fmt.Errorf("env %s must set a literal value", name)
+		}
+		return strings.TrimSpace(value), true, nil
+	}
+	return "", false, nil
 }
 
 func validateSubstrateWorkspaceTemplateBootstrapEnv(template *unstructured.Unstructured, request *ExecutionWorkspaceRequest) error {
@@ -432,11 +549,7 @@ func validateSubstrateWorkspaceTemplateBootstrapEnv(template *unstructured.Unstr
 	}
 	for _, container := range daemonContainers {
 		if err := validateSubstrateWorkspaceDaemonBootstrapEnv(container, request); err != nil {
-			name, _, _ := unstructured.NestedString(container, "name")
-			if strings.TrimSpace(name) != "" {
-				return fmt.Errorf("workspace daemon container %q %w", name, err)
-			}
-			return fmt.Errorf("workspace daemon container %w", err)
+			return substrateWorkspaceDaemonContainerError(container, err)
 		}
 	}
 	return nil
@@ -514,16 +627,12 @@ func substrateContainerStringList(container map[string]any, field string) ([]str
 }
 
 func validateSubstrateWorkspaceDaemonBootstrapEnv(container map[string]any, request *ExecutionWorkspaceRequest) error {
-	envValue, found, err := unstructured.NestedFieldNoCopy(container, "env")
+	env, found, err := substrateContainerEnv(container)
 	if err != nil {
-		return fmt.Errorf("has invalid container env: %w", err)
+		return err
 	}
-	if !found || envValue == nil {
+	if !found {
 		return fmt.Errorf("missing required env %s", workerenv.WorkspaceBootstrapToken)
-	}
-	env, ok := envValue.([]any)
-	if !ok {
-		return fmt.Errorf("has invalid container env")
 	}
 	for _, envItem := range env {
 		envVar, ok := envItem.(map[string]any)

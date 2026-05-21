@@ -209,9 +209,11 @@ metadata:
     orka.ai/agent-runtimes: codex
 ```
 
-The daemon port must match the daemon container's configuration. The staging
-root is currently required to be `/app`, because the worker handoff stages the
-inner worker binary and secret scrub paths under that directory.
+The daemon port must match the daemon container's literal
+`ORKA_WORKSPACE_AGENT_LISTEN_ADDR` value, or the daemon default `:8080` when
+that environment variable is omitted. The staging root is currently required to
+be `/app`, because the worker handoff stages the inner worker binary and secret
+scrub paths under that directory.
 Use the Orka agent worker image for the runtime, not the daemon-only image; the
 ActorTemplate container must include `/orka-workspace-agent`, the selected CLI,
 and normal workspace tools such as `git`.

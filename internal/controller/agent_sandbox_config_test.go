@@ -307,6 +307,31 @@ func TestValidateSubstrateWorkspaceTemplateAcceptsLiteralBootstrapTokenEnv(t *te
 	}
 }
 
+func TestValidateSubstrateWorkspaceTemplateRejectsDaemonPortMismatch(t *testing.T) {
+	template := readySubstrateActorTemplateWithContainersForTest([]any{
+		map[string]any{
+			"name":    "workspace",
+			"command": []any{"/orka-workspace-agent"},
+			"env": []any{
+				map[string]any{
+					"name":  workerenv.WorkspaceBootstrapToken,
+					"value": "bootstrap-token",
+				},
+			},
+		},
+	})
+	r := substrateTemplateValidatorForTest(t, template)
+
+	err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest())
+	if err == nil {
+		t.Fatal("validateSubstrateWorkspaceTemplate() error = nil, want daemon port mismatch error")
+	}
+	if !strings.Contains(err.Error(), `workspace daemon container "workspace" listen port 8080`) ||
+		!strings.Contains(err.Error(), "orka.ai/workspace-daemon-port=80") {
+		t.Fatalf("error = %q, want daemon port mismatch context", err.Error())
+	}
+}
+
 func TestValidateSubstrateWorkspaceTemplateRequiresBootstrapTokenOnDaemonContainer(t *testing.T) {
 	template := readySubstrateActorTemplateWithContainersForTest([]any{
 		map[string]any{
@@ -321,6 +346,9 @@ func TestValidateSubstrateWorkspaceTemplateRequiresBootstrapTokenOnDaemonContain
 		map[string]any{
 			"name":    "workspace",
 			"command": []any{"/orka-workspace-agent"},
+			"env": []any{
+				substrateWorkspaceDaemonListenEnvForTest(),
+			},
 		},
 	})
 	r := substrateTemplateValidatorForTest(t, template)
@@ -344,6 +372,7 @@ func TestValidateSubstrateWorkspaceTemplateAcceptsBootstrapTokenOnDaemonContaine
 			"name":    "workspace",
 			"command": []any{"/orka-workspace-agent"},
 			"env": []any{
+				substrateWorkspaceDaemonListenEnvForTest(),
 				map[string]any{
 					"name":  workerenv.WorkspaceBootstrapToken,
 					"value": "bootstrap-token",
@@ -691,13 +720,21 @@ func substrateTemplateValidatorForTest(t *testing.T, template *unstructured.Unst
 }
 
 func readySubstrateActorTemplateForTest(env []any) *unstructured.Unstructured {
+	daemonEnv := append([]any{substrateWorkspaceDaemonListenEnvForTest()}, env...)
 	return readySubstrateActorTemplateWithContainersForTest([]any{
 		map[string]any{
 			"name":    "workspace",
 			"command": []any{"/orka-workspace-agent"},
-			"env":     env,
+			"env":     daemonEnv,
 		},
 	})
+}
+
+func substrateWorkspaceDaemonListenEnvForTest() map[string]any {
+	return map[string]any{
+		"name":  substrateWorkspaceDaemonListenEnv,
+		"value": ":80",
+	}
 }
 
 func readySubstrateActorTemplateWithContainersForTest(containers []any) *unstructured.Unstructured {
