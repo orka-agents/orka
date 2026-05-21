@@ -81,6 +81,10 @@ rules:
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["sandboxes"]
     verbs: ["get", "list", "watch"]
+  # Substrate workspace backend: validate approved ActorTemplates before job creation
+  - apiGroups: ["ate.dev"]
+    resources: ["actortemplates"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods/portforward"]
     verbs: ["create"]
