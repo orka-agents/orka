@@ -47,6 +47,7 @@ const (
 	defaultAgentSandboxClaimTimeout   = 2 * time.Minute
 	defaultAgentSandboxCommandTimeout = 30 * time.Minute
 	substrateWorkspaceStagingRoot     = "/app"
+	substrateWorkspaceDaemonCommand   = "orka-workspace-agent"
 )
 
 // AgentSandboxConfig holds disabled-by-default alpha configuration for agent sandbox workspace integration.
@@ -425,45 +426,127 @@ func validateSubstrateWorkspaceTemplateBootstrapEnv(template *unstructured.Unstr
 		return fmt.Errorf("must define a container with %s", workerenv.WorkspaceBootstrapToken)
 	}
 
+	daemonContainers, err := substrateWorkspaceDaemonContainers(containers)
+	if err != nil {
+		return err
+	}
+	for _, container := range daemonContainers {
+		if err := validateSubstrateWorkspaceDaemonBootstrapEnv(container, request); err != nil {
+			name, _, _ := unstructured.NestedString(container, "name")
+			if strings.TrimSpace(name) != "" {
+				return fmt.Errorf("workspace daemon container %q %w", name, err)
+			}
+			return fmt.Errorf("workspace daemon container %w", err)
+		}
+	}
+	return nil
+}
+
+func substrateWorkspaceDaemonContainers(containers []any) ([]map[string]any, error) {
+	parsed := make([]map[string]any, 0, len(containers))
+	daemons := make([]map[string]any, 0, len(containers))
+
 	for _, item := range containers {
 		container, ok := item.(map[string]any)
 		if !ok {
-			return fmt.Errorf("has invalid spec.containers entry")
+			return nil, fmt.Errorf("has invalid spec.containers entry")
 		}
-		envValue, found, err := unstructured.NestedFieldNoCopy(container, "env")
+		parsed = append(parsed, container)
+
+		runsDaemon, err := substrateContainerRunsWorkspaceDaemon(container)
 		if err != nil {
-			return fmt.Errorf("has invalid container env: %w", err)
+			return nil, err
 		}
-		if !found || envValue == nil {
+		if runsDaemon {
+			daemons = append(daemons, container)
+		}
+	}
+
+	if len(daemons) > 0 {
+		return daemons, nil
+	}
+	if len(parsed) == 1 {
+		return parsed, nil
+	}
+	return nil, fmt.Errorf(
+		"must identify the workspace daemon container with command or args containing /%s",
+		substrateWorkspaceDaemonCommand,
+	)
+}
+
+func substrateContainerRunsWorkspaceDaemon(container map[string]any) (bool, error) {
+	for _, field := range []string{"command", "args"} {
+		values, err := substrateContainerStringList(container, field)
+		if err != nil {
+			return false, err
+		}
+		for _, value := range values {
+			if strings.Contains(value, substrateWorkspaceDaemonCommand) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func substrateContainerStringList(container map[string]any, field string) ([]string, error) {
+	value, found, err := unstructured.NestedFieldNoCopy(container, field)
+	if err != nil {
+		return nil, fmt.Errorf("has invalid container %s: %w", field, err)
+	}
+	if !found || value == nil {
+		return nil, nil
+	}
+	values, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("has invalid container %s", field)
+	}
+
+	result := make([]string, 0, len(values))
+	for _, item := range values {
+		stringValue, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("has invalid container %s entry", field)
+		}
+		result = append(result, strings.TrimSpace(stringValue))
+	}
+	return result, nil
+}
+
+func validateSubstrateWorkspaceDaemonBootstrapEnv(container map[string]any, request *ExecutionWorkspaceRequest) error {
+	envValue, found, err := unstructured.NestedFieldNoCopy(container, "env")
+	if err != nil {
+		return fmt.Errorf("has invalid container env: %w", err)
+	}
+	if !found || envValue == nil {
+		return fmt.Errorf("missing required env %s", workerenv.WorkspaceBootstrapToken)
+	}
+	env, ok := envValue.([]any)
+	if !ok {
+		return fmt.Errorf("has invalid container env")
+	}
+	for _, envItem := range env {
+		envVar, ok := envItem.(map[string]any)
+		if !ok {
+			return fmt.Errorf("has invalid container env entry")
+		}
+		name, _, _ := unstructured.NestedString(envVar, "name")
+		if name != workerenv.WorkspaceBootstrapToken {
 			continue
 		}
-		env, ok := envValue.([]any)
-		if !ok {
-			return fmt.Errorf("has invalid container env")
+		value, _, _ := unstructured.NestedString(envVar, "value")
+		if strings.TrimSpace(value) != "" {
+			return nil
 		}
-		for _, envItem := range env {
-			envVar, ok := envItem.(map[string]any)
-			if !ok {
-				return fmt.Errorf("has invalid container env entry")
-			}
-			name, _, _ := unstructured.NestedString(envVar, "name")
-			if name != workerenv.WorkspaceBootstrapToken {
-				continue
-			}
-			value, _, _ := unstructured.NestedString(envVar, "value")
-			if strings.TrimSpace(value) != "" {
-				return nil
-			}
-			if ok, err := substrateBootstrapEnvUsesConfiguredSecret(envVar, request); err != nil {
-				return err
-			} else if ok {
-				return nil
-			}
-			return fmt.Errorf(
-				"%s must set a non-empty value or valueFrom.secretKeyRef",
-				workerenv.WorkspaceBootstrapToken,
-			)
+		if ok, err := substrateBootstrapEnvUsesConfiguredSecret(envVar, request); err != nil {
+			return err
+		} else if ok {
+			return nil
 		}
+		return fmt.Errorf(
+			"%s must set a non-empty value or valueFrom.secretKeyRef",
+			workerenv.WorkspaceBootstrapToken,
+		)
 	}
 
 	return fmt.Errorf("missing required env %s", workerenv.WorkspaceBootstrapToken)
