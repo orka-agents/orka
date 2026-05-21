@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	defaultListenAddr            = ":80"
+	defaultListenAddr            = ":8080"
 	defaultCommandTimeout        = 30 * time.Minute
 	completedExecutionRetention  = 15 * time.Minute
 	defaultMaxOutputBytes        = 1 << 20
@@ -46,6 +46,8 @@ const (
 )
 
 var allowedRoots = []string{"/app", "/workspace", "/home/worker", "/tmp"}
+
+var errHandoffTokenMissing = errors.New("handoff token file is missing")
 
 func main() {
 	if err := run(); err != nil {
@@ -105,13 +107,15 @@ func (s *workspaceAgentServer) requireAuth(next http.HandlerFunc) http.HandlerFu
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, err := handoffToken()
 		if err != nil {
-			allowBootstrap, handled := s.allowHandoffBootstrap(w, r)
-			if allowBootstrap {
-				next(w, r)
-				return
-			}
-			if handled {
-				return
+			if errors.Is(err, errHandoffTokenMissing) {
+				allowBootstrap, handled := s.allowHandoffBootstrap(w, r)
+				if allowBootstrap {
+					next(w, r)
+					return
+				}
+				if handled {
+					return
+				}
 			}
 			http.Error(w, "handoff credential unavailable", http.StatusServiceUnavailable)
 			return
@@ -182,6 +186,9 @@ func handoffToken() (string, error) {
 	}
 	data, err := os.ReadFile(handoffTokenFilePath())
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("%w: %w", errHandoffTokenMissing, err)
+		}
 		return "", err
 	}
 	token := strings.TrimSpace(string(data))

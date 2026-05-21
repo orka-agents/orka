@@ -242,9 +242,24 @@ func (e *SubstrateWorkspaceExecutor) WaitReady(ctx context.Context, req WaitRead
 	backoff := substrateReadyInitialPollInterval
 	for {
 		actor, err := e.control.GetActor(ctx, actorID)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, contextError("wait ready", ctxErr)
+			}
+			if !retryableWorkspaceError(err) {
+				return nil, err
+			}
+		}
 		if err == nil && actor.Status == substrateStatusRunning && strings.TrimSpace(actor.PodIP) != "" {
 			if err := e.daemonRequest(ctx, actorID, http.MethodGet, "/healthz", nil, nil); err == nil {
 				return &ReadyResult{Ref: substrateRef(req.Ref.Namespace, actor), Phase: PhaseReady, Message: "workspace ready", ReadyAt: e.now()}, nil
+			} else {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, contextError("wait ready", ctxErr)
+				}
+				if !retryableWorkspaceError(err) {
+					return nil, err
+				}
 			}
 		}
 		if err := sleepContext(ctx, backoff); err != nil {
@@ -635,6 +650,14 @@ func (e *SubstrateWorkspaceExecutor) requireBootstrapToken(op string) (string, e
 		return "", NewError(op, ErrorKindFailedPrecondition, "workspace bootstrap token is required", false, nil)
 	}
 	return token, nil
+}
+
+func retryableWorkspaceError(err error) bool {
+	var workspaceErr *Error
+	if errors.As(err, &workspaceErr) {
+		return workspaceErr.Retryable
+	}
+	return true
 }
 
 func (e *SubstrateWorkspaceExecutor) daemonURL(path string) (string, error) {

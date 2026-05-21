@@ -109,23 +109,10 @@ func deterministicSubstrateTaskActorID(taskUID string, attempt int32) string {
 		uid = "unknown"
 	}
 	uid = strings.ToLower(uid)
-	var b strings.Builder
-	for _, r := range uid {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
-			b.WriteRune(r)
-		}
-	}
-	cleanUID := strings.Trim(b.String(), "-")
-	if len(cleanUID) > 24 {
-		cleanUID = cleanUID[:24]
-		cleanUID = strings.TrimRight(cleanUID, "-")
-	}
-	if cleanUID == "" {
-		sum := sha256.Sum256([]byte(uid))
-		cleanUID = hex.EncodeToString(sum[:])[:24]
-	}
+	sum := sha256.Sum256([]byte(uid))
+	uidHash := hex.EncodeToString(sum[:])[:32]
 	if attempt <= 0 {
 		attempt = 1
 	}
-	return fmt.Sprintf("orka-t-%s-%d", cleanUID, attempt)
+	return fmt.Sprintf("orka-t-%s-%d", uidHash, attempt)
 }

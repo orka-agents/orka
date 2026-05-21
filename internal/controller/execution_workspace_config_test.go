@@ -21,22 +21,28 @@ func TestDeterministicSubstrateTaskActorID(t *testing.T) {
 		want    string
 	}{
 		{
-			name:    "standard kubernetes uid trims truncation hyphen",
+			name:    "standard kubernetes uid uses full uid hash",
 			uid:     "abcdef01-2345-6789-abcd-ef0123456789",
 			attempt: 1,
-			want:    "orka-t-abcdef01-2345-6789-abcd-1",
+			want:    "orka-t-" + substrateActorIDHashPrefix("abcdef01-2345-6789-abcd-ef0123456789") + "-1",
 		},
 		{
-			name:    "normalizes uid characters and attempt",
+			name:    "normalizes uid case and attempt",
 			uid:     " ABC_DEF.123 ",
 			attempt: 0,
-			want:    "orka-t-abcdef123-1",
+			want:    "orka-t-" + substrateActorIDHashPrefix("ABC_DEF.123") + "-1",
 		},
 		{
-			name:    "hashes empty sanitized uid",
+			name:    "hashes punctuation uid",
 			uid:     "!!!",
 			attempt: 2,
 			want:    "orka-t-" + substrateActorIDHashPrefix("!!!") + "-2",
+		},
+		{
+			name:    "different suffix changes actor id",
+			uid:     "abcdef01-2345-6789-abcd-ef0123456780",
+			attempt: 1,
+			want:    "orka-t-" + substrateActorIDHashPrefix("abcdef01-2345-6789-abcd-ef0123456780") + "-1",
 		},
 	}
 
@@ -46,8 +52,8 @@ func TestDeterministicSubstrateTaskActorID(t *testing.T) {
 			if got != tt.want {
 				t.Fatalf("deterministicSubstrateTaskActorID() = %q, want %q", got, tt.want)
 			}
-			if strings.Contains(got, "--") {
-				t.Fatalf("deterministicSubstrateTaskActorID() = %q, want no double hyphen", got)
+			if len(strings.TrimPrefix(got, "orka-t-")) < 34 {
+				t.Fatalf("deterministicSubstrateTaskActorID() = %q, want hash plus attempt suffix", got)
 			}
 		})
 	}
@@ -68,5 +74,5 @@ func TestDeterministicSubstrateSessionActorID(t *testing.T) {
 
 func substrateActorIDHashPrefix(value string) string {
 	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(value))))
-	return hex.EncodeToString(sum[:])[:24]
+	return hex.EncodeToString(sum[:])[:32]
 }

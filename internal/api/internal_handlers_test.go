@@ -19,12 +19,16 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	authenticationv1 "k8s.io/api/authentication/v1"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
 )
@@ -340,15 +344,58 @@ func TestSubmitResult(t *testing.T) {
 func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	taskUID := types.UID("task-uid")
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "my-task", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "my-task", Namespace: "default", UID: taskUID},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
 	}
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-task-job",
+			Namespace: "default",
+			UID:       types.UID("job-uid"),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(),
+				Kind:       "Task",
+				Name:       "my-task",
+				UID:        taskUID,
+			}},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-task-pod",
+			Namespace: "default",
+			UID:       types.UID("pod-uid"),
+			Labels: map[string]string{
+				labels.LabelTask: labels.SelectorValue("my-task"),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: batchv1.SchemeGroupVersion.String(),
+				Kind:       "Job",
+				Name:       "my-task-job",
+				UID:        types.UID("job-uid"),
+			}},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task, job, pod).
+		Build()
 	h := NewInternalHandlers(nil, nil, nil, nil, nil, InternalHandlersConfig{Client: k8sClient})
 	app := fiber.New()
 	app.Use(func(c fiber.Ctx) error {
-		c.Locals(UserInfoContextKey, &UserInfo{Username: "system:serviceaccount:default:worker"})
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username: "system:serviceaccount:default:worker",
+			AuthType: AuthTypeTokenReview,
+			Extra: map[string]authenticationv1.ExtraValue{
+				"authentication.kubernetes.io/pod-name": {"my-task-pod"},
+				"authentication.kubernetes.io/pod-uid":  {"pod-uid"},
+			},
+		})
 		return c.Next()
 	})
 	app.Post("/internal/v1/tasks/:namespace/:taskName/execution-workspace/status", h.UpdateExecutionWorkspaceStatus)
@@ -378,6 +425,25 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 	require.Equal(t, corev1alpha1.WorkspaceProviderSubstrate, updated.Status.ExecutionWorkspace.Provider)
 	require.Equal(t, corev1alpha1.ExecutionWorkspacePhaseReady, updated.Status.ExecutionWorkspace.Phase)
 	require.True(t, updated.Status.ExecutionWorkspace.Reused)
+
+	appForbidden := fiber.New()
+	appForbidden.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username: "system:serviceaccount:default:worker",
+			AuthType: AuthTypeTokenReview,
+			Extra: map[string]authenticationv1.ExtraValue{
+				"authentication.kubernetes.io/pod-name": {"other-pod"},
+				"authentication.kubernetes.io/pod-uid":  {"other-pod-uid"},
+			},
+		})
+		return c.Next()
+	})
+	appForbidden.Post("/internal/v1/tasks/:namespace/:taskName/execution-workspace/status", h.UpdateExecutionWorkspaceStatus)
+	forbiddenReq := httptest.NewRequest(http.MethodPost, "/internal/v1/tasks/default/my-task/execution-workspace/status", bytes.NewReader(bodyBytes))
+	forbiddenReq.Header.Set("Content-Type", "application/json")
+	forbiddenResp, err := appForbidden.Test(forbiddenReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, forbiddenResp.StatusCode)
 }
 
 func TestGetSessionTranscript(t *testing.T) {

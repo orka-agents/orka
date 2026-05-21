@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,12 +16,15 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 )
 
@@ -152,10 +156,17 @@ func (h *InternalHandlers) UpdateExecutionWorkspaceStatus(c fiber.Ctx) error {
 		if err := h.k8sClient.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: taskName}, task); err != nil {
 			return err
 		}
+		if err := verifyCallerOwnsTaskWorker(c.Context(), h.k8sClient, GetUserInfo(c), task); err != nil {
+			return err
+		}
 		task.Status.ExecutionWorkspace = status
 		return h.k8sClient.Status().Update(c.Context(), task)
 	})
 	if err != nil {
+		var fiberErr *fiber.Error
+		if errors.As(err, &fiberErr) {
+			return fiberErr
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update execution workspace status: %v", err))
 	}
 
@@ -513,6 +524,61 @@ func verifyCallerNamespace(c fiber.Ctx, namespace string) error {
 	}
 
 	return nil
+}
+
+func verifyCallerOwnsTaskWorker(ctx context.Context, c client.Client, userInfo *UserInfo, task *corev1alpha1.Task) error {
+	if c == nil || userInfo == nil || task == nil {
+		return fiber.NewError(fiber.StatusUnauthorized, "authentication required")
+	}
+	if userInfo.AuthType != AuthTypeTokenReview {
+		return fiber.NewError(fiber.StatusForbidden, "caller pod token required")
+	}
+	podName := firstUserExtra(userInfo, "authentication.kubernetes.io/pod-name")
+	podUID := firstUserExtra(userInfo, "authentication.kubernetes.io/pod-uid")
+	if podName == "" || podUID == "" {
+		return fiber.NewError(fiber.StatusForbidden, "caller pod identity required")
+	}
+
+	pod := &corev1.Pod{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: podName}, pod); err != nil {
+		return fiber.NewError(fiber.StatusForbidden, "caller pod not found")
+	}
+	if string(pod.UID) != podUID {
+		return fiber.NewError(fiber.StatusForbidden, "caller pod identity mismatch")
+	}
+	if pod.Labels[labels.LabelTask] != labels.SelectorValue(task.Name) {
+		return fiber.NewError(fiber.StatusForbidden, "caller pod does not belong to task")
+	}
+
+	for _, owner := range pod.OwnerReferences {
+		if owner.Kind != "Job" || owner.Name == "" {
+			continue
+		}
+		job := &batchv1.Job{}
+		if err := c.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: owner.Name}, job); err != nil {
+			return fiber.NewError(fiber.StatusForbidden, "caller job not found")
+		}
+		if owner.UID != "" && owner.UID != job.UID {
+			continue
+		}
+		for _, jobOwner := range job.OwnerReferences {
+			if jobOwner.Kind == "Task" && jobOwner.UID == task.UID {
+				return nil
+			}
+		}
+	}
+	return fiber.NewError(fiber.StatusForbidden, "caller job does not own task")
+}
+
+func firstUserExtra(userInfo *UserInfo, key string) string {
+	if userInfo == nil || len(userInfo.Extra) == 0 {
+		return ""
+	}
+	values := userInfo.Extra[key]
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }
 
 // SendMessage handles POST /internal/v1/messages/{namespace}.

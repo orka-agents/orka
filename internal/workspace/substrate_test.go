@@ -219,6 +219,66 @@ func TestSubstrateBootstrapHandoffUploadUsesBootstrapToken(t *testing.T) {
 	}
 }
 
+func TestSubstrateWaitReadyFailsFastOnNonRetryableActorError(t *testing.T) {
+	control := &recordingSubstrateControlClient{
+		getErrs: []error{NewError("get actor", ErrorKindNotFound, "actor missing", false, nil)},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     http.DefaultClient,
+		routerURL:      "http://router.test",
+		actorDNSSuffix: "actors.test",
+		now:            time.Now,
+	}
+
+	_, err := executor.WaitReady(t.Context(), WaitReadyRequest{
+		Ref:     WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
+		Timeout: time.Second,
+	})
+	if err == nil {
+		t.Fatal("WaitReady() error = nil, want not found error")
+	}
+	if !IsKind(err, ErrorKindNotFound) {
+		t.Fatalf("WaitReady() error kind = %s, want %s", KindOf(err), ErrorKindNotFound)
+	}
+	if control.getCalls != 1 {
+		t.Fatalf("GetActor calls = %d, want fail-fast single call", control.getCalls)
+	}
+}
+
+func TestSubstrateWaitReadyFailsFastOnNonRetryableDaemonError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	control := &recordingSubstrateControlClient{
+		getStatuses: []string{substrateStatusRunning},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     server.Client(),
+		routerURL:      server.URL,
+		actorDNSSuffix: "actors.test",
+		handoffToken:   substrateTestToken,
+		now:            time.Now,
+	}
+
+	_, err := executor.WaitReady(t.Context(), WaitReadyRequest{
+		Ref:     WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
+		Timeout: time.Second,
+	})
+	if err == nil {
+		t.Fatal("WaitReady() error = nil, want daemon auth error")
+	}
+	if !strings.Contains(err.Error(), "HTTP 401") {
+		t.Fatalf("WaitReady() error = %q, want HTTP 401", err.Error())
+	}
+	if control.getCalls != 1 {
+		t.Fatalf("GetActor calls = %d, want fail-fast single call", control.getCalls)
+	}
+}
+
 func TestSubstrateDeleteWaitsForSuspendedAfterSuspend(t *testing.T) {
 	var scrubbed bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -632,6 +692,8 @@ type recordingSubstrateControlClient struct {
 	getCalls      int
 	createErr     error
 	createCalls   int
+	resumeErr     error
+	resumeCalls   int
 	suspendStatus string
 	suspendErr    error
 	suspendCalls  int
@@ -669,7 +731,17 @@ func (c *recordingSubstrateControlClient) CreateActor(ctx context.Context, actor
 }
 
 func (c *recordingSubstrateControlClient) ResumeActor(ctx context.Context, actorID string) (*substrateActor, error) {
-	return nil, fmt.Errorf("unexpected ResumeActor")
+	c.resumeCalls++
+	if c.resumeErr != nil {
+		return nil, c.resumeErr
+	}
+	return &substrateActor{
+		ActorID:           actorID,
+		TemplateNamespace: "ate-demo",
+		TemplateName:      "orka-codex-ci",
+		Status:            substrateStatusResuming,
+		PodIP:             "10.244.0.10",
+	}, nil
 }
 
 func (c *recordingSubstrateControlClient) SuspendActor(ctx context.Context, actorID string) (*substrateActor, error) {

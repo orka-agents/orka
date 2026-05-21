@@ -301,6 +301,24 @@ func TestWorkspaceAgentRejectsHandoffBootstrapBearerMatchingUploadedToken(t *tes
 	}
 }
 
+func TestWorkspaceAgentRejectsHandoffBootstrapWhenTokenPathUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	previousAllowedRoots := allowedRoots
+	allowedRoots = []string{dir}
+	t.Cleanup(func() {
+		allowedRoots = previousAllowedRoots
+	})
+	tokenFile := filepath.Join(dir, "handoff-token")
+	if err := os.Mkdir(tokenFile, 0o700); err != nil {
+		t.Fatalf("mkdir token path: %v", err)
+	}
+	resp := exerciseHandoffBootstrapWithBearer(t, tokenFile, tokenFile, "bootstrap-secret")
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusServiceUnavailable, resp.Body.String())
+	}
+}
+
 func TestHandoffTokenFilePathNormalizesRelativeEnv(t *testing.T) {
 	t.Setenv(envHandoffTokenFile, "custom-handoff-token")
 

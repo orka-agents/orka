@@ -400,7 +400,12 @@ func (r *TaskReconciler) validateSubstrateWorkspaceTemplate(ctx context.Context,
 	if stagingRoot != substrateWorkspaceStagingRoot {
 		return fmt.Errorf("substrate ActorTemplate %q in namespace %q must set annotation orka.ai/workspace-staging-root=%s", request.TemplateName, request.TemplateNamespace, substrateWorkspaceStagingRoot)
 	}
-	if phase, _, _ := unstructured.NestedString(template.Object, "status", "phase"); strings.TrimSpace(phase) != "" && phase != "Ready" {
+	phase, _, _ := unstructured.NestedString(template.Object, "status", "phase")
+	phase = strings.TrimSpace(phase)
+	if phase != "Ready" {
+		if phase == "" {
+			phase = "<empty>"
+		}
 		return fmt.Errorf("substrate ActorTemplate %q in namespace %q is not Ready: phase=%s", request.TemplateName, request.TemplateNamespace, phase)
 	}
 	_ = task

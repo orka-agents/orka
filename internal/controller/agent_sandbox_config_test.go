@@ -222,6 +222,44 @@ func TestValidateSubstrateWorkspaceTemplateRequiresAppStagingRoot(t *testing.T) 
 	}
 }
 
+func TestValidateSubstrateWorkspaceTemplateRequiresReadyPhase(t *testing.T) {
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   "ate.dev",
+		Version: "v1alpha1",
+		Kind:    "ActorTemplate",
+	}, &unstructured.Unstructured{})
+
+	template := &unstructured.Unstructured{}
+	template.SetAPIVersion("ate.dev/v1alpha1")
+	template.SetKind("ActorTemplate")
+	template.SetName("orka-codex")
+	template.SetNamespace("ate-demo")
+	template.SetLabels(map[string]string{
+		"orka.ai/execution-workspace": "true",
+		"orka.ai/workspace-provider":  "substrate",
+	})
+	template.SetAnnotations(map[string]string{
+		"orka.ai/workspace-protocol":     "http-json-v1",
+		"orka.ai/workspace-daemon-port":  "80",
+		"orka.ai/workspace-staging-root": "/app",
+	})
+
+	r := &TaskReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build(),
+	}
+	err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, &ExecutionWorkspaceRequest{
+		TemplateName:      "orka-codex",
+		TemplateNamespace: "ate-demo",
+	})
+	if err == nil {
+		t.Fatal("validateSubstrateWorkspaceTemplate() error = nil, want missing readiness error")
+	}
+	if !strings.Contains(err.Error(), "is not Ready: phase=<empty>") {
+		t.Fatalf("error = %q, want missing readiness context", err.Error())
+	}
+}
+
 func TestAgentSandboxConfigValidate(t *testing.T) {
 	tests := []struct {
 		name    string
