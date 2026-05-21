@@ -35,7 +35,6 @@ const (
 	substrateExecInitialPollInterval  = 250 * time.Millisecond
 	substrateExecMaxPollInterval      = 2 * time.Second
 	substrateDefaultDaemonTimeout     = 30 * time.Second
-	substrateDefaultSuspendQuiesce    = 3 * time.Second
 	substrateDefaultHandoffTokenEnv   = "ORKA_WORKSPACE_HANDOFF_TOKEN"
 
 	substrateStatusResuming   = "STATUS_RESUMING"
@@ -52,7 +51,6 @@ type SubstrateConfig struct {
 	RouterURL             string
 	ActorDNSSuffix        string
 	HandoffToken          string
-	SuspendQuiesceDelay   time.Duration
 	HTTPClient            *http.Client
 	ControlClient         substrateControlClient
 }
@@ -109,7 +107,6 @@ func NewSubstrateExecutor(cfg SubstrateConfig, opts ...SubstrateOption) (*Substr
 		routerURL:      strings.TrimRight(cfg.RouterURL, "/"),
 		actorDNSSuffix: strings.Trim(strings.TrimSpace(cfg.ActorDNSSuffix), "."),
 		handoffToken:   cfg.HandoffToken,
-		suspendQuiesce: substrateSuspendQuiesceDelay(cfg.SuspendQuiesceDelay),
 		now:            time.Now,
 		retained:       make(map[string]bool),
 	}, nil
@@ -123,7 +120,6 @@ type SubstrateWorkspaceExecutor struct {
 	routerURL      string
 	actorDNSSuffix string
 	handoffToken   string
-	suspendQuiesce time.Duration
 	now            func() time.Time
 	retained       map[string]bool
 }
@@ -398,11 +394,6 @@ func (e *SubstrateWorkspaceExecutor) Delete(ctx context.Context, req DeleteReque
 }
 
 func (e *SubstrateWorkspaceExecutor) suspendActorAndWait(ctx context.Context, actorID string) (*substrateActor, error) {
-	if e.suspendQuiesce > 0 {
-		if err := sleepContext(ctx, e.suspendQuiesce); err != nil {
-			return nil, contextError("suspend actor", err)
-		}
-	}
 	actor, err := e.control.SuspendActor(ctx, actorID)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -598,16 +589,6 @@ func defaultSubstrateScrubPaths() []string {
 		"/app/orka-git-askpass",
 		"/app/orka-workspace-handoff-token",
 	}
-}
-
-func substrateSuspendQuiesceDelay(delay time.Duration) time.Duration {
-	if delay < 0 {
-		return 0
-	}
-	if delay == 0 {
-		return substrateDefaultSuspendQuiesce
-	}
-	return delay
 }
 
 type substrateExecRequest struct {

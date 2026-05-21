@@ -252,25 +252,6 @@ func TestSubstrateReleaseWaitsWhenSuspendReturnsAfterStartingTransition(t *testi
 	}
 }
 
-func TestSubstrateExecutorDefaultsSuspendQuiesceDelay(t *testing.T) {
-	executor, err := NewSubstrateExecutor(
-		SubstrateConfig{
-			RouterURL:      "http://127.0.0.1",
-			ActorDNSSuffix: "actors.test",
-		},
-		WithSubstrateControlClient(&recordingSubstrateControlClient{}),
-	)
-	if err != nil {
-		t.Fatalf("NewSubstrateExecutor() error = %v", err)
-	}
-	if executor.suspendQuiesce != substrateDefaultSuspendQuiesce {
-		t.Fatalf("suspendQuiesce = %v, want %v", executor.suspendQuiesce, substrateDefaultSuspendQuiesce)
-	}
-	if got := substrateSuspendQuiesceDelay(-1); got != 0 {
-		t.Fatalf("substrateSuspendQuiesceDelay(-1) = %v, want 0", got)
-	}
-}
-
 func TestDefaultSubstrateScrubPathsIncludesStagedWorker(t *testing.T) {
 	paths := defaultSubstrateScrubPaths()
 	if slices.Contains(paths, "/app/orka-agent-worker") {

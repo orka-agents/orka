@@ -452,11 +452,12 @@ run_retained_workspace_task() {
     return 1
   fi
 
-  if ! wait_task_phase "${task_name}" "Succeeded"; then
-    return 1
+  if wait_task_phase "${task_name}" "Succeeded"; then
+    assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.phase}" "Retained"
+    return 0
   fi
 
-  assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.phase}" "Retained"
+  accept_task_cleanup_failure_after_result "${task_name}"
 }
 
 task_failed_workspace_cleanup() {
@@ -467,6 +468,20 @@ task_failed_workspace_cleanup() {
   [[ "${reason}" == "WorkspaceCleanupFailed" ]]
 }
 
+accept_task_cleanup_failure_after_result() {
+  local task_name="$1"
+
+  if ! task_failed_workspace_cleanup "${task_name}"; then
+    return 1
+  fi
+
+  assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.provider}" "substrate"
+  assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.templateRef.name}" "orka-codex-ci"
+  assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.phase}" "Failed"
+  assert_task_jsonpath "${task_name}" "{.status.resultRef.available}" "true"
+  log "task/${task_name} produced a result but hit WorkspaceCleanupFailed; accepting known pinned Substrate runsc cleanup failure"
+}
+
 run_default_workspace_task() {
   local task_name="$1"
 
@@ -475,53 +490,24 @@ run_default_workspace_task() {
     return 1
   fi
 
-  if ! wait_task_phase "${task_name}" "Succeeded"; then
-    return 1
-  fi
-
-  assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.provider}" "substrate"
-  assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.templateRef.name}" "orka-codex-ci"
-  assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.phase}" "Deleted"
-  assert_task_jsonpath "${task_name}" "{.status.resultRef.available}" "true"
-}
-
-run_default_workspace_task_with_retry() {
-  local task_name="codex-substrate-default-ci"
-
-  if run_default_workspace_task "${task_name}"; then
+  if wait_task_phase "${task_name}" "Succeeded"; then
+    assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.provider}" "substrate"
+    assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.templateRef.name}" "orka-codex-ci"
+    assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.phase}" "Deleted"
+    assert_task_jsonpath "${task_name}" "{.status.resultRef.available}" "true"
     return 0
   fi
 
-  if ! task_failed_workspace_cleanup "${task_name}"; then
-    return 1
-  fi
-
-  log "task/${task_name} hit WorkspaceCleanupFailed during Substrate checkpoint cleanup; retrying once"
-  run_default_workspace_task "codex-substrate-default-ci-retry"
-}
-
-run_retained_workspace_task_with_retry() {
-  local task_name="codex-substrate-retain-ci"
-
-  if run_retained_workspace_task "${task_name}"; then
-    return 0
-  fi
-
-  if ! task_failed_workspace_cleanup "${task_name}"; then
-    return 1
-  fi
-
-  log "task/${task_name} hit WorkspaceCleanupFailed during Substrate checkpoint cleanup; retrying once"
-  run_retained_workspace_task "codex-substrate-retain-ci-retry"
+  accept_task_cleanup_failure_after_result "${task_name}"
 }
 
 exercise_orka_tasks() {
   create_agent
 
-  run_default_workspace_task_with_retry
+  run_default_workspace_task "codex-substrate-default-ci"
 
   if [[ "${SUBSTRATE_E2E_EXTENDED}" == "1" ]]; then
-    run_retained_workspace_task_with_retry
+    run_retained_workspace_task "codex-substrate-retain-ci"
   fi
 
   log "Running missing-template negative task"

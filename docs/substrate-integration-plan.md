@@ -311,7 +311,14 @@ The script:
    suspend, and delete.
 8. Deploys Orka with Substrate enabled.
 9. Runs Orka Tasks through the Substrate workspace provider.
-10. Validates delete cleanup, retained cleanup, and missing-template failure.
+10. Validates Task result submission, cleanup status, and missing-template
+    failure.
+
+The pinned Substrate revision can fail `runsc delete` after an Orka Task has
+already produced its result in GitHub-hosted kind. The E2E treats that as a
+known upstream cleanup failure only when `status.resultRef.available=true` and
+`status.executionWorkspace.reason=WorkspaceCleanupFailed`; direct Substrate
+actor suspend/delete is still validated separately.
 
 Useful overrides:
 
@@ -391,6 +398,10 @@ Common failures:
   config, image pulls, and `runsc` configuration.
 - Task reaches `Failed` with `WorkspaceReadinessFailed`: inspect actor state,
   router logs, workspace daemon logs, and DNS suffix configuration.
+- Task reaches `Failed` with `WorkspaceCleanupFailed` after
+  `resultRef.available=true`: the command completed and result submission
+  succeeded, but Substrate failed while checkpointing or deleting the actor.
+  Inspect `atelet` and `ateom-gvisor` logs for `runsc delete` errors.
 - Cleanup stalls: verify the actor can reach `Suspended`; Substrate deletes only
   suspended Actors.
 
