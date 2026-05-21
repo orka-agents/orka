@@ -13,6 +13,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/workerenv"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -257,6 +258,75 @@ func TestValidateSubstrateWorkspaceTemplateRequiresReadyPhase(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "is not Ready: phase=<empty>") {
 		t.Fatalf("error = %q, want missing readiness context", err.Error())
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateRequiresBootstrapTokenEnv(t *testing.T) {
+	template := readySubstrateActorTemplateForTest(nil)
+	r := substrateTemplateValidatorForTest(t, template)
+
+	err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest())
+	if err == nil {
+		t.Fatal("validateSubstrateWorkspaceTemplate() error = nil, want missing bootstrap env error")
+	}
+	if !strings.Contains(err.Error(), workerenv.WorkspaceBootstrapToken) {
+		t.Fatalf("error = %q, want bootstrap env context", err.Error())
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateAcceptsBootstrapTokenSecretRef(t *testing.T) {
+	template := readySubstrateActorTemplateForTest([]any{
+		map[string]any{
+			"name": workerenv.WorkspaceBootstrapToken,
+			"valueFrom": map[string]any{
+				"secretKeyRef": map[string]any{
+					"name": testSubstrateBootstrapSecretName,
+					"key":  testSubstrateBootstrapSecretKey,
+				},
+			},
+		},
+	})
+	r := substrateTemplateValidatorForTest(t, template)
+
+	if err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest()); err != nil {
+		t.Fatalf("validateSubstrateWorkspaceTemplate() error = %v", err)
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateAcceptsLiteralBootstrapTokenEnv(t *testing.T) {
+	template := readySubstrateActorTemplateForTest([]any{
+		map[string]any{
+			"name":  workerenv.WorkspaceBootstrapToken,
+			"value": "bootstrap-token",
+		},
+	})
+	r := substrateTemplateValidatorForTest(t, template)
+
+	if err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest()); err != nil {
+		t.Fatalf("validateSubstrateWorkspaceTemplate() error = %v", err)
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateRejectsMismatchedBootstrapSecretRef(t *testing.T) {
+	template := readySubstrateActorTemplateForTest([]any{
+		map[string]any{
+			"name": workerenv.WorkspaceBootstrapToken,
+			"valueFrom": map[string]any{
+				"secretKeyRef": map[string]any{
+					"name": "other-bootstrap-secret",
+					"key":  testSubstrateBootstrapSecretKey,
+				},
+			},
+		},
+	})
+	r := substrateTemplateValidatorForTest(t, template)
+
+	err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest())
+	if err == nil {
+		t.Fatal("validateSubstrateWorkspaceTemplate() error = nil, want mismatched secret error")
+	}
+	if !strings.Contains(err.Error(), "configured bootstrap Secret") {
+		t.Fatalf("error = %q, want configured secret context", err.Error())
 	}
 }
 
@@ -518,4 +588,58 @@ func TestResolveExecutionWorkspaceRequestControllerNamespaceDefault(t *testing.T
 	if request.TemplateNamespace != "orka-system" || request.ClaimNamespace != "orka-system" {
 		t.Fatalf("resolved namespaces = template %q claim %q, want orka-system", request.TemplateNamespace, request.ClaimNamespace)
 	}
+}
+
+func substrateTemplateRequestForTest() *ExecutionWorkspaceRequest {
+	return &ExecutionWorkspaceRequest{
+		TemplateName:                 "orka-codex",
+		TemplateNamespace:            "ate-demo",
+		SubstrateBootstrapSecretName: testSubstrateBootstrapSecretName,
+		SubstrateBootstrapSecretKey:  testSubstrateBootstrapSecretKey,
+	}
+}
+
+func substrateTemplateValidatorForTest(t *testing.T, template *unstructured.Unstructured) *TaskReconciler {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   "ate.dev",
+		Version: "v1alpha1",
+		Kind:    "ActorTemplate",
+	}, &unstructured.Unstructured{})
+	return &TaskReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build(),
+	}
+}
+
+func readySubstrateActorTemplateForTest(env []any) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "ate.dev/v1alpha1",
+		"kind":       "ActorTemplate",
+		"metadata": map[string]any{
+			"name":      "orka-codex",
+			"namespace": "ate-demo",
+			"labels": map[string]any{
+				"orka.ai/execution-workspace": "true",
+				"orka.ai/workspace-provider":  "substrate",
+			},
+			"annotations": map[string]any{
+				"orka.ai/workspace-protocol":     "http-json-v1",
+				"orka.ai/workspace-daemon-port":  "80",
+				"orka.ai/workspace-staging-root": "/app",
+			},
+		},
+		"spec": map[string]any{
+			"containers": []any{
+				map[string]any{
+					"name": "workspace",
+					"env":  env,
+				},
+			},
+		},
+		"status": map[string]any{
+			"phase": "Ready",
+		},
+	}}
 }

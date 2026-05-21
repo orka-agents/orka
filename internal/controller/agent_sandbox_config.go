@@ -19,6 +19,7 @@ import (
 	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
@@ -408,6 +409,95 @@ func (r *TaskReconciler) validateSubstrateWorkspaceTemplate(ctx context.Context,
 		}
 		return fmt.Errorf("substrate ActorTemplate %q in namespace %q is not Ready: phase=%s", request.TemplateName, request.TemplateNamespace, phase)
 	}
+	if err := validateSubstrateWorkspaceTemplateBootstrapEnv(template, request); err != nil {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q %w", request.TemplateName, request.TemplateNamespace, err)
+	}
 	_ = task
 	return nil
+}
+
+func validateSubstrateWorkspaceTemplateBootstrapEnv(template *unstructured.Unstructured, request *ExecutionWorkspaceRequest) error {
+	containers, found, err := unstructured.NestedSlice(template.Object, "spec", "containers")
+	if err != nil {
+		return fmt.Errorf("has invalid spec.containers: %w", err)
+	}
+	if !found || len(containers) == 0 {
+		return fmt.Errorf("must define a container with %s", workerenv.WorkspaceBootstrapToken)
+	}
+
+	for _, item := range containers {
+		container, ok := item.(map[string]any)
+		if !ok {
+			return fmt.Errorf("has invalid spec.containers entry")
+		}
+		envValue, found, err := unstructured.NestedFieldNoCopy(container, "env")
+		if err != nil {
+			return fmt.Errorf("has invalid container env: %w", err)
+		}
+		if !found || envValue == nil {
+			continue
+		}
+		env, ok := envValue.([]any)
+		if !ok {
+			return fmt.Errorf("has invalid container env")
+		}
+		for _, envItem := range env {
+			envVar, ok := envItem.(map[string]any)
+			if !ok {
+				return fmt.Errorf("has invalid container env entry")
+			}
+			name, _, _ := unstructured.NestedString(envVar, "name")
+			if name != workerenv.WorkspaceBootstrapToken {
+				continue
+			}
+			value, _, _ := unstructured.NestedString(envVar, "value")
+			if strings.TrimSpace(value) != "" {
+				return nil
+			}
+			if ok, err := substrateBootstrapEnvUsesConfiguredSecret(envVar, request); err != nil {
+				return err
+			} else if ok {
+				return nil
+			}
+			return fmt.Errorf(
+				"%s must set a non-empty value or valueFrom.secretKeyRef",
+				workerenv.WorkspaceBootstrapToken,
+			)
+		}
+	}
+
+	return fmt.Errorf("missing required env %s", workerenv.WorkspaceBootstrapToken)
+}
+
+func substrateBootstrapEnvUsesConfiguredSecret(envVar map[string]any, request *ExecutionWorkspaceRequest) (bool, error) {
+	secretName, secretNameFound, secretNameErr := unstructured.NestedString(envVar, "valueFrom", "secretKeyRef", "name")
+	secretKey, secretKeyFound, secretKeyErr := unstructured.NestedString(envVar, "valueFrom", "secretKeyRef", "key")
+	if secretNameErr != nil || secretKeyErr != nil {
+		return false, fmt.Errorf("%s has invalid valueFrom.secretKeyRef", workerenv.WorkspaceBootstrapToken)
+	}
+	if !secretNameFound && !secretKeyFound {
+		return false, nil
+	}
+	secretName = strings.TrimSpace(secretName)
+	secretKey = strings.TrimSpace(secretKey)
+	if secretName == "" || secretKey == "" {
+		return false, fmt.Errorf("%s valueFrom.secretKeyRef must set name and key", workerenv.WorkspaceBootstrapToken)
+	}
+	if request != nil && strings.TrimSpace(request.SubstrateBootstrapSecretName) != "" &&
+		secretName != strings.TrimSpace(request.SubstrateBootstrapSecretName) {
+		return false, fmt.Errorf(
+			"%s valueFrom.secretKeyRef must use configured bootstrap Secret %q",
+			workerenv.WorkspaceBootstrapToken,
+			request.SubstrateBootstrapSecretName,
+		)
+	}
+	if request != nil && strings.TrimSpace(request.SubstrateBootstrapSecretKey) != "" &&
+		secretKey != strings.TrimSpace(request.SubstrateBootstrapSecretKey) {
+		return false, fmt.Errorf(
+			"%s valueFrom.secretKeyRef must use configured bootstrap Secret key %q",
+			workerenv.WorkspaceBootstrapToken,
+			request.SubstrateBootstrapSecretKey,
+		)
+	}
+	return true, nil
 }

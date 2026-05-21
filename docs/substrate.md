@@ -215,6 +215,9 @@ inner worker binary and secret scrub paths under that directory.
 Use the Orka agent worker image for the runtime, not the daemon-only image; the
 ActorTemplate container must include `/orka-workspace-agent`, the selected CLI,
 and normal workspace tools such as `git`.
+The controller also validates that one ActorTemplate container defines
+`ORKA_WORKSPACE_BOOTSTRAP_TOKEN` with either a non-empty literal value or a
+`valueFrom.secretKeyRef` matching the configured bootstrap Secret name and key.
 
 Example shape:
 
