@@ -661,6 +661,52 @@ func TestRunAgent_ExecutionWorkspaceCleanupFailureRetriedByDeferredCleanup(t *te
 	}
 }
 
+func TestRunAgent_SubstratePreHandoffRetainFailureDeletesWorkspace(t *testing.T) {
+	t.Setenv(workerenv.TaskName, "task-name")
+	t.Setenv(workerenv.TaskNamespace, "task-ns")
+	t.Setenv(workspaceHandoffTokenEnv, "handoff-token")
+
+	recorder := newRecordingWorkspaceExecutor()
+	recorder.waitReadyErr = fmt.Errorf("not ready")
+	restoreExecutor := setSubstrateWorkspaceExecutorForTest(recorder, nil)
+	t.Cleanup(restoreExecutor)
+
+	err := runAgentInWorkspace(
+		context.Background(),
+		"test-agent",
+		"/workspace",
+		workerenv.ExecutionWorkspaceEnv{
+			Provider:          string(corev1alpha1.WorkspaceProviderSubstrate),
+			TemplateName:      "orka-codex",
+			TemplateNamespace: "ate-demo",
+			ClaimNamespace:    "ate-demo",
+			ClaimName:         "actor-1",
+			ClaimTimeout:      3 * time.Second,
+			CommandTimeout:    9 * time.Second,
+			CleanupPolicy:     "retain",
+		},
+	)
+	if err == nil {
+		t.Fatal("expected readiness failure")
+	}
+	if !strings.Contains(err.Error(), "wait for execution workspace") ||
+		!strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("runAgentInWorkspace() error = %q, want readiness context", err.Error())
+	}
+
+	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "delete")
+	if releaseReqs := recorder.releaseRequests(); len(releaseReqs) != 0 {
+		t.Fatalf("recorded %d release requests, want delete before handoff bootstrap", len(releaseReqs))
+	}
+	deleteReqs := recorder.deleteRequests()
+	if len(deleteReqs) != 1 {
+		t.Fatalf("recorded %d delete requests, want 1", len(deleteReqs))
+	}
+	if deleteReqs[0].Reason != "execution workspace cleanup policy delete" {
+		t.Fatalf("delete reason = %q, want delete cleanup policy", deleteReqs[0].Reason)
+	}
+}
+
 func TestRunAgent_AgentSandboxRecursionFailsFast(t *testing.T) {
 	setRequiredAgentSandboxEnv(t, "delete")
 	t.Setenv(workerenv.AgentSandboxDepth, "1")

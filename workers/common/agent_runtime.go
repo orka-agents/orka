@@ -266,6 +266,22 @@ func setAgentSandboxWorkspaceExecutorForTest(executor workspace.WorkspaceExecuto
 	}
 }
 
+func setSubstrateWorkspaceExecutorForTest(executor workspace.WorkspaceExecutor, err error) func() {
+	substrateWorkspaceExecutorMu.Lock()
+	previousExecutor := substrateWorkspaceExecutor
+	previousErr := substrateWorkspaceExecutorErr
+	substrateWorkspaceExecutor = executor
+	substrateWorkspaceExecutorErr = err
+	substrateWorkspaceExecutorMu.Unlock()
+
+	return func() {
+		substrateWorkspaceExecutorMu.Lock()
+		substrateWorkspaceExecutor = previousExecutor
+		substrateWorkspaceExecutorErr = previousErr
+		substrateWorkspaceExecutorMu.Unlock()
+	}
+}
+
 func getSubstrateWorkspaceExecutor() (workspace.WorkspaceExecutor, error) {
 	substrateWorkspaceExecutorMu.RLock()
 	executor := substrateWorkspaceExecutor
@@ -446,13 +462,15 @@ func runAgentInWorkspace(
 	}
 	ref := claim.Ref
 	cleaned := false
+	substrateHandoffBootstrapped := false
 	defer func() {
 		if cleaned {
 			return
 		}
 		cleanupCtx, cleanupCancel := agentSandboxCleanupContext(workspaceEnv.ClaimTimeout)
 		defer cleanupCancel()
-		if err := cleanupExecutionWorkspace(cleanupCtx, executor, ref, workspaceEnv, claim.Reused, false); err != nil {
+		cleanupEnv := preTerminalExecutionWorkspaceCleanupEnv(workspaceEnv, substrateHandoffBootstrapped)
+		if err := cleanupExecutionWorkspace(cleanupCtx, executor, ref, cleanupEnv, claim.Reused, false); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to clean up execution workspace: %v\n", err)
 		}
 	}()
@@ -496,6 +514,7 @@ func runAgentInWorkspace(
 			)
 			return err
 		}
+		substrateHandoffBootstrapped = true
 	}
 
 	command, innerEnv, err := stageAgentSandboxExecutable(
@@ -578,6 +597,19 @@ func runAgentInWorkspace(
 		ref.ClaimName,
 	)
 	return nil
+}
+
+func preTerminalExecutionWorkspaceCleanupEnv(
+	workspaceEnv workerenv.ExecutionWorkspaceEnv,
+	substrateHandoffBootstrapped bool,
+) workerenv.ExecutionWorkspaceEnv {
+	if substrateHandoffBootstrapped ||
+		strings.TrimSpace(workspaceEnv.Provider) != string(corev1alpha1.WorkspaceProviderSubstrate) ||
+		!strings.EqualFold(strings.TrimSpace(workspaceEnv.CleanupPolicy), string(corev1alpha1.WorkspaceCleanupPolicyRetain)) {
+		return workspaceEnv
+	}
+	workspaceEnv.CleanupPolicy = string(corev1alpha1.WorkspaceCleanupPolicyDelete)
+	return workspaceEnv
 }
 
 func runAgentInSandbox(ctx context.Context, name, workspaceDir string, sandboxEnv workerenv.AgentSandboxEnv) error {

@@ -202,6 +202,9 @@ metadata:
 The daemon port must match the daemon container's configuration. The staging
 root is currently required to be `/app`, because the worker handoff stages the
 inner worker binary and secret scrub paths under that directory.
+Use the Orka agent worker image for the runtime, not the daemon-only image; the
+ActorTemplate container must include `/orka-workspace-agent`, the selected CLI,
+and normal workspace tools such as `git`.
 
 Example shape:
 
@@ -232,7 +235,7 @@ spec:
   pauseImage: registry.k8s.io/pause:3.10.2
   containers:
     - name: workspace
-      image: registry.example.com/orka-workspace-agent:tag
+      image: registry.example.com/orka/agent-worker-codex:tag
       command:
         - /orka-workspace-agent
       env:
