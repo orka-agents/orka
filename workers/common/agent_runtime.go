@@ -626,7 +626,8 @@ func executionWorkspaceCompletionMessage(
 }
 
 type executionWorkspaceCleanupOptions struct {
-	skipSubstrateDeleteScrub bool
+	skipSubstrateDeleteScrub  bool
+	skipSubstrateReleaseScrub bool
 }
 
 func preTerminalExecutionWorkspaceCleanup(
@@ -638,7 +639,10 @@ func preTerminalExecutionWorkspaceCleanup(
 		strings.TrimSpace(workspaceEnv.Provider) != string(corev1alpha1.WorkspaceProviderSubstrate) {
 		return workspaceEnv, executionWorkspaceCleanupOptions{}
 	}
-	options := executionWorkspaceCleanupOptions{skipSubstrateDeleteScrub: true}
+	options := executionWorkspaceCleanupOptions{
+		skipSubstrateDeleteScrub:  true,
+		skipSubstrateReleaseScrub: true,
+	}
 	if claimedNewWorkspace && strings.EqualFold(
 		strings.TrimSpace(workspaceEnv.CleanupPolicy),
 		string(corev1alpha1.WorkspaceCleanupPolicyRetain),
@@ -1097,10 +1101,11 @@ func cleanupExecutionWorkspaceWithOptions(
 			}
 		}
 		if _, err := executor.Release(ctx, workspace.ReleaseRequest{
-			Ref:     ref,
-			Retain:  true,
-			Reason:  "execution workspace cleanup policy retain",
-			Timeout: workspaceEnv.ClaimTimeout,
+			Ref:       ref,
+			Retain:    true,
+			Reason:    "execution workspace cleanup policy retain",
+			Timeout:   workspaceEnv.ClaimTimeout,
+			SkipScrub: options.skipSubstrateReleaseScrub,
 		}); err != nil {
 			return fmt.Errorf("retain workspace: %w", err)
 		}
@@ -1145,10 +1150,11 @@ func cleanupExecutionWorkspaceWithOptions(
 			}
 		}
 		if _, err := executor.Release(ctx, workspace.ReleaseRequest{
-			Ref:     ref,
-			Retain:  true,
-			Reason:  "unsupported execution workspace cleanup policy",
-			Timeout: workspaceEnv.ClaimTimeout,
+			Ref:       ref,
+			Retain:    true,
+			Reason:    "unsupported execution workspace cleanup policy",
+			Timeout:   workspaceEnv.ClaimTimeout,
+			SkipScrub: options.skipSubstrateReleaseScrub,
 		}); err != nil {
 			return fmt.Errorf("retain workspace after unsupported cleanup policy: %w", err)
 		}

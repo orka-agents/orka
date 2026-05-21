@@ -355,9 +355,13 @@ func (e *SubstrateWorkspaceExecutor) pollExec(ctx context.Context, actorID, exec
 	for {
 		var resp substrateExecResponse
 		if err := e.daemonRequest(ctx, actorID, http.MethodGet, "/v1/exec/"+url.PathEscape(execID), nil, &resp); err != nil {
-			return nil, err
-		}
-		if !resp.Running {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, contextError("exec", ctxErr)
+			}
+			if !retryableWorkspaceError(err) {
+				return nil, err
+			}
+		} else if !resp.Running {
 			return &resp, nil
 		}
 		if err := sleepContext(ctx, backoff); err != nil {
@@ -433,8 +437,10 @@ func (e *SubstrateWorkspaceExecutor) Release(ctx context.Context, req ReleaseReq
 	if actorID == "" {
 		return nil, NewError("release", ErrorKindInvalidArgument, "actor id is required", false, nil)
 	}
-	if err := e.scrubDaemon(ctx, actorID); err != nil {
-		return nil, NewError("release", ErrorKindFailedPrecondition, "failed to scrub workspace before release", false, err)
+	if !req.SkipScrub {
+		if err := e.scrubDaemon(ctx, actorID); err != nil {
+			return nil, NewError("release", ErrorKindFailedPrecondition, "failed to scrub workspace before release", false, err)
+		}
 	}
 	actor, err := e.suspendActorAndWait(ctx, actorID)
 	if err != nil {

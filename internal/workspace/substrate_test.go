@@ -254,6 +254,52 @@ func TestSubstrateExecUsesDetachedPolling(t *testing.T) {
 	}
 }
 
+func TestSubstrateExecRetriesTransientPollingErrors(t *testing.T) {
+	var polls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/exec":
+			_ = json.NewEncoder(w).Encode(substrateExecResponse{ExecID: "exec-1", Running: true})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/exec/exec-1":
+			polls++
+			if polls == 1 {
+				http.Error(w, "router warming", http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(substrateExecResponse{
+				ExecID:   "exec-1",
+				Stdout:   "ok",
+				ExitCode: 0,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	executor := &SubstrateWorkspaceExecutor{
+		httpClient:     server.Client(),
+		routerURL:      server.URL,
+		actorDNSSuffix: "actors.test",
+		handoffToken:   substrateTestToken,
+	}
+
+	got, err := executor.Exec(t.Context(), ExecRequest{
+		Ref:     WorkspaceRef{ID: "actor-1"},
+		Command: []string{"echo", "ok"},
+		Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Exec() error = %v", err)
+	}
+	if polls != 2 {
+		t.Fatalf("poll count = %d, want retry after transient error", polls)
+	}
+	if got.Stdout != "ok" || got.ExitCode != 0 {
+		t.Fatalf("Exec() result = stdout %q exit %d, want ok/0", got.Stdout, got.ExitCode)
+	}
+}
+
 func TestSubstrateBootstrapHandoffUploadUsesBootstrapToken(t *testing.T) {
 	var uploaded bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -687,6 +733,50 @@ func TestSubstrateReleaseRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testi
 	}
 	if !restored {
 		t.Fatal("Release() did not restore handoff token after suspend failure")
+	}
+}
+
+func TestSubstrateReleaseSkipScrubSuspendsRunningActor(t *testing.T) {
+	var scrubbed bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == substrateTestScrubPath {
+			scrubbed = true
+			http.Error(w, "scrub should be skipped", http.StatusInternalServerError)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	control := &recordingSubstrateControlClient{
+		suspendStatus: substrateStatusSuspended,
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     server.Client(),
+		routerURL:      server.URL,
+		actorDNSSuffix: "actors.test",
+		handoffToken:   substrateTestToken,
+		now:            time.Now,
+	}
+
+	got, err := executor.Release(t.Context(), ReleaseRequest{
+		Ref:       WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
+		Retain:    true,
+		Timeout:   time.Second,
+		SkipScrub: true,
+	})
+	if err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if scrubbed {
+		t.Fatal("Release() scrubbed despite SkipScrub")
+	}
+	if control.suspendCalls != 1 {
+		t.Fatalf("SuspendActor calls = %d, want 1", control.suspendCalls)
+	}
+	if !got.Retained || got.Phase != PhaseRetained {
+		t.Fatalf("Release() = %#v, want retained phase", got)
 	}
 }
 

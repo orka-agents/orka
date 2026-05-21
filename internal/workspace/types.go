@@ -213,6 +213,9 @@ type ReleaseRequest struct {
 	Retain  bool
 	Reason  string
 	Timeout time.Duration
+	// SkipScrub bypasses backend daemon scrubbing when the caller knows the
+	// current handoff credential is unavailable or not yet installed.
+	SkipScrub bool
 }
 
 // ReleaseResult describes the release/retain decision.

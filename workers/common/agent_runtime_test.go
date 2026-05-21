@@ -772,6 +772,9 @@ func TestRunAgent_SubstratePreHandoffRetainFailurePreservesReusedWorkspace(t *te
 	if !releaseReqs[0].Retain {
 		t.Fatal("release Retain = false, want true")
 	}
+	if !releaseReqs[0].SkipScrub {
+		t.Fatal("release SkipScrub = false, want true before handoff bootstrap")
+	}
 }
 
 func TestExecutionWorkspaceCompletionMessageOmitsSubstrateActorID(t *testing.T) {
