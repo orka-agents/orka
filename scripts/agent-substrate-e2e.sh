@@ -268,7 +268,7 @@ metadata:
   name: orka-workers
   namespace: ate-demo
 spec:
-  replicas: 2
+  replicas: 3
   ateomImage: ${ateom_image}
 ---
 apiVersion: ate.dev/v1alpha1
@@ -459,16 +459,55 @@ run_retained_workspace_task() {
   assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.phase}" "Retained"
 }
 
+task_failed_workspace_cleanup() {
+  local task_name="$1"
+  local reason
+
+  reason="$(task_jsonpath "${task_name}" "{.status.executionWorkspace.reason}")"
+  [[ "${reason}" == "WorkspaceCleanupFailed" ]]
+}
+
+run_default_workspace_task() {
+  local task_name="$1"
+
+  log "Running default Substrate configuration task/${task_name}"
+  if ! apply_task "${task_name}" "      enabled: true"; then
+    return 1
+  fi
+
+  if ! wait_task_phase "${task_name}" "Succeeded"; then
+    return 1
+  fi
+
+  assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.provider}" "substrate"
+  assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.templateRef.name}" "orka-codex-ci"
+  assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.phase}" "Deleted"
+  assert_task_jsonpath "${task_name}" "{.status.resultRef.available}" "true"
+}
+
+run_default_workspace_task_with_retry() {
+  local task_name="codex-substrate-default-ci"
+
+  if run_default_workspace_task "${task_name}"; then
+    return 0
+  fi
+
+  if ! task_failed_workspace_cleanup "${task_name}"; then
+    return 1
+  fi
+
+  log "task/${task_name} hit WorkspaceCleanupFailed during Substrate checkpoint cleanup; retrying once"
+  run_default_workspace_task "codex-substrate-default-ci-retry"
+}
+
 run_retained_workspace_task_with_retry() {
   local task_name="codex-substrate-retain-ci"
-  local reason
 
   if run_retained_workspace_task "${task_name}"; then
     return 0
   fi
 
-  reason="$(task_jsonpath "${task_name}" "{.status.executionWorkspace.reason}")"
-  if [[ "${reason}" != "WorkspaceCleanupFailed" ]]; then
+  if ! task_failed_workspace_cleanup "${task_name}"; then
     return 1
   fi
 
@@ -479,13 +518,7 @@ run_retained_workspace_task_with_retry() {
 exercise_orka_tasks() {
   create_agent
 
-  log "Running default Substrate configuration task"
-  apply_task "codex-substrate-default-ci" "      enabled: true"
-  wait_task_phase "codex-substrate-default-ci" "Succeeded"
-  assert_task_jsonpath "codex-substrate-default-ci" "{.status.executionWorkspace.provider}" "substrate"
-  assert_task_jsonpath "codex-substrate-default-ci" "{.status.executionWorkspace.templateRef.name}" "orka-codex-ci"
-  assert_task_jsonpath "codex-substrate-default-ci" "{.status.executionWorkspace.phase}" "Deleted"
-  assert_task_jsonpath "codex-substrate-default-ci" "{.status.resultRef.available}" "true"
+  run_default_workspace_task_with_retry
 
   if [[ "${SUBSTRATE_E2E_EXTENDED}" == "1" ]]; then
     run_retained_workspace_task_with_retry
