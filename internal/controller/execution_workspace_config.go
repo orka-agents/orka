@@ -116,6 +116,7 @@ func deterministicSubstrateTaskActorID(taskUID string, attempt int32) string {
 	cleanUID := strings.Trim(b.String(), "-")
 	if len(cleanUID) > 24 {
 		cleanUID = cleanUID[:24]
+		cleanUID = strings.TrimRight(cleanUID, "-")
 	}
 	if cleanUID == "" {
 		sum := sha256.Sum256([]byte(uid))
