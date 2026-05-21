@@ -133,12 +133,14 @@ func (s *workspaceAgentServer) allowHandoffBootstrap(w http.ResponseWriter, r *h
 		return false, true
 	}
 	path := filepath.Clean(req.Files[0].Path)
-	tokenPath := strings.TrimSpace(os.Getenv(envHandoffTokenFile))
-	if tokenPath == "" {
-		tokenPath = defaultHandoffTokenFile
+	requestedPath, err := normalizeAgentPath(path)
+	if err != nil {
+		http.Error(w, "invalid handoff bootstrap path", http.StatusUnauthorized)
+		return false, true
 	}
-	cleanTokenPath := filepath.Clean(tokenPath)
-	if path != defaultHandoffTokenUpload && path != defaultHandoffTokenFile && path != cleanTokenPath {
+	tokenPath := handoffTokenFilePath()
+	isDefaultUploadAlias := path == defaultHandoffTokenUpload || requestedPath == defaultHandoffTokenFile
+	if !isDefaultUploadAlias && requestedPath != tokenPath {
 		http.Error(w, "invalid handoff bootstrap path", http.StatusUnauthorized)
 		return false, true
 	}
@@ -146,14 +148,11 @@ func (s *workspaceAgentServer) allowHandoffBootstrap(w http.ResponseWriter, r *h
 		http.Error(w, "empty handoff bootstrap token", http.StatusBadRequest)
 		return false, true
 	}
-	if path == defaultHandoffTokenUpload || path == defaultHandoffTokenFile {
-		req.Files[0].Path = cleanTokenPath
-		var err error
-		data, err = json.Marshal(req)
-		if err != nil {
-			http.Error(w, "invalid handoff bootstrap request", http.StatusBadRequest)
-			return false, true
-		}
+	req.Files[0].Path = tokenPath
+	data, err = json.Marshal(req)
+	if err != nil {
+		http.Error(w, "invalid handoff bootstrap request", http.StatusBadRequest)
+		return false, true
 	}
 	r.Body.Close() //nolint:errcheck
 	r.Body = io.NopCloser(bytes.NewReader(data))
@@ -164,11 +163,7 @@ func handoffToken() (string, error) {
 	if token := strings.TrimSpace(os.Getenv(envHandoffToken)); token != "" {
 		return token, nil
 	}
-	path := strings.TrimSpace(os.Getenv(envHandoffTokenFile))
-	if path == "" {
-		path = defaultHandoffTokenFile
-	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(handoffTokenFilePath())
 	if err != nil {
 		return "", err
 	}
@@ -177,6 +172,29 @@ func handoffToken() (string, error) {
 		return "", fmt.Errorf("handoff token file is empty")
 	}
 	return token, nil
+}
+
+func handoffTokenFilePath() string {
+	path := strings.TrimSpace(os.Getenv(envHandoffTokenFile))
+	if path == "" {
+		path = defaultHandoffTokenFile
+	}
+	normalized, err := normalizeAgentPath(path)
+	if err != nil {
+		return defaultHandoffTokenFile
+	}
+	return normalized
+}
+
+func normalizeAgentPath(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	if !filepath.IsAbs(value) {
+		value = filepath.Join("/app", value)
+	}
+	return filepath.Clean(value), nil
 }
 
 func validHandoffBearer(header, token string) bool {
@@ -451,6 +469,7 @@ func (s *workspaceAgentServer) handleScrub(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+	req.Paths = appendUniquePath(req.Paths, handoffTokenFilePath())
 	for _, requested := range req.Paths {
 		path, err := safePath(requested)
 		if err != nil {
@@ -463,6 +482,15 @@ func (s *workspaceAgentServer) handleScrub(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func appendUniquePath(paths []string, path string) []string {
+	for _, existing := range paths {
+		if filepath.Clean(existing) == filepath.Clean(path) {
+			return paths
+		}
+	}
+	return append(paths, path)
 }
 
 type execRequest struct {
@@ -592,6 +620,14 @@ func resolveExistingPrefix(path string) (string, error) {
 		}
 		if !os.IsNotExist(err) {
 			return "", err
+		}
+		if info, lstatErr := os.Lstat(current); lstatErr == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return "", fmt.Errorf("dangling symlink %s", current)
+			}
+			return "", err
+		} else if !os.IsNotExist(lstatErr) {
+			return "", lstatErr
 		}
 		parent := filepath.Dir(current)
 		if parent == current {

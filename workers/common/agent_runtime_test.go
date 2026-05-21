@@ -1102,6 +1102,63 @@ func TestCleanupExecutionWorkspaceRetainScrubsSecretsAndReportsReused(t *testing
 	}
 }
 
+func TestCleanupExecutionWorkspaceSubstrateRetainUsesReleaseScrub(t *testing.T) {
+	var statuses []executionWorkspaceStatusUpdate
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var status executionWorkspaceStatusUpdate
+		if err := json.NewDecoder(r.Body).Decode(&status); err != nil {
+			t.Errorf("decode status: %v", err)
+		}
+		statuses = append(statuses, status)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	recorder := newRecordingWorkspaceExecutor()
+	claim, err := recorder.Claim(context.Background(), workspace.ClaimRequest{
+		Namespace:       "ns",
+		CreateIfMissing: true,
+		Template:        workspace.TemplateRef{Name: "template"},
+		Timeout:         time.Second,
+	})
+	if err != nil {
+		t.Fatalf("claim workspace: %v", err)
+	}
+
+	err = cleanupExecutionWorkspace(
+		context.Background(),
+		recorder,
+		claim.Ref,
+		workerenv.ExecutionWorkspaceEnv{
+			Provider:       string(corev1alpha1.WorkspaceProviderSubstrate),
+			CleanupPolicy:  "retain",
+			ClaimTimeout:   time.Second,
+			StatusEndpoint: server.URL,
+		},
+		true,
+		true,
+	)
+	if err != nil {
+		t.Fatalf("cleanupExecutionWorkspace returned error: %v", err)
+	}
+
+	assertOperationOrder(t, recorder.operations(), "claim", "release")
+	if execReqs := recorder.execRequests(); len(execReqs) != 0 {
+		t.Fatalf("recorded %d exec requests, want release-time provider scrub", len(execReqs))
+	}
+	releaseReqs := recorder.releaseRequests()
+	if len(releaseReqs) != 1 || !releaseReqs[0].Retain {
+		t.Fatalf("release requests = %#v, want retain release", releaseReqs)
+	}
+	if len(statuses) != 1 {
+		t.Fatalf("recorded %d statuses, want 1", len(statuses))
+	}
+	if statuses[0].Phase != corev1alpha1.ExecutionWorkspacePhaseRetained ||
+		statuses[0].Reason != corev1alpha1.ExecutionWorkspaceReasonRetained ||
+		!statuses[0].Reused {
+		t.Fatalf("status = %#v, want retained/reused", statuses[0])
+	}
+}
+
 func TestCleanupExecutionWorkspaceCanSkipTerminalStatus(t *testing.T) {
 	var statusRequests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -1003,8 +1003,10 @@ func cleanupExecutionWorkspace(
 
 	switch strings.TrimSpace(strings.ToLower(workspaceEnv.CleanupPolicy)) {
 	case "retain":
-		if err := scrubExecutionWorkspaceSecrets(ctx, executor, ref, workspaceEnv); err != nil {
-			return fmt.Errorf("%w: %w", errExecutionWorkspaceSecretScrubFailed, err)
+		if shouldPreScrubExecutionWorkspaceSecrets(workspaceEnv) {
+			if err := scrubExecutionWorkspaceSecrets(ctx, executor, ref, workspaceEnv); err != nil {
+				return fmt.Errorf("%w: %w", errExecutionWorkspaceSecretScrubFailed, err)
+			}
 		}
 		if _, err := executor.Release(ctx, workspace.ReleaseRequest{
 			Ref:     ref,
@@ -1048,8 +1050,10 @@ func cleanupExecutionWorkspace(
 			"warning: unsupported workspace cleanup policy %q; retaining workspace to avoid unintended deletion\n",
 			workspaceEnv.CleanupPolicy,
 		)
-		if err := scrubExecutionWorkspaceSecrets(ctx, executor, ref, workspaceEnv); err != nil {
-			return fmt.Errorf("%w: %w", errExecutionWorkspaceSecretScrubFailed, err)
+		if shouldPreScrubExecutionWorkspaceSecrets(workspaceEnv) {
+			if err := scrubExecutionWorkspaceSecrets(ctx, executor, ref, workspaceEnv); err != nil {
+				return fmt.Errorf("%w: %w", errExecutionWorkspaceSecretScrubFailed, err)
+			}
 		}
 		if _, err := executor.Release(ctx, workspace.ReleaseRequest{
 			Ref:     ref,
@@ -1070,6 +1074,10 @@ func cleanupExecutionWorkspace(
 		}
 		return nil
 	}
+}
+
+func shouldPreScrubExecutionWorkspaceSecrets(workspaceEnv workerenv.ExecutionWorkspaceEnv) bool {
+	return strings.TrimSpace(workspaceEnv.Provider) != string(corev1alpha1.WorkspaceProviderSubstrate)
 }
 
 func scrubExecutionWorkspaceSecrets(

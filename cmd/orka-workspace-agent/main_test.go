@@ -214,6 +214,14 @@ func TestWorkspaceAgentBootstrapDefaultUploadHonorsConfiguredTokenFile(t *testin
 	}
 }
 
+func TestHandoffTokenFilePathNormalizesRelativeEnv(t *testing.T) {
+	t.Setenv(envHandoffTokenFile, "custom-handoff-token")
+
+	if got, want := handoffTokenFilePath(), "/app/custom-handoff-token"; got != want {
+		t.Fatalf("handoffTokenFilePath() = %q, want %q", got, want)
+	}
+}
+
 func exerciseHandoffBootstrap(t *testing.T, tokenFile, uploadPath string) *httptest.ResponseRecorder {
 	t.Helper()
 	t.Setenv(envHandoffTokenFile, tokenFile)
@@ -264,6 +272,43 @@ func TestWorkspaceAgentRejectsInvalidHandoffBootstrapWithoutWritingFile(t *testi
 	}
 }
 
+func TestWorkspaceAgentScrubRemovesConfiguredHandoffTokenFile(t *testing.T) {
+	dir := t.TempDir()
+	previousAllowedRoots := allowedRoots
+	allowedRoots = []string{dir}
+	t.Cleanup(func() {
+		allowedRoots = previousAllowedRoots
+	})
+	tokenFile := filepath.Join(dir, "custom-handoff-token")
+	otherFile := filepath.Join(dir, "scratch")
+	if err := os.WriteFile(tokenFile, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	if err := os.WriteFile(otherFile, []byte("scratch"), 0o600); err != nil {
+		t.Fatalf("write scratch file: %v", err)
+	}
+	t.Setenv(envHandoffTokenFile, tokenFile)
+	server := newWorkspaceAgentServer()
+	body, err := json.Marshal(scrubRequest{Paths: []string{otherFile}})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/scrub", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	resp := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusNoContent, resp.Body.String())
+	}
+	for _, path := range []string{tokenFile, otherFile} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("scrub left %s: %v", path, err)
+		}
+	}
+}
+
 func TestSafePathRejectsSymlinkTargetsOutsideAllowedRoot(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
@@ -290,5 +335,25 @@ func TestSafePathRejectsSymlinkTargetsOutsideAllowedRoot(t *testing.T) {
 	}
 	if _, err := safePath(filepath.Join(linkDir, "new-file")); err == nil {
 		t.Fatal("safePath accepted path through symlink directory escaping allowed root")
+	}
+}
+
+func TestSafePathRejectsDanglingSymlinkTargetsOutsideAllowedRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "missing")
+	previousAllowedRoots := allowedRoots
+	allowedRoots = []string{root}
+	t.Cleanup(func() {
+		allowedRoots = previousAllowedRoots
+	})
+	linkFile := filepath.Join(root, "dangling-file")
+	if err := os.Symlink(outside, linkFile); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := safePath(linkFile); err == nil {
+		t.Fatal("safePath accepted dangling symlink escaping allowed root")
+	}
+	if _, err := safePath(filepath.Join(linkFile, "new-file")); err == nil {
+		t.Fatal("safePath accepted path through dangling symlink escaping allowed root")
 	}
 }
