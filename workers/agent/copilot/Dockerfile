@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
+    libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a simple token-echo script for git auth
@@ -38,6 +39,9 @@ RUN printf '#!/bin/sh\necho "$GIT_TOKEN"\n' > /bin/echo-token \
 # Copy the Go worker binaries
 COPY --from=builder /workspace/worker /worker
 COPY --from=builder /workspace/orka-workspace-agent /orka-workspace-agent
+
+RUN setcap 'cap_net_bind_service=+ep' /orka-workspace-agent \
+    && apt-get purge -y --auto-remove libcap2-bin
 
 # Create writable directories for readOnlyRootFilesystem compatibility.
 # The embedded CLI is extracted to a cache dir at runtime.

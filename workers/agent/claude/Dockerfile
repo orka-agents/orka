@@ -21,6 +21,7 @@ FROM node:22-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ca-certificates \
+    libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code CLI globally
@@ -33,6 +34,9 @@ RUN printf '#!/bin/sh\necho "$GIT_TOKEN"\n' > /bin/echo-token \
 # Copy the Go worker binaries
 COPY --from=builder /workspace/worker /worker
 COPY --from=builder /workspace/orka-workspace-agent /orka-workspace-agent
+
+RUN setcap 'cap_net_bind_service=+ep' /orka-workspace-agent \
+    && apt-get purge -y --auto-remove libcap2-bin
 
 # Create writable directories for readOnlyRootFilesystem compatibility
 # node:22-slim already has uid 1000 as the 'node' user

@@ -204,17 +204,19 @@ metadata:
     orka.ai/workspace-provider: substrate
   annotations:
     orka.ai/workspace-protocol: http-json-v1
-    orka.ai/workspace-daemon-port: "8080"
+    orka.ai/workspace-daemon-port: "80"
     orka.ai/workspace-staging-root: /app
     orka.ai/agent-runtimes: codex
 ```
 
 The daemon port must match the daemon container's literal
 `ORKA_WORKSPACE_AGENT_LISTEN_ADDR` value, or the daemon default `:8080` when
-that environment variable is omitted. Use an unprivileged port such as `8080`
-because the Orka workspace-agent image runs as a non-root user. The staging root
-is currently required to be `/app`, because the worker handoff stages the inner
-worker binary and secret scrub paths under that directory.
+that environment variable is omitted. The pinned Substrate router currently
+forwards actor HTTP traffic to port `80`, so Orka agent worker images grant the
+workspace daemon `cap_net_bind_service` while still running it as a non-root
+user. The staging root is currently required to be `/app`, because the worker
+handoff stages the inner worker binary and secret scrub paths under that
+directory.
 Use the Orka agent worker image for the runtime, not the daemon-only image; the
 ActorTemplate container must include `/orka-workspace-agent`, the selected CLI,
 and normal workspace tools such as `git`.
@@ -245,7 +247,7 @@ metadata:
     orka.ai/workspace-provider: substrate
   annotations:
     orka.ai/agent-runtimes: codex
-    orka.ai/workspace-daemon-port: "8080"
+    orka.ai/workspace-daemon-port: "80"
     orka.ai/workspace-protocol: http-json-v1
     orka.ai/workspace-staging-root: /app
 spec:
@@ -257,7 +259,7 @@ spec:
         - /orka-workspace-agent
       env:
         - name: ORKA_WORKSPACE_AGENT_LISTEN_ADDR
-          value: ":8080"
+          value: ":80"
         - name: ORKA_WORKSPACE_HANDOFF_TOKEN_FILE
           value: /app/orka-workspace-handoff-token
         - name: ORKA_WORKSPACE_BOOTSTRAP_TOKEN
@@ -266,7 +268,7 @@ spec:
               name: orka-substrate-bootstrap
               key: token
       ports:
-        - containerPort: 8080
+        - containerPort: 80
   workerPoolRef:
     name: orka-workers
     namespace: ate-demo
