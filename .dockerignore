@@ -23,6 +23,11 @@
 !go.mod
 !go.sum
 
+# Re-include script-local Go helpers used by live E2E Docker builds
+!scripts/
+!scripts/live-kontxt-e2e/
+!scripts/live-kontxt-e2e/**
+
 # Re-include UI source files for frontend build
 !ui/
 !ui/package.json
