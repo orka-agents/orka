@@ -262,7 +262,7 @@ metadata:
   name: orka-workers
   namespace: ate-demo
 spec:
-  replicas: 1
+  replicas: 2
   ateomImage: ${ateom_image}
 ---
 apiVersion: ate.dev/v1alpha1
