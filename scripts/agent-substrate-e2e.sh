@@ -308,10 +308,7 @@ spec:
       - name: ORKA_WORKSPACE_HANDOFF_TOKEN_FILE
         value: /app/orka-workspace-handoff-token
       - name: ORKA_WORKSPACE_BOOTSTRAP_TOKEN
-        valueFrom:
-          secretKeyRef:
-            name: ${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME}
-            key: ${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY}
+        value: "${SUBSTRATE_BOOTSTRAP_TOKEN}"
     ports:
       - containerPort: 80
   workerPoolRef:

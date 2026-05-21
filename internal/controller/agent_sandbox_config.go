@@ -645,13 +645,6 @@ func validateSubstrateWorkspaceDaemonBootstrapEnv(container map[string]any, requ
 		}
 		value, _, _ := unstructured.NestedString(envVar, "value")
 		if strings.TrimSpace(value) != "" {
-			if request != nil && strings.TrimSpace(request.SubstrateBootstrapSecretName) != "" {
-				return fmt.Errorf(
-					"%s must use valueFrom.secretKeyRef for configured bootstrap Secret %q",
-					workerenv.WorkspaceBootstrapToken,
-					request.SubstrateBootstrapSecretName,
-				)
-			}
 			return nil
 		}
 		if ok, err := substrateBootstrapEnvUsesConfiguredSecret(envVar, request); err != nil {

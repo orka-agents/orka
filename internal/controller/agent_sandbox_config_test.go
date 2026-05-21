@@ -302,10 +302,7 @@ func TestValidateSubstrateWorkspaceTemplateAcceptsLiteralBootstrapTokenEnv(t *te
 	})
 	r := substrateTemplateValidatorForTest(t, template)
 
-	request := substrateTemplateRequestForTest()
-	request.SubstrateBootstrapSecretName = ""
-	request.SubstrateBootstrapSecretKey = ""
-	if err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, request); err != nil {
+	if err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest()); err != nil {
 		t.Fatalf("validateSubstrateWorkspaceTemplate() error = %v", err)
 	}
 }
@@ -444,24 +441,6 @@ func TestValidateSubstrateWorkspaceTemplateRejectsMismatchedBootstrapSecretRef(t
 	}
 	if !strings.Contains(err.Error(), "configured bootstrap Secret") {
 		t.Fatalf("error = %q, want configured secret context", err.Error())
-	}
-}
-
-func TestValidateSubstrateWorkspaceTemplateRejectsLiteralBootstrapTokenWhenSecretConfigured(t *testing.T) {
-	template := readySubstrateActorTemplateForTest([]any{
-		map[string]any{
-			"name":  workerenv.WorkspaceBootstrapToken,
-			"value": "bootstrap-token",
-		},
-	})
-	r := substrateTemplateValidatorForTest(t, template)
-
-	err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest())
-	if err == nil {
-		t.Fatal("validateSubstrateWorkspaceTemplate() error = nil, want literal bootstrap token error")
-	}
-	if !strings.Contains(err.Error(), "must use valueFrom.secretKeyRef for configured bootstrap Secret") {
-		t.Fatalf("error = %q, want configured secret literal rejection context", err.Error())
 	}
 }
 

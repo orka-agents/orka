@@ -221,9 +221,11 @@ Use the Orka agent worker image for the runtime, not the daemon-only image; the
 ActorTemplate container must include `/orka-workspace-agent`, the selected CLI,
 and normal workspace tools such as `git`.
 The controller also validates that the workspace-daemon ActorTemplate container
-defines `ORKA_WORKSPACE_BOOTSTRAP_TOKEN` with a `valueFrom.secretKeyRef` matching
-the configured bootstrap Secret name and key. Literal values are accepted only
-when the controller is not configured with a bootstrap Secret.
+defines `ORKA_WORKSPACE_BOOTSTRAP_TOKEN`. Prefer `valueFrom.secretKeyRef` when
+the deployed Substrate version propagates Kubernetes env sources into the actor
+runtime. The pinned Substrate revision used by the kind E2E propagates literal
+env values only, so the CI template uses a generated, ephemeral literal value
+that matches the worker Job Secret.
 
 Example shape:
 
@@ -263,10 +265,7 @@ spec:
         - name: ORKA_WORKSPACE_HANDOFF_TOKEN_FILE
           value: /app/orka-workspace-handoff-token
         - name: ORKA_WORKSPACE_BOOTSTRAP_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: orka-substrate-bootstrap
-              key: token
+          value: "${ROTATED_BOOTSTRAP_TOKEN}"
       ports:
         - containerPort: 80
   workerPoolRef:
@@ -294,8 +293,8 @@ handling is strict:
 
 - The outer worker stages only a short-lived handoff token for the inner worker.
 - The first handoff-token upload is authenticated with
-  `ORKA_WORKSPACE_BOOTSTRAP_TOKEN`, which must come from a Kubernetes Secret and
-  must not be the token being uploaded.
+  `ORKA_WORKSPACE_BOOTSTRAP_TOKEN`, which must match the worker Job bootstrap
+  Secret and must not be the token being uploaded.
 - The daemon reads the handoff token from the configured file path.
 - The daemon removes the bootstrap token from its process environment before
   launching task commands.
@@ -310,9 +309,9 @@ handling is strict:
 Do not place API keys, long-lived credentials, or source-control tokens directly
 in an `ActorTemplate`. Use Kubernetes Secrets and Orka's existing runtime secret
 mechanisms for Task execution. The bootstrap token is control-plane credential
-material; keep it in a Secret, rotate it like other cluster credentials, and use
-the same Secret name/key in the worker Task namespace and the `ActorTemplate`
-namespace.
+material; keep the worker-side value in a Secret, rotate it like other cluster
+credentials, and ensure the ActorTemplate daemon receives the same value through
+the most restrictive env mechanism supported by the deployed Substrate version.
 
 ## Local Kind Validation
 
