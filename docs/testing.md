@@ -19,6 +19,9 @@ make ui-test-coverage       # or: cd ui && bun run test:coverage
 # Run E2E tests (requires isolated Kind cluster)
 make test-e2e
 
+# Run Agent Substrate E2E (requires Docker, Go, git, curl, kind, kubectl, ko, jq)
+SUBSTRATE_E2E_EXTENDED=1 bash scripts/agent-substrate-e2e.sh
+
 # Lint
 make lint
 make lint-fix
@@ -86,6 +89,7 @@ End-to-end tests run against a dedicated Kind cluster:
 - `E2E_LIVE_COPILOT_PROXY_BASE_URL` (or `E2E_COPILOT_PROXY_BASE_URL` / `COPILOT_PROXY_BASE_URL`): enables the focused live copilot-proxy spec against a running proxy
 - `E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE`, `E2E_LIVE_COPILOT_PROXY_SERVICE_NAME`, `E2E_LIVE_COPILOT_PROXY_SERVICE_PORT`: optional overrides for how the live spec reaches the in-cluster proxy service for `/readyz` and `/v1/models` checks
 - Structural e2e tests (job/env/volume assertions) run without external model keys
+- Agent Substrate E2E is secret-free, but requires Docker plus local toolchain dependencies: Go, git, curl, `kind`, `kubectl`, `ko`, and `jq`
 
 The live copilot-proxy E2E path runs in a separate workflow and executes the focused live suites for:
 
@@ -112,6 +116,23 @@ The live GitHub OIDC workflow (`.github/workflows/live-github-oidc-e2e.yml`) run
 - the `kontxt`-created Task response and persisted CR contain `spec.requestedBy` with the configured kontxt issuer, subject, and scope-derived roles
 - top-level `requestedBy` and nested `spec.requestedBy` client tampering are rejected with `400`
 - a tampered `kontxt` TxToken is rejected with `401`
+
+The Agent Substrate workflow (`.github/workflows/agent-substrate-e2e.yml`) is secret-free and runs `scripts/agent-substrate-e2e.sh` against a fresh Kind cluster. It pins the Substrate checkout with `SUBSTRATE_REF`, installs Substrate, initializes the local RustFS snapshot bucket, builds local Orka controller/workspace/worker images, then validates:
+
+- direct Substrate actor create/resume/router/daemon exec/suspend/delete
+- Orka `Task` execution with the default Substrate workspace provider
+- cleanup delete behavior reaches `Deleted`
+- retained cleanup reaches `Retained`
+- a missing `ActorTemplate` fails predictably
+- failure diagnostics include Orka controller logs, worker Job logs, Task YAML, Kubernetes events, and Substrate actor/worker state
+
+Run it locally with:
+
+```bash
+PATH="$(go env GOPATH)/bin:$PATH" \
+SUBSTRATE_E2E_EXTENDED=1 \
+bash scripts/agent-substrate-e2e.sh
+```
 
 ### Frontend Tests
 

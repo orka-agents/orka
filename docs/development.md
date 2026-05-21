@@ -41,23 +41,34 @@ make test-e2e
 
 See [Testing](testing.md) for full test structure and patterns.
 
-### Live CI Validation
+### CI Validation
 
-The repository has two live GitHub Actions E2E workflows in addition to the normal test matrix:
+The repository has additional GitHub Actions E2E workflows in addition to the normal test matrix:
 
 - `Live Copilot Proxy E2E` — exercises live model-backed Orka paths through the copilot-proxy harness.
 - `Live GitHub OIDC E2E` — builds the PR controller image, deploys it to Kind, authenticates to Orka with a real GitHub Actions OIDC token, then generates a real `kontxt` TxToken against an in-cluster JWKS endpoint. It verifies `spec.requestedBy` stamping for both auth modes, rejects client tampering, and rejects a tampered TxToken.
+- `Agent Substrate E2E` — installs Agent Substrate and Orka into a fresh Kind cluster, creates an Orka-compatible `WorkerPool`/`ActorTemplate`, validates direct Substrate actor execution, and runs Orka Tasks through the Substrate workspace provider. This workflow is secret-free.
 
 Validate workflow/script edits locally before pushing:
 
 ```bash
 bash -n scripts/live-copilot-proxy-e2e.sh
 bash -n scripts/live-github-oidc-e2e.sh
+bash -n scripts/agent-substrate-e2e.sh
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-copilot-proxy-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-github-oidc-e2e.yml
+go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent-substrate-e2e.yml
 ```
 
 The GitHub OIDC live script requires GitHub Actions `id-token: write` or a manual `ORKA_GITHUB_OIDC_TOKEN`; without either, it fails fast before creating a cluster. The `kontxt` portion is self-contained: it generates an ephemeral RSA key/JWKS and TxToken during the run, so no external kontxt service or secret is required.
+
+Run the Agent Substrate E2E locally with:
+
+```bash
+PATH="$(go env GOPATH)/bin:$PATH" \
+SUBSTRATE_E2E_EXTENDED=1 \
+bash scripts/agent-substrate-e2e.sh
+```
 
 ## UI Development
 
