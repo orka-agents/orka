@@ -614,6 +614,53 @@ func TestRunAgent_AgentSandboxCleanupUsesFreshContextAfterCancellation(t *testin
 	}
 }
 
+func TestRunAgent_ExecutionWorkspaceCleanupFailureRetriedByDeferredCleanup(t *testing.T) {
+	t.Setenv(workerenv.TaskName, "task-name")
+	t.Setenv(workerenv.TaskNamespace, "task-ns")
+	t.Setenv(workerenv.ServiceAccountToken, "")
+	t.Setenv(workerenv.ServiceAccountTokenPath, filepath.Join(t.TempDir(), "missing-token"))
+
+	recorder := newRecordingWorkspaceExecutor()
+	recorder.deleteErr = fmt.Errorf("delete boom")
+	recorder.afterDelete = func() {
+		recorder.mu.Lock()
+		defer recorder.mu.Unlock()
+		recorder.deleteErr = nil
+		recorder.afterDelete = nil
+	}
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	err := runAgentInWorkspace(
+		context.Background(),
+		"test-agent",
+		"/sandbox/workspace",
+		workerenv.ExecutionWorkspaceEnv{
+			Provider:          string(corev1alpha1.WorkspaceProviderAgentSandbox),
+			TemplateName:      "agent-template",
+			TemplateNamespace: testAgentSandboxTemplateNamespace,
+			ClaimNamespace:    testAgentSandboxTemplateNamespace,
+			ClaimName:         "claim-name",
+			ClaimTimeout:      3 * time.Second,
+			CommandTimeout:    9 * time.Second,
+			CleanupPolicy:     "delete",
+		},
+	)
+	if err == nil {
+		t.Fatal("expected terminal cleanup failure")
+	}
+	if !strings.Contains(err.Error(), "execution workspace cleanup failed") ||
+		!strings.Contains(err.Error(), "delete boom") {
+		t.Fatalf("runAgentInWorkspace() error = %q, want cleanup failure context", err.Error())
+	}
+
+	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "delete", "delete")
+	deleteReqs := recorder.deleteRequests()
+	if len(deleteReqs) != 2 {
+		t.Fatalf("recorded %d delete requests, want terminal cleanup plus deferred retry", len(deleteReqs))
+	}
+}
+
 func TestRunAgent_AgentSandboxRecursionFailsFast(t *testing.T) {
 	setRequiredAgentSandboxEnv(t, "delete")
 	t.Setenv(workerenv.AgentSandboxDepth, "1")
@@ -1499,6 +1546,7 @@ type recordingWorkspaceExecutor struct {
 	describeReqs  []workspace.DescribeRequest
 	deleteCtxErrs []error
 	afterExec     func()
+	afterDelete   func()
 	claimErr      error
 	waitReadyErr  error
 	execErr       error
@@ -1619,7 +1667,11 @@ func (r *recordingWorkspaceExecutor) Delete(
 	r.deleteReqs = append(r.deleteReqs, req)
 	r.deleteCtxErrs = append(r.deleteCtxErrs, ctx.Err())
 	err := r.deleteErr
+	afterDelete := r.afterDelete
 	r.mu.Unlock()
+	if afterDelete != nil {
+		afterDelete()
+	}
 	if err != nil {
 		return nil, err
 	}

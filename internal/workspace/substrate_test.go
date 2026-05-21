@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -33,6 +34,19 @@ func TestNewSubstrateExecutorDefaultHTTPClientHasNoTimeout(t *testing.T) {
 	}
 	if executor.httpClient.Timeout != 0 {
 		t.Fatalf("default HTTP timeout = %s, want operation context controlled timeout", executor.httpClient.Timeout)
+	}
+}
+
+func TestSubstrateTransportCredentialsRequireExplicitTrust(t *testing.T) {
+	_, err := substrateTransportCredentials(SubstrateConfig{})
+	if err == nil {
+		t.Fatal("expected missing API trust error")
+	}
+	if !IsKind(err, ErrorKindInvalidArgument) {
+		t.Fatalf("substrateTransportCredentials() error kind = %s, want %s", KindOf(err), ErrorKindInvalidArgument)
+	}
+	if !strings.Contains(err.Error(), "Substrate API trust") {
+		t.Fatalf("substrateTransportCredentials() error = %q, want API trust context", err.Error())
 	}
 }
 

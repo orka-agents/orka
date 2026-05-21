@@ -100,7 +100,8 @@ The same values can be provided through environment variables:
 | `--substrate-command-timeout` | `ORKA_SUBSTRATE_COMMAND_TIMEOUT` | `30m` |
 | `--substrate-cleanup-policy` | `ORKA_SUBSTRATE_CLEANUP_POLICY` | `delete` |
 
-Use `--substrate-api-ca-file` in production. Reserve
+When Substrate is enabled, the controller requires explicit API trust
+configuration. Use `--substrate-api-ca-file` in production. Reserve
 `--substrate-api-insecure-skip-verify=true` for local smoke tests such as the
 kind E2E.
 

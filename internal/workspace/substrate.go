@@ -665,7 +665,13 @@ func substrateTransportCredentials(cfg SubstrateConfig) (credentials.TransportCr
 		return credentials.NewTLS(&tls.Config{InsecureSkipVerify: true}), nil //nolint:gosec // explicit local smoke-test option
 	}
 	if strings.TrimSpace(cfg.APICAFile) == "" {
-		return credentials.NewTLS(&tls.Config{}), nil
+		return nil, NewError(
+			"configure substrate",
+			ErrorKindInvalidArgument,
+			"Substrate API trust requires a CA file or insecure skip verify",
+			false,
+			nil,
+		)
 	}
 	data, err := os.ReadFile(cfg.APICAFile)
 	if err != nil {

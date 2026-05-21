@@ -139,6 +139,11 @@ func (c SubstrateConfig) Validate() error {
 	if strings.TrimSpace(cfg.APIEndpoint) == "" {
 		return fmt.Errorf("substrate API endpoint is required")
 	}
+	if strings.TrimSpace(cfg.APICAFile) == "" && !cfg.APIInsecureSkipVerify {
+		return fmt.Errorf(
+			"substrate API trust requires --substrate-api-ca-file or --substrate-api-insecure-skip-verify=true",
+		)
+	}
 	if strings.TrimSpace(cfg.RouterURL) == "" {
 		return fmt.Errorf("substrate router URL is required")
 	}

@@ -143,6 +143,28 @@ func TestSubstrateConfigFromEnv(t *testing.T) {
 	}
 }
 
+func TestSubstrateConfigValidateRequiresExplicitTrust(t *testing.T) {
+	cfg := DefaultSubstrateConfig()
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected missing API trust error")
+	}
+	if !strings.Contains(err.Error(), "substrate API trust") {
+		t.Fatalf("Validate() error = %q, want API trust context", err.Error())
+	}
+
+	cfg.APICAFile = "/var/run/orka/substrate/ca.crt"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with CA file error = %v", err)
+	}
+
+	cfg.APICAFile = ""
+	cfg.APIInsecureSkipVerify = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with insecure skip verify error = %v", err)
+	}
+}
+
 func TestValidateSubstrateWorkspaceTemplateRequiresAppStagingRoot(t *testing.T) {
 	scheme := runtime.NewScheme()
 	scheme.AddKnownTypeWithName(schema.GroupVersionKind{

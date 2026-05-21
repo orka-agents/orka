@@ -566,7 +566,6 @@ func runAgentInWorkspace(
 			claim.Reused,
 			"workspace cleanup failed",
 		)
-		cleaned = true
 		return fmt.Errorf("execution workspace cleanup failed: %w", err)
 	}
 	cleaned = true
