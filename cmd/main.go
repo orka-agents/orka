@@ -138,9 +138,14 @@ func main() {
 	var enableTracing bool
 	var tlsOpts []func(*tls.Config)
 
+	executionWorkspaceDefaultProvider := controller.ExecutionWorkspaceDefaultProviderFromEnv(os.Getenv)
+	executionWorkspaceDefaultProviderFlag := string(executionWorkspaceDefaultProvider)
 	agentSandboxEnabled = strings.EqualFold(os.Getenv("ORKA_AGENT_SANDBOX_ENABLED"), "true")
 	agentSandboxConfig, agentSandboxConfigErr := controller.AgentSandboxConfigFromEnv(os.Getenv)
 	agentSandboxCleanupPolicy = string(agentSandboxConfig.CleanupPolicy)
+	substrateEnabled := strings.EqualFold(os.Getenv("ORKA_SUBSTRATE_ENABLED"), "true")
+	substrateConfig, substrateConfigErr := controller.SubstrateConfigFromEnv(os.Getenv)
+	substrateCleanupPolicy := string(substrateConfig.CleanupPolicy)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -213,6 +218,9 @@ func main() {
 		"When true, restrict users to their ServiceAccount's namespace for all operations.")
 	flag.IntVar(&maxTasksPerNamespace, "max-tasks-per-namespace", 0,
 		"Maximum active tasks per namespace (0 = unlimited).")
+	flag.StringVar(&executionWorkspaceDefaultProviderFlag, "execution-workspace-default-provider",
+		executionWorkspaceDefaultProviderFlag,
+		"Default execution workspace provider when Task execution.workspace.provider is omitted (agent-sandbox, substrate).")
 	flag.BoolVar(&agentSandboxEnabled, "agent-sandbox-enabled", agentSandboxEnabled,
 		"Enable experimental agent sandbox workspace execution for agent Tasks.")
 	flag.StringVar(&agentSandboxConfig.RouterURL, "agent-sandbox-router-url", agentSandboxConfig.RouterURL,
@@ -234,6 +242,30 @@ func main() {
 		"Timeout for agent runtime execution inside the sandbox.")
 	flag.StringVar(&agentSandboxCleanupPolicy, "agent-sandbox-cleanup-policy", agentSandboxCleanupPolicy,
 		"Default agent sandbox workspace cleanup policy (delete, retain).")
+	flag.BoolVar(&substrateEnabled, "substrate-enabled", substrateEnabled,
+		"Enable experimental Substrate execution workspace provider for agent Tasks.")
+	flag.StringVar(&substrateConfig.APIEndpoint, "substrate-api-endpoint", substrateConfig.APIEndpoint,
+		"Substrate control API endpoint used by worker Jobs.")
+	flag.StringVar(&substrateConfig.APICAFile, "substrate-api-ca-file", substrateConfig.APICAFile,
+		"CA bundle file for the Substrate control API.")
+	flag.BoolVar(&substrateConfig.APIInsecureSkipVerify, "substrate-api-insecure-skip-verify",
+		substrateConfig.APIInsecureSkipVerify,
+		"Skip Substrate control API certificate verification. Only for local smoke tests.")
+	flag.StringVar(&substrateConfig.RouterURL, "substrate-router-url", substrateConfig.RouterURL,
+		"Substrate router base URL used by worker Jobs for actor daemon calls.")
+	flag.StringVar(&substrateConfig.ActorDNSSuffix, "substrate-actor-dns-suffix", substrateConfig.ActorDNSSuffix,
+		"DNS suffix used to route HTTP requests to active Substrate actors.")
+	flag.StringVar(&substrateConfig.DefaultTemplate, "substrate-default-template", substrateConfig.DefaultTemplate,
+		"Default Substrate ActorTemplate name used when a Task omits execution.workspace.templateRef.name.")
+	flag.StringVar(&substrateConfig.DefaultTemplateNS, "substrate-default-template-namespace",
+		substrateConfig.DefaultTemplateNS,
+		"Default Substrate ActorTemplate namespace used when a Task omits execution.workspace.templateRef.namespace.")
+	flag.DurationVar(&substrateConfig.ClaimTimeout, "substrate-claim-timeout", substrateConfig.ClaimTimeout,
+		"Timeout for Substrate actor claim, readiness, release, retain, and delete operations.")
+	flag.DurationVar(&substrateConfig.CommandTimeout, "substrate-command-timeout", substrateConfig.CommandTimeout,
+		"Timeout for agent runtime execution inside the Substrate actor.")
+	flag.StringVar(&substrateCleanupPolicy, "substrate-cleanup-policy", substrateCleanupPolicy,
+		"Default Substrate workspace cleanup policy (delete, retain).")
 	flag.StringVar(&oidcIssuer, "oidc-issuer", os.Getenv("ORKA_OIDC_ISSUER"),
 		"OIDC issuer URL for authenticating external API requests. Requires --oidc-audience when set.")
 	flag.StringVar(&oidcAudience, "oidc-audience", os.Getenv("ORKA_OIDC_AUDIENCE"),
@@ -342,6 +374,12 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	executionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProvider(executionWorkspaceDefaultProviderFlag)
+	if !controller.WorkspaceProviderSupported(executionWorkspaceDefaultProvider) {
+		setupLog.Error(fmt.Errorf("unsupported execution workspace default provider %q", executionWorkspaceDefaultProvider),
+			"invalid execution workspace configuration")
+		os.Exit(1)
+	}
 	agentSandboxConfig.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy(agentSandboxCleanupPolicy)
 	agentSandboxConfig = agentSandboxConfig.WithDefaults()
 	if agentSandboxEnabled {
@@ -351,6 +389,18 @@ func main() {
 		}
 		if err := agentSandboxConfig.Validate(); err != nil {
 			setupLog.Error(err, "invalid agent sandbox configuration")
+			os.Exit(1)
+		}
+	}
+	substrateConfig.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy(substrateCleanupPolicy)
+	substrateConfig = substrateConfig.WithDefaults()
+	if substrateEnabled {
+		if substrateConfigErr != nil {
+			setupLog.Error(substrateConfigErr, "invalid substrate configuration from environment")
+			os.Exit(1)
+		}
+		if err := substrateConfig.Validate(); err != nil {
+			setupLog.Error(err, "invalid substrate configuration")
 			os.Exit(1)
 		}
 	}
@@ -601,8 +651,11 @@ func main() {
 		ArtifactStore:                      sqliteStore,
 		EnforceNamespaceIsolation:          enforceNamespaceIsolation,
 		MaxTasksPerNamespace:               maxTasksPerNamespaceValue,
+		ExecutionWorkspaceDefaultProvider:  executionWorkspaceDefaultProvider,
 		AgentSandboxEnabled:                agentSandboxEnabled,
 		AgentSandboxConfig:                 agentSandboxConfig,
+		SubstrateEnabled:                   substrateEnabled,
+		SubstrateConfig:                    substrateConfig,
 		AIWorkerClusterRoleName:            aiWorkerClusterRoleName,
 		VendorWorkerClusterRoleName:        vendorWorkerClusterRoleName,
 		ContainerWorkerClusterRoleName:     containerWorkerClusterRoleName,

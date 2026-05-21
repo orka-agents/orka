@@ -181,6 +181,40 @@ func TestAgentSandboxEnvVarsDisabledReturnsEmpty(t *testing.T) {
 	}
 }
 
+func TestExecutionWorkspaceEnvRenderAndParse(t *testing.T) {
+	env := ExecutionWorkspaceEnv{
+		Enabled:           true,
+		Provider:          "substrate",
+		TemplateName:      "orka-codex",
+		TemplateNamespace: "ate-demo",
+		ClaimNamespace:    "ate-demo",
+		ClaimName:         "orka-s-abc",
+		ReusePolicy:       "session",
+		ReuseKey:          "session-1",
+		CleanupPolicy:     "retain",
+		ClaimTimeout:      2 * time.Minute,
+		CommandTimeout:    30 * time.Minute,
+		StatusEndpoint:    "http://orka/internal/v1/tasks/default/task/execution-workspace/status",
+		Depth:             0,
+	}
+
+	values := map[string]string{}
+	for _, envVar := range env.EnvVars() {
+		values[envVar.Name] = envVar.Value
+	}
+
+	parsed := ParseExecutionWorkspaceEnv(func(name string) string { return values[name] })
+	if !parsed.Enabled {
+		t.Fatal("parsed execution workspace env is not enabled")
+	}
+	if parsed.Provider != env.Provider || parsed.ClaimName != env.ClaimName {
+		t.Fatalf("parsed provider/claim = %s/%s, want %s/%s", parsed.Provider, parsed.ClaimName, env.Provider, env.ClaimName)
+	}
+	if parsed.ClaimTimeout != env.ClaimTimeout || parsed.CommandTimeout != env.CommandTimeout {
+		t.Fatalf("parsed timeouts = %s/%s, want %s/%s", parsed.ClaimTimeout, parsed.CommandTimeout, env.ClaimTimeout, env.CommandTimeout)
+	}
+}
+
 func TestAgentSandboxEnvRenderAndParse(t *testing.T) {
 	env := AgentSandboxEnv{
 		Enabled:           true,

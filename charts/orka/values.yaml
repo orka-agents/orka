@@ -45,6 +45,10 @@ controller:
   maxTasksPerNamespace: 0
 
   # Experimental agent sandbox workspace support (disabled by default)
+  executionWorkspace:
+    # Default provider used when Task execution.workspace.provider is omitted.
+    defaultProvider: agent-sandbox
+
   agentSandbox:
     # Enables workspace-backed execution for agent Tasks that set Task execution.workspace.
     enabled: false
@@ -61,6 +65,20 @@ controller:
     # Timeout for agent runtime execution inside the sandbox.
     commandTimeout: 30m
     # Default cleanup policy: delete, retain.
+    cleanupPolicy: delete
+
+  # Experimental Substrate execution workspace support (disabled by default)
+  substrate:
+    enabled: false
+    apiEndpoint: api.ate-system.svc:443
+    apiCAFile: ""
+    apiInsecureSkipVerify: false
+    routerUrl: http://atenet-router.ate-system.svc
+    actorDnsSuffix: actors.resources.substrate.ate.dev
+    defaultTemplate: ""
+    defaultTemplateNamespace: ""
+    claimTimeout: 2m
+    commandTimeout: 30m
     cleanupPolicy: delete
 
   # OIDC/JWT authentication for external API requests

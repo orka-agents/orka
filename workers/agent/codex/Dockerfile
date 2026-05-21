@@ -12,8 +12,9 @@ RUN go mod download
 # Copy source
 COPY . .
 
-# Build the worker
+# Build the worker and workspace daemon
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o worker ./workers/agent/codex
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o orka-workspace-agent ./cmd/orka-workspace-agent
 
 # Runtime stage — Node.js required for Codex CLI
 FROM node:22-slim
@@ -47,8 +48,9 @@ RUN npm install -g @openai/codex \
 RUN printf '#!/bin/sh\necho "$GIT_TOKEN"\n' > /bin/echo-token \
     && chmod +x /bin/echo-token
 
-# Copy the Go worker binary
+# Copy the Go worker binaries
 COPY --from=builder /workspace/worker /worker
+COPY --from=builder /workspace/orka-workspace-agent /orka-workspace-agent
 
 # Create writable directories for readOnlyRootFilesystem compatibility
 # node:22-slim already has uid 1000 as the 'node' user

@@ -139,6 +139,26 @@ const (
 	SkillsDir         = "ORKA_SKILLS_DIR"
 
 	// Agent sandbox workspace env vars used by agent-runtime workers.
+	ExecutionWorkspaceEnabled               = "ORKA_EXECUTION_WORKSPACE_ENABLED"
+	ExecutionWorkspaceProvider              = "ORKA_EXECUTION_WORKSPACE_PROVIDER"
+	ExecutionWorkspaceTemplateName          = "ORKA_EXECUTION_WORKSPACE_TEMPLATE_NAME"
+	ExecutionWorkspaceTemplateNamespace     = "ORKA_EXECUTION_WORKSPACE_TEMPLATE_NAMESPACE"
+	ExecutionWorkspaceClaimNamespace        = "ORKA_EXECUTION_WORKSPACE_CLAIM_NAMESPACE"
+	ExecutionWorkspaceClaimName             = "ORKA_EXECUTION_WORKSPACE_CLAIM_NAME"
+	ExecutionWorkspaceReusePolicy           = "ORKA_EXECUTION_WORKSPACE_REUSE_POLICY"
+	ExecutionWorkspaceReuseKey              = "ORKA_EXECUTION_WORKSPACE_REUSE_KEY"
+	ExecutionWorkspaceCleanupPolicy         = "ORKA_EXECUTION_WORKSPACE_CLEANUP_POLICY"
+	ExecutionWorkspaceClaimTimeoutSeconds   = "ORKA_EXECUTION_WORKSPACE_CLAIM_TIMEOUT_SECONDS"
+	ExecutionWorkspaceCommandTimeoutSeconds = "ORKA_EXECUTION_WORKSPACE_COMMAND_TIMEOUT_SECONDS"
+	ExecutionWorkspaceStatusEndpoint        = "ORKA_EXECUTION_WORKSPACE_STATUS_ENDPOINT"
+	ExecutionWorkspaceDepth                 = "ORKA_EXECUTION_WORKSPACE_DEPTH"
+
+	SubstrateAPIEndpoint           = "ORKA_SUBSTRATE_API_ENDPOINT"
+	SubstrateAPICAFile             = "ORKA_SUBSTRATE_API_CA_FILE"
+	SubstrateAPIInsecureSkipVerify = "ORKA_SUBSTRATE_API_INSECURE_SKIP_VERIFY"
+	SubstrateRouterURL             = "ORKA_SUBSTRATE_ROUTER_URL"
+	SubstrateActorDNSSuffix        = "ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX"
+
 	AgentSandboxEnabled               = "ORKA_AGENT_SANDBOX_ENABLED"
 	AgentSandboxRouterURL             = "ORKA_AGENT_SANDBOX_ROUTER_URL"
 	AgentSandboxTemplateName          = "ORKA_AGENT_SANDBOX_TEMPLATE_NAME"
@@ -438,6 +458,97 @@ func (e AIWorkerEnv) ValidateRequired() error {
 		return fmt.Errorf("%s is required", AIPrompt)
 	}
 	return nil
+}
+
+// ExecutionWorkspaceEnv is the provider-neutral execution workspace env
+// contract passed to agent-runtime workers.
+type ExecutionWorkspaceEnv struct {
+	Enabled           bool
+	Provider          string
+	TemplateName      string
+	TemplateNamespace string
+	ClaimNamespace    string
+	ClaimName         string
+	ReusePolicy       string
+	ReuseKey          string
+	CleanupPolicy     string
+	ClaimTimeout      time.Duration
+	CommandTimeout    time.Duration
+	StatusEndpoint    string
+	Depth             int
+}
+
+// EnvVars renders the generic execution workspace environment.
+func (e ExecutionWorkspaceEnv) EnvVars() []corev1.EnvVar {
+	if !e.Enabled {
+		return nil
+	}
+
+	return []corev1.EnvVar{
+		Env(ExecutionWorkspaceEnabled, strconv.FormatBool(e.Enabled)),
+		Env(ExecutionWorkspaceProvider, e.Provider),
+		Env(ExecutionWorkspaceTemplateName, e.TemplateName),
+		Env(ExecutionWorkspaceTemplateNamespace, e.TemplateNamespace),
+		Env(ExecutionWorkspaceClaimNamespace, e.ClaimNamespace),
+		Env(ExecutionWorkspaceClaimName, e.ClaimName),
+		Env(ExecutionWorkspaceReusePolicy, e.ReusePolicy),
+		Env(ExecutionWorkspaceReuseKey, e.ReuseKey),
+		Env(ExecutionWorkspaceCleanupPolicy, e.CleanupPolicy),
+		Env(ExecutionWorkspaceClaimTimeoutSeconds, strconv.FormatInt(int64(e.ClaimTimeout/time.Second), 10)),
+		Env(ExecutionWorkspaceCommandTimeoutSeconds, strconv.FormatInt(int64(e.CommandTimeout/time.Second), 10)),
+		Env(ExecutionWorkspaceStatusEndpoint, e.StatusEndpoint),
+		Env(ExecutionWorkspaceDepth, strconv.Itoa(e.Depth)),
+	}
+}
+
+// ParseExecutionWorkspaceEnv reads the generic execution workspace environment.
+func ParseExecutionWorkspaceEnv(getenv func(string) string) ExecutionWorkspaceEnv {
+	return ExecutionWorkspaceEnv{
+		Enabled:           IsTrue(getenv(ExecutionWorkspaceEnabled)),
+		Provider:          getenv(ExecutionWorkspaceProvider),
+		TemplateName:      getenv(ExecutionWorkspaceTemplateName),
+		TemplateNamespace: getenv(ExecutionWorkspaceTemplateNamespace),
+		ClaimNamespace:    getenv(ExecutionWorkspaceClaimNamespace),
+		ClaimName:         getenv(ExecutionWorkspaceClaimName),
+		ReusePolicy:       getenv(ExecutionWorkspaceReusePolicy),
+		ReuseKey:          getenv(ExecutionWorkspaceReuseKey),
+		CleanupPolicy:     getenv(ExecutionWorkspaceCleanupPolicy),
+		ClaimTimeout:      time.Duration(parsePositiveInt(getenv(ExecutionWorkspaceClaimTimeoutSeconds))) * time.Second,
+		CommandTimeout:    time.Duration(parsePositiveInt(getenv(ExecutionWorkspaceCommandTimeoutSeconds))) * time.Second,
+		StatusEndpoint:    getenv(ExecutionWorkspaceStatusEndpoint),
+		Depth:             parsePositiveInt(getenv(ExecutionWorkspaceDepth)),
+	}
+}
+
+// SubstrateEnv is the Substrate-specific worker env contract.
+type SubstrateEnv struct {
+	APIEndpoint           string
+	APICAFile             string
+	APIInsecureSkipVerify bool
+	RouterURL             string
+	ActorDNSSuffix        string
+}
+
+// EnvVars renders Substrate-specific worker env vars.
+func (e SubstrateEnv) EnvVars() []corev1.EnvVar {
+	return []corev1.EnvVar{
+		Env(SubstrateAPIEndpoint, e.APIEndpoint),
+		Env(SubstrateAPICAFile, e.APICAFile),
+		Env(SubstrateAPIInsecureSkipVerify, strconv.FormatBool(e.APIInsecureSkipVerify)),
+		Env(SubstrateRouterURL, e.RouterURL),
+		Env(SubstrateActorDNSSuffix, e.ActorDNSSuffix),
+	}
+}
+
+// ParseSubstrateEnv reads Substrate-specific worker env vars.
+func ParseSubstrateEnv(getenv func(string) string) SubstrateEnv {
+	return SubstrateEnv{
+		APIEndpoint:           getenv(SubstrateAPIEndpoint),
+		APICAFile:             getenv(SubstrateAPICAFile),
+		APIInsecureSkipVerify: IsTrue(getenv(SubstrateAPIInsecureSkipVerify)),
+		RouterURL:             getenv(SubstrateRouterURL),
+		ActorDNSSuffix:        getenv(SubstrateActorDNSSuffix),
+	}
 }
 
 // AgentSandboxEnv is the resolved sandbox workspace env contract passed to

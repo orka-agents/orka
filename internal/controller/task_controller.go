@@ -88,8 +88,11 @@ type TaskReconciler struct {
 	ArtifactStore                      store.ArtifactStore
 	EnforceNamespaceIsolation          bool
 	MaxTasksPerNamespace               int32
+	ExecutionWorkspaceDefaultProvider  corev1alpha1.WorkspaceProvider
 	AgentSandboxEnabled                bool
 	AgentSandboxConfig                 AgentSandboxConfig
+	SubstrateEnabled                   bool
+	SubstrateConfig                    SubstrateConfig
 	AIWorkerClusterRoleName            string
 	VendorWorkerClusterRoleName        string
 	ContainerWorkerClusterRoleName     string
@@ -127,6 +130,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list
+// +kubebuilder:rbac:groups=ate.dev,resources=actortemplates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch
@@ -715,7 +719,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 
 	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{
-		AgentSandboxWorkspace: workspaceRequest,
+		ExecutionWorkspace: workspaceRequest,
 	})
 	if err != nil {
 		log.Error(err, "failed to build Job")
@@ -1444,22 +1448,39 @@ func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) err
 	}
 
 	ws := task.Spec.Execution.Workspace
-	cfg := r.AgentSandboxConfig.WithDefaults()
+	provider := resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
 
-	if !r.AgentSandboxEnabled {
-		return fmt.Errorf("execution workspace requires agent sandbox to be enabled")
+	if !supportedWorkspaceProvider(provider) {
+		return fmt.Errorf("unsupported execution workspace provider %q", provider)
 	}
 
 	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		return fmt.Errorf("execution workspace is only supported for type: agent tasks")
 	}
 
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
-
-	if executionWorkspaceTemplateName(ws, cfg) == "" {
-		return fmt.Errorf("execution workspace templateRef.name is required when no agent sandbox default template is configured")
+	switch provider {
+	case corev1alpha1.WorkspaceProviderAgentSandbox:
+		if !r.AgentSandboxEnabled {
+			return fmt.Errorf("execution workspace provider %q requires agent sandbox to be enabled", provider)
+		}
+		cfg := r.AgentSandboxConfig.WithDefaults()
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		if executionWorkspaceTemplateName(ws, cfg) == "" {
+			return fmt.Errorf("execution workspace templateRef.name is required when no agent sandbox default template is configured")
+		}
+	case corev1alpha1.WorkspaceProviderSubstrate:
+		if !r.SubstrateEnabled {
+			return fmt.Errorf("execution workspace provider %q requires substrate to be enabled", provider)
+		}
+		cfg := r.SubstrateConfig.WithDefaults()
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		if substrateTemplateName(ws, cfg) == "" {
+			return fmt.Errorf("execution workspace templateRef.name is required when no substrate default template is configured")
+		}
 	}
 
 	switch ws.ReusePolicy {

@@ -179,6 +179,9 @@ spec:
             {{- if gt (int .Values.controller.maxTasksPerNamespace) 0 }}
             - --max-tasks-per-namespace={{ .Values.controller.maxTasksPerNamespace }}
             {{- end }}
+            {{- with .Values.controller.executionWorkspace }}
+            - --execution-workspace-default-provider={{ .defaultProvider | default "agent-sandbox" }}
+            {{- end }}
             {{- with .Values.controller.agentSandbox }}
             {{- if .enabled }}
             - --agent-sandbox-enabled=true
@@ -193,6 +196,29 @@ spec:
             - --agent-sandbox-claim-timeout={{ .claimTimeout | default "2m" }}
             - --agent-sandbox-command-timeout={{ .commandTimeout | default "30m" }}
             - --agent-sandbox-cleanup-policy={{ .cleanupPolicy | default "delete" }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.controller.substrate }}
+            {{- if .enabled }}
+            - --substrate-enabled=true
+            - {{ printf "--substrate-api-endpoint=%s" (.apiEndpoint | default "api.ate-system.svc:443") | quote }}
+            {{- if .apiCAFile }}
+            - {{ printf "--substrate-api-ca-file=%s" .apiCAFile | quote }}
+            {{- end }}
+            {{- if .apiInsecureSkipVerify }}
+            - --substrate-api-insecure-skip-verify=true
+            {{- end }}
+            - {{ printf "--substrate-router-url=%s" (.routerUrl | default "http://atenet-router.ate-system.svc") | quote }}
+            - {{ printf "--substrate-actor-dns-suffix=%s" (.actorDnsSuffix | default "actors.resources.substrate.ate.dev") | quote }}
+            {{- if .defaultTemplate }}
+            - {{ printf "--substrate-default-template=%s" .defaultTemplate | quote }}
+            {{- end }}
+            {{- if .defaultTemplateNamespace }}
+            - {{ printf "--substrate-default-template-namespace=%s" .defaultTemplateNamespace | quote }}
+            {{- end }}
+            - --substrate-claim-timeout={{ .claimTimeout | default "2m" }}
+            - --substrate-command-timeout={{ .commandTimeout | default "30m" }}
+            - --substrate-cleanup-policy={{ .cleanupPolicy | default "delete" }}
             {{- end }}
             {{- end }}
           env:

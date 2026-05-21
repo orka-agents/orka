@@ -13,6 +13,8 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
@@ -169,23 +171,6 @@ func (c AgentSandboxConfig) Validate() error {
 	return nil
 }
 
-// AgentSandboxWorkspaceRequest is the controller's resolved, validated view of a Task execution
-// workspace request. JobBuilder uses it to propagate sandbox workspace settings to agent workers;
-// the worker wrapper owns the sandbox claim, command execution, and cleanup lifecycle.
-type AgentSandboxWorkspaceRequest struct {
-	RouterURL         string
-	TemplateName      string
-	TemplateNamespace string
-	ClaimNamespace    string
-	ReusePolicy       corev1alpha1.WorkspaceReusePolicy
-	ReuseKey          string
-	CleanupPolicy     corev1alpha1.WorkspaceCleanupPolicy
-	WarmPoolPolicy    string
-	NamespaceStrategy string
-	ClaimTimeout      time.Duration
-	CommandTimeout    time.Duration
-}
-
 func executionWorkspaceTemplateName(ws *corev1alpha1.ExecutionWorkspaceSpec, cfg AgentSandboxConfig) string {
 	if ws != nil && ws.TemplateRef != nil && ws.TemplateRef.Name != "" {
 		return ws.TemplateRef.Name
@@ -204,9 +189,27 @@ func executionWorkspaceTemplateNamespace(ws *corev1alpha1.ExecutionWorkspaceSpec
 	return taskNamespace
 }
 
+func substrateTemplateName(ws *corev1alpha1.ExecutionWorkspaceSpec, cfg SubstrateConfig) string {
+	if ws != nil && ws.TemplateRef != nil && strings.TrimSpace(ws.TemplateRef.Name) != "" {
+		return strings.TrimSpace(ws.TemplateRef.Name)
+	}
+	return strings.TrimSpace(cfg.WithDefaults().DefaultTemplate)
+}
+
+func substrateTemplateNamespace(ws *corev1alpha1.ExecutionWorkspaceSpec, taskNamespace string, cfg SubstrateConfig) string {
+	if ws != nil && ws.TemplateRef != nil && strings.TrimSpace(ws.TemplateRef.Namespace) != "" {
+		return strings.TrimSpace(ws.TemplateRef.Namespace)
+	}
+	cfg = cfg.WithDefaults()
+	if strings.TrimSpace(cfg.DefaultTemplateNS) != "" {
+		return strings.TrimSpace(cfg.DefaultTemplateNS)
+	}
+	return taskNamespace
+}
+
 // resolveExecutionWorkspaceRequest applies controller defaults to a Task execution workspace request.
 // It returns nil when the Task does not request an enabled execution workspace.
-func (r *TaskReconciler) resolveExecutionWorkspaceRequest(ctx context.Context, task *corev1alpha1.Task) (*AgentSandboxWorkspaceRequest, error) {
+func (r *TaskReconciler) resolveExecutionWorkspaceRequest(ctx context.Context, task *corev1alpha1.Task) (*ExecutionWorkspaceRequest, error) {
 	if task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil || !task.Spec.Execution.Workspace.Enabled {
 		return nil, nil
 	}
@@ -214,6 +217,14 @@ func (r *TaskReconciler) resolveExecutionWorkspaceRequest(ctx context.Context, t
 		return nil, err
 	}
 
+	provider := resolveWorkspaceProvider(task.Spec.Execution.Workspace, r.ExecutionWorkspaceDefaultProvider)
+	if provider == corev1alpha1.WorkspaceProviderSubstrate {
+		return r.resolveSubstrateWorkspaceRequest(ctx, task)
+	}
+	return r.resolveAgentSandboxWorkspaceRequest(ctx, task)
+}
+
+func (r *TaskReconciler) resolveAgentSandboxWorkspaceRequest(ctx context.Context, task *corev1alpha1.Task) (*ExecutionWorkspaceRequest, error) {
 	cfg := r.AgentSandboxConfig.WithDefaults()
 	ws := task.Spec.Execution.Workspace
 
@@ -227,7 +238,8 @@ func (r *TaskReconciler) resolveExecutionWorkspaceRequest(ctx context.Context, t
 	}
 
 	templateNamespace := executionWorkspaceTemplateNamespace(ws, task.Namespace, cfg)
-	request := &AgentSandboxWorkspaceRequest{
+	request := &ExecutionWorkspaceRequest{
+		Provider:          corev1alpha1.WorkspaceProviderAgentSandbox,
 		RouterURL:         cfg.RouterURL,
 		TemplateName:      executionWorkspaceTemplateName(ws, cfg),
 		TemplateNamespace: templateNamespace,
@@ -247,6 +259,51 @@ func (r *TaskReconciler) resolveExecutionWorkspaceRequest(ctx context.Context, t
 		return nil, err
 	}
 
+	return request, nil
+}
+
+func (r *TaskReconciler) resolveSubstrateWorkspaceRequest(ctx context.Context, task *corev1alpha1.Task) (*ExecutionWorkspaceRequest, error) {
+	cfg := r.SubstrateConfig.WithDefaults()
+	ws := task.Spec.Execution.Workspace
+
+	reusePolicy := ws.ReusePolicy
+	if reusePolicy == "" {
+		reusePolicy = corev1alpha1.WorkspaceReusePolicyNone
+	}
+	cleanupPolicy := ws.CleanupPolicy
+	if cleanupPolicy == "" {
+		cleanupPolicy = cfg.CleanupPolicy
+	}
+	templateName := substrateTemplateName(ws, cfg)
+	templateNamespace := substrateTemplateNamespace(ws, task.Namespace, cfg)
+	reuseKey := ""
+	claimName := deterministicSubstrateTaskActorID(string(task.UID), task.Status.Attempts+1)
+	if reusePolicy == corev1alpha1.WorkspaceReusePolicySession && task.Spec.SessionRef != nil {
+		reuseKey = task.Spec.SessionRef.Name
+		claimName = deterministicSubstrateSessionActorID(task.Namespace, templateNamespace, templateName, reuseKey)
+	}
+
+	request := &ExecutionWorkspaceRequest{
+		Provider:                       corev1alpha1.WorkspaceProviderSubstrate,
+		TemplateName:                   templateName,
+		TemplateNamespace:              templateNamespace,
+		ClaimNamespace:                 templateNamespace,
+		ClaimName:                      claimName,
+		ReusePolicy:                    reusePolicy,
+		ReuseKey:                       reuseKey,
+		CleanupPolicy:                  cleanupPolicy,
+		ClaimTimeout:                   cfg.ClaimTimeout,
+		CommandTimeout:                 cfg.CommandTimeout,
+		SubstrateAPIEndpoint:           cfg.APIEndpoint,
+		SubstrateAPICAFile:             cfg.APICAFile,
+		SubstrateAPIInsecureSkipVerify: cfg.APIInsecureSkipVerify,
+		SubstrateRouterURL:             cfg.RouterURL,
+		SubstrateActorDNSSuffix:        cfg.ActorDNSSuffix,
+	}
+
+	if err := r.validateSubstrateWorkspaceTemplate(ctx, task, request); err != nil {
+		return nil, err
+	}
 	return request, nil
 }
 
@@ -286,4 +343,59 @@ func (r *TaskReconciler) validateExecutionWorkspaceTemplateExists(ctx context.Co
 		lookupNamespace,
 		err,
 	)
+}
+
+func (r *TaskReconciler) validateSubstrateWorkspaceTemplate(ctx context.Context, task *corev1alpha1.Task, request *ExecutionWorkspaceRequest) error {
+	if r == nil || r.Client == nil || request == nil || request.TemplateName == "" {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	template := &unstructured.Unstructured{}
+	template.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "ate.dev",
+		Version: "v1alpha1",
+		Kind:    "ActorTemplate",
+	})
+	err := r.Get(ctx, types.NamespacedName{Namespace: request.TemplateNamespace, Name: request.TemplateName}, template)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf(
+				"substrate execution workspace ActorTemplate %q not found in namespace %q",
+				request.TemplateName,
+				request.TemplateNamespace,
+			)
+		}
+		return fmt.Errorf(
+			"failed to validate substrate execution workspace ActorTemplate %q in namespace %q: %w",
+			request.TemplateName,
+			request.TemplateNamespace,
+			err,
+		)
+	}
+
+	labels := template.GetLabels()
+	annotations := template.GetAnnotations()
+	if labels["orka.ai/execution-workspace"] != "true" {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing label orka.ai/execution-workspace=true", request.TemplateName, request.TemplateNamespace)
+	}
+	if labels["orka.ai/workspace-provider"] != string(corev1alpha1.WorkspaceProviderSubstrate) {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing label orka.ai/workspace-provider=substrate", request.TemplateName, request.TemplateNamespace)
+	}
+	if annotations["orka.ai/workspace-protocol"] != "http-json-v1" {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing annotation orka.ai/workspace-protocol=http-json-v1", request.TemplateName, request.TemplateNamespace)
+	}
+	if strings.TrimSpace(annotations["orka.ai/workspace-daemon-port"]) == "" {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing annotation orka.ai/workspace-daemon-port", request.TemplateName, request.TemplateNamespace)
+	}
+	if strings.TrimSpace(annotations["orka.ai/workspace-staging-root"]) == "" {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing annotation orka.ai/workspace-staging-root", request.TemplateName, request.TemplateNamespace)
+	}
+	if phase, _, _ := unstructured.NestedString(template.Object, "status", "phase"); strings.TrimSpace(phase) != "" && phase != "Ready" {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q is not Ready: phase=%s", request.TemplateName, request.TemplateNamespace, phase)
+	}
+	_ = task
+	return nil
 }

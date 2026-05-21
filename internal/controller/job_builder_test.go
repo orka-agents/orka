@@ -2297,7 +2297,7 @@ func TestJobBuilder_Build_AgentTask_AllowBash_AgentDefault(t *testing.T) {
 	if !ok {
 		t.Fatal("Missing ORKA_ALLOW_BASH")
 	}
-	if ev.Value != "true" {
+	if ev.Value != scheduledRunLabelValue {
 		t.Errorf("ORKA_ALLOW_BASH = %s, want true", ev.Value)
 	}
 }

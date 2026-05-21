@@ -19,7 +19,12 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
 )
@@ -330,6 +335,49 @@ func TestSubmitResult(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	})
+}
+
+func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+	h := NewInternalHandlers(nil, nil, nil, nil, nil, InternalHandlersConfig{Client: k8sClient})
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "system:serviceaccount:default:worker"})
+		return c.Next()
+	})
+	app.Post("/internal/v1/tasks/:namespace/:taskName/execution-workspace/status", h.UpdateExecutionWorkspaceStatus)
+
+	body := map[string]any{
+		"provider":      "substrate",
+		"phase":         "Ready",
+		"reason":        "WorkspaceReady",
+		"templateRef":   map[string]string{"name": "orka-codex", "namespace": "ate-demo"},
+		"reusePolicy":   "session",
+		"cleanupPolicy": "retain",
+		"reused":        true,
+		"message":       "workspace ready",
+	}
+	bodyBytes, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/tasks/default/my-task/execution-workspace/status", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	updated := &corev1alpha1.Task{}
+	require.NoError(t, k8sClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "my-task"}, updated))
+	require.NotNil(t, updated.Status.ExecutionWorkspace)
+	require.Equal(t, corev1alpha1.WorkspaceProviderSubstrate, updated.Status.ExecutionWorkspace.Provider)
+	require.Equal(t, corev1alpha1.ExecutionWorkspacePhaseReady, updated.Status.ExecutionWorkspace.Phase)
+	require.True(t, updated.Status.ExecutionWorkspace.Reused)
 }
 
 func TestGetSessionTranscript(t *testing.T) {

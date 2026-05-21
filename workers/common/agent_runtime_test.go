@@ -9,6 +9,7 @@ package common
 import (
 	"context"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -399,6 +400,40 @@ func TestRunAgent_ExecutorSuccess(t *testing.T) {
 	err := RunAgent("test-agent", "/tmp/ws", 50, executor)
 	if err != nil {
 		t.Fatalf("RunAgent should succeed, got: %v", err)
+	}
+}
+
+func TestRunAgent_ExecutorEmptyResultSubmitsPlaceholder(t *testing.T) {
+	t.Setenv("ORKA_PROMPT", "test prompt")
+	t.Setenv("ORKA_TASK_NAME", "t1")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_MAX_TURNS", "")
+	t.Setenv("ORKA_ALLOWED_TOOLS", "")
+	t.Setenv("ORKA_DISALLOWED_TOOLS", "")
+	t.Setenv("ORKA_TIMEOUT_SECONDS", "")
+	t.Setenv("ORKA_GIT_REPO", "")
+	t.Setenv("ORKA_PRIOR_TASK", "")
+
+	var body []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		body, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	t.Setenv("ORKA_RESULT_ENDPOINT", server.URL)
+
+	err := RunAgent("test-agent", "/tmp/ws", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("RunAgent should succeed, got: %v", err)
+	}
+	if got := string(body); !strings.Contains(got, "test-agent completed without a final message") {
+		t.Fatalf("submitted body = %q, want non-empty placeholder", got)
 	}
 }
 

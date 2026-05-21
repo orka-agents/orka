@@ -1,0 +1,198 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestWorkspaceAgentRejectsUnauthenticatedExec(t *testing.T) {
+	t.Setenv(envHandoffToken, "secret")
+	server := newWorkspaceAgentServer()
+	req := httptest.NewRequest(http.MethodPost, "/v1/exec", strings.NewReader(`{"command":["echo","ok"]}`))
+	resp := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestSafePathRejectsTraversal(t *testing.T) {
+	if _, err := safePath("/workspace/../etc/passwd"); err == nil {
+		t.Fatal("safePath accepted path traversal")
+	}
+}
+
+func TestWorkspaceAgentExecTruncatesOutput(t *testing.T) {
+	t.Setenv(envHandoffToken, "secret")
+	server := newWorkspaceAgentServer()
+	server.defaultCommandTimeout = time.Second
+	server.defaultMaxOutputBytes = 4
+	body, err := json.Marshal(execRequest{
+		Command:        []string{"sh", "-c", "printf abcdef"},
+		WorkDir:        "/tmp",
+		MaxOutputBytes: 4,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/exec", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	resp := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	var got execResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.Stdout != "abcd" || !got.StdoutTruncated {
+		t.Fatalf("stdout = %q truncated=%t, want abcd/true", got.Stdout, got.StdoutTruncated)
+	}
+}
+
+func TestWorkspaceAgentDetachedExecCanBePolled(t *testing.T) {
+	t.Setenv(envHandoffToken, "secret")
+	server := newWorkspaceAgentServer()
+	body, err := json.Marshal(execRequest{
+		Command: []string{"sh", "-c", "printf detached-ok"},
+		WorkDir: "/tmp",
+		Detach:  true,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/exec", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	resp := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	var started execResponse
+	if err := json.NewDecoder(resp.Body).Decode(&started); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+	if started.ExecID == "" || !started.Running {
+		t.Fatalf("start response execID=%q running=%t, want id/running", started.ExecID, started.Running)
+	}
+
+	var got execResponse
+	for range 100 {
+		statusReq := httptest.NewRequest(http.MethodGet, "/v1/exec/"+started.ExecID, nil)
+		statusReq.Header.Set("Authorization", "Bearer secret")
+		statusResp := httptest.NewRecorder()
+		server.routes().ServeHTTP(statusResp, statusReq)
+		if statusResp.Code != http.StatusOK {
+			t.Fatalf("status poll code = %d, want %d: %s", statusResp.Code, http.StatusOK, statusResp.Body.String())
+		}
+		var status execResponse
+		if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
+			t.Fatalf("decode status response: %v", err)
+		}
+		got = status
+		if !got.Running {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got.Running || got.Stdout != "detached-ok" || got.ExitCode != 0 {
+		t.Fatalf(
+			"detached result running=%t stdout=%q exit=%d, want done/detached-ok/0",
+			got.Running,
+			got.Stdout,
+			got.ExitCode,
+		)
+	}
+}
+
+func TestWorkspaceAgentDecodesLargeUploadRequest(t *testing.T) {
+	server := newWorkspaceAgentServer()
+	payload := bytes.Repeat([]byte("a"), 8<<20)
+	body, err := json.Marshal(uploadRequest{Files: []uploadFile{{
+		Path: "/tmp/large-worker",
+		Data: payload,
+		Mode: 0o700,
+	}}})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	if len(body) <= 10<<20 {
+		t.Fatalf("test body length = %d, want above prior 10MiB limit", len(body))
+	}
+	req := httptest.NewRequest(http.MethodPut, "/v1/files", bytes.NewReader(body))
+
+	var got uploadRequest
+	if err := server.decodeJSON(req, &got); err != nil {
+		t.Fatalf("decodeJSON() error = %v", err)
+	}
+	decodedLen := 0
+	if len(got.Files) == 1 {
+		decodedLen = len(got.Files[0].Data)
+	}
+	if len(got.Files) != 1 || decodedLen != len(payload) {
+		t.Fatalf("decoded payload length = %d, want %d", decodedLen, len(payload))
+	}
+}
+
+func TestWorkspaceAgentMaxRequestBytesFromEnv(t *testing.T) {
+	t.Setenv(envMaxRequestBytes, "1024")
+	server := newWorkspaceAgentServer()
+	if server.maxRequestBytes != 1024 {
+		t.Fatalf("maxRequestBytes = %d, want 1024", server.maxRequestBytes)
+	}
+}
+
+func TestWorkspaceAgentAllowsOnlyHandoffTokenBootstrap(t *testing.T) {
+	dir := t.TempDir()
+	previousAllowedRoots := allowedRoots
+	allowedRoots = []string{dir}
+	t.Cleanup(func() {
+		allowedRoots = previousAllowedRoots
+	})
+	tokenFile := filepath.Join(dir, "handoff-token")
+	t.Setenv(envHandoffTokenFile, tokenFile)
+	server := newWorkspaceAgentServer()
+	body, err := json.Marshal(uploadRequest{Files: []uploadFile{{
+		Path: tokenFile,
+		Data: []byte("secret"),
+		Mode: 0o600,
+	}}})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/v1/files", bytes.NewReader(body))
+	resp := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	data, err := os.ReadFile(tokenFile)
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "secret" {
+		t.Fatalf("token file = %q, want secret", string(data))
+	}
+}

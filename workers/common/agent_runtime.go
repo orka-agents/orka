@@ -8,6 +8,7 @@ package common
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
 )
@@ -225,13 +227,19 @@ const (
 	agentSandboxContextSubjectTokenExecPath   = "/app/" + agentSandboxContextSubjectTokenUploadPath
 	agentSandboxGitAskpassUploadPath          = "orka-git-askpass"
 	agentSandboxGitAskpassExecPath            = "/app/" + agentSandboxGitAskpassUploadPath
+	workspaceHandoffTokenUploadPath           = "orka-workspace-handoff-token"
 	agentSandboxExecMaxOutputBytes            = 2000
+	workerEnvFalse                            = "false"
+	workspaceHandoffTokenEnv                  = "ORKA_WORKSPACE_HANDOFF_TOKEN"
 )
 
 var (
 	agentSandboxWorkspaceExecutorMu sync.RWMutex
 	agentSandboxWorkspaceExecutor   workspace.WorkspaceExecutor = workspace.NewAgentSandboxExecutor()
-	setupGitCredentialsForRunAgent                              = SetupGitCredentials
+	substrateWorkspaceExecutorMu    sync.RWMutex
+	substrateWorkspaceExecutor      workspace.WorkspaceExecutor
+	substrateWorkspaceExecutorErr   error
+	setupGitCredentialsForRunAgent  = SetupGitCredentials
 )
 
 func getAgentSandboxWorkspaceExecutor() workspace.WorkspaceExecutor {
@@ -253,6 +261,31 @@ func setAgentSandboxWorkspaceExecutorForTest(executor workspace.WorkspaceExecuto
 	}
 }
 
+func getSubstrateWorkspaceExecutor() (workspace.WorkspaceExecutor, error) {
+	substrateWorkspaceExecutorMu.RLock()
+	executor := substrateWorkspaceExecutor
+	err := substrateWorkspaceExecutorErr
+	substrateWorkspaceExecutorMu.RUnlock()
+	if executor != nil || err != nil {
+		return executor, err
+	}
+
+	substrateWorkspaceExecutorMu.Lock()
+	defer substrateWorkspaceExecutorMu.Unlock()
+	if substrateWorkspaceExecutor != nil || substrateWorkspaceExecutorErr != nil {
+		return substrateWorkspaceExecutor, substrateWorkspaceExecutorErr
+	}
+	substrateEnv := workerenv.ParseSubstrateEnv(os.Getenv)
+	substrateWorkspaceExecutor, substrateWorkspaceExecutorErr = workspace.NewSubstrateExecutor(workspace.SubstrateConfig{
+		APIEndpoint:           substrateEnv.APIEndpoint,
+		APICAFile:             substrateEnv.APICAFile,
+		APIInsecureSkipVerify: substrateEnv.APIInsecureSkipVerify,
+		RouterURL:             substrateEnv.RouterURL,
+		ActorDNSSuffix:        substrateEnv.ActorDNSSuffix,
+	})
+	return substrateWorkspaceExecutor, substrateWorkspaceExecutorErr
+}
+
 // RunAgent orchestrates the common agent worker lifecycle: signal handling,
 // config loading, git setup, workspace preparation, agent execution, and
 // result submission.
@@ -266,6 +299,17 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	// Populate git credential env vars before the sandbox handoff so the inner
 	// worker can clone private repositories without mounting the outer secret.
 	setupGitCredentialsForRunAgent()
+
+	if workspaceEnv := workerenv.ParseExecutionWorkspaceEnv(os.Getenv); workspaceEnv.Enabled {
+		if workspaceEnv.Depth > 0 {
+			return fmt.Errorf(
+				"execution workspace recursion detected: %s=%d",
+				workerenv.ExecutionWorkspaceDepth,
+				workspaceEnv.Depth,
+			)
+		}
+		return runAgentInWorkspace(ctx, name, workspaceDir, workspaceEnv)
+	}
 
 	if sandboxEnv := workerenv.ParseAgentSandboxEnv(os.Getenv); sandboxEnv.Enabled {
 		if depth := agentSandboxDepth(os.Getenv(workerenv.AgentSandboxDepth)); depth > 0 {
@@ -322,6 +366,7 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	// Build structured result with diff if workspace has changes
 	if result == "" {
 		fmt.Fprintf(os.Stderr, "warning: %s executor returned empty result\n", name)
+		result = fmt.Sprintf("%s completed without a final message", name)
 	}
 	resultDir := ""
 	if cfg.GitRepo != "" {
@@ -340,6 +385,190 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 
 	fmt.Printf("Task %s/%s completed successfully%s\n",
 		cfg.TaskNamespace, cfg.TaskName, workerenv.TransactionLogFields(cfg.TransactionID, cfg.TransactionProfile))
+	return nil
+}
+
+func runAgentInWorkspace(
+	ctx context.Context,
+	name string,
+	workspaceDir string,
+	workspaceEnv workerenv.ExecutionWorkspaceEnv,
+) error {
+	handoffToken, err := ensureWorkspaceHandoffToken(workspaceEnv)
+	if err != nil {
+		return err
+	}
+	executor, err := executionWorkspaceExecutor(workspaceEnv)
+	if err != nil {
+		return err
+	}
+	if executor == nil {
+		return fmt.Errorf("execution workspace executor is not configured for provider %q", workspaceEnv.Provider)
+	}
+
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve %s executable for workspace: %w", name, err)
+	}
+	taskNamespace := os.Getenv(workerenv.TaskNamespace)
+	taskName := os.Getenv(workerenv.TaskName)
+	templateNamespace := workspaceTemplateNamespace(workspaceEnv, taskNamespace)
+	claimNamespace := workspaceClaimNamespace(workspaceEnv, taskNamespace, templateNamespace)
+	claimName := workspaceClaimName(workspaceEnv, claimNamespace, taskNamespace, templateNamespace)
+
+	claim, err := executor.Claim(ctx, workspace.ClaimRequest{
+		Namespace:       claimNamespace,
+		TaskName:        taskName,
+		ClaimName:       claimName,
+		CreateIfMissing: true,
+		Template: workspace.TemplateRef{
+			Namespace: templateNamespace,
+			Name:      workspaceEnv.TemplateName,
+		},
+		ReuseKey:       workspaceEnv.ReuseKey,
+		WarmPoolPolicy: workspaceWarmPoolPolicy(workspaceEnv),
+		Timeout:        workspaceEnv.ClaimTimeout,
+	})
+	if err != nil {
+		submitExecutionWorkspaceStatus(
+			workspaceEnv,
+			corev1alpha1.ExecutionWorkspacePhaseFailed,
+			corev1alpha1.ExecutionWorkspaceReasonClaimFailed,
+			false,
+			"workspace claim failed",
+		)
+		return fmt.Errorf("claim execution workspace: %w", err)
+	}
+	ref := claim.Ref
+	cleaned := false
+	defer func() {
+		if cleaned {
+			return
+		}
+		cleanupCtx, cleanupCancel := agentSandboxCleanupContext(workspaceEnv.ClaimTimeout)
+		defer cleanupCancel()
+		if err := cleanupExecutionWorkspace(cleanupCtx, executor, ref, workspaceEnv); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to clean up execution workspace: %v\n", err)
+		}
+	}()
+	submitExecutionWorkspaceStatus(
+		workspaceEnv,
+		corev1alpha1.ExecutionWorkspacePhasePending,
+		corev1alpha1.ExecutionWorkspaceReasonClaimed,
+		claim.Reused,
+		"workspace claimed",
+	)
+
+	if _, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
+		Ref:     ref,
+		Timeout: workspaceEnv.ClaimTimeout,
+	}); err != nil {
+		submitExecutionWorkspaceStatus(
+			workspaceEnv,
+			corev1alpha1.ExecutionWorkspacePhaseFailed,
+			corev1alpha1.ExecutionWorkspaceReasonReadinessFailed,
+			claim.Reused,
+			"workspace readiness failed",
+		)
+		return fmt.Errorf("wait for execution workspace: %w", err)
+	}
+	submitExecutionWorkspaceStatus(
+		workspaceEnv,
+		corev1alpha1.ExecutionWorkspacePhaseReady,
+		corev1alpha1.ExecutionWorkspaceReasonReady,
+		claim.Reused,
+		"workspace ready",
+	)
+
+	if handoffToken != "" {
+		if err := bootstrapWorkspaceHandoffToken(ctx, executor, ref, handoffToken, workspaceEnv); err != nil {
+			submitExecutionWorkspaceStatus(
+				workspaceEnv,
+				corev1alpha1.ExecutionWorkspacePhaseFailed,
+				corev1alpha1.ExecutionWorkspaceReasonHandoffFailed,
+				claim.Reused,
+				"workspace handoff failed",
+			)
+			return err
+		}
+	}
+
+	command, innerEnv, err := stageAgentSandboxExecutable(
+		ctx,
+		executor,
+		ref,
+		executable,
+		os.Args[1:],
+		workspaceInnerEnv(os.Environ(), workspaceEnv),
+		workspaceEnv.CommandTimeout,
+	)
+	if err != nil {
+		submitExecutionWorkspaceStatus(
+			workspaceEnv,
+			corev1alpha1.ExecutionWorkspacePhaseFailed,
+			corev1alpha1.ExecutionWorkspaceReasonHandoffFailed,
+			claim.Reused,
+			"workspace handoff failed",
+		)
+		return err
+	}
+
+	execResult, err := executor.Exec(ctx, workspace.ExecRequest{
+		Ref:            ref,
+		Command:        command,
+		Env:            innerEnv,
+		WorkDir:        workspaceDir,
+		Timeout:        workspaceEnv.CommandTimeout,
+		MaxOutputBytes: agentSandboxExecMaxOutputBytes,
+	})
+	if err != nil {
+		submitExecutionWorkspaceStatus(
+			workspaceEnv,
+			corev1alpha1.ExecutionWorkspacePhaseFailed,
+			corev1alpha1.ExecutionWorkspaceReasonCommandFailed,
+			claim.Reused,
+			"workspace command failed",
+		)
+		return fmt.Errorf("%s workspace execution failed: %w%s", name, err, formatSandboxExecOutput(execResult))
+	}
+	if execResult != nil && !execResult.Succeeded() {
+		submitExecutionWorkspaceStatus(
+			workspaceEnv,
+			corev1alpha1.ExecutionWorkspacePhaseFailed,
+			corev1alpha1.ExecutionWorkspaceReasonCommandFailed,
+			claim.Reused,
+			"workspace command failed",
+		)
+		return fmt.Errorf(
+			"%s workspace execution failed: command exited with code %d%s",
+			name,
+			execResult.ExitCode,
+			formatSandboxExecOutput(execResult),
+		)
+	}
+
+	cleanupCtx, cleanupCancel := agentSandboxCleanupContext(workspaceEnv.ClaimTimeout)
+	defer cleanupCancel()
+	if err := cleanupExecutionWorkspace(cleanupCtx, executor, ref, workspaceEnv); err != nil {
+		submitExecutionWorkspaceStatus(
+			workspaceEnv,
+			corev1alpha1.ExecutionWorkspacePhaseFailed,
+			corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
+			claim.Reused,
+			"workspace cleanup failed",
+		)
+		cleaned = true
+		return fmt.Errorf("execution workspace cleanup failed: %w", err)
+	}
+	cleaned = true
+
+	fmt.Printf(
+		"Task %s/%s completed in %s workspace %s\n",
+		taskNamespace,
+		taskName,
+		workspaceEnv.Provider,
+		ref.ClaimName,
+	)
 	return nil
 }
 
@@ -423,6 +652,107 @@ func runAgentInSandbox(ctx context.Context, name, workspaceDir string, sandboxEn
 
 	fmt.Printf("Task %s/%s completed in sandbox workspace %s\n", taskNamespace, taskName, ref.ClaimName)
 	return nil
+}
+
+func ensureWorkspaceHandoffToken(workspaceEnv workerenv.ExecutionWorkspaceEnv) (string, error) {
+	if strings.TrimSpace(workspaceEnv.Provider) != string(corev1alpha1.WorkspaceProviderSubstrate) {
+		return "", nil
+	}
+	if token := strings.TrimSpace(os.Getenv(workspaceHandoffTokenEnv)); token != "" {
+		return token, nil
+	}
+	var random [32]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate workspace handoff token: %w", err)
+	}
+	token := hex.EncodeToString(random[:])
+	if err := os.Setenv(workspaceHandoffTokenEnv, token); err != nil {
+		return "", fmt.Errorf("store workspace handoff token in environment: %w", err)
+	}
+	return token, nil
+}
+
+func bootstrapWorkspaceHandoffToken(
+	ctx context.Context,
+	executor workspace.WorkspaceExecutor,
+	ref workspace.WorkspaceRef,
+	token string,
+	workspaceEnv workerenv.ExecutionWorkspaceEnv,
+) error {
+	if strings.TrimSpace(workspaceEnv.Provider) != string(corev1alpha1.WorkspaceProviderSubstrate) {
+		return nil
+	}
+	if _, err := executor.Upload(ctx, workspace.UploadRequest{
+		Ref: ref,
+		Artifacts: []workspace.UploadArtifact{{
+			Path: workspaceHandoffTokenUploadPath,
+			Data: []byte(token),
+			Mode: 0o600,
+		}},
+		Timeout: workspaceEnv.ClaimTimeout,
+	}); err != nil {
+		return fmt.Errorf("stage workspace handoff token: %w", err)
+	}
+	return nil
+}
+
+func executionWorkspaceExecutor(workspaceEnv workerenv.ExecutionWorkspaceEnv) (workspace.WorkspaceExecutor, error) {
+	switch strings.TrimSpace(workspaceEnv.Provider) {
+	case "", string(corev1alpha1.WorkspaceProviderAgentSandbox):
+		return getAgentSandboxWorkspaceExecutor(), nil
+	case string(corev1alpha1.WorkspaceProviderSubstrate):
+		return getSubstrateWorkspaceExecutor()
+	default:
+		return nil, fmt.Errorf("unsupported execution workspace provider %q", workspaceEnv.Provider)
+	}
+}
+
+func workspaceTemplateNamespace(workspaceEnv workerenv.ExecutionWorkspaceEnv, taskNamespace string) string {
+	if ns := strings.TrimSpace(workspaceEnv.TemplateNamespace); ns != "" {
+		return ns
+	}
+	return taskNamespace
+}
+
+func workspaceClaimNamespace(
+	workspaceEnv workerenv.ExecutionWorkspaceEnv,
+	taskNamespace string,
+	templateNamespace string,
+) string {
+	if ns := strings.TrimSpace(workspaceEnv.ClaimNamespace); ns != "" {
+		return ns
+	}
+	if strings.TrimSpace(workspaceEnv.Provider) == string(corev1alpha1.WorkspaceProviderSubstrate) {
+		return templateNamespace
+	}
+	legacy := workerenv.ParseAgentSandboxEnv(os.Getenv)
+	return agentSandboxClaimNamespace(legacy, taskNamespace, templateNamespace)
+}
+
+func workspaceClaimName(
+	workspaceEnv workerenv.ExecutionWorkspaceEnv,
+	claimNamespace string,
+	taskNamespace string,
+	templateNamespace string,
+) string {
+	if claimName := strings.TrimSpace(workspaceEnv.ClaimName); claimName != "" {
+		return claimName
+	}
+	if strings.TrimSpace(workspaceEnv.Provider) == string(corev1alpha1.WorkspaceProviderSubstrate) {
+		return ""
+	}
+	legacy := workerenv.ParseAgentSandboxEnv(os.Getenv)
+	legacy.ReusePolicy = workspaceEnv.ReusePolicy
+	legacy.ReuseKey = workspaceEnv.ReuseKey
+	legacy.TemplateName = workspaceEnv.TemplateName
+	return agentSandboxSessionClaimName(legacy, claimNamespace, taskNamespace, templateNamespace)
+}
+
+func workspaceWarmPoolPolicy(workspaceEnv workerenv.ExecutionWorkspaceEnv) string {
+	if strings.TrimSpace(workspaceEnv.Provider) == string(corev1alpha1.WorkspaceProviderSubstrate) {
+		return ""
+	}
+	return agentSandboxClaimWarmPoolPolicy(workerenv.ParseAgentSandboxEnv(os.Getenv).WarmPoolPolicy)
 }
 
 func stageAgentSandboxExecutable(
@@ -650,6 +980,75 @@ func cleanupAgentSandboxWorkspace(
 	}
 }
 
+func cleanupExecutionWorkspace(
+	ctx context.Context,
+	executor workspace.WorkspaceExecutor,
+	ref workspace.WorkspaceRef,
+	workspaceEnv workerenv.ExecutionWorkspaceEnv,
+) error {
+	if ref.IsZero() || executor == nil {
+		return nil
+	}
+
+	switch strings.TrimSpace(strings.ToLower(workspaceEnv.CleanupPolicy)) {
+	case "retain":
+		if _, err := executor.Release(ctx, workspace.ReleaseRequest{
+			Ref:     ref,
+			Retain:  true,
+			Reason:  "execution workspace cleanup policy retain",
+			Timeout: workspaceEnv.ClaimTimeout,
+		}); err != nil {
+			return fmt.Errorf("retain workspace: %w", err)
+		}
+		submitExecutionWorkspaceStatus(
+			workspaceEnv,
+			corev1alpha1.ExecutionWorkspacePhaseRetained,
+			corev1alpha1.ExecutionWorkspaceReasonRetained,
+			false,
+			"workspace retained",
+		)
+		return nil
+	case "", "delete":
+		if _, err := executor.Delete(ctx, workspace.DeleteRequest{
+			Ref:     ref,
+			Reason:  "execution workspace cleanup policy delete",
+			Timeout: workspaceEnv.ClaimTimeout,
+		}); err != nil {
+			return fmt.Errorf("delete workspace: %w", err)
+		}
+		submitExecutionWorkspaceStatus(
+			workspaceEnv,
+			corev1alpha1.ExecutionWorkspacePhaseDeleted,
+			corev1alpha1.ExecutionWorkspaceReasonDeleted,
+			false,
+			"workspace deleted",
+		)
+		return nil
+	default:
+		fmt.Fprintf(
+			os.Stderr,
+			"warning: unsupported workspace cleanup policy %q; retaining workspace to avoid unintended deletion\n",
+			workspaceEnv.CleanupPolicy,
+		)
+		if _, err := executor.Release(ctx, workspace.ReleaseRequest{
+			Ref:     ref,
+			Retain:  true,
+			Reason:  "unsupported execution workspace cleanup policy",
+			Timeout: workspaceEnv.ClaimTimeout,
+		}); err != nil {
+			return fmt.Errorf("retain workspace after unsupported cleanup policy: %w", err)
+		}
+		submitExecutionWorkspaceStatus(
+			workspaceEnv,
+			corev1alpha1.ExecutionWorkspacePhaseRetained,
+			corev1alpha1.ExecutionWorkspaceReasonRetained,
+			false,
+			"workspace retained",
+		)
+		return nil
+	}
+}
+
 func agentSandboxCleanupContext(timeout time.Duration) (context.Context, context.CancelFunc) {
 	if timeout <= 0 {
 		return context.WithCancel(context.Background())
@@ -744,10 +1143,28 @@ func truncateForError(value string, max int) string {
 func agentSandboxInnerEnv(environ []string) map[string]string {
 	env := environToMap(environ)
 	depth := agentSandboxDepth(env[workerenv.AgentSandboxDepth])
-	env[workerenv.AgentSandboxEnabled] = "false"
+	workspaceDepth := agentSandboxDepth(env[workerenv.ExecutionWorkspaceDepth])
+	env[workerenv.ExecutionWorkspaceEnabled] = workerEnvFalse
+	env[workerenv.ExecutionWorkspaceDepth] = strconv.Itoa(workspaceDepth + 1)
+	env[workerenv.AgentSandboxEnabled] = workerEnvFalse
 	env[workerenv.AgentSandboxDepth] = strconv.Itoa(depth + 1)
 	delete(env, workerenv.ServiceAccountToken)
 	delete(env, workerenv.ServiceAccountTokenPath)
+	delete(env, workspaceHandoffTokenEnv)
+	return env
+}
+
+func workspaceInnerEnv(environ []string, workspaceEnv workerenv.ExecutionWorkspaceEnv) map[string]string {
+	env := environToMap(environ)
+	depth := workspaceEnv.Depth
+	env[workerenv.ExecutionWorkspaceEnabled] = workerEnvFalse
+	env[workerenv.ExecutionWorkspaceDepth] = strconv.Itoa(depth + 1)
+	legacyDepth := agentSandboxDepth(env[workerenv.AgentSandboxDepth])
+	env[workerenv.AgentSandboxEnabled] = workerEnvFalse
+	env[workerenv.AgentSandboxDepth] = strconv.Itoa(legacyDepth + 1)
+	delete(env, workerenv.ServiceAccountToken)
+	delete(env, workerenv.ServiceAccountTokenPath)
+	delete(env, workspaceHandoffTokenEnv)
 	return env
 }
 

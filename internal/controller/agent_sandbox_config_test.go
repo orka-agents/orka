@@ -106,6 +106,41 @@ func TestAgentSandboxConfigFromEnv_InvalidDuration(t *testing.T) {
 	}
 }
 
+func TestSubstrateConfigFromEnv(t *testing.T) {
+	env := map[string]string{
+		EnvSubstrateAPIEndpoint:           "api.ate-system.svc:443",
+		EnvSubstrateAPICAFile:             "/var/run/orka/substrate/ca.crt",
+		EnvSubstrateAPIInsecureSkipVerify: "true",
+		EnvSubstrateRouterURL:             "http://atenet-router.ate-system.svc",
+		EnvSubstrateActorDNSSuffix:        "actors.resources.substrate.ate.dev",
+		EnvSubstrateDefaultTemplate:       "orka-codex",
+		EnvSubstrateDefaultTemplateNS:     "ate-demo",
+		EnvSubstrateClaimTimeout:          "45s",
+		EnvSubstrateCommandTimeout:        "10m",
+		EnvSubstrateCleanupPolicy:         string(corev1alpha1.WorkspaceCleanupPolicyRetain),
+	}
+
+	cfg, err := SubstrateConfigFromEnv(func(key string) string { return env[key] })
+	if err != nil {
+		t.Fatalf("SubstrateConfigFromEnv() error = %v", err)
+	}
+	if cfg.APIEndpoint != env[EnvSubstrateAPIEndpoint] || cfg.RouterURL != env[EnvSubstrateRouterURL] {
+		t.Fatalf("unexpected substrate endpoints: %#v", cfg)
+	}
+	if !cfg.APIInsecureSkipVerify {
+		t.Fatal("APIInsecureSkipVerify = false, want true")
+	}
+	if cfg.DefaultTemplate != "orka-codex" || cfg.DefaultTemplateNS != "ate-demo" {
+		t.Fatalf("unexpected substrate defaults: %#v", cfg)
+	}
+	if cfg.ClaimTimeout != 45*time.Second || cfg.CommandTimeout != 10*time.Minute {
+		t.Fatalf("unexpected substrate timeouts: %#v", cfg)
+	}
+	if cfg.CleanupPolicy != corev1alpha1.WorkspaceCleanupPolicyRetain {
+		t.Fatalf("CleanupPolicy = %q, want retain", cfg.CleanupPolicy)
+	}
+}
+
 func TestAgentSandboxConfigValidate(t *testing.T) {
 	tests := []struct {
 		name    string
