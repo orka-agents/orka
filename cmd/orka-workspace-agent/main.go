@@ -47,7 +47,10 @@ const (
 
 var allowedRoots = []string{"/app", "/workspace", "/home/worker", "/tmp"}
 
-var errHandoffTokenMissing = errors.New("handoff token file is missing")
+var (
+	errHandoffTokenMissing = errors.New("handoff token file is missing")
+	errHandoffTokenEmpty   = errors.New("handoff token file is empty")
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -107,7 +110,7 @@ func (s *workspaceAgentServer) requireAuth(next http.HandlerFunc) http.HandlerFu
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, err := handoffToken()
 		if err != nil {
-			if errors.Is(err, errHandoffTokenMissing) {
+			if handoffBootstrapAllowedForTokenError(err) {
 				allowBootstrap, handled := s.allowHandoffBootstrap(w, r)
 				if allowBootstrap {
 					next(w, r)
@@ -126,6 +129,10 @@ func (s *workspaceAgentServer) requireAuth(next http.HandlerFunc) http.HandlerFu
 		}
 		next(w, r)
 	}
+}
+
+func handoffBootstrapAllowedForTokenError(err error) bool {
+	return errors.Is(err, errHandoffTokenMissing) || errors.Is(err, errHandoffTokenEmpty)
 }
 
 func (s *workspaceAgentServer) allowHandoffBootstrap(w http.ResponseWriter, r *http.Request) (bool, bool) {
@@ -193,7 +200,7 @@ func handoffToken() (string, error) {
 	}
 	token := strings.TrimSpace(string(data))
 	if token == "" {
-		return "", fmt.Errorf("handoff token file is empty")
+		return "", errHandoffTokenEmpty
 	}
 	return token, nil
 }

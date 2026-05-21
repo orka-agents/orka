@@ -18,6 +18,8 @@ import (
 	"time"
 )
 
+const testBootstrapHandoffToken = "secret"
+
 func TestWorkspaceAgentRejectsUnauthenticatedExec(t *testing.T) {
 	t.Setenv(envHandoffToken, "secret")
 	server := newWorkspaceAgentServer()
@@ -296,8 +298,8 @@ func TestWorkspaceAgentAllowsOnlyHandoffTokenBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read token file: %v", err)
 	}
-	if strings.TrimSpace(string(data)) != "secret" {
-		t.Fatalf("token file = %q, want secret", string(data))
+	if strings.TrimSpace(string(data)) != testBootstrapHandoffToken {
+		t.Fatalf("token file = %q, want %s", string(data), testBootstrapHandoffToken)
 	}
 }
 
@@ -318,8 +320,33 @@ func TestWorkspaceAgentBootstrapDefaultUploadHonorsConfiguredTokenFile(t *testin
 	if err != nil {
 		t.Fatalf("read configured token file: %v", err)
 	}
-	if strings.TrimSpace(string(data)) != "secret" {
-		t.Fatalf("configured token file = %q, want secret", string(data))
+	if strings.TrimSpace(string(data)) != testBootstrapHandoffToken {
+		t.Fatalf("configured token file = %q, want %s", string(data), testBootstrapHandoffToken)
+	}
+}
+
+func TestWorkspaceAgentHandoffBootstrapRepairsEmptyTokenFile(t *testing.T) {
+	dir := t.TempDir()
+	previousAllowedRoots := allowedRoots
+	allowedRoots = []string{dir}
+	t.Cleanup(func() {
+		allowedRoots = previousAllowedRoots
+	})
+	tokenFile := filepath.Join(dir, "handoff-token")
+	if err := os.WriteFile(tokenFile, []byte(" \n"), 0o600); err != nil {
+		t.Fatalf("write empty token file: %v", err)
+	}
+	resp := exerciseHandoffBootstrap(t, tokenFile, tokenFile)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	data, err := os.ReadFile(tokenFile)
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != testBootstrapHandoffToken {
+		t.Fatalf("token file = %q, want %s", string(data), testBootstrapHandoffToken)
 	}
 }
 
@@ -367,7 +394,7 @@ func TestWorkspaceAgentRejectsHandoffBootstrapBearerMatchingUploadedToken(t *tes
 		allowedRoots = previousAllowedRoots
 	})
 	tokenFile := filepath.Join(dir, "handoff-token")
-	resp := exerciseHandoffBootstrapWithBearer(t, tokenFile, tokenFile, "secret")
+	resp := exerciseHandoffBootstrapWithBearer(t, tokenFile, tokenFile, testBootstrapHandoffToken)
 
 	if resp.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusUnauthorized, resp.Body.String())
@@ -420,7 +447,7 @@ func exerciseHandoffBootstrapWithBearer(
 	server := newWorkspaceAgentServer()
 	body, err := json.Marshal(uploadRequest{Files: []uploadFile{{
 		Path: uploadPath,
-		Data: []byte("secret"),
+		Data: []byte(testBootstrapHandoffToken),
 		Mode: 0o600,
 	}}})
 	if err != nil {
@@ -449,7 +476,7 @@ func TestWorkspaceAgentRejectsInvalidHandoffBootstrapWithoutWritingFile(t *testi
 	disallowedPath := filepath.Join(dir, "not-the-token")
 	body, err := json.Marshal(uploadRequest{Files: []uploadFile{{
 		Path: disallowedPath,
-		Data: []byte("secret"),
+		Data: []byte(testBootstrapHandoffToken),
 		Mode: 0o600,
 	}}})
 	if err != nil {
