@@ -35,6 +35,7 @@ const (
 	substrateExecInitialPollInterval  = 250 * time.Millisecond
 	substrateExecMaxPollInterval      = 2 * time.Second
 	substrateDefaultHandoffTokenEnv   = "ORKA_WORKSPACE_HANDOFF_TOKEN"
+	substrateHandoffTokenUploadPath   = "orka-workspace-handoff-token"
 
 	substrateStatusResuming   = "STATUS_RESUMING"
 	substrateStatusRunning    = "STATUS_RUNNING"
@@ -177,6 +178,22 @@ func (e *SubstrateWorkspaceExecutor) Claim(ctx context.Context, req ClaimRequest
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, contextError("claim", ctxErr)
+		}
+		if IsKind(err, ErrorKindAlreadyExists) {
+			actor, err = e.control.GetActor(ctx, actorID)
+			if err == nil {
+				return &ClaimResult{
+					Ref:      substrateRef(req.Template.Namespace, actor),
+					Template: req.Template,
+					ReuseKey: req.ReuseKey,
+					Reused:   true,
+					Phase:    substratePhase(actor, e.actorRetained(actorID)),
+					Message:  "workspace actor reattached",
+				}, nil
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, contextError("claim", ctxErr)
+			}
 		}
 		return nil, err
 	}
@@ -353,6 +370,15 @@ func (e *SubstrateWorkspaceExecutor) Release(ctx context.Context, req ReleaseReq
 	}
 	actor, err := e.suspendActorAndWait(ctx, actorID)
 	if err != nil {
+		if restoreErr := e.restoreHandoffToken(ctx, actorID); restoreErr != nil {
+			return nil, NewError(
+				"release",
+				ErrorKindFailedPrecondition,
+				"failed to restore workspace handoff token after release failure",
+				true,
+				errors.Join(err, restoreErr),
+			)
+		}
 		return nil, err
 	}
 	e.setActorRetained(actorID, req.Retain)
@@ -471,6 +497,26 @@ func (e *SubstrateWorkspaceExecutor) Describe(ctx context.Context, req DescribeR
 
 func (e *SubstrateWorkspaceExecutor) scrubDaemon(ctx context.Context, actorID string) error {
 	return e.daemonRequest(ctx, actorID, http.MethodPost, "/v1/scrub", substrateScrubRequest{Paths: defaultSubstrateScrubPaths()}, nil)
+}
+
+func (e *SubstrateWorkspaceExecutor) restoreHandoffToken(ctx context.Context, actorID string) error {
+	if strings.TrimSpace(e.handoffToken) == "" {
+		return nil
+	}
+	restoreCtx := ctx
+	if restoreCtx == nil || restoreCtx.Err() != nil {
+		restoreCtx = context.Background()
+	}
+	restoreCtx, cancel := context.WithTimeout(restoreCtx, 10*time.Second)
+	defer cancel()
+
+	return e.daemonRequest(restoreCtx, actorID, http.MethodPut, "/v1/files", substrateUploadRequest{
+		Files: []substrateUploadFile{{
+			Path: substrateHandoffTokenUploadPath,
+			Data: []byte(e.handoffToken),
+			Mode: 0o600,
+		}},
+	}, nil)
 }
 
 func (e *SubstrateWorkspaceExecutor) daemonRequest(ctx context.Context, actorID, method, path string, body any, out any) error {

@@ -50,6 +50,52 @@ func TestSubstrateTransportCredentialsRequireExplicitTrust(t *testing.T) {
 	}
 }
 
+func TestSubstrateClaimReattachesAfterConcurrentCreateAlreadyExists(t *testing.T) {
+	const (
+		actorID  = "actor-1"
+		reuseKey = "session-1"
+	)
+	control := &recordingSubstrateControlClient{
+		getErrs: []error{
+			NewError("get actor", ErrorKindNotFound, "actor not found", false, nil),
+			nil,
+		},
+		createErr: NewError("create actor", ErrorKindAlreadyExists, "actor already exists", false, nil),
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     http.DefaultClient,
+		routerURL:      "http://router.test",
+		actorDNSSuffix: "actors.test",
+		now:            time.Now,
+		retained:       map[string]bool{},
+	}
+
+	got, err := executor.Claim(t.Context(), ClaimRequest{
+		Namespace:       "ate-demo",
+		ClaimName:       actorID,
+		CreateIfMissing: true,
+		Template:        TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"},
+		ReuseKey:        reuseKey,
+		Timeout:         time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	if control.createCalls != 1 {
+		t.Fatalf("CreateActor calls = %d, want 1", control.createCalls)
+	}
+	if control.getCalls != 2 {
+		t.Fatalf("GetActor calls = %d, want 2", control.getCalls)
+	}
+	if !got.Reused || got.Created {
+		t.Fatalf("Claim() reused=%t created=%t, want reused existing actor", got.Reused, got.Created)
+	}
+	if got.Ref.ID != actorID || got.ReuseKey != reuseKey {
+		t.Fatalf("Claim() ref=%#v reuseKey=%q, want %s/%s", got.Ref, got.ReuseKey, actorID, reuseKey)
+	}
+}
+
 func TestSubstrateExecUsesDetachedPolling(t *testing.T) {
 	var sawDetached bool
 	var polls int
@@ -205,6 +251,71 @@ func TestSubstrateDeleteWaitsWhenSuspendReturnsAfterStartingTransition(t *testin
 	}
 }
 
+func TestSubstrateReleaseRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testing.T) {
+	var scrubbed bool
+	var restored bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Errorf("Authorization = %q, want bearer token", got)
+		}
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == substrateTestScrubPath:
+			scrubbed = true
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/files":
+			var req substrateUploadRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode restore request: %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if len(req.Files) != 1 {
+				t.Errorf("restore files len = %d, want 1", len(req.Files))
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			file := req.Files[0]
+			if file.Path != substrateHandoffTokenUploadPath || string(file.Data) != "token" || file.Mode != 0o600 {
+				t.Errorf("restore file = path %q data %q mode %#o, want handoff token", file.Path, string(file.Data), file.Mode)
+			}
+			restored = true
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	control := &recordingSubstrateControlClient{
+		getStatuses: []string{substrateStatusRunning},
+		suspendErr:  fmt.Errorf("suspend failed"),
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     server.Client(),
+		routerURL:      server.URL,
+		actorDNSSuffix: "actors.test",
+		handoffToken:   "token",
+		now:            time.Now,
+		retained:       map[string]bool{},
+	}
+
+	_, err := executor.Release(t.Context(), ReleaseRequest{
+		Ref:     WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
+		Retain:  true,
+		Timeout: time.Second,
+	})
+	if err == nil {
+		t.Fatal("Release() error = nil, want suspend failure")
+	}
+	if !scrubbed {
+		t.Fatal("Release() did not scrub before suspend")
+	}
+	if !restored {
+		t.Fatal("Release() did not restore handoff token after suspend failure")
+	}
+}
+
 func TestSubstrateReleaseWaitsForSuspendedAfterSuspend(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == substrateTestScrubPath {
@@ -293,7 +404,10 @@ func TestDefaultSubstrateScrubPathsIncludesStagedWorker(t *testing.T) {
 
 type recordingSubstrateControlClient struct {
 	getStatuses   []string
+	getErrs       []error
 	getCalls      int
+	createErr     error
+	createCalls   int
 	suspendStatus string
 	suspendErr    error
 	suspendCalls  int
@@ -304,11 +418,15 @@ func (c *recordingSubstrateControlClient) GetActor(ctx context.Context, actorID 
 	if actorID == "" {
 		return nil, fmt.Errorf("actor id required")
 	}
-	status := substrateStatusSuspended
-	if c.getCalls < len(c.getStatuses) {
-		status = c.getStatuses[c.getCalls]
-	}
+	call := c.getCalls
 	c.getCalls++
+	if call < len(c.getErrs) && c.getErrs[call] != nil {
+		return nil, c.getErrs[call]
+	}
+	status := substrateStatusSuspended
+	if call < len(c.getStatuses) {
+		status = c.getStatuses[call]
+	}
 	return &substrateActor{
 		ActorID:           actorID,
 		TemplateNamespace: "ate-demo",
@@ -319,6 +437,10 @@ func (c *recordingSubstrateControlClient) GetActor(ctx context.Context, actorID 
 }
 
 func (c *recordingSubstrateControlClient) CreateActor(ctx context.Context, actorID, templateNamespace, templateName string) (*substrateActor, error) {
+	c.createCalls++
+	if c.createErr != nil {
+		return nil, c.createErr
+	}
 	return nil, fmt.Errorf("unexpected CreateActor")
 }
 
