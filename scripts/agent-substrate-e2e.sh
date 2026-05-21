@@ -220,6 +220,12 @@ assert_task_jsonpath() {
   fi
 }
 
+task_jsonpath() {
+  local task="$1"
+  local path="$2"
+  kubectl -n default get task "${task}" -o "jsonpath=${path}" 2>/dev/null || true
+}
+
 patch_substrate_kind_registry_script() {
   local script="${SUBSTRATE_DIR}/hack/create-kind-cluster.sh"
   sed -i.bak \
@@ -433,6 +439,43 @@ ${workspace_yaml}
 YAML
 }
 
+run_retained_workspace_task() {
+  local task_name="$1"
+
+  log "Running retained-workspace task/${task_name}"
+  if ! apply_task "${task_name}" "      enabled: true
+      provider: substrate
+      templateRef:
+        name: orka-codex-ci
+        namespace: ate-demo
+      cleanupPolicy: retain"; then
+    return 1
+  fi
+
+  if ! wait_task_phase "${task_name}" "Succeeded"; then
+    return 1
+  fi
+
+  assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.phase}" "Retained"
+}
+
+run_retained_workspace_task_with_retry() {
+  local task_name="codex-substrate-retain-ci"
+  local reason
+
+  if run_retained_workspace_task "${task_name}"; then
+    return 0
+  fi
+
+  reason="$(task_jsonpath "${task_name}" "{.status.executionWorkspace.reason}")"
+  if [[ "${reason}" != "WorkspaceCleanupFailed" ]]; then
+    return 1
+  fi
+
+  log "task/${task_name} hit WorkspaceCleanupFailed during Substrate checkpoint cleanup; retrying once"
+  run_retained_workspace_task "codex-substrate-retain-ci-retry"
+}
+
 exercise_orka_tasks() {
   create_agent
 
@@ -445,15 +488,7 @@ exercise_orka_tasks() {
   assert_task_jsonpath "codex-substrate-default-ci" "{.status.resultRef.available}" "true"
 
   if [[ "${SUBSTRATE_E2E_EXTENDED}" == "1" ]]; then
-    log "Running retained-workspace task"
-    apply_task "codex-substrate-retain-ci" "      enabled: true
-      provider: substrate
-      templateRef:
-        name: orka-codex-ci
-        namespace: ate-demo
-      cleanupPolicy: retain"
-    wait_task_phase "codex-substrate-retain-ci" "Succeeded"
-    assert_task_jsonpath "codex-substrate-retain-ci" "{.status.executionWorkspace.phase}" "Retained"
+    run_retained_workspace_task_with_retry
   fi
 
   log "Running missing-template negative task"
