@@ -68,6 +68,35 @@ func TestWorkspaceAgentExecTruncatesOutput(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAgentExecTimeoutReturns124(t *testing.T) {
+	t.Setenv(envHandoffToken, "secret")
+	server := newWorkspaceAgentServer()
+	body, err := json.Marshal(execRequest{
+		Command:        []string{"sh", "-c", "sleep 2"},
+		WorkDir:        "/tmp",
+		TimeoutSeconds: 1,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/exec", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	resp := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	var got execResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.ExitCode != 124 {
+		t.Fatalf("exitCode = %d, want 124", got.ExitCode)
+	}
+}
+
 func TestWorkspaceAgentDetachedExecCanBePolled(t *testing.T) {
 	t.Setenv(envHandoffToken, "secret")
 	server := newWorkspaceAgentServer()
@@ -163,6 +192,53 @@ func TestWorkspaceAgentExecDoesNotInheritDaemonAuthTokens(t *testing.T) {
 	}
 	if got.Stdout != "/" {
 		t.Fatalf("auth env stdout = %q, want empty token values", got.Stdout)
+	}
+}
+
+func TestWorkspaceAgentUploadUpdatesExistingFileMode(t *testing.T) {
+	t.Setenv(envHandoffToken, "secret")
+	dir := t.TempDir()
+	previousAllowedRoots := allowedRoots
+	allowedRoots = []string{dir}
+	t.Cleanup(func() {
+		allowedRoots = previousAllowedRoots
+	})
+	path := filepath.Join(dir, "worker")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write existing file: %v", err)
+	}
+
+	server := newWorkspaceAgentServer()
+	body, err := json.Marshal(uploadRequest{Files: []uploadFile{{
+		Path: path,
+		Data: []byte("new"),
+		Mode: 0o700,
+	}}})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/v1/files", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	resp := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat uploaded file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("uploaded mode = %#o, want 0700", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read uploaded file: %v", err)
+	}
+	if string(data) != "new" {
+		t.Fatalf("uploaded data = %q, want new", string(data))
 	}
 }
 

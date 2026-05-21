@@ -349,10 +349,10 @@ func (s *workspaceAgentServer) runExec(
 	exitCode := 0
 	if err != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			exitCode = exitErr.ExitCode()
-		} else if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			exitCode = 124
+		} else if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
 		} else {
 			exitCode = 1
 		}
@@ -432,6 +432,10 @@ func (s *workspaceAgentServer) handleFiles(w http.ResponseWriter, r *http.Reques
 		}
 		if err := os.WriteFile(path, file.Data, mode); err != nil {
 			http.Error(w, "failed to write file", http.StatusInternalServerError)
+			return
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			http.Error(w, "failed to set file mode", http.StatusInternalServerError)
 			return
 		}
 		if !file.ModTime.IsZero() {
