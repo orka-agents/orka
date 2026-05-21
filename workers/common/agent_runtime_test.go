@@ -8,6 +8,7 @@ package common
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"maps"
@@ -23,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
 )
@@ -986,6 +988,157 @@ func TestRunAgent_AgentSandboxCommandFailureCleansUpWithoutSubmittingResult(t *t
 	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "delete")
 	if got := resultRequests.Load(); got != 0 {
 		t.Fatalf("result endpoint received %d requests, want 0", got)
+	}
+}
+
+func TestBootstrapWorkspaceHandoffTokenHonorsConfiguredFile(t *testing.T) {
+	t.Setenv(workspaceHandoffTokenFileEnv, "/home/worker/custom-handoff-token")
+	recorder := newRecordingWorkspaceExecutor()
+	claim, err := recorder.Claim(context.Background(), workspace.ClaimRequest{
+		Namespace:       "ns",
+		CreateIfMissing: true,
+		Template:        workspace.TemplateRef{Name: "template"},
+		Timeout:         time.Second,
+	})
+	if err != nil {
+		t.Fatalf("claim workspace: %v", err)
+	}
+
+	if err := bootstrapWorkspaceHandoffToken(
+		context.Background(),
+		recorder,
+		claim.Ref,
+		"handoff-token",
+		workerenv.ExecutionWorkspaceEnv{
+			Provider:     string(corev1alpha1.WorkspaceProviderSubstrate),
+			ClaimTimeout: time.Second,
+		},
+	); err != nil {
+		t.Fatalf("bootstrapWorkspaceHandoffToken returned error: %v", err)
+	}
+
+	uploadReqs := recorder.uploadRequests()
+	if len(uploadReqs) != 1 || len(uploadReqs[0].Artifacts) != 1 {
+		t.Fatalf("upload requests = %#v, want one handoff token artifact", uploadReqs)
+	}
+	artifact := uploadReqs[0].Artifacts[0]
+	if artifact.Path != "/home/worker/custom-handoff-token" {
+		t.Fatalf("handoff token upload path = %q, want configured path", artifact.Path)
+	}
+	if string(artifact.Data) != "handoff-token" || artifact.Mode != 0o600 {
+		t.Fatalf("handoff artifact data/mode = %q/%#o, want token/0600", string(artifact.Data), artifact.Mode)
+	}
+}
+
+func TestCleanupExecutionWorkspaceRetainScrubsSecretsAndReportsReused(t *testing.T) {
+	t.Setenv(workspaceHandoffTokenFileEnv, "/home/worker/custom-handoff-token")
+	var statuses []executionWorkspaceStatusUpdate
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var status executionWorkspaceStatusUpdate
+		if err := json.NewDecoder(r.Body).Decode(&status); err != nil {
+			t.Errorf("decode status: %v", err)
+		}
+		statuses = append(statuses, status)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	recorder := newRecordingWorkspaceExecutor()
+	claim, err := recorder.Claim(context.Background(), workspace.ClaimRequest{
+		Namespace:       "ns",
+		CreateIfMissing: true,
+		Template:        workspace.TemplateRef{Name: "template"},
+		Timeout:         time.Second,
+	})
+	if err != nil {
+		t.Fatalf("claim workspace: %v", err)
+	}
+
+	err = cleanupExecutionWorkspace(
+		context.Background(),
+		recorder,
+		claim.Ref,
+		workerenv.ExecutionWorkspaceEnv{
+			CleanupPolicy:  "retain",
+			ClaimTimeout:   time.Second,
+			StatusEndpoint: server.URL,
+		},
+		true,
+		true,
+	)
+	if err != nil {
+		t.Fatalf("cleanupExecutionWorkspace returned error: %v", err)
+	}
+
+	assertOperationOrder(t, recorder.operations(), "claim", "exec", "release")
+	execReqs := recorder.execRequests()
+	if len(execReqs) != 1 {
+		t.Fatalf("recorded %d exec requests, want scrub exec", len(execReqs))
+	}
+	wantScrub := []string{
+		"rm",
+		"-f",
+		agentSandboxWorkerExecPath,
+		agentSandboxSATokenExecPath,
+		agentSandboxTransactionTokenExecPath,
+		agentSandboxContextSubjectTokenExecPath,
+		agentSandboxGitAskpassExecPath,
+		workspaceHandoffTokenDefaultPath,
+		"/home/worker/custom-handoff-token",
+	}
+	if !reflect.DeepEqual(execReqs[0].Command, wantScrub) {
+		t.Fatalf("scrub command = %#v, want %#v", execReqs[0].Command, wantScrub)
+	}
+	releaseReqs := recorder.releaseRequests()
+	if len(releaseReqs) != 1 || !releaseReqs[0].Retain {
+		t.Fatalf("release requests = %#v, want retain release", releaseReqs)
+	}
+	if len(statuses) != 1 {
+		t.Fatalf("recorded %d statuses, want 1", len(statuses))
+	}
+	if statuses[0].Phase != corev1alpha1.ExecutionWorkspacePhaseRetained ||
+		statuses[0].Reason != corev1alpha1.ExecutionWorkspaceReasonRetained ||
+		!statuses[0].Reused {
+		t.Fatalf("status = %#v, want retained/reused", statuses[0])
+	}
+}
+
+func TestCleanupExecutionWorkspaceCanSkipTerminalStatus(t *testing.T) {
+	var statusRequests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		statusRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	recorder := newRecordingWorkspaceExecutor()
+	claim, err := recorder.Claim(context.Background(), workspace.ClaimRequest{
+		Namespace:       "ns",
+		CreateIfMissing: true,
+		Template:        workspace.TemplateRef{Name: "template"},
+		Timeout:         time.Second,
+	})
+	if err != nil {
+		t.Fatalf("claim workspace: %v", err)
+	}
+
+	err = cleanupExecutionWorkspace(
+		context.Background(),
+		recorder,
+		claim.Ref,
+		workerenv.ExecutionWorkspaceEnv{
+			CleanupPolicy:  "delete",
+			ClaimTimeout:   time.Second,
+			StatusEndpoint: server.URL,
+		},
+		false,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("cleanupExecutionWorkspace returned error: %v", err)
+	}
+
+	assertOperationOrder(t, recorder.operations(), "claim", "delete")
+	if got := statusRequests.Load(); got != 0 {
+		t.Fatalf("status endpoint received %d requests, want 0", got)
 	}
 }
 

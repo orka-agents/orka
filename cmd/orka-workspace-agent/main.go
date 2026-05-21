@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,9 +31,11 @@ import (
 const (
 	defaultListenAddr            = ":80"
 	defaultCommandTimeout        = 30 * time.Minute
+	completedExecutionRetention  = 15 * time.Minute
 	defaultMaxOutputBytes        = 1 << 20
 	defaultMaxRequestBytes       = 256 << 20
 	defaultHandoffTokenFile      = "/app/orka-workspace-handoff-token"
+	defaultHandoffTokenUpload    = "orka-workspace-handoff-token"
 	envListenAddr                = "ORKA_WORKSPACE_AGENT_LISTEN_ADDR"
 	envHandoffToken              = "ORKA_WORKSPACE_HANDOFF_TOKEN"
 	envHandoffTokenFile          = "ORKA_WORKSPACE_HANDOFF_TOKEN_FILE"
@@ -95,15 +98,18 @@ func (s *workspaceAgentServer) requireAuth(next http.HandlerFunc) http.HandlerFu
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, err := handoffToken()
 		if err != nil {
-			if s.allowHandoffBootstrap(w, r) {
+			allowBootstrap, handled := s.allowHandoffBootstrap(w, r)
+			if allowBootstrap {
 				next(w, r)
+				return
+			}
+			if handled {
 				return
 			}
 			http.Error(w, "handoff credential unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		got := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-		if got == "" || got != token {
+		if !validHandoffBearer(r.Header.Get("Authorization"), token) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -111,37 +117,47 @@ func (s *workspaceAgentServer) requireAuth(next http.HandlerFunc) http.HandlerFu
 	}
 }
 
-func (s *workspaceAgentServer) allowHandoffBootstrap(w http.ResponseWriter, r *http.Request) bool {
+func (s *workspaceAgentServer) allowHandoffBootstrap(w http.ResponseWriter, r *http.Request) (bool, bool) {
 	if r.Method != http.MethodPut || r.URL.Path != "/v1/files" {
-		return false
+		return false, false
 	}
 	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		http.Error(w, "invalid handoff bootstrap request", http.StatusBadRequest)
-		return true
+		return false, true
 	}
-	r.Body.Close() //nolint:errcheck
-	r.Body = io.NopCloser(bytes.NewReader(data))
 
 	var req uploadRequest
 	if err := json.Unmarshal(data, &req); err != nil || len(req.Files) != 1 {
 		http.Error(w, "invalid handoff bootstrap request", http.StatusBadRequest)
-		return true
+		return false, true
 	}
 	path := filepath.Clean(req.Files[0].Path)
 	tokenPath := strings.TrimSpace(os.Getenv(envHandoffTokenFile))
 	if tokenPath == "" {
 		tokenPath = defaultHandoffTokenFile
 	}
-	if path != "orka-workspace-handoff-token" && path != defaultHandoffTokenFile && path != filepath.Clean(tokenPath) {
+	cleanTokenPath := filepath.Clean(tokenPath)
+	if path != defaultHandoffTokenUpload && path != defaultHandoffTokenFile && path != cleanTokenPath {
 		http.Error(w, "invalid handoff bootstrap path", http.StatusUnauthorized)
-		return true
+		return false, true
 	}
 	if strings.TrimSpace(string(req.Files[0].Data)) == "" {
 		http.Error(w, "empty handoff bootstrap token", http.StatusBadRequest)
-		return true
+		return false, true
 	}
-	return true
+	if path == defaultHandoffTokenUpload || path == defaultHandoffTokenFile {
+		req.Files[0].Path = cleanTokenPath
+		var err error
+		data, err = json.Marshal(req)
+		if err != nil {
+			http.Error(w, "invalid handoff bootstrap request", http.StatusBadRequest)
+			return false, true
+		}
+	}
+	r.Body.Close() //nolint:errcheck
+	r.Body = io.NopCloser(bytes.NewReader(data))
+	return true, true
 }
 
 func handoffToken() (string, error) {
@@ -161,6 +177,16 @@ func handoffToken() (string, error) {
 		return "", fmt.Errorf("handoff token file is empty")
 	}
 	return token, nil
+}
+
+func validHandoffBearer(header, token string) bool {
+	got := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
+	if got == "" || strings.TrimSpace(token) == "" {
+		return false
+	}
+	gotHash := sha256.Sum256([]byte(got))
+	tokenHash := sha256.Sum256([]byte(token))
+	return subtle.ConstantTimeCompare(gotHash[:], tokenHash[:]) == 1
 }
 
 func (s *workspaceAgentServer) handleExec(w http.ResponseWriter, r *http.Request) {
@@ -292,14 +318,30 @@ func (s *workspaceAgentServer) runExec(
 func (s *workspaceAgentServer) storeExecution(resp execResponse) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.evictCompletedExecutionsLocked(time.Now().UTC())
 	s.executions[resp.ExecID] = resp
 }
 
 func (s *workspaceAgentServer) loadExecution(id string) (execResponse, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.evictCompletedExecutionsLocked(time.Now().UTC())
 	resp, ok := s.executions[id]
+	if ok && !resp.Running {
+		delete(s.executions, id)
+	}
 	return resp, ok
+}
+
+func (s *workspaceAgentServer) evictCompletedExecutionsLocked(now time.Time) {
+	for id, resp := range s.executions {
+		if resp.Running || resp.FinishedAt.IsZero() {
+			continue
+		}
+		if now.Sub(resp.FinishedAt) >= completedExecutionRetention {
+			delete(s.executions, id)
+		}
+	}
 }
 
 func newExecID() (string, error) {
@@ -512,25 +554,58 @@ func safePath(value string) (string, error) {
 	}
 	clean := filepath.Clean(value)
 	for _, root := range allowedRoots {
-		if clean == root || strings.HasPrefix(clean, root+"/") {
-			if clean == root {
-				return clean, nil
-			}
-			parent := filepath.Dir(clean)
-			if resolved, err := filepath.EvalSymlinks(parent); err == nil {
-				resolvedRoot, rootErr := filepath.EvalSymlinks(root)
-				if rootErr != nil {
-					resolvedRoot = root
-				}
-				if resolved != root && !strings.HasPrefix(resolved, root+"/") &&
-					resolved != resolvedRoot && !strings.HasPrefix(resolved, resolvedRoot+"/") {
-					return "", fmt.Errorf("path escapes allowed root")
-				}
+		root = filepath.Clean(root)
+		if pathWithinRoot(clean, root) {
+			if err := validateResolvedPath(clean, root); err != nil {
+				return "", err
 			}
 			return clean, nil
 		}
 	}
 	return "", fmt.Errorf("path escapes allowed roots")
+}
+
+func validateResolvedPath(path, root string) error {
+	resolved, err := resolveExistingPrefix(path)
+	if err != nil {
+		return fmt.Errorf("resolve path: %w", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		resolvedRoot = root
+	}
+	if pathWithinRoot(resolved, root) || pathWithinRoot(resolved, resolvedRoot) {
+		return nil
+	}
+	return fmt.Errorf("path escapes allowed root")
+}
+
+func resolveExistingPrefix(path string) (string, error) {
+	path = filepath.Clean(path)
+	current := path
+	var suffix []string
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			parts := append([]string{resolved}, suffix...)
+			return filepath.Clean(filepath.Join(parts...)), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return path, nil
+		}
+		suffix = append([]string{filepath.Base(current)}, suffix...)
+		current = parent
+	}
+}
+
+func pathWithinRoot(path, root string) bool {
+	path = filepath.Clean(path)
+	root = filepath.Clean(root)
+	return path == root || strings.HasPrefix(path, root+string(os.PathSeparator))
 }
 
 func cleanReportedPath(path string) string {

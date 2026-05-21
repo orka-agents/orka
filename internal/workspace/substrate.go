@@ -460,11 +460,12 @@ func (e *SubstrateWorkspaceExecutor) Describe(ctx context.Context, req DescribeR
 		}
 		return nil, err
 	}
+	retained := e.actorRetained(actorID)
 	return &Description{
 		Ref:      substrateRef(req.Ref.Namespace, actor),
 		Template: TemplateRef{Namespace: actor.TemplateNamespace, Name: actor.TemplateName},
-		Phase:    substratePhase(actor, e.actorRetained(actorID)),
-		Retained: e.actorRetained(actorID),
+		Phase:    substratePhase(actor, retained),
+		Retained: retained,
 		Message:  "workspace described",
 	}, nil
 }

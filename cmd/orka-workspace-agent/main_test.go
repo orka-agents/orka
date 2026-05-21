@@ -123,6 +123,14 @@ func TestWorkspaceAgentDetachedExecCanBePolled(t *testing.T) {
 			got.ExitCode,
 		)
 	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/v1/exec/"+started.ExecID, nil)
+	statusReq.Header.Set("Authorization", "Bearer secret")
+	statusResp := httptest.NewRecorder()
+	server.routes().ServeHTTP(statusResp, statusReq)
+	if statusResp.Code != http.StatusNotFound {
+		t.Fatalf("completed detached exec status after poll = %d, want %d", statusResp.Code, http.StatusNotFound)
+	}
 }
 
 func TestWorkspaceAgentDecodesLargeUploadRequest(t *testing.T) {
@@ -170,10 +178,73 @@ func TestWorkspaceAgentAllowsOnlyHandoffTokenBootstrap(t *testing.T) {
 		allowedRoots = previousAllowedRoots
 	})
 	tokenFile := filepath.Join(dir, "handoff-token")
+	resp := exerciseHandoffBootstrap(t, tokenFile, tokenFile)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	data, err := os.ReadFile(tokenFile)
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "secret" {
+		t.Fatalf("token file = %q, want secret", string(data))
+	}
+}
+
+func TestWorkspaceAgentBootstrapDefaultUploadHonorsConfiguredTokenFile(t *testing.T) {
+	dir := t.TempDir()
+	previousAllowedRoots := allowedRoots
+	allowedRoots = []string{dir}
+	t.Cleanup(func() {
+		allowedRoots = previousAllowedRoots
+	})
+	tokenFile := filepath.Join(dir, "custom-handoff-token")
+	resp := exerciseHandoffBootstrap(t, tokenFile, defaultHandoffTokenUpload)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	data, err := os.ReadFile(tokenFile)
+	if err != nil {
+		t.Fatalf("read configured token file: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "secret" {
+		t.Fatalf("configured token file = %q, want secret", string(data))
+	}
+}
+
+func exerciseHandoffBootstrap(t *testing.T, tokenFile, uploadPath string) *httptest.ResponseRecorder {
+	t.Helper()
 	t.Setenv(envHandoffTokenFile, tokenFile)
 	server := newWorkspaceAgentServer()
 	body, err := json.Marshal(uploadRequest{Files: []uploadFile{{
-		Path: tokenFile,
+		Path: uploadPath,
+		Data: []byte("secret"),
+		Mode: 0o600,
+	}}})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/v1/files", bytes.NewReader(body))
+	resp := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(resp, req)
+	return resp
+}
+
+func TestWorkspaceAgentRejectsInvalidHandoffBootstrapWithoutWritingFile(t *testing.T) {
+	dir := t.TempDir()
+	previousAllowedRoots := allowedRoots
+	allowedRoots = []string{dir}
+	t.Cleanup(func() {
+		allowedRoots = previousAllowedRoots
+	})
+	t.Setenv(envHandoffTokenFile, filepath.Join(dir, "handoff-token"))
+	server := newWorkspaceAgentServer()
+	disallowedPath := filepath.Join(dir, "not-the-token")
+	body, err := json.Marshal(uploadRequest{Files: []uploadFile{{
+		Path: disallowedPath,
 		Data: []byte("secret"),
 		Mode: 0o600,
 	}}})
@@ -185,14 +256,39 @@ func TestWorkspaceAgentAllowsOnlyHandoffTokenBootstrap(t *testing.T) {
 
 	server.routes().ServeHTTP(resp, req)
 
-	if resp.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusUnauthorized, resp.Body.String())
 	}
-	data, err := os.ReadFile(tokenFile)
-	if err != nil {
-		t.Fatalf("read token file: %v", err)
+	if _, err := os.Stat(disallowedPath); !os.IsNotExist(err) {
+		t.Fatalf("invalid bootstrap wrote %s: %v", disallowedPath, err)
 	}
-	if strings.TrimSpace(string(data)) != "secret" {
-		t.Fatalf("token file = %q, want secret", string(data))
+}
+
+func TestSafePathRejectsSymlinkTargetsOutsideAllowedRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	previousAllowedRoots := allowedRoots
+	allowedRoots = []string{root}
+	t.Cleanup(func() {
+		allowedRoots = previousAllowedRoots
+	})
+	outsideFile := filepath.Join(outside, "secret")
+	if err := os.WriteFile(outsideFile, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	linkFile := filepath.Join(root, "file-link")
+	if err := os.Symlink(outsideFile, linkFile); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := safePath(linkFile); err == nil {
+		t.Fatal("safePath accepted symlink file escaping allowed root")
+	}
+
+	linkDir := filepath.Join(root, "dir-link")
+	if err := os.Symlink(outside, linkDir); err != nil {
+		t.Skipf("symlink directory unavailable: %v", err)
+	}
+	if _, err := safePath(filepath.Join(linkDir, "new-file")); err == nil {
+		t.Fatal("safePath accepted path through symlink directory escaping allowed root")
 	}
 }

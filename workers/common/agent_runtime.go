@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -228,9 +229,11 @@ const (
 	agentSandboxGitAskpassUploadPath          = "orka-git-askpass"
 	agentSandboxGitAskpassExecPath            = "/app/" + agentSandboxGitAskpassUploadPath
 	workspaceHandoffTokenUploadPath           = "orka-workspace-handoff-token"
+	workspaceHandoffTokenDefaultPath          = "/app/" + workspaceHandoffTokenUploadPath
 	agentSandboxExecMaxOutputBytes            = 2000
 	workerEnvFalse                            = "false"
 	workspaceHandoffTokenEnv                  = "ORKA_WORKSPACE_HANDOFF_TOKEN"
+	workspaceHandoffTokenFileEnv              = "ORKA_WORKSPACE_HANDOFF_TOKEN_FILE"
 )
 
 var (
@@ -241,6 +244,8 @@ var (
 	substrateWorkspaceExecutorErr   error
 	setupGitCredentialsForRunAgent  = SetupGitCredentials
 )
+
+var errExecutionWorkspaceSecretScrubFailed = errors.New("execution workspace secret scrub failed")
 
 func getAgentSandboxWorkspaceExecutor() workspace.WorkspaceExecutor {
 	agentSandboxWorkspaceExecutorMu.RLock()
@@ -447,7 +452,7 @@ func runAgentInWorkspace(
 		}
 		cleanupCtx, cleanupCancel := agentSandboxCleanupContext(workspaceEnv.ClaimTimeout)
 		defer cleanupCancel()
-		if err := cleanupExecutionWorkspace(cleanupCtx, executor, ref, workspaceEnv); err != nil {
+		if err := cleanupExecutionWorkspace(cleanupCtx, executor, ref, workspaceEnv, claim.Reused, false); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to clean up execution workspace: %v\n", err)
 		}
 	}()
@@ -549,11 +554,15 @@ func runAgentInWorkspace(
 
 	cleanupCtx, cleanupCancel := agentSandboxCleanupContext(workspaceEnv.ClaimTimeout)
 	defer cleanupCancel()
-	if err := cleanupExecutionWorkspace(cleanupCtx, executor, ref, workspaceEnv); err != nil {
+	if err := cleanupExecutionWorkspace(cleanupCtx, executor, ref, workspaceEnv, claim.Reused, true); err != nil {
+		reason := corev1alpha1.ExecutionWorkspaceReasonCleanupFailed
+		if errors.Is(err, errExecutionWorkspaceSecretScrubFailed) {
+			reason = corev1alpha1.ExecutionWorkspaceReasonSecretScrubFailed
+		}
 		submitExecutionWorkspaceStatus(
 			workspaceEnv,
 			corev1alpha1.ExecutionWorkspacePhaseFailed,
-			corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
+			reason,
 			claim.Reused,
 			"workspace cleanup failed",
 		)
@@ -685,7 +694,7 @@ func bootstrapWorkspaceHandoffToken(
 	if _, err := executor.Upload(ctx, workspace.UploadRequest{
 		Ref: ref,
 		Artifacts: []workspace.UploadArtifact{{
-			Path: workspaceHandoffTokenUploadPath,
+			Path: workspaceHandoffTokenUploadTarget(),
 			Data: []byte(token),
 			Mode: 0o600,
 		}},
@@ -985,6 +994,8 @@ func cleanupExecutionWorkspace(
 	executor workspace.WorkspaceExecutor,
 	ref workspace.WorkspaceRef,
 	workspaceEnv workerenv.ExecutionWorkspaceEnv,
+	reused bool,
+	submitStatus bool,
 ) error {
 	if ref.IsZero() || executor == nil {
 		return nil
@@ -992,6 +1003,9 @@ func cleanupExecutionWorkspace(
 
 	switch strings.TrimSpace(strings.ToLower(workspaceEnv.CleanupPolicy)) {
 	case "retain":
+		if err := scrubExecutionWorkspaceSecrets(ctx, executor, ref, workspaceEnv); err != nil {
+			return fmt.Errorf("%w: %w", errExecutionWorkspaceSecretScrubFailed, err)
+		}
 		if _, err := executor.Release(ctx, workspace.ReleaseRequest{
 			Ref:     ref,
 			Retain:  true,
@@ -1000,13 +1014,15 @@ func cleanupExecutionWorkspace(
 		}); err != nil {
 			return fmt.Errorf("retain workspace: %w", err)
 		}
-		submitExecutionWorkspaceStatus(
-			workspaceEnv,
-			corev1alpha1.ExecutionWorkspacePhaseRetained,
-			corev1alpha1.ExecutionWorkspaceReasonRetained,
-			false,
-			"workspace retained",
-		)
+		if submitStatus {
+			submitExecutionWorkspaceStatus(
+				workspaceEnv,
+				corev1alpha1.ExecutionWorkspacePhaseRetained,
+				corev1alpha1.ExecutionWorkspaceReasonRetained,
+				reused,
+				"workspace retained",
+			)
+		}
 		return nil
 	case "", "delete":
 		if _, err := executor.Delete(ctx, workspace.DeleteRequest{
@@ -1016,13 +1032,15 @@ func cleanupExecutionWorkspace(
 		}); err != nil {
 			return fmt.Errorf("delete workspace: %w", err)
 		}
-		submitExecutionWorkspaceStatus(
-			workspaceEnv,
-			corev1alpha1.ExecutionWorkspacePhaseDeleted,
-			corev1alpha1.ExecutionWorkspaceReasonDeleted,
-			false,
-			"workspace deleted",
-		)
+		if submitStatus {
+			submitExecutionWorkspaceStatus(
+				workspaceEnv,
+				corev1alpha1.ExecutionWorkspacePhaseDeleted,
+				corev1alpha1.ExecutionWorkspaceReasonDeleted,
+				reused,
+				"workspace deleted",
+			)
+		}
 		return nil
 	default:
 		fmt.Fprintf(
@@ -1030,6 +1048,9 @@ func cleanupExecutionWorkspace(
 			"warning: unsupported workspace cleanup policy %q; retaining workspace to avoid unintended deletion\n",
 			workspaceEnv.CleanupPolicy,
 		)
+		if err := scrubExecutionWorkspaceSecrets(ctx, executor, ref, workspaceEnv); err != nil {
+			return fmt.Errorf("%w: %w", errExecutionWorkspaceSecretScrubFailed, err)
+		}
 		if _, err := executor.Release(ctx, workspace.ReleaseRequest{
 			Ref:     ref,
 			Retain:  true,
@@ -1038,15 +1059,61 @@ func cleanupExecutionWorkspace(
 		}); err != nil {
 			return fmt.Errorf("retain workspace after unsupported cleanup policy: %w", err)
 		}
-		submitExecutionWorkspaceStatus(
-			workspaceEnv,
-			corev1alpha1.ExecutionWorkspacePhaseRetained,
-			corev1alpha1.ExecutionWorkspaceReasonRetained,
-			false,
-			"workspace retained",
-		)
+		if submitStatus {
+			submitExecutionWorkspaceStatus(
+				workspaceEnv,
+				corev1alpha1.ExecutionWorkspacePhaseRetained,
+				corev1alpha1.ExecutionWorkspaceReasonRetained,
+				reused,
+				"workspace retained",
+			)
+		}
 		return nil
 	}
+}
+
+func scrubExecutionWorkspaceSecrets(
+	ctx context.Context,
+	executor workspace.WorkspaceExecutor,
+	ref workspace.WorkspaceRef,
+	workspaceEnv workerenv.ExecutionWorkspaceEnv,
+) error {
+	paths := executionWorkspaceScrubPaths()
+	if len(paths) == 0 {
+		return nil
+	}
+	_, err := executor.Exec(ctx, workspace.ExecRequest{
+		Ref:            ref,
+		Command:        append([]string{"rm", "-f"}, paths...),
+		Timeout:        workspaceEnv.ClaimTimeout,
+		MaxOutputBytes: agentSandboxExecMaxOutputBytes,
+	})
+	if err != nil {
+		return fmt.Errorf("scrub execution workspace staged credentials: %w", err)
+	}
+	return nil
+}
+
+func executionWorkspaceScrubPaths() []string {
+	paths := []string{
+		agentSandboxWorkerExecPath,
+		agentSandboxSATokenExecPath,
+		agentSandboxTransactionTokenExecPath,
+		agentSandboxContextSubjectTokenExecPath,
+		agentSandboxGitAskpassExecPath,
+		workspaceHandoffTokenDefaultPath,
+	}
+	if custom := strings.TrimSpace(os.Getenv(workspaceHandoffTokenFileEnv)); custom != "" {
+		paths = appendUniqueString(paths, custom)
+	}
+	return paths
+}
+
+func workspaceHandoffTokenUploadTarget() string {
+	if custom := strings.TrimSpace(os.Getenv(workspaceHandoffTokenFileEnv)); custom != "" {
+		return custom
+	}
+	return workspaceHandoffTokenUploadPath
 }
 
 func agentSandboxCleanupContext(timeout time.Duration) (context.Context, context.CancelFunc) {
