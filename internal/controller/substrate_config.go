@@ -22,6 +22,8 @@ const (
 	EnvSubstrateActorDNSSuffix        = "ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX"
 	EnvSubstrateDefaultTemplate       = "ORKA_SUBSTRATE_DEFAULT_TEMPLATE"
 	EnvSubstrateDefaultTemplateNS     = "ORKA_SUBSTRATE_DEFAULT_TEMPLATE_NAMESPACE"
+	EnvSubstrateBootstrapSecretName   = "ORKA_SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME"
+	EnvSubstrateBootstrapSecretKey    = "ORKA_SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY"
 	EnvSubstrateClaimTimeout          = "ORKA_SUBSTRATE_CLAIM_TIMEOUT"
 	EnvSubstrateCommandTimeout        = "ORKA_SUBSTRATE_COMMAND_TIMEOUT"
 	EnvSubstrateCleanupPolicy         = "ORKA_SUBSTRATE_CLEANUP_POLICY"
@@ -31,6 +33,7 @@ const (
 	defaultSubstrateAPIEndpoint    = "api.ate-system.svc:443"
 	defaultSubstrateRouterURL      = "http://atenet-router.ate-system.svc"
 	defaultSubstrateActorDNSSuffix = "actors.resources.substrate.ate.dev"
+	defaultSubstrateBootstrapKey   = "token"
 	defaultSubstrateClaimTimeout   = 2 * time.Minute
 	defaultSubstrateCommandTimeout = 30 * time.Minute
 )
@@ -45,6 +48,8 @@ type SubstrateConfig struct {
 	ActorDNSSuffix        string
 	DefaultTemplate       string
 	DefaultTemplateNS     string
+	BootstrapSecretName   string
+	BootstrapSecretKey    string
 	ClaimTimeout          time.Duration
 	CommandTimeout        time.Duration
 	CleanupPolicy         corev1alpha1.WorkspaceCleanupPolicy
@@ -88,6 +93,12 @@ func SubstrateConfigFromEnv(getenv func(string) string) (SubstrateConfig, error)
 	if value := strings.TrimSpace(getenv(EnvSubstrateDefaultTemplateNS)); value != "" {
 		cfg.DefaultTemplateNS = value
 	}
+	if value := strings.TrimSpace(getenv(EnvSubstrateBootstrapSecretName)); value != "" {
+		cfg.BootstrapSecretName = value
+	}
+	if value := strings.TrimSpace(getenv(EnvSubstrateBootstrapSecretKey)); value != "" {
+		cfg.BootstrapSecretKey = value
+	}
 	if value := strings.TrimSpace(getenv(EnvSubstrateClaimTimeout)); value != "" {
 		duration, err := time.ParseDuration(value)
 		if err != nil {
@@ -129,6 +140,9 @@ func (c SubstrateConfig) WithDefaults() SubstrateConfig {
 	if c.CleanupPolicy == "" {
 		c.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyDelete
 	}
+	if strings.TrimSpace(c.BootstrapSecretName) != "" && strings.TrimSpace(c.BootstrapSecretKey) == "" {
+		c.BootstrapSecretKey = defaultSubstrateBootstrapKey
+	}
 	return c
 }
 
@@ -149,6 +163,12 @@ func (c SubstrateConfig) Validate() error {
 	}
 	if strings.TrimSpace(cfg.ActorDNSSuffix) == "" {
 		return fmt.Errorf("substrate actor DNS suffix is required")
+	}
+	if strings.TrimSpace(cfg.BootstrapSecretName) == "" {
+		return fmt.Errorf("substrate workspace bootstrap token secret name is required")
+	}
+	if strings.TrimSpace(cfg.BootstrapSecretKey) == "" {
+		return fmt.Errorf("substrate workspace bootstrap token secret key is required")
 	}
 	if cfg.ClaimTimeout <= 0 {
 		return fmt.Errorf("substrate claim timeout must be greater than zero")

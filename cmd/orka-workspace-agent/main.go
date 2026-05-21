@@ -39,6 +39,7 @@ const (
 	envListenAddr                = "ORKA_WORKSPACE_AGENT_LISTEN_ADDR"
 	envHandoffToken              = "ORKA_WORKSPACE_HANDOFF_TOKEN"
 	envHandoffTokenFile          = "ORKA_WORKSPACE_HANDOFF_TOKEN_FILE"
+	envBootstrapToken            = "ORKA_WORKSPACE_BOOTSTRAP_TOKEN"
 	envDefaultCommandTimeoutSecs = "ORKA_WORKSPACE_AGENT_DEFAULT_COMMAND_TIMEOUT_SECONDS"
 	envDefaultMaxOutputBytes     = "ORKA_WORKSPACE_AGENT_MAX_OUTPUT_BYTES"
 	envMaxRequestBytes           = "ORKA_WORKSPACE_AGENT_MAX_REQUEST_BYTES"
@@ -67,16 +68,22 @@ type workspaceAgentServer struct {
 	defaultCommandTimeout time.Duration
 	defaultMaxOutputBytes int64
 	maxRequestBytes       int64
+	bootstrapToken        string
 
 	mu         sync.Mutex
 	executions map[string]execResponse
 }
 
 func newWorkspaceAgentServer() *workspaceAgentServer {
+	bootstrapToken := strings.TrimSpace(os.Getenv(envBootstrapToken))
+	if bootstrapToken != "" {
+		_ = os.Unsetenv(envBootstrapToken)
+	}
 	return &workspaceAgentServer{
 		defaultCommandTimeout: durationEnvSeconds(envDefaultCommandTimeoutSecs, defaultCommandTimeout),
 		defaultMaxOutputBytes: int64Env(envDefaultMaxOutputBytes, defaultMaxOutputBytes),
 		maxRequestBytes:       int64Env(envMaxRequestBytes, defaultMaxRequestBytes),
+		bootstrapToken:        bootstrapToken,
 		executions:            make(map[string]execResponse),
 	}
 }
@@ -121,6 +128,10 @@ func (s *workspaceAgentServer) allowHandoffBootstrap(w http.ResponseWriter, r *h
 	if r.Method != http.MethodPut || r.URL.Path != "/v1/files" {
 		return false, false
 	}
+	if s.bootstrapToken == "" {
+		http.Error(w, "handoff bootstrap credential unavailable", http.StatusServiceUnavailable)
+		return false, true
+	}
 	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		http.Error(w, "invalid handoff bootstrap request", http.StatusBadRequest)
@@ -149,7 +160,7 @@ func (s *workspaceAgentServer) allowHandoffBootstrap(w http.ResponseWriter, r *h
 		http.Error(w, "empty handoff bootstrap token", http.StatusBadRequest)
 		return false, true
 	}
-	if !validHandoffBearer(r.Header.Get("Authorization"), tokenValue) {
+	if !validHandoffBearer(r.Header.Get("Authorization"), s.bootstrapToken) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return false, true
 	}
@@ -318,7 +329,7 @@ func (s *workspaceAgentServer) runExec(
 	startedAt := time.Now().UTC()
 	cmd := exec.CommandContext(ctx, req.Command[0], req.Command[1:]...)
 	cmd.Dir = normalized.workDir
-	cmd.Env = mergeEnv(os.Environ(), req.Env)
+	cmd.Env = mergeEnv(commandBaseEnv(os.Environ()), req.Env)
 	if len(req.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
 	}
@@ -713,6 +724,23 @@ func mergeEnv(base []string, overrides map[string]string) []string {
 		out = append(out, name+"="+value)
 	}
 	return out
+}
+
+func commandBaseEnv(environ []string) []string {
+	filtered := make([]string, 0, len(environ))
+	for _, item := range environ {
+		name, _, ok := strings.Cut(item, "=")
+		if !ok {
+			continue
+		}
+		switch name {
+		case envHandoffToken, envBootstrapToken:
+			continue
+		default:
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
 }
 
 func fileArtifact(absPath, requestedPath string, data []byte, mode uint32, modTime time.Time) artifact {

@@ -19,8 +19,11 @@ import (
 )
 
 const (
-	substrateTestBearer    = "Bearer token"
-	substrateTestScrubPath = "/v1/scrub"
+	substrateTestBearer          = "Bearer token"
+	substrateTestBootstrapBearer = "Bearer bootstrap-token"
+	substrateTestFilesPath       = "/v1/files"
+	substrateTestScrubPath       = "/v1/scrub"
+	substrateTestToken           = "token"
 )
 
 func TestNewSubstrateExecutorDefaultHTTPClientHasNoTimeout(t *testing.T) {
@@ -138,7 +141,7 @@ func TestSubstrateExecUsesDetachedPolling(t *testing.T) {
 		httpClient:     server.Client(),
 		routerURL:      server.URL,
 		actorDNSSuffix: "actors.test",
-		handoffToken:   "token",
+		handoffToken:   substrateTestToken,
 	}
 
 	got, err := executor.Exec(t.Context(), ExecRequest{
@@ -157,6 +160,62 @@ func TestSubstrateExecUsesDetachedPolling(t *testing.T) {
 	}
 	if got.Stdout != "ok" || got.Stderr != "warn" || got.ExitCode != 0 {
 		t.Fatalf("Exec() result = stdout %q stderr %q exit %d, want ok/warn/0", got.Stdout, got.Stderr, got.ExitCode)
+	}
+}
+
+func TestSubstrateBootstrapHandoffUploadUsesBootstrapToken(t *testing.T) {
+	var uploaded bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != substrateTestBootstrapBearer {
+			t.Errorf("Authorization = %q, want bootstrap bearer", got)
+		}
+		if r.Method != http.MethodPut || r.URL.Path != substrateTestFilesPath {
+			http.NotFound(w, r)
+			return
+		}
+		var req substrateUploadRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode upload request: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if len(req.Files) != 1 {
+			t.Errorf("upload files len = %d, want 1", len(req.Files))
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		file := req.Files[0]
+		if file.Path != substrateHandoffTokenUploadPath || string(file.Data) != substrateTestToken {
+			t.Errorf("upload file = path %q data %q, want handoff token", file.Path, string(file.Data))
+		}
+		uploaded = true
+		_ = json.NewEncoder(w).Encode(substrateUploadResponse{})
+	}))
+	defer server.Close()
+
+	executor := &SubstrateWorkspaceExecutor{
+		httpClient:     server.Client(),
+		routerURL:      server.URL,
+		actorDNSSuffix: "actors.test",
+		handoffToken:   substrateTestToken,
+		bootstrapToken: "bootstrap-token",
+	}
+
+	_, err := executor.Upload(t.Context(), UploadRequest{
+		Ref:              WorkspaceRef{ID: "actor-1"},
+		BootstrapHandoff: true,
+		Artifacts: []UploadArtifact{{
+			Path: substrateHandoffTokenUploadPath,
+			Data: []byte(substrateTestToken),
+			Mode: 0o600,
+		}},
+		Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Upload() error = %v", err)
+	}
+	if !uploaded {
+		t.Fatal("Upload() did not send handoff token")
 	}
 }
 
@@ -181,7 +240,7 @@ func TestSubstrateDeleteWaitsForSuspendedAfterSuspend(t *testing.T) {
 		httpClient:     server.Client(),
 		routerURL:      server.URL,
 		actorDNSSuffix: "actors.test",
-		handoffToken:   "token",
+		handoffToken:   substrateTestToken,
 		now:            time.Now,
 		retained:       map[string]bool{},
 	}
@@ -228,7 +287,7 @@ func TestSubstrateDeleteWaitsWhenSuspendReturnsAfterStartingTransition(t *testin
 		httpClient:     server.Client(),
 		routerURL:      server.URL,
 		actorDNSSuffix: "actors.test",
-		handoffToken:   "token",
+		handoffToken:   substrateTestToken,
 		now:            time.Now,
 		retained:       map[string]bool{},
 	}
@@ -274,7 +333,7 @@ func TestSubstrateDeleteSkipScrubDeletesRunningActor(t *testing.T) {
 		httpClient:     server.Client(),
 		routerURL:      server.URL,
 		actorDNSSuffix: "actors.test",
-		handoffToken:   "token",
+		handoffToken:   substrateTestToken,
 		now:            time.Now,
 		retained:       map[string]bool{},
 	}
@@ -319,7 +378,7 @@ func TestSubstrateDeleteFailsClosedWhenRunningScrubFails(t *testing.T) {
 		httpClient:     server.Client(),
 		routerURL:      server.URL,
 		actorDNSSuffix: "actors.test",
-		handoffToken:   "token",
+		handoffToken:   substrateTestToken,
 		now:            time.Now,
 		retained:       map[string]bool{},
 	}
@@ -345,13 +404,16 @@ func TestSubstrateDeleteFailsClosedWhenRunningScrubFails(t *testing.T) {
 func TestSubstrateDeleteRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testing.T) {
 	var restored bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != substrateTestBearer {
-			t.Errorf("Authorization = %q, want bearer token", got)
-		}
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == substrateTestScrubPath:
+			if got := r.Header.Get("Authorization"); got != substrateTestBearer {
+				t.Errorf("scrub Authorization = %q, want handoff bearer", got)
+			}
 			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPut && r.URL.Path == "/v1/files":
+		case r.Method == http.MethodPut && r.URL.Path == substrateTestFilesPath:
+			if got := r.Header.Get("Authorization"); got != substrateTestBootstrapBearer {
+				t.Errorf("restore Authorization = %q, want bootstrap bearer", got)
+			}
 			var req substrateUploadRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Errorf("decode restore request: %v", err)
@@ -364,7 +426,9 @@ func TestSubstrateDeleteRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testin
 				return
 			}
 			file := req.Files[0]
-			if file.Path != substrateHandoffTokenUploadPath || string(file.Data) != "token" || file.Mode != 0o600 {
+			if file.Path != substrateHandoffTokenUploadPath ||
+				string(file.Data) != substrateTestToken ||
+				file.Mode != 0o600 {
 				t.Errorf("restore file = path %q data %q mode %#o, want handoff token", file.Path, string(file.Data), file.Mode)
 			}
 			restored = true
@@ -384,7 +448,8 @@ func TestSubstrateDeleteRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testin
 		httpClient:     server.Client(),
 		routerURL:      server.URL,
 		actorDNSSuffix: "actors.test",
-		handoffToken:   "token",
+		handoffToken:   substrateTestToken,
+		bootstrapToken: "bootstrap-token",
 		now:            time.Now,
 		retained:       map[string]bool{},
 	}
@@ -408,14 +473,17 @@ func TestSubstrateReleaseRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testi
 	var scrubbed bool
 	var restored bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != substrateTestBearer {
-			t.Errorf("Authorization = %q, want bearer token", got)
-		}
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == substrateTestScrubPath:
+			if got := r.Header.Get("Authorization"); got != substrateTestBearer {
+				t.Errorf("scrub Authorization = %q, want handoff bearer", got)
+			}
 			scrubbed = true
 			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPut && r.URL.Path == "/v1/files":
+		case r.Method == http.MethodPut && r.URL.Path == substrateTestFilesPath:
+			if got := r.Header.Get("Authorization"); got != substrateTestBootstrapBearer {
+				t.Errorf("restore Authorization = %q, want bootstrap bearer", got)
+			}
 			var req substrateUploadRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Errorf("decode restore request: %v", err)
@@ -428,7 +496,9 @@ func TestSubstrateReleaseRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testi
 				return
 			}
 			file := req.Files[0]
-			if file.Path != substrateHandoffTokenUploadPath || string(file.Data) != "token" || file.Mode != 0o600 {
+			if file.Path != substrateHandoffTokenUploadPath ||
+				string(file.Data) != substrateTestToken ||
+				file.Mode != 0o600 {
 				t.Errorf("restore file = path %q data %q mode %#o, want handoff token", file.Path, string(file.Data), file.Mode)
 			}
 			restored = true
@@ -448,7 +518,8 @@ func TestSubstrateReleaseRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testi
 		httpClient:     server.Client(),
 		routerURL:      server.URL,
 		actorDNSSuffix: "actors.test",
-		handoffToken:   "token",
+		handoffToken:   substrateTestToken,
+		bootstrapToken: "bootstrap-token",
 		now:            time.Now,
 		retained:       map[string]bool{},
 	}

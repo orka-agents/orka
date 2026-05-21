@@ -1,4 +1,4 @@
-# Agent Substrate Integration
+# Substrate Execution Workspaces
 
 Orka can run agent Tasks inside
 [Agent Substrate](https://github.com/agent-substrate/substrate) Actors through
@@ -78,6 +78,8 @@ Enable the provider on the Orka controller:
 --substrate-actor-dns-suffix=actors.resources.substrate.ate.dev
 --substrate-default-template=orka-codex
 --substrate-default-template-namespace=ate-demo
+--substrate-bootstrap-token-secret-name=orka-substrate-bootstrap
+--substrate-bootstrap-token-secret-key=token
 --substrate-claim-timeout=2m
 --substrate-command-timeout=30m
 --substrate-cleanup-policy=delete
@@ -96,6 +98,8 @@ The same values can be provided through environment variables:
 | `--substrate-actor-dns-suffix` | `ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX` | `actors.resources.substrate.ate.dev` |
 | `--substrate-default-template` | `ORKA_SUBSTRATE_DEFAULT_TEMPLATE` | empty |
 | `--substrate-default-template-namespace` | `ORKA_SUBSTRATE_DEFAULT_TEMPLATE_NAMESPACE` | empty |
+| `--substrate-bootstrap-token-secret-name` | `ORKA_SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME` | empty |
+| `--substrate-bootstrap-token-secret-key` | `ORKA_SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY` | `token` when a secret name is set |
 | `--substrate-claim-timeout` | `ORKA_SUBSTRATE_CLAIM_TIMEOUT` | `2m` |
 | `--substrate-command-timeout` | `ORKA_SUBSTRATE_COMMAND_TIMEOUT` | `30m` |
 | `--substrate-cleanup-policy` | `ORKA_SUBSTRATE_CLEANUP_POLICY` | `delete` |
@@ -104,6 +108,12 @@ When Substrate is enabled, the controller requires explicit API trust
 configuration. Use `--substrate-api-ca-file` in production. Reserve
 `--substrate-api-insecure-skip-verify=true` for local smoke tests such as the
 kind E2E.
+
+The controller also requires a bootstrap token Secret reference. Worker Jobs use
+that Secret to authenticate the first handoff-token upload to a fresh or resumed
+workspace daemon. Create a Secret with the configured name and key in every Task
+namespace that will run Substrate-backed workers, and provide the same token to
+the Substrate `ActorTemplate` daemon environment.
 
 If `--execution-workspace-default-provider=substrate` is set, Tasks may omit
 `spec.execution.workspace.provider` and still use Substrate. If the default is
@@ -243,6 +253,11 @@ spec:
           value: ":80"
         - name: ORKA_WORKSPACE_HANDOFF_TOKEN_FILE
           value: /app/orka-workspace-handoff-token
+        - name: ORKA_WORKSPACE_BOOTSTRAP_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: orka-substrate-bootstrap
+              key: token
       ports:
         - containerPort: 80
   workerPoolRef:
@@ -269,7 +284,12 @@ Substrate Actors can preserve memory and filesystem state, so staged credential
 handling is strict:
 
 - The outer worker stages only a short-lived handoff token for the inner worker.
+- The first handoff-token upload is authenticated with
+  `ORKA_WORKSPACE_BOOTSTRAP_TOKEN`, which must come from a Kubernetes Secret and
+  must not be the token being uploaded.
 - The daemon reads the handoff token from the configured file path.
+- The daemon removes the bootstrap token from its process environment before
+  launching task commands.
 - The outer worker calls the daemon scrub endpoint before retaining or deleting
   an Actor.
 - `cleanupPolicy: retain` scrubs staged secrets before suspending the Actor.
@@ -278,9 +298,12 @@ handling is strict:
 - Task status and logs must not contain raw tokens, credentials, snapshot URIs,
   or provider-native routing details.
 
-Do not place API keys, long-lived credentials, or source-control tokens in an
-`ActorTemplate`. Use Kubernetes Secrets and Orka's existing runtime secret
-mechanisms for Task execution.
+Do not place API keys, long-lived credentials, or source-control tokens directly
+in an `ActorTemplate`. Use Kubernetes Secrets and Orka's existing runtime secret
+mechanisms for Task execution. The bootstrap token is control-plane credential
+material; keep it in a Secret, rotate it like other cluster credentials, and use
+the same Secret name/key in the worker Task namespace and the `ActorTemplate`
+namespace.
 
 ## Local Kind Validation
 
@@ -334,6 +357,8 @@ SUBSTRATE_REPO=https://github.com/agent-substrate/substrate.git
 SUBSTRATE_REF=main
 SUBSTRATE_E2E_EXTENDED=1
 KEEP_CLUSTER=1
+SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME=orka-substrate-bootstrap
+SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY=token
 ```
 
 Set `KEEP_CLUSTER=1` when you want to inspect the cluster after a failure.
@@ -391,6 +416,9 @@ Common failures:
 
 - `execution workspace provider "substrate" requires substrate to be enabled`:
   set `--substrate-enabled=true` on the controller.
+- `substrate workspace bootstrap token secret name is required`: set
+  `--substrate-bootstrap-token-secret-name` and create that Secret in the Task
+  namespace and `ActorTemplate` namespace.
 - `execution workspace templateRef.name is required`: set
   `spec.execution.workspace.templateRef.name` or configure
   `--substrate-default-template`.

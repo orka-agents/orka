@@ -1146,6 +1146,9 @@ func TestBootstrapWorkspaceHandoffTokenHonorsConfiguredFile(t *testing.T) {
 	if len(uploadReqs) != 1 || len(uploadReqs[0].Artifacts) != 1 {
 		t.Fatalf("upload requests = %#v, want one handoff token artifact", uploadReqs)
 	}
+	if !uploadReqs[0].BootstrapHandoff {
+		t.Fatal("handoff token upload did not request bootstrap auth")
+	}
 	artifact := uploadReqs[0].Artifacts[0]
 	if artifact.Path != "/home/worker/custom-handoff-token" {
 		t.Fatalf("handoff token upload path = %q, want configured path", artifact.Path)

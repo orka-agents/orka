@@ -158,6 +158,7 @@ const (
 	SubstrateAPIInsecureSkipVerify = "ORKA_SUBSTRATE_API_INSECURE_SKIP_VERIFY"
 	SubstrateRouterURL             = "ORKA_SUBSTRATE_ROUTER_URL"
 	SubstrateActorDNSSuffix        = "ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX"
+	WorkspaceBootstrapToken        = "ORKA_WORKSPACE_BOOTSTRAP_TOKEN"
 
 	AgentSandboxEnabled               = "ORKA_AGENT_SANDBOX_ENABLED"
 	AgentSandboxRouterURL             = "ORKA_AGENT_SANDBOX_ROUTER_URL"

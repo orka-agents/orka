@@ -260,6 +260,12 @@ func main() {
 	flag.StringVar(&substrateConfig.DefaultTemplateNS, "substrate-default-template-namespace",
 		substrateConfig.DefaultTemplateNS,
 		"Default Substrate ActorTemplate namespace used when a Task omits execution.workspace.templateRef.namespace.")
+	flag.StringVar(&substrateConfig.BootstrapSecretName, "substrate-bootstrap-token-secret-name",
+		substrateConfig.BootstrapSecretName,
+		"Kubernetes Secret name containing the Substrate workspace daemon bootstrap token in each Task namespace.")
+	flag.StringVar(&substrateConfig.BootstrapSecretKey, "substrate-bootstrap-token-secret-key",
+		substrateConfig.BootstrapSecretKey,
+		"Kubernetes Secret key containing the Substrate workspace daemon bootstrap token.")
 	flag.DurationVar(&substrateConfig.ClaimTimeout, "substrate-claim-timeout", substrateConfig.ClaimTimeout,
 		"Timeout for Substrate actor claim, readiness, release, retain, and delete operations.")
 	flag.DurationVar(&substrateConfig.CommandTimeout, "substrate-command-timeout", substrateConfig.CommandTimeout,

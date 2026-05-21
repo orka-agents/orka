@@ -77,6 +77,8 @@ controller:
     actorDnsSuffix: actors.resources.substrate.ate.dev
     defaultTemplate: ""
     defaultTemplateNamespace: ""
+    bootstrapTokenSecretName: ""
+    bootstrapTokenSecretKey: token
     claimTimeout: 2m
     commandTimeout: 30m
     cleanupPolicy: delete

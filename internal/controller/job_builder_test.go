@@ -1717,6 +1717,81 @@ func TestJobBuilder_BuildWithOptions_NonAgentTask_IgnoresSandboxWorkspaceEnv(t *
 	}
 }
 
+func TestJobBuilder_BuildWithOptions_AgentTask_AddsSubstrateWorkspaceEnv(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "agent-task-substrate",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAgent,
+			Prompt: "Fix the bug",
+		},
+	}
+	request := &ExecutionWorkspaceRequest{
+		Provider:                     corev1alpha1.WorkspaceProviderSubstrate,
+		TemplateName:                 "orka-codex",
+		TemplateNamespace:            "ate-demo",
+		ClaimNamespace:               "ate-demo",
+		ClaimName:                    "orka-t-abc-1",
+		ReusePolicy:                  corev1alpha1.WorkspaceReusePolicyNone,
+		CleanupPolicy:                corev1alpha1.WorkspaceCleanupPolicyDelete,
+		ClaimTimeout:                 2 * time.Minute,
+		CommandTimeout:               30 * time.Minute,
+		SubstrateAPIEndpoint:         "api.ate-system.svc:443",
+		SubstrateAPICAFile:           "/var/run/orka/substrate/ca.crt",
+		SubstrateRouterURL:           "http://atenet-router.ate-system.svc",
+		SubstrateActorDNSSuffix:      "actors.resources.substrate.ate.dev",
+		SubstrateBootstrapSecretName: "orka-substrate-bootstrap",
+		SubstrateBootstrapSecretKey:  "token",
+	}
+
+	job, err := builder.BuildWithOptions(context.Background(), task, nil, nil, JobBuildOptions{
+		ExecutionWorkspace: request,
+	})
+	if err != nil {
+		t.Fatalf("BuildWithOptions() error = %v", err)
+	}
+
+	envVars := job.Spec.Template.Spec.Containers[0].Env
+	expected := map[string]string{
+		workerenv.ExecutionWorkspaceProvider:       "substrate",
+		workerenv.ExecutionWorkspaceTemplateName:   "orka-codex",
+		workerenv.ExecutionWorkspaceClaimName:      "orka-t-abc-1",
+		workerenv.SubstrateAPIEndpoint:             "api.ate-system.svc:443",
+		workerenv.SubstrateAPICAFile:               "/var/run/orka/substrate/ca.crt",
+		workerenv.SubstrateRouterURL:               "http://atenet-router.ate-system.svc",
+		workerenv.SubstrateActorDNSSuffix:          "actors.resources.substrate.ate.dev",
+		workerenv.ExecutionWorkspaceCleanupPolicy:  "delete",
+		workerenv.ExecutionWorkspaceClaimNamespace: "ate-demo",
+	}
+	for name, want := range expected {
+		ev, ok := findEnvVar(envVars, name)
+		if !ok {
+			t.Errorf("missing substrate env var %s", name)
+			continue
+		}
+		if ev.Value != want {
+			t.Errorf("%s = %q, want %q", name, ev.Value, want)
+		}
+	}
+	bootstrapEnv, ok := findEnvVar(envVars, workerenv.WorkspaceBootstrapToken)
+	if !ok {
+		t.Fatalf("missing %s env var", workerenv.WorkspaceBootstrapToken)
+	}
+	if bootstrapEnv.ValueFrom == nil || bootstrapEnv.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("%s ValueFrom = %#v, want SecretKeyRef", workerenv.WorkspaceBootstrapToken, bootstrapEnv.ValueFrom)
+	}
+	if got := bootstrapEnv.ValueFrom.SecretKeyRef.Name; got != "orka-substrate-bootstrap" {
+		t.Fatalf("bootstrap secret name = %q, want orka-substrate-bootstrap", got)
+	}
+	if got := bootstrapEnv.ValueFrom.SecretKeyRef.Key; got != "token" {
+		t.Fatalf("bootstrap secret key = %q, want token", got)
+	}
+}
+
 func TestJobBuilder_Build_AgentTask_CopilotRuntime(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{

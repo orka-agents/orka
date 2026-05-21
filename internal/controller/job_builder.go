@@ -636,13 +636,27 @@ func (b *JobBuilder) addExecutionWorkspaceEnvVars(envVars []corev1.EnvVar, task 
 	}.EnvVars()...)
 
 	if request.Provider == corev1alpha1.WorkspaceProviderSubstrate {
-		return append(envVars, workerenv.SubstrateEnv{
+		envVars = append(envVars, workerenv.SubstrateEnv{
 			APIEndpoint:           request.SubstrateAPIEndpoint,
 			APICAFile:             request.SubstrateAPICAFile,
 			APIInsecureSkipVerify: request.SubstrateAPIInsecureSkipVerify,
 			RouterURL:             request.SubstrateRouterURL,
 			ActorDNSSuffix:        request.SubstrateActorDNSSuffix,
 		}.EnvVars()...)
+		if strings.TrimSpace(request.SubstrateBootstrapSecretName) != "" {
+			envVars = append(envVars, corev1.EnvVar{
+				Name: workerenv.WorkspaceBootstrapToken,
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: request.SubstrateBootstrapSecretName,
+						},
+						Key: request.SubstrateBootstrapSecretKey,
+					},
+				},
+			})
+		}
+		return envVars
 	}
 
 	// Render the legacy agent-sandbox env during the migration so existing

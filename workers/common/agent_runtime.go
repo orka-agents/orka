@@ -234,6 +234,7 @@ const (
 	workerEnvFalse                            = "false"
 	workspaceHandoffTokenEnv                  = "ORKA_WORKSPACE_HANDOFF_TOKEN"
 	workspaceHandoffTokenFileEnv              = "ORKA_WORKSPACE_HANDOFF_TOKEN_FILE"
+	workspaceBootstrapTokenEnv                = "ORKA_WORKSPACE_BOOTSTRAP_TOKEN"
 )
 
 var (
@@ -753,7 +754,8 @@ func bootstrapWorkspaceHandoffToken(
 		return nil
 	}
 	if _, err := executor.Upload(ctx, workspace.UploadRequest{
-		Ref: ref,
+		Ref:              ref,
+		BootstrapHandoff: true,
 		Artifacts: []workspace.UploadArtifact{{
 			Path: workspaceHandoffTokenUploadTarget(),
 			Data: []byte(token),
@@ -1308,6 +1310,7 @@ func agentSandboxInnerEnv(environ []string) map[string]string {
 	delete(env, workerenv.ServiceAccountToken)
 	delete(env, workerenv.ServiceAccountTokenPath)
 	delete(env, workspaceHandoffTokenEnv)
+	delete(env, workspaceBootstrapTokenEnv)
 	return env
 }
 
@@ -1322,6 +1325,7 @@ func workspaceInnerEnv(environ []string, workspaceEnv workerenv.ExecutionWorkspa
 	delete(env, workerenv.ServiceAccountToken)
 	delete(env, workerenv.ServiceAccountTokenPath)
 	delete(env, workspaceHandoffTokenEnv)
+	delete(env, workspaceBootstrapTokenEnv)
 	return env
 }
 

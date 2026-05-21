@@ -21,7 +21,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-const testSandboxTemplatesNamespace = "sandbox-templates"
+const (
+	testSandboxTemplatesNamespace    = "sandbox-templates"
+	testSubstrateBootstrapSecretName = "orka-substrate-bootstrap"
+	testSubstrateBootstrapSecretKey  = "bootstrap-token"
+)
 
 func TestDefaultAgentSandboxConfig(t *testing.T) {
 	cfg := DefaultAgentSandboxConfig()
@@ -117,6 +121,8 @@ func TestSubstrateConfigFromEnv(t *testing.T) {
 		EnvSubstrateActorDNSSuffix:        "actors.resources.substrate.ate.dev",
 		EnvSubstrateDefaultTemplate:       "orka-codex",
 		EnvSubstrateDefaultTemplateNS:     "ate-demo",
+		EnvSubstrateBootstrapSecretName:   testSubstrateBootstrapSecretName,
+		EnvSubstrateBootstrapSecretKey:    testSubstrateBootstrapSecretKey,
 		EnvSubstrateClaimTimeout:          "45s",
 		EnvSubstrateCommandTimeout:        "10m",
 		EnvSubstrateCleanupPolicy:         string(corev1alpha1.WorkspaceCleanupPolicyRetain),
@@ -134,6 +140,10 @@ func TestSubstrateConfigFromEnv(t *testing.T) {
 	}
 	if cfg.DefaultTemplate != "orka-codex" || cfg.DefaultTemplateNS != "ate-demo" {
 		t.Fatalf("unexpected substrate defaults: %#v", cfg)
+	}
+	if cfg.BootstrapSecretName != testSubstrateBootstrapSecretName ||
+		cfg.BootstrapSecretKey != testSubstrateBootstrapSecretKey {
+		t.Fatalf("unexpected substrate bootstrap secret: %#v", cfg)
 	}
 	if cfg.ClaimTimeout != 45*time.Second || cfg.CommandTimeout != 10*time.Minute {
 		t.Fatalf("unexpected substrate timeouts: %#v", cfg)
@@ -154,8 +164,17 @@ func TestSubstrateConfigValidateRequiresExplicitTrust(t *testing.T) {
 	}
 
 	cfg.APICAFile = "/var/run/orka/substrate/ca.crt"
+	err = cfg.Validate()
+	if err == nil {
+		t.Fatal("expected missing bootstrap secret error")
+	}
+	if !strings.Contains(err.Error(), "bootstrap token secret name") {
+		t.Fatalf("Validate() error = %q, want bootstrap secret context", err.Error())
+	}
+
+	cfg.BootstrapSecretName = testSubstrateBootstrapSecretName
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() with CA file error = %v", err)
+		t.Fatalf("Validate() with CA file and bootstrap secret error = %v", err)
 	}
 
 	cfg.APICAFile = ""

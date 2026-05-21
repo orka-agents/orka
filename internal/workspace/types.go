@@ -158,6 +158,9 @@ type UploadRequest struct {
 	Ref       WorkspaceRef
 	Artifacts []UploadArtifact
 	Timeout   time.Duration
+	// BootstrapHandoff asks backends with a separate daemon bootstrap credential
+	// to use it for the initial per-task handoff token upload.
+	BootstrapHandoff bool
 }
 
 // UploadArtifact is an artifact payload to write into a workspace.

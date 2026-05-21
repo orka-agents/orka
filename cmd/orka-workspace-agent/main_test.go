@@ -133,6 +133,39 @@ func TestWorkspaceAgentDetachedExecCanBePolled(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAgentExecDoesNotInheritDaemonAuthTokens(t *testing.T) {
+	t.Setenv(envHandoffToken, "secret")
+	t.Setenv(envBootstrapToken, "bootstrap-secret")
+	server := newWorkspaceAgentServer()
+	body, err := json.Marshal(execRequest{
+		Command: []string{
+			"sh",
+			"-c",
+			`printf '%s/%s' "${ORKA_WORKSPACE_HANDOFF_TOKEN:-}" "${ORKA_WORKSPACE_BOOTSTRAP_TOKEN:-}"`,
+		},
+		WorkDir: "/tmp",
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/exec", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	resp := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	var got execResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.Stdout != "/" {
+		t.Fatalf("auth env stdout = %q, want empty token values", got.Stdout)
+	}
+}
+
 func TestWorkspaceAgentDecodesLargeUploadRequest(t *testing.T) {
 	server := newWorkspaceAgentServer()
 	payload := bytes.Repeat([]byte("a"), 8<<20)
@@ -250,6 +283,24 @@ func TestWorkspaceAgentRejectsHandoffBootstrapBearerMismatch(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAgentRejectsHandoffBootstrapBearerMatchingUploadedToken(t *testing.T) {
+	dir := t.TempDir()
+	previousAllowedRoots := allowedRoots
+	allowedRoots = []string{dir}
+	t.Cleanup(func() {
+		allowedRoots = previousAllowedRoots
+	})
+	tokenFile := filepath.Join(dir, "handoff-token")
+	resp := exerciseHandoffBootstrapWithBearer(t, tokenFile, tokenFile, "secret")
+
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusUnauthorized, resp.Body.String())
+	}
+	if _, err := os.Stat(tokenFile); !os.IsNotExist(err) {
+		t.Fatalf("self-proved bootstrap wrote token file: %v", err)
+	}
+}
+
 func TestHandoffTokenFilePathNormalizesRelativeEnv(t *testing.T) {
 	t.Setenv(envHandoffTokenFile, "custom-handoff-token")
 
@@ -260,12 +311,18 @@ func TestHandoffTokenFilePathNormalizesRelativeEnv(t *testing.T) {
 
 func exerciseHandoffBootstrap(t *testing.T, tokenFile, uploadPath string) *httptest.ResponseRecorder {
 	t.Helper()
-	return exerciseHandoffBootstrapWithBearer(t, tokenFile, uploadPath, "secret")
+	return exerciseHandoffBootstrapWithBearer(t, tokenFile, uploadPath, "bootstrap-secret")
 }
 
-func exerciseHandoffBootstrapWithBearer(t *testing.T, tokenFile, uploadPath, bearer string) *httptest.ResponseRecorder {
+func exerciseHandoffBootstrapWithBearer(
+	t *testing.T,
+	tokenFile string,
+	uploadPath string,
+	bearer string,
+) *httptest.ResponseRecorder {
 	t.Helper()
 	t.Setenv(envHandoffTokenFile, tokenFile)
+	t.Setenv(envBootstrapToken, "bootstrap-secret")
 	server := newWorkspaceAgentServer()
 	body, err := json.Marshal(uploadRequest{Files: []uploadFile{{
 		Path: uploadPath,
@@ -293,6 +350,7 @@ func TestWorkspaceAgentRejectsInvalidHandoffBootstrapWithoutWritingFile(t *testi
 		allowedRoots = previousAllowedRoots
 	})
 	t.Setenv(envHandoffTokenFile, filepath.Join(dir, "handoff-token"))
+	t.Setenv(envBootstrapToken, "bootstrap-secret")
 	server := newWorkspaceAgentServer()
 	disallowedPath := filepath.Join(dir, "not-the-token")
 	body, err := json.Marshal(uploadRequest{Files: []uploadFile{{
@@ -304,6 +362,7 @@ func TestWorkspaceAgentRejectsInvalidHandoffBootstrapWithoutWritingFile(t *testi
 		t.Fatalf("marshal request: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodPut, "/v1/files", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer bootstrap-secret")
 	resp := httptest.NewRecorder()
 
 	server.routes().ServeHTTP(resp, req)

@@ -61,6 +61,8 @@ type ExecutionWorkspaceRequest struct {
 	SubstrateAPIInsecureSkipVerify bool
 	SubstrateRouterURL             string
 	SubstrateActorDNSSuffix        string
+	SubstrateBootstrapSecretName   string
+	SubstrateBootstrapSecretKey    string
 }
 
 // AgentSandboxWorkspaceRequest is kept as a compatibility alias for tests and

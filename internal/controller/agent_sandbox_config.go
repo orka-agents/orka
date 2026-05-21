@@ -300,6 +300,8 @@ func (r *TaskReconciler) resolveSubstrateWorkspaceRequest(ctx context.Context, t
 		SubstrateAPIInsecureSkipVerify: cfg.APIInsecureSkipVerify,
 		SubstrateRouterURL:             cfg.RouterURL,
 		SubstrateActorDNSSuffix:        cfg.ActorDNSSuffix,
+		SubstrateBootstrapSecretName:   cfg.BootstrapSecretName,
+		SubstrateBootstrapSecretKey:    cfg.BootstrapSecretKey,
 	}
 
 	if err := r.validateSubstrateWorkspaceTemplate(ctx, task, request); err != nil {

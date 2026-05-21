@@ -11,6 +11,9 @@ IMAGE_TAG="${IMAGE_TAG:-agent-substrate-ci}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 TASK_TIMEOUT_SECONDS="${TASK_TIMEOUT_SECONDS:-900}"
 SUBSTRATE_E2E_EXTENDED="${SUBSTRATE_E2E_EXTENDED:-0}"
+SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME="${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME:-orka-substrate-bootstrap}"
+SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY="${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY:-token}"
+SUBSTRATE_BOOTSTRAP_TOKEN="${SUBSTRATE_BOOTSTRAP_TOKEN:-bootstrap-ci-$(date +%s%N)-${RANDOM}}"
 
 SUBSTRATE_DIR=""
 TMP_ROOT=""
@@ -27,7 +30,8 @@ redact() {
     -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]+/\1[REDACTED]/Ig' \
     -e 's/([Tt]xn-[Tt]oken:[[:space:]]*)[^[:space:]]+/\1[REDACTED]/g' \
     -e 's/([Tt]oken["'\'']?[=:][[:space:]]*["'\'']?)[A-Za-z0-9._~+\/=-]+/\1[REDACTED]/g' \
-    -e 's/(ORKA_WORKSPACE_HANDOFF_TOKEN=)[^[:space:]]+/\1[REDACTED]/g'
+    -e 's/(ORKA_WORKSPACE_HANDOFF_TOKEN=)[^[:space:]]+/\1[REDACTED]/g' \
+    -e 's/(ORKA_WORKSPACE_BOOTSTRAP_TOKEN=)[^[:space:]]+/\1[REDACTED]/g'
 }
 
 run_redacted() {
@@ -261,6 +265,11 @@ create_substrate_resources() {
 
   log "Creating Substrate WorkerPool and ActorTemplate"
   kubectl create namespace ate-demo --dry-run=client -o yaml | kubectl apply -f -
+  for ns in ate-demo default; do
+    kubectl -n "${ns}" create secret generic "${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME}" \
+      "--from-literal=${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY}=${SUBSTRATE_BOOTSTRAP_TOKEN}" \
+      --dry-run=client -o yaml | kubectl apply -f -
+  done
   kubectl apply -f - <<YAML
 apiVersion: ate.dev/v1alpha1
 kind: WorkerPool
@@ -296,6 +305,11 @@ spec:
         value: ":80"
       - name: ORKA_WORKSPACE_HANDOFF_TOKEN_FILE
         value: /app/orka-workspace-handoff-token
+      - name: ORKA_WORKSPACE_BOOTSTRAP_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: ${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME}
+            key: ${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY}
     ports:
       - containerPort: 80
   workerPoolRef:
@@ -337,6 +351,8 @@ deploy_orka() {
   local patch
   patch="$(jq -cn \
     --arg codex_image "${codex_image}" \
+    --arg bootstrap_secret_name "${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME}" \
+    --arg bootstrap_secret_key "${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY}" \
     '{
       spec: {
         template: {
@@ -377,6 +393,8 @@ deploy_orka() {
                   "--substrate-actor-dns-suffix=actors.resources.substrate.ate.dev",
                   "--substrate-default-template=orka-codex-ci",
                   "--substrate-default-template-namespace=ate-demo",
+                  "--substrate-bootstrap-token-secret-name=" + $bootstrap_secret_name,
+                  "--substrate-bootstrap-token-secret-key=" + $bootstrap_secret_key,
                   "--substrate-claim-timeout=2m",
                   "--substrate-command-timeout=10m",
                   "--substrate-cleanup-policy=delete"
@@ -569,7 +587,7 @@ exercise_direct_substrate() {
   token_b64="$(printf '%s' "${token}" | base64 | tr -d '\n')"
   curl -fsS \
     -H "Host: ${host_header}" \
-    -H "Authorization: Bearer ${token}" \
+    -H "Authorization: Bearer ${SUBSTRATE_BOOTSTRAP_TOKEN}" \
     -H "Content-Type: application/json" \
     -X PUT \
     -d "{\"files\":[{\"path\":\"/app/orka-workspace-handoff-token\",\"data\":\"${token_b64}\",\"mode\":384}]}" \

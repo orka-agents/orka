@@ -216,6 +216,10 @@ spec:
             {{- if .defaultTemplateNamespace }}
             - {{ printf "--substrate-default-template-namespace=%s" .defaultTemplateNamespace | quote }}
             {{- end }}
+            {{- if .bootstrapTokenSecretName }}
+            - {{ printf "--substrate-bootstrap-token-secret-name=%s" .bootstrapTokenSecretName | quote }}
+            - {{ printf "--substrate-bootstrap-token-secret-key=%s" (.bootstrapTokenSecretKey | default "token") | quote }}
+            {{- end }}
             - --substrate-claim-timeout={{ .claimTimeout | default "2m" }}
             - --substrate-command-timeout={{ .commandTimeout | default "30m" }}
             - --substrate-cleanup-policy={{ .cleanupPolicy | default "delete" }}

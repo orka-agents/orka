@@ -35,6 +35,7 @@ const (
 	substrateExecInitialPollInterval  = 250 * time.Millisecond
 	substrateExecMaxPollInterval      = 2 * time.Second
 	substrateDefaultHandoffTokenEnv   = "ORKA_WORKSPACE_HANDOFF_TOKEN"
+	substrateDefaultBootstrapTokenEnv = "ORKA_WORKSPACE_BOOTSTRAP_TOKEN"
 	substrateHandoffTokenUploadPath   = "orka-workspace-handoff-token"
 
 	substrateStatusResuming   = "STATUS_RESUMING"
@@ -51,6 +52,7 @@ type SubstrateConfig struct {
 	RouterURL             string
 	ActorDNSSuffix        string
 	HandoffToken          string
+	BootstrapToken        string
 	HTTPClient            *http.Client
 	ControlClient         substrateControlClient
 }
@@ -76,6 +78,12 @@ func WithSubstrateHandoffToken(token string) SubstrateOption {
 	}
 }
 
+func WithSubstrateBootstrapToken(token string) SubstrateOption {
+	return func(c *SubstrateConfig) {
+		c.BootstrapToken = token
+	}
+}
+
 // NewSubstrateExecutor returns a WorkspaceExecutor backed by Agent Substrate.
 func NewSubstrateExecutor(cfg SubstrateConfig, opts ...SubstrateOption) (*SubstrateWorkspaceExecutor, error) {
 	for _, opt := range opts {
@@ -93,6 +101,9 @@ func NewSubstrateExecutor(cfg SubstrateConfig, opts ...SubstrateOption) (*Substr
 	if cfg.HandoffToken == "" {
 		cfg.HandoffToken = strings.TrimSpace(os.Getenv(substrateDefaultHandoffTokenEnv))
 	}
+	if cfg.BootstrapToken == "" {
+		cfg.BootstrapToken = strings.TrimSpace(os.Getenv(substrateDefaultBootstrapTokenEnv))
+	}
 	if cfg.ControlClient == nil {
 		client, err := newGRPCSubstrateControlClient(cfg)
 		if err != nil {
@@ -107,6 +118,7 @@ func NewSubstrateExecutor(cfg SubstrateConfig, opts ...SubstrateOption) (*Substr
 		routerURL:      strings.TrimRight(cfg.RouterURL, "/"),
 		actorDNSSuffix: strings.Trim(strings.TrimSpace(cfg.ActorDNSSuffix), "."),
 		handoffToken:   cfg.HandoffToken,
+		bootstrapToken: cfg.BootstrapToken,
 		now:            time.Now,
 		retained:       make(map[string]bool),
 	}, nil
@@ -120,6 +132,7 @@ type SubstrateWorkspaceExecutor struct {
 	routerURL      string
 	actorDNSSuffix string
 	handoffToken   string
+	bootstrapToken string
 	now            func() time.Time
 	retained       map[string]bool
 }
@@ -338,7 +351,23 @@ func (e *SubstrateWorkspaceExecutor) Upload(ctx context.Context, req UploadReque
 		})
 	}
 	var resp substrateUploadResponse
-	if err := e.daemonRequest(ctx, actorID, http.MethodPut, "/v1/files", substrateUploadRequest{Files: files}, &resp); err != nil {
+	authToken := e.handoffToken
+	if req.BootstrapHandoff {
+		bootstrapToken, err := e.requireBootstrapToken("upload")
+		if err != nil {
+			return nil, err
+		}
+		authToken = bootstrapToken
+	}
+	if err := e.daemonRequestWithAuthToken(
+		ctx,
+		actorID,
+		http.MethodPut,
+		"/v1/files",
+		substrateUploadRequest{Files: files},
+		&resp,
+		authToken,
+	); err != nil {
 		return nil, err
 	}
 	return &UploadResult{Ref: req.Ref, Artifacts: resp.Artifacts}, nil
@@ -518,6 +547,10 @@ func (e *SubstrateWorkspaceExecutor) restoreHandoffToken(ctx context.Context, ac
 	if strings.TrimSpace(e.handoffToken) == "" {
 		return nil
 	}
+	bootstrapToken, err := e.requireBootstrapToken("restore handoff token")
+	if err != nil {
+		return err
+	}
 	restoreCtx := ctx
 	if restoreCtx == nil || restoreCtx.Err() != nil {
 		restoreCtx = context.Background()
@@ -525,16 +558,36 @@ func (e *SubstrateWorkspaceExecutor) restoreHandoffToken(ctx context.Context, ac
 	restoreCtx, cancel := context.WithTimeout(restoreCtx, 10*time.Second)
 	defer cancel()
 
-	return e.daemonRequest(restoreCtx, actorID, http.MethodPut, "/v1/files", substrateUploadRequest{
-		Files: []substrateUploadFile{{
-			Path: substrateHandoffTokenUploadPath,
-			Data: []byte(e.handoffToken),
-			Mode: 0o600,
-		}},
-	}, nil)
+	return e.daemonRequestWithAuthToken(
+		restoreCtx,
+		actorID,
+		http.MethodPut,
+		"/v1/files",
+		substrateUploadRequest{
+			Files: []substrateUploadFile{{
+				Path: substrateHandoffTokenUploadPath,
+				Data: []byte(e.handoffToken),
+				Mode: 0o600,
+			}},
+		},
+		nil,
+		bootstrapToken,
+	)
 }
 
 func (e *SubstrateWorkspaceExecutor) daemonRequest(ctx context.Context, actorID, method, path string, body any, out any) error {
+	return e.daemonRequestWithAuthToken(ctx, actorID, method, path, body, out, e.handoffToken)
+}
+
+func (e *SubstrateWorkspaceExecutor) daemonRequestWithAuthToken(
+	ctx context.Context,
+	actorID string,
+	method string,
+	path string,
+	body any,
+	out any,
+	authToken string,
+) error {
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -555,8 +608,8 @@ func (e *SubstrateWorkspaceExecutor) daemonRequest(ctx context.Context, actorID,
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if e.handoffToken != "" {
-		req.Header.Set("Authorization", "Bearer "+e.handoffToken)
+	if strings.TrimSpace(authToken) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(authToken))
 	}
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
@@ -574,6 +627,14 @@ func (e *SubstrateWorkspaceExecutor) daemonRequest(ctx context.Context, actorID,
 		return NewError("daemon request", ErrorKindUnknown, "failed to decode response", false, err)
 	}
 	return nil
+}
+
+func (e *SubstrateWorkspaceExecutor) requireBootstrapToken(op string) (string, error) {
+	token := strings.TrimSpace(e.bootstrapToken)
+	if token == "" {
+		return "", NewError(op, ErrorKindFailedPrecondition, "workspace bootstrap token is required", false, nil)
+	}
+	return token, nil
 }
 
 func (e *SubstrateWorkspaceExecutor) daemonURL(path string) (string, error) {
