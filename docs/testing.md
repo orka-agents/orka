@@ -72,6 +72,7 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/live_chat_api_test.go` | Live chat SSE and JSON transport/session coverage using a proxy-backed Provider |
 | `test/e2e/live_anthropic_compat_test.go` | Live Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` coverage with default tools-enabled behavior |
 | `test/e2e/live_agent_runtime_matrix_test.go` | Live Orka runtime matrix: Codex+GPT, Claude Code+Claude, Copilot+Gemini |
+| `.github/workflows/live-agent-sandbox-e2e.yml` / `scripts/live-agent-sandbox-e2e.sh` | Live upstream `agent-sandbox` Kind validation for Orka agent workspace claim, sandbox execution, delete cleanup, retained-session reuse, and token scrubbing using a fake model-free Claude runtime |
 | `test/e2e/tools_test.go` | Built-in tools (including `web_fetch`, `file_write`) and custom Tool CRD |
 | `test/e2e/scheduled_task_test.go` | Cron scheduling, suspend, `concurrencyPolicy: Forbid`, history-limit cleanup |
 | `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
@@ -82,6 +83,7 @@ End-to-end tests run against a dedicated Kind cluster:
 - `E2E_ANTHROPIC_API_KEY`: required for Anthropic-specific e2e cases
 - `E2E_GITHUB_TOKEN`: required for GitHub/Copilot and live Copilot runtime tests
 - `COPILOT_GITHUB_TOKEN`: required by the live `copilot-proxy` workflow for proxy auth
+- The live agent sandbox workflow requires Docker, Kind, kubectl, curl, jq, and network access to install the pinned upstream `agent-sandbox` release. It does not require model credentials.
 - GitHub Actions `id-token: write` permission: required by the live GitHub OIDC workflow. For local/manual runs of `scripts/live-github-oidc-e2e.sh`, set `ORKA_GITHUB_OIDC_TOKEN` to a valid JWT instead. The same workflow also runs a self-contained `kontxt` TxToken check using an ephemeral key/JWKS fixture, so no external kontxt secret is required.
 - `E2E_LIVE_COPILOT_PROXY_BASE_URL` (or `E2E_COPILOT_PROXY_BASE_URL` / `COPILOT_PROXY_BASE_URL`): enables the focused live copilot-proxy spec against a running proxy
 - `E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE`, `E2E_LIVE_COPILOT_PROXY_SERVICE_NAME`, `E2E_LIVE_COPILOT_PROXY_SERVICE_PORT`: optional overrides for how the live spec reaches the in-cluster proxy service for `/readyz` and `/v1/models` checks
@@ -103,6 +105,15 @@ This is an **Orka** live integration suite, not a deep `copilot-proxy` feature s
 It bootstraps a fresh Kind cluster, deploys the published multi-arch `docker.io/sozercan/copilot-proxy:latest` image, injects `COPILOT_GITHUB_TOKEN` for proxy auth, requires the live proxy to expose GPT/Claude/Gemini model families, maps that same secret to `E2E_GITHUB_TOKEN` for the Copilot runtime case, and then runs the focused live suites against the in-cluster proxy.
 
 Model selection is endpoint-specific. Provider-backed `type: ai` tasks and `/api/v1/chat` probe the live proxy before choosing an OpenAI-compatible Chat Completions model, because a model can appear in the catalog while still being rejected for that endpoint. The Codex runtime uses GPT models that work with the Responses API, while the Claude and Copilot runtime matrix cases use Claude and Gemini families respectively. Keep these preferences in `test/e2e/helpers_test.go` aligned with the live proxy's allowed models rather than assuming one model family works across every endpoint.
+
+The live agent sandbox workflow (`.github/workflows/live-agent-sandbox-e2e.yml`) runs `scripts/live-agent-sandbox-e2e.sh`. It installs upstream `agent-sandbox` `v0.4.6`, builds the PR controller image, builds a fake Claude worker image that also hosts the sandbox `/execute` and file APIs, builds the pinned upstream sandbox router image, and validates that Orka can run an agent Task inside the claimed sandbox without external model access. The script asserts:
+
+- the outer worker re-execs inside the sandbox with `ORKA_AGENT_SANDBOX_DEPTH=1` and sandbox recursion disabled
+- the staged service account token is available to the inner worker while the command runs
+- `cleanupPolicy: delete` removes the generated `SandboxClaim`
+- `cleanupPolicy: retain` plus `reusePolicy: session` reattaches to the deterministic session claim
+- retained workspace state persists across tasks
+- staged token files are scrubbed before the retained workspace is left behind
 
 The live GitHub OIDC workflow (`.github/workflows/live-github-oidc-e2e.yml`) runs `scripts/live-github-oidc-e2e.sh` in GitHub Actions with `id-token: write`. It builds the controller from the PR, deploys it to a fresh Kind cluster, configures `ORKA_OIDC_ISSUER=https://token.actions.githubusercontent.com` and the workflow audience, fetches a real GitHub Actions OIDC token, generates a real `kontxt` TxToken against an in-cluster JWKS endpoint, and validates:
 
