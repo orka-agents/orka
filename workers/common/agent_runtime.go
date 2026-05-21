@@ -470,7 +470,11 @@ func runAgentInWorkspace(
 		}
 		cleanupCtx, cleanupCancel := agentSandboxCleanupContext(workspaceEnv.ClaimTimeout)
 		defer cleanupCancel()
-		cleanupEnv, cleanupOptions := preTerminalExecutionWorkspaceCleanup(workspaceEnv, substrateHandoffBootstrapped)
+		cleanupEnv, cleanupOptions := preTerminalExecutionWorkspaceCleanup(
+			workspaceEnv,
+			substrateHandoffBootstrapped,
+			claim.Created && !claim.Reused,
+		)
 		if err := cleanupExecutionWorkspaceWithOptions(
 			cleanupCtx,
 			executor,
@@ -628,13 +632,14 @@ type executionWorkspaceCleanupOptions struct {
 func preTerminalExecutionWorkspaceCleanup(
 	workspaceEnv workerenv.ExecutionWorkspaceEnv,
 	substrateHandoffBootstrapped bool,
+	claimedNewWorkspace bool,
 ) (workerenv.ExecutionWorkspaceEnv, executionWorkspaceCleanupOptions) {
 	if substrateHandoffBootstrapped ||
 		strings.TrimSpace(workspaceEnv.Provider) != string(corev1alpha1.WorkspaceProviderSubstrate) {
 		return workspaceEnv, executionWorkspaceCleanupOptions{}
 	}
 	options := executionWorkspaceCleanupOptions{skipSubstrateDeleteScrub: true}
-	if strings.EqualFold(
+	if claimedNewWorkspace && strings.EqualFold(
 		strings.TrimSpace(workspaceEnv.CleanupPolicy),
 		string(corev1alpha1.WorkspaceCleanupPolicyRetain),
 	) {

@@ -661,7 +661,7 @@ func TestRunAgent_ExecutionWorkspaceCleanupFailureRetriedByDeferredCleanup(t *te
 	}
 }
 
-func TestRunAgent_SubstratePreHandoffRetainFailureDeletesWorkspace(t *testing.T) {
+func TestRunAgent_SubstratePreHandoffRetainFailureDeletesNewWorkspace(t *testing.T) {
 	t.Setenv(workerenv.TaskName, "task-name")
 	t.Setenv(workerenv.TaskNamespace, "task-ns")
 	t.Setenv(workspaceHandoffTokenEnv, "handoff-token")
@@ -707,6 +707,70 @@ func TestRunAgent_SubstratePreHandoffRetainFailureDeletesWorkspace(t *testing.T)
 	}
 	if !deleteReqs[0].SkipScrub {
 		t.Fatal("delete SkipScrub = false, want true before handoff bootstrap")
+	}
+}
+
+func TestRunAgent_SubstratePreHandoffRetainFailurePreservesReusedWorkspace(t *testing.T) {
+	t.Setenv(workerenv.TaskName, "task-name")
+	t.Setenv(workerenv.TaskNamespace, "task-ns")
+	t.Setenv(workspaceHandoffTokenEnv, "handoff-token")
+
+	recorder := newRecordingWorkspaceExecutor()
+	seed, err := recorder.fake.Claim(context.Background(), workspace.ClaimRequest{
+		Namespace:       "ate-demo",
+		ClaimName:       "actor-1",
+		CreateIfMissing: true,
+		Template:        workspace.TemplateRef{Namespace: "ate-demo", Name: "orka-codex"},
+		Timeout:         time.Second,
+	})
+	if err != nil {
+		t.Fatalf("seed retained workspace: %v", err)
+	}
+	if _, err := recorder.fake.Release(context.Background(), workspace.ReleaseRequest{
+		Ref:     seed.Ref,
+		Retain:  true,
+		Reason:  "seed retained workspace",
+		Timeout: time.Second,
+	}); err != nil {
+		t.Fatalf("retain seeded workspace: %v", err)
+	}
+	recorder.waitReadyErr = fmt.Errorf("not ready")
+	restoreExecutor := setSubstrateWorkspaceExecutorForTest(recorder, nil)
+	t.Cleanup(restoreExecutor)
+
+	err = runAgentInWorkspace(
+		context.Background(),
+		"test-agent",
+		"/workspace",
+		workerenv.ExecutionWorkspaceEnv{
+			Provider:          string(corev1alpha1.WorkspaceProviderSubstrate),
+			TemplateName:      "orka-codex",
+			TemplateNamespace: "ate-demo",
+			ClaimNamespace:    "ate-demo",
+			ClaimName:         "actor-1",
+			ClaimTimeout:      3 * time.Second,
+			CommandTimeout:    9 * time.Second,
+			CleanupPolicy:     "retain",
+		},
+	)
+	if err == nil {
+		t.Fatal("expected readiness failure")
+	}
+	if !strings.Contains(err.Error(), "wait for execution workspace") ||
+		!strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("runAgentInWorkspace() error = %q, want readiness context", err.Error())
+	}
+
+	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "release")
+	if deleteReqs := recorder.deleteRequests(); len(deleteReqs) != 0 {
+		t.Fatalf("recorded %d delete requests, want reused workspace retained", len(deleteReqs))
+	}
+	releaseReqs := recorder.releaseRequests()
+	if len(releaseReqs) != 1 {
+		t.Fatalf("recorded %d release requests, want 1", len(releaseReqs))
+	}
+	if !releaseReqs[0].Retain {
+		t.Fatal("release Retain = false, want true")
 	}
 }
 
