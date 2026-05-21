@@ -569,6 +569,7 @@ exercise_direct_substrate() {
   token_b64="$(printf '%s' "${token}" | base64 | tr -d '\n')"
   curl -fsS \
     -H "Host: ${host_header}" \
+    -H "Authorization: Bearer ${token}" \
     -H "Content-Type: application/json" \
     -X PUT \
     -d "{\"files\":[{\"path\":\"/app/orka-workspace-handoff-token\",\"data\":\"${token_b64}\",\"mode\":384}]}" \

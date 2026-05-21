@@ -403,13 +403,26 @@ func (e *SubstrateWorkspaceExecutor) Delete(ctx context.Context, req DeleteReque
 		}
 		return nil, err
 	}
-	if actor.Status == substrateStatusRunning {
+	scrubbed := false
+	if actor.Status == substrateStatusRunning && !req.SkipScrub {
 		if err := e.scrubDaemon(ctx, actorID); err != nil {
 			return nil, NewError("delete", ErrorKindFailedPrecondition, "failed to scrub workspace before delete", false, err)
 		}
+		scrubbed = true
 	}
 	if actor.Status != substrateStatusSuspended {
 		if actor, err = e.suspendActorAndWait(ctx, actorID); err != nil {
+			if scrubbed {
+				if restoreErr := e.restoreHandoffToken(ctx, actorID); restoreErr != nil {
+					return nil, NewError(
+						"delete",
+						ErrorKindFailedPrecondition,
+						"failed to restore workspace handoff token after delete failure",
+						true,
+						errors.Join(err, restoreErr),
+					)
+				}
+			}
 			return nil, err
 		}
 	}

@@ -223,9 +223,10 @@ type ReleaseResult struct {
 
 // DeleteRequest destroys a workspace.
 type DeleteRequest struct {
-	Ref     WorkspaceRef
-	Reason  string
-	Timeout time.Duration
+	Ref       WorkspaceRef
+	Reason    string
+	Timeout   time.Duration
+	SkipScrub bool
 }
 
 // DeleteResult describes workspace deletion.

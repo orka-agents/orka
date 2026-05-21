@@ -469,8 +469,16 @@ func runAgentInWorkspace(
 		}
 		cleanupCtx, cleanupCancel := agentSandboxCleanupContext(workspaceEnv.ClaimTimeout)
 		defer cleanupCancel()
-		cleanupEnv := preTerminalExecutionWorkspaceCleanupEnv(workspaceEnv, substrateHandoffBootstrapped)
-		if err := cleanupExecutionWorkspace(cleanupCtx, executor, ref, cleanupEnv, claim.Reused, false); err != nil {
+		cleanupEnv, cleanupOptions := preTerminalExecutionWorkspaceCleanup(workspaceEnv, substrateHandoffBootstrapped)
+		if err := cleanupExecutionWorkspaceWithOptions(
+			cleanupCtx,
+			executor,
+			ref,
+			cleanupEnv,
+			claim.Reused,
+			false,
+			cleanupOptions,
+		); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to clean up execution workspace: %v\n", err)
 		}
 	}()
@@ -612,17 +620,26 @@ func executionWorkspaceCompletionMessage(
 	return fmt.Sprintf("Task %s/%s completed in %s workspace", taskNamespace, taskName, provider)
 }
 
-func preTerminalExecutionWorkspaceCleanupEnv(
+type executionWorkspaceCleanupOptions struct {
+	skipSubstrateDeleteScrub bool
+}
+
+func preTerminalExecutionWorkspaceCleanup(
 	workspaceEnv workerenv.ExecutionWorkspaceEnv,
 	substrateHandoffBootstrapped bool,
-) workerenv.ExecutionWorkspaceEnv {
+) (workerenv.ExecutionWorkspaceEnv, executionWorkspaceCleanupOptions) {
 	if substrateHandoffBootstrapped ||
-		strings.TrimSpace(workspaceEnv.Provider) != string(corev1alpha1.WorkspaceProviderSubstrate) ||
-		!strings.EqualFold(strings.TrimSpace(workspaceEnv.CleanupPolicy), string(corev1alpha1.WorkspaceCleanupPolicyRetain)) {
-		return workspaceEnv
+		strings.TrimSpace(workspaceEnv.Provider) != string(corev1alpha1.WorkspaceProviderSubstrate) {
+		return workspaceEnv, executionWorkspaceCleanupOptions{}
 	}
-	workspaceEnv.CleanupPolicy = string(corev1alpha1.WorkspaceCleanupPolicyDelete)
-	return workspaceEnv
+	options := executionWorkspaceCleanupOptions{skipSubstrateDeleteScrub: true}
+	if strings.EqualFold(
+		strings.TrimSpace(workspaceEnv.CleanupPolicy),
+		string(corev1alpha1.WorkspaceCleanupPolicyRetain),
+	) {
+		workspaceEnv.CleanupPolicy = string(corev1alpha1.WorkspaceCleanupPolicyDelete)
+	}
+	return workspaceEnv, options
 }
 
 func runAgentInSandbox(ctx context.Context, name, workspaceDir string, sandboxEnv workerenv.AgentSandboxEnv) error {
@@ -1041,6 +1058,26 @@ func cleanupExecutionWorkspace(
 	reused bool,
 	submitStatus bool,
 ) error {
+	return cleanupExecutionWorkspaceWithOptions(
+		ctx,
+		executor,
+		ref,
+		workspaceEnv,
+		reused,
+		submitStatus,
+		executionWorkspaceCleanupOptions{},
+	)
+}
+
+func cleanupExecutionWorkspaceWithOptions(
+	ctx context.Context,
+	executor workspace.WorkspaceExecutor,
+	ref workspace.WorkspaceRef,
+	workspaceEnv workerenv.ExecutionWorkspaceEnv,
+	reused bool,
+	submitStatus bool,
+	options executionWorkspaceCleanupOptions,
+) error {
 	if ref.IsZero() || executor == nil {
 		return nil
 	}
@@ -1072,9 +1109,10 @@ func cleanupExecutionWorkspace(
 		return nil
 	case "", "delete":
 		if _, err := executor.Delete(ctx, workspace.DeleteRequest{
-			Ref:     ref,
-			Reason:  "execution workspace cleanup policy delete",
-			Timeout: workspaceEnv.ClaimTimeout,
+			Ref:       ref,
+			Reason:    "execution workspace cleanup policy delete",
+			Timeout:   workspaceEnv.ClaimTimeout,
+			SkipScrub: options.skipSubstrateDeleteScrub,
 		}); err != nil {
 			return fmt.Errorf("delete workspace: %w", err)
 		}

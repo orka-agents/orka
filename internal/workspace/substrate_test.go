@@ -18,7 +18,10 @@ import (
 	"time"
 )
 
-const substrateTestScrubPath = "/v1/scrub"
+const (
+	substrateTestBearer    = "Bearer token"
+	substrateTestScrubPath = "/v1/scrub"
+)
 
 func TestNewSubstrateExecutorDefaultHTTPClientHasNoTimeout(t *testing.T) {
 	executor, err := NewSubstrateExecutor(SubstrateConfig{
@@ -103,7 +106,7 @@ func TestSubstrateExecUsesDetachedPolling(t *testing.T) {
 		if r.Host != "actor-1.actors.test" {
 			t.Errorf("Host = %q, want actor-1.actors.test", r.Host)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+		if got := r.Header.Get("Authorization"); got != substrateTestBearer {
 			t.Errorf("Authorization = %q, want bearer token", got)
 		}
 
@@ -251,6 +254,53 @@ func TestSubstrateDeleteWaitsWhenSuspendReturnsAfterStartingTransition(t *testin
 	}
 }
 
+func TestSubstrateDeleteSkipScrubDeletesRunningActor(t *testing.T) {
+	var scrubbed bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == substrateTestScrubPath {
+			scrubbed = true
+			http.Error(w, "scrub should be skipped", http.StatusInternalServerError)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	control := &recordingSubstrateControlClient{
+		getStatuses: []string{substrateStatusRunning},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     server.Client(),
+		routerURL:      server.URL,
+		actorDNSSuffix: "actors.test",
+		handoffToken:   "token",
+		now:            time.Now,
+		retained:       map[string]bool{},
+	}
+
+	got, err := executor.Delete(t.Context(), DeleteRequest{
+		Ref:       WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
+		Timeout:   time.Second,
+		SkipScrub: true,
+	})
+	if err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if scrubbed {
+		t.Fatal("Delete() scrubbed despite SkipScrub")
+	}
+	if control.suspendCalls != 1 {
+		t.Fatalf("SuspendActor calls = %d, want 1", control.suspendCalls)
+	}
+	if !control.deleted {
+		t.Fatal("DeleteActor was not called")
+	}
+	if !got.Deleted || got.Phase != PhaseDeleted {
+		t.Fatalf("Delete() = %#v, want deleted phase", got)
+	}
+}
+
 func TestSubstrateDeleteFailsClosedWhenRunningScrubFails(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == substrateTestScrubPath {
@@ -292,11 +342,73 @@ func TestSubstrateDeleteFailsClosedWhenRunningScrubFails(t *testing.T) {
 	}
 }
 
+func TestSubstrateDeleteRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testing.T) {
+	var restored bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != substrateTestBearer {
+			t.Errorf("Authorization = %q, want bearer token", got)
+		}
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == substrateTestScrubPath:
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/files":
+			var req substrateUploadRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode restore request: %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if len(req.Files) != 1 {
+				t.Errorf("restore files len = %d, want 1", len(req.Files))
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			file := req.Files[0]
+			if file.Path != substrateHandoffTokenUploadPath || string(file.Data) != "token" || file.Mode != 0o600 {
+				t.Errorf("restore file = path %q data %q mode %#o, want handoff token", file.Path, string(file.Data), file.Mode)
+			}
+			restored = true
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	control := &recordingSubstrateControlClient{
+		getStatuses: []string{substrateStatusRunning, substrateStatusRunning},
+		suspendErr:  fmt.Errorf("suspend failed"),
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     server.Client(),
+		routerURL:      server.URL,
+		actorDNSSuffix: "actors.test",
+		handoffToken:   "token",
+		now:            time.Now,
+		retained:       map[string]bool{},
+	}
+
+	_, err := executor.Delete(t.Context(), DeleteRequest{
+		Ref:     WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
+		Timeout: time.Second,
+	})
+	if err == nil {
+		t.Fatal("Delete() error = nil, want suspend failure")
+	}
+	if !restored {
+		t.Fatal("Delete() did not restore handoff token after suspend failure")
+	}
+	if control.deleted {
+		t.Fatal("DeleteActor was called after suspend failure")
+	}
+}
+
 func TestSubstrateReleaseRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testing.T) {
 	var scrubbed bool
 	var restored bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+		if got := r.Header.Get("Authorization"); got != substrateTestBearer {
 			t.Errorf("Authorization = %q, want bearer token", got)
 		}
 		switch {

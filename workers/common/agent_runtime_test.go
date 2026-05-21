@@ -705,6 +705,9 @@ func TestRunAgent_SubstratePreHandoffRetainFailureDeletesWorkspace(t *testing.T)
 	if deleteReqs[0].Reason != "execution workspace cleanup policy delete" {
 		t.Fatalf("delete reason = %q, want delete cleanup policy", deleteReqs[0].Reason)
 	}
+	if !deleteReqs[0].SkipScrub {
+		t.Fatal("delete SkipScrub = false, want true before handoff bootstrap")
+	}
 }
 
 func TestExecutionWorkspaceCompletionMessageOmitsSubstrateActorID(t *testing.T) {
