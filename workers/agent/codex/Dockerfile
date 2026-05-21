@@ -54,9 +54,9 @@ COPY --from=builder /workspace/orka-workspace-agent /orka-workspace-agent
 
 # Create writable directories for readOnlyRootFilesystem compatibility
 # node:22-slim already has uid 1000 as the 'node' user
-RUN mkdir -p /workspace /home/node /tmp \
+RUN mkdir -p /app /workspace /home/node /tmp \
     && ln -s /home/node /home/worker \
-    && chown -R 1000:1000 /workspace /home/node /tmp
+    && chown -R 1000:1000 /app /workspace /home/node /tmp
 
 USER 1000:1000
 ENV HOME=/home/worker

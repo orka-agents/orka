@@ -19,6 +19,23 @@ import (
 
 const substrateTestScrubPath = "/v1/scrub"
 
+func TestNewSubstrateExecutorDefaultHTTPClientHasNoTimeout(t *testing.T) {
+	executor, err := NewSubstrateExecutor(SubstrateConfig{
+		RouterURL:      "http://router.test",
+		ActorDNSSuffix: "actors.test",
+		ControlClient:  &recordingSubstrateControlClient{},
+	})
+	if err != nil {
+		t.Fatalf("NewSubstrateExecutor() error = %v", err)
+	}
+	if executor.httpClient == nil {
+		t.Fatal("httpClient = nil, want default client")
+	}
+	if executor.httpClient.Timeout != 0 {
+		t.Fatalf("default HTTP timeout = %s, want operation context controlled timeout", executor.httpClient.Timeout)
+	}
+}
+
 func TestSubstrateExecUsesDetachedPolling(t *testing.T) {
 	var sawDetached bool
 	var polls int

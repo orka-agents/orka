@@ -42,8 +42,8 @@ COPY --from=builder /workspace/orka-workspace-agent /orka-workspace-agent
 # Create writable directories for readOnlyRootFilesystem compatibility.
 # The embedded CLI is extracted to a cache dir at runtime.
 RUN groupadd -g 1000 worker && useradd -u 1000 -g worker -m worker \
-    && mkdir -p /workspace /tmp \
-    && chown -R 1000:1000 /workspace /home/worker /tmp
+    && mkdir -p /app /workspace /tmp \
+    && chown -R 1000:1000 /app /workspace /home/worker /tmp
 
 USER 1000:1000
 ENV HOME=/home/worker

@@ -198,9 +198,9 @@ metadata:
     orka.ai/agent-runtimes: codex
 ```
 
-The `orka.ai/workspace-daemon-port` and
-`orka.ai/workspace-staging-root` values must match the daemon container's
-configuration.
+The daemon port must match the daemon container's configuration. The staging
+root is currently required to be `/app`, because the worker handoff stages the
+inner worker binary and secret scrub paths under that directory.
 
 Example shape:
 

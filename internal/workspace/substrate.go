@@ -34,7 +34,6 @@ const (
 	substrateReadyMaxPollInterval     = 2 * time.Second
 	substrateExecInitialPollInterval  = 250 * time.Millisecond
 	substrateExecMaxPollInterval      = 2 * time.Second
-	substrateDefaultDaemonTimeout     = 30 * time.Second
 	substrateDefaultHandoffTokenEnv   = "ORKA_WORKSPACE_HANDOFF_TOKEN"
 
 	substrateStatusResuming   = "STATUS_RESUMING"
@@ -88,7 +87,7 @@ func NewSubstrateExecutor(cfg SubstrateConfig, opts ...SubstrateOption) (*Substr
 		return nil, NewError("configure substrate", ErrorKindInvalidArgument, "actor DNS suffix is required", false, nil)
 	}
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = &http.Client{Timeout: substrateDefaultDaemonTimeout}
+		cfg.HTTPClient = &http.Client{}
 	}
 	if cfg.HandoffToken == "" {
 		cfg.HandoffToken = strings.TrimSpace(os.Getenv(substrateDefaultHandoffTokenEnv))

@@ -45,6 +45,7 @@ const (
 const (
 	defaultAgentSandboxClaimTimeout   = 2 * time.Minute
 	defaultAgentSandboxCommandTimeout = 30 * time.Minute
+	substrateWorkspaceStagingRoot     = "/app"
 )
 
 // AgentSandboxConfig holds disabled-by-default alpha configuration for agent sandbox workspace integration.
@@ -390,8 +391,12 @@ func (r *TaskReconciler) validateSubstrateWorkspaceTemplate(ctx context.Context,
 	if strings.TrimSpace(annotations["orka.ai/workspace-daemon-port"]) == "" {
 		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing annotation orka.ai/workspace-daemon-port", request.TemplateName, request.TemplateNamespace)
 	}
-	if strings.TrimSpace(annotations["orka.ai/workspace-staging-root"]) == "" {
+	stagingRoot := strings.TrimRight(strings.TrimSpace(annotations["orka.ai/workspace-staging-root"]), "/")
+	if stagingRoot == "" {
 		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing annotation orka.ai/workspace-staging-root", request.TemplateName, request.TemplateNamespace)
+	}
+	if stagingRoot != substrateWorkspaceStagingRoot {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q must set annotation orka.ai/workspace-staging-root=%s", request.TemplateName, request.TemplateNamespace, substrateWorkspaceStagingRoot)
 	}
 	if phase, _, _ := unstructured.NestedString(template.Object, "status", "phase"); strings.TrimSpace(phase) != "" && phase != "Ready" {
 		return fmt.Errorf("substrate ActorTemplate %q in namespace %q is not Ready: phase=%s", request.TemplateName, request.TemplateNamespace, phase)

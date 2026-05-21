@@ -14,7 +14,9 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -138,6 +140,44 @@ func TestSubstrateConfigFromEnv(t *testing.T) {
 	}
 	if cfg.CleanupPolicy != corev1alpha1.WorkspaceCleanupPolicyRetain {
 		t.Fatalf("CleanupPolicy = %q, want retain", cfg.CleanupPolicy)
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateRequiresAppStagingRoot(t *testing.T) {
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   "ate.dev",
+		Version: "v1alpha1",
+		Kind:    "ActorTemplate",
+	}, &unstructured.Unstructured{})
+
+	template := &unstructured.Unstructured{}
+	template.SetAPIVersion("ate.dev/v1alpha1")
+	template.SetKind("ActorTemplate")
+	template.SetName("orka-codex")
+	template.SetNamespace("ate-demo")
+	template.SetLabels(map[string]string{
+		"orka.ai/execution-workspace": "true",
+		"orka.ai/workspace-provider":  "substrate",
+	})
+	template.SetAnnotations(map[string]string{
+		"orka.ai/workspace-protocol":     "http-json-v1",
+		"orka.ai/workspace-daemon-port":  "80",
+		"orka.ai/workspace-staging-root": "/workspace",
+	})
+
+	r := &TaskReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build(),
+	}
+	err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, &ExecutionWorkspaceRequest{
+		TemplateName:      "orka-codex",
+		TemplateNamespace: "ate-demo",
+	})
+	if err == nil {
+		t.Fatal("validateSubstrateWorkspaceTemplate() error = nil, want unsupported staging root error")
+	}
+	if !strings.Contains(err.Error(), "orka.ai/workspace-staging-root=/app") {
+		t.Fatalf("error = %q, want /app staging root requirement", err.Error())
 	}
 }
 
