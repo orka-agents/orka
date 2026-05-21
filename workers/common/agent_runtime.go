@@ -1303,6 +1303,7 @@ func agentSandboxInnerEnv(environ []string) map[string]string {
 	env := environToMap(environ)
 	depth := agentSandboxDepth(env[workerenv.AgentSandboxDepth])
 	workspaceDepth := agentSandboxDepth(env[workerenv.ExecutionWorkspaceDepth])
+	scrubInnerExecutionWorkspaceEnv(env)
 	env[workerenv.ExecutionWorkspaceEnabled] = workerEnvFalse
 	env[workerenv.ExecutionWorkspaceDepth] = strconv.Itoa(workspaceDepth + 1)
 	env[workerenv.AgentSandboxEnabled] = workerEnvFalse
@@ -1317,6 +1318,7 @@ func agentSandboxInnerEnv(environ []string) map[string]string {
 func workspaceInnerEnv(environ []string, workspaceEnv workerenv.ExecutionWorkspaceEnv) map[string]string {
 	env := environToMap(environ)
 	depth := workspaceEnv.Depth
+	scrubInnerExecutionWorkspaceEnv(env)
 	env[workerenv.ExecutionWorkspaceEnabled] = workerEnvFalse
 	env[workerenv.ExecutionWorkspaceDepth] = strconv.Itoa(depth + 1)
 	legacyDepth := agentSandboxDepth(env[workerenv.AgentSandboxDepth])
@@ -1327,6 +1329,30 @@ func workspaceInnerEnv(environ []string, workspaceEnv workerenv.ExecutionWorkspa
 	delete(env, workspaceHandoffTokenEnv)
 	delete(env, workspaceBootstrapTokenEnv)
 	return env
+}
+
+func scrubInnerExecutionWorkspaceEnv(env map[string]string) {
+	for _, name := range []string{
+		workerenv.ExecutionWorkspaceProvider,
+		workerenv.ExecutionWorkspaceTemplateName,
+		workerenv.ExecutionWorkspaceTemplateNamespace,
+		workerenv.ExecutionWorkspaceClaimNamespace,
+		workerenv.ExecutionWorkspaceClaimName,
+		workerenv.ExecutionWorkspaceReusePolicy,
+		workerenv.ExecutionWorkspaceReuseKey,
+		workerenv.ExecutionWorkspaceCleanupPolicy,
+		workerenv.ExecutionWorkspaceClaimTimeoutSeconds,
+		workerenv.ExecutionWorkspaceCommandTimeoutSeconds,
+		workerenv.ExecutionWorkspaceStatusEndpoint,
+		workerenv.SubstrateAPIEndpoint,
+		workerenv.SubstrateAPICAFile,
+		workerenv.SubstrateAPIInsecureSkipVerify,
+		workerenv.SubstrateRouterURL,
+		workerenv.SubstrateActorDNSSuffix,
+		workerenv.WorkspaceBootstrapToken,
+	} {
+		delete(env, name)
+	}
 }
 
 func agentSandboxDepth(value string) int {

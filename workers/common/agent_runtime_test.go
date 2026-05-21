@@ -739,6 +739,76 @@ func TestExecutionWorkspaceCompletionMessageKeepsAgentSandboxClaimName(t *testin
 	}
 }
 
+func TestWorkspaceInnerEnvStripsExecutionWorkspaceMetadata(t *testing.T) {
+	env := workspaceInnerEnv(
+		[]string{
+			workerenv.ExecutionWorkspaceEnabled + "=true",
+			workerenv.ExecutionWorkspaceProvider + "=substrate",
+			workerenv.ExecutionWorkspaceTemplateName + "=orka-codex",
+			workerenv.ExecutionWorkspaceTemplateNamespace + "=ate-demo",
+			workerenv.ExecutionWorkspaceClaimNamespace + "=ate-demo",
+			workerenv.ExecutionWorkspaceClaimName + "=actor-1",
+			workerenv.ExecutionWorkspaceReusePolicy + "=by-session",
+			workerenv.ExecutionWorkspaceReuseKey + "=session-1",
+			workerenv.ExecutionWorkspaceCleanupPolicy + "=retain",
+			workerenv.ExecutionWorkspaceClaimTimeoutSeconds + "=30",
+			workerenv.ExecutionWorkspaceCommandTimeoutSeconds + "=600",
+			workerenv.ExecutionWorkspaceStatusEndpoint + "=http://controller/internal",
+			workerenv.ExecutionWorkspaceDepth + "=4",
+			workerenv.SubstrateAPIEndpoint + "=api.ate-system.svc:443",
+			workerenv.SubstrateAPICAFile + "=/var/run/orka/substrate/ca.crt",
+			workerenv.SubstrateAPIInsecureSkipVerify + "=true",
+			workerenv.SubstrateRouterURL + "=http://atenet-router.ate-system.svc",
+			workerenv.SubstrateActorDNSSuffix + "=actors.resources.substrate.ate.dev",
+			workerenv.WorkspaceBootstrapToken + "=bootstrap-token",
+			workspaceHandoffTokenEnv + "=handoff-token",
+			workerenv.AgentSandboxDepth + "=2",
+			"USER_DEFINED=value",
+		},
+		workerenv.ExecutionWorkspaceEnv{Depth: 4},
+	)
+
+	for _, name := range []string{
+		workerenv.ExecutionWorkspaceProvider,
+		workerenv.ExecutionWorkspaceTemplateName,
+		workerenv.ExecutionWorkspaceTemplateNamespace,
+		workerenv.ExecutionWorkspaceClaimNamespace,
+		workerenv.ExecutionWorkspaceClaimName,
+		workerenv.ExecutionWorkspaceReusePolicy,
+		workerenv.ExecutionWorkspaceReuseKey,
+		workerenv.ExecutionWorkspaceCleanupPolicy,
+		workerenv.ExecutionWorkspaceClaimTimeoutSeconds,
+		workerenv.ExecutionWorkspaceCommandTimeoutSeconds,
+		workerenv.ExecutionWorkspaceStatusEndpoint,
+		workerenv.SubstrateAPIEndpoint,
+		workerenv.SubstrateAPICAFile,
+		workerenv.SubstrateAPIInsecureSkipVerify,
+		workerenv.SubstrateRouterURL,
+		workerenv.SubstrateActorDNSSuffix,
+		workerenv.WorkspaceBootstrapToken,
+		workspaceHandoffTokenEnv,
+	} {
+		if _, ok := env[name]; ok {
+			t.Fatalf("inner env unexpectedly contains %s", name)
+		}
+	}
+	if env[workerenv.ExecutionWorkspaceEnabled] != workerEnvFalse {
+		t.Fatalf("%s = %q, want false", workerenv.ExecutionWorkspaceEnabled, env[workerenv.ExecutionWorkspaceEnabled])
+	}
+	if env[workerenv.ExecutionWorkspaceDepth] != "5" {
+		t.Fatalf("%s = %q, want 5", workerenv.ExecutionWorkspaceDepth, env[workerenv.ExecutionWorkspaceDepth])
+	}
+	if env[workerenv.AgentSandboxEnabled] != workerEnvFalse {
+		t.Fatalf("%s = %q, want false", workerenv.AgentSandboxEnabled, env[workerenv.AgentSandboxEnabled])
+	}
+	if env[workerenv.AgentSandboxDepth] != "3" {
+		t.Fatalf("%s = %q, want 3", workerenv.AgentSandboxDepth, env[workerenv.AgentSandboxDepth])
+	}
+	if env["USER_DEFINED"] != "value" {
+		t.Fatalf("USER_DEFINED = %q, want value", env["USER_DEFINED"])
+	}
+}
+
 func TestRunAgent_AgentSandboxRecursionFailsFast(t *testing.T) {
 	setRequiredAgentSandboxEnv(t, "delete")
 	t.Setenv(workerenv.AgentSandboxDepth, "1")
