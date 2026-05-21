@@ -158,6 +158,9 @@ type UploadRequest struct {
 	Ref       WorkspaceRef
 	Artifacts []UploadArtifact
 	Timeout   time.Duration
+	// BootstrapHandoff asks backends with a separate daemon bootstrap credential
+	// to use it for the initial per-task handoff token upload.
+	BootstrapHandoff bool
 }
 
 // UploadArtifact is an artifact payload to write into a workspace.
@@ -210,6 +213,9 @@ type ReleaseRequest struct {
 	Retain  bool
 	Reason  string
 	Timeout time.Duration
+	// SkipScrub bypasses backend daemon scrubbing when the caller knows the
+	// current handoff credential is unavailable or not yet installed.
+	SkipScrub bool
 }
 
 // ReleaseResult describes the release/retain decision.
@@ -223,9 +229,10 @@ type ReleaseResult struct {
 
 // DeleteRequest destroys a workspace.
 type DeleteRequest struct {
-	Ref     WorkspaceRef
-	Reason  string
-	Timeout time.Duration
+	Ref       WorkspaceRef
+	Reason    string
+	Timeout   time.Duration
+	SkipScrub bool
 }
 
 // DeleteResult describes workspace deletion.

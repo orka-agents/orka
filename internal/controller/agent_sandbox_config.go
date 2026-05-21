@@ -9,14 +9,19 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
@@ -43,6 +48,10 @@ const (
 const (
 	defaultAgentSandboxClaimTimeout   = 2 * time.Minute
 	defaultAgentSandboxCommandTimeout = 30 * time.Minute
+	substrateWorkspaceStagingRoot     = "/app"
+	substrateWorkspaceDaemonCommand   = "orka-workspace-agent"
+	substrateWorkspaceDaemonListenEnv = "ORKA_WORKSPACE_AGENT_LISTEN_ADDR"
+	substrateWorkspaceDaemonListen    = ":8080"
 )
 
 // AgentSandboxConfig holds disabled-by-default alpha configuration for agent sandbox workspace integration.
@@ -169,23 +178,6 @@ func (c AgentSandboxConfig) Validate() error {
 	return nil
 }
 
-// AgentSandboxWorkspaceRequest is the controller's resolved, validated view of a Task execution
-// workspace request. JobBuilder uses it to propagate sandbox workspace settings to agent workers;
-// the worker wrapper owns the sandbox claim, command execution, and cleanup lifecycle.
-type AgentSandboxWorkspaceRequest struct {
-	RouterURL         string
-	TemplateName      string
-	TemplateNamespace string
-	ClaimNamespace    string
-	ReusePolicy       corev1alpha1.WorkspaceReusePolicy
-	ReuseKey          string
-	CleanupPolicy     corev1alpha1.WorkspaceCleanupPolicy
-	WarmPoolPolicy    string
-	NamespaceStrategy string
-	ClaimTimeout      time.Duration
-	CommandTimeout    time.Duration
-}
-
 func executionWorkspaceTemplateName(ws *corev1alpha1.ExecutionWorkspaceSpec, cfg AgentSandboxConfig) string {
 	if ws != nil && ws.TemplateRef != nil && ws.TemplateRef.Name != "" {
 		return ws.TemplateRef.Name
@@ -204,9 +196,27 @@ func executionWorkspaceTemplateNamespace(ws *corev1alpha1.ExecutionWorkspaceSpec
 	return taskNamespace
 }
 
+func substrateTemplateName(ws *corev1alpha1.ExecutionWorkspaceSpec, cfg SubstrateConfig) string {
+	if ws != nil && ws.TemplateRef != nil && strings.TrimSpace(ws.TemplateRef.Name) != "" {
+		return strings.TrimSpace(ws.TemplateRef.Name)
+	}
+	return strings.TrimSpace(cfg.WithDefaults().DefaultTemplate)
+}
+
+func substrateTemplateNamespace(ws *corev1alpha1.ExecutionWorkspaceSpec, taskNamespace string, cfg SubstrateConfig) string {
+	if ws != nil && ws.TemplateRef != nil && strings.TrimSpace(ws.TemplateRef.Namespace) != "" {
+		return strings.TrimSpace(ws.TemplateRef.Namespace)
+	}
+	cfg = cfg.WithDefaults()
+	if strings.TrimSpace(cfg.DefaultTemplateNS) != "" {
+		return strings.TrimSpace(cfg.DefaultTemplateNS)
+	}
+	return taskNamespace
+}
+
 // resolveExecutionWorkspaceRequest applies controller defaults to a Task execution workspace request.
 // It returns nil when the Task does not request an enabled execution workspace.
-func (r *TaskReconciler) resolveExecutionWorkspaceRequest(ctx context.Context, task *corev1alpha1.Task) (*AgentSandboxWorkspaceRequest, error) {
+func (r *TaskReconciler) resolveExecutionWorkspaceRequest(ctx context.Context, task *corev1alpha1.Task) (*ExecutionWorkspaceRequest, error) {
 	if task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil || !task.Spec.Execution.Workspace.Enabled {
 		return nil, nil
 	}
@@ -214,6 +224,14 @@ func (r *TaskReconciler) resolveExecutionWorkspaceRequest(ctx context.Context, t
 		return nil, err
 	}
 
+	provider := resolveWorkspaceProvider(task.Spec.Execution.Workspace, r.ExecutionWorkspaceDefaultProvider)
+	if provider == corev1alpha1.WorkspaceProviderSubstrate {
+		return r.resolveSubstrateWorkspaceRequest(ctx, task)
+	}
+	return r.resolveAgentSandboxWorkspaceRequest(ctx, task)
+}
+
+func (r *TaskReconciler) resolveAgentSandboxWorkspaceRequest(ctx context.Context, task *corev1alpha1.Task) (*ExecutionWorkspaceRequest, error) {
 	cfg := r.AgentSandboxConfig.WithDefaults()
 	ws := task.Spec.Execution.Workspace
 
@@ -227,7 +245,8 @@ func (r *TaskReconciler) resolveExecutionWorkspaceRequest(ctx context.Context, t
 	}
 
 	templateNamespace := executionWorkspaceTemplateNamespace(ws, task.Namespace, cfg)
-	request := &AgentSandboxWorkspaceRequest{
+	request := &ExecutionWorkspaceRequest{
+		Provider:          corev1alpha1.WorkspaceProviderAgentSandbox,
 		RouterURL:         cfg.RouterURL,
 		TemplateName:      executionWorkspaceTemplateName(ws, cfg),
 		TemplateNamespace: templateNamespace,
@@ -247,6 +266,53 @@ func (r *TaskReconciler) resolveExecutionWorkspaceRequest(ctx context.Context, t
 		return nil, err
 	}
 
+	return request, nil
+}
+
+func (r *TaskReconciler) resolveSubstrateWorkspaceRequest(ctx context.Context, task *corev1alpha1.Task) (*ExecutionWorkspaceRequest, error) {
+	cfg := r.SubstrateConfig.WithDefaults()
+	ws := task.Spec.Execution.Workspace
+
+	reusePolicy := ws.ReusePolicy
+	if reusePolicy == "" {
+		reusePolicy = corev1alpha1.WorkspaceReusePolicyNone
+	}
+	cleanupPolicy := ws.CleanupPolicy
+	if cleanupPolicy == "" {
+		cleanupPolicy = cfg.CleanupPolicy
+	}
+	templateName := substrateTemplateName(ws, cfg)
+	templateNamespace := substrateTemplateNamespace(ws, task.Namespace, cfg)
+	reuseKey := ""
+	claimName := deterministicSubstrateTaskActorID(string(task.UID), task.Status.Attempts+1)
+	if reusePolicy == corev1alpha1.WorkspaceReusePolicySession && task.Spec.SessionRef != nil {
+		reuseKey = task.Spec.SessionRef.Name
+		claimName = deterministicSubstrateSessionActorID(task.Namespace, templateNamespace, templateName, reuseKey)
+	}
+
+	request := &ExecutionWorkspaceRequest{
+		Provider:                       corev1alpha1.WorkspaceProviderSubstrate,
+		TemplateName:                   templateName,
+		TemplateNamespace:              templateNamespace,
+		ClaimNamespace:                 templateNamespace,
+		ClaimName:                      claimName,
+		ReusePolicy:                    reusePolicy,
+		ReuseKey:                       reuseKey,
+		CleanupPolicy:                  cleanupPolicy,
+		ClaimTimeout:                   cfg.ClaimTimeout,
+		CommandTimeout:                 cfg.CommandTimeout,
+		SubstrateAPIEndpoint:           cfg.APIEndpoint,
+		SubstrateAPICAFile:             cfg.APICAFile,
+		SubstrateAPIInsecureSkipVerify: cfg.APIInsecureSkipVerify,
+		SubstrateRouterURL:             cfg.RouterURL,
+		SubstrateActorDNSSuffix:        cfg.ActorDNSSuffix,
+		SubstrateBootstrapSecretName:   cfg.BootstrapSecretName,
+		SubstrateBootstrapSecretKey:    cfg.BootstrapSecretKey,
+	}
+
+	if err := r.validateSubstrateWorkspaceTemplate(ctx, task, request); err != nil {
+		return nil, err
+	}
 	return request, nil
 }
 
@@ -286,4 +352,344 @@ func (r *TaskReconciler) validateExecutionWorkspaceTemplateExists(ctx context.Co
 		lookupNamespace,
 		err,
 	)
+}
+
+func (r *TaskReconciler) validateSubstrateWorkspaceTemplate(ctx context.Context, task *corev1alpha1.Task, request *ExecutionWorkspaceRequest) error {
+	if r == nil || r.Client == nil || request == nil || request.TemplateName == "" {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	template := &unstructured.Unstructured{}
+	template.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "ate.dev",
+		Version: "v1alpha1",
+		Kind:    "ActorTemplate",
+	})
+	err := r.Get(ctx, types.NamespacedName{Namespace: request.TemplateNamespace, Name: request.TemplateName}, template)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf(
+				"substrate execution workspace ActorTemplate %q not found in namespace %q",
+				request.TemplateName,
+				request.TemplateNamespace,
+			)
+		}
+		return fmt.Errorf(
+			"failed to validate substrate execution workspace ActorTemplate %q in namespace %q: %w",
+			request.TemplateName,
+			request.TemplateNamespace,
+			err,
+		)
+	}
+
+	labels := template.GetLabels()
+	annotations := template.GetAnnotations()
+	if labels["orka.ai/execution-workspace"] != "true" {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing label orka.ai/execution-workspace=true", request.TemplateName, request.TemplateNamespace)
+	}
+	if labels["orka.ai/workspace-provider"] != string(corev1alpha1.WorkspaceProviderSubstrate) {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing label orka.ai/workspace-provider=substrate", request.TemplateName, request.TemplateNamespace)
+	}
+	if annotations["orka.ai/workspace-protocol"] != "http-json-v1" {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing annotation orka.ai/workspace-protocol=http-json-v1", request.TemplateName, request.TemplateNamespace)
+	}
+	if strings.TrimSpace(annotations["orka.ai/workspace-daemon-port"]) == "" {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing annotation orka.ai/workspace-daemon-port", request.TemplateName, request.TemplateNamespace)
+	}
+	stagingRoot := strings.TrimRight(strings.TrimSpace(annotations["orka.ai/workspace-staging-root"]), "/")
+	if stagingRoot == "" {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing annotation orka.ai/workspace-staging-root", request.TemplateName, request.TemplateNamespace)
+	}
+	if stagingRoot != substrateWorkspaceStagingRoot {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q must set annotation orka.ai/workspace-staging-root=%s", request.TemplateName, request.TemplateNamespace, substrateWorkspaceStagingRoot)
+	}
+	phase, _, _ := unstructured.NestedString(template.Object, "status", "phase")
+	phase = strings.TrimSpace(phase)
+	if phase != "Ready" {
+		if phase == "" {
+			phase = "<empty>"
+		}
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q is not Ready: phase=%s", request.TemplateName, request.TemplateNamespace, phase)
+	}
+	if err := validateSubstrateWorkspaceTemplateDaemonPort(template, annotations["orka.ai/workspace-daemon-port"]); err != nil {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q %w", request.TemplateName, request.TemplateNamespace, err)
+	}
+	if err := validateSubstrateWorkspaceTemplateBootstrapEnv(template, request); err != nil {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q %w", request.TemplateName, request.TemplateNamespace, err)
+	}
+	_ = task
+	return nil
+}
+
+func validateSubstrateWorkspaceTemplateDaemonPort(template *unstructured.Unstructured, annotatedPort string) error {
+	port, err := parseSubstrateWorkspaceDaemonPort(annotatedPort)
+	if err != nil {
+		return fmt.Errorf("has invalid annotation orka.ai/workspace-daemon-port: %w", err)
+	}
+	containers, found, err := unstructured.NestedSlice(template.Object, "spec", "containers")
+	if err != nil {
+		return fmt.Errorf("has invalid spec.containers: %w", err)
+	}
+	if !found || len(containers) == 0 {
+		return fmt.Errorf("must define a workspace daemon container")
+	}
+
+	daemonContainers, err := substrateWorkspaceDaemonContainers(containers)
+	if err != nil {
+		return err
+	}
+	for _, container := range daemonContainers {
+		listenPort, err := substrateWorkspaceDaemonListenPort(container)
+		if err != nil {
+			return substrateWorkspaceDaemonContainerError(container, err)
+		}
+		if listenPort != port {
+			return substrateWorkspaceDaemonContainerError(
+				container,
+				fmt.Errorf(
+					"listen port %d must match annotation orka.ai/workspace-daemon-port=%d",
+					listenPort,
+					port,
+				),
+			)
+		}
+	}
+	return nil
+}
+
+func substrateWorkspaceDaemonContainerError(container map[string]any, err error) error {
+	name, _, _ := unstructured.NestedString(container, "name")
+	if strings.TrimSpace(name) != "" {
+		return fmt.Errorf("workspace daemon container %q %w", name, err)
+	}
+	return fmt.Errorf("workspace daemon container %w", err)
+}
+
+func parseSubstrateWorkspaceDaemonPort(value string) (int, error) {
+	value = strings.TrimSpace(value)
+	port, err := strconv.ParseUint(value, 10, 16)
+	if err != nil || port == 0 {
+		return 0, fmt.Errorf("must be a TCP port number from 1 to 65535")
+	}
+	return int(port), nil
+}
+
+func substrateWorkspaceDaemonListenPort(container map[string]any) (int, error) {
+	listenAddr := substrateWorkspaceDaemonListen
+	env, found, err := substrateContainerEnv(container)
+	if err != nil {
+		return 0, err
+	}
+	if found {
+		if value, ok, err := substrateContainerLiteralEnv(env, substrateWorkspaceDaemonListenEnv); err != nil {
+			return 0, err
+		} else if ok {
+			listenAddr = value
+		}
+	}
+	_, port, err := net.SplitHostPort(strings.TrimSpace(listenAddr))
+	if err != nil {
+		return 0, fmt.Errorf("env %s must be a listen address with a port", substrateWorkspaceDaemonListenEnv)
+	}
+	return parseSubstrateWorkspaceDaemonPort(port)
+}
+
+func substrateContainerEnv(container map[string]any) ([]any, bool, error) {
+	envValue, found, err := unstructured.NestedFieldNoCopy(container, "env")
+	if err != nil {
+		return nil, false, fmt.Errorf("has invalid container env: %w", err)
+	}
+	if !found || envValue == nil {
+		return nil, false, nil
+	}
+	env, ok := envValue.([]any)
+	if !ok {
+		return nil, false, fmt.Errorf("has invalid container env")
+	}
+	return env, true, nil
+}
+
+func substrateContainerLiteralEnv(env []any, name string) (string, bool, error) {
+	for _, envItem := range env {
+		envVar, ok := envItem.(map[string]any)
+		if !ok {
+			return "", false, fmt.Errorf("has invalid container env entry")
+		}
+		envName, _, _ := unstructured.NestedString(envVar, "name")
+		if envName != name {
+			continue
+		}
+		value, found, err := unstructured.NestedString(envVar, "value")
+		if err != nil {
+			return "", false, fmt.Errorf("env %s has invalid value", name)
+		}
+		if !found {
+			return "", false, fmt.Errorf("env %s must set a literal value", name)
+		}
+		return strings.TrimSpace(value), true, nil
+	}
+	return "", false, nil
+}
+
+func validateSubstrateWorkspaceTemplateBootstrapEnv(template *unstructured.Unstructured, request *ExecutionWorkspaceRequest) error {
+	containers, found, err := unstructured.NestedSlice(template.Object, "spec", "containers")
+	if err != nil {
+		return fmt.Errorf("has invalid spec.containers: %w", err)
+	}
+	if !found || len(containers) == 0 {
+		return fmt.Errorf("must define a container with %s", workerenv.WorkspaceBootstrapToken)
+	}
+
+	daemonContainers, err := substrateWorkspaceDaemonContainers(containers)
+	if err != nil {
+		return err
+	}
+	for _, container := range daemonContainers {
+		if err := validateSubstrateWorkspaceDaemonBootstrapEnv(container, request); err != nil {
+			return substrateWorkspaceDaemonContainerError(container, err)
+		}
+	}
+	return nil
+}
+
+func substrateWorkspaceDaemonContainers(containers []any) ([]map[string]any, error) {
+	parsed := make([]map[string]any, 0, len(containers))
+	daemons := make([]map[string]any, 0, len(containers))
+
+	for _, item := range containers {
+		container, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("has invalid spec.containers entry")
+		}
+		parsed = append(parsed, container)
+
+		runsDaemon, err := substrateContainerRunsWorkspaceDaemon(container)
+		if err != nil {
+			return nil, err
+		}
+		if runsDaemon {
+			daemons = append(daemons, container)
+		}
+	}
+
+	if len(daemons) > 0 {
+		return daemons, nil
+	}
+	if len(parsed) == 1 {
+		return parsed, nil
+	}
+	return nil, fmt.Errorf(
+		"must identify the workspace daemon container with command or args containing /%s",
+		substrateWorkspaceDaemonCommand,
+	)
+}
+
+func substrateContainerRunsWorkspaceDaemon(container map[string]any) (bool, error) {
+	for _, field := range []string{"command", "args"} {
+		values, err := substrateContainerStringList(container, field)
+		if err != nil {
+			return false, err
+		}
+		for _, value := range values {
+			if strings.Contains(value, substrateWorkspaceDaemonCommand) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func substrateContainerStringList(container map[string]any, field string) ([]string, error) {
+	value, found, err := unstructured.NestedFieldNoCopy(container, field)
+	if err != nil {
+		return nil, fmt.Errorf("has invalid container %s: %w", field, err)
+	}
+	if !found || value == nil {
+		return nil, nil
+	}
+	values, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("has invalid container %s", field)
+	}
+
+	result := make([]string, 0, len(values))
+	for _, item := range values {
+		stringValue, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("has invalid container %s entry", field)
+		}
+		result = append(result, strings.TrimSpace(stringValue))
+	}
+	return result, nil
+}
+
+func validateSubstrateWorkspaceDaemonBootstrapEnv(container map[string]any, request *ExecutionWorkspaceRequest) error {
+	env, found, err := substrateContainerEnv(container)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("missing required env %s", workerenv.WorkspaceBootstrapToken)
+	}
+	for _, envItem := range env {
+		envVar, ok := envItem.(map[string]any)
+		if !ok {
+			return fmt.Errorf("has invalid container env entry")
+		}
+		name, _, _ := unstructured.NestedString(envVar, "name")
+		if name != workerenv.WorkspaceBootstrapToken {
+			continue
+		}
+		value, _, _ := unstructured.NestedString(envVar, "value")
+		if strings.TrimSpace(value) != "" {
+			return nil
+		}
+		if ok, err := substrateBootstrapEnvUsesConfiguredSecret(envVar, request); err != nil {
+			return err
+		} else if ok {
+			return nil
+		}
+		return fmt.Errorf(
+			"%s must set a non-empty value or valueFrom.secretKeyRef",
+			workerenv.WorkspaceBootstrapToken,
+		)
+	}
+
+	return fmt.Errorf("missing required env %s", workerenv.WorkspaceBootstrapToken)
+}
+
+func substrateBootstrapEnvUsesConfiguredSecret(envVar map[string]any, request *ExecutionWorkspaceRequest) (bool, error) {
+	secretName, secretNameFound, secretNameErr := unstructured.NestedString(envVar, "valueFrom", "secretKeyRef", "name")
+	secretKey, secretKeyFound, secretKeyErr := unstructured.NestedString(envVar, "valueFrom", "secretKeyRef", "key")
+	if secretNameErr != nil || secretKeyErr != nil {
+		return false, fmt.Errorf("%s has invalid valueFrom.secretKeyRef", workerenv.WorkspaceBootstrapToken)
+	}
+	if !secretNameFound && !secretKeyFound {
+		return false, nil
+	}
+	secretName = strings.TrimSpace(secretName)
+	secretKey = strings.TrimSpace(secretKey)
+	if secretName == "" || secretKey == "" {
+		return false, fmt.Errorf("%s valueFrom.secretKeyRef must set name and key", workerenv.WorkspaceBootstrapToken)
+	}
+	if request != nil && strings.TrimSpace(request.SubstrateBootstrapSecretName) != "" &&
+		secretName != strings.TrimSpace(request.SubstrateBootstrapSecretName) {
+		return false, fmt.Errorf(
+			"%s valueFrom.secretKeyRef must use configured bootstrap Secret %q",
+			workerenv.WorkspaceBootstrapToken,
+			request.SubstrateBootstrapSecretName,
+		)
+	}
+	if request != nil && strings.TrimSpace(request.SubstrateBootstrapSecretKey) != "" &&
+		secretKey != strings.TrimSpace(request.SubstrateBootstrapSecretKey) {
+		return false, fmt.Errorf(
+			"%s valueFrom.secretKeyRef must use configured bootstrap Secret key %q",
+			workerenv.WorkspaceBootstrapToken,
+			request.SubstrateBootstrapSecretKey,
+		)
+	}
+	return true, nil
 }

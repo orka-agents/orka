@@ -1384,6 +1384,15 @@ spec:
                         description: Enabled requests use of a durable workspace for
                           the task execution.
                         type: boolean
+                      provider:
+                        description: |-
+                          Provider selects the workspace backend. When omitted, the controller
+                          resolves the configured default workspace provider; the built-in
+                          compatibility default is agent-sandbox.
+                        enum:
+                        - agent-sandbox
+                        - substrate
+                        type: string
                       reusePolicy:
                         default: none
                         description: |-
@@ -1397,7 +1406,7 @@ spec:
                         description: |-
                           TemplateRef references the workspace template to instantiate or reuse.
                           The template name is required when enabled is true unless the controller
-                          is configured with a default agent sandbox template.
+                          is configured with a provider-specific default template.
                         properties:
                           name:
                             description: Name is the name of the workspace template.
@@ -1845,6 +1854,84 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              executionWorkspace:
+                description: |-
+                  ExecutionWorkspace reports the provider-neutral lifecycle state for a
+                  requested execution workspace. Provider-native identifiers and credentials
+                  are intentionally omitted.
+                properties:
+                  cleanupPolicy:
+                    description: CleanupPolicy is the resolved cleanup policy.
+                    enum:
+                    - delete
+                    - retain
+                    type: string
+                  lastUpdateTime:
+                    description: LastUpdateTime is the last time workspace status
+                      was updated.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message contains sanitized lifecycle context.
+                    type: string
+                  phase:
+                    description: Phase is the provider-neutral lifecycle phase.
+                    enum:
+                    - Pending
+                    - Ready
+                    - Released
+                    - Retained
+                    - Deleted
+                    - Failed
+                    type: string
+                  provider:
+                    description: Provider is the resolved workspace backend.
+                    enum:
+                    - agent-sandbox
+                    - substrate
+                    type: string
+                  reason:
+                    description: Reason is the provider-neutral lifecycle reason.
+                    enum:
+                    - WorkspacePending
+                    - WorkspaceClaimed
+                    - WorkspaceReady
+                    - WorkspaceReleased
+                    - WorkspaceRetained
+                    - WorkspaceDeleted
+                    - WorkspaceValidationFailed
+                    - WorkspaceAttachmentLocked
+                    - WorkspaceClaimFailed
+                    - WorkspaceReadinessFailed
+                    - WorkspaceHandoffFailed
+                    - WorkspaceCommandFailed
+                    - WorkspaceSecretScrubFailed
+                    - WorkspaceCleanupFailed
+                    - WorkspaceStatusUpdateFailed
+                    type: string
+                  reusePolicy:
+                    description: ReusePolicy is the resolved reuse policy.
+                    enum:
+                    - none
+                    - session
+                    type: string
+                  reused:
+                    description: Reused reports whether an existing workspace was
+                      reattached.
+                    type: boolean
+                  templateRef:
+                    description: TemplateRef is the resolved workspace template.
+                    properties:
+                      name:
+                        description: Name is the name of the workspace template.
+                        type: string
+                      namespace:
+                        description: |-
+                          Namespace is the namespace of the workspace template and claim.
+                          It defaults to the Task namespace, or the controller namespace when configured.
+                        type: string
+                    type: object
+                type: object
               iteration:
                 description: |-
                   Iteration is the current autonomous loop iteration (0-based).

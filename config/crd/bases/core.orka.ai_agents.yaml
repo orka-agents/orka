@@ -1104,6 +1104,15 @@ spec:
                         description: Enabled requests use of a durable workspace for
                           the task execution.
                         type: boolean
+                      provider:
+                        description: |-
+                          Provider selects the workspace backend. When omitted, the controller
+                          resolves the configured default workspace provider; the built-in
+                          compatibility default is agent-sandbox.
+                        enum:
+                        - agent-sandbox
+                        - substrate
+                        type: string
                       reusePolicy:
                         default: none
                         description: |-
@@ -1117,7 +1126,7 @@ spec:
                         description: |-
                           TemplateRef references the workspace template to instantiate or reuse.
                           The template name is required when enabled is true unless the controller
-                          is configured with a default agent sandbox template.
+                          is configured with a provider-specific default template.
                         properties:
                           name:
                             description: Name is the name of the workspace template.
