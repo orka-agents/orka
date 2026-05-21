@@ -567,7 +567,7 @@ func verifyCallerOwnsTaskWorker(ctx context.Context, c client.Client, userInfo *
 			}
 		}
 	}
-	return fiber.NewError(fiber.StatusForbidden, "caller job does not own task")
+	return fiber.NewError(fiber.StatusForbidden, "caller is not a worker for this task")
 }
 
 func firstUserExtra(userInfo *UserInfo, key string) string {
