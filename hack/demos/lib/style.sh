@@ -80,6 +80,28 @@ demo_pe() {
   fi
 }
 
+# demo_show_cmd <cmd> — print a command at the demo prompt WITHOUT running
+# it. Use when the real invocation has to happen via a different code path
+# (e.g. claude-code with a sidecar --settings file to neutralize the
+# user's ~/.claude/settings.json env block) but the cast should still
+# show viewers the command they could type at a shell. Honors TYPE_SPEED
+# the same way demo_pe does so the prompt looks identical.
+demo_show_cmd() {
+  local cmd="$*"
+  printf '\n'
+  if declare -F _demo_magic_render_prompt >/dev/null 2>&1; then
+    _demo_magic_render_prompt
+  else
+    printf '%b' "${BOLD}${CYAN}> ${COLOR_RESET}"
+  fi
+  if command -v pv >/dev/null 2>&1 && [[ -n "${TYPE_SPEED:-}" && "${TYPE_SPEED}" != "0" ]] && demo_profile_is presenter; then
+    printf '%s' "${cmd}" | pv -qL "${TYPE_SPEED}"
+    printf '\n'
+  else
+    printf '%s\n' "${cmd}"
+  fi
+}
+
 # demo_show <path> — render a file with profile-appropriate verbosity.
 #   presenter: full file via cat (audit transparency)
 #   docs:      first 20 lines + footer with path

@@ -110,10 +110,13 @@ log_info "Provider-default models exposed by Orka (/anthropic/v1/models):"
 demo_pe "curl -sS -H \"Authorization: Bearer \$(get_orka_token)\" ${ANTHROPIC_BASE_URL}/v1/models | jq -r '.data[].id'"
 log_info "Selected Opus model: ${DEMO_CHAT_OPUS_MODEL} (Orka passes the model name through to ${DEMO_PROVIDER_REF})"
 DEMO_CHAT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-# Show the exact `claude -p` command we are about to run (the real one runs
-# silently right after so kubectl logs don't double-print). Token is fetched
-# from the shell — never inlined into the visible command.
-demo_pe "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL} ANTHROPIC_API_KEY=\$(get_orka_token) ${DEMO_CLAUDE_BIN} -p --model ${DEMO_CHAT_OPUS_MODEL} < ${DEMO_WORKDIR}/chat-request.txt"
+# Show the exact `claude -p` command the viewer could run themselves. We
+# render it WITHOUT executing (demo_show_cmd) — the real invocation runs
+# via run_demo_chat_request_file just below with a sidecar --settings
+# file so Claude Code's settings.env doesn't override ANTHROPIC_BASE_URL
+# with the user's local proxy. Token is fetched from the shell — never
+# inlined into the visible command.
+demo_show_cmd "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL} ANTHROPIC_API_KEY=\$(get_orka_token) ${DEMO_CLAUDE_BIN} -p --model ${DEMO_CHAT_OPUS_MODEL} < ${DEMO_WORKDIR}/chat-request.txt"
 log_info "Running the actual chat turn (output captured to ${DEMO_WORKDIR}/chat-client-result.json)..."
 run_demo_chat_request_file "${DEMO_WORKDIR}/chat-request.txt" "${DEMO_WORKDIR}/chat-client-result.json"
 log_success "Chat request accepted; coordinator Task will appear shortly"

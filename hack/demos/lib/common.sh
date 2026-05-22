@@ -386,7 +386,12 @@ configure_demo_magic() {
   else
     TYPE_SPEED=""
   fi
-  DEMO_PROMPT="${DEMO_PROMPT:-${GREEN}orka-demo ${CYAN}\W ${COLOR_RESET}}"
+  # Terminal-style prompt: a single ">" with no path/host noise. Keeps the
+  # cast looking like a real shell session rather than a branded demo.
+  # Unconditional overwrite — demo-magic.sh sets its own default at source
+  # time, so a `:-` fallback here would be a no-op. Callers wanting a
+  # different prompt can set DEMO_PROMPT after calling configure_demo_magic.
+  DEMO_PROMPT="${BOLD}${CYAN}> ${COLOR_RESET}"
   PROMPT_TIMEOUT="${PROMPT_TIMEOUT:-0}"
 }
 
