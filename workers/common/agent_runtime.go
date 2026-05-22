@@ -157,19 +157,12 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 			}
 		}
 		if cfg.GitRef != "" {
-			fetchErr := execGitContext(ctx, workspaceDir, "fetch", "origin", cfg.GitRef)
-			if fetchErr != nil {
-				fetchErr = execGitContext(ctx, workspaceDir, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*")
+			directFetch, err := fetchGitRef(ctx, workspaceDir, cfg.GitRef)
+			if err != nil {
+				return err
 			}
-			if fetchErr != nil {
-				return fmt.Errorf("git fetch ref failed: %w", fetchErr)
-			}
-			if err := execGitContext(ctx, workspaceDir, "checkout", cfg.GitRef); err != nil {
-				if fbErr := execGitContext(ctx, workspaceDir, "checkout", "FETCH_HEAD"); fbErr != nil {
-					if branchErr := execGitContext(ctx, workspaceDir, "checkout", "origin/"+cfg.GitRef); branchErr != nil {
-						return fmt.Errorf("git checkout ref failed: %w", err)
-					}
-				}
+			if err := checkoutGitRef(ctx, workspaceDir, cfg.GitRef, directFetch); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -203,26 +196,46 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 	// branch name, so fall back to fetching all remote heads when the server does
 	// not allow fetching the object by SHA directly.
 	if cfg.GitRef != "" {
-		fetchErr := execGitContext(ctx, workspaceDir, "fetch", "origin", cfg.GitRef)
-		if fetchErr != nil {
-			fetchErr = execGitContext(ctx, workspaceDir, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*")
+		directFetch, err := fetchGitRef(ctx, workspaceDir, cfg.GitRef)
+		if err != nil {
+			return err
 		}
-		if fetchErr != nil {
-			return fmt.Errorf("git fetch ref failed: %w", fetchErr)
-		}
-
-		if err := execGitContext(ctx, workspaceDir, "checkout", cfg.GitRef); err != nil {
-			// Ref may not exist as a local branch; fall back to FETCH_HEAD from a
-			// direct ref fetch, then to origin/<ref> for branch-name refs.
-			if fbErr := execGitContext(ctx, workspaceDir, "checkout", "FETCH_HEAD"); fbErr != nil {
-				if branchErr := execGitContext(ctx, workspaceDir, "checkout", "origin/"+cfg.GitRef); branchErr != nil {
-					return fmt.Errorf("git checkout ref failed: %w", err)
-				}
-			}
+		if err := checkoutGitRef(ctx, workspaceDir, cfg.GitRef, directFetch); err != nil {
+			return err
 		}
 	}
 
 	return nil
+}
+
+func fetchGitRef(ctx context.Context, workspaceDir, ref string) (bool, error) {
+	if err := execGitContext(ctx, workspaceDir, "fetch", "origin", ref); err == nil {
+		return true, nil
+	}
+	if err := execGitContext(ctx, workspaceDir, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+		return false, fmt.Errorf("git fetch ref %q failed: %w", ref, err)
+	}
+	return false, nil
+}
+
+func checkoutGitRef(ctx context.Context, workspaceDir, ref string, directFetch bool) error {
+	checkoutErr := execGitContext(ctx, workspaceDir, "checkout", ref)
+	if checkoutErr == nil {
+		return nil
+	}
+	if directFetch {
+		// FETCH_HEAD is only a precise checkout target after fetching the
+		// requested ref directly. A broad remote-head fetch may point it at an
+		// unrelated branch.
+		if fbErr := execGitContext(ctx, workspaceDir, "checkout", "FETCH_HEAD"); fbErr == nil {
+			return nil
+		}
+	}
+
+	if err := execGitContext(ctx, workspaceDir, "checkout", "origin/"+ref); err == nil {
+		return nil
+	}
+	return fmt.Errorf("git checkout ref %q failed: %w", ref, checkoutErr)
 }
 
 func refreshReusedGitBranch(ctx context.Context, workspaceDir, branch string) error {

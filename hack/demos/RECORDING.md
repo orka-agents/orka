@@ -592,7 +592,7 @@ the successful Task and renders:
 ╭─ One identity, two outcomes ────────────────────────────────╮
 │                                                             │
 │  txn-1a2b3c4d   ✓ scoped ok   → Task sealed                 │
-│  txn-5e6f7a8b   ✗ wrong scope → 403 in 1.2s                 │
+│  txn-5e6f7a8b   ✗ wrong namespace → 403 in 1.2s             │
 │                                                             │
 │  ServiceAccount → kontxt → Txn-Token → Orka                 │
 │                                                             │

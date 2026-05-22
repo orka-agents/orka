@@ -31,6 +31,9 @@ else
   kind create cluster --name "${cluster_name}"
 fi
 
+log "Selecting kubectl context kind-${cluster_name}"
+kubectl config use-context "kind-${cluster_name}" >/dev/null
+
 log "Building controller image ${img}"
 (cd "${repo_root}" && make docker-build IMG="${img}")
 
@@ -45,7 +48,7 @@ log "Deploying Orka (make deploy IMG=${img})"
 (cd "${repo_root}" && make deploy IMG="${img}")
 
 log "Waiting for orka-controller-manager rollout"
-kubectl -n "${namespace}" rollout status deployment/orka-controller-manager --timeout=300s || true
+kubectl -n "${namespace}" rollout status deployment/orka-controller-manager --timeout=300s
 
 log "Cluster up. Next steps (optional):"
 log "  hack/demos/cluster/install-kontxt.sh         # for Demo 50"

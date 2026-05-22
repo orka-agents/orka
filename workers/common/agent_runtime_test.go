@@ -497,6 +497,43 @@ func TestCloneRepo_ReusedWorkspaceChecksOutRef(t *testing.T) {
 	}
 }
 
+func TestCloneRepo_ReusedWorkspaceRejectsUnresolvedRef(t *testing.T) {
+	bareDir := t.TempDir()
+	runGit(t, bareDir, "init", "--bare")
+
+	workDir := t.TempDir()
+	runGit(t, workDir, "init")
+	runGit(t, workDir, "checkout", "-b", "main")
+	runGit(t, workDir, "config", "user.email", "test@test.com")
+	runGit(t, workDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(workDir, "main.txt"), []byte("main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workDir, "add", ".")
+	runGit(t, workDir, "commit", "-m", "main")
+	runGit(t, workDir, "remote", "add", "origin", bareDir)
+	runGit(t, workDir, "push", "origin", "main")
+	runGit(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	cloneDir := filepath.Join(t.TempDir(), "cloned")
+	if err := CloneRepo(context.Background(), &AgentConfig{GitRepo: bareDir, GitBranch: "main"}, cloneDir); err != nil {
+		t.Fatalf("initial CloneRepo failed: %v", err)
+	}
+	startSHA := strings.TrimSpace(runGitOutput(t, cloneDir, "rev-parse", "HEAD"))
+
+	err := CloneRepo(context.Background(), &AgentConfig{GitRepo: bareDir, GitRef: "missing/ref"}, cloneDir)
+	if err == nil {
+		t.Fatal("expected reused CloneRepo with unresolved ref to fail")
+	}
+	if !strings.Contains(err.Error(), `git checkout ref "missing/ref" failed`) {
+		t.Fatalf("error = %q, want unresolved ref checkout failure", err)
+	}
+	gotSHA := strings.TrimSpace(runGitOutput(t, cloneDir, "rev-parse", "HEAD"))
+	if gotSHA != startSHA {
+		t.Fatalf("HEAD = %s, want unchanged SHA %s", gotSHA, startSHA)
+	}
+}
+
 func TestCloneRepo_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately

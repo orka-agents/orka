@@ -622,14 +622,12 @@ EOF
 }
 
 render_kontxt_denied_caller_job() {
-  # Same identity, but ask the TTS for a TxToken with the wrong scope.
-  # The API rejects /tasks list calls without orka:tasks:list, demonstrating
-  # request-scoped authorization on top of SA-token authentication.
+  # Same identity and scope, but target a namespace outside the TxToken context.
+  # The API rejects the cross-namespace /tasks list call.
   render_kontxt_caller_job \
     "${DEMO_KONTXT_DENIED_JOB_NAME}" \
-    "${DEMO_NAMESPACE}" \
-    "0" \
-    "orka:secrets:read"
+    "${DEMO_KONTXT_DENIED_NAMESPACE}" \
+    "0"
 }
 
 # ---------------------------------------------------------------------------

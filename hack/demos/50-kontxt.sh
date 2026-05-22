@@ -77,7 +77,7 @@ chapter "Read the caller log" "🪵"
 demo_pe "kubectl logs -n ${kontxt_ns} job/${ok_job} --tail=20 | grep -E '^[0-9]/3'"
 
 # Chapter 5 ------------------------------------------------------------------
-narrate "Denied call: same identity, wrong scope — the TxToken can't list Tasks."
+narrate "Denied call: same identity and scope, wrong namespace — the TxToken can't list Tasks there."
 chapter "Run the denied caller" "🚫"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/kontxt-denied-job.yaml"
 log_info "Waiting for the denied caller Job to fail (this is expected)..."
