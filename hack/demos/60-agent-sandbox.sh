@@ -102,18 +102,18 @@ banner "Agent Sandbox — session reuse"
 # Chapter 1 ------------------------------------------------------------------
 narrate "Two agents with different toolsets share a workspace across turns."
 chapter "Apply the scout + builder Agents" "🤝"
+log_info "Session: ${session}  ·  Sandbox template: ${DEMO_SANDBOX_TEMPLATE_REF}"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/sandbox-scout-agent.yaml"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/sandbox-builder-agent.yaml"
-demo_pe "kubectl get agents -n ${DEMO_NAMESPACE} ${scout_agent} ${builder_agent}"
 
 # Chapter 2 ------------------------------------------------------------------
 narrate "Turn 1 creates the session — sessionRef.create=true."
-chapter "Turn 1: scout the repo" "🔎"
+chapter "Turn 1: scout the repo (read-only)" "🔎"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/sandbox-turn-1.yaml"
 log_info "Waiting for scout to finish (timeout ${DEMO_SANDBOX_TURN_TIMEOUT:-1800}s)..."
 wait_for_task_succeeded         "${t1}" "${DEMO_SANDBOX_TURN_TIMEOUT:-1800}" >/dev/null
 wait_for_task_result_available  "${t1}" "${DEMO_SANDBOX_RESULT_TIMEOUT:-120}" >/dev/null
-log_success "turn 1 succeeded"
+log_success "turn 1 succeeded; SandboxClaim created"
 demo_pe "kubectl get sandboxclaims -n ${sandbox_claim_namespace} -l orka.ai/session=${session}"
 
 # Chapter 3 ------------------------------------------------------------------
@@ -123,7 +123,7 @@ demo_pe "kubectl apply -f ${DEMO_WORKDIR}/sandbox-turn-2.yaml"
 log_info "Waiting for builder to finish (timeout ${DEMO_SANDBOX_TURN_TIMEOUT:-1800}s)..."
 wait_for_task_succeeded         "${t2}" "${DEMO_SANDBOX_TURN_TIMEOUT:-1800}" >/dev/null
 wait_for_task_result_available  "${t2}" "${DEMO_SANDBOX_RESULT_TIMEOUT:-120}" >/dev/null
-log_success "turn 2 succeeded"
+log_success "turn 2 succeeded; PR opened"
 
 # Chapter 4 ------------------------------------------------------------------
 narrate "Turn 3 reuses the same workspace — branch is still checked out."
@@ -135,9 +135,9 @@ wait_for_task_result_available  "${t3}" "${DEMO_SANDBOX_RESULT_TIMEOUT:-120}" >/
 log_success "turn 3 succeeded"
 
 # Chapter 5 ------------------------------------------------------------------
-narrate "Worker logs print the claim name — same string for all three turns."
-chapter "Worker log evidence" "🪵"
-demo_pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/session=${session} -o jsonpath='{range .items[*]}{.metadata.name}{\"\\t\"}{.status.phase}{\"\\n\"}{end}'"
+narrate "All three turns landed on Succeeded — Orka stitched the workspace."
+chapter "Session Tasks at a glance" "🪵"
+demo_pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/session=${session} -L orka.ai/session"
 
 # Chapter 6 ------------------------------------------------------------------
 narrate "PR URL from turn 2's result; verify it's a real GitHub pull request."

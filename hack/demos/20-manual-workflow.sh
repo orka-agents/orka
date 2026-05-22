@@ -50,24 +50,24 @@ demo_pe "kubectl get agents -n ${DEMO_NAMESPACE} ${DEMO_PR_COORDINATOR_NAME} ${D
 narrate "The Task manifest is the source of truth — same prompt as the chat path."
 chapter "Inspect the Task manifest" "📄"
 demo_show "${DEMO_WORKDIR}/manual-story.txt"
-log_info "Full Task manifest: ${DEMO_WORKDIR}/manual-task.yaml"
 demo_show "${DEMO_WORKDIR}/manual-task.yaml"
 
 # Chapter 3 ------------------------------------------------------------------
 narrate "kubectl apply creates the coordinator Task — Orka reconciles it."
 chapter "Create the coordinator Task" "🚀"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/manual-task.yaml"
-demo_pe "kubectl get task ${DEMO_MANUAL_TASK_NAME} -n ${DEMO_NAMESPACE}"
 
 # Chapter 4 ------------------------------------------------------------------
 narrate "Implementation, validation, parallel review, CI — silently, in the background."
 chapter "Coordinator runs to completion" "⏳"
-demo_pe "require_orka_api_reachable"
+require_orka_api_reachable
+log_success "Orka API reachable at ${ORKA_API_BASE}"
 log_info "Waiting for the coordinator to finish (timeout ${DEMO_MANUAL_TASK_TIMEOUT:-10800}s)..."
 wait_for_task_succeeded            "${DEMO_MANUAL_TASK_NAME}" "${DEMO_MANUAL_TASK_TIMEOUT:-10800}" >/dev/null
 wait_for_task_result_available     "${DEMO_MANUAL_TASK_NAME}" "${DEMO_MANUAL_RESULT_TIMEOUT:-120}"  >/dev/null
 log_success "coordinator succeeded"
-demo_pe "orka_api GET \"/api/v1/tasks/${DEMO_MANUAL_TASK_NAME}/children?namespace=${DEMO_NAMESPACE}\" | jq '.items | map({name: .metadata.name, agent: .spec.agentRef.name, phase: .status.phase})'"
+log_info "Child tasks spawned by the coordinator:"
+demo_pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/parent-task=${DEMO_MANUAL_TASK_NAME}"
 
 # Chapter 5 ------------------------------------------------------------------
 narrate "Same PR. Same agents. Just YAML."

@@ -60,27 +60,30 @@ chapter "Apply the scan + remediation Agents" "🔍"
 log_info "Target: ${DEMO_SECURITY_GIT_REPO} (${DEMO_SECURITY_GIT_BRANCH})"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/security-agents.yaml"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/security-repositoryscan.yaml"
+demo_pe "kubectl get repositoryscan ${DEMO_SECURITY_SCAN_NAME} -n ${DEMO_NAMESPACE}"
 
 # Chapter 2 ------------------------------------------------------------------
 narrate "Findings are severity-ranked; the top one becomes the work item."
 chapter "Inspect the open findings" "📋"
-demo_pe "orka_api GET \"/api/v1/security/repositories/${DEMO_SECURITY_SCAN_NAME}?namespace=${DEMO_NAMESPACE}\" | jq '{name: .metadata.name, phase: .status.phase, findings: .status.findingCounts}'"
-demo_pe "orka_api GET \"/api/v1/security/repositories/${DEMO_SECURITY_SCAN_NAME}/findings?namespace=${DEMO_NAMESPACE}&state=open&limit=5\" | jq '.items | map({id, severity, title, validationStatus, state})'"
+log_info "Top 5 open findings ranked by severity:"
+demo_pe "orka_api GET \"/api/v1/security/repositories/${DEMO_SECURITY_SCAN_NAME}/findings?namespace=${DEMO_NAMESPACE}&state=open&limit=5\" | jq -r '.items[] | \"\\(.severity)\\t\\(.id)\\t\\(.title)\"' | column -t -s\$'\\t'"
 log_success "selected finding: ${security_finding_id}"
 
 # Chapter 3 ------------------------------------------------------------------
 narrate "One POST asks Orka to patch the finding — a remediation Task is born."
 chapter "Request a patch" "🛠️"
+log_info "Requesting patch for finding ${security_finding_id}..."
 demo_pe "orka_api POST \"/api/v1/security/findings/${security_finding_id}/patch?namespace=${DEMO_NAMESPACE}\" | jq '{id, status, branch}'"
 
 # Chapter 4 ------------------------------------------------------------------
-narrate "Remediation runs; we wait silently for the patch proposal to land."
+narrate "Remediation runs; we wait for the patch proposal to land."
 chapter "Wait for the patch proposal" "⏳"
 log_info "Waiting for patch proposal (timeout ${DEMO_SECURITY_PATCH_TIMEOUT:-1200}s)..."
 wait_for_patch_proposal_ready "${security_finding_id}" "${DEMO_SECURITY_PATCH_TIMEOUT:-1200}" \
   || die "patch proposal did not become ready for finding ${security_finding_id}"
 log_success "patch proposal ready"
-demo_pe "orka_api GET \"/api/v1/security/findings/${security_finding_id}/patches?namespace=${DEMO_NAMESPACE}\" | jq '.items | map({id, status, branch, taskName})'"
+log_info "Patch proposals for ${security_finding_id}:"
+demo_pe "orka_api GET \"/api/v1/security/findings/${security_finding_id}/patches?namespace=${DEMO_NAMESPACE}\" | jq -r '.items[] | \"\\(.status)\\t\\(.branch)\\t\\(.taskName)\"' | column -t -s\$'\\t'"
 
 # Chapter 5 ------------------------------------------------------------------
 narrate "The patch becomes a real branch and a real PR for human review."
@@ -89,7 +92,7 @@ log_info "Waiting for pull request to open (timeout ${DEMO_SECURITY_PR_TIMEOUT:-
 wait_for_security_pull_request "${security_finding_id}" "${DEMO_SECURITY_PR_TIMEOUT:-180}" \
   > "${DEMO_WORKDIR}/security-pr.json" \
   || die "pull request did not open for finding ${security_finding_id}"
-demo_pe "jq '{status, number: (.prNumber // .number), html_url: (.prURL // .html_url)}' ${DEMO_WORKDIR}/security-pr.json"
+log_success "pull request opened"
 
 # Chapter 6 ------------------------------------------------------------------
 narrate "Scan → finding → patch → branch → PR — every step replayable from the API."

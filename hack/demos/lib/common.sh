@@ -1374,10 +1374,70 @@ wait_for_first_security_finding() {
   return 1
 }
 
+# wait_for_job_with_progress <job-name> <namespace> <timeout-seconds> <expect>
+# expect = "complete"   → return 0 on Complete=True, 1 on Failed=True
+# expect = "fail"       → return 0 on Failed=True,   1 on Complete=True
+# Emits a per-tick status line to stderr (in-place on tty, newlines off-tty)
+# showing the latest Pod phase so the viewer can see what's happening.
+# Honors DEMO_WAIT_QUIET and hero profile.
+wait_for_job_with_progress() {
+  local job_name="$1"
+  local job_ns="$2"
+  local timeout_seconds="${3:-120}"
+  local expect="${4:-complete}"
+  local deadline start elapsed complete failed pod_phase line
+  start="${SECONDS}"
+  deadline=$((SECONDS + timeout_seconds))
+  local tick_interval="${DEMO_WAIT_TICK_SECONDS:-3}"
+  (( tick_interval < 1 )) && tick_interval=1
+
+  while (( SECONDS < deadline )); do
+    complete="$(kubectl get job "${job_name}" -n "${job_ns}" \
+      -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)"
+    failed="$(kubectl get job "${job_name}" -n "${job_ns}" \
+      -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
+
+    if [[ "${complete}" == "True" ]]; then
+      if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+        printf '\n' >&2
+      fi
+      [[ "${expect}" == "complete" ]] && return 0 || return 1
+    fi
+    if [[ "${failed}" == "True" ]]; then
+      if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+        printf '\n' >&2
+      fi
+      [[ "${expect}" == "fail" ]] && return 0 || return 1
+    fi
+
+    if [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+      pod_phase="$(kubectl get pods -n "${job_ns}" -l "job-name=${job_name}" \
+        --sort-by=.metadata.creationTimestamp \
+        -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null || true)"
+      [[ -z "${pod_phase}" ]] && pod_phase="Pending"
+      elapsed=$(( SECONDS - start ))
+      line="$(printf '[%s] ⏳  job/%s pod=%s elapsed=%ss' \
+              "$(__demo_log_ts)" "${job_name}" "${pod_phase}" "${elapsed}")"
+      if [[ -t 2 ]]; then
+        printf '\r\033[2K%b%s%b' "${DIM}" "${line}" "${COLOR_RESET}" >&2
+      else
+        printf '%s\n' "${line}" >&2
+      fi
+    fi
+    sleep "${tick_interval}"
+  done
+
+  if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+    printf '\n' >&2
+  fi
+  return 1
+}
+
 wait_for_patch_proposal_ready() {
   local finding_id="$1"
   local timeout_seconds="${2:-1200}"
-  local deadline status
+  local deadline status start elapsed line
+  start="${SECONDS}"
   deadline=$((SECONDS + timeout_seconds))
 
   while (( SECONDS < deadline )); do
@@ -1385,15 +1445,34 @@ wait_for_patch_proposal_ready() {
       | jq -r '.items[0].status // empty')"
     case "${status}" in
       succeeded|pr_opened)
+        if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+          printf '\n' >&2
+        fi
         return 0
         ;;
       failed)
+        if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+          printf '\n' >&2
+        fi
         return 1
         ;;
     esac
+    if [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+      elapsed=$(( SECONDS - start ))
+      line="$(printf '[%s] ⏳  patch %s status=%s elapsed=%ss' \
+              "$(__demo_log_ts)" "${finding_id}" "${status:-pending}" "${elapsed}")"
+      if [[ -t 2 ]]; then
+        printf '\r\033[2K%b%s%b' "${DIM}" "${line}" "${COLOR_RESET}" >&2
+      else
+        printf '%s\n' "${line}" >&2
+      fi
+    fi
     sleep 10
   done
 
+  if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+    printf '\n' >&2
+  fi
   return 1
 }
 

@@ -55,7 +55,6 @@ chapter "Apply the caller ServiceAccount" "🪪"
 log_info "TTS URL: ${DEMO_KONTXT_TTS_URL}"
 log_info "Audience: ${DEMO_KONTXT_TTS_AUDIENCE}"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/kontxt-sa.yaml"
-demo_pe "kubectl get sa ${DEMO_KONTXT_SA_NAME} -n ${kontxt_ns}"
 
 # Chapter 2 ------------------------------------------------------------------
 narrate "The Job mounts a projected SA token with audience=${DEMO_KONTXT_TTS_AUDIENCE}."
@@ -66,10 +65,10 @@ demo_show "${DEMO_WORKDIR}/kontxt-job.yaml"
 narrate "Allowed call: target namespace matches what the TTS will authorize."
 chapter "Run the allowed caller" "✅"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/kontxt-job.yaml"
-log_info "Waiting for the caller Job to complete..."
-kubectl wait --for=condition=complete --timeout=120s \
-  -n "${kontxt_ns}" "job/${ok_job}" >/dev/null \
+log_info "Waiting for the caller Job to complete (timeout 120s)..."
+wait_for_job_with_progress "${ok_job}" "${kontxt_ns}" 120 complete \
   || die "allowed caller Job did not complete in time"
+log_success "allowed caller completed"
 
 # Chapter 4 ------------------------------------------------------------------
 narrate "The caller prints 1/3 → 2/3 → 3/3; JWTs are redacted by the image."
@@ -81,26 +80,9 @@ narrate "Denied call: same identity and scope, wrong namespace — the TxToken c
 chapter "Run the denied caller" "🚫"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/kontxt-denied-job.yaml"
 log_info "Waiting for the denied caller Job to fail (this is expected)..."
-# The denied job sets backoffLimit: 0; either Failed or Complete=false within 120s.
-deadline=$(( SECONDS + 120 ))
-denied_status=""
-denied_complete=""
-while (( SECONDS < deadline )); do
-  denied_status="$(kubectl get job "${denied_job}" -n "${kontxt_ns}" \
-    -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
-  if [[ "${denied_status}" == "True" ]]; then
-    break
-  fi
-  denied_complete="$(kubectl get job "${denied_job}" -n "${kontxt_ns}" \
-    -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)"
-  if [[ "${denied_complete}" == "True" ]]; then
-    die "denied caller Job completed; expected authorization failure"
-  fi
-  sleep 3
-done
-if [[ "${denied_status}" != "True" ]]; then
-  die "denied caller Job did not transition to Failed=True within 120s"
-fi
+wait_for_job_with_progress "${denied_job}" "${kontxt_ns}" 120 fail \
+  || die "denied caller Job did not transition to Failed=True within 120s"
+log_success "denied caller failed as expected"
 
 # Chapter 6 ------------------------------------------------------------------
 narrate "Failure surface: 3/3 reports status=403, no JWT material in logs."

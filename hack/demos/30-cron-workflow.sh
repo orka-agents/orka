@@ -63,15 +63,15 @@ demo_pe "kubectl apply -f ${DEMO_WORKDIR}/cron-task.yaml"
 
 # Chapter 2 ------------------------------------------------------------------
 narrate "Each tick spawns a child Task — pre-warmed so we skip the wait."
-chapter "Watch a child Task appear" "👶"
-log_success "first child task: ${DEMO_CRON_CHILD_TASK}"
-demo_pe "kubectl get task ${DEMO_CRON_TASK_NAME} -n ${DEMO_NAMESPACE}"
+chapter "Watch the schedule tick" "👶"
+log_success "first child task already completed off-camera: ${DEMO_CRON_CHILD_TASK}"
 demo_pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/parent-task=${DEMO_CRON_TASK_NAME},orka.ai/scheduled-run=true"
 
 # Chapter 3 ------------------------------------------------------------------
 narrate "The child's result is the repository heartbeat report."
 chapter "Fetch the heartbeat result" "💓"
-demo_pe "orka_api GET \"/api/v1/tasks/${DEMO_CRON_CHILD_TASK}/result?namespace=${DEMO_NAMESPACE}\" | jq -r '.result | .[0:600]'"
+log_info "First 600 chars of ${DEMO_CRON_CHILD_TASK} result:"
+demo_pe "orka_api GET \"/api/v1/tasks/${DEMO_CRON_CHILD_TASK}/result?namespace=${DEMO_NAMESPACE}\" | jq -r '.result[0:600]'"
 
 # Chapter 4 ------------------------------------------------------------------
 narrate "Same Task status, history, and result API as interactive runs."
