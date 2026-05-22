@@ -570,9 +570,16 @@ EOF
 
 render_kontxt_caller_job() {
   local job_name="${1:-${DEMO_KONTXT_JOB_NAME}}"
-  local target_ns="${2:-${DEMO_NAMESPACE}}"
+  # Default the target to the bound namespace so the allowed path is a clean
+  # match. The denied job overrides target_ns to DEMO_KONTXT_DENIED_NAMESPACE.
+  local target_ns="${2:-${DEMO_KONTXT_NAMESPACE}}"
   local backoff="${3:-0}"
   local requested_scope="${4:-orka:tasks:list orka:tasks:get}"
+  # Bind the TxToken to DEMO_KONTXT_NAMESPACE via request_details (becomes
+  # the tctx claim). The allowed job targets the same namespace and is
+  # accepted; the denied job targets DEMO_KONTXT_DENIED_NAMESPACE and is
+  # rejected by Orka's tctx.namespace check.
+  local bound_ns="${5:-${DEMO_KONTXT_NAMESPACE}}"
   cat <<EOF
 apiVersion: batch/v1
 kind: Job
@@ -606,6 +613,8 @@ spec:
               value: ${target_ns}
             - name: KONTXT_TTS_PARENT_SCOPE
               value: "${requested_scope}"
+            - name: KONTXT_BOUND_NAMESPACE
+              value: ${bound_ns}
           volumeMounts:
             - name: kontxt-token
               mountPath: /var/run/orka

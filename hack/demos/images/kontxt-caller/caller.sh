@@ -37,7 +37,15 @@ emit "1/3 subject token: present (${SUBJECT_TOKEN_PATH})"
 # 2/3 — exchange the subject token at the TTS for a TxToken. The TTS
 # server in scripts/live-kontxt-e2e (main.go:137) registers /token_endpoint
 # and expects id_token subject_token_type + txn_token requested_token_type.
+# `request_details` becomes the `tctx` claim in the minted TxToken; Orka's
+# /api/v1/tasks handler then enforces `tctx.namespace == ?namespace=` per
+# internal/api/context_token_authorization.go:544. Both the allowed and
+# denied callers bind the TxToken to KONTXT_BOUND_NAMESPACE (default
+# "default"); the denied job demonstrates rejection by then targeting a
+# different ?namespace= than the binding.
 : "${KONTXT_TTS_PARENT_SCOPE:=orka:tasks:list orka:tasks:get}"
+: "${KONTXT_BOUND_NAMESPACE:=default}"
+request_details="$(printf '{"namespace":"%s"}' "${KONTXT_BOUND_NAMESPACE}")"
 tts_response="$(curl -sS -m 15 \
   -X POST "${ORKA_CONTEXT_TOKEN_TTS_URL}/token_endpoint" \
   -H 'Content-Type: application/x-www-form-urlencoded' \
@@ -45,6 +53,7 @@ tts_response="$(curl -sS -m 15 \
   --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:id_token' \
   --data-urlencode 'requested_token_type=urn:ietf:params:oauth:token-type:txn_token' \
   --data-urlencode "scope=${KONTXT_TTS_PARENT_SCOPE}" \
+  --data-urlencode "request_details=${request_details}" \
   --data-urlencode "subject_token=$(cat "${SUBJECT_TOKEN_PATH}")" || true)"
 
 if ! tx_token="$(printf '%s' "${tts_response}" | jq -r '.access_token // empty')" \
