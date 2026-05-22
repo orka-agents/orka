@@ -679,10 +679,15 @@ print_chat_client_json_summary() {
   session_id="$(jq -r '.session_id // empty' "${output_file}")"
   result="$(jq -r '.result // empty' "${output_file}")"
 
-  if [[ -n "${session_id}" ]]; then
-    printf 'chat client session: %s\n' "${session_id}"
+  # Presenter audience wants the full audit trail (session id + on-disk path
+  # for post-run inspection). Recording profiles get the human-readable
+  # result body only — no UUIDs, no /tmp paths.
+  if demo_profile_is presenter; then
+    if [[ -n "${session_id}" ]]; then
+      printf 'chat client session: %s\n' "${session_id}"
+    fi
+    printf 'debug response file: %s\n' "${output_file}"
   fi
-  printf 'debug response file: %s\n' "${output_file}"
 
   if [[ "${DEMO_SHOW_CHAT_CLIENT_RESULT}" == "1" && -n "${result}" ]]; then
     printf 'chat client summary:\n%s\n' "${result}"
@@ -1141,23 +1146,71 @@ latest_scheduled_child_task() {
   latest_task_by_selector "orka.ai/parent-task=${DEMO_CRON_TASK_NAME},orka.ai/scheduled-run=true"
 }
 
+__demo_wait_emit_status() {
+  # Emit a one-line "phase=X children=N latest=child/Phase elapsed=Zs" status
+  # to stderr so callers using $() capture on stdout still see clean output.
+  # Uses \r in-place rewrite when stderr is a tty; falls back to newlines
+  # so log scrapers and non-tty runs still get readable output.
+  local task_name="$1"
+  local elapsed="$2"
+  if [[ "${DEMO_WAIT_QUIET:-0}" == "1" ]] || demo_profile_is hero; then
+    return 0
+  fi
+  local phase children latest_child latest_phase latest_label line
+  phase="$(kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  [[ -z "${phase}" ]] && phase="Pending"
+  children="$(kubectl get tasks -n "${DEMO_NAMESPACE}" -l "orka.ai/parent-task=${task_name}" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+  latest_child="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
+                    -l "orka.ai/parent-task=${task_name}" \
+                    --sort-by=.metadata.creationTimestamp \
+                    -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)"
+  latest_phase="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
+                    -l "orka.ai/parent-task=${task_name}" \
+                    --sort-by=.metadata.creationTimestamp \
+                    -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null || true)"
+  latest_label=""
+  if [[ -n "${latest_child}" ]]; then
+    latest_label=" latest=${latest_child}/${latest_phase:-Pending}"
+  fi
+  line="$(printf '[%s] ⏳  %s phase=%s children=%s%s elapsed=%ss' \
+          "$(__demo_log_ts)" "${task_name}" "${phase}" "${children}" "${latest_label}" "${elapsed}")"
+  if [[ -t 2 ]]; then
+    # Clear the prior line, then rewrite in place.
+    printf '\r\033[2K%b%s%b' "${DIM}" "${line}" "${COLOR_RESET}" >&2
+  else
+    printf '%s\n' "${line}" >&2
+  fi
+}
+
 wait_for_task_terminal() {
   local task_name="$1"
   local timeout_seconds="${2:-900}"
-  local deadline phase
+  local deadline phase elapsed start
+  start="${SECONDS}"
   deadline=$((SECONDS + timeout_seconds))
+  local tick_interval="${DEMO_WAIT_TICK_SECONDS:-5}"
+  (( tick_interval < 1 )) && tick_interval=1
 
   while (( SECONDS < deadline )); do
     phase="$(kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
     case "${phase}" in
       Succeeded|Failed|Cancelled)
+        # Newline so the next log line lands on a fresh row after \r updates.
+        if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+          printf '\n' >&2
+        fi
         printf '%s\n' "${phase}"
         return 0
         ;;
     esac
-    sleep 5
+    elapsed=$(( SECONDS - start ))
+    __demo_wait_emit_status "${task_name}" "${elapsed}"
+    sleep "${tick_interval}"
   done
 
+  if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+    printf '\n' >&2
+  fi
   return 1
 }
 

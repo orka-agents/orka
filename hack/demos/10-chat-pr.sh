@@ -66,9 +66,12 @@ narrate "The same wire format your Claude client already speaks."
 chapter "Send the request through Orka's Anthropic API" "📨"
 export ANTHROPIC_BASE_URL="$(demo_anthropic_base_url)"
 export ANTHROPIC_MODEL="$(demo_anthropic_model)"
-demo_pe "require_orka_api_reachable"
+require_orka_api_reachable
+log_success "Orka Anthropic API reachable at ${ANTHROPIC_BASE_URL}"
 DEMO_CHAT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-demo_pe 'run_demo_chat_request_file "${DEMO_WORKDIR}/chat-request.txt" "${DEMO_WORKDIR}/chat-client-result.json"'
+log_info  "Sending chat request to ${ANTHROPIC_MODEL} via ${DEMO_CHAT_CLIENT}..."
+run_demo_chat_request_file "${DEMO_WORKDIR}/chat-request.txt" "${DEMO_WORKDIR}/chat-client-result.json"
+log_success "Chat request accepted; coordinator Task will appear shortly"
 
 # Chapter 3 ------------------------------------------------------------------
 narrate "The chat turn creates a real coordinator Task in Kubernetes."
