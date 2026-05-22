@@ -60,7 +60,7 @@ func (t *CreateContainerTaskTool) Execute(ctx context.Context, args json.RawMess
 	// Route to the coordinator path when the chat-executor hooks are absent.
 	// Worker-side ToolContexts only set Client/Namespace/Tenant/TaskID and
 	// leave the chat-only function fields nil; calling them would panic.
-	if tc == nil || tc.CheckTaskLimit == nil || tc.GenerateTaskName == nil || tc.TaskLabels == nil {
+	if tc == nil || tc.CheckTaskLimit == nil || tc.GenerateTaskName == nil || tc.TaskLabels == nil || tc.IncrementTasks == nil {
 		return t.executeCoordination(ctx, args)
 	}
 

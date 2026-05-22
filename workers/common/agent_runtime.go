@@ -142,11 +142,9 @@ func SetupGitCredentials() {
 //
 // When the workspace already contains a git repository (e.g. a sandbox
 // workspace reused across turns of the same session), CloneRepo skips the
-// clone and instead refreshes the working tree against the latest remote
-// branch head so subsequent turns see fresh commits without losing local
-// state captured during the prior turn (the worker decides separately
-// whether to reset hard versus preserve in-progress edits — see the branch
-// refresh logic below).
+// clone and refreshes in place. Branch workspaces are fast-forwarded only
+// when the configured branch is still checked out; a session-created branch
+// is preserved as part of the reused workspace state.
 func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error {
 	// Detect a reused workspace: if <workspaceDir>/.git exists we already
 	// have a clone (sandbox session reuse). Re-running `git clone` would
@@ -154,11 +152,8 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 	if info, err := os.Stat(filepath.Join(workspaceDir, ".git")); err == nil && (info.IsDir() || info.Mode().IsRegular()) {
 		fmt.Printf("Reusing existing git repo at %s (sandbox workspace reuse)\n", workspaceDir)
 		if cfg.GitBranch != "" && cfg.GitRef == "" {
-			// Best-effort refresh: fetch the branch and fast-forward the
-			// working tree. Failures here are non-fatal — the existing
-			// checkout is still usable for the agent.
-			if fetchErr := execGitContext(ctx, workspaceDir, "fetch", "--depth=1", "origin", cfg.GitBranch); fetchErr != nil {
-				fmt.Fprintf(os.Stderr, "warning: git fetch on reused workspace failed: %v\n", fetchErr)
+			if err := refreshReusedGitBranch(ctx, workspaceDir, cfg.GitBranch); err != nil {
+				return err
 			}
 		}
 		if cfg.GitRef != "" {
@@ -230,6 +225,30 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 	return nil
 }
 
+func refreshReusedGitBranch(ctx context.Context, workspaceDir, branch string) error {
+	if err := execGitContext(ctx, workspaceDir, "fetch", "origin", branch); err != nil {
+		return fmt.Errorf("git fetch branch %q on reused workspace failed: %w", branch, err)
+	}
+
+	currentBranch, err := execGitOutputContext(ctx, workspaceDir, "branch", "--show-current")
+	if err != nil {
+		return fmt.Errorf("git inspect current branch on reused workspace failed: %w", err)
+	}
+	if currentBranch != strings.TrimSpace(branch) {
+		if currentBranch == "" {
+			fmt.Printf("Reused git repo is detached; fetched origin/%s without switching\n", branch)
+		} else {
+			fmt.Printf("Reused git repo remains on branch %q; fetched origin/%s without switching\n", currentBranch, branch)
+		}
+		return nil
+	}
+
+	if err := execGitContext(ctx, workspaceDir, "merge", "--ff-only", "FETCH_HEAD"); err != nil {
+		return fmt.Errorf("git fast-forward branch %q on reused workspace failed: %w", branch, err)
+	}
+	return nil
+}
+
 func gitSafeDirectoryArgs(dir string, args ...string) []string {
 	if strings.TrimSpace(dir) == "" {
 		return args
@@ -241,6 +260,14 @@ func gitSafeDirectoryArgs(dir string, args ...string) []string {
 	}
 
 	return append([]string{"-c", "safe.directory=" + safeDir}, args...)
+}
+
+func execGitOutputContext(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", gitSafeDirectoryArgs(dir, args...)...)
+	cmd.Dir = dir
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
 }
 
 func execGitContext(ctx context.Context, dir string, args ...string) error {

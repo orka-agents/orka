@@ -84,16 +84,22 @@ log_info "Waiting for the denied caller Job to fail (this is expected)..."
 # The denied job sets backoffLimit: 0; either Failed or Complete=false within 120s.
 deadline=$(( SECONDS + 120 ))
 denied_status=""
+denied_complete=""
 while (( SECONDS < deadline )); do
   denied_status="$(kubectl get job "${denied_job}" -n "${kontxt_ns}" \
     -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
   if [[ "${denied_status}" == "True" ]]; then
     break
   fi
+  denied_complete="$(kubectl get job "${denied_job}" -n "${kontxt_ns}" \
+    -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)"
+  if [[ "${denied_complete}" == "True" ]]; then
+    die "denied caller Job completed; expected authorization failure"
+  fi
   sleep 3
 done
 if [[ "${denied_status}" != "True" ]]; then
-  log_warning "denied job did not transition to Failed=True within 120s; continuing anyway"
+  die "denied caller Job did not transition to Failed=True within 120s"
 fi
 
 # Chapter 6 ------------------------------------------------------------------

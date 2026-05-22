@@ -470,12 +470,9 @@ func (e *AgentSandboxExecutor) Exec(ctx context.Context, req ExecRequest) (*Exec
 		}
 	}
 
-	// The handle's underlying SDK client was created with the Claim-time
-	// RequestTimeout (typically a short claim-readiness window). Exec calls
-	// can run for the full CommandTimeout — pass it as a per-call override
-	// so the SDK's http.Client doesn't drop long-running commands. We only
-	// override when the caller supplied a positive timeout; otherwise we
-	// let the SDK use its client default.
+	// Claim normally sizes the cached SDK client for MaxRequestTimeout, which
+	// covers long Exec calls. Keep this per-call timeout as a safety net for
+	// handles created without that larger transport budget.
 	runOpts := []sandbox.CallOption{}
 	if req.Timeout > 0 {
 		runOpts = append(runOpts, sandbox.WithTimeout(req.Timeout))
@@ -755,10 +752,7 @@ func (e *AgentSandboxExecutor) agentSandboxOptions(req ClaimRequest) sandbox.Opt
 	// longer of Timeout and MaxRequestTimeout so a long-running command
 	// is not killed by a transport-level ResponseHeaderTimeout sized for
 	// the short claim-readiness window.
-	transportTimeout := req.Timeout
-	if req.MaxRequestTimeout > transportTimeout {
-		transportTimeout = req.MaxRequestTimeout
-	}
+	transportTimeout := max(req.Timeout, req.MaxRequestTimeout)
 	if transportTimeout > 0 {
 		opts.RequestTimeout = transportTimeout
 		opts.PerAttemptTimeout = transportTimeout
