@@ -219,23 +219,55 @@ func fetchGitRef(ctx context.Context, workspaceDir, ref string) (bool, error) {
 }
 
 func checkoutGitRef(ctx context.Context, workspaceDir, ref string, directFetch bool) error {
-	checkoutErr := execGitContext(ctx, workspaceDir, "checkout", ref)
-	if checkoutErr == nil {
-		return nil
-	}
 	if directFetch {
-		// FETCH_HEAD is only a precise checkout target after fetching the
-		// requested ref directly. A broad remote-head fetch may point it at an
-		// unrelated branch.
-		if fbErr := execGitContext(ctx, workspaceDir, "checkout", "FETCH_HEAD"); fbErr == nil {
+		if err := execGitContext(ctx, workspaceDir, "checkout", "FETCH_HEAD"); err == nil {
 			return nil
+		} else if branchErr := execGitContext(ctx, workspaceDir, "checkout", "origin/"+ref); branchErr == nil {
+			return nil
+		} else {
+			return fmt.Errorf("git checkout fetched ref %q failed: %w", ref, err)
 		}
 	}
 
-	if err := execGitContext(ctx, workspaceDir, "checkout", "origin/"+ref); err == nil {
+	originErr := execGitContext(ctx, workspaceDir, "checkout", "origin/"+ref)
+	if originErr == nil {
 		return nil
 	}
-	return fmt.Errorf("git checkout ref %q failed: %w", ref, checkoutErr)
+	if isHexGitObjectID(ref) && remoteBranchesContainRef(ctx, workspaceDir, ref) {
+		if err := execGitContext(ctx, workspaceDir, "checkout", ref); err == nil {
+			return nil
+		} else {
+			return fmt.Errorf("git checkout fetched commit ref %q failed: %w", ref, err)
+		}
+	}
+	return fmt.Errorf("git checkout ref %q failed: %w", ref, originErr)
+}
+
+func isHexGitObjectID(ref string) bool {
+	if len(ref) < 7 || len(ref) > 64 {
+		return false
+	}
+	for _, r := range ref {
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func remoteBranchesContainRef(ctx context.Context, workspaceDir, ref string) bool {
+	out, err := execGitOutputContext(ctx, workspaceDir, "branch", "-r", "--contains", ref)
+	if err != nil {
+		return false
+	}
+	for line := range strings.SplitSeq(out, "\n") {
+		branch := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "*"))
+		if strings.HasPrefix(branch, "origin/") {
+			return true
+		}
+	}
+	return false
 }
 
 func refreshReusedGitBranch(ctx context.Context, workspaceDir, branch string) error {

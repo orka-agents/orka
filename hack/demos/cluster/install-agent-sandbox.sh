@@ -40,6 +40,9 @@ if ! kind get clusters | grep -qx "${cluster_name}"; then
   die "kind cluster ${cluster_name} not found — run hack/demos/cluster/cluster-up.sh first"
 fi
 
+log "Selecting kubectl context kind-${cluster_name}"
+kubectl config use-context "kind-${cluster_name}" >/dev/null
+
 log "Installing agent-sandbox ${agent_sandbox_version} CRDs + controllers"
 kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${agent_sandbox_version}/manifest.yaml"
 kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${agent_sandbox_version}/extensions.yaml"

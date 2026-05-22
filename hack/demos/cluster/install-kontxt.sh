@@ -43,6 +43,9 @@ if ! kind get clusters | grep -qx "${cluster_name}"; then
   die "kind cluster ${cluster_name} not found — run hack/demos/cluster/cluster-up.sh first"
 fi
 
+log "Selecting kubectl context kind-${cluster_name}"
+kubectl config use-context "kind-${cluster_name}" >/dev/null
+
 # 1. Ephemeral RSA key + JWKS. We inline a small generator (mirrors
 #    scripts/live-github-oidc-e2e.sh:310–446) so the JWKS schema matches
 #    what the TTS verifier in the live-kontxt-e2e helper image expects.

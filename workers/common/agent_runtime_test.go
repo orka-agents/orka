@@ -519,6 +519,15 @@ func TestCloneRepo_ReusedWorkspaceRejectsUnresolvedRef(t *testing.T) {
 	if err := CloneRepo(context.Background(), &AgentConfig{GitRepo: bareDir, GitBranch: "main"}, cloneDir); err != nil {
 		t.Fatalf("initial CloneRepo failed: %v", err)
 	}
+	runGit(t, cloneDir, "checkout", "-b", "missing/ref")
+	runGit(t, cloneDir, "config", "user.email", "test@test.com")
+	runGit(t, cloneDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(cloneDir, "stale.txt"), []byte("stale local branch"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, cloneDir, "add", ".")
+	runGit(t, cloneDir, "commit", "-m", "stale local branch")
+	runGit(t, cloneDir, "checkout", "main")
 	startSHA := strings.TrimSpace(runGitOutput(t, cloneDir, "rev-parse", "HEAD"))
 
 	err := CloneRepo(context.Background(), &AgentConfig{GitRepo: bareDir, GitRef: "missing/ref"}, cloneDir)
