@@ -695,9 +695,20 @@ run_demo_chat_client_claude_code() {
   model="$(demo_anthropic_model)"
   base_url="$(demo_anthropic_base_url)"
 
+  # Write a per-run settings file so the demo's ANTHROPIC_BASE_URL/API_KEY win over
+  # whatever the user has in ~/.claude/settings.json (which Claude Code's settings.env
+  # block overrides shell env, even in --bare mode).
+  local settings_file
+  settings_file="$(mktemp -t orka-demo-claude-settings.XXXXXX.json)"
+  # No secrets logged: the file is written 0600 by mktemp and removed below.
+  cat >"${settings_file}" <<JSON
+{"env": {"ANTHROPIC_BASE_URL": "${base_url}", "ANTHROPIC_API_KEY": "${token}"}}
+JSON
+
   local cmd=(
     "${DEMO_CLAUDE_BIN}"
     --bare
+    --settings "${settings_file}"
     --setting-sources "${DEMO_CLAUDE_SETTING_SOURCES}"
     -p
     --model "${model}"
@@ -741,6 +752,9 @@ run_demo_chat_client_claude_code() {
       set -e
     fi
   fi
+
+  # Settings file held the per-run token; remove it now that claude has exited.
+  rm -f "${settings_file}"
 
   if (( status != 0 )); then
     printf 'error: Claude Code exited with status %s\n' "${status}" >&2
