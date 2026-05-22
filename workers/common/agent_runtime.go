@@ -151,17 +151,20 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 	// fail with "destination path already exists". Refresh in place instead.
 	if info, err := os.Stat(filepath.Join(workspaceDir, ".git")); err == nil && (info.IsDir() || info.Mode().IsRegular()) {
 		fmt.Printf("Reusing existing git repo at %s (sandbox workspace reuse)\n", workspaceDir)
+		if err := validateReusedGitRemote(ctx, workspaceDir, cfg.GitRepo); err != nil {
+			return err
+		}
 		if cfg.GitBranch != "" && cfg.GitRef == "" {
 			if err := refreshReusedGitBranch(ctx, workspaceDir, cfg.GitBranch); err != nil {
 				return err
 			}
 		}
 		if cfg.GitRef != "" {
-			directFetch, err := fetchGitRef(ctx, workspaceDir, cfg.GitRef)
+			fetchMode, err := fetchGitRef(ctx, workspaceDir, cfg.GitRef)
 			if err != nil {
 				return err
 			}
-			if err := checkoutGitRef(ctx, workspaceDir, cfg.GitRef, directFetch); err != nil {
+			if err := checkoutGitRef(ctx, workspaceDir, cfg.GitRef, fetchMode); err != nil {
 				return err
 			}
 		}
@@ -196,11 +199,11 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 	// branch name, so fall back to fetching all remote heads when the server does
 	// not allow fetching the object by SHA directly.
 	if cfg.GitRef != "" {
-		directFetch, err := fetchGitRef(ctx, workspaceDir, cfg.GitRef)
+		fetchMode, err := fetchGitRef(ctx, workspaceDir, cfg.GitRef)
 		if err != nil {
 			return err
 		}
-		if err := checkoutGitRef(ctx, workspaceDir, cfg.GitRef, directFetch); err != nil {
+		if err := checkoutGitRef(ctx, workspaceDir, cfg.GitRef, fetchMode); err != nil {
 			return err
 		}
 	}
@@ -208,31 +211,58 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 	return nil
 }
 
-func fetchGitRef(ctx context.Context, workspaceDir, ref string) (bool, error) {
-	if err := execGitContext(ctx, workspaceDir, "fetch", "origin", ref); err == nil {
-		return true, nil
+type gitRefFetchMode int
+
+const (
+	gitRefFetchDirect gitRefFetchMode = iota
+	gitRefFetchRemoteBranch
+	gitRefFetchRemoteHeads
+)
+
+func validateReusedGitRemote(ctx context.Context, workspaceDir, expectedRepo string) error {
+	if strings.TrimSpace(expectedRepo) == "" {
+		return nil
 	}
-	if err := execGitContext(ctx, workspaceDir, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
-		return false, fmt.Errorf("git fetch ref %q failed: %w", ref, err)
+	remoteURL, err := execGitOutputContext(ctx, workspaceDir, "remote", "get-url", "origin")
+	if err != nil {
+		return fmt.Errorf("git inspect origin remote on reused workspace failed: %w", err)
 	}
-	return false, nil
+	if strings.TrimSpace(remoteURL) != strings.TrimSpace(expectedRepo) {
+		return fmt.Errorf("existing git remote origin does not match configured repo")
+	}
+	return nil
 }
 
-func checkoutGitRef(ctx context.Context, workspaceDir, ref string, directFetch bool) error {
-	if directFetch {
-		if err := execGitContext(ctx, workspaceDir, "checkout", "FETCH_HEAD"); err == nil {
+func fetchGitRef(ctx context.Context, workspaceDir, ref string) (gitRefFetchMode, error) {
+	if branch, ok := gitBranchNameFromRef(ctx, workspaceDir, ref); ok {
+		refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branch, branch)
+		if err := execGitContext(ctx, workspaceDir, "fetch", "origin", refspec); err == nil {
+			return gitRefFetchRemoteBranch, nil
+		}
+	}
+	if err := execGitContext(ctx, workspaceDir, "fetch", "origin", ref); err == nil {
+		return gitRefFetchDirect, nil
+	}
+	if err := execGitContext(ctx, workspaceDir, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+		return gitRefFetchDirect, fmt.Errorf("git fetch ref %q failed: %w", ref, err)
+	}
+	return gitRefFetchRemoteHeads, nil
+}
+
+func checkoutGitRef(ctx context.Context, workspaceDir, ref string, fetchMode gitRefFetchMode) error {
+	if fetchMode == gitRefFetchRemoteBranch || fetchMode == gitRefFetchRemoteHeads {
+		if err := checkoutRemoteGitBranch(ctx, workspaceDir, ref); err == nil {
 			return nil
-		} else if branchErr := execGitContext(ctx, workspaceDir, "checkout", "origin/"+ref); branchErr == nil {
+		}
+	}
+	if fetchMode == gitRefFetchDirect {
+		if err := execGitContext(ctx, workspaceDir, "checkout", "FETCH_HEAD"); err == nil {
 			return nil
 		} else {
 			return fmt.Errorf("git checkout fetched ref %q failed: %w", ref, err)
 		}
 	}
 
-	originErr := execGitContext(ctx, workspaceDir, "checkout", "origin/"+ref)
-	if originErr == nil {
-		return nil
-	}
 	if isHexGitObjectID(ref) && remoteBranchesContainRef(ctx, workspaceDir, ref) {
 		if err := execGitContext(ctx, workspaceDir, "checkout", ref); err == nil {
 			return nil
@@ -240,7 +270,26 @@ func checkoutGitRef(ctx context.Context, workspaceDir, ref string, directFetch b
 			return fmt.Errorf("git checkout fetched commit ref %q failed: %w", ref, err)
 		}
 	}
-	return fmt.Errorf("git checkout ref %q failed: %w", ref, originErr)
+	return fmt.Errorf("git checkout ref %q failed", ref)
+}
+
+func gitBranchNameFromRef(ctx context.Context, workspaceDir, ref string) (string, bool) {
+	branch := strings.TrimPrefix(ref, "refs/heads/")
+	if branch == "" || strings.HasPrefix(branch, "-") {
+		return "", false
+	}
+	if _, err := execGitOutputContext(ctx, workspaceDir, "check-ref-format", "--branch", branch); err != nil {
+		return "", false
+	}
+	return branch, true
+}
+
+func checkoutRemoteGitBranch(ctx context.Context, workspaceDir, ref string) error {
+	branch, ok := gitBranchNameFromRef(ctx, workspaceDir, ref)
+	if !ok {
+		return fmt.Errorf("git ref %q is not a branch name", ref)
+	}
+	return execGitContext(ctx, workspaceDir, "checkout", "-B", branch, "origin/"+branch)
 }
 
 func isHexGitObjectID(ref string) bool {

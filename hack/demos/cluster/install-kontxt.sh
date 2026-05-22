@@ -192,25 +192,11 @@ kind load docker-image "${live_kontxt_image}" --name "${cluster_name}"
 
 # 4. TTS Deployment + Service.
 log "Deploying kontxt TTS ${kontxt_tts_name}"
-# TTS uses the kube API as the subject-issuer OIDC discovery endpoint. Grant
-# anonymous access to /.well-known/openid-configuration + /openid/v1/jwks so
-# the TTS pod (no SA token of its own) can fetch the discovery doc + JWKS.
-kubectl apply -f - <<'YAML'
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: kontxt-tts-anon-discovery
-  labels:
-    orka.ai/demo: kontxt-infra
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: system:service-account-issuer-discovery
-subjects:
-  - kind: User
-    apiGroup: rbac.authorization.k8s.io
-    name: system:anonymous
-YAML
+# Remove the legacy anonymous discovery binding if it was created by an
+# earlier demo install. The TTS pod can use its mounted service-account token
+# for kube API discovery instead of widening unauthenticated cluster access.
+kubectl delete clusterrolebinding kontxt-tts-anon-discovery \
+  --ignore-not-found >/dev/null 2>&1 || true
 
 kubectl apply -f - <<YAML
 apiVersion: apps/v1

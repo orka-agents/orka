@@ -267,6 +267,10 @@ func TestCloneRepo_WithRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CloneRepo failed: %v", err)
 	}
+	gotBranch := strings.TrimSpace(runGitOutput(t, cloneDir, "branch", "--show-current"))
+	if gotBranch != "main" {
+		t.Fatalf("branch = %q, want main", gotBranch)
+	}
 }
 
 func TestCloneRepo_WithCommitRefFromNonDefaultBranch(t *testing.T) {
@@ -441,7 +445,9 @@ func TestCloneRepo_ReusedWorkspaceBranchFetchFailureIsFatal(t *testing.T) {
 	if err := CloneRepo(context.Background(), cfg, cloneDir); err != nil {
 		t.Fatalf("initial CloneRepo failed: %v", err)
 	}
-	runGit(t, cloneDir, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing.git"))
+	missingRepo := filepath.Join(t.TempDir(), "missing.git")
+	runGit(t, cloneDir, "remote", "set-url", "origin", missingRepo)
+	cfg.GitRepo = missingRepo
 
 	err := CloneRepo(context.Background(), cfg, cloneDir)
 	if err == nil {
@@ -497,6 +503,53 @@ func TestCloneRepo_ReusedWorkspaceChecksOutRef(t *testing.T) {
 	}
 }
 
+func TestCloneRepo_ReusedWorkspaceChecksOutBranchRef(t *testing.T) {
+	bareDir := t.TempDir()
+	runGit(t, bareDir, "init", "--bare")
+
+	workDir := t.TempDir()
+	runGit(t, workDir, "init")
+	runGit(t, workDir, "checkout", "-b", "main")
+	runGit(t, workDir, "config", "user.email", "test@test.com")
+	runGit(t, workDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(workDir, "main.txt"), []byte("main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workDir, "add", ".")
+	runGit(t, workDir, "commit", "-m", "main")
+	runGit(t, workDir, "remote", "add", "origin", bareDir)
+	runGit(t, workDir, "push", "origin", "main")
+	runGit(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	runGit(t, workDir, "checkout", "-b", "feature/reused")
+	if err := os.WriteFile(filepath.Join(workDir, "feature.txt"), []byte("feature"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workDir, "add", ".")
+	runGit(t, workDir, "commit", "-m", "feature")
+	wantSHA := strings.TrimSpace(runGitOutput(t, workDir, "rev-parse", "HEAD"))
+	runGit(t, workDir, "push", "origin", "feature/reused")
+
+	cloneDir := filepath.Join(t.TempDir(), "cloned")
+	if err := CloneRepo(context.Background(), &AgentConfig{GitRepo: bareDir, GitBranch: "main"}, cloneDir); err != nil {
+		t.Fatalf("initial CloneRepo failed: %v", err)
+	}
+
+	featureCfg := &AgentConfig{GitRepo: bareDir, GitRef: "feature/reused"}
+	if err := CloneRepo(context.Background(), featureCfg, cloneDir); err != nil {
+		t.Fatalf("reused CloneRepo with branch ref failed: %v", err)
+	}
+
+	gotBranch := strings.TrimSpace(runGitOutput(t, cloneDir, "branch", "--show-current"))
+	if gotBranch != "feature/reused" {
+		t.Fatalf("branch = %q, want feature/reused", gotBranch)
+	}
+	gotSHA := strings.TrimSpace(runGitOutput(t, cloneDir, "rev-parse", "HEAD"))
+	if gotSHA != wantSHA {
+		t.Fatalf("HEAD = %s, want feature branch SHA %s", gotSHA, wantSHA)
+	}
+}
+
 func TestCloneRepo_ReusedWorkspaceRejectsUnresolvedRef(t *testing.T) {
 	bareDir := t.TempDir()
 	runGit(t, bareDir, "init", "--bare")
@@ -540,6 +593,40 @@ func TestCloneRepo_ReusedWorkspaceRejectsUnresolvedRef(t *testing.T) {
 	gotSHA := strings.TrimSpace(runGitOutput(t, cloneDir, "rev-parse", "HEAD"))
 	if gotSHA != startSHA {
 		t.Fatalf("HEAD = %s, want unchanged SHA %s", gotSHA, startSHA)
+	}
+}
+
+func TestCloneRepo_ReusedWorkspaceRejectsDifferentRemote(t *testing.T) {
+	bareDir := t.TempDir()
+	runGit(t, bareDir, "init", "--bare")
+	otherBareDir := t.TempDir()
+	runGit(t, otherBareDir, "init", "--bare")
+
+	workDir := t.TempDir()
+	runGit(t, workDir, "init")
+	runGit(t, workDir, "checkout", "-b", "main")
+	runGit(t, workDir, "config", "user.email", "test@test.com")
+	runGit(t, workDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(workDir, "main.txt"), []byte("main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workDir, "add", ".")
+	runGit(t, workDir, "commit", "-m", "main")
+	runGit(t, workDir, "remote", "add", "origin", bareDir)
+	runGit(t, workDir, "push", "origin", "main")
+	runGit(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	cloneDir := filepath.Join(t.TempDir(), "cloned")
+	if err := CloneRepo(context.Background(), &AgentConfig{GitRepo: bareDir, GitBranch: "main"}, cloneDir); err != nil {
+		t.Fatalf("initial CloneRepo failed: %v", err)
+	}
+
+	err := CloneRepo(context.Background(), &AgentConfig{GitRepo: otherBareDir, GitBranch: "main"}, cloneDir)
+	if err == nil {
+		t.Fatal("expected reused CloneRepo with different remote to fail")
+	}
+	if !strings.Contains(err.Error(), "existing git remote origin does not match configured repo") {
+		t.Fatalf("error = %q, want remote mismatch failure", err)
 	}
 }
 

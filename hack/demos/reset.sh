@@ -10,6 +10,41 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 require_cmd kubectl
 require_cmd jq
 
+sandbox_session_claim_name() {
+  local session_name="$1"
+  local claim_namespace="${DEMO_SANDBOX_CLAIM_NAMESPACE:-${DEMO_NAMESPACE}}"
+  local task_namespace="${DEMO_NAMESPACE}"
+  local template_namespace="${DEMO_SANDBOX_TEMPLATE_NAMESPACE:-${DEMO_NAMESPACE}}"
+  local template_ref="${DEMO_SANDBOX_TEMPLATE_REF:-orka-live-template}"
+  local digest
+
+  if command -v shasum >/dev/null 2>&1; then
+    digest="$(
+      printf '%s\0%s\0%s\0%s\0%s' \
+        "${claim_namespace}" \
+        "${task_namespace}" \
+        "${template_namespace}" \
+        "${template_ref}" \
+        "${session_name}" \
+        | shasum -a 256 | awk '{print $1}'
+    )"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest="$(
+      printf '%s\0%s\0%s\0%s\0%s' \
+        "${claim_namespace}" \
+        "${task_namespace}" \
+        "${template_namespace}" \
+        "${template_ref}" \
+        "${session_name}" \
+        | sha256sum | awk '{print $1}'
+    )"
+  else
+    die "shasum or sha256sum is required to compute the demo SandboxClaim name"
+  fi
+
+  printf 'orka-session-%.32s\n' "${digest}"
+}
+
 log "Cleaning up demo tasks"
 delete_tasks_by_selector "$(demo_label_selector)"
 delete_tasks_by_name_prefix "chat-${DEMO_CHAT_SESSION_PREFIX}"
@@ -38,13 +73,13 @@ kubectl delete tasks,sandboxclaims -n "${DEMO_NAMESPACE}" \
 kubectl delete agents -n "${DEMO_NAMESPACE}" \
   -l 'orka.ai/demo in (sandbox)' --ignore-not-found >/dev/null 2>&1 || true
 # Session claims are named orka-session-<sha256> by the worker and don't
-# carry the orka.ai/demo label; sweep them by name prefix.
-for stale_claim in $(kubectl get sandboxclaims -n "${DEMO_NAMESPACE}" \
-    -o jsonpath='{range .items[?(@.metadata.name)]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
-    | grep -E '^orka-session-' || true); do
-  kubectl delete sandboxclaim -n "${DEMO_NAMESPACE}" "${stale_claim}" \
-    --ignore-not-found >/dev/null 2>&1 || true
-done
+# carry the orka.ai/demo label. Delete only the deterministic claim for
+# this demo session; other session claims may belong to active workspaces.
+sandbox_claim_namespace="${DEMO_SANDBOX_CLAIM_NAMESPACE:-${DEMO_NAMESPACE}}"
+sandbox_session="${DEMO_SANDBOX_SESSION:-vekil-metrics-77}"
+stale_claim="$(sandbox_session_claim_name "${sandbox_session}")"
+kubectl delete sandboxclaim -n "${sandbox_claim_namespace}" "${stale_claim}" \
+  --ignore-not-found >/dev/null 2>&1 || true
 
 prepare_api_env >/dev/null 2>&1 || true
 orka_api DELETE "/api/v1/chat/${DEMO_CHAT_SESSION}?namespace=${DEMO_NAMESPACE}" >/dev/null 2>&1 || true
