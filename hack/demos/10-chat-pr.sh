@@ -46,6 +46,44 @@ delete_agent_if_exists "${DEMO_SECURITY_REVIEWER_NAME}"
 delete_agent_if_exists "${DEMO_QUALITY_REVIEWER_NAME}"
 orka_api DELETE "/api/v1/chat/${DEMO_CHAT_SESSION}?namespace=${DEMO_NAMESPACE}" >/dev/null 2>&1 || true
 
+# Pick the best Opus model the cluster will accept. Caller can pin a
+# specific model via DEMO_CHAT_MODEL (full <provider>/<model> form) to
+# skip discovery. Otherwise we ping `/anthropic/v1/messages` with each
+# candidate in preferred order — first 2xx wins. This keeps the demo
+# self-tuning to whatever upstream catalog the cluster's Provider sees.
+pick_chat_opus_model() {
+  if [[ -n "${DEMO_CHAT_MODEL:-}" ]]; then
+    printf '%s\n' "${DEMO_CHAT_MODEL}"
+    return 0
+  fi
+  local provider="${DEMO_PROVIDER_REF}"
+  local token candidate model_id http_code body_file
+  token="$(get_orka_token)"
+  body_file="$(mktemp)"
+  trap 'rm -f "${body_file}"' RETURN
+  for candidate in claude-opus-4.7 claude-opus-4.6; do
+    model_id="${provider}/${candidate}"
+    http_code="$(curl -sS -m 15 -o "${body_file}" -w '%{http_code}' \
+      -X POST "${ORKA_API_BASE%/}/anthropic/v1/messages" \
+      -H "Authorization: Bearer ${token}" \
+      -H "Content-Type: application/json" \
+      -d "{\"model\":\"${model_id}\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
+      2>/dev/null || printf '000')"
+    if [[ "${http_code}" =~ ^2 ]]; then
+      printf '%s\n' "${model_id}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+DEMO_CHAT_OPUS_MODEL="$(pick_chat_opus_model || true)"
+if [[ -z "${DEMO_CHAT_OPUS_MODEL}" ]]; then
+  die "no Opus model accepted by ${ORKA_API_BASE}/anthropic — tried claude-opus-4.7, claude-opus-4.6. Set DEMO_CHAT_MODEL=<provider>/<model> to override."
+fi
+# Make the chosen model the one demo_anthropic_model emits.
+export DEMO_CLAUDE_MODEL="${DEMO_CHAT_OPUS_MODEL}"
+
 # ---------------------------------------------------------------------------
 # Narrated walkthrough.
 # ---------------------------------------------------------------------------
@@ -56,20 +94,27 @@ banner "Chat to PR"
 # Chapter 1 ------------------------------------------------------------------
 narrate "One chat turn becomes a coordinator, specialists, review, CI, PR."
 chapter "A maintainer asks for one repo change" "🧑"
-log_info "Connecting to $(demo_anthropic_base_url) as $(demo_anthropic_model)"
+log_info "Connecting to $(demo_anthropic_base_url)"
 log_info "Client: ${DEMO_CLAUDE_BIN} (${DEMO_CHAT_CLIENT})"
 log_info "Request preset: ${DEMO_REQUEST_PRESET}"
 demo_show "${DEMO_WORKDIR}/chat-story.txt"
 
 # Chapter 2 ------------------------------------------------------------------
-narrate "The same wire format your Claude client already speaks."
+narrate "Discover available models, pick an Opus, then send the request as Claude."
 chapter "Send the request through Orka's Anthropic API" "📨"
 export ANTHROPIC_BASE_URL="$(demo_anthropic_base_url)"
 export ANTHROPIC_MODEL="$(demo_anthropic_model)"
 require_orka_api_reachable
 log_success "Orka Anthropic API reachable at ${ANTHROPIC_BASE_URL}"
+log_info "Provider-default models exposed by Orka (/anthropic/v1/models):"
+demo_pe "curl -sS -H \"Authorization: Bearer \$(get_orka_token)\" ${ANTHROPIC_BASE_URL}/v1/models | jq -r '.data[].id'"
+log_info "Selected Opus model: ${DEMO_CHAT_OPUS_MODEL} (Orka passes the model name through to ${DEMO_PROVIDER_REF})"
 DEMO_CHAT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-log_info  "Sending chat request to ${ANTHROPIC_MODEL} via ${DEMO_CHAT_CLIENT}..."
+# Show the exact `claude -p` command we are about to run (the real one runs
+# silently right after so kubectl logs don't double-print). Token is fetched
+# from the shell — never inlined into the visible command.
+demo_pe "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL} ANTHROPIC_API_KEY=\$(get_orka_token) ${DEMO_CLAUDE_BIN} -p --model ${DEMO_CHAT_OPUS_MODEL} < ${DEMO_WORKDIR}/chat-request.txt"
+log_info "Running the actual chat turn (output captured to ${DEMO_WORKDIR}/chat-client-result.json)..."
 run_demo_chat_request_file "${DEMO_WORKDIR}/chat-request.txt" "${DEMO_WORKDIR}/chat-client-result.json"
 log_success "Chat request accepted; coordinator Task will appear shortly"
 
