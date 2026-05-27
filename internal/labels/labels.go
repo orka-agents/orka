@@ -40,6 +40,11 @@ const (
 	LabelSecurityStage     = "orka.ai/security-stage"
 	LabelSecurityScope     = "orka.ai/security-scope"
 	LabelSecurityFindingID = "orka.ai/security-finding-id"
+	LabelGitHubEvent       = "orka.ai/github-event"
+	LabelGitHubAction      = "orka.ai/github-action"
+	LabelGitHubRepository  = "orka.ai/github-repository"
+	LabelGitHubTarget      = "orka.ai/github-target"
+	LabelGitHubNumber      = "orka.ai/github-number"
 
 	// Annotations
 	AnnotationCoordinationDepth = "orka.ai/coordination-depth"
@@ -48,6 +53,13 @@ const (
 	AnnotationRetryCount        = "orka.ai/retry-count"
 	AnnotationOriginalPrompt    = "orka.ai/original-prompt"
 	AnnotationParentTaskName    = "orka.ai/parent-task-name"
+	AnnotationGitHubDelivery    = "orka.ai/github-delivery"
+	AnnotationGitHubLabel       = "orka.ai/github-label"
+	AnnotationGitHubAction      = "orka.ai/github-action"
+	AnnotationGitHubRepository  = "orka.ai/github-repository"
+	AnnotationGitHubNumber      = "orka.ai/github-number"
+	AnnotationGitHubURL         = "orka.ai/github-url"
+	AnnotationGitHubSender      = "orka.ai/github-sender"
 )
 
 // SelectorValue returns a Kubernetes label-safe value derived from the input.

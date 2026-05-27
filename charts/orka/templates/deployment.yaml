@@ -59,6 +59,44 @@ spec:
             {{- if gt (int .Values.controller.maxTasksPerNamespace) 0 }}
             - --max-tasks-per-namespace={{ .Values.controller.maxTasksPerNamespace }}
             {{- end }}
+          {{- if or .Values.github.webhook.secretName .Values.github.labelTrigger.agent .Values.github.labelTrigger.namespace .Values.github.labelTrigger.gitSecret .Values.github.labelTrigger.agents }}
+          env:
+            {{- if .Values.github.webhook.secretName }}
+            - name: ORKA_GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.github.webhook.secretName | quote }}
+                  key: {{ .Values.github.webhook.secretKey | quote }}
+            {{- end }}
+            {{- if .Values.github.labelTrigger.agent }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_AGENT
+              value: {{ .Values.github.labelTrigger.agent | quote }}
+            {{- end }}
+            {{- if .Values.github.labelTrigger.namespace }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE
+              value: {{ .Values.github.labelTrigger.namespace | quote }}
+            {{- end }}
+            {{- if .Values.github.labelTrigger.gitSecret }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_GIT_SECRET
+              value: {{ .Values.github.labelTrigger.gitSecret | quote }}
+            {{- end }}
+            {{- if .Values.github.labelTrigger.prefix }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_PREFIX
+              value: {{ .Values.github.labelTrigger.prefix | quote }}
+            {{- end }}
+            {{- if .Values.github.labelTrigger.timeout }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_TIMEOUT
+              value: {{ .Values.github.labelTrigger.timeout | quote }}
+            {{- end }}
+            {{- if .Values.github.labelTrigger.maxTurns }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_MAX_TURNS
+              value: {{ .Values.github.labelTrigger.maxTurns | quote }}
+            {{- end }}
+            {{- range $action, $agent := .Values.github.labelTrigger.agents }}
+            - name: ORKA_GITHUB_LABEL_AGENT_{{ regexReplaceAll "[^A-Z0-9]+" (upper $action) "_" | trimAll "_" }}
+              value: {{ $agent | quote }}
+            {{- end }}
+          {{- end }}
           ports:
             - name: api
               containerPort: {{ .Values.controller.apiPort }}

@@ -109,5 +109,6 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Web Dashboard](docs/ui.md)                                  | Frontend architecture and pages                       |
 | [Security](docs/security.md)                                 | Security model and hardening                          |
 | [Repository Security Scanning](docs/repository-security-scanning.md) | Repository scan workflow, threat models, findings, and remediation |
+| [GitHub Label Triggers](docs/github-label-triggers.md) | Trigger Orka agent tasks from GitHub labels such as `agent:implement` and `agent:review` |
 | [Development](docs/development.md)                           | Building, testing, and contributing                   |
 | [Testing](docs/testing.md)                                   | Test structure, patterns, and commands                |

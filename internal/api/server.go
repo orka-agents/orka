@@ -156,6 +156,9 @@ func (s *Server) setupRoutes() {
 	s.app.Get("/healthz", s.handlers.Healthz)
 	s.app.Get("/readyz", s.handlers.Readyz)
 
+	// GitHub webhooks use HMAC verification instead of Kubernetes/OIDC bearer auth.
+	s.app.Post("/webhooks/github", s.handlers.HandleGitHubWebhook)
+
 	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC})
 
 	// API v1 group

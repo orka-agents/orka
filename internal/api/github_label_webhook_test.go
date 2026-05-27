@@ -1,0 +1,375 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package api
+
+import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
+)
+
+func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, map[string]string{
+		githubLabelTriggerAgentEnv:     "codex-agent",
+		githubLabelTriggerGitSecretEnv: "git-credentials",
+	})
+	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
+	server := NewServer(fc, nil, ServerConfig{})
+
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"agent:implement"},
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"issue":{"number":12,"title":"Add health endpoint","body":"Please add /healthz.","html_url":"https://github.com/sozercan/vekil/issues/12"},
+		"sender":{"login":"octocat"}
+	}`)
+
+	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-1", secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
+	}
+
+	var task corev1alpha1.Task
+	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubTaskName(githubActionImplement, 12, "delivery-1"), Namespace: "default"}, &task); err != nil {
+		t.Fatalf("created task not found: %v", err)
+	}
+	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
+		t.Fatalf("task type = %q, want agent", task.Spec.Type)
+	}
+	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "codex-agent" {
+		t.Fatalf("agentRef = %#v, want codex-agent", task.Spec.AgentRef)
+	}
+	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+		t.Fatal("agent runtime workspace missing")
+	}
+	ws := task.Spec.AgentRuntime.Workspace
+	if ws.GitRepo != "https://github.com/sozercan/vekil.git" {
+		t.Errorf("gitRepo = %q", ws.GitRepo)
+	}
+	if ws.Branch != "main" {
+		t.Errorf("branch = %q, want main", ws.Branch)
+	}
+	if ws.PushBranch != "orka/implement-issue-12" {
+		t.Errorf("pushBranch = %q", ws.PushBranch)
+	}
+	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != "git-credentials" {
+		t.Fatalf("gitSecretRef = %#v, want git-credentials", ws.GitSecretRef)
+	}
+	if task.Labels[labels.LabelCreatedBy] != githubWebhookCreatedBy {
+		t.Errorf("created-by label = %q", task.Labels[labels.LabelCreatedBy])
+	}
+	if task.Labels[labels.LabelGitHubAction] != githubActionImplement {
+		t.Errorf("github action label = %q", task.Labels[labels.LabelGitHubAction])
+	}
+	if task.Annotations[labels.AnnotationGitHubDelivery] != "delivery-1" {
+		t.Errorf("delivery annotation = %q", task.Annotations[labels.AnnotationGitHubDelivery])
+	}
+	if !strings.Contains(task.Spec.Prompt, "agent:implement") || !strings.Contains(task.Spec.Prompt, "Please add /healthz.") {
+		t.Errorf("prompt missing trigger context: %s", task.Spec.Prompt)
+	}
+}
+
+func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, map[string]string{
+		githubLabelTriggerAgentEnv: "claude-agent",
+	})
+	fc := newGitHubWebhookFakeClient(t, runtimeAgent("claude-agent"))
+	server := NewServer(fc, nil, ServerConfig{})
+
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"agent:update-branch"},
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"pull_request":{
+			"number":34,
+			"title":"Feature branch",
+			"body":"Update me",
+			"html_url":"https://github.com/sozercan/vekil/pull/34",
+			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}},
+			"head":{"ref":"feature/x","sha":"head-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}}
+		},
+		"sender":{"login":"octocat"}
+	}`)
+
+	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-2", secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
+	}
+
+	var task corev1alpha1.Task
+	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubTaskName(githubActionUpdateBranch, 34, "delivery-2"), Namespace: "default"}, &task); err != nil {
+		t.Fatalf("created task not found: %v", err)
+	}
+	ws := task.Spec.AgentRuntime.Workspace
+	if ws.Branch != "feature/x" {
+		t.Errorf("branch = %q, want feature/x", ws.Branch)
+	}
+	if ws.Ref != "head-sha" {
+		t.Errorf("ref = %q, want head-sha", ws.Ref)
+	}
+	if ws.PushBranch != "feature/x" {
+		t.Errorf("pushBranch = %q, want feature/x", ws.PushBranch)
+	}
+	if ws.PRBaseBranch != "main" {
+		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)
+	}
+	if !strings.Contains(task.Spec.Prompt, "Update the pull request branch") {
+		t.Errorf("prompt = %s", task.Spec.Prompt)
+	}
+}
+
+func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, map[string]string{
+		githubLabelTriggerAgentEnv: "codex-agent",
+	})
+	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
+	server := NewServer(fc, nil, ServerConfig{})
+
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"agent:implement"},
+		"repository":{"full_name":"sozercan/orka","html_url":"https://github.com/sozercan/orka","clone_url":"https://github.com/sozercan/orka.git","default_branch":"main"},
+		"pull_request":{
+			"number":35,
+			"title":"Fork change",
+			"body":"Implement on fork",
+			"html_url":"https://github.com/sozercan/orka/pull/35",
+			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/orka","html_url":"https://github.com/sozercan/orka","clone_url":"https://github.com/sozercan/orka.git","default_branch":"main"}},
+			"head":{"ref":"feature/fork-change","sha":"fork-head-sha","repo":{"full_name":"contributor/orka","html_url":"https://github.com/contributor/orka","clone_url":"https://github.com/contributor/orka.git","default_branch":"main"}}
+		},
+		"sender":{"login":"octocat"}
+	}`)
+
+	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-fork-pr", secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
+	}
+
+	var task corev1alpha1.Task
+	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubTaskName(githubActionImplement, 35, "delivery-fork-pr"), Namespace: "default"}, &task); err != nil {
+		t.Fatalf("created task not found: %v", err)
+	}
+	ws := task.Spec.AgentRuntime.Workspace
+	if ws.GitRepo != "https://github.com/contributor/orka.git" {
+		t.Errorf("gitRepo = %q, want fork head repo", ws.GitRepo)
+	}
+	if ws.Branch != "feature/fork-change" {
+		t.Errorf("branch = %q, want feature/fork-change", ws.Branch)
+	}
+	if ws.Ref != "fork-head-sha" {
+		t.Errorf("ref = %q, want fork-head-sha", ws.Ref)
+	}
+	if ws.PushBranch != "feature/fork-change" {
+		t.Errorf("pushBranch = %q, want feature/fork-change", ws.PushBranch)
+	}
+	if ws.PRBaseBranch != "main" {
+		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)
+	}
+	if !strings.Contains(task.Spec.Prompt, "do not commit or push yourself") {
+		t.Errorf("prompt missing Orka push handling guidance: %s", task.Spec.Prompt)
+	}
+}
+
+func TestGitHubWebhook_IgnoresIssuePullRequestStub(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, map[string]string{
+		githubLabelTriggerAgentEnv: "codex-agent",
+	})
+	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
+	server := NewServer(fc, nil, ServerConfig{})
+
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"agent:update-branch"},
+		"repository":{"full_name":"sozercan/orka","html_url":"https://github.com/sozercan/orka","clone_url":"https://github.com/sozercan/orka.git","default_branch":"main"},
+		"issue":{"number":35,"title":"Fork change","body":"Implement on fork","html_url":"https://github.com/sozercan/orka/issues/35","pull_request":{"html_url":"https://github.com/sozercan/orka/pull/35"}},
+		"sender":{"login":"octocat"}
+	}`)
+
+	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-pr-stub", secret, body)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d; body: %s", resp.StatusCode, readRespBody(t, resp))
+	}
+	assertTaskCount(t, fc, 0)
+}
+
+func TestGitHubWebhook_DuplicateDeliveryIsIdempotent(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, map[string]string{
+		githubLabelTriggerAgentEnv: "codex-agent",
+	})
+	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
+	server := NewServer(fc, nil, ServerConfig{})
+	body := []byte(`{"action":"labeled","label":{"name":"agent:implement"},"repository":{"full_name":"sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},"issue":{"number":1,"title":"Do it","body":"Body","html_url":"https://github.com/sozercan/vekil/issues/1"}}`)
+
+	first := performSignedGitHubWebhook(t, server, githubEventIssues, "same-delivery", secret, body)
+	if first.StatusCode != http.StatusCreated {
+		t.Fatalf("first status = %d; body: %s", first.StatusCode, readRespBody(t, first))
+	}
+	second := performSignedGitHubWebhook(t, server, githubEventIssues, "same-delivery", secret, body)
+	if second.StatusCode != http.StatusAccepted {
+		t.Fatalf("second status = %d; body: %s", second.StatusCode, readRespBody(t, second))
+	}
+}
+
+func TestGitHubWebhook_IgnoresNonAgentLabelsAndUnsupportedTargets(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, map[string]string{
+		githubLabelTriggerAgentEnv: "codex-agent",
+	})
+	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
+	server := NewServer(fc, nil, ServerConfig{})
+
+	body := []byte(`{"action":"labeled","label":{"name":"bug"},"repository":{"full_name":"sozercan/vekil"},"issue":{"number":1,"title":"Bug","body":"Body","html_url":"https://github.com/sozercan/vekil/issues/1"}}`)
+	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-ignore", secret, body)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d; body: %s", resp.StatusCode, readRespBody(t, resp))
+	}
+	assertTaskCount(t, fc, 0)
+
+	body = []byte(`{"action":"labeled","label":{"name":"agent:review"},"repository":{"full_name":"sozercan/vekil"},"issue":{"number":1,"title":"Bug","body":"Body","html_url":"https://github.com/sozercan/vekil/issues/1"}}`)
+	resp = performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-review-issue", secret, body)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d; body: %s", resp.StatusCode, readRespBody(t, resp))
+	}
+	assertTaskCount(t, fc, 0)
+}
+
+func TestGitHubWebhook_RejectsInvalidSignature(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, map[string]string{
+		githubLabelTriggerAgentEnv: "codex-agent",
+	})
+	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
+	server := NewServer(fc, nil, ServerConfig{})
+	body := []byte(`{"action":"labeled","label":{"name":"agent:implement"}}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(githubEventHeader, githubEventIssues)
+	req.Header.Set(githubDeliveryHeader, "bad-signature")
+	req.Header.Set(githubSignature256Header, signGitHubWebhook(body, "wrong-secret"))
+	resp, err := server.app.Test(req)
+	if err != nil {
+		t.Fatalf("test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+	_ = secret
+	assertTaskCount(t, fc, 0)
+}
+
+func TestGitHubWebhook_PingVerifiesSignatureWithoutAuth(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, nil)
+	server := NewServer(newGitHubWebhookFakeClient(t), nil, ServerConfig{})
+	body := []byte(`{"zen":"Keep it logically awesome."}`)
+
+	resp := performSignedGitHubWebhook(t, server, githubEventPing, "ping-1", secret, body)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d; body: %s", resp.StatusCode, readRespBody(t, resp))
+	}
+}
+
+func configureGitHubWebhookTest(t *testing.T, env map[string]string) string {
+	t.Helper()
+	secret := "webhook-secret"
+	keys := []string{
+		githubWebhookSecretEnv,
+		githubLabelTriggerAgentEnv,
+		githubLabelTriggerGitSecretEnv,
+		githubLabelTriggerNamespaceEnv,
+		githubLabelTriggerPrefixEnv,
+		githubLabelTriggerTimeoutEnv,
+		githubLabelTriggerMaxTurnsEnv,
+		githubActionAgentEnv(githubActionImplement),
+		githubActionAgentEnv(githubActionUpdateBranch),
+		githubActionAgentEnv(githubActionReview),
+		githubActionAgentEnv(githubActionToIssues),
+	}
+	for _, key := range keys {
+		t.Setenv(key, "")
+	}
+	t.Setenv(githubWebhookSecretEnv, secret)
+	for key, value := range env {
+		t.Setenv(key, value)
+	}
+	return secret
+}
+
+func newGitHubWebhookFakeClient(t *testing.T, objs ...client.Object) client.Client {
+	t.Helper()
+	s := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("add orka scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	return fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
+}
+
+func runtimeAgent(name string) *corev1alpha1.Agent {
+	return &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+}
+
+func performSignedGitHubWebhook(t *testing.T, server *Server, event, delivery, secret string, body []byte) *http.Response {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(githubEventHeader, event)
+	req.Header.Set(githubDeliveryHeader, delivery)
+	req.Header.Set(githubSignature256Header, signGitHubWebhook(body, secret))
+	resp, err := server.app.Test(req)
+	if err != nil {
+		t.Fatalf("test request failed: %v", err)
+	}
+	return resp
+}
+
+func signGitHubWebhook(body []byte, secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(body)
+	return githubSignature256Prefix + hex.EncodeToString(mac.Sum(nil))
+}
+
+func readRespBody(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	defer resp.Body.Close() //nolint:errcheck
+	buf := new(bytes.Buffer)
+	_, _ = buf.ReadFrom(resp.Body)
+	return buf.String()
+}
+
+func assertTaskCount(t *testing.T, c client.Client, want int) {
+	t.Helper()
+	var tasks corev1alpha1.TaskList
+	if err := c.List(t.Context(), &tasks); err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	if len(tasks.Items) != want {
+		encoded, _ := json.Marshal(tasks.Items)
+		t.Fatalf("task count = %d, want %d: %s", len(tasks.Items), want, string(encoded))
+	}
+}

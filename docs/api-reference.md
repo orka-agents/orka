@@ -17,6 +17,16 @@ Authentication modes:
 
 When a Task is created through OIDC authentication, Orka stamps the verified caller identity into `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Clients cannot provide or override `requestedBy`; requests containing top-level `requestedBy` or nested `spec.requestedBy` are rejected with `400`.
 
+## Webhooks
+
+GitHub webhooks use HMAC verification instead of bearer-token authentication.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/webhooks/github` | POST | Accept GitHub `issues` / `pull_request` `labeled` events and create agent Tasks for labels such as `agent:implement` |
+
+The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Signature-256` header. See [GitHub Label Triggers](github-label-triggers.md) for configuration and label behavior.
+
 ## Tasks
 
 | Endpoint | Method | Description |

@@ -9,6 +9,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -89,13 +90,13 @@ func TestCreatePRMonitorTool_ExecuteMissingToolContext(t *testing.T) {
 }
 
 func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
-	client := newFakeClient(&corev1alpha1.Agent{
+	fc := newFakeClient(&corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
 		Spec: corev1alpha1.AgentSpec{
 			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
 		},
 	})
-	ctx := newCreatePRMonitorToolContext(client)
+	ctx := newCreatePRMonitorToolContext(fc)
 	tool := &CreatePRMonitorTool{}
 
 	resultJSON, err := tool.Execute(ctx, mustJSON(t, map[string]any{
@@ -121,7 +122,7 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 	}
 
 	var task corev1alpha1.Task
-	if err := client.Get(context.Background(), types.NamespacedName{Name: "pr-monitor-task", Namespace: defaultNamespace}, &task); err != nil {
+	if err := fc.Get(context.Background(), types.NamespacedName{Name: "pr-monitor-task", Namespace: defaultNamespace}, &task); err != nil {
 		t.Fatalf("failed to get created task: %v", err)
 	}
 	if task.Spec.Type != corev1alpha1.TaskTypeAI {
@@ -160,7 +161,7 @@ func TestCreatePRMonitorTool_ExecuteMissingAgentRef(t *testing.T) {
 		nameField:     "daily-pr-monitor",
 		scheduleField: "*/15 * * * *",
 	})
-	if result.ErrorType != "invalid_arguments" || !strings.Contains(result.Error, "agent_ref is required") {
+	if result.ErrorType != errTypeInvalidArgs || !strings.Contains(result.Error, "agent_ref is required") {
 		t.Fatalf("result = %#v, want missing agent_ref invalid_arguments", result)
 	}
 }
@@ -171,31 +172,31 @@ func TestCreatePRMonitorTool_ExecuteAgentNotFound(t *testing.T) {
 		scheduleField: "*/15 * * * *",
 		agentRefField: "missing-agent",
 	})
-	if result.ErrorType != "invalid_arguments" || !strings.Contains(result.Error, "not found") {
+	if result.ErrorType != errTypeInvalidArgs || !strings.Contains(result.Error, "not found") {
 		t.Fatalf("result = %#v, want agent not found invalid_arguments", result)
 	}
 }
 
 func TestCreatePRMonitorTool_ExecuteAgentCoordinationDisabled(t *testing.T) {
-	client := newFakeClient(&corev1alpha1.Agent{
+	fc := newFakeClient(&corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
 		Spec: corev1alpha1.AgentSpec{
 			Coordination: &corev1alpha1.CoordinationConfig{Enabled: false},
 		},
 	})
-	result := executeCreatePRMonitorForFailure(t, client, map[string]any{
+	result := executeCreatePRMonitorForFailure(t, fc, map[string]any{
 		nameField:     "daily-pr-monitor",
 		scheduleField: "*/15 * * * *",
 		agentRefField: "reviewer",
 	})
-	if result.ErrorType != "invalid_arguments" || !strings.Contains(result.Error, "must have coordination enabled") {
+	if result.ErrorType != errTypeInvalidArgs || !strings.Contains(result.Error, "must have coordination enabled") {
 		t.Fatalf("result = %#v, want coordination disabled invalid_arguments", result)
 	}
 }
 
-func executeCreatePRMonitorForFailure(t *testing.T, client client.Client, args map[string]any) ChatToolResult {
+func executeCreatePRMonitorForFailure(t *testing.T, c client.Client, args map[string]any) ChatToolResult {
 	t.Helper()
-	ctx := newCreatePRMonitorToolContext(client)
+	ctx := newCreatePRMonitorToolContext(c)
 	resultJSON, err := (&CreatePRMonitorTool{}).Execute(ctx, mustJSON(t, args))
 	if err != nil {
 		t.Fatalf("Execute() returned error: %v", err)
@@ -210,9 +211,9 @@ func executeCreatePRMonitorForFailure(t *testing.T, client client.Client, args m
 	return result
 }
 
-func newCreatePRMonitorToolContext(client client.Client) context.Context {
+func newCreatePRMonitorToolContext(c client.Client) context.Context {
 	return WithToolContext(context.Background(), &ToolContext{
-		Client:    client,
+		Client:    c,
 		Namespace: defaultNamespace,
 		GenerateTaskName: func() string {
 			return "pr-monitor-task"
@@ -235,12 +236,7 @@ func mustJSON(t *testing.T, v map[string]any) json.RawMessage {
 }
 
 func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }
 
 func containsAnyString(values []any, want string) bool {
