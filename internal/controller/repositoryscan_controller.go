@@ -23,7 +23,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -562,10 +561,14 @@ func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *c
 	}
 
 	slices.SortFunc(tasks.Items, func(a, b corev1alpha1.Task) int {
-		return a.CreationTimestamp.Compare(b.CreationTimestamp.Time)
+		if cmp := a.CreationTimestamp.Compare(b.CreationTimestamp.Time); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.Name, b.Name)
 	})
 
 	latestScanRunID := latestOwnedScanPipelineRunID(tasks.Items)
+	refreshLatestScanRun := false
 
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
@@ -589,10 +592,25 @@ func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *c
 			continue
 		}
 
-		updateStatus := latestScanRunID != "" && scanTaskRunID(task) == latestScanRunID
+		updateStatus := false
+		if latestScanRunID != "" && scanTaskRunID(task) == latestScanRunID {
+			if stage == security.StageCombined {
+				updateStatus = true
+			} else {
+				refreshLatestScanRun = true
+			}
+		}
 		if err := r.ingestScanTask(ctx, scan, task, updateStatus); err != nil {
 			return err
 		}
+	}
+
+	if refreshLatestScanRun {
+		run, err := r.SecurityStore.GetScanRun(ctx, scan.Namespace, latestScanRunID)
+		if err != nil {
+			return err
+		}
+		return r.refreshScanRunStatus(ctx, scan, run, latestScanRunID, true)
 	}
 
 	return nil
@@ -899,16 +917,24 @@ type scanRunProgress struct {
 	hasActive           bool
 	hasThreatModelReady bool
 	hasDiscovery        bool
+	hasCombined         bool
 	discoveryCount      int
 	discoverySucceeded  int
 	failedStages        []string
+	failureMessage      string
 	latestCompletion    *time.Time
+}
+
+func recordScanProgressFailure(progress *scanRunProgress, task *corev1alpha1.Task, message string) {
+	progress.failedStages = append(progress.failedStages, pipelineTaskDisplayName(task))
+	if progress.failureMessage == "" {
+		progress.failureMessage = message
+	}
 }
 
 func (r *RepositoryScanReconciler) collectScanRunProgress(
 	ctx context.Context,
 	tasks []corev1alpha1.Task,
-	run *store.ScanRun,
 ) scanRunProgress {
 	progress := scanRunProgress{}
 	for i := range tasks {
@@ -932,22 +958,19 @@ func (r *RepositoryScanReconciler) collectScanRunProgress(
 				progress.hasThreatModelReady = true
 			}
 			if task.Status.Phase == corev1alpha1.TaskPhaseFailed {
-				progress.failedStages = append(progress.failedStages, pipelineTaskDisplayName(task))
-				if run.ErrorMessage == "" {
-					run.ErrorMessage = r.pipelineTaskSummary(ctx, task, "threat model stage failed")
-				}
+				recordScanProgressFailure(&progress, task, r.pipelineTaskSummary(ctx, task, "threat model stage failed"))
 			}
 		case security.StageDiscovery, security.StageCombined:
+			if stage == security.StageCombined {
+				progress.hasCombined = true
+			}
 			progress.hasDiscovery = true
 			progress.discoveryCount++
 			if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
 				progress.discoverySucceeded++
 			}
 			if task.Status.Phase == corev1alpha1.TaskPhaseFailed {
-				progress.failedStages = append(progress.failedStages, pipelineTaskDisplayName(task))
-				if run.ErrorMessage == "" {
-					run.ErrorMessage = r.pipelineTaskSummary(ctx, task, "discovery stage failed")
-				}
+				recordScanProgressFailure(&progress, task, r.pipelineTaskSummary(ctx, task, "discovery stage failed"))
 			}
 		}
 	}
@@ -968,12 +991,14 @@ func applyScanRunProgress(run *store.ScanRun, progress scanRunProgress) {
 		return
 	}
 
-	if run.ErrorMessage != "" || len(progress.failedStages) > 0 {
+	if progress.failureMessage != "" || run.ErrorMessage != "" || len(progress.failedStages) > 0 {
 		run.Phase = scanRunPhaseFailed
 		if progress.latestCompletion != nil {
 			run.CompletedAt = progress.latestCompletion
 		}
-		if run.ErrorMessage == "" {
+		if progress.failureMessage != "" {
+			run.ErrorMessage = progress.failureMessage
+		} else if run.ErrorMessage == "" {
 			run.ErrorMessage = fmt.Sprintf(
 				"scan failed in stages: %s",
 				strings.Join(progress.failedStages, ", "),
@@ -986,8 +1011,24 @@ func applyScanRunProgress(run *store.ScanRun, progress scanRunProgress) {
 	if progress.hasThreatModelReady && !progress.hasDiscovery {
 		run.Phase = scanRunPhaseRunning
 		run.CompletedAt = nil
+		run.ErrorMessage = ""
 		run.Summary = scanSummaryThreatModelPending
 		return
+	}
+
+	if progress.hasThreatModelReady && progress.hasDiscovery && !progress.hasCombined {
+		expectedDiscoveryCount := len(security.DiscoveryScopes())
+		if expectedDiscoveryCount > 0 && progress.discoveryCount < expectedDiscoveryCount {
+			run.Phase = scanRunPhaseRunning
+			run.CompletedAt = nil
+			run.ErrorMessage = ""
+			run.Summary = fmt.Sprintf(
+				"Threat model generated and %d/%d discovery scopes completed successfully",
+				progress.discoverySucceeded,
+				expectedDiscoveryCount,
+			)
+			return
+		}
 	}
 
 	run.Phase = scanRunPhaseSucceeded
@@ -1036,8 +1077,15 @@ func (r *RepositoryScanReconciler) refreshScanRunStatus(
 	); err != nil {
 		return err
 	}
+	slices.SortFunc(tasks.Items, func(a, b corev1alpha1.Task) int {
+		if cmp := a.CreationTimestamp.Compare(b.CreationTimestamp.Time); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
 
-	applyScanRunProgress(run, r.collectScanRunProgress(ctx, tasks.Items, run))
+	progress := r.collectScanRunProgress(ctx, tasks.Items)
+	applyScanRunProgress(run, progress)
 
 	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
 		return err
@@ -1244,6 +1292,44 @@ func (r *RepositoryScanReconciler) enqueueAutoValidationTasks(ctx context.Contex
 	return nil
 }
 
+func clearRunError(run *store.ScanRun) {
+	if run == nil {
+		return
+	}
+	if run.Summary == run.ErrorMessage {
+		run.Summary = ""
+	}
+	run.ErrorMessage = ""
+}
+
+func clearThreatModelRunError(run *store.ScanRun) {
+	if run == nil || run.ErrorMessage == "" {
+		return
+	}
+	if strings.Contains(run.ErrorMessage, security.ArtifactThreatModel) ||
+		strings.Contains(run.ErrorMessage, "threat model stage failed") {
+		clearRunError(run)
+	}
+}
+
+func clearDiscoveryRunError(run *store.ScanRun, scope string) {
+	if run == nil || run.ErrorMessage == "" {
+		return
+	}
+	if scope != "" {
+		if strings.Contains(run.ErrorMessage, fmt.Sprintf("scope %s:", scope)) {
+			clearRunError(run)
+		}
+		if strings.Contains(run.ErrorMessage, "scope ") {
+			return
+		}
+	}
+	if strings.Contains(run.ErrorMessage, security.ArtifactFindings) ||
+		strings.Contains(run.ErrorMessage, "discovery stage failed") {
+		clearRunError(run)
+	}
+}
+
 func (r *RepositoryScanReconciler) ingestThreatModelTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, run *store.ScanRun, updateStatus bool) error {
 	run.TaskName = task.Name
 	if mode := task.Labels[labels.LabelSecurityMode]; mode != "" {
@@ -1261,6 +1347,7 @@ func (r *RepositoryScanReconciler) ingestThreatModelTask(ctx context.Context, sc
 			if err := r.persistThreatModelIfChanged(ctx, scan, run.ID, run.StartedAt, threatModel); err != nil {
 				return err
 			}
+			clearThreatModelRunError(run)
 			run.Summary = scanSummaryThreatModelPending
 		}
 	} else {
@@ -1284,6 +1371,7 @@ func (r *RepositoryScanReconciler) ingestDiscoveryTask(ctx context.Context, scan
 				run.ErrorMessage = validationProblem
 			}
 		} else if findingsArtifact != nil {
+			clearDiscoveryRunError(run, strings.TrimSpace(task.Labels[labels.LabelSecurityScope]))
 			if findingsArtifact.Scan.Mode != "" {
 				run.Mode = findingsArtifact.Scan.Mode
 			}
@@ -1340,7 +1428,8 @@ func (r *RepositoryScanReconciler) ingestCombinedScanTask(ctx context.Context, s
 	run.TaskName = task.Name
 	run.ErrorMessage = ""
 	if task.Status.CompletionTime != nil {
-		run.CompletedAt = ptr.To(task.Status.CompletionTime.Time)
+		completedAt := task.Status.CompletionTime.Time
+		run.CompletedAt = &completedAt
 	} else {
 		now := time.Now()
 		run.CompletedAt = &now

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -143,6 +144,9 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 	parseCoordinationConfig(a, agent)
 
+	if result, ok := authorizeAgentCreate(ctx, tc, agent); !ok {
+		return result, nil
+	}
 	if err := tc.Client.Create(ctx, agent); err != nil {
 		return classifyChatK8sErr(err)
 	}
@@ -187,6 +191,12 @@ func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolC
 		task.Spec.AI.ProviderRef = agent.Spec.ProviderRef
 	}
 
+	if result, ok := authorizeTaskCreate(ctx, tc, task); !ok {
+		if err := tc.Client.Delete(ctx, agent); err != nil && !apierrors.IsNotFound(err) {
+			return ChatToolErrorResult("cleanup_failed", fmt.Sprintf("initial task authorization failed and agent cleanup failed: %v", err), "Delete the agent manually before retrying.")
+		}
+		return result, nil
+	}
 	if err := tc.Client.Create(ctx, task); err != nil {
 		return ChatToolSuccess(map[string]any{
 			"agentName":      agent.Name,

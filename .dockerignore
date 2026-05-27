@@ -2,13 +2,31 @@
 # Ignore everything by default and re-include only needed files
 **
 
-# Re-include Go source files (but not *_test.go)
-!**/*.go
+# Re-include Go source directories and files (but not *_test.go). Parent
+# directories must be re-included or Docker will not traverse them.
+!api/
+!api/**/
+!api/**/*.go
+!cmd/
+!cmd/**/
+!cmd/**/*.go
+!internal/
+!internal/**/
+!internal/**/*.go
+!workers/
+!workers/**/
+!workers/**/*.go
+!*.go
 **/*_test.go
 
 # Re-include Go module files
 !go.mod
 !go.sum
+
+# Re-include script-local Go helpers used by live E2E Docker builds
+!scripts/
+!scripts/live-kontxt-e2e/
+!scripts/live-kontxt-e2e/**
 
 # Re-include UI source files for frontend build
 !ui/
@@ -23,6 +41,11 @@
 !ui/public/**
 !ui/src/
 !ui/src/**
+ui/node_modules
+ui/node_modules/**
+ui/dist
+ui/dist/**
+ui/tsconfig.tsbuildinfo
 
 # Re-include pre-built UI assets for embed
 !internal/uiembed/dist/

@@ -26,10 +26,11 @@ import (
 )
 
 type testOIDCProvider struct {
-	server *httptest.Server
-	key    *rsa.PrivateKey
-	kid    string
-	aud    string
+	server        *httptest.Server
+	key           *rsa.PrivateKey
+	kid           string
+	aud           string
+	extraJWKSKeys []testJWKKey
 
 	discoveryHits atomic.Int64
 	jwksHits      atomic.Int64
@@ -73,10 +74,11 @@ func newTestOIDCProvider(t *testing.T) *testOIDCProvider {
 				"issuer":   p.server.URL,
 				"jwks_uri": p.server.URL + "/jwks",
 			})
-		case "/jwks":
+		case "/jwks", "/.well-known/jwks.json":
 			p.jwksHits.Add(1)
+			keys := append([]testJWKKey{testJWKFromPublicKey(&p.key.PublicKey, p.kid)}, p.extraJWKSKeys...)
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"keys": []jwkKey{testJWKFromPublicKey(&p.key.PublicKey, p.kid)},
+				"keys": keys,
 			})
 		default:
 			http.NotFound(w, r)
@@ -180,8 +182,18 @@ func mustBase64JSON(t *testing.T, v any) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-func testJWKFromPublicKey(key *rsa.PublicKey, kid string) jwkKey {
-	return jwkKey{
+type testJWKKey struct {
+	KeyType   string   `json:"kty"`
+	KeyUse    string   `json:"use,omitempty"`
+	KeyID     string   `json:"kid,omitempty"`
+	Algorithm string   `json:"alg,omitempty"`
+	N         string   `json:"n"`
+	E         string   `json:"e"`
+	X5C       []string `json:"x5c,omitempty"`
+}
+
+func testJWKFromPublicKey(key *rsa.PublicKey, kid string) testJWKKey {
+	return testJWKKey{
 		KeyType:   "RSA",
 		KeyUse:    "sig",
 		KeyID:     kid,
@@ -287,6 +299,31 @@ func TestValidateOIDCToken_TamperedSignature(t *testing.T) {
 	}
 }
 
+func TestValidateOIDCToken_UnknownKid(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	token := provider.issueToken(t, testOIDCTokenOptions{Kid: "unknown-key"})
+
+	_, err := validateOIDCToken(context.Background(), token, provider.config())
+	if err == nil || !strings.Contains(err.Error(), "kid") {
+		t.Fatalf("validateOIDCToken error = %v, want unknown kid error", err)
+	}
+}
+
+func TestValidateOIDCToken_KidSelectsMatchingJWKSKey(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	wrongKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate wrong RSA key: %v", err)
+	}
+	provider.extraJWKSKeys = []testJWKKey{testJWKFromPublicKey(&wrongKey.PublicKey, "wrong-key")}
+
+	token := provider.issueToken(t, testOIDCTokenOptions{Kid: "wrong-key"})
+	_, err = validateOIDCToken(context.Background(), token, provider.config())
+	if err == nil || !strings.Contains(err.Error(), "signature") {
+		t.Fatalf("validateOIDCToken error = %v, want signature error from matching wrong kid key", err)
+	}
+}
+
 func TestValidateOIDCToken_DiscoveryJWKSURL(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	token := provider.issueToken(t, testOIDCTokenOptions{})
@@ -300,6 +337,37 @@ func TestValidateOIDCToken_DiscoveryJWKSURL(t *testing.T) {
 	}
 	if provider.jwksHits.Load() == 0 {
 		t.Fatal("expected JWKS endpoint to be called")
+	}
+}
+
+func TestValidateOIDCToken_InvalidJWTSkipsDiscovery(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+
+	_, err := validateOIDCToken(context.Background(), "not-a-compact-jwt", provider.configWithoutJWKSURL())
+	if err == nil || !strings.Contains(err.Error(), "invalid JWT format") {
+		t.Fatalf("validateOIDCToken error = %v, want invalid JWT format", err)
+	}
+	if got := provider.discoveryHits.Load(); got != 0 {
+		t.Fatalf("OIDC discovery hits = %d, want 0", got)
+	}
+	if got := provider.jwksHits.Load(); got != 0 {
+		t.Fatalf("JWKS hits = %d, want 0", got)
+	}
+}
+
+func TestValidateOIDCToken_WrongIssuerSkipsDiscovery(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	token := provider.issueToken(t, testOIDCTokenOptions{Issuer: "https://kubernetes.default.svc"})
+
+	_, err := validateOIDCToken(context.Background(), token, provider.configWithoutJWKSURL())
+	if err == nil || !strings.Contains(err.Error(), "invalid issuer") {
+		t.Fatalf("validateOIDCToken error = %v, want invalid issuer", err)
+	}
+	if got := provider.discoveryHits.Load(); got != 0 {
+		t.Fatalf("OIDC discovery hits = %d, want 0", got)
+	}
+	if got := provider.jwksHits.Load(); got != 0 {
+		t.Fatalf("JWKS hits = %d, want 0", got)
 	}
 }
 

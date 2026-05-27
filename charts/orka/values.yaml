@@ -44,6 +44,107 @@ controller:
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
 
+  # Experimental agent sandbox workspace support (disabled by default)
+  executionWorkspace:
+    # Default provider used when Task execution.workspace.provider is omitted.
+    defaultProvider: agent-sandbox
+
+  agentSandbox:
+    # Enables workspace-backed execution for agent Tasks that set Task execution.workspace.
+    enabled: false
+    # Optional upstream agent-sandbox router base URL used for workspace claims.
+    routerUrl: ""
+    # Optional default execution workspace template name used when a Task omits execution.workspace.templateRef.name.
+    defaultTemplate: ""
+    # Warm pool policy: disabled, template.
+    warmPoolPolicy: disabled
+    # Namespace strategy: task, controller.
+    namespaceStrategy: task
+    # Timeout for workspace claim and readiness operations.
+    claimTimeout: 2m
+    # Timeout for agent runtime execution inside the sandbox.
+    commandTimeout: 30m
+    # Default cleanup policy: delete, retain.
+    cleanupPolicy: delete
+
+  # Experimental Substrate execution workspace support (disabled by default)
+  substrate:
+    enabled: false
+    apiEndpoint: api.ate-system.svc:443
+    apiCAFile: ""
+    apiInsecureSkipVerify: false
+    routerUrl: http://atenet-router.ate-system.svc
+    actorDnsSuffix: actors.resources.substrate.ate.dev
+    defaultTemplate: ""
+    defaultTemplateNamespace: ""
+    bootstrapTokenSecretName: ""
+    bootstrapTokenSecretKey: token
+    claimTimeout: 2m
+    commandTimeout: 30m
+    cleanupPolicy: delete
+
+  # OIDC/JWT authentication for external API requests
+  oidc:
+    # Issuer URL expected in bearer tokens. Requires audience when set.
+    issuer: ""
+    # Audience expected in bearer tokens. Requires issuer when set.
+    audience: ""
+    # Optional JWKS URL. When empty, Orka discovers it from issuer.
+    jwksUrl: ""
+
+  # Context-token authentication, scoped authorization, and optional kontxt TTS exchange.
+  # Empty values keep the controller defaults / corresponding environment variables.
+  contextToken:
+    # Profile for external context tokens (supported: kontxt).
+    profile: ""
+    # Issuer URL expected in context tokens. Requires profile and audience when set.
+    issuer: ""
+    # Audience expected in context tokens. Requires profile and issuer when set.
+    audience: ""
+    # Optional JWKS URL. For kontxt, defaults to <issuer>/.well-known/jwks.json.
+    jwksUrl: ""
+    # Comma-separated token headers, e.g. Txn-Token or Txn-Token,Authorization:Bearer.
+    headers: ""
+    # Authorization mode: off, audit, or enforce. Empty defaults to off.
+    authzMode: ""
+    scopes:
+      taskCreate: ""
+      taskRead: ""
+      taskList: ""
+      taskDelete: ""
+      toolRead: ""
+      toolUse: ""
+      providerUse: ""
+      secretRead: ""
+      agentRead: ""
+      agentWrite: ""
+      memoryRead: ""
+      memoryWrite: ""
+      sessionRead: ""
+      sessionWrite: ""
+      securityRead: ""
+      securityWrite: ""
+      skillRead: ""
+      skillWrite: ""
+    tts:
+      # kontxt TTS base URL for child/outbound token exchange.
+      url: ""
+      # Optional exchange audience.
+      audience: ""
+      # Exchange timeout, e.g. 5s.
+      timeout: ""
+      # Subject token source: serviceAccount, incoming, or none.
+      tokenSource: ""
+      # Worker-side subject token type.
+      subjectTokenType: ""
+      # Requested scope for child delegated TxTokens.
+      childScope: ""
+      # Requested scope for outbound HTTP Tool TxTokens.
+      outboundScope: ""
+      # Requested TTLs, e.g. 5m and 2m.
+      childTokenTTL: ""
+      toolTokenTTL: ""
+
 # Worker configuration
 workers:
   ai:

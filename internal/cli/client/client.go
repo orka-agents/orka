@@ -17,6 +17,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/sozercan/orka/internal/labels"
 )
 
 // Client is an HTTP client for the Orka API.
@@ -307,12 +309,14 @@ type TaskDetail map[string]any
 
 // TaskSummary is a lightweight representation of a task for list display.
 type TaskSummary struct {
-	Name      string
-	Namespace string
-	Type      string
-	Phase     string
-	Age       string
-	Iteration int
+	Name          string
+	Namespace     string
+	Type          string
+	Phase         string
+	Age           string
+	Iteration     int
+	TransactionID string
+	ParentTask    string
 }
 
 // taskListResponse matches the API ListResponse shape.
@@ -329,6 +333,13 @@ type ListTasksOptions struct {
 	Namespace string
 	Limit     int
 	Continue  string
+}
+
+// ListTasksResult contains a page of task summaries and pagination metadata.
+type ListTasksResult struct {
+	Items              []TaskSummary
+	Continue           string
+	RemainingItemCount *int64
 }
 
 // TaskLogsResponse is the response for getting task logs.
@@ -383,6 +394,15 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (*TaskDe
 
 // ListTasks returns tasks from the API.
 func (c *Client) ListTasks(ctx context.Context, opts ListTasksOptions) ([]TaskSummary, error) {
+	result, err := c.ListTasksPage(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return result.Items, nil
+}
+
+// ListTasksPage returns one task page from the API, including pagination metadata.
+func (c *Client) ListTasksPage(ctx context.Context, opts ListTasksOptions) (*ListTasksResult, error) {
 	u, err := url.Parse(c.BaseURL + "/api/v1/tasks")
 	if err != nil {
 		return nil, fmt.Errorf("invalid base URL: %w", err)
@@ -413,7 +433,11 @@ func (c *Client) ListTasks(ctx context.Context, opts ListTasksOptions) ([]TaskSu
 	for _, item := range resp.Items {
 		summaries = append(summaries, extractTaskSummary(item))
 	}
-	return summaries, nil
+	return &ListTasksResult{
+		Items:              summaries,
+		Continue:           resp.Metadata.Continue,
+		RemainingItemCount: resp.Metadata.RemainingItemCount,
+	}, nil
 }
 
 // GetTask returns full details for a single task.
@@ -827,11 +851,16 @@ func (c *Client) DownloadArtifact(ctx context.Context, taskName, filename string
 // extractTaskSummary pulls summary fields from the raw task JSON.
 func extractTaskSummary(item TaskDetail) TaskSummary {
 	s := TaskSummary{
-		Name:      StringField(item, "metadata", "name"),
-		Namespace: StringField(item, "metadata", "namespace"),
-		Type:      StringField(item, "spec", "type"),
-		Phase:     StringField(item, "status", "phase"),
-		Age:       StringField(item, "metadata", "creationTimestamp"),
+		Name:          StringField(item, "metadata", "name"),
+		Namespace:     StringField(item, "metadata", "namespace"),
+		Type:          StringField(item, "spec", "type"),
+		Phase:         StringField(item, "status", "phase"),
+		Age:           StringField(item, "metadata", "creationTimestamp"),
+		TransactionID: StringField(item, "spec", "transaction", "id"),
+		ParentTask:    StringField(item, "metadata", "annotations", labels.AnnotationParentTaskName),
+	}
+	if s.ParentTask == "" {
+		s.ParentTask = StringField(item, "metadata", "labels", labels.LabelParentTask)
 	}
 	if status, ok := item["status"].(map[string]any); ok {
 		if v, ok := status["iteration"].(float64); ok {

@@ -12,6 +12,8 @@ import (
 	"github.com/gofiber/fiber/v3"
 )
 
+const resolvedNamespaceLocalKey = "resolvedNamespace"
+
 // ResolveNamespace determines the effective namespace for a request.
 // When watchNamespace is set: it's the only allowed namespace (explicit mismatches are rejected with 403).
 // Otherwise: explicit param > SA namespace from token > "default".
@@ -48,5 +50,6 @@ func ResolveNamespace(c fiber.Ctx, explicit string, watchNamespace string, enfor
 		}
 	}
 
+	c.Locals(resolvedNamespaceLocalKey, ns)
 	return ns, nil
 }

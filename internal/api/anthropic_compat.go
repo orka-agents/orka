@@ -37,6 +37,7 @@ type AnthropicCompatHandler struct {
 	config                    ChatConfig
 	resolver                  *ProviderResolver
 	resultStore               store.ResultStore
+	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
 
 // NewAnthropicCompatHandler creates an Anthropic-compatible API handler.
@@ -238,18 +239,18 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		return anthropicError(c, 400, "invalid_request_error", "max_tokens is required and must be greater than 0")
 	}
 
+	userInfo := GetUserInfo(c)
+	var contextToken *ContextToken
+	if userInfo != nil {
+		contextToken = userInfo.ContextToken
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
 	defer cancel()
 
-	namespace := GetEffectiveNamespace(c, "")
-	if h.watchNamespace != "" {
-		namespace = h.watchNamespace
-	}
-	if h.enforceNamespaceIsolation {
-		ui := GetUserInfo(c)
-		if ui != nil && ui.Namespace != "" && namespace != ui.Namespace {
-			return anthropicError(c, 403, "permission_error", fmt.Sprintf("namespace %q not allowed", namespace))
-		}
+	namespace, err := ResolveNamespace(c, c.Query("namespace", ""), h.watchNamespace, h.enforceNamespaceIsolation)
+	if err != nil {
+		return anthropicContextTokenAuthorizationError(c, err)
 	}
 
 	provider, model, providerInfo, err := h.resolver.ResolveWithInfo(ctx, ResolveOpts{
@@ -260,6 +261,10 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 	if err != nil {
 		anthropicLog.Error(err, "failed to resolve provider", "model", req.Model)
 		return anthropicError(c, 400, "invalid_request_error", "failed to resolve provider: "+err.Error())
+	}
+
+	if err := authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "anthropicMessages", namespace, providerInfo, model); err != nil {
+		return anthropicContextTokenAuthorizationError(c, err)
 	}
 
 	messages, err := convertAnthropicMessages(req.Messages)
@@ -296,6 +301,10 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		// not be visible to the LLM or it will call them and get "tool not found" errors.
 		compReq.Tools = nil
 		injectOrkaTools(ctx, h.client, compReq, namespace)
+		compReq.Tools = filterCompletionToolsForContextToken(c, h.contextTokenAuthorization, compReq.Tools)
+		if err := authorizeContextTokenToolUse(c, h.contextTokenAuthorization, "anthropicTools", completionToolNames(compReq.Tools)); err != nil {
+			return anthropicContextTokenAuthorizationError(c, err)
+		}
 
 		// Inject coordinator instructions so the LLM knows how to use task management tools
 		compReq.SystemPrompt = coordinatorSystemPrompt(namespace) + "\n\n" + compReq.SystemPrompt
@@ -321,6 +330,26 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 			ResultStore:               h.resultStore,
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", uuid.New().String()[:8]) },
 			TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": "anthropic-proxy"} },
+			AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
+				if err := authorizeAndStampToolTaskCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "anthropicToolCreateTask", userInfo, task); err != nil {
+					return &tools.ChatToolError{
+						Type:       "authorization_failed",
+						Message:    err.Error(),
+						Suggestion: "Use a task configuration authorized by the context token",
+					}
+				}
+				return nil
+			},
+			AuthorizeAgentCreate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
+				if err := authorizeContextTokenToolAgentCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "anthropicToolCreateAgent", agent); err != nil {
+					return &tools.ChatToolError{
+						Type:       "authorization_failed",
+						Message:    err.Error(),
+						Suggestion: "Use an agent configuration authorized by the context token",
+					}
+				}
+				return nil
+			},
 			CheckTaskLimit: func() *tools.ChatToolError {
 				if tasksCreated >= 20 {
 					return &tools.ChatToolError{Type: "limit_reached", Message: "task creation limit reached (max 20)", Suggestion: "Wait for existing tasks to complete"}
@@ -376,9 +405,13 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 func (h *AnthropicCompatHandler) HandleListModels(c fiber.Ctx) error {
 	ctx := c.Context()
 
-	namespace := GetEffectiveNamespace(c, "")
-	if h.watchNamespace != "" {
-		namespace = h.watchNamespace
+	namespace, err := ResolveNamespace(c, c.Query("namespace", ""), h.watchNamespace, h.enforceNamespaceIsolation)
+	if err != nil {
+		return anthropicContextTokenAuthorizationError(c, err)
+	}
+
+	if err := authorizeContextTokenActionWithConfig(c, h.contextTokenAuthorization, "anthropicListModels", h.contextTokenAuthorization.ProviderUseScopes); err != nil {
+		return anthropicContextTokenAuthorizationError(c, err)
 	}
 
 	providerList := &corev1alpha1.ProviderList{}
@@ -397,6 +430,9 @@ func (h *AnthropicCompatHandler) HandleListModels(c fiber.Ctx) error {
 
 	for _, p := range providerList.Items {
 		if p.Spec.DefaultModel != "" {
+			if !contextTokenAllowsListedProviderModel(c, h.contextTokenAuthorization, "anthropicListModels", namespace, providerResolutionInfo(&p), p.Spec.DefaultModel) {
+				continue
+			}
 			modelID := fmt.Sprintf("%s/%s", p.Name, p.Spec.DefaultModel)
 			if !seen[modelID] {
 				models = append(models, OAIModel{

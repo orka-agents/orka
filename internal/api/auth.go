@@ -10,6 +10,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +21,8 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/sozercan/orka/internal/metrics"
 )
 
 const (
@@ -77,13 +81,15 @@ type UserInfo struct {
 	Username  string
 	UID       string
 	Groups    []string
+	Extra     map[string]authenticationv1.ExtraValue
 	Namespace string // Extracted from ServiceAccount username (system:serviceaccount:<ns>:<name>)
 
-	AuthType string
-	Subject  string
-	Email    string
-	Issuer   string
-	Roles    []string
+	AuthType     string
+	Subject      string
+	Email        string
+	Issuer       string
+	Roles        []string
+	ContextToken *ContextToken
 }
 
 // OIDCConfig holds OpenID Connect JWT validation settings.
@@ -100,7 +106,13 @@ func (c OIDCConfig) Enabled() bool {
 
 // AuthConfig holds authentication middleware configuration.
 type AuthConfig struct {
-	OIDC OIDCConfig
+	OIDC          OIDCConfig
+	ContextTokens ContextTokenConfig
+
+	// TokenSources optionally overrides the ordered request headers used to
+	// extract authentication tokens. When empty, Authorization: Bearer is used
+	// first and x-api-key remains the fallback.
+	TokenSources []AuthTokenSource
 }
 
 // parseServiceAccountNamespace extracts the namespace from a ServiceAccount username.
@@ -125,28 +137,43 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 		cfg = configs[0]
 	}
 
+	tokenExtractor := AuthTokenExtractor{Sources: cfg.TokenSources}
+
 	return func(ctx fiber.Ctx) error {
-		// Extract token from Authorization header or x-api-key fallback
-		var token string
-		authHeader := ctx.Get(AuthHeader)
-		if authHeader != "" {
-			// Check for bearer token
-			if !strings.HasPrefix(authHeader, BearerPrefix) {
+		contextToken, profile, ok, err := extractContextTokenCandidate(ctx, cfg.ContextTokens)
+		if err != nil {
+			log.Info("authentication failed: invalid context token header format", "ip", ctx.IP())
+			return fiber.NewError(fiber.StatusUnauthorized, "invalid context token header format")
+		}
+
+		var userInfo *UserInfo
+		if ok {
+			userInfo, err = authenticateContextToken(ctx.Context(), contextToken, profile)
+		} else {
+			bearerContextToken, bearerErr := isUnconfiguredBearerContextToken(ctx, cfg.ContextTokens)
+			if bearerErr != nil {
 				log.Info("authentication failed: invalid authorization header format", "ip", ctx.IP())
 				return fiber.NewError(fiber.StatusUnauthorized, "invalid authorization header format")
 			}
-			token = strings.TrimPrefix(authHeader, BearerPrefix)
-		}
-		if token == "" {
-			// Fallback to x-api-key header (Anthropic convention)
-			token = ctx.Get(XAPIKeyHeader)
-		}
-		if token == "" {
-			log.Info("authentication failed: missing authorization header", "ip", ctx.IP())
-			return fiber.NewError(fiber.StatusUnauthorized, "missing authorization header")
-		}
+			if bearerContextToken {
+				log.Info("authentication failed: authorization bearer context token is not configured", "ip", ctx.IP())
+				return fiber.NewError(fiber.StatusUnauthorized, "kontxt TxTokens must be sent via the Txn-Token header unless Authorization: Bearer is explicitly enabled")
+			}
 
-		userInfo, err := authenticateToken(ctx.Context(), c, token, cfg)
+			var token string
+			token, err = tokenExtractor.Extract(ctx)
+			if err != nil {
+				if errors.Is(err, errInvalidAuthHeaderFormat) {
+					log.Info("authentication failed: invalid authorization header format", "ip", ctx.IP())
+					return fiber.NewError(fiber.StatusUnauthorized, "invalid authorization header format")
+				}
+
+				log.Info("authentication failed: missing authorization header", "ip", ctx.IP())
+				return fiber.NewError(fiber.StatusUnauthorized, "missing authorization header")
+			}
+
+			userInfo, err = authenticateToken(ctx.Context(), c, token, cfg)
+		}
 		if err != nil {
 			log.Error(err, "token validation failed")
 			return fiber.NewError(fiber.StatusUnauthorized, "invalid token")
@@ -160,10 +187,49 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 }
 
 func authenticateToken(ctx context.Context, c client.Client, token string, cfg AuthConfig) (*UserInfo, error) {
-	if cfg.OIDC.Enabled() {
-		return validateOIDCToken(ctx, token, cfg.OIDC)
+	if !cfg.OIDC.Enabled() {
+		return validateToken(ctx, c, token)
 	}
-	return validateToken(ctx, c, token)
+
+	parsedOIDC, oidcErr := parseOIDCTokenCandidate(token, cfg.OIDC)
+	if oidcErr == nil {
+		userInfo, oidcErr := validateParsedOIDCToken(ctx, parsedOIDC, cfg.OIDC)
+		if oidcErr == nil {
+			return userInfo, nil
+		}
+
+		if c == nil {
+			return nil, oidcErr
+		}
+
+		userInfo, tokenReviewErr := validateToken(ctx, c, token)
+		if tokenReviewErr == nil {
+			return userInfo, nil
+		}
+
+		return nil, fmt.Errorf("OIDC validation failed: %w; TokenReview validation failed: %v", oidcErr, tokenReviewErr)
+	}
+
+	if c == nil {
+		return nil, oidcErr
+	}
+
+	userInfo, tokenReviewErr := validateToken(ctx, c, token)
+	if tokenReviewErr == nil {
+		return userInfo, nil
+	}
+
+	return nil, fmt.Errorf("OIDC validation skipped: %w; TokenReview validation failed: %v", oidcErr, tokenReviewErr)
+}
+
+func authenticateContextToken(ctx context.Context, token string, profile ContextTokenProfileConfig) (*UserInfo, error) {
+	contextToken, err := validateContextToken(ctx, token, profile)
+	if err != nil {
+		metrics.RecordContextTokenAuth(profile.Name, "failure")
+		return nil, err
+	}
+	metrics.RecordContextTokenAuth(contextToken.Profile, "success")
+	return contextTokenToUserInfo(contextToken), nil
 }
 
 // validateToken validates a ServiceAccount token using TokenReview with caching
@@ -203,6 +269,7 @@ func validateToken(ctx context.Context, c client.Client, token string) (*UserInf
 		Username:  review.Status.User.Username,
 		UID:       review.Status.User.UID,
 		Groups:    review.Status.User.Groups,
+		Extra:     review.Status.User.Extra,
 		Namespace: parseServiceAccountNamespace(review.Status.User.Username),
 		AuthType:  AuthTypeTokenReview,
 	}

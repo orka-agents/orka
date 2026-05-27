@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +16,15 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 )
 
@@ -23,6 +32,7 @@ const maxResultSize = 10 << 20 // 10MB
 
 // InternalHandlers contains handlers for internal worker endpoints.
 type InternalHandlers struct {
+	k8sClient           client.Client
 	resultStore         store.ResultStore
 	sessionStore        store.SessionStore
 	planStore           store.PlanStore
@@ -34,6 +44,7 @@ type InternalHandlers struct {
 
 // InternalHandlersConfig holds optional configuration for internal handlers.
 type InternalHandlersConfig struct {
+	Client              client.Client
 	MemoryStore         store.MemoryStore
 	MemoryProposalStore store.MemoryProposalStore
 }
@@ -48,6 +59,7 @@ func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.P
 		artifactStore: as,
 	}
 	if len(configs) > 0 {
+		h.k8sClient = configs[0].Client
 		h.memoryStore = configs[0].MemoryStore
 		h.memoryProposalStore = configs[0].MemoryProposalStore
 	}
@@ -109,6 +121,146 @@ func (h *InternalHandlers) SubmitResult(c fiber.Ctx) error {
 	}
 
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// UpdateExecutionWorkspaceStatus handles
+// POST /internal/v1/tasks/{namespace}/{taskName}/execution-workspace/status.
+func (h *InternalHandlers) UpdateExecutionWorkspaceStatus(c fiber.Ctx) error {
+	namespace := c.Params("namespace")
+	taskName := c.Params("taskName")
+
+	if namespace == "" || taskName == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
+	}
+	if err := verifyCallerNamespace(c, namespace); err != nil {
+		return err
+	}
+	if h.k8sClient == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "task status updates not enabled")
+	}
+
+	var req executionWorkspaceStatusRequest
+	if err := c.Bind().JSON(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+	}
+	status := req.status()
+	if status.Provider == "" || status.Phase == "" || status.Reason == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "provider, phase, and reason are required")
+	}
+	if !validExecutionWorkspaceStatus(status) {
+		return fiber.NewError(fiber.StatusBadRequest, "unsupported execution workspace status value")
+	}
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		task := &corev1alpha1.Task{}
+		if err := h.k8sClient.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: taskName}, task); err != nil {
+			return err
+		}
+		if err := verifyCallerOwnsTaskWorker(c.Context(), h.k8sClient, GetUserInfo(c), task); err != nil {
+			return err
+		}
+		task.Status.ExecutionWorkspace = status
+		return h.k8sClient.Status().Update(c.Context(), task)
+	})
+	if err != nil {
+		var fiberErr *fiber.Error
+		if errors.As(err, &fiberErr) {
+			return fiberErr
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update execution workspace status: %v", err))
+	}
+
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+type executionWorkspaceStatusRequest struct {
+	Provider      corev1alpha1.WorkspaceProvider           `json:"provider"`
+	TemplateRef   *corev1alpha1.WorkspaceTemplateReference `json:"templateRef,omitempty"`
+	Phase         corev1alpha1.ExecutionWorkspacePhase     `json:"phase"`
+	Reason        corev1alpha1.ExecutionWorkspaceReason    `json:"reason"`
+	ReusePolicy   corev1alpha1.WorkspaceReusePolicy        `json:"reusePolicy,omitempty"`
+	CleanupPolicy corev1alpha1.WorkspaceCleanupPolicy      `json:"cleanupPolicy,omitempty"`
+	Reused        bool                                     `json:"reused,omitempty"`
+	Message       string                                   `json:"message,omitempty"`
+	ObservedAt    *metav1.Time                             `json:"observedAt,omitempty"`
+}
+
+func (r executionWorkspaceStatusRequest) status() *corev1alpha1.ExecutionWorkspaceStatus {
+	updateTime := r.ObservedAt
+	if updateTime == nil {
+		now := metav1.Now()
+		updateTime = &now
+	}
+	return &corev1alpha1.ExecutionWorkspaceStatus{
+		Provider:       r.Provider,
+		TemplateRef:    r.TemplateRef,
+		Phase:          r.Phase,
+		Reason:         r.Reason,
+		ReusePolicy:    r.ReusePolicy,
+		CleanupPolicy:  r.CleanupPolicy,
+		Reused:         r.Reused,
+		Message:        sanitizeWorkspaceStatusMessage(r.Message),
+		LastUpdateTime: updateTime,
+	}
+}
+
+func validExecutionWorkspaceStatus(status *corev1alpha1.ExecutionWorkspaceStatus) bool {
+	if status == nil {
+		return false
+	}
+	switch status.Provider {
+	case corev1alpha1.WorkspaceProviderAgentSandbox, corev1alpha1.WorkspaceProviderSubstrate:
+	default:
+		return false
+	}
+	switch status.Phase {
+	case corev1alpha1.ExecutionWorkspacePhasePending,
+		corev1alpha1.ExecutionWorkspacePhaseReady,
+		corev1alpha1.ExecutionWorkspacePhaseReleased,
+		corev1alpha1.ExecutionWorkspacePhaseRetained,
+		corev1alpha1.ExecutionWorkspacePhaseDeleted,
+		corev1alpha1.ExecutionWorkspacePhaseFailed:
+	default:
+		return false
+	}
+	switch status.Reason {
+	case corev1alpha1.ExecutionWorkspaceReasonPending,
+		corev1alpha1.ExecutionWorkspaceReasonClaimed,
+		corev1alpha1.ExecutionWorkspaceReasonReady,
+		corev1alpha1.ExecutionWorkspaceReasonReleased,
+		corev1alpha1.ExecutionWorkspaceReasonRetained,
+		corev1alpha1.ExecutionWorkspaceReasonDeleted,
+		corev1alpha1.ExecutionWorkspaceReasonValidationFailed,
+		corev1alpha1.ExecutionWorkspaceReasonAttachmentLocked,
+		corev1alpha1.ExecutionWorkspaceReasonClaimFailed,
+		corev1alpha1.ExecutionWorkspaceReasonReadinessFailed,
+		corev1alpha1.ExecutionWorkspaceReasonHandoffFailed,
+		corev1alpha1.ExecutionWorkspaceReasonCommandFailed,
+		corev1alpha1.ExecutionWorkspaceReasonSecretScrubFailed,
+		corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
+		corev1alpha1.ExecutionWorkspaceReasonStatusUpdateFailed:
+	default:
+		return false
+	}
+	switch status.ReusePolicy {
+	case "", corev1alpha1.WorkspaceReusePolicyNone, corev1alpha1.WorkspaceReusePolicySession:
+	default:
+		return false
+	}
+	switch status.CleanupPolicy {
+	case "", corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
+	default:
+		return false
+	}
+	return true
+}
+
+func sanitizeWorkspaceStatusMessage(message string) string {
+	message = strings.TrimSpace(message)
+	if len(message) > 1024 {
+		return message[:1024] + "...<truncated>"
+	}
+	return message
 }
 
 // UploadArtifact handles POST /internal/v1/artifacts/{namespace}/{taskName}/{filename}.
@@ -372,6 +524,68 @@ func verifyCallerNamespace(c fiber.Ctx, namespace string) error {
 	}
 
 	return nil
+}
+
+func verifyCallerOwnsTaskWorker(ctx context.Context, c client.Client, userInfo *UserInfo, task *corev1alpha1.Task) error {
+	if c == nil || userInfo == nil || task == nil {
+		return fiber.NewError(fiber.StatusUnauthorized, "authentication required")
+	}
+	if userInfo.AuthType != AuthTypeTokenReview {
+		return fiber.NewError(fiber.StatusForbidden, "caller pod token required")
+	}
+	podName := firstUserExtra(userInfo, "authentication.kubernetes.io/pod-name")
+	podUID := firstUserExtra(userInfo, "authentication.kubernetes.io/pod-uid")
+	if podName == "" || podUID == "" {
+		return fiber.NewError(fiber.StatusForbidden, "caller pod identity required")
+	}
+
+	pod := &corev1.Pod{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: podName}, pod); err != nil {
+		return fiber.NewError(fiber.StatusForbidden, "caller pod not found")
+	}
+	if string(pod.UID) != podUID {
+		return fiber.NewError(fiber.StatusForbidden, "caller pod identity mismatch")
+	}
+	if pod.Labels[labels.LabelTask] != labels.SelectorValue(task.Name) {
+		return fiber.NewError(fiber.StatusForbidden, "caller pod does not belong to task")
+	}
+	currentJobName := strings.TrimSpace(task.Status.JobName)
+	if currentJobName == "" {
+		return fiber.NewError(fiber.StatusForbidden, "task has no active worker job")
+	}
+
+	for _, owner := range pod.OwnerReferences {
+		if owner.Kind != "Job" || owner.Name == "" {
+			continue
+		}
+		if owner.Name != currentJobName {
+			continue
+		}
+		job := &batchv1.Job{}
+		if err := c.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: owner.Name}, job); err != nil {
+			return fiber.NewError(fiber.StatusForbidden, "caller job not found")
+		}
+		if owner.UID != "" && owner.UID != job.UID {
+			continue
+		}
+		for _, jobOwner := range job.OwnerReferences {
+			if jobOwner.Kind == "Task" && jobOwner.UID == task.UID {
+				return nil
+			}
+		}
+	}
+	return fiber.NewError(fiber.StatusForbidden, "caller is not the current worker for this task")
+}
+
+func firstUserExtra(userInfo *UserInfo, key string) string {
+	if userInfo == nil || len(userInfo.Extra) == 0 {
+		return ""
+	}
+	values := userInfo.Extra[key]
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }
 
 // SendMessage handles POST /internal/v1/messages/{namespace}.

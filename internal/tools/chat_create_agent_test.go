@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -58,6 +59,76 @@ func TestChatCreateAgentTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 	}
 	if created.Spec.Model.Provider != testProviderOpenAI {
 		t.Fatalf("model.provider = %q, want openai when no providerRef is set", created.Spec.Model.Provider)
+	}
+}
+
+func TestChatCreateAgentTool_Execute_RollsBackAgentWhenInitialTaskAuthorizationFails(t *testing.T) {
+	fc := newFakeClient()
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Client:     fc,
+		Namespace:  defaultNamespace,
+		TaskLabels: func() map[string]string { return map[string]string{} },
+		CheckTaskLimit: func() *ChatToolError {
+			return nil
+		},
+		GenerateTaskName: func() string { return "blocked-task" },
+		AuthorizeTaskCreate: func(context.Context, *corev1alpha1.Task) *ChatToolError {
+			return &ChatToolError{Type: "permission_denied", Message: "task blocked by context token"}
+		},
+	})
+
+	tool := &ChatCreateAgentTool{}
+	result, err := tool.Execute(ctx, json.RawMessage(`{"name":"agent-rollback","initialPrompt":"run this"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var r ChatToolResult
+	if err := json.Unmarshal([]byte(result), &r); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if r.Success {
+		t.Fatalf("expected authorization failure, got success: %#v", r)
+	}
+	if r.ErrorType != "permission_denied" {
+		t.Fatalf("errorType = %q, want permission_denied", r.ErrorType)
+	}
+
+	var created corev1alpha1.Agent
+	err = fc.Get(context.Background(), client.ObjectKey{Name: "agent-rollback", Namespace: defaultNamespace}, &created)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("agent should have been rolled back, get err=%v", err)
+	}
+}
+
+func TestChatCreateAgentTool_Execute_AuthorizesAgentBeforeCreate(t *testing.T) {
+	fc := newFakeClient()
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Client:    fc,
+		Namespace: defaultNamespace,
+		AuthorizeAgentCreate: func(context.Context, *corev1alpha1.Agent) *ChatToolError {
+			return &ChatToolError{Type: "authorization_failed", Message: "agent blocked by context token"}
+		},
+	})
+
+	tool := &ChatCreateAgentTool{}
+	result, err := tool.Execute(ctx, json.RawMessage(`{"name":"agent-blocked"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var r ChatToolResult
+	if err := json.Unmarshal([]byte(result), &r); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if r.Success {
+		t.Fatalf("expected authorization failure, got success: %#v", r)
+	}
+
+	var created corev1alpha1.Agent
+	err = fc.Get(context.Background(), client.ObjectKey{Name: "agent-blocked", Namespace: defaultNamespace}, &created)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("agent should not have been created, get err=%v", err)
 	}
 }
 

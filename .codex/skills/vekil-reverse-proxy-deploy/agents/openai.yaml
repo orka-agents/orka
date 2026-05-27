@@ -1,0 +1,4 @@
+interface:
+  display_name: "Vekil Reverse Proxy Deploy"
+  short_description: "Deploy Vekil as a reverse proxy"
+  default_prompt: "Use $vekil-reverse-proxy-deploy to deploy or update Vekil as a Kubernetes reverse proxy and verify readiness."

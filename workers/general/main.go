@@ -39,6 +39,13 @@ func run() error {
 		return prepareWorkspace(ctx)
 	}
 
+	baseEnv := workerenv.ParseBaseEnv(os.Getenv)
+	transactionLogFields := workerenv.TransactionLogFields(
+		baseEnv.TransactionID, baseEnv.TransactionProfile,
+	)
+	fmt.Printf("Worker general started task=%s/%s%s\n",
+		baseEnv.TaskNamespace, baseEnv.TaskName, transactionLogFields)
+
 	workDir, err := prepareWorkspaceIfConfigured(ctx)
 	if err != nil {
 		return err
@@ -93,6 +100,8 @@ func run() error {
 		return err
 	}
 
+	fmt.Printf("Task %s/%s completed successfully%s\n",
+		baseEnv.TaskNamespace, baseEnv.TaskName, transactionLogFields)
 	return nil
 }
 

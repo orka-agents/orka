@@ -7,6 +7,7 @@ Orka is a Kubernetes-native task execution platform that manages Jobs and Pods f
 - **No secrets** — never commit, log, or print API keys, tokens, or credentials. Use Kubernetes Secrets or env vars.
 - **No binaries in repo** — build artifacts go in `bin/` (gitignored) or CI release pipelines.
 - **Scope discipline** — implement exactly what's asked, nothing more.
+- **Git push discipline** — after making a change, push to the current branch when it is not `main`; never push directly to `main`.
 
 ## Build & Test
 
@@ -50,6 +51,7 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments.
 - Structured logging: `log := log.FromContext(ctx); log.Info("msg", "key", val)`
 - LLM tool args for nested objects arrive as `map[string]any`, not strings — always type-switch
 - Memory features are governance-first: `remember` and `propose_memory` create review proposals, not durable memories
+- Kontxt integration is fail-closed: never store raw TxTokens in Task specs/status/logs; use owner-referenced Secrets for child tokens, safe metadata/digests for audit, subset checks for child scopes, and fail-closed TTS exchanges for outbound scopes.
 
 ## Gotchas
 
@@ -60,5 +62,6 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments.
 - Built-in AI worker tools: `web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`
 - Coordination memory tools: `recall_memory`, `remember`, `propose_memory`, `search_transcript`
 - Do not store secrets, credentials, tokens, raw transcripts, or one-off task status in durable memory
-- Reviewing a memory proposal does not apply it; create durable memory explicitly via the API until an apply flow exists
-- Live GitHub OIDC E2E requires GitHub Actions `id-token: write` or `ORKA_GITHUB_OIDC_TOKEN`; redact JWTs and request tokens in logs
+- Reviewing a memory proposal does not apply it; use the explicit proposal apply endpoint for accepted `memory` proposals when durable memory should be created
+- Kontxt TxTokens are accepted via `Txn-Token` by default; `Authorization: Bearer` context-token support is opt-in so ServiceAccount/OIDC auth can coexist
+- Live GitHub OIDC/kontxt E2E requires GitHub Actions `id-token: write` or `ORKA_GITHUB_OIDC_TOKEN`; redact JWTs, TxTokens, and request tokens in logs

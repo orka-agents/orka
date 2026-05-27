@@ -35,6 +35,8 @@ type ServerConfig struct {
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
 	OIDC                      OIDCConfig
+	ContextTokens             ContextTokenConfig
+	ContextTokenAuthorization ContextTokenAuthorizationConfig
 	Chat                      ChatConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
@@ -96,6 +98,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		Client:                    c,
 		WatchNamespace:            config.WatchNamespace,
 		EnforceNamespaceIsolation: config.EnforceNamespaceIsolation,
+		ContextTokenAuthorization: config.ContextTokenAuthorization,
 		ResultStore:               config.ResultStore,
 		SessionStore:              config.SessionStore,
 		PlanStore:                 config.PlanStore,
@@ -108,8 +111,11 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	})
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
+	server.chatHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
+	server.openaiHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.anthropicHandler = NewAnthropicCompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
+	server.anthropicHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.setupMiddleware()
 	server.setupRoutes()
 	server.setupStaticFiles()
@@ -140,7 +146,7 @@ func (s *Server) setupMiddleware() {
 	s.app.Use(cors.New(cors.Config{
 		AllowOrigins: origins,
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization", "x-api-key"},
+		AllowHeaders: allowedCORSHeaders(s.config.ContextTokens),
 	}))
 
 	// Logging middleware
@@ -148,6 +154,28 @@ func (s *Server) setupMiddleware() {
 
 	// Metrics middleware
 	s.app.Use(NewMetricsMiddleware())
+}
+
+func allowedCORSHeaders(contextTokens ContextTokenConfig) []string {
+	headers := []string{"Origin", "Content-Type", "Accept", AuthHeader, XAPIKeyHeader}
+	addHeader := func(name string) {
+		if name == "" {
+			return
+		}
+		for _, existing := range headers {
+			if strings.EqualFold(existing, name) {
+				return
+			}
+		}
+		headers = append(headers, name)
+	}
+
+	for _, profile := range contextTokens.Profiles {
+		for _, header := range profile.Headers {
+			addHeader(header.Name)
+		}
+	}
+	return headers
 }
 
 // setupRoutes configures the API routes
@@ -159,7 +187,7 @@ func (s *Server) setupRoutes() {
 	// GitHub webhooks use HMAC verification instead of Kubernetes/OIDC bearer auth.
 	s.app.Post("/webhooks/github", s.handlers.HandleGitHubWebhook)
 
-	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC})
+	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC, ContextTokens: s.config.ContextTokens})
 
 	// API v1 group
 	api := s.app.Group("/api/v1")
@@ -196,6 +224,7 @@ func (s *Server) setupRoutes() {
 	api.Post("/memory-proposals", s.handlers.CreateMemoryProposal)
 	api.Get("/memory-proposals/:id", s.handlers.GetMemoryProposal)
 	api.Post("/memory-proposals/:id/review", s.handlers.ReviewMemoryProposal)
+	api.Post("/memory-proposals/:id/apply", s.handlers.ApplyMemoryProposal)
 	api.Post("/memory-proposals/:id/archive", s.handlers.ArchiveMemoryProposal)
 
 	// Tool endpoints
@@ -271,6 +300,7 @@ func (s *Server) setupRoutes() {
 			s.MessageStore,
 			s.ArtifactStore,
 			InternalHandlersConfig{
+				Client:              s.client,
 				MemoryStore:         s.MemoryStore,
 				MemoryProposalStore: s.MemoryProposalStore,
 			},
@@ -278,6 +308,7 @@ func (s *Server) setupRoutes() {
 		internal := s.app.Group("/internal/v1")
 		internal.Use(NewAuthMiddleware(s.client))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
+		internal.Post("/tasks/:namespace/:taskName/execution-workspace/status", s.internalHandlers.UpdateExecutionWorkspaceStatus)
 		internal.Get("/sessions/:namespace/search", s.internalHandlers.SearchTranscript)
 		internal.Get("/sessions/:namespace/:name/transcript", s.internalHandlers.GetSessionTranscript)
 		internal.Post("/plans/:namespace/:taskName", s.internalHandlers.SubmitPlan)
@@ -296,6 +327,7 @@ func (s *Server) setupRoutes() {
 		internal.Post("/memory-proposals/:namespace", s.internalHandlers.CreateMemoryProposal)
 		internal.Get("/memory-proposals/:namespace/:id", s.internalHandlers.GetMemoryProposal)
 		internal.Post("/memory-proposals/:namespace/:id/review", s.internalHandlers.ReviewMemoryProposal)
+		internal.Post("/memory-proposals/:namespace/:id/apply", s.internalHandlers.ApplyMemoryProposal)
 		internal.Post("/memory-proposals/:namespace/:id/archive", s.internalHandlers.ArchiveMemoryProposal)
 	}
 }

@@ -22,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -74,6 +75,7 @@ type Handlers struct {
 	clientset                 kubernetes.Interface
 	watchNamespace            string
 	enforceNamespaceIsolation bool
+	contextTokenAuthorization ContextTokenAuthorizationConfig
 	resultStore               store.ResultStore
 	sessionStore              store.SessionStore
 	planStore                 store.PlanStore
@@ -89,6 +91,7 @@ type HandlersConfig struct {
 	Client                    client.Client
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
+	ContextTokenAuthorization ContextTokenAuthorizationConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
 	PlanStore                 store.PlanStore
@@ -107,6 +110,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		clientset:                 cfg.KubeClient,
 		watchNamespace:            cfg.WatchNamespace,
 		enforceNamespaceIsolation: cfg.EnforceNamespaceIsolation,
+		contextTokenAuthorization: cfg.ContextTokenAuthorization,
 		resultStore:               cfg.ResultStore,
 		sessionStore:              cfg.SessionStore,
 		planStore:                 cfg.PlanStore,
@@ -160,6 +164,7 @@ func (h *Handlers) resolveNamespace(c fiber.Ctx, explicit string) (string, error
 		}
 	}
 
+	c.Locals(resolvedNamespaceLocalKey, ns)
 	return ns, nil
 }
 
@@ -178,28 +183,30 @@ type UpdateAgentRequest struct {
 
 // CreateTaskRequest is the request body for creating a task
 type CreateTaskRequest struct {
-	Name              string                         `json:"name"`
-	Namespace         string                         `json:"namespace"`
-	Type              corev1alpha1.TaskType          `json:"type"`
-	Image             string                         `json:"image,omitempty"`
-	Command           []string                       `json:"command,omitempty"`
-	Args              []string                       `json:"args,omitempty"`
-	Env               []corev1.EnvVar                `json:"env,omitempty"`
-	Timeout           string                         `json:"timeout,omitempty"`
-	Priority          *int32                         `json:"priority,omitempty"`
-	RetryPolicy       *corev1alpha1.RetryPolicy      `json:"retryPolicy,omitempty"`
-	WebhookURL        string                         `json:"webhookURL,omitempty"`
-	SecretRef         *corev1alpha1.SecretReference  `json:"secretRef,omitempty"`
-	SessionRef        *corev1alpha1.SessionReference `json:"sessionRef,omitempty"`
-	AI                *corev1alpha1.AISpec           `json:"ai,omitempty"`
-	AgentRef          *corev1alpha1.AgentReference   `json:"agentRef,omitempty"`
-	Prompt            string                         `json:"prompt,omitempty"`
-	AgentRuntime      *corev1alpha1.AgentRuntimeSpec `json:"agentRuntime,omitempty"`
-	Execution         *corev1alpha1.ExecutionSpec    `json:"execution,omitempty"`
-	Schedule          string                         `json:"schedule,omitempty"`
-	TimeZone          *string                        `json:"timeZone,omitempty"`
-	ConcurrencyPolicy string                         `json:"concurrencyPolicy,omitempty"`
-	Suspend           *bool                          `json:"suspend,omitempty"`
+	Name              string                           `json:"name"`
+	Namespace         string                           `json:"namespace"`
+	Type              corev1alpha1.TaskType            `json:"type"`
+	Image             string                           `json:"image,omitempty"`
+	Command           []string                         `json:"command,omitempty"`
+	Args              []string                         `json:"args,omitempty"`
+	Env               []corev1.EnvVar                  `json:"env,omitempty"`
+	Timeout           string                           `json:"timeout,omitempty"`
+	Priority          *int32                           `json:"priority,omitempty"`
+	RetryPolicy       *corev1alpha1.RetryPolicy        `json:"retryPolicy,omitempty"`
+	WebhookURL        string                           `json:"webhookURL,omitempty"`
+	SecretRef         *corev1alpha1.SecretReference    `json:"secretRef,omitempty"`
+	SessionRef        *corev1alpha1.SessionReference   `json:"sessionRef,omitempty"`
+	AI                *corev1alpha1.AISpec             `json:"ai,omitempty"`
+	AgentRef          *corev1alpha1.AgentReference     `json:"agentRef,omitempty"`
+	Prompt            string                           `json:"prompt,omitempty"`
+	AgentRuntime      *corev1alpha1.AgentRuntimeSpec   `json:"agentRuntime,omitempty"`
+	Execution         *corev1alpha1.ExecutionSpec      `json:"execution,omitempty"`
+	Workspace         *corev1alpha1.WorkspaceConfig    `json:"workspace,omitempty"`
+	PriorTaskRef      *corev1alpha1.PriorTaskReference `json:"priorTaskRef,omitempty"`
+	Schedule          string                           `json:"schedule,omitempty"`
+	TimeZone          *string                          `json:"timeZone,omitempty"`
+	ConcurrencyPolicy string                           `json:"concurrencyPolicy,omitempty"`
+	Suspend           *bool                            `json:"suspend,omitempty"`
 }
 
 // ListResponse is a generic list response with pagination
@@ -270,12 +277,18 @@ func rejectRequestedByTampering(body []byte) error {
 	if _, ok := topLevel["requestedBy"]; ok {
 		return fiber.NewError(fiber.StatusBadRequest, "requestedBy cannot be set by clients")
 	}
+	if _, ok := topLevel["transaction"]; ok {
+		return fiber.NewError(fiber.StatusBadRequest, "transaction cannot be set by clients")
+	}
 
 	if specRaw, ok := topLevel["spec"]; ok {
 		var spec map[string]json.RawMessage
 		if err := json.Unmarshal(specRaw, &spec); err == nil {
 			if _, ok := spec["requestedBy"]; ok {
 				return fiber.NewError(fiber.StatusBadRequest, "spec.requestedBy cannot be set by clients")
+			}
+			if _, ok := spec["transaction"]; ok {
+				return fiber.NewError(fiber.StatusBadRequest, "spec.transaction cannot be set by clients")
 			}
 		}
 	}
@@ -306,6 +319,9 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenTaskCreate(c, req, namespace); err != nil {
+		return err
+	}
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -327,6 +343,8 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 			AgentRef:     req.AgentRef,
 			Prompt:       req.Prompt,
 			AgentRuntime: req.AgentRuntime,
+			Workspace:    req.Workspace,
+			PriorTaskRef: req.PriorTaskRef,
 			Schedule:     req.Schedule,
 			Suspend:      req.Suspend,
 		},
@@ -335,16 +353,7 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		task.Spec.Execution = req.Execution.DeepCopy()
 	}
 
-	if ui := GetUserInfo(c); ui != nil && ui.AuthType == AuthTypeOIDC {
-		task.Spec.RequestedBy = &corev1alpha1.RequestedBy{
-			Subject:  ui.Subject,
-			Issuer:   ui.Issuer,
-			Username: ui.Username,
-			Email:    ui.Email,
-			Groups:   append([]string{}, ui.Groups...),
-			Roles:    append([]string{}, ui.Roles...),
-		}
-	}
+	stampTaskRequesterFromUserInfo(task, GetUserInfo(c))
 
 	// Parse timeout if provided
 	if req.Timeout != "" {
@@ -388,6 +397,9 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 		return err
 	}
 	opts.Namespace = namespace
+	if err := h.authorizeContextTokenAction(c, "listTasks", h.contextTokenAuthorization.TaskListScopes); err != nil {
+		return err
+	}
 
 	// Apply pagination
 	pagination, err := ParsePagination(limit, continueToken)
@@ -402,12 +414,31 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 	if err := h.client.List(ctx, taskList, opts); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tasks: %v", err))
 	}
+	filteredList := false
+	if h.contextTokenAuthorization.Enabled() {
+		filtered := taskList.Items[:0]
+		for i := range taskList.Items {
+			allowed, err := h.contextTokenAllowsLoadedTask(c, "listTasks", &taskList.Items[i])
+			if err != nil {
+				return err
+			}
+			if allowed {
+				filtered = append(filtered, taskList.Items[i])
+			}
+		}
+		filteredList = len(filtered) != len(taskList.Items)
+		taskList.Items = filtered
+	}
+	remainingItemCount := taskList.RemainingItemCount
+	if filteredList {
+		remainingItemCount = nil
+	}
 
 	response := ListResponse{
 		Items: taskList.Items,
 		Metadata: ListMeta{
 			Continue:           taskList.Continue,
-			RemainingItemCount: taskList.RemainingItemCount,
+			RemainingItemCount: remainingItemCount,
 		},
 	}
 
@@ -421,6 +452,9 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenTaskRead(c, "getTask", namespace, id); err != nil {
+		return err
+	}
 
 	task := &corev1alpha1.Task{}
 	ctx := c.Context()
@@ -429,6 +463,9 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "task not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+	if err := h.authorizeContextTokenLoadedTask(c, "getTask", task); err != nil {
+		return err
 	}
 
 	// Build consistent response shape with optional plan data
@@ -467,6 +504,9 @@ func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "deleteTask", h.contextTokenAuthorization.TaskDeleteScopes); err != nil {
+		return err
+	}
 
 	task := &corev1alpha1.Task{}
 	ctx := c.Context()
@@ -475,6 +515,9 @@ func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "task not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+	if err := h.authorizeContextTokenLoadedTask(c, "deleteTask", task); err != nil {
+		return err
 	}
 
 	if err := h.client.Delete(ctx, task); err != nil {
@@ -491,6 +534,9 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenTaskRead(c, "getTaskLogs", namespace, id); err != nil {
+		return err
+	}
 
 	task := &corev1alpha1.Task{}
 	ctx := c.Context()
@@ -499,6 +545,9 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "task not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+	if err := h.authorizeContextTokenLoadedTask(c, "getTaskLogs", task); err != nil {
+		return err
 	}
 
 	// For completed tasks with results available, serve from ResultStore
@@ -597,6 +646,9 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenTaskRead(c, "getTaskResult", namespace, id); err != nil {
+		return err
+	}
 
 	task := &corev1alpha1.Task{}
 	ctx := c.Context()
@@ -605,6 +657,9 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "task not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+	if err := h.authorizeContextTokenLoadedTask(c, "getTaskResult", task); err != nil {
+		return err
 	}
 
 	if task.Status.ResultRef == nil || !task.Status.ResultRef.Available {
@@ -631,6 +686,9 @@ func (h *Handlers) GetTaskPlan(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenTaskRead(c, "getTaskPlan", namespace, id); err != nil {
+		return err
+	}
 
 	task := &corev1alpha1.Task{}
 	ctx := c.Context()
@@ -639,6 +697,9 @@ func (h *Handlers) GetTaskPlan(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "task not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+	if err := h.authorizeContextTokenLoadedTask(c, "getTaskPlan", task); err != nil {
+		return err
 	}
 
 	if h.planStore == nil {
@@ -660,6 +721,9 @@ func (h *Handlers) GetTaskPlan(c fiber.Ctx) error {
 func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "listSessions", h.contextTokenAuthorization.SessionReadScopes); err != nil {
 		return err
 	}
 
@@ -698,6 +762,9 @@ func (h *Handlers) GetSession(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "getSession", h.contextTokenAuthorization.SessionReadScopes); err != nil {
 		return err
 	}
 
@@ -744,6 +811,9 @@ func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "deleteSession", h.contextTokenAuthorization.SessionWriteScopes); err != nil {
+		return err
+	}
 
 	ctx := c.Context()
 	if err := h.sessionStore.DeleteSession(ctx, namespace, id); err != nil {
@@ -760,6 +830,9 @@ func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 func (h *Handlers) ListTools(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "listTools", h.contextTokenAuthorization.ToolReadScopes); err != nil {
 		return err
 	}
 	limit := c.Query("limit", "100")
@@ -783,9 +856,25 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 
 	// Add built-in tools to the response
 	toolItems := make([]fiber.Map, 0, len(toolList.Items)+len(builtinToolsList))
-	toolItems = append(toolItems, builtinToolsList...)
+	for _, tool := range builtinToolsList {
+		name, _ := tool["name"].(string)
+		allowed, err := contextTokenAllowsToolMetadata(c, h.contextTokenAuthorization, "listTools", name)
+		if err != nil {
+			return err
+		}
+		if allowed {
+			toolItems = append(toolItems, tool)
+		}
+	}
 
 	for _, tool := range toolList.Items {
+		allowed, err := contextTokenAllowsToolMetadata(c, h.contextTokenAuthorization, "listTools", tool.Name)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			continue
+		}
 		toolItems = append(toolItems, fiber.Map{
 			"name":        tool.Name,
 			"namespace":   tool.Namespace,
@@ -814,9 +903,15 @@ func (h *Handlers) GetTool(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "getTool", h.contextTokenAuthorization.ToolReadScopes); err != nil {
+		return err
+	}
 
 	// Check if it's a built-in tool
 	if builtin, ok := builtinToolsMap[name]; ok {
+		if err := authorizeContextTokenToolMetadata(c, h.contextTokenAuthorization, "getTool", name); err != nil {
+			return err
+		}
 		return c.JSON(builtin)
 	}
 
@@ -829,6 +924,9 @@ func (h *Handlers) GetTool(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get tool: %v", err))
 	}
+	if err := authorizeContextTokenToolMetadata(c, h.contextTokenAuthorization, "getTool", tool.Name); err != nil {
+		return err
+	}
 
 	return c.JSON(tool)
 }
@@ -837,6 +935,9 @@ func (h *Handlers) GetTool(c fiber.Ctx) error {
 func (h *Handlers) ListAgents(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "listAgents", h.contextTokenAuthorization.AgentReadScopes); err != nil {
 		return err
 	}
 	limit := c.Query("limit", "100")
@@ -857,6 +958,20 @@ func (h *Handlers) ListAgents(c fiber.Ctx) error {
 	if err := h.client.List(ctx, agentList, opts); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list agents: %v", err))
 	}
+	if h.contextTokenAuthorization.Enabled() {
+		filtered := agentList.Items[:0]
+		for i := range agentList.Items {
+			agent := &agentList.Items[i]
+			allowed, err := contextTokenAllowsAgentContext(c, h.contextTokenAuthorization, "listAgents", agent.Namespace, agent.Name)
+			if err != nil {
+				return err
+			}
+			if allowed {
+				filtered = append(filtered, *agent)
+			}
+		}
+		agentList.Items = filtered
+	}
 
 	response := ListResponse{
 		Items: agentList.Items,
@@ -876,6 +991,9 @@ func (h *Handlers) GetAgent(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "getAgent", h.contextTokenAuthorization.AgentReadScopes); err != nil {
+		return err
+	}
 
 	agent := &corev1alpha1.Agent{}
 	ctx := c.Context()
@@ -884,6 +1002,9 @@ func (h *Handlers) GetAgent(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "agent not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent: %v", err))
+	}
+	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "getAgent", agent.Namespace, agent.Name); err != nil {
+		return err
 	}
 
 	return c.JSON(agent)
@@ -914,6 +1035,9 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "createAgent", h.contextTokenAuthorization.AgentWriteScopes); err != nil {
+		return err
+	}
 
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
@@ -921,6 +1045,12 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 			Namespace: namespace,
 		},
 		Spec: req.Spec,
+	}
+	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "createAgent", agent.Namespace, agent.Name); err != nil {
+		return err
+	}
+	if err := authorizeContextTokenAgentSpec(c.Context(), h.client, contextTokenFromUserInfo(GetUserInfo(c)), h.contextTokenAuthorization, "createAgent", agent); err != nil {
+		return err
 	}
 
 	ctx := c.Context()
@@ -941,23 +1071,52 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-
-	agent := &corev1alpha1.Agent{}
-	ctx := c.Context()
-	if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, agent); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusNotFound, "agent not found")
-		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent: %v", err))
+	if err := h.authorizeContextTokenAction(c, "updateAgent", h.contextTokenAuthorization.AgentWriteScopes); err != nil {
+		return err
 	}
 
+	// Namespace isolation is resolved before parsing the body so unauthorized
+	// namespace probes cannot learn whether the payload is syntactically valid.
 	var req UpdateAgentRequest
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
 
-	agent.Spec = req.Spec
-	if err := h.client.Update(ctx, agent); err != nil {
+	ctx := c.Context()
+	token := contextTokenFromUserInfo(GetUserInfo(c))
+
+	var agent *corev1alpha1.Agent
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Agent{}
+		if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, current); err != nil {
+			return err
+		}
+		if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "updateAgent", current.Namespace, current.Name); err != nil {
+			return err
+		}
+
+		patchBase := current.DeepCopy()
+		current.Spec = req.Spec
+		if err := authorizeContextTokenAgentSpec(ctx, h.client, token, h.contextTokenAuthorization, "updateAgent", current); err != nil {
+			return err
+		}
+		if err := h.client.Patch(ctx, current, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		agent = current
+		return nil
+	})
+	if err != nil {
+		var fiberErr *fiber.Error
+		if errors.As(err, &fiberErr) {
+			return err
+		}
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "agent not found")
+		}
+		if apierrors.IsConflict(err) {
+			return fiber.NewError(fiber.StatusConflict, "agent was modified concurrently")
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update agent: %v", err))
 	}
 
@@ -971,6 +1130,9 @@ func (h *Handlers) DeleteAgent(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "deleteAgent", h.contextTokenAuthorization.AgentWriteScopes); err != nil {
+		return err
+	}
 
 	agent := &corev1alpha1.Agent{}
 	ctx := c.Context()
@@ -979,6 +1141,9 @@ func (h *Handlers) DeleteAgent(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "agent not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent: %v", err))
+	}
+	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "deleteAgent", agent.Namespace, agent.Name); err != nil {
+		return err
 	}
 
 	if err := h.client.Delete(ctx, agent); err != nil {
@@ -1005,6 +1170,9 @@ type UpdateSkillRequest struct {
 func (h *Handlers) ListSkills(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "listSkills", h.contextTokenAuthorization.SkillReadScopes); err != nil {
 		return err
 	}
 	limit := c.Query("limit", "100")
@@ -1057,6 +1225,9 @@ func (h *Handlers) GetSkill(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "getSkill", h.contextTokenAuthorization.SkillReadScopes); err != nil {
+		return err
+	}
 
 	skill := &corev1alpha1.Skill{}
 	ctx := c.Context()
@@ -1075,6 +1246,9 @@ func (h *Handlers) GetSkillContent(c fiber.Ctx) error {
 	name := c.Params("name")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "getSkillContent", h.contextTokenAuthorization.SkillReadScopes); err != nil {
 		return err
 	}
 
@@ -1114,6 +1288,9 @@ func (h *Handlers) CreateSkill(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "createSkill", h.contextTokenAuthorization.SkillWriteScopes); err != nil {
+		return err
+	}
 
 	skill := &corev1alpha1.Skill{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1139,6 +1316,9 @@ func (h *Handlers) UpdateSkill(c fiber.Ctx) error {
 	name := c.Params("name")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "updateSkill", h.contextTokenAuthorization.SkillWriteScopes); err != nil {
 		return err
 	}
 
@@ -1171,6 +1351,9 @@ func (h *Handlers) DeleteSkill(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenAction(c, "deleteSkill", h.contextTokenAuthorization.SkillWriteScopes); err != nil {
+		return err
+	}
 
 	skill := &corev1alpha1.Skill{}
 	ctx := c.Context()
@@ -1199,6 +1382,9 @@ type SecretNameResponse struct {
 func (h *Handlers) ListSecretNames(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "listSecrets", h.contextTokenAuthorization.SecretReadScopes()); err != nil {
 		return err
 	}
 
@@ -1253,13 +1439,46 @@ func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenTaskRead(c, "getTaskChildren", namespace, taskName); err != nil {
+		return err
+	}
+
+	ctx := c.Context()
+	if h.contextTokenAuthorization.Enabled() {
+		ui := GetUserInfo(c)
+		if ui != nil && ui.AuthType == AuthTypeContextToken && ui.ContextToken != nil {
+			parentTask := &corev1alpha1.Task{}
+			if err := h.client.Get(ctx, types.NamespacedName{Name: taskName, Namespace: namespace}, parentTask); err != nil {
+				if apierrors.IsNotFound(err) {
+					return fiber.NewError(fiber.StatusNotFound, "task not found")
+				}
+				return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+			}
+			if err := h.authorizeContextTokenLoadedTask(c, "getTaskChildren", parentTask); err != nil {
+				return err
+			}
+		}
+	}
 
 	var taskList corev1alpha1.TaskList
-	if err := h.client.List(c.Context(), &taskList,
+	if err := h.client.List(ctx, &taskList,
 		client.InNamespace(namespace),
 		client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(taskName)},
 	); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list child tasks: %v", err))
+	}
+	if h.contextTokenAuthorization.Enabled() {
+		filtered := taskList.Items[:0]
+		for i := range taskList.Items {
+			allowed, err := h.contextTokenAllowsLoadedTaskWithIdentity(c, "getTaskChildren", &taskList.Items[i], false)
+			if err != nil {
+				return err
+			}
+			if allowed {
+				filtered = append(filtered, taskList.Items[i])
+			}
+		}
+		taskList.Items = filtered
 	}
 
 	return c.JSON(ListResponse{
@@ -1275,6 +1494,9 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenTaskRead(c, "listTaskArtifacts", namespace, id); err != nil {
+		return err
+	}
 
 	task := &corev1alpha1.Task{}
 	ctx := c.Context()
@@ -1283,6 +1505,9 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "task not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+	if err := h.authorizeContextTokenLoadedTask(c, "listTaskArtifacts", task); err != nil {
+		return err
 	}
 
 	if h.artifactStore == nil {
@@ -1309,6 +1534,9 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeContextTokenTaskRead(c, "downloadTaskArtifact", namespace, id); err != nil {
+		return err
+	}
 
 	task := &corev1alpha1.Task{}
 	ctx := c.Context()
@@ -1317,6 +1545,9 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "task not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+	if err := h.authorizeContextTokenLoadedTask(c, "downloadTaskArtifact", task); err != nil {
+		return err
 	}
 
 	if h.artifactStore == nil {

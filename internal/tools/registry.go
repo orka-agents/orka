@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"sync"
 
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/llm"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,10 +40,15 @@ type ToolContext struct {
 		DeleteSession(ctx context.Context, namespace, sessionID string) error
 	}
 	// Task creation helpers provided by the chat executor
-	GenerateTaskName func() string
-	TaskLabels       func() map[string]string
-	CheckTaskLimit   func() *ChatToolError
-	IncrementTasks   func()
+	GenerateTaskName     func() string
+	TaskLabels           func() map[string]string
+	CheckTaskLimit       func() *ChatToolError
+	AuthorizeTaskCreate  func(context.Context, *corev1alpha1.Task) *ChatToolError
+	AuthorizeTaskDelete  func(context.Context, *corev1alpha1.Task) *ChatToolError
+	AuthorizeAgentCreate func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	AuthorizeAgentUpdate func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	AuthorizeAgentDelete func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	IncrementTasks       func()
 }
 
 type toolContextKey struct{}

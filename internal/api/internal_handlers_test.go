@@ -19,7 +19,16 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	authenticationv1 "k8s.io/api/authentication/v1"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
 )
@@ -330,6 +339,172 @@ func TestSubmitResult(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	})
+}
+
+func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	taskUID := types.UID("task-uid")
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-task", Namespace: "default", UID: taskUID},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status:     corev1alpha1.TaskStatus{JobName: "my-task-job"},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-task-job",
+			Namespace: "default",
+			UID:       types.UID("job-uid"),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(),
+				Kind:       "Task",
+				Name:       "my-task",
+				UID:        taskUID,
+			}},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-task-pod",
+			Namespace: "default",
+			UID:       types.UID("pod-uid"),
+			Labels: map[string]string{
+				labels.LabelTask: labels.SelectorValue("my-task"),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: batchv1.SchemeGroupVersion.String(),
+				Kind:       "Job",
+				Name:       "my-task-job",
+				UID:        types.UID("job-uid"),
+			}},
+		},
+	}
+	oldJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-task-old-job",
+			Namespace: "default",
+			UID:       types.UID("old-job-uid"),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(),
+				Kind:       "Task",
+				Name:       "my-task",
+				UID:        taskUID,
+			}},
+		},
+	}
+	oldPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-task-old-pod",
+			Namespace: "default",
+			UID:       types.UID("old-pod-uid"),
+			Labels: map[string]string{
+				labels.LabelTask: labels.SelectorValue("my-task"),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: batchv1.SchemeGroupVersion.String(),
+				Kind:       "Job",
+				Name:       "my-task-old-job",
+				UID:        types.UID("old-job-uid"),
+			}},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task, job, pod, oldJob, oldPod).
+		Build()
+	h := NewInternalHandlers(nil, nil, nil, nil, nil, InternalHandlersConfig{Client: k8sClient})
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username: "system:serviceaccount:default:worker",
+			AuthType: AuthTypeTokenReview,
+			Extra: map[string]authenticationv1.ExtraValue{
+				"authentication.kubernetes.io/pod-name": {"my-task-pod"},
+				"authentication.kubernetes.io/pod-uid":  {"pod-uid"},
+			},
+		})
+		return c.Next()
+	})
+	app.Post("/internal/v1/tasks/:namespace/:taskName/execution-workspace/status", h.UpdateExecutionWorkspaceStatus)
+
+	body := map[string]any{
+		"provider":      "substrate",
+		"phase":         "Ready",
+		"reason":        "WorkspaceReady",
+		"templateRef":   map[string]string{"name": "orka-codex", "namespace": "ate-demo"},
+		"reusePolicy":   "session",
+		"cleanupPolicy": "retain",
+		"reused":        true,
+		"message":       "workspace ready",
+	}
+	bodyBytes, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/tasks/default/my-task/execution-workspace/status", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	updated := &corev1alpha1.Task{}
+	require.NoError(t, k8sClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "my-task"}, updated))
+	require.NotNil(t, updated.Status.ExecutionWorkspace)
+	require.Equal(t, corev1alpha1.WorkspaceProviderSubstrate, updated.Status.ExecutionWorkspace.Provider)
+	require.Equal(t, corev1alpha1.ExecutionWorkspacePhaseReady, updated.Status.ExecutionWorkspace.Phase)
+	require.True(t, updated.Status.ExecutionWorkspace.Reused)
+
+	appOldWorker := fiber.New()
+	appOldWorker.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username: "system:serviceaccount:default:worker",
+			AuthType: AuthTypeTokenReview,
+			Extra: map[string]authenticationv1.ExtraValue{
+				"authentication.kubernetes.io/pod-name": {"my-task-old-pod"},
+				"authentication.kubernetes.io/pod-uid":  {"old-pod-uid"},
+			},
+		})
+		return c.Next()
+	})
+	appOldWorker.Post("/internal/v1/tasks/:namespace/:taskName/execution-workspace/status", h.UpdateExecutionWorkspaceStatus)
+	staleBody := map[string]any{
+		"provider": "substrate",
+		"phase":    "Failed",
+		"reason":   "WorkspaceCommandFailed",
+		"message":  "stale worker update",
+	}
+	staleBodyBytes, err := json.Marshal(staleBody)
+	require.NoError(t, err)
+	staleReq := httptest.NewRequest(http.MethodPost, "/internal/v1/tasks/default/my-task/execution-workspace/status", bytes.NewReader(staleBodyBytes))
+	staleReq.Header.Set("Content-Type", "application/json")
+	staleResp, err := appOldWorker.Test(staleReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, staleResp.StatusCode)
+
+	afterStale := &corev1alpha1.Task{}
+	require.NoError(t, k8sClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "my-task"}, afterStale))
+	require.Equal(t, corev1alpha1.ExecutionWorkspacePhaseReady, afterStale.Status.ExecutionWorkspace.Phase)
+
+	appForbidden := fiber.New()
+	appForbidden.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username: "system:serviceaccount:default:worker",
+			AuthType: AuthTypeTokenReview,
+			Extra: map[string]authenticationv1.ExtraValue{
+				"authentication.kubernetes.io/pod-name": {"other-pod"},
+				"authentication.kubernetes.io/pod-uid":  {"other-pod-uid"},
+			},
+		})
+		return c.Next()
+	})
+	appForbidden.Post("/internal/v1/tasks/:namespace/:taskName/execution-workspace/status", h.UpdateExecutionWorkspaceStatus)
+	forbiddenReq := httptest.NewRequest(http.MethodPost, "/internal/v1/tasks/default/my-task/execution-workspace/status", bytes.NewReader(bodyBytes))
+	forbiddenReq.Header.Set("Content-Type", "application/json")
+	forbiddenResp, err := appForbidden.Test(forbiddenReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, forbiddenResp.StatusCode)
 }
 
 func TestGetSessionTranscript(t *testing.T) {
@@ -665,6 +840,59 @@ func TestSendMessageAdditional(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	})
+}
+
+func TestInternalApplyMemoryProposal(t *testing.T) {
+	h, app, ss := setupTestInternalHandlers()
+	app.Post("/internal/v1/memory-proposals/:namespace/:id/apply", h.ApplyMemoryProposal)
+
+	proposal := &store.MemoryProposal{
+		Namespace:   "default",
+		TaskName:    "task-a",
+		AgentName:   "agent-a",
+		Type:        "memory",
+		Title:       "Remember handler apply flow",
+		Description: "Apply via internal API.\n\nTags: api, memory",
+		Content:     "Accepted memory proposals can be applied explicitly.",
+	}
+	require.NoError(t, ss.CreateMemoryProposal(context.Background(), proposal))
+	require.NoError(t, ss.ReviewMemoryProposal(context.Background(), store.MemoryProposalReview{
+		Namespace: "default",
+		ID:        proposal.ID,
+		Status:    "accepted",
+		Reviewer:  "reviewer",
+	}))
+
+	body, _ := json.Marshal(map[string]string{"appliedBy": "coordinator"})
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/memory-proposals/default/"+proposal.ID+"/apply", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var memory store.Memory
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&memory))
+	require.Equal(t, proposal.ID, memory.SourceProposalID)
+	require.Equal(t, "memory_proposal", memory.Source)
+	require.Equal(t, []string{"api", "memory"}, memory.Tags)
+
+	updated, err := ss.GetMemoryProposal(context.Background(), "default", proposal.ID)
+	require.NoError(t, err)
+	require.Equal(t, "applied", updated.Status)
+	require.Equal(t, memory.ID, updated.AppliedMemoryID)
+	require.Equal(t, "coordinator", updated.AppliedBy)
+}
+
+func TestInternalApplyMemoryProposalRejectsNamespaceMismatch(t *testing.T) {
+	h, app, _ := setupTestInternalHandlers()
+	app.Post("/internal/v1/memory-proposals/:namespace/:id/apply", h.ApplyMemoryProposal)
+
+	body, _ := json.Marshal(map[string]string{"namespace": "other"})
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/memory-proposals/default/mprop-1/apply", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
 func TestGetPlanAdditional(t *testing.T) {

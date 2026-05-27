@@ -10,7 +10,23 @@ The current model has three related concepts:
 | **Memory proposal** | A worker- or user-submitted suggestion for memory, policy, workflow, or skill changes | Stored in SQLite as `memory_proposals` for review |
 | **Transcript search** | Compact search over prior session messages | Stored in SQLite session transcript tables |
 
-Memory proposals are **review-only**. Reviewing a proposal as accepted or rejected records the decision but does not automatically create or update durable memory. To create durable memory today, use the durable memory API directly.
+Memory proposal review is **non-applying**. Reviewing a proposal as accepted or rejected records the decision only. Accepted proposals with `type: "memory"` can then be applied explicitly, which creates (or idempotently returns) durable memory linked back to the proposal.
+
+## Memory proposal lifecycle
+
+Memory proposals follow an explicit review/apply lifecycle:
+
+- New proposals start with `status: "pending"`.
+- Review decisions only apply to pending proposals and record either `status: "accepted"` or `status: "rejected"`; review does not create durable memory.
+- Accepted proposals with `type: "memory"` require an explicit apply request before they become durable memory.
+- Rejected or archived proposals cannot be applied.
+
+Accepted memory proposals can suggest durable memory tags by including a `Tags:` line in the proposal `description`. The apply step reads tags from the first `Tags:` line only, normalizes them, and ignores later `Tags:` lines. Example:
+
+```text
+Reusable release procedure discovered during task execution.
+Tags: release, testing
+```
 
 ## Worker behavior
 
@@ -62,7 +78,7 @@ Supported list query parameters:
 | `agentName` | Filter by agent provenance |
 | `taskName` | Filter by task provenance |
 | `parentTask` | Filter by parent task provenance |
-| `source` | Filter by source such as `task`, `session`, `user`, `system`, or `e2e` |
+| `source` | Filter by source such as `task`, `session`, `user`, `system`, `memory_proposal`, or `e2e` |
 | `tags` | Comma-separated tags |
 | `ids` | Comma-separated memory IDs |
 | `includeDisabled` | Include disabled memories when `true` |
@@ -102,7 +118,8 @@ curl -sS -X POST http://localhost:8080/api/v1/memories \
 | `/api/v1/memory-proposals` | GET | List memory proposals |
 | `/api/v1/memory-proposals` | POST | Create a memory proposal |
 | `/api/v1/memory-proposals/:id` | GET | Get a memory proposal |
-| `/api/v1/memory-proposals/:id/review` | POST | Record a review decision |
+| `/api/v1/memory-proposals/:id/review` | POST | Record a review decision without applying it |
+| `/api/v1/memory-proposals/:id/apply` | POST | Apply an accepted `memory` proposal into durable memory |
 | `/api/v1/memory-proposals/:id/archive` | POST | Archive a proposal without applying it |
 
 Supported list query parameters:
@@ -113,7 +130,7 @@ Supported list query parameters:
 | `taskName` | Filter by task provenance |
 | `agentName` | Filter by agent provenance |
 | `type` | Filter by proposal type, for example `memory`, `skill`, `policy`, or `workflow` |
-| `status` | Filter by status such as `pending`, `accepted`, `rejected`, or `archived` |
+| `status` | Filter by status such as `pending`, `accepted`, `rejected`, `applied`, or `archived` |
 | `query` or `q` | Text search over title, description, content, and skill name |
 | `limit` | Maximum rows to return |
 
@@ -129,7 +146,7 @@ curl -sS -X POST http://localhost:8080/api/v1/memory-proposals \
     "agentName": "release-agent",
     "type": "memory",
     "title": "Release validation command",
-    "description": "Reusable release procedure discovered during task execution.",
+    "description": "Reusable release procedure discovered during task execution.\nTags: release, testing",
     "content": "Run make lint-fix and make test before merging release PRs."
   }'
 ```
@@ -149,6 +166,19 @@ curl -sS -X POST "http://localhost:8080/api/v1/memory-proposals/mprop-example/re
 
 Review returns `204 No Content`. It records governance state only; it does not apply the proposal as durable memory.
 
+Apply an accepted memory proposal:
+
+```bash
+curl -sS -X POST "http://localhost:8080/api/v1/memory-proposals/mprop-example/apply?namespace=orka-system" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "appliedBy": "platform-team"
+  }'
+```
+
+Apply returns the durable memory as JSON. The created memory has `source: "memory_proposal"` and `sourceProposalId` set to the proposal ID, and the proposal is updated to `status: "applied"` with `appliedMemoryId`, `appliedBy`, and `appliedAt`. Repeating the apply request is idempotent and returns the same durable memory. Only accepted proposals with `type: "memory"` can be applied; rejected and archived proposals cannot be applied.
+
 ## Safety model
 
 - Store durable memories only for reusable project facts, decisions, conventions, or procedures.
@@ -156,6 +186,7 @@ Review returns `204 No Content`. It records governance state only; it does not a
 - Memory and proposal persistence passes content through sensitive-text redaction.
 - Disabled and deleted memories are excluded from normal recall by default.
 - Memory writes are namespace-scoped and authenticated through the same ServiceAccount-token API model as other Orka APIs.
+- Applying accepted memory proposals preserves proposal-to-memory linkage for auditability.
 
 ## Validation
 
@@ -165,15 +196,16 @@ The live Copilot proxy E2E suite validates the current memory path with a real m
 - a live worker receives memory tools through `ORKA_AI_TOOLS`
 - the worker executes `recall_memory`, `remember`, `propose_memory`, and `search_transcript`
 - durable recall does not create duplicate durable memory
-- proposed memory remains a proposal and is not written as durable memory
+- proposed memory remains a proposal until it is explicitly applied
 - proposal review persists accepted/rejected state without applying the proposal
+- accepted memory proposals apply idempotently into linked durable memory
 
 Deterministic unit and integration tests cover store behavior, API handlers, tool registration, prompt composition, and worker/tool plumbing.
 
 ## Current limitations
 
-- Accepted proposals are not automatically converted to durable memories.
-- There is no explicit proposal apply endpoint yet.
+- Accepted proposals are not automatically converted to durable memories; they require the explicit apply endpoint.
+- Only accepted proposals with `type: "memory"` can be applied into durable memory.
 - Durable memory search currently uses store-level filters and substring matching rather than semantic ranking.
 - Transcript search returns snippets, not model-generated summaries.
 - External memory backends are not part of the default implementation.

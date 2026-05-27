@@ -1,6 +1,16 @@
+<div align="center">
+
+<img src="docs/images/orka-logo.png" alt="Orka" width="400" />
+
 # Orka
 
 **Kubernetes-native AI agent orchestration.**
+
+[Getting Started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [API Reference](docs/api-reference.md) · [Documentation](#documentation)
+
+</div>
+
+---
 
 Orka turns your Kubernetes cluster into an AI-powered task execution platform. Spin up swarms of AI agents that write code, review PRs, research topics, or run containers — each as an isolated Kubernetes Job with full scheduling, retries, and observability. A coordinator agent dynamically decomposes complex tasks, spawns specialist agents to work in parallel, and synthesizes their results — no manual orchestration graphs required.
 
@@ -35,16 +45,18 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 ## Features
 
 - 🤖 **AI Agents** — Anthropic, OpenAI, or Azure OpenAI with tools, skills, and session persistence
-- 🛠️ **Agent Runtimes** — Delegate to Codex CLI, Claude Code CLI, or GitHub Copilot CLI for full autonomous coding
+- 🛠️ **Agent Runtimes** — Delegate repo-backed coding tasks to Codex CLI, Claude Code CLI, or GitHub Copilot CLI
+- 🔁 **Autonomous Task Loops** — Coordinators can iterate on long-running goals until complete, canceled, or at an iteration limit
 - 🔀 **Multi-Agent Coordination** — Coordinators delegate to specialists with depth and concurrency controls
 - 💬 **Interactive Chat** — Agentic orchestrator with SSE streaming that creates and manages agents and tasks for you
-- 🧠 **Durable Memory** — Namespace-scoped recall, transcript search, and reviewable memory proposals for coordinated agents
+- 🧠 **Durable Memory** — Namespace-scoped recall, transcript search, and reviewable memory proposals that can be applied
 - 🛡️ **Repository Security Scanning** — Scheduled and incremental repository scans with threat models, validated findings, patch generation, and remediation PRs
+- 🧰 **Agent Sandbox Workspaces** — Experimental durable, reusable coding workspaces through `agent-sandbox`
 - 🖥️ **Web Dashboard** — Built-in React UI embedded in the controller binary — zero extra deployments
 - 📦 **Declarative CRDs** — Task, Agent, Tool, Provider, and Skill custom resources for GitOps workflows
 - ⏰ **Scheduled Tasks** — Cron-based recurring execution with concurrency policies
 - 🔌 **REST & OpenAI-Compatible API** — Full CRUD + `/openai/v1/chat/completions` endpoint for Continue, Cursor, and any OpenAI-compatible client
-- 🔐 **Kubernetes & OIDC API Auth** — ServiceAccount bearer tokens by default, optional OIDC JWT validation for external callers, and verified requester stamping on Tasks
+- 🔐 **Kubernetes, OIDC & Kontxt TxToken Auth** — ServiceAccount tokens by default, with optional OIDC and scoped `kontxt` transaction-token flows
 - 🔮 **Anthropic-Compatible API** — `/anthropic/v1/messages` endpoint for Claude Code and other Anthropic-native clients
 - 📊 **Observability** — Prometheus metrics, structured logging, health probes
 - 🔒 **Hardened by Default** — Non-root containers, read-only rootfs, ServiceAccount token auth
@@ -100,14 +112,18 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Architecture](docs/architecture.md)                         | System design, components, and data flow              |
 | [Configuration](docs/configuration.md)                       | CRD reference, Helm values, controller flags, metrics |
 | [Agent Runtimes](docs/agent-runtimes.md)                     | Codex CLI, Claude Code CLI, and Copilot CLI runtimes  |
+| [Agent Sandbox](docs/agent-sandbox.md)                       | Experimental upstream `agent-sandbox` workspace execution for agent runtimes |
 | [Interactive Chat](docs/chat.md)                             | Chat endpoint, tools, and SSE streaming               |
 | [Multi-Agent Coordination](docs/multi-agent-coordination.md) | Coordinator agents and task delegation                |
-| [Memory](docs/memory.md)                                   | Durable memory, proposals, transcript search, and validation |
+| [Autonomous Tasks](docs/autonomous-tasks.md)                 | Long-running coordinator loops with persisted plan state |
+| [Memory](docs/memory.md)                                     | Durable memory, proposals, transcript search, and validation |
 | [API Reference](docs/api-reference.md)                       | REST API endpoints and usage examples                 |
 | [OpenAI Compatibility](docs/openai-compat.md)                | OpenAI-compatible chat completions API                |
 | [Anthropic Compatibility](docs/anthropic-compat.md)          | Anthropic-compatible Messages API                     |
 | [Web Dashboard](docs/ui.md)                                  | Frontend architecture and pages                       |
 | [Security](docs/security.md)                                 | Security model and hardening                          |
+| [Kontxt Quickstart](docs/kontxt-quickstart.md)               | Use OIDC identity to call Orka without long-lived tokens |
+| [Kontxt TxToken Integration](docs/kontxt.md)                 | TxToken verification, authorization, TTS, and audit guidance |
 | [Repository Security Scanning](docs/repository-security-scanning.md) | Repository scan workflow, threat models, findings, and remediation |
 | [GitHub Label Triggers](docs/github-label-triggers.md) | Trigger Orka agent tasks from GitHub labels such as `agent:implement` and `agent:review` |
 | [Development](docs/development.md)                           | Building, testing, and contributing                   |

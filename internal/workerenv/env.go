@@ -10,8 +10,10 @@ package workerenv
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -29,6 +31,28 @@ const (
 	PriorTask          = "ORKA_PRIOR_TASK"
 	PriorTaskNamespace = "ORKA_PRIOR_TASK_NAMESPACE"
 	ParentTask         = "ORKA_PARENT_TASK"
+
+	// Transaction context env vars.
+	TransactionID                     = "ORKA_TRANSACTION_ID"
+	TransactionProfile                = "ORKA_TRANSACTION_PROFILE"
+	TransactionIssuer                 = "ORKA_TRANSACTION_ISSUER"
+	TransactionSubject                = "ORKA_TRANSACTION_SUBJECT"
+	TransactionRequestingWorkload     = "ORKA_TRANSACTION_REQUESTING_WORKLOAD"
+	TransactionScope                  = "ORKA_TRANSACTION_SCOPE"
+	TransactionScopes                 = "ORKA_TRANSACTION_SCOPES"
+	TransactionContextDigest          = "ORKA_TRANSACTION_CONTEXT_DIGEST"
+	TransactionRequesterContextDigest = "ORKA_TRANSACTION_REQUESTER_CONTEXT_DIGEST"
+	TransactionTokenFile              = "ORKA_TRANSACTION_TOKEN_FILE"
+	ContextTokenTTSURL                = "ORKA_CONTEXT_TOKEN_TTS_URL"
+	ContextTokenTTSAudience           = "ORKA_CONTEXT_TOKEN_TTS_AUDIENCE"
+	ContextTokenTTSTimeout            = "ORKA_CONTEXT_TOKEN_TTS_TIMEOUT"
+	ContextTokenTTSTokenSource        = "ORKA_CONTEXT_TOKEN_TTS_TOKEN_SOURCE"
+	ContextTokenSubjectTokenFile      = "ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE"
+	ContextTokenSubjectTokenType      = "ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_TYPE"
+	ContextTokenOutboundScope         = "ORKA_CONTEXT_TOKEN_OUTBOUND_SCOPE"
+	ContextTokenChildScope            = "ORKA_CONTEXT_TOKEN_CHILD_SCOPE"
+	ContextTokenChildTokenTTL         = "ORKA_CONTEXT_TOKEN_CHILD_TOKEN_TTL"
+	ContextTokenToolTokenTTL          = "ORKA_CONTEXT_TOKEN_TOOL_TOKEN_TTL"
 
 	// AI worker env vars.
 	AIProvider        = "ORKA_AI_PROVIDER"
@@ -114,16 +138,55 @@ const (
 	WorkDir           = "ORKA_WORK_DIR"
 	SkillsDir         = "ORKA_SKILLS_DIR"
 
+	// Agent sandbox workspace env vars used by agent-runtime workers.
+	ExecutionWorkspaceEnabled               = "ORKA_EXECUTION_WORKSPACE_ENABLED"
+	ExecutionWorkspaceProvider              = "ORKA_EXECUTION_WORKSPACE_PROVIDER"
+	ExecutionWorkspaceTemplateName          = "ORKA_EXECUTION_WORKSPACE_TEMPLATE_NAME"
+	ExecutionWorkspaceTemplateNamespace     = "ORKA_EXECUTION_WORKSPACE_TEMPLATE_NAMESPACE"
+	ExecutionWorkspaceClaimNamespace        = "ORKA_EXECUTION_WORKSPACE_CLAIM_NAMESPACE"
+	ExecutionWorkspaceClaimName             = "ORKA_EXECUTION_WORKSPACE_CLAIM_NAME"
+	ExecutionWorkspaceReusePolicy           = "ORKA_EXECUTION_WORKSPACE_REUSE_POLICY"
+	ExecutionWorkspaceReuseKey              = "ORKA_EXECUTION_WORKSPACE_REUSE_KEY"
+	ExecutionWorkspaceCleanupPolicy         = "ORKA_EXECUTION_WORKSPACE_CLEANUP_POLICY"
+	ExecutionWorkspaceClaimTimeoutSeconds   = "ORKA_EXECUTION_WORKSPACE_CLAIM_TIMEOUT_SECONDS"
+	ExecutionWorkspaceCommandTimeoutSeconds = "ORKA_EXECUTION_WORKSPACE_COMMAND_TIMEOUT_SECONDS"
+	ExecutionWorkspaceStatusEndpoint        = "ORKA_EXECUTION_WORKSPACE_STATUS_ENDPOINT"
+	ExecutionWorkspaceDepth                 = "ORKA_EXECUTION_WORKSPACE_DEPTH"
+
+	SubstrateAPIEndpoint           = "ORKA_SUBSTRATE_API_ENDPOINT"
+	SubstrateAPICAFile             = "ORKA_SUBSTRATE_API_CA_FILE"
+	SubstrateAPIInsecureSkipVerify = "ORKA_SUBSTRATE_API_INSECURE_SKIP_VERIFY"
+	SubstrateRouterURL             = "ORKA_SUBSTRATE_ROUTER_URL"
+	SubstrateActorDNSSuffix        = "ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX"
+	WorkspaceBootstrapToken        = "ORKA_WORKSPACE_BOOTSTRAP_TOKEN"
+
+	AgentSandboxEnabled               = "ORKA_AGENT_SANDBOX_ENABLED"
+	AgentSandboxRouterURL             = "ORKA_AGENT_SANDBOX_ROUTER_URL"
+	AgentSandboxTemplateName          = "ORKA_AGENT_SANDBOX_TEMPLATE_NAME"
+	AgentSandboxTemplateNamespace     = "ORKA_AGENT_SANDBOX_TEMPLATE_NAMESPACE"
+	AgentSandboxClaimNamespace        = "ORKA_AGENT_SANDBOX_CLAIM_NAMESPACE"
+	AgentSandboxReusePolicy           = "ORKA_AGENT_SANDBOX_REUSE_POLICY"
+	AgentSandboxReuseKey              = "ORKA_AGENT_SANDBOX_REUSE_KEY"
+	AgentSandboxCleanupPolicy         = "ORKA_AGENT_SANDBOX_CLEANUP_POLICY"
+	AgentSandboxWarmPoolPolicy        = "ORKA_AGENT_SANDBOX_WARM_POOL_POLICY"
+	AgentSandboxNamespaceStrategy     = "ORKA_AGENT_SANDBOX_NAMESPACE_STRATEGY"
+	AgentSandboxClaimTimeoutSeconds   = "ORKA_AGENT_SANDBOX_CLAIM_TIMEOUT_SECONDS"
+	AgentSandboxCommandTimeoutSeconds = "ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT_SECONDS"
+	AgentSandboxDepth                 = "ORKA_AGENT_SANDBOX_DEPTH"
+
 	// Git config env vars used to mark the prepared workspace as safe.
 	GitConfigCount  = "GIT_CONFIG_COUNT"
 	GitConfigKey0   = "GIT_CONFIG_KEY_0"
 	GitConfigValue0 = "GIT_CONFIG_VALUE_0"
 
 	// Memory/controller context env vars used by AI worker memory integration.
-	MemoryContextEnabled  = "ORKA_MEMORY_CONTEXT_ENABLED"
-	MemoryContextLimit    = "ORKA_MEMORY_CONTEXT_LIMIT"
-	MemoryContextMaxChars = "ORKA_MEMORY_CONTEXT_MAX_CHARS"
-	ServiceAccountToken   = "ORKA_SA_TOKEN"
+	MemoryContextEnabled    = "ORKA_MEMORY_CONTEXT_ENABLED"
+	MemoryContextLimit      = "ORKA_MEMORY_CONTEXT_LIMIT"
+	MemoryContextMaxChars   = "ORKA_MEMORY_CONTEXT_MAX_CHARS"
+	ServiceAccountToken     = "ORKA_SA_TOKEN"
+	ServiceAccountTokenPath = "ORKA_SA_TOKEN_PATH"
+
+	ServiceAccountTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 )
 
 const trueString = "true"
@@ -166,6 +229,49 @@ func SplitCSV(value string) []string {
 	return out
 }
 
+// ReadTokenFile reads and trims a token file. It fails closed when the
+// configured path cannot be read or contains only whitespace.
+func ReadTokenFile(path, description string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("%s file path is empty", description)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read %s file: %w", description, err)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", fmt.Errorf("%s file %q is empty", description, path)
+	}
+	return token, nil
+}
+
+// ReadTokenFileEnv reads and trims a token file path referenced by envName.
+// It returns ok=false when envName is unset, and fails closed when a configured
+// path cannot be read or contains only whitespace.
+func ReadTokenFileEnv(envName, description string) (string, bool, error) {
+	path := strings.TrimSpace(os.Getenv(envName))
+	if path == "" {
+		return "", false, nil
+	}
+	token, err := ReadTokenFile(path, description)
+	return token, true, err
+}
+
+// RequireTokenFileEnv reads a token file path referenced by envName and returns
+// an error when the env var is unset.
+func RequireTokenFileEnv(envName, description string) (string, error) {
+	token, ok, err := ReadTokenFileEnv(envName, description)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("%s is required", envName)
+	}
+	return token, nil
+}
+
 // JoinCSV joins values using the comma-separated format used by worker env vars.
 func JoinCSV(values []string) string {
 	return strings.Join(values, ",")
@@ -173,30 +279,52 @@ func JoinCSV(values []string) string {
 
 // BaseEnv is the common env contract passed to all Orka worker containers.
 type BaseEnv struct {
-	TaskName       string
-	TaskNamespace  string
-	ResultEndpoint string
-	ControllerURL  string
+	TaskName           string
+	TaskNamespace      string
+	ResultEndpoint     string
+	ControllerURL      string
+	TransactionID      string
+	TransactionProfile string
 }
 
 // EnvVars renders the base worker environment.
 func (e BaseEnv) EnvVars() []corev1.EnvVar {
-	return []corev1.EnvVar{
+	envVars := []corev1.EnvVar{
 		Env(TaskName, e.TaskName),
 		Env(TaskNamespace, e.TaskNamespace),
 		Env(ResultEndpoint, e.ResultEndpoint),
 		Env(ControllerURL, e.ControllerURL),
 	}
+	envVars = AppendIfSet(envVars, TransactionID, e.TransactionID)
+	envVars = AppendIfSet(envVars, TransactionProfile, e.TransactionProfile)
+	return envVars
 }
 
 // ParseBaseEnv reads the common worker environment.
 func ParseBaseEnv(getenv func(string) string) BaseEnv {
 	return BaseEnv{
-		TaskName:       getenv(TaskName),
-		TaskNamespace:  getenv(TaskNamespace),
-		ResultEndpoint: getenv(ResultEndpoint),
-		ControllerURL:  getenv(ControllerURL),
+		TaskName:           getenv(TaskName),
+		TaskNamespace:      getenv(TaskNamespace),
+		ResultEndpoint:     getenv(ResultEndpoint),
+		ControllerURL:      getenv(ControllerURL),
+		TransactionID:      getenv(TransactionID),
+		TransactionProfile: getenv(TransactionProfile),
 	}
+}
+
+// TransactionLogFields returns safe key/value fragments for worker stdout logs.
+func TransactionLogFields(transactionID, profile string) string {
+	fields := []string{}
+	if transactionID != "" {
+		fields = append(fields, "transactionID="+strconv.Quote(transactionID))
+	}
+	if profile != "" {
+		fields = append(fields, "contextTokenProfile="+strconv.Quote(profile))
+	}
+	if len(fields) == 0 {
+		return ""
+	}
+	return " " + strings.Join(fields, " ")
 }
 
 // FallbackProviderEnv is one fallback provider entry from the AI worker env contract.
@@ -331,6 +459,155 @@ func (e AIWorkerEnv) ValidateRequired() error {
 		return fmt.Errorf("%s is required", AIPrompt)
 	}
 	return nil
+}
+
+// ExecutionWorkspaceEnv is the provider-neutral execution workspace env
+// contract passed to agent-runtime workers.
+type ExecutionWorkspaceEnv struct {
+	Enabled           bool
+	Provider          string
+	TemplateName      string
+	TemplateNamespace string
+	ClaimNamespace    string
+	ClaimName         string
+	ReusePolicy       string
+	ReuseKey          string
+	CleanupPolicy     string
+	ClaimTimeout      time.Duration
+	CommandTimeout    time.Duration
+	StatusEndpoint    string
+	Depth             int
+}
+
+// EnvVars renders the generic execution workspace environment.
+func (e ExecutionWorkspaceEnv) EnvVars() []corev1.EnvVar {
+	if !e.Enabled {
+		return nil
+	}
+
+	return []corev1.EnvVar{
+		Env(ExecutionWorkspaceEnabled, strconv.FormatBool(e.Enabled)),
+		Env(ExecutionWorkspaceProvider, e.Provider),
+		Env(ExecutionWorkspaceTemplateName, e.TemplateName),
+		Env(ExecutionWorkspaceTemplateNamespace, e.TemplateNamespace),
+		Env(ExecutionWorkspaceClaimNamespace, e.ClaimNamespace),
+		Env(ExecutionWorkspaceClaimName, e.ClaimName),
+		Env(ExecutionWorkspaceReusePolicy, e.ReusePolicy),
+		Env(ExecutionWorkspaceReuseKey, e.ReuseKey),
+		Env(ExecutionWorkspaceCleanupPolicy, e.CleanupPolicy),
+		Env(ExecutionWorkspaceClaimTimeoutSeconds, strconv.FormatInt(int64(e.ClaimTimeout/time.Second), 10)),
+		Env(ExecutionWorkspaceCommandTimeoutSeconds, strconv.FormatInt(int64(e.CommandTimeout/time.Second), 10)),
+		Env(ExecutionWorkspaceStatusEndpoint, e.StatusEndpoint),
+		Env(ExecutionWorkspaceDepth, strconv.Itoa(e.Depth)),
+	}
+}
+
+// ParseExecutionWorkspaceEnv reads the generic execution workspace environment.
+func ParseExecutionWorkspaceEnv(getenv func(string) string) ExecutionWorkspaceEnv {
+	return ExecutionWorkspaceEnv{
+		Enabled:           IsTrue(getenv(ExecutionWorkspaceEnabled)),
+		Provider:          getenv(ExecutionWorkspaceProvider),
+		TemplateName:      getenv(ExecutionWorkspaceTemplateName),
+		TemplateNamespace: getenv(ExecutionWorkspaceTemplateNamespace),
+		ClaimNamespace:    getenv(ExecutionWorkspaceClaimNamespace),
+		ClaimName:         getenv(ExecutionWorkspaceClaimName),
+		ReusePolicy:       getenv(ExecutionWorkspaceReusePolicy),
+		ReuseKey:          getenv(ExecutionWorkspaceReuseKey),
+		CleanupPolicy:     getenv(ExecutionWorkspaceCleanupPolicy),
+		ClaimTimeout:      time.Duration(parsePositiveInt(getenv(ExecutionWorkspaceClaimTimeoutSeconds))) * time.Second,
+		CommandTimeout:    time.Duration(parsePositiveInt(getenv(ExecutionWorkspaceCommandTimeoutSeconds))) * time.Second,
+		StatusEndpoint:    getenv(ExecutionWorkspaceStatusEndpoint),
+		Depth:             parsePositiveInt(getenv(ExecutionWorkspaceDepth)),
+	}
+}
+
+// SubstrateEnv is the Substrate-specific worker env contract.
+type SubstrateEnv struct {
+	APIEndpoint           string
+	APICAFile             string
+	APIInsecureSkipVerify bool
+	RouterURL             string
+	ActorDNSSuffix        string
+}
+
+// EnvVars renders Substrate-specific worker env vars.
+func (e SubstrateEnv) EnvVars() []corev1.EnvVar {
+	return []corev1.EnvVar{
+		Env(SubstrateAPIEndpoint, e.APIEndpoint),
+		Env(SubstrateAPICAFile, e.APICAFile),
+		Env(SubstrateAPIInsecureSkipVerify, strconv.FormatBool(e.APIInsecureSkipVerify)),
+		Env(SubstrateRouterURL, e.RouterURL),
+		Env(SubstrateActorDNSSuffix, e.ActorDNSSuffix),
+	}
+}
+
+// ParseSubstrateEnv reads Substrate-specific worker env vars.
+func ParseSubstrateEnv(getenv func(string) string) SubstrateEnv {
+	return SubstrateEnv{
+		APIEndpoint:           getenv(SubstrateAPIEndpoint),
+		APICAFile:             getenv(SubstrateAPICAFile),
+		APIInsecureSkipVerify: IsTrue(getenv(SubstrateAPIInsecureSkipVerify)),
+		RouterURL:             getenv(SubstrateRouterURL),
+		ActorDNSSuffix:        getenv(SubstrateActorDNSSuffix),
+	}
+}
+
+// AgentSandboxEnv is the resolved sandbox workspace env contract passed to
+// agent-runtime workers.
+type AgentSandboxEnv struct {
+	Enabled           bool
+	RouterURL         string
+	TemplateName      string
+	TemplateNamespace string
+	ClaimNamespace    string
+	ReusePolicy       string
+	ReuseKey          string
+	CleanupPolicy     string
+	WarmPoolPolicy    string
+	NamespaceStrategy string
+	ClaimTimeout      time.Duration
+	CommandTimeout    time.Duration
+}
+
+// EnvVars renders the agent sandbox workspace environment.
+func (e AgentSandboxEnv) EnvVars() []corev1.EnvVar {
+	if !e.Enabled {
+		return nil
+	}
+
+	return []corev1.EnvVar{
+		Env(AgentSandboxEnabled, strconv.FormatBool(e.Enabled)),
+		Env(AgentSandboxRouterURL, e.RouterURL),
+		Env(AgentSandboxTemplateName, e.TemplateName),
+		Env(AgentSandboxTemplateNamespace, e.TemplateNamespace),
+		Env(AgentSandboxClaimNamespace, e.ClaimNamespace),
+		Env(AgentSandboxReusePolicy, e.ReusePolicy),
+		Env(AgentSandboxReuseKey, e.ReuseKey),
+		Env(AgentSandboxCleanupPolicy, e.CleanupPolicy),
+		Env(AgentSandboxWarmPoolPolicy, e.WarmPoolPolicy),
+		Env(AgentSandboxNamespaceStrategy, e.NamespaceStrategy),
+		Env(AgentSandboxClaimTimeoutSeconds, strconv.FormatInt(int64(e.ClaimTimeout/time.Second), 10)),
+		Env(AgentSandboxCommandTimeoutSeconds, strconv.FormatInt(int64(e.CommandTimeout/time.Second), 10)),
+		Env(AgentSandboxDepth, "0"),
+	}
+}
+
+// ParseAgentSandboxEnv reads the agent sandbox workspace environment.
+func ParseAgentSandboxEnv(getenv func(string) string) AgentSandboxEnv {
+	return AgentSandboxEnv{
+		Enabled:           IsTrue(getenv(AgentSandboxEnabled)),
+		RouterURL:         getenv(AgentSandboxRouterURL),
+		TemplateName:      getenv(AgentSandboxTemplateName),
+		TemplateNamespace: getenv(AgentSandboxTemplateNamespace),
+		ClaimNamespace:    getenv(AgentSandboxClaimNamespace),
+		ReusePolicy:       getenv(AgentSandboxReusePolicy),
+		ReuseKey:          getenv(AgentSandboxReuseKey),
+		CleanupPolicy:     getenv(AgentSandboxCleanupPolicy),
+		WarmPoolPolicy:    getenv(AgentSandboxWarmPoolPolicy),
+		NamespaceStrategy: getenv(AgentSandboxNamespaceStrategy),
+		ClaimTimeout:      time.Duration(parsePositiveInt(getenv(AgentSandboxClaimTimeoutSeconds))) * time.Second,
+		CommandTimeout:    time.Duration(parsePositiveInt(getenv(AgentSandboxCommandTimeoutSeconds))) * time.Second,
+	}
 }
 
 // CoordinationEnv is the coordination/autonomous env contract used by AI tasks.
