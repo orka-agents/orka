@@ -28,6 +28,8 @@ import (
 	"github.com/sozercan/orka/internal/labels"
 )
 
+const githubWebhookTestDefaultBranch = "main"
+
 func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{
 		githubLabelTriggerAgentEnv:     "codex-agent",
@@ -66,7 +68,7 @@ func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 	if ws.GitRepo != "https://github.com/sozercan/vekil.git" {
 		t.Errorf("gitRepo = %q", ws.GitRepo)
 	}
-	if ws.Branch != "main" {
+	if ws.Branch != githubWebhookTestDefaultBranch {
 		t.Errorf("branch = %q, want main", ws.Branch)
 	}
 	if ws.PushBranch != "orka/implement-issue-12" {
@@ -130,7 +132,7 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 	if ws.PushBranch != "feature/x" {
 		t.Errorf("pushBranch = %q, want feature/x", ws.PushBranch)
 	}
-	if ws.PRBaseBranch != "main" {
+	if ws.PRBaseBranch != githubWebhookTestDefaultBranch {
 		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)
 	}
 	if !strings.Contains(task.Spec.Prompt, "Update the pull request branch") {
@@ -182,7 +184,7 @@ func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
 	if ws.PushBranch != "feature/fork-change" {
 		t.Errorf("pushBranch = %q, want feature/fork-change", ws.PushBranch)
 	}
-	if ws.PRBaseBranch != "main" {
+	if ws.PRBaseBranch != githubWebhookTestDefaultBranch {
 		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)
 	}
 	if !strings.Contains(task.Spec.Prompt, "do not commit or push yourself") {
@@ -209,7 +211,7 @@ func TestGitHubWebhook_IgnoresIssuePullRequestStub(t *testing.T) {
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("status = %d; body: %s", resp.StatusCode, readRespBody(t, resp))
 	}
-	assertTaskCount(t, fc, 0)
+	assertNoTasks(t, fc)
 }
 
 func TestGitHubWebhook_DuplicateDeliveryIsIdempotent(t *testing.T) {
@@ -242,14 +244,14 @@ func TestGitHubWebhook_IgnoresNonAgentLabelsAndUnsupportedTargets(t *testing.T) 
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("status = %d; body: %s", resp.StatusCode, readRespBody(t, resp))
 	}
-	assertTaskCount(t, fc, 0)
+	assertNoTasks(t, fc)
 
 	body = []byte(`{"action":"labeled","label":{"name":"agent:review"},"repository":{"full_name":"sozercan/vekil"},"issue":{"number":1,"title":"Bug","body":"Body","html_url":"https://github.com/sozercan/vekil/issues/1"}}`)
 	resp = performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-review-issue", secret, body)
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("status = %d; body: %s", resp.StatusCode, readRespBody(t, resp))
 	}
-	assertTaskCount(t, fc, 0)
+	assertNoTasks(t, fc)
 }
 
 func TestGitHubWebhook_RejectsInvalidSignature(t *testing.T) {
@@ -273,7 +275,7 @@ func TestGitHubWebhook_RejectsInvalidSignature(t *testing.T) {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
 	_ = secret
-	assertTaskCount(t, fc, 0)
+	assertNoTasks(t, fc)
 }
 
 func TestGitHubWebhook_PingVerifiesSignatureWithoutAuth(t *testing.T) {
@@ -362,14 +364,14 @@ func readRespBody(t *testing.T, resp *http.Response) string {
 	return buf.String()
 }
 
-func assertTaskCount(t *testing.T, c client.Client, want int) {
+func assertNoTasks(t *testing.T, c client.Client) {
 	t.Helper()
 	var tasks corev1alpha1.TaskList
 	if err := c.List(t.Context(), &tasks); err != nil {
 		t.Fatalf("list tasks: %v", err)
 	}
-	if len(tasks.Items) != want {
+	if len(tasks.Items) != 0 {
 		encoded, _ := json.Marshal(tasks.Items)
-		t.Fatalf("task count = %d, want %d: %s", len(tasks.Items), want, string(encoded))
+		t.Fatalf("task count = %d, want 0: %s", len(tasks.Items), string(encoded))
 	}
 }

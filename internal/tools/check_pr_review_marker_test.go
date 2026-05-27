@@ -67,11 +67,6 @@ func TestCheckPRReviewMarkerTool_NoMarkerFoundWithExplicitHeadSHA(t *testing.T) 
 		requestCount++
 		assertCheckPRReviewMarkerAuth(t, r)
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/repos/sozercan/ayna/issues/%d/comments", prNumber):
-			if r.URL.Query().Get(perPageField) != "100" {
-				t.Errorf("comments per_page = %q, want 100", r.URL.Query().Get(perPageField))
-			}
-			_, _ = fmt.Fprint(w, `[]`)
 		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/repos/sozercan/ayna/pulls/%d/reviews", prNumber):
 			if r.URL.Query().Get(perPageField) != "100" {
 				t.Errorf("reviews per_page = %q, want 100", r.URL.Query().Get(perPageField))
@@ -112,61 +107,8 @@ func TestCheckPRReviewMarkerTool_NoMarkerFoundWithExplicitHeadSHA(t *testing.T) 
 	if !strings.Contains(got.Message, "no review marker found") {
 		t.Errorf("Message = %q, want no marker found", got.Message)
 	}
-	if requestCount != 2 {
-		t.Errorf("requestCount = %d, want 2", requestCount)
-	}
-}
-
-func TestCheckPRReviewMarkerTool_MarkerFoundInIssueComments(t *testing.T) {
-	const prNumber = 43
-	const commentURL = "https://github.com/sozercan/ayna/pull/43#issuecomment-1"
-	reviewsCalled := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assertCheckPRReviewMarkerAuth(t, r)
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/repos/sozercan/ayna/issues/%d/comments", prNumber):
-			_, _ = fmt.Fprintf(w, `[{"body":"reviewed\n\n%s","html_url":%q,"user":{"login":"orka-bot"}}]`, formatPRReviewMarker(checkPRReviewMarkerTestSHA), commentURL)
-		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/repos/sozercan/ayna/pulls/%d/reviews", prNumber):
-			reviewsCalled = true
-			t.Errorf("reviews endpoint should not be called when marker is found in comments")
-			w.WriteHeader(http.StatusInternalServerError)
-		default:
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	t.Setenv("GITHUB_TOKEN", testGitHubToken)
-	tool := &CheckPRReviewMarkerTool{k8sClient: newFakeClient(), apiBaseURL: server.URL}
-	args, _ := json.Marshal(CheckPRReviewMarkerArgs{RepoURL: testSozercanAynaRepoURL, PRNumber: prNumber, HeadSHA: checkPRReviewMarkerTestSHA})
-
-	result, err := tool.Execute(context.Background(), args)
-	if err != nil {
-		t.Fatalf("Execute() returned error: %v", err)
-	}
-	if reviewsCalled {
-		t.Fatal("reviews endpoint was called")
-	}
-
-	var got CheckPRReviewMarkerResult
-	if err := json.Unmarshal([]byte(result), &got); err != nil {
-		t.Fatalf("failed to parse result: %v", err)
-	}
-	if !got.Found {
-		t.Error("Found = false, want true")
-	}
-	if got.Source != "issue_comment" {
-		t.Errorf("Source = %q, want issue_comment", got.Source)
-	}
-	if got.HTMLURL != commentURL {
-		t.Errorf("HTMLURL = %q, want %q", got.HTMLURL, commentURL)
-	}
-	if got.Author != "orka-bot" {
-		t.Errorf("Author = %q, want orka-bot", got.Author)
-	}
-	if got.Marker != formatPRReviewMarker(checkPRReviewMarkerTestSHA) {
-		t.Errorf("Marker = %q, want %q", got.Marker, formatPRReviewMarker(checkPRReviewMarkerTestSHA))
+	if requestCount != 1 {
+		t.Errorf("requestCount = %d, want 1", requestCount)
 	}
 }
 
@@ -176,8 +118,6 @@ func TestCheckPRReviewMarkerTool_MarkerFoundInReviews(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assertCheckPRReviewMarkerAuth(t, r)
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/repos/sozercan/ayna/issues/%d/comments", prNumber):
-			_, _ = fmt.Fprint(w, `[]`)
 		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/repos/sozercan/ayna/pulls/%d/reviews", prNumber):
 			_, _ = fmt.Fprintf(w, `[{"body":"LGTM\n\n%s","html_url":%q,"user":{"login":"reviewer-bot"}}]`, formatPRReviewMarker(checkPRReviewMarkerTestSHA), reviewURL)
 		default:
@@ -214,73 +154,6 @@ func TestCheckPRReviewMarkerTool_MarkerFoundInReviews(t *testing.T) {
 	}
 }
 
-func TestCheckPRReviewMarkerTool_MarkerFoundInIssueCommentsPage2(t *testing.T) {
-	const prNumber = 45
-	const commentURL = "https://github.com/sozercan/ayna/pull/45#issuecomment-101"
-	var commentPages []string
-	reviewsCalled := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assertCheckPRReviewMarkerAuth(t, r)
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/repos/sozercan/ayna/issues/%d/comments", prNumber):
-			if r.URL.Query().Get(perPageField) != "100" {
-				t.Errorf("comments per_page = %q, want 100", r.URL.Query().Get(perPageField))
-			}
-			page := r.URL.Query().Get(pageField)
-			commentPages = append(commentPages, page)
-			switch page {
-			case "1":
-				_, _ = fmt.Fprint(w, checkPRReviewMarkerPageJSON(100, "", "", ""))
-			case "2":
-				_, _ = fmt.Fprint(w, checkPRReviewMarkerPageJSON(1, "reviewed\n\n"+formatPRReviewMarker(checkPRReviewMarkerTestSHA), commentURL, "orka-bot"))
-			default:
-				t.Errorf("unexpected comments page: %q", page)
-				w.WriteHeader(http.StatusNotFound)
-			}
-		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/repos/sozercan/ayna/pulls/%d/reviews", prNumber):
-			reviewsCalled = true
-			t.Errorf("reviews endpoint should not be called when marker is found in comments")
-			w.WriteHeader(http.StatusInternalServerError)
-		default:
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	t.Setenv("GITHUB_TOKEN", testGitHubToken)
-	tool := &CheckPRReviewMarkerTool{k8sClient: newFakeClient(), apiBaseURL: server.URL}
-	args, _ := json.Marshal(CheckPRReviewMarkerArgs{RepoURL: testSozercanAynaRepoURL, PRNumber: prNumber, HeadSHA: checkPRReviewMarkerTestSHA})
-
-	result, err := tool.Execute(context.Background(), args)
-	if err != nil {
-		t.Fatalf("Execute() returned error: %v", err)
-	}
-	if reviewsCalled {
-		t.Fatal("reviews endpoint was called")
-	}
-	if strings.Join(commentPages, ",") != "1,2" {
-		t.Fatalf("comment pages = %v, want [1 2]", commentPages)
-	}
-
-	var got CheckPRReviewMarkerResult
-	if err := json.Unmarshal([]byte(result), &got); err != nil {
-		t.Fatalf("failed to parse result: %v", err)
-	}
-	if !got.Found {
-		t.Error("Found = false, want true")
-	}
-	if got.Source != "issue_comment" {
-		t.Errorf("Source = %q, want issue_comment", got.Source)
-	}
-	if got.HTMLURL != commentURL {
-		t.Errorf("HTMLURL = %q, want %q", got.HTMLURL, commentURL)
-	}
-	if got.Author != "orka-bot" {
-		t.Errorf("Author = %q, want orka-bot", got.Author)
-	}
-}
-
 func TestCheckPRReviewMarkerTool_MarkerFoundInReviewsPage2(t *testing.T) {
 	const prNumber = 46
 	const reviewURL = "https://github.com/sozercan/ayna/pull/46#pullrequestreview-101"
@@ -288,11 +161,6 @@ func TestCheckPRReviewMarkerTool_MarkerFoundInReviewsPage2(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assertCheckPRReviewMarkerAuth(t, r)
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/repos/sozercan/ayna/issues/%d/comments", prNumber):
-			if r.URL.Query().Get(pageField) != "1" {
-				t.Errorf("comments page = %q, want 1", r.URL.Query().Get(pageField))
-			}
-			_, _ = fmt.Fprint(w, `[]`)
 		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/repos/sozercan/ayna/pulls/%d/reviews", prNumber):
 			if r.URL.Query().Get(perPageField) != "100" {
 				t.Errorf("reviews per_page = %q, want 100", r.URL.Query().Get(perPageField))
@@ -342,6 +210,53 @@ func TestCheckPRReviewMarkerTool_MarkerFoundInReviewsPage2(t *testing.T) {
 	}
 	if got.Author != "reviewer-bot" {
 		t.Errorf("Author = %q, want reviewer-bot", got.Author)
+	}
+}
+
+func TestCheckPRReviewMarkerTool_FetchesHeadSHAWhenOmitted(t *testing.T) {
+	const prNumber = 47
+	const reviewURL = "https://github.com/sozercan/ayna/pull/47#pullrequestreview-1"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertCheckPRReviewMarkerAuth(t, r)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/repos/sozercan/ayna/pulls/%d", prNumber):
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPRReviewMarkerTestSHA)
+		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/repos/sozercan/ayna/pulls/%d/reviews", prNumber):
+			_, _ = fmt.Fprintf(w, `[{"body":"%s","html_url":%q,"user":{"login":"reviewer-bot"}}]`, formatPRReviewMarker(checkPRReviewMarkerTestSHA), reviewURL)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	tool := &CheckPRReviewMarkerTool{k8sClient: newFakeClient(), apiBaseURL: server.URL}
+	args, _ := json.Marshal(CheckPRReviewMarkerArgs{RepoURL: testSozercanAynaRepoURL, PRNumber: prNumber})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() returned error: %v", err)
+	}
+	var got CheckPRReviewMarkerResult
+	if err := json.Unmarshal([]byte(result), &got); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !got.Found {
+		t.Fatal("Found = false, want true")
+	}
+	if got.HeadSHA != checkPRReviewMarkerTestSHA {
+		t.Errorf("HeadSHA = %q, want %q", got.HeadSHA, checkPRReviewMarkerTestSHA)
+	}
+}
+
+func TestContainsPRReviewMarkerRequiresExactMarker(t *testing.T) {
+	otherText := defaultPRReviewMarkerPrefix + " something else --> " + checkPRReviewMarkerTestSHA
+	if containsPRReviewMarker(otherText, checkPRReviewMarkerTestSHA) {
+		t.Fatalf("containsPRReviewMarker matched prefix and SHA without exact marker")
+	}
+	if !containsPRReviewMarker("reviewed\n"+formatPRReviewMarker(checkPRReviewMarkerTestSHA), checkPRReviewMarkerTestSHA) {
+		t.Fatalf("containsPRReviewMarker did not match exact marker")
 	}
 }
 

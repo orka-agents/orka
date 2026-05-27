@@ -155,39 +155,7 @@ type prReviewMarkerMatch struct {
 }
 
 func findPRReviewMarker(ctx context.Context, token, owner, repo string, prNumber int, headSHA, baseURL string) (*prReviewMarkerMatch, error) {
-	if match, err := findPRReviewMarkerInIssueComments(ctx, token, owner, repo, prNumber, headSHA, baseURL); err != nil || match != nil {
-		return match, err
-	}
 	return findPRReviewMarkerInReviews(ctx, token, owner, repo, prNumber, headSHA, baseURL)
-}
-
-func findPRReviewMarkerInIssueComments(ctx context.Context, token, owner, repo string, prNumber int, headSHA, baseURL string) (*prReviewMarkerMatch, error) {
-	const perPage = 100
-	for page := 1; ; page++ {
-		endpoint := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments?per_page=%d&page=%d", baseURL, owner, repo, prNumber, perPage, page)
-		body, err := githubGet(ctx, token, endpoint)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list PR comments: %w", err)
-		}
-		var comments []struct {
-			Body    string `json:"body"`
-			HTMLURL string `json:"html_url"`
-			User    struct {
-				Login string `json:"login"`
-			} `json:"user"`
-		}
-		if err := json.Unmarshal(body, &comments); err != nil {
-			return nil, fmt.Errorf("failed to parse GitHub comments response: %w", err)
-		}
-		for _, c := range comments {
-			if containsPRReviewMarker(c.Body, headSHA) {
-				return &prReviewMarkerMatch{Source: "issue_comment", HTMLURL: c.HTMLURL, Author: c.User.Login}, nil
-			}
-		}
-		if len(comments) < perPage {
-			return nil, nil
-		}
-	}
 }
 
 func findPRReviewMarkerInReviews(ctx context.Context, token, owner, repo string, prNumber int, headSHA, baseURL string) (*prReviewMarkerMatch, error) {
@@ -244,7 +212,10 @@ func githubGet(ctx context.Context, token, endpoint string) ([]byte, error) {
 func containsPRReviewMarker(body, headSHA string) bool {
 	body = strings.TrimSpace(body)
 	headSHA = strings.TrimSpace(headSHA)
-	return strings.Contains(body, defaultPRReviewMarkerPrefix) && (headSHA == "" || strings.Contains(body, headSHA))
+	if headSHA == "" {
+		return strings.Contains(body, defaultPRReviewMarkerPrefix)
+	}
+	return strings.Contains(body, formatPRReviewMarker(headSHA))
 }
 
 func formatPRReviewMarker(headSHA string) string {

@@ -12,11 +12,14 @@ import (
 	"fmt"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 // CreatePRMonitorTool creates a scheduled AI task that monitors GitHub PRs.
@@ -63,6 +66,10 @@ func (t *CreatePRMonitorTool) Parameters() json.RawMessage {
 			providerRefField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,
 				jsonSchemaDescriptionField: "Optional Provider CRD reference name for the scheduled AI task.",
+			},
+			"gitSecretRef": map[string]any{
+				jsonSchemaTypeField:        jsonSchemaTypeString,
+				jsonSchemaDescriptionField: "Optional Secret name containing git/GitHub credentials for private repositories. If omitted, Orka tries common git credential secret names.",
 			},
 			perPageField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeInteger,
@@ -128,12 +135,26 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 	if agent.Spec.Coordination == nil || !agent.Spec.Coordination.Enabled {
 		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("agent %q must have coordination enabled", agentRef), "Enable coordination on the Agent before creating a PR monitor")
 	}
+	if agent.Spec.Runtime != nil {
+		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("agent %q is a runtime Agent, but PR monitors require an AI Agent", agentRef), "Provide an AI Agent without spec.runtime for the scheduled PR monitor")
+	}
+	if agent.Spec.Coordination.Autonomous {
+		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("agent %q must not have autonomous coordination enabled", agentRef), "Disable coordination.autonomous for the Agent before creating a scheduled PR monitor")
+	}
+	if reviewEvent := chatGetStringArg(args, "review_event"); reviewEvent != "" {
+		if _, ok := normalizePRMonitorReviewEvent(reviewEvent); !ok {
+			return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("invalid review_event %q", reviewEvent), "Use COMMENT, APPROVE, or REQUEST_CHANGES")
+		}
+	}
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      tc.GenerateTaskName(),
 			Namespace: namespace,
 			Labels:    tc.TaskLabels(),
+			Annotations: map[string]string{
+				labels.AnnotationPRMonitorName: monitorName,
+			},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAI,
@@ -146,6 +167,18 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 	task.Spec.AI = &corev1alpha1.AISpec{
 		Tools: append([]string(nil), prMonitorRequiredTools...),
 	}
+	if repoURL := chatGetStringArg(args, repoURLField); repoURL != "" {
+		workspace := &corev1alpha1.WorkspaceConfig{GitRepo: repoURL}
+		secretRef, err := resolveWorkspaceGitSecretRef(ctx, tc.Client, namespace, nil, chatGetStringArg(args, "gitSecretRef"))
+		if err != nil {
+			return classifyChatK8sErr(err)
+		}
+		if secretRef != nil {
+			workspace.GitSecretRef = secretRef
+		}
+		task.Spec.Workspace = workspace
+		task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: workerenv.GitRepo, Value: repoURL})
+	}
 	if providerName := chatGetStringArg(args, providerRefField); providerName != "" {
 		task.Spec.AI.ProviderRef = &corev1alpha1.ProviderReference{Name: providerName}
 	}
@@ -157,10 +190,24 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 	tc.IncrementTasks()
 	return ChatToolSuccess(map[string]any{
 		nameField:      task.Name,
+		"monitor_name": monitorName,
 		namespaceField: task.Namespace,
 		scheduleField:  task.Spec.Schedule,
 		messageField:   "PR monitor task created",
 	})
+}
+
+func normalizePRMonitorReviewEvent(value string) (string, bool) {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	if value == "" {
+		return reviewEventComment, true
+	}
+	switch value {
+	case reviewEventComment, reviewEventApprove, reviewEventRequestChanges:
+		return value, true
+	default:
+		return "", false
+	}
 }
 
 func buildPRMonitorPrompt(args map[string]any) string {
@@ -173,10 +220,7 @@ func buildPRMonitorPrompt(args map[string]any) string {
 		perPage = 100
 	}
 
-	reviewEvent := strings.ToUpper(strings.TrimSpace(chatGetStringArg(args, "review_event")))
-	if reviewEvent == "" {
-		reviewEvent = reviewEventComment
-	}
+	reviewEvent, _ := normalizePRMonitorReviewEvent(chatGetStringArg(args, "review_event"))
 
 	var b strings.Builder
 	b.WriteString("You are an automated pull request monitor.\n\n")

@@ -13,11 +13,14 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 func TestCreatePRMonitorTool_Metadata(t *testing.T) {
@@ -49,6 +52,7 @@ func TestCreatePRMonitorTool_Metadata(t *testing.T) {
 		scheduleField,
 		agentRefField,
 		providerRefField,
+		"gitSecretRef",
 		perPageField,
 		"review_event",
 		promptField,
@@ -90,12 +94,15 @@ func TestCreatePRMonitorTool_ExecuteMissingToolContext(t *testing.T) {
 }
 
 func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
-	fc := newFakeClient(&corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
-		Spec: corev1alpha1.AgentSpec{
-			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+	fc := newFakeClient(
+		&corev1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
+			Spec: corev1alpha1.AgentSpec{
+				Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+			},
 		},
-	})
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-credentials", Namespace: defaultNamespace}},
+	)
 	ctx := newCreatePRMonitorToolContext(fc)
 	tool := &CreatePRMonitorTool{}
 
@@ -105,6 +112,7 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 		scheduleField:    "*/15 * * * *",
 		agentRefField:    "reviewer",
 		providerRefField: "default-provider",
+		"gitSecretRef":   "git-credentials",
 		perPageField:     100,
 		"review_event":   "comment",
 		promptField:      "Focus on regressions.",
@@ -131,6 +139,9 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 	if task.Spec.Schedule != "*/15 * * * *" {
 		t.Errorf("schedule = %q", task.Spec.Schedule)
 	}
+	if task.Annotations[labels.AnnotationPRMonitorName] != "daily-pr-monitor" {
+		t.Errorf("monitor annotation = %q", task.Annotations[labels.AnnotationPRMonitorName])
+	}
 	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "reviewer" {
 		t.Fatalf("AgentRef = %#v, want reviewer", task.Spec.AgentRef)
 	}
@@ -139,6 +150,18 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 	}
 	if task.Spec.AI.ProviderRef == nil || task.Spec.AI.ProviderRef.Name != "default-provider" {
 		t.Fatalf("ProviderRef = %#v, want default-provider", task.Spec.AI.ProviderRef)
+	}
+	if task.Spec.Workspace == nil {
+		t.Fatal("Workspace is nil")
+	}
+	if task.Spec.Workspace.GitRepo != "https://github.com/sozercan/orka" {
+		t.Errorf("workspace.gitRepo = %q", task.Spec.Workspace.GitRepo)
+	}
+	if task.Spec.Workspace.GitSecretRef == nil || task.Spec.Workspace.GitSecretRef.Name != "git-credentials" {
+		t.Fatalf("workspace.gitSecretRef = %#v, want git-credentials", task.Spec.Workspace.GitSecretRef)
+	}
+	if !hasEnvVar(task.Spec.Env, workerenv.GitRepo, "https://github.com/sozercan/orka") {
+		t.Errorf("env missing %s=https://github.com/sozercan/orka: %#v", workerenv.GitRepo, task.Spec.Env)
 	}
 	for _, tool := range prMonitorRequiredTools {
 		if !containsString(task.Spec.AI.Tools, tool) {
@@ -194,6 +217,59 @@ func TestCreatePRMonitorTool_ExecuteAgentCoordinationDisabled(t *testing.T) {
 	}
 }
 
+func TestCreatePRMonitorTool_ExecuteRuntimeAgentRejected(t *testing.T) {
+	fc := newFakeClient(&corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "runtime-reviewer", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime:      &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+		},
+	})
+	result := executeCreatePRMonitorForFailure(t, fc, map[string]any{
+		nameField:     "daily-pr-monitor",
+		scheduleField: "*/15 * * * *",
+		agentRefField: "runtime-reviewer",
+	})
+	if result.ErrorType != errTypeInvalidArgs || !strings.Contains(result.Error, "runtime Agent") {
+		t.Fatalf("result = %#v, want runtime agent invalid_arguments", result)
+	}
+}
+
+func TestCreatePRMonitorTool_ExecuteAutonomousAgentRejected(t *testing.T) {
+	fc := newFakeClient(&corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "autonomous-reviewer", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+		},
+	})
+	result := executeCreatePRMonitorForFailure(t, fc, map[string]any{
+		nameField:     "daily-pr-monitor",
+		scheduleField: "*/15 * * * *",
+		agentRefField: "autonomous-reviewer",
+	})
+	if result.ErrorType != errTypeInvalidArgs || !strings.Contains(result.Error, "autonomous") {
+		t.Fatalf("result = %#v, want autonomous agent invalid_arguments", result)
+	}
+}
+
+func TestCreatePRMonitorTool_ExecuteInvalidReviewEventRejected(t *testing.T) {
+	fc := newFakeClient(&corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+		},
+	})
+	result := executeCreatePRMonitorForFailure(t, fc, map[string]any{
+		nameField:      "daily-pr-monitor",
+		scheduleField:  "*/15 * * * *",
+		agentRefField:  "reviewer",
+		"review_event": "INVALID",
+	})
+	if result.ErrorType != errTypeInvalidArgs || !strings.Contains(result.Error, "invalid review_event") {
+		t.Fatalf("result = %#v, want invalid review event", result)
+	}
+}
+
 func executeCreatePRMonitorForFailure(t *testing.T, c client.Client, args map[string]any) ChatToolResult {
 	t.Helper()
 	ctx := newCreatePRMonitorToolContext(c)
@@ -233,6 +309,15 @@ func mustJSON(t *testing.T, v map[string]any) json.RawMessage {
 		t.Fatalf("failed to marshal JSON: %v", err)
 	}
 	return b
+}
+
+func hasEnvVar(values []corev1.EnvVar, name, want string) bool {
+	for _, value := range values {
+		if value.Name == name && value.Value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func containsString(values []string, want string) bool {
