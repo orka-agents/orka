@@ -118,7 +118,27 @@ DEMO_CHAT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # inlined into the visible command.
 demo_show_cmd "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL} ANTHROPIC_API_KEY=\$(get_orka_token) ${DEMO_CLAUDE_BIN} -p --model ${DEMO_CHAT_OPUS_MODEL} < ${DEMO_WORKDIR}/chat-request.txt"
 log_info "Running the actual chat turn (output captured to ${DEMO_WORKDIR}/chat-client-result.json)..."
+# Background heartbeat so viewers see something during the model's quiet
+# multi-turn tool dance. Ticks every 10s, only when stderr is a tty so
+# log scrapers stay clean. We tear it down whether the call succeeds or
+# not — `trap` covers the SIGTERM/exit path.
+__demo_chat_heartbeat() {
+  local started="${SECONDS}"
+  while sleep 10; do
+    if [[ -t 2 ]]; then
+      printf '\r\033[2K%b[%s] ⏳  chat turn in flight (tool round-trips)... elapsed=%ss%b' \
+        "${DIM}" "$(__demo_log_ts)" "$((SECONDS - started))" "${COLOR_RESET}" >&2
+    fi
+  done
+}
+__demo_chat_heartbeat &
+__DEMO_CHAT_HB_PID=$!
+trap 'kill "${__DEMO_CHAT_HB_PID}" 2>/dev/null || true; [[ -t 2 ]] && printf "\r\033[2K" >&2 || true' EXIT
 run_demo_chat_request_file "${DEMO_WORKDIR}/chat-request.txt" "${DEMO_WORKDIR}/chat-client-result.json"
+kill "${__DEMO_CHAT_HB_PID}" 2>/dev/null || true
+wait "${__DEMO_CHAT_HB_PID}" 2>/dev/null || true
+trap - EXIT
+[[ -t 2 ]] && printf '\r\033[2K' >&2 || true
 log_success "Chat request accepted; coordinator Task will appear shortly"
 
 # Chapter 3 ------------------------------------------------------------------
@@ -132,7 +152,8 @@ log_success "coordinator task: ${DEMO_CHAT_PARENT_TASK}"
 # Chapter 4 ------------------------------------------------------------------
 narrate "Four named Agents created via create_agent: coder, two reviewers, coordinator."
 chapter "Watch the coordinator delegate" "🪄"
-demo_pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/source=anthropic-proxy"
+# Show just this run's coordinator (not every historical proxy-* Task in the ns).
+demo_pe "kubectl get task -n ${DEMO_NAMESPACE} ${DEMO_CHAT_PARENT_TASK}"
 demo_pe "kubectl get agents -n ${DEMO_NAMESPACE} ${DEMO_PR_COORDINATOR_NAME} ${DEMO_CODER_AGENT_NAME} ${DEMO_SECURITY_REVIEWER_NAME} ${DEMO_QUALITY_REVIEWER_NAME}"
 
 # Chapter 5 ------------------------------------------------------------------

@@ -705,21 +705,24 @@ run_demo_chat_client_claude_code() {
   model="$(demo_anthropic_model)"
   base_url="$(demo_anthropic_base_url)"
 
-  # Write a per-run settings file so the demo's ANTHROPIC_BASE_URL/API_KEY win over
-  # whatever the user has in ~/.claude/settings.json (which Claude Code's settings.env
-  # block overrides shell env, even in --bare mode).
-  local settings_file
-  settings_file="$(mktemp -t orka-demo-claude-settings.XXXXXX.json)"
-  # No secrets logged: the file is written 0600 by mktemp and removed below.
-  cat >"${settings_file}" <<JSON
-{"env": {"ANTHROPIC_BASE_URL": "${base_url}", "ANTHROPIC_API_KEY": "${token}"}}
+  # Claude Code merges user-level settings.json AFTER --settings, so an
+  # `env.ANTHROPIC_BASE_URL` in ~/.claude/settings.json silently wins
+  # over what we pass via flag (and over shell env). Workaround: point
+  # the whole config dir at a per-run scratch dir via CLAUDE_CONFIG_DIR.
+  # That dir holds ONLY our settings.json, so user-level env can't shadow.
+  local settings_dir
+  settings_dir="$(mktemp -d -t orka-demo-claude-cfg.XXXXXX)"
+  chmod 700 "${settings_dir}"
+  # No secrets logged: the file is written 0600 below and removed when done.
+  umask 077
+  cat >"${settings_dir}/settings.json" <<JSON
+{"permissions": {"defaultMode": "${DEMO_CLAUDE_PERMISSION_MODE}"},
+ "env": {"ANTHROPIC_BASE_URL": "${base_url}", "ANTHROPIC_API_KEY": "${token}"}}
 JSON
 
   local cmd=(
     "${DEMO_CLAUDE_BIN}"
     --bare
-    --settings "${settings_file}"
-    --setting-sources "${DEMO_CLAUDE_SETTING_SOURCES}"
     -p
     --model "${model}"
     --no-session-persistence
@@ -745,7 +748,8 @@ JSON
       had_errexit=1
       set +e
     fi
-    ANTHROPIC_BASE_URL="${base_url}" ANTHROPIC_API_KEY="${token}" "${cmd[@]}" >"${output_file}"
+    CLAUDE_CONFIG_DIR="${settings_dir}" \
+      ANTHROPIC_BASE_URL="${base_url}" ANTHROPIC_API_KEY="${token}" "${cmd[@]}" >"${output_file}"
     status="$?"
     if (( had_errexit )); then
       set -e
@@ -756,15 +760,16 @@ JSON
       had_errexit=1
       set +e
     fi
-    ANTHROPIC_BASE_URL="${base_url}" ANTHROPIC_API_KEY="${token}" "${cmd[@]}" | tee "${output_file}"
+    CLAUDE_CONFIG_DIR="${settings_dir}" \
+      ANTHROPIC_BASE_URL="${base_url}" ANTHROPIC_API_KEY="${token}" "${cmd[@]}" | tee "${output_file}"
     status="${PIPESTATUS[0]}"
     if (( had_errexit )); then
       set -e
     fi
   fi
 
-  # Settings file held the per-run token; remove it now that claude has exited.
-  rm -f "${settings_file}"
+  # Scratch config dir held the per-run token; remove it now.
+  rm -rf "${settings_dir}"
 
   if (( status != 0 )); then
     printf 'error: Claude Code exited with status %s\n' "${status}" >&2
@@ -926,7 +931,15 @@ assert_real_pr_result() {
     if printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?Validation([[:space:]]+status)?):[[:space:]]*PASS(ED)?([^[:alnum:]_]|$)' \
       && printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?Review([[:space:]]+status)?):[[:space:]]*APPROVED([^[:alnum:]_]|$)' \
       && printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?CI([[:space:]]+status)?):[[:space:]]*(PASS(ED)?|NO_CHECKS|NOT_APPLICABLE|NONE)([^[:alnum:]_]|$)'; then
-      printf 'note: task %s had recovered intermediate child failures:\n%s\n' "${task_name}" "${failed_children}" >&2
+      # Viewer-friendly note: present the recovery as "self-healed", with
+      # the gory child names only when the presenter wants them.
+      local failed_count
+      failed_count="$(printf '%s\n' "${failed_children}" | grep -c . || true)"
+      if declare -F demo_profile_is >/dev/null 2>&1 && demo_profile_is presenter; then
+        printf 'note: task %s had recovered intermediate child failures:\n%s\n' "${task_name}" "${failed_children}" >&2
+      else
+        printf '🔁 self-healed %d intermediate child failure(s) before success\n' "${failed_count}" >&2
+      fi
     else
       printf 'error: task %s has failed child tasks without final pass evidence; refusing to treat result as demo success:\n%s\n' "${task_name}" "${failed_children}" >&2
       return 1
@@ -1193,8 +1206,15 @@ wait_for_task_terminal() {
   local deadline phase elapsed start
   start="${SECONDS}"
   deadline=$((SECONDS + timeout_seconds))
-  local tick_interval="${DEMO_WAIT_TICK_SECONDS:-5}"
-  (( tick_interval < 1 )) && tick_interval=1
+  # Adaptive tick: tight cadence for the first minute so viewers see the
+  # workflow start, then back off to 30s so long coordinator runs don't
+  # spam the cast with 100+ heartbeat lines. DEMO_WAIT_TICK_SECONDS still
+  # overrides if the caller pins a value.
+  local tick_initial tick_slow
+  tick_initial="${DEMO_WAIT_TICK_SECONDS:-5}"
+  tick_slow="${DEMO_WAIT_SLOW_TICK_SECONDS:-30}"
+  (( tick_initial < 1 )) && tick_initial=1
+  (( tick_slow < tick_initial )) && tick_slow="${tick_initial}"
 
   while (( SECONDS < deadline )); do
     phase="$(kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
@@ -1210,7 +1230,11 @@ wait_for_task_terminal() {
     esac
     elapsed=$(( SECONDS - start ))
     __demo_wait_emit_status "${task_name}" "${elapsed}"
-    sleep "${tick_interval}"
+    if (( elapsed < 60 )); then
+      sleep "${tick_initial}"
+    else
+      sleep "${tick_slow}"
+    fi
   done
 
   if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then

@@ -43,6 +43,15 @@ banner "Manual Workflow"
 narrate "Declarative YAML drives the same coordinator + specialists as chat."
 chapter "Apply the named Agents" "📜"
 log_info "Request preset: ${DEMO_REQUEST_PRESET}"
+# Pre-clean any prior agents so apply doesn't warn about missing
+# last-applied-configuration annotations (they may have been created via
+# the chat path earlier and are not annotated).
+kubectl delete -n "${DEMO_NAMESPACE}" \
+  agents/"${DEMO_PR_COORDINATOR_NAME}" \
+  agents/"${DEMO_CODER_AGENT_NAME}" \
+  agents/"${DEMO_SECURITY_REVIEWER_NAME}" \
+  agents/"${DEMO_QUALITY_REVIEWER_NAME}" \
+  --ignore-not-found >/dev/null 2>&1 || true
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/pr-agents.yaml"
 demo_pe "kubectl get agents -n ${DEMO_NAMESPACE} ${DEMO_PR_COORDINATOR_NAME} ${DEMO_CODER_AGENT_NAME} ${DEMO_SECURITY_REVIEWER_NAME} ${DEMO_QUALITY_REVIEWER_NAME}"
 

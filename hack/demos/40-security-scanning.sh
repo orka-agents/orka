@@ -67,6 +67,16 @@ narrate "Findings are severity-ranked; the top one becomes the work item."
 chapter "Inspect the open findings" "📋"
 log_info "Top 5 open findings ranked by severity:"
 demo_pe "orka_api GET \"/api/v1/security/repositories/${DEMO_SECURITY_SCAN_NAME}/findings?namespace=${DEMO_NAMESPACE}&state=open&limit=5\" | jq -r '.items[] | \"\\(.severity)\\t\\(.id)\\t\\(.title)\"' | column -t -s\$'\\t'"
+# Print the selected finding's row by itself so viewers can match the
+# `selected finding:` ID against a real row even if the scan added new
+# findings between selection time and now. Failure to look it up is
+# non-fatal — the patch flow still uses ${security_finding_id} either way.
+selected_row="$(orka_api GET "/api/v1/security/findings/${security_finding_id}?namespace=${DEMO_NAMESPACE}" 2>/dev/null \
+  | jq -r '[.severity, .id, .title] | @tsv' 2>/dev/null || true)"
+if [[ -n "${selected_row}" ]]; then
+  log_info "Selected for remediation:"
+  printf '%s\n' "${selected_row}" | column -t -s$'\t'
+fi
 log_success "selected finding: ${security_finding_id}"
 
 # Chapter 3 ------------------------------------------------------------------
@@ -79,8 +89,23 @@ demo_pe "orka_api POST \"/api/v1/security/findings/${security_finding_id}/patch?
 narrate "Remediation runs; we wait for the patch proposal to land."
 chapter "Wait for the patch proposal" "⏳"
 log_info "Waiting for patch proposal (timeout ${DEMO_SECURITY_PATCH_TIMEOUT:-1200}s)..."
-wait_for_patch_proposal_ready "${security_finding_id}" "${DEMO_SECURITY_PATCH_TIMEOUT:-1200}" \
-  || die "patch proposal did not become ready for finding ${security_finding_id}"
+# Retry on transient failures (e.g. upstream LLM 429). Each attempt POSTs
+# a fresh patch request; the wait helper polls until the latest patch
+# row reaches ready or failed.
+patch_attempts=0
+max_attempts="${DEMO_SECURITY_PATCH_MAX_ATTEMPTS:-3}"
+while (( patch_attempts < max_attempts )); do
+  if wait_for_patch_proposal_ready "${security_finding_id}" "${DEMO_SECURITY_PATCH_TIMEOUT:-1200}"; then
+    break
+  fi
+  patch_attempts=$(( patch_attempts + 1 ))
+  if (( patch_attempts >= max_attempts )); then
+    die "patch proposal did not become ready for finding ${security_finding_id} after ${max_attempts} attempts"
+  fi
+  log_warning "patch attempt ${patch_attempts} did not finish ready (often upstream LLM 429); retrying in 60s"
+  sleep 60
+  orka_api POST "/api/v1/security/findings/${security_finding_id}/patch?namespace=${DEMO_NAMESPACE}" >/dev/null 2>&1 || true
+done
 log_success "patch proposal ready"
 log_info "Patch proposals for ${security_finding_id}:"
 demo_pe "orka_api GET \"/api/v1/security/findings/${security_finding_id}/patches?namespace=${DEMO_NAMESPACE}\" | jq -r '.items[] | \"\\(.status)\\t\\(.branch)\\t\\(.taskName)\"' | column -t -s\$'\\t'"
