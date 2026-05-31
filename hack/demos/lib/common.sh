@@ -873,6 +873,38 @@ assert_real_pr_result() {
   local task_name="$1"
   local task_json result_json children_json result pr_url failed_children task_phase
 
+  # Chat-session sentinel: the chat-driven coordinator lives in the chat
+  # tool loop, not a Task. Validate from the chat-client-result.json file.
+  if [[ "${task_name}" == "chat-session" ]]; then
+    local chat_file="${DEMO_WORKDIR}/chat-client-result.json"
+    if [[ ! -s "${chat_file}" ]]; then
+      printf 'error: chat client result file missing or empty: %s\n' "${chat_file}" >&2
+      return 1
+    fi
+    local is_error
+    is_error="$(jq -r '.is_error // false' "${chat_file}" 2>/dev/null || printf 'true')"
+    result="$(jq -r '.result // ""' "${chat_file}" 2>/dev/null || printf '')"
+    if [[ "${is_error}" == "true" ]]; then
+      printf 'error: chat session ended with an error result:\n%s\n' "${result}" >&2
+      return 1
+    fi
+    if [[ -z "${result}" ]]; then
+      printf 'error: chat session produced an empty result\n' >&2
+      return 1
+    fi
+    if printf '%s\n' "${result}" | grep -Eiq 'implementation failed|did not create a pull request|did not open a pull request|pull request[^\n]*(not created|not opened)|PR:[[:space:]]*not created|not create a pull request|no pull request|VALIDATION_CONFIG_BLOCKED|VALIDATION_BLOCKED|REVIEW_BLOCKED|CI_BLOCKED|CI_PENDING'; then
+      printf 'error: chat session result is not a successful PR handoff:\n%s\n' "${result}" >&2
+      return 1
+    fi
+    pr_url="$(printf '%s\n' "${result}" | grep -Eo "https://github[.]com/[^[:space:])\"'<>]+/[^[:space:])\"'<>]+/pull/[0-9]+" | head -n 1 || true)"
+    if [[ -z "${pr_url}" ]]; then
+      printf 'error: chat session result does not contain a GitHub pull request URL:\n%s\n' "${result}" >&2
+      return 1
+    fi
+    printf 'validated pull request handoff: %s\n' "${pr_url}"
+    return 0
+  fi
+
   task_json="$(orka_api GET "/api/v1/tasks/${task_name}?namespace=${DEMO_NAMESPACE}")" || {
     printf 'error: failed to fetch task %s\n' "${task_name}" >&2
     return 1
@@ -953,6 +985,48 @@ summarize_task_run() {
   local task_name="$1"
   local demo_name="${2:-task-run}"
   local task_json children_json result_json
+
+  # Chat-session sentinel: emit a summary derived from the chat result file
+  # and live cluster Agents/Tasks. payoff_card_pr extracts the PR URL from
+  # .result; the rest is best-effort context for the audit-mode viewer.
+  if [[ "${task_name}" == "chat-session" ]]; then
+    local chat_file="${DEMO_WORKDIR}/chat-client-result.json"
+    local chat_json="{}"
+    if [[ -s "${chat_file}" ]]; then
+      chat_json="$(cat "${chat_file}")"
+    fi
+    children_json="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
+                      -l "orka.ai/source=anthropic-proxy" -o json 2>/dev/null \
+                      || printf '{"items":[]}')"
+    jq -n \
+      --arg demo "${demo_name}" \
+      --arg started_at "${DEMO_CHAT_STARTED_AT:-}" \
+      --argjson chat "${chat_json}" \
+      --argjson children "${children_json}" \
+      '{
+        demo: $demo,
+        task: "chat-session",
+        phase: (if ($chat.is_error // false) then "Failed" else "Succeeded" end),
+        agent: "chat-coordinator",
+        job: null,
+        childTasks: (
+          ($children.items // [])
+          | map(select(($started_at == "") or (.metadata.creationTimestamp >= $started_at)))
+          | length
+        ),
+        children: (
+          ($children.items // [])
+          | map(select(($started_at == "") or (.metadata.creationTimestamp >= $started_at)))
+          | map({
+              name: .metadata.name,
+              agent: (.spec.agentRef.name // null),
+              phase: (.status.phase // "Unknown")
+            })
+        ),
+        result: (($chat.result // "") | tostring | .[0:1200])
+      }'
+    return 0
+  fi
 
   task_json="$(kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" -o json)"
   children_json="$(orka_api GET "/api/v1/tasks/${task_name}/children?namespace=${DEMO_NAMESPACE}" 2>/dev/null || printf '{"items":[]}')"
@@ -1040,6 +1114,30 @@ delete_agent_if_exists() {
   kubectl delete agent "$1" -n "${DEMO_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
 }
 
+# delete_demo_chat_agents_if_present removes Agents that the chat-driven
+# coordinator created in a prior run of demo 10. The chat path no longer
+# pre-creates Agents with fixed demo names — the coordinator invents them —
+# so we delete by label (orka.ai/created-by=chat) and by the fixed names
+# from prior versions of the demo, ignoring missing resources.
+delete_demo_chat_agents_if_present() {
+  # New shape: Agents created via the chat `create_agent` tool get this label.
+  local names
+  names="$(
+    kubectl get agents -n "${DEMO_NAMESPACE}" \
+      -l 'orka.ai/created-by=chat' \
+      -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || printf ''
+  )"
+  if [[ -n "${names}" ]]; then
+    # shellcheck disable=SC2086
+    kubectl delete agent -n "${DEMO_NAMESPACE}" ${names} --ignore-not-found >/dev/null 2>&1 || true
+  fi
+  # Legacy shape: Agents the old demo pre-created by name.
+  delete_agent_if_exists "${DEMO_PR_COORDINATOR_NAME}"
+  delete_agent_if_exists "${DEMO_CODER_AGENT_NAME}"
+  delete_agent_if_exists "${DEMO_SECURITY_REVIEWER_NAME}"
+  delete_agent_if_exists "${DEMO_QUALITY_REVIEWER_NAME}"
+}
+
 delete_repository_scan_if_exists() {
   kubectl delete repositoryscan "$1" -n "${DEMO_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
 }
@@ -1112,6 +1210,17 @@ delete_chat_session_tasks() {
 latest_chat_parent_task() {
   local started_at="${1:-}"
   local parent
+
+  # New chat-coordinator flow: the "coordinator" lives in the chat session
+  # itself (the proxy's tool loop), not as a Kubernetes Task. When the chat
+  # client has produced its result file, treat the chat session as the
+  # parent — assert_real_pr_result / payoff_card_pr / wait_for_task_succeeded
+  # / wait_for_task_result_available all special-case the "chat-session"
+  # sentinel and read from chat-client-result.json.
+  if [[ -n "${DEMO_WORKDIR:-}" && -s "${DEMO_WORKDIR}/chat-client-result.json" ]]; then
+    printf 'chat-session\n'
+    return 0
+  fi
 
   parent="$(
     kubectl get tasks -n "${DEMO_NAMESPACE}" -l "orka.ai/source=anthropic-proxy" -o json 2>/dev/null |
@@ -1248,6 +1357,21 @@ wait_for_task_succeeded() {
   local timeout_seconds="${2:-900}"
   local phase
 
+  if [[ "${task_name}" == "chat-session" ]]; then
+    local chat_file="${DEMO_WORKDIR}/chat-client-result.json"
+    if [[ -s "${chat_file}" ]]; then
+      local is_error
+      is_error="$(jq -r '.is_error // false' "${chat_file}" 2>/dev/null || printf 'true')"
+      if [[ "${is_error}" != "true" ]]; then
+        return 0
+      fi
+      printf 'chat session ended with is_error=true\n' >&2
+      return 1
+    fi
+    printf 'chat session result file missing: %s\n' "${chat_file}" >&2
+    return 1
+  fi
+
   phase="$(wait_for_task_terminal "${task_name}" "${timeout_seconds}")" || return 1
   if [[ "${phase}" == "Succeeded" ]]; then
     return 0
@@ -1333,6 +1457,17 @@ wait_for_task_result_available() {
   local timeout_seconds="${2:-120}"
   local deadline
   deadline=$((SECONDS + timeout_seconds))
+
+  if [[ "${task_name}" == "chat-session" ]]; then
+    local chat_file="${DEMO_WORKDIR}/chat-client-result.json"
+    while (( SECONDS < deadline )); do
+      if [[ -s "${chat_file}" ]] && jq -e '.result // empty' "${chat_file}" >/dev/null 2>&1; then
+        return 0
+      fi
+      sleep 1
+    done
+    return 1
+  fi
 
   while (( SECONDS < deadline )); do
     if orka_api GET "/api/v1/tasks/${task_name}/result?namespace=${DEMO_NAMESPACE}" >/dev/null 2>&1; then

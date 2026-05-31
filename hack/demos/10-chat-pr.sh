@@ -35,15 +35,15 @@ configure_demo_magic
 ensure_demo_workdir
 prepare_api_env
 
-render_pr_agents_manifest > "${DEMO_WORKDIR}/pr-agents.yaml"
 render_chat_request_file  > "${DEMO_WORKDIR}/chat-request.txt"
 render_chat_story_file    > "${DEMO_WORKDIR}/chat-story.txt"
 
+# The chat turn carries no agent specs; the server-side coordinator system
+# prompt instructs the model to create_agent itself. Whatever Agents linger
+# from earlier runs are cleaned by name patterns (delete_chat_session_tasks
+# also removes proxy-* Tasks created by this session).
 delete_chat_session_tasks
-delete_agent_if_exists "${DEMO_PR_COORDINATOR_NAME}"
-delete_agent_if_exists "${DEMO_CODER_AGENT_NAME}"
-delete_agent_if_exists "${DEMO_SECURITY_REVIEWER_NAME}"
-delete_agent_if_exists "${DEMO_QUALITY_REVIEWER_NAME}"
+delete_demo_chat_agents_if_present
 orka_api DELETE "/api/v1/chat/${DEMO_CHAT_SESSION}?namespace=${DEMO_NAMESPACE}" >/dev/null 2>&1 || true
 
 # Pick the best Opus model the cluster will accept. Caller can pin a
@@ -110,6 +110,12 @@ log_info "Provider-default models exposed by Orka (/anthropic/v1/models):"
 demo_pe "curl -sS -H \"Authorization: Bearer \$(get_orka_token)\" ${ANTHROPIC_BASE_URL}/v1/models | jq -r '.data[].id'"
 log_info "Selected Opus model: ${DEMO_CHAT_OPUS_MODEL} (Orka passes the model name through to ${DEMO_PROVIDER_REF})"
 DEMO_CHAT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# Show the prompt that `claude -p` will receive on stdin, then the exact
+# command itself. demo_show handles profile-correct verbosity (full body
+# in presenter, head -20 in docs, head -8 in social, path-only in hero)
+# so audit-mode viewers see the real ask while social cuts stay short.
+log_info "Prompt sent to claude -p (from ${DEMO_WORKDIR}/chat-request.txt):"
+demo_show "${DEMO_WORKDIR}/chat-request.txt"
 # Show the exact `claude -p` command the viewer could run themselves. We
 # render it WITHOUT executing (demo_show_cmd) — the real invocation runs
 # via run_demo_chat_request_file just below with a sidecar --settings
@@ -150,11 +156,14 @@ DEMO_CHAT_PARENT_TASK="$(wait_for_chat_parent_task "${DEMO_CHAT_PARENT_TIMEOUT:-
 log_success "coordinator task: ${DEMO_CHAT_PARENT_TASK}"
 
 # Chapter 4 ------------------------------------------------------------------
-narrate "Four named Agents created via create_agent: coder, two reviewers, coordinator."
+narrate "The coordinator invents its own Agents via create_agent. Names vary per run."
 chapter "Watch the coordinator delegate" "🪄"
-# Show just this run's coordinator (not every historical proxy-* Task in the ns).
-demo_pe "kubectl get task -n ${DEMO_NAMESPACE} ${DEMO_CHAT_PARENT_TASK}"
-demo_pe "kubectl get agents -n ${DEMO_NAMESPACE} ${DEMO_PR_COORDINATOR_NAME} ${DEMO_CODER_AGENT_NAME} ${DEMO_SECURITY_REVIEWER_NAME} ${DEMO_QUALITY_REVIEWER_NAME}"
+# The chat-driven coordinator lives in the chat session itself (no single
+# Kubernetes Task represents it). Show the child Tasks the chat created
+# during this run, plus the Agents it spun up.
+demo_pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/source=anthropic-proxy --sort-by=.metadata.creationTimestamp"
+# Whatever Agents the coordinator created in this run carry the chat label.
+demo_pe "kubectl get agents -n ${DEMO_NAMESPACE} -l orka.ai/created-by=chat"
 
 # Chapter 5 ------------------------------------------------------------------
 narrate "Implementation, validation, parallel review, CI — silently, in the background."
