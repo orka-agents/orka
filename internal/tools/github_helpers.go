@@ -87,8 +87,21 @@ func resolveRepoAndToken(ctx context.Context, k8sClient client.Client, taskName,
 
 // resolveFromTask looks up a Task CR in K8s and extracts owner/repo and token
 // from its workspace configuration and gitSecretRef.
+//
+// Namespace resolution prefers the ToolContext namespace (set by the proxy
+// when running server-side), then ORKA_TASK_NAMESPACE (set in worker pods),
+// then the default namespace. Without the ToolContext fallback the proxy
+// process — which has no per-request env vars — would always look in
+// "default", which silently breaks create_pull_request and similar tools for
+// any chat session that targets a non-default namespace.
 func resolveFromTask(ctx context.Context, k8sClient client.Client, taskName string) (owner, repo, token string, err error) {
-	ns := os.Getenv(envOrkaTaskNamespace)
+	ns := ""
+	if tc := GetToolContext(ctx); tc != nil {
+		ns = tc.Namespace
+	}
+	if ns == "" {
+		ns = os.Getenv(envOrkaTaskNamespace)
+	}
 	if ns == "" {
 		ns = defaultNamespace
 	}

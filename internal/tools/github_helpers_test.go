@@ -161,6 +161,58 @@ func TestResolveRepoAndToken_TaskName_PasswordKey(t *testing.T) {
 	}
 }
 
+// TestResolveRepoAndToken_TaskName_ToolContextNamespace pins the namespace
+// resolution order for the proxy use case: when the controller process runs
+// create_pull_request server-side, it has no per-request env vars, so the
+// helper must read namespace from ToolContext (set by the proxy from the
+// request context). Falling back to ORKA_TASK_NAMESPACE / "default" silently
+// resolved the wrong Task and broke the chat-to-PR demo after every retry.
+func TestResolveRepoAndToken_TaskName_ToolContextNamespace(t *testing.T) {
+	// Intentionally point env var at the wrong namespace to prove ToolContext wins.
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv("GITHUB_TOKEN", "")
+
+	const proxyNamespace = "demo-magic"
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "proxy-task", Namespace: proxyNamespace},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/proxorg/proxyrepo",
+					GitSecretRef: &corev1.LocalObjectReference{Name: "proxy-creds"},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "proxy-creds", Namespace: proxyNamespace},
+		Data:       map[string][]byte{tokenKey: []byte("proxy-token")},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+
+	ctx := WithToolContext(context.Background(), &ToolContext{Namespace: proxyNamespace})
+
+	owner, repo, token, _, err := resolveRepoAndToken(
+		ctx, k8sClient, "proxy-task", "", "",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if owner != "proxorg" || repo != "proxyrepo" {
+		t.Errorf("got owner=%q repo=%q, want proxorg/proxyrepo", owner, repo)
+	}
+	if token != "proxy-token" {
+		t.Errorf("got token=%q, want proxy-token", token)
+	}
+}
+
 func TestResolveRepoAndToken_TokenFromFile(t *testing.T) {
 	// Create a temp directory to simulate /secrets/git/token
 	tmpDir := t.TempDir()
