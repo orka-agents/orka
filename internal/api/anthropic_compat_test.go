@@ -25,6 +25,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/tools"
 
 	_ "github.com/sozercan/orka/internal/llm/anthropic"
 	_ "github.com/sozercan/orka/internal/llm/openai"
@@ -1087,6 +1088,36 @@ func TestInjectOrkaTools_WithToolCRDs(t *testing.T) {
 	for _, expected := range builtinProxyTools {
 		if !names[expected] {
 			t.Errorf("expected built-in tool %q not found", expected)
+		}
+	}
+}
+
+// TestInjectOrkaTools_CoordinatorToolsAllRegistered guards against a class of
+// outages where coordinatorProxyTools lists a tool name that is not registered
+// in DefaultRegistry. When that happens ToLLMTools silently drops the tool, the
+// model never sees it in its tool list, but the system prompt still tells the
+// model to call it. The chat-to-PR demo finished all the real work and then
+// blew up with "tool create_pull_request is not available in this request"
+// because exactly this drift had crept in.
+//
+// The test calls every registration path the controller's main.go uses so the
+// assertion is "all advertised tools are reachable in DefaultRegistry once the
+// controller is fully wired", not "this single registration path covers them".
+func TestInjectOrkaTools_CoordinatorToolsAllRegistered(t *testing.T) {
+	handler, _ := setupTestAnthropicHandler()
+	tools.RegisterProxyPRTools(handler.client)
+
+	req := &llm.CompletionRequest{}
+	injectOrkaTools(context.Background(), handler.client, req, "default")
+
+	names := map[string]bool{}
+	for _, tool := range req.Tools {
+		names[tool.Name] = true
+	}
+	for _, expected := range coordinatorProxyTools {
+		if !names[expected] {
+			t.Errorf("coordinatorProxyTools advertises %q but it is not registered in DefaultRegistry; "+
+				"add it to RegisterChatTools, RegisterProxyPRTools, or another initializer the controller calls before serving traffic", expected)
 		}
 	}
 }

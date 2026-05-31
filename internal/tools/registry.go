@@ -258,6 +258,21 @@ func RegisterChatToolsDefault() {
 	RegisterChatTools(DefaultRegistry)
 }
 
+// RegisterProxyPRTools registers the GitHub PR coordination tools that the
+// Anthropic and OpenAI proxies advertise in coordinatorProxyTools but that
+// RegisterChatTools does not provide. Without this the proxy lists the tools
+// for the model, ToLLMTools silently drops them (they are missing from the
+// registry), and the model gets back "tool not available in this request"
+// when it tries to open the PR after all the real work is done.
+//
+// Callers must invoke this once after the controller manager's client is
+// available. Tests that exercise injectOrkaTools should also call this so the
+// advertised tool set matches the runtime registration set.
+func RegisterProxyPRTools(k8sClient client.Client) {
+	DefaultRegistry.Register(NewCreatePullRequestTool(k8sClient))
+	DefaultRegistry.Register(NewCheckPullRequestCITool(k8sClient))
+}
+
 // ChatToolNames returns the names of all chat tools in registration order.
 func ChatToolNames() []string {
 	return []string{

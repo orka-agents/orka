@@ -40,6 +40,7 @@ import (
 	_ "github.com/sozercan/orka/internal/llm/openai"
 	_ "github.com/sozercan/orka/internal/metrics"
 	"github.com/sozercan/orka/internal/store/sqlite"
+	"github.com/sozercan/orka/internal/tools"
 	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
 	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
@@ -664,6 +665,13 @@ func main() {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
+
+	// Register coordination tools the Anthropic/OpenAI proxy advertises but that
+	// RegisterChatToolsDefault does not provide. Without these the proxy lists the
+	// tool in coordinatorProxyTools but ToLLMTools silently drops it, leaving the
+	// coordinator to call a tool name that comes back as "not available in this
+	// request" and aborting the chat-to-PR workflow after all the real work is done.
+	tools.RegisterProxyPRTools(mgr.GetClient())
 
 	// Start REST API server
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
