@@ -125,15 +125,38 @@ demo_show "${DEMO_WORKDIR}/chat-request.txt"
 demo_show_cmd "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL} ANTHROPIC_API_KEY=\$(get_orka_token) ${DEMO_CLAUDE_BIN} -p --model ${DEMO_CHAT_OPUS_MODEL} < ${DEMO_WORKDIR}/chat-request.txt"
 log_info "Running the actual chat turn (output captured to ${DEMO_WORKDIR}/chat-client-result.json)..."
 # Background heartbeat so viewers see something during the model's quiet
-# multi-turn tool dance. Ticks every 10s, only when stderr is a tty so
-# log scrapers stay clean. We tear it down whether the call succeeds or
-# not — `trap` covers the SIGTERM/exit path.
+# multi-turn tool dance. Ticks the elapsed spinner every 10s (only when
+# stderr is a tty so log scrapers stay clean) and, every ~60s, prints
+# a richer one-line snapshot of the child tasks the coordinator has
+# scheduled so far — visible even when stderr is redirected, so audit
+# logs preserve actual progress milestones.
 __demo_chat_heartbeat() {
   local started="${SECONDS}"
+  local last_snapshot=0
+  local tick=0
+  local elapsed
   while sleep 10; do
+    tick=$((tick + 1))
+    elapsed=$((SECONDS - started))
     if [[ -t 2 ]]; then
-      printf '\r\033[2K%b[%s] ⏳  chat turn in flight (tool round-trips)... elapsed=%ss%b' \
-        "${DIM}" "$(__demo_log_ts)" "$((SECONDS - started))" "${COLOR_RESET}" >&2
+      printf '\r\033[2K%b[%s] ⏳  chat turn in flight (tool round-trips)... elapsed=%ds%b' \
+        "${DIM}" "$(__demo_log_ts)" "${elapsed}" "${COLOR_RESET}" >&2
+    fi
+    # Every ~60s, append a milestone line showing child-task progress.
+    # Use a short kubectl timeout so a slow API server doesn't stall the
+    # heartbeat. Output via a real newline so prior milestones stay on
+    # screen, then the spinner resumes on the next line.
+    if (( elapsed - last_snapshot >= 60 )); then
+      last_snapshot=${elapsed}
+      local counts
+      counts="$(kubectl --request-timeout=3s get tasks -n "${DEMO_NAMESPACE}" \
+        -l orka.ai/source=anthropic-proxy --no-headers 2>/dev/null \
+        | awk '{phase=$3; if(phase=="")phase="Pending"; c[phase]++}
+               END { out=""; for(p in c){if(out!="")out=out" "; out=out p"="c[p]}
+                     if(out=="")out="(no child tasks yet)"; print out }' )"
+      [[ -t 2 ]] && printf '\r\033[2K' >&2
+      printf '%b[%s] 🪄  coordinator progress: %s%b\n' \
+        "${DIM}" "$(__demo_log_ts)" "${counts}" "${COLOR_RESET}" >&2
     fi
   done
 }
