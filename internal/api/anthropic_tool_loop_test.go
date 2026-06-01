@@ -197,6 +197,67 @@ func TestCoordinatorSystemPrompt_TurnEndingInvariant(t *testing.T) {
 	}
 }
 
+// Demo 10 run 2026-05-31 21:40 PT regressed in a new way: the TURN-ENDING
+// INVARIANT prompt fix worked perfectly (14 iterations, $0.063, followed
+// postcondition table), but BOTH coder Tasks (proxy-9072de74, proxy-2abe472e)
+// failed because the coordinator picked a bare pushBranch ("orka/quiet-flag")
+// that already existed on the remote from a prior demo run. The codex worker
+// built the code, ran tests successfully, then died on
+// `failed to push some refs to 'https://github.com/sozercan/vekil'
+//
+//	! [rejected]        orka/quiet-flag -> orka/quiet-flag (fetch first)`.
+//
+// Because the push happens AFTER PHASE 5 — i.e., after the result configmap
+// would have been written — fetch_task_output returned empty and the
+// coordinator misdiagnosed it as `codex runtime container is failing
+// (likely missing credentials)` and reported VALIDATION_BLOCKED.
+// Two prompt fixes:
+//
+//	(a) WORKSPACE BRANCH RULES requires a unique 8-char suffix on pushBranch.
+//	    Eliminates the collision class entirely.
+//	(b) CRITICAL RULES table interprets `container exit 1 + empty output` as a
+//	    likely workspace/git problem first (with explicit recovery action),
+//	    not a credentials problem.
+//
+// Plus a brand-new explicit "failed to push some refs" signal handler.
+func TestCoordinatorSystemPrompt_PushBranchCollisionGuardrails(t *testing.T) {
+	prompt := coordinatorSystemPrompt("default")
+
+	for _, want := range []string{
+		// (a) unique suffix requirement
+		`workspace.pushBranch = "orka/<short-task-description>-<8-char-suffix>"`,
+		"unique per session",
+		"NEVER use a bare topic name like",
+		`"orka/quiet-flag" — that branch may already exist on the remote`,
+		"cannot fast-forward over it",
+		// (b) revised "container exit 1" interpretation
+		"container exited with code",
+		"fetch_task_output returns EMPTY",
+		"the worker pod crashed BEFORE writing its result configmap",
+		"git push was rejected",
+		"Do NOT declare VALIDATION_BLOCKED on the first occurrence",
+		"empty output from a runtime container is much more often a workspace/git problem than a credentials problem",
+		// new explicit push-rejection handler
+		`"failed to push some refs"`,
+		`"non-fast-forward"`,
+		"8-char hex suffix",
+		`"orka/<topic>-a3f9c241"`,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("coordinator prompt missing push-branch-collision guardrail %q", want)
+		}
+	}
+
+	// The old bare instruction must NOT come back.
+	for _, banned := range []string{
+		`First implementation: workspace.pushBranch = "orka/<short-task-description>".`,
+	} {
+		if strings.Contains(prompt, banned) {
+			t.Fatalf("coordinator prompt still contains old bare-pushBranch wording %q", banned)
+		}
+	}
+}
+
 func TestCoordinatorProxyToolsIncludePRCIWorkflowTools(t *testing.T) {
 	for _, toolName := range []string{"create_agent", "create_pull_request", "check_pull_request_ci"} {
 		if !slices.Contains(coordinatorProxyTools, toolName) {
