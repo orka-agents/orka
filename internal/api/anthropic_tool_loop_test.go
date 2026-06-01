@@ -339,3 +339,76 @@ func TestCoordinatorSystemPrompt_Demo10CorrectionGuardrails(t *testing.T) {
 		}
 	}
 }
+
+// Demo 10 run 2026-06-01 15:30 PT (after the prompt-poisoning + check_pull_request_ci
+// fixes shipped) still produced 4 corrections on the way to a green PR. Each is
+// addressable with a small prompt clarification:
+//   - 2x container task failures (proxy-d8d62f54 / proxy-8b258dc6) with
+//     'mkdir /go/pkg: read-only file system'. The first attempt used no cache
+//     env vars; the second used `GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomodcache
+//     go test && go build` and STILL failed because inline env vars only apply
+//     to the first command — `go build` reverted to default /go/pkg.
+//   - 1x ai task failure (proxy-60556d3f) where the coordinator created a
+//     runtime-backed reviewer Agent and dispatched via create_ai_task →
+//     'agent ... has runtime configured (use type: agent instead of type: ai)'.
+//   - 1x ai task failure (proxy-a56617f4) where the coordinator recovered by
+//     creating an LLM-only reviewer Agent and dispatched via create_ai_task →
+//     ai worker died with 'error: API key for anthropic not found' (this
+//     cluster's ai workers have no upstream provider credentials in pod env).
+//
+// Two prompt clarifications fix all four:
+//
+//	(a) Expand the validation guidance to call out that inline env vars don't
+//	    propagate across `&&` chains; show the `export ... &&` wrapping pattern.
+//	    Add a new "could not create module cache" / "mkdir /go/pkg: read-only"
+//	    failure-signal handler in CRITICAL RULES.
+//	(b) Make WORKFLOW step 6 (REVIEW) explicit: reviewers MUST use
+//	    create_agent_task with a runtime-backed Agent, NEVER create_ai_task.
+//	    Add a new "API key for ... not found" failure-signal handler that
+//	    steers the coordinator to switch to create_agent_task on such errors.
+//
+// This test pins both changes so a future edit can't silently regress them.
+func TestCoordinatorSystemPrompt_Demo10ContainerCacheAndReviewerTypeGuardrails(t *testing.T) {
+	prompt := coordinatorSystemPrompt("default")
+
+	for _, want := range []string{
+		// (a) read-only /go/pkg guidance in validation step
+		"The worker filesystem is read-only outside /tmp, /home/worker, /workspace",
+		"default Go module cache (/go/pkg/mod)",
+		"every go command must use writable GOCACHE and GOMODCACHE under /tmp",
+		"export GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomodcache",
+		"inline env vars apply only to the first command",
+		"'go build' reverts to /go/pkg and crashes",
+		// (a) failure-signal handler
+		`"could not create module cache"`,
+		`"mkdir /go/pkg: read-only file system"`,
+		"Inline 'GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomodcache go test && go build' does NOT propagate the env to chained subcommands",
+		// (b) WORKFLOW step 6 — reviewers use create_agent_task not create_ai_task
+		"Create one or more SEPARATE reviewer tasks via create_agent_task (NEVER\n   create_ai_task",
+		"code review requires git access to fetch the branch",
+		"create_ai_task reviewers fail with\n   'API key for ... not found'",
+		"The\n   reviewer Agent MUST be runtime-backed",
+		// (b) failure-signal handler for ai worker missing credentials
+		`"API key for ... not found"`,
+		"switch the task from create_ai_task to create_agent_task",
+		"the runtime workspace also gives the reviewer the git access it needs",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("coordinator prompt missing demo-10 container-cache/reviewer-type guardrail %q", want)
+		}
+	}
+
+	// The old vague guidance must NOT come back — it failed to prevent both
+	// failure classes in the 2026-06-01 15:30 PT run.
+	for _, banned := range []string{
+		// Old single-sentence GOCACHE hint without the export-wrap warning or
+		// the inline-prefix-doesn't-propagate explanation.
+		"NEVER guess the Go version — picking golang:1.23 when go.mod says toolchain go1.25 wastes the entire validation iteration ('go.mod requires go >= 1.25'). Use writable GOCACHE and GOMODCACHE under /tmp. For ALL container tasks",
+		// Old REVIEW step that didn't mandate create_agent_task.
+		"6. REVIEW: Create one or more SEPARATE reviewer agent tasks using the REVIEW PROMPT template.",
+	} {
+		if strings.Contains(prompt, banned) {
+			t.Fatalf("coordinator prompt still contains old vague guidance:\n%s", banned)
+		}
+	}
+}
