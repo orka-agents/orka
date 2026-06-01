@@ -57,7 +57,7 @@ func TestCoordinatorSystemPrompt_GoalState(t *testing.T) {
 		"CI_PENDING",
 		"VALIDATION_CONFIG_BLOCKED",
 		"DO NOT stop with",
-		"your next tool call MUST be",
+		"your VERY NEXT\nresponse must be a tool_use=wait_for_task",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("coordinator prompt missing goal-state directive %q", want)
@@ -135,6 +135,64 @@ func TestCoordinatorSystemPrompt_ImplementationPromptForbidsAgentSidePush(t *tes
 	} {
 		if strings.Contains(prompt, banned) {
 			t.Fatalf("coordinator prompt still contains old commit/push instruction %q", banned)
+		}
+	}
+}
+
+// Demo 10 run 2026-05-31 21:00 PT regressed: the coordinator stopped after only
+// 4 tool iterations (38s, $0.024, 318 output tokens) by emitting a "Progress
+// summary" text response after create_agent_task. In the Anthropic streaming
+// protocol, any text response outside a tool_use ENDS the turn — the chat
+// client disconnects, the orka-api tool loop dies (the auto-poll resume can't
+// reach a dead SSE stream), and validation/review/PR are never executed even
+// though the implementation Task itself succeeded asynchronously.
+// The existing "DO NOT stop with progress summary" line at the bottom of
+// CRITICAL RULES was too easy for the model to ignore. This test pins:
+//
+//	(a) The new TURN-ENDING INVARIANT block at the top of the prompt.
+//	(b) The POSTCONDITION TABLE so the model has explicit per-tool guidance.
+//	(c) The cross-reference from the CRITICAL RULES anti-stopping line back to
+//	    the invariant (so a future edit can't silently remove the invariant
+//	    without also removing the cross-reference).
+func TestCoordinatorSystemPrompt_TurnEndingInvariant(t *testing.T) {
+	prompt := coordinatorSystemPrompt("default")
+
+	for _, want := range []string{
+		// (a) top-of-prompt invariant
+		"TURN-ENDING INVARIANT",
+		"a turn ENDS the instant you emit any text",
+		"ALL remaining work (validate, review, PR, CI) is LOST",
+		`"I'll proceed"`,
+		`"now I will"`,
+		`"here is what I've done so far"`,
+		"FAILURE MODES",
+		// (b) postcondition table — explicit per-tool next-step rules
+		"POSTCONDITION TABLE",
+		"After create_agent_task     → wait_for_task",
+		"After create_container_task → wait_for_task",
+		"After create_ai_task        → wait_for_task",
+		"After wait_for_task (Succeeded)       → fetch_task_output",
+		"After fetch_task_output (implementation succeeded)  → create_container_task (validation)",
+		"After fetch_task_output (every reviewer LGTM)       → create_pull_request",
+		"After create_pull_request                            → check_pull_request_ci",
+		"After check_pull_request_ci (success)               → FINAL TEXT REPORT (GOAL STATE A)",
+		"FINAL TEXT REPORT (GOAL STATE B)",
+		// (c) cross-reference from old CRITICAL RULES line
+		"per the TURN-ENDING INVARIANT at the top of this prompt",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("coordinator prompt missing turn-ending invariant marker %q", want)
+		}
+	}
+
+	// The bare "If you have running tasks, your next tool call MUST be wait_for_task"
+	// sentence (without the invariant cross-reference) was too easy for the model
+	// to skim past. The new wording must replace it, not duplicate it.
+	for _, banned := range []string{
+		"If you have running tasks, your next tool call MUST be\nwait_for_task (the auto-poll layer keeps polling without burning your iteration\nbudget). If wait_for_task returns \"still running\", call wait_for_task again.\nOnly emit a final text response after one of (A), (B), or (C) is satisfied.",
+	} {
+		if strings.Contains(prompt, banned) {
+			t.Fatalf("coordinator prompt still contains pre-invariant anti-stopping wording without cross-reference")
 		}
 	}
 }
