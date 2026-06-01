@@ -39,6 +39,59 @@ func truncateForLog(s string, max int) string {
 	return s[:max] + "…"
 }
 
+// isStreamingRequiredErr returns true when the upstream provider rejects a
+// non-streaming completion because the request may exceed its server-side
+// timeout (typically 10 minutes for Copilot/Anthropic). The error string is
+// the only reliable signal — upstream returns 400 without a typed error code.
+func isStreamingRequiredErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "streaming is required")
+}
+
+// completeViaStream issues the request via provider.Stream and aggregates the
+// resulting chunks into a synthesized CompletionResponse. This is the
+// fallback path when provider.Complete is refused with
+// "streaming is required for operations that may take longer than N minutes".
+// The aggregation is intentionally simple: concatenate text content, append
+// each tool call exactly once, sum token counts. Final stop_reason follows
+// the last chunk's reason or defaults to "end_turn".
+func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	streamCh, err := provider.Stream(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("stream open: %w", err)
+	}
+
+	resp := &llm.CompletionResponse{}
+	for chunk := range streamCh {
+		if chunk.Error != nil {
+			return nil, fmt.Errorf("stream chunk: %w", chunk.Error)
+		}
+		if chunk.Content != "" {
+			resp.Content += chunk.Content
+		}
+		if chunk.ToolCall != nil {
+			resp.ToolCalls = append(resp.ToolCalls, *chunk.ToolCall)
+		}
+		if chunk.Done {
+			if chunk.StopReason != "" {
+				resp.StopReason = chunk.StopReason
+			}
+			break
+		}
+	}
+	if resp.StopReason == "" {
+		if len(resp.ToolCalls) > 0 {
+			resp.StopReason = "tool_use"
+		} else {
+			resp.StopReason = "end_turn"
+		}
+	}
+	return resp, nil
+}
+
 // coordinatorSystemPrompt returns the system prompt supplement for the proxy's coordinator mode.
 func coordinatorSystemPrompt(namespace string) string {
 	return fmt.Sprintf(`<orka_coordinator>
@@ -517,6 +570,14 @@ func runNonStreamingToolLoop(
 		}
 
 		resp, err := provider.Complete(ctx, compReq)
+		if err != nil && isStreamingRequiredErr(err) {
+			// Upstream (Copilot/Anthropic) refuses non-streaming for requests
+			// that may exceed its 10-minute timeout. Re-issue via Stream and
+			// aggregate the chunks into a synthesized CompletionResponse so
+			// our tool loop can continue as if Complete had worked.
+			anthropicLog.Info("upstream refused non-streaming, retrying via Stream and aggregating")
+			resp, err = completeViaStream(ctx, provider, compReq)
+		}
 		if err != nil && llm.IsContextTooLongErr(err) {
 			tokenEstimate := 0
 			for _, m := range messages {
@@ -525,6 +586,9 @@ func runNonStreamingToolLoop(
 			messages = llm.TruncateMessages(messages, tokenEstimate/2)
 			compReq.Messages = messages
 			resp, err = provider.Complete(ctx, compReq)
+			if err != nil && isStreamingRequiredErr(err) {
+				resp, err = completeViaStream(ctx, provider, compReq)
+			}
 		}
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion failed: %w", err)
