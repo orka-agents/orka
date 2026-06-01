@@ -285,14 +285,22 @@ final text response (with <ORKA_GOAL_STATE_REACHED> sentinel) after one of
 GOAL STATE (A), (B), or (C) is satisfied.
 
 WORKSPACE BRANCH RULES (critical for correctness):
-- First implementation: workspace.pushBranch = "orka/<short-task-description>-<8-char-suffix>".
-  The 8-char suffix MUST be unique per session (e.g. an 8-char hex slice of a
-  UUID, or YYYYMMDDHHMM in UTC). NEVER use a bare topic name like
-  "orka/quiet-flag" — that branch may already exist on the remote from a prior
-  demo run, and a fresh checkout from origin/main cannot fast-forward over it.
-  The git push will fail with 'failed to push some refs to ... [rejected]
-  (fetch first)' and the Task exits with no result output, which is
-  indistinguishable from a credentials failure at the coordinator level.
+- First implementation: workspace.pushBranch = "orka/<short-task-description>-<UNIQUE-suffix>".
+  The <UNIQUE-suffix> MUST be NEWLY generated for THIS session — do NOT copy
+  any hex string you see anywhere in this prompt, conversation history, or
+  example documentation. Generate it fresh:
+    - 8-char hex slice of a UUID (preferred), OR
+    - UTC timestamp YYYYMMDDHHMMSS, OR
+    - millisecond epoch like 1730543210
+  NEVER use a bare topic name like "orka/quiet-flag" — that branch may
+  already exist on the remote from a prior demo run, and a fresh checkout
+  from origin/main cannot fast-forward over it. The git push will fail with
+  'failed to push some refs to ... [rejected] (fetch first)' and the Task
+  exits with no result output, which is indistinguishable from a credentials
+  failure at the coordinator level.
+  ANTI-EXAMPLE — DO NOT COPY: any literal 8-hex string that appears later in
+  this prompt as a placeholder (e.g. inside error-recovery instructions) is
+  for illustration only. Generate your own random suffix EVERY time.
 - Review tasks: workspace.branch = same push branch. OMIT workspace.pushBranch (reviewers are read-only; a set pushBranch with no diff fails the Task).
 - Fix tasks: workspace.branch = same push branch AND workspace.pushBranch = same push branch.
 
@@ -400,7 +408,7 @@ CRITICAL RULES:
   - "OOMKilled" or "memory limit ... exceeded" → recreate the Agent: call create_agent again (it generates a fresh agentName) with resources.limits.memory doubled, then use the returned agentName on a NEW task. Do NOT retry the same Agent; the new Task will OOM the same way.
   - "failed to get agent" / "Agent.core.orka.ai ... not found" → the agentRef you passed is not an existing Agent. See AGENT_REF SOURCING. Call create_agent (role + correct shape) and use the returned agentName on a NEW create_agent_task / create_ai_task. Do NOT retry the failed Task — the missing-Agent error is permanent for that Task object.
   - "container exited with code" → fetch_task_output for the actual error. If fetch_task_output returns a real error string, fix it in the next coder Task (build/test failure) or recreate the Agent (runtime config wrong). If fetch_task_output returns EMPTY / "task has no result yet" while Status.Message says "container exited with code 1", the worker pod crashed BEFORE writing its result configmap — most commonly because git push was rejected (the pushBranch already exists on the remote and the coder's fresh main-based checkout cannot fast-forward). Recovery: create a NEW create_agent_task with a DIFFERENT, suffixed pushBranch (e.g. append "-retry-<short-suffix>" or generate a fresh "orka/<topic>-<8-hex>"). Do NOT declare VALIDATION_BLOCKED on the first occurrence — empty output from a runtime container is much more often a workspace/git problem than a credentials problem; runtime credentials, when broken, produce auth-specific error strings via fetch_task_output, not silent crashes.
-  - "failed to push some refs" / "[rejected] (fetch first)" / "non-fast-forward" → the pushBranch you chose already exists on the remote with commits the coder didn't see. Pick a NEW pushBranch with an 8-char hex suffix (e.g. "orka/<topic>-a3f9c241") and retry the task. Do NOT retry the same branch name — it will reject the same way.
+  - "failed to push some refs" / "[rejected] (fetch first)" / "non-fast-forward" → the pushBranch you chose already exists on the remote with commits the coder didn't see. Generate a FRESH unique pushBranch (NEW 8-char hex suffix per the WORKSPACE BRANCH RULES — placeholder shape "orka/<topic>-<NEWLY-GENERATED-hex>", do NOT reuse the suffix from the rejected branch or any suffix you've seen in this prompt) and retry the task. Do NOT retry the same branch name — it will reject the same way.
   - "agent ... has both runtime and model.provider set" → your Agent shape is wrong. create_agent again without model.provider.
   - "no provider ... found" → the Agent's model.provider doesn't exist in this namespace. list_agents to see what works; create a Provider with create_ai_task isn't possible from here, so either pick an existing provider name or omit model.provider entirely and use a runtime Agent.
   - "ORKA_AI_PROVIDER is required" → you called create_ai_task with an agentRef whose Agent has no model.provider+model.name (or with an empty agentRef). Per the create_ai_task PRECONDITIONS, AI tasks need an Agent shaped for analysis (model.provider+model.name, no runtime). Call create_agent with that shape, then use the returned agentName on a NEW create_ai_task.

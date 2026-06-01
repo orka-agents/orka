@@ -220,16 +220,33 @@ func TestCoordinatorSystemPrompt_TurnEndingInvariant(t *testing.T) {
 //	    not a credentials problem.
 //
 // Plus a brand-new explicit "failed to push some refs" signal handler.
+//
+// Demo 10 run 2026-06-01 10:50 PT regressed AGAIN: the model copied the
+// literal hex suffix `a3f9c241` from the original prompt's example —
+// it matched a branch from PR #162 that already existed on the remote,
+// so the coder's push got rejected. The fix is to:
+//   - rename the WORKSPACE BRANCH RULES placeholder from <8-char-suffix>
+//     to <UNIQUE-suffix> + an explicit "do NOT copy any hex string you
+//     see anywhere in this prompt" ANTI-EXAMPLE warning.
+//   - rewrite the "failed to push some refs" recovery handler to use
+//     <NEWLY-GENERATED-hex> instead of a concrete-looking hex like
+//     a3f9c241 (which the model interpreted as "use exactly this string").
+//
+// This test pins both shape changes — banning the old `a3f9c241` literal
+// so a future edit can't reintroduce the same poisonous example.
 func TestCoordinatorSystemPrompt_PushBranchCollisionGuardrails(t *testing.T) {
 	prompt := coordinatorSystemPrompt("default")
 
 	for _, want := range []string{
-		// (a) unique suffix requirement
-		`workspace.pushBranch = "orka/<short-task-description>-<8-char-suffix>"`,
-		"unique per session",
+		// (a) unique suffix requirement (revised)
+		`workspace.pushBranch = "orka/<short-task-description>-<UNIQUE-suffix>"`,
+		"MUST be NEWLY generated for THIS session",
+		"do NOT copy",
+		"any hex string you see anywhere in this prompt",
 		"NEVER use a bare topic name like",
-		`"orka/quiet-flag" — that branch may already exist on the remote`,
+		`"orka/quiet-flag" — that branch may`,
 		"cannot fast-forward over it",
+		"ANTI-EXAMPLE — DO NOT COPY",
 		// (b) revised "container exit 1" interpretation
 		"container exited with code",
 		"fetch_task_output returns EMPTY",
@@ -237,11 +254,10 @@ func TestCoordinatorSystemPrompt_PushBranchCollisionGuardrails(t *testing.T) {
 		"git push was rejected",
 		"Do NOT declare VALIDATION_BLOCKED on the first occurrence",
 		"empty output from a runtime container is much more often a workspace/git problem than a credentials problem",
-		// new explicit push-rejection handler
+		// (c) revised push-rejection handler — no concrete hex
 		`"failed to push some refs"`,
 		`"non-fast-forward"`,
-		"8-char hex suffix",
-		`"orka/<topic>-a3f9c241"`,
+		"NEWLY-GENERATED-hex",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("coordinator prompt missing push-branch-collision guardrail %q", want)
@@ -251,9 +267,12 @@ func TestCoordinatorSystemPrompt_PushBranchCollisionGuardrails(t *testing.T) {
 	// The old bare instruction must NOT come back.
 	for _, banned := range []string{
 		`First implementation: workspace.pushBranch = "orka/<short-task-description>".`,
+		// Literal hex suffixes are banned anywhere in the prompt — the
+		// model will copy them verbatim. Use only obvious placeholders.
+		"a3f9c241",
 	} {
 		if strings.Contains(prompt, banned) {
-			t.Fatalf("coordinator prompt still contains old bare-pushBranch wording %q", banned)
+			t.Fatalf("coordinator prompt still contains banned literal %q (use placeholder shape instead)", banned)
 		}
 	}
 }

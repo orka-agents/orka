@@ -185,6 +185,14 @@ func waitForPullRequestCI(
 	if lastPending != nil {
 		lastPending.Attempts = attempts
 		lastPending.WaitTimedOut = true
+		// Preserve no_checks as terminal-after-timeout: if the PR genuinely
+		// has no GitHub Actions workflows registered after the full
+		// waitTimeout window, surface that distinctly so the coordinator
+		// can report status=no_checks rather than mis-claiming CI_PENDING.
+		if lastPending.Status == "no_checks" {
+			lastPending.Message = fmt.Sprintf("no CI checks have been registered for this pull request after %s; treating as terminal no_checks (the repository likely has no GitHub Actions workflows configured for this PR)", waitTimeout)
+			return lastPending, nil
+		}
 		lastPending.Status = "pending"
 		lastPending.ChecksPending = true
 		lastPending.Message = fmt.Sprintf("CI_PENDING: timed out after %s waiting for CI checks to finish", waitTimeout)
@@ -231,9 +239,19 @@ func checkPullRequestCIOnce(ctx context.Context, token, owner, repo string, prNu
 	ciResult, err := checkCIStatusDetailed(ctx, token, owner, repo, headSHA, baseURL)
 	if err != nil {
 		if errors.Is(err, errNoCIChecksConfigured) {
+			// On a freshly opened PR, GitHub Actions workflows take 10-60
+			// seconds to register check_run objects. Returning a terminal
+			// "no_checks" before that grace period makes the coordinator
+			// declare the PR "shipped with no CI configured" when in
+			// reality CI hasn't even started yet. Mark this as
+			// non-terminal so waitForPullRequestCI keeps polling until
+			// checks register OR the caller's wait_timeout elapses. If
+			// the wait_timeout elapses with no_checks still true, the
+			// final result will correctly say no_checks — but only after
+			// we've given GitHub a real chance to schedule the workflow.
 			result.Status = "no_checks"
-			result.Message = "no CI checks are configured for this pull request"
-			return result, true, nil
+			result.Message = "no CI checks have been registered yet for this pull request (may still be queueing)"
+			return result, false, nil
 		}
 		return nil, false, fmt.Errorf("failed to check CI status: %w", err)
 	}
