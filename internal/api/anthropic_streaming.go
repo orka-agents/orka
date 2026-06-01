@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
@@ -56,6 +57,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 		totalOutputTokens := 0
 		repetitionTracker := make(map[string]int)
 		exposedToolNames := completionToolNameSet(capturedReq.Tools)
+		prematureEndRetries := 0
 
 		for iteration := 0; iteration < h.config.MaxIterations; iteration++ {
 			// Check context cancellation
@@ -70,14 +72,6 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 				_ = writeMessageStop(w)
 				return
 			default:
-			}
-
-			// Progress check every 5 iterations
-			if iteration > 0 && iteration%5 == 0 {
-				messages = append(messages, llm.Message{
-					Role:    "user",
-					Content: "[System: Progress check — summarize what you've done so far and what remains.]",
-				})
 			}
 
 			// Truncate conversation if needed
@@ -210,12 +204,53 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 				}
 			}
 
-			// No tool calls → final response, close the stream
+			// No tool calls — potentially final response. Guard against premature
+			// end-of-turn: if the streamed text lacks the GOAL_STATE sentinel and
+			// we haven't yet exhausted the retry budget, inject a "continue with
+			// next tool_use" reminder and re-loop. The client will see the
+			// premature text already streamed plus the recovery, but the
+			// workflow continues instead of validation/review/PR being skipped.
 			if len(toolCalls) == 0 {
-				stopReason := oaiStopReasonEndTurn
-				_ = writeMessageDelta(w, stopReason, totalOutputTokens)
-				_ = writeMessageStop(w)
-				return
+				if strings.Contains(textContent, goalStateSentinel) {
+					stopReason := oaiStopReasonEndTurn
+					_ = writeMessageDelta(w, stopReason, totalOutputTokens)
+					_ = writeMessageStop(w)
+					return
+				}
+				if prematureEndRetries >= h.config.MaxPrematureEndRetries {
+					anthropicLog.Info("streaming: premature end of turn — retry budget exhausted, closing stream anyway",
+						"iteration", iteration,
+						"retries", prematureEndRetries,
+					)
+					stopReason := oaiStopReasonEndTurn
+					_ = writeMessageDelta(w, stopReason, totalOutputTokens)
+					_ = writeMessageStop(w)
+					return
+				}
+				prematureEndRetries++
+				anthropicLog.Info("streaming: premature end of turn — injecting continue message and re-looping",
+					"iteration", iteration,
+					"retries", prematureEndRetries,
+					"content_prefix", truncateForLog(textContent, 120),
+				)
+				continueMsg := fmt.Sprintf(
+					"[System: You emitted text but did not include the literal %q sentinel that marks GOAL STATE A or GOAL STATE B. The workflow is not done. Per the TURN-ENDING INVARIANT, your next response MUST contain a tool_use (not text). Look at the POSTCONDITION TABLE and call the correct next tool. Do NOT emit any text until you are ready to write your final report that begins with %q on its own line.]",
+					goalStateSentinel, goalStateSentinel,
+				)
+				if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{Type: "text", Text: ""}); err == nil {
+					_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{Type: "text_delta", Text: "[⚠️  premature end — re-prompting coordinator]"})
+					_ = writeContentBlockStop(w, blockIndex)
+					blockIndex++
+				}
+				messages = append(messages, llm.Message{
+					Role:    "assistant",
+					Content: textContent,
+				})
+				messages = append(messages, llm.Message{
+					Role:    "user",
+					Content: continueMsg,
+				})
+				continue
 			}
 
 			toolNames := make([]string, len(toolCalls))

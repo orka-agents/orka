@@ -92,6 +92,7 @@ func main() {
 	var chatMaxConcurrent int
 	var chatMaxTasksPerTurn int
 	var chatMaxSessionSize int
+	var chatMaxPrematureEndRetries int
 	var aiWorkerImage string
 	var storeBackend string
 	var storePath string
@@ -206,6 +207,8 @@ func main() {
 	flag.IntVar(&chatMaxTasksPerTurn, "chat-max-tasks-per-turn", 5, "Max tasks created per chat turn.")
 	flag.IntVar(&chatMaxSessionSize, "chat-max-session-size", 500*1024,
 		"Soft limit for session ConfigMap size before truncation (bytes).")
+	flag.IntVar(&chatMaxPrematureEndRetries, "chat-max-premature-end-retries", 3,
+		"How many times to re-prompt the coordinator with 'continue with tool_use' before accepting a no-tool-use response as the final turn. The model must emit the GOAL_STATE sentinel on its true final turn — see coordinatorSystemPrompt.")
 	flag.StringVar(&storeBackend, "store-backend", "sqlite", "Storage backend (sqlite)")
 	flag.StringVar(&storePath, "store-path", "/data/orka.db", "Path to SQLite database file")
 	flag.StringVar(&controllerURL, "controller-url", "",
@@ -696,15 +699,16 @@ func main() {
 		HealthChecker:             sqliteStore,
 		Clientset:                 kubeClient,
 		Chat: api.ChatConfig{
-			Enabled:         chatEnabled,
-			Provider:        chatProvider,
-			Model:           chatModel,
-			MaxIterations:   chatMaxIterations,
-			MaxDuration:     chatMaxDuration,
-			ToolTimeout:     chatToolTimeout,
-			MaxConcurrent:   chatMaxConcurrent,
-			MaxTasksPerTurn: chatMaxTasksPerTurn,
-			MaxSessionSize:  chatMaxSessionSize,
+			Enabled:                chatEnabled,
+			Provider:               chatProvider,
+			Model:                  chatModel,
+			MaxIterations:          chatMaxIterations,
+			MaxDuration:            chatMaxDuration,
+			ToolTimeout:            chatToolTimeout,
+			MaxConcurrent:          chatMaxConcurrent,
+			MaxTasksPerTurn:        chatMaxTasksPerTurn,
+			MaxSessionSize:         chatMaxSessionSize,
+			MaxPrematureEndRetries: chatMaxPrematureEndRetries,
 		},
 	})
 

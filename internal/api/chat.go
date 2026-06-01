@@ -44,15 +44,16 @@ const defaultNamespace = "default"
 
 // ChatConfig holds configuration for the chat handler.
 type ChatConfig struct {
-	Enabled         bool
-	Provider        string
-	Model           string
-	MaxIterations   int
-	MaxDuration     time.Duration
-	ToolTimeout     time.Duration
-	MaxConcurrent   int
-	MaxTasksPerTurn int
-	MaxSessionSize  int // bytes
+	Enabled                bool
+	Provider               string
+	Model                  string
+	MaxIterations          int
+	MaxDuration            time.Duration
+	ToolTimeout            time.Duration
+	MaxConcurrent          int
+	MaxTasksPerTurn        int
+	MaxSessionSize         int // bytes
+	MaxPrematureEndRetries int // re-prompts when the model emits text without the GOAL_STATE sentinel
 }
 
 // ChatRequest is the request body for POST /api/v1/chat.

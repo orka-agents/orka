@@ -1124,6 +1124,95 @@ func TestInjectOrkaTools_CoordinatorToolsAllRegistered(t *testing.T) {
 
 // --- Tests: runNonStreamingToolLoop ---
 
+// Demo 10 run 2026-06-01 07:40 PT regressed: coordinator stopped at iter 9
+// emitting "## Progress Summary" + "Hard-limit budget remaining" markdown
+// (instead of a tool_use) right after wait_for_task on the discovery
+// container task. This terminated the SSE stream — validation, review, PR
+// never ran.
+//
+// Two structural fixes in this commit:
+//
+//  1. anthropic_tool_loop.go (and anthropic_streaming.go) used to inject
+//     "[System: Progress check — summarize what you've done so far and what
+//     remains.]" every 5 iterations. That message literally instructed the
+//     model to emit the progress-summary pattern we'd then blame it for.
+//     REMOVED in both files.
+//
+//  2. The "no tool calls → return" branch in both paths now requires the
+//     response to contain the literal goalStateSentinel
+//     ("<ORKA_GOAL_STATE_REACHED>"). Without it, the server treats the text
+//     as a premature progress summary, injects a "continue with tool_use"
+//     reminder, and re-loops up to ChatConfig.MaxPrematureEndRetries times
+//     before giving up and returning the response anyway.
+//
+// This test pins behavior (1)+(2) for the non-streaming path. Streaming
+// equivalent: TestStreamingToolLoop_PrematureEndIsRetried below.
+func TestRunNonStreamingToolLoop_PrematureEndIsRetried(t *testing.T) {
+	_, _ = setupTestAnthropicHandler()
+	mock := &mockAnthropicProvider{
+		responses: []*llm.CompletionResponse{
+			// Iteration 0: model emits markdown progress summary, no tool_use.
+			// Without the safety net, this would be returned to the client.
+			{Content: "## Progress Summary\n\nI've done X.\n\n### Remaining\n1. Y", StopReason: "end_turn"},
+			// Iteration 1 (re-prompt): model still hasn't included sentinel.
+			// Still no tool_use; still must retry.
+			{Content: "Continuing... I'll do Y next.", StopReason: "end_turn"},
+			// Iteration 2 (re-prompt): model finally emits the sentinel + body.
+			// This response must be returned to the client without further re-prompting.
+			{Content: "<ORKA_GOAL_STATE_REACHED>\nPR ready: https://example.test/pr/1", StopReason: "end_turn"},
+		},
+	}
+	req := &llm.CompletionRequest{
+		Model:    "test-model",
+		Messages: []llm.Message{{Role: "user", Content: "ship a PR"}},
+	}
+
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model",
+		ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second, MaxPrematureEndRetries: 3}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(resp.Content, "ORKA_GOAL_STATE_REACHED") {
+		t.Errorf("final content should contain the sentinel, got %q", resp.Content)
+	}
+	if mock.callIdx != 3 {
+		t.Errorf("expected 3 LLM calls (one initial + 2 retries until sentinel), got %d", mock.callIdx)
+	}
+}
+
+// If the model never emits the sentinel, the loop must still terminate after
+// MaxPrematureEndRetries+1 attempts. Otherwise a stubborn model could pin a
+// chat session forever.
+func TestRunNonStreamingToolLoop_PrematureEndExhaustsBudget(t *testing.T) {
+	_, _ = setupTestAnthropicHandler()
+	mock := &mockAnthropicProvider{
+		responses: []*llm.CompletionResponse{
+			{Content: "summary 1", StopReason: "end_turn"},
+			{Content: "summary 2", StopReason: "end_turn"},
+			{Content: "summary 3 (final, but still no sentinel)", StopReason: "end_turn"},
+			// If a 4th call happens, the test fails.
+			{Content: "should not happen", StopReason: "end_turn"},
+		},
+	}
+	req := &llm.CompletionRequest{
+		Model:    "test-model",
+		Messages: []llm.Message{{Role: "user", Content: "ship a PR"}},
+	}
+
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model",
+		ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second, MaxPrematureEndRetries: 2}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Initial call + 2 retries = 3 calls. The 3rd response is returned as-is.
+	if mock.callIdx != 3 {
+		t.Errorf("expected 3 LLM calls, got %d", mock.callIdx)
+	}
+	if !strings.Contains(resp.Content, "summary 3") {
+		t.Errorf("expected final summary content, got %q", resp.Content)
+	}
+}
+
 func TestRunNonStreamingToolLoop_NoToolCalls(t *testing.T) {
 	_, _ = setupTestAnthropicHandler()
 	mock := &mockAnthropicProvider{

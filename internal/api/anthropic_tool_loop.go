@@ -19,6 +19,26 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// goalStateSentinel is the literal tag the coordinator MUST include in its
+// final text response (GOAL STATE A or B). The streaming tool loop uses it as
+// a structural end-of-turn signal — any text response without this sentinel
+// triggers a "continue with the next tool_use" re-prompt instead of being
+// forwarded to the chat client. Without this mechanism, Opus 4.7 reliably
+// emits "## Progress Summary" mid-workflow, which terminates the SSE stream
+// and skips validation/review/PR.
+const goalStateSentinel = "<ORKA_GOAL_STATE_REACHED>"
+
+// truncateForLog returns s clipped to max runes, appending "…" if clipped.
+// Used so log lines stay scannable when the model dumps a long progress
+// summary as the body of a premature-end response.
+func truncateForLog(s string, max int) string {
+	s = strings.ReplaceAll(strings.TrimSpace(s), "\n", "⏎ ")
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
+}
+
 // coordinatorSystemPrompt returns the system prompt supplement for the proxy's coordinator mode.
 func coordinatorSystemPrompt(namespace string) string {
 	return fmt.Sprintf(`<orka_coordinator>
@@ -184,13 +204,32 @@ GOAL STATE — your turn is NOT done until ONE of these is true:
   (C) The harness has appended "[System: You have reached the maximum number
       of iterations...]" — provide the requested final summary.
 
+FINAL REPORT SENTINEL (structurally enforced — server rejects responses without it):
+- Your FINAL text response — and ONLY your final text response — MUST begin
+  with the literal tag <ORKA_GOAL_STATE_REACHED> on its own line, followed
+  by the goal state body (A or B above).
+- The orka chat server inspects every text response. If a response lacks the
+  <ORKA_GOAL_STATE_REACHED> tag AND lacks tool_use blocks, the server
+  injects '[System: You emitted text without the sentinel — continue with the
+  next tool_use per the POSTCONDITION TABLE]' and re-prompts you up to
+  chat-max-premature-end-retries times. This means premature progress summaries
+  do not actually end your turn — they just waste iterations and tokens.
+- Example shape of a valid final response:
+    <ORKA_GOAL_STATE_REACHED>
+    PR ready: https://github.com/owner/repo/pull/123
+    - Implementation: <files>
+    - Validation: green (image=golang:1.25, headSHA=abc123)
+    - Reviewers: 2 LGTM
+    - CI: success (6 checks)
+
 DO NOT stop with "I've dispatched a task, here's a progress summary" — that is
 failure, not completion (per the TURN-ENDING INVARIANT at the top of this prompt).
 After create_agent_task / create_ai_task / create_container_task, your VERY NEXT
 response must be a tool_use=wait_for_task, with no surrounding prose. The
 auto-poll layer keeps polling without burning your iteration budget; if
 wait_for_task returns "still running", call wait_for_task again. Only emit a
-final text response after one of GOAL STATE (A), (B), or (C) is satisfied.
+final text response (with <ORKA_GOAL_STATE_REACHED> sentinel) after one of
+GOAL STATE (A), (B), or (C) is satisfied.
 
 WORKSPACE BRANCH RULES (critical for correctness):
 - First implementation: workspace.pushBranch = "orka/<short-task-description>-<8-char-suffix>".
@@ -426,6 +465,7 @@ func runNonStreamingToolLoop(
 	exposedToolNames := completionToolNameSet(req.Tools)
 	messages := make([]llm.Message, len(req.Messages))
 	copy(messages, req.Messages)
+	prematureEndRetries := 0
 
 	for iteration := 0; ; iteration++ {
 		// Check context cancellation
@@ -460,14 +500,6 @@ func runNonStreamingToolLoop(
 			return resp, nil
 		}
 
-		// Progress check every 5 iterations
-		if iteration > 0 && iteration%5 == 0 {
-			messages = append(messages, llm.Message{
-				Role:    "user",
-				Content: "[System: Progress check — summarize what you've done so far and what remains.]",
-			})
-		}
-
 		// Truncate conversation if it exceeds the session size budget
 		if config.MaxSessionSize > 0 {
 			tokenBudget := config.MaxSessionSize / 4
@@ -498,9 +530,44 @@ func runNonStreamingToolLoop(
 			return nil, fmt.Errorf("LLM completion failed: %w", err)
 		}
 
-		// No tool calls → final response
+		// No tool calls → potentially final response. Guard against premature
+		// end-of-turn: if the response lacks the GOAL_STATE sentinel and we
+		// haven't yet exhausted the premature-end budget, inject a "continue"
+		// message and re-loop. Models (Opus 4.7 in particular) like to emit
+		// "## Progress Summary" markdown after a few successful tool rounds
+		// even though the TURN-ENDING INVARIANT in the system prompt forbids
+		// it — that summary terminates the SSE stream and validation/review/PR
+		// never run. The sentinel + safety net make the end-of-turn explicit
+		// and structurally enforced rather than purely norm-based.
 		if len(resp.ToolCalls) == 0 {
-			return resp, nil
+			if strings.Contains(resp.Content, goalStateSentinel) {
+				return resp, nil
+			}
+			if prematureEndRetries >= config.MaxPrematureEndRetries {
+				anthropicLog.Info("premature end of turn (no tool_use, no goal-state sentinel) — retry budget exhausted, returning response anyway",
+					"iteration", iteration,
+					"retries", prematureEndRetries,
+				)
+				return resp, nil
+			}
+			prematureEndRetries++
+			anthropicLog.Info("premature end of turn — injecting continue message and re-looping",
+				"iteration", iteration,
+				"retries", prematureEndRetries,
+				"content_prefix", truncateForLog(resp.Content, 120),
+			)
+			messages = append(messages, llm.Message{
+				Role:    "assistant",
+				Content: resp.Content,
+			})
+			messages = append(messages, llm.Message{
+				Role: "user",
+				Content: fmt.Sprintf(
+					"[System: You emitted text but did not include the literal %q sentinel that marks GOAL STATE A or GOAL STATE B. The workflow is not done — child Tasks you created are still in flight or pending follow-up. Per the TURN-ENDING INVARIANT, your next response MUST contain a tool_use (not text). Look at the POSTCONDITION TABLE and call the correct next tool. Do NOT emit any text until you are ready to write your final report that begins with %q on its own line.]",
+					goalStateSentinel, goalStateSentinel,
+				),
+			})
+			continue
 		}
 
 		anthropicLog.Info("tool loop iteration",
