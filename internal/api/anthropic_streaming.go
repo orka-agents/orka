@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
@@ -572,67 +571,6 @@ func writeAnthropicSSE(w *bufio.Writer, eventType string, data any) error {
 	}
 	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, jsonData)
 	return w.Flush()
-}
-
-// handleStreamingCoordinatorAsSingleResponse runs the non-streaming coordinator
-// tool loop synchronously, then emits the final assistant text as a single
-// SSE message. This is the streaming-friendly alternative to the old
-// handleStreamingMessages, which races with Claude Code 2.x's dual-streaming
-// session pattern. The client sees a normal SSE stream from the outside;
-// internally the server fully owns the multi-iteration tool loop and emits
-// exactly one message lifecycle per chat turn.
-func (h *AnthropicCompatHandler) handleStreamingCoordinatorAsSingleResponse(
-	c fiber.Ctx,
-	ctx context.Context,
-	provider llm.Provider,
-	req *llm.CompletionRequest,
-	model string,
-	toolCtx *tools.ToolContext,
-	start time.Time,
-) error {
-	loopCtx, cancel := context.WithTimeout(ctx, h.config.MaxDuration)
-	defer cancel()
-	resp, err := runNonStreamingToolLoop(loopCtx, provider, req, model, h.config, toolCtx)
-	if err != nil {
-		anthropicLog.Error(err, "streaming-coordinator tool loop failed")
-		return anthropicError(c, 500, "api_error", "completion failed: "+err.Error())
-	}
-
-	user := ""
-	if ui := GetUserInfo(c); ui != nil {
-		user = ui.Username
-	}
-	anthropicLog.Info("messages completed",
-		"user", user,
-		"model", model,
-		"input_tokens", resp.InputTokens,
-		"output_tokens", resp.OutputTokens,
-		"stop_reason", resp.StopReason,
-		"duration", time.Since(start).String(),
-		"transport", "streaming-coordinator",
-	)
-
-	c.Set("Content-Type", "text/event-stream")
-	c.Set("Cache-Control", "no-cache")
-	c.Set("Connection", "keep-alive")
-	c.Set("X-Accel-Buffering", "no")
-
-	return c.SendStreamWriter(func(w *bufio.Writer) {
-		msgID := "msg_" + uuid.New().String()
-		if err := writeMessageStart(w, msgID, model, resp.InputTokens); err != nil {
-			return
-		}
-		if err := writeContentBlockStart(w, 0, AnthropicContentBlock{Type: "text", Text: ""}); err == nil {
-			_ = writeContentBlockDelta(w, 0, AnthropicDelta{Type: "text_delta", Text: resp.Content})
-			_ = writeContentBlockStop(w, 0)
-		}
-		stopReason := mapAnthropicStopReason(resp.StopReason)
-		if stopReason == "" {
-			stopReason = oaiStopReasonEndTurn
-		}
-		_ = writeMessageDelta(w, stopReason, resp.OutputTokens)
-		_ = writeMessageStop(w)
-	})
 }
 
 // writeMessageStart emits the message_start event.

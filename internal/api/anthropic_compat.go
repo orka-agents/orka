@@ -362,20 +362,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 
 	if req.Stream {
 		if !orkaToolsDisabled {
-			// Run the tool loop synchronously (so we own the full request
-			// lifecycle) and then emit the final response as a single SSE
-			// stream. This avoids the dual-streaming-session race triggered
-			// by Claude Code 2.x clients, which send a SECOND streaming
-			// POST to /anthropic/v1/messages as a context probe alongside
-			// the main session — with our coordinator system prompt
-			// injected into both streams, the short probe stream often
-			// closes first with just a tool result preview, the demo
-			// wrapper captures that partial output, and the real
-			// coordinator session orphans server-side. By emitting the
-			// stream only AFTER the tool loop completes, the client sees
-			// exactly one terminal SSE event per chat turn and captures the
-			// full final response.
-			return h.handleStreamingCoordinatorAsSingleResponse(c, ctx, provider, compReq, model, proxyToolCtx, start)
+			return h.handleStreamingMessages(c, provider, compReq, model, 0, proxyToolCtx)
 		}
 		return h.handleStreamingProxy(c, provider, compReq, model)
 	}
