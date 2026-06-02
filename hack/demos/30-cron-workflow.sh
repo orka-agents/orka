@@ -55,30 +55,30 @@ clear
 banner "Scheduled Workflow"
 
 # Chapter 1 ------------------------------------------------------------------
-narrate "Cron-style schedules become recurring Task runs."
+narrate "Same Task primitive as demos 10 and 20 — plus a schedule. The agent runs autonomously every tick."
 chapter "Apply a scheduled parent Task" "📅"
-log_info "Schedule: ${DEMO_CRON_SCHEDULE}"
+log_info "Schedule: ${DEMO_CRON_SCHEDULE}  (production: use ${DEMO_CRON_PRODUCTION_HINT:-*/30 * * * * or 0 */4 * * *})"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/cron-agent.yaml"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/cron-task.yaml"
 
 # Chapter 2 ------------------------------------------------------------------
-narrate "Each tick spawns a child Task — pre-warmed so we skip the wait."
+narrate "Each tick spawns a child Task — pre-warmed off-camera so we can show the result now."
 chapter "Watch the schedule tick" "👶"
 log_success "first child task already completed off-camera: ${DEMO_CRON_CHILD_TASK}"
 demo_pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/parent-task=${DEMO_CRON_TASK_NAME},orka.ai/scheduled-run=true"
 
 # Chapter 3 ------------------------------------------------------------------
-narrate "The child's result is the repository heartbeat report."
-chapter "Fetch the heartbeat result" "💓"
+narrate "The child's result is a stale-PR triage report — paste-ready for Slack, standup, or your maintainer dashboard."
+chapter "Fetch the triage report" "📋"
 log_info "First 600 chars of ${DEMO_CRON_CHILD_TASK} result:"
 demo_pe "orka_api GET \"/api/v1/tasks/${DEMO_CRON_CHILD_TASK}/result?namespace=${DEMO_NAMESPACE}\" | jq -r '.result[0:600]'"
 
 # Chapter 4 ------------------------------------------------------------------
-narrate "Same Task status, history, and result API as interactive runs."
+narrate "Same Task / result API as your interactive demos. Now a self-updating AI triage queue."
 chapter "Schedule overview" "🚦"
 DEMO_CRON_CHILD_TASK="${DEMO_CRON_CHILD_TASK}" payoff_card_cron "${DEMO_CRON_CHILD_TASK}"
 
 if demo_profile_is presenter; then
   printf '\n%bAudit JSON%b\n' "${DIM}" "${COLOR_RESET}"
-  summarize_task_run "${DEMO_CRON_CHILD_TASK}" scheduled-heartbeat
+  summarize_task_run "${DEMO_CRON_CHILD_TASK}" scheduled-pr-triage
 fi

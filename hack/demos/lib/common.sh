@@ -116,7 +116,39 @@ esac
 
 : "${DEMO_CHAT_REQUEST:=${__DEMO_PRESET_REQUEST}}"
 : "${DEMO_MANUAL_REQUEST:=${__DEMO_PRESET_REQUEST}}"
-: "${DEMO_CRON_REQUEST:=Produce a short repository heartbeat report with the current HEAD commit, a count of Markdown files, and a brief summary of the repo purpose. Do not modify files, commit, or push.}"
+: "${DEMO_CRON_REQUEST:=Triage stale pull requests on github.com/sozercan/vekil.
+
+Use curl against api.github.com (no gh CLI is installed). The GitHub token is
+available in the GH_TOKEN environment variable; reference it inside your curl
+commands as the value of an 'Authorization: Bearer ...' header. Never print,
+echo, or include the token value in your output. Also send
+'Accept: application/vnd.github+json' on every request.
+
+Steps:
+1. List open PRs: GET /repos/sozercan/vekil/pulls?state=open&per_page=20
+2. For each PR idle more than 3 days (computed from updated_at vs the current
+   UTC time), fetch its check-runs status and its last review comments so you
+   can understand WHY it is stuck.
+3. Classify each into exactly one blocker bucket from this set:
+   awaiting-review | ci-broken | merge-conflict | author-needs-respond |
+   discussion-stalled | dependabot
+4. Produce a markdown report in this exact shape (no other commentary):
+
+## Stale PR triage — <current UTC timestamp>
+Open: N  |  Idle >3 days: M
+
+| #   | Title (truncated to 50 chars) | Days idle | Blocker | Suggested next action |
+|-----|-------------------------------|-----------|---------|-----------------------|
+| 162 | Add prometheus metrics endpoint | 12 | author-needs-respond | Ping author about reviewer feedback |
+| ... |                                 |    |                       |                                 |
+
+### Top 3 priorities
+1. PR #X — <one-line reason a human reviewer should look here first>
+2. PR #Y — <one-line reason>
+3. PR #Z — <one-line reason>
+
+Output ONLY the markdown report. Do not commit, push, open a PR, comment on
+any PR, or modify any file in the workspace.}"
 
 # ---------------------------------------------------------------------------
 # Recording profile.

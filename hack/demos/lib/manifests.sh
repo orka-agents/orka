@@ -213,55 +213,12 @@ EOF
 
 
 render_chat_request_file() {
-  emit_block "" "Claude Code is the local client. Orka is the server-side orchestrator.
-Start exactly one coordinator task for this demo, but first create the coordinator and specialist Agents through Orka's chat tool path.
-
-Create the Agents by translating the Agent specs below into create_agent tool calls. This YAML is the source of truth for the four demo Agents; do not apply it with kubectl and do not create any extra Agents.
-
-Critical tool-use constraints:
-- The first four Orka tool calls MUST be direct create_agent tool calls.
-- Do not use create_ai_task, create_agent_task, or create_container_task to create Agents.
-- A Task whose prompt starts with "create_agent" is incorrect and must not be created.
-- Only after all four create_agent calls return success may you call create_ai_task once for the coordinator.
-
-Create-agent mapping rules:
-- Call create_agent exactly four times before creating the coordinator task, one call for each Agent object in this order: ${DEMO_CODER_AGENT_NAME}, ${DEMO_SECURITY_REVIEWER_NAME}, ${DEMO_QUALITY_REVIEWER_NAME}, ${DEMO_PR_COORDINATOR_NAME}.
-- Pass metadata.name as name and metadata.namespace as namespace.
-- Pass spec.providerRef.name as providerRef when present.
-- Pass spec.model.name as model.name.
-- Pass spec.systemPrompt.inline as systemPrompt verbatim.
-- Pass spec.runtime as runtime. For runtime Agents, map spec.secretRef.name to runtime.secretRef.
-- Preserve runtime.defaultMaxTurns, runtime.defaultAllowedTools, and runtime.defaultAllowBash.
-- Pass spec.resources as resources, including requests and limits, when present.
-- Pass spec.coordination as coordination, including allowedAgents, maxDepth, and maxConcurrentChildren.
-- Do not use create_agent initialPrompt. Agent creation must not start any task.
-- create_agent does not need labels for this chat demo path; ignore metadata.labels if they are not supported by the tool.
-
----BEGIN AGENT SPECS---"
-  render_pr_agents_manifest
-  emit_block "" "---END AGENT SPECS---
-
-After all four create_agent calls succeed, use Orka's create_ai_task tool exactly once with these arguments:
-- name: ${DEMO_CHAT_SESSION}
-- namespace: ${DEMO_NAMESPACE}
-- agentRef: ${DEMO_PR_COORDINATOR_NAME}
-- providerRef: ${DEMO_PROVIDER_REF}
-- sessionRef: ${DEMO_CHAT_SESSION}
-- timeout: ${DEMO_PR_WORKFLOW_TIMEOUT}
-- priority: 700
-- prompt: use the entire Coordinator task prompt section below verbatim
-
-Do not create, update, or delete tools or providers in this chat turn.
-Do not create any task except the one coordinator create_ai_task call described above.
-After creating the coordinator task, capture the returned task name, use wait_for_task until it reaches Succeeded or Failed, then use fetch_task_output and report only a concise final status.
-
-Coordinator task prompt (verbatim):
----BEGIN COORDINATOR TASK PROMPT---"
-  pr_repo_details_block "${DEMO_CHAT_PUSH_BRANCH}"
-  printf '\n\n'
-  emit_block "" "Change request:
-${DEMO_CHAT_REQUEST}
----END COORDINATOR TASK PROMPT---"
+  # The visible chat prompt is one line — the maintainer's request, verbatim.
+  # Everything else (agent topology, workflow contract, goal state, failure
+  # handling) lives in the server-side coordinator system prompt injected by
+  # /anthropic/v1/messages (internal/api/anthropic_tool_loop.go). The
+  # coordinator creates the coder/reviewer Agents itself via create_agent.
+  emit_block "" "${DEMO_CHAT_REQUEST}"
 }
 
 render_chat_story_file() {
@@ -350,9 +307,21 @@ spec:
     name: ${DEMO_RUNTIME_MODEL}
   systemPrompt:
     inline: |
-      You are the scheduled repository reporter for a live Orka demo.
-      Read the repository, produce a short report in the task result, and stop.
-      Do not commit, push, or open a pull request.
+      You are a scheduled repository operations agent for a live Orka demo.
+
+      Tools available in this container: bash, git, curl, ripgrep, jq. You do
+      NOT have the gh CLI; use curl against the GitHub REST API
+      (https://api.github.com).
+
+      GitHub authentication: a GitHub token is provided in the GH_TOKEN env
+      variable. Reference it inside your curl commands as the value of an
+      'Authorization: Bearer ...' header. Also send 'Accept:
+      application/vnd.github+json' on every api.github.com call. Never echo,
+      print, or include the token value in your output.
+
+      Your role is read-only reporting. Read the request, produce the requested
+      report in the task result, and stop. Do not modify files, commit, push,
+      open a pull request, or comment on any PR or issue.
   resources:
     requests:
       cpu: ${DEMO_AGENT_CPU_REQUEST}
@@ -366,6 +335,8 @@ EOF
 }
 
 render_cron_task_manifest() {
+  local gh_token_secret="${DEMO_CRON_GH_TOKEN_SECRET_REF:-${DEMO_GIT_SECRET_REF:-github-credentials}}"
+  local gh_token_secret_key="${DEMO_CRON_GH_TOKEN_SECRET_KEY:-token}"
   cat <<EOF
 apiVersion: core.orka.ai/v1alpha1
 kind: Task
@@ -384,6 +355,12 @@ spec:
   successfulRunsHistoryLimit: 2
   failedRunsHistoryLimit: 1
   timeout: 20m
+  env:
+    - name: GH_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: ${gh_token_secret}
+          key: ${gh_token_secret_key}
   prompt: |
 EOF
   emit_block "    " "${DEMO_CRON_REQUEST}"

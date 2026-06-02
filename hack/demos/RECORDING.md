@@ -69,7 +69,7 @@ Six demos total. Four exist; two are new.
 |---|------|--------|--------|----------|
 | 10 | Chat-to-PR | `10-chat-pr.sh` | exists, needs polish | One chat turn → coordinator → coder + reviewer → CI → PR |
 | 20 | YAML workflow | `20-manual-workflow.sh` | exists, needs polish | Same payload, declarative `Task` CR — GitOps-friendly |
-| 30 | Scheduled workflow | `30-cron-workflow.sh` | exists, needs polish | Cron-scheduled repository heartbeat |
+| 30 | Scheduled workflow | `30-cron-workflow.sh` | exists, needs polish | Cron-scheduled stale-PR triage report |
 | 40 | Security remediation | `40-security-scanning.sh` | exists, needs polish | Finding → patch proposal → reviewable PR |
 | 50 | **Kontxt transaction tokens** | `50-kontxt.sh` | **new** | Caller Pod proves identity → kontxt mints TxToken → Orka stamps immutable provenance |
 | 60 | **Agent sandbox workspaces** | `60-agent-sandbox.sh` | **new** | One session, two agents, three turns — Scout, Builder, and a CI fixup share one warm sandbox |
@@ -1111,7 +1111,7 @@ and by the payoff cards):
 |---|---|---|
 | 10 | "Chat to PR" | "One chat turn becomes a coordinator, specialists, review, CI, and a real PR." |
 | 20 | "GitOps workflow" | "Same workflow from YAML. The agent isn't magic — it's a CR." |
-| 30 | "Scheduled work" | "Cron-driven repo heartbeats with the same auditable Task model." |
+| 30 | "Scheduled work" | "Recurring AI triage queue — same auditable Task model, just add a `schedule:`." |
 | 40 | "Security remediation" | "Finding → patch proposal → reviewable PR. No human triage required." |
 | 50 | "Kontxt transaction tokens" | "Zero-secret caller, one-shot transaction token, sealed Kubernetes provenance." |
 | 60 | "Warm agent sandboxes" | "One session, two agents, three turns. Scout, Builder, CI fixup — one warm workspace." |

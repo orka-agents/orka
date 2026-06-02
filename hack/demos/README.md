@@ -297,7 +297,7 @@ The scenarios are:
 - `00-preflight.sh`: prove the namespace, controller, API tunnel, provider, Secrets, model surface, and local client are ready.
 - `10-chat-pr.sh`: a live or default repo-change request starts as a Claude Code chat request and ends as a coordinator Task, specialist child Tasks, validation/review/CI repair if needed, and PR result.
 - `20-manual-workflow.sh`: the same kind of live or default repo-change workflow runs from declarative Kubernetes YAML.
-- `30-cron-workflow.sh`: a scheduled parent Task creates recurring repository heartbeat child runs.
+- `30-cron-workflow.sh`: a scheduled parent Task triages stale GitHub PRs every tick and produces a paste-ready markdown report — the same Task primitive as demos 10/20 with a `schedule:` field added.
 - `40-security-scanning.sh`: an open finding becomes a patch proposal and human-reviewable PR.
 
 ## How the Claude Code Scenario Works
