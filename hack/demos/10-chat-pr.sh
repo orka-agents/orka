@@ -114,7 +114,7 @@ DEMO_CHAT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # command itself. demo_show handles profile-correct verbosity (full body
 # in presenter, head -20 in docs, head -8 in social, path-only in hero)
 # so audit-mode viewers see the real ask while social cuts stay short.
-log_info "Prompt sent to claude -p (from ${DEMO_WORKDIR}/chat-request.txt):"
+log_info "Prompt sent to claude -p:"
 demo_show "${DEMO_WORKDIR}/chat-request.txt"
 # Show the exact `claude -p` command the viewer could run themselves. We
 # render it WITHOUT executing (demo_show_cmd) — the real invocation runs
@@ -123,7 +123,7 @@ demo_show "${DEMO_WORKDIR}/chat-request.txt"
 # with the user's local proxy. Token is fetched from the shell — never
 # inlined into the visible command.
 demo_show_cmd "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL} ANTHROPIC_API_KEY=\$(get_orka_token) ${DEMO_CLAUDE_BIN} -p --model ${DEMO_CHAT_OPUS_MODEL} < ${DEMO_WORKDIR}/chat-request.txt"
-log_info "Running the actual chat turn (output captured to ${DEMO_WORKDIR}/chat-client-result.json)..."
+log_info "Running the chat turn (result captured for replay)..."
 # Background heartbeat so viewers see something during the model's quiet
 # multi-turn tool dance. Ticks the elapsed spinner every 10s (only when
 # stderr is a tty so log scrapers stay clean) and, every ~60s, prints
