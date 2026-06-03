@@ -47,3 +47,4 @@ ui/coverage/
 test/e2e/.env
 
 .plans/
+.claude/worktrees/
