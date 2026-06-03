@@ -55,26 +55,29 @@ clear
 banner "Scheduled Workflow"
 
 # Chapter 1 ------------------------------------------------------------------
-narrate "Same Task primitive as demos 10 and 20 — plus a schedule. The agent runs autonomously every tick."
-chapter "Apply a scheduled parent Task" "📅"
+narrate "Every tick, an autonomous agent triages stale PRs on the target repo. Same Agent shape as demos 10 and 20 — just a Task with a schedule."
+chapter "Apply the triage Agent + cron Task" "📅"
 log_info "Schedule: ${DEMO_CRON_SCHEDULE}  (production: use ${DEMO_CRON_PRODUCTION_HINT:-*/30 * * * * or 0 */4 * * *})"
+log_info "Peek at the cron Task — note the schedule and the prompt that runs every tick:"
+demo_pe "head -25 ${DEMO_WORKDIR}/cron-task.yaml"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/cron-agent.yaml"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/cron-task.yaml"
 
 # Chapter 2 ------------------------------------------------------------------
-narrate "Each tick spawns a child Task — pre-warmed off-camera so we can show the result now."
+narrate "Orka's cron controller spawns one child Task per tick — like Kubernetes CronJob, but for AI agents."
 chapter "Watch the schedule tick" "👶"
-log_success "first child task already completed off-camera: ${DEMO_CRON_CHILD_TASK}"
+log_success "first child already completed off-camera: ${DEMO_CRON_CHILD_TASK}"
+demo_pe "kubectl get task ${DEMO_CRON_TASK_NAME} -n ${DEMO_NAMESPACE}"
 demo_pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/parent-task=${DEMO_CRON_TASK_NAME},orka.ai/scheduled-run=true"
 
 # Chapter 3 ------------------------------------------------------------------
-narrate "The child's result is a stale-PR triage report — paste-ready for Slack, standup, or your maintainer dashboard."
-chapter "Fetch the triage report" "📋"
-log_info "First 600 chars of ${DEMO_CRON_CHILD_TASK} result:"
-demo_pe "orka_api GET \"/api/v1/tasks/${DEMO_CRON_CHILD_TASK}/result?namespace=${DEMO_NAMESPACE}\" | jq -r '.result[0:600]'"
+narrate "Each tick produces a stale-PR triage report — paste-ready markdown for Slack, standup, or your maintainer dashboard."
+chapter "Read the triage report" "📋"
+log_info "Markdown report from ${DEMO_CRON_CHILD_TASK}:"
+demo_pe "orka_api GET \"/api/v1/tasks/${DEMO_CRON_CHILD_TASK}/result?namespace=${DEMO_NAMESPACE}\" | jq -r '.result | fromjson | .summary'"
 
 # Chapter 4 ------------------------------------------------------------------
-narrate "Same Task / result API as your interactive demos. Now a self-updating AI triage queue."
+narrate "Same Task / result API as your interactive demos — but recurring. Your existing dashboards just got a self-updating AI triage queue."
 chapter "Schedule overview" "🚦"
 DEMO_CRON_CHILD_TASK="${DEMO_CRON_CHILD_TASK}" payoff_card_cron "${DEMO_CRON_CHILD_TASK}"
 
