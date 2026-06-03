@@ -853,24 +853,26 @@ render_security_story_file() {
   emit_block "" "Scenario:
 Demo 40 — Security Scanning + Auto-Remediation.
 
-THE FEATURE: Orka models security work as Kubernetes CRDs. A RepositoryScan describes what to scan; resulting Findings become first-class objects you can list, rank, and query via the Orka API. A single POST /api/v1/security/findings/<id>/patch turns a finding into a remediation Task that ends in a reviewable PR. Scan -> finding -> patch -> branch -> PR, all in K8s.
+THE FEATURE: Orka models source-code security as Kubernetes CRDs. A RepositoryScan triggers an LLM-driven SAST pass over the target repo (think: hardcoded credentials, injection sinks, auth bypasses, dangerous defaults — vulnerabilities in YOUR code, not in your dependencies). Each Finding becomes a first-class object you can list, rank, and query via the Orka API. A single POST /api/v1/security/findings/<id>/patch turns a finding into a remediation Task that ends in a reviewable PR. Scan -> finding -> patch -> branch -> PR, all in K8s.
 
-Why not a traditional scanner + Jira workflow? Tools like Trivy or Snyk produce findings; what happens next is human ticket-bouncing. Orka closes the loop: each finding has a one-click /patch endpoint that creates a remediation Task driven by the same Agent runtime as demos 10 / 20. The output is a PR the maintainer reviews, not a ticket the maintainer triages.
+Why not a traditional SAST tool + Jira workflow? Tools like CodeQL, Semgrep, or SonarQube produce findings; what happens next is human ticket-bouncing. Orka closes the loop: each finding has a one-click /patch endpoint that creates a remediation Task driven by the same Agent runtime as demos 10 / 20. The output is a PR the maintainer reviews, not a ticket the maintainer triages.
+
+(SCA / dependency scanners like Trivy and Snyk live one layer down — they flag CVEs in third-party packages. This demo is about flaws in first-party code.)
 
 THIS DEMO:
 A RepositoryScan inspects a known-vulnerable fork (nodejs-goof). Findings are ranked by severity. We pick the top one, hit /patch, and Orka opens a real PR with the fix.
 
 What to watch:
-- The scan + remediation Agents are pre-applied; the scan runs off-camera and surfaces a finding.
+- The analysis + remediation Agents are pre-applied; the scan runs off-camera, surfaces code-level findings (hardcoded admin password, login bypass, reflected XSS, etc.).
 - Listing findings: severity-ranked, replayable via the Orka REST API.
 - One POST against /api/v1/security/findings/<id>/patch creates a remediation Task.
-- The Task runs a coder Agent against the target repo; the result is a branch + PR.
+- The Task runs a coder Agent against the target repo; the result is a branch + PR with a structured 'Summary / Root cause / Remediation guidance' body.
 - The PR carries provenance back to the finding ID — every step in the chain is queryable.
 
 Target repo:       ${DEMO_SECURITY_GIT_REPO}
 Scan name:         ${DEMO_SECURITY_SCAN_NAME}
 
-Beyond this demo, any scanner that emits structured findings (SAST, SCA, IaC, secrets) can plug into the same RepositoryScan / Finding / Patch flow. Same RBAC, same audit log, same Task primitive."
+Beyond this demo, any scanner that emits structured findings (custom rules, LLM-driven heuristics, IaC checks, secrets detection) can plug into the same RepositoryScan / Finding / Patch flow. Same RBAC, same audit log, same Task primitive."
 }
 
 render_kontxt_story_file() {

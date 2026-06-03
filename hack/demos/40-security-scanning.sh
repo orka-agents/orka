@@ -61,7 +61,7 @@ chapter "What this demo is doing" "🧑"
 demo_show_full "${DEMO_WORKDIR}/security-story.txt"
 
 # Chapter 2 ------------------------------------------------------------------
-narrate "A RepositoryScan finds real CVEs in a real app — pre-warmed off-camera."
+narrate "An LLM-driven SAST pass over a known-vulnerable app — pre-warmed off-camera. Finds code-level flaws (hardcoded creds, injection, auth bypass) directly in the source."
 chapter "Apply the scan + remediation Agents" "🔍"
 log_info "Target: ${DEMO_SECURITY_GIT_REPO} (${DEMO_SECURITY_GIT_BRANCH})"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/security-agents.yaml"
