@@ -75,7 +75,6 @@ narrate "Run the caller. At runtime it reads its projected SA token, exchanges i
 chapter "Run the allowed caller" "✅"
 demo_event "🚀" "Apply the Job. Pod boots; caller script will: (1) read its SA token from disk, (2) POST to TTS for a TxToken, (3) call Orka with that TxToken."
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/kontxt-job.yaml"
-log_info "Waiting for the caller Job to complete (timeout 120s)..."
 wait_for_job_with_progress "${ok_job}" "${kontxt_ns}" 120 complete \
   || die "allowed caller Job did not complete in time"
 demo_event "✅" "Job completed — the 3-step dance succeeded. Read the log next to see each step in order."
@@ -91,7 +90,6 @@ narrate "Same caller, same identity, same TTS exchange — but the request targe
 chapter "Run the denied caller" "🚫"
 demo_event "🚀" "Apply the second Job. Identical code, identical SA — only the target namespace differs. Watch what Orka does at the API boundary."
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/kontxt-denied-job.yaml"
-log_info "Waiting for the denied caller Job to fail (this is expected)..."
 wait_for_job_with_progress "${denied_job}" "${kontxt_ns}" 120 fail \
   || die "denied caller Job did not transition to Failed=True within 120s"
 demo_event "🛑" "Job failed (expected). The denial happened at the Orka API boundary — TTS still minted the TxToken cleanly. That's the point: identity and authorization are decoupled."

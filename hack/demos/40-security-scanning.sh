@@ -140,14 +140,12 @@ log_success "selected finding: ${security_finding_id}"
 narrate "One POST asks Orka to patch the finding — a remediation Task is born."
 chapter "Request a patch" "🛠️"
 demo_event "📮" "POST /api/v1/security/findings/<id>/patch — this single REST call creates a Task object whose owner reference points back to the Finding."
-log_info "Requesting patch for finding ${security_finding_id}..."
 demo_pe "orka_api POST \"/api/v1/security/findings/${security_finding_id}/patch?namespace=${DEMO_NAMESPACE}\" | jq '{id, status, branch}'"
 demo_event "🤖" "The remediation Agent now runs: read source, draft minimal fix, run tests, open branch, open PR. Provenance is preserved end-to-end."
 
 # Chapter 5 ------------------------------------------------------------------
 narrate "Remediation runs; we wait for the patch proposal to land."
 chapter "Wait for the patch proposal" "⏳"
-log_info "Waiting for patch proposal (timeout ${DEMO_SECURITY_PATCH_TIMEOUT:-1200}s)..."
 # Retry on transient failures (e.g. upstream LLM 429). Each attempt POSTs
 # a fresh patch request; the wait helper polls until the latest patch
 # row reaches ready or failed.
@@ -173,7 +171,6 @@ demo_pe "orka_api GET \"/api/v1/security/findings/${security_finding_id}/patches
 narrate "The patch becomes a real branch and a real PR for human review."
 chapter "Open the remediation pull request" "🚢"
 demo_event "🚀" "The branch is pushed and a PR is opened automatically. From here it's a normal code review — humans approve, GitHub merges."
-log_info "Waiting for pull request to open (timeout ${DEMO_SECURITY_PR_TIMEOUT:-180}s)..."
 wait_for_security_pull_request "${security_finding_id}" "${DEMO_SECURITY_PR_TIMEOUT:-180}" \
   > "${DEMO_WORKDIR}/security-pr.json" \
   || die "pull request did not open for finding ${security_finding_id}"

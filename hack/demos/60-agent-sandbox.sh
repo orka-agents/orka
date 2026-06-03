@@ -151,7 +151,6 @@ narrate "Turn 1 creates the session — sessionRef.create=true."
 chapter "Turn 1: scout the repo (read-only)" "🔎"
 demo_event "1️⃣ " "Turn 1 = scout. sessionRef.create=true tells Orka 'mint a new SandboxClaim for this session'. The claim survives the Task that creates it."
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/sandbox-turn-1.yaml"
-log_info "Waiting for scout to finish (timeout ${DEMO_SANDBOX_TURN_TIMEOUT:-1800}s)..."
 demo_announce_reset "turn-${t1}-"
 DEMO_WAIT_STATUS_HOOK=_sandbox_turn_status \
   wait_for_task_succeeded         "${t1}" "${DEMO_SANDBOX_TURN_TIMEOUT:-1800}" >/dev/null
@@ -164,7 +163,6 @@ narrate "Turn 2 reattaches the existing claim — sessionRef.create=false."
 chapter "Turn 2: builder implements + opens PR" "🛠️"
 demo_event "2️⃣ " "Turn 2 = builder. sessionRef.create=false means 'attach to the EXISTING claim'. Same git checkout, same deps, same warm runtime. Cold-start cost: zero."
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/sandbox-turn-2.yaml"
-log_info "Waiting for builder to finish (timeout ${DEMO_SANDBOX_TURN_TIMEOUT:-1800}s)..."
 demo_announce_reset "turn-${t2}-"
 DEMO_WAIT_STATUS_HOOK=_sandbox_turn_status \
   wait_for_task_succeeded         "${t2}" "${DEMO_SANDBOX_TURN_TIMEOUT:-1800}" >/dev/null
@@ -176,7 +174,6 @@ narrate "Turn 3 reuses the same workspace — branch is still checked out."
 chapter "Turn 3: CI fixup on the same branch" "🩹"
 demo_event "3️⃣ " "Turn 3 = CI fixup. The branch opened in turn 2 is STILL CHECKED OUT in the workspace — no re-clone, no re-checkout, no context loss."
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/sandbox-turn-3.yaml"
-log_info "Waiting for fixup turn to finish (timeout ${DEMO_SANDBOX_TURN_TIMEOUT:-1800}s)..."
 demo_announce_reset "turn-${t3}-"
 DEMO_WAIT_STATUS_HOOK=_sandbox_turn_status \
   wait_for_task_succeeded         "${t3}" "${DEMO_SANDBOX_TURN_TIMEOUT:-1800}" >/dev/null

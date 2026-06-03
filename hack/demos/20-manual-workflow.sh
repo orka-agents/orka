@@ -113,8 +113,7 @@ narrate "Implementation, validation, parallel review, CI — silently, in the ba
 chapter "Coordinator runs to completion" "⏳"
 require_orka_api_reachable
 log_success "Orka API reachable at ${ORKA_API_BASE}"
-demo_event "⏱️ " "Waiting for the coordinator to drive all specialist Tasks to Succeeded. Status hook below shows live child-Task phase counts so the wait is never a black box."
-log_info "Waiting for the coordinator to finish (timeout ${DEMO_MANUAL_TASK_TIMEOUT:-10800}s)..."
+demo_event "⏱️ " "Waiting for the coordinator to drive all specialist Tasks to Succeeded."
 DEMO_WAIT_STATUS_HOOK=_manual_coordinator_status \
   wait_for_task_succeeded            "${DEMO_MANUAL_TASK_NAME}" "${DEMO_MANUAL_TASK_TIMEOUT:-10800}" >/dev/null
 wait_for_task_result_available     "${DEMO_MANUAL_TASK_NAME}" "${DEMO_MANUAL_RESULT_TIMEOUT:-120}"  >/dev/null

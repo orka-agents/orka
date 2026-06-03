@@ -202,7 +202,6 @@ demo_event "📬" "Chat HTTP turn returned. The coordinator Task is already runn
 narrate "The chat turn creates a real coordinator Task in Kubernetes."
 chapter "Orka spawns the coordinator" "🎬"
 demo_event "🔭" "Looking up the Task that the chat session minted — discovered by orka.ai/source=anthropic-proxy label + creation timestamp >= chat start."
-log_info "Watching for the coordinator task to appear..."
 DEMO_CHAT_PARENT_TASK="$(wait_for_chat_parent_task "${DEMO_CHAT_PARENT_TIMEOUT:-120}" "${DEMO_CHAT_STARTED_AT}")" \
   || die "failed to discover the Anthropic-proxy-created coordinator task"
 demo_event "✅" "Coordinator Task discovered: ${DEMO_CHAT_PARENT_TASK} — the K8s representation of the chat session's parent agent."
@@ -217,8 +216,7 @@ demo_pe "kubectl get agents -n ${DEMO_NAMESPACE} -l orka.ai/created-by=chat"
 # Chapter 5 ------------------------------------------------------------------
 narrate "Implementation, validation, parallel review, CI — silently, in the background."
 chapter "Coordinator runs to completion" "⏳"
-demo_event "⏱️ " "Waiting for the coordinator to drive all specialist Tasks to Succeeded. Status hook below shows live child-Task phase counts so the wait is never a black box."
-log_info "Waiting for the coordinator to finish (timeout ${DEMO_CHAT_TASK_TIMEOUT:-10800}s)..."
+demo_event "⏱️ " "Waiting for the coordinator to drive all specialist Tasks to Succeeded."
 DEMO_WAIT_STATUS_HOOK=_chat_coordinator_status \
   wait_for_task_succeeded            "${DEMO_CHAT_PARENT_TASK}" "${DEMO_CHAT_TASK_TIMEOUT:-10800}" >/dev/null
 wait_for_task_result_available     "${DEMO_CHAT_PARENT_TASK}" "${DEMO_CHAT_RESULT_TIMEOUT:-120}"  >/dev/null
