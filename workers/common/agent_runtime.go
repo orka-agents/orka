@@ -148,6 +148,12 @@ func SetupGitCredentials() {
 // clone and refreshes in place. Branch workspaces are fast-forwarded only
 // when the configured branch is still checked out; a session-created branch
 // is preserved as part of the reused workspace state.
+//
+// When ORKA_PUSH_BRANCH is set and no ORKA_GIT_REF pinned a specific commit,
+// CloneRepo also creates and checks out a local branch with that name. This
+// way any agent-initiated `git push origin HEAD` lands on the intended remote
+// branch instead of the upstream default (often "main"). The post-run worker
+// finalize step still owns the canonical commit + push.
 func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error {
 	// Detect a reused workspace: if <workspaceDir>/.git exists we already
 	// have a clone (sandbox session reuse). Re-running `git clone` would
@@ -208,6 +214,20 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 		}
 		if err := checkoutGitRef(ctx, workspaceDir, cfg.GitRef, fetchMode); err != nil {
 			return err
+		}
+	}
+
+	// If ORKA_PUSH_BRANCH is set and we're not pinned to a specific ref, create
+	// and check out a local branch with that name. This way any agent-initiated
+	// `git push origin HEAD` lands on the intended remote branch rather than
+	// overwriting "main" (or whatever the upstream default branch was). Skipped
+	// for ref-pinned validation tasks because those aren't expected to push.
+	if cfg.GitRef == "" {
+		if pushBranch := strings.TrimSpace(os.Getenv(workerenv.PushBranch)); pushBranch != "" {
+			if err := execGitContext(ctx, workspaceDir, "checkout", "-B", pushBranch); err != nil {
+				return fmt.Errorf("pre-checkout push branch %q failed: %w", pushBranch, err)
+			}
+			fmt.Printf("Pre-checked out push branch %s before agent run\n", pushBranch)
 		}
 	}
 

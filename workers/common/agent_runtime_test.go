@@ -241,6 +241,83 @@ func TestCloneRepo_WithBranch(t *testing.T) {
 	}
 }
 
+// When ORKA_PUSH_BRANCH is set, CloneRepo must pre-checkout a local branch
+// with that name so an agent-initiated `git push origin HEAD` lands on the
+// intended remote branch rather than overwriting "main". This prevents the
+// production bug we hit on sozercan/vekil where the Codex agent committed
+// and pushed inside its own loop, landing on main and breaking the worker's
+// post-run push to ORKA_PUSH_BRANCH.
+func TestCloneRepo_PreChecksOutPushBranchFromEnv(t *testing.T) {
+	bareDir := t.TempDir()
+	runGit(t, bareDir, "init", "--bare")
+
+	workDir := t.TempDir()
+	runGit(t, workDir, "init")
+	runGit(t, workDir, "checkout", "-b", "main")
+	if err := os.WriteFile(workDir+"/test.txt", []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workDir, "add", ".")
+	runGit(t, workDir, "config", "user.email", "test@test.com")
+	runGit(t, workDir, "config", "user.name", "Test")
+	runGit(t, workDir, "commit", "-m", "init")
+	runGit(t, workDir, "remote", "add", "origin", bareDir)
+	runGit(t, workDir, "push", "origin", "main")
+
+	t.Setenv(workerenv.PushBranch, "orka/feature-branch")
+	cloneDir := t.TempDir() + "/cloned"
+	cfg := &AgentConfig{GitRepo: bareDir, GitBranch: "main"}
+	if err := CloneRepo(context.Background(), cfg, cloneDir); err != nil {
+		t.Fatalf("CloneRepo failed: %v", err)
+	}
+
+	branch, err := exec.Command("git", "-C", cloneDir, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("git rev-parse failed: %v", err)
+	}
+	got := strings.TrimSpace(string(branch))
+	if got != "orka/feature-branch" {
+		t.Errorf("HEAD branch = %q, want %q (pre-checkout did not fire)", got, "orka/feature-branch")
+	}
+}
+
+// When ORKA_PUSH_BRANCH is unset, CloneRepo must NOT alter the checked-out
+// branch. Tasks that only read the workspace (validation, discovery) rely on
+// HEAD remaining on the cloned branch.
+func TestCloneRepo_NoPushBranchLeavesHEADAlone(t *testing.T) {
+	bareDir := t.TempDir()
+	runGit(t, bareDir, "init", "--bare")
+
+	workDir := t.TempDir()
+	runGit(t, workDir, "init")
+	runGit(t, workDir, "checkout", "-b", "main")
+	if err := os.WriteFile(workDir+"/test.txt", []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workDir, "add", ".")
+	runGit(t, workDir, "config", "user.email", "test@test.com")
+	runGit(t, workDir, "config", "user.name", "Test")
+	runGit(t, workDir, "commit", "-m", "init")
+	runGit(t, workDir, "remote", "add", "origin", bareDir)
+	runGit(t, workDir, "push", "origin", "main")
+
+	t.Setenv(workerenv.PushBranch, "")
+	cloneDir := t.TempDir() + "/cloned"
+	cfg := &AgentConfig{GitRepo: bareDir, GitBranch: "main"}
+	if err := CloneRepo(context.Background(), cfg, cloneDir); err != nil {
+		t.Fatalf("CloneRepo failed: %v", err)
+	}
+
+	branch, err := exec.Command("git", "-C", cloneDir, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("git rev-parse failed: %v", err)
+	}
+	got := strings.TrimSpace(string(branch))
+	if got != "main" {
+		t.Errorf("HEAD branch = %q, want main (no pushBranch should leave HEAD alone)", got)
+	}
+}
+
 func TestCloneRepo_WithRef(t *testing.T) {
 	// Create a local bare repo
 	bareDir := t.TempDir()
