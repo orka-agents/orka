@@ -86,7 +86,7 @@ _security_stage_status() {
 
 DEMO_WAIT_STATUS_HOOK=_security_stage_status
 
-demo_event "🔎" "Waiting for the scan to surface the top-ranked open finding (multi-minute on first run — stage-by-stage events below)…"
+demo_event "🔎" "Waiting for the scan to surface the top-ranked open finding…"
 if [[ -n "${DEMO_SECURITY_FINDING_ID:-}" ]]; then
   security_finding_id="${DEMO_SECURITY_FINDING_ID}"
 else
