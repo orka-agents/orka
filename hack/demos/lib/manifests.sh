@@ -853,18 +853,26 @@ render_security_story_file() {
   emit_block "" "Scenario:
 Demo 40 — Security Scanning + Auto-Remediation.
 
-THE FEATURE: Orka models source-code security as Kubernetes CRDs. A RepositoryScan triggers an LLM-driven SAST pass over the target repo (think: hardcoded credentials, injection sinks, auth bypasses, dangerous defaults — vulnerabilities in YOUR code, not in your dependencies). Each Finding becomes a first-class object you can list, rank, and query via the Orka API. A single POST /api/v1/security/findings/<id>/patch turns a finding into a remediation Task that ends in a reviewable PR. Scan -> finding -> patch -> branch -> PR, all in K8s.
+THE FEATURE: Orka models source-code security as Kubernetes CRDs. A RepositoryScan triggers an LLM-driven SAST pipeline over the target repo (think: hardcoded credentials, injection sinks, auth bypasses, dangerous defaults — vulnerabilities in YOUR code, not in your dependencies). Each Finding becomes a first-class object you can list, rank, and query via the Orka API. A single POST /api/v1/security/findings/<id>/patch turns a finding into a remediation Task that ends in a reviewable PR. Scan -> threat model -> findings -> patch -> branch -> PR, all in K8s.
+
+How the scan actually works (you do not have to memorize this; it runs off-camera):
+1. DISCOVERY — five parallel child Tasks survey the repo from five complementary scopes: auth-secrets-privilege, data-exposure-logging, ci-cd-supply-chain, app-logic-inputs, recent-commits-history. Each scope is a separate agent run so the model focuses instead of trying to grep everything at once.
+2. THREAT MODEL — one child Task synthesizes the discovery outputs into a repository-specific threat model: what this app does, where the trust boundaries are, which classes of attack matter. This is what lets the next stage rank findings by REAL risk, not by line count.
+3. FINDINGS + VALIDATION — candidate findings are pulled out of the threat model and each one runs through a per-finding validator Task to suppress false positives before surfacing in the API.
+4. PATCH (on demand) — POST /api/v1/security/findings/<id>/patch creates a remediation Task that drafts the fix, opens a branch, and opens a PR with a structured 'Summary / Root cause / Remediation guidance' body. The PR carries provenance back to the finding ID.
 
 Why not a traditional SAST tool + Jira workflow? Tools like CodeQL, Semgrep, or SonarQube produce findings; what happens next is human ticket-bouncing. Orka closes the loop: each finding has a one-click /patch endpoint that creates a remediation Task driven by the same Agent runtime as demos 10 / 20. The output is a PR the maintainer reviews, not a ticket the maintainer triages.
+
+The threat-model step is the part that distinguishes this from running a static linter. A linter sees 'hardcoded string'; the threat model sees 'this app auto-provisions a privileged admin account with a hardcoded password on startup' and ranks accordingly.
 
 (SCA / dependency scanners like Trivy and Snyk live one layer down — they flag CVEs in third-party packages. This demo is about flaws in first-party code.)
 
 THIS DEMO:
-A RepositoryScan inspects a known-vulnerable fork (nodejs-goof). Today's scan surfaces ~10 code-level findings, ranked by severity. The demo picks the top-ranked one, hits /patch, and Orka opens a real PR for that single finding. In production you would loop the same /patch call over every finding above a severity threshold; the demo focuses on the one-finding mechanic for clarity.
+A RepositoryScan inspects a known-vulnerable fork (nodejs-goof). Today's scan surfaces ~10 code-level findings, ranked by severity using the threat-model context. The demo picks the top-ranked one, hits /patch, and Orka opens a real PR for that single finding. In production you would loop the same /patch call over every finding above a severity threshold; the demo focuses on the one-finding mechanic for clarity.
 
 What to watch:
-- The analysis + remediation Agents are pre-applied; the scan runs off-camera, surfaces code-level findings (hardcoded admin password, login bypass, reflected XSS, etc.).
-- Listing findings: severity-ranked, replayable via the Orka REST API.
+- The analysis + remediation Agents are pre-applied; the discovery -> threat-model -> validation pipeline runs off-camera and surfaces code-level findings (hardcoded admin password, login bypass, reflected XSS, etc.).
+- Listing findings: severity-ranked using the threat-model context, replayable via the Orka REST API.
 - One POST against /api/v1/security/findings/<id>/patch creates a remediation Task.
 - The Task runs a coder Agent against the target repo; the result is a branch + PR with a structured 'Summary / Root cause / Remediation guidance' body.
 - The PR carries provenance back to the finding ID — every step in the chain is queryable.

@@ -61,7 +61,7 @@ chapter "What this demo is doing" "🧑"
 demo_show_full "${DEMO_WORKDIR}/security-story.txt"
 
 # Chapter 2 ------------------------------------------------------------------
-narrate "An LLM-driven SAST pass over a known-vulnerable app — pre-warmed off-camera. Finds code-level flaws (hardcoded creds, injection, auth bypass) directly in the source."
+narrate "Behind the scenes, the scan ran a 4-stage pipeline: 5 parallel discovery passes (auth, data exposure, supply chain, app logic, recent commits) → one threat-model synthesis that gives the repo context → per-finding validators that suppress false positives. The findings you're about to see are ranked by REAL risk, not by line count."
 chapter "Apply the scan + remediation Agents" "🔍"
 log_info "Target: ${DEMO_SECURITY_GIT_REPO} (${DEMO_SECURITY_GIT_BRANCH})"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/security-agents.yaml"
