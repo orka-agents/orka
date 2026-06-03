@@ -56,6 +56,52 @@ const (
 	WorkspaceCleanupPolicyRetain WorkspaceCleanupPolicy = "retain"
 )
 
+// WorkspaceProvider selects the execution workspace backend.
+// +kubebuilder:validation:Enum=agent-sandbox;substrate
+type WorkspaceProvider string
+
+const (
+	// WorkspaceProviderAgentSandbox uses the Kubernetes SIG agent-sandbox backend.
+	WorkspaceProviderAgentSandbox WorkspaceProvider = "agent-sandbox"
+	// WorkspaceProviderSubstrate uses the Agent Substrate actor backend.
+	WorkspaceProviderSubstrate WorkspaceProvider = "substrate"
+)
+
+// ExecutionWorkspacePhase is Orka's provider-neutral workspace lifecycle phase.
+// +kubebuilder:validation:Enum=Pending;Ready;Released;Retained;Deleted;Failed
+type ExecutionWorkspacePhase string
+
+const (
+	ExecutionWorkspacePhasePending  ExecutionWorkspacePhase = "Pending"
+	ExecutionWorkspacePhaseReady    ExecutionWorkspacePhase = "Ready"
+	ExecutionWorkspacePhaseReleased ExecutionWorkspacePhase = "Released"
+	ExecutionWorkspacePhaseRetained ExecutionWorkspacePhase = "Retained"
+	ExecutionWorkspacePhaseDeleted  ExecutionWorkspacePhase = "Deleted"
+	ExecutionWorkspacePhaseFailed   ExecutionWorkspacePhase = "Failed"
+)
+
+// ExecutionWorkspaceReason explains provider-neutral workspace lifecycle transitions.
+// +kubebuilder:validation:Enum=WorkspacePending;WorkspaceClaimed;WorkspaceReady;WorkspaceReleased;WorkspaceRetained;WorkspaceDeleted;WorkspaceValidationFailed;WorkspaceAttachmentLocked;WorkspaceClaimFailed;WorkspaceReadinessFailed;WorkspaceHandoffFailed;WorkspaceCommandFailed;WorkspaceSecretScrubFailed;WorkspaceCleanupFailed;WorkspaceStatusUpdateFailed
+type ExecutionWorkspaceReason string
+
+const (
+	ExecutionWorkspaceReasonPending            ExecutionWorkspaceReason = "WorkspacePending"
+	ExecutionWorkspaceReasonClaimed            ExecutionWorkspaceReason = "WorkspaceClaimed"
+	ExecutionWorkspaceReasonReady              ExecutionWorkspaceReason = "WorkspaceReady"
+	ExecutionWorkspaceReasonReleased           ExecutionWorkspaceReason = "WorkspaceReleased"
+	ExecutionWorkspaceReasonRetained           ExecutionWorkspaceReason = "WorkspaceRetained"
+	ExecutionWorkspaceReasonDeleted            ExecutionWorkspaceReason = "WorkspaceDeleted"
+	ExecutionWorkspaceReasonValidationFailed   ExecutionWorkspaceReason = "WorkspaceValidationFailed"
+	ExecutionWorkspaceReasonAttachmentLocked   ExecutionWorkspaceReason = "WorkspaceAttachmentLocked"
+	ExecutionWorkspaceReasonClaimFailed        ExecutionWorkspaceReason = "WorkspaceClaimFailed"
+	ExecutionWorkspaceReasonReadinessFailed    ExecutionWorkspaceReason = "WorkspaceReadinessFailed"
+	ExecutionWorkspaceReasonHandoffFailed      ExecutionWorkspaceReason = "WorkspaceHandoffFailed"
+	ExecutionWorkspaceReasonCommandFailed      ExecutionWorkspaceReason = "WorkspaceCommandFailed"
+	ExecutionWorkspaceReasonSecretScrubFailed  ExecutionWorkspaceReason = "WorkspaceSecretScrubFailed"
+	ExecutionWorkspaceReasonCleanupFailed      ExecutionWorkspaceReason = "WorkspaceCleanupFailed"
+	ExecutionWorkspaceReasonStatusUpdateFailed ExecutionWorkspaceReason = "WorkspaceStatusUpdateFailed"
+)
+
 // ExecutionWorkspaceSpec defines an optional durable execution workspace request.
 type ExecutionWorkspaceSpec struct {
 	// Enabled requests use of a durable workspace for the task execution.
@@ -63,9 +109,15 @@ type ExecutionWorkspaceSpec struct {
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 
+	// Provider selects the workspace backend. When omitted, the controller
+	// resolves the configured default workspace provider; the built-in
+	// compatibility default is agent-sandbox.
+	// +optional
+	Provider WorkspaceProvider `json:"provider,omitempty"`
+
 	// TemplateRef references the workspace template to instantiate or reuse.
 	// The template name is required when enabled is true unless the controller
-	// is configured with a default agent sandbox template.
+	// is configured with a provider-specific default template.
 	// +optional
 	TemplateRef *WorkspaceTemplateReference `json:"templateRef,omitempty"`
 

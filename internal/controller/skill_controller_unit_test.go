@@ -67,7 +67,7 @@ func TestSkillReconcilerReconcileReady(t *testing.T) {
 		t.Fatalf("get updated skill failed: %v", err)
 	}
 
-	if updated.Status.Phase != "Ready" {
+	if updated.Status.Phase != testConditionReady {
 		t.Fatalf("phase = %q, want Ready", updated.Status.Phase)
 	}
 	if !strings.HasPrefix(updated.Status.ContentHash, "sha256:") {

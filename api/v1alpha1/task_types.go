@@ -428,6 +428,12 @@ type TaskStatus struct {
 	// +optional
 	ResultRef *ResultReference `json:"resultRef,omitempty"`
 
+	// ExecutionWorkspace reports the provider-neutral lifecycle state for a
+	// requested execution workspace. Provider-native identifiers and credentials
+	// are intentionally omitted.
+	// +optional
+	ExecutionWorkspace *ExecutionWorkspaceStatus `json:"executionWorkspace,omitempty"`
+
 	// WebhookDelivered indicates whether the webhook was successfully called
 	// +optional
 	WebhookDelivered bool `json:"webhookDelivered,omitempty"`
@@ -459,6 +465,45 @@ type TaskStatus struct {
 type ResultReference struct {
 	// Available indicates whether a result has been stored for this task
 	Available bool `json:"available"`
+}
+
+// ExecutionWorkspaceStatus is the safe status surface for execution workspace lifecycle.
+type ExecutionWorkspaceStatus struct {
+	// Provider is the resolved workspace backend.
+	// +optional
+	Provider WorkspaceProvider `json:"provider,omitempty"`
+
+	// TemplateRef is the resolved workspace template.
+	// +optional
+	TemplateRef *WorkspaceTemplateReference `json:"templateRef,omitempty"`
+
+	// Phase is the provider-neutral lifecycle phase.
+	// +optional
+	Phase ExecutionWorkspacePhase `json:"phase,omitempty"`
+
+	// Reason is the provider-neutral lifecycle reason.
+	// +optional
+	Reason ExecutionWorkspaceReason `json:"reason,omitempty"`
+
+	// ReusePolicy is the resolved reuse policy.
+	// +optional
+	ReusePolicy WorkspaceReusePolicy `json:"reusePolicy,omitempty"`
+
+	// CleanupPolicy is the resolved cleanup policy.
+	// +optional
+	CleanupPolicy WorkspaceCleanupPolicy `json:"cleanupPolicy,omitempty"`
+
+	// Reused reports whether an existing workspace was reattached.
+	// +optional
+	Reused bool `json:"reused,omitempty"`
+
+	// Message contains sanitized lifecycle context.
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// LastUpdateTime is the last time workspace status was updated.
+	// +optional
+	LastUpdateTime *metav1.Time `json:"lastUpdateTime,omitempty"`
 }
 
 // ChildTaskStatus tracks the status of a delegated child task

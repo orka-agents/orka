@@ -3652,6 +3652,152 @@ func TestHandlePending_TransactionTokenPendingRequeuesWithoutJob(t *testing.T) {
 	}
 }
 
+func TestHandlePending_ExecutionWorkspaceValidationFailureSetsWorkspaceStatus(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "workspace-validation-fails",
+			Namespace: defaultNS,
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+			Prompt:   "do work",
+			Execution: &corev1alpha1.ExecutionSpec{
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					Enabled:  true,
+					Provider: corev1alpha1.WorkspaceProviderSubstrate,
+					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
+						Name: "orka-codex",
+					},
+				},
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+	}
+	assertExecutionWorkspaceValidationFailedStatus(t, updated.Status.ExecutionWorkspace, corev1alpha1.WorkspaceProviderSubstrate, "orka-codex", "requires substrate to be enabled")
+	assertNoJobsForTask(t, r, task)
+}
+
+func TestHandlePending_ExecutionWorkspaceResolutionFailureSetsWorkspaceStatus(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "workspace-resolution-fails",
+			Namespace: defaultNS,
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+			Prompt:   "do work",
+			Execution: &corev1alpha1.ExecutionSpec{
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					Enabled:  true,
+					Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
+					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
+						Name: "missing-template",
+					},
+				},
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+	r.AgentSandboxEnabled = true
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+	}
+	assertExecutionWorkspaceValidationFailedStatus(t, updated.Status.ExecutionWorkspace, corev1alpha1.WorkspaceProviderAgentSandbox, "missing-template", "execution workspace template")
+	if !strings.Contains(updated.Status.Message, "failed to resolve execution workspace") {
+		t.Fatalf("message = %q, want resolve execution workspace failure", updated.Status.Message)
+	}
+	assertNoJobsForTask(t, r, task)
+}
+
+func assertExecutionWorkspaceValidationFailedStatus(t *testing.T, status *corev1alpha1.ExecutionWorkspaceStatus, provider corev1alpha1.WorkspaceProvider, templateName, messageSubstring string) {
+	t.Helper()
+	if status == nil {
+		t.Fatal("ExecutionWorkspace status is nil")
+	}
+	if status.Provider != provider {
+		t.Fatalf("workspace provider = %q, want %q", status.Provider, provider)
+	}
+	if status.Phase != corev1alpha1.ExecutionWorkspacePhaseFailed {
+		t.Fatalf("workspace phase = %q, want %q", status.Phase, corev1alpha1.ExecutionWorkspacePhaseFailed)
+	}
+	if status.Reason != corev1alpha1.ExecutionWorkspaceReasonValidationFailed {
+		t.Fatalf("workspace reason = %q, want %q", status.Reason, corev1alpha1.ExecutionWorkspaceReasonValidationFailed)
+	}
+	if status.TemplateRef == nil || status.TemplateRef.Name != templateName || status.TemplateRef.Namespace != defaultNS {
+		t.Fatalf("workspace templateRef = %#v, want default/%s", status.TemplateRef, templateName)
+	}
+	if status.ReusePolicy != corev1alpha1.WorkspaceReusePolicyNone {
+		t.Fatalf("workspace reusePolicy = %q, want %q", status.ReusePolicy, corev1alpha1.WorkspaceReusePolicyNone)
+	}
+	if status.CleanupPolicy != corev1alpha1.WorkspaceCleanupPolicyDelete {
+		t.Fatalf("workspace cleanupPolicy = %q, want %q", status.CleanupPolicy, corev1alpha1.WorkspaceCleanupPolicyDelete)
+	}
+	if !strings.Contains(status.Message, messageSubstring) {
+		t.Fatalf("workspace message = %q, want substring %q", status.Message, messageSubstring)
+	}
+	if status.LastUpdateTime == nil {
+		t.Fatal("workspace LastUpdateTime is nil")
+	}
+}
+
+func assertNoJobsForTask(t *testing.T, r *TaskReconciler, task *corev1alpha1.Task) {
+	t.Helper()
+	jobs := &batchv1.JobList{}
+	if err := r.List(context.Background(), jobs, client.InNamespace(task.Namespace)); err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs.Items) != 0 {
+		t.Fatalf("expected no Jobs to be created, got %d", len(jobs.Items))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // handlePending — namespace task limit
 // ---------------------------------------------------------------------------
