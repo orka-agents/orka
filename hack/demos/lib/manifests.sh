@@ -223,7 +223,14 @@ render_chat_request_file() {
 
 render_chat_story_file() {
   emit_block "" "Scenario:
-A maintainer gives Orka a live change request through an Anthropic-compatible chat client. Orka should turn that request into an auditable coordinator Task, specialist child Tasks, validation, review, and a PR handoff.
+Demo 10 — Chat to PR.
+
+THE FEATURE: Orka speaks the Anthropic Messages protocol on /anthropic/v1/messages. Any client that already speaks Claude — Claude Code, the Anthropic SDK, an IDE plugin, a Slack bot, plain curl — becomes an Orka client without code changes. One chat turn drives a full agentic SDLC workflow that ends in a real GitHub PR.
+
+Why not call Claude directly? Claude alone returns text. With Orka, the same chat protocol drives an auditable Kubernetes Task tree: a coordinator Task, specialist Agents created at runtime via create_agent, implementation + validation + parallel review + CI checks, and a real PR — every step a CR you can inspect, replay, or attach RBAC to.
+
+THIS DEMO:
+A maintainer gives Orka a live change request through an Anthropic-compatible chat client. Orka turns it into an auditable coordinator Task, specialist child Tasks, validation, review, and a PR handoff.
 
 What to watch:
 - Claude Code sends one chat request to Orka's Anthropic-compatible endpoint.
@@ -242,10 +249,17 @@ Repository details:"
 
 render_manual_story_file() {
   emit_block "" "Scenario:
-The platform team submits the same kind of work as declarative Kubernetes YAML instead of a chat turn. The request can be the default Vekil metrics slice or a live request supplied with DEMO_MANUAL_REQUEST, DEMO_REQUEST_FILE, or DEMO_MANUAL_REQUEST_FILE.
+Demo 20 — Manual / GitOps Workflow.
+
+THE FEATURE: Orka Tasks are Kubernetes CRDs. The same agentic SDLC workflow that demo 10 drives from chat is here described declaratively in YAML — kubectl apply, ArgoCD, Flux, or Tekton can trigger it. The Task IS the source of truth: version-controlled, replayable, auditable, gate-able.
+
+Why not the chat endpoint? Chat is great for ad-hoc maintainer work. YAML is what you commit to git and what your CI/CD pipelines apply. Same coordinator, same specialists, same review gates, same PR — just a declarative trigger.
+
+THIS DEMO:
+The platform team submits the same kind of work as a Task CR instead of a chat turn. Default request is the vekil quiet-flag preset, overridable via DEMO_MANUAL_REQUEST or DEMO_MANUAL_REQUEST_FILE.
 
 What to watch:
-- The coordinator, coder, and reviewer Agents are applied up front.
+- The coordinator, coder, and reviewer Agents are applied up front (pre-baked, auditable, version-controlled).
 - The Task CR starts a bounded workflow from the rendered prompt.
 - Orka records child Tasks, runtime logs, validation, review, CI repair if needed, and the final PR status.
 
@@ -833,4 +847,75 @@ EOF
       reusePolicy: session
       cleanupPolicy: retain
 EOF
+}
+
+render_security_story_file() {
+  emit_block "" "Scenario:
+Demo 40 — Security Scanning + Auto-Remediation.
+
+THE FEATURE: Orka models security work as Kubernetes CRDs. A RepositoryScan describes what to scan; resulting Findings become first-class objects you can list, rank, and query via the Orka API. A single POST /api/v1/security/findings/<id>/patch turns a finding into a remediation Task that ends in a reviewable PR. Scan -> finding -> patch -> branch -> PR, all in K8s.
+
+Why not a traditional scanner + Jira workflow? Tools like Trivy or Snyk produce findings; what happens next is human ticket-bouncing. Orka closes the loop: each finding has a one-click /patch endpoint that creates a remediation Task driven by the same Agent runtime as demos 10 / 20. The output is a PR the maintainer reviews, not a ticket the maintainer triages.
+
+THIS DEMO:
+A RepositoryScan inspects a known-vulnerable fork (nodejs-goof). Findings are ranked by severity. We pick the top one, hit /patch, and Orka opens a real PR with the fix.
+
+What to watch:
+- The scan + remediation Agents are pre-applied; the scan runs off-camera and surfaces a finding.
+- Listing findings: severity-ranked, replayable via the Orka REST API.
+- One POST against /api/v1/security/findings/<id>/patch creates a remediation Task.
+- The Task runs a coder Agent against the target repo; the result is a branch + PR.
+- The PR carries provenance back to the finding ID — every step in the chain is queryable.
+
+Target repo:       ${DEMO_SECURITY_GIT_REPO}
+Scan name:         ${DEMO_SECURITY_SCAN_NAME}
+
+Beyond this demo, any scanner that emits structured findings (SAST, SCA, IaC, secrets) can plug into the same RepositoryScan / Finding / Patch flow. Same RBAC, same audit log, same Task primitive."
+}
+
+render_kontxt_story_file() {
+  emit_block "" "Scenario:
+Demo 50 — kontxt Transaction Tokens (zero-secret zero-trust agent calls).
+
+THE FEATURE: callers prove their identity with a projected Kubernetes ServiceAccount token. An in-cluster Token Translation Service (TTS) exchanges that SA token for a short-lived, narrowly-scoped TxToken. Orka enforces the TxToken's scope on every request and stamps an immutable, redacted record of the transaction into the Task's status. No shared API keys, no agent-side secret management.
+
+Why not a static API key? Shared keys are coarse (one key = full permissions), persistent (rotation is painful), and silent (audit logs show 'key X did Y', not 'caller Z did Y'). TxTokens are per-request, scoped to the action + namespace, and tied back to the caller pod's identity — every Task carries the caller's SA, the granted scope, and a transaction digest you can correlate against TTS logs.
+
+THIS DEMO:
+The same caller workload runs twice. Once it asks for something the TxToken allows (target namespace matches policy). Once it asks for something the TxToken does not allow (wrong namespace). Same identity, two outcomes: a clean success and a clean 403.
+
+What to watch:
+- A caller Job that mounts a projected SA token with audience=${DEMO_KONTXT_TTS_AUDIENCE}.
+- The caller exchanges that SA token at the TTS for a TxToken at runtime — no static creds.
+- The allowed call succeeds with three steps printed (1/3, 2/3, 3/3); JWT material is redacted by the image, never logged.
+- The denied call returns status=403 — same identity, wrong namespace, denied at the Orka API boundary.
+- The transaction summary in Task status shows safe digests + caller SA — the audit trail your security team wants without leaking secrets.
+
+TTS audience:  ${DEMO_KONTXT_TTS_AUDIENCE}
+TTS URL:       ${DEMO_KONTXT_TTS_URL}
+
+Beyond this demo, the same flow plugs in for any in-cluster client — CI pods, operators, ServiceAccount-bearing workloads — that needs scoped, auditable access to Orka APIs without storing long-lived credentials."
+}
+
+render_sandbox_story_file() {
+  emit_block "" "Scenario:
+Demo 60 — Agent Sandbox (warm workspace, session reuse across turns).
+
+THE FEATURE: Orka's workspace executor backs agent Tasks with durable SandboxClaim resources. Multiple Tasks can share a single workspace via sessionRef — the same git checkout, the same dependency cache, the same runtime state. Cold-start costs (clone, dep download, agent boot) happen once per session, not once per Task.
+
+Why not a fresh pod per turn? Every fresh pod re-clones the repo, re-downloads dependencies, re-boots the agent runtime — 30-60s overhead each time. A planner -> builder -> tester workflow that has 90 seconds of real work spends 5+ minutes in cold starts. With sessionRef, the second and third turns reattach the SAME claim and skip all of that.
+
+THIS DEMO:
+Three Tasks share one session. Turn 1 is the scout (read-only persona). Turn 2 is the builder (file write + git push + open PR). Turn 3 is a CI fixup that reattaches the same workspace — the branch is still checked out, the deps are still cached. The payoff card hard-asserts that all three turns landed on the SAME SandboxClaim name; if they did not, the demo fails.
+
+What to watch:
+- Two different Agent personas (scout, builder) — the workspace is the shared resource, not the agent.
+- Turn 1 declares sessionRef.create=true; turns 2 and 3 declare sessionRef.create=false (reattach existing).
+- All three child Tasks complete Succeeded; the second turn opens a real GitHub PR; the third turn lands a follow-up commit on the same branch without re-cloning.
+- A final hard assertion: the claim name on turn 1 == turn 2 == turn 3. Orka stitched the workspace.
+
+Session:       ${DEMO_SANDBOX_SESSION}
+Template:      ${DEMO_SANDBOX_TEMPLATE_REF}
+
+Beyond this demo, any multi-turn workflow (planner -> builder -> tester, scout -> fix -> verify, parallel reviewers on the same diff) gets dramatically faster and cheaper because the heavy state stays warm across calls."
 }

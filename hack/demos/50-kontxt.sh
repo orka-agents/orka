@@ -37,6 +37,7 @@ denied_job="${DEMO_KONTXT_DENIED_JOB_NAME:-orka-kontxt-caller-denied}"
 render_kontxt_caller_sa            > "${DEMO_WORKDIR}/kontxt-sa.yaml"
 render_kontxt_caller_job           > "${DEMO_WORKDIR}/kontxt-job.yaml"
 render_kontxt_denied_caller_job    > "${DEMO_WORKDIR}/kontxt-denied-job.yaml"
+render_kontxt_story_file           > "${DEMO_WORKDIR}/kontxt-story.txt"
 
 log "Resetting any prior kontxt caller jobs"
 kubectl delete job/"${ok_job}"     -n "${kontxt_ns}" --ignore-not-found >/dev/null 2>&1 || true
@@ -45,11 +46,16 @@ kubectl delete job/"${denied_job}" -n "${kontxt_ns}" --ignore-not-found >/dev/nu
 # ---------------------------------------------------------------------------
 # Narrated walkthrough.
 # ---------------------------------------------------------------------------
-DEMO_CHAPTER_TOTAL=7
+DEMO_CHAPTER_TOTAL=8
 clear
 banner "kontxt — TxTokens in action"
 
 # Chapter 1 ------------------------------------------------------------------
+narrate "Zero-secret zero-trust agent calls: caller's SA token becomes a one-shot, scoped TxToken. Same identity, two outcomes — one allowed, one denied."
+chapter "What this demo is doing" "🧑"
+demo_show "${DEMO_WORKDIR}/kontxt-story.txt"
+
+# Chapter 2 ------------------------------------------------------------------
 narrate "Workload identity (SA token) becomes a request-scoped TxToken via TTS."
 chapter "Apply the caller ServiceAccount" "🪪"
 log_info "TTS URL: ${DEMO_KONTXT_TTS_URL}"

@@ -35,14 +35,19 @@ delete_task_if_exists "${DEMO_MANUAL_TASK_NAME}"
 # ---------------------------------------------------------------------------
 # Narrated walkthrough.
 # ---------------------------------------------------------------------------
-DEMO_CHAPTER_TOTAL=5
+DEMO_CHAPTER_TOTAL=6
 clear
 banner "Manual Workflow"
 
 # Chapter 1 ------------------------------------------------------------------
-narrate "Declarative YAML drives the same coordinator + specialists as chat."
-chapter "Apply the named Agents" "📜"
+narrate "Orka Tasks are Kubernetes CRDs. The same agentic SDLC workflow you saw from chat is here described declaratively — GitOps-shaped, replayable, auditable."
+chapter "What this demo is doing" "🧑"
 log_info "Request preset: ${DEMO_REQUEST_PRESET}"
+demo_show "${DEMO_WORKDIR}/manual-story.txt"
+
+# Chapter 2 ------------------------------------------------------------------
+narrate "The coordinator + specialist Agents are pre-baked — applied up front so the Task can reference them by name."
+chapter "Apply the named Agents" "📜"
 # Pre-clean any prior agents so apply doesn't warn about missing
 # last-applied-configuration annotations (they may have been created via
 # the chat path earlier and are not annotated).
@@ -55,18 +60,17 @@ kubectl delete -n "${DEMO_NAMESPACE}" \
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/pr-agents.yaml"
 demo_pe "kubectl get agents -n ${DEMO_NAMESPACE} ${DEMO_PR_COORDINATOR_NAME} ${DEMO_CODER_AGENT_NAME} ${DEMO_SECURITY_REVIEWER_NAME} ${DEMO_QUALITY_REVIEWER_NAME}"
 
-# Chapter 2 ------------------------------------------------------------------
-narrate "The Task manifest is the source of truth — same prompt as the chat path."
+# Chapter 3 ------------------------------------------------------------------
+narrate "Here's the Task manifest — same prompt the chat demo sent, just as a CR you can commit to git."
 chapter "Inspect the Task manifest" "📄"
-demo_show "${DEMO_WORKDIR}/manual-story.txt"
 demo_show "${DEMO_WORKDIR}/manual-task.yaml"
 
-# Chapter 3 ------------------------------------------------------------------
+# Chapter 4 ------------------------------------------------------------------
 narrate "kubectl apply creates the coordinator Task — Orka reconciles it."
 chapter "Create the coordinator Task" "🚀"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/manual-task.yaml"
 
-# Chapter 4 ------------------------------------------------------------------
+# Chapter 5 ------------------------------------------------------------------
 narrate "Implementation, validation, parallel review, CI — silently, in the background."
 chapter "Coordinator runs to completion" "⏳"
 require_orka_api_reachable
@@ -78,8 +82,8 @@ log_success "coordinator succeeded"
 log_info "Child tasks spawned by the coordinator:"
 demo_pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/parent-task=${DEMO_MANUAL_TASK_NAME}"
 
-# Chapter 5 ------------------------------------------------------------------
-narrate "Same PR. Same agents. Just YAML."
+# Chapter 6 ------------------------------------------------------------------
+narrate "Same PR. Same agents. Just YAML — your existing GitOps stack can now trigger AI workflows."
 chapter "The pull request" "🚢"
 assert_real_pr_result "${DEMO_MANUAL_TASK_NAME}"
 payoff_card_pr        "${DEMO_MANUAL_TASK_NAME}"

@@ -30,6 +30,7 @@ require_orka_api_reachable
 
 render_security_agents_manifest          > "${DEMO_WORKDIR}/security-agents.yaml"
 render_security_repository_scan_manifest > "${DEMO_WORKDIR}/security-repositoryscan.yaml"
+render_security_story_file               > "${DEMO_WORKDIR}/security-story.txt"
 
 log "Applying analysis + remediation agents and the RepositoryScan"
 kubectl apply -f "${DEMO_WORKDIR}/security-agents.yaml"          >/dev/null
@@ -50,11 +51,16 @@ log "Top-ranked finding: ${security_finding_id}"
 # ---------------------------------------------------------------------------
 # Narrated walkthrough.
 # ---------------------------------------------------------------------------
-DEMO_CHAPTER_TOTAL=6
+DEMO_CHAPTER_TOTAL=7
 clear
 banner "Security Scanning"
 
 # Chapter 1 ------------------------------------------------------------------
+narrate "Security findings become first-class Kubernetes objects. One POST turns a finding into a real PR — scan -> finding -> patch -> branch -> PR, all in K8s."
+chapter "What this demo is doing" "🧑"
+demo_show "${DEMO_WORKDIR}/security-story.txt"
+
+# Chapter 2 ------------------------------------------------------------------
 narrate "A RepositoryScan finds real CVEs in a real app — pre-warmed off-camera."
 chapter "Apply the scan + remediation Agents" "🔍"
 log_info "Target: ${DEMO_SECURITY_GIT_REPO} (${DEMO_SECURITY_GIT_BRANCH})"

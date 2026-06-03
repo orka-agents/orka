@@ -92,7 +92,7 @@ clear
 banner "Chat to PR"
 
 # Chapter 1 ------------------------------------------------------------------
-narrate "One chat turn becomes a coordinator, specialists, review, CI, PR."
+narrate "Orka speaks the Anthropic Messages protocol. One chat turn from any Claude-compatible client drives a full agentic SDLC — coordinator, specialists, review, CI, real PR."
 chapter "A maintainer asks for one repo change" "🧑"
 log_info "Connecting to $(demo_anthropic_base_url)"
 log_info "Client: ${DEMO_CLAUDE_BIN} (${DEMO_CHAT_CLIENT})"

@@ -76,6 +76,7 @@ render_sandbox_builder_agent    > "${DEMO_WORKDIR}/sandbox-builder-agent.yaml"
 render_sandbox_turn_task "${t1}" "${scout_agent}"   "${prompts_dir}/sandbox-turn-1-scout.txt"   --create-session > "${DEMO_WORKDIR}/sandbox-turn-1.yaml"
 render_sandbox_turn_task "${t2}" "${builder_agent}" "${prompts_dir}/sandbox-turn-2-builder.txt"                  > "${DEMO_WORKDIR}/sandbox-turn-2.yaml"
 render_sandbox_turn_task "${t3}" "${builder_agent}" "${prompts_dir}/sandbox-turn-3-fixup.txt"                    > "${DEMO_WORKDIR}/sandbox-turn-3.yaml"
+render_sandbox_story_file       > "${DEMO_WORKDIR}/sandbox-story.txt"
 
 log "Resetting any prior sandbox session for ${session}"
 delete_task_if_exists "${t1}"
@@ -95,11 +96,16 @@ kubectl delete sandboxclaim -n "${sandbox_claim_namespace}" "${stale_claim}" \
 # ---------------------------------------------------------------------------
 # Narrated walkthrough.
 # ---------------------------------------------------------------------------
-DEMO_CHAPTER_TOTAL=7
+DEMO_CHAPTER_TOTAL=8
 clear
 banner "Agent Sandbox — session reuse"
 
 # Chapter 1 ------------------------------------------------------------------
+narrate "Multiple agent Tasks reattach ONE workspace via sessionRef — no cold start per turn. Heavy state (git checkout, dep cache, runtime) stays warm across calls."
+chapter "What this demo is doing" "🧑"
+demo_show "${DEMO_WORKDIR}/sandbox-story.txt"
+
+# Chapter 2 ------------------------------------------------------------------
 narrate "Two agents with different toolsets share a workspace across turns."
 chapter "Apply the scout + builder Agents" "🤝"
 log_info "Session: ${session}  ·  Sandbox template: ${DEMO_SANDBOX_TEMPLATE_REF}"
