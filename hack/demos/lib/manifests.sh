@@ -286,26 +286,53 @@ render_cron_story_file() {
   emit_block "" "Scenario:
 Demo 30 — Scheduled Workflow.
 
+THE FEATURE: Orka Tasks can carry a 'schedule:' field. When set, the Task
+acts as a template — Orka's cron controller spawns one child Task per tick,
+just like Kubernetes CronJob, but for AI agents instead of plain containers.
+The same Task primitive that powers demos 10 and 20 just gained recurring
+execution, history retention, and concurrency control.
+
+THIS DEMO:
 An autonomous AI agent runs every cron tick to triage stale pull requests
-on a target repo and emit a paste-ready markdown report. Same Agent + Task
-primitives as demos 10 and 20; the only new field is 'schedule:' on the Task.
+on github.com/sozercan/vekil and emit a paste-ready markdown report. The
+report drops into Slack, your standup, or any maintainer dashboard.
 
 What to watch:
-- One Agent (codex/claude/copilot) declared with a read-only system prompt.
-- One Task carrying the triage prompt AND a 'schedule:' field. The Orka cron
-  controller spawns one child Task per tick, just like a Kubernetes CronJob.
+- One Agent CR — a codex/claude/copilot persona with a read-only system
+  prompt. The same Agent shape as demos 10 and 20; nothing scheduled-specific.
+- One Task CR carrying the triage prompt AND a 'schedule:' field. The parent
+  Task stays in phase=Scheduled forever; each tick instantiates a fresh
+  child Task with its own name, pod, and result.
+- Children are labeled 'orka.ai/parent-task=<parent>' and
+  'orka.ai/scheduled-run=true' so dashboards can list runs per schedule.
+  OwnerReferences ensure deleting the parent cleans up children.
 - Each child fetches open PRs from the GitHub API using GH_TOKEN (sourced
-  from the github-credentials Secret via task spec.env), classifies each
-  PR into a blocker bucket (awaiting-review / ci-broken / merge-conflict /
+  from a Kubernetes Secret via task spec.env), classifies each PR into a
+  blocker bucket (awaiting-review / ci-broken / merge-conflict /
   author-needs-respond / discussion-stalled / dependabot), and writes a
   markdown report into the Task result API.
-- The result API is the same one your interactive demos write to — so any
+- The result API is the SAME one your interactive demos write to — so any
   dashboard, Slack bot, or CLI that already reads task results gets the
   triage queue for free.
 
+Why not a plain Kubernetes CronJob?
+- A CronJob runs a container on a schedule; this runs an AI agent on a
+  schedule. The agent gets runtime credentials, an LLM, tools, and a
+  structured result API — none of which a vanilla CronJob ships with.
+- 'concurrencyPolicy: Forbid' prevents two LLM workflows from stacking when
+  a tick fires before the previous one finishes — same flag, but here it
+  guards against running 10 minutes of expensive reasoning twice in parallel.
+- Result API instead of just pod logs: each tick writes structured JSON
+  (the markdown shown in chapter 4 is one field) consumable by other systems.
+
 Schedule:        ${DEMO_CRON_SCHEDULE}  (demo speed; production: */30 * * * * or 0 */4 * * *)
 Target repo:     ${DEMO_GIT_REPO}
-Triage criteria: open PRs idle more than 3 days"
+Triage criteria: open PRs idle more than 3 days
+
+Beyond this demo, the same pattern fits any LLM-shaped recurring workload:
+weekly engineering digests, CVE-watch reports, release notes drafts, issue
+triage, on-call handoff summaries — anything you'd reach for a CronJob for,
+plus reasoning."
 }
 
 render_cron_agent_manifest() {
