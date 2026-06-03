@@ -103,15 +103,8 @@ demo_pe "kubectl logs -n ${kontxt_ns} job/${denied_job} --tail=20 | grep -E '^[0
 # Chapter 8 ------------------------------------------------------------------
 narrate "Same SA identity, two outcomes — decided per request by the TxToken's scope. The audit trail keeps only safe digests; no JWT material ever lands in Task status or logs. Zero-trust by construction."
 chapter "Transaction summary" "🔐"
-demo_event "📜" "Payoff card pulls the safe orka.ai/transaction-id annotation — auditors correlate against TTS logs without seeing the JWT."
-# Pull the first allowed Job's controller-tracked Task (if Orka recorded one)
-# from the safe orka.ai/transaction-id annotation. The card never reads the
-# raw TxToken — only the annotation digest the controller writes.
-ok_task=""
-ok_task="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
-  -l "orka.ai/source=kontxt-caller" \
-  -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)"
-payoff_card_kontxt "${ok_task}" "${denied_job}"
+demo_event "📜" "Payoff card pulls the parsed status + target ns from each caller's log — same SA, same TTS, only scope differed."
+payoff_card_kontxt "${ok_job}" "${denied_job}" "${kontxt_ns}"
 
 if demo_profile_is presenter; then
   printf '\n%bAudit JSON (Jobs)%b\n' "${DIM}" "${COLOR_RESET}"

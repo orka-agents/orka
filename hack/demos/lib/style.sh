@@ -627,45 +627,72 @@ payoff_card_cron() {
 }
 
 # ---------------------------------------------------------------------------
-# payoff_card_kontxt <ok-task> <denied-job>
+# payoff_card_kontxt <allowed-job> <denied-job> [<job-namespace>]
 #
-# Renders the kontxt "one identity, two outcomes" card.
-# Reads the safe orka.ai/transaction-id annotation digest only — NEVER the
-# raw Txn-Token. The denied side just reports the Job's failed status.
+# Renders the kontxt "same identity, two outcomes" card. The two caller
+# Jobs are vanilla Kubernetes Jobs (not Orka Tasks); the meaningful
+# per-run facts live in their pod logs as the line emitted by
+# images/kontxt-caller/caller.sh:
+#     3/3 orka api call: ok|denied|error status=NNN namespace=NS
+# We pull that one line per Job, parse out status + target namespace,
+# and show them side-by-side so the viewer can read down the rows and
+# see that everything matched except `target ns` and `result`.
+#
+# SECURITY: caller.sh already redacts JWT-ish strings before printing,
+# and this card only reads the post-redaction status/namespace fields
+# from `kubectl logs`. No raw TxToken material is read or displayed.
 # ---------------------------------------------------------------------------
 payoff_card_kontxt() {
-  local ok_task="${1:-}"
+  local allowed_job="${1:-}"
   local denied_job="${2:-}"
-  local ok_ns="${DEMO_NAMESPACE:-demo-magic}"
-  local job_ns="${DEMO_KONTXT_NAMESPACE:-${ORKA_TOKEN_NAMESPACE:-default}}"
+  local job_ns="${3:-${DEMO_KONTXT_NAMESPACE:-${ORKA_TOKEN_NAMESPACE:-default}}}"
 
-  local ok_txn="-"
-  local ok_phase="-"
-  if [[ -n "${ok_task}" ]] && command -v kubectl >/dev/null 2>&1; then
-    ok_phase="$(kubectl get task "${ok_task}" -n "${ok_ns}" \
-                 -o jsonpath='{.status.phase}' 2>/dev/null || printf 'Unknown')"
-    ok_txn="$(kubectl get task "${ok_task}" -n "${ok_ns}" \
-               -o jsonpath='{.metadata.annotations.orka\.ai/transaction-id}' \
-               2>/dev/null || printf '')"
-    [[ -z "${ok_txn}"  ]] && ok_txn="(no transaction-id annotation)"
-    [[ -z "${ok_phase}" ]] && ok_phase="Unknown"
-  fi
+  # __kontxt_job_outcome <job> <var-status> <var-ns>
+  # Sets <var-status> to the HTTP code (or "-") and <var-ns> to the
+  # target namespace (or "-") parsed from the caller's 3/3 log line.
+  __kontxt_job_outcome() {
+    local job="$1"
+    local __status_var="$2"
+    local __ns_var="$3"
+    local line=""
+    if [[ -n "${job}" ]] && command -v kubectl >/dev/null 2>&1; then
+      line="$(kubectl logs -n "${job_ns}" "job/${job}" --tail=20 2>/dev/null \
+              | grep -E '^3/3 orka api call:' \
+              | tail -n 1 || true)"
+    fi
+    local s="-" n="-"
+    if [[ -n "${line}" ]]; then
+      s="$(printf '%s' "${line}" | sed -nE 's/.*status=([0-9]+).*/\1/p')"
+      n="$(printf '%s' "${line}" | sed -nE 's/.*namespace=([^ ]+).*/\1/p')"
+      [[ -z "${s}" ]] && s="-"
+      [[ -z "${n}" ]] && n="-"
+    fi
+    printf -v "${__status_var}" '%s' "${s}"
+    printf -v "${__ns_var}"     '%s' "${n}"
+  }
 
-  local denied_status="-"
-  if [[ -n "${denied_job}" ]] && command -v kubectl >/dev/null 2>&1; then
-    denied_status="$(kubectl get job "${denied_job}" -n "${job_ns}" \
-                      -o jsonpath='{.status.conditions[?(@.type=="Failed")].reason}' \
-                      2>/dev/null || printf 'Unknown')"
-    [[ -z "${denied_status}" ]] && denied_status="BackoffLimitExceeded"
-  fi
+  local ok_status ok_ns_target denied_status denied_ns_target
+  __kontxt_job_outcome "${allowed_job}" ok_status     ok_ns_target
+  __kontxt_job_outcome "${denied_job}"  denied_status denied_ns_target
 
-  __card_top "One identity, two outcomes"
-  __card_kv "ok task"   "${ok_task:-(none)}"
-  __card_kv "ok phase"  "${ok_phase}"
-  __card_kv "ok txn"    "${ok_txn}"
+  local ok_result="-"
+  [[ "${ok_status}" != "-" ]] && ok_result="HTTP ${ok_status}"
+  local denied_result="-"
+  [[ "${denied_status}" != "-" ]] && denied_result="HTTP ${denied_status}"
+
+  __card_top "Same identity, two outcomes"
   __card_blank
-  __card_kv "denied"    "${denied_job:-(none)}"
-  __card_kv "denied"    "${denied_status}"
+  __card_line "ALLOWED"
+  __card_line "  job         ${allowed_job:-(none)}"
+  __card_line "  target ns   ${ok_ns_target}"
+  __card_line "  result      ${ok_result}"
+  __card_blank
+  __card_line "DENIED"
+  __card_line "  job         ${denied_job:-(none)}"
+  __card_line "  target ns   ${denied_ns_target}"
+  __card_line "  result      ${denied_result}"
+  __card_blank
+  __card_line "Same SA, same TTS exchange - only scope differed."
   __card_bottom
 }
 
