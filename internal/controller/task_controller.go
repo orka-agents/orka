@@ -901,7 +901,12 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			log.Info("retrying task", "attempt", task.Status.Attempts)
 			return r.retryTask(ctx, task)
 		}
-		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "job failed")
+		// Inspect terminated containers for a specific cause (OOMKilled, non-zero
+		// exit code, etc.) so the coordinator that delegated this Task can read
+		// fetch_task_output and adapt — e.g. recreate the Agent with more memory.
+		// Falls back to the generic "job failed" if no signal is available.
+		msg := r.diagnoseFailedJob(ctx, task)
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
 	}
 
 	// Check for pods stuck in Pending/ContainerCreating with unrecoverable errors
@@ -1076,6 +1081,93 @@ func jobFailedDueToActiveDeadline(job *batchv1.Job) bool {
 	}
 
 	return false
+}
+
+// diagnoseFailedJob inspects pods belonging to a failed Task's Job and returns a
+// Status.Message that is specific enough for a coordinator LLM to act on.
+//
+// Priority of signals:
+//  1. Any container terminated with reason=OOMKilled → "job failed: container
+//     OOMKilled (memory limit <X> exceeded). Recreate the agent with higher
+//     resources.limits.memory or set spec.resources on the task."
+//  2. Any container terminated with a non-zero exit code → "job failed:
+//     container exited with code <N> (reason=<R>)".
+//  3. No signal available → the generic "job failed".
+//
+// Pod listing failures are non-fatal — we fall back to the generic message
+// rather than block task completion.
+func (r *TaskReconciler) diagnoseFailedJob(ctx context.Context, task *corev1alpha1.Task) string {
+	log := logf.FromContext(ctx)
+	var podList corev1.PodList
+	if err := r.List(ctx, &podList, client.InNamespace(task.Namespace),
+		client.MatchingLabels{labels.LabelTask: labels.SelectorValue(task.Name)}); err != nil {
+		log.V(1).Info("diagnoseFailedJob: pod list failed, using generic message", "error", err.Error())
+		return "job failed"
+	}
+
+	var (
+		oomMsg     string
+		exitMsg    string
+		exitReason string
+	)
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		// Worker pods only have one container; iterate defensively anyway.
+		for _, cs := range pod.Status.ContainerStatuses {
+			term := cs.State.Terminated
+			if term == nil {
+				// Also check LastTerminationState — pods that crashed and restarted
+				// expose the relevant terminated state there.
+				term = cs.LastTerminationState.Terminated
+			}
+			if term == nil {
+				continue
+			}
+			if term.Reason == "OOMKilled" || term.ExitCode == 137 {
+				limit := podContainerMemoryLimit(pod, cs.Name)
+				if limit == "" {
+					limit = "unknown"
+				}
+				oomMsg = fmt.Sprintf("job failed: container OOMKilled (memory limit %s exceeded). Recreate the agent with higher resources.limits.memory or set spec.resources on the task.", limit)
+				continue
+			}
+			if term.ExitCode != 0 && exitMsg == "" {
+				reason := term.Reason
+				if reason == "" {
+					reason = "Error"
+				}
+				exitMsg = fmt.Sprintf("job failed: container exited with code %d (reason=%s)", term.ExitCode, reason)
+				exitReason = reason
+			}
+		}
+	}
+
+	if oomMsg != "" {
+		return oomMsg
+	}
+	if exitMsg != "" {
+		// Suppress noisy default exit reasons that add nothing.
+		_ = exitReason
+		return exitMsg
+	}
+	return "job failed"
+}
+
+// podContainerMemoryLimit returns the memory limit configured on the named
+// container as a string ("2Gi"), or "" if not set.
+func podContainerMemoryLimit(pod *corev1.Pod, containerName string) string {
+	if pod == nil {
+		return ""
+	}
+	for _, c := range pod.Spec.Containers {
+		if c.Name != containerName {
+			continue
+		}
+		if q, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
+			return q.String()
+		}
+	}
+	return ""
 }
 
 func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1alpha1.Task) bool {
