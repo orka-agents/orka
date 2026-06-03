@@ -97,7 +97,7 @@ chapter "A maintainer asks for one repo change" "🧑"
 log_info "Connecting to $(demo_anthropic_base_url)"
 log_info "Client: ${DEMO_CLAUDE_BIN} (${DEMO_CHAT_CLIENT})"
 log_info "Request preset: ${DEMO_REQUEST_PRESET}"
-demo_show "${DEMO_WORKDIR}/chat-story.txt"
+demo_show_full "${DEMO_WORKDIR}/chat-story.txt"
 
 # Chapter 2 ------------------------------------------------------------------
 narrate "Discover available models, pick an Opus, then send the request as Claude."

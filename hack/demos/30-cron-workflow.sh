@@ -58,7 +58,7 @@ banner "Scheduled Workflow"
 # Chapter 1 ------------------------------------------------------------------
 narrate "Add a 'schedule:' field to a Task and Orka turns an AI agent into a recurring K8s job — stale-PR triage, every tick."
 chapter "What this demo is doing" "🧑"
-demo_show "${DEMO_WORKDIR}/cron-story.txt"
+demo_show_full "${DEMO_WORKDIR}/cron-story.txt"
 
 # Chapter 2 ------------------------------------------------------------------
 narrate "Same Agent + Task primitive as demos 10 and 20. Adding 'schedule:' turns it from one-shot into recurring — Orka handles the cron mechanics."

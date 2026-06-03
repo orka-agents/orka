@@ -123,6 +123,18 @@ demo_show() {
   esac
 }
 
+# demo_show_full renders the WHOLE file regardless of recording profile.
+# Use this for story files / scenario explanations where the content IS the
+# teaching, not for yaml/code where head + truncation is appropriate.
+demo_show_full() {
+  local path="$1"
+  if [[ ! -f "${path}" ]]; then
+    printf '%b[file not found: %s]%b\n' "${YELLOW}" "${path}" "${COLOR_RESET}"
+    return 0
+  fi
+  cat "${path}"
+}
+
 # ---------------------------------------------------------------------------
 # Banner — `╔══╗ ║ 🤖 Orka — <title> ║ ╚══╝` (68 cols wide, cyan border).
 # Call once per script, after `clear`. Idempotent within a single shell

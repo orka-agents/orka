@@ -58,7 +58,7 @@ banner "Security Scanning"
 # Chapter 1 ------------------------------------------------------------------
 narrate "Security findings become first-class Kubernetes objects. One POST turns a finding into a real PR — scan -> finding -> patch -> branch -> PR, all in K8s."
 chapter "What this demo is doing" "🧑"
-demo_show "${DEMO_WORKDIR}/security-story.txt"
+demo_show_full "${DEMO_WORKDIR}/security-story.txt"
 
 # Chapter 2 ------------------------------------------------------------------
 narrate "A RepositoryScan finds real CVEs in a real app — pre-warmed off-camera."

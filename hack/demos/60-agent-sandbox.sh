@@ -103,7 +103,7 @@ banner "Agent Sandbox — session reuse"
 # Chapter 1 ------------------------------------------------------------------
 narrate "Multiple agent Tasks reattach ONE workspace via sessionRef — no cold start per turn. Heavy state (git checkout, dep cache, runtime) stays warm across calls."
 chapter "What this demo is doing" "🧑"
-demo_show "${DEMO_WORKDIR}/sandbox-story.txt"
+demo_show_full "${DEMO_WORKDIR}/sandbox-story.txt"
 
 # Chapter 2 ------------------------------------------------------------------
 narrate "Two agents with different toolsets share a workspace across turns."

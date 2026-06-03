@@ -53,7 +53,7 @@ banner "kontxt — TxTokens in action"
 # Chapter 1 ------------------------------------------------------------------
 narrate "Zero-secret zero-trust agent calls: caller's SA token becomes a one-shot, scoped TxToken. Same identity, two outcomes — one allowed, one denied."
 chapter "What this demo is doing" "🧑"
-demo_show "${DEMO_WORKDIR}/kontxt-story.txt"
+demo_show_full "${DEMO_WORKDIR}/kontxt-story.txt"
 
 # Chapter 2 ------------------------------------------------------------------
 narrate "Workload identity (SA token) becomes a request-scoped TxToken via TTS."

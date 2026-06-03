@@ -43,7 +43,7 @@ banner "Manual Workflow"
 narrate "Orka Tasks are Kubernetes CRDs. The same agentic SDLC workflow you saw from chat is here described declaratively — GitOps-shaped, replayable, auditable."
 chapter "What this demo is doing" "🧑"
 log_info "Request preset: ${DEMO_REQUEST_PRESET}"
-demo_show "${DEMO_WORKDIR}/manual-story.txt"
+demo_show_full "${DEMO_WORKDIR}/manual-story.txt"
 
 # Chapter 2 ------------------------------------------------------------------
 narrate "The coordinator + specialist Agents are pre-baked — applied up front so the Task can reference them by name."
