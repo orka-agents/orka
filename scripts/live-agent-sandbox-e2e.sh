@@ -806,7 +806,7 @@ sandbox_pod_name() {
 verify_delete_cleanup() {
   local logs="$1"
   local claim
-  claim="$(printf '%s\n' "${logs}" | sed -n 's/.*completed in sandbox workspace \([^[:space:]]*\).*/\1/p' | tail -n 1)"
+  claim="$(printf '%s\n' "${logs}" | sed -nE 's/.*completed in (agent-sandbox|sandbox) workspace ([^[:space:]]*).*/\2/p' | tail -n 1)"
   [[ -n "${claim}" ]] || die "could not find claimed sandbox workspace in delete task logs"
 
   log "Verifying delete cleanup removed SandboxClaim/${claim}"
@@ -915,7 +915,7 @@ main() {
   assert_result_contains "${delete_result}" "enabled=false"
   assert_result_contains "${delete_result}" "retained_marker=absent"
   delete_logs="$(task_logs "${delete_task_name}")"
-  assert_result_contains "${delete_logs}" "completed in sandbox workspace"
+  assert_result_contains "${delete_logs}" "completed in agent-sandbox workspace"
   verify_delete_cleanup "${delete_logs}"
 
   log "Running retained session sandbox task"

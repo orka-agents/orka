@@ -275,6 +275,7 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 // the historical Build signature stable.
 type JobBuildOptions struct {
 	AgentSandboxWorkspace *AgentSandboxWorkspaceRequest
+	ExecutionWorkspace    *ExecutionWorkspaceRequest
 }
 
 // Build creates a Job for the given Task.
@@ -598,7 +599,11 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
 		envVars = b.addAgentEnvVars(ctx, envVars, task, agent)
 		envVars = b.addCodexSandboxEnvVars(envVars, agent)
-		envVars = b.addAgentSandboxWorkspaceEnvVars(envVars, opts.AgentSandboxWorkspace)
+		workspaceRequest := opts.ExecutionWorkspace
+		if workspaceRequest == nil {
+			workspaceRequest = opts.AgentSandboxWorkspace
+		}
+		envVars = b.addExecutionWorkspaceEnvVars(envVars, task, workspaceRequest)
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
@@ -608,12 +613,54 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	return envVars
 }
 
-// addAgentSandboxWorkspaceEnvVars injects resolved sandbox workspace settings for agent tasks.
-func (b *JobBuilder) addAgentSandboxWorkspaceEnvVars(envVars []corev1.EnvVar, request *AgentSandboxWorkspaceRequest) []corev1.EnvVar {
+// addExecutionWorkspaceEnvVars injects resolved execution workspace settings for agent tasks.
+func (b *JobBuilder) addExecutionWorkspaceEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, request *ExecutionWorkspaceRequest) []corev1.EnvVar {
 	if request == nil {
 		return envVars
 	}
 
+	envVars = append(envVars, workerenv.ExecutionWorkspaceEnv{
+		Enabled:           true,
+		Provider:          string(request.Provider),
+		TemplateName:      request.TemplateName,
+		TemplateNamespace: request.TemplateNamespace,
+		ClaimNamespace:    request.ClaimNamespace,
+		ClaimName:         request.ClaimName,
+		ReusePolicy:       string(request.ReusePolicy),
+		ReuseKey:          request.ReuseKey,
+		CleanupPolicy:     string(request.CleanupPolicy),
+		ClaimTimeout:      request.ClaimTimeout,
+		CommandTimeout:    request.CommandTimeout,
+		StatusEndpoint:    fmt.Sprintf("%s/internal/v1/tasks/%s/%s/execution-workspace/status", b.ControllerURL, task.Namespace, task.Name),
+		Depth:             0,
+	}.EnvVars()...)
+
+	if request.Provider == corev1alpha1.WorkspaceProviderSubstrate {
+		envVars = append(envVars, workerenv.SubstrateEnv{
+			APIEndpoint:           request.SubstrateAPIEndpoint,
+			APICAFile:             request.SubstrateAPICAFile,
+			APIInsecureSkipVerify: request.SubstrateAPIInsecureSkipVerify,
+			RouterURL:             request.SubstrateRouterURL,
+			ActorDNSSuffix:        request.SubstrateActorDNSSuffix,
+		}.EnvVars()...)
+		if strings.TrimSpace(request.SubstrateBootstrapSecretName) != "" {
+			envVars = append(envVars, corev1.EnvVar{
+				Name: workerenv.WorkspaceBootstrapToken,
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: request.SubstrateBootstrapSecretName,
+						},
+						Key: request.SubstrateBootstrapSecretKey,
+					},
+				},
+			})
+		}
+		return envVars
+	}
+
+	// Render the legacy agent-sandbox env during the migration so existing
+	// worker images and tests continue to work unchanged.
 	return append(envVars, workerenv.AgentSandboxEnv{
 		Enabled:           true,
 		RouterURL:         request.RouterURL,

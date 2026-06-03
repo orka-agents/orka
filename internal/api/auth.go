@@ -81,6 +81,7 @@ type UserInfo struct {
 	Username  string
 	UID       string
 	Groups    []string
+	Extra     map[string]authenticationv1.ExtraValue
 	Namespace string // Extracted from ServiceAccount username (system:serviceaccount:<ns>:<name>)
 
 	AuthType     string
@@ -268,6 +269,7 @@ func validateToken(ctx context.Context, c client.Client, token string) (*UserInf
 		Username:  review.Status.User.Username,
 		UID:       review.Status.User.UID,
 		Groups:    review.Status.User.Groups,
+		Extra:     review.Status.User.Extra,
 		Namespace: parseServiceAccountNamespace(review.Status.User.Username),
 		AuthType:  AuthTypeTokenReview,
 	}

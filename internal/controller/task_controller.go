@@ -88,8 +88,11 @@ type TaskReconciler struct {
 	ArtifactStore                      store.ArtifactStore
 	EnforceNamespaceIsolation          bool
 	MaxTasksPerNamespace               int32
+	ExecutionWorkspaceDefaultProvider  corev1alpha1.WorkspaceProvider
 	AgentSandboxEnabled                bool
 	AgentSandboxConfig                 AgentSandboxConfig
+	SubstrateEnabled                   bool
+	SubstrateConfig                    SubstrateConfig
 	AIWorkerClusterRoleName            string
 	VendorWorkerClusterRoleName        string
 	ContainerWorkerClusterRoleName     string
@@ -127,6 +130,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list
+// +kubebuilder:rbac:groups=ate.dev,resources=actortemplates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch
@@ -410,6 +414,10 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 
 	if err := r.validateExecutionWorkspace(task); err != nil {
 		log.Error(err, "execution workspace validation failed")
+		if statusErr := r.markExecutionWorkspaceValidationFailed(ctx, task, err); statusErr != nil {
+			log.Error(statusErr, "failed to update execution workspace validation status")
+			return ctrl.Result{}, statusErr
+		}
 		return r.failTask(ctx, task, err.Error())
 	}
 
@@ -710,12 +718,16 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, task)
 	if err != nil {
 		log.Error(err, "failed to resolve execution workspace")
+		if statusErr := r.markExecutionWorkspaceValidationFailed(ctx, task, err); statusErr != nil {
+			log.Error(statusErr, "failed to update execution workspace validation status")
+			return ctrl.Result{}, statusErr
+		}
 		return r.failTask(ctx, task, fmt.Sprintf("failed to resolve execution workspace: %v", err))
 	}
 
 	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{
-		AgentSandboxWorkspace: workspaceRequest,
+		ExecutionWorkspace: workspaceRequest,
 	})
 	if err != nil {
 		log.Error(err, "failed to build Job")
@@ -1444,22 +1456,39 @@ func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) err
 	}
 
 	ws := task.Spec.Execution.Workspace
-	cfg := r.AgentSandboxConfig.WithDefaults()
+	provider := resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
 
-	if !r.AgentSandboxEnabled {
-		return fmt.Errorf("execution workspace requires agent sandbox to be enabled")
+	if !supportedWorkspaceProvider(provider) {
+		return fmt.Errorf("unsupported execution workspace provider %q", provider)
 	}
 
 	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		return fmt.Errorf("execution workspace is only supported for type: agent tasks")
 	}
 
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
-
-	if executionWorkspaceTemplateName(ws, cfg) == "" {
-		return fmt.Errorf("execution workspace templateRef.name is required when no agent sandbox default template is configured")
+	switch provider {
+	case corev1alpha1.WorkspaceProviderAgentSandbox:
+		if !r.AgentSandboxEnabled {
+			return fmt.Errorf("execution workspace provider %q requires agent sandbox to be enabled", provider)
+		}
+		cfg := r.AgentSandboxConfig.WithDefaults()
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		if executionWorkspaceTemplateName(ws, cfg) == "" {
+			return fmt.Errorf("execution workspace templateRef.name is required when no agent sandbox default template is configured")
+		}
+	case corev1alpha1.WorkspaceProviderSubstrate:
+		if !r.SubstrateEnabled {
+			return fmt.Errorf("execution workspace provider %q requires substrate to be enabled", provider)
+		}
+		cfg := r.SubstrateConfig.WithDefaults()
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		if substrateTemplateName(ws, cfg) == "" {
+			return fmt.Errorf("execution workspace templateRef.name is required when no substrate default template is configured")
+		}
 	}
 
 	switch ws.ReusePolicy {
@@ -1479,6 +1508,106 @@ func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) err
 	}
 
 	return nil
+}
+
+func (r *TaskReconciler) markExecutionWorkspaceValidationFailed(ctx context.Context, task *corev1alpha1.Task, validationErr error) error {
+	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil || !task.Spec.Execution.Workspace.Enabled {
+		return nil
+	}
+
+	now := metav1.Now()
+	message := ""
+	if validationErr != nil {
+		message = strings.TrimSpace(validationErr.Error())
+	}
+	status := &corev1alpha1.ExecutionWorkspaceStatus{
+		Phase:          corev1alpha1.ExecutionWorkspacePhaseFailed,
+		Reason:         corev1alpha1.ExecutionWorkspaceReasonValidationFailed,
+		Message:        message,
+		LastUpdateTime: &now,
+	}
+	ws := task.Spec.Execution.Workspace
+	provider := resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
+	if supportedWorkspaceProvider(provider) {
+		status.Provider = provider
+		status.TemplateRef = r.executionWorkspaceStatusTemplateRef(task, provider)
+	}
+	if reusePolicy, ok := executionWorkspaceStatusReusePolicy(ws); ok {
+		status.ReusePolicy = reusePolicy
+	}
+	if cleanupPolicy, ok := r.executionWorkspaceStatusCleanupPolicy(ws, provider); ok {
+		status.CleanupPolicy = cleanupPolicy
+	}
+
+	return r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		t.Status.ExecutionWorkspace = status
+	})
+}
+
+func (r *TaskReconciler) executionWorkspaceStatusTemplateRef(task *corev1alpha1.Task, provider corev1alpha1.WorkspaceProvider) *corev1alpha1.WorkspaceTemplateReference {
+	ws := task.Spec.Execution.Workspace
+	var name string
+	var namespace string
+	switch provider {
+	case corev1alpha1.WorkspaceProviderAgentSandbox:
+		cfg := r.AgentSandboxConfig.WithDefaults()
+		name = executionWorkspaceTemplateName(ws, cfg)
+		namespace = executionWorkspaceTemplateNamespace(ws, task.Namespace, cfg)
+	case corev1alpha1.WorkspaceProviderSubstrate:
+		cfg := r.SubstrateConfig.WithDefaults()
+		name = substrateTemplateName(ws, cfg)
+		namespace = substrateTemplateNamespace(ws, task.Namespace, cfg)
+	default:
+		return nil
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	return &corev1alpha1.WorkspaceTemplateReference{
+		Name:      name,
+		Namespace: strings.TrimSpace(namespace),
+	}
+}
+
+func executionWorkspaceStatusReusePolicy(ws *corev1alpha1.ExecutionWorkspaceSpec) (corev1alpha1.WorkspaceReusePolicy, bool) {
+	if ws == nil || ws.ReusePolicy == "" {
+		return corev1alpha1.WorkspaceReusePolicyNone, true
+	}
+	switch ws.ReusePolicy {
+	case corev1alpha1.WorkspaceReusePolicyNone, corev1alpha1.WorkspaceReusePolicySession:
+		return ws.ReusePolicy, true
+	default:
+		return "", false
+	}
+}
+
+func (r *TaskReconciler) executionWorkspaceStatusCleanupPolicy(ws *corev1alpha1.ExecutionWorkspaceSpec, provider corev1alpha1.WorkspaceProvider) (corev1alpha1.WorkspaceCleanupPolicy, bool) {
+	if ws != nil && ws.CleanupPolicy != "" {
+		switch ws.CleanupPolicy {
+		case corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
+			return ws.CleanupPolicy, true
+		default:
+			return "", false
+		}
+	}
+	switch provider {
+	case corev1alpha1.WorkspaceProviderAgentSandbox:
+		return executionWorkspaceStatusValidCleanupPolicy(r.AgentSandboxConfig.WithDefaults().CleanupPolicy)
+	case corev1alpha1.WorkspaceProviderSubstrate:
+		return executionWorkspaceStatusValidCleanupPolicy(r.SubstrateConfig.WithDefaults().CleanupPolicy)
+	default:
+		return corev1alpha1.WorkspaceCleanupPolicyDelete, true
+	}
+}
+
+func executionWorkspaceStatusValidCleanupPolicy(cleanupPolicy corev1alpha1.WorkspaceCleanupPolicy) (corev1alpha1.WorkspaceCleanupPolicy, bool) {
+	switch cleanupPolicy {
+	case corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
+		return cleanupPolicy, true
+	default:
+		return "", false
+	}
 }
 
 // validateTaskAgentCompatibility validates that the task type and agent configuration are compatible.

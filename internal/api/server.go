@@ -297,6 +297,7 @@ func (s *Server) setupRoutes() {
 			s.MessageStore,
 			s.ArtifactStore,
 			InternalHandlersConfig{
+				Client:              s.client,
 				MemoryStore:         s.MemoryStore,
 				MemoryProposalStore: s.MemoryProposalStore,
 			},
@@ -304,6 +305,7 @@ func (s *Server) setupRoutes() {
 		internal := s.app.Group("/internal/v1")
 		internal.Use(NewAuthMiddleware(s.client))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
+		internal.Post("/tasks/:namespace/:taskName/execution-workspace/status", s.internalHandlers.UpdateExecutionWorkspaceStatus)
 		internal.Get("/sessions/:namespace/search", s.internalHandlers.SearchTranscript)
 		internal.Get("/sessions/:namespace/:name/transcript", s.internalHandlers.GetSessionTranscript)
 		internal.Post("/plans/:namespace/:taskName", s.internalHandlers.SubmitPlan)

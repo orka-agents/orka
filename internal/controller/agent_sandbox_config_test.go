@@ -13,13 +13,20 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/workerenv"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-const testSandboxTemplatesNamespace = "sandbox-templates"
+const (
+	testSandboxTemplatesNamespace    = "sandbox-templates"
+	testSubstrateBootstrapSecretName = "orka-substrate-bootstrap"
+	testSubstrateBootstrapSecretKey  = "bootstrap-token"
+)
 
 func TestDefaultAgentSandboxConfig(t *testing.T) {
 	cfg := DefaultAgentSandboxConfig()
@@ -103,6 +110,337 @@ func TestAgentSandboxConfigFromEnv_InvalidDuration(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), EnvAgentSandboxClaimTimeout) {
 		t.Fatalf("error = %q, want env var name", err.Error())
+	}
+}
+
+func TestSubstrateConfigFromEnv(t *testing.T) {
+	env := map[string]string{
+		EnvSubstrateAPIEndpoint:           "api.ate-system.svc:443",
+		EnvSubstrateAPICAFile:             "/var/run/orka/substrate/ca.crt",
+		EnvSubstrateAPIInsecureSkipVerify: "true",
+		EnvSubstrateRouterURL:             "http://atenet-router.ate-system.svc",
+		EnvSubstrateActorDNSSuffix:        "actors.resources.substrate.ate.dev",
+		EnvSubstrateDefaultTemplate:       "orka-codex",
+		EnvSubstrateDefaultTemplateNS:     "ate-demo",
+		EnvSubstrateBootstrapSecretName:   testSubstrateBootstrapSecretName,
+		EnvSubstrateBootstrapSecretKey:    testSubstrateBootstrapSecretKey,
+		EnvSubstrateClaimTimeout:          "45s",
+		EnvSubstrateCommandTimeout:        "10m",
+		EnvSubstrateCleanupPolicy:         string(corev1alpha1.WorkspaceCleanupPolicyRetain),
+	}
+
+	cfg, err := SubstrateConfigFromEnv(func(key string) string { return env[key] })
+	if err != nil {
+		t.Fatalf("SubstrateConfigFromEnv() error = %v", err)
+	}
+	if cfg.APIEndpoint != env[EnvSubstrateAPIEndpoint] || cfg.RouterURL != env[EnvSubstrateRouterURL] {
+		t.Fatalf("unexpected substrate endpoints: %#v", cfg)
+	}
+	if !cfg.APIInsecureSkipVerify {
+		t.Fatal("APIInsecureSkipVerify = false, want true")
+	}
+	if cfg.DefaultTemplate != "orka-codex" || cfg.DefaultTemplateNS != "ate-demo" {
+		t.Fatalf("unexpected substrate defaults: %#v", cfg)
+	}
+	if cfg.BootstrapSecretName != testSubstrateBootstrapSecretName ||
+		cfg.BootstrapSecretKey != testSubstrateBootstrapSecretKey {
+		t.Fatalf("unexpected substrate bootstrap secret: %#v", cfg)
+	}
+	if cfg.ClaimTimeout != 45*time.Second || cfg.CommandTimeout != 10*time.Minute {
+		t.Fatalf("unexpected substrate timeouts: %#v", cfg)
+	}
+	if cfg.CleanupPolicy != corev1alpha1.WorkspaceCleanupPolicyRetain {
+		t.Fatalf("CleanupPolicy = %q, want retain", cfg.CleanupPolicy)
+	}
+}
+
+func TestSubstrateConfigValidateRequiresExplicitTrust(t *testing.T) {
+	cfg := DefaultSubstrateConfig()
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected missing API trust error")
+	}
+	if !strings.Contains(err.Error(), "substrate API trust") {
+		t.Fatalf("Validate() error = %q, want API trust context", err.Error())
+	}
+
+	cfg.APICAFile = "/var/run/orka/substrate/ca.crt"
+	err = cfg.Validate()
+	if err == nil {
+		t.Fatal("expected missing bootstrap secret error")
+	}
+	if !strings.Contains(err.Error(), "bootstrap token secret name") {
+		t.Fatalf("Validate() error = %q, want bootstrap secret context", err.Error())
+	}
+
+	cfg.BootstrapSecretName = testSubstrateBootstrapSecretName
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with CA file and bootstrap secret error = %v", err)
+	}
+
+	cfg.APICAFile = ""
+	cfg.APIInsecureSkipVerify = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with insecure skip verify error = %v", err)
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateRequiresAppStagingRoot(t *testing.T) {
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   "ate.dev",
+		Version: "v1alpha1",
+		Kind:    "ActorTemplate",
+	}, &unstructured.Unstructured{})
+
+	template := &unstructured.Unstructured{}
+	template.SetAPIVersion("ate.dev/v1alpha1")
+	template.SetKind("ActorTemplate")
+	template.SetName("orka-codex")
+	template.SetNamespace("ate-demo")
+	template.SetLabels(map[string]string{
+		"orka.ai/execution-workspace": "true",
+		"orka.ai/workspace-provider":  "substrate",
+	})
+	template.SetAnnotations(map[string]string{
+		"orka.ai/workspace-protocol":     "http-json-v1",
+		"orka.ai/workspace-daemon-port":  "8080",
+		"orka.ai/workspace-staging-root": "/workspace",
+	})
+
+	r := &TaskReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build(),
+	}
+	err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, &ExecutionWorkspaceRequest{
+		TemplateName:      "orka-codex",
+		TemplateNamespace: "ate-demo",
+	})
+	if err == nil {
+		t.Fatal("validateSubstrateWorkspaceTemplate() error = nil, want unsupported staging root error")
+	}
+	if !strings.Contains(err.Error(), "orka.ai/workspace-staging-root=/app") {
+		t.Fatalf("error = %q, want /app staging root requirement", err.Error())
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateRequiresReadyPhase(t *testing.T) {
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   "ate.dev",
+		Version: "v1alpha1",
+		Kind:    "ActorTemplate",
+	}, &unstructured.Unstructured{})
+
+	template := &unstructured.Unstructured{}
+	template.SetAPIVersion("ate.dev/v1alpha1")
+	template.SetKind("ActorTemplate")
+	template.SetName("orka-codex")
+	template.SetNamespace("ate-demo")
+	template.SetLabels(map[string]string{
+		"orka.ai/execution-workspace": "true",
+		"orka.ai/workspace-provider":  "substrate",
+	})
+	template.SetAnnotations(map[string]string{
+		"orka.ai/workspace-protocol":     "http-json-v1",
+		"orka.ai/workspace-daemon-port":  "8080",
+		"orka.ai/workspace-staging-root": "/app",
+	})
+
+	r := &TaskReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build(),
+	}
+	err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, &ExecutionWorkspaceRequest{
+		TemplateName:      "orka-codex",
+		TemplateNamespace: "ate-demo",
+	})
+	if err == nil {
+		t.Fatal("validateSubstrateWorkspaceTemplate() error = nil, want missing readiness error")
+	}
+	if !strings.Contains(err.Error(), "is not Ready: phase=<empty>") {
+		t.Fatalf("error = %q, want missing readiness context", err.Error())
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateRequiresBootstrapTokenEnv(t *testing.T) {
+	template := readySubstrateActorTemplateForTest(nil)
+	r := substrateTemplateValidatorForTest(t, template)
+
+	err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest())
+	if err == nil {
+		t.Fatal("validateSubstrateWorkspaceTemplate() error = nil, want missing bootstrap env error")
+	}
+	if !strings.Contains(err.Error(), workerenv.WorkspaceBootstrapToken) {
+		t.Fatalf("error = %q, want bootstrap env context", err.Error())
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateAcceptsBootstrapTokenSecretRef(t *testing.T) {
+	template := readySubstrateActorTemplateForTest([]any{
+		map[string]any{
+			"name": workerenv.WorkspaceBootstrapToken,
+			"valueFrom": map[string]any{
+				"secretKeyRef": map[string]any{
+					"name": testSubstrateBootstrapSecretName,
+					"key":  testSubstrateBootstrapSecretKey,
+				},
+			},
+		},
+	})
+	r := substrateTemplateValidatorForTest(t, template)
+
+	if err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest()); err != nil {
+		t.Fatalf("validateSubstrateWorkspaceTemplate() error = %v", err)
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateAcceptsLiteralBootstrapTokenEnv(t *testing.T) {
+	template := readySubstrateActorTemplateForTest([]any{
+		map[string]any{
+			"name":  workerenv.WorkspaceBootstrapToken,
+			"value": "bootstrap-token",
+		},
+	})
+	r := substrateTemplateValidatorForTest(t, template)
+
+	if err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest()); err != nil {
+		t.Fatalf("validateSubstrateWorkspaceTemplate() error = %v", err)
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateRejectsDaemonPortMismatch(t *testing.T) {
+	template := readySubstrateActorTemplateWithContainersForTest([]any{
+		map[string]any{
+			"name":    "workspace",
+			"command": []any{"/orka-workspace-agent"},
+			"env": []any{
+				map[string]any{
+					"name":  workerenv.WorkspaceBootstrapToken,
+					"value": "bootstrap-token",
+				},
+			},
+		},
+	})
+	annotations := template.GetAnnotations()
+	annotations["orka.ai/workspace-daemon-port"] = "80"
+	template.SetAnnotations(annotations)
+	r := substrateTemplateValidatorForTest(t, template)
+
+	err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest())
+	if err == nil {
+		t.Fatal("validateSubstrateWorkspaceTemplate() error = nil, want daemon port mismatch error")
+	}
+	if !strings.Contains(err.Error(), `workspace daemon container "workspace" listen port 8080`) ||
+		!strings.Contains(err.Error(), "orka.ai/workspace-daemon-port=80") {
+		t.Fatalf("error = %q, want daemon port mismatch context", err.Error())
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateRequiresBootstrapTokenOnDaemonContainer(t *testing.T) {
+	template := readySubstrateActorTemplateWithContainersForTest([]any{
+		map[string]any{
+			"name": "sidecar",
+			"env": []any{
+				map[string]any{
+					"name":  workerenv.WorkspaceBootstrapToken,
+					"value": "bootstrap-token",
+				},
+			},
+		},
+		map[string]any{
+			"name":    "workspace",
+			"command": []any{"/orka-workspace-agent"},
+			"env": []any{
+				substrateWorkspaceDaemonListenEnvForTest(),
+			},
+		},
+	})
+	r := substrateTemplateValidatorForTest(t, template)
+
+	err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest())
+	if err == nil {
+		t.Fatal("validateSubstrateWorkspaceTemplate() error = nil, want daemon bootstrap env error")
+	}
+	if !strings.Contains(err.Error(), `workspace daemon container "workspace"`) ||
+		!strings.Contains(err.Error(), workerenv.WorkspaceBootstrapToken) {
+		t.Fatalf("error = %q, want daemon bootstrap env context", err.Error())
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateAcceptsBootstrapTokenOnDaemonContainer(t *testing.T) {
+	template := readySubstrateActorTemplateWithContainersForTest([]any{
+		map[string]any{
+			"name": "sidecar",
+		},
+		map[string]any{
+			"name":    "workspace",
+			"command": []any{"/orka-workspace-agent"},
+			"env": []any{
+				substrateWorkspaceDaemonListenEnvForTest(),
+				map[string]any{
+					"name": workerenv.WorkspaceBootstrapToken,
+					"valueFrom": map[string]any{
+						"secretKeyRef": map[string]any{
+							"name": testSubstrateBootstrapSecretName,
+							"key":  testSubstrateBootstrapSecretKey,
+						},
+					},
+				},
+			},
+		},
+	})
+	r := substrateTemplateValidatorForTest(t, template)
+
+	if err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest()); err != nil {
+		t.Fatalf("validateSubstrateWorkspaceTemplate() error = %v", err)
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateRequiresDaemonContainerForMultiContainerTemplate(t *testing.T) {
+	template := readySubstrateActorTemplateWithContainersForTest([]any{
+		map[string]any{
+			"name": "sidecar",
+			"env": []any{
+				map[string]any{
+					"name":  workerenv.WorkspaceBootstrapToken,
+					"value": "bootstrap-token",
+				},
+			},
+		},
+		map[string]any{
+			"name": "workspace",
+		},
+	})
+	r := substrateTemplateValidatorForTest(t, template)
+
+	err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest())
+	if err == nil {
+		t.Fatal("validateSubstrateWorkspaceTemplate() error = nil, want daemon identification error")
+	}
+	if !strings.Contains(err.Error(), "must identify the workspace daemon container") {
+		t.Fatalf("error = %q, want daemon identification context", err.Error())
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateRejectsMismatchedBootstrapSecretRef(t *testing.T) {
+	template := readySubstrateActorTemplateForTest([]any{
+		map[string]any{
+			"name": workerenv.WorkspaceBootstrapToken,
+			"valueFrom": map[string]any{
+				"secretKeyRef": map[string]any{
+					"name": "other-bootstrap-secret",
+					"key":  testSubstrateBootstrapSecretKey,
+				},
+			},
+		},
+	})
+	r := substrateTemplateValidatorForTest(t, template)
+
+	err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest())
+	if err == nil {
+		t.Fatal("validateSubstrateWorkspaceTemplate() error = nil, want mismatched secret error")
+	}
+	if !strings.Contains(err.Error(), "configured bootstrap Secret") {
+		t.Fatalf("error = %q, want configured secret context", err.Error())
 	}
 }
 
@@ -364,4 +702,71 @@ func TestResolveExecutionWorkspaceRequestControllerNamespaceDefault(t *testing.T
 	if request.TemplateNamespace != "orka-system" || request.ClaimNamespace != "orka-system" {
 		t.Fatalf("resolved namespaces = template %q claim %q, want orka-system", request.TemplateNamespace, request.ClaimNamespace)
 	}
+}
+
+func substrateTemplateRequestForTest() *ExecutionWorkspaceRequest {
+	return &ExecutionWorkspaceRequest{
+		TemplateName:                 "orka-codex",
+		TemplateNamespace:            "ate-demo",
+		SubstrateBootstrapSecretName: testSubstrateBootstrapSecretName,
+		SubstrateBootstrapSecretKey:  testSubstrateBootstrapSecretKey,
+	}
+}
+
+func substrateTemplateValidatorForTest(t *testing.T, template *unstructured.Unstructured) *TaskReconciler {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   "ate.dev",
+		Version: "v1alpha1",
+		Kind:    "ActorTemplate",
+	}, &unstructured.Unstructured{})
+	return &TaskReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build(),
+	}
+}
+
+func readySubstrateActorTemplateForTest(env []any) *unstructured.Unstructured {
+	daemonEnv := append([]any{substrateWorkspaceDaemonListenEnvForTest()}, env...)
+	return readySubstrateActorTemplateWithContainersForTest([]any{
+		map[string]any{
+			"name":    "workspace",
+			"command": []any{"/orka-workspace-agent"},
+			"env":     daemonEnv,
+		},
+	})
+}
+
+func substrateWorkspaceDaemonListenEnvForTest() map[string]any {
+	return map[string]any{
+		"name":  substrateWorkspaceDaemonListenEnv,
+		"value": ":8080",
+	}
+}
+
+func readySubstrateActorTemplateWithContainersForTest(containers []any) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "ate.dev/v1alpha1",
+		"kind":       "ActorTemplate",
+		"metadata": map[string]any{
+			"name":      "orka-codex",
+			"namespace": "ate-demo",
+			"labels": map[string]any{
+				"orka.ai/execution-workspace": "true",
+				"orka.ai/workspace-provider":  "substrate",
+			},
+			"annotations": map[string]any{
+				"orka.ai/workspace-protocol":     "http-json-v1",
+				"orka.ai/workspace-daemon-port":  "8080",
+				"orka.ai/workspace-staging-root": "/app",
+			},
+		},
+		"spec": map[string]any{
+			"containers": containers,
+		},
+		"status": map[string]any{
+			"phase": "Ready",
+		},
+	}}
 }
