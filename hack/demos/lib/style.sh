@@ -293,7 +293,39 @@ log_error() {
 #   demo_state "<key>" "<value>"      — compact "🔄 key: value" status
 #                                       snapshot for one-shot state probes
 #                                       (e.g. "Workers: prefill=2 decode=4").
+#
+#   demo_scenario "<title>" "<paragraph...>"
+#                                     — opening card. Use ONCE at the very
+#                                       top of a demo to orient the viewer
+#                                       before any cluster work happens.
+#                                       Replaces the old clear+banner+chapter-1
+#                                       intro pattern.
 # ---------------------------------------------------------------------------
+
+# Opening scenario card — printed at the very top of a demo so viewers
+# immediately know what they're about to see. Subsequent pre-warm output
+# stays visible underneath (no `clear`) so the cast shows what the cluster
+# is doing as it happens.
+demo_scenario() {
+  local title="${1:-Demo scenario}"
+  shift || true
+  local body="$*"
+  local bar_width=68
+  local bar
+  bar="$(printf '━%.0s' $(seq 1 "${bar_width}"))"
+  printf '\n%b%s%b\n' "${CYAN}" "${bar}" "${COLOR_RESET}"
+  printf '%b🎬  Scenario — %s%b\n' "${BOLD}" "${title}" "${COLOR_RESET}"
+  printf '%b%s%b\n' "${CYAN}" "${bar}" "${COLOR_RESET}"
+  if [[ -n "${body}" ]]; then
+    # Wrap body to ~72 cols, indent with 4 spaces for readability.
+    if command -v fold >/dev/null 2>&1; then
+      printf '%s\n' "${body}" | fold -s -w 72 | sed 's/^/    /'
+    else
+      printf '    %s\n' "${body}"
+    fi
+  fi
+  printf '%b%s%b\n\n' "${CYAN}" "${bar}" "${COLOR_RESET}"
+}
 
 # Persistent activity event — timestamped, emoji-prefixed.
 # Goes to STDOUT so asciinema captures it in the cast.

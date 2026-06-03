@@ -39,7 +39,10 @@ render_kontxt_caller_job           > "${DEMO_WORKDIR}/kontxt-job.yaml"
 render_kontxt_denied_caller_job    > "${DEMO_WORKDIR}/kontxt-denied-job.yaml"
 render_kontxt_story_file           > "${DEMO_WORKDIR}/kontxt-story.txt"
 
-log "Resetting any prior kontxt caller jobs"
+demo_scenario "kontxt — zero-secret zero-trust agent calls" \
+  "Same workload identity, two outcomes. A Kubernetes ServiceAccount token is exchanged at the Token Translation Service (TTS) for a one-shot scoped TxToken; Orka validates the TxToken's scopes before serving the call. We run TWO identical caller Jobs — one whose TxToken includes the required scope (allowed), one whose scope is missing (denied). No API keys, no shared secrets, decisions made per-request."
+
+demo_event "🧹" "Clearing any prior kontxt caller Jobs so this run starts clean…"
 kubectl delete job/"${ok_job}"     -n "${kontxt_ns}" --ignore-not-found >/dev/null 2>&1 || true
 kubectl delete job/"${denied_job}" -n "${kontxt_ns}" --ignore-not-found >/dev/null 2>&1 || true
 
@@ -47,8 +50,6 @@ kubectl delete job/"${denied_job}" -n "${kontxt_ns}" --ignore-not-found >/dev/nu
 # Narrated walkthrough.
 # ---------------------------------------------------------------------------
 DEMO_CHAPTER_TOTAL=8
-clear
-banner "kontxt — TxTokens in action"
 
 # Chapter 1 ------------------------------------------------------------------
 narrate "Zero-secret zero-trust agent calls: caller's SA token becomes a one-shot, scoped TxToken. Same identity, two outcomes — one allowed, one denied."

@@ -32,7 +32,10 @@ render_cron_agent_manifest > "${DEMO_WORKDIR}/cron-agent.yaml"
 render_cron_task_manifest  > "${DEMO_WORKDIR}/cron-task.yaml"
 render_cron_story_file     > "${DEMO_WORKDIR}/cron-story.txt"
 
-log "Preparing one scheduled child run before the presenter view; this may take a few minutes"
+demo_scenario "Scheduled AI workflow — cron in Kubernetes" \
+  "Add a 'schedule:' field to a Task and Orka turns an AI agent into a recurring Kubernetes job. We're scheduling a stale-PR triage agent against a GitHub repo. Each tick spawns a fresh child Task owned by the parent — just like CronJob spawns Jobs. We'll prep one scheduled run first so the presenter view starts with a real result to inspect."
+
+demo_event "📥" "Applying the cron Agent + scheduled Task; waiting for one scheduled child to land and complete so the presenter view has a real result to inspect…"
 delete_task_if_exists "${DEMO_CRON_TASK_NAME}"
 kubectl delete tasks -n "${DEMO_NAMESPACE}" \
   -l "orka.ai/parent-task=${DEMO_CRON_TASK_NAME},orka.ai/scheduled-run=true" \
@@ -40,20 +43,19 @@ kubectl delete tasks -n "${DEMO_NAMESPACE}" \
 kubectl apply -f "${DEMO_WORKDIR}/cron-agent.yaml" >/dev/null
 kubectl apply -f "${DEMO_WORKDIR}/cron-task.yaml"  >/dev/null
 
-DEMO_CRON_CHILD_TASK="$(DEMO_WAIT_QUIET=1 wait_for_first_scheduled_child "${DEMO_CRON_READY_TIMEOUT:-240}")" \
+DEMO_CRON_CHILD_TASK="$(wait_for_first_scheduled_child "${DEMO_CRON_READY_TIMEOUT:-240}")" \
   || die "timed out waiting for the first scheduled child task"
-DEMO_WAIT_QUIET=1 wait_for_task_succeeded        "${DEMO_CRON_CHILD_TASK}" "${DEMO_CRON_TASK_TIMEOUT:-1200}" \
+demo_event "⏰" "First scheduled child landed: ${DEMO_CRON_CHILD_TASK}"
+wait_for_task_succeeded        "${DEMO_CRON_CHILD_TASK}" "${DEMO_CRON_TASK_TIMEOUT:-1200}" \
   || die "scheduled child task did not succeed"
-DEMO_WAIT_QUIET=1 wait_for_task_result_available "${DEMO_CRON_CHILD_TASK}" "${DEMO_CRON_RESULT_TIMEOUT:-120}" \
+wait_for_task_result_available "${DEMO_CRON_CHILD_TASK}" "${DEMO_CRON_RESULT_TIMEOUT:-120}" \
   || die "scheduled child task result was not available in time"
-log "Prepared scheduled child task ${DEMO_CRON_CHILD_TASK}"
+demo_event "✅" "Scheduled child ${DEMO_CRON_CHILD_TASK} finished and stored its result"
 
 # ---------------------------------------------------------------------------
 # Narrated walkthrough.
 # ---------------------------------------------------------------------------
 DEMO_CHAPTER_TOTAL=5
-clear
-banner "Scheduled Workflow"
 
 # Chapter 1 ------------------------------------------------------------------
 narrate "Add a 'schedule:' field to a Task and Orka turns an AI agent into a recurring K8s job — stale-PR triage, every tick."

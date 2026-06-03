@@ -38,6 +38,11 @@ prepare_api_env
 render_chat_request_file  > "${DEMO_WORKDIR}/chat-request.txt"
 render_chat_story_file    > "${DEMO_WORKDIR}/chat-story.txt"
 
+demo_scenario "Chat → GitHub PR — Kubernetes is the AI runtime" \
+  "We post one chat turn (a natural-language request) to Orka's OpenAI/Anthropic-compatible endpoint. The server-side coordinator decides what Agents and Tasks to spin up, runs them as Kubernetes Pods, and ends with a real pull request on a real repo. No CI plugins, no shell scripts — just the chat call and the cluster."
+
+demo_event "🧹" "Clearing any prior chat session, Agents, and Tasks so this run starts clean…"
+
 # The chat turn carries no agent specs; the server-side coordinator system
 # prompt instructs the model to create_agent itself. Whatever Agents linger
 # from earlier runs are cleaned by name patterns (delete_chat_session_tasks
@@ -88,8 +93,6 @@ export DEMO_CLAUDE_MODEL="${DEMO_CHAT_OPUS_MODEL}"
 # Narrated walkthrough.
 # ---------------------------------------------------------------------------
 DEMO_CHAPTER_TOTAL=6
-clear
-banner "Chat to PR"
 
 # Coordinator status hook — replaces the generic "phase=X children=N"
 # heartbeat with a chat-aware breakdown of child Tasks by phase, plus

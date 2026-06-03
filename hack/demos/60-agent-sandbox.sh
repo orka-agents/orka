@@ -78,7 +78,10 @@ render_sandbox_turn_task "${t2}" "${builder_agent}" "${prompts_dir}/sandbox-turn
 render_sandbox_turn_task "${t3}" "${builder_agent}" "${prompts_dir}/sandbox-turn-3-fixup.txt"                    > "${DEMO_WORKDIR}/sandbox-turn-3.yaml"
 render_sandbox_story_file       > "${DEMO_WORKDIR}/sandbox-story.txt"
 
-log "Resetting any prior sandbox session for ${session}"
+demo_scenario "Agent Sandbox — multi-turn workspace reuse" \
+  "Three sequential agent Tasks reattach to ONE workspace via sessionRef. The first turn (a Scout agent) clones the repo, explores it, and writes a plan into the workspace. Turns 2 and 3 (a Builder agent) reattach the same SandboxClaim and pick up the live state — git checkout, dep cache, runtime, planning notes. Heavy setup cost is paid once; subsequent turns start hot."
+
+demo_event "🧹" "Clearing any prior sandbox session ${session} so this run starts clean…"
 delete_task_if_exists "${t1}"
 delete_task_if_exists "${t2}"
 delete_task_if_exists "${t3}"
@@ -129,8 +132,6 @@ _sandbox_turn_status() {
 # Narrated walkthrough.
 # ---------------------------------------------------------------------------
 DEMO_CHAPTER_TOTAL=8
-clear
-banner "Agent Sandbox — session reuse"
 
 # Chapter 1 ------------------------------------------------------------------
 narrate "Multiple agent Tasks reattach ONE workspace via sessionRef — no cold start per turn. Heavy state (git checkout, dep cache, runtime) stays warm across calls."

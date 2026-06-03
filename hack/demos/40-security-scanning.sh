@@ -32,7 +32,10 @@ render_security_agents_manifest          > "${DEMO_WORKDIR}/security-agents.yaml
 render_security_repository_scan_manifest > "${DEMO_WORKDIR}/security-repositoryscan.yaml"
 render_security_story_file               > "${DEMO_WORKDIR}/security-story.txt"
 
-log "Applying analysis + remediation agents and the RepositoryScan"
+demo_scenario "Security finding → real PR" \
+  "We have a forked Node.js app with known vulnerabilities. Orka scans the repo, ranks the findings using a repo-specific threat model, drafts a patch for the top one, and opens a real GitHub pull request — entirely through Kubernetes CRs. Watch what the cluster does as it does it."
+
+demo_event "📥" "Applying analysis + remediation Agents and the RepositoryScan…"
 kubectl apply -f "${DEMO_WORKDIR}/security-agents.yaml"          >/dev/null
 kubectl apply -f "${DEMO_WORKDIR}/security-repositoryscan.yaml"  >/dev/null
 
@@ -83,7 +86,7 @@ _security_stage_status() {
 
 DEMO_WAIT_STATUS_HOOK=_security_stage_status
 
-log "Discovering the top-ranked open finding (this can take a few minutes on the first run)"
+demo_event "🔎" "Waiting for the scan to surface the top-ranked open finding (multi-minute on first run — stage-by-stage events below)…"
 if [[ -n "${DEMO_SECURITY_FINDING_ID:-}" ]]; then
   security_finding_id="${DEMO_SECURITY_FINDING_ID}"
 else
@@ -93,14 +96,12 @@ else
       || die "no open findings were discovered for ${DEMO_SECURITY_SCAN_NAME}"
   fi
 fi
-log "Top-ranked finding: ${security_finding_id}"
+demo_event "🏆" "Top-ranked open finding: ${security_finding_id}"
 
 # ---------------------------------------------------------------------------
 # Narrated walkthrough.
 # ---------------------------------------------------------------------------
 DEMO_CHAPTER_TOTAL=7
-clear
-banner "Security Scanning"
 
 # Chapter 1 ------------------------------------------------------------------
 narrate "Security findings become first-class Kubernetes objects. One POST turns a finding into a real PR — scan -> finding -> patch -> branch -> PR, all in K8s."

@@ -30,6 +30,10 @@ render_pr_agents_manifest    > "${DEMO_WORKDIR}/pr-agents.yaml"
 render_manual_task_manifest  > "${DEMO_WORKDIR}/manual-task.yaml"
 render_manual_story_file     > "${DEMO_WORKDIR}/manual-story.txt"
 
+demo_scenario "Declarative agentic workflow — Tasks as Kubernetes CRDs" \
+  "Same end-to-end agentic SDLC workflow you saw from chat (demo 10), but described declaratively as a Kubernetes Task CRD instead of a chat turn. The coordinator Agent fans out to specialist child Tasks (implement → test → review → CI). GitOps-shaped, replayable, auditable. We're about to apply two YAML files and watch the cluster do the rest."
+
+demo_event "🧹" "Clearing any prior Task with the same name so this run starts clean…"
 delete_task_if_exists "${DEMO_MANUAL_TASK_NAME}"
 
 # Coordinator status hook — child Task phase breakdown so the long wait
@@ -68,8 +72,6 @@ _manual_coordinator_status() {
 # Narrated walkthrough.
 # ---------------------------------------------------------------------------
 DEMO_CHAPTER_TOTAL=6
-clear
-banner "Manual Workflow"
 
 # Chapter 1 ------------------------------------------------------------------
 narrate "Orka Tasks are Kubernetes CRDs. The same agentic SDLC workflow you saw from chat is here described declaratively — GitOps-shaped, replayable, auditable."
