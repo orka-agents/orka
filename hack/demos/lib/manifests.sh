@@ -282,6 +282,32 @@ EOF
   emit_block "    " "$(pr_repo_details_block "${DEMO_MANUAL_PUSH_BRANCH}")"
 }
 
+render_cron_story_file() {
+  emit_block "" "Scenario:
+Demo 30 — Scheduled Workflow.
+
+An autonomous AI agent runs every cron tick to triage stale pull requests
+on a target repo and emit a paste-ready markdown report. Same Agent + Task
+primitives as demos 10 and 20; the only new field is 'schedule:' on the Task.
+
+What to watch:
+- One Agent (codex/claude/copilot) declared with a read-only system prompt.
+- One Task carrying the triage prompt AND a 'schedule:' field. The Orka cron
+  controller spawns one child Task per tick, just like a Kubernetes CronJob.
+- Each child fetches open PRs from the GitHub API using GH_TOKEN (sourced
+  from the github-credentials Secret via task spec.env), classifies each
+  PR into a blocker bucket (awaiting-review / ci-broken / merge-conflict /
+  author-needs-respond / discussion-stalled / dependabot), and writes a
+  markdown report into the Task result API.
+- The result API is the same one your interactive demos write to — so any
+  dashboard, Slack bot, or CLI that already reads task results gets the
+  triage queue for free.
+
+Schedule:        ${DEMO_CRON_SCHEDULE}  (demo speed; production: */30 * * * * or 0 */4 * * *)
+Target repo:     ${DEMO_GIT_REPO}
+Triage criteria: open PRs idle more than 3 days"
+}
+
 render_cron_agent_manifest() {
   cat <<EOF
 apiVersion: core.orka.ai/v1alpha1
