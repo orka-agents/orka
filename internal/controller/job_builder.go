@@ -538,15 +538,18 @@ func (b *JobBuilder) buildResources(task *corev1alpha1.Task, agent *corev1alpha1
 		return agent.Spec.Resources
 	}
 
-	// Default resources
+	// Default resources. Memory limit is sized for real Go/Node/Python
+	// test suites — 512Mi was too small for `go test ./...` on medium repos
+	// and silently OOMKilled workers. Agents/tasks can still override via
+	// agent.spec.resources or task.spec.resources (checked above).
 	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("100m"),
-			corev1.ResourceMemory: resource.MustParse("128Mi"),
+			corev1.ResourceMemory: resource.MustParse("512Mi"),
 		},
 		Limits: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("1"),
-			corev1.ResourceMemory: resource.MustParse("512Mi"),
+			corev1.ResourceMemory: resource.MustParse("2Gi"),
 		},
 	}
 }
