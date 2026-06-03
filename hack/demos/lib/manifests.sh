@@ -860,7 +860,7 @@ Why not a traditional SAST tool + Jira workflow? Tools like CodeQL, Semgrep, or 
 (SCA / dependency scanners like Trivy and Snyk live one layer down — they flag CVEs in third-party packages. This demo is about flaws in first-party code.)
 
 THIS DEMO:
-A RepositoryScan inspects a known-vulnerable fork (nodejs-goof). Findings are ranked by severity. We pick the top one, hit /patch, and Orka opens a real PR with the fix.
+A RepositoryScan inspects a known-vulnerable fork (nodejs-goof). Today's scan surfaces ~10 code-level findings, ranked by severity. The demo picks the top-ranked one, hits /patch, and Orka opens a real PR for that single finding. In production you would loop the same /patch call over every finding above a severity threshold; the demo focuses on the one-finding mechanic for clarity.
 
 What to watch:
 - The analysis + remediation Agents are pre-applied; the scan runs off-camera, surfaces code-level findings (hardcoded admin password, login bypass, reflected XSS, etc.).
