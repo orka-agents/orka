@@ -40,11 +40,11 @@ kubectl delete tasks -n "${DEMO_NAMESPACE}" \
 kubectl apply -f "${DEMO_WORKDIR}/cron-agent.yaml" >/dev/null
 kubectl apply -f "${DEMO_WORKDIR}/cron-task.yaml"  >/dev/null
 
-DEMO_CRON_CHILD_TASK="$(wait_for_first_scheduled_child "${DEMO_CRON_READY_TIMEOUT:-240}")" \
+DEMO_CRON_CHILD_TASK="$(DEMO_WAIT_QUIET=1 wait_for_first_scheduled_child "${DEMO_CRON_READY_TIMEOUT:-240}")" \
   || die "timed out waiting for the first scheduled child task"
-wait_for_task_succeeded        "${DEMO_CRON_CHILD_TASK}" "${DEMO_CRON_TASK_TIMEOUT:-1200}" \
+DEMO_WAIT_QUIET=1 wait_for_task_succeeded        "${DEMO_CRON_CHILD_TASK}" "${DEMO_CRON_TASK_TIMEOUT:-1200}" \
   || die "scheduled child task did not succeed"
-wait_for_task_result_available "${DEMO_CRON_CHILD_TASK}" "${DEMO_CRON_RESULT_TIMEOUT:-120}" \
+DEMO_WAIT_QUIET=1 wait_for_task_result_available "${DEMO_CRON_CHILD_TASK}" "${DEMO_CRON_RESULT_TIMEOUT:-120}" \
   || die "scheduled child task result was not available in time"
 log "Prepared scheduled child task ${DEMO_CRON_CHILD_TASK}"
 

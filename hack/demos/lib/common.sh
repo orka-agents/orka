@@ -1331,8 +1331,12 @@ __demo_wait_emit_status() {
   if [[ -n "${latest_child}" ]]; then
     latest_label=" latest=${latest_child}/${latest_phase:-Pending}"
   fi
-  line="$(printf '[%s] ⏳  %s phase=%s children=%s%s elapsed=%ss' \
-          "$(__demo_log_ts)" "${task_name}" "${phase}" "${children}" "${latest_label}" "${elapsed}")"
+  local children_field=""
+  if (( children > 0 )); then
+    children_field=" children=${children}"
+  fi
+  line="$(printf '[%s] ⏳  %s phase=%s%s%s elapsed=%ss' \
+          "$(__demo_log_ts)" "${task_name}" "${phase}" "${children_field}" "${latest_label}" "${elapsed}")"
   if [[ -t 2 ]]; then
     # Clear the prior line, then rewrite in place.
     printf '\r\033[2K%b%s%b' "${DIM}" "${line}" "${COLOR_RESET}" >&2
