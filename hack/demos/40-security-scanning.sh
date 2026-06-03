@@ -33,7 +33,7 @@ render_security_repository_scan_manifest > "${DEMO_WORKDIR}/security-repositorys
 render_security_story_file               > "${DEMO_WORKDIR}/security-story.txt"
 
 demo_scenario "Security finding → real PR" \
-  "We have a forked Node.js app with known vulnerabilities. Orka scans the repo, ranks the findings using a repo-specific threat model, drafts a patch for the top one, and opens a real GitHub pull request — entirely through Kubernetes CRs. Watch what the cluster does as it does it."
+  "We have a Node.js app with known vulnerabilities. Orka scans the repo, ranks the findings, drafts a patch for the top one, and opens a real GitHub pull request — entirely through Kubernetes CRs. Watch what the cluster does as it does it."
 
 demo_event "📥" "Applying analysis + remediation Agents and the RepositoryScan…"
 kubectl apply -f "${DEMO_WORKDIR}/security-agents.yaml"          >/dev/null
