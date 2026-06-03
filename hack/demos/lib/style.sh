@@ -104,9 +104,9 @@ demo_show_cmd() {
 
 # demo_show <path> — render a file with profile-appropriate verbosity.
 #   presenter: full file via cat (audit transparency)
-#   docs:      first 20 lines + footer with path
-#   social:    first 8 lines + footer with path
-#   hero:      footer with path only (no body)
+#   docs:      first 20 lines + truncation marker
+#   social:    first 8 lines + truncation marker
+#   hero:      truncation marker only (no body)
 demo_show() {
   local path="$1"
   if [[ ! -f "${path}" ]]; then
@@ -117,9 +117,9 @@ demo_show() {
   profile="$(demo_profile)"
   case "${profile}" in
     presenter) cat "${path}" ;;
-    docs)      head -n 20 "${path}"; printf '%b… (%s)%b\n' "${DIM}" "${path}" "${COLOR_RESET}" ;;
-    social)    head -n 8  "${path}"; printf '%b… (%s)%b\n' "${DIM}" "${path}" "${COLOR_RESET}" ;;
-    hero)      printf '%b(%s)%b\n' "${DIM}" "${path}" "${COLOR_RESET}" ;;
+    docs)      head -n 20 "${path}"; printf '%b…%b\n' "${DIM}" "${COLOR_RESET}" ;;
+    social)    head -n 8  "${path}"; printf '%b…%b\n' "${DIM}" "${COLOR_RESET}" ;;
+    hero)      printf '%b…%b\n' "${DIM}" "${COLOR_RESET}" ;;
   esac
 }
 
