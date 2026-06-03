@@ -61,7 +61,7 @@ chapter "What this demo is doing" "🧑"
 demo_show_full "${DEMO_WORKDIR}/security-story.txt"
 
 # Chapter 2 ------------------------------------------------------------------
-narrate "Behind the scenes, the scan ran a 4-stage pipeline: 5 parallel discovery passes (auth, data exposure, supply chain, app logic, recent commits) → one threat-model synthesis that gives the repo context → per-finding validators that suppress false positives. The findings you're about to see are ranked by REAL risk, not by line count."
+narrate "Behind the scenes, the scan ran a 4-stage pipeline: first one threat-model task analyzed the repo (what does this app DO, where are the trust boundaries), then 5 parallel discovery passes — each handed that same threat model as canonical context — scanned scope by scope (auth, data exposure, supply chain, app logic, recent commits), then per-finding validators suppressed false positives. The findings you're about to see are ranked using the repo's own threat model, not just a generic linter ruleset."
 chapter "Apply the scan + remediation Agents" "🔍"
 log_info "Target: ${DEMO_SECURITY_GIT_REPO} (${DEMO_SECURITY_GIT_BRANCH})"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/security-agents.yaml"
