@@ -115,13 +115,13 @@ demo_event "📥" "Applying analysis + remediation Agents and the RepositoryScan
 log_info "Target: ${DEMO_SECURITY_GIT_REPO} (${DEMO_SECURITY_GIT_BRANCH})"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/security-agents.yaml"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/security-repositoryscan.yaml"
-demo_event "📊" "RepositoryScan is the control object. Phase transitions: Pending → Scanning → Ready. findingCounts is updated as discovery + validation complete."
+demo_event "📊" "RepositoryScan is the control object. Phase: Pending → Scanning → Ready. findingCounts updates as the pipeline runs."
 demo_pe "kubectl get repositoryscan ${DEMO_SECURITY_SCAN_NAME} -n ${DEMO_NAMESPACE}"
 
 # Chapter 3 ------------------------------------------------------------------
 narrate "Findings are severity-ranked; the top one becomes the work item."
 chapter "Inspect the open findings" "📋"
-demo_event "🔎" "Each Finding is a first-class object: severity, ID, title, source location, and the threat-model context that justified its ranking."
+demo_event "🔎" "Each Finding is a first-class object: severity, ID, title, source location, and the context that justified its ranking."
 log_info "Top 5 open findings ranked by severity:"
 demo_pe "orka_api GET \"/api/v1/security/repositories/${DEMO_SECURITY_SCAN_NAME}/findings?namespace=${DEMO_NAMESPACE}&state=open&limit=5\" | jq -r '.items[] | \"\\(.severity)\\t\\(.id)\\t\\(.title)\"' | column -t -s\$'\\t'"
 # Print the selected finding's row by itself so viewers can match the
@@ -139,9 +139,9 @@ log_success "selected finding: ${security_finding_id}"
 # Chapter 4 ------------------------------------------------------------------
 narrate "One POST asks Orka to patch the finding — a remediation Task is born."
 chapter "Request a patch" "🛠️"
-demo_event "📮" "POST /api/v1/security/findings/<id>/patch — this single REST call creates a Task object whose owner reference points back to the Finding."
+demo_event "📮" "POST /api/v1/security/findings/<id>/patch — creates a Task whose owner reference points back to the Finding."
 demo_pe "orka_api POST \"/api/v1/security/findings/${security_finding_id}/patch?namespace=${DEMO_NAMESPACE}\" | jq '{id, status, branch}'"
-demo_event "🤖" "The remediation Agent now runs: read source, draft minimal fix, run tests, open branch, open PR. Provenance is preserved end-to-end."
+demo_event "🤖" "The remediation Agent now runs: read source, draft fix, run tests, open branch, open PR."
 
 # Chapter 5 ------------------------------------------------------------------
 narrate "Remediation runs; we wait for the patch proposal to land."
@@ -170,11 +170,11 @@ demo_pe "orka_api GET \"/api/v1/security/findings/${security_finding_id}/patches
 # Chapter 6 ------------------------------------------------------------------
 narrate "The patch becomes a real branch and a real PR for human review."
 chapter "Open the remediation pull request" "🚢"
-demo_event "🚀" "The branch is pushed and a PR is opened automatically. From here it's a normal code review — humans approve, GitHub merges."
+demo_event "🚀" "Branch pushed and PR opened automatically. From here it's a normal code review."
 wait_for_security_pull_request "${security_finding_id}" "${DEMO_SECURITY_PR_TIMEOUT:-180}" \
   > "${DEMO_WORKDIR}/security-pr.json" \
   || die "pull request did not open for finding ${security_finding_id}"
-demo_event "🎉" "Pull request opened. The Finding object now has the PR URL stamped on its status — full audit chain from scan → finding → patch → branch → PR."
+demo_event "🎉" "Pull request opened. Full audit chain: scan → finding → patch → branch → PR."
 
 # Chapter 7 ------------------------------------------------------------------
 narrate "Scan → finding → patch → branch → PR — every step replayable from the API."

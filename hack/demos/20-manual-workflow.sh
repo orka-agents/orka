@@ -31,7 +31,7 @@ render_manual_task_manifest  > "${DEMO_WORKDIR}/manual-task.yaml"
 render_manual_story_file     > "${DEMO_WORKDIR}/manual-story.txt"
 
 demo_scenario "Declarative agentic workflow — Tasks as Kubernetes CRDs" \
-  "Same end-to-end agentic SDLC workflow you saw from chat (demo 10), but described declaratively as a Kubernetes Task CRD instead of a chat turn. The coordinator Agent fans out to specialist child Tasks (implement → test → review → CI). GitOps-shaped, replayable, auditable. We're about to apply two YAML files and watch the cluster do the rest."
+  "Same end-to-end workflow as demo 10, but as a Kubernetes Task CRD instead of a chat turn. The coordinator fans out to specialist child Tasks. GitOps-shaped, replayable, auditable."
 
 demo_event "🧹" "Clearing any prior Task with the same name so this run starts clean…"
 delete_task_if_exists "${DEMO_MANUAL_TASK_NAME}"
@@ -82,7 +82,7 @@ demo_show_full "${DEMO_WORKDIR}/manual-story.txt"
 # Chapter 2 ------------------------------------------------------------------
 narrate "The coordinator + specialist Agents are pre-baked — applied up front so the Task can reference them by name."
 chapter "Apply the named Agents" "📜"
-demo_event "📥" "Four named Agent CRs (coordinator + coder + 2 reviewers). The Task in chapter 3 references them by name — separation of WHO does the work (Agent) from WHAT to do (Task)."
+demo_event "📥" "Four named Agent CRs. The Task in chapter 3 references them by name — separates WHO does the work (Agent) from WHAT to do (Task)."
 # Pre-clean any prior agents so apply doesn't warn about missing
 # last-applied-configuration annotations (they may have been created via
 # the chat path earlier and are not annotated).
@@ -98,15 +98,15 @@ demo_pe "kubectl get agents -n ${DEMO_NAMESPACE} ${DEMO_PR_COORDINATOR_NAME} ${D
 # Chapter 3 ------------------------------------------------------------------
 narrate "Here's the Task manifest — same prompt the chat demo sent, just as a CR you can commit to git."
 chapter "Inspect the Task manifest" "📄"
-demo_event "📐" "This is a real Kubernetes CR — fits in any GitOps repo. Same shape as a Deployment or CronJob: kind, spec, status. Argo CD / Flux can drive it."
+demo_event "📐" "A real Kubernetes CR — fits any GitOps repo. Same shape as Deployment/CronJob. Argo CD / Flux can drive it."
 demo_show "${DEMO_WORKDIR}/manual-task.yaml"
 
 # Chapter 4 ------------------------------------------------------------------
 narrate "kubectl apply creates the coordinator Task — Orka reconciles it."
 chapter "Create the coordinator Task" "🚀"
-demo_event "📤" "kubectl apply — the controller picks it up via the watch, schedules a Job, the worker pod boots and the agent loop begins."
+demo_event "📤" "kubectl apply — the controller picks it up, schedules a Job, and the agent loop begins."
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/manual-task.yaml"
-demo_event "🤖" "Coordinator now running. It will use create_task / create_agent to delegate to specialists — same primitive demos 10 + 60 use."
+demo_event "🤖" "Coordinator now running. It uses create_task / create_agent to delegate — same primitive as demos 10 + 60."
 
 # Chapter 5 ------------------------------------------------------------------
 narrate "Implementation, validation, parallel review, CI — silently, in the background."
@@ -124,7 +124,7 @@ demo_pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/parent-task=${DEMO_MA
 # Chapter 6 ------------------------------------------------------------------
 narrate "Same PR. Same agents. Just YAML — your existing GitOps stack can now trigger AI workflows."
 chapter "The pull request" "🚢"
-demo_event "🔗" "PR URL extracted from the coordinator's structured result — assert_real_pr_result validates it's an actual GitHub PR endpoint."
+demo_event "🔗" "PR URL extracted from the coordinator's structured result. assert_real_pr_result validates it's a real GitHub PR."
 assert_real_pr_result "${DEMO_MANUAL_TASK_NAME}"
 payoff_card_pr        "${DEMO_MANUAL_TASK_NAME}"
 

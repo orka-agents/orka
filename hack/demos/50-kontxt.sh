@@ -40,7 +40,7 @@ render_kontxt_denied_caller_job    > "${DEMO_WORKDIR}/kontxt-denied-job.yaml"
 render_kontxt_story_file           > "${DEMO_WORKDIR}/kontxt-story.txt"
 
 demo_scenario "kontxt — zero-secret zero-trust agent calls" \
-  "Same workload identity, two outcomes. A Kubernetes ServiceAccount token is exchanged at the Token Translation Service (TTS) for a one-shot scoped TxToken; Orka validates the TxToken's scopes before serving the call. We run TWO identical caller Jobs — one whose TxToken includes the required scope (allowed), one whose scope is missing (denied). No API keys, no shared secrets, decisions made per-request."
+  "Same workload identity, two outcomes. Two identical caller Jobs — one with a TxToken that has the required scope (allowed), one without (denied). No API keys, decisions made per-request."
 
 demo_event "🧹" "Clearing any prior kontxt caller Jobs so this run starts clean…"
 kubectl delete job/"${ok_job}"     -n "${kontxt_ns}" --ignore-not-found >/dev/null 2>&1 || true
@@ -59,7 +59,7 @@ demo_show_full "${DEMO_WORKDIR}/kontxt-story.txt"
 # Chapter 2 ------------------------------------------------------------------
 narrate "The caller workload uses only a normal Kubernetes ServiceAccount — no API keys, no shared secrets. The SA proves WHO the caller is; the TTS will decide WHAT it can do."
 chapter "Apply the caller ServiceAccount" "🪪"
-demo_event "🆔" "Apply a normal Kubernetes SA. No secrets to manage, no keys to rotate. Identity = pod's SA, proven by Kubernetes' built-in projected-token mechanism."
+demo_event "🆔" "Apply a normal Kubernetes SA. No secrets to manage. Identity = pod's SA, proven by projected tokens."
 log_info "TTS URL:  ${DEMO_KONTXT_TTS_URL}"
 log_info "Audience: ${DEMO_KONTXT_TTS_AUDIENCE}  (binds the SA token so it can ONLY be exchanged at the TTS)"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/kontxt-sa.yaml"
@@ -67,13 +67,13 @@ demo_pe "kubectl apply -f ${DEMO_WORKDIR}/kontxt-sa.yaml"
 # Chapter 3 ------------------------------------------------------------------
 narrate "The Job mounts a projected SA token at /var/run/orka/token — per-pod, ephemeral, audience-bound. The pod presents it to the TTS at runtime to mint a short-lived TxToken; it never holds a long-lived secret."
 chapter "Inspect the Job manifest" "📄"
-demo_event "📐" "Look for the projected serviceAccountToken volume — that is the entire 'auth setup'. No Secret resources, no env vars carrying credentials."
+demo_event "📐" "Look for the projected serviceAccountToken volume — that is the entire 'auth setup'. No Secrets, no env-var credentials."
 demo_show "${DEMO_WORKDIR}/kontxt-job.yaml"
 
 # Chapter 4 ------------------------------------------------------------------
 narrate "Run the caller. At runtime it reads its projected SA token, exchanges it at the TTS for a TxToken scoped to (action, namespace), then calls the Orka API. Orka enforces the scope on every request."
 chapter "Run the allowed caller" "✅"
-demo_event "🚀" "Apply the Job. Pod boots; caller script will: (1) read its SA token from disk, (2) POST to TTS for a TxToken, (3) call Orka with that TxToken."
+demo_event "🚀" "Apply the Job. Caller will: (1) read SA token, (2) exchange at TTS for a TxToken, (3) call Orka."
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/kontxt-job.yaml"
 wait_for_job_with_progress "${ok_job}" "${kontxt_ns}" 120 complete \
   || die "allowed caller Job did not complete in time"
@@ -82,28 +82,28 @@ demo_event "✅" "Job completed — the 3-step dance succeeded. Read the log nex
 # Chapter 5 ------------------------------------------------------------------
 narrate "What the caller printed: step 1 reads the projected SA token from disk; step 2 trades it at the TTS for a TxToken scoped to THIS exact call; step 3 calls Orka with the TxToken. Orka verifies the scope, allows the request, returns 200. No JWT material is logged."
 chapter "Read the caller log" "🪵"
-demo_event "🔍" "Three lines: 1/3 read SA token, 2/3 exchange at TTS → TxToken, 3/3 call Orka → status=200. JWT material is redacted by the caller — only digests are printed."
+demo_event "🔍" "Three lines: 1/3 read SA token, 2/3 exchange at TTS, 3/3 call Orka → status=200. JWT material is redacted."
 demo_pe "kubectl logs -n ${kontxt_ns} job/${ok_job} --tail=20 | grep -E '^[0-9]/3'"
 
 # Chapter 6 ------------------------------------------------------------------
 narrate "Same caller, same identity, same TTS exchange — but the request targets namespace=not-default, which the TxToken's scope does not authorize."
 chapter "Run the denied caller" "🚫"
-demo_event "🚀" "Apply the second Job. Identical code, identical SA — only the target namespace differs. Watch what Orka does at the API boundary."
+demo_event "🚀" "Apply the second Job. Identical code, identical SA — only the target namespace differs."
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/kontxt-denied-job.yaml"
 wait_for_job_with_progress "${denied_job}" "${kontxt_ns}" 120 fail \
   || die "denied caller Job did not transition to Failed=True within 120s"
-demo_event "🛑" "Job failed (expected). The denial happened at the Orka API boundary — TTS still minted the TxToken cleanly. That's the point: identity and authorization are decoupled."
+demo_event "🛑" "Job failed (expected). Denial happened at the Orka API — TTS still minted the TxToken cleanly."
 
 # Chapter 7 ------------------------------------------------------------------
 narrate "Steps 1 and 2 look identical to the allowed run — the TxToken minted cleanly. Step 3 returns 403: the TxToken is valid, but Orka enforces its scope at the API boundary and the requested namespace is outside it. No leaked JWT, just a clean denial."
 chapter "Read the denied caller log" "🪵"
-demo_event "🔍" "1/3 and 2/3 succeed (identical to the allowed run). 3/3 returns status=403 — same TxToken, same caller, different requested namespace, denied."
+demo_event "🔍" "1/3 and 2/3 succeed (same as allowed run). 3/3 returns 403 — same TxToken, different namespace, denied."
 demo_pe "kubectl logs -n ${kontxt_ns} job/${denied_job} --tail=20 | grep -E '^[0-9]/3'"
 
 # Chapter 8 ------------------------------------------------------------------
 narrate "Same SA identity, two outcomes — decided per request by the TxToken's scope. The audit trail keeps only safe digests; no JWT material ever lands in Task status or logs. Zero-trust by construction."
 chapter "Transaction summary" "🔐"
-demo_event "📜" "The payoff card pulls the safe orka.ai/transaction-id annotation — a SHA-256 digest of the transaction. Auditors can correlate against TTS logs without ever seeing the JWT."
+demo_event "📜" "Payoff card pulls the safe orka.ai/transaction-id annotation — auditors correlate against TTS logs without seeing the JWT."
 # Pull the first allowed Job's controller-tracked Task (if Orka recorded one)
 # from the safe orka.ai/transaction-id annotation. The card never reads the
 # raw TxToken — only the annotation digest the controller writes.

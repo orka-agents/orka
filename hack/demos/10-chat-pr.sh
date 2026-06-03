@@ -39,7 +39,7 @@ render_chat_request_file  > "${DEMO_WORKDIR}/chat-request.txt"
 render_chat_story_file    > "${DEMO_WORKDIR}/chat-story.txt"
 
 demo_scenario "Chat → GitHub PR — Kubernetes is the AI runtime" \
-  "We post one chat turn (a natural-language request) to Orka's OpenAI/Anthropic-compatible endpoint. The server-side coordinator decides what Agents and Tasks to spin up, runs them as Kubernetes Pods, and ends with a real pull request on a real repo. No CI plugins, no shell scripts — just the chat call and the cluster."
+  "One chat turn → real GitHub pull request. The coordinator spins up Agents and Tasks as Kubernetes Pods. No CI plugins, no glue scripts."
 
 demo_event "🧹" "Clearing any prior chat session, Agents, and Tasks so this run starts clean…"
 
@@ -139,7 +139,7 @@ demo_show_full "${DEMO_WORKDIR}/chat-story.txt"
 # Chapter 2 ------------------------------------------------------------------
 narrate "Discover available models, pick an Opus, then send the request as Claude."
 chapter "Send the request through Orka's Anthropic API" "📨"
-demo_event "🛰️ " "Same /v1/messages endpoint Claude clients already know how to call. Orka is API-compatible — drop-in for any tool that speaks Anthropic."
+demo_event "🛰️ " "Same /v1/messages endpoint Claude clients already use. Orka is API-compatible — drop-in for any Anthropic tool."
 export ANTHROPIC_BASE_URL="$(demo_anthropic_base_url)"
 export ANTHROPIC_MODEL="$(demo_anthropic_model)"
 require_orka_api_reachable
@@ -151,7 +151,7 @@ DEMO_CHAT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 log_info "Prompt sent to claude -p:"
 demo_show "${DEMO_WORKDIR}/chat-request.txt"
 demo_show_cmd "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL} ANTHROPIC_API_KEY=\$(get_orka_token) ${DEMO_CLAUDE_BIN} -p --model ${DEMO_CHAT_OPUS_MODEL} < ${DEMO_WORKDIR}/chat-request.txt"
-demo_event "▶️ " "Running the chat turn — claude-code now tool-calls through Orka, which transparently turns those tool calls into Kubernetes Task objects."
+demo_event "▶️ " "Running the chat turn — claude-code tool-calls through Orka, which turns those calls into Kubernetes Task objects."
 # Background heartbeat so viewers see something during the model's quiet
 # multi-turn tool dance. Ticks the elapsed spinner every 10s (only when
 # stderr is a tty so log scrapers stay clean) and, every ~60s, prints
@@ -196,12 +196,12 @@ kill "${__DEMO_CHAT_HB_PID}" 2>/dev/null || true
 wait "${__DEMO_CHAT_HB_PID}" 2>/dev/null || true
 trap - EXIT
 [[ -t 2 ]] && printf '\r\033[2K' >&2 || true
-demo_event "📬" "Chat HTTP turn returned. The coordinator Task is already running on the cluster — chat client and Kubernetes are two views of the same agent loop."
+demo_event "📬" "Chat HTTP turn returned. The coordinator Task is already running on the cluster."
 
 # Chapter 3 ------------------------------------------------------------------
 narrate "The chat turn creates a real coordinator Task in Kubernetes."
 chapter "Orka spawns the coordinator" "🎬"
-demo_event "🔭" "Looking up the Task that the chat session minted — discovered by orka.ai/source=anthropic-proxy label + creation timestamp >= chat start."
+demo_event "🔭" "Looking up the Task that the chat session minted (via orka.ai/source=anthropic-proxy label + creation timestamp)."
 DEMO_CHAT_PARENT_TASK="$(wait_for_chat_parent_task "${DEMO_CHAT_PARENT_TIMEOUT:-120}" "${DEMO_CHAT_STARTED_AT}")" \
   || die "failed to discover the Anthropic-proxy-created coordinator task"
 demo_event "✅" "Coordinator Task discovered: ${DEMO_CHAT_PARENT_TASK} — the K8s representation of the chat session's parent agent."
@@ -209,7 +209,7 @@ demo_event "✅" "Coordinator Task discovered: ${DEMO_CHAT_PARENT_TASK} — the 
 # Chapter 4 ------------------------------------------------------------------
 narrate "The coordinator invents its own Agents via create_agent. Names vary per run."
 chapter "Watch the coordinator delegate" "🪄"
-demo_event "🧩" "The coordinator uses create_agent + create_task to fan out work. Specialist Agents (implementer, reviewer, CI runner) are minted on demand — no static workflow YAML."
+demo_event "🧩" "The coordinator uses create_agent + create_task to fan out work. Specialist Agents are minted on demand — no static workflow YAML."
 demo_pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/source=anthropic-proxy --sort-by=.metadata.creationTimestamp"
 demo_pe "kubectl get agents -n ${DEMO_NAMESPACE} -l orka.ai/created-by=chat"
 
@@ -225,7 +225,7 @@ demo_event "🏁" "Coordinator succeeded — all specialist Tasks finished, PR i
 # Chapter 6 ------------------------------------------------------------------
 narrate "Real PR. Real CI. Real review. Reproducible from one chat turn."
 chapter "The pull request" "🚢"
-demo_event "🔗" "PR URL extracted from the coordinator's structured result — assert_real_pr_result validates it's an actual GitHub PR endpoint."
+demo_event "🔗" "PR URL extracted from the coordinator's structured result. assert_real_pr_result validates it's a real GitHub PR."
 assert_real_pr_result "${DEMO_CHAT_PARENT_TASK}"
 payoff_card_pr        "${DEMO_CHAT_PARENT_TASK}"
 
