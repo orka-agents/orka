@@ -32,6 +32,38 @@ render_manual_story_file     > "${DEMO_WORKDIR}/manual-story.txt"
 
 delete_task_if_exists "${DEMO_MANUAL_TASK_NAME}"
 
+# Coordinator status hook — child Task phase breakdown so the long wait
+# isn't a black box.
+_manual_coordinator_status() {
+  local parent="$1"
+  local elapsed="$2"
+  local phase counts children_count latest_child latest_phase
+  phase="$(kubectl get task "${parent}" -n "${DEMO_NAMESPACE}" \
+    -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  counts="$(kubectl --request-timeout=3s get tasks -n "${DEMO_NAMESPACE}" \
+    -l "orka.ai/parent-task=${parent}" --no-headers 2>/dev/null \
+    | awk '{p=$3; if(p=="")p="Pending"; c[p]++}
+           END { out=""; for(p in c){if(out!="")out=out" "; out=out p"="c[p]}
+                 if(out=="")out="(none yet)"; print out }')"
+  children_count="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
+    -l "orka.ai/parent-task=${parent}" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+  latest_child="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
+    -l "orka.ai/parent-task=${parent}" --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)"
+  latest_phase="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
+    -l "orka.ai/parent-task=${parent}" --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null || true)"
+
+  (( children_count >= 1 )) && demo_announce_once "manual-first-child" \
+    "👶" "Coordinator delegated to its first specialist child Task — agentic fan-out has started"
+  (( children_count >= 3 )) && demo_announce_once "manual-fanout" \
+    "🌳" "Coordinator has now spawned ${children_count}+ specialist Tasks (implement, test, review, CI…)"
+
+  __demo_heartbeat 'coordinator/%s phase=%s children=%s [%s] latest=%s/%s elapsed=%ss' \
+    "${parent}" "${phase:-Pending}" "${children_count}" "${counts}" \
+    "${latest_child:-—}" "${latest_phase:-—}" "${elapsed}"
+}
+
 # ---------------------------------------------------------------------------
 # Narrated walkthrough.
 # ---------------------------------------------------------------------------
@@ -48,6 +80,7 @@ demo_show_full "${DEMO_WORKDIR}/manual-story.txt"
 # Chapter 2 ------------------------------------------------------------------
 narrate "The coordinator + specialist Agents are pre-baked — applied up front so the Task can reference them by name."
 chapter "Apply the named Agents" "📜"
+demo_event "📥" "Four named Agent CRs (coordinator + coder + 2 reviewers). The Task in chapter 3 references them by name — separation of WHO does the work (Agent) from WHAT to do (Task)."
 # Pre-clean any prior agents so apply doesn't warn about missing
 # last-applied-configuration annotations (they may have been created via
 # the chat path earlier and are not annotated).
@@ -63,28 +96,34 @@ demo_pe "kubectl get agents -n ${DEMO_NAMESPACE} ${DEMO_PR_COORDINATOR_NAME} ${D
 # Chapter 3 ------------------------------------------------------------------
 narrate "Here's the Task manifest — same prompt the chat demo sent, just as a CR you can commit to git."
 chapter "Inspect the Task manifest" "📄"
+demo_event "📐" "This is a real Kubernetes CR — fits in any GitOps repo. Same shape as a Deployment or CronJob: kind, spec, status. Argo CD / Flux can drive it."
 demo_show "${DEMO_WORKDIR}/manual-task.yaml"
 
 # Chapter 4 ------------------------------------------------------------------
 narrate "kubectl apply creates the coordinator Task — Orka reconciles it."
 chapter "Create the coordinator Task" "🚀"
+demo_event "📤" "kubectl apply — the controller picks it up via the watch, schedules a Job, the worker pod boots and the agent loop begins."
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/manual-task.yaml"
+demo_event "🤖" "Coordinator now running. It will use create_task / create_agent to delegate to specialists — same primitive demos 10 + 60 use."
 
 # Chapter 5 ------------------------------------------------------------------
 narrate "Implementation, validation, parallel review, CI — silently, in the background."
 chapter "Coordinator runs to completion" "⏳"
 require_orka_api_reachable
 log_success "Orka API reachable at ${ORKA_API_BASE}"
+demo_event "⏱️ " "Waiting for the coordinator to drive all specialist Tasks to Succeeded. Status hook below shows live child-Task phase counts so the wait is never a black box."
 log_info "Waiting for the coordinator to finish (timeout ${DEMO_MANUAL_TASK_TIMEOUT:-10800}s)..."
-wait_for_task_succeeded            "${DEMO_MANUAL_TASK_NAME}" "${DEMO_MANUAL_TASK_TIMEOUT:-10800}" >/dev/null
+DEMO_WAIT_STATUS_HOOK=_manual_coordinator_status \
+  wait_for_task_succeeded            "${DEMO_MANUAL_TASK_NAME}" "${DEMO_MANUAL_TASK_TIMEOUT:-10800}" >/dev/null
 wait_for_task_result_available     "${DEMO_MANUAL_TASK_NAME}" "${DEMO_MANUAL_RESULT_TIMEOUT:-120}"  >/dev/null
-log_success "coordinator succeeded"
+demo_event "🏁" "Coordinator succeeded — all specialist Tasks finished. The result payload carries the PR URL."
 log_info "Child tasks spawned by the coordinator:"
 demo_pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/parent-task=${DEMO_MANUAL_TASK_NAME}"
 
 # Chapter 6 ------------------------------------------------------------------
 narrate "Same PR. Same agents. Just YAML — your existing GitOps stack can now trigger AI workflows."
 chapter "The pull request" "🚢"
+demo_event "🔗" "PR URL extracted from the coordinator's structured result — assert_real_pr_result validates it's an actual GitHub PR endpoint."
 assert_real_pr_result "${DEMO_MANUAL_TASK_NAME}"
 payoff_card_pr        "${DEMO_MANUAL_TASK_NAME}"
 

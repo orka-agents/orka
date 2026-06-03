@@ -1310,12 +1310,23 @@ __demo_wait_emit_status() {
   # to stderr so callers using $() capture on stdout still see clean output.
   # Uses \r in-place rewrite when stderr is a tty; falls back to newlines
   # so log scrapers and non-tty runs still get readable output.
+  #
+  # If DEMO_WAIT_STATUS_HOOK is set to a defined function name, that hook
+  # is called instead (with task_name, elapsed). The hook is expected to
+  # use demo_announce_once / __demo_heartbeat itself. This lets each demo
+  # narrate state transitions in domain-specific terms (threat-model →
+  # discovery → validation in demo 40, parent → child fan-out in demo 10,
+  # etc) instead of the generic phase=X children=N line.
   local task_name="$1"
   local elapsed="$2"
   if [[ "${DEMO_WAIT_QUIET:-0}" == "1" ]] || demo_profile_is hero; then
     return 0
   fi
-  local phase children latest_child latest_phase latest_label line
+  if [[ -n "${DEMO_WAIT_STATUS_HOOK:-}" ]] && declare -F "${DEMO_WAIT_STATUS_HOOK}" >/dev/null 2>&1; then
+    "${DEMO_WAIT_STATUS_HOOK}" "${task_name}" "${elapsed}"
+    return 0
+  fi
+  local phase children latest_child latest_phase latest_label
   phase="$(kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
   [[ -z "${phase}" ]] && phase="Pending"
   children="$(kubectl get tasks -n "${DEMO_NAMESPACE}" -l "orka.ai/parent-task=${task_name}" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
@@ -1335,14 +1346,8 @@ __demo_wait_emit_status() {
   if (( children > 0 )); then
     children_field=" children=${children}"
   fi
-  line="$(printf '[%s] ⏳  %s phase=%s%s%s elapsed=%ss' \
-          "$(__demo_log_ts)" "${task_name}" "${phase}" "${children_field}" "${latest_label}" "${elapsed}")"
-  if [[ -t 2 ]]; then
-    # Clear the prior line, then rewrite in place.
-    printf '\r\033[2K%b%s%b' "${DIM}" "${line}" "${COLOR_RESET}" >&2
-  else
-    printf '%s\n' "${line}" >&2
-  fi
+  __demo_heartbeat '%s phase=%s%s%s elapsed=%ss' \
+    "${task_name}" "${phase}" "${children_field}" "${latest_label}" "${elapsed}"
 }
 
 wait_for_task_terminal() {
@@ -1521,22 +1526,39 @@ wait_for_task_result_available() {
 wait_for_repository_scan_ready() {
   local scan_name="$1"
   local timeout_seconds="${2:-1800}"
-  local deadline phase
+  local deadline phase start elapsed
+  start="${SECONDS}"
   deadline=$((SECONDS + timeout_seconds))
 
   while (( SECONDS < deadline )); do
     phase="$(kubectl get repositoryscan "${scan_name}" -n "${DEMO_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
     case "${phase}" in
       Ready)
+        if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+          printf '\n' >&2
+        fi
         return 0
         ;;
       Error)
+        if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+          printf '\n' >&2
+        fi
         return 1
         ;;
     esac
+    elapsed=$(( SECONDS - start ))
+    if [[ -n "${DEMO_WAIT_STATUS_HOOK:-}" ]] && declare -F "${DEMO_WAIT_STATUS_HOOK}" >/dev/null 2>&1; then
+      "${DEMO_WAIT_STATUS_HOOK}" "${scan_name}" "${elapsed}"
+    else
+      __demo_heartbeat 'scan/%s phase=%s elapsed=%ss' \
+        "${scan_name}" "${phase:-Pending}" "${elapsed}"
+    fi
     sleep 10
   done
 
+  if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+    printf '\n' >&2
+  fi
   return 1
 }
 
@@ -1559,18 +1581,28 @@ first_security_finding_id() {
 
 wait_for_first_security_finding() {
   local timeout_seconds="${1:-1800}"
-  local deadline finding_id
+  local deadline finding_id start elapsed
+  start="${SECONDS}"
   deadline=$((SECONDS + timeout_seconds))
 
   while (( SECONDS < deadline )); do
     finding_id="$(first_security_finding_id)"
     if [[ -n "${finding_id}" ]]; then
+      if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+        printf '\n' >&2
+      fi
       printf '%s\n' "${finding_id}"
       return 0
     fi
+    elapsed=$(( SECONDS - start ))
+    __demo_heartbeat 'awaiting first finding from %s scan elapsed=%ss' \
+      "${DEMO_SECURITY_SCAN_NAME:-scan}" "${elapsed}"
     sleep 10
   done
 
+  if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+    printf '\n' >&2
+  fi
   return 1
 }
 

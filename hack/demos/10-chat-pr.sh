@@ -91,6 +91,40 @@ DEMO_CHAPTER_TOTAL=6
 clear
 banner "Chat to PR"
 
+# Coordinator status hook — replaces the generic "phase=X children=N"
+# heartbeat with a chat-aware breakdown of child Tasks by phase, plus
+# persistent demo_event announcements for major milestones.
+_chat_coordinator_status() {
+  local parent="$1"
+  local elapsed="$2"
+  local phase counts children_count latest_child latest_phase
+  phase="$(kubectl get task "${parent}" -n "${DEMO_NAMESPACE}" \
+    -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  # Child Task phase histogram via one kubectl call.
+  counts="$(kubectl --request-timeout=3s get tasks -n "${DEMO_NAMESPACE}" \
+    -l "orka.ai/source=anthropic-proxy" --no-headers 2>/dev/null \
+    | awk '{p=$3; if(p=="")p="Pending"; c[p]++}
+           END { out=""; for(p in c){if(out!="")out=out" "; out=out p"="c[p]}
+                 if(out=="")out="(none yet)"; print out }')"
+  children_count="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
+    -l "orka.ai/source=anthropic-proxy" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+  latest_child="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
+    -l "orka.ai/source=anthropic-proxy" --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)"
+  latest_phase="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
+    -l "orka.ai/source=anthropic-proxy" --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null || true)"
+
+  (( children_count >= 1 )) && demo_announce_once "chat-first-child" \
+    "👶" "Coordinator created its first specialist child Task — agentic fan-out has started"
+  (( children_count >= 3 )) && demo_announce_once "chat-fanout" \
+    "🌳" "Coordinator has now spawned ${children_count}+ specialist Tasks (implement, test, review, CI…)"
+
+  __demo_heartbeat 'coordinator/%s phase=%s children=%s [%s] latest=%s/%s elapsed=%ss' \
+    "${parent}" "${phase:-Pending}" "${children_count}" "${counts}" \
+    "${latest_child:-—}" "${latest_phase:-—}" "${elapsed}"
+}
+
 # Chapter 1 ------------------------------------------------------------------
 narrate "Orka speaks the Anthropic Messages protocol. One chat turn from any Claude-compatible client drives a full agentic SDLC — coordinator, specialists, review, CI, real PR."
 chapter "A maintainer asks for one repo change" "🧑"
@@ -102,6 +136,7 @@ demo_show_full "${DEMO_WORKDIR}/chat-story.txt"
 # Chapter 2 ------------------------------------------------------------------
 narrate "Discover available models, pick an Opus, then send the request as Claude."
 chapter "Send the request through Orka's Anthropic API" "📨"
+demo_event "🛰️ " "Same /v1/messages endpoint Claude clients already know how to call. Orka is API-compatible — drop-in for any tool that speaks Anthropic."
 export ANTHROPIC_BASE_URL="$(demo_anthropic_base_url)"
 export ANTHROPIC_MODEL="$(demo_anthropic_model)"
 require_orka_api_reachable
@@ -110,20 +145,10 @@ log_info "Provider-default models exposed by Orka (/anthropic/v1/models):"
 demo_pe "curl -sS -H \"Authorization: Bearer \$(get_orka_token)\" ${ANTHROPIC_BASE_URL}/v1/models | jq -r '.data[].id'"
 log_info "Selected Opus model: ${DEMO_CHAT_OPUS_MODEL} (Orka passes the model name through to ${DEMO_PROVIDER_REF})"
 DEMO_CHAT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-# Show the prompt that `claude -p` will receive on stdin, then the exact
-# command itself. demo_show handles profile-correct verbosity (full body
-# in presenter, head -20 in docs, head -8 in social, path-only in hero)
-# so audit-mode viewers see the real ask while social cuts stay short.
 log_info "Prompt sent to claude -p:"
 demo_show "${DEMO_WORKDIR}/chat-request.txt"
-# Show the exact `claude -p` command the viewer could run themselves. We
-# render it WITHOUT executing (demo_show_cmd) — the real invocation runs
-# via run_demo_chat_request_file just below with a sidecar --settings
-# file so Claude Code's settings.env doesn't override ANTHROPIC_BASE_URL
-# with the user's local proxy. Token is fetched from the shell — never
-# inlined into the visible command.
 demo_show_cmd "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL} ANTHROPIC_API_KEY=\$(get_orka_token) ${DEMO_CLAUDE_BIN} -p --model ${DEMO_CHAT_OPUS_MODEL} < ${DEMO_WORKDIR}/chat-request.txt"
-log_info "Running the chat turn (result captured for replay)..."
+demo_event "▶️ " "Running the chat turn — claude-code now tool-calls through Orka, which transparently turns those tool calls into Kubernetes Task objects."
 # Background heartbeat so viewers see something during the model's quiet
 # multi-turn tool dance. Ticks the elapsed spinner every 10s (only when
 # stderr is a tty so log scrapers stay clean) and, every ~60s, prints
@@ -168,37 +193,38 @@ kill "${__DEMO_CHAT_HB_PID}" 2>/dev/null || true
 wait "${__DEMO_CHAT_HB_PID}" 2>/dev/null || true
 trap - EXIT
 [[ -t 2 ]] && printf '\r\033[2K' >&2 || true
-log_success "Chat request accepted; coordinator Task will appear shortly"
+demo_event "📬" "Chat HTTP turn returned. The coordinator Task is already running on the cluster — chat client and Kubernetes are two views of the same agent loop."
 
 # Chapter 3 ------------------------------------------------------------------
 narrate "The chat turn creates a real coordinator Task in Kubernetes."
 chapter "Orka spawns the coordinator" "🎬"
+demo_event "🔭" "Looking up the Task that the chat session minted — discovered by orka.ai/source=anthropic-proxy label + creation timestamp >= chat start."
 log_info "Watching for the coordinator task to appear..."
 DEMO_CHAT_PARENT_TASK="$(wait_for_chat_parent_task "${DEMO_CHAT_PARENT_TIMEOUT:-120}" "${DEMO_CHAT_STARTED_AT}")" \
   || die "failed to discover the Anthropic-proxy-created coordinator task"
-log_success "coordinator task: ${DEMO_CHAT_PARENT_TASK}"
+demo_event "✅" "Coordinator Task discovered: ${DEMO_CHAT_PARENT_TASK} — the K8s representation of the chat session's parent agent."
 
 # Chapter 4 ------------------------------------------------------------------
 narrate "The coordinator invents its own Agents via create_agent. Names vary per run."
 chapter "Watch the coordinator delegate" "🪄"
-# The chat-driven coordinator lives in the chat session itself (no single
-# Kubernetes Task represents it). Show the child Tasks the chat created
-# during this run, plus the Agents it spun up.
+demo_event "🧩" "The coordinator uses create_agent + create_task to fan out work. Specialist Agents (implementer, reviewer, CI runner) are minted on demand — no static workflow YAML."
 demo_pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/source=anthropic-proxy --sort-by=.metadata.creationTimestamp"
-# Whatever Agents the coordinator created in this run carry the chat label.
 demo_pe "kubectl get agents -n ${DEMO_NAMESPACE} -l orka.ai/created-by=chat"
 
 # Chapter 5 ------------------------------------------------------------------
 narrate "Implementation, validation, parallel review, CI — silently, in the background."
 chapter "Coordinator runs to completion" "⏳"
+demo_event "⏱️ " "Waiting for the coordinator to drive all specialist Tasks to Succeeded. Status hook below shows live child-Task phase counts so the wait is never a black box."
 log_info "Waiting for the coordinator to finish (timeout ${DEMO_CHAT_TASK_TIMEOUT:-10800}s)..."
-wait_for_task_succeeded            "${DEMO_CHAT_PARENT_TASK}" "${DEMO_CHAT_TASK_TIMEOUT:-10800}" >/dev/null
+DEMO_WAIT_STATUS_HOOK=_chat_coordinator_status \
+  wait_for_task_succeeded            "${DEMO_CHAT_PARENT_TASK}" "${DEMO_CHAT_TASK_TIMEOUT:-10800}" >/dev/null
 wait_for_task_result_available     "${DEMO_CHAT_PARENT_TASK}" "${DEMO_CHAT_RESULT_TIMEOUT:-120}"  >/dev/null
-log_success "coordinator succeeded"
+demo_event "🏁" "Coordinator succeeded — all specialist Tasks finished, PR is in the result payload."
 
 # Chapter 6 ------------------------------------------------------------------
 narrate "Real PR. Real CI. Real review. Reproducible from one chat turn."
 chapter "The pull request" "🚢"
+demo_event "🔗" "PR URL extracted from the coordinator's structured result — assert_real_pr_result validates it's an actual GitHub PR endpoint."
 assert_real_pr_result "${DEMO_CHAT_PARENT_TASK}"
 payoff_card_pr        "${DEMO_CHAT_PARENT_TASK}"
 

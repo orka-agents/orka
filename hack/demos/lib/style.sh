@@ -260,6 +260,151 @@ log_error() {
 }
 
 # ---------------------------------------------------------------------------
+# Live-narration helpers — inspired by the airline reference demo
+# (https://gist.github.com/sozercan/a8b878ab9acfd515d2e459c77346c34d).
+#
+# Use these to keep viewers oriented during long Kubernetes waits where the
+# real action is happening on the cluster (the controller building a threat
+# model, agents fanning out across child Tasks, a PR being opened, etc).
+#
+#   demo_event "<emoji>" "<msg>"     — persistent timestamped activity line.
+#                                       Use for state transitions you want
+#                                       the viewer to remember (✅ ⚠ 🧠 🔍
+#                                       🛠 🔄 🧪 📊). Stays on screen — does
+#                                       NOT get \r-overwritten.
+#
+#   demo_phase "<emoji>" "<title>" "<one-line description>"
+#                                     — chunky horizontal-rule sub-phase
+#                                       divider. Use INSIDE a chapter to
+#                                       mark a major state transition
+#                                       (e.g. "Threat model phase" →
+#                                       "Discovery phase").
+#
+#   demo_announce_once "<key>" "<emoji>" "<msg>"
+#                                     — emit a demo_event the FIRST time
+#                                       this key is seen; no-op on
+#                                       subsequent calls. Lets a status
+#                                       hook called every tick announce
+#                                       stage transitions exactly once.
+#                                       Auto-flushes any in-progress
+#                                       \r-heartbeat first so the persistent
+#                                       line lands cleanly.
+#
+#   demo_state "<key>" "<value>"      — compact "🔄 key: value" status
+#                                       snapshot for one-shot state probes
+#                                       (e.g. "Workers: prefill=2 decode=4").
+# ---------------------------------------------------------------------------
+
+# Persistent activity event — timestamped, emoji-prefixed.
+# Goes to STDOUT so asciinema captures it in the cast.
+demo_event() {
+  local emoji="${1:-▸}"
+  shift || true
+  printf '%b[%s]%b %s  %s\n' \
+    "${DIM}" "$(__demo_log_ts)" "${COLOR_RESET}" \
+    "${emoji}" "$*"
+}
+
+# Chunky sub-phase divider (heavier visual weight than a log line, lighter
+# than a chapter). Skipped in hero profile. In social, only emits when
+# the current chapter is ≤3 (chapters past 3 are suppressed in social).
+demo_phase() {
+  local emoji="${1:-▸}"
+  local title="${2:-}"
+  local desc="${3:-}"
+  if demo_profile_is hero; then
+    return 0
+  fi
+  if demo_profile_is social && (( ${__DEMO_CHAPTER_INDEX:-0} > 3 )); then
+    return 0
+  fi
+  local bar_width=64
+  local bar
+  bar="$(printf '─%.0s' $(seq 1 "${bar_width}"))"
+  printf '\n%b%s%b\n' "${DIM}" "${bar}" "${COLOR_RESET}"
+  printf '%s  %b%s%b\n' "${emoji}" "${BOLD}" "${title}" "${COLOR_RESET}"
+  if [[ -n "${desc}" ]]; then
+    printf '   %s\n' "${desc}"
+  fi
+  printf '%b%s%b\n\n' "${DIM}" "${bar}" "${COLOR_RESET}"
+}
+
+# Compact state snapshot. Use for one-shot "here is the cluster right now"
+# lines from inside a status hook or after a demo_pe.
+demo_state() {
+  local key="$1"
+  shift || true
+  printf '%b[%s]%b 🔄  %s%s%s\n' \
+    "${DIM}" "$(__demo_log_ts)" "${COLOR_RESET}" \
+    "${key}" \
+    "${key:+: }" \
+    "$*"
+}
+
+# Once-only announcement. Used by per-demo status hooks to print a
+# persistent transition line exactly the first time a condition is true.
+# Auto-flushes any \r-heartbeat in progress so the persistent line is
+# not eaten by the next overwrite.
+#
+# State is held in a single space-separated key list to stay compatible
+# with the macOS-shipped bash 3.2 (no associative arrays).
+__DEMO_ANNOUNCED_KEYS=""
+demo_announce_once() {
+  local key="$1"
+  local emoji="${2:-▸}"
+  shift 2 || true
+  case " ${__DEMO_ANNOUNCED_KEYS} " in
+    *" ${key} "*) return 0 ;;
+  esac
+  # Flush any \r-overwrite heartbeat before the persistent line.
+  if [[ -t 2 ]] && ! demo_profile_is hero; then
+    printf '\r\033[2K' >&2
+  fi
+  demo_event "${emoji}" "$*"
+  __DEMO_ANNOUNCED_KEYS="${__DEMO_ANNOUNCED_KEYS} ${key}"
+}
+
+# Reset the announce-once memory. Useful between independent waits in
+# the same demo (e.g. demo 60 re-uses the same scan-wait infrastructure
+# across three turns and wants each turn's announcements to fire fresh).
+demo_announce_reset() {
+  if (( $# == 0 )); then
+    __DEMO_ANNOUNCED_KEYS=""
+    return 0
+  fi
+  local prefix="$1"
+  local new="" k
+  for k in ${__DEMO_ANNOUNCED_KEYS}; do
+    case "${k}" in
+      ${prefix}*) ;;
+      *) new="${new} ${k}" ;;
+    esac
+  done
+  __DEMO_ANNOUNCED_KEYS="${new}"
+}
+
+# Shared \r-overwrite heartbeat renderer. Used by wait helpers in
+# lib/common.sh and by per-demo DEMO_WAIT_STATUS_HOOK callbacks to keep
+# all in-place updates visually consistent.
+#
+# Usage:  __demo_heartbeat "task=%s elapsed=%ss" "${name}" "${elapsed}"
+__demo_heartbeat() {
+  local fmt="$1"
+  shift || true
+  if [[ "${DEMO_WAIT_QUIET:-0}" == "1" ]] || demo_profile_is hero; then
+    return 0
+  fi
+  local body line
+  body="$(printf "${fmt}" "$@")"
+  line="$(printf '[%s] ⏳  %s' "$(__demo_log_ts)" "${body}")"
+  if [[ -t 2 ]]; then
+    printf '\r\033[2K%b%s%b' "${DIM}" "${line}" "${COLOR_RESET}" >&2
+  else
+    printf '%s\n' "${line}" >&2
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Payoff card primitives.
 #
 # Cards are 62 inner cols wide (64 outer with the box edges). Hand-drawn
