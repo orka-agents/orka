@@ -82,7 +82,7 @@ demo_event "✅" "Job completed — the 3-step dance succeeded. Read the log nex
 # Chapter 5 ------------------------------------------------------------------
 narrate "What the caller printed: step 1 reads the projected SA token from disk; step 2 trades it at the TTS for a TxToken scoped to THIS exact call; step 3 calls Orka with the TxToken. Orka verifies the scope, allows the request, returns 200. No JWT material is logged."
 chapter "Read the caller log" "🪵"
-demo_event "🔍" "Three lines: 1/3 read SA token, 2/3 exchange at TTS, 3/3 call Orka → status=200. JWT material is redacted."
+demo_event "🔍" "Step 2 shows the scope-down: a broad parent scope from the SA is narrowed to tctx.namespace for THIS request. Step 3 hits Orka and returns 200."
 demo_pe "kubectl logs -n ${kontxt_ns} job/${ok_job} --tail=20 | grep -E '^[0-9]/3'"
 
 # Chapter 6 ------------------------------------------------------------------
@@ -97,7 +97,7 @@ demo_event "🛑" "Job failed (expected). Denial happened at the Orka API — TT
 # Chapter 7 ------------------------------------------------------------------
 narrate "Steps 1 and 2 look identical to the allowed run — the TxToken minted cleanly. Step 3 returns 403: the TxToken is valid, but Orka enforces its scope at the API boundary and the requested namespace is outside it. No leaked JWT, just a clean denial."
 chapter "Read the denied caller log" "🪵"
-demo_event "🔍" "1/3 and 2/3 succeed (same as allowed run). 3/3 returns 403 — same TxToken, different namespace, denied."
+demo_event "🔍" "Step 2 shows the same scope-down as the allowed run. 3/3 returns 403 because step 3's target ns now differs from the bound tctx.namespace."
 demo_pe "kubectl logs -n ${kontxt_ns} job/${denied_job} --tail=20 | grep -E '^[0-9]/3'"
 
 # Chapter 8 ------------------------------------------------------------------

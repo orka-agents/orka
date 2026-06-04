@@ -671,9 +671,30 @@ payoff_card_kontxt() {
     printf -v "${__ns_var}"     '%s' "${n}"
   }
 
+  # __kontxt_job_bound_ns <job> <var-bound>
+  # Reads KONTXT_BOUND_NAMESPACE from the Job spec's caller container env
+  # so the card can show the TxToken's tctx scope-down next to the
+  # target namespace. The Job spec is the authoritative source — we
+  # don't decode any JWT.
+  __kontxt_job_bound_ns() {
+    local job="$1"
+    local __bound_var="$2"
+    local b=""
+    if [[ -n "${job}" ]] && command -v kubectl >/dev/null 2>&1; then
+      b="$(kubectl get job "${job}" -n "${job_ns}" \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="caller")].env[?(@.name=="KONTXT_BOUND_NAMESPACE")].value}' \
+            2>/dev/null || true)"
+    fi
+    [[ -z "${b}" ]] && b="-"
+    printf -v "${__bound_var}" '%s' "${b}"
+  }
+
   local ok_status ok_ns_target denied_status denied_ns_target
-  __kontxt_job_outcome "${allowed_job}" ok_status     ok_ns_target
-  __kontxt_job_outcome "${denied_job}"  denied_status denied_ns_target
+  local ok_bound denied_bound
+  __kontxt_job_outcome  "${allowed_job}" ok_status     ok_ns_target
+  __kontxt_job_outcome  "${denied_job}"  denied_status denied_ns_target
+  __kontxt_job_bound_ns "${allowed_job}" ok_bound
+  __kontxt_job_bound_ns "${denied_job}"  denied_bound
 
   local ok_result="-"
   [[ "${ok_status}" != "-" ]] && ok_result="HTTP ${ok_status}"
@@ -684,15 +705,18 @@ payoff_card_kontxt() {
   __card_blank
   __card_line "ALLOWED"
   __card_line "  job         ${allowed_job:-(none)}"
+  __card_line "  bound ns    ${ok_bound}"
   __card_line "  target ns   ${ok_ns_target}"
   __card_line "  result      ${ok_result}"
   __card_blank
   __card_line "DENIED"
   __card_line "  job         ${denied_job:-(none)}"
+  __card_line "  bound ns    ${denied_bound}"
   __card_line "  target ns   ${denied_ns_target}"
   __card_line "  result      ${denied_result}"
   __card_blank
-  __card_line "Same SA, same TTS exchange - only scope differed."
+  __card_line "Same SA + same scope-down."
+  __card_line "Denial = target ns != bound ns."
   __card_bottom
 }
 

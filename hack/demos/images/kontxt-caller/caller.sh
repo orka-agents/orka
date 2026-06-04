@@ -62,7 +62,9 @@ if ! tx_token="$(printf '%s' "${tts_response}" | jq -r '.access_token // empty')
   exit 1
 fi
 scope_value="$(printf '%s' "${tts_response}" | jq -r '.scope // "-"')"
-emit "2/3 TTS exchange: ok (TxToken minted, scope=${scope_value})"
+emit "2/3 TTS exchange: ok (TxToken minted)"
+emit "2/3   parent scope: ${scope_value}"
+emit "2/3   scope-down:   tctx.namespace=${KONTXT_BOUND_NAMESPACE}"
 
 # 3/3 — call the Orka API with the TxToken attached. Use Txn-Token header
 # (the default kontxt mode); never log the value. /api/v1/tasks is a
