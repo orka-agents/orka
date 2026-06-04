@@ -140,8 +140,8 @@ demo-cluster-down: ## Tear down the kind demo cluster
 
 .PHONY: demo-images
 demo-images: ## Build + kind-load demo-only images (currently: kontxt-caller)
-	docker build -t orka-kontxt-caller:demo hack/demos/images/kontxt-caller
-	kind load docker-image orka-kontxt-caller:demo --name $${ORKA_DEMO_CLUSTER:-orka-demo}
+	docker build -t docker.io/sozercan/orka-kontxt-caller:demo hack/demos/images/kontxt-caller
+	kind load docker-image docker.io/sozercan/orka-kontxt-caller:demo --name $${ORKA_DEMO_CLUSTER:-orka-demo}
 
 .PHONY: demo-test
 demo-test: ## Run hack/demos smoke tests (style helpers, profile dispatch, payoff cards)
