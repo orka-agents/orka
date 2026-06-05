@@ -232,6 +232,22 @@ task_jsonpath() {
   kubectl -n default get task "${task}" -o "jsonpath=${path}" 2>/dev/null || true
 }
 
+assert_task_workspace_teleport_visibility() {
+  local task="$1"
+  local worker_pool worker_pod resume_latency
+
+  worker_pool="$(task_jsonpath "${task}" "{.status.executionWorkspace.placement.workerPool}")"
+  worker_pod="$(task_jsonpath "${task}" "{.status.executionWorkspace.placement.workerPodName}")"
+  resume_latency="$(task_jsonpath "${task}" "{.status.executionWorkspace.resumeLatency}")"
+
+  if [[ -z "${resume_latency}" ]]; then
+    echo "task/${task} missing Substrate teleport latency: resumeLatency=<empty>" >&2
+    exit 1
+  fi
+
+  log "task/${task} teleport visibility: workerPool=${worker_pool} workerPodName=${worker_pod} resumeLatency=${resume_latency}"
+}
+
 patch_substrate_kind_registry_script() {
   local script="${SUBSTRATE_DIR}/hack/create-kind-cluster.sh"
   sed -i.bak \
@@ -471,6 +487,7 @@ run_retained_workspace_task() {
 
   if wait_task_phase "${task_name}" "Succeeded"; then
     assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.phase}" "Retained"
+    assert_task_workspace_teleport_visibility "${task_name}"
     return 0
   fi
 
@@ -496,14 +513,16 @@ accept_task_cleanup_failure_after_result() {
   assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.templateRef.name}" "orka-codex-ci"
   assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.phase}" "Failed"
   assert_task_jsonpath "${task_name}" "{.status.resultRef.available}" "true"
+  assert_task_workspace_teleport_visibility "${task_name}"
   log "task/${task_name} produced a result but hit WorkspaceCleanupFailed; accepting known pinned Substrate runsc cleanup failure"
 }
 
 run_default_workspace_task() {
   local task_name="$1"
 
-  log "Running default Substrate configuration task/${task_name}"
-  if ! apply_task "${task_name}" "      enabled: true"; then
+  log "Running default Substrate boot task/${task_name}"
+  if ! apply_task "${task_name}" "      enabled: true
+      boot: true"; then
     return 1
   fi
 
@@ -512,6 +531,7 @@ run_default_workspace_task() {
     assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.templateRef.name}" "orka-codex-ci"
     assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.phase}" "Deleted"
     assert_task_jsonpath "${task_name}" "{.status.resultRef.available}" "true"
+    assert_task_workspace_teleport_visibility "${task_name}"
     return 0
   fi
 

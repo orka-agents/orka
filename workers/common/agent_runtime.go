@@ -299,11 +299,16 @@ func getSubstrateWorkspaceExecutor() (workspace.WorkspaceExecutor, error) {
 	}
 	substrateEnv := workerenv.ParseSubstrateEnv(os.Getenv)
 	substrateWorkspaceExecutor, substrateWorkspaceExecutorErr = workspace.NewSubstrateExecutor(workspace.SubstrateConfig{
-		APIEndpoint:           substrateEnv.APIEndpoint,
-		APICAFile:             substrateEnv.APICAFile,
-		APIInsecureSkipVerify: substrateEnv.APIInsecureSkipVerify,
-		RouterURL:             substrateEnv.RouterURL,
-		ActorDNSSuffix:        substrateEnv.ActorDNSSuffix,
+		APIEndpoint:             substrateEnv.APIEndpoint,
+		APICAFile:               substrateEnv.APICAFile,
+		APIInsecureSkipVerify:   substrateEnv.APIInsecureSkipVerify,
+		RouterURL:               substrateEnv.RouterURL,
+		ActorDNSSuffix:          substrateEnv.ActorDNSSuffix,
+		SessionIdentityToken:    substrateEnv.SessionIdentityToken,
+		SessionIdentityAudience: strings.Split(substrateEnv.SessionIdentityAudience, ","),
+		SessionIdentityAppID:    substrateEnv.SessionIdentityAppID,
+		SessionIdentityUserID:   substrateEnv.SessionIdentityUserID,
+		SessionIdentityRequired: substrateEnv.SessionIdentityRequired,
 	})
 	return substrateWorkspaceExecutor, substrateWorkspaceExecutorErr
 }
@@ -495,10 +500,12 @@ func runAgentInWorkspace(
 		"workspace claimed",
 	)
 
-	if _, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
+	ready, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
 		Ref:     ref,
 		Timeout: workspaceEnv.ClaimTimeout,
-	}); err != nil {
+		Boot:    workspaceEnv.Boot,
+	})
+	if err != nil {
 		submitExecutionWorkspaceStatus(
 			workspaceEnv,
 			corev1alpha1.ExecutionWorkspacePhaseFailed,
@@ -508,12 +515,14 @@ func runAgentInWorkspace(
 		)
 		return fmt.Errorf("wait for execution workspace: %w", err)
 	}
+	readyStatusOptions := []executionWorkspaceStatusOption{withExecutionWorkspaceReadyResult(ready)}
 	submitExecutionWorkspaceStatus(
 		workspaceEnv,
 		corev1alpha1.ExecutionWorkspacePhaseReady,
 		corev1alpha1.ExecutionWorkspaceReasonReady,
 		claim.Reused,
 		"workspace ready",
+		readyStatusOptions...,
 	)
 
 	if handoffToken != "" {
@@ -524,6 +533,7 @@ func runAgentInWorkspace(
 				corev1alpha1.ExecutionWorkspaceReasonHandoffFailed,
 				claim.Reused,
 				"workspace handoff failed",
+				readyStatusOptions...,
 			)
 			return err
 		}
@@ -546,6 +556,7 @@ func runAgentInWorkspace(
 			corev1alpha1.ExecutionWorkspaceReasonHandoffFailed,
 			claim.Reused,
 			"workspace handoff failed",
+			readyStatusOptions...,
 		)
 		return err
 	}
@@ -565,6 +576,7 @@ func runAgentInWorkspace(
 			corev1alpha1.ExecutionWorkspaceReasonCommandFailed,
 			claim.Reused,
 			"workspace command failed",
+			readyStatusOptions...,
 		)
 		return fmt.Errorf("%s workspace execution failed: %w%s", name, err, formatSandboxExecOutput(execResult))
 	}
@@ -575,6 +587,7 @@ func runAgentInWorkspace(
 			corev1alpha1.ExecutionWorkspaceReasonCommandFailed,
 			claim.Reused,
 			"workspace command failed",
+			readyStatusOptions...,
 		)
 		return fmt.Errorf(
 			"%s workspace execution failed: command exited with code %d%s",
@@ -586,7 +599,15 @@ func runAgentInWorkspace(
 
 	cleanupCtx, cleanupCancel := agentSandboxCleanupContext(workspaceEnv.ClaimTimeout)
 	defer cleanupCancel()
-	if err := cleanupExecutionWorkspace(cleanupCtx, executor, ref, workspaceEnv, claim.Reused, true); err != nil {
+	if err := cleanupExecutionWorkspaceWithOptions(
+		cleanupCtx,
+		executor,
+		ref,
+		workspaceEnv,
+		claim.Reused,
+		true,
+		executionWorkspaceCleanupOptions{statusOptions: readyStatusOptions},
+	); err != nil {
 		reason := corev1alpha1.ExecutionWorkspaceReasonCleanupFailed
 		if errors.Is(err, errExecutionWorkspaceSecretScrubFailed) {
 			reason = corev1alpha1.ExecutionWorkspaceReasonSecretScrubFailed
@@ -597,6 +618,7 @@ func runAgentInWorkspace(
 			reason,
 			claim.Reused,
 			"workspace cleanup failed",
+			readyStatusOptions...,
 		)
 		return fmt.Errorf("execution workspace cleanup failed: %w", err)
 	}
@@ -628,6 +650,7 @@ func executionWorkspaceCompletionMessage(
 type executionWorkspaceCleanupOptions struct {
 	skipSubstrateDeleteScrub  bool
 	skipSubstrateReleaseScrub bool
+	statusOptions             []executionWorkspaceStatusOption
 }
 
 func preTerminalExecutionWorkspaceCleanup(
@@ -1116,6 +1139,7 @@ func cleanupExecutionWorkspaceWithOptions(
 				corev1alpha1.ExecutionWorkspaceReasonRetained,
 				reused,
 				"workspace retained",
+				options.statusOptions...,
 			)
 		}
 		return nil
@@ -1135,6 +1159,7 @@ func cleanupExecutionWorkspaceWithOptions(
 				corev1alpha1.ExecutionWorkspaceReasonDeleted,
 				reused,
 				"workspace deleted",
+				options.statusOptions...,
 			)
 		}
 		return nil
@@ -1165,6 +1190,7 @@ func cleanupExecutionWorkspaceWithOptions(
 				corev1alpha1.ExecutionWorkspaceReasonRetained,
 				reused,
 				"workspace retained",
+				options.statusOptions...,
 			)
 		}
 		return nil
@@ -1352,6 +1378,7 @@ func scrubInnerExecutionWorkspaceEnv(env map[string]string) {
 		workerenv.ExecutionWorkspaceReusePolicy,
 		workerenv.ExecutionWorkspaceReuseKey,
 		workerenv.ExecutionWorkspaceCleanupPolicy,
+		workerenv.ExecutionWorkspaceBoot,
 		workerenv.ExecutionWorkspaceClaimTimeoutSeconds,
 		workerenv.ExecutionWorkspaceCommandTimeoutSeconds,
 		workerenv.ExecutionWorkspaceStatusEndpoint,
@@ -1360,6 +1387,11 @@ func scrubInnerExecutionWorkspaceEnv(env map[string]string) {
 		workerenv.SubstrateAPIInsecureSkipVerify,
 		workerenv.SubstrateRouterURL,
 		workerenv.SubstrateActorDNSSuffix,
+		workerenv.SubstrateSessionIdentityToken,
+		workerenv.SubstrateSessionIdentityRequired,
+		workerenv.SubstrateSessionIdentityAudience,
+		workerenv.SubstrateSessionIdentityAppID,
+		workerenv.SubstrateSessionIdentityUserID,
 		workerenv.WorkspaceBootstrapToken,
 	} {
 		delete(env, name)

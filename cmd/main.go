@@ -266,6 +266,24 @@ func main() {
 	flag.StringVar(&substrateConfig.BootstrapSecretKey, "substrate-bootstrap-token-secret-key",
 		substrateConfig.BootstrapSecretKey,
 		"Kubernetes Secret key containing the Substrate workspace daemon bootstrap token.")
+	flag.StringVar(&substrateConfig.SessionIdentitySecretName, "substrate-session-identity-token-secret-name",
+		substrateConfig.SessionIdentitySecretName,
+		"Kubernetes Secret name containing the bearer token for Substrate SessionIdentity.")
+	flag.StringVar(&substrateConfig.SessionIdentitySecretKey, "substrate-session-identity-token-secret-key",
+		substrateConfig.SessionIdentitySecretKey,
+		"Kubernetes Secret key containing the bearer token for Substrate SessionIdentity.")
+	flag.BoolVar(&substrateConfig.SessionIdentityRequired, "substrate-session-identity-required",
+		substrateConfig.SessionIdentityRequired,
+		"Fail Substrate workspace handoff when SessionIdentity cannot mint a per-actor JWT.")
+	flag.StringVar(&substrateConfig.SessionIdentityAudience, "substrate-session-identity-audience",
+		substrateConfig.SessionIdentityAudience,
+		"Comma-separated audiences requested from Substrate SessionIdentity minted JWTs.")
+	flag.StringVar(&substrateConfig.SessionIdentityAppID, "substrate-session-identity-app-id",
+		substrateConfig.SessionIdentityAppID,
+		"Application ID requested from Substrate SessionIdentity minted JWTs.")
+	flag.StringVar(&substrateConfig.SessionIdentityUserID, "substrate-session-identity-user-id",
+		substrateConfig.SessionIdentityUserID,
+		"User ID requested from Substrate SessionIdentity minted JWTs.")
 	flag.DurationVar(&substrateConfig.ClaimTimeout, "substrate-claim-timeout", substrateConfig.ClaimTimeout,
 		"Timeout for Substrate actor claim, readiness, release, retain, and delete operations.")
 	flag.DurationVar(&substrateConfig.CommandTimeout, "substrate-command-timeout", substrateConfig.CommandTimeout,

@@ -665,6 +665,19 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			wantErr: "unsupported execution workspace cleanupPolicy",
 		},
 		{
+			name:                "boot unsupported for agent sandbox",
+			agentSandboxEnabled: true,
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.Boot = true
+					}),
+				},
+			}},
+			wantErr: "execution workspace boot is only supported",
+		},
+		{
 			name:                "session reuse without sessionRef",
 			agentSandboxEnabled: true,
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{

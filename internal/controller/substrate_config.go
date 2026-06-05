@@ -15,44 +15,57 @@ import (
 )
 
 const (
-	EnvSubstrateAPIEndpoint           = "ORKA_SUBSTRATE_API_ENDPOINT"
-	EnvSubstrateAPICAFile             = "ORKA_SUBSTRATE_API_CA_FILE"
-	EnvSubstrateAPIInsecureSkipVerify = "ORKA_SUBSTRATE_API_INSECURE_SKIP_VERIFY"
-	EnvSubstrateRouterURL             = "ORKA_SUBSTRATE_ROUTER_URL"
-	EnvSubstrateActorDNSSuffix        = "ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX"
-	EnvSubstrateDefaultTemplate       = "ORKA_SUBSTRATE_DEFAULT_TEMPLATE"
-	EnvSubstrateDefaultTemplateNS     = "ORKA_SUBSTRATE_DEFAULT_TEMPLATE_NAMESPACE"
-	EnvSubstrateBootstrapSecretName   = "ORKA_SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME"
-	EnvSubstrateBootstrapSecretKey    = "ORKA_SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY"
-	EnvSubstrateClaimTimeout          = "ORKA_SUBSTRATE_CLAIM_TIMEOUT"
-	EnvSubstrateCommandTimeout        = "ORKA_SUBSTRATE_COMMAND_TIMEOUT"
-	EnvSubstrateCleanupPolicy         = "ORKA_SUBSTRATE_CLEANUP_POLICY"
+	EnvSubstrateAPIEndpoint               = "ORKA_SUBSTRATE_API_ENDPOINT"
+	EnvSubstrateAPICAFile                 = "ORKA_SUBSTRATE_API_CA_FILE"
+	EnvSubstrateAPIInsecureSkipVerify     = "ORKA_SUBSTRATE_API_INSECURE_SKIP_VERIFY"
+	EnvSubstrateRouterURL                 = "ORKA_SUBSTRATE_ROUTER_URL"
+	EnvSubstrateActorDNSSuffix            = "ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX"
+	EnvSubstrateDefaultTemplate           = "ORKA_SUBSTRATE_DEFAULT_TEMPLATE"
+	EnvSubstrateDefaultTemplateNS         = "ORKA_SUBSTRATE_DEFAULT_TEMPLATE_NAMESPACE"
+	EnvSubstrateBootstrapSecretName       = "ORKA_SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME"
+	EnvSubstrateBootstrapSecretKey        = "ORKA_SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY"
+	EnvSubstrateSessionIdentitySecretName = "ORKA_SUBSTRATE_SESSION_IDENTITY_TOKEN_SECRET_NAME"
+	EnvSubstrateSessionIdentitySecretKey  = "ORKA_SUBSTRATE_SESSION_IDENTITY_TOKEN_SECRET_KEY"
+	EnvSubstrateSessionIdentityRequired   = "ORKA_SUBSTRATE_SESSION_IDENTITY_REQUIRED"
+	EnvSubstrateSessionIdentityAudience   = "ORKA_SUBSTRATE_SESSION_IDENTITY_AUDIENCE"
+	EnvSubstrateSessionIdentityAppID      = "ORKA_SUBSTRATE_SESSION_IDENTITY_APP_ID"
+	EnvSubstrateSessionIdentityUserID     = "ORKA_SUBSTRATE_SESSION_IDENTITY_USER_ID"
+	EnvSubstrateClaimTimeout              = "ORKA_SUBSTRATE_CLAIM_TIMEOUT"
+	EnvSubstrateCommandTimeout            = "ORKA_SUBSTRATE_COMMAND_TIMEOUT"
+	EnvSubstrateCleanupPolicy             = "ORKA_SUBSTRATE_CLEANUP_POLICY"
 )
 
 const (
-	defaultSubstrateAPIEndpoint    = "api.ate-system.svc:443"
-	defaultSubstrateRouterURL      = "http://atenet-router.ate-system.svc"
-	defaultSubstrateActorDNSSuffix = "actors.resources.substrate.ate.dev"
-	defaultSubstrateBootstrapKey   = "token"
-	defaultSubstrateClaimTimeout   = 2 * time.Minute
-	defaultSubstrateCommandTimeout = 30 * time.Minute
+	defaultSubstrateAPIEndpoint        = "api.ate-system.svc:443"
+	defaultSubstrateRouterURL          = "http://atenet-router.ate-system.svc"
+	defaultSubstrateActorDNSSuffix     = "actors.resources.substrate.ate.dev"
+	defaultSubstrateBootstrapKey       = "token"
+	defaultSubstrateSessionIdentityKey = "token"
+	defaultSubstrateClaimTimeout       = 2 * time.Minute
+	defaultSubstrateCommandTimeout     = 30 * time.Minute
 )
 
 // SubstrateConfig holds disabled-by-default alpha configuration for the
 // Agent Substrate execution workspace provider.
 type SubstrateConfig struct {
-	APIEndpoint           string
-	APICAFile             string
-	APIInsecureSkipVerify bool
-	RouterURL             string
-	ActorDNSSuffix        string
-	DefaultTemplate       string
-	DefaultTemplateNS     string
-	BootstrapSecretName   string
-	BootstrapSecretKey    string
-	ClaimTimeout          time.Duration
-	CommandTimeout        time.Duration
-	CleanupPolicy         corev1alpha1.WorkspaceCleanupPolicy
+	APIEndpoint               string
+	APICAFile                 string
+	APIInsecureSkipVerify     bool
+	RouterURL                 string
+	ActorDNSSuffix            string
+	DefaultTemplate           string
+	DefaultTemplateNS         string
+	BootstrapSecretName       string
+	BootstrapSecretKey        string
+	SessionIdentitySecretName string
+	SessionIdentitySecretKey  string
+	SessionIdentityRequired   bool
+	SessionIdentityAudience   string
+	SessionIdentityAppID      string
+	SessionIdentityUserID     string
+	ClaimTimeout              time.Duration
+	CommandTimeout            time.Duration
+	CleanupPolicy             corev1alpha1.WorkspaceCleanupPolicy
 }
 
 // DefaultSubstrateConfig returns safe alpha defaults. Substrate is still
@@ -99,6 +112,24 @@ func SubstrateConfigFromEnv(getenv func(string) string) (SubstrateConfig, error)
 	if value := strings.TrimSpace(getenv(EnvSubstrateBootstrapSecretKey)); value != "" {
 		cfg.BootstrapSecretKey = value
 	}
+	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentitySecretName)); value != "" {
+		cfg.SessionIdentitySecretName = value
+	}
+	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentitySecretKey)); value != "" {
+		cfg.SessionIdentitySecretKey = value
+	}
+	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentityRequired)); value != "" {
+		cfg.SessionIdentityRequired = strings.EqualFold(value, "true")
+	}
+	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentityAudience)); value != "" {
+		cfg.SessionIdentityAudience = value
+	}
+	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentityAppID)); value != "" {
+		cfg.SessionIdentityAppID = value
+	}
+	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentityUserID)); value != "" {
+		cfg.SessionIdentityUserID = value
+	}
 	if value := strings.TrimSpace(getenv(EnvSubstrateClaimTimeout)); value != "" {
 		duration, err := time.ParseDuration(value)
 		if err != nil {
@@ -143,6 +174,9 @@ func (c SubstrateConfig) WithDefaults() SubstrateConfig {
 	if strings.TrimSpace(c.BootstrapSecretName) != "" && strings.TrimSpace(c.BootstrapSecretKey) == "" {
 		c.BootstrapSecretKey = defaultSubstrateBootstrapKey
 	}
+	if strings.TrimSpace(c.SessionIdentitySecretName) != "" && strings.TrimSpace(c.SessionIdentitySecretKey) == "" {
+		c.SessionIdentitySecretKey = defaultSubstrateSessionIdentityKey
+	}
 	return c
 }
 
@@ -169,6 +203,9 @@ func (c SubstrateConfig) Validate() error {
 	}
 	if strings.TrimSpace(cfg.BootstrapSecretKey) == "" {
 		return fmt.Errorf("substrate workspace bootstrap token secret key is required")
+	}
+	if cfg.SessionIdentityRequired && strings.TrimSpace(cfg.SessionIdentitySecretName) == "" {
+		return fmt.Errorf("substrate SessionIdentity requires --substrate-session-identity-token-secret-name")
 	}
 	if cfg.ClaimTimeout <= 0 {
 		return fmt.Errorf("substrate claim timeout must be greater than zero")

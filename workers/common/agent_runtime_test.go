@@ -818,6 +818,7 @@ func TestWorkspaceInnerEnvStripsExecutionWorkspaceMetadata(t *testing.T) {
 			workerenv.ExecutionWorkspaceReusePolicy + "=by-session",
 			workerenv.ExecutionWorkspaceReuseKey + "=session-1",
 			workerenv.ExecutionWorkspaceCleanupPolicy + "=retain",
+			workerenv.ExecutionWorkspaceBoot + "=true",
 			workerenv.ExecutionWorkspaceClaimTimeoutSeconds + "=30",
 			workerenv.ExecutionWorkspaceCommandTimeoutSeconds + "=600",
 			workerenv.ExecutionWorkspaceStatusEndpoint + "=http://controller/internal",
@@ -827,6 +828,11 @@ func TestWorkspaceInnerEnvStripsExecutionWorkspaceMetadata(t *testing.T) {
 			workerenv.SubstrateAPIInsecureSkipVerify + "=true",
 			workerenv.SubstrateRouterURL + "=http://atenet-router.ate-system.svc",
 			workerenv.SubstrateActorDNSSuffix + "=actors.resources.substrate.ate.dev",
+			workerenv.SubstrateSessionIdentityToken + "=session-identity-token",
+			workerenv.SubstrateSessionIdentityRequired + "=true",
+			workerenv.SubstrateSessionIdentityAudience + "=orka-workspace-daemon,custom-audience",
+			workerenv.SubstrateSessionIdentityAppID + "=orka",
+			workerenv.SubstrateSessionIdentityUserID + "=orka-worker",
 			workerenv.WorkspaceBootstrapToken + "=bootstrap-token",
 			workspaceHandoffTokenEnv + "=handoff-token",
 			workerenv.AgentSandboxDepth + "=2",
@@ -844,6 +850,7 @@ func TestWorkspaceInnerEnvStripsExecutionWorkspaceMetadata(t *testing.T) {
 		workerenv.ExecutionWorkspaceReusePolicy,
 		workerenv.ExecutionWorkspaceReuseKey,
 		workerenv.ExecutionWorkspaceCleanupPolicy,
+		workerenv.ExecutionWorkspaceBoot,
 		workerenv.ExecutionWorkspaceClaimTimeoutSeconds,
 		workerenv.ExecutionWorkspaceCommandTimeoutSeconds,
 		workerenv.ExecutionWorkspaceStatusEndpoint,
@@ -852,6 +859,11 @@ func TestWorkspaceInnerEnvStripsExecutionWorkspaceMetadata(t *testing.T) {
 		workerenv.SubstrateAPIInsecureSkipVerify,
 		workerenv.SubstrateRouterURL,
 		workerenv.SubstrateActorDNSSuffix,
+		workerenv.SubstrateSessionIdentityToken,
+		workerenv.SubstrateSessionIdentityRequired,
+		workerenv.SubstrateSessionIdentityAudience,
+		workerenv.SubstrateSessionIdentityAppID,
+		workerenv.SubstrateSessionIdentityUserID,
 		workerenv.WorkspaceBootstrapToken,
 		workspaceHandoffTokenEnv,
 	} {
@@ -1367,6 +1379,66 @@ func TestCleanupExecutionWorkspaceRetainScrubsSecretsAndReportsReused(t *testing
 	}
 }
 
+func TestSubmitExecutionWorkspaceStatusIncludesReadyPlacement(t *testing.T) {
+	var status executionWorkspaceStatusUpdate
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&status); err != nil {
+			t.Errorf("decode status: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	submitExecutionWorkspaceStatus(
+		workerenv.ExecutionWorkspaceEnv{
+			Provider:          string(corev1alpha1.WorkspaceProviderSubstrate),
+			TemplateName:      "orka-codex",
+			TemplateNamespace: "ate-demo",
+			ReusePolicy:       "session",
+			CleanupPolicy:     "retain",
+			StatusEndpoint:    server.URL,
+		},
+		corev1alpha1.ExecutionWorkspacePhaseReady,
+		corev1alpha1.ExecutionWorkspaceReasonReady,
+		true,
+		"workspace ready",
+		withExecutionWorkspaceReadyResult(&workspace.ReadyResult{
+			Placement: workspace.Placement{
+				WorkerNamespace: "ate-demo",
+				WorkerPool:      "codex-pool",
+				WorkerPodName:   "ateom-worker-1",
+				PodIP:           "10.244.0.42",
+			},
+			Density: workspace.Density{
+				WorkerCount:         1,
+				ActorCount:          3,
+				RunningActorCount:   1,
+				SuspendedActorCount: 2,
+				ActorsPerWorker:     "3.00",
+			},
+			ResumeLatency: 750 * time.Millisecond,
+		}),
+	)
+
+	if status.Placement == nil {
+		t.Fatal("placement = nil, want placement status")
+	}
+	if status.Placement.WorkerPool != "codex-pool" ||
+		status.Placement.WorkerPodName != "ateom-worker-1" {
+		t.Fatalf("placement = %#v, want worker placement", status.Placement)
+	}
+	if status.ResumeLatency == nil || status.ResumeLatency.Duration != 750*time.Millisecond {
+		t.Fatalf("resume latency = %#v, want 750ms", status.ResumeLatency)
+	}
+	if status.Density == nil {
+		t.Fatal("density = nil, want density status")
+	}
+	if status.Density.ActorCount != 3 || status.Density.WorkerCount != 1 ||
+		status.Density.ActorsPerWorker != "3.00" {
+		t.Fatalf("density = %#v, want actor/worker density", status.Density)
+	}
+}
+
 func TestCleanupExecutionWorkspaceSubstrateRetainUsesReleaseScrub(t *testing.T) {
 	var statuses []executionWorkspaceStatusUpdate
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1421,6 +1493,88 @@ func TestCleanupExecutionWorkspaceSubstrateRetainUsesReleaseScrub(t *testing.T) 
 		statuses[0].Reason != corev1alpha1.ExecutionWorkspaceReasonRetained ||
 		!statuses[0].Reused {
 		t.Fatalf("status = %#v, want retained/reused", statuses[0])
+	}
+}
+
+func TestCleanupExecutionWorkspaceIncludesReadyTelemetryInTerminalStatus(t *testing.T) {
+	var status executionWorkspaceStatusUpdate
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&status); err != nil {
+			t.Errorf("decode status: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	recorder := newRecordingWorkspaceExecutor()
+	claim, err := recorder.Claim(context.Background(), workspace.ClaimRequest{
+		Namespace:       "ns",
+		CreateIfMissing: true,
+		Template:        workspace.TemplateRef{Name: "template"},
+		Timeout:         time.Second,
+	})
+	if err != nil {
+		t.Fatalf("claim workspace: %v", err)
+	}
+
+	err = cleanupExecutionWorkspaceWithOptions(
+		context.Background(),
+		recorder,
+		claim.Ref,
+		workerenv.ExecutionWorkspaceEnv{
+			Provider:       string(corev1alpha1.WorkspaceProviderSubstrate),
+			CleanupPolicy:  "delete",
+			ClaimTimeout:   time.Second,
+			StatusEndpoint: server.URL,
+		},
+		true,
+		true,
+		executionWorkspaceCleanupOptions{
+			statusOptions: []executionWorkspaceStatusOption{
+				withExecutionWorkspaceReadyResult(&workspace.ReadyResult{
+					Placement: workspace.Placement{
+						WorkerNamespace: "ate-demo",
+						WorkerPool:      "codex-pool",
+						WorkerPodName:   "ateom-worker-1",
+						PodIP:           "10.244.0.42",
+					},
+					Density: workspace.Density{
+						WorkerCount:         1,
+						ActorCount:          3,
+						RunningActorCount:   1,
+						SuspendedActorCount: 2,
+						ActorsPerWorker:     "3.00",
+					},
+					ResumeLatency: 750 * time.Millisecond,
+				}),
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("cleanupExecutionWorkspaceWithOptions returned error: %v", err)
+	}
+
+	assertOperationOrder(t, recorder.operations(), "claim", "delete")
+	if status.Phase != corev1alpha1.ExecutionWorkspacePhaseDeleted ||
+		status.Reason != corev1alpha1.ExecutionWorkspaceReasonDeleted ||
+		!status.Reused {
+		t.Fatalf("status = %#v, want deleted/reused", status)
+	}
+	if status.Placement == nil {
+		t.Fatal("placement = nil, want ready placement on terminal status")
+	}
+	if status.Placement.WorkerPool != "codex-pool" ||
+		status.Placement.WorkerPodName != "ateom-worker-1" {
+		t.Fatalf("placement = %#v, want worker placement", status.Placement)
+	}
+	if status.ResumeLatency == nil || status.ResumeLatency.Duration != 750*time.Millisecond {
+		t.Fatalf("resume latency = %#v, want 750ms", status.ResumeLatency)
+	}
+	if status.Density == nil {
+		t.Fatal("density = nil, want ready density on terminal status")
+	}
+	if status.Density.ActorCount != 3 || status.Density.WorkerCount != 1 ||
+		status.Density.ActorsPerWorker != "3.00" {
+		t.Fatalf("density = %#v, want actor/worker density", status.Density)
 	}
 }
 

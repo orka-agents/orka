@@ -70,6 +70,37 @@ type TemplateRef struct {
 	Name      string `json:"name,omitempty"`
 }
 
+// Placement captures non-secret runtime placement metadata for a workspace.
+type Placement struct {
+	WorkerNamespace string `json:"workerNamespace,omitempty"`
+	WorkerPool      string `json:"workerPool,omitempty"`
+	WorkerPodName   string `json:"workerPodName,omitempty"`
+	PodIP           string `json:"podIP,omitempty"`
+}
+
+// IsZero reports whether no placement metadata is available.
+func (p Placement) IsZero() bool {
+	return p.WorkerNamespace == "" && p.WorkerPool == "" && p.WorkerPodName == "" && p.PodIP == ""
+}
+
+// Density captures non-secret actor/worker density metadata for a workspace provider.
+type Density struct {
+	WorkerCount         int    `json:"workerCount,omitempty"`
+	ActorCount          int    `json:"actorCount,omitempty"`
+	RunningActorCount   int    `json:"runningActorCount,omitempty"`
+	SuspendedActorCount int    `json:"suspendedActorCount,omitempty"`
+	ActorsPerWorker     string `json:"actorsPerWorker,omitempty"`
+}
+
+// IsZero reports whether no density metadata is available.
+func (d Density) IsZero() bool {
+	return d.WorkerCount == 0 &&
+		d.ActorCount == 0 &&
+		d.RunningActorCount == 0 &&
+		d.SuspendedActorCount == 0 &&
+		d.ActorsPerWorker == ""
+}
+
 // ClaimRequest asks the executor to create or reuse a workspace claim.
 type ClaimRequest struct {
 	Namespace string
@@ -99,20 +130,25 @@ type ClaimResult struct {
 	Phase     Phase
 	Message   string
 	ClaimedAt time.Time
+	Placement Placement
 }
 
 // WaitReadyRequest waits until a workspace can execute commands.
 type WaitReadyRequest struct {
 	Ref     WorkspaceRef
 	Timeout time.Duration
+	Boot    bool
 }
 
 // ReadyResult describes a workspace that became ready.
 type ReadyResult struct {
-	Ref     WorkspaceRef
-	Phase   Phase
-	Message string
-	ReadyAt time.Time
+	Ref           WorkspaceRef
+	Phase         Phase
+	Message       string
+	ReadyAt       time.Time
+	Placement     Placement
+	Density       Density
+	ResumeLatency time.Duration
 }
 
 // ExecRequest executes a command inside a ready workspace.
@@ -260,6 +296,8 @@ type Description struct {
 	ReadyAt     time.Time
 	ReleasedAt  time.Time
 	DeletedAt   time.Time
+	Placement   Placement
+	Density     Density
 	Labels      map[string]string
 	Annotations map[string]string
 	Artifacts   []Artifact

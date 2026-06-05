@@ -18,14 +18,17 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 const (
-	testSandboxTemplatesNamespace    = "sandbox-templates"
-	testSubstrateBootstrapSecretName = "orka-substrate-bootstrap"
-	testSubstrateBootstrapSecretKey  = "bootstrap-token"
+	testSandboxTemplatesNamespace          = "sandbox-templates"
+	testSubstrateBootstrapSecretName       = "orka-substrate-bootstrap"
+	testSubstrateBootstrapSecretKey        = "bootstrap-token"
+	testSubstrateSessionIdentitySecretName = "orka-substrate-session-identity"
+	testSubstrateSessionIdentitySecretKey  = "session-token"
 )
 
 func TestDefaultAgentSandboxConfig(t *testing.T) {
@@ -115,18 +118,24 @@ func TestAgentSandboxConfigFromEnv_InvalidDuration(t *testing.T) {
 
 func TestSubstrateConfigFromEnv(t *testing.T) {
 	env := map[string]string{
-		EnvSubstrateAPIEndpoint:           "api.ate-system.svc:443",
-		EnvSubstrateAPICAFile:             "/var/run/orka/substrate/ca.crt",
-		EnvSubstrateAPIInsecureSkipVerify: "true",
-		EnvSubstrateRouterURL:             "http://atenet-router.ate-system.svc",
-		EnvSubstrateActorDNSSuffix:        "actors.resources.substrate.ate.dev",
-		EnvSubstrateDefaultTemplate:       "orka-codex",
-		EnvSubstrateDefaultTemplateNS:     "ate-demo",
-		EnvSubstrateBootstrapSecretName:   testSubstrateBootstrapSecretName,
-		EnvSubstrateBootstrapSecretKey:    testSubstrateBootstrapSecretKey,
-		EnvSubstrateClaimTimeout:          "45s",
-		EnvSubstrateCommandTimeout:        "10m",
-		EnvSubstrateCleanupPolicy:         string(corev1alpha1.WorkspaceCleanupPolicyRetain),
+		EnvSubstrateAPIEndpoint:               "api.ate-system.svc:443",
+		EnvSubstrateAPICAFile:                 "/var/run/orka/substrate/ca.crt",
+		EnvSubstrateAPIInsecureSkipVerify:     "true",
+		EnvSubstrateRouterURL:                 "http://atenet-router.ate-system.svc",
+		EnvSubstrateActorDNSSuffix:            "actors.resources.substrate.ate.dev",
+		EnvSubstrateDefaultTemplate:           "orka-codex",
+		EnvSubstrateDefaultTemplateNS:         "ate-demo",
+		EnvSubstrateBootstrapSecretName:       testSubstrateBootstrapSecretName,
+		EnvSubstrateBootstrapSecretKey:        testSubstrateBootstrapSecretKey,
+		EnvSubstrateSessionIdentitySecretName: testSubstrateSessionIdentitySecretName,
+		EnvSubstrateSessionIdentitySecretKey:  testSubstrateSessionIdentitySecretKey,
+		EnvSubstrateSessionIdentityRequired:   "true",
+		EnvSubstrateSessionIdentityAudience:   "orka-workspace-daemon,custom-audience",
+		EnvSubstrateSessionIdentityAppID:      "orka",
+		EnvSubstrateSessionIdentityUserID:     "orka-worker",
+		EnvSubstrateClaimTimeout:              "45s",
+		EnvSubstrateCommandTimeout:            "10m",
+		EnvSubstrateCleanupPolicy:             string(corev1alpha1.WorkspaceCleanupPolicyRetain),
 	}
 
 	cfg, err := SubstrateConfigFromEnv(func(key string) string { return env[key] })
@@ -145,6 +154,14 @@ func TestSubstrateConfigFromEnv(t *testing.T) {
 	if cfg.BootstrapSecretName != testSubstrateBootstrapSecretName ||
 		cfg.BootstrapSecretKey != testSubstrateBootstrapSecretKey {
 		t.Fatalf("unexpected substrate bootstrap secret: %#v", cfg)
+	}
+	if cfg.SessionIdentitySecretName != testSubstrateSessionIdentitySecretName ||
+		cfg.SessionIdentitySecretKey != testSubstrateSessionIdentitySecretKey ||
+		!cfg.SessionIdentityRequired ||
+		cfg.SessionIdentityAudience != "orka-workspace-daemon,custom-audience" ||
+		cfg.SessionIdentityAppID != "orka" ||
+		cfg.SessionIdentityUserID != "orka-worker" {
+		t.Fatalf("unexpected substrate SessionIdentity config: %#v", cfg)
 	}
 	if cfg.ClaimTimeout != 45*time.Second || cfg.CommandTimeout != 10*time.Minute {
 		t.Fatalf("unexpected substrate timeouts: %#v", cfg)
@@ -182,6 +199,29 @@ func TestSubstrateConfigValidateRequiresExplicitTrust(t *testing.T) {
 	cfg.APIInsecureSkipVerify = true
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() with insecure skip verify error = %v", err)
+	}
+}
+
+func TestSubstrateConfigValidateRequiresSessionIdentitySecretWhenRequired(t *testing.T) {
+	cfg := DefaultSubstrateConfig()
+	cfg.APIInsecureSkipVerify = true
+	cfg.BootstrapSecretName = testSubstrateBootstrapSecretName
+	cfg.SessionIdentityRequired = true
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected missing SessionIdentity token secret error")
+	}
+	if !strings.Contains(err.Error(), "substrate-session-identity-token-secret-name") {
+		t.Fatalf("Validate() error = %q, want SessionIdentity secret flag context", err.Error())
+	}
+
+	cfg.SessionIdentitySecretName = testSubstrateSessionIdentitySecretName
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with SessionIdentity secret returned error: %v", err)
+	}
+	if got := cfg.WithDefaults().SessionIdentitySecretKey; got != "token" {
+		t.Fatalf("default SessionIdentity secret key = %q, want token", got)
 	}
 }
 
@@ -625,6 +665,58 @@ func TestResolveExecutionWorkspaceRequest(t *testing.T) {
 		}
 		if request.CleanupPolicy != corev1alpha1.WorkspaceCleanupPolicyRetain {
 			t.Fatalf("CleanupPolicy = %q, want %q", request.CleanupPolicy, corev1alpha1.WorkspaceCleanupPolicyRetain)
+		}
+	})
+
+	t.Run("substrate boot request is carried", func(t *testing.T) {
+		r := &TaskReconciler{
+			SubstrateEnabled: true,
+			SubstrateConfig: SubstrateConfig{
+				APIInsecureSkipVerify:     true,
+				BootstrapSecretName:       testSubstrateBootstrapSecretName,
+				BootstrapSecretKey:        testSubstrateBootstrapSecretKey,
+				SessionIdentitySecretName: testSubstrateSessionIdentitySecretName,
+				SessionIdentitySecretKey:  testSubstrateSessionIdentitySecretKey,
+				SessionIdentityRequired:   true,
+				SessionIdentityAudience:   "orka-workspace-daemon,custom-audience",
+				SessionIdentityAppID:      "orka",
+				SessionIdentityUserID:     "orka-worker",
+			},
+		}
+		task := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: defaultNS,
+				UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+			},
+			Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
+						ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{
+							Name:      "orka-codex",
+							Namespace: "ate-demo",
+						}
+						ws.Boot = true
+					}),
+				},
+			},
+		}
+
+		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task)
+		if err != nil {
+			t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
+		}
+		if request.Provider != corev1alpha1.WorkspaceProviderSubstrate || !request.Boot {
+			t.Fatalf("request provider/boot = %s/%t, want substrate/true", request.Provider, request.Boot)
+		}
+		if request.SubstrateSessionIdentitySecretName != testSubstrateSessionIdentitySecretName ||
+			request.SubstrateSessionIdentitySecretKey != testSubstrateSessionIdentitySecretKey ||
+			!request.SubstrateSessionIdentityRequired ||
+			request.SubstrateSessionIdentityAudience != "orka-workspace-daemon,custom-audience" ||
+			request.SubstrateSessionIdentityAppID != "orka" ||
+			request.SubstrateSessionIdentityUserID != "orka-worker" {
+			t.Fatalf("request SessionIdentity config = %#v, want resolved controller config", request)
 		}
 	})
 }

@@ -131,6 +131,12 @@ type ExecutionWorkspaceSpec struct {
 	// Defaults to delete when omitted.
 	// +optional
 	CleanupPolicy WorkspaceCleanupPolicy `json:"cleanupPolicy,omitempty"`
+
+	// Boot asks providers that support it to boot the workspace workload from scratch
+	// instead of resuming from the provider's default snapshot. Currently supported
+	// by the Substrate provider.
+	// +optional
+	Boot bool `json:"boot,omitempty"`
 }
 
 // WorkspaceTemplateReference references an execution workspace template.

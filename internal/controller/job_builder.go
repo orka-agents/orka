@@ -629,6 +629,7 @@ func (b *JobBuilder) addExecutionWorkspaceEnvVars(envVars []corev1.EnvVar, task 
 		ReusePolicy:       string(request.ReusePolicy),
 		ReuseKey:          request.ReuseKey,
 		CleanupPolicy:     string(request.CleanupPolicy),
+		Boot:              request.Boot,
 		ClaimTimeout:      request.ClaimTimeout,
 		CommandTimeout:    request.CommandTimeout,
 		StatusEndpoint:    fmt.Sprintf("%s/internal/v1/tasks/%s/%s/execution-workspace/status", b.ControllerURL, task.Namespace, task.Name),
@@ -637,11 +638,15 @@ func (b *JobBuilder) addExecutionWorkspaceEnvVars(envVars []corev1.EnvVar, task 
 
 	if request.Provider == corev1alpha1.WorkspaceProviderSubstrate {
 		envVars = append(envVars, workerenv.SubstrateEnv{
-			APIEndpoint:           request.SubstrateAPIEndpoint,
-			APICAFile:             request.SubstrateAPICAFile,
-			APIInsecureSkipVerify: request.SubstrateAPIInsecureSkipVerify,
-			RouterURL:             request.SubstrateRouterURL,
-			ActorDNSSuffix:        request.SubstrateActorDNSSuffix,
+			APIEndpoint:             request.SubstrateAPIEndpoint,
+			APICAFile:               request.SubstrateAPICAFile,
+			APIInsecureSkipVerify:   request.SubstrateAPIInsecureSkipVerify,
+			RouterURL:               request.SubstrateRouterURL,
+			ActorDNSSuffix:          request.SubstrateActorDNSSuffix,
+			SessionIdentityRequired: request.SubstrateSessionIdentityRequired,
+			SessionIdentityAudience: request.SubstrateSessionIdentityAudience,
+			SessionIdentityAppID:    request.SubstrateSessionIdentityAppID,
+			SessionIdentityUserID:   request.SubstrateSessionIdentityUserID,
 		}.EnvVars()...)
 		if strings.TrimSpace(request.SubstrateBootstrapSecretName) != "" {
 			envVars = append(envVars, corev1.EnvVar{
@@ -652,6 +657,19 @@ func (b *JobBuilder) addExecutionWorkspaceEnvVars(envVars []corev1.EnvVar, task 
 							Name: request.SubstrateBootstrapSecretName,
 						},
 						Key: request.SubstrateBootstrapSecretKey,
+					},
+				},
+			})
+		}
+		if strings.TrimSpace(request.SubstrateSessionIdentitySecretName) != "" {
+			envVars = append(envVars, corev1.EnvVar{
+				Name: workerenv.SubstrateSessionIdentityToken,
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: request.SubstrateSessionIdentitySecretName,
+						},
+						Key: request.SubstrateSessionIdentitySecretKey,
 					},
 				},
 			})

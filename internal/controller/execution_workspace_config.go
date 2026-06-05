@@ -51,18 +51,25 @@ type ExecutionWorkspaceRequest struct {
 	ReusePolicy       corev1alpha1.WorkspaceReusePolicy
 	ReuseKey          string
 	CleanupPolicy     corev1alpha1.WorkspaceCleanupPolicy
+	Boot              bool
 	WarmPoolPolicy    string
 	NamespaceStrategy string
 	ClaimTimeout      time.Duration
 	CommandTimeout    time.Duration
 
-	SubstrateAPIEndpoint           string
-	SubstrateAPICAFile             string
-	SubstrateAPIInsecureSkipVerify bool
-	SubstrateRouterURL             string
-	SubstrateActorDNSSuffix        string
-	SubstrateBootstrapSecretName   string
-	SubstrateBootstrapSecretKey    string
+	SubstrateAPIEndpoint               string
+	SubstrateAPICAFile                 string
+	SubstrateAPIInsecureSkipVerify     bool
+	SubstrateRouterURL                 string
+	SubstrateActorDNSSuffix            string
+	SubstrateBootstrapSecretName       string
+	SubstrateBootstrapSecretKey        string
+	SubstrateSessionIdentitySecretName string
+	SubstrateSessionIdentitySecretKey  string
+	SubstrateSessionIdentityRequired   bool
+	SubstrateSessionIdentityAudience   string
+	SubstrateSessionIdentityAppID      string
+	SubstrateSessionIdentityUserID     string
 }
 
 // AgentSandboxWorkspaceRequest is kept as a compatibility alias for tests and

@@ -148,17 +148,23 @@ const (
 	ExecutionWorkspaceReusePolicy           = "ORKA_EXECUTION_WORKSPACE_REUSE_POLICY"
 	ExecutionWorkspaceReuseKey              = "ORKA_EXECUTION_WORKSPACE_REUSE_KEY"
 	ExecutionWorkspaceCleanupPolicy         = "ORKA_EXECUTION_WORKSPACE_CLEANUP_POLICY"
+	ExecutionWorkspaceBoot                  = "ORKA_EXECUTION_WORKSPACE_BOOT"
 	ExecutionWorkspaceClaimTimeoutSeconds   = "ORKA_EXECUTION_WORKSPACE_CLAIM_TIMEOUT_SECONDS"
 	ExecutionWorkspaceCommandTimeoutSeconds = "ORKA_EXECUTION_WORKSPACE_COMMAND_TIMEOUT_SECONDS"
 	ExecutionWorkspaceStatusEndpoint        = "ORKA_EXECUTION_WORKSPACE_STATUS_ENDPOINT"
 	ExecutionWorkspaceDepth                 = "ORKA_EXECUTION_WORKSPACE_DEPTH"
 
-	SubstrateAPIEndpoint           = "ORKA_SUBSTRATE_API_ENDPOINT"
-	SubstrateAPICAFile             = "ORKA_SUBSTRATE_API_CA_FILE"
-	SubstrateAPIInsecureSkipVerify = "ORKA_SUBSTRATE_API_INSECURE_SKIP_VERIFY"
-	SubstrateRouterURL             = "ORKA_SUBSTRATE_ROUTER_URL"
-	SubstrateActorDNSSuffix        = "ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX"
-	WorkspaceBootstrapToken        = "ORKA_WORKSPACE_BOOTSTRAP_TOKEN"
+	SubstrateAPIEndpoint             = "ORKA_SUBSTRATE_API_ENDPOINT"
+	SubstrateAPICAFile               = "ORKA_SUBSTRATE_API_CA_FILE"
+	SubstrateAPIInsecureSkipVerify   = "ORKA_SUBSTRATE_API_INSECURE_SKIP_VERIFY"
+	SubstrateRouterURL               = "ORKA_SUBSTRATE_ROUTER_URL"
+	SubstrateActorDNSSuffix          = "ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX"
+	SubstrateSessionIdentityToken    = "ORKA_SUBSTRATE_SESSION_IDENTITY_TOKEN"
+	SubstrateSessionIdentityRequired = "ORKA_SUBSTRATE_SESSION_IDENTITY_REQUIRED"
+	SubstrateSessionIdentityAudience = "ORKA_SUBSTRATE_SESSION_IDENTITY_AUDIENCE"
+	SubstrateSessionIdentityAppID    = "ORKA_SUBSTRATE_SESSION_IDENTITY_APP_ID"
+	SubstrateSessionIdentityUserID   = "ORKA_SUBSTRATE_SESSION_IDENTITY_USER_ID"
+	WorkspaceBootstrapToken          = "ORKA_WORKSPACE_BOOTSTRAP_TOKEN"
 
 	AgentSandboxEnabled               = "ORKA_AGENT_SANDBOX_ENABLED"
 	AgentSandboxRouterURL             = "ORKA_AGENT_SANDBOX_ROUTER_URL"
@@ -473,6 +479,7 @@ type ExecutionWorkspaceEnv struct {
 	ReusePolicy       string
 	ReuseKey          string
 	CleanupPolicy     string
+	Boot              bool
 	ClaimTimeout      time.Duration
 	CommandTimeout    time.Duration
 	StatusEndpoint    string
@@ -495,6 +502,7 @@ func (e ExecutionWorkspaceEnv) EnvVars() []corev1.EnvVar {
 		Env(ExecutionWorkspaceReusePolicy, e.ReusePolicy),
 		Env(ExecutionWorkspaceReuseKey, e.ReuseKey),
 		Env(ExecutionWorkspaceCleanupPolicy, e.CleanupPolicy),
+		Env(ExecutionWorkspaceBoot, strconv.FormatBool(e.Boot)),
 		Env(ExecutionWorkspaceClaimTimeoutSeconds, strconv.FormatInt(int64(e.ClaimTimeout/time.Second), 10)),
 		Env(ExecutionWorkspaceCommandTimeoutSeconds, strconv.FormatInt(int64(e.CommandTimeout/time.Second), 10)),
 		Env(ExecutionWorkspaceStatusEndpoint, e.StatusEndpoint),
@@ -514,6 +522,7 @@ func ParseExecutionWorkspaceEnv(getenv func(string) string) ExecutionWorkspaceEn
 		ReusePolicy:       getenv(ExecutionWorkspaceReusePolicy),
 		ReuseKey:          getenv(ExecutionWorkspaceReuseKey),
 		CleanupPolicy:     getenv(ExecutionWorkspaceCleanupPolicy),
+		Boot:              IsTrue(getenv(ExecutionWorkspaceBoot)),
 		ClaimTimeout:      time.Duration(parsePositiveInt(getenv(ExecutionWorkspaceClaimTimeoutSeconds))) * time.Second,
 		CommandTimeout:    time.Duration(parsePositiveInt(getenv(ExecutionWorkspaceCommandTimeoutSeconds))) * time.Second,
 		StatusEndpoint:    getenv(ExecutionWorkspaceStatusEndpoint),
@@ -523,32 +532,50 @@ func ParseExecutionWorkspaceEnv(getenv func(string) string) ExecutionWorkspaceEn
 
 // SubstrateEnv is the Substrate-specific worker env contract.
 type SubstrateEnv struct {
-	APIEndpoint           string
-	APICAFile             string
-	APIInsecureSkipVerify bool
-	RouterURL             string
-	ActorDNSSuffix        string
+	APIEndpoint             string
+	APICAFile               string
+	APIInsecureSkipVerify   bool
+	RouterURL               string
+	ActorDNSSuffix          string
+	SessionIdentityToken    string
+	SessionIdentityRequired bool
+	SessionIdentityAudience string
+	SessionIdentityAppID    string
+	SessionIdentityUserID   string
 }
 
 // EnvVars renders Substrate-specific worker env vars.
 func (e SubstrateEnv) EnvVars() []corev1.EnvVar {
-	return []corev1.EnvVar{
+	envVars := []corev1.EnvVar{
 		Env(SubstrateAPIEndpoint, e.APIEndpoint),
 		Env(SubstrateAPICAFile, e.APICAFile),
 		Env(SubstrateAPIInsecureSkipVerify, strconv.FormatBool(e.APIInsecureSkipVerify)),
 		Env(SubstrateRouterURL, e.RouterURL),
 		Env(SubstrateActorDNSSuffix, e.ActorDNSSuffix),
+		Env(SubstrateSessionIdentityRequired, strconv.FormatBool(e.SessionIdentityRequired)),
+		Env(SubstrateSessionIdentityAudience, e.SessionIdentityAudience),
+		Env(SubstrateSessionIdentityAppID, e.SessionIdentityAppID),
+		Env(SubstrateSessionIdentityUserID, e.SessionIdentityUserID),
 	}
+	if strings.TrimSpace(e.SessionIdentityToken) != "" {
+		envVars = append(envVars, Env(SubstrateSessionIdentityToken, e.SessionIdentityToken))
+	}
+	return envVars
 }
 
 // ParseSubstrateEnv reads Substrate-specific worker env vars.
 func ParseSubstrateEnv(getenv func(string) string) SubstrateEnv {
 	return SubstrateEnv{
-		APIEndpoint:           getenv(SubstrateAPIEndpoint),
-		APICAFile:             getenv(SubstrateAPICAFile),
-		APIInsecureSkipVerify: IsTrue(getenv(SubstrateAPIInsecureSkipVerify)),
-		RouterURL:             getenv(SubstrateRouterURL),
-		ActorDNSSuffix:        getenv(SubstrateActorDNSSuffix),
+		APIEndpoint:             getenv(SubstrateAPIEndpoint),
+		APICAFile:               getenv(SubstrateAPICAFile),
+		APIInsecureSkipVerify:   IsTrue(getenv(SubstrateAPIInsecureSkipVerify)),
+		RouterURL:               getenv(SubstrateRouterURL),
+		ActorDNSSuffix:          getenv(SubstrateActorDNSSuffix),
+		SessionIdentityToken:    getenv(SubstrateSessionIdentityToken),
+		SessionIdentityRequired: IsTrue(getenv(SubstrateSessionIdentityRequired)),
+		SessionIdentityAudience: getenv(SubstrateSessionIdentityAudience),
+		SessionIdentityAppID:    getenv(SubstrateSessionIdentityAppID),
+		SessionIdentityUserID:   getenv(SubstrateSessionIdentityUserID),
 	}
 }
 

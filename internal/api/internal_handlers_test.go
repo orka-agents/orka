@@ -438,6 +438,19 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 		"reusePolicy":   "session",
 		"cleanupPolicy": "retain",
 		"reused":        true,
+		"placement": map[string]string{
+			"workerNamespace": "ate-demo",
+			"workerPool":      "codex-pool",
+			"workerPodName":   "ateom-worker-1",
+		},
+		"density": map[string]any{
+			"workerCount":         1,
+			"actorCount":          3,
+			"runningActorCount":   1,
+			"suspendedActorCount": 2,
+			"actorsPerWorker":     "3.00",
+		},
+		"resumeLatency": "750ms",
 		"message":       "workspace ready",
 	}
 	bodyBytes, err := json.Marshal(body)
@@ -455,6 +468,19 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 	require.Equal(t, corev1alpha1.WorkspaceProviderSubstrate, updated.Status.ExecutionWorkspace.Provider)
 	require.Equal(t, corev1alpha1.ExecutionWorkspacePhaseReady, updated.Status.ExecutionWorkspace.Phase)
 	require.True(t, updated.Status.ExecutionWorkspace.Reused)
+	require.Equal(t, &corev1alpha1.ExecutionWorkspacePlacementStatus{
+		WorkerNamespace: "ate-demo",
+		WorkerPool:      "codex-pool",
+		WorkerPodName:   "ateom-worker-1",
+	}, updated.Status.ExecutionWorkspace.Placement)
+	require.Equal(t, &corev1alpha1.ExecutionWorkspaceDensityStatus{
+		WorkerCount:         1,
+		ActorCount:          3,
+		RunningActorCount:   1,
+		SuspendedActorCount: 2,
+		ActorsPerWorker:     "3.00",
+	}, updated.Status.ExecutionWorkspace.Density)
+	require.Equal(t, 750*time.Millisecond, updated.Status.ExecutionWorkspace.ResumeLatency.Duration)
 
 	appOldWorker := fiber.New()
 	appOldWorker.Use(func(c fiber.Ctx) error {
@@ -486,6 +512,10 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 	afterStale := &corev1alpha1.Task{}
 	require.NoError(t, k8sClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "my-task"}, afterStale))
 	require.Equal(t, corev1alpha1.ExecutionWorkspacePhaseReady, afterStale.Status.ExecutionWorkspace.Phase)
+	require.NotNil(t, afterStale.Status.ExecutionWorkspace.Placement)
+	require.Equal(t, "codex-pool", afterStale.Status.ExecutionWorkspace.Placement.WorkerPool)
+	require.NotNil(t, afterStale.Status.ExecutionWorkspace.Density)
+	require.Equal(t, int32(3), afterStale.Status.ExecutionWorkspace.Density.ActorCount)
 
 	appForbidden := fiber.New()
 	appForbidden.Use(func(c fiber.Ctx) error {
@@ -505,6 +535,50 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 	forbiddenResp, err := appForbidden.Test(forbiddenReq)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, forbiddenResp.StatusCode)
+
+	terminalBody := map[string]any{
+		"provider": "substrate",
+		"phase":    "Failed",
+		"reason":   "WorkspaceCommandFailed",
+		"message":  "workspace command failed",
+	}
+	terminalBodyBytes, err := json.Marshal(terminalBody)
+	require.NoError(t, err)
+	terminalReq := httptest.NewRequest(http.MethodPost, "/internal/v1/tasks/default/my-task/execution-workspace/status", bytes.NewReader(terminalBodyBytes))
+	terminalReq.Header.Set("Content-Type", "application/json")
+	terminalResp, err := app.Test(terminalReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNoContent, terminalResp.StatusCode)
+
+	afterTerminal := &corev1alpha1.Task{}
+	require.NoError(t, k8sClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "my-task"}, afterTerminal))
+	require.Equal(t, corev1alpha1.ExecutionWorkspacePhaseFailed, afterTerminal.Status.ExecutionWorkspace.Phase)
+	require.NotNil(t, afterTerminal.Status.ExecutionWorkspace.Placement)
+	require.Equal(t, "codex-pool", afterTerminal.Status.ExecutionWorkspace.Placement.WorkerPool)
+	require.NotNil(t, afterTerminal.Status.ExecutionWorkspace.Density)
+	require.Equal(t, int32(3), afterTerminal.Status.ExecutionWorkspace.Density.ActorCount)
+	require.Equal(t, 750*time.Millisecond, afterTerminal.Status.ExecutionWorkspace.ResumeLatency.Duration)
+
+	claimedBody := map[string]any{
+		"provider": "substrate",
+		"phase":    "Pending",
+		"reason":   "WorkspaceClaimed",
+		"message":  "workspace claimed",
+	}
+	claimedBodyBytes, err := json.Marshal(claimedBody)
+	require.NoError(t, err)
+	claimedReq := httptest.NewRequest(http.MethodPost, "/internal/v1/tasks/default/my-task/execution-workspace/status", bytes.NewReader(claimedBodyBytes))
+	claimedReq.Header.Set("Content-Type", "application/json")
+	claimedResp, err := app.Test(claimedReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNoContent, claimedResp.StatusCode)
+
+	afterClaimed := &corev1alpha1.Task{}
+	require.NoError(t, k8sClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "my-task"}, afterClaimed))
+	require.Equal(t, corev1alpha1.ExecutionWorkspacePhasePending, afterClaimed.Status.ExecutionWorkspace.Phase)
+	require.Nil(t, afterClaimed.Status.ExecutionWorkspace.Placement)
+	require.Nil(t, afterClaimed.Status.ExecutionWorkspace.Density)
+	require.Nil(t, afterClaimed.Status.ExecutionWorkspace.ResumeLatency)
 }
 
 func TestGetSessionTranscript(t *testing.T) {

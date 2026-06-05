@@ -1465,6 +1465,9 @@ func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) err
 	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		return fmt.Errorf("execution workspace is only supported for type: agent tasks")
 	}
+	if ws.Boot && provider != corev1alpha1.WorkspaceProviderSubstrate {
+		return fmt.Errorf("execution workspace boot is only supported for provider %q", corev1alpha1.WorkspaceProviderSubstrate)
+	}
 
 	switch provider {
 	case corev1alpha1.WorkspaceProviderAgentSandbox:
@@ -1926,7 +1929,7 @@ func workerClusterRoleName(configured, fallback string) string {
 
 func workerClusterRoleBindingName(prefix, tier, namespace string) string {
 	if prefix == "" {
-		prefix = "orka"
+		prefix = managedByLabelValue
 	}
 	name := fmt.Sprintf("%s-%s-worker-%s", prefix, tier, namespace)
 	if len(name) <= maxWorkerClusterRoleBindingNameLength {
