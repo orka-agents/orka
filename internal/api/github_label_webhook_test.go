@@ -54,7 +54,8 @@ func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 	}
 
 	var task corev1alpha1.Task
-	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForDelivery(githubActionImplement, 12, delivery), Namespace: "default"}, &task); err != nil {
+	replayKey := githubWebhookReplayKey(body)
+	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionImplement, 12, body), Namespace: "default"}, &task); err != nil {
 		t.Fatalf("created task not found: %v", err)
 	}
 	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
@@ -73,7 +74,7 @@ func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 	if ws.Branch != githubWebhookTestDefaultBranch {
 		t.Errorf("branch = %q, want main", ws.Branch)
 	}
-	wantPushBranch := "orka/implement-issue-12-" + githubReplayKeySuffix(delivery)
+	wantPushBranch := "orka/implement-issue-12-" + githubReplayKeySuffix(replayKey)
 	if ws.PushBranch != wantPushBranch {
 		t.Errorf("pushBranch = %q, want %q", ws.PushBranch, wantPushBranch)
 	}
@@ -124,7 +125,7 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 	}
 
 	var task corev1alpha1.Task
-	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForDelivery(githubActionUpdateBranch, 34, delivery), Namespace: "default"}, &task); err != nil {
+	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionUpdateBranch, 34, body), Namespace: "default"}, &task); err != nil {
 		t.Fatalf("created task not found: %v", err)
 	}
 	ws := task.Spec.AgentRuntime.Workspace
@@ -187,7 +188,7 @@ func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
 	}
 
 	var task corev1alpha1.Task
-	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForDelivery(githubActionImplement, 35, delivery), Namespace: "default"}, &task); err != nil {
+	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionImplement, 35, body), Namespace: "default"}, &task); err != nil {
 		t.Fatalf("created task not found: %v", err)
 	}
 	ws := task.Spec.AgentRuntime.Workspace
@@ -244,7 +245,7 @@ func TestGitHubWebhook_PullRequestMissingHeadRepoFailsClosedForGitSecret(t *test
 	}
 
 	var task corev1alpha1.Task
-	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForDelivery(githubActionImplement, 36, delivery), Namespace: "default"}, &task); err != nil {
+	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionImplement, 36, body), Namespace: "default"}, &task); err != nil {
 		t.Fatalf("created task not found: %v", err)
 	}
 	ws := task.Spec.AgentRuntime.Workspace
@@ -287,7 +288,7 @@ func TestGitHubWebhook_IgnoresIssuePullRequestStub(t *testing.T) {
 	assertNoTasks(t, fc)
 }
 
-func TestGitHubWebhook_DeliveryIDControlsIdempotency(t *testing.T) {
+func TestGitHubWebhook_SignedPayloadControlsIdempotency(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{
 		githubLabelTriggerAgentEnv: "codex-agent",
 	})
@@ -303,9 +304,15 @@ func TestGitHubWebhook_DeliveryIDControlsIdempotency(t *testing.T) {
 	if duplicate.StatusCode != http.StatusAccepted {
 		t.Fatalf("duplicate status = %d; body: %s", duplicate.StatusCode, readRespBody(t, duplicate))
 	}
-	second := performSignedGitHubWebhook(t, server, githubEventIssues, "new-delivery", secret, body)
+	headerReplay := performSignedGitHubWebhook(t, server, githubEventIssues, "new-delivery", secret, body)
+	if headerReplay.StatusCode != http.StatusAccepted {
+		t.Fatalf("header replay status = %d; body: %s", headerReplay.StatusCode, readRespBody(t, headerReplay))
+	}
+
+	changedBody := []byte(`{"action":"labeled","label":{"name":"agent:implement"},"repository":{"full_name":"sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},"issue":{"number":1,"title":"Do it","body":"Changed body","html_url":"https://github.com/sozercan/vekil/issues/1"}}`)
+	second := performSignedGitHubWebhook(t, server, githubEventIssues, "new-delivery", secret, changedBody)
 	if second.StatusCode != http.StatusCreated {
-		t.Fatalf("second status = %d; body: %s", second.StatusCode, readRespBody(t, second))
+		t.Fatalf("changed payload status = %d; body: %s", second.StatusCode, readRespBody(t, second))
 	}
 
 	var tasks corev1alpha1.TaskList
@@ -435,8 +442,8 @@ func performSignedGitHubWebhook(t *testing.T, server *Server, event, delivery, s
 	return resp
 }
 
-func githubWebhookTaskNameForDelivery(action string, number int, delivery string) string {
-	return githubTaskName(action, number, delivery)
+func githubWebhookTaskNameForBody(action string, number int, body []byte) string {
+	return githubTaskName(action, number, githubWebhookReplayKey(body))
 }
 
 func signGitHubWebhook(body []byte, secret string) string {

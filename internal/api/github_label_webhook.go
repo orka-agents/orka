@@ -182,10 +182,9 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 		return err
 	}
 
+	replayKey := githubWebhookReplayKey(body)
 	delivery := strings.TrimSpace(c.Get(githubDeliveryHeader))
-	replayKey := delivery
-	if replayKey == "" {
-		replayKey = githubWebhookReplayKey(body)
+	if delivery == "" {
 		delivery = githubReplayKeySuffix(replayKey)
 	}
 
@@ -194,7 +193,7 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
 				"status":    "duplicate",
-				"message":   "task already exists for this GitHub delivery",
+				"message":   "task already exists for this GitHub webhook payload",
 				"taskName":  task.Name,
 				"namespace": task.Namespace,
 				"action":    action,
@@ -434,12 +433,12 @@ func buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, eve
 	return task
 }
 
-func githubTaskName(action string, number int, delivery string) string {
+func githubTaskName(action string, number int, replayKey string) string {
 	action = dnsNamePart(action)
 	if action == "" {
 		action = "action"
 	}
-	deliveryHash := hex.EncodeToString(githubHash([]byte(delivery)))[:12]
+	deliveryHash := hex.EncodeToString(githubHash([]byte(replayKey)))[:12]
 	base := fmt.Sprintf("github-%s-%d", action, number)
 	maxBaseLen := 63 - len(deliveryHash) - 1
 	if len(base) > maxBaseLen {
