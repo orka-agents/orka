@@ -1,0 +1,809 @@
+---
+slug: /configuration
+---
+
+# Configuration
+
+## Custom Resources
+
+### Task
+
+The core work unit. Supports container commands, AI agent prompts, or external agent CLI runtimes.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: my-task
+spec:
+  type: ai  # or "container" or "agent"
+  agentRef:
+    name: my-agent
+  prompt: "Analyze the latest Kubernetes security best practices"
+  execution:
+    runtimeClassName: gvisor
+    nodeSelector:
+      sandbox-runtime: gvisor
+  sessionRef:
+    name: my-session
+    create: false  # default: false
+    append: true
+    maxMessages: 50
+  priority: 500
+  timeout: 5m
+  retryPolicy:
+    maxRetries: 3
+    backoffMultiplier: 2
+    initialDelay: 10s
+  webhookURL: "https://example.com/webhook"
+  # Scheduled/recurring task fields (optional)
+  schedule: "0 */6 * * *"      # Cron expression
+  timeZone: "America/New_York" # IANA timezone
+  concurrencyPolicy: Forbid    # Allow or Forbid concurrent runs
+  startingDeadlineSeconds: 100  # Deadline for starting missed scheduled runs (default: 100)
+  suspend: false
+  successfulRunsHistoryLimit: 3
+  failedRunsHistoryLimit: 1
+```
+
+### Agent
+
+Reusable agent configurations with model settings, tools, skills, and optional agent-to-agent coordination.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: researcher-agent
+spec:
+  providerRef:
+    name: anthropic-prod
+  execution:
+    runtimeClassName: kata-qemu
+    nodeSelector:
+      sandbox-runtime: kata
+  model:
+    temperature: 0.7
+    maxTokens: 4096
+  systemPrompt:
+    inline: "You are a research specialist..."
+  tools:
+    - name: web-search
+    - name: github-search
+  skills:
+    - name: skill-researcher
+  session:
+    persistence: configmap # configmap, pvc, or none
+    ttl: 24h
+    maxMessages: 50
+  coordination:
+    enabled: true
+    autonomous: true          # Enable autonomous loop mode
+    maxIterations: 20         # Max loop iterations (0 = unlimited)
+    allowedAgents:
+      - name: coder-agent
+    maxConcurrentChildren: 5
+    maxDepth: 3
+```
+
+**Coordination fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable agent-to-agent coordination tools |
+| `autonomous` | bool | `false` | Enables autonomous loop mode. When true, the controller re-creates Jobs in a loop instead of marking the task as Succeeded |
+| `maxIterations` | int32 | `0` | Limits the number of autonomous loop iterations. Only used when `autonomous` is true. `0` means unlimited |
+| `allowedAgents` | list | `[]` | List of agent names this agent is allowed to delegate to |
+| `maxConcurrentChildren` | int32 | `5` | Maximum number of concurrent child tasks |
+| `maxDepth` | int32 | `3` | Maximum delegation depth |
+
+**Auto-injected coordination tools** (when `enabled: true`):
+
+`delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, `create_pull_request`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `create_agent`, `delete_agent`, `update_plan`
+
+**Opt-in coordination tools** (require explicit `spec.tools[]` entries on the Agent):
+
+`list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`
+
+### RepositoryScan
+
+Repository security scan configuration. A `RepositoryScan` is namespace-scoped and tells Orka which repository to scan, how to schedule incremental scans, and which Agents should perform analysis and remediation.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: RepositoryScan
+metadata:
+  name: example-repo
+  namespace: default
+spec:
+  provider: github
+  repoURL: "https://github.com/example/app"
+  owner: example
+  repository: app
+  branch: main
+  subPath: "services/api"       # optional monorepo scope
+  gitSecretRef:                  # optional for private repositories
+    name: github-credentials
+  forkRepo: "https://github.com/example/app-security-fork" # optional remediation fork
+  prBaseBranch: main             # optional PR base branch override
+  schedule: "0 2 * * *"         # optional cron expression for incremental scans
+  timeZone: "UTC"               # optional IANA time zone
+  historyDays: 30                # optional initial history window
+  validationMode: light          # off, light, or full
+  analysisAgentRef:
+    name: security-reviewer
+  patchAgentRef:                 # optional; defaults to the analysis agent when omitted
+    name: security-patcher
+  maxFindingsPerRun: 25
+  suspend: false                 # pause scheduled incremental scans when true
+```
+
+**Spec fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `provider` | string | No | Source control provider. `github` is the supported v1 provider and default. |
+| `repoURL` | string | Yes | Repository URL to scan. |
+| `owner` | string | No | Repository owner or organization. Inferred from `repoURL` when omitted. |
+| `repository` | string | No | Repository name. Inferred from `repoURL` when omitted. |
+| `branch` | string | No | Base branch to scan. Defaults to the repository default branch when omitted. |
+| `subPath` | string | No | Optional subdirectory to scan in a monorepo. |
+| `gitSecretRef` | LocalObjectReference | No | Secret containing credentials for private repository access. |
+| `forkRepo` | string | No | Writable fork repository URL for patch proposal branches and remediation PRs. |
+| `prBaseBranch` | string | No | Pull request base branch for remediation. Defaults to `branch` when omitted. |
+| `schedule` | string | No | Cron expression for scheduled incremental scans. |
+| `timeZone` | string | No | IANA time zone used by `schedule`. |
+| `historyDays` | int32 | No | How far back the initial scan should inspect repository history. |
+| `validationMode` | string | No | Validation aggressiveness: `off`, `light`, or `full`. Defaults to `light`. |
+| `analysisAgentRef` | AgentReference | Yes | Agent used for repository scan runs and threat model generation. |
+| `patchAgentRef` | AgentReference | No | Agent used for patch proposal runs. |
+| `maxFindingsPerRun` | int32 | No | Bounds scan output volume. |
+| `suspend` | bool | No | Pauses scheduled incremental scans while preserving the scan configuration. |
+
+**Status fields:**
+
+`status.phase`, `status.lastScanID`, `status.lastScanTaskName`, `status.lastSuccessfulScanAt`, `status.lastObservedHeadSHA`, `status.lastProcessedCommit`, `status.threatModelVersion`, `status.findingCounts`, and `status.conditions` summarize the latest scan lifecycle and open findings. Dynamic scan runs, threat models, findings, and patch proposals are stored by the controller and surfaced through the security API/UI rather than embedded directly in the CRD status.
+
+### Execution
+
+Tasks and Agents both support `spec.execution` for worker pod runtime selection and placement. Agent Tasks can also set `Task.spec.execution.workspace` to request experimental workspace-backed execution through upstream `agent-sandbox`; see [Agent Sandbox Workspaces](agent-sandbox.md).
+
+```yaml
+execution:
+  runtimeClassName: gvisor
+  nodeSelector:
+    sandbox-runtime: gvisor
+  tolerations:
+    - key: sandbox-runtime
+      operator: Equal
+      value: gvisor
+      effect: NoSchedule
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: sandbox-runtime
+                operator: In
+                values: ["gvisor"]
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `runtimeClassName` | string | Selects a Kubernetes `RuntimeClass` such as `gvisor` or `kata-qemu` |
+| `nodeSelector` | map[string]string | Restricts worker pods to nodes with matching labels |
+| `tolerations` | list | Allows worker pods onto tainted runtime-specific node pools |
+| `affinity` | object | Adds Kubernetes affinity or anti-affinity rules for worker pods |
+| `workspace` | object | Experimental upstream `agent-sandbox` workspace request under `Task.spec.execution.workspace`. Use only on `type: agent` Tasks. |
+
+Resolution order:
+
+- `Agent.spec.execution` provides defaults for tasks that reference the Agent
+- `Task.spec.execution` overrides Agent defaults
+- `runtimeClassName` is a scalar override
+- `nodeSelector`, `tolerations`, and `affinity` replace Agent defaults when they are set on the Task
+
+#### Agent Sandbox Workspace Requests
+
+`Task.spec.execution.workspace` is alpha support for durable, claimable agent workspaces backed by an existing upstream `agent-sandbox` installation. When `workspace.enabled: true`, the Task controller validates the request, resolves defaults, and passes sandbox settings to the agent worker Job. Orka still creates the outer Kubernetes worker Job; the worker wrapper claims and waits for the upstream sandbox workspace, runs the configured agent runtime inside it, and then deletes or retains/releases the workspace according to `cleanupPolicy`.
+
+This field is distinct from `Task.spec.agentRuntime.workspace`, which configures the git checkout prepared for the agent runtime inside the current execution environment.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: coding-agent-task
+spec:
+  type: agent
+  agentRef:
+    name: claude-agent
+  prompt: "Continue implementing the feature in this session."
+  sessionRef:
+    name: feature-123
+    create: true
+  execution:
+    runtimeClassName: gvisor
+    workspace:
+      enabled: true
+      templateRef:
+        name: coding-agent
+      reusePolicy: session
+      cleanupPolicy: retain
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enables experimental workspace-backed execution. When false or omitted, sandbox settings are not propagated. |
+| `templateRef.name` | string | Controller default template, if configured | Workspace template name. Required when enabled unless the controller has a default template. |
+| `templateRef.namespace` | string | Task namespace | Namespace containing the workspace template. Orka propagates this value in its worker environment/request identity. |
+| `reusePolicy` | string | `none` | Reuse behavior: `none` or `session`. `session` requires `spec.sessionRef.name`. |
+| `cleanupPolicy` | string | Controller default cleanup policy, defaulting to `delete` | Cleanup behavior after execution: `delete` or `retain`. |
+
+See [Agent Sandbox Workspaces](agent-sandbox.md) for validation rules, controller flags, execution flow, and operational limitations.
+
+### Provider Fallback Chain
+
+You can configure fallback providers that are automatically tried when the primary provider fails (e.g., due to auth errors, provider outages, or rate limiting). Fallbacks are configured on the Agent CRD's `spec.model.fallbacks` field.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: resilient-agent
+spec:
+  providerRef:
+    name: my-openai
+  model:
+    name: gpt-4o
+    fallbacks:
+      - providerRef: my-anthropic
+        model: claude-sonnet-4-20250514
+      - providerRef: my-azure-openai
+        model: gpt-4o
+```
+
+#### How fallbacks work
+
+1. The primary provider is tried first with automatic retries (exponential backoff on 429/5xx errors).
+2. If the primary provider fails with an auth error (401/403), network error, or exhausts all retries, the first fallback provider is tried.
+3. Each fallback provider also gets automatic retries.
+4. If all providers fail, the last error is returned.
+
+#### Fallback fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `providerRef` | string | Yes | Name of a Provider CRD to fall back to |
+| `model` | string | No | Model to use with this provider. If empty, uses the provider's `defaultModel` |
+
+#### Notes
+
+- Fallbacks are only supported on Agent-based tasks. Agent-less tasks get retries only.
+- Each fallback provider must have its own Provider CRD with a valid secret reference.
+- Rate-limited providers (429 responses) are temporarily cooled down and skipped in subsequent requests.
+- Streaming requests are retried/failed over only on the initial connection — mid-stream failures are not retried.
+
+### Agent (with Runtime)
+
+Agent configuration for external CLI runtimes (Claude Code CLI, GitHub Copilot CLI, or Codex CLI).
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: claude-agent
+spec:
+  secretRef:
+    name: claude-credentials
+  model:
+    name: "claude-sonnet-4-20250514"
+  systemPrompt:
+    inline: "You are a senior software engineer."
+  runtime:
+    type: claude         # or "copilot" / "codex"
+    defaultMaxTurns: 50
+    defaultAllowBash: true
+    defaultAllowedTools:
+      - Read
+      - Write
+      - Edit
+      - Bash
+```
+
+Agent runtime tasks reference an Agent with `runtime` configured:
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: code-review
+spec:
+  type: agent
+  agentRef:
+    name: claude-agent
+  prompt: "Review the code in this repo for security issues"
+  agentRuntime:
+    workspace:
+      gitRepo: "https://github.com/example/repo.git"
+      branch: main
+      # gitSecretRef:
+      #   name: git-credentials
+      # subPath: "services/api"
+    maxTurns: 100
+    allowBash: true
+    allowedTools:
+      - Read
+      - Write
+      - Edit
+      - Bash
+      - Glob
+      - Grep
+```
+
+### Skill
+
+Reusable skill definitions (Agent Skills standard) that are referenced by Agents and AI Tasks.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Skill
+metadata:
+  name: skill-researcher
+  labels:
+    orka.ai/category: "research"
+spec:
+  displayName: "Research Methodology"
+  description: "Structured research workflow and source validation guidance"
+  version: "1.0.0"
+  author: "platform-team"
+  tags: ["research", "analysis"]
+  content:
+    inline: |
+      # Research Skill
+      Use primary sources and cite references.
+    files:
+      templates/checklist.md: |
+        - [ ] Validate source credibility
+        - [ ] Cross-check key claims
+  # source tracks where a skill was imported from (for updates)
+  # source:
+  #   github: "anthropics/skills"
+  #   skillName: "researcher"
+  #   context7: false
+status:
+  phase: Ready
+  contentHash: sha256:...
+```
+
+### Tool
+
+Custom HTTP-based tool definitions for agents. Supports header-based or body-based auth injection.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: tavily-search
+spec:
+  description: "Search the web for current information"
+  parameters:
+    type: object
+    properties:
+      query:
+        type: string
+        description: "Search query"
+    required: ["query"]
+  http:
+    url: "https://api.tavily.com/search"
+    method: POST
+    timeout: 30s
+    authSecretRef:
+      name: tavily-secret
+      key: api-key
+    authInject: body     # "header" (Bearer token) or "body" (JSON key)
+    authBodyKey: api_key # JSON key name when authInject=body
+```
+
+#### URL Path Interpolation
+
+Tool CRD URLs can contain `{{paramName}}` placeholders that are replaced with parameter values at runtime. Interpolated values are URL path-escaped, and the matching parameters are removed from the request body. This is useful for REST APIs that require path parameters.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: github-merge-pr
+spec:
+  description: "Merge a GitHub pull request"
+  parameters:
+    type: object
+    properties:
+      owner:
+        type: string
+      repo:
+        type: string
+      pull_number:
+        type: integer
+      merge_method:
+        type: string
+        enum: [merge, squash, rebase]
+    required: [owner, repo, pull_number]
+  http:
+    url: "https://api.github.com/repos/{{owner}}/{{repo}}/pulls/{{pull_number}}/merge"
+    method: PUT
+    authSecretRef:
+      name: github-token
+      key: token
+    authInject: header
+```
+
+In this example, `owner`, `repo`, and `pull_number` are interpolated into the URL path and removed from the JSON body. Only `merge_method` is sent in the request body.
+
+### Provider
+
+LLM provider configuration with credentials. Supports Anthropic, OpenAI, and Azure OpenAI.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Provider
+metadata:
+  name: anthropic-prod
+spec:
+  type: anthropic  # or "openai", "azure-openai"
+  secretRef:
+    name: anthropic-secret
+    key: api-key
+  baseURL: ""  # optional custom endpoint for proxies
+  defaultModel: claude-sonnet-4-20250514
+  rateLimit:
+    requestsPerMinute: 60
+    tokensPerMinute: 100000
+  # Azure-specific (only for type: azure-openai)
+  # azure:
+  #   deploymentName: my-deployment
+  #   apiVersion: "2024-02-15-preview"
+```
+
+## Helm Chart
+
+Key configuration values for the Helm chart:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `controller.replicas` | `1` | Controller replicas |
+| `controller.image.repository` | `ghcr.io/sozercan/orka` | Controller image |
+| `controller.watchNamespace` | `""` | Namespace scope (empty = cluster-wide) |
+| `controller.apiPort` | `8080` | REST API port |
+| `controller.metricsPort` | `8081` | Metrics endpoint port |
+| `controller.healthPort` | `8082` | Health probe port |
+| `controller.logLevel` | `info` | Log level (debug/info/warn/error) |
+| `controller.agentSandbox.enabled` | `false` | Enable experimental workspace-backed execution for agent Tasks that set `execution.workspace` |
+| `controller.agentSandbox.routerUrl` | `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
+| `controller.agentSandbox.defaultTemplate` | `""` | Default execution workspace template when a Task omits `templateRef.name` |
+| `controller.agentSandbox.warmPoolPolicy` | `disabled` | Warm pool policy: `disabled` or `template` |
+| `controller.agentSandbox.namespaceStrategy` | `task` | Sandbox resource namespace strategy: `task` or `controller` |
+| `controller.agentSandbox.claimTimeout` | `2m` | Timeout for workspace claim and readiness operations |
+| `controller.agentSandbox.commandTimeout` | `30m` | Timeout for agent runtime execution inside the sandbox |
+| `controller.agentSandbox.cleanupPolicy` | `delete` | Default workspace cleanup policy: `delete` or `retain` |
+| `workers.ai.image.repository` | `ghcr.io/sozercan/orka/ai-worker` | AI worker image |
+| `workers.general.image.repository` | `ghcr.io/sozercan/orka/general-worker` | General worker image |
+| `service.type` | `ClusterIP` | Service type |
+| `crds.install` | `true` | Install CRDs |
+| `crds.keep` | `true` | Keep CRDs on uninstall |
+| `monitoring.enabled` | `false` | Enable Prometheus ServiceMonitor |
+| `client.create` | `true` | Create client ServiceAccount for API access |
+| `client.name` | `orka-client` | Client ServiceAccount name |
+
+Context-token flags can also be configured through Helm under
+`controller.contextToken`. For example:
+
+```yaml
+controller:
+  contextToken:
+    profile: kontxt
+    issuer: https://issuer.example.com
+    audience: orka
+    headers: Txn-Token
+    authzMode: enforce
+    scopes:
+      taskCreate: orka:tasks:create
+      providerUse: orka:providers:use
+      toolUse: orka:tools:use
+    tts:
+      url: https://tts.example.com
+      audience: orka-workers
+      timeout: 5s
+      tokenSource: serviceAccount
+      childScope: orka:tasks:create
+      outboundScope: orka:tools:use
+      childTokenTTL: 5m
+      toolTokenTTL: 2m
+```
+
+The Helm keys mirror the controller flags: for example,
+`controller.contextToken.jwksUrl` renders `--context-token-jwks-url`,
+`controller.contextToken.scopes.secretRead` renders
+`--context-token-secret-read-scopes`, and
+`controller.contextToken.tts.toolTokenTTL` renders
+`--context-token-tool-token-ttl`.
+
+See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/orka/values.yaml) for the full list.
+
+## Controller Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--api-port` | `8080` | REST API server port |
+| `--watch-namespace` | `""` | Namespace to watch (empty = all) |
+| `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
+| `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
+| `--agent-sandbox-enabled` | `ORKA_AGENT_SANDBOX_ENABLED` env or `false` | Enable experimental workspace-backed execution for agent Tasks that set `execution.workspace` |
+| `--agent-sandbox-router-url` | `ORKA_AGENT_SANDBOX_ROUTER_URL` env or `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
+| `--agent-sandbox-default-template` | `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` env or `""` | Default execution workspace template when a Task omits `templateRef.name` |
+| `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` env or `disabled` | Warm pool policy: `disabled` or `template` |
+| `--agent-sandbox-namespace-strategy` | `ORKA_AGENT_SANDBOX_NAMESPACE_STRATEGY` env or `task` | Sandbox resource namespace strategy: `task` or `controller` |
+| `--agent-sandbox-claim-timeout` | `ORKA_AGENT_SANDBOX_CLAIM_TIMEOUT` env or `2m` | Timeout for workspace claim and readiness operations |
+| `--agent-sandbox-command-timeout` | `ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT` env or `30m` | Timeout for agent runtime execution inside the sandbox |
+| `--agent-sandbox-cleanup-policy` | `ORKA_AGENT_SANDBOX_CLEANUP_POLICY` env or `delete` | Default workspace cleanup policy: `delete` or `retain` |
+| `--controller-url` | `""` | Base URL workers use to reach the controller API (e.g., `http://orka-api.orka-system.svc:8080`). Required for worker result callbacks and session transcript fetching |
+| `--oidc-issuer` | `ORKA_OIDC_ISSUER` env or `""` | OIDC issuer URL for external API bearer token validation. Requires `--oidc-audience` when set |
+| `--oidc-audience` | `ORKA_OIDC_AUDIENCE` env or `""` | Expected OIDC audience for external API bearer tokens. Requires `--oidc-issuer` when set |
+| `--oidc-jwks-url` | `ORKA_OIDC_JWKS_URL` env or `""` | Optional JWKS URL. When empty, Orka discovers it from the issuer metadata |
+| `--context-token-profile` | `ORKA_CONTEXT_TOKEN_PROFILE` env or `""` | Context-token profile for external API requests. Currently supports `kontxt` |
+| `--context-token-issuer` | `ORKA_CONTEXT_TOKEN_ISSUER` env or `""` | Context-token issuer URL. Requires `--context-token-profile` and `--context-token-audience` when set |
+| `--context-token-audience` | `ORKA_CONTEXT_TOKEN_AUDIENCE` env or `""` | Expected context-token audience. Requires `--context-token-profile` and `--context-token-issuer` when set |
+| `--context-token-jwks-url` | `ORKA_CONTEXT_TOKEN_JWKS_URL` env or `""` | Optional context-token JWKS URL. For `kontxt`, defaults to `<issuer>/.well-known/jwks.json` |
+| `--context-token-headers` | `ORKA_CONTEXT_TOKEN_HEADERS` env or `""` | Comma-separated context-token header locations. Use `Header` for raw tokens or `Header:Scheme` for scheme-prefixed tokens. The `kontxt` default is `Txn-Token` |
+| `--context-token-authz-mode` | `ORKA_CONTEXT_TOKEN_AUTHZ_MODE` env or `""` | Context-token authorization mode: `off`, `audit`, or `enforce`. Empty defaults to `off` |
+| `--context-token-task-create-scopes` | `ORKA_CONTEXT_TOKEN_TASK_CREATE_SCOPES` env or `""` | Comma-separated scopes authorizing Task creation. Defaults to `orka:tasks:create` |
+| `--context-token-task-read-scopes` | `ORKA_CONTEXT_TOKEN_TASK_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Task reads and related data. Defaults to `orka:tasks:get` |
+| `--context-token-task-list-scopes` | `ORKA_CONTEXT_TOKEN_TASK_LIST_SCOPES` env or `""` | Comma-separated scopes authorizing Task listing. Defaults to `orka:tasks:list` |
+| `--context-token-task-delete-scopes` | `ORKA_CONTEXT_TOKEN_TASK_DELETE_SCOPES` env or `""` | Comma-separated scopes authorizing Task deletion. Defaults to `orka:tasks:delete` |
+| `--context-token-tool-read-scopes` | `ORKA_CONTEXT_TOKEN_TOOL_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Tool reads. Defaults to `orka:tools:read` |
+| `--context-token-tool-use-scopes` | `ORKA_CONTEXT_TOKEN_TOOL_USE_SCOPES` env or `""` | Comma-separated scopes authorizing Orka-managed chat/OpenAI/Anthropic tool execution. Defaults to `orka:tools:use` |
+| `--context-token-provider-use-scopes` | `ORKA_CONTEXT_TOKEN_PROVIDER_USE_SCOPES` env or `""` | Comma-separated scopes authorizing chat/OpenAI/Anthropic model-provider use and model listing. Defaults to `orka:providers:use` |
+| `--context-token-secret-read-scopes` | `ORKA_CONTEXT_TOKEN_SECRET_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Secret metadata reads. Defaults to `orka:secrets:read` |
+| `--context-token-agent-read-scopes` | `ORKA_CONTEXT_TOKEN_AGENT_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Agent reads. Defaults to `orka:agents:read` |
+| `--context-token-agent-write-scopes` | `ORKA_CONTEXT_TOKEN_AGENT_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing Agent writes. Defaults to `orka:agents:write` |
+| `--context-token-memory-read-scopes` | `ORKA_CONTEXT_TOKEN_MEMORY_READ_SCOPES` env or `""` | Comma-separated scopes authorizing memory reads. Defaults to `orka:memory:read` |
+| `--context-token-memory-write-scopes` | `ORKA_CONTEXT_TOKEN_MEMORY_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing memory writes. Defaults to `orka:memory:write` |
+| `--context-token-session-read-scopes` | `ORKA_CONTEXT_TOKEN_SESSION_READ_SCOPES` env or `""` | Comma-separated scopes authorizing session reads. Defaults to `orka:sessions:read` |
+| `--context-token-session-write-scopes` | `ORKA_CONTEXT_TOKEN_SESSION_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing session writes/deletes. Defaults to `orka:sessions:write` |
+| `--context-token-security-read-scopes` | `ORKA_CONTEXT_TOKEN_SECURITY_READ_SCOPES` env or `""` | Comma-separated scopes authorizing security scan reads. Defaults to `orka:security:read` |
+| `--context-token-security-write-scopes` | `ORKA_CONTEXT_TOKEN_SECURITY_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing security scan creates, updates, deletes, and other mutations. Defaults to `orka:security:write` |
+| `--context-token-skill-read-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Skill reads. Defaults to `orka:skills:read` |
+| `--context-token-skill-write-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing Skill writes. Defaults to `orka:skills:write` |
+| `--context-token-tts-url` | `ORKA_CONTEXT_TOKEN_TTS_URL` env or `""` | kontxt TTS base URL for optional token exchange/replacement |
+| `--context-token-tts-audience` | `ORKA_CONTEXT_TOKEN_TTS_AUDIENCE` env or `""` | Audience requested from kontxt TTS exchanges |
+| `--context-token-tts-timeout` | `ORKA_CONTEXT_TOKEN_TTS_TIMEOUT` env or `""` | Timeout for kontxt TTS exchanges. Defaults to `5s` when TTS is enabled |
+| `--context-token-tts-token-source` | `ORKA_CONTEXT_TOKEN_TTS_TOKEN_SOURCE` env or `""` | Subject token source for TTS exchanges: `serviceAccount`, `incoming`, or `none`. Defaults to `serviceAccount` when TTS is enabled |
+| `--context-token-subject-token-type` | `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_TYPE` env or `""` | Subject token type for worker-side TTS exchanges. Workers default to TxToken subject tokens when empty |
+| `--context-token-child-scope` | `ORKA_CONTEXT_TOKEN_CHILD_SCOPE` env or `""` | Scope workers request for child delegated TxTokens when TTS is configured |
+| `--context-token-outbound-scope` | `ORKA_CONTEXT_TOKEN_OUTBOUND_SCOPE` env or `""` | Scope workers request for outbound HTTP Tool TxTokens when TTS is configured |
+| `--context-token-child-token-ttl` | `ORKA_CONTEXT_TOKEN_CHILD_TOKEN_TTL` env or `""` | Requested TTL for child delegation TxTokens. Defaults to `5m` when TTS is enabled |
+| `--context-token-tool-token-ttl` | `ORKA_CONTEXT_TOKEN_TOOL_TOKEN_TTL` env or `""` | Requested TTL for outbound tool TxTokens. Defaults to `2m` when TTS is enabled |
+| `--task-provenance-admission-enabled` | `ORKA_TASK_PROVENANCE_ADMISSION_ENABLED` env or `false` | Enable validating admission that rejects untrusted direct Kubernetes Task writes to Orka-managed provenance fields (`spec.requestedBy`, `spec.transaction`, and transaction metadata labels/annotations) |
+| `--task-provenance-admission-trusted-users` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_USERS` env or controller ServiceAccount usernames | Comma-separated Kubernetes usernames trusted to set Orka-managed Task provenance fields |
+| `--task-provenance-admission-trusted-service-accounts` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS` env or `orka-ai-worker` | Comma-separated ServiceAccount names trusted in the target Task namespace to set Orka-managed Task provenance fields for child Task creation |
+| `--ai-worker-image` | `ghcr.io/sozercan/orka/ai-worker:latest` | AI worker container image |
+| `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Copilot agent worker image |
+| `--claude-worker-image` | `ghcr.io/sozercan/orka/agent-worker-claude:latest` | Claude agent worker image |
+| `--codex-worker-image` | `ghcr.io/sozercan/orka/agent-worker-codex:latest` | Codex agent worker image |
+| `--general-worker-image` | `ghcr.io/sozercan/orka/general-worker:latest` | General worker container image |
+| `--store-backend` | `sqlite` | Storage backend (sqlite) |
+| `--store-path` | `/data/orka.db` | Path to SQLite database file |
+| `--chat-enabled` | `true` | Enable the chat endpoint |
+| `--chat-provider` | `""` | Default Provider CRD name for chat |
+| `--chat-model` | `""` | Default model for chat |
+| `--chat-max-iterations` | `50` | Max tool execution loops per chat request |
+| `--chat-max-duration` | `30m` | Max wall-clock time per chat request |
+| `--chat-tool-timeout` | `60s` | Max time for single tool execution |
+| `--chat-max-concurrent` | `10` | Max concurrent chat sessions |
+| `--chat-max-tasks-per-turn` | `5` | Max tasks created per chat turn |
+| `--chat-max-session-size` | `512000` | Soft limit for session size before truncation (bytes) |
+| `--leader-elect` | `false` | Enable leader election |
+| `--metrics-bind-address` | `0` | Metrics endpoint address |
+| `--health-probe-bind-address` | `:8081` | Health probe address |
+| `--metrics-secure` | `true` | Serve metrics via HTTPS |
+| `--enable-http2` | `false` | Enable HTTP/2 for metrics and webhook servers |
+| `--enable-tracing` | `false` | Enable OpenTelemetry distributed tracing (requires `OTEL_EXPORTER_OTLP_ENDPOINT`) |
+
+### Agent Sandbox Controller Settings
+
+Agent sandbox settings are disabled by default. When enabled, the controller validates `Task.spec.execution.workspace`, resolves/defaults the effective `SandboxTemplate` and workspace settings, injects the resolved settings into agent worker Jobs, and the worker wrapper owns upstream sandbox claim, execution, and cleanup. Settings can be supplied as flags, environment variables, or Helm values:
+
+| Flag | Environment variable | Helm value | Default |
+|------|----------------------|------------|---------|
+| `--agent-sandbox-enabled` | `ORKA_AGENT_SANDBOX_ENABLED` | `controller.agentSandbox.enabled` | `false` |
+| `--agent-sandbox-router-url` | `ORKA_AGENT_SANDBOX_ROUTER_URL` | `controller.agentSandbox.routerUrl` | empty |
+| `--agent-sandbox-default-template` | `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` | `controller.agentSandbox.defaultTemplate` | empty |
+| `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` | `controller.agentSandbox.warmPoolPolicy` | `disabled` |
+| `--agent-sandbox-namespace-strategy` | `ORKA_AGENT_SANDBOX_NAMESPACE_STRATEGY` | `controller.agentSandbox.namespaceStrategy` | `task` |
+| `--agent-sandbox-claim-timeout` | `ORKA_AGENT_SANDBOX_CLAIM_TIMEOUT` | `controller.agentSandbox.claimTimeout` | `2m` |
+| `--agent-sandbox-command-timeout` | `ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT` | `controller.agentSandbox.commandTimeout` | `30m` |
+| `--agent-sandbox-cleanup-policy` | `ORKA_AGENT_SANDBOX_CLEANUP_POLICY` | `controller.agentSandbox.cleanupPolicy` | `delete` |
+
+Supported values are `disabled` or `template` for warm pool policy, `task` or `controller` for namespace strategy, and `delete` or `retain` for cleanup policy. `task` defaults sandbox claims to the Task namespace; `controller` defaults them to the controller namespace when discoverable, and explicit `templateRef.namespace` values are honored as the claim/template namespace. See [Agent Sandbox Workspaces](agent-sandbox.md) for examples, live smoke-test steps, and limitations.
+
+When this feature is enabled, worker pods need RBAC for the upstream sandbox API: create/delete/patch `sandboxclaims`, read `sandboxtemplates`, `sandboxwarmpools`, and `sandboxes`, create `pods/portforward`, and read `endpointslices`. The Helm chart and generated worker RBAC include these permissions; custom deployments must include equivalent rules for the worker ServiceAccount.
+
+### External API OIDC Authentication
+
+ServiceAccount bearer token authentication is always available. To allow external callers such as GitHub Actions to authenticate directly with OIDC JWTs, configure both issuer and audience:
+
+```bash
+--oidc-issuer=https://token.actions.githubusercontent.com
+--oidc-audience=orka-ci
+```
+
+The same settings can be supplied with environment variables:
+
+```bash
+ORKA_OIDC_ISSUER=https://token.actions.githubusercontent.com
+ORKA_OIDC_AUDIENCE=orka-ci
+# Optional; when omitted, Orka discovers the JWKS URL from the issuer metadata.
+ORKA_OIDC_JWKS_URL=https://token.actions.githubusercontent.com/.well-known/jwks
+```
+
+OIDC validation requires RS256-signed JWTs with matching `iss` and `aud`, valid time claims, and a non-empty `sub`. When an OIDC-authenticated caller creates a Task, Orka records the verified identity in `spec.requestedBy`. Clients cannot set `requestedBy` themselves.
+
+### External API Context-Token Authentication
+
+Orka can also authenticate external API requests with generic transaction/context tokens. The built-in `kontxt` profile validates RS256-signed JWTs with JOSE header `typ: txntoken+jwt`, matching `iss` and `aud`, valid time claims, a non-empty `sub`, and the required `kontxt` claims `iat`, `txn`, `scope`, and `req_wl`.
+
+For a newcomer-friendly setup and smoke test, see [Kontxt quickstart: use Kubernetes identity to call Orka without long-lived tokens](../guides/kontxt-quickstart.md).
+
+Enable the profile by configuring the profile, issuer, and audience:
+
+```bash
+--context-token-profile=kontxt
+--context-token-issuer=https://issuer.example.com
+--context-token-audience=orka-api
+```
+
+The same settings can be supplied with environment variables:
+
+```bash
+ORKA_CONTEXT_TOKEN_PROFILE=kontxt
+ORKA_CONTEXT_TOKEN_ISSUER=https://issuer.example.com
+ORKA_CONTEXT_TOKEN_AUDIENCE=orka-api
+# Optional for kontxt; when omitted, Orka uses <issuer>/.well-known/jwks.json.
+ORKA_CONTEXT_TOKEN_JWKS_URL=https://issuer.example.com/.well-known/jwks.json
+```
+
+By default, the `kontxt` profile reads raw transaction tokens from the `Txn-Token` header:
+
+```bash
+curl -H "Txn-Token: $TXN_TOKEN" https://orka.example.com/api/v1/tasks
+```
+
+To customize token locations, set `--context-token-headers` or `ORKA_CONTEXT_TOKEN_HEADERS` to a comma-separated list. Use `Header` for raw token headers and `Header:Scheme` for scheme-prefixed headers. For example, keep the default `Txn-Token` header and explicitly opt in to `Authorization: Bearer` context-token support:
+
+```bash
+--context-token-headers=Txn-Token,Authorization:Bearer
+```
+
+`Authorization: Bearer` remains the default location for Kubernetes ServiceAccount and OIDC JWT authentication. Context-token bearer authentication is only attempted when `Authorization:Bearer` is explicitly configured and the bearer JWT has `typ: txntoken+jwt`; other bearer tokens continue through the standard OIDC or Kubernetes TokenReview flow. When an external context-token caller creates a Task, Orka records the verified subject and issuer in immutable `spec.requestedBy` and records safe transaction metadata in immutable `spec.transaction`, transaction labels, and transaction annotations. Clients cannot set `requestedBy` or `transaction` themselves.
+
+Optional authorization is controlled by `--context-token-authz-mode` / `ORKA_CONTEXT_TOKEN_AUTHZ_MODE`. In `audit` mode, Orka logs safe authorization failures and allows the request. In `enforce` mode, Orka rejects context-token callers that lack the configured operation scope or violate signed `tctx` constraints. Task creation can be constrained by `tctx.namespace`, `tctx.taskType`, `tctx.agent`, `tctx.allowedAgents`, workspace `tctx.repo`/`tctx.branch`/`tctx.ref`, and `tctx.allowedTools`. Chat, OpenAI-compatible, and Anthropic-compatible model calls require the provider-use scope (default `orka:providers:use`) and honor `tctx.namespace`, `tctx.provider`, `tctx.allowedProviders`, `tctx.model`, and `tctx.allowedModels`. When Orka-managed server-side tools are exposed to those endpoints, they also require the tool-use scope (default `orka:tools:use`) and honor `tctx.allowedTools`. Security scan read/list/get endpoints require the security-read scope (default `orka:security:read`), and security scan create/update/delete and mutation endpoints require the security-write scope (default `orka:security:write`). The raw TxToken is never logged or persisted in Task specs/status.
+
+### Kontxt TTS Exchange and Propagation
+
+Configure `--context-token-tts-url` / `ORKA_CONTEXT_TOKEN_TTS_URL` when workers should exchange a mounted subject token for child or outbound replacement TxTokens. Delegation tools require `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE` and `ORKA_CONTEXT_TOKEN_CHILD_SCOPE`; HTTP Tool calls can use `ORKA_CONTEXT_TOKEN_OUTBOUND_SCOPE` or fall back to the current transaction scope. Child scopes are fail-closed: Orka rejects a requested child scope that is not already present in the parent transaction scopes before it creates the child Task.
+
+Successful delegation exchanges store the raw child TxToken only in an owner-referenced Kubernetes Secret and annotate the child Task with the Secret name. The controller mounts that Secret into the child worker and sets `ORKA_TRANSACTION_TOKEN_FILE` / `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE` so deeper delegation and downstream Tool calls can continue the same transaction with configured child/outbound scopes.
+
+### Task Provenance Admission Hardening
+
+The REST API rejects client-supplied `requestedBy` and `transaction` fields and stamps verified provenance itself. To also protect direct Kubernetes `Task` CRD writes, enable the optional validating admission webhook:
+
+```bash
+--task-provenance-admission-enabled=true
+```
+
+The webhook denies untrusted `CREATE` or `UPDATE` requests that set or modify Orka-managed provenance fields: `spec.requestedBy`, `spec.transaction`, `orka.ai/transaction-*` labels/annotations, `orka.ai/context-token-profile`, and the child token Secret annotation. By default, trusted writers are the Orka controller ServiceAccount usernames in the controller namespace and the `orka-ai-worker` ServiceAccount name in the target Task namespace; override them with `--task-provenance-admission-trusted-users` and `--task-provenance-admission-trusted-service-accounts`.
+
+Admission deployment is opt-in. To install the manifests, uncomment the `[WEBHOOK]` resource and patch in `config/default/kustomization.yaml`, provide a `webhook-server-cert` TLS Secret for the manager, and set the webhook `caBundle` (or configure certificate-manager CA injection) before applying the webhook configuration. The bundled webhook manifest defaults to `failurePolicy: Ignore`; switch it to `Fail` only after webhook TLS and availability are configured.
+
+## Prometheus Metrics
+
+Orka exposes 19 Prometheus metrics. Enable monitoring with the Helm chart:
+
+```yaml
+monitoring:
+  enabled: true
+  interval: 30s
+```
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `orka_tasks_total` | Counter | Total tasks created (by type, phase, namespace) |
+| `orka_tasks_active` | Gauge | Currently running tasks |
+| `orka_task_duration_seconds` | Histogram | Task execution duration |
+| `orka_task_queue_depth` | Gauge | Tasks waiting by priority |
+| `orka_task_retries_total` | Counter | Retry attempts |
+| `orka_webhook_deliveries_total` | Counter | Webhook deliveries (success/failure) |
+| `orka_api_requests_total` | Counter | API requests (by endpoint, method, status) |
+| `orka_api_request_duration_seconds` | Histogram | API latency |
+| `orka_sessions_total` | Gauge | Active sessions |
+| `orka_session_messages_total` | Counter | Messages appended to sessions |
+| `orka_session_queue_waiting` | Gauge | Tasks waiting for session lock |
+| `orka_tools_discovered` | Gauge | Tool CRDs discovered |
+| `orka_tool_calls_total` | Counter | Tool invocations (by tool, status) |
+| `orka_tool_call_duration_seconds` | Histogram | Tool HTTP call latency |
+| `orka_tool_health_status` | Gauge | Tool availability (1/0) |
+| `orka_agents_total` | Gauge | Agent count |
+| `orka_agent_tasks_active` | Gauge | Active tasks per agent |
+| `orka_agent_tasks_total` | Counter | Total tasks per agent |
+| `orka_skills_loaded_total` | Counter | Skills loaded |
+
+## OpenTelemetry Tracing
+
+Orka supports opt-in OpenTelemetry distributed tracing for debugging and performance analysis. Tracing is disabled by default (zero overhead).
+
+### Enabling Tracing
+
+Add the `--enable-tracing` flag to the controller:
+
+```yaml
+args:
+  - --enable-tracing
+env:
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: "jaeger-collector.observability.svc:4317"
+```
+
+| Flag / Environment Variable | Default | Description |
+|------------------------------|---------|-------------|
+| `--enable-tracing` | `false` | Enable OpenTelemetry tracing |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP gRPC collector endpoint |
+
+### Instrumented Components
+
+| Tracer | Span | Attributes |
+|--------|------|------------|
+| `orka.api` | `GET /api/v1/tasks` | `http.method`, `http.route`, `http.status_code`, `http.request_id` |
+| `orka.chat` | `chat.request` | `session.id`, `chat.provider`, `chat.model` |
+| `orka.chat` | `chat.tool_loop.iteration` | `chat.iteration` |
+| `orka.llm` | `llm.complete` | `llm.provider`, `llm.model`, `llm.input_tokens`, `llm.output_tokens` |
+| `orka.tools` | `tool.execute` | `tool.name`, `tool.success` |
+| `orka.controller` | `task.reconcile` | `task.name`, `task.namespace`, `task.type` |
+
+### Example: Jaeger Setup
+
+```bash
+# Deploy Jaeger all-in-one (development only)
+kubectl create namespace observability
+kubectl apply -n observability -f https://raw.githubusercontent.com/jaegertracing/jaeger-operator/main/examples/simplest.yaml
+
+# Configure the controller
+kubectl set env deployment/orka-controller \
+  OTEL_EXPORTER_OTLP_ENDPOINT=jaeger-collector.observability.svc:4317
+```
+
+## Context Engineering Best Practices
+
+Research on LLM agent context files ([arxiv 2602.11988](https://arxiv.org/abs/2602.11988)) shows that verbose context hurts more than it helps: LLM-generated context files reduce task success rates by 0.5–2% while increasing inference costs by 20–23%. Even developer-written files yield only marginal improvements (~4%) with similar cost increases. The guidelines below translate these findings into practical advice for Orka's `systemPrompt`, `Skill`, and `Agent` configuration.
+
+### Writing Effective System Prompts
+
+Keep Agent `systemPrompt` content **minimal and requirement-focused**:
+
+- **Include only**: tooling commands (build/test/lint invocations), non-discoverable gotchas (e.g., "provider secret key defaults to `api-key`"), and hard constraints the agent cannot infer from source code.
+- **Avoid codebase overviews** — agents discover project structure efficiently on their own through file listing and search tools. Overviews add tokens without improving navigation speed.
+- **Don't duplicate** information already present in `website/docs/`, `README`, or inline code comments. Redundant instructions increase reasoning token usage (14–22% more) without improving outcomes.
+
+### Writing Effective Skills
+
+Skills are prepended to the system prompt on **every LLM call** for every task that uses the parent Agent. Each Skill directly increases per-request token cost.
+
+- Keep Skill `content` concise and **action-oriented** — write instructions ("run `make lint-fix` after changes"), not descriptions ("this project uses a Makefile-based build system").
+- Split large Skills so Agents only reference the ones they need. A research Agent doesn't need a coding-standards Skill.
+- Regularly audit Skill content and remove instructions the agent follows by default.
+
+### Monitoring Recommendations
+
+- Track `orka_task_duration_seconds` and LLM token metrics — more instructions ≠ better outcomes.
+- A/B test agent performance with and without specific `systemPrompt` or `Skill` content to validate that each addition provides measurable benefit.
+- Well-documented repositories benefit least from additional context; focus context engineering effort on repos with limited existing documentation.
