@@ -1,24 +1,27 @@
 #!/usr/bin/env bash
-# Demo 70 — Agent Substrate (gVisor execution workspaces)
+# Demo 70 — Agent Substrate (a real agent in a gVisor workspace)
 #
 # Orka's workspace executor is provider-neutral. Demo 60 backed agent Tasks
 # with agent-sandbox; this demo backs the SAME Task API with Agent Substrate —
 # a second provider that runs each workspace as a gVisor-isolated Actor drawn
-# from a pre-warmed WorkerPool, and snapshots/suspends it between turns.
+# from a pre-warmed WorkerPool, and keeps it warm between turns.
 #
-# Three beats:
-#   1. Lifecycle  — cleanupPolicy: delete; fresh Actor claimed, run, deleted.
-#   2. Retained   — cleanupPolicy: retain + reusePolicy: session; workspace
-#                   stays warm (phase Retained).
-#   3. Reuse      — a second Task with the same sessionRef reattaches the warm
-#                   workspace (status.executionWorkspace.reused == true).
-# The payoff card asserts provider=substrate on all three and reused=true on
-# the reuse beat.
+# Two beats, both with a REAL model-driven codex agent:
+#   COLD — fresh gVisor workspace: the agent clones the repo, makes a change,
+#          stops. Orka pushes the branch; the demo opens a real pull request.
+#   WARM — a second Task with the same sessionRef reattaches the RETAINED
+#          workspace (reused=true) for a follow-up change — no cold start. The
+#          PR is updated with the second commit.
 #
-# The agent runtime CLI is stubbed to /bin/true (CODEX_CLI_PATH), so this demo
-# is model-free and deterministic — it exercises the WORKSPACE lifecycle, not
-# model output. The Substrate control plane + WorkerPool + ActorTemplate must
-# already be installed (hack/demos/cluster/install-substrate.sh).
+# Clean-exit contract: the agent EDITS FILES ONLY and stops; Orka's pushBranch
+# pushes the branch; THIS SCRIPT opens/updates the PR via gh. (If the agent ran
+# post-edit commands itself, a nonzero one could make codex exit 1 even though
+# the work succeeded.) The Task sets ORKA_CODEX_DISABLE_SANDBOX=true because
+# gVisor is the sandbox — codex's inner bubblewrap cannot nest under runsc.
+#
+# Prerequisites (hack/demos/cluster/install-substrate.sh): the Substrate control
+# plane, a WorkerPool + ActorTemplate on a codex-capable image, an in-cluster
+# model proxy (vekil), and the model + git Secrets.
 #
 # Pacing is controlled by DEMO_RECORD_PROFILE (presenter|docs|social|hero).
 
@@ -27,16 +30,13 @@ set -Eeuo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Pin the demo namespace BEFORE sourcing the libs, and make it AUTHORITATIVE.
-# Demo 70 runs on the dedicated Substrate kind cluster, where
-# install-substrate.sh placed the Agent/Tasks (and the bootstrap-token secret)
-# in DEMO_SUBSTRATE_NAMESPACE (default "default"). The shared wait_for_task_*
-# helpers key off DEMO_NAMESPACE while the render_substrate_* renderers key off
-# DEMO_SUBSTRATE_NAMESPACE — if those diverge, tasks are created in one
-# namespace and polled in another, so the demo hangs until timeout. We
-# therefore FORCE DEMO_NAMESPACE to the substrate namespace, overriding any
-# value inherited from the shell (e.g. "demo-magic" left over from demos
-# 50/60, which doesn't exist on the Substrate cluster). Override the namespace
-# via DEMO_SUBSTRATE_NAMESPACE, not DEMO_NAMESPACE.
+# Demo 70 runs on the dedicated Substrate kind cluster. The shared
+# wait_for_task_* helpers key off DEMO_NAMESPACE while the render_substrate_*
+# renderers key off DEMO_SUBSTRATE_NAMESPACE — if those diverge, tasks are
+# created in one namespace and polled in another, so the demo hangs. We force
+# DEMO_NAMESPACE to the substrate namespace, overriding any value inherited
+# from the shell (e.g. "demo-magic" left over from demos 50/60). Override the
+# namespace via DEMO_SUBSTRATE_NAMESPACE, not DEMO_NAMESPACE.
 export DEMO_SUBSTRATE_NAMESPACE="${DEMO_SUBSTRATE_NAMESPACE:-default}"
 export DEMO_NAMESPACE="${DEMO_SUBSTRATE_NAMESPACE}"
 
@@ -55,69 +55,96 @@ configure_demo_magic
 ensure_demo_workdir
 prepare_api_env
 require_orka_api_reachable
+# The PR step uses gh; fail early if it is missing rather than mid-demo.
+require_cmd gh
 
 agent="${DEMO_SUBSTRATE_AGENT}"
 substrate_ns="${DEMO_NAMESPACE}"
-lifecycle_task="${DEMO_SUBSTRATE_LIFECYCLE_TASK}"
-retain_task="${DEMO_SUBSTRATE_RETAIN_TASK}"
-reuse_task="${DEMO_SUBSTRATE_REUSE_TASK}"
+cold_task="${DEMO_SUBSTRATE_COLD_TASK}"
+warm_task="${DEMO_SUBSTRATE_WARM_TASK}"
 template_ns="${DEMO_SUBSTRATE_TEMPLATE_NAMESPACE}"
 template_name="${DEMO_SUBSTRATE_TEMPLATE_NAME}"
+# Substrate retains the session's gVisor Actor (named deterministically from
+# the session coordinates) after a run, and Actors are gRPC-only — there is no
+# kubectl resource to delete them in cleanup. If two runs share a session name,
+# the SECOND run's "cold" beat would reattach the first run's retained Actor and
+# report reused=true — breaking the cold/warm story. So unless the caller pins
+# DEMO_SUBSTRATE_SESSION explicitly, give each run a unique session id. The
+# session only needs to be stable WITHIN a run (cold creates, warm reattaches).
+if [[ -z "${DEMO_SUBSTRATE_SESSION_PINNED:-}" ]]; then
+  export DEMO_SUBSTRATE_SESSION="${DEMO_SUBSTRATE_SESSION}-$(date +%s)"
+fi
+session="${DEMO_SUBSTRATE_SESSION}"
+pr_repo="${DEMO_SUBSTRATE_PR_REPO}"
+push_branch="${DEMO_SUBSTRATE_PUSH_BRANCH}"
+base_branch="${DEMO_SUBSTRATE_GIT_BASE_BRANCH}"
+model="${DEMO_SUBSTRATE_RUNTIME_MODEL}"
 
-render_substrate_agent                                          > "${DEMO_WORKDIR}/substrate-agent.yaml"
-render_substrate_task "${lifecycle_task}" delete none           > "${DEMO_WORKDIR}/substrate-lifecycle.yaml"
-render_substrate_task "${retain_task}"    retain  session true  > "${DEMO_WORKDIR}/substrate-retain.yaml"
-render_substrate_task "${reuse_task}"     delete  session false > "${DEMO_WORKDIR}/substrate-reuse.yaml"
-render_substrate_story_file                                    > "${DEMO_WORKDIR}/substrate-story.txt"
+# The cold beat creates a fresh README marker; the warm beat appends a second
+# line. The agent edits only — Orka pushes, this script PRs.
+cold_prompt="    Append exactly this line to the end of README.md and make no other change:
+    \"<!-- orka substrate demo: cold gVisor workspace -->\"
+    Then stop. Do not run git, do not open a PR — Orka handles the push."
+warm_prompt="    The repo is already checked out from the previous turn (warm workspace).
+    Append exactly this line to the end of README.md and make no other change:
+    \"<!-- orka substrate demo: warm reuse, no cold start -->\"
+    Then stop. Do not run git, do not open a PR — Orka handles the push."
 
-demo_scenario "Agent Substrate — gVisor workspaces, one Task API" \
-  "The same Orka Task that ran on agent-sandbox in Demo 60 now runs on Agent Substrate: a gVisor-isolated Actor from a warm WorkerPool. Switch one field — provider: substrate — and keep the entire workflow."
+render_substrate_agent                                       > "${DEMO_WORKDIR}/substrate-agent.yaml"
+render_substrate_task "${cold_task}" session true  "${cold_prompt}" > "${DEMO_WORKDIR}/substrate-cold.yaml"
+render_substrate_task "${warm_task}" session false "${warm_prompt}" > "${DEMO_WORKDIR}/substrate-warm.yaml"
+render_substrate_story_file                                  > "${DEMO_WORKDIR}/substrate-story.txt"
 
-demo_event "🧹" "Clearing any prior demo Tasks so this run starts clean…"
-delete_task_if_exists "${lifecycle_task}"
-delete_task_if_exists "${retain_task}"
-delete_task_if_exists "${reuse_task}"
+demo_scenario "Agent Substrate — a real agent in a gVisor workspace" \
+  "A live ${model} agent clones ${pr_repo}, makes a change inside a gVisor-isolated Actor, and opens a real PR. Then a second task reuses the warm workspace — no cold start. Same Orka Task API as Demo 60; only the provider changed."
+
+demo_event "🧹" "Clearing any prior demo Tasks + stale demo branch so this run starts clean…"
+delete_task_if_exists "${cold_task}"
+delete_task_if_exists "${warm_task}"
+# Close any previous demo PR and delete the branch so the cold beat opens fresh.
+__prev_pr="$(gh pr list --repo "${pr_repo}" --head "${push_branch}" --state open \
+  --json number --jq '.[0].number' 2>/dev/null || true)"
+if [[ -n "${__prev_pr}" ]]; then
+  gh pr close "${__prev_pr}" --repo "${pr_repo}" --delete-branch >/dev/null 2>&1 || true
+else
+  git ls-remote --exit-code --heads "https://github.com/${pr_repo}.git" "${push_branch}" >/dev/null 2>&1 \
+    && gh api -X DELETE "repos/${pr_repo}/git/refs/heads/${push_branch}" >/dev/null 2>&1 || true
+fi
 
 # ---------------------------------------------------------------------------
 # Per-task status hook — narrates Task/workspace transitions during waits.
 #
-# IMPORTANT: everything here must go to stderr. The wait helpers capture the
-# task phase via `phase="$(wait_for_task_terminal ...)"`, and this hook runs
-# inside that same command substitution. demo_announce_once routes through
-# demo_event, which prints to STDOUT — so if an announce fires on the same tick
-# the task reaches a terminal phase (common for fast Substrate workspaces that
-# claim + complete in ~10s), its line would be captured into the phase string
-# and corrupt the "== Succeeded" check, failing the demo after beat 1. We force
-# the whole hook body to stderr to keep the narration visible without leaking
-# into the phase capture.
+# IMPORTANT: everything here goes to stderr. The wait helpers capture the task
+# phase via `phase="$(wait_for_task_terminal ...)"`, and this hook runs inside
+# that same command substitution. demo_announce_once routes through demo_event
+# (STDOUT), so without the stderr wrap an announce firing on the terminal tick
+# would corrupt the captured phase. Force the whole hook body to stderr.
 # ---------------------------------------------------------------------------
 _substrate_task_status() {
   local task_name="$1"
   local elapsed="$2"
   {
-    local phase ws_phase ws_provider
+    local phase ws_phase ws_provider ws_reused
     phase="$(kubectl get task "${task_name}" -n "${substrate_ns}" \
       -o jsonpath='{.status.phase}' 2>/dev/null || true)"
     ws_phase="$(kubectl get task "${task_name}" -n "${substrate_ns}" \
       -o jsonpath='{.status.executionWorkspace.phase}' 2>/dev/null || true)"
     ws_provider="$(kubectl get task "${task_name}" -n "${substrate_ns}" \
       -o jsonpath='{.status.executionWorkspace.provider}' 2>/dev/null || true)"
+    ws_reused="$(kubectl get task "${task_name}" -n "${substrate_ns}" \
+      -o jsonpath='{.status.executionWorkspace.reused}' 2>/dev/null || true)"
 
     [[ "${ws_provider}" == "substrate" ]] && demo_announce_once "ws-${task_name}-claim" \
-      "📦" "Substrate workspace claimed — a gVisor Actor from the WorkerPool is now this Task's sandbox"
-    [[ "${ws_phase}" == "Retained" ]] && demo_announce_once "ws-${task_name}-retained" \
-      "🔥" "Workspace retained warm — its snapshot survives for the next sessionRef to reattach"
+      "📦" "Substrate workspace claimed — a gVisor Actor is now this agent's sandbox (reaching the model proxy + github from inside runsc)"
+    [[ "${ws_reused}" == "true" ]] && demo_announce_once "ws-${task_name}-reused" \
+      "⚡" "Warm workspace reattached (reused=true) — repo already cloned, no cold start"
 
-    __demo_heartbeat 'task/%s phase=%s workspace=%s elapsed=%ss' \
+    __demo_heartbeat 'task/%s phase=%s workspace=%s elapsed=%ss (live model run)' \
       "${task_name}" "${phase:-Pending}" "${ws_phase:-Pending}" "${elapsed}"
   } 1>&2
 }
 
-# _substrate_recap "<what just happened>" "<why it matters>"
-# A reflective beat after each fast (~10s) workspace operation, so a viewer
-# isn't outrun by how quickly Substrate claims/reuses a workspace. demo_phase
-# is profile-aware (suppressed in hero, and in social past chapter 3); the
-# short pause only happens in presenter so non-interactive casts stay fast.
+# _substrate_recap "<what just happened>" "<why it matters>" — reflective beat.
 _substrate_recap() {
   local what="$1"
   local why="$2"
@@ -128,84 +155,99 @@ _substrate_recap() {
   fi
 }
 
+# open_or_update_demo_pr — open the PR after the cold beat (branch already
+# pushed by Orka), or report the existing PR after the warm beat. Prints the URL.
+open_or_update_demo_pr() {
+  local existing url
+  existing="$(gh pr list --repo "${pr_repo}" --head "${push_branch}" --state open \
+    --json url --jq '.[0].url' 2>/dev/null || true)"
+  if [[ -n "${existing}" ]]; then
+    printf '%s\n' "${existing}"
+    return 0
+  fi
+  url="$(gh pr create --repo "${pr_repo}" --head "${push_branch}" --base "${base_branch}" \
+    --title "Orka Agent Substrate demo" \
+    --body "Opened from the Orka Agent Substrate demo. A ${model} codex agent made this change inside a gVisor-isolated Substrate workspace; Orka pushed the branch; the demo opened this PR." \
+    2>/dev/null || true)"
+  printf '%s\n' "${url}"
+}
+
 # ---------------------------------------------------------------------------
 # Narrated walkthrough.
 # ---------------------------------------------------------------------------
 DEMO_CHAPTER_TOTAL=7
 
 # Chapter 1 ------------------------------------------------------------------
-narrate "Orka's workspace executor is provider-neutral. The Task you saw on agent-sandbox runs unchanged on Substrate — a gVisor Actor from a warm pool — by switching one field."
+narrate "Orka's workspace executor is provider-neutral. The agent Task you saw on agent-sandbox runs unchanged on Substrate — a gVisor Actor from a warm pool — by switching one field."
 chapter "What this demo is doing" "🧑"
 demo_show_full "${DEMO_WORKDIR}/substrate-story.txt"
 
 # Chapter 2 ------------------------------------------------------------------
-narrate "One model-free Agent. The runtime CLI is stubbed so the focus is the workspace, not model output."
+narrate "One real codex Agent. Its model endpoint is an in-cluster proxy; the agent edits files inside the gVisor workspace."
 chapter "Apply the Agent" "🤖"
-demo_event "📥" "A single Agent CR. CODEX_CLI_PATH=/bin/true makes the run deterministic — this demo is about the execution substrate."
-log_info "Template: ${template_ns}/${template_name}  (Substrate ActorTemplate, gVisor runtime)"
+demo_event "📥" "A codex-runtime Agent (model ${model}). secretRef carries the in-cluster model endpoint — the agent runs a real model from inside the sandbox."
+log_info "Template: ${template_ns}/${template_name}  (gVisor ActorTemplate)   Repo: ${pr_repo}"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/substrate-agent.yaml"
 
 # Chapter 3 ------------------------------------------------------------------
-narrate "Beat 1 — lifecycle. provider: substrate claims a fresh gVisor Actor; cleanupPolicy: delete tears it down after."
-chapter "Beat 1: workspace lifecycle" "♻️"
-demo_event "1️⃣ " "Task with execution.workspace.provider=substrate, cleanupPolicy=delete. Claims an Actor, runs, deletes the workspace."
-demo_show "${DEMO_WORKDIR}/substrate-lifecycle.yaml"
-demo_pe "kubectl apply -f ${DEMO_WORKDIR}/substrate-lifecycle.yaml"
-demo_announce_reset "ws-${lifecycle_task}-"
+narrate "Beat 1 (COLD) — a fresh gVisor workspace. The agent clones the repo, makes a change, and stops; Orka pushes the branch."
+chapter "Beat 1: cold agentic run" "🧊"
+demo_event "1️⃣ " "provider=substrate, a fresh Actor. The agent clones ${pr_repo}, edits a file with a live model, then stops. cleanupPolicy=retain keeps the workspace warm."
+demo_show "${DEMO_WORKDIR}/substrate-cold.yaml"
+demo_pe "kubectl apply -f ${DEMO_WORKDIR}/substrate-cold.yaml"
+demo_announce_reset "ws-${cold_task}-"
+demo_event "⏳" "Real model run — this takes a couple of minutes (clone, model reasoning, edit, push)."
 DEMO_WAIT_STATUS_HOOK=_substrate_task_status \
-  wait_for_task_succeeded        "${lifecycle_task}" "${DEMO_SUBSTRATE_TASK_TIMEOUT:-600}" >/dev/null
-wait_for_task_result_available "${lifecycle_task}" "${DEMO_SUBSTRATE_RESULT_TIMEOUT:-120}" >/dev/null
-demo_event "✅" "Beat 1 done. provider=substrate, workspace phase=Deleted — gVisor Actor claimed, ran, cleaned up."
-demo_pe "kubectl get task ${lifecycle_task} -n ${substrate_ns} -o jsonpath='{.status.executionWorkspace.provider}{\"  phase=\"}{.status.executionWorkspace.phase}{\"\n\"}'"
-_substrate_recap \
-  "Orka claimed a gVisor-isolated Actor from the Substrate WorkerPool, ran the task inside it, then deleted the workspace — because cleanupPolicy was 'delete'." \
-  "This is the same Orka Task API as Demo 60's agent-sandbox; only the provider field changed. Orka hides the execution substrate behind one contract."
+  wait_for_task_succeeded        "${cold_task}" "${DEMO_SUBSTRATE_TASK_TIMEOUT:-900}" >/dev/null
+wait_for_task_result_available "${cold_task}" "${DEMO_SUBSTRATE_RESULT_TIMEOUT:-120}" >/dev/null
+demo_event "✅" "Cold beat done — agent edited the file inside gVisor; Orka pushed branch ${push_branch}."
 
 # Chapter 4 ------------------------------------------------------------------
-narrate "Beat 2 — retain a warm workspace. cleanupPolicy: retain + reusePolicy: session keeps the Actor and snapshots it."
-chapter "Beat 2: retain a warm workspace" "🔥"
-demo_event "2️⃣ " "cleanupPolicy=retain + reusePolicy=session + sessionRef. The workspace is NOT deleted — it stays warm for reuse."
-demo_show "${DEMO_WORKDIR}/substrate-retain.yaml"
-demo_pe "kubectl apply -f ${DEMO_WORKDIR}/substrate-retain.yaml"
-demo_announce_reset "ws-${retain_task}-"
-DEMO_WAIT_STATUS_HOOK=_substrate_task_status \
-  wait_for_task_succeeded        "${retain_task}" "${DEMO_SUBSTRATE_TASK_TIMEOUT:-600}" >/dev/null
-wait_for_task_result_available "${retain_task}" "${DEMO_SUBSTRATE_RESULT_TIMEOUT:-120}" >/dev/null
-demo_event "🔥" "Beat 2 done. workspace phase=Retained — the gVisor Actor + its snapshot survive for the next sessionRef."
+narrate "Orka pushed the branch; the demo opens the pull request."
+chapter "Open the pull request" "🚢"
+demo_event "🔗" "The agent edited ONLY (clean exit); Orka pushed; now the demo opens the PR via gh."
+cold_pr_url="$(open_or_update_demo_pr)"
+if [[ -n "${cold_pr_url}" ]]; then
+  demo_event "🎉" "Real pull request opened: ${cold_pr_url}"
+else
+  log_warning "Could not resolve a PR URL for ${push_branch} on ${pr_repo}"
+fi
 _substrate_recap \
-  "This task asked for cleanupPolicy=retain + reusePolicy=session and CREATED the session '${DEMO_SUBSTRATE_SESSION}'. The workspace was NOT torn down — it is held warm, snapshotted to the Substrate snapshot store." \
-  "Tearing a workspace down and rebuilding it per task wastes the expensive setup (clone, deps, runtime boot). Retaining it warm lets the next task in the session skip all of that."
+  "A real ${model} agent, running inside a gVisor Actor, cloned ${pr_repo} and made a change. It reached the model proxy AND github.com from inside runsc. Orka pushed the branch; the demo opened the PR." \
+  "This is the same Orka agent Task contract as Demo 60 — only execution.workspace.provider changed. The agent gets gVisor isolation for free."
 
 # Chapter 5 ------------------------------------------------------------------
-narrate "Beat 3 — reuse. A second Task with the SAME sessionRef reattaches the warm workspace instead of cold-starting."
-chapter "Beat 3: reuse the warm workspace" "⚡"
-demo_event "3️⃣ " "Same sessionRef=${DEMO_SUBSTRATE_SESSION}. Orka reattaches the retained Actor — reused=true, no new cold start."
-demo_show "${DEMO_WORKDIR}/substrate-reuse.yaml"
-demo_pe "kubectl apply -f ${DEMO_WORKDIR}/substrate-reuse.yaml"
-demo_announce_reset "ws-${reuse_task}-"
+narrate "Beat 2 (WARM) — a second Task with the same sessionRef reattaches the retained workspace. Repo already cloned, no cold start."
+chapter "Beat 2: warm reuse" "⚡"
+demo_event "2️⃣ " "Same sessionRef=${session}, create=false. Orka reattaches the warm Actor — reused=true. The repo is already there; the agent skips the clone."
+demo_show "${DEMO_WORKDIR}/substrate-warm.yaml"
+demo_pe "kubectl apply -f ${DEMO_WORKDIR}/substrate-warm.yaml"
+demo_announce_reset "ws-${warm_task}-"
 DEMO_WAIT_STATUS_HOOK=_substrate_task_status \
-  wait_for_task_succeeded        "${reuse_task}" "${DEMO_SUBSTRATE_TASK_TIMEOUT:-600}" >/dev/null
-wait_for_task_result_available "${reuse_task}" "${DEMO_SUBSTRATE_RESULT_TIMEOUT:-120}" >/dev/null
-demo_event "⚡" "Beat 3 done. status.executionWorkspace.reused=true — the warm workspace was reattached, not rebuilt."
+  wait_for_task_succeeded        "${warm_task}" "${DEMO_SUBSTRATE_TASK_TIMEOUT:-900}" >/dev/null
+wait_for_task_result_available "${warm_task}" "${DEMO_SUBSTRATE_RESULT_TIMEOUT:-120}" >/dev/null
+demo_event "⚡" "Warm beat done — status.executionWorkspace.reused=true. Orka pushed the follow-up commit to the same branch."
+warm_pr_url="$(open_or_update_demo_pr)"
+[[ -n "${warm_pr_url}" ]] && demo_event "🔗" "PR updated with the warm-reuse commit: ${warm_pr_url}"
 _substrate_recap \
-  "This task named the SAME session '${DEMO_SUBSTRATE_SESSION}' with create=false. Instead of cold-starting a new Actor, Orka reattached the workspace Beat 2 left warm — status.executionWorkspace.reused=true proves it." \
-  "Same Orka Task contract, gVisor isolation, AND warm-state reuse across tasks — no cold start tax. That is the whole point of a pluggable execution substrate."
+  "The second Task named the SAME session with create=false. Orka reattached the workspace the cold beat left warm — reused=true — so the agent skipped cloning and started hot." \
+  "Same Task contract, gVisor isolation, AND warm-state reuse across tasks — no cold-start tax. That is the point of a pluggable execution substrate."
 
 # Chapter 6 ------------------------------------------------------------------
-narrate "All three Tasks at a glance — same provider, the reuse Task carries reused=true."
+narrate "Both Tasks at a glance — same provider, the warm Task carries reused=true."
 chapter "Substrate Tasks at a glance" "🪵"
-demo_event "📊" "Every Task ran on provider=substrate. The Orka Task API is identical to Demo 60 — only the backend changed."
+demo_event "📊" "Both Tasks ran on provider=substrate with a real model. The Orka agent Task API is identical to Demo 60 — only the backend changed."
 demo_pe "kubectl get tasks -n ${substrate_ns} -l demo.orka.ai/scenario=substrate -o custom-columns=TASK:.metadata.name,PHASE:.status.phase,WS:.status.executionWorkspace.provider,WSPHASE:.status.executionWorkspace.phase,REUSED:.status.executionWorkspace.reused"
 
 # Chapter 7 ------------------------------------------------------------------
-narrate "Hard assertion: provider=substrate on all three, and the reuse Task reattached the warm workspace."
-chapter "Substrate workspace summary" "📦"
-demo_event "🔍" "Payoff card reads each Task's status.executionWorkspace and ASSERTS provider=substrate + reused=true. Demo fails if not."
-payoff_card_substrate "${lifecycle_task}" "${retain_task}" "${reuse_task}"
+narrate "Hard assertion: provider=substrate on both, the warm Task reused the workspace, and a real PR exists."
+chapter "Substrate run summary" "📦"
+demo_event "🔍" "Payoff card asserts provider=substrate + reused=true and shows the real PR URL. Demo fails if not."
+payoff_card_substrate "${cold_task}" "${warm_task}" "${warm_pr_url:-${cold_pr_url:-}}"
 
 if demo_profile_is presenter; then
   printf '\n%bAudit JSON (Tasks)%b\n' "${DIM}" "${COLOR_RESET}"
   kubectl get tasks -n "${substrate_ns}" \
-    "${lifecycle_task}" "${retain_task}" "${reuse_task}" \
+    "${cold_task}" "${warm_task}" \
     -o json | jq '.items | map({task: .metadata.name, phase: .status.phase, workspace: .status.executionWorkspace})'
 fi

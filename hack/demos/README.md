@@ -8,7 +8,7 @@ This directory contains a small `demo-magic` kit for showing Orka in six ways:
 - `40-security-scanning.sh`: repository scan -> findings -> patch -> PR
 - `50-kontxt.sh`: workload SA token -> in-cluster TTS -> request-scoped TxToken -> Orka API call (one identity, two outcomes)
 - `60-agent-sandbox.sh`: three turns share a single SandboxClaim via `sessionRef` (scout -> builder -> CI fixup, same workspace)
-- `70-agent-substrate.sh`: same Orka Task API on a second workspace provider — a gVisor Actor from Agent Substrate (lifecycle -> retained warm workspace -> reuse)
+- `70-agent-substrate.sh`: a real gpt-5.4 codex agent in a gVisor Actor (Agent Substrate) clones a repo, edits it, and opens a PR; a second task reuses the warm workspace with no cold start
 
 There is also:
 

@@ -931,31 +931,46 @@ Beyond this demo, any multi-turn workflow (planner -> builder -> tester, scout -
 }
 
 # ---------------------------------------------------------------------------
-# Demo 70 — Agent Substrate (gVisor execution workspaces).
+# Demo 70 — Agent Substrate (real agentic run in a gVisor workspace).
 #
 # Substrate is a SECOND execution-workspace provider (distinct from Demo 60's
 # agent-sandbox). Orka Tasks request `execution.workspace.provider: substrate`;
 # the controller claims a gVisor-isolated Actor from a Substrate WorkerPool via
-# the ActorTemplate, runs the agent runtime inside it, and snapshots/suspends
-# the microVM between turns. These renderers assume the Substrate control plane
-# + WorkerPool + ActorTemplate are already installed (see
-# hack/demos/cluster/install-substrate.sh), mirroring how Demo 60 assumes the
-# agent-sandbox stack is present.
+# the ActorTemplate and runs a REAL codex agent inside it. These renderers
+# assume install-substrate.sh already stood up: the Substrate control plane, a
+# WorkerPool + ActorTemplate on a codex-capable image, an in-cluster model
+# proxy (vekil), and the model + git Secrets.
 #
-# The demo Agent stubs the runtime CLI to /bin/true (CODEX_CLI_PATH), so no
-# model API key is required — the point is the WORKSPACE lifecycle, not model
-# output. This matches scripts/agent-substrate-e2e.sh.
+# Two beats, both with a live gpt model:
+#   COLD  — fresh gVisor workspace: agent clones the repo, makes a change;
+#           Orka pushes the branch; the demo opens a real PR.
+#   WARM  — same sessionRef reattaches the RETAINED workspace (reused=true,
+#           repo already cloned) for a follow-up change — no cold start.
+#
+# Clean-exit contract (validated): the agent EDITS FILES ONLY and stops. Orka's
+# pushBranch pushes the branch; the demo script opens/updates the PR via gh.
+# Having the agent run post-edit commands (git status, a PR curl) can make the
+# codex CLI exit nonzero even when the work succeeded.
+#
+# gVisor contract (validated): the Task sets ORKA_CODEX_DISABLE_SANDBOX=true so
+# codex runs danger-full-access — correct, because gVisor IS the sandbox; its
+# inner bubblewrap cannot nest under runsc.
 # ---------------------------------------------------------------------------
 : "${DEMO_SUBSTRATE_NAMESPACE:=${DEMO_NAMESPACE:-default}}"
 : "${DEMO_SUBSTRATE_AGENT:=demo-substrate-codex}"
 : "${DEMO_SUBSTRATE_TEMPLATE_NAME:=orka-codex-ci}"
 : "${DEMO_SUBSTRATE_TEMPLATE_NAMESPACE:=ate-demo}"
 : "${DEMO_SUBSTRATE_SESSION:=substrate-warm-70}"
-: "${DEMO_SUBSTRATE_LIFECYCLE_TASK:=demo-substrate-lifecycle}"
-: "${DEMO_SUBSTRATE_RETAIN_TASK:=demo-substrate-retain}"
-: "${DEMO_SUBSTRATE_REUSE_TASK:=demo-substrate-reuse}"
+: "${DEMO_SUBSTRATE_COLD_TASK:=demo-substrate-cold}"
+: "${DEMO_SUBSTRATE_WARM_TASK:=demo-substrate-warm}"
 : "${DEMO_SUBSTRATE_RUNTIME_TYPE:=codex}"
 : "${DEMO_SUBSTRATE_RUNTIME_MODEL:=gpt-5.4}"
+: "${DEMO_SUBSTRATE_MODEL_SECRET:=substrate-model-key}"
+: "${DEMO_SUBSTRATE_GIT_SECRET:=github-credentials}"
+: "${DEMO_SUBSTRATE_GIT_REPO:=https://github.com/sozercan/vekil.git}"
+: "${DEMO_SUBSTRATE_GIT_BASE_BRANCH:=main}"
+: "${DEMO_SUBSTRATE_PUSH_BRANCH:=orka/substrate-demo}"
+: "${DEMO_SUBSTRATE_PR_REPO:=sozercan/vekil}"
 
 render_substrate_agent() {
   cat <<EOF
@@ -970,27 +985,37 @@ metadata:
 spec:
   runtime:
     type: ${DEMO_SUBSTRATE_RUNTIME_TYPE}
-    defaultMaxTurns: 1
+    defaultMaxTurns: 30
     defaultAllowBash: true
   model:
     name: ${DEMO_SUBSTRATE_RUNTIME_MODEL}
+  # secretRef (NOT providerRef — mutually exclusive with runtime) carries the
+  # model endpoint: OPENAI_BASE_URL -> the in-cluster proxy, OPENAI_API_KEY (a
+  # placeholder; the proxy holds the real session). EnvFrom-injected.
+  secretRef:
+    name: ${DEMO_SUBSTRATE_MODEL_SECRET}
   systemPrompt:
     inline: |
-      You are a workspace smoke-test agent for a live Orka Substrate demo.
-      Run the requested command inside the gVisor-isolated workspace and stop.
+      You are a coding agent running inside a gVisor-isolated Substrate
+      workspace for a live Orka demo. The target repository is checked out in
+      the current working directory. Make ONLY the requested file change, then
+      stop. Do not run git status, git commit, git push, or open a pull request
+      yourself — Orka pushes your branch and the demo opens the PR.
 EOF
 }
 
-# render_substrate_task <name> <cleanup:delete|retain> <reuse:none|session> [create:true|false]
-# Emits an agent Task that runs inside a Substrate execution workspace. The CLI
-# is stubbed to /bin/true so the run is model-free and deterministic. When
-# reuse=session, the first (workspace-creating) task must pass create=true to
-# mint the session; later tasks reattach with create=false (the default).
+# render_substrate_task <name> <reuse:none|session> <create:true|false> <prompt>
+# Emits a REAL agentic Task in a Substrate gVisor workspace. The COLD beat uses
+# reuse=session + create=true (mints the warm workspace, retained); the WARM
+# beat uses reuse=session + create=false (reattaches it). Both push the same
+# branch via Orka pushBranch; the demo opens/updates the PR afterward.
 render_substrate_task() {
   local name="$1"
-  local cleanup="${2:-delete}"
-  local reuse="${3:-none}"
-  local create="${4:-false}"
+  local reuse="${2:-session}"
+  local create="${3:-false}"
+  local prompt="${4:-Make the requested change and stop.}"
+  local cleanup="retain"
+  [[ "${reuse}" == "session" ]] || cleanup="delete"
   local session_block=""
   if [[ "${reuse}" == "session" ]]; then
     session_block="  sessionRef:
@@ -1010,15 +1035,23 @@ spec:
   type: agent
   agentRef:
     name: ${DEMO_SUBSTRATE_AGENT}
-  prompt: "Run the configured CLI inside the Substrate workspace and finish."
-  timeout: 10m
-  agentRuntime:
-    maxTurns: 1
-    allowBash: true
+  prompt: |
+${prompt}
+  timeout: 15m
   env:
-    - name: CODEX_CLI_PATH
-      value: /bin/true
+    # gVisor is the sandbox; disable codex's inner bubblewrap (cannot nest).
+    - name: ORKA_CODEX_DISABLE_SANDBOX
+      value: "true"
 ${session_block}
+  agentRuntime:
+    maxTurns: 30
+    allowBash: true
+    workspace:
+      gitRepo: ${DEMO_SUBSTRATE_GIT_REPO}
+      branch: ${DEMO_SUBSTRATE_GIT_BASE_BRANCH}
+      pushBranch: ${DEMO_SUBSTRATE_PUSH_BRANCH}
+      gitSecretRef:
+        name: ${DEMO_SUBSTRATE_GIT_SECRET}
   execution:
     workspace:
       enabled: true
@@ -1033,26 +1066,26 @@ EOF
 
 render_substrate_story_file() {
   emit_block "" "Scenario:
-Demo 70 — Agent Substrate (gVisor-isolated execution workspaces).
+Demo 70 — Agent Substrate (a real agent in a gVisor-isolated workspace).
 
-THE FEATURE: Orka's workspace executor is provider-neutral. Demo 60 backed agent Tasks with agent-sandbox; this demo backs the SAME Task API with Agent Substrate — a second provider that runs each workspace as a gVisor-isolated Actor (a microVM-class sandbox) drawn from a pre-warmed WorkerPool, and can snapshot/suspend that Actor between turns.
+THE FEATURE: Orka's workspace executor is provider-neutral. Demo 60 backed agent Tasks with agent-sandbox; this demo backs the SAME Task API with Agent Substrate — a second provider that runs each workspace as a gVisor-isolated Actor (a microVM-class sandbox) drawn from a pre-warmed WorkerPool, and keeps that Actor warm between turns.
 
-One Task field switches backends: execution.workspace.provider: substrate. Everything else — the Agent CR, the Task CR, the /result endpoint — is identical to every other Orka Task. Orka abstracts the execution substrate.
+One Task field switches backends: execution.workspace.provider: substrate. Everything else — the Agent CR, the Task CR, the model call, the git push — is identical to every other Orka agent Task. Orka abstracts the execution substrate.
 
-THIS DEMO (three beats):
-1. Lifecycle — a Task with cleanupPolicy: delete claims a fresh gVisor Actor, runs, and the workspace is deleted. status.executionWorkspace.provider == substrate, phase == Deleted.
-2. Retained reuse — a Task with cleanupPolicy: retain + reusePolicy: session leaves its workspace warm (phase == Retained); a second Task with the same sessionRef REUSES it (status.executionWorkspace.reused == true) instead of cold-starting a new Actor.
-3. Snapshot — the retained Actor is snapshotted to the Substrate snapshot store (configured on the ActorTemplate), so warm state survives suspend/resume. The payoff card shows provider, phase, reuse, and result availability for each beat.
+THIS DEMO (two beats, real ${DEMO_SUBSTRATE_RUNTIME_MODEL} agent):
+1. COLD — a fresh gVisor workspace. The agent clones ${DEMO_SUBSTRATE_PR_REPO}, makes a change, and stops. Orka pushes the branch; the demo opens a real pull request. status.executionWorkspace.provider == substrate.
+2. WARM — a second Task with the same sessionRef REATTACHES the retained workspace (status.executionWorkspace.reused == true). The repo is already cloned and the Actor is warm, so the follow-up change skips the cold start. The PR is updated with the second commit.
 
 What to watch:
-- provider == substrate on every Task — the Orka Task API is unchanged from Demo 60.
-- gVisor isolation: each workspace is an Actor under runsc, not a shared pod.
-- Beat 2's second Task reports reused == true: the warm workspace was reattached, not rebuilt.
-- The agent CLI is stubbed (/bin/true) so the run is model-free — this demo is about the workspace, not model output.
+- provider == substrate on both Tasks — the Orka agent Task contract is unchanged from Demo 60.
+- gVisor isolation: each workspace is an Actor under runsc, reaching the in-cluster model proxy and github.com from inside the sandbox.
+- The WARM Task reports reused == true: the warm workspace was reattached, not rebuilt.
+- A REAL pull request lands on ${DEMO_SUBSTRATE_PR_REPO}, authored by a model-driven agent inside the sandbox.
 
-Agent:         ${DEMO_SUBSTRATE_AGENT}
-Template:      ${DEMO_SUBSTRATE_TEMPLATE_NAMESPACE}/${DEMO_SUBSTRATE_TEMPLATE_NAME}
-Session:       ${DEMO_SUBSTRATE_SESSION}
+Agent:    ${DEMO_SUBSTRATE_AGENT}  (runtime ${DEMO_SUBSTRATE_RUNTIME_TYPE}, model ${DEMO_SUBSTRATE_RUNTIME_MODEL})
+Template: ${DEMO_SUBSTRATE_TEMPLATE_NAMESPACE}/${DEMO_SUBSTRATE_TEMPLATE_NAME}  (gVisor)
+Session:  ${DEMO_SUBSTRATE_SESSION}
+Repo:     ${DEMO_SUBSTRATE_PR_REPO}
 
 Beyond this demo, Substrate gives agent workloads strong (gVisor) isolation and warm-state reuse without changing a line of the Orka Task contract — swap the provider, keep the workflow."
 }

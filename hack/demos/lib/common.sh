@@ -1803,15 +1803,16 @@ require_security_demo_env() {
 }
 
 require_substrate_demo_env() {
-  # Demo 70 is model-free (the runtime CLI is stubbed to /bin/true), so no
-  # provider/model/git secrets are required — only the Substrate template
-  # coordinates, which default in manifests.sh. We validate the ones a user is
-  # most likely to override so a typo fails fast instead of mid-run.
+  # Demo 70 runs a real codex agent that opens a PR. We validate the coordinates
+  # a user is most likely to override so a typo fails fast instead of mid-run.
+  # The model + git Secrets are created by install-substrate.sh.
   require_vars \
     DEMO_SUBSTRATE_AGENT \
     DEMO_SUBSTRATE_TEMPLATE_NAME \
     DEMO_SUBSTRATE_TEMPLATE_NAMESPACE \
-    DEMO_SUBSTRATE_SESSION
+    DEMO_SUBSTRATE_SESSION \
+    DEMO_SUBSTRATE_PR_REPO \
+    DEMO_SUBSTRATE_PUSH_BRANCH
 }
 
 open_url() {
