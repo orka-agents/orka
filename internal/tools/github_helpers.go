@@ -61,6 +61,19 @@ func resolveRepoAndToken(ctx context.Context, k8sClient client.Client, taskName,
 		} else {
 			if owner == "" || repo == "" {
 				owner, repo = taskOwner, taskRepo
+			} else if repoURL != "" {
+				scopes, err := taskRepoScopes(ctx, k8sClient, taskName)
+				if err != nil {
+					return "", "", "", "", err
+				}
+				if !githubRepoAllowed(owner, repo, scopes) {
+					return "", "", "", "", fmt.Errorf(
+						"repo_url repository %s/%s does not match task repository scope %s",
+						owner,
+						repo,
+						formatGitHubRepoScopes(scopes),
+					)
+				}
 			}
 			token = taskToken
 		}
@@ -124,6 +137,15 @@ func validateRepoURLScope(ctx context.Context, k8sClient client.Client, taskName
 		repo,
 		formatGitHubRepoScopes(scopes),
 	)
+}
+
+func githubRepoAllowed(owner, repo string, scopes []githubRepoScope) bool {
+	for _, scope := range scopes {
+		if githubRepoMatches(owner, repo, scope.owner, scope.repo) {
+			return true
+		}
+	}
+	return false
 }
 
 func taskRepoScopes(ctx context.Context, k8sClient client.Client, taskName string) ([]githubRepoScope, error) {

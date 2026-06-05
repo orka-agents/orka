@@ -340,9 +340,7 @@ func TestResolveRepoAndToken_ErrorTaskNoGitSecretRef(t *testing.T) {
 	}
 }
 
-func TestResolveRepoAndToken_RepoURLTakesPriorityOverTaskName(t *testing.T) {
-	// When both repoURL and taskName are provided, repoURL selects the repo and
-	// taskName can still supply credentials.
+func TestResolveRepoAndToken_RepoURLMatchingTaskNameUsesTaskToken(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	scheme := runtime.NewScheme()
@@ -369,16 +367,53 @@ func TestResolveRepoAndToken_RepoURLTakesPriorityOverTaskName(t *testing.T) {
 
 	owner, repo, token, _, err := resolveRepoAndToken(
 		context.Background(), k8sClient,
-		"some-task", "https://github.com/url-org/url-repo", "",
+		"some-task", "https://github.com/task-org/task-repo", "",
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if owner != "url-org" || repo != "url-repo" {
-		t.Errorf("got owner=%q repo=%q, want url-org/url-repo", owner, repo)
+	if owner != "task-org" || repo != "task-repo" {
+		t.Errorf("got owner=%q repo=%q, want task-org/task-repo", owner, repo)
 	}
 	if token != "task-token" {
 		t.Errorf("got token=%q, want task-token", token)
+	}
+}
+
+func TestResolveRepoAndToken_RepoURLMismatchRejectsTaskToken(t *testing.T) {
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "some-task", Namespace: defaultNamespace},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/task-org/task-repo",
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte("task-token")},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+
+	_, _, _, _, err := resolveRepoAndToken(
+		context.Background(), k8sClient,
+		"some-task", "https://github.com/url-org/url-repo", "",
+	)
+	if err == nil {
+		t.Fatal("expected repo scope mismatch error")
+	}
+	if !contains(err.Error(), "does not match task repository scope") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

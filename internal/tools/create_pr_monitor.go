@@ -53,7 +53,7 @@ func (t *CreatePRMonitorTool) Parameters() json.RawMessage {
 			},
 			repoURLField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,
-				jsonSchemaDescriptionField: "GitHub repository URL to monitor. If omitted, the monitor relies on ORKA_GIT_REPO at execution time.",
+				jsonSchemaDescriptionField: "GitHub repository URL to monitor.",
 			},
 			scheduleField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,
@@ -84,7 +84,7 @@ func (t *CreatePRMonitorTool) Parameters() json.RawMessage {
 				jsonSchemaDescriptionField: "Optional additional instructions appended to the generated PR monitor prompt.",
 			},
 		},
-		jsonSchemaRequiredField: []string{nameField, scheduleField, agentRefField},
+		jsonSchemaRequiredField: []string{nameField, repoURLField, scheduleField, agentRefField},
 	})
 }
 
@@ -124,6 +124,13 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 	agentRef := chatGetStringArg(args, agentRefField)
 	if agentRef == "" {
 		return ChatToolErrorResult("invalid_arguments", "agent_ref is required", "Provide an Agent with coordination enabled")
+	}
+	repoURL := chatGetStringArg(args, repoURLField)
+	if repoURL == "" {
+		return ChatToolErrorResult("invalid_arguments", "repo_url is required", "Provide the GitHub repository URL to monitor")
+	}
+	if _, _, err := parseGitHubRepo(repoURL); err != nil {
+		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("invalid repo_url %q: %v", repoURL, err), "Provide a GitHub repository URL such as https://github.com/owner/repo")
 	}
 	var agent corev1alpha1.Agent
 	if err := tc.Client.Get(ctx, types.NamespacedName{Name: agentRef, Namespace: namespace}, &agent); err != nil {
@@ -168,18 +175,16 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 	task.Spec.AI = &corev1alpha1.AISpec{
 		Tools: append([]string(nil), prMonitorRequiredTools...),
 	}
-	if repoURL := chatGetStringArg(args, repoURLField); repoURL != "" {
-		workspace := &corev1alpha1.WorkspaceConfig{GitRepo: repoURL}
-		secretRef, err := resolveWorkspaceGitSecretRef(ctx, tc.Client, namespace, nil, chatGetStringArg(args, "gitSecretRef"))
-		if err != nil {
-			return classifyChatK8sErr(err)
-		}
-		if secretRef != nil {
-			workspace.GitSecretRef = secretRef
-		}
-		task.Spec.Workspace = workspace
-		task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: workerenv.GitRepo, Value: repoURL})
+	workspace := &corev1alpha1.WorkspaceConfig{GitRepo: repoURL}
+	secretRef, err := resolveWorkspaceGitSecretRef(ctx, tc.Client, namespace, nil, chatGetStringArg(args, "gitSecretRef"))
+	if err != nil {
+		return classifyChatK8sErr(err)
 	}
+	if secretRef != nil {
+		workspace.GitSecretRef = secretRef
+	}
+	task.Spec.Workspace = workspace
+	task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: workerenv.GitRepo, Value: repoURL})
 	if providerName := chatGetStringArg(args, providerRefField); providerName != "" {
 		task.Spec.AI.ProviderRef = &corev1alpha1.ProviderReference{Name: providerName}
 	}

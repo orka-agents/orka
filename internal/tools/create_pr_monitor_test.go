@@ -66,7 +66,7 @@ func TestCreatePRMonitorTool_Metadata(t *testing.T) {
 	if !ok {
 		t.Fatalf("schema required = %T, want []any", schema[jsonSchemaRequiredField])
 	}
-	for _, field := range []string{nameField, scheduleField, agentRefField} {
+	for _, field := range []string{nameField, repoURLField, scheduleField, agentRefField} {
 		if !containsAnyString(required, field) {
 			t.Errorf("schema required = %v, want %q", required, field)
 		}
@@ -201,6 +201,7 @@ func TestCreatePRMonitorTool_ExecuteAuthorizesTaskCreate(t *testing.T) {
 
 	resultJSON, err := (&CreatePRMonitorTool{}).Execute(ctx, mustJSON(t, map[string]any{
 		nameField:     "daily-pr-monitor",
+		repoURLField:  testSozercanAynaRepoURL,
 		scheduleField: "*/15 * * * *",
 		agentRefField: "reviewer",
 	}))
@@ -240,6 +241,7 @@ func TestCreatePRMonitorTool_ExecuteRejectsUnauthorizedTaskCreate(t *testing.T) 
 
 	resultJSON, err := (&CreatePRMonitorTool{}).Execute(ctx, mustJSON(t, map[string]any{
 		nameField:     "daily-pr-monitor",
+		repoURLField:  testSozercanAynaRepoURL,
 		scheduleField: "*/15 * * * *",
 		agentRefField: "reviewer",
 	}))
@@ -274,9 +276,21 @@ func TestCreatePRMonitorTool_ExecuteMissingAgentRef(t *testing.T) {
 	}
 }
 
+func TestCreatePRMonitorTool_ExecuteMissingRepoURL(t *testing.T) {
+	result := executeCreatePRMonitorForFailure(t, newFakeClient(), map[string]any{
+		nameField:     "daily-pr-monitor",
+		scheduleField: "*/15 * * * *",
+		agentRefField: "reviewer",
+	})
+	if result.ErrorType != errTypeInvalidArgs || !strings.Contains(result.Error, "repo_url is required") {
+		t.Fatalf("result = %#v, want missing repo_url invalid_arguments", result)
+	}
+}
+
 func TestCreatePRMonitorTool_ExecuteAgentNotFound(t *testing.T) {
 	result := executeCreatePRMonitorForFailure(t, newFakeClient(), map[string]any{
 		nameField:     "daily-pr-monitor",
+		repoURLField:  testSozercanAynaRepoURL,
 		scheduleField: "*/15 * * * *",
 		agentRefField: "missing-agent",
 	})
@@ -294,6 +308,7 @@ func TestCreatePRMonitorTool_ExecuteAgentCoordinationDisabled(t *testing.T) {
 	})
 	result := executeCreatePRMonitorForFailure(t, fc, map[string]any{
 		nameField:     "daily-pr-monitor",
+		repoURLField:  testSozercanAynaRepoURL,
 		scheduleField: "*/15 * * * *",
 		agentRefField: "reviewer",
 	})
@@ -312,6 +327,7 @@ func TestCreatePRMonitorTool_ExecuteRuntimeAgentRejected(t *testing.T) {
 	})
 	result := executeCreatePRMonitorForFailure(t, fc, map[string]any{
 		nameField:     "daily-pr-monitor",
+		repoURLField:  testSozercanAynaRepoURL,
 		scheduleField: "*/15 * * * *",
 		agentRefField: "runtime-reviewer",
 	})
@@ -329,6 +345,7 @@ func TestCreatePRMonitorTool_ExecuteAutonomousAgentRejected(t *testing.T) {
 	})
 	result := executeCreatePRMonitorForFailure(t, fc, map[string]any{
 		nameField:     "daily-pr-monitor",
+		repoURLField:  testSozercanAynaRepoURL,
 		scheduleField: "*/15 * * * *",
 		agentRefField: "autonomous-reviewer",
 	})
@@ -346,6 +363,7 @@ func TestCreatePRMonitorTool_ExecuteInvalidReviewEventRejected(t *testing.T) {
 	})
 	result := executeCreatePRMonitorForFailure(t, fc, map[string]any{
 		nameField:      "daily-pr-monitor",
+		repoURLField:   testSozercanAynaRepoURL,
 		scheduleField:  "*/15 * * * *",
 		agentRefField:  "reviewer",
 		"review_event": "INVALID",
