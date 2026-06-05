@@ -197,8 +197,8 @@ func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
 	if ws.Ref != "fork-head-sha" {
 		t.Errorf("ref = %q, want fork-head-sha", ws.Ref)
 	}
-	if ws.PushBranch != "feature/fork-change" {
-		t.Errorf("pushBranch = %q, want feature/fork-change", ws.PushBranch)
+	if ws.PushBranch != "" {
+		t.Errorf("pushBranch = %q, want empty for fork PR without safe git credentials", ws.PushBranch)
 	}
 	if ws.GitSecretRef != nil {
 		t.Fatalf("gitSecretRef = %#v, want nil for fork PR", ws.GitSecretRef)
@@ -206,8 +206,8 @@ func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
 	if ws.PRBaseBranch != githubWebhookTestDefaultBranch {
 		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)
 	}
-	if !strings.Contains(task.Spec.Prompt, "do not commit or push yourself") {
-		t.Errorf("prompt missing Orka push handling guidance: %s", task.Spec.Prompt)
+	if !strings.Contains(task.Spec.Prompt, "Orka will not push them automatically") {
+		t.Errorf("prompt missing no-push guidance: %s", task.Spec.Prompt)
 	}
 }
 

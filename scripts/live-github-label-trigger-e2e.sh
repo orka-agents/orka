@@ -416,9 +416,8 @@ main() {
   task_name="$(jq -er '.taskName' "${response_file}")"
 
   log "Verifying created Task ${task_name} targets ${repo_full}"
-  local task_file expected_push_branch
+  local task_file
   task_file="${work_dir}/created-task.json"
-  expected_push_branch="orka/implement-issue-${target_number}"
   run kubectl get task "${task_name}" -n default -o json >"${task_file}"
   jq -e \
     --arg agent "${agent_name}" \
@@ -426,12 +425,12 @@ main() {
     --arg label "${label_name}" \
     --arg repo_full "${repo_full}" \
     --arg repo_clone "${repo_clone}" \
-    --arg push_branch "${expected_push_branch}" \
     '.spec.type == "agent"
       and .spec.agentRef.name == $agent
       and .spec.agentRuntime.workspace.gitRepo == $repo_clone
       and .spec.agentRuntime.workspace.branch == "main"
-      and .spec.agentRuntime.workspace.pushBranch == $push_branch
+      and ((.spec.agentRuntime.workspace.pushBranch // "") == "")
+      and (.spec.agentRuntime.workspace.gitSecretRef == null)
       and .metadata.annotations["orka.ai/github-delivery"] == $delivery
       and .metadata.annotations["orka.ai/github-label"] == $label
       and .metadata.annotations["orka.ai/github-repository"] == $repo_full

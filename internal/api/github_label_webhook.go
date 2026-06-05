@@ -482,7 +482,9 @@ func githubWorkspace(action string, target githubLabelTarget, replayKey string) 
 		ws.Branch = target.Repo.DefaultBranch
 	}
 
-	if action == githubActionImplement {
+	gitSecret := githubLabelTaskGitSecret(target)
+	canPush := gitSecret != ""
+	if action == githubActionImplement && canPush {
 		ws.PushBranch = fmt.Sprintf("orka/implement-%s-%d", target.Kind, target.Number)
 		if target.IsPR && target.HeadBranch != "" {
 			ws.PushBranch = target.HeadBranch
@@ -490,20 +492,28 @@ func githubWorkspace(action string, target githubLabelTarget, replayKey string) 
 			ws.PushBranch = fmt.Sprintf("%s-%s", ws.PushBranch, githubReplayKeySuffix(replayKey))
 		}
 	}
-	if action == githubActionUpdateBranch && target.HeadBranch != "" {
+	if action == githubActionUpdateBranch && target.HeadBranch != "" && canPush {
 		ws.PushBranch = target.HeadBranch
 	}
-	if action != githubActionReview && action != githubActionToIssues && action != githubActionImplement && action != githubActionUpdateBranch {
+	if action != githubActionReview && action != githubActionToIssues && action != githubActionImplement && action != githubActionUpdateBranch && canPush {
 		ws.PushBranch = fmt.Sprintf("orka/%s-%s-%d", dnsNamePart(action), target.Kind, target.Number)
 	}
 
-	if gitSecret := strings.TrimSpace(os.Getenv(githubLabelTriggerGitSecretEnv)); gitSecret != "" && githubLabelTaskCanUseGitSecret(target) {
+	if gitSecret != "" {
 		ws.GitSecretRef = &corev1.LocalObjectReference{Name: gitSecret}
 	}
 	if target.IsPR && target.BaseBranch != "" {
 		ws.PRBaseBranch = target.BaseBranch
 	}
 	return ws
+}
+
+func githubLabelTaskGitSecret(target githubLabelTarget) string {
+	gitSecret := strings.TrimSpace(os.Getenv(githubLabelTriggerGitSecretEnv))
+	if gitSecret == "" || !githubLabelTaskCanUseGitSecret(target) {
+		return ""
+	}
+	return gitSecret
 }
 
 func githubLabelTaskCanUseGitSecret(target githubLabelTarget) bool {
@@ -639,9 +649,17 @@ func buildGitHubActionPrompt(action string, payload githubLabelWebhookPayload, t
 
 	switch action {
 	case githubActionImplement:
-		b.WriteString("Implement the requested change. Keep the scope limited to the GitHub issue or PR request. Run relevant tests. Leave final changes uncommitted for Orka to commit and push. Summarize changes and test results.\n")
+		if workspace != nil && workspace.PushBranch != "" {
+			b.WriteString("Implement the requested change. Keep the scope limited to the GitHub issue or PR request. Run relevant tests. Leave final changes uncommitted for Orka to commit and push. Summarize changes and test results.\n")
+		} else {
+			b.WriteString("Implement the requested change. Keep the scope limited to the GitHub issue or PR request. Run relevant tests. Leave final changes in the workspace for Orka to capture in the task result; Orka will not push them automatically. Summarize changes and test results.\n")
+		}
 	case githubActionUpdateBranch:
-		b.WriteString("Update the pull request branch with the latest base branch changes using a no-commit merge/rebase workflow. Resolve conflicts if needed, run relevant tests, and leave final changes uncommitted for Orka to commit and push. Do not merge the pull request.\n")
+		if workspace != nil && workspace.PushBranch != "" {
+			b.WriteString("Update the pull request branch with the latest base branch changes using a no-commit merge/rebase workflow. Resolve conflicts if needed, run relevant tests, and leave final changes uncommitted for Orka to commit and push. Do not merge the pull request.\n")
+		} else {
+			b.WriteString("Update the pull request branch with the latest base branch changes using a no-commit merge/rebase workflow. Resolve conflicts if needed, run relevant tests, and leave final changes in the workspace for Orka to capture in the task result; Orka will not push them automatically. Do not merge the pull request.\n")
+		}
 	case githubActionReview:
 		b.WriteString("Review the pull request for correctness, tests, security, maintainability, and regressions. Do not change code. Produce a concise review with blocking findings first and include file/line references when available.\n")
 	case githubActionToIssues:

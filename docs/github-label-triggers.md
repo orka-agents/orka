@@ -22,7 +22,7 @@ Set these environment variables on the controller Deployment:
 | `ORKA_GITHUB_WEBHOOK_SECRET` | yes | Shared webhook secret used for HMAC verification. Use a Kubernetes Secret. |
 | `ORKA_GITHUB_LABEL_TRIGGER_AGENT` | yes | Default runtime Agent CR used for created `type: agent` Tasks. |
 | `ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE` | no | Namespace for created Tasks. Defaults to the controller watch namespace, then `default`. |
-| `ORKA_GITHUB_LABEL_TRIGGER_GIT_SECRET` | no | Secret name mounted into agent workspaces as `/secrets/git` for clone, push, and GitHub API auth. |
+| `ORKA_GITHUB_LABEL_TRIGGER_GIT_SECRET` | no | Secret name mounted into agent workspaces as `/secrets/git` for clone, push, and GitHub API auth. Automatic push branches are only configured when this secret is set and safe for the target repository. |
 | `ORKA_GITHUB_LABEL_TRIGGER_PREFIX` | no | Label prefix. Defaults to `agent:`. |
 | `ORKA_GITHUB_LABEL_TRIGGER_TIMEOUT` | no | Task timeout. Defaults to `30m`. |
 | `ORKA_GITHUB_LABEL_TRIGGER_MAX_TURNS` | no | Agent max turns. Defaults to `100`. |
@@ -36,8 +36,8 @@ When GitHub sends a `labeled` event and the label starts with the configured pre
 
 Default action prompts:
 
-- `agent:implement` — implement the issue or PR request, run tests, and leave final changes for Orka to commit and push to a generated `orka/implement-...` branch (or the PR head branch when applied to a PR).
-- `agent:update-branch` — for pull requests only; update the PR head branch from the base branch and leave final changes for Orka to commit and push back.
+- `agent:implement` — implement the issue or PR request and run tests. When a safe git secret is configured, Orka commits and pushes final changes to a generated `orka/implement-...` branch (or the PR head branch for same-repository PRs). For fork PRs or deployments without a git secret, Orka captures the final workspace diff in the task result and does not push automatically.
+- `agent:update-branch` — for pull requests only; update the PR head branch from the base branch. Orka pushes back only when a safe git secret is configured for the PR head repository.
 - `agent:review` — for pull requests only; review without changing code.
 - `agent:to-issues` — break the request into independently implementable GitHub issues, creating them when credentials/tools permit or returning drafts.
 - Other `agent:<action>` labels create a generic action task with a scoped prompt.
