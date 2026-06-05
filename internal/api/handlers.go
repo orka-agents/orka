@@ -185,6 +185,7 @@ type UpdateAgentRequest struct {
 type CreateTaskRequest struct {
 	Name              string                           `json:"name"`
 	Namespace         string                           `json:"namespace"`
+	Annotations       map[string]string                `json:"annotations,omitempty"`
 	Type              corev1alpha1.TaskType            `json:"type"`
 	Image             string                           `json:"image,omitempty"`
 	Command           []string                         `json:"command,omitempty"`
@@ -296,6 +297,15 @@ func rejectRequestedByTampering(body []byte) error {
 	return nil
 }
 
+func rejectReservedTaskAnnotations(annotations map[string]string) error {
+	for key := range annotations {
+		if strings.HasPrefix(key, "orka.ai/") {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("annotation %q is reserved", key))
+		}
+	}
+	return nil
+}
+
 // CreateTask creates a new task
 func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	if err := rejectRequestedByTampering(c.Body()); err != nil {
@@ -314,6 +324,9 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	if req.Type == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "type is required")
 	}
+	if err := rejectReservedTaskAnnotations(req.Annotations); err != nil {
+		return err
+	}
 
 	namespace, err := h.resolveNamespace(c, req.Namespace)
 	if err != nil {
@@ -325,8 +338,9 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      req.Name,
-			Namespace: namespace,
+			Name:        req.Name,
+			Namespace:   namespace,
+			Annotations: req.Annotations,
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:         req.Type,

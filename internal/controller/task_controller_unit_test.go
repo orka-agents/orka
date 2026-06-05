@@ -3301,6 +3301,56 @@ func TestHandleScheduled_CreateChildTask(t *testing.T) {
 	}
 }
 
+func TestHandleScheduled_CopiesCoordinationToolInjectionDisableAnnotation(t *testing.T) {
+	scheme := newTestScheme()
+	lastSchedule := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-pr-monitor",
+			Namespace:         "default",
+			UID:               "12345678-abcd-efgh-ijkl-1234567890ad",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
+			Annotations: map[string]string{
+				labels.AnnotationDisableCoordinationToolInject: scheduledRunLabelValue,
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:                    corev1alpha1.TaskTypeAI,
+			Prompt:                  "review this PR",
+			Schedule:                "* * * * *",
+			StartingDeadlineSeconds: new(int64(300)),
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseScheduled,
+			LastScheduleTime: &lastSchedule,
+		},
+	}
+
+	ctx := context.Background()
+	r := newUnitReconciler(scheme, task)
+	if _, err := r.handleScheduled(ctx, task); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var childList corev1alpha1.TaskList
+	if err := r.List(ctx, &childList, client.InNamespace(task.Namespace), client.MatchingLabels{
+		labels.LabelParentTask: labels.SelectorValue(task.Name),
+	}); err != nil {
+		t.Fatalf("list child tasks: %v", err)
+	}
+	if len(childList.Items) != 1 {
+		t.Fatalf("expected 1 scheduled child task, got %d", len(childList.Items))
+	}
+	child := childList.Items[0]
+	if child.Annotations[labels.AnnotationDisableCoordinationToolInject] != scheduledRunLabelValue {
+		t.Fatalf("child coordination injection disable annotation = %q, want %q",
+			child.Annotations[labels.AnnotationDisableCoordinationToolInject], scheduledRunLabelValue)
+	}
+	if child.Annotations[labels.AnnotationParentTaskName] != task.Name {
+		t.Fatalf("child parent task annotation = %q, want %q", child.Annotations[labels.AnnotationParentTaskName], task.Name)
+	}
+}
+
 func TestHandleScheduled_ExistingChildTaskStillUpdatesScheduleStatus(t *testing.T) {
 	scheme := newTestScheme()
 	lastSchedule := metav1.NewTime(time.Now().Add(-2 * time.Minute).UTC())

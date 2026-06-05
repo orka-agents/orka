@@ -17,7 +17,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
+
+const workspaceTestFeatureBranch = "feature-branch"
 
 func TestPrepareWorkspace_NoOp(t *testing.T) {
 	// When ORKA_PRIOR_TASK is not set, PrepareWorkspace should be a no-op
@@ -347,7 +351,7 @@ func TestFinalizeResult_PushBranchNoRemote(t *testing.T) {
 	}
 
 	// Set push branch but no remote — push will fail gracefully
-	t.Setenv("ORKA_PUSH_BRANCH", "feature-branch")
+	t.Setenv("ORKA_PUSH_BRANCH", workspaceTestFeatureBranch)
 
 	data, err := FinalizeResult(dir, "agent output")
 	if err != nil {
@@ -391,7 +395,7 @@ func TestFinalizeResult_PushBranchWithRemote(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Setenv("ORKA_PUSH_BRANCH", "feature-branch")
+	t.Setenv("ORKA_PUSH_BRANCH", workspaceTestFeatureBranch)
 
 	data, err := FinalizeResult(dir, "agent output")
 	if err != nil {
@@ -402,8 +406,8 @@ func TestFinalizeResult_PushBranchWithRemote(t *testing.T) {
 	if err := json.Unmarshal(data, &sr); err != nil {
 		t.Fatalf("expected JSON result, got: %s", string(data))
 	}
-	if sr.PushBranch != "feature-branch" {
-		t.Errorf("PushBranch = %q, want feature-branch", sr.PushBranch)
+	if sr.PushBranch != workspaceTestFeatureBranch {
+		t.Errorf("PushBranch = %q, want %s", sr.PushBranch, workspaceTestFeatureBranch)
 	}
 	if sr.PushError != "" {
 		t.Errorf("PushError = %q, want empty", sr.PushError)
@@ -425,14 +429,14 @@ func TestFinalizeResult_RequirePushBranchNoRemote(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Setenv("ORKA_PUSH_BRANCH", "feature-branch")
+	t.Setenv("ORKA_PUSH_BRANCH", workspaceTestFeatureBranch)
 	t.Setenv(requirePushBranchEnvVar, "true")
 
 	_, err := FinalizeResult(dir, "agent output")
 	if err == nil {
 		t.Fatal("expected push-required finalize to fail without a remote")
 	}
-	if !strings.Contains(err.Error(), "failed to push to feature-branch") {
+	if !strings.Contains(err.Error(), "failed to push to "+workspaceTestFeatureBranch) {
 		t.Fatalf("expected push failure error, got: %v", err)
 	}
 }
@@ -448,7 +452,7 @@ func TestFinalizeResult_RequirePushBranchWithoutWorkspaceDiff(t *testing.T) {
 	runGitWS(t, dir, "add", ".")
 	runGitWS(t, dir, "commit", "-m", "initial")
 
-	t.Setenv("ORKA_PUSH_BRANCH", "feature-branch")
+	t.Setenv("ORKA_PUSH_BRANCH", workspaceTestFeatureBranch)
 	t.Setenv(requirePushBranchEnvVar, "true")
 
 	_, err := FinalizeResult(dir, "agent output")
@@ -457,6 +461,124 @@ func TestFinalizeResult_RequirePushBranchWithoutWorkspaceDiff(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no workspace diff was produced") {
 		t.Fatalf("expected no-diff error, got: %v", err)
+	}
+}
+
+func TestFinalizeResult_RequirePushBranchAllowsEmptyWorkspaceDiff(t *testing.T) {
+	bareDir := t.TempDir()
+	runGitWS(t, bareDir, "init", "--bare")
+
+	dir := t.TempDir()
+	runGitWS(t, dir, "init")
+	runGitWS(t, dir, "checkout", "-b", "main")
+	runGitWS(t, dir, "config", "user.email", "test@test.com")
+	runGitWS(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(dir+"/file.txt", []byte("content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, dir, "add", ".")
+	runGitWS(t, dir, "commit", "-m", "initial")
+	runGitWS(t, dir, "remote", "add", "origin", bareDir)
+	runGitWS(t, dir, "push", "-u", "origin", "main")
+	runGitWS(t, dir, "checkout", "-b", workspaceTestFeatureBranch)
+	runGitWS(t, dir, "push", "-u", "origin", workspaceTestFeatureBranch)
+
+	t.Setenv("ORKA_PUSH_BRANCH", workspaceTestFeatureBranch)
+	t.Setenv(requirePushBranchEnvVar, "true")
+	t.Setenv(workerenv.AllowEmptyPushBranch, "true")
+	t.Setenv(workerenv.PRBaseBranch, "main")
+
+	data, err := FinalizeResult(dir, "already up to date")
+	if err != nil {
+		t.Fatalf("FinalizeResult failed: %v", err)
+	}
+	var sr StructuredResult
+	if err := json.Unmarshal(data, &sr); err != nil {
+		t.Fatalf("unmarshal structured result: %v", err)
+	}
+	if sr.PushBranch != workspaceTestFeatureBranch {
+		t.Errorf("PushBranch = %q, want %s", sr.PushBranch, workspaceTestFeatureBranch)
+	}
+	if sr.PushError != "" {
+		t.Errorf("PushError = %q, want empty", sr.PushError)
+	}
+}
+
+func TestFinalizeResult_RequirePushBranchAllowsEmptyWorkspaceDiffRejectsStaleHead(t *testing.T) {
+	bareDir := t.TempDir()
+	runGitWS(t, bareDir, "init", "--bare")
+
+	dir := t.TempDir()
+	runGitWS(t, dir, "init")
+	runGitWS(t, dir, "checkout", "-b", "main")
+	runGitWS(t, dir, "config", "user.email", "test@test.com")
+	runGitWS(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(dir+"/file.txt", []byte("content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, dir, "add", ".")
+	runGitWS(t, dir, "commit", "-m", "initial")
+	runGitWS(t, dir, "remote", "add", "origin", bareDir)
+	runGitWS(t, dir, "push", "-u", "origin", "main")
+	runGitWS(t, dir, "checkout", "-b", workspaceTestFeatureBranch)
+	runGitWS(t, dir, "push", "-u", "origin", workspaceTestFeatureBranch)
+
+	runGitWS(t, dir, "checkout", "main")
+	runGitWS(t, dir, "commit", "--allow-empty", "-m", "advance base")
+	runGitWS(t, dir, "push", "origin", "main")
+	runGitWS(t, dir, "checkout", workspaceTestFeatureBranch)
+
+	t.Setenv("ORKA_PUSH_BRANCH", workspaceTestFeatureBranch)
+	t.Setenv(requirePushBranchEnvVar, "true")
+	t.Setenv(workerenv.AllowEmptyPushBranch, "true")
+	t.Setenv(workerenv.PRBaseBranch, "main")
+
+	_, err := FinalizeResult(dir, "stale branch")
+	if err == nil {
+		t.Fatal("expected stale empty push to fail")
+	}
+	if !strings.Contains(err.Error(), "does not contain origin/main") {
+		t.Fatalf("expected stale base containment error, got: %v", err)
+	}
+}
+
+func TestFinalizeResult_RequirePushBranchAllowsEmptyWorkspaceDiffPushesAdvancedHead(t *testing.T) {
+	bareDir := t.TempDir()
+	runGitWS(t, bareDir, "init", "--bare")
+
+	dir := t.TempDir()
+	runGitWS(t, dir, "init")
+	runGitWS(t, dir, "checkout", "-b", "main")
+	runGitWS(t, dir, "config", "user.email", "test@test.com")
+	runGitWS(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(dir+"/file.txt", []byte("content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, dir, "add", ".")
+	runGitWS(t, dir, "commit", "-m", "initial")
+	runGitWS(t, dir, "remote", "add", "origin", bareDir)
+	runGitWS(t, dir, "push", "-u", "origin", "main")
+	runGitWS(t, dir, "commit", "--allow-empty", "-m", "advance head")
+	advancedHead := strings.TrimSpace(runGitOutputWS(t, dir, "rev-parse", "HEAD"))
+
+	t.Setenv("ORKA_PUSH_BRANCH", workspaceTestFeatureBranch)
+	t.Setenv(requirePushBranchEnvVar, "true")
+	t.Setenv(workerenv.AllowEmptyPushBranch, "true")
+
+	data, err := FinalizeResult(dir, "advanced head")
+	if err != nil {
+		t.Fatalf("FinalizeResult failed: %v", err)
+	}
+	var sr StructuredResult
+	if err := json.Unmarshal(data, &sr); err != nil {
+		t.Fatalf("unmarshal structured result: %v", err)
+	}
+	if sr.PushBranch != workspaceTestFeatureBranch {
+		t.Errorf("PushBranch = %q, want %s", sr.PushBranch, workspaceTestFeatureBranch)
+	}
+	remoteHead := strings.TrimSpace(runGitOutputWS(t, bareDir, "rev-parse", "refs/heads/"+workspaceTestFeatureBranch))
+	if remoteHead != advancedHead {
+		t.Fatalf("remote feature-branch HEAD = %q, want %q", remoteHead, advancedHead)
 	}
 }
 
@@ -472,7 +594,7 @@ func TestPushChanges_NothingToCommit(t *testing.T) {
 	runGitWS(t, dir, "commit", "-m", "initial")
 
 	// No changes — pushChanges should return nil (nothing to commit)
-	err := pushChanges(dir, "feature-branch")
+	err := pushChanges(dir, workspaceTestFeatureBranch)
 	if err != nil {
 		t.Fatalf("pushChanges should succeed with nothing to commit, got: %v", err)
 	}
@@ -495,7 +617,7 @@ func TestPushChanges_NoRemote(t *testing.T) {
 	}
 
 	// Push should fail because there's no remote
-	err := pushChanges(dir, "feature-branch")
+	err := pushChanges(dir, workspaceTestFeatureBranch)
 	if err == nil {
 		t.Fatal("expected error pushing without remote")
 	}
@@ -536,8 +658,8 @@ func TestPushChanges_WithRemote(t *testing.T) {
 		if remote != "origin" {
 			t.Fatalf("remote = %q, want origin", remote)
 		}
-		if branch != "feature-branch" {
-			t.Fatalf("branch = %q, want feature-branch", branch)
+		if branch != workspaceTestFeatureBranch {
+			t.Fatalf("branch = %q, want %s", branch, workspaceTestFeatureBranch)
 		}
 		if timeout <= 0 {
 			t.Fatalf("timeout = %v, want > 0", timeout)
@@ -545,7 +667,7 @@ func TestPushChanges_WithRemote(t *testing.T) {
 		return nil
 	}
 
-	err := pushChanges(dir, "feature-branch")
+	err := pushChanges(dir, workspaceTestFeatureBranch)
 	if err != nil {
 		t.Fatalf("pushChanges failed: %v", err)
 	}
@@ -583,11 +705,11 @@ func TestPushChanges_WithRemoteBranchVisibilityFailure(t *testing.T) {
 		return errors.New("branch not visible yet")
 	}
 
-	err := pushChanges(dir, "feature-branch")
+	err := pushChanges(dir, workspaceTestFeatureBranch)
 	if err == nil {
 		t.Fatal("expected pushChanges to fail when remote branch never becomes visible")
 	}
-	if !strings.Contains(err.Error(), "remote branch feature-branch not visible after push") {
+	if !strings.Contains(err.Error(), "remote branch "+workspaceTestFeatureBranch+" not visible after push") {
 		t.Fatalf("expected visibility failure, got: %v", err)
 	}
 }
@@ -601,4 +723,15 @@ func runGitWS(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %v failed: %v\n%s", args, err, out)
 	}
+}
+
+func runGitOutputWS(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+	return string(out)
 }

@@ -142,6 +142,9 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 	if task.Annotations[labels.AnnotationPRMonitorName] != "daily-pr-monitor" {
 		t.Errorf("monitor annotation = %q", task.Annotations[labels.AnnotationPRMonitorName])
 	}
+	if task.Annotations[labels.AnnotationDisableCoordinationToolInject] != trueStr {
+		t.Errorf("disable coordination tool injection annotation = %q", task.Annotations[labels.AnnotationDisableCoordinationToolInject])
+	}
 	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "reviewer" {
 		t.Fatalf("AgentRef = %#v, want reviewer", task.Spec.AgentRef)
 	}
@@ -176,6 +179,88 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 	}
 	if !strings.Contains(task.Spec.Prompt, "Focus on regressions.") {
 		t.Errorf("prompt missing extra instructions: %s", task.Spec.Prompt)
+	}
+}
+
+func TestCreatePRMonitorTool_ExecuteAuthorizesTaskCreate(t *testing.T) {
+	fc := newFakeClient(&corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+		},
+	})
+	authorized := false
+	ctx := newCreatePRMonitorToolContextWithAuthorize(fc, func(_ context.Context, task *corev1alpha1.Task) *ChatToolError {
+		authorized = true
+		if task.Annotations == nil {
+			task.Annotations = map[string]string{}
+		}
+		task.Annotations["test.authorization"] = "stamped"
+		return nil
+	})
+
+	resultJSON, err := (&CreatePRMonitorTool{}).Execute(ctx, mustJSON(t, map[string]any{
+		nameField:     "daily-pr-monitor",
+		scheduleField: "*/15 * * * *",
+		agentRefField: "reviewer",
+	}))
+	if err != nil {
+		t.Fatalf("Execute() returned error: %v", err)
+	}
+	var result ChatToolResult
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %s", result.Error)
+	}
+	if !authorized {
+		t.Fatal("AuthorizeTaskCreate was not called")
+	}
+
+	var task corev1alpha1.Task
+	if err := fc.Get(context.Background(), types.NamespacedName{Name: "pr-monitor-task", Namespace: defaultNamespace}, &task); err != nil {
+		t.Fatalf("failed to get created task: %v", err)
+	}
+	if task.Annotations["test.authorization"] != "stamped" {
+		t.Fatalf("authorization stamp = %q, want stamped", task.Annotations["test.authorization"])
+	}
+}
+
+func TestCreatePRMonitorTool_ExecuteRejectsUnauthorizedTaskCreate(t *testing.T) {
+	fc := newFakeClient(&corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+		},
+	})
+	ctx := newCreatePRMonitorToolContextWithAuthorize(fc, func(context.Context, *corev1alpha1.Task) *ChatToolError {
+		return &ChatToolError{Type: "authorization_failed", Message: "task blocked by context token"}
+	})
+
+	resultJSON, err := (&CreatePRMonitorTool{}).Execute(ctx, mustJSON(t, map[string]any{
+		nameField:     "daily-pr-monitor",
+		scheduleField: "*/15 * * * *",
+		agentRefField: "reviewer",
+	}))
+	if err != nil {
+		t.Fatalf("Execute() returned error: %v", err)
+	}
+	var result ChatToolResult
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected failure, got success: %s", resultJSON)
+	}
+	if result.ErrorType != "authorization_failed" || !strings.Contains(result.Error, "blocked") {
+		t.Fatalf("result = %#v, want authorization_failed", result)
+	}
+
+	var task corev1alpha1.Task
+	err = fc.Get(context.Background(), types.NamespacedName{Name: "pr-monitor-task", Namespace: defaultNamespace}, &task)
+	if err == nil {
+		t.Fatal("task was created despite authorization failure")
 	}
 }
 
@@ -288,9 +373,14 @@ func executeCreatePRMonitorForFailure(t *testing.T, c client.Client, args map[st
 }
 
 func newCreatePRMonitorToolContext(c client.Client) context.Context {
+	return newCreatePRMonitorToolContextWithAuthorize(c, nil)
+}
+
+func newCreatePRMonitorToolContextWithAuthorize(c client.Client, authorize func(context.Context, *corev1alpha1.Task) *ChatToolError) context.Context {
 	return WithToolContext(context.Background(), &ToolContext{
-		Client:    c,
-		Namespace: defaultNamespace,
+		Client:              c,
+		Namespace:           defaultNamespace,
+		AuthorizeTaskCreate: authorize,
 		GenerateTaskName: func() string {
 			return "pr-monitor-task"
 		},

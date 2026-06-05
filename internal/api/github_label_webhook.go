@@ -26,6 +26,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
@@ -417,6 +418,15 @@ func buildGitHubLabelTask(namespace, agentName, action, delivery, event string, 
 	if target.Number > 0 {
 		task.Labels[labels.LabelGitHubNumber] = labels.SelectorValue(strconv.Itoa(target.Number))
 		task.Annotations[labels.AnnotationGitHubNumber] = strconv.Itoa(target.Number)
+	}
+	if action == githubActionUpdateBranch {
+		task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: workerenv.AllowEmptyPushBranch, Value: "true"})
+		if baseRepo := repoURL(target.BaseRepo); baseRepo != "" {
+			task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: workerenv.PRBaseRepo, Value: baseRepo})
+		}
+		if target.BaseSHA != "" {
+			task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: workerenv.PRBaseSHA, Value: target.BaseSHA})
+		}
 	}
 	return task
 }

@@ -547,6 +547,47 @@ func testTaskCreateAuthorizationContext() contextTokenTaskCreateAuthorizationCon
 	}
 }
 
+func TestContextTokenTaskCreateEffectiveAIToolsSkipsDisabledCoordinationInjection(t *testing.T) {
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+		},
+	}
+	req := CreateTaskRequest{
+		Type:        corev1alpha1.TaskTypeAI,
+		Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: "true"},
+		AI: &corev1alpha1.AISpec{
+			Tools: []string{"list_pull_requests", "check_pr_review_marker"},
+		},
+	}
+
+	got := contextTokenTaskCreateEffectiveAITools(req, agent)
+	require.Contains(t, got, "list_pull_requests")
+	require.Contains(t, got, "check_pr_review_marker")
+	require.Contains(t, got, "recall_memory")
+	require.Contains(t, got, "remember")
+	require.Contains(t, got, "propose_memory")
+	require.Contains(t, got, "search_transcript")
+	require.NotContains(t, got, "delegate_task")
+	require.NotContains(t, got, "merge_pull_request")
+	require.NotContains(t, got, "auto_merge_pull_request")
+}
+
+func TestContextTokenTaskCreateEffectiveAIToolsIncludesPRReviewCoordinationTools(t *testing.T) {
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+		},
+	}
+	req := CreateTaskRequest{
+		Type: corev1alpha1.TaskTypeAI,
+	}
+
+	got := contextTokenTaskCreateEffectiveAITools(req, agent)
+	require.Contains(t, got, "list_pull_requests")
+	require.Contains(t, got, "check_pr_review_marker")
+}
+
 func TestRedactedContextTokenAuthorizationFailuresRedactsRepositoryCredentials(t *testing.T) {
 	got := redactedContextTokenAuthorizationFailures([]string{
 		`workspace repo "https://user:embedded-secret@example.com/org/repo.git" does not match token context "https://github.com/org/repo"`,

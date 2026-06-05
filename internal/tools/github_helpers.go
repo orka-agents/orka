@@ -23,6 +23,12 @@ import (
 
 const githubPRStateClosed = "closed"
 
+type githubRepoScope struct {
+	source string
+	owner  string
+	repo   string
+}
+
 // resolveRepoAndToken resolves GitHub owner/repo, auth token, and API base URL.
 // Repository resolution prefers an explicit repoURL, then task workspace config,
 // then ORKA_GIT_REPO. If taskName is provided alongside repoURL, repoURL still
@@ -80,6 +86,98 @@ func resolveRepoAndToken(ctx context.Context, k8sClient client.Client, taskName,
 	}
 
 	return owner, repo, token, baseURL, nil
+}
+
+func validateRepoURLScope(ctx context.Context, k8sClient client.Client, taskName, repoURL string) error {
+	repoURL = strings.TrimSpace(repoURL)
+	if repoURL == "" {
+		return nil
+	}
+	owner, repo, err := parseGitHubRepo(repoURL)
+	if err != nil {
+		return fmt.Errorf("failed to parse repo_url: %w", err)
+	}
+
+	scopes, err := taskRepoScopes(ctx, k8sClient, taskName)
+	if err != nil {
+		return err
+	}
+	if envRepo := strings.TrimSpace(os.Getenv(workerenv.GitRepo)); envRepo != "" {
+		envOwner, envRepoName, err := parseGitHubRepo(envRepo)
+		if err != nil {
+			return fmt.Errorf("failed to parse %s for repo_url scope: %w", workerenv.GitRepo, err)
+		}
+		scopes = append(scopes, githubRepoScope{source: workerenv.GitRepo, owner: envOwner, repo: envRepoName})
+	}
+	if len(scopes) == 0 {
+		return fmt.Errorf("repo_url repository %s/%s requires a permitted repository scope", owner, repo)
+	}
+
+	for _, scope := range scopes {
+		if githubRepoMatches(owner, repo, scope.owner, scope.repo) {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"repo_url repository %s/%s does not match permitted repository scope %s",
+		owner,
+		repo,
+		formatGitHubRepoScopes(scopes),
+	)
+}
+
+func taskRepoScopes(ctx context.Context, k8sClient client.Client, taskName string) ([]githubRepoScope, error) {
+	if strings.TrimSpace(taskName) == "" {
+		return nil, nil
+	}
+	if k8sClient == nil {
+		return nil, fmt.Errorf("task_name %q requires a Kubernetes client for repo_url scope validation", taskName)
+	}
+
+	ns := os.Getenv(envOrkaTaskNamespace)
+	if ns == "" {
+		ns = defaultNamespace
+	}
+
+	var task corev1alpha1.Task
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: taskName, Namespace: ns}, &task); err != nil {
+		return nil, fmt.Errorf("failed to get task %s: %w", taskName, err)
+	}
+
+	var scopes []githubRepoScope
+	ws := task.Spec.Workspace
+	if ws == nil && task.Spec.AgentRuntime != nil {
+		ws = task.Spec.AgentRuntime.Workspace
+	}
+	if ws != nil && strings.TrimSpace(ws.GitRepo) != "" {
+		owner, repo, err := parseGitHubRepo(ws.GitRepo)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse GitHub repo from %s: %w", ws.GitRepo, err)
+		}
+		scopes = append(scopes, githubRepoScope{source: "task workspace", owner: owner, repo: repo})
+	}
+	if task.Spec.Transaction != nil {
+		if txRepo := strings.TrimSpace(task.Spec.Transaction.Context["repo"]); txRepo != "" {
+			owner, repo, err := parseGitHubRepo(txRepo)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse transaction repo context: %w", err)
+			}
+			scopes = append(scopes, githubRepoScope{source: "transaction repo context", owner: owner, repo: repo})
+		}
+	}
+	return scopes, nil
+}
+
+func githubRepoMatches(owner, repo, wantOwner, wantRepo string) bool {
+	return strings.EqualFold(owner, wantOwner) && strings.EqualFold(repo, wantRepo)
+}
+
+func formatGitHubRepoScopes(scopes []githubRepoScope) string {
+	parts := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		parts = append(parts, fmt.Sprintf("%s=%s/%s", scope.source, scope.owner, scope.repo))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // resolveFromTask looks up a Task CR in K8s and extracts owner/repo and token

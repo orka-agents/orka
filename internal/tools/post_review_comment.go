@@ -113,6 +113,10 @@ func (t *PostReviewCommentTool) Execute(ctx context.Context, argsJSON json.RawMe
 		return "", fmt.Errorf("invalid event value %q: must be APPROVE, REQUEST_CHANGES, or COMMENT", args.Event)
 	}
 
+	if err := validateRepoURLScope(ctx, t.k8sClient, args.TaskName, args.RepoURL); err != nil {
+		return "", err
+	}
+
 	owner, repo, token, _, err := resolveRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
 		return "", err

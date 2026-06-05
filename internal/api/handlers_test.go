@@ -175,11 +175,12 @@ func TestHandlers_CreateTask_Valid(t *testing.T) {
 	app.Post("/tasks", handlers.CreateTask)
 
 	body := CreateTaskRequest{
-		Name:      "test-task",
-		Namespace: "default",
-		Type:      corev1alpha1.TaskTypeContainer,
-		Image:     "busybox",
-		Command:   []string{"echo", "hello"},
+		Name:        "test-task",
+		Namespace:   "default",
+		Annotations: map[string]string{"example.com/purpose": "smoke"},
+		Type:        corev1alpha1.TaskTypeContainer,
+		Image:       "busybox",
+		Command:     []string{"echo", "hello"},
 	}
 	bodyBytes, _ := json.Marshal(body)
 
@@ -193,6 +194,14 @@ func TestHandlers_CreateTask_Valid(t *testing.T) {
 
 	if resp.StatusCode != http.StatusCreated {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+
+	created := &corev1alpha1.Task{}
+	if err := handlers.client.Get(context.Background(), types.NamespacedName{Name: "test-task", Namespace: "default"}, created); err != nil {
+		t.Fatalf("failed to fetch created task: %v", err)
+	}
+	if created.Annotations["example.com/purpose"] != "smoke" {
+		t.Fatalf("annotation example.com/purpose = %q, want smoke", created.Annotations["example.com/purpose"])
 	}
 }
 
@@ -1639,6 +1648,41 @@ func TestHandlers_CreateTask_RejectsClientSuppliedTransaction(t *testing.T) {
 			app.Post("/tasks", handlers.CreateTask)
 
 			bodyBytes, _ := json.Marshal(tt.body)
+			req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
+func TestHandlers_CreateTask_RejectsReservedAnnotations(t *testing.T) {
+	tests := []struct {
+		name       string
+		annotation string
+	}{
+		{name: "transaction token secret", annotation: labels.AnnotationTransactionTokenSecret},
+		{name: "coordination injection control", annotation: labels.AnnotationDisableCoordinationToolInject},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handlers, app := setupTestHandlers()
+			app.Post("/tasks", handlers.CreateTask)
+
+			body := CreateTaskRequest{
+				Name:        "reserved-annotation-task",
+				Namespace:   "default",
+				Annotations: map[string]string{tt.annotation: "reserved-value"},
+				Type:        corev1alpha1.TaskTypeContainer,
+				Image:       "busybox",
+			}
+			bodyBytes, _ := json.Marshal(body)
 			req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)

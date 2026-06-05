@@ -91,6 +91,10 @@ func (t *ReviewPullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 		return "", fmt.Errorf("pr_number is required")
 	}
 
+	if err := validateRepoURLScope(ctx, t.k8sClient, args.TaskName, args.RepoURL); err != nil {
+		return "", err
+	}
+
 	owner, repo, token, baseURL, err := resolveRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
 		return "", err

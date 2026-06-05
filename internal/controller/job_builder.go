@@ -815,8 +815,11 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		AzureAPIVersion: cfg.azureAPIVersion,
 	}.EnvVars()...)
 
-	// Auto-inject coordination tools when coordination is enabled
-	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
+	disableCoordinationToolInjection := task.Annotations[labels.AnnotationDisableCoordinationToolInject] == "true"
+
+	// Auto-inject coordination tools when coordination is enabled, unless the
+	// task deliberately supplies a narrower explicit tool set.
+	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && !disableCoordinationToolInjection {
 		for _, ct := range []string{
 			"delegate_task",
 			"wait_for_tasks",
@@ -849,7 +852,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	// Auto-inject messaging tools for child tasks (tasks delegated by a coordinator)
 	// so they can communicate with sibling tasks via send_message/check_messages
 	_, isChildTask := task.Labels[labels.LabelParentTask]
-	if isChildTask {
+	if isChildTask && !disableCoordinationToolInjection {
 		for _, ct := range []string{"send_message", "check_messages"} {
 			if !slices.Contains(cfg.tools, ct) {
 				cfg.tools = append(cfg.tools, ct)

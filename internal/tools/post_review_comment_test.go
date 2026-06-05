@@ -202,6 +202,7 @@ func TestPostReviewCommentTool_WithRepoURL(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := &PostReviewCommentTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
+	t.Setenv("ORKA_GIT_REPO", testSozercanAynaRepoURL)
 	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
@@ -225,6 +226,131 @@ func TestPostReviewCommentTool_WithRepoURL(t *testing.T) {
 	}
 	if reviewResult.Status != testReviewStatus {
 		t.Errorf("unexpected status: %s", reviewResult.Status)
+	}
+}
+
+func TestPostReviewCommentTool_RejectsRepoURLWithoutScope(t *testing.T) {
+	serverCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tool := &PostReviewCommentTool{k8sClient: k8sClient, apiBaseURL: server.URL}
+
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+
+	args, _ := json.Marshal(PostReviewCommentArgs{
+		RepoURL:  testSozercanAynaRepoURL,
+		PRNumber: 6,
+		Body:     "Repo URL review",
+		Event:    reviewEventComment,
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected repo scope error")
+	}
+	if !strings.Contains(err.Error(), "requires a permitted repository scope") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if serverCalled {
+		t.Fatal("server was called despite missing repo scope")
+	}
+}
+
+func TestPostReviewCommentTool_RejectsRepoURLOutsideTaskWorkspace(t *testing.T) {
+	serverCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "scoped-review-task", Namespace: defaultNamespace},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: testSozercanAynaRepoURL,
+					GitSecretRef: &corev1.LocalObjectReference{
+						Name: testGitCredsSecretName,
+					},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	tool := &PostReviewCommentTool{k8sClient: k8sClient, apiBaseURL: server.URL}
+
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+
+	args, _ := json.Marshal(PostReviewCommentArgs{
+		TaskName: "scoped-review-task",
+		RepoURL:  testOrgTestRepoURL,
+		PRNumber: 6,
+		Body:     "Repo URL review",
+		Event:    reviewEventComment,
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected repo scope mismatch error")
+	}
+	if !strings.Contains(err.Error(), "does not match permitted repository scope") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if serverCalled {
+		t.Fatal("server was called despite repo scope mismatch")
+	}
+}
+
+func TestPostReviewCommentTool_RejectsRepoURLOutsideEnvGitRepo(t *testing.T) {
+	serverCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tool := &PostReviewCommentTool{k8sClient: k8sClient, apiBaseURL: server.URL}
+
+	t.Setenv("ORKA_GIT_REPO", testSozercanAynaRepoURL)
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+
+	args, _ := json.Marshal(PostReviewCommentArgs{
+		RepoURL:  testOrgTestRepoURL,
+		PRNumber: 6,
+		Body:     "Repo URL review",
+		Event:    reviewEventComment,
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected repo scope mismatch error")
+	}
+	if !strings.Contains(err.Error(), "does not match permitted repository scope") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if serverCalled {
+		t.Fatal("server was called despite repo scope mismatch")
 	}
 }
 

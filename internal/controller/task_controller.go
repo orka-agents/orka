@@ -1741,6 +1741,12 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 
 	// Create child task with deterministic name
 	childName := fmt.Sprintf("%s-%d", task.Name, scheduledTime.Unix())
+	childAnnotations := map[string]string{
+		labels.AnnotationParentTaskName: task.Name,
+	}
+	if task.Annotations[labels.AnnotationDisableCoordinationToolInject] == scheduledRunLabelValue {
+		childAnnotations[labels.AnnotationDisableCoordinationToolInject] = scheduledRunLabelValue
+	}
 	child := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      childName,
@@ -1749,9 +1755,7 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 				labels.LabelParentTask:   labels.SelectorValue(task.Name),
 				labels.LabelScheduledRun: scheduledRunLabelValue,
 			},
-			Annotations: map[string]string{
-				labels.AnnotationParentTaskName: task.Name,
-			},
+			Annotations: childAnnotations,
 		},
 		Spec: *task.Spec.DeepCopy(),
 	}

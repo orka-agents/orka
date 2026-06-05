@@ -26,6 +26,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const githubWebhookTestDefaultBranch = "main"
@@ -134,6 +135,15 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 	}
 	if ws.PRBaseBranch != githubWebhookTestDefaultBranch {
 		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)
+	}
+	if got := githubWebhookTaskEnvValue(task.Spec.Env, workerenv.AllowEmptyPushBranch); got != "true" {
+		t.Errorf("%s = %q, want true", workerenv.AllowEmptyPushBranch, got)
+	}
+	if got := githubWebhookTaskEnvValue(task.Spec.Env, workerenv.PRBaseRepo); got != "https://github.com/sozercan/vekil.git" {
+		t.Errorf("%s = %q, want base repo clone URL", workerenv.PRBaseRepo, got)
+	}
+	if got := githubWebhookTaskEnvValue(task.Spec.Env, workerenv.PRBaseSHA); got != "base-sha" {
+		t.Errorf("%s = %q, want base-sha", workerenv.PRBaseSHA, got)
 	}
 	if !strings.Contains(task.Spec.Prompt, "Update the pull request branch") {
 		t.Errorf("prompt = %s", task.Spec.Prompt)
@@ -362,6 +372,15 @@ func readRespBody(t *testing.T, resp *http.Response) string {
 	buf := new(bytes.Buffer)
 	_, _ = buf.ReadFrom(resp.Body)
 	return buf.String()
+}
+
+func githubWebhookTaskEnvValue(envVars []corev1.EnvVar, name string) string {
+	for _, envVar := range envVars {
+		if envVar.Name == name {
+			return envVar.Value
+		}
+	}
+	return ""
 }
 
 func assertNoTasks(t *testing.T, c client.Client) {

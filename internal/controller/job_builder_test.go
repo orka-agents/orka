@@ -3719,7 +3719,7 @@ func TestAddAIEnvVars_ChildTaskMessaging(t *testing.T) {
 		t.Errorf("expected messaging tools for child task, got %s", tools)
 	}
 	// Also ORKA_COORDINATION_ENABLED should be set
-	if envMap["ORKA_COORDINATION_ENABLED"] != "true" {
+	if envMap["ORKA_COORDINATION_ENABLED"] != scheduledRunLabelValue {
 		t.Error("expected ORKA_COORDINATION_ENABLED=true for child task without coordination agent")
 	}
 }
@@ -3751,6 +3751,53 @@ func TestAddAIEnvVars_CoordinationEnabled(t *testing.T) {
 	for _, tool := range []string{"delegate_task", "list_pull_requests", "check_pr_review_marker"} {
 		if !strings.Contains(tools, tool) {
 			t.Errorf("expected coordination tool %s, got %s", tool, tools)
+		}
+	}
+}
+
+func TestAddAIEnvVars_CoordinationEnabledWithExplicitToolsOnly(t *testing.T) {
+	jb := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        testTask,
+			Namespace:   defaultNS,
+			Labels:      map[string]string{labels.LabelParentTask: labels.SelectorValue("scheduled-parent")},
+			Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: scheduledRunLabelValue},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI: &corev1alpha1.AISpec{
+				Prompt: "test",
+				Tools:  []string{"list_pull_requests", "check_pr_review_marker"},
+			},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "coord-agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled: true,
+			},
+		},
+	}
+	envVars := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
+	envMap := make(map[string]string)
+	for _, e := range envVars {
+		envMap[e.Name] = e.Value
+	}
+	if envMap[workerenv.CoordinationEnabled] != scheduledRunLabelValue {
+		t.Error("expected ORKA_COORDINATION_ENABLED=true")
+	}
+	tools := envMap[workerenv.AITools]
+	for _, tool := range []string{"list_pull_requests", "check_pr_review_marker"} {
+		if !strings.Contains(tools, tool) {
+			t.Errorf("expected explicit tool %s, got %s", tool, tools)
+		}
+	}
+	for _, tool := range []string{"delegate_task", "send_message", "check_messages", "merge_pull_request", "auto_merge_pull_request"} {
+		if strings.Contains(tools, tool) {
+			t.Errorf("unexpected auto-injected coordination tool %s in %s", tool, tools)
 		}
 	}
 }

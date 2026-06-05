@@ -153,7 +153,8 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 			Namespace: namespace,
 			Labels:    tc.TaskLabels(),
 			Annotations: map[string]string{
-				labels.AnnotationPRMonitorName: monitorName,
+				labels.AnnotationPRMonitorName:                 monitorName,
+				labels.AnnotationDisableCoordinationToolInject: trueStr,
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -183,6 +184,9 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 		task.Spec.AI.ProviderRef = &corev1alpha1.ProviderReference{Name: providerName}
 	}
 
+	if result, ok := authorizeTaskCreate(ctx, tc, task); !ok {
+		return result, nil
+	}
 	if err := tc.Client.Create(ctx, task); err != nil {
 		return classifyChatK8sErr(err)
 	}

@@ -163,13 +163,32 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 	// Auto-push if ORKA_PUSH_BRANCH is set and there are changes.
 	pushBranch := os.Getenv(workerenv.PushBranch)
 	requirePushBranch := strings.EqualFold(os.Getenv(requirePushBranchEnvVar), "true")
+	allowEmptyPushBranch := strings.EqualFold(os.Getenv(workerenv.AllowEmptyPushBranch), "true")
 	if requirePushBranch && pushBranch == "" {
 		return nil, fmt.Errorf("%s is true but %s is empty", requirePushBranchEnvVar, workerenv.PushBranch)
 	}
 	if pushBranch != "" {
 		if diff == "" {
-			if requirePushBranch {
+			if requirePushBranch && !allowEmptyPushBranch {
 				return nil, fmt.Errorf("%s=%s but no workspace diff was produced", workerenv.PushBranch, pushBranch)
+			}
+			if requirePushBranch && allowEmptyPushBranch {
+				if pushErr := validateEmptyPushBranch(
+					workDir,
+					pushBranch,
+					os.Getenv(workerenv.PRBaseBranch),
+					os.Getenv(workerenv.PRBaseRepo),
+					os.Getenv(workerenv.PRBaseSHA),
+				); pushErr != nil {
+					sr.PushError = pushErr.Error()
+					return nil, fmt.Errorf("%s=%s but no workspace diff was produced: %w", workerenv.PushBranch, pushBranch, pushErr)
+				}
+				if pushErr := pushCurrentHEAD(workDir, pushBranch); pushErr != nil {
+					sr.PushError = pushErr.Error()
+					return nil, fmt.Errorf("failed to push to %s: %w", pushBranch, pushErr)
+				}
+				fmt.Fprintf(os.Stderr, "pushed current HEAD to branch %s\n", pushBranch)
+				sr.PushBranch = pushBranch
 			}
 		} else if pushErr := pushChanges(workDir, pushBranch); pushErr != nil {
 			sr.PushError = pushErr.Error()
@@ -213,6 +232,11 @@ func pushChanges(workDir, branch string) error {
 		return fmt.Errorf("git commit failed: %s: %w", out, err)
 	}
 
+	return pushCurrentHEAD(workDir, branch)
+}
+
+// pushCurrentHEAD pushes the current commit without creating a new commit.
+func pushCurrentHEAD(workDir, branch string) error {
 	// Create/reset the branch locally (handles pre-existing local branch names)
 	if out, err := execGit(workDir, "checkout", "-B", branch); err != nil {
 		return fmt.Errorf("git checkout -B %s failed: %s: %w", branch, out, err)
@@ -226,6 +250,141 @@ func pushChanges(workDir, branch string) error {
 	}
 
 	return nil
+}
+
+func validateEmptyPushBranch(workDir, pushBranch, baseBranch, baseRepo, baseSHA string) error {
+	advanced, err := headAdvancedFromRemoteBranch(workDir, pushBranch)
+	if err != nil {
+		return err
+	}
+	if advanced {
+		return nil
+	}
+
+	baseSHA = strings.TrimSpace(baseSHA)
+	if baseSHA != "" {
+		containsBase, err := headContainsBaseSHA(workDir, baseSHA, baseRepo)
+		if err != nil {
+			return err
+		}
+		if !containsBase {
+			return fmt.Errorf(
+				"current HEAD is unchanged from origin/%s and does not contain PR base SHA %s",
+				pushBranch,
+				shortGitSHA(baseSHA),
+			)
+		}
+		return nil
+	}
+
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		return fmt.Errorf(
+			"current HEAD is unchanged from origin/%s and neither %s nor %s is set",
+			pushBranch,
+			workerenv.PRBaseSHA,
+			workerenv.PRBaseBranch,
+		)
+	}
+	containsBase, err := headContainsRemoteBranch(workDir, baseBranch)
+	if err != nil {
+		return err
+	}
+	if !containsBase {
+		return fmt.Errorf("current HEAD is unchanged from origin/%s and does not contain origin/%s", pushBranch, baseBranch)
+	}
+	return nil
+}
+
+func headAdvancedFromRemoteBranch(workDir, branch string) (bool, error) {
+	head, err := execGit(workDir, "rev-parse", "HEAD")
+	if err != nil {
+		return false, fmt.Errorf("git rev-parse HEAD failed: %w", err)
+	}
+	head = strings.TrimSpace(head)
+
+	remoteSHA, exists, err := fetchRemoteBranch(workDir, branch)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return true, nil
+	}
+	if head == remoteSHA {
+		return false, nil
+	}
+	if _, err := execGit(workDir, "merge-base", "--is-ancestor", remoteSHA, "HEAD"); err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
+func headContainsRemoteBranch(workDir, branch string) (bool, error) {
+	remoteSHA, exists, err := fetchRemoteBranch(workDir, branch)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, fmt.Errorf("remote branch origin/%s not found", branch)
+	}
+	if _, err := execGit(workDir, "merge-base", "--is-ancestor", remoteSHA, "HEAD"); err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
+func headContainsBaseSHA(workDir, baseSHA, baseRepo string) (bool, error) {
+	if !commitExists(workDir, baseSHA) {
+		if repo := strings.TrimSpace(baseRepo); repo != "" {
+			if _, err := execGit(workDir, "fetch", "--depth=1", repo, baseSHA); err != nil && !commitExists(workDir, baseSHA) {
+				return false, fmt.Errorf("fetching PR base SHA %s failed: %w", shortGitSHA(baseSHA), err)
+			}
+		}
+	}
+	if !commitExists(workDir, baseSHA) {
+		return false, nil
+	}
+	if _, err := execGit(workDir, "merge-base", "--is-ancestor", baseSHA, "HEAD"); err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
+func commitExists(workDir, sha string) bool {
+	if strings.TrimSpace(sha) == "" {
+		return false
+	}
+	_, err := execGit(workDir, "cat-file", "-e", sha+"^{commit}")
+	return err == nil
+}
+
+func shortGitSHA(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}
+
+func fetchRemoteBranch(workDir, branch string) (string, bool, error) {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return "", false, nil
+	}
+	ref := "refs/heads/" + branch
+	out, err := execGit(workDir, "ls-remote", "--heads", "origin", ref)
+	if err != nil {
+		return "", false, fmt.Errorf("git ls-remote %s failed: %s: %w", ref, out, err)
+	}
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return "", false, nil
+	}
+	remoteSHA := fields[0]
+	if _, err := execGit(workDir, "fetch", "origin", "+"+ref+":refs/remotes/origin/"+branch); err != nil {
+		return "", true, fmt.Errorf("git fetch origin %s failed: %w", ref, err)
+	}
+	return remoteSHA, true, nil
 }
 
 func waitForRemoteBranchVisibilityWithGit(workDir, remote, branch string, timeout time.Duration) error {

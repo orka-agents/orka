@@ -74,6 +74,7 @@ const (
 	AnnotationGitHubURL                     = "orka.ai/github-url"
 	AnnotationGitHubSender                  = "orka.ai/github-sender"
 	AnnotationPRMonitorName                 = "orka.ai/pr-monitor-name"
+	AnnotationDisableCoordinationToolInject = "orka.ai/disable-coordination-tool-injection"
 )
 
 // SelectorValue returns a Kubernetes label-safe value derived from the input.

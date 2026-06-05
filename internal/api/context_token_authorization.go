@@ -16,6 +16,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/llm"
 	"github.com/sozercan/orka/internal/metrics"
 	"github.com/sozercan/orka/internal/redact"
@@ -491,6 +492,7 @@ func createTaskRequestFromTask(task *corev1alpha1.Task) CreateTaskRequest {
 	req := CreateTaskRequest{
 		Name:              task.Name,
 		Namespace:         task.Namespace,
+		Annotations:       task.Annotations,
 		Type:              task.Spec.Type,
 		Image:             task.Spec.Image,
 		Command:           task.Spec.Command,
@@ -1081,7 +1083,7 @@ func contextTokenTaskCreateEffectiveAITools(req CreateTaskRequest, agent *corev1
 				tools = append(tools, tool.Name)
 			}
 		}
-		if agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
+		if agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && req.Annotations[labels.AnnotationDisableCoordinationToolInject] != queryTrue {
 			for _, tool := range coordinationToolNames() {
 				if !slices.Contains(tools, tool) {
 					tools = append(tools, tool)
@@ -1096,7 +1098,23 @@ func contextTokenTaskCreateEffectiveAITools(req CreateTaskRequest, agent *corev1
 			}
 		}
 	}
+	if req.Type == corev1alpha1.TaskTypeAI {
+		for _, tool := range memoryToolNames() {
+			if !slices.Contains(tools, tool) {
+				tools = append(tools, tool)
+			}
+		}
+	}
 	return tools
+}
+
+func memoryToolNames() []string {
+	return []string{
+		"recall_memory",
+		"remember",
+		"propose_memory",
+		"search_transcript",
+	}
 }
 
 func coordinationToolNames() []string {
@@ -1112,6 +1130,8 @@ func coordinationToolNames() []string {
 		"propose_memory",
 		"search_transcript",
 		"create_pull_request",
+		"list_pull_requests",
+		"check_pr_review_marker",
 		"check_pull_request_ci",
 		"merge_pull_request",
 		"auto_merge_pull_request",

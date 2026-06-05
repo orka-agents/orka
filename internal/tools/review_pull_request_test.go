@@ -324,6 +324,7 @@ func TestReviewPullRequestTool_WithRepoURL(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	tool := &ReviewPullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
+	t.Setenv("ORKA_GIT_REPO", testSozercanAynaRepoURL)
 	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{
@@ -348,6 +349,71 @@ func TestReviewPullRequestTool_WithRepoURL(t *testing.T) {
 	}
 	if reviewResult.Status != testFetched {
 		t.Errorf("unexpected status: %s", reviewResult.Status)
+	}
+}
+
+func TestReviewPullRequestTool_RejectsRepoURLWithoutScope(t *testing.T) {
+	serverCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tool := &ReviewPullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
+
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+
+	args, _ := json.Marshal(ReviewPullRequestArgs{
+		RepoURL:  testSozercanAynaRepoURL,
+		PRNumber: 7,
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected repo scope error")
+	}
+	if !strings.Contains(err.Error(), "requires a permitted repository scope") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if serverCalled {
+		t.Fatal("server was called despite missing repo scope")
+	}
+}
+
+func TestReviewPullRequestTool_RejectsRepoURLOutsideEnvGitRepo(t *testing.T) {
+	serverCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tool := &ReviewPullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
+
+	t.Setenv("ORKA_GIT_REPO", testSozercanAynaRepoURL)
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+
+	args, _ := json.Marshal(ReviewPullRequestArgs{
+		RepoURL:  testOrgTestRepoURL,
+		PRNumber: 7,
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected repo scope mismatch error")
+	}
+	if !strings.Contains(err.Error(), "does not match permitted repository scope") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if serverCalled {
+		t.Fatal("server was called despite repo scope mismatch")
 	}
 }
 

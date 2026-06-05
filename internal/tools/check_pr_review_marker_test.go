@@ -79,7 +79,7 @@ func TestCheckPRReviewMarkerTool_NoMarkerFoundWithExplicitHeadSHA(t *testing.T) 
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	setCheckPRReviewMarkerTestEnv(t)
 	tool := &CheckPRReviewMarkerTool{k8sClient: newFakeClient(), apiBaseURL: server.URL}
 	args, _ := json.Marshal(CheckPRReviewMarkerArgs{RepoURL: testSozercanAynaRepoURL, PRNumber: prNumber, HeadSHA: checkPRReviewMarkerTestSHA})
 
@@ -101,8 +101,8 @@ func TestCheckPRReviewMarkerTool_NoMarkerFoundWithExplicitHeadSHA(t *testing.T) 
 	if got.HeadSHA != checkPRReviewMarkerTestSHA {
 		t.Errorf("HeadSHA = %q, want %q", got.HeadSHA, checkPRReviewMarkerTestSHA)
 	}
-	if got.Marker != formatPRReviewMarker(checkPRReviewMarkerTestSHA) {
-		t.Errorf("Marker = %q, want %q", got.Marker, formatPRReviewMarker(checkPRReviewMarkerTestSHA))
+	if got.Marker != formatTestPRReviewMarker(prNumber) {
+		t.Errorf("Marker = %q, want %q", got.Marker, formatTestPRReviewMarker(prNumber))
 	}
 	if !strings.Contains(got.Message, "no review marker found") {
 		t.Errorf("Message = %q, want no marker found", got.Message)
@@ -119,7 +119,7 @@ func TestCheckPRReviewMarkerTool_MarkerFoundInReviews(t *testing.T) {
 		assertCheckPRReviewMarkerAuth(t, r)
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/repos/sozercan/ayna/pulls/%d/reviews", prNumber):
-			_, _ = fmt.Fprintf(w, `[{"body":"LGTM\n\n%s","html_url":%q,"user":{"login":"reviewer-bot"}}]`, formatPRReviewMarker(checkPRReviewMarkerTestSHA), reviewURL)
+			_, _ = fmt.Fprintf(w, `[{"body":"LGTM\n\n%s","html_url":%q,"user":{"login":"reviewer-bot"}}]`, formatTestPRReviewMarker(prNumber), reviewURL)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
 			w.WriteHeader(http.StatusNotFound)
@@ -127,7 +127,7 @@ func TestCheckPRReviewMarkerTool_MarkerFoundInReviews(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	setCheckPRReviewMarkerTestEnv(t)
 	tool := &CheckPRReviewMarkerTool{k8sClient: newFakeClient(), apiBaseURL: server.URL}
 	args, _ := json.Marshal(CheckPRReviewMarkerArgs{RepoURL: testSozercanAynaRepoURL, PRNumber: prNumber, HeadSHA: checkPRReviewMarkerTestSHA})
 
@@ -171,7 +171,7 @@ func TestCheckPRReviewMarkerTool_MarkerFoundInReviewsPage2(t *testing.T) {
 			case "1":
 				_, _ = fmt.Fprint(w, checkPRReviewMarkerPageJSON(100, "", "", ""))
 			case "2":
-				_, _ = fmt.Fprint(w, checkPRReviewMarkerPageJSON(1, "LGTM\n\n"+formatPRReviewMarker(checkPRReviewMarkerTestSHA), reviewURL, "reviewer-bot"))
+				_, _ = fmt.Fprint(w, checkPRReviewMarkerPageJSON(1, "LGTM\n\n"+formatTestPRReviewMarker(prNumber), reviewURL, "reviewer-bot"))
 			default:
 				t.Errorf("unexpected reviews page: %q", page)
 				w.WriteHeader(http.StatusNotFound)
@@ -183,7 +183,7 @@ func TestCheckPRReviewMarkerTool_MarkerFoundInReviewsPage2(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	setCheckPRReviewMarkerTestEnv(t)
 	tool := &CheckPRReviewMarkerTool{k8sClient: newFakeClient(), apiBaseURL: server.URL}
 	args, _ := json.Marshal(CheckPRReviewMarkerArgs{RepoURL: testSozercanAynaRepoURL, PRNumber: prNumber, HeadSHA: checkPRReviewMarkerTestSHA})
 
@@ -222,7 +222,7 @@ func TestCheckPRReviewMarkerTool_FetchesHeadSHAWhenOmitted(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/repos/sozercan/ayna/pulls/%d", prNumber):
 			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPRReviewMarkerTestSHA)
 		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/repos/sozercan/ayna/pulls/%d/reviews", prNumber):
-			_, _ = fmt.Fprintf(w, `[{"body":"%s","html_url":%q,"user":{"login":"reviewer-bot"}}]`, formatPRReviewMarker(checkPRReviewMarkerTestSHA), reviewURL)
+			_, _ = fmt.Fprintf(w, `[{"body":"%s","html_url":%q,"user":{"login":"reviewer-bot"}}]`, formatTestPRReviewMarker(prNumber), reviewURL)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
 			w.WriteHeader(http.StatusNotFound)
@@ -230,7 +230,7 @@ func TestCheckPRReviewMarkerTool_FetchesHeadSHAWhenOmitted(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	setCheckPRReviewMarkerTestEnv(t)
 	tool := &CheckPRReviewMarkerTool{k8sClient: newFakeClient(), apiBaseURL: server.URL}
 	args, _ := json.Marshal(CheckPRReviewMarkerArgs{RepoURL: testSozercanAynaRepoURL, PRNumber: prNumber})
 
@@ -250,14 +250,43 @@ func TestCheckPRReviewMarkerTool_FetchesHeadSHAWhenOmitted(t *testing.T) {
 	}
 }
 
-func TestContainsPRReviewMarkerRequiresExactMarker(t *testing.T) {
+func TestContainsPRReviewMarkerRequiresSignedMarker(t *testing.T) {
+	const prNumber = 42
 	otherText := defaultPRReviewMarkerPrefix + " something else --> " + checkPRReviewMarkerTestSHA
-	if containsPRReviewMarker(otherText, checkPRReviewMarkerTestSHA) {
+	if containsPRReviewMarker(otherText, testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, []string{testGitHubToken}, "reviewer-bot", "reviewer-bot") {
 		t.Fatalf("containsPRReviewMarker matched prefix and SHA without exact marker")
 	}
-	if !containsPRReviewMarker("reviewed\n"+formatPRReviewMarker(checkPRReviewMarkerTestSHA), checkPRReviewMarkerTestSHA) {
+	unsignedMarker := fmt.Sprintf("%s head_sha=%s -->", defaultPRReviewMarkerPrefix, checkPRReviewMarkerTestSHA)
+	if containsPRReviewMarker("reviewed\n"+unsignedMarker, testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, []string{testGitHubToken}, "contributor", "reviewer-bot") {
+		t.Fatalf("containsPRReviewMarker matched unsigned marker from untrusted author")
+	}
+	if !containsPRReviewMarker("reviewed\n"+unsignedMarker, testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, []string{testGitHubToken}, "reviewer-bot", "reviewer-bot") {
+		t.Fatalf("containsPRReviewMarker did not match legacy marker from trusted author")
+	}
+	oldSignedMarker := formatPRReviewMarker(testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, "old-token")
+	if !containsPRReviewMarker("reviewed\n"+oldSignedMarker, testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, []string{testGitHubToken}, "reviewer-bot", "reviewer-bot") {
+		t.Fatalf("containsPRReviewMarker did not match old signed marker from trusted author")
+	}
+	previousKeyMarker := formatPRReviewMarker(testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, "previous-secret")
+	if !containsPRReviewMarker("reviewed\n"+previousKeyMarker, testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, []string{testGitHubToken, "previous-secret"}, "contributor", "reviewer-bot") {
+		t.Fatalf("containsPRReviewMarker did not match marker signed with previous key")
+	}
+	if containsPRReviewMarker("reviewed\n"+formatTestPRReviewMarker(prNumber), testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, []string{"wrong-token"}, "contributor", "reviewer-bot") {
+		t.Fatalf("containsPRReviewMarker matched marker signed with a different token")
+	}
+	if !containsPRReviewMarker("reviewed\n"+formatTestPRReviewMarker(prNumber), testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, []string{testGitHubToken}, "contributor", "reviewer-bot") {
 		t.Fatalf("containsPRReviewMarker did not match exact marker")
 	}
+}
+
+func setCheckPRReviewMarkerTestEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	t.Setenv(prReviewMarkerTrustedAuthorEnv, "reviewer-bot")
+}
+
+func formatTestPRReviewMarker(prNumber int) string {
+	return formatPRReviewMarker(testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, testGitHubToken)
 }
 
 func checkPRReviewMarkerPageJSON(count int, markerBody, markerURL, markerAuthor string) string {

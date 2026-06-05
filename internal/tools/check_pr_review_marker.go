@@ -8,17 +8,26 @@ package tools
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const defaultPRReviewMarkerPrefix = "<!-- orka:pr-review"
+const (
+	defaultPRReviewMarkerPrefix      = "<!-- orka:pr-review"
+	prReviewMarkerSecretEnv          = "ORKA_PR_REVIEW_MARKER_SECRET"
+	prReviewMarkerPreviousSecretsEnv = "ORKA_PR_REVIEW_MARKER_PREVIOUS_SECRETS"
+	prReviewMarkerTrustedAuthorEnv   = "ORKA_PR_REVIEW_MARKER_TRUSTED_AUTHOR"
+)
 
 // CheckPRReviewMarkerTool checks whether Orka has already reviewed a PR head SHA.
 type CheckPRReviewMarkerTool struct {
@@ -121,7 +130,8 @@ func (t *CheckPRReviewMarkerTool) Execute(ctx context.Context, argsJSON json.Raw
 		}
 	}
 
-	marker := formatPRReviewMarker(headSHA)
+	markerKeys := prReviewMarkerSigningKeys(token)
+	marker := formatPRReviewMarker(owner, repo, args.PRNumber, headSHA, markerKeys[0])
 	match, err := findPRReviewMarker(ctx, token, owner, repo, args.PRNumber, headSHA, baseURL)
 	if err != nil {
 		return "", err
@@ -160,6 +170,8 @@ func findPRReviewMarker(ctx context.Context, token, owner, repo string, prNumber
 
 func findPRReviewMarkerInReviews(ctx context.Context, token, owner, repo string, prNumber int, headSHA, baseURL string) (*prReviewMarkerMatch, error) {
 	const perPage = 100
+	markerKeys := prReviewMarkerSigningKeys(token)
+	trustedAuthor := trustedPRReviewMarkerAuthor(ctx, token, baseURL)
 	for page := 1; ; page++ {
 		endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=%d&page=%d", baseURL, owner, repo, prNumber, perPage, page)
 		body, err := githubGet(ctx, token, endpoint)
@@ -177,7 +189,7 @@ func findPRReviewMarkerInReviews(ctx context.Context, token, owner, repo string,
 			return nil, fmt.Errorf("failed to parse GitHub reviews response: %w", err)
 		}
 		for _, r := range reviews {
-			if containsPRReviewMarker(r.Body, headSHA) {
+			if containsPRReviewMarker(r.Body, owner, repo, prNumber, headSHA, markerKeys, r.User.Login, trustedAuthor) {
 				return &prReviewMarkerMatch{Source: "review", HTMLURL: r.HTMLURL, Author: r.User.Login}, nil
 			}
 		}
@@ -209,17 +221,98 @@ func githubGet(ctx context.Context, token, endpoint string) ([]byte, error) {
 	return respBody, nil
 }
 
-func containsPRReviewMarker(body, headSHA string) bool {
+func containsPRReviewMarker(body, owner, repo string, prNumber int, headSHA string, markerKeys []string, author, trustedAuthor string) bool {
 	body = strings.TrimSpace(body)
-	headSHA = strings.TrimSpace(headSHA)
-	if headSHA == "" {
-		return strings.Contains(body, defaultPRReviewMarkerPrefix)
+	for _, key := range markerKeys {
+		if key != "" && strings.Contains(body, formatPRReviewMarker(owner, repo, prNumber, headSHA, key)) {
+			return true
+		}
 	}
-	return strings.Contains(body, formatPRReviewMarker(headSHA))
+	if trustedAuthor != "" && strings.EqualFold(strings.TrimSpace(author), trustedAuthor) {
+		return containsAnyPRReviewMarkerForHead(body, headSHA)
+	}
+	return false
 }
 
-func formatPRReviewMarker(headSHA string) string {
-	return fmt.Sprintf("%s head_sha=%s -->", defaultPRReviewMarkerPrefix, strings.TrimSpace(headSHA))
+func formatPRReviewMarker(owner, repo string, prNumber int, headSHA, markerKey string) string {
+	owner = strings.ToLower(strings.TrimSpace(owner))
+	repo = strings.ToLower(strings.TrimSpace(repo))
+	headSHA = strings.TrimSpace(headSHA)
+	return fmt.Sprintf("%s repo=%s/%s pr=%d head_sha=%s sig=%s -->",
+		defaultPRReviewMarkerPrefix,
+		owner,
+		repo,
+		prNumber,
+		headSHA,
+		prReviewMarkerSignature(owner, repo, prNumber, headSHA, markerKey),
+	)
+}
+
+func prReviewMarkerSigningKeys(token string) []string {
+	primary := strings.TrimSpace(os.Getenv(prReviewMarkerSecretEnv))
+	if primary == "" {
+		primary = strings.TrimSpace(token)
+	}
+	keys := []string{primary}
+	for previous := range strings.SplitSeq(os.Getenv(prReviewMarkerPreviousSecretsEnv), ",") {
+		if previous = strings.TrimSpace(previous); previous != "" {
+			keys = append(keys, previous)
+		}
+	}
+	if token = strings.TrimSpace(token); token != "" && token != primary {
+		keys = append(keys, token)
+	}
+	return keys
+}
+
+func trustedPRReviewMarkerAuthor(ctx context.Context, token, baseURL string) string {
+	if author := strings.TrimSpace(os.Getenv(prReviewMarkerTrustedAuthorEnv)); author != "" {
+		return author
+	}
+	login, err := githubAuthenticatedLogin(ctx, token, baseURL)
+	if err != nil {
+		return ""
+	}
+	return login
+}
+
+func githubAuthenticatedLogin(ctx context.Context, token, baseURL string) (string, error) {
+	body, err := githubGet(ctx, token, baseURL+"/user")
+	if err != nil {
+		return "", err
+	}
+	var user struct {
+		Login string `json:"login"`
+	}
+	if err := json.Unmarshal(body, &user); err != nil {
+		return "", fmt.Errorf("failed to parse GitHub user response: %w", err)
+	}
+	return strings.TrimSpace(user.Login), nil
+}
+
+func containsAnyPRReviewMarkerForHead(body, headSHA string) bool {
+	body = strings.TrimSpace(body)
+	headSHA = strings.TrimSpace(headSHA)
+	if headSHA == "" || !strings.Contains(body, defaultPRReviewMarkerPrefix) {
+		return false
+	}
+	legacyMarker := fmt.Sprintf("%s head_sha=%s -->", defaultPRReviewMarkerPrefix, headSHA)
+	if strings.Contains(body, legacyMarker) {
+		return true
+	}
+	return strings.Contains(body, "head_sha="+headSHA) && strings.Contains(body, "sig=")
+}
+
+func prReviewMarkerSignature(owner, repo string, prNumber int, headSHA, markerKey string) string {
+	payload := fmt.Sprintf("%s/%s\n%d\n%s",
+		strings.ToLower(strings.TrimSpace(owner)),
+		strings.ToLower(strings.TrimSpace(repo)),
+		prNumber,
+		strings.TrimSpace(headSHA),
+	)
+	mac := hmac.New(sha256.New, []byte(markerKey))
+	_, _ = mac.Write([]byte(payload))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func marshalCheckPRReviewMarkerResult(result CheckPRReviewMarkerResult) string {
