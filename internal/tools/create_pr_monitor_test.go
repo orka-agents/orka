@@ -101,7 +101,7 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 				Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
 			},
 		},
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-credentials", Namespace: defaultNamespace}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testGitCredentialsSecret, Namespace: defaultNamespace}},
 	)
 	ctx := newCreatePRMonitorToolContext(fc)
 	tool := &CreatePRMonitorTool{}
@@ -112,7 +112,7 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 		scheduleField:    "*/15 * * * *",
 		agentRefField:    "reviewer",
 		providerRefField: "default-provider",
-		"gitSecretRef":   "git-credentials",
+		"gitSecretRef":   testGitCredentialsSecret,
 		perPageField:     100,
 		"review_event":   "comment",
 		promptField:      "Focus on regressions.",
@@ -160,8 +160,8 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 	if task.Spec.Workspace.GitRepo != "https://github.com/sozercan/orka" {
 		t.Errorf("workspace.gitRepo = %q", task.Spec.Workspace.GitRepo)
 	}
-	if task.Spec.Workspace.GitSecretRef == nil || task.Spec.Workspace.GitSecretRef.Name != "git-credentials" {
-		t.Fatalf("workspace.gitSecretRef = %#v, want git-credentials", task.Spec.Workspace.GitSecretRef)
+	if task.Spec.Workspace.GitSecretRef == nil || task.Spec.Workspace.GitSecretRef.Name != testGitCredentialsSecret {
+		t.Fatalf("workspace.gitSecretRef = %#v, want %s", task.Spec.Workspace.GitSecretRef, testGitCredentialsSecret)
 	}
 	if !hasEnvVar(task.Spec.Env, workerenv.GitRepo, "https://github.com/sozercan/orka") {
 		t.Errorf("env missing %s=https://github.com/sozercan/orka: %#v", workerenv.GitRepo, task.Spec.Env)
@@ -183,15 +183,22 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 }
 
 func TestCreatePRMonitorTool_ExecuteAuthorizesTaskCreate(t *testing.T) {
-	fc := newFakeClient(&corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
-		Spec: corev1alpha1.AgentSpec{
-			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+	fc := newFakeClient(
+		&corev1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
+			Spec: corev1alpha1.AgentSpec{
+				Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+			},
 		},
-	})
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testGitCredentialsSecret, Namespace: defaultNamespace}},
+	)
 	authorized := false
+	authorizedWithSecret := false
 	ctx := newCreatePRMonitorToolContextWithAuthorize(fc, func(_ context.Context, task *corev1alpha1.Task) *ChatToolError {
 		authorized = true
+		authorizedWithSecret = task.Spec.Workspace != nil &&
+			task.Spec.Workspace.GitSecretRef != nil &&
+			task.Spec.Workspace.GitSecretRef.Name == testGitCredentialsSecret
 		if task.Annotations == nil {
 			task.Annotations = map[string]string{}
 		}
@@ -218,6 +225,9 @@ func TestCreatePRMonitorTool_ExecuteAuthorizesTaskCreate(t *testing.T) {
 	if !authorized {
 		t.Fatal("AuthorizeTaskCreate was not called")
 	}
+	if !authorizedWithSecret {
+		t.Fatal("AuthorizeTaskCreate did not see the resolved gitSecretRef")
+	}
 
 	var task corev1alpha1.Task
 	if err := fc.Get(context.Background(), types.NamespacedName{Name: "pr-monitor-task", Namespace: defaultNamespace}, &task); err != nil {
@@ -229,12 +239,15 @@ func TestCreatePRMonitorTool_ExecuteAuthorizesTaskCreate(t *testing.T) {
 }
 
 func TestCreatePRMonitorTool_ExecuteRejectsUnauthorizedTaskCreate(t *testing.T) {
-	fc := newFakeClient(&corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
-		Spec: corev1alpha1.AgentSpec{
-			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+	fc := newFakeClient(
+		&corev1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
+			Spec: corev1alpha1.AgentSpec{
+				Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+			},
 		},
-	})
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testGitCredentialsSecret, Namespace: defaultNamespace}},
+	)
 	ctx := newCreatePRMonitorToolContextWithAuthorize(fc, func(context.Context, *corev1alpha1.Task) *ChatToolError {
 		return &ChatToolError{Type: "authorization_failed", Message: "task blocked by context token"}
 	})
@@ -263,6 +276,105 @@ func TestCreatePRMonitorTool_ExecuteRejectsUnauthorizedTaskCreate(t *testing.T) 
 	err = fc.Get(context.Background(), types.NamespacedName{Name: "pr-monitor-task", Namespace: defaultNamespace}, &task)
 	if err == nil {
 		t.Fatal("task was created despite authorization failure")
+	}
+}
+
+func TestCreatePRMonitorTool_ExecuteAuthorizesBeforeExplicitGitSecretLookup(t *testing.T) {
+	fc := newFakeClient(&corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+		},
+	})
+	ctx := newCreatePRMonitorToolContextWithAuthorize(fc, func(context.Context, *corev1alpha1.Task) *ChatToolError {
+		return &ChatToolError{Type: "authorization_failed", Message: "task blocked by context token"}
+	})
+
+	resultJSON, err := (&CreatePRMonitorTool{}).Execute(ctx, mustJSON(t, map[string]any{
+		nameField:      "daily-pr-monitor",
+		repoURLField:   testSozercanAynaRepoURL,
+		scheduleField:  "*/15 * * * *",
+		agentRefField:  "reviewer",
+		"gitSecretRef": "missing-secret",
+	}))
+	if err != nil {
+		t.Fatalf("Execute() returned error: %v", err)
+	}
+	var result ChatToolResult
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected failure, got success: %s", resultJSON)
+	}
+	if result.ErrorType != "authorization_failed" || strings.Contains(result.Error, "missing-secret") {
+		t.Fatalf("result = %#v, want authorization failure without secret existence details", result)
+	}
+
+	var task corev1alpha1.Task
+	err = fc.Get(context.Background(), types.NamespacedName{Name: "pr-monitor-task", Namespace: defaultNamespace}, &task)
+	if err == nil {
+		t.Fatal("task was created despite authorization failure")
+	}
+}
+
+func TestCreatePRMonitorTool_ExecuteRejectsMissingGitCredentials(t *testing.T) {
+	fc := newFakeClient(&corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+		},
+	})
+
+	result := executeCreatePRMonitorForFailure(t, fc, map[string]any{
+		nameField:     "daily-pr-monitor",
+		repoURLField:  testSozercanAynaRepoURL,
+		scheduleField: "*/15 * * * *",
+		agentRefField: "reviewer",
+	})
+	if result.ErrorType != errTypeInvalidArgs || !strings.Contains(result.Error, "gitSecretRef is required") {
+		t.Fatalf("result = %#v, want missing git credentials invalid_arguments", result)
+	}
+
+	var task corev1alpha1.Task
+	err := fc.Get(context.Background(), types.NamespacedName{Name: "pr-monitor-task", Namespace: defaultNamespace}, &task)
+	if err == nil {
+		t.Fatal("task was created despite missing git credentials")
+	}
+}
+
+func TestCreatePRMonitorTool_ExecutePreservesExplicitGitSecretWithoutLookup(t *testing.T) {
+	fc := newFakeClient(&corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+		},
+	})
+
+	resultJSON, err := (&CreatePRMonitorTool{}).Execute(newCreatePRMonitorToolContext(fc), mustJSON(t, map[string]any{
+		nameField:      "daily-pr-monitor",
+		repoURLField:   testSozercanAynaRepoURL,
+		scheduleField:  "*/15 * * * *",
+		agentRefField:  "reviewer",
+		"gitSecretRef": "missing-secret",
+	}))
+	if err != nil {
+		t.Fatalf("Execute() returned error: %v", err)
+	}
+	var result ChatToolResult
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success without probing explicit gitSecretRef, got error: %s", result.Error)
+	}
+
+	var task corev1alpha1.Task
+	if err := fc.Get(context.Background(), types.NamespacedName{Name: "pr-monitor-task", Namespace: defaultNamespace}, &task); err != nil {
+		t.Fatalf("failed to get created task: %v", err)
+	}
+	if task.Spec.Workspace == nil || task.Spec.Workspace.GitSecretRef == nil || task.Spec.Workspace.GitSecretRef.Name != "missing-secret" {
+		t.Fatalf("workspace.gitSecretRef = %#v, want missing-secret", task.Spec.Workspace)
 	}
 }
 

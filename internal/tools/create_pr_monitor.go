@@ -176,11 +176,9 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 		Tools: append([]string(nil), prMonitorRequiredTools...),
 	}
 	workspace := &corev1alpha1.WorkspaceConfig{GitRepo: repoURL}
-	secretRef, err := resolveWorkspaceGitSecretRef(ctx, tc.Client, namespace, nil, chatGetStringArg(args, "gitSecretRef"))
-	if err != nil {
-		return classifyChatK8sErr(err)
-	}
-	if secretRef != nil {
+	requestedGitSecretRef := chatGetStringArg(args, "gitSecretRef")
+	secretRef, secretRefErr := resolveWorkspaceGitSecretRef(ctx, tc.Client, namespace, nil, requestedGitSecretRef)
+	if secretRefErr == nil && secretRef != nil {
 		workspace.GitSecretRef = secretRef
 	}
 	task.Spec.Workspace = workspace
@@ -192,6 +190,19 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 	if result, ok := authorizeTaskCreate(ctx, tc, task); !ok {
 		return result, nil
 	}
+
+	if secretRefErr != nil {
+		return classifyChatK8sErr(secretRefErr)
+	}
+	if secretRef == nil {
+		return ChatToolErrorResult(
+			"invalid_arguments",
+			fmt.Sprintf("gitSecretRef is required for PR monitor GitHub access; no supported git credential Secret found in namespace %q", namespace),
+			fmt.Sprintf("Provide gitSecretRef or create one of these Secrets in namespace %q: %s", namespace, strings.Join(gitCredentialSecretCandidates, ", ")),
+		)
+	}
+	workspace.GitSecretRef = secretRef
+
 	if err := tc.Client.Create(ctx, task); err != nil {
 		return classifyChatK8sErr(err)
 	}

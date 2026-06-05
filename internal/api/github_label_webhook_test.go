@@ -29,12 +29,15 @@ import (
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
-const githubWebhookTestDefaultBranch = "main"
+const (
+	githubWebhookTestDefaultBranch = "main"
+	githubWebhookTestGitSecret     = "git-credentials"
+)
 
 func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{
 		githubLabelTriggerAgentEnv:     "codex-agent",
-		githubLabelTriggerGitSecretEnv: "git-credentials",
+		githubLabelTriggerGitSecretEnv: githubWebhookTestGitSecret,
 	})
 	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
 	server := NewServer(fc, nil, ServerConfig{})
@@ -78,8 +81,8 @@ func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 	if ws.PushBranch != wantPushBranch {
 		t.Errorf("pushBranch = %q, want %q", ws.PushBranch, wantPushBranch)
 	}
-	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != "git-credentials" {
-		t.Fatalf("gitSecretRef = %#v, want git-credentials", ws.GitSecretRef)
+	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != githubWebhookTestGitSecret {
+		t.Fatalf("gitSecretRef = %#v, want %s", ws.GitSecretRef, githubWebhookTestGitSecret)
 	}
 	if task.Labels[labels.LabelCreatedBy] != githubWebhookCreatedBy {
 		t.Errorf("created-by label = %q", task.Labels[labels.LabelCreatedBy])
@@ -98,7 +101,7 @@ func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{
 		githubLabelTriggerAgentEnv:     "claude-agent",
-		githubLabelTriggerGitSecretEnv: "git-credentials",
+		githubLabelTriggerGitSecretEnv: githubWebhookTestGitSecret,
 	})
 	fc := newGitHubWebhookFakeClient(t, runtimeAgent("claude-agent"))
 	server := NewServer(fc, nil, ServerConfig{})
@@ -138,8 +141,8 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 	if ws.PushBranch != "feature/x" {
 		t.Errorf("pushBranch = %q, want feature/x", ws.PushBranch)
 	}
-	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != "git-credentials" {
-		t.Fatalf("gitSecretRef = %#v, want git-credentials for same-repo PR", ws.GitSecretRef)
+	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != githubWebhookTestGitSecret {
+		t.Fatalf("gitSecretRef = %#v, want %s for same-repo PR", ws.GitSecretRef, githubWebhookTestGitSecret)
 	}
 	if ws.PRBaseBranch != githubWebhookTestDefaultBranch {
 		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)
@@ -161,7 +164,7 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{
 		githubLabelTriggerAgentEnv:     "codex-agent",
-		githubLabelTriggerGitSecretEnv: "git-credentials",
+		githubLabelTriggerGitSecretEnv: githubWebhookTestGitSecret,
 	})
 	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
 	server := NewServer(fc, nil, ServerConfig{})
@@ -218,7 +221,7 @@ func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
 func TestGitHubWebhook_PullRequestMissingHeadRepoFailsClosedForGitSecret(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{
 		githubLabelTriggerAgentEnv:     "codex-agent",
-		githubLabelTriggerGitSecretEnv: "git-credentials",
+		githubLabelTriggerGitSecretEnv: githubWebhookTestGitSecret,
 	})
 	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
 	server := NewServer(fc, nil, ServerConfig{})
@@ -263,6 +266,81 @@ func TestGitHubWebhook_PullRequestMissingHeadRepoFailsClosedForGitSecret(t *test
 	}
 	if !strings.Contains(task.Spec.Prompt, "Orka will not push them automatically") {
 		t.Errorf("prompt missing no-push guidance: %s", task.Spec.Prompt)
+	}
+}
+
+func TestGitHubWebhook_PullRequestReviewMountsGitSecretWithoutPushBranch(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, map[string]string{
+		githubLabelTriggerAgentEnv:     "codex-agent",
+		githubLabelTriggerGitSecretEnv: githubWebhookTestGitSecret,
+	})
+	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
+	server := NewServer(fc, nil, ServerConfig{})
+
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"agent:review"},
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"pull_request":{
+			"number":37,
+			"title":"Review me",
+			"body":"Please review",
+			"html_url":"https://github.com/sozercan/vekil/pull/37",
+			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}},
+			"head":{"ref":"feature/review","sha":"head-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}}
+		},
+		"sender":{"login":"octocat"}
+	}`)
+
+	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-review-pr", secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
+	}
+
+	var task corev1alpha1.Task
+	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionReview, 37, body), Namespace: "default"}, &task); err != nil {
+		t.Fatalf("created task not found: %v", err)
+	}
+	ws := task.Spec.AgentRuntime.Workspace
+	if ws.PushBranch != "" {
+		t.Errorf("pushBranch = %q, want empty for review action", ws.PushBranch)
+	}
+	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != githubWebhookTestGitSecret {
+		t.Fatalf("gitSecretRef = %#v, want %s for private repo clone/auth", ws.GitSecretRef, githubWebhookTestGitSecret)
+	}
+}
+
+func TestGitHubWebhook_ToIssuesMountsGitSecretWithoutPushBranch(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, map[string]string{
+		githubLabelTriggerAgentEnv:     "codex-agent",
+		githubLabelTriggerGitSecretEnv: githubWebhookTestGitSecret,
+	})
+	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
+	server := NewServer(fc, nil, ServerConfig{})
+
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"agent:to-issues"},
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"issue":{"number":38,"title":"Plan this","body":"Break this into issues.","html_url":"https://github.com/sozercan/vekil/issues/38"},
+		"sender":{"login":"octocat"}
+	}`)
+
+	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-to-issues", secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
+	}
+
+	var task corev1alpha1.Task
+	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionToIssues, 38, body), Namespace: "default"}, &task); err != nil {
+		t.Fatalf("created task not found: %v", err)
+	}
+	ws := task.Spec.AgentRuntime.Workspace
+	if ws.PushBranch != "" {
+		t.Errorf("pushBranch = %q, want empty for to-issues action", ws.PushBranch)
+	}
+	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != githubWebhookTestGitSecret {
+		t.Fatalf("gitSecretRef = %#v, want %s", ws.GitSecretRef, githubWebhookTestGitSecret)
 	}
 }
 

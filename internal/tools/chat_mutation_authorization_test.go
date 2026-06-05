@@ -17,6 +17,8 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
+const testAuthorizationFailedErrorType = "authorization_failed"
+
 func TestChatCancelTaskTool_Execute_AuthorizesBeforeDelete(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: testMyTaskName, Namespace: defaultNamespace},
@@ -26,7 +28,7 @@ func TestChatCancelTaskTool_Execute_AuthorizesBeforeDelete(t *testing.T) {
 		Client:    fc,
 		Namespace: defaultNamespace,
 		AuthorizeTaskDelete: func(context.Context, *corev1alpha1.Task) *ChatToolError {
-			return &ChatToolError{Type: "authorization_failed", Message: "task delete denied"}
+			return &ChatToolError{Type: testAuthorizationFailedErrorType, Message: "task delete denied"}
 		},
 	})
 
@@ -52,7 +54,7 @@ func TestUpdateAgentTool_Execute_AuthorizesBeforeUpdate(t *testing.T) {
 		Client:    fc,
 		Namespace: defaultNamespace,
 		AuthorizeAgentUpdate: func(context.Context, *corev1alpha1.Agent) *ChatToolError {
-			return &ChatToolError{Type: "authorization_failed", Message: "agent update denied"}
+			return &ChatToolError{Type: testAuthorizationFailedErrorType, Message: "agent update denied"}
 		},
 	})
 
@@ -83,7 +85,7 @@ func TestChatDeleteAgentTool_Execute_AuthorizesBeforeDelete(t *testing.T) {
 		Client:    fc,
 		Namespace: defaultNamespace,
 		AuthorizeAgentDelete: func(context.Context, *corev1alpha1.Agent) *ChatToolError {
-			return &ChatToolError{Type: "authorization_failed", Message: "agent delete denied"}
+			return &ChatToolError{Type: testAuthorizationFailedErrorType, Message: "agent delete denied"}
 		},
 	})
 
@@ -108,7 +110,7 @@ func assertChatAuthorizationFailure(t *testing.T, result string) {
 	if r.Success {
 		t.Fatalf("expected authorization failure, got success: %#v", r)
 	}
-	if r.ErrorType != "authorization_failed" {
-		t.Fatalf("errorType = %q, want authorization_failed", r.ErrorType)
+	if r.ErrorType != testAuthorizationFailedErrorType {
+		t.Fatalf("errorType = %q, want %s", r.ErrorType, testAuthorizationFailedErrorType)
 	}
 }
