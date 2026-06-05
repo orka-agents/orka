@@ -137,12 +137,15 @@ jobs:
           fi
 
           # Replace the website at the Pages root while preserving Pages
-          # metadata and the Helm chart repository.
+          # metadata and Helm chart repository artifacts.
           find . -mindepth 1 -maxdepth 1 \
             ! -name '.git' \
             ! -name '.nojekyll' \
             ! -name 'CNAME' \
             ! -name 'charts' \
+            ! -name 'index.yaml' \
+            ! -name '*.tgz' \
+            ! -name '*.prov' \
             -exec rm -rf {} +
 
           rsync -a ../website/build/ ./
