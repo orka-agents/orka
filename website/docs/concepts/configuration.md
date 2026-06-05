@@ -146,7 +146,7 @@ spec:
 | `repoURL` | string | Yes | Repository URL to scan. |
 | `owner` | string | No | Repository owner or organization. Inferred from `repoURL` when omitted. |
 | `repository` | string | No | Repository name. Inferred from `repoURL` when omitted. |
-| `branch` | string | No | Base branch to scan. Defaults to the repository default branch when omitted. |
+| `branch` | string | No | Base branch to scan. Defaults to the literal `main` when omitted (not resolved from the repository's actual default branch). Set this explicitly for repositories whose default branch is not `main`. |
 | `subPath` | string | No | Optional subdirectory to scan in a monorepo. |
 | `gitSecretRef` | LocalObjectReference | No | Secret containing credentials for private repository access. |
 | `forkRepo` | string | No | Writable fork repository URL for patch proposal branches and remediation PRs. |
@@ -708,7 +708,7 @@ Admission deployment is opt-in. To install the manifests, uncomment the `[WEBHOO
 
 ## Prometheus Metrics
 
-Orka exposes 19 Prometheus metrics. Enable monitoring with the Helm chart:
+Orka registers the following Prometheus metrics on the controller-runtime registry. Enable monitoring with the Helm chart:
 
 ```yaml
 monitoring:
@@ -716,27 +716,18 @@ monitoring:
   interval: 30s
 ```
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `orka_tasks_total` | Counter | Total tasks created (by type, phase, namespace) |
-| `orka_tasks_active` | Gauge | Currently running tasks |
-| `orka_task_duration_seconds` | Histogram | Task execution duration |
-| `orka_task_queue_depth` | Gauge | Tasks waiting by priority |
-| `orka_task_retries_total` | Counter | Retry attempts |
-| `orka_webhook_deliveries_total` | Counter | Webhook deliveries (success/failure) |
-| `orka_api_requests_total` | Counter | API requests (by endpoint, method, status) |
-| `orka_api_request_duration_seconds` | Histogram | API latency |
-| `orka_sessions_total` | Gauge | Active sessions |
-| `orka_session_messages_total` | Counter | Messages appended to sessions |
-| `orka_session_queue_waiting` | Gauge | Tasks waiting for session lock |
-| `orka_tools_discovered` | Gauge | Tool CRDs discovered |
-| `orka_tool_calls_total` | Counter | Tool invocations (by tool, status) |
-| `orka_tool_call_duration_seconds` | Histogram | Tool HTTP call latency |
-| `orka_tool_health_status` | Gauge | Tool availability (1/0) |
-| `orka_agents_total` | Gauge | Agent count |
-| `orka_agent_tasks_active` | Gauge | Active tasks per agent |
-| `orka_agent_tasks_total` | Counter | Total tasks per agent |
-| `orka_skills_loaded_total` | Counter | Skills loaded |
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `orka_api_requests_total` | Counter | `endpoint`, `method`, `status` | Total API requests (status bucketed as `2xx`/`4xx`/`5xx`) |
+| `orka_api_request_duration_seconds` | Histogram | `endpoint`, `method` | API request latency in seconds |
+| `orka_skills_loaded_total` | Counter | `skill`, `namespace` | Skills loaded by namespace and name |
+| `orka_store_db_size_bytes` | Gauge | — | Size of the SQLite database file in bytes |
+| `orka_context_token_auth_total` | Counter | `profile`, `result` | Context-token authentication attempts |
+| `orka_context_token_authorization_total` | Counter | `action`, `result`, `reason` | Context-token authorization decisions (allow/deny/audit) |
+| `orka_context_token_tts_exchange_total` | Counter | `result`, `reason` | kontxt TTS token-exchange attempts |
+| `orka_context_token_tts_exchange_duration_seconds` | Histogram | `result`, `reason` | kontxt TTS token-exchange latency in seconds |
+
+Context-token metrics are described in more detail in [Kontxt TxToken integration](kontxt.md#observability). All context-token labels use low-cardinality values only.
 
 ## OpenTelemetry Tracing
 

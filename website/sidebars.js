@@ -42,7 +42,11 @@ const sidebars = {
     {
       type: 'category',
       label: 'Development',
-      items: ['development/development', 'development/testing'],
+      items: [
+        'development/development',
+        'development/testing',
+        'development/security-scanning-design',
+      ],
     },
   ],
 };

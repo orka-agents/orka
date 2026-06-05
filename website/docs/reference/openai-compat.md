@@ -133,8 +133,7 @@ curl -X POST https://orka.example.com/openai/v1/chat/completions \
   -d '{
     "model": "anthropic/claude-sonnet-4-20250514",
     "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 1024,
-    "stream": true
+    "max_tokens": 1024
   }'
 ```
 

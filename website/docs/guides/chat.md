@@ -19,7 +19,7 @@ DELETE /api/v1/chat/:sessionId — Cancel a chat session
 ```
 User ──POST /api/v1/chat──▶ API Server ──▶ Concurrency Semaphore
                                │
-                               ├─▶ context.WithTimeout (--chat-max-duration, default 5m)
+                               ├─▶ context.WithTimeout (--chat-max-duration, default 30m)
                                ├─▶ Resolve Provider CRD → get LLM client
                                ├─▶ Load/create chat session (prefix: chat-session-)
                                ├─▶ Build structured system prompt (cached per request)
