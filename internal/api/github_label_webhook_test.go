@@ -72,8 +72,9 @@ func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 	if ws.Branch != githubWebhookTestDefaultBranch {
 		t.Errorf("branch = %q, want main", ws.Branch)
 	}
-	if ws.PushBranch != "orka/implement-issue-12" {
-		t.Errorf("pushBranch = %q", ws.PushBranch)
+	wantPushBranch := "orka/implement-issue-12-" + githubReplayKeySuffix(githubWebhookReplayKey(body))
+	if ws.PushBranch != wantPushBranch {
+		t.Errorf("pushBranch = %q, want %q", ws.PushBranch, wantPushBranch)
 	}
 	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != "git-credentials" {
 		t.Fatalf("gitSecretRef = %#v, want git-credentials", ws.GitSecretRef)
@@ -94,7 +95,8 @@ func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 
 func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{
-		githubLabelTriggerAgentEnv: "claude-agent",
+		githubLabelTriggerAgentEnv:     "claude-agent",
+		githubLabelTriggerGitSecretEnv: "git-credentials",
 	})
 	fc := newGitHubWebhookFakeClient(t, runtimeAgent("claude-agent"))
 	server := NewServer(fc, nil, ServerConfig{})
@@ -133,6 +135,9 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 	if ws.PushBranch != "feature/x" {
 		t.Errorf("pushBranch = %q, want feature/x", ws.PushBranch)
 	}
+	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != "git-credentials" {
+		t.Fatalf("gitSecretRef = %#v, want git-credentials for same-repo PR", ws.GitSecretRef)
+	}
 	if ws.PRBaseBranch != githubWebhookTestDefaultBranch {
 		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)
 	}
@@ -152,7 +157,8 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 
 func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{
-		githubLabelTriggerAgentEnv: "codex-agent",
+		githubLabelTriggerAgentEnv:     "codex-agent",
+		githubLabelTriggerGitSecretEnv: "git-credentials",
 	})
 	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
 	server := NewServer(fc, nil, ServerConfig{})
@@ -193,6 +199,9 @@ func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
 	}
 	if ws.PushBranch != "feature/fork-change" {
 		t.Errorf("pushBranch = %q, want feature/fork-change", ws.PushBranch)
+	}
+	if ws.GitSecretRef != nil {
+		t.Fatalf("gitSecretRef = %#v, want nil for fork PR", ws.GitSecretRef)
 	}
 	if ws.PRBaseBranch != githubWebhookTestDefaultBranch {
 		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)

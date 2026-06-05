@@ -377,7 +377,7 @@ func (h *Handlers) ensureAgentExists(c fiber.Ctx, namespace, agentName string) e
 }
 
 func buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, event string, payload githubLabelWebhookPayload, target githubLabelTarget) *corev1alpha1.Task {
-	workspace := githubWorkspace(action, target)
+	workspace := githubWorkspace(action, target, replayKey)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      githubTaskName(action, target.Number, replayKey),
@@ -463,7 +463,7 @@ func dnsNamePart(value string) string {
 	return value
 }
 
-func githubWorkspace(action string, target githubLabelTarget) *corev1alpha1.WorkspaceConfig {
+func githubWorkspace(action string, target githubLabelTarget, replayKey string) *corev1alpha1.WorkspaceConfig {
 	repo := target.Repo
 	if target.IsPR {
 		repo = target.HeadRepo
@@ -486,6 +486,8 @@ func githubWorkspace(action string, target githubLabelTarget) *corev1alpha1.Work
 		ws.PushBranch = fmt.Sprintf("orka/implement-%s-%d", target.Kind, target.Number)
 		if target.IsPR && target.HeadBranch != "" {
 			ws.PushBranch = target.HeadBranch
+		} else if replayKey != "" {
+			ws.PushBranch = fmt.Sprintf("%s-%s", ws.PushBranch, githubReplayKeySuffix(replayKey))
 		}
 	}
 	if action == githubActionUpdateBranch && target.HeadBranch != "" {
@@ -495,13 +497,75 @@ func githubWorkspace(action string, target githubLabelTarget) *corev1alpha1.Work
 		ws.PushBranch = fmt.Sprintf("orka/%s-%s-%d", dnsNamePart(action), target.Kind, target.Number)
 	}
 
-	if gitSecret := strings.TrimSpace(os.Getenv(githubLabelTriggerGitSecretEnv)); gitSecret != "" {
+	if gitSecret := strings.TrimSpace(os.Getenv(githubLabelTriggerGitSecretEnv)); gitSecret != "" && githubLabelTaskCanUseGitSecret(target) {
 		ws.GitSecretRef = &corev1.LocalObjectReference{Name: gitSecret}
 	}
 	if target.IsPR && target.BaseBranch != "" {
 		ws.PRBaseBranch = target.BaseBranch
 	}
 	return ws
+}
+
+func githubLabelTaskCanUseGitSecret(target githubLabelTarget) bool {
+	if !target.IsPR {
+		return true
+	}
+	return githubSameRepository(target.HeadRepo, target.BaseRepo)
+}
+
+func githubSameRepository(a, b githubWebhookRepository) bool {
+	if a.FullName != "" && b.FullName != "" {
+		return strings.EqualFold(a.FullName, b.FullName)
+	}
+
+	aOwner, aRepo, aOK := githubRepositoryParts(a)
+	bOwner, bRepo, bOK := githubRepositoryParts(b)
+	return aOK && bOK && strings.EqualFold(aOwner, bOwner) && strings.EqualFold(aRepo, bRepo)
+}
+
+func githubRepositoryParts(repo githubWebhookRepository) (owner, name string, ok bool) {
+	if repo.FullName != "" {
+		parts := strings.Split(repo.FullName, "/")
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			return parts[0], parts[1], true
+		}
+	}
+	for _, url := range []string{repo.CloneURL, repo.HTMLURL} {
+		if url == "" {
+			continue
+		}
+		if owner, name, ok := githubRepositoryPartsFromURL(url); ok {
+			return owner, name, true
+		}
+	}
+	return "", "", false
+}
+
+func githubRepositoryPartsFromURL(repoURL string) (owner, name string, ok bool) {
+	repoURL = strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(repoURL), "/"), ".git")
+	for _, prefix := range []string{"https://github.com/", "http://github.com/"} {
+		if after, found := strings.CutPrefix(repoURL, prefix); found {
+			parts := strings.SplitN(after, "/", 3)
+			if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
+				return parts[0], parts[1], true
+			}
+		}
+	}
+	if after, found := strings.CutPrefix(repoURL, "git@github.com:"); found {
+		parts := strings.SplitN(after, "/", 3)
+		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
+			return parts[0], parts[1], true
+		}
+	}
+	return "", "", false
+}
+
+func githubReplayKeySuffix(replayKey string) string {
+	replayKey = strings.TrimSpace(replayKey)
+	if len(replayKey) >= 12 {
+		return replayKey[:12]
+	}
+	return hex.EncodeToString(githubHash([]byte(replayKey)))[:12]
 }
 
 func repoURL(repo githubWebhookRepository) string {
