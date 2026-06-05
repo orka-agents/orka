@@ -21,6 +21,8 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/sozercan/orka/internal/metrics"
 )
 
 const (
@@ -79,13 +81,15 @@ type UserInfo struct {
 	Username  string
 	UID       string
 	Groups    []string
+	Extra     map[string]authenticationv1.ExtraValue
 	Namespace string // Extracted from ServiceAccount username (system:serviceaccount:<ns>:<name>)
 
-	AuthType string
-	Subject  string
-	Email    string
-	Issuer   string
-	Roles    []string
+	AuthType     string
+	Subject      string
+	Email        string
+	Issuer       string
+	Roles        []string
+	ContextToken *ContextToken
 }
 
 // OIDCConfig holds OpenID Connect JWT validation settings.
@@ -102,7 +106,8 @@ func (c OIDCConfig) Enabled() bool {
 
 // AuthConfig holds authentication middleware configuration.
 type AuthConfig struct {
-	OIDC OIDCConfig
+	OIDC          OIDCConfig
+	ContextTokens ContextTokenConfig
 
 	// TokenSources optionally overrides the ordered request headers used to
 	// extract authentication tokens. When empty, Authorization: Bearer is used
@@ -135,18 +140,40 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 	tokenExtractor := AuthTokenExtractor{Sources: cfg.TokenSources}
 
 	return func(ctx fiber.Ctx) error {
-		token, err := tokenExtractor.Extract(ctx)
+		contextToken, profile, ok, err := extractContextTokenCandidate(ctx, cfg.ContextTokens)
 		if err != nil {
-			if errors.Is(err, errInvalidAuthHeaderFormat) {
+			log.Info("authentication failed: invalid context token header format", "ip", ctx.IP())
+			return fiber.NewError(fiber.StatusUnauthorized, "invalid context token header format")
+		}
+
+		var userInfo *UserInfo
+		if ok {
+			userInfo, err = authenticateContextToken(ctx.Context(), contextToken, profile)
+		} else {
+			bearerContextToken, bearerErr := isUnconfiguredBearerContextToken(ctx, cfg.ContextTokens)
+			if bearerErr != nil {
 				log.Info("authentication failed: invalid authorization header format", "ip", ctx.IP())
 				return fiber.NewError(fiber.StatusUnauthorized, "invalid authorization header format")
 			}
+			if bearerContextToken {
+				log.Info("authentication failed: authorization bearer context token is not configured", "ip", ctx.IP())
+				return fiber.NewError(fiber.StatusUnauthorized, "kontxt TxTokens must be sent via the Txn-Token header unless Authorization: Bearer is explicitly enabled")
+			}
 
-			log.Info("authentication failed: missing authorization header", "ip", ctx.IP())
-			return fiber.NewError(fiber.StatusUnauthorized, "missing authorization header")
+			var token string
+			token, err = tokenExtractor.Extract(ctx)
+			if err != nil {
+				if errors.Is(err, errInvalidAuthHeaderFormat) {
+					log.Info("authentication failed: invalid authorization header format", "ip", ctx.IP())
+					return fiber.NewError(fiber.StatusUnauthorized, "invalid authorization header format")
+				}
+
+				log.Info("authentication failed: missing authorization header", "ip", ctx.IP())
+				return fiber.NewError(fiber.StatusUnauthorized, "missing authorization header")
+			}
+
+			userInfo, err = authenticateToken(ctx.Context(), c, token, cfg)
 		}
-
-		userInfo, err := authenticateToken(ctx.Context(), c, token, cfg)
 		if err != nil {
 			log.Error(err, "token validation failed")
 			return fiber.NewError(fiber.StatusUnauthorized, "invalid token")
@@ -195,6 +222,16 @@ func authenticateToken(ctx context.Context, c client.Client, token string, cfg A
 	return nil, fmt.Errorf("OIDC validation skipped: %w; TokenReview validation failed: %v", oidcErr, tokenReviewErr)
 }
 
+func authenticateContextToken(ctx context.Context, token string, profile ContextTokenProfileConfig) (*UserInfo, error) {
+	contextToken, err := validateContextToken(ctx, token, profile)
+	if err != nil {
+		metrics.RecordContextTokenAuth(profile.Name, "failure")
+		return nil, err
+	}
+	metrics.RecordContextTokenAuth(contextToken.Profile, "success")
+	return contextTokenToUserInfo(contextToken), nil
+}
+
 // validateToken validates a ServiceAccount token using TokenReview with caching
 func validateToken(ctx context.Context, c client.Client, token string) (*UserInfo, error) {
 	hash := getTokenHash(token)
@@ -232,6 +269,7 @@ func validateToken(ctx context.Context, c client.Client, token string) (*UserInf
 		Username:  review.Status.User.Username,
 		UID:       review.Status.User.UID,
 		Groups:    review.Status.User.Groups,
+		Extra:     review.Status.User.Extra,
 		Namespace: parseServiceAccountNamespace(review.Status.User.Username),
 		AuthType:  AuthTypeTokenReview,
 	}

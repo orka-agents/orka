@@ -21,11 +21,15 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
@@ -47,6 +51,79 @@ func setupTestHandlers() (*Handlers, *fiber.App) {
 
 	app := fiber.New()
 	return handlers, app
+}
+
+func setupTestHandlersWithAuthz(t *testing.T, ctxTokenConfig ContextTokenConfig, mode string, objs ...runtime.Object) *fiber.App {
+	t.Helper()
+	app, _ := setupTestHandlersWithAuthzStore(t, ctxTokenConfig, mode, objs...)
+	return app
+}
+
+func setupTestHandlersWithAuthzStore(
+	t *testing.T,
+	ctxTokenConfig ContextTokenConfig,
+	mode string,
+	objs ...runtime.Object,
+) (*fiber.App, *sqlite.Store) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{
+		Mode: mode,
+	})
+	require.NoError(t, err)
+	handlers := NewHandlers(HandlersConfig{
+		Client:                    fakeClient,
+		SessionStore:              ss,
+		ResultStore:               ss,
+		PlanStore:                 ss,
+		ArtifactStore:             ss,
+		MemoryStore:               ss,
+		MemoryProposalStore:       ss,
+		ContextTokenAuthorization: authz,
+	})
+
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(handlers.client, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Post("/tasks", handlers.CreateTask)
+	app.Get("/tasks", handlers.ListTasks)
+	app.Get("/tasks/:id", handlers.GetTask)
+	app.Get("/tasks/:id/logs", handlers.GetTaskLogs)
+	app.Get("/tasks/:id/result", handlers.GetTaskResult)
+	app.Get("/tasks/:id/plan", handlers.GetTaskPlan)
+	app.Get("/tasks/:id/children", handlers.GetTaskChildren)
+	app.Get("/tasks/:id/artifacts", handlers.ListTaskArtifacts)
+	app.Get("/tasks/:id/artifacts/:filename", handlers.DownloadTaskArtifact)
+	app.Delete("/tasks/:id", handlers.DeleteTask)
+	app.Get("/tools", handlers.ListTools)
+	app.Get("/tools/:name", handlers.GetTool)
+	app.Get("/secrets", handlers.ListSecretNames)
+	app.Post("/agents", handlers.CreateAgent)
+	app.Get("/agents", handlers.ListAgents)
+	app.Get("/agents/:name", handlers.GetAgent)
+	app.Put("/agents/:name", handlers.UpdateAgent)
+	app.Delete("/agents/:name", handlers.DeleteAgent)
+	app.Get("/memories", handlers.ListMemories)
+	app.Post("/memories", handlers.CreateMemory)
+	app.Get("/memories/:id", handlers.GetMemory)
+	app.Put("/memories/:id", handlers.UpdateMemory)
+	app.Delete("/memories/:id", handlers.DeleteMemory)
+	app.Post("/memory-proposals/:id/apply", handlers.ApplyMemoryProposal)
+	app.Get("/sessions", handlers.ListSessions)
+	app.Get("/sessions/:id", handlers.GetSession)
+	app.Delete("/sessions/:id", handlers.DeleteSession)
+	app.Post("/skills", handlers.CreateSkill)
+	app.Get("/skills", handlers.ListSkills)
+	app.Get("/skills/:name", handlers.GetSkill)
+	app.Get("/skills/:name/content", handlers.GetSkillContent)
+	app.Put("/skills/:name", handlers.UpdateSkill)
+	app.Delete("/skills/:name", handlers.DeleteSkill)
+	return app, ss
 }
 
 func setupTestHandlersWithObjects(objs ...runtime.Object) (*Handlers, *fiber.App) {
@@ -248,6 +325,1239 @@ func TestHandlers_CreateTask_StampsRequestedByFromOIDC(t *testing.T) {
 	}
 }
 
+func TestHandlers_CreateTask_StampsRequestedByFromContextToken(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	handlers, app := setupTestHandlers()
+	app.Use(NewAuthMiddleware(handlers.client, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Post("/tasks", handlers.CreateTask)
+
+	token := issueTestContextToken(t, provider, nil, nil)
+	body := CreateTaskRequest{
+		Name:      "context-token-task",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeContainer,
+		Image:     "busybox",
+		Command:   []string{"echo", "hello"},
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+
+	created := &corev1alpha1.Task{}
+	if err := handlers.client.Get(context.Background(), types.NamespacedName{Name: "context-token-task", Namespace: "default"}, created); err != nil {
+		t.Fatalf("failed to fetch created task: %v", err)
+	}
+	if created.Spec.RequestedBy == nil {
+		t.Fatal("expected requestedBy to be stamped")
+	}
+	if created.Spec.RequestedBy.Subject != "workload-subject" {
+		t.Fatalf("requestedBy.subject = %q, want %q", created.Spec.RequestedBy.Subject, "workload-subject")
+	}
+	if created.Spec.RequestedBy.Issuer != provider.server.URL {
+		t.Fatalf("requestedBy.issuer = %q, want %q", created.Spec.RequestedBy.Issuer, provider.server.URL)
+	}
+	if strings.Join(created.Spec.RequestedBy.Roles, ",") != "read,write" {
+		t.Fatalf("requestedBy.roles = %#v, want [read write]", created.Spec.RequestedBy.Roles)
+	}
+	if created.Spec.Transaction == nil {
+		t.Fatal("expected transaction metadata to be stamped")
+	}
+	if created.Spec.Transaction.Profile != ContextTokenProfileKontxt {
+		t.Fatalf("transaction.profile = %q, want %q", created.Spec.Transaction.Profile, ContextTokenProfileKontxt)
+	}
+	if created.Spec.Transaction.ID != testContextTokenTransactionID {
+		t.Fatalf("transaction.id = %q, want txn-123", created.Spec.Transaction.ID)
+	}
+	if created.Spec.Transaction.RequestingWorkload != "spiffe://example.test/ns/default/sa/client" {
+		t.Fatalf("transaction.requestingWorkload = %q", created.Spec.Transaction.RequestingWorkload)
+	}
+	if strings.Join(created.Spec.Transaction.Scopes, ",") != "read,write" {
+		t.Fatalf("transaction.scopes = %#v, want [read write]", created.Spec.Transaction.Scopes)
+	}
+	if !strings.HasPrefix(created.Spec.Transaction.ContextDigest, "sha256:") {
+		t.Fatalf("transaction.contextDigest = %q, want sha256 digest", created.Spec.Transaction.ContextDigest)
+	}
+	if !strings.HasPrefix(created.Spec.Transaction.RequesterContextDigest, "sha256:") {
+		t.Fatalf("transaction.requesterContextDigest = %q, want sha256 digest", created.Spec.Transaction.RequesterContextDigest)
+	}
+	if created.Spec.Transaction.Context["trace_id"] != "trace-123" {
+		t.Fatalf("transaction.context = %#v, want trace_id", created.Spec.Transaction.Context)
+	}
+	if created.Labels[labels.LabelTransactionID] != labels.SelectorValue(testContextTokenTransactionID) {
+		t.Fatalf("transaction label = %q, want txn-123", created.Labels[labels.LabelTransactionID])
+	}
+	if created.Annotations[labels.AnnotationTransactionID] != testContextTokenTransactionID {
+		t.Fatalf("transaction annotation = %q, want txn-123", created.Annotations[labels.AnnotationTransactionID])
+	}
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceAllowsMatchingToken(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate + " orka:agents:run",
+		"tctx": map[string]any{
+			"namespace":    "default",
+			"taskType":     "agent",
+			"agent":        "reviewer",
+			"repo":         "https://github.com/sozercan/orka.git",
+			"branch":       "kontxt",
+			"allowedTools": []string{"file_read", "code_exec", "Bash"},
+		},
+	})
+	body := CreateTaskRequest{
+		Name:      "authorized-context-token-task",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeAgent,
+		AgentRef:  &corev1alpha1.AgentReference{Name: "reviewer"},
+		AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/sozercan/orka.git",
+				Branch:  "kontxt",
+			},
+			AllowedTools: []string{"file_read"},
+		},
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceRejectsMissingScope(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": "orka:tasks:get",
+	})
+	body := CreateTaskRequest{
+		Name:      "unauthorized-context-token-task",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeContainer,
+		Image:     "busybox",
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceRejectsContextMismatch(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace": "restricted",
+		},
+	})
+	body := CreateTaskRequest{
+		Name:      "context-mismatch-task",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeContainer,
+		Image:     "busybox",
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationAuditAllowsFailures(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeAudit)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": "orka:tasks:get",
+	})
+	body := CreateTaskRequest{
+		Name:      "audit-context-token-task",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeContainer,
+		Image:     "busybox",
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsProviderModelResolvedFromAgentProviderCRD(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	providerCRD := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic-main", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeAnthropic,
+			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "llm-key"},
+			DefaultModel: "claude-3-5-sonnet",
+		},
+	}
+	agent := testAgentFromJSON(t, `{
+		"metadata": {
+			"name": "reviewer",
+			"namespace": "default"
+		},
+		"spec": {
+			"providerRef": {
+				"name": "anthropic-main"
+			},
+			"model": {
+				"provider": "openai",
+				"name": "claude-3-opus"
+			}
+		}
+	}`)
+
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, providerCRD, agent)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace":        "default",
+			"provider":         "openai",
+			"model":            "claude-3-5-sonnet",
+			"allowedProviders": []string{"openai"},
+			"allowedModels":    []string{"openai/claude-3-5-sonnet"},
+		},
+	})
+
+	resp := postCreateTaskWithContextToken(t, app, token, CreateTaskRequest{
+		Name:      "agent-provider-model-denied",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeAgent,
+		AgentRef:  &corev1alpha1.AgentReference{Name: "reviewer"},
+		Prompt:    "review this change",
+	})
+
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsCrossNamespaceProviderRefMatches(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	privilegedProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "llm", Namespace: "privileged"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeOpenAI,
+			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "llm-key"},
+			DefaultModel: "gpt-4o-mini",
+		},
+	}
+	defaultProvider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "llm", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeOpenAI,
+			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "llm-key"},
+			DefaultModel: "gpt-4o-mini",
+		},
+	}
+
+	tests := []struct {
+		name               string
+		taskName           string
+		transactionContext map[string]any
+		providerRef        *corev1alpha1.ProviderReference
+		wantStatus         int
+	}{
+		{
+			name:     "denies cross-namespace providerRef despite bare allowed provider",
+			taskName: "cross-ns-provider-denied",
+			transactionContext: map[string]any{
+				"namespace":        "default",
+				"allowedProviders": []string{"llm"},
+			},
+			providerRef: &corev1alpha1.ProviderReference{
+				Name:      "llm",
+				Namespace: "privileged",
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:     "denies cross-namespace providerRef via ambiguous allowedModels",
+			taskName: "cross-ns-model-denied",
+			transactionContext: map[string]any{
+				"namespace":     "default",
+				"allowedModels": []string{"llm/gpt-4o-mini"},
+			},
+			providerRef: &corev1alpha1.ProviderReference{
+				Name:      "llm",
+				Namespace: "privileged",
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:     "denies unresolved cross-namespace providerRef",
+			taskName: "missing-cross-ns-provider-denied",
+			transactionContext: map[string]any{
+				"namespace": "default",
+			},
+			providerRef: &corev1alpha1.ProviderReference{
+				Name:      "missing-llm",
+				Namespace: "privileged",
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:     "allows bare provider match in token namespace",
+			taskName: "same-ns-provider-allowed",
+			transactionContext: map[string]any{
+				"namespace":        "default",
+				"allowedProviders": []string{"llm"},
+			},
+			providerRef: &corev1alpha1.ProviderReference{
+				Name: "llm",
+			},
+			wantStatus: http.StatusCreated,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, privilegedProvider.DeepCopyObject(), defaultProvider.DeepCopyObject())
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"scope": ContextTokenScopeTaskCreate,
+				"tctx":  tt.transactionContext,
+			})
+
+			resp := postCreateTaskWithContextToken(t, app, token, CreateTaskRequest{
+				Name:      tt.taskName,
+				Namespace: "default",
+				Type:      corev1alpha1.TaskTypeAI,
+				Prompt:    "review this change",
+				AI: &corev1alpha1.AISpec{
+					ProviderRef: tt.providerRef,
+				},
+			})
+
+			require.Equal(t, tt.wantStatus, resp.StatusCode)
+		})
+	}
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsEffectiveAITools(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	agent := testAgentFromJSON(t, `{
+		"metadata": {
+			"name": "reviewer",
+			"namespace": "default"
+		},
+		"spec": {
+			"tools": [
+				{
+					"name": "web_search",
+					"enabled": true
+				},
+				{
+					"name": "disabled_tool",
+					"enabled": false
+				}
+			]
+		}
+	}`)
+
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, agent)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace":    "default",
+			"allowedTools": []string{"file_read"},
+		},
+	})
+
+	resp := postCreateTaskWithContextToken(t, app, token, CreateTaskRequest{
+		Name:      "ai-tools-denied",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeAI,
+		AgentRef:  &corev1alpha1.AgentReference{Name: "reviewer"},
+		Prompt:    "review this change",
+		AI: &corev1alpha1.AISpec{
+			Tools: []string{"file_write"},
+		},
+	})
+
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsCrossNamespaceAgentRef(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace": "default",
+		},
+	})
+
+	resp := postCreateTaskWithContextToken(t, app, token, CreateTaskRequest{
+		Name:      "cross-namespace-agent-denied",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeAgent,
+		AgentRef: &corev1alpha1.AgentReference{
+			Name:      "reviewer",
+			Namespace: "team-a",
+		},
+		Prompt: "review this change",
+	})
+
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsAgentRuntimeDefaultAllowedTools(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	agent := testAgentFromJSON(t, `{
+		"metadata": {
+			"name": "claude-agent",
+			"namespace": "default"
+		},
+		"spec": {
+			"runtime": {
+				"defaultAllowedTools": [
+					"bash"
+				]
+			}
+		}
+	}`)
+
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, agent)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace":    "default",
+			"allowedTools": []string{"file_read"},
+		},
+	})
+
+	resp := postCreateTaskWithContextToken(t, app, token, CreateTaskRequest{
+		Name:      "runtime-default-tool-denied",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeAgent,
+		AgentRef:  &corev1alpha1.AgentReference{Name: "claude-agent"},
+		Prompt:    "make a change",
+	})
+
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func postCreateTaskWithContextToken(t *testing.T, app *fiber.App, token string, body CreateTaskRequest) *http.Response {
+	t.Helper()
+
+	bodyBytes, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+
+	return resp
+}
+
+func testAgentFromJSON(t *testing.T, raw string) *corev1alpha1.Agent {
+	t.Helper()
+
+	agent := &corev1alpha1.Agent{}
+	require.NoError(t, json.Unmarshal([]byte(raw), agent))
+	return agent
+}
+
+func TestHandlers_TaskActions_ContextTokenAuthorization(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		scope  string
+		want   int
+	}{
+		{name: "list allowed", method: http.MethodGet, path: "/tasks", scope: ContextTokenScopeTaskList, want: http.StatusOK},
+		{name: "list denied by read scope", method: http.MethodGet, path: "/tasks", scope: ContextTokenScopeTaskGet, want: http.StatusForbidden},
+		{name: "get allowed", method: http.MethodGet, path: "/tasks/authz-task", scope: ContextTokenScopeTaskGet, want: http.StatusOK},
+		{name: "get denied by list scope", method: http.MethodGet, path: "/tasks/authz-task", scope: ContextTokenScopeTaskList, want: http.StatusForbidden},
+		{name: "delete allowed", method: http.MethodDelete, path: "/tasks/authz-task", scope: ContextTokenScopeTaskDelete, want: http.StatusNoContent},
+		{name: "delete denied by read scope", method: http.MethodDelete, path: "/tasks/authz-task", scope: ContextTokenScopeTaskGet, want: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "authz-task", Namespace: "default"},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+			}
+			app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, task)
+			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.Header.Set(KontxtHeaderName, token)
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if resp.StatusCode != tt.want {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandlers_TaskReadActions_ContextTokenAuthorizationEnforcesTaskNameContext(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	const taskName = "authz-task"
+
+	tests := []struct {
+		name    string
+		path    string
+		prepare func(t *testing.T, ss *sqlite.Store)
+	}{
+		{
+			name: "get task",
+			path: "/tasks/" + taskName,
+		},
+		{
+			name: "get task logs",
+			path: "/tasks/" + taskName + "/logs",
+			prepare: func(t *testing.T, ss *sqlite.Store) {
+				t.Helper()
+				require.NoError(t, ss.SaveResult(context.Background(), "default", taskName, []byte("logs")))
+			},
+		},
+		{
+			name: "get task result",
+			path: "/tasks/" + taskName + "/result",
+			prepare: func(t *testing.T, ss *sqlite.Store) {
+				t.Helper()
+				require.NoError(t, ss.SaveResult(context.Background(), "default", taskName, []byte("result")))
+			},
+		},
+		{
+			name: "get task plan",
+			path: "/tasks/" + taskName + "/plan",
+			prepare: func(t *testing.T, ss *sqlite.Store) {
+				t.Helper()
+				require.NoError(t, ss.SavePlan(context.Background(), "default", taskName, &store.PlanState{
+					TaskName:    taskName,
+					Namespace:   "default",
+					Summary:     "in progress",
+					ProgressPct: 50,
+				}))
+			},
+		},
+		{
+			name: "get task children",
+			path: "/tasks/" + taskName + "/children",
+		},
+		{
+			name: "list task artifacts",
+			path: "/tasks/" + taskName + "/artifacts",
+		},
+		{
+			name: "download task artifact",
+			path: "/tasks/" + taskName + "/artifacts/report.txt",
+			prepare: func(t *testing.T, ss *sqlite.Store) {
+				t.Helper()
+				require.NoError(t, ss.SaveArtifact(context.Background(), "default", taskName, "report.txt", "text/plain", []byte("artifact")))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: "default"},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+				Status: corev1alpha1.TaskStatus{
+					ResultRef: &corev1alpha1.ResultReference{Available: true},
+				},
+			}
+			child := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "authz-child",
+					Namespace: "default",
+					Labels: map[string]string{
+						labels.LabelParentTask: labels.SelectorValue(taskName),
+					},
+				},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+			}
+
+			t.Run("allows matching taskName", func(t *testing.T) {
+				app, ss := setupTestHandlersWithAuthzStore(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, task.DeepCopyObject(), child.DeepCopyObject())
+				if tt.prepare != nil {
+					tt.prepare(t, ss)
+				}
+
+				token := issueTestContextToken(t, provider, nil, map[string]any{
+					"scope": ContextTokenScopeTaskGet,
+					"tctx": map[string]any{
+						"namespace": "default",
+						"taskName":  taskName,
+					},
+				})
+				req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+				req.Header.Set(KontxtHeaderName, token)
+				resp, err := app.Test(req)
+				require.NoError(t, err)
+				require.Equal(t, http.StatusOK, resp.StatusCode)
+			})
+
+			t.Run("denies mismatched taskName", func(t *testing.T) {
+				app, ss := setupTestHandlersWithAuthzStore(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, task.DeepCopyObject(), child.DeepCopyObject())
+				if tt.prepare != nil {
+					tt.prepare(t, ss)
+				}
+
+				token := issueTestContextToken(t, provider, nil, map[string]any{
+					"scope": ContextTokenScopeTaskGet,
+					"tctx": map[string]any{
+						"namespace": "default",
+						"taskName":  "other-task",
+					},
+				})
+				req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+				req.Header.Set(KontxtHeaderName, token)
+				resp, err := app.Test(req)
+				require.NoError(t, err)
+				require.Equal(t, http.StatusForbidden, resp.StatusCode)
+			})
+		})
+	}
+}
+
+func TestHandlers_GetTask_ContextTokenAuthorizationEnforcesLoadedTaskRepoContext(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "repo-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/acme/allowed.git",
+				},
+			},
+		},
+	}
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, task)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskGet,
+		"tctx": map[string]any{
+			"repo": "https://github.com/acme/other.git",
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks/repo-task", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestHandlers_ListTasks_ContextTokenAuthorizationFiltersLoadedTaskContext(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	allowedTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "allowed-repo-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/acme/allowed.git",
+				},
+			},
+		},
+	}
+	otherTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-repo-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/acme/other.git",
+				},
+			},
+		},
+	}
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, allowedTask, otherTask)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskList,
+		"tctx": map[string]any{
+			"repo":     "https://github.com/acme/allowed.git",
+			"agent":    "reviewer",
+			"taskType": string(corev1alpha1.TaskTypeAgent),
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var body struct {
+		Items []corev1alpha1.Task `json:"items"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Len(t, body.Items, 1)
+	require.Equal(t, "allowed-repo-task", body.Items[0].Name)
+}
+
+func TestHandlers_GetTaskChildren_ContextTokenAuthorizationFiltersLoadedTaskContext(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	parentTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/acme/allowed.git",
+				},
+			},
+		},
+	}
+	allowedChild := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "allowed-child",
+			Namespace: "default",
+			Labels: map[string]string{
+				labels.LabelParentTask: labels.SelectorValue("parent-task"),
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/acme/allowed.git",
+				},
+			},
+		},
+	}
+	otherChild := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other-child",
+			Namespace: "default",
+			Labels: map[string]string{
+				labels.LabelParentTask: labels.SelectorValue("parent-task"),
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/acme/other.git",
+				},
+			},
+		},
+	}
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, parentTask, allowedChild, otherChild)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskGet,
+		"tctx": map[string]any{
+			"namespace": "default",
+			"taskName":  "parent-task",
+			"repo":      "https://github.com/acme/allowed.git",
+			"agent":     "reviewer",
+			"taskType":  string(corev1alpha1.TaskTypeAgent),
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks/parent-task/children", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var body struct {
+		Items []corev1alpha1.Task `json:"items"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Len(t, body.Items, 1)
+	require.Equal(t, "allowed-child", body.Items[0].Name)
+}
+
+func TestHandlers_DeleteTask_ContextTokenAuthorizationEnforcesLoadedTaskRepoContext(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "repo-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo: "https://github.com/acme/allowed.git",
+				},
+			},
+		},
+	}
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, task)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskDelete,
+		"tctx": map[string]any{
+			"repo": "https://github.com/acme/other.git",
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/tasks/repo-task", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestHandlers_GenericActions_ContextTokenAuthorizationEnforceRejectsNamespaceMismatch(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		scope  string
+	}{
+		{
+			name:   "task list",
+			method: http.MethodGet,
+			path:   "/tasks?namespace=other",
+			scope:  ContextTokenScopeTaskList,
+		},
+		{
+			name:   "task get",
+			method: http.MethodGet,
+			path:   "/tasks/authz-task?namespace=other",
+			scope:  ContextTokenScopeTaskGet,
+		},
+		{
+			name:   "task delete",
+			method: http.MethodDelete,
+			path:   "/tasks/authz-task?namespace=other",
+			scope:  ContextTokenScopeTaskDelete,
+		},
+		{
+			name:   "agent create",
+			method: http.MethodPost,
+			path:   "/agents",
+			body:   `{"name":"created-agent","namespace":"other","spec":{}}`,
+			scope:  ContextTokenScopeAgentsWrite,
+		},
+		{
+			name:   "skill create",
+			method: http.MethodPost,
+			path:   "/skills",
+			body:   `{"name":"created-skill","namespace":"other","spec":{"description":"create","content":{"inline":"# Create"}}}`,
+			scope:  ContextTokenScopeSkillsWrite,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"scope": tt.scope,
+				"tctx":  map[string]any{"namespace": "default"},
+			})
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode)
+		})
+	}
+}
+
+func TestHandlers_ToolAndAgentActions_ContextTokenAuthorization(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "authz-agent", Namespace: "default"},
+		Spec:       corev1alpha1.AgentSpec{},
+	}
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		scope  string
+		want   int
+	}{
+		{name: "list tools allowed", method: http.MethodGet, path: "/tools", scope: ContextTokenScopeToolsRead, want: http.StatusOK},
+		{name: "list tools denied", method: http.MethodGet, path: "/tools", scope: ContextTokenScopeAgentsRead, want: http.StatusForbidden},
+		{name: "list agents allowed", method: http.MethodGet, path: "/agents", scope: ContextTokenScopeAgentsRead, want: http.StatusOK},
+		{name: "list agents denied", method: http.MethodGet, path: "/agents", scope: ContextTokenScopeToolsRead, want: http.StatusForbidden},
+		{name: "create agent allowed", method: http.MethodPost, path: "/agents", body: `{"name":"new-agent","spec":{}}`, scope: ContextTokenScopeAgentsWrite, want: http.StatusCreated},
+		{name: "create agent denied", method: http.MethodPost, path: "/agents", body: `{"name":"new-agent","spec":{}}`, scope: ContextTokenScopeAgentsRead, want: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, agent.DeepCopyObject())
+			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if resp.StatusCode != tt.want {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandlers_MemoryActions_ContextTokenAuthorization(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		scope  string
+		want   int
+	}{
+		{name: "list memories allowed", method: http.MethodGet, path: "/memories", scope: ContextTokenScopeMemoryRead, want: http.StatusOK},
+		{name: "list memories denied", method: http.MethodGet, path: "/memories", scope: ContextTokenScopeMemoryWrite, want: http.StatusForbidden},
+		{name: "create memory allowed", method: http.MethodPost, path: "/memories", body: `{"namespace":"default","content":"remember this"}`, scope: ContextTokenScopeMemoryWrite, want: http.StatusCreated},
+		{name: "create memory denied", method: http.MethodPost, path: "/memories", body: `{"namespace":"default","content":"remember this"}`, scope: ContextTokenScopeMemoryRead, want: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if resp.StatusCode != tt.want {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandlers_SessionActions_ContextTokenAuthorization(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	const authzSessionName = "authz-session"
+	const authzSessionsPath = "/sessions"
+	authzSessionPath := authzSessionsPath + "/" + authzSessionName
+
+	tests := []struct {
+		name        string
+		mode        string
+		method      string
+		path        string
+		scope       string
+		seedSession bool
+		want        int
+	}{
+		{
+			name:        "session read denied without read scope",
+			mode:        ContextTokenAuthorizationModeEnforce,
+			method:      http.MethodGet,
+			path:        authzSessionPath,
+			scope:       ContextTokenScopeSkillsRead,
+			seedSession: true,
+			want:        http.StatusForbidden,
+		},
+		{
+			name:        "session read allowed with read scope",
+			mode:        ContextTokenAuthorizationModeEnforce,
+			method:      http.MethodGet,
+			path:        authzSessionPath,
+			scope:       ContextTokenScopeSessionsRead,
+			seedSession: true,
+			want:        http.StatusOK,
+		},
+		{
+			name:        "session delete denied without write scope",
+			mode:        ContextTokenAuthorizationModeEnforce,
+			method:      http.MethodDelete,
+			path:        authzSessionPath,
+			scope:       ContextTokenScopeSessionsRead,
+			seedSession: true,
+			want:        http.StatusForbidden,
+		},
+		{
+			name:        "session delete allowed with write scope",
+			mode:        ContextTokenAuthorizationModeEnforce,
+			method:      http.MethodDelete,
+			path:        authzSessionPath,
+			scope:       ContextTokenScopeSessionsWrite,
+			seedSession: true,
+			want:        http.StatusNoContent,
+		},
+		{
+			name:   "session audit mode allows missing scope",
+			mode:   ContextTokenAuthorizationModeAudit,
+			method: http.MethodGet,
+			path:   authzSessionsPath,
+			scope:  ContextTokenScopeSkillsRead,
+			want:   http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, ss := setupTestHandlersWithAuthzStore(t, ctxTokenConfig, tt.mode)
+			if tt.seedSession {
+				require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
+					Namespace:   "default",
+					Name:        authzSessionName,
+					SessionType: "task",
+				}))
+			}
+
+			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.Header.Set(KontxtHeaderName, token)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, resp.StatusCode)
+		})
+	}
+}
+
+func TestHandlers_SkillActions_ContextTokenAuthorization(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	const authzSkillName = "authz-skill"
+	const authzSkillsPath = "/skills"
+	authzSkillPath := authzSkillsPath + "/" + authzSkillName
+	writeBody := `{"name":"created-skill","spec":{"description":"create","content":{"inline":"# Create"}}}`
+	updateBody := `{"spec":{"description":"update","content":{"inline":"# Update"}}}`
+	seedSkill := func() *corev1alpha1.Skill {
+		return &corev1alpha1.Skill{
+			ObjectMeta: metav1.ObjectMeta{Name: authzSkillName, Namespace: "default"},
+			Spec: corev1alpha1.SkillSpec{
+				Description: "authz skill",
+				Content: corev1alpha1.SkillContent{
+					Inline: "# Authz",
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mode   string
+		method string
+		path   string
+		body   string
+		scope  string
+		seed   bool
+		want   int
+	}{
+		{
+			name:   "skill list denied without read scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodGet,
+			path:   authzSkillsPath,
+			scope:  ContextTokenScopeSkillsWrite,
+			want:   http.StatusForbidden,
+		},
+		{
+			name:   "skill list allowed with read scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodGet,
+			path:   authzSkillsPath,
+			scope:  ContextTokenScopeSkillsRead,
+			want:   http.StatusOK,
+		},
+		{
+			name:   "skill get allowed with read scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodGet,
+			path:   authzSkillPath,
+			scope:  ContextTokenScopeSkillsRead,
+			seed:   true,
+			want:   http.StatusOK,
+		},
+		{
+			name:   "skill content denied without read scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodGet,
+			path:   authzSkillPath + "/content",
+			scope:  ContextTokenScopeSkillsWrite,
+			seed:   true,
+			want:   http.StatusForbidden,
+		},
+		{
+			name:   "skill content allowed with read scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodGet,
+			path:   authzSkillPath + "/content",
+			scope:  ContextTokenScopeSkillsRead,
+			seed:   true,
+			want:   http.StatusOK,
+		},
+		{
+			name:   "skill create denied without write scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodPost,
+			path:   authzSkillsPath,
+			body:   writeBody,
+			scope:  ContextTokenScopeSkillsRead,
+			want:   http.StatusForbidden,
+		},
+		{
+			name:   "skill create allowed with write scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodPost,
+			path:   authzSkillsPath,
+			body:   writeBody,
+			scope:  ContextTokenScopeSkillsWrite,
+			want:   http.StatusCreated,
+		},
+		{
+			name:   "skill update denied without write scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodPut,
+			path:   authzSkillPath,
+			body:   updateBody,
+			scope:  ContextTokenScopeSkillsRead,
+			seed:   true,
+			want:   http.StatusForbidden,
+		},
+		{
+			name:   "skill update allowed with write scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodPut,
+			path:   authzSkillPath,
+			body:   updateBody,
+			scope:  ContextTokenScopeSkillsWrite,
+			seed:   true,
+			want:   http.StatusOK,
+		},
+		{
+			name:   "skill delete denied without write scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodDelete,
+			path:   authzSkillPath,
+			scope:  ContextTokenScopeSkillsRead,
+			seed:   true,
+			want:   http.StatusForbidden,
+		},
+		{
+			name:   "skill delete allowed with write scope",
+			mode:   ContextTokenAuthorizationModeEnforce,
+			method: http.MethodDelete,
+			path:   authzSkillPath,
+			scope:  ContextTokenScopeSkillsWrite,
+			seed:   true,
+			want:   http.StatusNoContent,
+		},
+		{
+			name:   "skill audit mode allows missing scope",
+			mode:   ContextTokenAuthorizationModeAudit,
+			method: http.MethodGet,
+			path:   authzSkillsPath,
+			scope:  ContextTokenScopeSessionsRead,
+			want:   http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objs := []runtime.Object{}
+			if tt.seed {
+				objs = append(objs, seedSkill())
+			}
+			app := setupTestHandlersWithAuthz(t, ctxTokenConfig, tt.mode, objs...)
+			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, resp.StatusCode)
+		})
+	}
+}
+
 func TestHandlers_CreateTask_RejectsTopLevelRequestedBy(t *testing.T) {
 	handlers, app := setupTestHandlers()
 	app.Post("/tasks", handlers.CreateTask)
@@ -293,6 +1603,52 @@ func TestHandlers_CreateTask_RejectsNestedSpecRequestedBy(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestHandlers_CreateTask_RejectsClientSuppliedTransaction(t *testing.T) {
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{
+			name: "top-level transaction",
+			body: map[string]any{
+				"name":        "tampered-transaction",
+				"namespace":   "default",
+				"type":        corev1alpha1.TaskTypeContainer,
+				"transaction": map[string]any{"id": "spoofed"},
+			},
+		},
+		{
+			name: "nested spec transaction",
+			body: map[string]any{
+				"name":      "tampered-spec-transaction",
+				"namespace": "default",
+				"type":      corev1alpha1.TaskTypeContainer,
+				"spec": map[string]any{
+					"transaction": map[string]any{"id": "spoofed"},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handlers, app := setupTestHandlers()
+			app.Post("/tasks", handlers.CreateTask)
+
+			bodyBytes, _ := json.Marshal(tt.body)
+			req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+			}
+		})
 	}
 }
 
@@ -1854,6 +3210,39 @@ func TestHandlers_CreateAgent_NamespaceForbidden(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
+func TestHandlers_CreateAgent_ContextTokenAuthorizationRejectsDisallowedAgentSpec(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeAgentsWrite,
+		"tctx": map[string]any{
+			"allowedProviders": []string{"openai"},
+			"allowedModels":    []string{"openai/gpt-4o"},
+			"allowedTools":     []string{"file_read"},
+		},
+	})
+
+	bodyBytes, _ := json.Marshal(CreateAgentRequest{
+		Name:      "test-agent",
+		Namespace: "default",
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Provider: "anthropic",
+				Name:     "claude-3-5-sonnet",
+			},
+			Tools: []corev1alpha1.ToolReference{{Name: "web_search"}},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/agents", bytes.NewReader(bodyBytes))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
 // --- UpdateAgent tests ---
 
 func TestHandlers_UpdateAgent_Success(t *testing.T) {
@@ -1895,6 +3284,163 @@ func TestHandlers_UpdateAgent_Success(t *testing.T) {
 	spec := result["spec"].(map[string]any)
 	model := spec["model"].(map[string]any)
 	require.Equal(t, "gpt-4", model["name"])
+}
+
+func TestHandlers_UpdateAgent_ContextTokenAuthorizationRejectsDisallowedAgentSpec(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"},
+		Spec:       corev1alpha1.AgentSpec{},
+	}
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, agent)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeAgentsWrite,
+		"tctx": map[string]any{
+			"allowedAgents":    []string{"test-agent"},
+			"allowedProviders": []string{"openai"},
+			"allowedModels":    []string{"openai/gpt-4o"},
+		},
+	})
+
+	bodyBytes, _ := json.Marshal(UpdateAgentRequest{
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Provider: "anthropic",
+				Name:     "claude-3-5-sonnet",
+			},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPut, "/agents/test-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestHandlers_UpdateAgent_PatchesSpecWithoutFullObjectUpdate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-agent",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Name: "gpt-4o-mini",
+			},
+		},
+	}
+
+	updateCalled := false
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(agent).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				updateCalled = true
+				return fmt.Errorf("unexpected full object update")
+			},
+		}).
+		Build()
+
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
+	app := fiber.New()
+	app.Put("/agents/:name", handlers.UpdateAgent)
+
+	body := UpdateAgentRequest{
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Name: "gpt-4.1",
+			},
+		},
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/agents/test-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.False(t, updateCalled)
+
+	updated := &corev1alpha1.Agent{}
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-agent", Namespace: "default"}, updated)
+	require.NoError(t, err)
+	require.Equal(t, "gpt-4.1", updated.Spec.Model.Name)
+}
+
+func TestHandlers_UpdateAgent_RetriesConflict(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-agent",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Name: "gpt-4o-mini",
+			},
+		},
+	}
+
+	patchCalls := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(agent).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patchCalls++
+				if patchCalls == 1 {
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "agents"},
+						obj.GetName(),
+						fmt.Errorf("changed"),
+					)
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
+	app := fiber.New()
+	app.Put("/agents/:name", handlers.UpdateAgent)
+
+	body := UpdateAgentRequest{
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Name: "gpt-4.1",
+			},
+		},
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/agents/test-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, 2, patchCalls)
+
+	updated := &corev1alpha1.Agent{}
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-agent", Namespace: "default"}, updated)
+	require.NoError(t, err)
+	require.Equal(t, "gpt-4.1", updated.Spec.Model.Name)
 }
 
 func TestHandlers_UpdateAgent_NotFound(t *testing.T) {
@@ -2036,6 +3582,69 @@ func TestHandlers_ListSecretNames_Empty(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
 	items := result["items"].([]any)
 	require.Len(t, items, 0)
+}
+
+func TestHandlers_ListSecretNames_ContextTokenAuthorizationEnforceAllowsReadScope(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-secret",
+			Namespace: "default",
+		},
+		Type: corev1.SecretTypeOpaque,
+	}
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, secret)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeSecretsRead,
+		"tctx": map[string]any{
+			"namespace": "default",
+		},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/secrets", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
+	items := result["items"].([]any)
+	require.Len(t, items, 1)
+}
+
+func TestHandlers_ListSecretNames_ContextTokenAuthorizationEnforceRejectsMissingReadScope(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeProvidersUse,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/secrets", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestHandlers_ListSecretNames_ContextTokenAuthorizationEnforceRejectsNamespaceMismatch(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeSecretsRead,
+		"tctx": map[string]any{
+			"namespace": "restricted",
+		},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/secrets?namespace=default", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
 // --- StreamPodLogs tests ---
@@ -2541,6 +4150,48 @@ func (conflictApplyMemoryProposalStore) ApplyMemoryProposal(context.Context, sto
 
 func (conflictApplyMemoryProposalStore) ArchiveMemoryProposal(context.Context, string, string) error {
 	return nil
+}
+
+func TestHandlers_ApplyMemoryProposal_ContextTokenAuthorization(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+
+	tests := []struct {
+		name  string
+		scope string
+		want  int
+	}{
+		{name: "allowed with memory write", scope: ContextTokenScopeMemoryWrite, want: http.StatusOK},
+		{name: "denied with only memory read", scope: ContextTokenScopeMemoryRead, want: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, ss := setupTestHandlersWithAuthzStore(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+			proposal := &store.MemoryProposal{
+				Namespace: "default",
+				Title:     "Remember project preference",
+				Type:      "memory",
+				Content:   "User prefers compact task summaries.",
+			}
+			require.NoError(t, ss.CreateMemoryProposal(context.Background(), proposal))
+			require.NoError(t, ss.ReviewMemoryProposal(context.Background(), store.MemoryProposalReview{
+				Namespace: "default",
+				ID:        proposal.ID,
+				Status:    "accepted",
+				Reviewer:  "reviewer",
+			}))
+
+			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
+			body, _ := json.Marshal(map[string]any{"appliedBy": "api-user"})
+			req := httptest.NewRequest(http.MethodPost, "/memory-proposals/"+proposal.ID+"/apply?namespace=default", bytes.NewReader(body))
+			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, resp.StatusCode)
+		})
+	}
 }
 
 func TestHandlers_ApplyMemoryProposal(t *testing.T) {

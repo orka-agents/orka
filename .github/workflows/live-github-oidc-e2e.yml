@@ -2,6 +2,9 @@ name: Live GitHub OIDC E2E
 
 on:
   workflow_dispatch:
+  schedule:
+    # Nightly at 09:17 UTC (~02:17 Pacific during daylight saving time).
+    - cron: "17 9 * * *"
   push:
     paths-ignore:
       - ".codex/**"
@@ -27,20 +30,45 @@ jobs:
     steps:
       - name: Clone Orka
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Check scheduled run necessity
+        id: schedule_gate
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" != "schedule" ]]; then
+            echo "run_e2e=true" >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          # Nightly runs are only useful when the checked-out ref has changed
+          # since the previous nightly window. Push and workflow_dispatch runs
+          # always execute.
+          if git log --since="25 hours ago" --format=%H -n 1 | grep -q .; then
+            echo "run_e2e=true" >>"${GITHUB_OUTPUT}"
+          else
+            echo "No commits in the last 25 hours; skipping live e2e."
+            echo "run_e2e=false" >>"${GITHUB_OUTPUT}"
+          fi
 
       - name: Setup Go
-        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+        if: steps.schedule_gate.outputs.run_e2e == 'true'
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: go.mod
 
       - name: Install kind
+        if: steps.schedule_gate.outputs.run_e2e == 'true'
         run: |
           curl -fsSL -o ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-$(go env GOARCH)"
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
 
       - name: Verify kind installation
+        if: steps.schedule_gate.outputs.run_e2e == 'true'
         run: kind version
 
       - name: Run live GitHub OIDC e2e
+        if: steps.schedule_gate.outputs.run_e2e == 'true'
         run: bash scripts/live-github-oidc-e2e.sh

@@ -115,11 +115,11 @@ test-e2e-run-only: manifests generate fmt vet ## Run e2e tests without rebuildin
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v
 
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter
+lint: ensure-ui-embed golangci-lint ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run
 
 .PHONY: lint-fix
-lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
+lint-fix: ensure-ui-embed golangci-lint ## Run golangci-lint linter and perform fixes
 	"$(GOLANGCI_LINT)" run --fix
 
 .PHONY: lint-config

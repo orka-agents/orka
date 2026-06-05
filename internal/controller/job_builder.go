@@ -10,10 +10,12 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"os"
 	"path"
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -21,13 +23,14 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/contexttoken"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/metrics"
+	"github.com/sozercan/orka/internal/taskmeta"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -49,6 +52,24 @@ const (
 
 	// DefaultInitImage is the default image for init containers
 	DefaultInitImage = "busybox:1.37"
+
+	// AIWorkerServiceAccount is the ServiceAccount used by trusted AI task workers.
+	AIWorkerServiceAccount = "orka-ai-worker"
+
+	// VendorWorkerServiceAccount is the ServiceAccount used by untrusted vendor/agent task workers.
+	VendorWorkerServiceAccount = "orka-vendor-worker"
+
+	// ContainerWorkerServiceAccount is the ServiceAccount used by untrusted container task workers.
+	ContainerWorkerServiceAccount = "orka-container-worker"
+
+	// directProviderSecretsEnvVar restores legacy direct provider API key/base URL injection for untrusted container pods.
+	directProviderSecretsEnvVar = "ORKA_AGENT_DIRECT_PROVIDER_SECRETS"
+
+	// directSecretMountsEnvVar restores legacy direct task/agent secret injection for untrusted container pods.
+	directSecretMountsEnvVar = "ORKA_AGENT_DIRECT_SECRET_MOUNTS"
+
+	// directGitCredentialsEnvVar restores legacy direct Git credential mounts for untrusted custom container pods.
+	directGitCredentialsEnvVar = "ORKA_AGENT_DIRECT_GIT_CREDENTIALS"
 
 	// ResultEndpointEnvVar is the env var for the result submission URL
 	ResultEndpointEnvVar = workerenv.ResultEndpoint
@@ -73,14 +94,30 @@ const (
 // JobBuilder builds Kubernetes Jobs for Tasks
 type JobBuilder struct {
 	client.Client
-	AIWorkerImage      string
-	GeneralWorkerImage string
-	CopilotWorkerImage string
-	ClaudeWorkerImage  string
-	CodexWorkerImage   string
-	CodexSandboxMode   string
-	InitImage          string
-	ControllerURL      string // e.g. http://orka-controller.orka-system.svc:8080
+	AIWorkerImage                string
+	GeneralWorkerImage           string
+	CopilotWorkerImage           string
+	ClaudeWorkerImage            string
+	CodexWorkerImage             string
+	CodexSandboxMode             string
+	InitImage                    string
+	ControllerURL                string // e.g. http://orka-controller.orka-system.svc:8080
+	ContextTokenTTSURL           string
+	ContextTokenTTSAudience      string
+	ContextTokenTTSTimeout       string
+	ContextTokenTTSTokenSource   string
+	ContextTokenSubjectTokenType string
+	ContextTokenChildScope       string
+	ContextTokenOutboundScope    string
+	ContextTokenChildTokenTTL    string
+	ContextTokenToolTokenTTL     string
+	directSecrets                directRuntimeSecretPolicy
+}
+
+type directRuntimeSecretPolicy struct {
+	providerSecrets bool
+	secretMounts    bool
+	gitCredentials  bool
 }
 
 // NewJobBuilder creates a new JobBuilder
@@ -93,7 +130,126 @@ func NewJobBuilder(c client.Client) *JobBuilder {
 		ClaudeWorkerImage:  DefaultClaudeWorkerImage,
 		CodexWorkerImage:   DefaultCodexWorkerImage,
 		InitImage:          DefaultInitImage,
+		directSecrets: directRuntimeSecretPolicy{
+			providerSecrets: envFlagEnabled(directProviderSecretsEnvVar),
+			secretMounts:    envFlagEnabled(directSecretMountsEnvVar),
+			gitCredentials:  envFlagEnabled(directGitCredentialsEnvVar),
+		},
 	}
+}
+
+func workerServiceAccountForTask(task *corev1alpha1.Task) string {
+	if task == nil {
+		return ContainerWorkerServiceAccount
+	}
+
+	switch task.Spec.Type {
+	case corev1alpha1.TaskTypeAI:
+		return AIWorkerServiceAccount
+	case corev1alpha1.TaskTypeAgent:
+		return VendorWorkerServiceAccount
+	case corev1alpha1.TaskTypeContainer:
+		return ContainerWorkerServiceAccount
+	default:
+		return ContainerWorkerServiceAccount
+	}
+}
+
+func workerAutomountServiceAccountToken(task *corev1alpha1.Task) *bool {
+	return new(podShouldAutomountServiceAccountToken(task))
+}
+
+func podShouldAutomountServiceAccountToken(task *corev1alpha1.Task) bool {
+	if task == nil || !isUntrustedComputeTask(task) {
+		return true
+	}
+
+	return taskUsesManagedOrkaWorker(task)
+}
+
+func taskUsesManagedOrkaWorker(task *corev1alpha1.Task) bool {
+	if task == nil {
+		return false
+	}
+
+	switch task.Spec.Type {
+	case corev1alpha1.TaskTypeAI, corev1alpha1.TaskTypeAgent:
+		return true
+	case corev1alpha1.TaskTypeContainer:
+		return task.Spec.Image == ""
+	default:
+		return false
+	}
+}
+
+func isVendorAgentTask(task *corev1alpha1.Task) bool {
+	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAgent
+}
+
+func isUntrustedComputeTask(task *corev1alpha1.Task) bool {
+	if task == nil {
+		return false
+	}
+
+	switch task.Spec.Type {
+	case corev1alpha1.TaskTypeAgent, corev1alpha1.TaskTypeContainer:
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *JobBuilder) directProviderSecretsAllowed(task *corev1alpha1.Task) bool {
+	return taskAllowsDirectRuntimeSecrets(task) || (b != nil && b.directSecrets.providerSecrets)
+}
+
+func (b *JobBuilder) directSecretMountsAllowed(task *corev1alpha1.Task) bool {
+	return taskAllowsDirectRuntimeSecrets(task) || (b != nil && b.directSecrets.secretMounts)
+}
+
+func taskAllowsDirectRuntimeSecrets(task *corev1alpha1.Task) bool {
+	return !isUntrustedComputeTask(task) || isVendorAgentTask(task)
+}
+
+func mainContainerNeedsGitCredentials(task *corev1alpha1.Task) bool {
+	return taskUsesManagedOrkaWorker(task)
+}
+
+func (b *JobBuilder) directGitCredentialsAllowed(task *corev1alpha1.Task) bool {
+	return !isUntrustedComputeTask(task) || mainContainerNeedsGitCredentials(task) || (b != nil && b.directSecrets.gitCredentials)
+}
+
+func envFlagEnabled(name string) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if enabled, err := strconv.ParseBool(value); err == nil {
+		return enabled
+	}
+
+	switch strings.ToLower(value) {
+	case "y", "yes", "on":
+		return true
+	case "n", "no", "off":
+		return false
+	default:
+		return false
+	}
+}
+
+func agentHasFallbackProviders(agent *corev1alpha1.Agent) bool {
+	return agent != nil && agent.Spec.Model != nil && len(agent.Spec.Model.Fallbacks) > 0
+}
+
+func (b *JobBuilder) needsSecretVolumes(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) bool {
+	if b.directSecretMountsAllowed(task) {
+		if task != nil && task.Spec.SecretRef != nil {
+			return true
+		}
+		if agent != nil && agent.Spec.SecretRef != nil {
+			return true
+		}
+	}
+
+	return b.directProviderSecretsAllowed(task) && (provider != nil || agentHasFallbackProviders(agent))
 }
 
 func buildTaskJobName(task *corev1alpha1.Task) string {
@@ -115,8 +271,20 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 	return prefix + suffix
 }
 
-// Build creates a Job for the given Task
+// JobBuildOptions carries optional inputs that affect Job rendering while keeping
+// the historical Build signature stable.
+type JobBuildOptions struct {
+	AgentSandboxWorkspace *AgentSandboxWorkspaceRequest
+	ExecutionWorkspace    *ExecutionWorkspaceRequest
+}
+
+// Build creates a Job for the given Task.
 func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (*batchv1.Job, error) {
+	return b.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{})
+}
+
+// BuildWithOptions creates a Job for the given Task using additional resolved options.
+func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) (*batchv1.Job, error) {
 	jobName := buildTaskJobName(task)
 	execution := resolveExecution(task, agent)
 
@@ -130,7 +298,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: ptr.To(int32(0)), // No retries at Job level, we handle retries in the controller
+			BackoffLimit: new(int32(0)), // No retries at Job level, we handle retries in the controller
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
@@ -139,16 +307,20 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 					},
 				},
 				Spec: corev1.PodSpec{
-					RestartPolicy:      corev1.RestartPolicyNever,
-					ServiceAccountName: "orka-worker",
-					SecurityContext:    b.buildPodSecurityContext(),
+					RestartPolicy:                corev1.RestartPolicyNever,
+					ServiceAccountName:           workerServiceAccountForTask(task),
+					AutomountServiceAccountToken: workerAutomountServiceAccountToken(task),
+					SecurityContext:              b.buildPodSecurityContext(),
 					Containers: []corev1.Container{
-						b.buildContainer(ctx, task, agent, provider),
+						b.buildContainerWithOptions(ctx, task, agent, provider, opts),
 					},
 				},
 			},
 		},
 	}
+
+	taskmeta.ApplyTransactionMetadata(&job.ObjectMeta, task.Spec.Transaction)
+	taskmeta.ApplyTransactionMetadata(&job.Spec.Template.ObjectMeta, task.Spec.Transaction)
 
 	applyExecution(job, execution)
 
@@ -159,6 +331,8 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		},
 	})
+
+	b.addTransactionTokenSecret(job, task)
 
 	// Add workspace/home volumes for tasks that need a git workspace.
 	if taskNeedsWorkspace(task) {
@@ -175,7 +349,7 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 	}
 
 	// Add secret volumes if needed
-	if task.Spec.SecretRef != nil || (agent != nil && agent.Spec.SecretRef != nil) || provider != nil {
+	if b.needsSecretVolumes(task, agent, provider) {
 		b.addSecretVolumes(ctx, job, task, agent, provider)
 	}
 
@@ -196,10 +370,10 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 // buildPodSecurityContext builds a secure pod security context
 func (b *JobBuilder) buildPodSecurityContext() *corev1.PodSecurityContext {
 	return &corev1.PodSecurityContext{
-		RunAsNonRoot: ptr.To(true),
-		RunAsUser:    ptr.To(int64(1000)),
-		RunAsGroup:   ptr.To(int64(1000)),
-		FSGroup:      ptr.To(int64(1000)),
+		RunAsNonRoot: new(true),
+		RunAsUser:    new(int64(1000)),
+		RunAsGroup:   new(int64(1000)),
+		FSGroup:      new(int64(1000)),
 		SeccompProfile: &corev1.SeccompProfile{
 			Type: corev1.SeccompProfileTypeRuntimeDefault,
 		},
@@ -209,10 +383,10 @@ func (b *JobBuilder) buildPodSecurityContext() *corev1.PodSecurityContext {
 // buildContainerSecurityContext builds a secure container security context
 func (b *JobBuilder) buildContainerSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
-		AllowPrivilegeEscalation: ptr.To(false),
-		ReadOnlyRootFilesystem:   ptr.To(true),
-		RunAsNonRoot:             ptr.To(true),
-		RunAsUser:                ptr.To(int64(1000)),
+		AllowPrivilegeEscalation: new(false),
+		ReadOnlyRootFilesystem:   new(true),
+		RunAsNonRoot:             new(true),
+		RunAsUser:                new(int64(1000)),
 		Capabilities: &corev1.Capabilities{
 			Drop: []corev1.Capability{"ALL"},
 		},
@@ -221,12 +395,17 @@ func (b *JobBuilder) buildContainerSecurityContext() *corev1.SecurityContext {
 
 // buildContainer builds the main container for the Job
 func (b *JobBuilder) buildContainer(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) corev1.Container {
+	return b.buildContainerWithOptions(ctx, task, agent, provider, JobBuildOptions{})
+}
+
+// buildContainerWithOptions builds the main container for the Job.
+func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) corev1.Container {
 	container := corev1.Container{
 		Name:            "worker",
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: b.buildContainerSecurityContext(),
 		Resources:       b.buildResources(task, agent),
-		Env:             b.buildEnvVars(ctx, task, agent, provider),
+		Env:             b.buildEnvVarsWithOptions(ctx, task, agent, provider, opts),
 		VolumeMounts:    []corev1.VolumeMount{},
 	}
 
@@ -315,7 +494,7 @@ func applyExecution(job *batchv1.Job, execution *corev1alpha1.ExecutionSpec) {
 	}
 
 	if execution.RuntimeClassName != "" {
-		job.Spec.Template.Spec.RuntimeClassName = ptr.To(execution.RuntimeClassName)
+		job.Spec.Template.Spec.RuntimeClassName = new(execution.RuntimeClassName)
 	}
 	if len(execution.NodeSelector) > 0 {
 		job.Spec.Template.Spec.NodeSelector = copyNodeSelector(execution.NodeSelector)
@@ -374,6 +553,11 @@ func (b *JobBuilder) buildResources(task *corev1alpha1.Task, agent *corev1alpha1
 
 // buildEnvVars builds the environment variables for the container
 func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) []corev1.EnvVar {
+	return b.buildEnvVarsWithOptions(ctx, task, agent, provider, JobBuildOptions{})
+}
+
+// buildEnvVarsWithOptions builds the environment variables for the container using additional options.
+func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) []corev1.EnvVar {
 	envVars := workerenv.BaseEnv{
 		TaskName:       task.Name,
 		TaskNamespace:  task.Namespace,
@@ -383,6 +567,7 @@ func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, 
 
 	// Add task-level env vars
 	envVars = append(envVars, task.Spec.Env...)
+	envVars = addTransactionEnvVars(envVars, task.Spec.Transaction)
 
 	// Add prior task env vars for iterative coordination
 	if task.Spec.PriorTaskRef != nil {
@@ -414,12 +599,97 @@ func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, 
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
 		envVars = b.addAgentEnvVars(ctx, envVars, task, agent)
 		envVars = b.addCodexSandboxEnvVars(envVars, agent)
+		workspaceRequest := opts.ExecutionWorkspace
+		if workspaceRequest == nil {
+			workspaceRequest = opts.AgentSandboxWorkspace
+		}
+		envVars = b.addExecutionWorkspaceEnvVars(envVars, task, workspaceRequest)
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
 		envVars = b.addWorkspaceEnvVars(envVars, task)
 	}
 
+	return envVars
+}
+
+// addExecutionWorkspaceEnvVars injects resolved execution workspace settings for agent tasks.
+func (b *JobBuilder) addExecutionWorkspaceEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, request *ExecutionWorkspaceRequest) []corev1.EnvVar {
+	if request == nil {
+		return envVars
+	}
+
+	envVars = append(envVars, workerenv.ExecutionWorkspaceEnv{
+		Enabled:           true,
+		Provider:          string(request.Provider),
+		TemplateName:      request.TemplateName,
+		TemplateNamespace: request.TemplateNamespace,
+		ClaimNamespace:    request.ClaimNamespace,
+		ClaimName:         request.ClaimName,
+		ReusePolicy:       string(request.ReusePolicy),
+		ReuseKey:          request.ReuseKey,
+		CleanupPolicy:     string(request.CleanupPolicy),
+		ClaimTimeout:      request.ClaimTimeout,
+		CommandTimeout:    request.CommandTimeout,
+		StatusEndpoint:    fmt.Sprintf("%s/internal/v1/tasks/%s/%s/execution-workspace/status", b.ControllerURL, task.Namespace, task.Name),
+		Depth:             0,
+	}.EnvVars()...)
+
+	if request.Provider == corev1alpha1.WorkspaceProviderSubstrate {
+		envVars = append(envVars, workerenv.SubstrateEnv{
+			APIEndpoint:           request.SubstrateAPIEndpoint,
+			APICAFile:             request.SubstrateAPICAFile,
+			APIInsecureSkipVerify: request.SubstrateAPIInsecureSkipVerify,
+			RouterURL:             request.SubstrateRouterURL,
+			ActorDNSSuffix:        request.SubstrateActorDNSSuffix,
+		}.EnvVars()...)
+		if strings.TrimSpace(request.SubstrateBootstrapSecretName) != "" {
+			envVars = append(envVars, corev1.EnvVar{
+				Name: workerenv.WorkspaceBootstrapToken,
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: request.SubstrateBootstrapSecretName,
+						},
+						Key: request.SubstrateBootstrapSecretKey,
+					},
+				},
+			})
+		}
+		return envVars
+	}
+
+	// Render the legacy agent-sandbox env during the migration so existing
+	// worker images and tests continue to work unchanged.
+	return append(envVars, workerenv.AgentSandboxEnv{
+		Enabled:           true,
+		RouterURL:         request.RouterURL,
+		TemplateName:      request.TemplateName,
+		TemplateNamespace: request.TemplateNamespace,
+		ClaimNamespace:    request.ClaimNamespace,
+		ReusePolicy:       string(request.ReusePolicy),
+		ReuseKey:          request.ReuseKey,
+		CleanupPolicy:     string(request.CleanupPolicy),
+		WarmPoolPolicy:    request.WarmPoolPolicy,
+		NamespaceStrategy: request.NamespaceStrategy,
+		ClaimTimeout:      request.ClaimTimeout,
+		CommandTimeout:    request.CommandTimeout,
+	}.EnvVars()...)
+}
+
+func addTransactionEnvVars(envVars []corev1.EnvVar, tx *corev1alpha1.TaskTransaction) []corev1.EnvVar {
+	if tx == nil {
+		return envVars
+	}
+	envVars = setControllerEnv(envVars, workerenv.TransactionID, tx.ID)
+	envVars = setControllerEnv(envVars, workerenv.TransactionProfile, tx.Profile)
+	envVars = setControllerEnv(envVars, workerenv.TransactionIssuer, tx.Issuer)
+	envVars = setControllerEnv(envVars, workerenv.TransactionSubject, tx.Subject)
+	envVars = setControllerEnv(envVars, workerenv.TransactionRequestingWorkload, tx.RequestingWorkload)
+	envVars = setControllerEnv(envVars, workerenv.TransactionScope, tx.Scope)
+	envVars = setControllerEnv(envVars, workerenv.TransactionScopes, workerenv.JoinCSV(tx.Scopes))
+	envVars = setControllerEnv(envVars, workerenv.TransactionContextDigest, tx.ContextDigest)
+	envVars = setControllerEnv(envVars, workerenv.TransactionRequesterContextDigest, tx.RequesterContextDigest)
 	return envVars
 }
 
@@ -643,10 +913,111 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	return envVars
 }
 
+func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alpha1.Task) {
+	if job == nil || len(job.Spec.Template.Spec.Containers) == 0 {
+		return
+	}
+	secretName := ""
+	if task != nil && task.Annotations != nil {
+		secretName = strings.TrimSpace(task.Annotations[labels.AnnotationTransactionTokenSecret])
+	}
+	injectTTS := b.shouldInjectContextTokenTTS(task, secretName)
+	for i := range job.Spec.Template.Spec.Containers {
+		container := &job.Spec.Template.Spec.Containers[i]
+		if injectTTS {
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSURL, b.ContextTokenTTSURL)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSAudience, b.ContextTokenTTSAudience)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSTimeout, b.ContextTokenTTSTimeout)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSTokenSource, b.ContextTokenTTSTokenSource)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenSubjectTokenType, b.ContextTokenSubjectTokenType)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenChildScope, b.ContextTokenChildScope)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenOutboundScope, b.ContextTokenOutboundScope)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenChildTokenTTL, b.ContextTokenChildTokenTTL)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenToolTokenTTL, b.ContextTokenToolTokenTTL)
+		} else {
+			for _, name := range contextTokenTTSEnvNames() {
+				container.Env = removeControllerEnv(container.Env, name)
+			}
+		}
+		container.Env = removeControllerEnv(container.Env, workerenv.TransactionTokenFile)
+		container.Env = removeControllerEnv(container.Env, workerenv.ContextTokenSubjectTokenFile)
+	}
+
+	if secretName == "" {
+		return
+	}
+	const (
+		volumeName = "transaction-token"
+		mountPath  = "/var/run/orka/transaction-token"
+		tokenPath  = mountPath + "/token"
+	)
+	defaultMode := int32(0400)
+	// The child transaction token is delegation authority. Add the Secret as a
+	// pod volume and expose the mounted token-file path to every workload
+	// container in the pod so secondary containers can make TTS-mediated calls.
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: volumeName,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName:  secretName,
+				DefaultMode: &defaultMode,
+				Items: []corev1.KeyToPath{{
+					Key:  "token",
+					Path: "token",
+				}},
+			},
+		},
+	})
+	for i := range job.Spec.Template.Spec.Containers {
+		container := &job.Spec.Template.Spec.Containers[i]
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:      volumeName,
+			MountPath: mountPath,
+			ReadOnly:  true,
+		})
+		container.Env = setControllerEnv(container.Env, workerenv.TransactionTokenFile, tokenPath)
+		if b.ContextTokenTTSTokenSource == contexttoken.TTSTokenSourceIncoming {
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenSubjectTokenFile, tokenPath)
+		} else {
+			container.Env = removeControllerEnv(container.Env, workerenv.ContextTokenSubjectTokenFile)
+		}
+	}
+}
+
+func (b *JobBuilder) shouldInjectContextTokenTTS(task *corev1alpha1.Task, secretName string) bool {
+	if b.ContextTokenTTSURL == "" {
+		return false
+	}
+	if secretName != "" {
+		return true
+	}
+	if task == nil || task.Spec.Transaction == nil {
+		return false
+	}
+	return b.ContextTokenTTSTokenSource != contexttoken.TTSTokenSourceIncoming
+}
+
+func contextTokenTTSEnvNames() []string {
+	return []string{
+		workerenv.ContextTokenTTSURL,
+		workerenv.ContextTokenTTSAudience,
+		workerenv.ContextTokenTTSTimeout,
+		workerenv.ContextTokenTTSTokenSource,
+		workerenv.ContextTokenSubjectTokenType,
+		workerenv.ContextTokenChildScope,
+		workerenv.ContextTokenOutboundScope,
+		workerenv.ContextTokenChildTokenTTL,
+		workerenv.ContextTokenToolTokenTTL,
+	}
+}
+
 // addSecretVolumes adds secret volumes to the Job
 func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) {
+	allowDirectProviderSecrets := b.directProviderSecretsAllowed(task)
+	allowDirectSecretMounts := b.directSecretMountsAllowed(task)
+
 	// Add provider secret (mounted as environment variable source)
-	if provider != nil {
+	if allowDirectProviderSecrets && provider != nil {
 		secretName := provider.Spec.SecretRef.Name
 		secretKey := provider.Spec.SecretRef.Key
 		if secretKey == "" {
@@ -689,7 +1060,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	// Add fallback provider secrets
-	if agent != nil && agent.Spec.Model != nil {
+	if allowDirectProviderSecrets && agentHasFallbackProviders(agent) {
 		for i, fb := range agent.Spec.Model.Fallbacks {
 			fbProvider := &corev1alpha1.Provider{}
 			if err := b.Get(ctx, client.ObjectKey{
@@ -722,7 +1093,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	// Add task secret
-	if task.Spec.SecretRef != nil {
+	if allowDirectSecretMounts && task.Spec.SecretRef != nil {
 		secretName := task.Spec.SecretRef.Name
 		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 			Name: "task-secrets",
@@ -743,7 +1114,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	// Add agent secret
-	if agent != nil && agent.Spec.SecretRef != nil {
+	if allowDirectSecretMounts && agent != nil && agent.Spec.SecretRef != nil {
 		secretName := agent.Spec.SecretRef.Name
 		// Inject all secret keys as environment variables
 		job.Spec.Template.Spec.Containers[0].EnvFrom = append(
@@ -802,6 +1173,35 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 	transcriptURL := fmt.Sprintf("%s/internal/v1/sessions/%s/%s/transcript",
 		b.ControllerURL, task.Namespace, sessionName)
 
+	volumeMounts := []corev1.VolumeMount{
+		{
+			Name:      "session-data",
+			MountPath: "/session",
+		},
+	}
+	if !podShouldAutomountServiceAccountToken(task) {
+		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+			Name: "session-token",
+			VolumeSource: corev1.VolumeSource{
+				Projected: &corev1.ProjectedVolumeSource{
+					Sources: []corev1.VolumeProjection{
+						{
+							ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+								Path:              "token",
+								ExpirationSeconds: new(int64(3600)),
+							},
+						},
+					},
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "session-token",
+			MountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
+			ReadOnly:  true,
+		})
+	}
+
 	// Add init container that fetches the transcript via HTTP
 	initContainer := corev1.Container{
 		Name:            "fetch-session",
@@ -814,12 +1214,7 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 				`touch /session/transcript.jsonl`,
 			transcriptURL,
 		)},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "session-data",
-				MountPath: "/session",
-			},
-		},
+		VolumeMounts: volumeMounts,
 	}
 
 	job.Spec.Template.Spec.InitContainers = append(job.Spec.Template.Spec.InitContainers, initContainer)
@@ -846,6 +1241,38 @@ func (b *JobBuilder) getAgentWorkerImage(agent *corev1alpha1.Agent) string {
 	default:
 		return b.ClaudeWorkerImage
 	}
+}
+
+func setControllerEnv(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {
+	if value == "" {
+		return removeControllerEnv(envVars, name)
+	}
+	out := make([]corev1.EnvVar, 0, len(envVars)+1)
+	set := false
+	for _, envVar := range envVars {
+		if envVar.Name != name {
+			out = append(out, envVar)
+			continue
+		}
+		if !set {
+			out = append(out, corev1.EnvVar{Name: name, Value: value})
+			set = true
+		}
+	}
+	if !set {
+		out = append(out, corev1.EnvVar{Name: name, Value: value})
+	}
+	return out
+}
+
+func removeControllerEnv(envVars []corev1.EnvVar, name string) []corev1.EnvVar {
+	out := make([]corev1.EnvVar, 0, len(envVars))
+	for _, envVar := range envVars {
+		if envVar.Name != name {
+			out = append(out, envVar)
+		}
+	}
+	return out
 }
 
 func envVarExists(envVars []corev1.EnvVar, name string) bool {
@@ -1108,14 +1535,16 @@ func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Ta
 				},
 			},
 		})
-		job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
-			job.Spec.Template.Spec.Containers[0].VolumeMounts,
-			corev1.VolumeMount{
-				Name:      "git-credentials",
-				MountPath: "/secrets/git",
-				ReadOnly:  true,
-			},
-		)
+		if b.directGitCredentialsAllowed(task) {
+			job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
+				job.Spec.Template.Spec.Containers[0].VolumeMounts,
+				corev1.VolumeMount{
+					Name:      "git-credentials",
+					MountPath: "/secrets/git",
+					ReadOnly:  true,
+				},
+			)
+		}
 	}
 }
 

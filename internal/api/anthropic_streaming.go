@@ -55,6 +55,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 		copy(messages, capturedReq.Messages)
 		totalOutputTokens := 0
 		repetitionTracker := make(map[string]int)
+		exposedToolNames := completionToolNameSet(capturedReq.Tools)
 
 		for iteration := 0; iteration < h.config.MaxIterations; iteration++ {
 			// Check context cancellation
@@ -245,7 +246,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 					iteration += 5
 				}
 
-				result := executeToolCall(streamCtx, tc, h.config.ToolTimeout, toolCtx)
+				result := executeExposedToolCall(streamCtx, tc, h.config.ToolTimeout, toolCtx, exposedToolNames)
 
 				// Emit tool result as a text content block so the user sees what happened
 				resultPreview := result
@@ -305,7 +306,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 					// Remove the old tool results from messages (last len(toolCalls) messages)
 					messages = messages[:len(messages)-len(toolCalls)]
 					for _, tc := range toolCalls {
-						result := executeToolCall(streamCtx, tc, h.config.ToolTimeout, toolCtx)
+						result := executeExposedToolCall(streamCtx, tc, h.config.ToolTimeout, toolCtx, exposedToolNames)
 						messages = append(messages, llm.Message{
 							Role:       "tool",
 							ToolCallID: tc.ID,

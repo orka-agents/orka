@@ -15,16 +15,18 @@ import (
 	"net/http"
 	neturl "net/url"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 	"time"
-
-	"github.com/sozercan/orka/internal/workerenv"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/contexttoken"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 // ToolExecutor handles execution of custom Tool CRDs via HTTP
@@ -33,6 +35,10 @@ type ToolExecutor struct {
 	secretPath string
 	namespace  string
 	k8sClient  kubernetes.Interface
+
+	ttsMu        sync.Mutex
+	ttsClient    *contexttoken.KontxtTTSClient
+	ttsClientKey string
 }
 
 // NewToolExecutor creates a new tool executor
@@ -140,6 +146,16 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 	if authInject == "header" && authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+authToken)
 	}
+	transactionToken, err := e.outboundTransactionToken(ctx, tool)
+	if err != nil {
+		return "", err
+	}
+	if transactionToken != "" {
+		if values, ok := req.Header[http.CanonicalHeaderKey(contexttoken.HeaderName)]; ok && len(values) > 0 {
+			return "", fmt.Errorf("tool configured reserved header %q while transaction token propagation is enabled", contexttoken.HeaderName)
+		}
+		req.Header.Set(contexttoken.HeaderName, transactionToken)
+	}
 
 	// Configure timeout
 	httpClient := e.client
@@ -162,10 +178,22 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 
 	// Check for HTTP errors
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("tool returned HTTP %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("tool returned HTTP %d: %s", resp.StatusCode, redactToolHTTPErrorBody(string(respBody), authToken, transactionToken))
 	}
 
 	return string(respBody), nil
+}
+
+func redactToolHTTPErrorBody(body string, secrets ...string) string {
+	redacted := body
+	for _, secret := range secrets {
+		secret = strings.TrimSpace(secret)
+		if secret == "" {
+			continue
+		}
+		redacted = strings.ReplaceAll(redacted, secret, "[REDACTED]")
+	}
+	return redacted
 }
 
 // getSecretKey reads a key from a secret (mounted path or Kubernetes API)
@@ -195,4 +223,150 @@ func (e *ToolExecutor) getSecretKey(ctx context.Context, secretName, key string)
 	}
 
 	return "", fmt.Errorf("secret %s/%s not found", secretName, key)
+}
+
+func (e *ToolExecutor) outboundTransactionToken(ctx context.Context, tool *corev1alpha1.Tool) (string, error) {
+	ttsURL := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSURL))
+	if ttsURL == "" {
+		return existingTransactionToken()
+	}
+	ttsConfig, err := contexttoken.NewTTSConfig(
+		ttsURL,
+		os.Getenv(workerenv.ContextTokenTTSAudience),
+		os.Getenv(workerenv.ContextTokenTTSTimeout),
+		os.Getenv(workerenv.ContextTokenTTSTokenSource),
+		"",
+		os.Getenv(workerenv.ContextTokenToolTokenTTL),
+	)
+	if err != nil {
+		return "", err
+	}
+	if !ttsConfig.Enabled() {
+		return existingTransactionToken()
+	}
+	subjectToken, err := outboundTTSSubjectToken(ttsConfig.TokenSource)
+	if err != nil {
+		return "", err
+	}
+	scope := strings.TrimSpace(os.Getenv(workerenv.ContextTokenOutboundScope))
+	if scope == "" {
+		scope = strings.TrimSpace(os.Getenv(workerenv.TransactionScope))
+	}
+	if scope == "" {
+		return "", fmt.Errorf("%s or %s is required when %s is set", workerenv.ContextTokenOutboundScope, workerenv.TransactionScope, workerenv.ContextTokenTTSURL)
+	}
+	if err := validateOutboundTransactionScope(scope); err != nil {
+		return "", err
+	}
+	subjectTokenType := strings.TrimSpace(os.Getenv(workerenv.ContextTokenSubjectTokenType))
+	if subjectTokenType == "" {
+		subjectTokenType = contexttoken.SubjectTokenTypeForSource(ttsConfig.TokenSource)
+	}
+	requestDetails := map[string]any{
+		"operation": "httpTool",
+		"tool":      tool.Name,
+		"namespace": e.namespace,
+	}
+	if taskName := strings.TrimSpace(os.Getenv(workerenv.TaskName)); taskName != "" {
+		requestDetails["task"] = taskName
+	}
+	ttsClient, err := e.outboundTTSClient(ttsConfig)
+	if err != nil {
+		return "", err
+	}
+	token, err := ttsClient.Exchange(ctx, contexttoken.ExchangeRequest{
+		SubjectToken:     subjectToken,
+		SubjectTokenType: subjectTokenType,
+		Scope:            scope,
+		RequestedTTL:     ttsConfig.ToolTokenTTL,
+		RequestDetails:   requestDetails,
+	})
+	if err != nil {
+		return "", fmt.Errorf("token exchange failed: %w", err)
+	}
+	return token, nil
+}
+
+func existingTransactionToken() (string, error) {
+	if token, ok, err := workerenv.ReadTokenFileEnv(workerenv.TransactionTokenFile, "transaction token"); ok || err != nil {
+		return token, err
+	}
+	return "", nil
+}
+
+func validateOutboundTransactionScope(scope string) error {
+	requested := strings.Fields(scope)
+	if len(requested) == 0 {
+		return fmt.Errorf("outbound transaction scope is required")
+	}
+	parentScope := strings.TrimSpace(os.Getenv(workerenv.TransactionScopes))
+	if parentScope == "" {
+		parentScope = strings.TrimSpace(os.Getenv(workerenv.TransactionScope))
+	}
+	parent := strings.Fields(parentScope)
+	if len(parent) == 0 {
+		return fmt.Errorf("parent transaction scopes are required for outbound token exchange")
+	}
+	for _, child := range requested {
+		if !slices.Contains(parent, child) {
+			return fmt.Errorf("outbound transaction scope %q is not present in parent transaction scopes", child)
+		}
+	}
+	return nil
+}
+
+func outboundTTSSubjectToken(tokenSource string) (string, error) {
+	switch tokenSource {
+	case contexttoken.TTSTokenSourceIncoming:
+		if token, ok, err := workerenv.ReadTokenFileEnv(workerenv.ContextTokenSubjectTokenFile, "context token subject token"); ok || err != nil {
+			return token, err
+		}
+		if token, ok, err := workerenv.ReadTokenFileEnv(workerenv.TransactionTokenFile, "transaction token"); ok || err != nil {
+			return token, err
+		}
+		return "", fmt.Errorf("%s or %s is required when %s uses %q", workerenv.ContextTokenSubjectTokenFile, workerenv.TransactionTokenFile, workerenv.ContextTokenTTSTokenSource, tokenSource)
+	case contexttoken.TTSTokenSourceServiceAccount:
+		return serviceAccountSubjectToken()
+	case contexttoken.TTSTokenSourceNone:
+		return "", fmt.Errorf("context token TTS token source %q does not provide a subject token", tokenSource)
+	default:
+		return "", fmt.Errorf("unsupported context token TTS token source %q", tokenSource)
+	}
+}
+
+func serviceAccountSubjectToken() (string, error) {
+	if token := strings.TrimSpace(os.Getenv(workerenv.ServiceAccountToken)); token != "" {
+		return token, nil
+	}
+	return workerenv.ReadTokenFile(workerenv.ServiceAccountTokenFile, "service account token")
+}
+
+func (e *ToolExecutor) outboundTTSClient(cfg contexttoken.TTSConfig) (*contexttoken.KontxtTTSClient, error) {
+	key := outboundTTSClientKey(cfg)
+
+	e.ttsMu.Lock()
+	defer e.ttsMu.Unlock()
+
+	if e.ttsClient != nil && e.ttsClientKey == key {
+		return e.ttsClient, nil
+	}
+
+	ttsClient, err := contexttoken.NewKontxtTTSClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	e.ttsClient = ttsClient
+	e.ttsClientKey = key
+	return ttsClient, nil
+}
+
+func outboundTTSClientKey(cfg contexttoken.TTSConfig) string {
+	return strings.Join([]string{
+		strings.TrimRight(strings.TrimSpace(cfg.URL), "/"),
+		strings.TrimSpace(cfg.Audience),
+		cfg.Timeout.String(),
+		strings.TrimSpace(cfg.TokenSource),
+		cfg.ChildTokenTTL.String(),
+		cfg.ToolTokenTTL.String(),
+	}, "\x00")
 }

@@ -39,8 +39,7 @@ func SubmitResult(result []byte) error {
 		return err
 	}
 
-	token, _ := os.ReadFile(saTokenPath)
-	saToken := strings.TrimSpace(string(token))
+	saToken := workerServiceAccountToken()
 
 	var lastErr error
 	for attempt := range maxRetries {
@@ -90,17 +89,35 @@ func resultEndpoint() (string, error) {
 	return fmt.Sprintf("%s/internal/v1/results/%s/%s", controllerURL, namespace, taskName), nil
 }
 
+func workerServiceAccountToken() string {
+	if path := strings.TrimSpace(os.Getenv(workerenv.ServiceAccountTokenPath)); path != "" {
+		if token, err := os.ReadFile(path); err == nil {
+			return strings.TrimSpace(string(token))
+		}
+	}
+
+	if token, err := os.ReadFile(saTokenPath); err == nil {
+		return strings.TrimSpace(string(token))
+	}
+
+	return strings.TrimSpace(os.Getenv(workerenv.ServiceAccountToken))
+}
+
 func doPost(endpoint string, data []byte, saToken string) error {
+	return doPostOnceWithContentType(endpoint, data, saToken, "application/octet-stream", 30*time.Second)
+}
+
+func doPostOnceWithContentType(endpoint string, data []byte, saToken, contentType string, timeout time.Duration) error {
 	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Content-Type", contentType)
 	if saToken != "" {
 		req.Header.Set("Authorization", "Bearer "+saToken)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w", err)

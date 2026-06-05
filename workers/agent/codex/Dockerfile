@@ -12,8 +12,9 @@ RUN go mod download
 # Copy source
 COPY . .
 
-# Build the worker
+# Build the worker and workspace daemon
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o worker ./workers/agent/codex
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o orka-workspace-agent ./cmd/orka-workspace-agent
 
 # Runtime stage — Node.js required for Codex CLI
 FROM node:22-slim
@@ -27,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     build-essential \
     pkg-config \
+    libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
 # Reuse the current Go toolchain from the builder image so runtime validation
@@ -47,14 +49,18 @@ RUN npm install -g @openai/codex \
 RUN printf '#!/bin/sh\necho "$GIT_TOKEN"\n' > /bin/echo-token \
     && chmod +x /bin/echo-token
 
-# Copy the Go worker binary
+# Copy the Go worker binaries
 COPY --from=builder /workspace/worker /worker
+COPY --from=builder /workspace/orka-workspace-agent /orka-workspace-agent
+
+RUN setcap 'cap_net_bind_service=+ep' /orka-workspace-agent \
+    && apt-get purge -y --auto-remove libcap2-bin
 
 # Create writable directories for readOnlyRootFilesystem compatibility
 # node:22-slim already has uid 1000 as the 'node' user
-RUN mkdir -p /workspace /home/node /tmp \
+RUN mkdir -p /app /workspace /home/node /tmp \
     && ln -s /home/node /home/worker \
-    && chown -R 1000:1000 /workspace /home/node /tmp
+    && chown -R 1000:1000 /app /workspace /home/node /tmp
 
 USER 1000:1000
 ENV HOME=/home/worker

@@ -4,11 +4,11 @@ slug: /api-reference
 
 # API Reference
 
-The controller exposes a REST API for programmatic access. All `/api/v1/*` endpoints require authentication. By default Orka accepts Kubernetes ServiceAccount bearer tokens; when OIDC is configured, external callers can use a valid OIDC JWT instead.
+The controller exposes a REST API for programmatic access. All `/api/v1/*` endpoints require authentication. By default Orka accepts Kubernetes ServiceAccount bearer tokens; when configured, external callers can use a valid OIDC JWT or generic context token instead.
 
 ## Authentication
 
-Send credentials with the standard bearer token header:
+Send Kubernetes ServiceAccount and OIDC credentials with the standard bearer token header:
 
 ```http
 Authorization: Bearer <token>
@@ -18,8 +18,13 @@ Authentication modes:
 
 - **Kubernetes ServiceAccount token** — default mode. Tokens are validated with the Kubernetes TokenReview API.
 - **OIDC JWT** — enabled when the controller is configured with `--oidc-issuer` and `--oidc-audience` (or `ORKA_OIDC_ISSUER` / `ORKA_OIDC_AUDIENCE`). Tokens are validated against the issuer, audience, expiration, and RS256 signature. If `--oidc-jwks-url` is omitted, Orka discovers the JWKS URL from the issuer metadata.
+- **Context token / `kontxt` TxToken** — enabled with `--context-token-profile=kontxt`, `--context-token-issuer`, and `--context-token-audience` (or the matching `ORKA_CONTEXT_TOKEN_*` env vars). The built-in profile validates RS256 TxTokens with `typ: txntoken+jwt`, issuer/audience/time claims, `kid`, and required `iat`, `txn`, `scope`, and `req_wl` claims. By default tokens are read from the raw `Txn-Token` header; `Authorization: Bearer` support is opt-in with `--context-token-headers=Txn-Token,Authorization:Bearer`.
 
-When a Task is created through OIDC authentication, Orka stamps the verified caller identity into `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Clients cannot provide or override `requestedBy`; requests containing top-level `requestedBy` or nested `spec.requestedBy` are rejected with `400`.
+```http
+Txn-Token: <txntoken+jwt>
+```
+
+When a Task is created through OIDC or context-token authentication, Orka stamps the verified caller identity into immutable `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Context-token Task creation also stamps immutable `spec.transaction` plus transaction labels/annotations for audit correlation. Clients cannot provide or override `requestedBy` or `transaction`; requests containing top-level or nested `spec.requestedBy`/`spec.transaction` are rejected with `400`. See [Kontxt TxToken integration](../concepts/kontxt.md) for scope/`tctx` authorization, TTS exchange, delegation, and audit behavior.
 
 ## Tasks
 
@@ -35,6 +40,20 @@ When a Task is created through OIDC authentication, Orka stamps the verified cal
 | `/api/v1/tasks/:id/artifacts/:filename` | GET | Download a task artifact |
 | `/api/v1/tasks/:id/plan` | GET | Get task plan |
 | `/api/v1/tasks/:id/children` | GET | Get child tasks |
+
+### Task Execution Workspace Schema
+
+`POST /api/v1/tasks` accepts the Task CRD shape. Agent Tasks may include `spec.execution.workspace` to request experimental workspace-backed execution through an upstream `agent-sandbox` installation. The controller validates the request, resolves/defaults the effective `SandboxTemplate` and workspace settings, and injects the resolved settings into the outer Kubernetes worker Job. The agent worker wrapper then claims and executes inside the sandbox workspace.
+
+| Path | Type | Values/default | Notes |
+|------|------|----------------|-------|
+| `spec.execution.workspace.enabled` | boolean | default `false` | Enables workspace-backed execution for an agent Task. The controller rejects enabled requests unless agent sandbox support is enabled. |
+| `spec.execution.workspace.templateRef.name` | string | controller default template, if configured | Workspace template name. Required when `enabled: true` and no controller default template is configured. |
+| `spec.execution.workspace.templateRef.namespace` | string | Task namespace | Namespace containing the workspace template in Orka metadata. Current SDK-backed execution creates claims in the Task namespace and requires the template to be usable there. |
+| `spec.execution.workspace.reusePolicy` | string | `none`; allowed `none`, `session` | `session` derives the reuse key from `spec.sessionRef.name` and requires that field to be set. Automatic cross-Job reattach is limited until Orka persists sandbox claim identity. |
+| `spec.execution.workspace.cleanupPolicy` | string | controller default cleanup policy; allowed `delete`, `retain` | Cleanup behavior after the sandbox command exits. |
+
+Workspace requests are only valid on `spec.type: agent` Tasks. See [Agent Sandbox Workspaces](../concepts/agent-sandbox.md) for configuration, validation rules, live smoke-test steps, and current limitations.
 
 ### Get Task Plan
 

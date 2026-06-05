@@ -170,34 +170,43 @@ var _ = Describe("API Coverage", Ordered, func() {
 		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
+		By("waiting for the agent to be visible via API")
+		Eventually(func(g Gomega) {
+			req, err := http.NewRequest("GET", apiBaseURL+"/api/v1/agents/"+agentName, nil)
+			g.Expect(err).NotTo(HaveOccurred())
+			req.Header.Set("Authorization", "Bearer "+token)
+
+			resp, err := http.DefaultClient.Do(req)
+			g.Expect(err).NotTo(HaveOccurred())
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(resp.StatusCode).To(Equal(http.StatusOK), "GET /api/v1/agents/:name response body: %s", string(body))
+		}, 30*time.Second, time.Second).Should(Succeed())
+
 		By("updating the agent via PUT /api/v1/agents/" + agentName)
-		updateBody := fmt.Sprintf(`{
-			"metadata": {
-				"name": "%s",
-				"namespace": "%s"
-			},
-			"spec": {
-				"systemPrompt": {
-					"inline": "Updated prompt"
+		updateBytes, err := json.Marshal(map[string]any{
+			"spec": map[string]any{
+				"systemPrompt": map[string]any{
+					"inline": "Updated prompt",
 				},
-				"model": {
-					"name": "gpt-4o-mini"
-				}
-			}
-		}`, agentName, namespace)
-
-		req, err := http.NewRequest("PUT", apiBaseURL+"/api/v1/agents/"+agentName,
-			strings.NewReader(updateBody))
+				"model": map[string]any{
+					"name": "gpt-4o-mini",
+				},
+			},
+		})
 		Expect(err).NotTo(HaveOccurred())
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
 
-		client := &http.Client{Timeout: 30 * time.Second}
-		resp, err := client.Do(req)
+		body, statusCode, err := doAuthorizedJSONRequest(
+			http.MethodPut,
+			apiBaseURL+"/api/v1/agents/"+agentName,
+			token,
+			string(updateBytes),
+			"",
+		)
 		Expect(err).NotTo(HaveOccurred())
-		defer resp.Body.Close()
-		Expect(resp.StatusCode).To(BeElementOf(http.StatusOK, http.StatusNoContent),
-			"PUT /api/v1/agents/:name should return 200 or 204")
+		Expect(statusCode).To(BeElementOf(http.StatusOK, http.StatusNoContent),
+			"PUT /api/v1/agents/:name response body: %s", body)
 
 		By("verifying the agent was updated")
 		Eventually(func(g Gomega) {

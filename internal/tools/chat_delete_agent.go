@@ -51,6 +51,9 @@ func (t *ChatDeleteAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	if err := tc.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, agent); err != nil {
 		return classifyChatK8sErr(err)
 	}
+	if result, ok := authorizeAgentDelete(ctx, tc, agent); !ok {
+		return result, nil
+	}
 
 	if err := tc.Client.Delete(ctx, agent); err != nil {
 		return classifyChatK8sErr(err)

@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -251,6 +252,18 @@ func executeToolCall(ctx context.Context, tc llm.ToolCall, timeout time.Duration
 	return result
 }
 
+func executeExposedToolCall(ctx context.Context, tc llm.ToolCall, timeout time.Duration, toolCtxOpt *tools.ToolContext, exposedToolNames map[string]struct{}) string {
+	name := strings.TrimSpace(tc.Name)
+	if _, ok := exposedToolNames[name]; !ok {
+		errResult, _ := json.Marshal(map[string]any{
+			"success": false,
+			"error":   fmt.Sprintf("tool %q is not available in this request", tc.Name),
+		})
+		return string(errResult)
+	}
+	return executeToolCall(ctx, tc, timeout, toolCtxOpt)
+}
+
 // runNonStreamingToolLoop runs the agentic tool loop using non-streaming Complete() calls.
 // It loops until the LLM produces a response with no tool calls, or limits are reached.
 // Returns the final CompletionResponse and all intermediate content blocks.
@@ -263,6 +276,7 @@ func runNonStreamingToolLoop(
 	toolCtx *tools.ToolContext,
 ) (*llm.CompletionResponse, error) {
 	repetitionTracker := make(map[string]int)
+	exposedToolNames := completionToolNameSet(req.Tools)
 	messages := make([]llm.Message, len(req.Messages))
 	copy(messages, req.Messages)
 
@@ -365,7 +379,7 @@ func runNonStreamingToolLoop(
 				iteration += 5
 			}
 
-			result := executeToolCall(ctx, tc, config.ToolTimeout, toolCtx)
+			result := executeExposedToolCall(ctx, tc, config.ToolTimeout, toolCtx, exposedToolNames)
 
 			messages = append(messages, llm.Message{
 				Role:       "tool",
@@ -396,7 +410,7 @@ func runNonStreamingToolLoop(
 				allStillRunning := true
 				messages = messages[:len(messages)-len(resp.ToolCalls)]
 				for _, tc := range resp.ToolCalls {
-					result := executeToolCall(ctx, tc, config.ToolTimeout, toolCtx)
+					result := executeExposedToolCall(ctx, tc, config.ToolTimeout, toolCtx, exposedToolNames)
 					messages = append(messages, llm.Message{
 						Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: result,
 					})

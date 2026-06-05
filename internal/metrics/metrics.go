@@ -38,6 +38,40 @@ var (
 		},
 		[]string{"skill", "namespace"},
 	)
+
+	// Context-token metrics
+	ContextTokenAuthTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_context_token_auth_total",
+			Help: "Total context-token authentication attempts by profile and result",
+		},
+		[]string{"profile", "result"},
+	)
+
+	ContextTokenAuthorizationTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_context_token_authorization_total",
+			Help: "Total context-token authorization decisions by action, result, and low-cardinality reason",
+		},
+		[]string{"action", "result", "reason"},
+	)
+
+	ContextTokenTTSExchangeTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_context_token_tts_exchange_total",
+			Help: "Total context-token TTS exchange attempts by result and low-cardinality reason",
+		},
+		[]string{"result", "reason"},
+	)
+
+	ContextTokenTTSExchangeDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_context_token_tts_exchange_duration_seconds",
+			Help:    "Context-token TTS exchange latency in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"result", "reason"},
+	)
 )
 
 func init() {
@@ -45,6 +79,10 @@ func init() {
 		APIRequestsTotal,
 		APIRequestDuration,
 		SkillsLoaded,
+		ContextTokenAuthTotal,
+		ContextTokenAuthorizationTotal,
+		ContextTokenTTSExchangeTotal,
+		ContextTokenTTSExchangeDuration,
 	)
 }
 
@@ -58,4 +96,33 @@ func RecordAPIRequest(endpoint, method string, status int, durationSeconds float
 	}
 	APIRequestsTotal.WithLabelValues(endpoint, method, statusStr).Inc()
 	APIRequestDuration.WithLabelValues(endpoint, method).Observe(durationSeconds)
+}
+
+// RecordContextTokenAuth records a context-token authentication attempt.
+func RecordContextTokenAuth(profile, result string) {
+	ContextTokenAuthTotal.WithLabelValues(normalizeMetricLabel(profile), normalizeMetricLabel(result)).Inc()
+}
+
+// RecordContextTokenAuthorization records a context-token authorization decision.
+func RecordContextTokenAuthorization(action, result, reason string) {
+	ContextTokenAuthorizationTotal.WithLabelValues(
+		normalizeMetricLabel(action),
+		normalizeMetricLabel(result),
+		normalizeMetricLabel(reason),
+	).Inc()
+}
+
+// RecordContextTokenTTSExchange records a kontxt TTS token exchange attempt.
+func RecordContextTokenTTSExchange(result, reason string, durationSeconds float64) {
+	result = normalizeMetricLabel(result)
+	reason = normalizeMetricLabel(reason)
+	ContextTokenTTSExchangeTotal.WithLabelValues(result, reason).Inc()
+	ContextTokenTTSExchangeDuration.WithLabelValues(result, reason).Observe(durationSeconds)
+}
+
+func normalizeMetricLabel(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }

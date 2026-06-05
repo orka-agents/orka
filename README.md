@@ -45,16 +45,18 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 ## Features
 
 - 🤖 **AI Agents** — Anthropic, OpenAI, or Azure OpenAI with tools, skills, and session persistence
-- 🛠️ **Agent Runtimes** — Delegate to Codex CLI, Claude Code CLI, or GitHub Copilot CLI for full autonomous coding
+- 🛠️ **Agent Runtimes** — Delegate repo-backed coding tasks to Codex CLI, Claude Code CLI, or GitHub Copilot CLI
+- 🔁 **Autonomous Task Loops** — Coordinators can iterate on long-running goals until complete, canceled, or at an iteration limit
 - 🔀 **Multi-Agent Coordination** — Coordinators delegate to specialists with depth and concurrency controls
 - 💬 **Interactive Chat** — Agentic orchestrator with SSE streaming that creates and manages agents and tasks for you
-- 🧠 **Durable Memory** — Namespace-scoped recall, transcript search, and reviewable memory proposals for coordinated agents
+- 🧠 **Durable Memory** — Namespace-scoped recall, transcript search, and reviewable memory proposals that can be applied
 - 🛡️ **Repository Security Scanning** — Scheduled and incremental repository scans with threat models, validated findings, patch generation, and remediation PRs
+- 🧰 **Agent Sandbox Workspaces** — Experimental durable, reusable coding workspaces through `agent-sandbox`
 - 🖥️ **Web Dashboard** — Built-in React UI embedded in the controller binary — zero extra deployments
 - 📦 **Declarative CRDs** — Task, Agent, Tool, Provider, and Skill custom resources for GitOps workflows
 - ⏰ **Scheduled Tasks** — Cron-based recurring execution with concurrency policies
 - 🔌 **REST & OpenAI-Compatible API** — Full CRUD + `/openai/v1/chat/completions` endpoint for Continue, Cursor, and any OpenAI-compatible client
-- 🔐 **Kubernetes & OIDC API Auth** — ServiceAccount bearer tokens by default, optional OIDC JWT validation for external callers, and verified requester stamping on Tasks
+- 🔐 **Kubernetes, OIDC & Kontxt TxToken Auth** — ServiceAccount tokens by default, with optional OIDC and scoped `kontxt` transaction-token flows
 - 🔮 **Anthropic-Compatible API** — `/anthropic/v1/messages` endpoint for Claude Code and other Anthropic-native clients
 - 📊 **Observability** — Prometheus metrics, structured logging, health probes
 - 🔒 **Hardened by Default** — Non-root containers, read-only rootfs, ServiceAccount token auth
@@ -110,14 +112,18 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Architecture](website/docs/concepts/architecture.md)                         | System design, components, and data flow              |
 | [Configuration](website/docs/concepts/configuration.md)                       | CRD reference, Helm values, controller flags, metrics |
 | [Agent Runtimes](website/docs/concepts/agent-runtimes.md)                     | Codex CLI, Claude Code CLI, and Copilot CLI runtimes  |
+| [Agent Sandbox](website/docs/concepts/agent-sandbox.md)                       | Experimental upstream `agent-sandbox` workspace execution for agent runtimes |
 | [Interactive Chat](website/docs/guides/chat.md)                             | Chat endpoint, tools, and SSE streaming               |
 | [Multi-Agent Coordination](website/docs/guides/multi-agent-coordination.md) | Coordinator agents and task delegation                |
+| [Autonomous Tasks](website/docs/guides/autonomous-tasks.md)                 | Long-running coordinator loops with persisted plan state |
 | [Memory](website/docs/concepts/memory.md)                                   | Durable memory, proposals, transcript search, and validation |
 | [API Reference](website/docs/reference/api-reference.md)                       | REST API endpoints and usage examples                 |
 | [OpenAI Compatibility](website/docs/reference/openai-compat.md)                | OpenAI-compatible chat completions API                |
 | [Anthropic Compatibility](website/docs/reference/anthropic-compat.md)          | Anthropic-compatible Messages API                     |
 | [Web Dashboard](website/docs/guides/ui.md)                                  | Frontend architecture and pages                       |
 | [Security](website/docs/concepts/security.md)                                 | Security model and hardening                          |
+| [Kontxt Quickstart](website/docs/guides/kontxt-quickstart.md)               | Use OIDC identity to call Orka without long-lived tokens |
+| [Kontxt TxToken Integration](website/docs/concepts/kontxt.md)                 | TxToken verification, authorization, TTS, and audit guidance |
 | [Repository Security Scanning](website/docs/guides/repository-security-scanning.md) | Repository scan workflow, threat models, findings, and remediation |
 | [Development](website/docs/development/development.md)                           | Building, testing, and contributing                   |
 | [Testing](website/docs/development/testing.md)                                   | Test structure, patterns, and commands                |

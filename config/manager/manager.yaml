@@ -73,6 +73,20 @@ spec:
           - --codex-worker-image=ghcr.io/sozercan/orka/agent-worker-codex:latest
           - --codex-sandbox-mode=danger-full-access
           - --general-worker-image=ghcr.io/sozercan/orka/general-worker:latest
+          - --execution-workspace-default-provider=agent-sandbox
+          - --agent-sandbox-enabled=false
+          - --agent-sandbox-warm-pool-policy=disabled
+          - --agent-sandbox-namespace-strategy=task
+          - --agent-sandbox-claim-timeout=2m
+          - --agent-sandbox-command-timeout=30m
+          - --agent-sandbox-cleanup-policy=delete
+          - --substrate-enabled=false
+          - --substrate-api-endpoint=api.ate-system.svc:443
+          - --substrate-router-url=http://atenet-router.ate-system.svc
+          - --substrate-actor-dns-suffix=actors.resources.substrate.ate.dev
+          - --substrate-claim-timeout=2m
+          - --substrate-command-timeout=30m
+          - --substrate-cleanup-policy=delete
         image: controller:latest
         imagePullPolicy: IfNotPresent
         name: manager

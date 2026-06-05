@@ -35,6 +35,59 @@ func setupTestApp(c client.Client) *fiber.App {
 	return app
 }
 
+func TestNewAuthMiddleware_OIDCPreservesServiceAccountFallback(t *testing.T) {
+	// Clear cache to avoid interference.
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	provider := newTestOIDCProvider(t)
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	const serviceAccountToken = "valid-service-account-token-for-oidc-fallback"
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
+					if tr.Spec.Token != serviceAccountToken {
+						t.Fatalf("TokenReview token = %q, want %q", tr.Spec.Token, serviceAccountToken)
+					}
+					tr.Status.Authenticated = true
+					tr.Status.User = authenticationv1.UserInfo{
+						Username: "system:serviceaccount:test-ns:test-sa",
+						UID:      "uid-fallback",
+						Groups:   []string{"system:serviceaccounts", "system:serviceaccounts:test-ns"},
+					}
+				}
+				return nil
+			},
+		}).
+		Build()
+
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{OIDC: provider.config()}))
+	app.Get("/test", func(ctx fiber.Ctx) error {
+		userInfo := GetUserInfo(ctx)
+		if userInfo == nil || userInfo.AuthType != AuthTypeTokenReview || userInfo.Namespace != testNamespace {
+			return fiber.NewError(fiber.StatusInternalServerError, "unexpected user info")
+		}
+		return ctx.SendString("OK")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set(AuthHeader, "Bearer "+serviceAccountToken)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
 func TestNewAuthMiddleware_MissingAuthHeader(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = authenticationv1.AddToScheme(scheme)
@@ -500,6 +553,72 @@ func TestNewAuthMiddleware_OIDCInvalidTokenFallsBackToTokenReview(t *testing.T) 
 	}
 	if capturedUserInfo.Namespace != "ns1" {
 		t.Fatalf("Namespace = %q, want ns1", capturedUserInfo.Namespace)
+	}
+}
+
+func TestNewAuthMiddleware_MalformedConfiguredNonAuthorizationContextTokenHeaderPreservesBearerFallback(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "X-Kontxt:Bearer")
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	const serviceAccountToken = "context-token-header-fallback-service-account-token"
+	var tokenSeen string
+	createCalls := 0
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
+					createCalls++
+					tokenSeen = tr.Spec.Token
+					if tr.Spec.Token == serviceAccountToken {
+						tr.Status.Authenticated = true
+						tr.Status.User = authenticationv1.UserInfo{
+							Username: "system:serviceaccount:ns1:fallback-sa",
+							UID:      "uid-context-token-header-fallback",
+							Groups:   []string{"system:serviceaccounts", "system:serviceaccounts:ns1"},
+						}
+					}
+				}
+				return nil
+			},
+		}).
+		Build()
+
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Get("/test", func(ctx fiber.Ctx) error {
+		userInfo := GetUserInfo(ctx)
+		if userInfo == nil || userInfo.AuthType != AuthTypeTokenReview {
+			return fiber.NewError(fiber.StatusInternalServerError, "unexpected user info")
+		}
+		return ctx.SendString("OK")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("X-Kontxt", "Basic malformed-context-token-header")
+	req.Header.Set("Authorization", "Bearer "+serviceAccountToken)
+
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if createCalls != 1 {
+		t.Fatalf("TokenReview Create calls = %d, want 1", createCalls)
+	}
+	if tokenSeen != serviceAccountToken {
+		t.Fatalf("TokenReview token = %q, want %q", tokenSeen, serviceAccountToken)
 	}
 }
 

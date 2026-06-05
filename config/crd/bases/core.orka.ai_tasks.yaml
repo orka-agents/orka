@@ -1364,6 +1364,60 @@ spec:
                           type: string
                       type: object
                     type: array
+                  workspace:
+                    description: |-
+                      Workspace requests an upstream agent-sandbox execution workspace for agent Tasks.
+                      When enabled, the Task controller validates the request and propagates the
+                      resolved sandbox settings to the agent worker Job. The worker wrapper then
+                      claims the sandbox workspace and runs the configured agent runtime inside it.
+                    properties:
+                      cleanupPolicy:
+                        description: |-
+                          CleanupPolicy controls whether the workspace is deleted or retained after use.
+                          Defaults to delete when omitted.
+                        enum:
+                        - delete
+                        - retain
+                        type: string
+                      enabled:
+                        default: false
+                        description: Enabled requests use of a durable workspace for
+                          the task execution.
+                        type: boolean
+                      provider:
+                        description: |-
+                          Provider selects the workspace backend. When omitted, the controller
+                          resolves the configured default workspace provider; the built-in
+                          compatibility default is agent-sandbox.
+                        enum:
+                        - agent-sandbox
+                        - substrate
+                        type: string
+                      reusePolicy:
+                        default: none
+                        description: |-
+                          ReusePolicy controls whether the workspace is fresh or session-scoped.
+                          Defaults to none when omitted.
+                        enum:
+                        - none
+                        - session
+                        type: string
+                      templateRef:
+                        description: |-
+                          TemplateRef references the workspace template to instantiate or reuse.
+                          The template name is required when enabled is true unless the controller
+                          is configured with a provider-specific default template.
+                        properties:
+                          name:
+                            description: Name is the name of the workspace template.
+                            type: string
+                          namespace:
+                            description: |-
+                              Namespace is the namespace of the workspace template and claim.
+                              It defaults to the Task namespace, or the controller namespace when configured.
+                            type: string
+                        type: object
+                    type: object
                 type: object
               failedRunsHistoryLimit:
                 default: 1
@@ -1403,31 +1457,31 @@ spec:
                 type: string
               requestedBy:
                 description: |-
-                  RequestedBy records the verified OIDC identity that created the task.
+                  RequestedBy records the verified identity that created the task.
                   This field is populated by the API server and is immutable.
                 properties:
                   email:
                     description: Email is the email claim, if present.
                     type: string
                   groups:
-                    description: Groups are the OIDC groups claim values, if present.
+                    description: Groups are verified group values, if present.
                     items:
                       type: string
                     type: array
                   issuer:
-                    description: Issuer is the OIDC issuer that authenticated the
+                    description: Issuer is the token issuer that authenticated the
                       requester.
                     type: string
                   roles:
-                    description: Roles are the OIDC roles claim values, if present.
+                    description: Roles are verified role or scope values, if present.
                     items:
                       type: string
                     type: array
                   subject:
-                    description: Subject is the OIDC subject claim.
+                    description: Subject is the verified subject claim.
                     type: string
                   username:
-                    description: Username is the preferred username claim, if present.
+                    description: Username is the verified username, if present.
                     type: string
                 type: object
               resources:
@@ -1578,6 +1632,58 @@ spec:
               timeout:
                 description: Timeout is the maximum duration for the task
                 type: string
+              transaction:
+                description: |-
+                  Transaction records verified transaction-token metadata for audit correlation.
+                  This field is populated by the API server and is immutable.
+                properties:
+                  audience:
+                    description: Audience lists the verified token audience values.
+                    items:
+                      type: string
+                    type: array
+                  context:
+                    additionalProperties:
+                      type: string
+                    description: Context contains allowlisted, non-sensitive transaction
+                      context fields for audit.
+                    type: object
+                  contextDigest:
+                    description: ContextDigest is a SHA256 digest of the full transaction
+                      context.
+                    type: string
+                  id:
+                    description: ID is the verified transaction identifier claim.
+                    type: string
+                  issuer:
+                    description: Issuer is the token issuer that authenticated the
+                      transaction.
+                    type: string
+                  profile:
+                    description: Profile is the context-token profile that authenticated
+                      the request.
+                    type: string
+                  requesterContextDigest:
+                    description: RequesterContextDigest is a SHA256 digest of the
+                      full requester context.
+                    type: string
+                  requestingWorkload:
+                    description: RequestingWorkload is the verified workload that
+                      requested the transaction.
+                    type: string
+                  scope:
+                    description: Scope is the original verified scope string.
+                    type: string
+                  scopes:
+                    description: Scopes lists parsed scope values from the verified
+                      scope string.
+                    items:
+                      type: string
+                    type: array
+                  subject:
+                    description: Subject is the verified subject claim.
+                    type: string
+                type: object
               type:
                 description: 'Type specifies the task type: "container" or "ai"'
                 enum:
@@ -1642,6 +1748,9 @@ spec:
             - message: requestedBy is immutable
               rule: has(self.requestedBy) == has(oldSelf.requestedBy) && (!has(self.requestedBy)
                 || self.requestedBy == oldSelf.requestedBy)
+            - message: transaction is immutable
+              rule: has(self.transaction) == has(oldSelf.transaction) && (!has(self.transaction)
+                || self.transaction == oldSelf.transaction)
           status:
             description: TaskStatus defines the observed state of Task
             properties:
@@ -1745,6 +1854,84 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              executionWorkspace:
+                description: |-
+                  ExecutionWorkspace reports the provider-neutral lifecycle state for a
+                  requested execution workspace. Provider-native identifiers and credentials
+                  are intentionally omitted.
+                properties:
+                  cleanupPolicy:
+                    description: CleanupPolicy is the resolved cleanup policy.
+                    enum:
+                    - delete
+                    - retain
+                    type: string
+                  lastUpdateTime:
+                    description: LastUpdateTime is the last time workspace status
+                      was updated.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message contains sanitized lifecycle context.
+                    type: string
+                  phase:
+                    description: Phase is the provider-neutral lifecycle phase.
+                    enum:
+                    - Pending
+                    - Ready
+                    - Released
+                    - Retained
+                    - Deleted
+                    - Failed
+                    type: string
+                  provider:
+                    description: Provider is the resolved workspace backend.
+                    enum:
+                    - agent-sandbox
+                    - substrate
+                    type: string
+                  reason:
+                    description: Reason is the provider-neutral lifecycle reason.
+                    enum:
+                    - WorkspacePending
+                    - WorkspaceClaimed
+                    - WorkspaceReady
+                    - WorkspaceReleased
+                    - WorkspaceRetained
+                    - WorkspaceDeleted
+                    - WorkspaceValidationFailed
+                    - WorkspaceAttachmentLocked
+                    - WorkspaceClaimFailed
+                    - WorkspaceReadinessFailed
+                    - WorkspaceHandoffFailed
+                    - WorkspaceCommandFailed
+                    - WorkspaceSecretScrubFailed
+                    - WorkspaceCleanupFailed
+                    - WorkspaceStatusUpdateFailed
+                    type: string
+                  reusePolicy:
+                    description: ReusePolicy is the resolved reuse policy.
+                    enum:
+                    - none
+                    - session
+                    type: string
+                  reused:
+                    description: Reused reports whether an existing workspace was
+                      reattached.
+                    type: boolean
+                  templateRef:
+                    description: TemplateRef is the resolved workspace template.
+                    properties:
+                      name:
+                        description: Name is the name of the workspace template.
+                        type: string
+                      namespace:
+                        description: |-
+                          Namespace is the namespace of the workspace template and claim.
+                          It defaults to the Task namespace, or the controller namespace when configured.
+                        type: string
+                    type: object
+                type: object
               iteration:
                 description: |-
                   Iteration is the current autonomous loop iteration (0-based).

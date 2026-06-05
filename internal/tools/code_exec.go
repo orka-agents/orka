@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"regexp"
@@ -63,7 +64,44 @@ var defaultDenyPatterns = []denyPattern{
 	{regexp.MustCompile(`:\(\)\s*\{.*\};\s*:`), "fork bomb"},
 }
 
-// CodeExecutor is the execution backend used by CodeExecTool.
+// SandboxClient is the sandbox abstraction used by CodeExecTool.
+//
+// The API intentionally avoids backend-specific types so Kubernetes, process,
+// or future sidecar-based sandboxes can be selected behind the same boundary.
+type SandboxClient interface {
+	Run(ctx context.Context, req SandboxRunRequest) SandboxRunResult
+}
+
+// SandboxRunRequest contains a validated sandbox execution request.
+type SandboxRunRequest struct {
+	Backend          string
+	Language         string
+	Code             string
+	Timeout          time.Duration
+	WorkDir          string
+	DenyPatterns     []denyPattern
+	OutputLimitBytes int64
+	ResourceAudit    map[string]string
+	Tenant           string
+	Provider         string
+	ProviderType     string
+	RunID            string
+	InputHash        string
+}
+
+// SandboxRunResult represents the sandbox execution result. Keep its fields
+// identical to CodeExecResult; conversion helpers rely on direct struct conversion.
+type SandboxRunResult struct {
+	Output          string `json:"output"`
+	Error           string `json:"error,omitempty"`
+	ExitCode        int    `json:"exit_code"`
+	TimedOut        bool   `json:"timed_out,omitempty"`
+	OutputTruncated bool   `json:"output_truncated,omitempty"`
+	ErrorTruncated  bool   `json:"error_truncated,omitempty"`
+}
+
+// CodeExecutor is the legacy execution backend interface. Prefer SandboxClient
+// for new call sites.
 type CodeExecutor interface {
 	Execute(ctx context.Context, req CodeExecutionRequest) CodeExecResult
 }
@@ -81,6 +119,8 @@ type CodeExecutionRequest struct {
 	Tenant           string
 	Provider         string
 	ProviderType     string
+	RunID            string
+	InputHash        string
 }
 
 // CodeExecTool implements code execution functionality.
@@ -89,6 +129,7 @@ type CodeExecTool struct {
 	timeout          time.Duration
 	allowedLangs     map[string]bool
 	denyPatterns     []denyPattern
+	sandboxClient    SandboxClient
 	executor         CodeExecutor
 	backend          string
 	outputLimitBytes int64
@@ -101,7 +142,8 @@ type CodeExecArgs struct {
 	Timeout  int    `json:"timeout,omitempty"` // Timeout in seconds
 }
 
-// CodeExecResult represents the execution result.
+// CodeExecResult represents the execution result. Keep its fields identical to
+// SandboxRunResult; conversion helpers rely on direct struct conversion.
 type CodeExecResult struct {
 	Output          string `json:"output"`
 	Error           string `json:"error,omitempty"`
@@ -118,6 +160,9 @@ type unsupportedCodeExecutor struct {
 	backend string
 }
 
+var _ SandboxClient = (*InProcessCodeExecutor)(nil)
+var _ SandboxClient = (*unsupportedCodeExecutor)(nil)
+
 // NewCodeExecTool creates a new code execution tool.
 func NewCodeExecTool() *CodeExecTool {
 	workDir := os.Getenv(workerenv.WorkDir)
@@ -132,6 +177,7 @@ func NewCodeExecTool() *CodeExecTool {
 		timeout:          defaultCodeExecTimeout,
 		allowedLangs:     defaultCodeExecAllowedLangs(),
 		denyPatterns:     defaultDenyPatterns,
+		sandboxClient:    sandboxClientFromCodeExecutor(executor),
 		executor:         executor,
 		backend:          backend,
 		outputLimitBytes: defaultCodeExecOutputLimitBytes,
@@ -153,6 +199,255 @@ func newCodeExecutorFromBackend(backend string) (CodeExecutor, string) {
 	default:
 		return &unsupportedCodeExecutor{backend: backend}, backend
 	}
+}
+
+func newSandboxClientFromBackend(backend string) (SandboxClient, string) {
+	executor, normalizedBackend := newCodeExecutorFromBackend(backend)
+	return sandboxClientFromCodeExecutor(executor), normalizedBackend
+}
+
+type codeExecutorSandboxClient struct {
+	executor CodeExecutor
+}
+
+func (c codeExecutorSandboxClient) Run(ctx context.Context, req SandboxRunRequest) SandboxRunResult {
+	if c.executor == nil {
+		return SandboxRunResult{Error: "code_exec sandbox client is not configured", ExitCode: -1}
+	}
+	return sandboxRunResultFromCodeExecResult(c.executor.Execute(ctx, codeExecutionRequestFromSandboxRunRequest(req)))
+}
+
+func sandboxClientFromCodeExecutor(executor CodeExecutor) SandboxClient {
+	if executor == nil {
+		return nil
+	}
+	if client, ok := executor.(SandboxClient); ok {
+		return client
+	}
+	return codeExecutorSandboxClient{executor: executor}
+}
+
+func sandboxRunRequestFromCodeExecutionRequest(req CodeExecutionRequest) SandboxRunRequest {
+	return SandboxRunRequest{
+		Backend:          req.Backend,
+		Language:         req.Language,
+		Code:             req.Code,
+		Timeout:          req.Timeout,
+		WorkDir:          req.WorkDir,
+		DenyPatterns:     append([]denyPattern(nil), req.DenyPatterns...),
+		OutputLimitBytes: req.OutputLimitBytes,
+		ResourceAudit:    cloneCodeExecResourceAudit(req.ResourceAudit),
+		Tenant:           req.Tenant,
+		Provider:         req.Provider,
+		ProviderType:     req.ProviderType,
+		RunID:            req.RunID,
+		InputHash:        req.InputHash,
+	}
+}
+
+func codeExecutionRequestFromSandboxRunRequest(req SandboxRunRequest) CodeExecutionRequest {
+	return CodeExecutionRequest{
+		Backend:          req.Backend,
+		Language:         req.Language,
+		Code:             req.Code,
+		Timeout:          req.Timeout,
+		WorkDir:          req.WorkDir,
+		DenyPatterns:     append([]denyPattern(nil), req.DenyPatterns...),
+		OutputLimitBytes: req.OutputLimitBytes,
+		ResourceAudit:    cloneCodeExecResourceAudit(req.ResourceAudit),
+		Tenant:           req.Tenant,
+		Provider:         req.Provider,
+		ProviderType:     req.ProviderType,
+		RunID:            req.RunID,
+		InputHash:        req.InputHash,
+	}
+}
+
+func sandboxRunResultFromCodeExecResult(result CodeExecResult) SandboxRunResult {
+	return SandboxRunResult(result)
+}
+
+func codeExecResultFromSandboxRunResult(result SandboxRunResult) CodeExecResult {
+	return CodeExecResult(result)
+}
+
+func cloneCodeExecResourceAudit(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	clone := make(map[string]string, len(values))
+	maps.Copy(clone, values)
+	return clone
+}
+
+const codeExecRequestIdentityVersion = "code_exec_request_identity_v1"
+
+func populateCodeExecRequestIdentity(ctx context.Context, req *CodeExecutionRequest) error {
+	if req == nil {
+		return nil
+	}
+	if err := populateCodeExecRequestResourceAudit(req); err != nil {
+		return err
+	}
+	ensureCodeExecRequestInputHash(req)
+	req.RunID = strings.TrimSpace(req.RunID)
+	if req.RunID == "" {
+		req.RunID = codeExecRunIDForRequest(ctx, *req)
+	}
+	return nil
+}
+
+func populateCodeExecRequestResourceAudit(req *CodeExecutionRequest) error {
+	if req == nil {
+		return nil
+	}
+	if len(req.ResourceAudit) > 0 {
+		req.ResourceAudit = normalizeCodeExecResourceAuditMap(req.ResourceAudit)
+		return nil
+	}
+
+	var (
+		resourceAudit map[string]string
+		err           error
+	)
+	switch normalizeCodeExecBackend(req.Backend) {
+	case codeExecBackendInProcess:
+		resourceAudit = codeExecLocalResourceAuditForRequest(*req)
+	case codeExecBackendKubernetes:
+		resourceAudit, err = codeExecKubernetesResourceAuditForRequest(*req)
+	}
+	if err != nil {
+		return err
+	}
+	req.ResourceAudit = normalizeCodeExecResourceAuditMap(resourceAudit)
+	return nil
+}
+
+type codeExecResourceAuditEntry struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+func normalizeCodeExecResourceAuditMap(values map[string]string) map[string]string {
+	entries := normalizedCodeExecResourceAudit(values)
+	if len(entries) == 0 {
+		return nil
+	}
+	normalized := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		normalized[entry.Key] = entry.Value
+	}
+	return normalized
+}
+
+func normalizedCodeExecResourceAudit(values map[string]string) []codeExecResourceAuditEntry {
+	if len(values) == 0 {
+		return nil
+	}
+	entries := make([]codeExecResourceAuditEntry, 0, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		entries = append(entries, codeExecResourceAuditEntry{
+			Key:   key,
+			Value: strings.TrimSpace(value),
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Key != entries[j].Key {
+			return entries[i].Key < entries[j].Key
+		}
+		return entries[i].Value < entries[j].Value
+	})
+	return entries
+}
+
+func ensureCodeExecRequestInputHash(req *CodeExecutionRequest) {
+	if req == nil {
+		return
+	}
+	req.InputHash = strings.TrimSpace(req.InputHash)
+	if req.InputHash == "" {
+		req.InputHash = codeExecInputHashForRequest(*req)
+	}
+}
+
+func codeExecInputHashForRequest(req CodeExecutionRequest) string {
+	payload := struct {
+		Version          string                       `json:"version"`
+		Backend          string                       `json:"backend"`
+		Language         string                       `json:"language"`
+		Code             string                       `json:"code"`
+		TimeoutMillis    int64                        `json:"timeout_ms"`
+		WorkDir          string                       `json:"work_dir"`
+		OutputLimitBytes int64                        `json:"output_limit_bytes"`
+		ResourceAudit    []codeExecResourceAuditEntry `json:"resource_audit,omitempty"`
+		Tenant           string                       `json:"tenant"`
+		Provider         string                       `json:"provider"`
+		ProviderType     string                       `json:"provider_type"`
+	}{
+		Version:          codeExecRequestIdentityVersion,
+		Backend:          strings.TrimSpace(req.Backend),
+		Language:         strings.ToLower(strings.TrimSpace(req.Language)),
+		Code:             req.Code,
+		TimeoutMillis:    req.Timeout.Milliseconds(),
+		WorkDir:          strings.TrimSpace(req.WorkDir),
+		OutputLimitBytes: req.OutputLimitBytes,
+		ResourceAudit:    normalizedCodeExecResourceAudit(req.ResourceAudit),
+		Tenant:           strings.TrimSpace(req.Tenant),
+		Provider:         strings.TrimSpace(req.Provider),
+		ProviderType:     strings.TrimSpace(req.ProviderType),
+	}
+	return codeExecSHA256HexJSON(payload)
+}
+
+func codeExecRunIDForRequest(ctx context.Context, req CodeExecutionRequest) string {
+	tc := GetToolContext(ctx)
+	if tc == nil {
+		return ""
+	}
+
+	payload := struct {
+		Version    string `json:"version"`
+		InputHash  string `json:"input_hash"`
+		SessionID  string `json:"session_id"`
+		TaskID     string `json:"task_id"`
+		ToolCallID string `json:"tool_call_id"`
+	}{
+		Version:   codeExecRequestIdentityVersion,
+		InputHash: strings.TrimSpace(req.InputHash),
+	}
+	if payload.InputHash == "" {
+		return ""
+	}
+
+	payload.SessionID = strings.TrimSpace(tc.SessionID)
+	payload.TaskID = strings.TrimSpace(tc.TaskID)
+	payload.ToolCallID = strings.TrimSpace(tc.ToolCallID)
+	if payload.SessionID == "" && payload.TaskID == "" && payload.ToolCallID == "" {
+		return ""
+	}
+
+	return "run-" + codeExecSHA256HexJSON(payload)[:32]
+}
+
+func codeExecSHA256HexJSON(value any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		data = fmt.Appendf(nil, "%#v", value)
+	}
+	return codeExecSHA256HexBytes(data)
+}
+
+func codeExecSHA256HexString(value string) string {
+	return codeExecSHA256HexBytes([]byte(value))
+}
+
+func codeExecSHA256HexBytes(value []byte) string {
+	sum := sha256.Sum256(value)
+	return fmt.Sprintf("%x", sum)
 }
 
 func normalizeCodeExecBackend(backend string) string {
@@ -226,11 +521,17 @@ func (t *CodeExecTool) Execute(ctx context.Context, args json.RawMessage) (strin
 
 	tenant, provider, providerType := codeExecScopeFromContext(ctx)
 	backend := t.resolveCodeExecBackend(provider, providerType, tenant)
-	executor := t.executor
-	if executor == nil || normalizeCodeExecBackend(t.backend) != backend {
+	sandboxClient := t.sandboxClient
+	if sandboxClient == nil {
+		sandboxClient = sandboxClientFromCodeExecutor(t.executor)
+	}
+	if sandboxClient == nil || normalizeCodeExecBackend(t.backend) != backend {
 		var normalizedBackend string
-		executor, normalizedBackend = newCodeExecutorFromBackend(backend)
+		sandboxClient, normalizedBackend = newSandboxClientFromBackend(backend)
 		backend = normalizedBackend
+	}
+	if sandboxClient == nil {
+		return "", fmt.Errorf("code_exec sandbox client is not configured")
 	}
 
 	if backend == codeExecBackendInProcess {
@@ -242,7 +543,7 @@ func (t *CodeExecTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	result := executor.Execute(ctx, CodeExecutionRequest{
+	execReq := CodeExecutionRequest{
 		Backend:          backend,
 		Language:         lang,
 		Code:             execArgs.Code,
@@ -253,7 +554,13 @@ func (t *CodeExecTool) Execute(ctx context.Context, args json.RawMessage) (strin
 		Tenant:           tenant,
 		Provider:         provider,
 		ProviderType:     providerType,
-	})
+	}
+	if err := populateCodeExecRequestIdentity(ctx, &execReq); err != nil {
+		return "", fmt.Errorf("failed to configure code execution identity: %w", err)
+	}
+
+	sandboxReq := sandboxRunRequestFromCodeExecutionRequest(execReq)
+	result := codeExecResultFromSandboxRunResult(sandboxClient.Run(ctx, sandboxReq))
 
 	output, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
@@ -278,6 +585,16 @@ func (t *CodeExecTool) codeExecOutputLimitBytes() int64 {
 	return defaultCodeExecOutputLimitBytes
 }
 
+// Run executes a sandbox request with the in-process backend.
+func (e *InProcessCodeExecutor) Run(ctx context.Context, req SandboxRunRequest) SandboxRunResult {
+	return sandboxRunResultFromCodeExecResult(e.Execute(ctx, codeExecutionRequestFromSandboxRunRequest(req)))
+}
+
+// Run returns an unsupported-backend sandbox result.
+func (e *unsupportedCodeExecutor) Run(ctx context.Context, req SandboxRunRequest) SandboxRunResult {
+	return sandboxRunResultFromCodeExecResult(e.Execute(ctx, codeExecutionRequestFromSandboxRunRequest(req)))
+}
+
 // Execute runs the request with the in-process backend.
 func (e *InProcessCodeExecutor) Execute(ctx context.Context, req CodeExecutionRequest) CodeExecResult {
 	start := time.Now()
@@ -295,8 +612,8 @@ func (e *InProcessCodeExecutor) Execute(ctx context.Context, req CodeExecutionRe
 	if req.Backend == "" {
 		req.Backend = codeExecBackendInProcess
 	}
-	if len(req.ResourceAudit) == 0 {
-		req.ResourceAudit = codeExecLocalResourceAuditForRequest(req)
+	if err := populateCodeExecRequestResourceAudit(&req); err != nil {
+		return CodeExecResult{Error: fmt.Sprintf("failed to configure code execution resources: %v", err), ExitCode: -1}
 	}
 	if err := os.MkdirAll(req.WorkDir, 0755); err != nil {
 		return CodeExecResult{Error: fmt.Sprintf("failed to create work directory: %v", err), ExitCode: -1}
@@ -710,6 +1027,12 @@ func auditCodeExec(ctx context.Context, req CodeExecutionRequest, result CodeExe
 		"exit_code", result.ExitCode,
 		"timeout_ms", req.Timeout.Milliseconds(),
 		"timed_out", result.TimedOut,
+	}
+	if req.InputHash != "" {
+		keysAndValues = append(keysAndValues, "input_hash", req.InputHash)
+	}
+	if req.RunID != "" {
+		keysAndValues = append(keysAndValues, "run_id", req.RunID)
 	}
 
 	tenant := strings.TrimSpace(req.Tenant)

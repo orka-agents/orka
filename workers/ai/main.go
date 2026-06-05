@@ -80,6 +80,10 @@ func run() error {
 
 	taskName := workerEnv.TaskName
 	taskNamespace := workerEnv.TaskNamespace
+	transactionLogFields := workerenv.TransactionLogFields(
+		workerEnv.TransactionID, workerEnv.TransactionProfile,
+	)
+	fmt.Printf("Worker ai started task=%s/%s%s\n", taskNamespace, taskName, transactionLogFields)
 	provider := workerEnv.Provider
 	model := workerEnv.Model
 	prompt := workerEnv.Prompt
@@ -240,7 +244,7 @@ func run() error {
 		// Don't fail the task if artifact upload fails
 	}
 
-	fmt.Printf("Task %s/%s completed successfully\n", taskNamespace, taskName)
+	fmt.Printf("Task %s/%s completed successfully%s\n", taskNamespace, taskName, transactionLogFields)
 	return nil
 }
 
