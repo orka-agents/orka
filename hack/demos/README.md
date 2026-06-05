@@ -8,6 +8,7 @@ This directory contains a small `demo-magic` kit for showing Orka in six ways:
 - `40-security-scanning.sh`: repository scan -> findings -> patch -> PR
 - `50-kontxt.sh`: workload SA token -> in-cluster TTS -> request-scoped TxToken -> Orka API call (one identity, two outcomes)
 - `60-agent-sandbox.sh`: three turns share a single SandboxClaim via `sessionRef` (scout -> builder -> CI fixup, same workspace)
+- `70-agent-substrate.sh`: same Orka Task API on a second workspace provider — a gVisor Actor from Agent Substrate (lifecycle -> retained warm workspace -> reuse)
 
 There is also:
 
@@ -229,6 +230,16 @@ hack/demos/30-cron-workflow.sh
 hack/demos/40-security-scanning.sh
 hack/demos/50-kontxt.sh           # requires hack/demos/cluster/install-kontxt.sh
 hack/demos/60-agent-sandbox.sh    # requires hack/demos/cluster/install-agent-sandbox.sh
+```
+
+Demo 70 (Agent Substrate) runs on its **own** kind cluster, not the shared
+demo-magic cluster (Substrate needs a custom registry + gVisor node config):
+
+```bash
+make demo-substrate-up                                # stand up the dedicated cluster
+kubectl config use-context kind-orka-agent-substrate-e2e
+DEMO_SUBSTRATE_NAMESPACE=default ./hack/demos/70-agent-substrate.sh
+make demo-substrate-down                              # tear it down
 ```
 
 ## Recording

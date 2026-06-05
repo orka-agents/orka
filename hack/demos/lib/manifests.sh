@@ -929,3 +929,130 @@ Template:      ${DEMO_SANDBOX_TEMPLATE_REF}
 
 Beyond this demo, any multi-turn workflow (planner -> builder -> tester, scout -> fix -> verify, parallel reviewers on the same diff) gets dramatically faster and cheaper because the heavy state stays warm across calls."
 }
+
+# ---------------------------------------------------------------------------
+# Demo 70 — Agent Substrate (gVisor execution workspaces).
+#
+# Substrate is a SECOND execution-workspace provider (distinct from Demo 60's
+# agent-sandbox). Orka Tasks request `execution.workspace.provider: substrate`;
+# the controller claims a gVisor-isolated Actor from a Substrate WorkerPool via
+# the ActorTemplate, runs the agent runtime inside it, and snapshots/suspends
+# the microVM between turns. These renderers assume the Substrate control plane
+# + WorkerPool + ActorTemplate are already installed (see
+# hack/demos/cluster/install-substrate.sh), mirroring how Demo 60 assumes the
+# agent-sandbox stack is present.
+#
+# The demo Agent stubs the runtime CLI to /bin/true (CODEX_CLI_PATH), so no
+# model API key is required — the point is the WORKSPACE lifecycle, not model
+# output. This matches scripts/agent-substrate-e2e.sh.
+# ---------------------------------------------------------------------------
+: "${DEMO_SUBSTRATE_NAMESPACE:=${DEMO_NAMESPACE:-default}}"
+: "${DEMO_SUBSTRATE_AGENT:=demo-substrate-codex}"
+: "${DEMO_SUBSTRATE_TEMPLATE_NAME:=orka-codex-ci}"
+: "${DEMO_SUBSTRATE_TEMPLATE_NAMESPACE:=ate-demo}"
+: "${DEMO_SUBSTRATE_SESSION:=substrate-warm-70}"
+: "${DEMO_SUBSTRATE_LIFECYCLE_TASK:=demo-substrate-lifecycle}"
+: "${DEMO_SUBSTRATE_RETAIN_TASK:=demo-substrate-retain}"
+: "${DEMO_SUBSTRATE_REUSE_TASK:=demo-substrate-reuse}"
+: "${DEMO_SUBSTRATE_RUNTIME_TYPE:=codex}"
+: "${DEMO_SUBSTRATE_RUNTIME_MODEL:=gpt-5.4}"
+
+render_substrate_agent() {
+  cat <<EOF
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: ${DEMO_SUBSTRATE_AGENT}
+  namespace: ${DEMO_SUBSTRATE_NAMESPACE}
+  labels:
+    orka.ai/demo: substrate
+    demo.orka.ai/scenario: substrate
+spec:
+  runtime:
+    type: ${DEMO_SUBSTRATE_RUNTIME_TYPE}
+    defaultMaxTurns: 1
+    defaultAllowBash: true
+  model:
+    name: ${DEMO_SUBSTRATE_RUNTIME_MODEL}
+  systemPrompt:
+    inline: |
+      You are a workspace smoke-test agent for a live Orka Substrate demo.
+      Run the requested command inside the gVisor-isolated workspace and stop.
+EOF
+}
+
+# render_substrate_task <name> <cleanup:delete|retain> <reuse:none|session> [create:true|false]
+# Emits an agent Task that runs inside a Substrate execution workspace. The CLI
+# is stubbed to /bin/true so the run is model-free and deterministic. When
+# reuse=session, the first (workspace-creating) task must pass create=true to
+# mint the session; later tasks reattach with create=false (the default).
+render_substrate_task() {
+  local name="$1"
+  local cleanup="${2:-delete}"
+  local reuse="${3:-none}"
+  local create="${4:-false}"
+  local session_block=""
+  if [[ "${reuse}" == "session" ]]; then
+    session_block="  sessionRef:
+    name: ${DEMO_SUBSTRATE_SESSION}
+    create: ${create}"
+  fi
+  cat <<EOF
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: ${name}
+  namespace: ${DEMO_SUBSTRATE_NAMESPACE}
+  labels:
+    orka.ai/demo: substrate
+    demo.orka.ai/scenario: substrate
+spec:
+  type: agent
+  agentRef:
+    name: ${DEMO_SUBSTRATE_AGENT}
+  prompt: "Run the configured CLI inside the Substrate workspace and finish."
+  timeout: 10m
+  agentRuntime:
+    maxTurns: 1
+    allowBash: true
+  env:
+    - name: CODEX_CLI_PATH
+      value: /bin/true
+${session_block}
+  execution:
+    workspace:
+      enabled: true
+      provider: substrate
+      cleanupPolicy: ${cleanup}
+      reusePolicy: ${reuse}
+      templateRef:
+        name: ${DEMO_SUBSTRATE_TEMPLATE_NAME}
+        namespace: ${DEMO_SUBSTRATE_TEMPLATE_NAMESPACE}
+EOF
+}
+
+render_substrate_story_file() {
+  emit_block "" "Scenario:
+Demo 70 — Agent Substrate (gVisor-isolated execution workspaces).
+
+THE FEATURE: Orka's workspace executor is provider-neutral. Demo 60 backed agent Tasks with agent-sandbox; this demo backs the SAME Task API with Agent Substrate — a second provider that runs each workspace as a gVisor-isolated Actor (a microVM-class sandbox) drawn from a pre-warmed WorkerPool, and can snapshot/suspend that Actor between turns.
+
+One Task field switches backends: execution.workspace.provider: substrate. Everything else — the Agent CR, the Task CR, the /result endpoint — is identical to every other Orka Task. Orka abstracts the execution substrate.
+
+THIS DEMO (three beats):
+1. Lifecycle — a Task with cleanupPolicy: delete claims a fresh gVisor Actor, runs, and the workspace is deleted. status.executionWorkspace.provider == substrate, phase == Deleted.
+2. Retained reuse — a Task with cleanupPolicy: retain + reusePolicy: session leaves its workspace warm (phase == Retained); a second Task with the same sessionRef REUSES it (status.executionWorkspace.reused == true) instead of cold-starting a new Actor.
+3. Snapshot — the retained Actor is snapshotted to the Substrate snapshot store (configured on the ActorTemplate), so warm state survives suspend/resume. The payoff card shows provider, phase, reuse, and result availability for each beat.
+
+What to watch:
+- provider == substrate on every Task — the Orka Task API is unchanged from Demo 60.
+- gVisor isolation: each workspace is an Actor under runsc, not a shared pod.
+- Beat 2's second Task reports reused == true: the warm workspace was reattached, not rebuilt.
+- The agent CLI is stubbed (/bin/true) so the run is model-free — this demo is about the workspace, not model output.
+
+Agent:         ${DEMO_SUBSTRATE_AGENT}
+Template:      ${DEMO_SUBSTRATE_TEMPLATE_NAMESPACE}/${DEMO_SUBSTRATE_TEMPLATE_NAME}
+Session:       ${DEMO_SUBSTRATE_SESSION}
+
+Beyond this demo, Substrate gives agent workloads strong (gVisor) isolation and warm-state reuse without changing a line of the Orka Task contract — swap the provider, keep the workflow."
+}

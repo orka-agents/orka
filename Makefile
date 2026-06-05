@@ -138,6 +138,14 @@ demo-cluster-up: ## Bootstrap a kind cluster with Orka + kontxt + agent-sandbox
 demo-cluster-down: ## Tear down the kind demo cluster
 	hack/demos/cluster/cluster-down.sh
 
+.PHONY: demo-substrate-up
+demo-substrate-up: ## Bootstrap a DEDICATED kind cluster with Agent Substrate + Orka (Demo 70)
+	hack/demos/cluster/install-substrate.sh
+
+.PHONY: demo-substrate-down
+demo-substrate-down: ## Tear down the Agent Substrate demo cluster (Demo 70)
+	kind delete cluster --name $${KIND_CLUSTER:-orka-agent-substrate-e2e}
+
 .PHONY: demo-images
 demo-images: ## Build + kind-load demo-only images (currently: kontxt-caller)
 	docker build -t docker.io/sozercan/orka-kontxt-caller:demo hack/demos/images/kontxt-caller

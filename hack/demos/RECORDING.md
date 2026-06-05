@@ -73,6 +73,7 @@ Six demos total. Four exist; two are new.
 | 40 | Security remediation | `40-security-scanning.sh` | exists, needs polish | Finding → patch proposal → reviewable PR |
 | 50 | **Kontxt transaction tokens** | `50-kontxt.sh` | **new** | Caller Pod proves identity → kontxt mints TxToken → Orka stamps immutable provenance |
 | 60 | **Agent sandbox workspaces** | `60-agent-sandbox.sh` | **new** | One session, two agents, three turns — Scout, Builder, and a CI fixup share one warm sandbox |
+| 70 | **Agent Substrate workspaces** | `70-agent-substrate.sh` | **new** | Same Orka Task API, second provider — a gVisor Actor: lifecycle → retained warm workspace → reuse |
 
 Demos 50 and 60 are designed in [§7](#7-new-scenario-storyboards).
 
@@ -718,6 +719,64 @@ by an order of magnitude.
 
 ---
 
+### Demo 70 — Agent Substrate workspaces (`70-agent-substrate.sh`)
+
+**Why this matters.** Orka's execution workspace is provider-neutral. Demo 60
+shows agent-sandbox; Demo 70 shows the *same Orka Task API* backed by a second
+provider — **Agent Substrate** — where each workspace is a gVisor-isolated
+Actor drawn from a pre-warmed WorkerPool and can be snapshotted/suspended
+between turns. The message: swap one field (`execution.workspace.provider:
+substrate`) and the entire Task contract is unchanged. Orka abstracts the
+execution substrate.
+
+**Headline.** "One Task API, two execution substrates. Switch the provider —
+keep the workflow. gVisor isolation and warm-state reuse for free."
+
+**Distinct from Demo 60.** agent-sandbox and Substrate are *different
+providers* (`agents.x-k8s.io` vs `ate.dev`). Demo 60 dwells on multi-turn
+session sharing with real agent work + a PR; Demo 70 is model-free (the runtime
+CLI is stubbed to `/bin/true`) and dwells on the provider abstraction + the
+gVisor workspace lifecycle. They are complementary, not duplicates.
+
+**Prerequisites.** Demo 70 runs on its **own** kind cluster — Substrate needs a
+custom registry + gVisor node config, so it cannot attach to the shared
+demo-magic cluster used by demos 00–60. Stand it up with `make
+demo-substrate-up` (a thin wrapper over the CI-proven
+`scripts/agent-substrate-e2e.sh` with `KEEP_CLUSTER=1`), which installs the
+Substrate control plane (`ate-system`), a `WorkerPool` + gVisor `ActorTemplate`
+(`orka-codex-ci` in `ate-demo`), and Orka wired with `--substrate-*` flags.
+Requires `kind`, `ko`, `docker`, `go`, `git`, `jq`, `kubectl`. Secret-free.
+
+**Beats.**
+
+| # | Beat | What the audience sees |
+|---|------|------------------------|
+| 1 | Lifecycle | A Task with `provider: substrate`, `cleanupPolicy: delete`. Claims a fresh gVisor Actor, runs, deletes it. `status.executionWorkspace.provider == substrate`, `phase == Deleted`. |
+| 2 | Retain | A Task with `cleanupPolicy: retain` + `reusePolicy: session` + `sessionRef.create: true`. Workspace stays warm: `phase == Retained`. |
+| 3 | Reuse | A Task with the same `sessionRef` (`create: false`). Reattaches the warm workspace: `status.executionWorkspace.reused == true` — no cold start. |
+
+**Payoff card.** `payoff_card_substrate` reads each Task's
+`status.executionWorkspace` and **hard-asserts** `provider == substrate` on all
+three beats and `reused == true` on beat 3; it fails the recording otherwise.
+ASCII-only card bodies (byte-width alignment).
+
+**Risk.** The Substrate standup is heavy (clones Substrate at a pinned ref,
+builds 4 images via `ko`+docker, needs gVisor `runsc` on the kind nodes). It is
+proven in CI (`agent-substrate-e2e`) and was verified end-to-end on
+darwin/arm64 + Docker Desktop. The `sessionRef.create` flag is load-bearing:
+the *first* (workspace-creating) Task must set `create: true`, or the session
+lookup fails with "session not found and create=false". `render_substrate_task`
+takes the create flag as its 4th arg; the demo wires beat 2 → `true`, beat 3 →
+`false`.
+
+**Determinism.** Model-free by design (`CODEX_CLI_PATH=/bin/true`), so beats
+don't depend on model availability or output — only the workspace lifecycle.
+The `sessionRef.name` (`substrate-warm-70`) makes beat 3's reuse deterministic;
+the demo's cleanup deletes prior demo Tasks so beat 2 genuinely creates the
+session fresh.
+
+---
+
 ## 7.5. Manifest specifications
 
 Each new beat references YAML files an implementer will otherwise have to
@@ -898,6 +957,32 @@ Prompt files in `hack/demos/prompts/`:
   counter. Add it. Push as a fixup commit on the same branch. Do not
   open a new PR."*
 
+### Substrate manifests (Demo 70)
+
+Rendered by `render_substrate_*` in `lib/manifests.sh`. The Substrate control
+plane + `WorkerPool` + `ActorTemplate` are installed out-of-band by
+`cluster/install-substrate.sh`; the demo only applies the Orka `Agent` + three
+`Task`s. All carry `orka.ai/demo: substrate` / `demo.orka.ai/scenario:
+substrate`.
+
+- **Agent** (`render_substrate_agent`) — `core.orka.ai/v1alpha1` Agent, runtime
+  `codex`, model `gpt-5.4`. Model-free at run time: the Tasks set
+  `CODEX_CLI_PATH=/bin/true`.
+- **Task** (`render_substrate_task <name> <delete|retain> <none|session>
+  [create]`) — agent Task whose `execution.workspace` selects
+  `provider: substrate`, with the requested `cleanupPolicy` / `reusePolicy` and
+  `templateRef` → `ate-demo/orka-codex-ci`. When `reusePolicy=session`, a
+  `sessionRef` block is emitted; the 4th arg controls `sessionRef.create`.
+  - Beat 1 lifecycle: `render_substrate_task <n> delete none` (no session).
+  - Beat 2 retain:    `render_substrate_task <n> retain session true`
+    (**creates** the session — `create: true` is required).
+  - Beat 3 reuse:     `render_substrate_task <n> delete session false`
+    (reattaches; the card asserts `status.executionWorkspace.reused == true`).
+
+The payoff card greps **Task status**, not worker logs — it reads
+`status.executionWorkspace.{provider,phase,reused}` via `kubectl jsonpath`, so
+there is no log-format coupling like Demo 60's.
+
 ### Worker log format the beats grep against
 
 Verified against `workers/common/agent_runtime.go:424`:
@@ -952,6 +1037,7 @@ hack/demos/
 │   ├── cluster-down.sh    # kind delete cluster --name orka-demo
 │   ├── install-kontxt.sh  # in-cluster kontxt-TTS + Orka env vars
 │   ├── install-agent-sandbox.sh   # upstream operator + SandboxTemplate
+│   ├── install-substrate.sh       # Agent Substrate on a dedicated kind cluster (Demo 70)
 │   └── templates/
 │       └── orka-live-template.yaml
 ├── images/                # NEW — demo-only container images
@@ -975,7 +1061,8 @@ hack/demos/
 ├── 40-security-scanning.sh# existing, tightened
 ├── 50-kontxt.sh           # NEW
 ├── 60-agent-sandbox.sh    # NEW
-├── reset.sh               # existing, extended for kontxt/sandbox resources
+├── 70-agent-substrate.sh  # NEW (runs on its own kind cluster)
+├── reset.sh               # existing, extended for kontxt/sandbox/substrate resources
 └── out/                   # gitignored; .cast/.gif/.svg artifacts land here
 ```
 
@@ -1115,6 +1202,7 @@ and by the payoff cards):
 | 40 | "Security remediation" | "Finding → patch proposal → reviewable PR. No human triage required." |
 | 50 | "Kontxt transaction tokens" | "Zero-secret caller, one-shot transaction token, sealed Kubernetes provenance." |
 | 60 | "Warm agent sandboxes" | "One session, two agents, three turns. Scout, Builder, CI fixup — one warm workspace." |
+| 70 | "Agent Substrate workspaces" | "One Task API, two execution substrates. Switch the provider, keep the workflow — gVisor isolation and warm reuse." |
 
 ---
 

@@ -773,3 +773,72 @@ payoff_card_sandbox() {
   fi
   log_success "sandbox claim reused across all three turns: ${c1}"
 }
+
+# payoff_card_substrate <lifecycle-task> <retain-task> <reuse-task>
+# Reads status.executionWorkspace from each Task and asserts the Substrate
+# workspace lifecycle: every Task ran on provider=substrate, and the reuse Task
+# reattached the retained workspace (reused=true). Fails loudly otherwise.
+# Card bodies are ASCII-only (byte-width alignment): use -> and != , never
+# multi-byte glyphs.
+payoff_card_substrate() {
+  local lifecycle_task="$1"
+  local retain_task="$2"
+  local reuse_task="$3"
+  local ns="${DEMO_SUBSTRATE_NAMESPACE:-default}"
+
+  __substrate_ws_field() {
+    local task="$1"
+    local field="$2"
+    local val="-"
+    if [[ -n "${task}" ]] && command -v kubectl >/dev/null 2>&1; then
+      val="$(kubectl get task "${task}" -n "${ns}" \
+        -o "jsonpath={.status.executionWorkspace.${field}}" 2>/dev/null || true)"
+    fi
+    [[ -z "${val}" ]] && val="-"
+    printf '%s' "${val}"
+  }
+
+  local life_provider life_phase
+  local retain_provider retain_phase
+  local reuse_provider reuse_phase reuse_reused
+  life_provider="$(__substrate_ws_field "${lifecycle_task}" provider)"
+  life_phase="$(__substrate_ws_field "${lifecycle_task}" phase)"
+  retain_provider="$(__substrate_ws_field "${retain_task}" provider)"
+  retain_phase="$(__substrate_ws_field "${retain_task}" phase)"
+  reuse_provider="$(__substrate_ws_field "${reuse_task}" provider)"
+  reuse_phase="$(__substrate_ws_field "${reuse_task}" phase)"
+  reuse_reused="$(__substrate_ws_field "${reuse_task}" reused)"
+
+  __card_top "Agent Substrate workspaces"
+  __card_blank
+  __card_line "LIFECYCLE (cleanup: delete)"
+  __card_kv "  task"      "${lifecycle_task:-(none)}"
+  __card_kv "  provider"  "${life_provider}"
+  __card_kv "  phase"     "${life_phase}"
+  __card_blank
+  __card_line "RETAINED (cleanup: retain)"
+  __card_kv "  task"      "${retain_task:-(none)}"
+  __card_kv "  provider"  "${retain_provider}"
+  __card_kv "  phase"     "${retain_phase}"
+  __card_blank
+  __card_line "REUSE (sessionRef -> warm workspace)"
+  __card_kv "  task"      "${reuse_task:-(none)}"
+  __card_kv "  provider"  "${reuse_provider}"
+  __card_kv "  phase"     "${reuse_phase}"
+  __card_kv "  reused"    "${reuse_reused}"
+  __card_blank
+  __card_line "One Task API, gVisor workspace, warm reuse."
+  __card_bottom
+
+  if [[ "${life_provider}" != "substrate" \
+        || "${retain_provider}" != "substrate" \
+        || "${reuse_provider}" != "substrate" ]]; then
+    log_error "payoff_card_substrate: expected provider=substrate on all three tasks"
+    return 1
+  fi
+  if [[ "${reuse_reused}" != "true" ]]; then
+    log_error "payoff_card_substrate: workspace reuse FAILED — reuse task did not reattach (reused != true)"
+    return 1
+  fi
+  log_success "substrate workspace reused across the session: ${reuse_task} reattached ${retain_task}'s workspace"
+}

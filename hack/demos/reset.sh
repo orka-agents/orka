@@ -81,6 +81,17 @@ stale_claim="$(sandbox_session_claim_name "${sandbox_session}")"
 kubectl delete sandboxclaim -n "${sandbox_claim_namespace}" "${stale_claim}" \
   --ignore-not-found >/dev/null 2>&1 || true
 
+# Demo 70 (Agent Substrate) normally runs on its OWN kind cluster, torn down
+# via `make demo-substrate-down`. This selector-scoped delete only matters if
+# the demo was pointed at a shared cluster; Substrate Actors are reaped by the
+# controller when the owning Tasks are removed.
+log "Cleaning up Agent Substrate demo resources"
+substrate_namespace="${DEMO_SUBSTRATE_NAMESPACE:-default}"
+kubectl delete tasks -n "${substrate_namespace}" \
+  -l 'orka.ai/demo in (substrate)' --ignore-not-found >/dev/null 2>&1 || true
+kubectl delete agents -n "${substrate_namespace}" \
+  -l 'orka.ai/demo in (substrate)' --ignore-not-found >/dev/null 2>&1 || true
+
 prepare_api_env >/dev/null 2>&1 || true
 orka_api DELETE "/api/v1/chat/${DEMO_CHAT_SESSION}?namespace=${DEMO_NAMESPACE}" >/dev/null 2>&1 || true
 

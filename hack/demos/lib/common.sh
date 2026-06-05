@@ -1802,6 +1802,18 @@ require_security_demo_env() {
     DEMO_SECURITY_GIT_SECRET_REF
 }
 
+require_substrate_demo_env() {
+  # Demo 70 is model-free (the runtime CLI is stubbed to /bin/true), so no
+  # provider/model/git secrets are required — only the Substrate template
+  # coordinates, which default in manifests.sh. We validate the ones a user is
+  # most likely to override so a typo fails fast instead of mid-run.
+  require_vars \
+    DEMO_SUBSTRATE_AGENT \
+    DEMO_SUBSTRATE_TEMPLATE_NAME \
+    DEMO_SUBSTRATE_TEMPLATE_NAMESPACE \
+    DEMO_SUBSTRATE_SESSION
+}
+
 open_url() {
   local url="$1"
   if command -v open >/dev/null 2>&1; then
