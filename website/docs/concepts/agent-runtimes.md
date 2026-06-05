@@ -615,7 +615,7 @@ kubectl logs -l job-name=$(kubectl get task fix-tests -o jsonpath='{.status.jobN
 ### Task fails immediately
 
 - **Type mismatch**: `type: agent` tasks require an Agent with `runtime` configured. `type: ai` tasks cannot use Agents with `runtime`.
-- **Invalid runtime type**: `runtime.type` must be `copilot` or `claude`.
+- **Invalid runtime type**: `runtime.type` must be `copilot`, `claude`, or `codex`.
 - **Worker image not available**: Check that the worker image is accessible from your cluster:
   ```bash
   kubectl describe pod -l orka.ai/worker-type=agent

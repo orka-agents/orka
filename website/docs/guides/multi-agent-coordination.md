@@ -920,7 +920,7 @@ Updates the autonomous execution plan state. Must be called at least once per it
 | `goal_complete` | boolean | no | Set to `true` when the overall goal has been fully achieved |
 | `plan_document` | string | yes | Full markdown plan document. Replaces the previous plan document entirely |
 
-### Recommended Coordinator System Prompt
+### Recommended Coordinator System Prompt (with PR Workflow)
 
 ```
 You are a coordinator agent. Follow this protocol:
@@ -948,6 +948,10 @@ You are a coordinator agent. Follow this protocol:
 For long-running goals that require multiple planning and execution cycles, enable autonomous mode on the coordinator agent. See [Autonomous Task Execution](autonomous-tasks.md) for details.
 
 When `coordination.autonomous: true` is set, the controller runs the coordinator in a loop — each iteration gets the accumulated plan state, delegates sub-tasks, and updates the plan. The loop continues until the goal is complete, max iterations are reached, or the task is suspended.
+
+## Roadmap
+
+Planned and in-progress extensions to the coordination model:
 
 - **TaskGroup CRD** — Declarative DAG-based workflows (Layer 2)
 - **Agent-to-Agent Messaging** — Real-time inter-agent communication (Layer 3)

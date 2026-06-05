@@ -1,5 +1,25 @@
 # Getting Started
 
+Orka is a Kubernetes-native platform for running AI agents and tool-using workflows as
+durable, observable Kubernetes Jobs. You describe work as a **Task**; the controller
+schedules it, runs it in a hardened worker pod, stores the result, and (optionally) notifies
+you — with sessions, retries, priorities, and multi-agent delegation handled for you.
+
+## Mental Model
+
+Three custom resources cover most use cases:
+
+- **Provider** — an LLM backend (Anthropic, OpenAI, or Azure OpenAI) plus its API-key Secret.
+- **Agent** — a reusable configuration: which Provider/model, system prompt, tools, skills,
+  and (optionally) an external CLI runtime or coordination settings.
+- **Task** — one unit of work. `type: ai` runs through Orka's built-in AI worker, `type: agent`
+  runs an external coding CLI (Claude Code, Codex, Copilot), and `type: container` runs an
+  arbitrary container command.
+
+A Task references an Agent, an Agent references a Provider. Results are retrieved over the
+REST API, the CLI, or the embedded dashboard. See [Architecture](concepts/architecture.md)
+for the full component picture.
+
 ## Prerequisites
 
 - Docker 17.03+
@@ -256,10 +276,20 @@ The CLI supports token extraction from bearer tokens, token files, exec-based au
 
 ## Next Steps
 
+**Core concepts**
+
+- [Architecture](concepts/architecture.md) — Controller, workers, CRDs, and task lifecycle
+- [Configuration](concepts/configuration.md) — Helm values, controller flags, and metrics
+- [Memory](concepts/memory.md) — Namespace-scoped durable memory and reviewable proposals
+- [Kontxt TxToken Integration](concepts/kontxt.md) — Request-scoped transaction-token auth
+- [Agent Sandbox Workspaces](concepts/agent-sandbox.md) / [Substrate](concepts/substrate.md) — Durable, reusable execution workspaces
+- [Security](concepts/security.md) — Pod hardening, authentication, and multi-tenancy
+
+**Guides & reference**
+
 - [Agent Runtimes](concepts/agent-runtimes.md) — Codex CLI, Claude Code CLI, and Copilot CLI configuration
 - [Interactive Chat](guides/chat.md) — Chat endpoint with tool execution
 - [Multi-Agent Coordination](guides/multi-agent-coordination.md) — Coordinator agents and delegation
 - [OpenAI Compatibility](reference/openai-compat.md) — Use any OpenAI-compatible client via `/openai/v1/`
 - [Anthropic Compatibility](reference/anthropic-compat.md) — Use Anthropic clients (Claude Code, etc.) via `/anthropic/v1/`
 - [API Reference](reference/api-reference.md) — REST API endpoints
-- [Configuration](concepts/configuration.md) — Helm values, controller flags, and metrics

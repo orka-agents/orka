@@ -26,14 +26,14 @@ Orka includes a built-in React web dashboard embedded into the controller binary
 
 ```
 ┌─────────────┐     ┌─────────────────┐     ┌──────────────────┐
-│   Browser   │────▶│   Go API Server │────▶│   Kubernetes     │
-│  (React)    │◀────│   (Fiber, :8080) │◀────│   API Server     │
-└─────────────┘     └─────────────────┘     └──────────────────┘
-                           │
-                    ┌──────┴──────┐
-                    │ //go:embed  │
-                    │  ui/dist/*  │
-                    └─────────────┘
+│   Browser   │────▶│  Go API Server  │────▶│   Kubernetes     │
+│   (React)   │◀────│ (Fiber, :8080)  │◀────│   API Server     │
+└─────────────┘     └────────┬────────┘     └──────────────────┘
+                             │
+                      ┌──────┴──────┐
+                      │ //go:embed  │
+                      │  ui/dist/*  │
+                      └─────────────┘
 
 Development:
   Vite (:5173) --proxy /api/*--> Go API (:8080)

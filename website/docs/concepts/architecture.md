@@ -10,26 +10,26 @@ Orka is a Kubernetes-native task execution platform where a controller manages J
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                          Orka Controller                           │
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────────┐    │
-│  │   Task      │  │   Agent      │  │   Tool & Provider        │    │
-│  │ Reconciler  │  │  Controller  │  │   Controllers            │    │
-│  └──────┬──────┘  └──────────────┘  └──────────────────────────┘    │
-│         │                                                            │
-│  ┌──────┴──────┐  ┌──────────────┐  ┌──────────────────────────┐    │
-│  │   Session   │  │   Priority   │  │   REST API + Chat        │    │
-│  │   Manager   │  │    Queue     │  │   (Fiber framework)      │    │
-│  └─────────────┘  └──────────────┘  └──────────────────────────┘    │
+│                          Orka Controller                             │
+│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────────┐     │
+│  │     Task    │  │    Agent     │  │     Tool & Provider      │     │
+│  │  Reconciler │  │  Controller  │  │       Controllers        │     │
+│  └─────────────┘  └──────────────┘  └──────────────────────────┘     │
 │                                                                      │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐   │
-│  │  Prometheus  │  │   Embedded   │  │   Auth Middleware        │   │
-│  │   Metrics    │  │   Web UI     │  │   (SA/OIDC auth)        │   │
-│  └──────────────┘  └──────────────┘  └──────────────────────────┘   │
+│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────────┐     │
+│  │   Session   │  │   Priority   │  │     REST API + Chat      │     │
+│  │   Manager   │  │    Queue     │  │    (Fiber framework)     │     │
+│  └─────────────┘  └──────────────┘  └──────────────────────────┘     │
+│                                                                      │
+│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────────┐     │
+│  │  Prometheus │  │   Embedded   │  │     Auth Middleware      │     │
+│  │   Metrics   │  │    Web UI    │  │      (SA/OIDC auth)      │     │
+│  └─────────────┘  └──────────────┘  └──────────────────────────┘     │
 └──────────────────────────────────────────────────────────────────────┘
                               │
               ┌───────────────┼───────────────┐
               │               │               │
-       ┌──────┴──────┐ ┌─────┴───────┐ ┌─────┴───────┐
+       ┌──────┴──────┐ ┌──────┴──────┐ ┌──────┴──────┐
        │   General   │ │     AI      │ │    Agent    │
        │   Worker    │ │   Worker    │ │   Workers   │
        │ (containers)│ │ (LLM agent) │ │(Claude CLI, │
@@ -155,21 +155,21 @@ Task Created
       │
       ▼
 ┌───────────┐    session locked?     ┌───────────┐
-│  Pending   │──────────────────────▶│  Pending   │ (wait for lock)
-│            │◀──────────────────────│            │
-└─────┬──────┘    lock acquired      └───────────┘
+│  Pending  │──────────────────────▶│  Pending  │ (wait for lock)
+│           │◀──────────────────────│           │
+└─────┬─────┘    lock acquired      └───────────┘
       │
       ▼
 ┌───────────┐
-│  Running   │ ── Job created, Pod running
-└─────┬──────┘
+│  Running  │ ── Job created, Pod running
+└─────┬─────┘
       │
    ┌──┴──┐
    │     │
    ▼     ▼
-┌──────┐ ┌──────┐
-│Succ. │ │Failed│ ── retry? → back to Running
-└──────┘ └──────┘
+┌───────┐ ┌────────┐
+│ Succ. │ │ Failed │ ── retry? → back to Running
+└───────┘ └────────┘
       │
       ▼
 Result stored in SQLite (workers POST to controller via HTTP)
@@ -237,12 +237,12 @@ Orka supports extensible AI capabilities through a three-layer system:
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  Layer 1: Skills (Skill CRDs)                                   │
-│  - Agent Skills standard content (`spec.content.inline`)         │
-│  - Mounted at /workspace/.skills and injected into prompts       │
+│  - Agent Skills standard content (`spec.content.inline`)        │
+│  - Mounted at /workspace/.skills and injected into prompts      │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 2: Built-in Tools (in worker image)                      │
-│  - Core, coordination, GitHub, agent management, planning,       │
-│    memory, transcript, chat, session, and task management        │
+│  - Core, coordination, GitHub, agent management, planning,      │
+│    memory, transcript, chat, session, and task management       │
 │  - Fast, no extra infrastructure                                │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 3: Custom Tools (Tool CRD + HTTP)                        │
