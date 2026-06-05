@@ -22,7 +22,7 @@ make docker-build-all   # All Docker images
 make deploy IMG=<registry>/orka:tag
 ```
 
-UI: `cd ui && bun install && bun run dev` (dev server on :5173). See @docs/development.md for full commands.
+UI: `cd ui && bun install && bun run dev` (dev server on :5173). See @website/docs/development/development.md for full commands.
 
 ## Verification
 

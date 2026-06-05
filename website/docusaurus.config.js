@@ -8,7 +8,7 @@ const config = {
   title: 'Orka',
   tagline: 'Kubernetes-native AI task orchestration',
   url: 'https://sozercan.github.io',
-  baseUrl: '/orka/',
+  baseUrl: '/orka/website/',
   organizationName: 'sozercan',
   projectName: 'orka',
   trailingSlash: false,
