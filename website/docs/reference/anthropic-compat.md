@@ -238,16 +238,16 @@ To use as a transparent proxy instead (client manages tools), add `X-Orka-Tools:
 ## Architecture
 
 ```
-┌──────────────┐     ┌──────────────────────────────┐     ┌──────────────────┐
-│  Claude Code │────▶│  Orka API Server             │────▶│  Anthropic API   │
-│  (or any     │     │  /anthropic/v1/messages       │     │  OpenAI API      │
-│  Anthropic   │◀────│                               │◀────│  Azure OpenAI    │
-│   client)    │     │  Provider resolution:         │     └──────────────────┘
-└──────────────┘     │  - Provider CRD lookup        │
-                     │  - Secret-based API keys      │
-                     │  - Model routing              │
-                     │  - Server-side tool execution  │
-                     └──────────────────────────────┘
+┌─────────────┐     ┌──────────────────────────────┐     ┌───────────────┐
+│ Claude Code │────▶│ Orka API Server              │────▶│ Anthropic API │
+│ (or any     │◀────│ /anthropic/v1/messages       │◀────│ OpenAI API    │
+│ Anthropic   │     │                              │     │ Azure OpenAI  │
+│ client)     │     │ Provider resolution:         │     └───────────────┘
+└─────────────┘     │ - Provider CRD lookup        │
+                    │ - Secret-based API keys      │
+                    │ - Model routing              │
+                    │ - Server-side tool execution │
+                    └──────────────────────────────┘
 ```
 
 Orka injects built-in tools and runs server-side tool execution by default. Set `X-Orka-Tools: disabled` to use as a transparent proxy where the client manages its own tool execution loop — see [Server-Side Tool Execution](#server-side-tool-execution) above.
