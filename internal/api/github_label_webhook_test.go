@@ -53,7 +53,7 @@ func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 	}
 
 	var task corev1alpha1.Task
-	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubTaskName(githubActionImplement, 12, "delivery-1"), Namespace: "default"}, &task); err != nil {
+	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionImplement, 12, body), Namespace: "default"}, &task); err != nil {
 		t.Fatalf("created task not found: %v", err)
 	}
 	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
@@ -120,7 +120,7 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 	}
 
 	var task corev1alpha1.Task
-	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubTaskName(githubActionUpdateBranch, 34, "delivery-2"), Namespace: "default"}, &task); err != nil {
+	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionUpdateBranch, 34, body), Namespace: "default"}, &task); err != nil {
 		t.Fatalf("created task not found: %v", err)
 	}
 	ws := task.Spec.AgentRuntime.Workspace
@@ -178,7 +178,7 @@ func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
 	}
 
 	var task corev1alpha1.Task
-	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubTaskName(githubActionImplement, 35, "delivery-fork-pr"), Namespace: "default"}, &task); err != nil {
+	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionImplement, 35, body), Namespace: "default"}, &task); err != nil {
 		t.Fatalf("created task not found: %v", err)
 	}
 	ws := task.Spec.AgentRuntime.Workspace
@@ -224,7 +224,7 @@ func TestGitHubWebhook_IgnoresIssuePullRequestStub(t *testing.T) {
 	assertNoTasks(t, fc)
 }
 
-func TestGitHubWebhook_DuplicateDeliveryIsIdempotent(t *testing.T) {
+func TestGitHubWebhook_DuplicateSignedPayloadIsIdempotent(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{
 		githubLabelTriggerAgentEnv: "codex-agent",
 	})
@@ -236,9 +236,17 @@ func TestGitHubWebhook_DuplicateDeliveryIsIdempotent(t *testing.T) {
 	if first.StatusCode != http.StatusCreated {
 		t.Fatalf("first status = %d; body: %s", first.StatusCode, readRespBody(t, first))
 	}
-	second := performSignedGitHubWebhook(t, server, githubEventIssues, "same-delivery", secret, body)
+	second := performSignedGitHubWebhook(t, server, githubEventIssues, "mutated-delivery", secret, body)
 	if second.StatusCode != http.StatusAccepted {
 		t.Fatalf("second status = %d; body: %s", second.StatusCode, readRespBody(t, second))
+	}
+
+	var tasks corev1alpha1.TaskList
+	if err := fc.List(t.Context(), &tasks); err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	if len(tasks.Items) != 1 {
+		t.Fatalf("task count = %d, want 1", len(tasks.Items))
 	}
 }
 
@@ -358,6 +366,10 @@ func performSignedGitHubWebhook(t *testing.T, server *Server, event, delivery, s
 		t.Fatalf("test request failed: %v", err)
 	}
 	return resp
+}
+
+func githubWebhookTaskNameForBody(action string, number int, body []byte) string {
+	return githubTaskName(action, number, githubWebhookReplayKey(body))
 }
 
 func signGitHubWebhook(body []byte, secret string) string {

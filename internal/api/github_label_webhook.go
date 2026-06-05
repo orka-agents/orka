@@ -182,12 +182,12 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 		return err
 	}
 
-	delivery := c.Get(githubDeliveryHeader)
+	delivery := strings.TrimSpace(c.Get(githubDeliveryHeader))
 	if delivery == "" {
 		delivery = hex.EncodeToString(githubHash(body))[:12]
 	}
 
-	task := buildGitHubLabelTask(namespace, agentName, action, delivery, event, payload, target)
+	task := buildGitHubLabelTask(namespace, agentName, action, githubWebhookReplayKey(body), delivery, event, payload, target)
 	if err := h.client.Create(c.Context(), task); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
@@ -227,6 +227,10 @@ func validGitHubSignature(body []byte, signatureHeader, secret string) bool {
 func githubHash(body []byte) []byte {
 	sum := sha256.Sum256(body)
 	return sum[:]
+}
+
+func githubWebhookReplayKey(body []byte) string {
+	return hex.EncodeToString(githubHash(body))
 }
 
 func githubWebhookIgnored(c fiber.Ctx, reason string) error {
@@ -372,11 +376,11 @@ func (h *Handlers) ensureAgentExists(c fiber.Ctx, namespace, agentName string) e
 	return nil
 }
 
-func buildGitHubLabelTask(namespace, agentName, action, delivery, event string, payload githubLabelWebhookPayload, target githubLabelTarget) *corev1alpha1.Task {
+func buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, event string, payload githubLabelWebhookPayload, target githubLabelTarget) *corev1alpha1.Task {
 	workspace := githubWorkspace(action, target)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      githubTaskName(action, target.Number, delivery),
+			Name:      githubTaskName(action, target.Number, replayKey),
 			Namespace: namespace,
 			Labels: map[string]string{
 				labels.LabelCreatedBy:        githubWebhookCreatedBy,

@@ -250,6 +250,34 @@ func TestCheckPRReviewMarkerTool_FetchesHeadSHAWhenOmitted(t *testing.T) {
 	}
 }
 
+func TestCheckPRReviewMarkerTool_RejectsRepoURLWithoutScope(t *testing.T) {
+	serverCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tool := &CheckPRReviewMarkerTool{k8sClient: newFakeClient(), apiBaseURL: server.URL}
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+
+	args, _ := json.Marshal(CheckPRReviewMarkerArgs{
+		RepoURL:  testSozercanAynaRepoURL,
+		PRNumber: 42,
+		HeadSHA:  checkPRReviewMarkerTestSHA,
+	})
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected repo scope error")
+	}
+	if !strings.Contains(err.Error(), "requires a permitted repository scope") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if serverCalled {
+		t.Fatal("server was called despite missing repo scope")
+	}
+}
+
 func TestContainsPRReviewMarkerRequiresSignedMarker(t *testing.T) {
 	const prNumber = 42
 	otherText := defaultPRReviewMarkerPrefix + " something else --> " + checkPRReviewMarkerTestSHA
@@ -281,6 +309,7 @@ func TestContainsPRReviewMarkerRequiresSignedMarker(t *testing.T) {
 
 func setCheckPRReviewMarkerTestEnv(t *testing.T) {
 	t.Helper()
+	t.Setenv("ORKA_GIT_REPO", testSozercanAynaRepoURL)
 	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 	t.Setenv(prReviewMarkerTrustedAuthorEnv, "reviewer-bot")
 }

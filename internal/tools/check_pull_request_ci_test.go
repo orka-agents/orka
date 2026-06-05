@@ -270,6 +270,37 @@ func TestCheckPullRequestCITool_WaitTimeoutPending(t *testing.T) {
 	}
 }
 
+func TestCheckPullRequestCITool_RejectsRepoURLWithoutScope(t *testing.T) {
+	serverCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tool := &CheckPullRequestCITool{
+		k8sClient:  newFakeClient(),
+		apiBaseURL: server.URL,
+	}
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+
+	args, _ := json.Marshal(CheckPullRequestCIArgs{
+		RepoURL:  testSozercanAynaRepoURL,
+		PRNumber: 42,
+	})
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected repo scope error")
+	}
+	if !strings.Contains(err.Error(), "requires a permitted repository scope") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if serverCalled {
+		t.Fatal("server was called despite missing repo scope")
+	}
+}
+
 func TestCheckPullRequestCITool_InvalidArgs(t *testing.T) {
 	tool := NewCheckPullRequestCITool(newFakeClient())
 
