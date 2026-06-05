@@ -31,6 +31,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Check typos
         uses: crate-ci/typos@aca895bf05aec0cb7dffa6f94495e923224d9f17 # v1.46.2
@@ -38,10 +40,10 @@ jobs:
           files: website .github/workflows/website.yml
 
   build:
-    name: Build and publish Docusaurus site
+    name: Build Docusaurus site
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
@@ -77,8 +79,43 @@ jobs:
         working-directory: website
         run: yarn build
 
+  publish:
+    name: Publish Docusaurus site
+    needs: [check_typos, build]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: yarn
+          cache-dependency-path: website/yarn.lock
+
+      - name: Install dependencies
+        working-directory: website
+        run: yarn install --frozen-lockfile
+
+      - name: Build website
+        working-directory: website
+        run: yarn build
+
       - name: Publish to gh-pages
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |

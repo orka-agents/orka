@@ -343,7 +343,7 @@ All persistent data uses SQLite via `modernc.org/sqlite` (pure Go, no CGO depend
 
 ### Session Locking
 
-Sessions use optimistic locking via an `active_task` column. `AcquireLock` atomically UPDATEs `active_task` only if it's currently empty. Tasks that fail to acquire the lock requeue every 5 seconds. The lock is released on task completion or deletion (via finalizer cleanup). There is no timeout — if the lock holder crashes, the lock persists until the task is deleted.
+Sessions use optimistic locking via an `active_task` column. `AcquireLock` atomically sets `active_task` only if it's currently empty. Tasks that fail to acquire the lock requeue every 5 seconds. The lock is released on task completion or deletion (via finalizer cleanup). There is no timeout — if the lock holder crashes, the lock persists until the task is deleted.
 
 ### Message Broadcast Scoping
 

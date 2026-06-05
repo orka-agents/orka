@@ -572,7 +572,7 @@ The scanner task should write a single compact JSON payload:
       "evidence": [
         {
           "kind": "artifact",
-          "name": "security-validation-fnd_01.txt",
+          "name": "security-validation-finding-01.txt",
           "label": "Validation transcript"
         }
       ]

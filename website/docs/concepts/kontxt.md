@@ -48,7 +48,7 @@ For Kubernetes, keep the distinction clear: direct ServiceAccount bearer authent
 
 When Kubernetes projected ServiceAccount tokens are used as kontxt TTS subject tokens, TTS must validate the token issuer, audience, expiry, and signing key before issuing a TxToken. Use bound projected tokens with a TTS-specific audience and short expiration; do not rely on legacy long-lived ServiceAccount Secret tokens.
 
-The ServiceAccount issuer is the `iss` value from the cluster's OIDC discovery document, and TTS needs a reachable discovery/JWKS endpoint for that issuer. In public or centrally managed clusters, prefer a stable issuer URL whose JWKS endpoint is reachable from TTS and handles key rotation normally. In private clusters or AKS-style environments where the advertised issuer/JWKS is not reachable from the TTS Pod, use one of these production-safe approaches:
+The ServiceAccount issuer is the `iss` value from the cluster's OIDC discovery document, and TTS needs a reachable discovery/JWKS endpoint for that issuer. In public or centrally managed clusters, prefer a stable issuer URL whose JWKS endpoint is reachable from TTS and handles key rotation normally. In private clusters or Azure Kubernetes Service-style environments where the advertised issuer/JWKS is not reachable from the TTS Pod, use one of these production-safe approaches:
 
 - make the issuer/JWKS endpoint reachable with the correct CA trust;
 - expose a managed discovery proxy that preserves the real issuer value and refreshes JWKS as keys rotate;
