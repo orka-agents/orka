@@ -183,11 +183,13 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 	}
 
 	delivery := strings.TrimSpace(c.Get(githubDeliveryHeader))
-	if delivery == "" {
-		delivery = hex.EncodeToString(githubHash(body))[:12]
+	replayKey := delivery
+	if replayKey == "" {
+		replayKey = githubWebhookReplayKey(body)
+		delivery = githubReplayKeySuffix(replayKey)
 	}
 
-	task := buildGitHubLabelTask(namespace, agentName, action, githubWebhookReplayKey(body), delivery, event, payload, target)
+	task := buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, event, payload, target)
 	if err := h.client.Create(c.Context(), task); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
@@ -272,9 +274,6 @@ func (p githubLabelWebhookPayload) target() (githubLabelTarget, bool) {
 		pr := p.PullRequest
 		repo := p.Repository
 		headRepo := pr.Head.Repo
-		if headRepo.CloneURL == "" && headRepo.HTMLURL == "" {
-			headRepo = repo
-		}
 		baseRepo := pr.Base.Repo
 		if baseRepo.CloneURL == "" && baseRepo.HTMLURL == "" {
 			baseRepo = repo
@@ -465,7 +464,7 @@ func dnsNamePart(value string) string {
 
 func githubWorkspace(action string, target githubLabelTarget, replayKey string) *corev1alpha1.WorkspaceConfig {
 	repo := target.Repo
-	if target.IsPR {
+	if target.IsPR && repoURL(target.HeadRepo) != "" {
 		repo = target.HeadRepo
 	}
 	ws := &corev1alpha1.WorkspaceConfig{
@@ -524,50 +523,7 @@ func githubLabelTaskCanUseGitSecret(target githubLabelTarget) bool {
 }
 
 func githubSameRepository(a, b githubWebhookRepository) bool {
-	if a.FullName != "" && b.FullName != "" {
-		return strings.EqualFold(a.FullName, b.FullName)
-	}
-
-	aOwner, aRepo, aOK := githubRepositoryParts(a)
-	bOwner, bRepo, bOK := githubRepositoryParts(b)
-	return aOK && bOK && strings.EqualFold(aOwner, bOwner) && strings.EqualFold(aRepo, bRepo)
-}
-
-func githubRepositoryParts(repo githubWebhookRepository) (owner, name string, ok bool) {
-	if repo.FullName != "" {
-		parts := strings.Split(repo.FullName, "/")
-		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
-			return parts[0], parts[1], true
-		}
-	}
-	for _, url := range []string{repo.CloneURL, repo.HTMLURL} {
-		if url == "" {
-			continue
-		}
-		if owner, name, ok := githubRepositoryPartsFromURL(url); ok {
-			return owner, name, true
-		}
-	}
-	return "", "", false
-}
-
-func githubRepositoryPartsFromURL(repoURL string) (owner, name string, ok bool) {
-	repoURL = strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(repoURL), "/"), ".git")
-	for _, prefix := range []string{"https://github.com/", "http://github.com/"} {
-		if after, found := strings.CutPrefix(repoURL, prefix); found {
-			parts := strings.SplitN(after, "/", 3)
-			if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
-				return parts[0], parts[1], true
-			}
-		}
-	}
-	if after, found := strings.CutPrefix(repoURL, "git@github.com:"); found {
-		parts := strings.SplitN(after, "/", 3)
-		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
-			return parts[0], parts[1], true
-		}
-	}
-	return "", "", false
+	return a.FullName != "" && b.FullName != "" && strings.EqualFold(a.FullName, b.FullName)
 }
 
 func githubReplayKeySuffix(replayKey string) string {

@@ -47,13 +47,14 @@ func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 		"sender":{"login":"octocat"}
 	}`)
 
-	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-1", secret, body)
+	delivery := "delivery-1"
+	resp := performSignedGitHubWebhook(t, server, githubEventIssues, delivery, secret, body)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
 	}
 
 	var task corev1alpha1.Task
-	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionImplement, 12, body), Namespace: "default"}, &task); err != nil {
+	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForDelivery(githubActionImplement, 12, delivery), Namespace: "default"}, &task); err != nil {
 		t.Fatalf("created task not found: %v", err)
 	}
 	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
@@ -72,7 +73,7 @@ func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 	if ws.Branch != githubWebhookTestDefaultBranch {
 		t.Errorf("branch = %q, want main", ws.Branch)
 	}
-	wantPushBranch := "orka/implement-issue-12-" + githubReplayKeySuffix(githubWebhookReplayKey(body))
+	wantPushBranch := "orka/implement-issue-12-" + githubReplayKeySuffix(delivery)
 	if ws.PushBranch != wantPushBranch {
 		t.Errorf("pushBranch = %q, want %q", ws.PushBranch, wantPushBranch)
 	}
@@ -85,7 +86,7 @@ func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 	if task.Labels[labels.LabelGitHubAction] != githubActionImplement {
 		t.Errorf("github action label = %q", task.Labels[labels.LabelGitHubAction])
 	}
-	if task.Annotations[labels.AnnotationGitHubDelivery] != "delivery-1" {
+	if task.Annotations[labels.AnnotationGitHubDelivery] != delivery {
 		t.Errorf("delivery annotation = %q", task.Annotations[labels.AnnotationGitHubDelivery])
 	}
 	if !strings.Contains(task.Spec.Prompt, "agent:implement") || !strings.Contains(task.Spec.Prompt, "Please add /healthz.") {
@@ -116,13 +117,14 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 		"sender":{"login":"octocat"}
 	}`)
 
-	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-2", secret, body)
+	delivery := "delivery-2"
+	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, delivery, secret, body)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
 	}
 
 	var task corev1alpha1.Task
-	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionUpdateBranch, 34, body), Namespace: "default"}, &task); err != nil {
+	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForDelivery(githubActionUpdateBranch, 34, delivery), Namespace: "default"}, &task); err != nil {
 		t.Fatalf("created task not found: %v", err)
 	}
 	ws := task.Spec.AgentRuntime.Workspace
@@ -178,13 +180,14 @@ func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
 		"sender":{"login":"octocat"}
 	}`)
 
-	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-fork-pr", secret, body)
+	delivery := "delivery-fork-pr"
+	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, delivery, secret, body)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
 	}
 
 	var task corev1alpha1.Task
-	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionImplement, 35, body), Namespace: "default"}, &task); err != nil {
+	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForDelivery(githubActionImplement, 35, delivery), Namespace: "default"}, &task); err != nil {
 		t.Fatalf("created task not found: %v", err)
 	}
 	ws := task.Spec.AgentRuntime.Workspace
@@ -205,6 +208,57 @@ func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
 	}
 	if ws.PRBaseBranch != githubWebhookTestDefaultBranch {
 		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)
+	}
+	if !strings.Contains(task.Spec.Prompt, "Orka will not push them automatically") {
+		t.Errorf("prompt missing no-push guidance: %s", task.Spec.Prompt)
+	}
+}
+
+func TestGitHubWebhook_PullRequestMissingHeadRepoFailsClosedForGitSecret(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, map[string]string{
+		githubLabelTriggerAgentEnv:     "codex-agent",
+		githubLabelTriggerGitSecretEnv: "git-credentials",
+	})
+	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
+	server := NewServer(fc, nil, ServerConfig{})
+
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"agent:implement"},
+		"repository":{"full_name":"sozercan/orka","html_url":"https://github.com/sozercan/orka","clone_url":"https://github.com/sozercan/orka.git","default_branch":"main"},
+		"pull_request":{
+			"number":36,
+			"title":"Unknown head repo",
+			"body":"Implement with unknown head repo",
+			"html_url":"https://github.com/sozercan/orka/pull/36",
+			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/orka","html_url":"https://github.com/sozercan/orka","clone_url":"https://github.com/sozercan/orka.git","default_branch":"main"}},
+			"head":{"ref":"feature/unknown-head","sha":"unknown-head-sha","repo":null}
+		},
+		"sender":{"login":"octocat"}
+	}`)
+
+	delivery := "delivery-missing-head-pr"
+	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, delivery, secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
+	}
+
+	var task corev1alpha1.Task
+	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForDelivery(githubActionImplement, 36, delivery), Namespace: "default"}, &task); err != nil {
+		t.Fatalf("created task not found: %v", err)
+	}
+	ws := task.Spec.AgentRuntime.Workspace
+	if ws.GitRepo != "https://github.com/sozercan/orka.git" {
+		t.Errorf("gitRepo = %q, want base repository fallback", ws.GitRepo)
+	}
+	if ws.Branch != "feature/unknown-head" {
+		t.Errorf("branch = %q, want feature/unknown-head", ws.Branch)
+	}
+	if ws.PushBranch != "" {
+		t.Errorf("pushBranch = %q, want empty for PR without verified head repository", ws.PushBranch)
+	}
+	if ws.GitSecretRef != nil {
+		t.Fatalf("gitSecretRef = %#v, want nil for PR without verified head repository", ws.GitSecretRef)
 	}
 	if !strings.Contains(task.Spec.Prompt, "Orka will not push them automatically") {
 		t.Errorf("prompt missing no-push guidance: %s", task.Spec.Prompt)
@@ -233,7 +287,7 @@ func TestGitHubWebhook_IgnoresIssuePullRequestStub(t *testing.T) {
 	assertNoTasks(t, fc)
 }
 
-func TestGitHubWebhook_DuplicateSignedPayloadIsIdempotent(t *testing.T) {
+func TestGitHubWebhook_DeliveryIDControlsIdempotency(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{
 		githubLabelTriggerAgentEnv: "codex-agent",
 	})
@@ -245,8 +299,12 @@ func TestGitHubWebhook_DuplicateSignedPayloadIsIdempotent(t *testing.T) {
 	if first.StatusCode != http.StatusCreated {
 		t.Fatalf("first status = %d; body: %s", first.StatusCode, readRespBody(t, first))
 	}
-	second := performSignedGitHubWebhook(t, server, githubEventIssues, "mutated-delivery", secret, body)
-	if second.StatusCode != http.StatusAccepted {
+	duplicate := performSignedGitHubWebhook(t, server, githubEventIssues, "same-delivery", secret, body)
+	if duplicate.StatusCode != http.StatusAccepted {
+		t.Fatalf("duplicate status = %d; body: %s", duplicate.StatusCode, readRespBody(t, duplicate))
+	}
+	second := performSignedGitHubWebhook(t, server, githubEventIssues, "new-delivery", secret, body)
+	if second.StatusCode != http.StatusCreated {
 		t.Fatalf("second status = %d; body: %s", second.StatusCode, readRespBody(t, second))
 	}
 
@@ -254,8 +312,8 @@ func TestGitHubWebhook_DuplicateSignedPayloadIsIdempotent(t *testing.T) {
 	if err := fc.List(t.Context(), &tasks); err != nil {
 		t.Fatalf("list tasks: %v", err)
 	}
-	if len(tasks.Items) != 1 {
-		t.Fatalf("task count = %d, want 1", len(tasks.Items))
+	if len(tasks.Items) != 2 {
+		t.Fatalf("task count = %d, want 2", len(tasks.Items))
 	}
 }
 
@@ -377,8 +435,8 @@ func performSignedGitHubWebhook(t *testing.T, server *Server, event, delivery, s
 	return resp
 }
 
-func githubWebhookTaskNameForBody(action string, number int, body []byte) string {
-	return githubTaskName(action, number, githubWebhookReplayKey(body))
+func githubWebhookTaskNameForDelivery(action string, number int, delivery string) string {
+	return githubTaskName(action, number, delivery)
 }
 
 func signGitHubWebhook(body []byte, secret string) string {
