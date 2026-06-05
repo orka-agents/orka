@@ -5,16 +5,16 @@ on:
     paths-ignore:
       - ".codex/**"
       - ".claude/**"
+      - "website/**"
       - '**.md'
-      - 'docs/**'
       - 'LICENSE'
       - '.gitignore'
   pull_request:
     paths-ignore:
       - ".codex/**"
       - ".claude/**"
+      - "website/**"
       - '**.md'
-      - 'docs/**'
       - 'LICENSE'
       - '.gitignore'
 

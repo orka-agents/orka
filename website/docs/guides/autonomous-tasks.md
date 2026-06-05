@@ -1,3 +1,7 @@
+---
+slug: /autonomous-tasks
+---
+
 # Autonomous Task Execution
 
 Autonomous mode enables long-running, self-driving development loops. A coordinator agent can autonomously decompose a high-level goal into sub-tasks, implement them, test, iterate, and continue working until the goal is complete.

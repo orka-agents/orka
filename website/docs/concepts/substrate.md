@@ -1,3 +1,7 @@
+---
+slug: /substrate
+---
+
 # Substrate Execution Workspaces
 
 Orka can run agent Tasks inside

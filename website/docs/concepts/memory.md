@@ -1,3 +1,7 @@
+---
+slug: /memory
+---
+
 # Memory
 
 Orka provides a namespace-scoped memory layer for AI worker tasks. It is designed for shared Kubernetes environments where memory should be useful, auditable, and safe by default.

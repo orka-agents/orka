@@ -1,3 +1,7 @@
+---
+slug: /development
+---
+
 # Development
 
 ## Prerequisites

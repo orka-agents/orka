@@ -1,3 +1,7 @@
+---
+slug: /agent-runtimes
+---
+
 # Agent Runtimes
 
 Agent runtimes let Orka delegate task execution to external agent CLIs—such as Codex CLI, Claude Code CLI, and GitHub Copilot CLI—instead of running tasks through Orka's built-in AI worker. This gives your tasks access to full autonomous coding capabilities (file read/write/edit, bash execution, git operations) provided by battle-tested agent runtimes, while Orka handles scheduling, lifecycle management, secrets, sessions, and Kubernetes-native orchestration.
@@ -516,7 +520,7 @@ Research on LLM agent context ([arxiv 2602.11988](https://arxiv.org/abs/2602.119
 
 ## Examples
 
-Complete sample manifests are available in [`config/samples/`](../config/samples/):
+Complete sample manifests are available in [`config/samples/`](https://github.com/sozercan/orka/tree/main/config/samples):
 
 | File | Description |
 |------|-------------|

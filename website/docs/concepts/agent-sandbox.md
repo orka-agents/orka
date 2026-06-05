@@ -1,10 +1,14 @@
+---
+slug: /agent-sandbox
+---
+
 # Agent Sandbox Workspaces
 
 Agent sandbox workspace support is **experimental** and disabled by default. When enabled, a `type: agent` Task can request an upstream `agent-sandbox` workspace with `Task.spec.execution.workspace`. Orka still creates the normal Kubernetes worker Job, but the agent worker wrapper uses the resolved workspace settings to claim and wait for an `agent-sandbox` workspace, then runs the configured agent runtime inside that sandbox.
 
 Use this feature for durable, warm, or reusable coding environments backed by an existing upstream `agent-sandbox` installation. For one-shot pod isolation, continue to use Kubernetes `RuntimeClass` through `spec.execution.runtimeClassName`.
 
-See the [agent sandbox integration plan](../agent-sandbox-integration.md) for the broader design, rollout phases, and upstream references.
+For the broader design, rollout phases, and upstream references, see the agent sandbox integration plan in the project repository.
 
 ## When to Use RuntimeClass vs Agent Sandbox
 

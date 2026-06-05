@@ -1,3 +1,7 @@
+---
+slug: /kontxt-quickstart
+---
+
 # Kontxt quickstart: use Kubernetes identity to call Orka without long-lived tokens
 
 This guide shows one successful Orka + kontxt run using a Kubernetes projected ServiceAccount token as the caller identity. The caller runs inside the cluster, exchanges its bound ServiceAccount token for a short-lived kontxt TxToken, and calls Orka with `Txn-Token`.
@@ -25,7 +29,7 @@ Initial caller Job Pod
   → Orka-created Task / Job / worker Pod with transaction metadata
 ```
 
-This guide deliberately covers only the runnable Kubernetes ServiceAccount smoke-test path. For the broader model, alternate identity providers, authz modes, delegation, outbound propagation, and full `scope`/`tctx` behavior, see [Kontxt TxToken integration](kontxt.md).
+This guide deliberately covers only the runnable Kubernetes ServiceAccount smoke-test path. For the broader model, alternate identity providers, authz modes, delegation, outbound propagation, and full `scope`/`tctx` behavior, see [Kontxt TxToken integration](../concepts/kontxt.md).
 
 ## What you will validate
 
@@ -120,7 +124,7 @@ By default, let kontxt TTS discover the issuer metadata from the issuer URL:
 export KUBERNETES_SERVICEACCOUNT_DISCOVERY_URL="${KUBERNETES_SERVICEACCOUNT_ISSUER%/}/.well-known/openid-configuration"
 ```
 
-If the issuer URL or its JWKS endpoint is not reachable from the kontxt TTS Pod, fix issuer/JWKS reachability or use the smoke-test mirror below. See [Kubernetes ServiceAccount token trust](kontxt.md#kubernetes-serviceaccount-token-trust) for the trust model and production options.
+If the issuer URL or its JWKS endpoint is not reachable from the kontxt TTS Pod, fix issuer/JWKS reachability or use the smoke-test mirror below. See [Kubernetes ServiceAccount token trust](../concepts/kontxt.md#kubernetes-serviceaccount-token-trust) for the trust model and production options.
 
 > **Static discovery mirror is for smoke tests and dev clusters**
 >
@@ -742,7 +746,7 @@ kubectl -n "$ORKA_NS" rollout status deployment/"$ORKA_DEPLOY" --timeout=5m
 
 ## Other identity providers
 
-This quickstart intentionally stays on the Kubernetes projected ServiceAccount path. For GitHub Actions OIDC, Microsoft Entra Workload ID, and other subject-token issuers, see [Subject-token sources for kontxt TTS](kontxt.md#subject-token-sources-for-kontxt-tts). The Orka side is unchanged: it validates the resulting TxToken from the `Txn-Token` header.
+This quickstart intentionally stays on the Kubernetes projected ServiceAccount path. For GitHub Actions OIDC, Microsoft Entra Workload ID, and other subject-token issuers, see [Subject-token sources for kontxt TTS](../concepts/kontxt.md#subject-token-sources-for-kontxt-tts). The Orka side is unchanged: it validates the resulting TxToken from the `Txn-Token` header.
 
 ## Troubleshooting
 

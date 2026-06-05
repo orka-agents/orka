@@ -1,3 +1,7 @@
+---
+slug: /api-reference
+---
+
 # API Reference
 
 The controller exposes a REST API for programmatic access. All `/api/v1/*` endpoints require authentication. By default Orka accepts Kubernetes ServiceAccount bearer tokens; when configured, external callers can use a valid OIDC JWT or generic context token instead.
@@ -20,7 +24,7 @@ Authentication modes:
 Txn-Token: <txntoken+jwt>
 ```
 
-When a Task is created through OIDC or context-token authentication, Orka stamps the verified caller identity into immutable `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Context-token Task creation also stamps immutable `spec.transaction` plus transaction labels/annotations for audit correlation. Clients cannot provide or override `requestedBy` or `transaction`; requests containing top-level or nested `spec.requestedBy`/`spec.transaction` are rejected with `400`. See [Kontxt TxToken integration](kontxt.md) for scope/`tctx` authorization, TTS exchange, delegation, and audit behavior.
+When a Task is created through OIDC or context-token authentication, Orka stamps the verified caller identity into immutable `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Context-token Task creation also stamps immutable `spec.transaction` plus transaction labels/annotations for audit correlation. Clients cannot provide or override `requestedBy` or `transaction`; requests containing top-level or nested `spec.requestedBy`/`spec.transaction` are rejected with `400`. See [Kontxt TxToken integration](../concepts/kontxt.md) for scope/`tctx` authorization, TTS exchange, delegation, and audit behavior.
 
 ## Tasks
 
@@ -49,7 +53,7 @@ When a Task is created through OIDC or context-token authentication, Orka stamps
 | `spec.execution.workspace.reusePolicy` | string | `none`; allowed `none`, `session` | `session` derives the reuse key from `spec.sessionRef.name` and requires that field to be set. Automatic cross-Job reattach is limited until Orka persists sandbox claim identity. |
 | `spec.execution.workspace.cleanupPolicy` | string | controller default cleanup policy; allowed `delete`, `retain` | Cleanup behavior after the sandbox command exits. |
 
-Workspace requests are only valid on `spec.type: agent` Tasks. See [Agent Sandbox Workspaces](agent-sandbox.md) for configuration, validation rules, live smoke-test steps, and current limitations.
+Workspace requests are only valid on `spec.type: agent` Tasks. See [Agent Sandbox Workspaces](../concepts/agent-sandbox.md) for configuration, validation rules, live smoke-test steps, and current limitations.
 
 ### Get Task Plan
 
@@ -87,7 +91,7 @@ Retrieve the autonomous plan state for a task.
 
 ## Memory
 
-Memory endpoints manage namespace-scoped durable memories and reviewable memory proposals. See [Memory](memory.md) for the full lifecycle, worker behavior, and examples.
+Memory endpoints manage namespace-scoped durable memories and reviewable memory proposals. See [Memory](../concepts/memory.md) for the full lifecycle, worker behavior, and examples.
 
 ### Durable Memories
 
@@ -232,7 +236,7 @@ A typical remediation workflow is:
 | `/api/v1/chat/config` | GET | Get chat configuration and available tools |
 | `/api/v1/chat/:sessionId` | DELETE | Cancel a chat session |
 
-See [Interactive Chat](chat.md) for full chat documentation.
+See [Interactive Chat](../guides/chat.md) for full chat documentation.
 
 ## OpenAI-Compatible API
 

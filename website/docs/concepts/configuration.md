@@ -1,3 +1,7 @@
+---
+slug: /configuration
+---
+
 # Configuration
 
 ## Custom Resources
@@ -524,7 +528,7 @@ The Helm keys mirror the controller flags: for example,
 `controller.contextToken.tts.toolTokenTTL` renders
 `--context-token-tool-token-ttl`.
 
-See [charts/orka/values.yaml](../charts/orka/values.yaml) for the full list.
+See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/orka/values.yaml) for the full list.
 
 ## Controller Flags
 
@@ -648,7 +652,7 @@ OIDC validation requires RS256-signed JWTs with matching `iss` and `aud`, valid 
 
 Orka can also authenticate external API requests with generic transaction/context tokens. The built-in `kontxt` profile validates RS256-signed JWTs with JOSE header `typ: txntoken+jwt`, matching `iss` and `aud`, valid time claims, a non-empty `sub`, and the required `kontxt` claims `iat`, `txn`, `scope`, and `req_wl`.
 
-For a newcomer-friendly setup and smoke test, see [Kontxt quickstart: use Kubernetes identity to call Orka without long-lived tokens](kontxt-quickstart.md).
+For a newcomer-friendly setup and smoke test, see [Kontxt quickstart: use Kubernetes identity to call Orka without long-lived tokens](../guides/kontxt-quickstart.md).
 
 Enable the profile by configuring the profile, issuer, and audience:
 
@@ -788,7 +792,7 @@ Keep Agent `systemPrompt` content **minimal and requirement-focused**:
 
 - **Include only**: tooling commands (build/test/lint invocations), non-discoverable gotchas (e.g., "provider secret key defaults to `api-key`"), and hard constraints the agent cannot infer from source code.
 - **Avoid codebase overviews** — agents discover project structure efficiently on their own through file listing and search tools. Overviews add tokens without improving navigation speed.
-- **Don't duplicate** information already present in `docs/`, `README`, or inline code comments. Redundant instructions increase reasoning token usage (14–22% more) without improving outcomes.
+- **Don't duplicate** information already present in `website/docs/`, `README`, or inline code comments. Redundant instructions increase reasoning token usage (14–22% more) without improving outcomes.
 
 ### Writing Effective Skills
 

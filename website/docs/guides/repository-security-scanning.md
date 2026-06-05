@@ -1,9 +1,13 @@
+---
+slug: /repository-security-scanning
+---
+
 # Repository Security Scanning
 
 Status: Implementation guide and design reference
 Last updated: 2026-05-06
 
-This document mixes user-facing workflow guidance with lower-level v1 design notes. For a concise endpoint reference, see [API Reference](api-reference.md#security); for CRD fields, see [Configuration](configuration.md#repositoryscan).
+This document mixes user-facing workflow guidance with lower-level v1 design notes. For a concise endpoint reference, see [API Reference](../reference/api-reference.md#security); for CRD fields, see [Configuration](../concepts/configuration.md#repositoryscan).
 
 ## Summary
 
@@ -568,7 +572,7 @@ The scanner task should write a single compact JSON payload:
       "evidence": [
         {
           "kind": "artifact",
-          "name": "security-validation-fnd_01.txt",
+          "name": "security-validation-finding-01.txt",
           "label": "Validation transcript"
         }
       ]
@@ -1014,8 +1018,8 @@ Add a new e2e scenario:
 
 - `config/samples/security_repositoryscan.yaml`
 - `config/samples/security_agents.yaml`
-- `docs/api-reference.md`
-- `docs/ui.md`
+- `website/docs/reference/api-reference.md`
+- `website/docs/guides/ui.md`
 
 ## Open Questions
 

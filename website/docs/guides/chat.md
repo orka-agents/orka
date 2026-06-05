@@ -1,3 +1,7 @@
+---
+slug: /chat
+---
+
 # Interactive Chat
 
 The chat endpoint provides an agentic conversational interface where an LLM orchestrator can create and manage Kubernetes resources on the user's behalf. It accepts natural language, reasons about what tasks to create, and autonomously executes them using the platform.

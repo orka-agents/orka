@@ -1,3 +1,7 @@
+---
+slug: /multi-agent-coordination
+---
+
 # Multi-Agent Coordination
 
 Enable coordinator agents to dynamically delegate subtasks to specialist agents at runtime. The LLM decides what to delegate, to whom, and how to synthesize results. The controller enforces guardrails (allowed agents, max depth, max concurrency). Each child task is a real Kubernetes Job with full isolation.

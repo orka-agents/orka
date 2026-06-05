@@ -1,3 +1,7 @@
+---
+slug: /anthropic-compat
+---
+
 # Anthropic-Compatible API
 
 Orka exposes an **Anthropic-compatible Messages API** at `/anthropic/v1/messages`, enabling Anthropic-compatible clients (Claude Code, etc.) to use Orka as a transparent proxy.
@@ -163,7 +167,7 @@ By default (without the `X-Orka-Tools: disabled` header), the proxy automaticall
 | `file_write` | Write files to workspace |
 | `web_fetch` | Fetch and extract content from URLs |
 
-Additionally, any [Tool CRDs](configuration.md) defined in the user's namespace are automatically included as custom HTTP tools.
+Additionally, any [Tool CRDs](../concepts/configuration.md) defined in the user's namespace are automatically included as custom HTTP tools.
 
 Client-provided tools in the request are preserved and merged with the injected tools.
 
