@@ -143,6 +143,7 @@ type SecurityStore interface {
     UpsertFinding(ctx context.Context, finding *Finding) error
     GetFinding(ctx context.Context, namespace, id string) (*Finding, error)
     ListFindings(ctx context.Context, filter FindingFilter) ([]Finding, string, error)
+    GetFindingCounts(ctx context.Context, namespace, repositoryScan string) (FindingCounts, error)
     UpdateFindingState(ctx context.Context, namespace, id, state string) error
 
     CreatePatchProposal(ctx context.Context, proposal *PatchProposal) error
