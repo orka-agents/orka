@@ -11,6 +11,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	apitypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -68,4 +69,31 @@ func newFakeClientWithTools(tools []*corev1alpha1.Tool) client.Client {
 		objs[i] = t
 	}
 	return newFakeClient(objs...)
+}
+
+func githubRepoTaskWithSecret(repoURL string) (*corev1alpha1.Task, *corev1.Secret) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      repoURL,
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
+	}
+	return task, secret
+}
+
+func contextWithTaskScope() context.Context {
+	return WithToolContext(context.Background(), &ToolContext{
+		TaskID:    testCoderTaskName,
+		Namespace: defaultNamespace,
+	})
 }

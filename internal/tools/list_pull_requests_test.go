@@ -360,14 +360,14 @@ func TestListPullRequestsTool_WithRepoURL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tool := &ListPullRequestsTool{apiBaseURL: server.URL}
-	t.Setenv("ORKA_GIT_REPO", testMyOrgRepoURL)
-	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	task, secret := githubRepoTaskWithSecret(testMyOrgRepoURL)
+	tool := &ListPullRequestsTool{k8sClient: newFakeClient(task, secret), apiBaseURL: server.URL}
+	ctx := contextWithTaskScope()
 
 	args, _ := json.Marshal(ListPullRequestsArgs{
 		RepoURL: testMyOrgRepoURL,
 	})
-	result, err := tool.Execute(context.Background(), args)
+	result, err := tool.Execute(ctx, args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

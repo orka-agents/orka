@@ -77,7 +77,7 @@ func (t *CheckPRReviewMarkerTool) Parameters() json.RawMessage {
 			},
 			repoURLField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,
-				jsonSchemaDescriptionField: "Optional GitHub repository URL. Falls back to ORKA_GIT_REPO when task_name is empty",
+				jsonSchemaDescriptionField: "Optional GitHub repository URL. Requires task_name or current task context and must match that task's repository scope.",
 			},
 			githubPRNumberField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeInteger,

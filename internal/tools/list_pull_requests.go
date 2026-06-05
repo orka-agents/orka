@@ -26,7 +26,7 @@ type ListPullRequestsTool struct {
 // ListPullRequestsArgs are the arguments for the list_pull_requests tool.
 type ListPullRequestsArgs struct {
 	TaskName string `json:"task_name"` // optional: resolve repo from a task's workspace
-	RepoURL  string `json:"repo_url"`  // optional: direct repo URL (falls back to ORKA_GIT_REPO)
+	RepoURL  string `json:"repo_url"`  // optional: direct repo URL; with task context it must match that task's repository scope
 	PerPage  int    `json:"per_page"`  // results per page (default: 30, max: 100)
 	Page     int    `json:"page"`      // page number (default: 1)
 }
@@ -72,7 +72,7 @@ func (t *ListPullRequestsTool) Description() string {
 
 // Parameters returns the JSON schema for tool parameters.
 func (t *ListPullRequestsTool) Parameters() json.RawMessage {
-	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Name of the task whose workspace config has the repo and git credentials"}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "GitHub repository URL (e.g. https://github.com/owner/repo). Falls back to ORKA_GIT_REPO env var if not provided"}, perPageField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Number of results per page (default: 30, max: 100)"}, pageField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Page number for pagination (default: 1)"}}}
+	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Name of the task whose workspace config has the repo and git credentials"}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "GitHub repository URL (for example, https://github.com/owner/repo). Requires task_name or current task context and must match that task's repository scope."}, perPageField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Number of results per page (default: 30, max: 100)"}, pageField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Page number for pagination (default: 1)"}}}
 	data, _ := json.Marshal(schema)
 	return data
 }

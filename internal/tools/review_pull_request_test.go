@@ -319,20 +319,17 @@ func TestReviewPullRequestTool_WithRepoURL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	scheme := runtime.NewScheme()
-	_ = corev1alpha1.AddToScheme(scheme)
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	task, secret := githubRepoTaskWithSecret(testSozercanAynaRepoURL)
+	k8sClient := newFakeClient(task, secret)
 	tool := &ReviewPullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
-
-	t.Setenv("ORKA_GIT_REPO", testSozercanAynaRepoURL)
-	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	ctx := contextWithTaskScope()
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{
 		RepoURL:  testSozercanAynaRepoURL,
 		PRNumber: 7,
 	})
 
-	result, err := tool.Execute(context.Background(), args)
+	result, err := tool.Execute(ctx, args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -384,7 +381,7 @@ func TestReviewPullRequestTool_RejectsRepoURLWithoutScope(t *testing.T) {
 	}
 }
 
-func TestReviewPullRequestTool_RejectsRepoURLOutsideEnvGitRepo(t *testing.T) {
+func TestReviewPullRequestTool_RejectsRepoURLOutsideTaskScope(t *testing.T) {
 	serverCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		serverCalled = true
@@ -392,20 +389,19 @@ func TestReviewPullRequestTool_RejectsRepoURLOutsideEnvGitRepo(t *testing.T) {
 	}))
 	defer server.Close()
 
-	scheme := runtime.NewScheme()
-	_ = corev1alpha1.AddToScheme(scheme)
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	task, secret := githubRepoTaskWithSecret(testSozercanAynaRepoURL)
+	k8sClient := newFakeClient(task, secret)
 	tool := &ReviewPullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("ORKA_GIT_REPO", testSozercanAynaRepoURL)
-	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	t.Setenv("ORKA_GIT_REPO", testOrgTestRepoURL)
+	ctx := contextWithTaskScope()
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{
 		RepoURL:  testOrgTestRepoURL,
 		PRNumber: 7,
 	})
 
-	_, err := tool.Execute(context.Background(), args)
+	_, err := tool.Execute(ctx, args)
 	if err == nil {
 		t.Fatal("expected repo scope mismatch error")
 	}
@@ -700,7 +696,31 @@ func TestReviewPullRequestTool_NoGitRepo(t *testing.T) {
 	}
 }
 
-func TestReviewPullRequestTool_NoGitSecretRef(t *testing.T) {
+func TestReviewPullRequestTool_NoGitSecretRefFallsBackToEnvToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != testBearerToken {
+			t.Errorf("unexpected auth header: %s", auth)
+		}
+
+		accept := r.Header.Get("Accept")
+		path := r.URL.Path
+		switch {
+		case path == testPRPath && accept == testDiffAccept:
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = fmt.Fprint(w, "diff --git a/main.go b/main.go\n")
+		case path == testPRPath:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"title":"env token PR","body":"b","user":{"login":"u"},"base":{"ref":"main"},"head":{"ref":"dev"}}`)
+		case strings.HasSuffix(path, "/files"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `[]`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
@@ -719,17 +739,23 @@ func TestReviewPullRequestTool_NoGitSecretRef(t *testing.T) {
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
-	tool := NewReviewPullRequestTool(k8sClient)
+	tool := &ReviewPullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{TaskName: testCoderTaskName, PRNumber: 42})
-	_, err := tool.Execute(context.Background(), args)
-	if err == nil {
-		t.Fatal("expected error for no gitSecretRef")
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "no gitSecretRef") {
-		t.Errorf("unexpected error: %s", err.Error())
+
+	var reviewResult ReviewPullRequestResult
+	if err := json.Unmarshal([]byte(result), &reviewResult); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if reviewResult.Status != testFetched {
+		t.Errorf("unexpected status: %s", reviewResult.Status)
 	}
 }
 

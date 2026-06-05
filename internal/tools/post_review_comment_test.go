@@ -197,13 +197,10 @@ func TestPostReviewCommentTool_WithRepoURL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	scheme := runtime.NewScheme()
-	_ = corev1alpha1.AddToScheme(scheme)
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	task, secret := githubRepoTaskWithSecret(testSozercanAynaRepoURL)
+	k8sClient := newFakeClient(task, secret)
 	tool := &PostReviewCommentTool{k8sClient: k8sClient, apiBaseURL: server.URL}
-
-	t.Setenv("ORKA_GIT_REPO", testSozercanAynaRepoURL)
-	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	ctx := contextWithTaskScope()
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
 		RepoURL:  testSozercanAynaRepoURL,
@@ -212,7 +209,7 @@ func TestPostReviewCommentTool_WithRepoURL(t *testing.T) {
 		Event:    reviewEventComment,
 	})
 
-	result, err := tool.Execute(context.Background(), args)
+	result, err := tool.Execute(ctx, args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -319,7 +316,7 @@ func TestPostReviewCommentTool_RejectsRepoURLOutsideTaskWorkspace(t *testing.T) 
 	}
 }
 
-func TestPostReviewCommentTool_RejectsRepoURLOutsideEnvGitRepo(t *testing.T) {
+func TestPostReviewCommentTool_RejectsRepoURLOutsideTaskScope(t *testing.T) {
 	serverCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		serverCalled = true
@@ -327,13 +324,12 @@ func TestPostReviewCommentTool_RejectsRepoURLOutsideEnvGitRepo(t *testing.T) {
 	}))
 	defer server.Close()
 
-	scheme := runtime.NewScheme()
-	_ = corev1alpha1.AddToScheme(scheme)
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	task, secret := githubRepoTaskWithSecret(testSozercanAynaRepoURL)
+	k8sClient := newFakeClient(task, secret)
 	tool := &PostReviewCommentTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
-	t.Setenv("ORKA_GIT_REPO", testSozercanAynaRepoURL)
-	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	t.Setenv("ORKA_GIT_REPO", testOrgTestRepoURL)
+	ctx := contextWithTaskScope()
 
 	args, _ := json.Marshal(PostReviewCommentArgs{
 		RepoURL:  testOrgTestRepoURL,
@@ -342,7 +338,7 @@ func TestPostReviewCommentTool_RejectsRepoURLOutsideEnvGitRepo(t *testing.T) {
 		Event:    reviewEventComment,
 	})
 
-	_, err := tool.Execute(context.Background(), args)
+	_, err := tool.Execute(ctx, args)
 	if err == nil {
 		t.Fatal("expected repo scope mismatch error")
 	}

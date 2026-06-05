@@ -80,10 +80,10 @@ func TestCheckPRReviewMarkerTool_NoMarkerFoundWithExplicitHeadSHA(t *testing.T) 
 	defer server.Close()
 
 	setCheckPRReviewMarkerTestEnv(t)
-	tool := &CheckPRReviewMarkerTool{k8sClient: newFakeClient(), apiBaseURL: server.URL}
+	tool, ctx := newCheckPRReviewMarkerTestTool(server.URL)
 	args, _ := json.Marshal(CheckPRReviewMarkerArgs{RepoURL: testSozercanAynaRepoURL, PRNumber: prNumber, HeadSHA: checkPRReviewMarkerTestSHA})
 
-	result, err := tool.Execute(context.Background(), args)
+	result, err := tool.Execute(ctx, args)
 	if err != nil {
 		t.Fatalf("Execute() returned error: %v", err)
 	}
@@ -128,10 +128,10 @@ func TestCheckPRReviewMarkerTool_MarkerFoundInReviews(t *testing.T) {
 	defer server.Close()
 
 	setCheckPRReviewMarkerTestEnv(t)
-	tool := &CheckPRReviewMarkerTool{k8sClient: newFakeClient(), apiBaseURL: server.URL}
+	tool, ctx := newCheckPRReviewMarkerTestTool(server.URL)
 	args, _ := json.Marshal(CheckPRReviewMarkerArgs{RepoURL: testSozercanAynaRepoURL, PRNumber: prNumber, HeadSHA: checkPRReviewMarkerTestSHA})
 
-	result, err := tool.Execute(context.Background(), args)
+	result, err := tool.Execute(ctx, args)
 	if err != nil {
 		t.Fatalf("Execute() returned error: %v", err)
 	}
@@ -184,10 +184,10 @@ func TestCheckPRReviewMarkerTool_MarkerFoundInReviewsPage2(t *testing.T) {
 	defer server.Close()
 
 	setCheckPRReviewMarkerTestEnv(t)
-	tool := &CheckPRReviewMarkerTool{k8sClient: newFakeClient(), apiBaseURL: server.URL}
+	tool, ctx := newCheckPRReviewMarkerTestTool(server.URL)
 	args, _ := json.Marshal(CheckPRReviewMarkerArgs{RepoURL: testSozercanAynaRepoURL, PRNumber: prNumber, HeadSHA: checkPRReviewMarkerTestSHA})
 
-	result, err := tool.Execute(context.Background(), args)
+	result, err := tool.Execute(ctx, args)
 	if err != nil {
 		t.Fatalf("Execute() returned error: %v", err)
 	}
@@ -231,10 +231,10 @@ func TestCheckPRReviewMarkerTool_FetchesHeadSHAWhenOmitted(t *testing.T) {
 	defer server.Close()
 
 	setCheckPRReviewMarkerTestEnv(t)
-	tool := &CheckPRReviewMarkerTool{k8sClient: newFakeClient(), apiBaseURL: server.URL}
+	tool, ctx := newCheckPRReviewMarkerTestTool(server.URL)
 	args, _ := json.Marshal(CheckPRReviewMarkerArgs{RepoURL: testSozercanAynaRepoURL, PRNumber: prNumber})
 
-	result, err := tool.Execute(context.Background(), args)
+	result, err := tool.Execute(ctx, args)
 	if err != nil {
 		t.Fatalf("Execute() returned error: %v", err)
 	}
@@ -309,9 +309,13 @@ func TestContainsPRReviewMarkerRequiresSignedMarker(t *testing.T) {
 
 func setCheckPRReviewMarkerTestEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv("ORKA_GIT_REPO", testSozercanAynaRepoURL)
-	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 	t.Setenv(prReviewMarkerTrustedAuthorEnv, "reviewer-bot")
+}
+
+func newCheckPRReviewMarkerTestTool(apiBaseURL string) (*CheckPRReviewMarkerTool, context.Context) {
+	task, secret := githubRepoTaskWithSecret(testSozercanAynaRepoURL)
+	return &CheckPRReviewMarkerTool{k8sClient: newFakeClient(task, secret), apiBaseURL: apiBaseURL},
+		contextWithTaskScope()
 }
 
 func formatTestPRReviewMarker(prNumber int) string {

@@ -307,8 +307,9 @@ func TestResolveRepoAndToken_ErrorTaskNoWorkspace(t *testing.T) {
 	}
 }
 
-func TestResolveRepoAndToken_ErrorTaskNoGitSecretRef(t *testing.T) {
+func TestResolveRepoAndToken_TaskWithoutGitSecretRefFallsBackToEnvToken(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv("GITHUB_TOKEN", testEnvToken)
 
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -328,15 +329,18 @@ func TestResolveRepoAndToken_ErrorTaskNoGitSecretRef(t *testing.T) {
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 
-	_, _, _, _, err := resolveRepoAndToken(
+	owner, repo, token, _, err := resolveRepoAndToken(
 		context.Background(), k8sClient,
 		"no-secret-task", "", "",
 	)
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !contains(err.Error(), "has no gitSecretRef configured") {
-		t.Errorf("got error %q, want it to contain 'has no gitSecretRef configured'", err.Error())
+	if owner != "org" || repo != "repo" {
+		t.Errorf("got owner=%q repo=%q, want org/repo", owner, repo)
+	}
+	if token != testEnvToken {
+		t.Errorf("got token=%q, want %q", token, testEnvToken)
 	}
 }
 
@@ -417,7 +421,7 @@ func TestResolveRepoAndToken_RepoURLMismatchRejectsTaskToken(t *testing.T) {
 	}
 }
 
-func TestResolveRepoAndToken_RepoURLWithMissingTaskFallsBackToEnvToken(t *testing.T) {
+func TestResolveRepoAndToken_RepoURLWithMissingTaskFailsClosed(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 	t.Setenv("GITHUB_TOKEN", testEnvToken)
 
@@ -426,17 +430,14 @@ func TestResolveRepoAndToken_RepoURLWithMissingTaskFallsBackToEnvToken(t *testin
 	_ = corev1.AddToScheme(scheme)
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	owner, repo, token, _, err := resolveRepoAndToken(
+	_, _, _, _, err := resolveRepoAndToken(
 		context.Background(), k8sClient,
 		"nonexistent-task", "https://github.com/url-org/url-repo", "",
 	)
-	if err != nil {
+	if err == nil {
+		t.Fatal("expected task lookup error")
+	}
+	if !contains(err.Error(), "failed to get task nonexistent-task") {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if owner != "url-org" || repo != "url-repo" {
-		t.Errorf("got owner=%q repo=%q, want url-org/url-repo", owner, repo)
-	}
-	if token != testEnvToken {
-		t.Errorf("got token=%q, want %q", token, testEnvToken)
 	}
 }

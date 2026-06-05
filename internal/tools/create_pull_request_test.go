@@ -417,7 +417,7 @@ func TestCreatePullRequestTool_NoGitRepo(t *testing.T) {
 	}
 }
 
-func TestCreatePullRequestTool_NoGitSecretRef(t *testing.T) {
+func TestCreatePullRequestTool_NoGitSecretRefWithoutFallbackToken(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
@@ -449,9 +449,9 @@ func TestCreatePullRequestTool_NoGitSecretRef(t *testing.T) {
 
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
-		t.Fatal("expected error for no gitSecretRef")
+		t.Fatal("expected error for no token")
 	}
-	if !strings.Contains(err.Error(), "no gitSecretRef") {
+	if !strings.Contains(err.Error(), "could not resolve GitHub token") {
 		t.Errorf("unexpected error: %s", err.Error())
 	}
 }
