@@ -612,9 +612,9 @@ func buildGitHubActionPrompt(action string, payload githubLabelWebhookPayload, t
 		}
 	case githubActionUpdateBranch:
 		if workspace != nil && workspace.PushBranch != "" {
-			b.WriteString("Update the pull request branch with the latest base branch changes using a no-commit merge/rebase workflow. Resolve conflicts if needed, run relevant tests, and leave final changes uncommitted for Orka to commit and push. Do not merge the pull request.\n")
+			b.WriteString("Update the pull request branch with the latest base branch changes using a no-commit merge workflow. Resolve conflicts if needed, run relevant tests, and leave final changes uncommitted for Orka to commit and push. Do not merge the pull request.\n")
 		} else {
-			b.WriteString("Update the pull request branch with the latest base branch changes using a no-commit merge/rebase workflow. Resolve conflicts if needed, run relevant tests, and leave final changes in the workspace for Orka to capture in the task result; Orka will not push them automatically. Do not merge the pull request.\n")
+			b.WriteString("Update the pull request branch with the latest base branch changes using a no-commit merge workflow. Resolve conflicts if needed, run relevant tests, and leave final changes in the workspace for Orka to capture in the task result; Orka will not push them automatically. Do not merge the pull request.\n")
 		}
 	case githubActionReview:
 		b.WriteString("Review the pull request for correctness, tests, security, maintainability, and regressions. Do not change code. Produce a concise review with blocking findings first and include file/line references when available.\n")
