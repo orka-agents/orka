@@ -108,6 +108,40 @@ orka_namespace="${ORKA_NAMESPACE:-orka-system}"
 controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
 codex_image="${DEMO_CODEX_WORKER_IMAGE:-localhost:${KIND_REGISTRY_PORT:-5001}/orka/agent-worker-codex:demo}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+
+# build_and_repoint_worker <controller-flag> <dockerfile> <image> <build?> <label>
+# Builds a worker image for the cluster node arch, pushes it to the local
+# registry, and points the controller's <controller-flag> at it — ADDING the
+# flag when the Substrate e2e deployment omits it (it only ever sets
+# --codex-worker-image). Used for the AI + general workers, which the e2e never
+# wires, so the controller otherwise falls back to unreachable ghcr defaults.
+build_and_repoint_worker() {
+  local flag="$1" dockerfile="$2" image="$3" do_build="$4" label="$5"
+  if command -v docker >/dev/null 2>&1 && [[ "${do_build}" == "1" ]]; then
+    local node_arch
+    node_arch="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
+    log "Building ${label} image ${image} (arch ${node_arch})"
+    docker build --platform "linux/${node_arch}" -t "${image}" \
+      -f "${repo_root}/${dockerfile}" "${repo_root}"
+    docker push "${image}"
+  fi
+  if kubectl -n "${orka_namespace}" get deployment "${controller_deployment}" >/dev/null 2>&1; then
+    log "Repointing ${controller_deployment} --${flag} -> ${image}"
+    kubectl -n "${orka_namespace}" get deployment "${controller_deployment}" -o json \
+      | jq --arg flag "--${flag}=" --arg img "${image}" '
+          .spec.template.spec.containers |= map(
+            if .name == "manager" then
+              .args = (
+                (.args // []) as $a |
+                if ($a | map(startswith($flag)) | any)
+                then ($a | map(if startswith($flag) then $flag + $img else . end))
+                else ($a + [$flag + $img])
+                end)
+            else . end)' \
+      | kubectl apply -f -
+    kubectl -n "${orka_namespace}" rollout status deployment/"${controller_deployment}" --timeout=300s
+  fi
+}
 if command -v docker >/dev/null 2>&1 && [[ "${DEMO_BUILD_CODEX_IMAGE:-1}" == "1" ]]; then
   node_arch="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
   log "Building git-capable codex worker image ${codex_image} (arch ${node_arch})"
@@ -132,33 +166,20 @@ fi
 # worker image (workers/ai/Dockerfile), NOT the codex worker. The Substrate e2e
 # never builds or wires this image, so the controller falls back to the code
 # default ghcr.io/sozercan/orka/ai-worker:latest, which the kind cluster cannot
-# pull -> ImagePullBackOff and the coordinator never starts. Build the AI worker
-# for the node arch, push to the local registry, and repoint the controller's
-# --ai-worker-image (ADD the flag if the e2e deployment omits it).
+# pull -> ImagePullBackOff and the coordinator never starts.
 ai_image="${DEMO_AI_WORKER_IMAGE:-localhost:${KIND_REGISTRY_PORT:-5001}/orka/ai-worker:demo}"
-if command -v docker >/dev/null 2>&1 && [[ "${DEMO_BUILD_AI_IMAGE:-1}" == "1" ]]; then
-  node_arch="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
-  log "Building AI worker image ${ai_image} (arch ${node_arch})"
-  docker build --platform "linux/${node_arch}" -t "${ai_image}" \
-    -f "${repo_root}/workers/ai/Dockerfile" "${repo_root}"
-  docker push "${ai_image}"
-fi
-if kubectl -n "${orka_namespace}" get deployment "${controller_deployment}" >/dev/null 2>&1; then
-  log "Repointing ${controller_deployment} --ai-worker-image -> ${ai_image}"
-  kubectl -n "${orka_namespace}" get deployment "${controller_deployment}" -o json \
-    | jq --arg img "${ai_image}" '
-        .spec.template.spec.containers |= map(
-          if .name == "manager" then
-            .args = (
-              (.args // []) as $a |
-              if ($a | map(startswith("--ai-worker-image=")) | any)
-              then ($a | map(if startswith("--ai-worker-image=") then "--ai-worker-image=" + $img else . end))
-              else ($a + ["--ai-worker-image=" + $img])
-              end)
-          else . end)' \
-    | kubectl apply -f -
-  kubectl -n "${orka_namespace}" rollout status deployment/"${controller_deployment}" --timeout=300s
-fi
+build_and_repoint_worker "ai-worker-image" "workers/ai/Dockerfile" \
+  "${ai_image}" "${DEMO_BUILD_AI_IMAGE:-1}" "AI worker"
+
+# --- General worker image (validation/discovery container child tasks) -------
+# The type: ai coordinator delegates repo validation/discovery to `type:
+# container` child Tasks that run the GENERAL worker image (workers/general/
+# Dockerfile) when the Task spec pins no image. The Substrate e2e never wires
+# it either, so those children hit ImagePullBackOff on the ghcr default and the
+# coordinator's validation phase stalls. Build + wire it the same way.
+general_image="${DEMO_GENERAL_WORKER_IMAGE:-localhost:${KIND_REGISTRY_PORT:-5001}/orka/general-worker:demo}"
+build_and_repoint_worker "general-worker-image" "workers/general/Dockerfile" \
+  "${general_image}" "${DEMO_BUILD_GENERAL_IMAGE:-1}" "general worker"
 
 log "Demo model stack ready: Provider ${provider_ref} + runtime/provider/git secrets in ${demo_namespace}."
 log "Run demos 10/20/30/40 with: source hack/demos/cluster/demo-env.sh"

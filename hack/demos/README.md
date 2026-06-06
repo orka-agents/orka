@@ -253,10 +253,19 @@ make demo-cluster-up-all        # substrate cluster + Orka + kontxt + agent-sand
 
 # Workspace demos bring their own namespace/env:
 kubectl config use-context kind-orka-agent-substrate-e2e
+
+# Demo 50 (kontxt): the orka-client API ServiceAccount lives in `default`.
 DEMO_NAMESPACE=default ./hack/demos/50-kontxt.sh
-DEMO_NAMESPACE=default DEMO_RUNTIME_TYPE=codex DEMO_RUNTIME_MODEL=gpt-5.4 \
+
+# Demo 60 (agent-sandbox): the bootstrap installs the SandboxTemplate
+# (orka-live-template) and the sandbox-model-key Secret into `demo-magic`, so
+# the demo MUST run there — DEMO_NAMESPACE=default fails with
+# "template orka-live-template not found in namespace default".
+DEMO_NAMESPACE=demo-magic DEMO_RUNTIME_TYPE=codex DEMO_RUNTIME_MODEL=gpt-5.4 \
   DEMO_RUNTIME_SECRET_REF=sandbox-model-key DEMO_GIT_SECRET_REF=github-credentials \
   DEMO_SANDBOX_TEMPLATE_REF=orka-live-template ./hack/demos/60-agent-sandbox.sh
+
+# Demo 70 (substrate): sets provider: substrate explicitly; runs in `default`.
 ./hack/demos/70-agent-substrate.sh
 
 # Model-backed SDLC demos share one env file (points at the in-cluster vekil + secrets):
@@ -275,6 +284,13 @@ on that default; Demo 70 sets `provider: substrate` explicitly, so it's
 unaffected). kontxt's `enforce` mode only gates requests carrying a `Txn-Token`
 header, so the other demos (which send normal ServiceAccount tokens) are
 unaffected — they coexist safely.
+
+Known flake (Demo 70): the warm-reuse Task occasionally fails during workspace
+release with a gVisor `RestoreWorkload: ... eth0: Link not found` daemon error
+*after* the agent's work and PR have already landed. This is Substrate runtime
+nondeterminism on `runsc`, not an Orka bug — the demo's story (cold run opens a
+real PR, warm run reattaches with `reused=true`) still completes. Re-run if the
+final card matters for a recording.
 
 ## Recording
 
