@@ -631,6 +631,12 @@ func runAgentInWorkspace(
 		ReuseKey:       workspaceEnv.ReuseKey,
 		WarmPoolPolicy: workspaceWarmPoolPolicy(workspaceEnv),
 		Timeout:        workspaceEnv.ClaimTimeout,
+		// Size the workspace executor's HTTP transport for long single Exec
+		// calls. Without this, the SDK transport's per-attempt response-header
+		// timeout is sized for the short claim window and a multi-minute agent
+		// exec fails with "timeout awaiting response headers". Mirrors the
+		// agent-sandbox-specific path in runAgentInSandbox.
+		MaxRequestTimeout: workspaceEnv.CommandTimeout,
 	})
 	if err != nil {
 		submitExecutionWorkspaceStatus(

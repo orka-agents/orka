@@ -173,7 +173,17 @@ if [[ "${AGENTIC}" == "1" ]]; then
     log "  kubectl -n ${SUBSTRATE_NS} create secret generic ${SUBSTRATE_GIT_SECRET} --from-literal=username=oauth2 --from-literal=password=<token>"
   fi
 
-  log "Agentic add-ons ready (model ${SUBSTRATE_MODEL} via vekil; codex Actor image; git secret)."
+  # The demos authenticate to the Orka API with a token minted for this SA
+  # (prepare_api_env -> kubectl create token orka-client). The API validates
+  # any SA token via TokenReview, so the SA just needs to exist. cluster-up.sh
+  # provides it on the shared cluster; this e2e-built cluster needs it created.
+  orka_client_sa="${ORKA_TOKEN_SERVICE_ACCOUNT:-orka-client}"
+  orka_client_ns="${ORKA_TOKEN_NAMESPACE:-${SUBSTRATE_NS}}"
+  log "Ensuring Orka API client ServiceAccount ${orka_client_ns}/${orka_client_sa}"
+  kubectl --context "${ctx}" create serviceaccount "${orka_client_sa}" -n "${orka_client_ns}" \
+    --dry-run=client -o yaml | kubectl --context "${ctx}" apply -f -
+
+  log "Agentic add-ons ready (model ${SUBSTRATE_MODEL} via vekil; codex Actor image; git secret; API client SA)."
 fi
 
 log "Agent Substrate installed. Demo 70 can run against context kind-${KIND_CLUSTER}:"

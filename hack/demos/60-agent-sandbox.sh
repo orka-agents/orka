@@ -103,29 +103,37 @@ kubectl delete sandboxclaim -n "${sandbox_claim_namespace}" "${stale_claim}" \
 _sandbox_turn_status() {
   local task_name="$1"
   local elapsed="$2"
-  local phase job_name pod_phase claim
-  phase="$(kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" \
-    -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-  job_name="$(kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" \
-    -o jsonpath='{.status.jobName}' 2>/dev/null || true)"
-  if [[ -n "${job_name}" ]]; then
-    pod_phase="$(kubectl get pods -n "${DEMO_NAMESPACE}" -l "job-name=${job_name}" \
-      --sort-by=.metadata.creationTimestamp \
-      -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null || true)"
-  fi
-  claim="$(kubectl get sandboxclaims -n "${sandbox_claim_namespace}" \
-    -l "orka.ai/session=${session}" --sort-by=.metadata.creationTimestamp \
-    -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)"
+  # Everything here must go to stderr. The wait helpers capture the task phase
+  # via `phase="$(wait_for_task_terminal ...)"`, and this hook runs inside that
+  # same command substitution. demo_announce_once routes through demo_event,
+  # which prints to STDOUT — so if an announce fires on the same tick the task
+  # reaches a terminal phase, its line is captured into the phase string and
+  # corrupts the "== Succeeded" check, failing the demo. Force stderr.
+  {
+    local phase job_name pod_phase claim
+    phase="$(kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" \
+      -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    job_name="$(kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" \
+      -o jsonpath='{.status.jobName}' 2>/dev/null || true)"
+    if [[ -n "${job_name}" ]]; then
+      pod_phase="$(kubectl get pods -n "${DEMO_NAMESPACE}" -l "job-name=${job_name}" \
+        --sort-by=.metadata.creationTimestamp \
+        -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null || true)"
+    fi
+    claim="$(kubectl get sandboxclaims -n "${sandbox_claim_namespace}" \
+      -l "orka.ai/session=${session}" --sort-by=.metadata.creationTimestamp \
+      -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)"
 
-  [[ -n "${job_name}" ]] && demo_announce_once "turn-${task_name}-job" \
-    "🛠️ " "Job created for ${task_name} — pod scheduling on the cluster"
-  [[ "${pod_phase}" == "Running" ]] && demo_announce_once "turn-${task_name}-pod" \
-    "🏃" "Pod running — agent loop bootstrapping (clone or reattach, then tool calls)"
-  [[ -n "${claim}" ]] && demo_announce_once "turn-${task_name}-claim" \
-    "📦" "SandboxClaim attached: ${claim} (this is the workspace state — git checkout, deps, runtime)"
+    [[ -n "${job_name}" ]] && demo_announce_once "turn-${task_name}-job" \
+      "🛠️ " "Job created for ${task_name} — pod scheduling on the cluster"
+    [[ "${pod_phase}" == "Running" ]] && demo_announce_once "turn-${task_name}-pod" \
+      "🏃" "Pod running — agent loop bootstrapping (clone or reattach, then tool calls)"
+    [[ -n "${claim}" ]] && demo_announce_once "turn-${task_name}-claim" \
+      "📦" "SandboxClaim attached: ${claim} (this is the workspace state — git checkout, deps, runtime)"
 
-  __demo_heartbeat 'turn/%s phase=%s pod=%s elapsed=%ss' \
-    "${task_name}" "${phase:-Pending}" "${pod_phase:-Pending}" "${elapsed}"
+    __demo_heartbeat 'turn/%s phase=%s pod=%s elapsed=%ss' \
+      "${task_name}" "${phase:-Pending}" "${pod_phase:-Pending}" "${elapsed}"
+  } 1>&2
 }
 
 # ---------------------------------------------------------------------------

@@ -822,6 +822,13 @@ spec:
     name: ${DEMO_SANDBOX_SESSION}
     create: ${create_session}
   timeout: 60m
+  env:
+    # agent-sandbox pods drop ALL caps + runAsNonRoot, so codex's inner
+    # bubblewrap sandbox cannot nest (bwrap: Operation not permitted). The
+    # sandbox IS the isolation boundary, so run codex with the sandbox
+    # bypassed. (No effect for non-codex runtimes.)
+    - name: ORKA_CODEX_DISABLE_SANDBOX
+      value: "true"
   prompt: |
 EOF
   emit_block "    " "${prompt_body}"
