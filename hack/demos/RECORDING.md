@@ -1064,6 +1064,8 @@ hack/demos/
 │   ├── install-kontxt.sh  # in-cluster kontxt-TTS + Orka env vars
 │   ├── install-agent-sandbox.sh   # upstream operator + SandboxTemplate
 │   ├── install-substrate.sh       # Agent Substrate on a dedicated kind cluster (Demo 70)
+│   ├── install-demo-model.sh      # Provider + model/git Secrets for demos 10/20/30/40
+│   ├── demo-env.sh                # sourceable consolidated DEMO_* env for the SDLC demos
 │   └── templates/
 │       └── orka-live-template.yaml
 ├── images/                # NEW — demo-only container images

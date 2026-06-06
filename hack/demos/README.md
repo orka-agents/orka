@@ -242,6 +242,40 @@ DEMO_SUBSTRATE_NAMESPACE=default ./hack/demos/70-agent-substrate.sh
 make demo-substrate-down                              # tear it down
 ```
 
+### One cluster for everything (`demo-cluster-up-all`)
+
+Because the Substrate cluster is the superset (custom registry + gVisor nodes),
+a single bootstrap can host **all** demos (00–70) on it:
+
+```bash
+make demo-cluster-up-all        # substrate cluster + Orka + kontxt + agent-sandbox + vekil + Provider/secrets
+                                # (one-time GitHub device-code login for vekil — follow the log prompt)
+
+# Workspace demos bring their own namespace/env:
+kubectl config use-context kind-orka-agent-substrate-e2e
+DEMO_NAMESPACE=default ./hack/demos/50-kontxt.sh
+DEMO_NAMESPACE=default DEMO_RUNTIME_TYPE=codex DEMO_RUNTIME_MODEL=gpt-5.4 \
+  DEMO_RUNTIME_SECRET_REF=sandbox-model-key DEMO_GIT_SECRET_REF=github-credentials \
+  DEMO_SANDBOX_TEMPLATE_REF=orka-live-template ./hack/demos/60-agent-sandbox.sh
+./hack/demos/70-agent-substrate.sh
+
+# Model-backed SDLC demos share one env file (points at the in-cluster vekil + secrets):
+source hack/demos/cluster/demo-env.sh
+./hack/demos/20-manual-workflow.sh
+./hack/demos/30-cron-workflow.sh
+./hack/demos/40-security-scanning.sh
+./hack/demos/10-chat-pr.sh        # also needs the `claude` CLI on PATH
+
+make demo-cluster-up-all-down     # tear it all down
+```
+
+Notes: `install-agent-sandbox.sh` runs **last** in the bootstrap because it sets
+the controller's default workspace provider to `agent-sandbox` (Demo 60 relies
+on that default; Demo 70 sets `provider: substrate` explicitly, so it's
+unaffected). kontxt's `enforce` mode only gates requests carrying a `Txn-Token`
+header, so the other demos (which send normal ServiceAccount tokens) are
+unaffected — they coexist safely.
+
 ## Recording
 
 The demo scripts are recording-ready: they pace themselves via the

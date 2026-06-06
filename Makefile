@@ -146,6 +146,17 @@ demo-substrate-up: ## Bootstrap a DEDICATED kind cluster with Agent Substrate + 
 demo-substrate-down: ## Tear down the Agent Substrate demo cluster (Demo 70)
 	kind delete cluster --name $${KIND_CLUSTER:-orka-agent-substrate-e2e}
 
+.PHONY: demo-cluster-up-all
+demo-cluster-up-all: ## ONE substrate-flavored kind cluster that runs ALL demos (00-70)
+	hack/demos/cluster/install-substrate.sh
+	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-kontxt.sh
+	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-demo-model.sh
+	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-agent-sandbox.sh
+
+.PHONY: demo-cluster-up-all-down
+demo-cluster-up-all-down: ## Tear down the unified demo cluster
+	kind delete cluster --name $${KIND_CLUSTER:-orka-agent-substrate-e2e}
+
 .PHONY: demo-images
 demo-images: ## Build + kind-load demo-only images (currently: kontxt-caller)
 	docker build -t docker.io/sozercan/orka-kontxt-caller:demo hack/demos/images/kontxt-caller

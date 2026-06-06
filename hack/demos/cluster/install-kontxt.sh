@@ -35,16 +35,40 @@ repo_root="$(cd "${script_dir}/../../.." && pwd)"
 log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-for cmd in kind docker kubectl go; do
+for cmd in docker kubectl go; do
   command -v "${cmd}" >/dev/null 2>&1 || die "missing required command: ${cmd}"
 done
 
-if ! kind get clusters | grep -qx "${cluster_name}"; then
-  die "kind cluster ${cluster_name} not found — run hack/demos/cluster/cluster-up.sh first"
+# Select context: prefer kind-<cluster_name> if that kind cluster exists,
+# otherwise use the current context (lets the kontxt demo share an existing
+# cluster, e.g. the Substrate demo cluster for a single-cluster bootstrap).
+if command -v kind >/dev/null 2>&1 && kind get clusters 2>/dev/null | grep -qx "${cluster_name}"; then
+  log "Selecting kubectl context kind-${cluster_name}"
+  kubectl config use-context "kind-${cluster_name}" >/dev/null
+else
+  log "kind cluster ${cluster_name} not found; using current context $(kubectl config current-context)"
 fi
 
-log "Selecting kubectl context kind-${cluster_name}"
-kubectl config use-context "kind-${cluster_name}" >/dev/null
+# Ensure the resources the demos expect: the demo namespace (10-60 default to
+# demo-magic) and the Orka API client ServiceAccount used to mint API tokens.
+# Both idempotent; other installers may also create them.
+demo_namespace="${DEMO_NAMESPACE:-demo-magic}"
+orka_client_sa="${ORKA_TOKEN_SERVICE_ACCOUNT:-orka-client}"
+orka_client_ns="${ORKA_TOKEN_NAMESPACE:-default}"
+kubectl create namespace "${demo_namespace}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl create serviceaccount "${orka_client_sa}" -n "${orka_client_ns}" \
+  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+# The TTS verifies caller ServiceAccount tokens by fetching the cluster's OIDC
+# discovery + JWKS ANONYMOUSLY from inside the pod. Vanilla kind binds
+# system:service-account-issuer-discovery to system:unauthenticated by default,
+# but some kind variants (e.g. Substrate's create-kind-cluster.sh) do NOT — then
+# discovery returns 403 and every token exchange fails with "no access_token".
+# Ensure the binding exists (idempotent).
+kubectl create clusterrolebinding kontxt-anon-issuer-discovery \
+  --clusterrole=system:service-account-issuer-discovery \
+  --group=system:unauthenticated \
+  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 # 1. Ephemeral RSA key + JWKS. We inline a small generator (mirrors
 #    scripts/live-github-oidc-e2e.sh:310–446) so the JWKS schema matches
@@ -185,10 +209,34 @@ spec:
       targetPort: ${kontxt_jwks_port}
 YAML
 
-# 3. Build + load the TTS helper image.
+# 3. Build the TTS helper image, then get it onto the cluster. If the named
+#    kind cluster exists, `kind load` it; otherwise push to the cluster's local
+#    registry (localhost:<port>) so normal pods can pull it.
 log "Building live kontxt helper image ${live_kontxt_image}"
-docker build -t "${live_kontxt_image}" -f "${repo_root}/scripts/live-kontxt-e2e/Dockerfile" "${repo_root}"
-kind load docker-image "${live_kontxt_image}" --name "${cluster_name}"
+if command -v kind >/dev/null 2>&1 && kind get clusters 2>/dev/null | grep -qx "${cluster_name}"; then
+  docker build -t "${live_kontxt_image}" -f "${repo_root}/scripts/live-kontxt-e2e/Dockerfile" "${repo_root}"
+  kind load docker-image "${live_kontxt_image}" --name "${cluster_name}"
+else
+  registry_port="${KIND_REGISTRY_PORT:-5001}"
+  live_kontxt_image="localhost:${registry_port}/orka-live-kontxt-e2e:demo"
+  log "kind cluster ${cluster_name} not found; pushing ${live_kontxt_image} to the local registry"
+  docker build -t "${live_kontxt_image}" -f "${repo_root}/scripts/live-kontxt-e2e/Dockerfile" "${repo_root}"
+  docker push "${live_kontxt_image}"
+fi
+
+# 3b. The Demo 50 caller image (docker.io/sozercan/orka-kontxt-caller:demo) is
+#     published amd64-only, so it ImagePullBackOffs on an arm64 cluster. Build it
+#     for the node arch and load/push it so the caller Job runs everywhere.
+caller_image="${DEMO_KONTXT_CALLER_IMAGE:-docker.io/sozercan/orka-kontxt-caller:demo}"
+node_arch="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
+log "Building kontxt caller image ${caller_image} (arch ${node_arch})"
+docker build --platform "linux/${node_arch}" -t "${caller_image}" \
+  "${repo_root}/hack/demos/images/kontxt-caller"
+if command -v kind >/dev/null 2>&1 && kind get clusters 2>/dev/null | grep -qx "${cluster_name}"; then
+  kind load docker-image "${caller_image}" --name "${cluster_name}"
+else
+  docker push "${caller_image}" || log "warning: could not push ${caller_image}; ensure the cluster can pull it"
+fi
 
 # 4. TTS Deployment + Service.
 log "Deploying kontxt TTS ${kontxt_tts_name}"
