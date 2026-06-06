@@ -41,31 +41,40 @@ delete_task_if_exists "${DEMO_MANUAL_TASK_NAME}"
 _manual_coordinator_status() {
   local parent="$1"
   local elapsed="$2"
-  local phase counts children_count latest_child latest_phase
-  phase="$(kubectl get task "${parent}" -n "${DEMO_NAMESPACE}" \
-    -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-  counts="$(kubectl --request-timeout=3s get tasks -n "${DEMO_NAMESPACE}" \
-    -l "orka.ai/parent-task=${parent}" --no-headers 2>/dev/null \
-    | awk '{p=$3; if(p=="")p="Pending"; c[p]++}
-           END { out=""; for(p in c){if(out!="")out=out" "; out=out p"="c[p]}
-                 if(out=="")out="(none yet)"; print out }')"
-  children_count="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
-    -l "orka.ai/parent-task=${parent}" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
-  latest_child="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
-    -l "orka.ai/parent-task=${parent}" --sort-by=.metadata.creationTimestamp \
-    -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)"
-  latest_phase="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
-    -l "orka.ai/parent-task=${parent}" --sort-by=.metadata.creationTimestamp \
-    -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null || true)"
+  # Everything here must go to stderr. The wait helpers capture the task phase
+  # via `phase="$(wait_for_task_terminal ...)"`, and this hook runs inside that
+  # same command substitution. demo_announce_once routes through demo_event,
+  # which prints to STDOUT — so if an announce fires on the same tick the task
+  # reaches a terminal phase, its line is captured into the phase string and
+  # corrupts the "== Succeeded" check, failing an otherwise-green run. Force
+  # stderr (mirrors the _sandbox_turn_status fix in 60-agent-sandbox.sh).
+  {
+    local phase counts children_count latest_child latest_phase
+    phase="$(kubectl get task "${parent}" -n "${DEMO_NAMESPACE}" \
+      -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    counts="$(kubectl --request-timeout=3s get tasks -n "${DEMO_NAMESPACE}" \
+      -l "orka.ai/parent-task=${parent}" --no-headers 2>/dev/null \
+      | awk '{p=$3; if(p=="")p="Pending"; c[p]++}
+             END { out=""; for(p in c){if(out!="")out=out" "; out=out p"="c[p]}
+                   if(out=="")out="(none yet)"; print out }')"
+    children_count="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
+      -l "orka.ai/parent-task=${parent}" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+    latest_child="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
+      -l "orka.ai/parent-task=${parent}" --sort-by=.metadata.creationTimestamp \
+      -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)"
+    latest_phase="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
+      -l "orka.ai/parent-task=${parent}" --sort-by=.metadata.creationTimestamp \
+      -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null || true)"
 
-  (( children_count >= 1 )) && demo_announce_once "manual-first-child" \
-    "👶" "Coordinator delegated to its first specialist child Task — agentic fan-out has started"
-  (( children_count >= 3 )) && demo_announce_once "manual-fanout" \
-    "🌳" "Coordinator has now spawned ${children_count}+ specialist Tasks (implement, test, review, CI…)"
+    (( children_count >= 1 )) && demo_announce_once "manual-first-child" \
+      "👶" "Coordinator delegated to its first specialist child Task — agentic fan-out has started"
+    (( children_count >= 3 )) && demo_announce_once "manual-fanout" \
+      "🌳" "Coordinator has now spawned ${children_count}+ specialist Tasks (implement, test, review, CI…)"
 
-  __demo_heartbeat 'coordinator/%s phase=%s children=%s [%s] latest=%s/%s elapsed=%ss' \
-    "${parent}" "${phase:-Pending}" "${children_count}" "${counts}" \
-    "${latest_child:-—}" "${latest_phase:-—}" "${elapsed}"
+    __demo_heartbeat 'coordinator/%s phase=%s children=%s [%s] latest=%s/%s elapsed=%ss' \
+      "${parent}" "${phase:-Pending}" "${children_count}" "${counts}" \
+      "${latest_child:-—}" "${latest_phase:-—}" "${elapsed}"
+  } 1>&2
 }
 
 # ---------------------------------------------------------------------------

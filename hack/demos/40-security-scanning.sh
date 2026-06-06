@@ -53,35 +53,42 @@ kubectl apply -f "${DEMO_WORKDIR}/security-repositoryscan.yaml"  >/dev/null
 _security_stage_status() {
   local scan_name="$1"
   local elapsed="$2"
-  # One kubectl query → counts for all stages.
-  local data
-  data="$(kubectl -n "${DEMO_NAMESPACE}" get task \
-            -l "orka.ai/security-target=${scan_name}" \
-            -o custom-columns=STAGE:.metadata.labels.orka\\.ai/security-stage,PHASE:.status.phase \
-            --no-headers 2>/dev/null || true)"
-  local th_total th_done di_total di_done val_total val_done patch_total patch_done
-  th_total=$(printf '%s\n'   "${data}" | awk '$1=="threat-model"{n++} END{print n+0}')
-  th_done=$(printf '%s\n'    "${data}" | awk '$1=="threat-model" && $2=="Succeeded"{n++} END{print n+0}')
-  di_total=$(printf '%s\n'   "${data}" | awk '$1=="discovery"{n++} END{print n+0}')
-  di_done=$(printf '%s\n'    "${data}" | awk '$1=="discovery" && $2=="Succeeded"{n++} END{print n+0}')
-  val_total=$(printf '%s\n'  "${data}" | awk '$1=="validation"{n++} END{print n+0}')
-  val_done=$(printf '%s\n'   "${data}" | awk '$1=="validation" && $2=="Succeeded"{n++} END{print n+0}')
-  patch_total=$(printf '%s\n' "${data}" | awk '$1=="patch"{n++} END{print n+0}')
-  patch_done=$(printf '%s\n' "${data}" | awk '$1=="patch" && $2=="Succeeded"{n++} END{print n+0}')
+  # Everything here must go to stderr. The wait helpers capture their return
+  # value via `x="$(wait_for_... )"` with this hook running in the same command
+  # substitution; demo_announce_once prints to STDOUT, so an announce firing on
+  # the tick a wait resolves would be captured into the returned string and
+  # corrupt it. Force stderr (mirrors the _sandbox_turn_status fix in 60).
+  {
+    # One kubectl query → counts for all stages.
+    local data
+    data="$(kubectl -n "${DEMO_NAMESPACE}" get task \
+              -l "orka.ai/security-target=${scan_name}" \
+              -o custom-columns=STAGE:.metadata.labels.orka\\.ai/security-stage,PHASE:.status.phase \
+              --no-headers 2>/dev/null || true)"
+    local th_total th_done di_total di_done val_total val_done patch_total patch_done
+    th_total=$(printf '%s\n'   "${data}" | awk '$1=="threat-model"{n++} END{print n+0}')
+    th_done=$(printf '%s\n'    "${data}" | awk '$1=="threat-model" && $2=="Succeeded"{n++} END{print n+0}')
+    di_total=$(printf '%s\n'   "${data}" | awk '$1=="discovery"{n++} END{print n+0}')
+    di_done=$(printf '%s\n'    "${data}" | awk '$1=="discovery" && $2=="Succeeded"{n++} END{print n+0}')
+    val_total=$(printf '%s\n'  "${data}" | awk '$1=="validation"{n++} END{print n+0}')
+    val_done=$(printf '%s\n'   "${data}" | awk '$1=="validation" && $2=="Succeeded"{n++} END{print n+0}')
+    patch_total=$(printf '%s\n' "${data}" | awk '$1=="patch"{n++} END{print n+0}')
+    patch_done=$(printf '%s\n' "${data}" | awk '$1=="patch" && $2=="Succeeded"{n++} END{print n+0}')
 
-  # Persistent stage-transition events (once each).
-  (( th_total  >= 1 )) && demo_announce_once "scan-tm-started"  "🧠" "Threat-model task started — building canonical repo context (longest single stage)"
-  (( th_done   >= 1 )) && demo_announce_once "scan-tm-done"     "✅" "Threat model complete — discovery agents will use it as canonical input"
-  (( di_total  >= 1 )) && demo_announce_once "scan-disc-start"  "🔍" "Discovery fan-out: parallel scope-focused passes across auth, data exposure, supply chain, app logic, recent commits"
-  (( di_total  >= 5 && di_done >= 5 )) && demo_announce_once "scan-disc-done" "✅" "Discovery complete — 5/5 scopes finished, validators will rank findings"
-  (( val_total >= 1 )) && demo_announce_once "scan-val-start"  "🧪" "Per-finding validators started — suppressing false positives before surfacing in the API"
-  (( patch_total >= 1 )) && demo_announce_once "scan-patch-start" "🛠️ " "Remediation Task started — drafting the fix on a new branch"
-  (( patch_done  >= 1 )) && demo_announce_once "scan-patch-done"  "✅" "Patch complete — branch + PR opened against ${DEMO_SECURITY_GIT_REPO}"
+    # Persistent stage-transition events (once each).
+    (( th_total  >= 1 )) && demo_announce_once "scan-tm-started"  "🧠" "Threat-model task started — building canonical repo context (longest single stage)"
+    (( th_done   >= 1 )) && demo_announce_once "scan-tm-done"     "✅" "Threat model complete — discovery agents will use it as canonical input"
+    (( di_total  >= 1 )) && demo_announce_once "scan-disc-start"  "🔍" "Discovery fan-out: parallel scope-focused passes across auth, data exposure, supply chain, app logic, recent commits"
+    (( di_total  >= 5 && di_done >= 5 )) && demo_announce_once "scan-disc-done" "✅" "Discovery complete — 5/5 scopes finished, validators will rank findings"
+    (( val_total >= 1 )) && demo_announce_once "scan-val-start"  "🧪" "Per-finding validators started — suppressing false positives before surfacing in the API"
+    (( patch_total >= 1 )) && demo_announce_once "scan-patch-start" "🛠️ " "Remediation Task started — drafting the fix on a new branch"
+    (( patch_done  >= 1 )) && demo_announce_once "scan-patch-done"  "✅" "Patch complete — branch + PR opened against ${DEMO_SECURITY_GIT_REPO}"
 
-  # Live heartbeat with counts.
-  __demo_heartbeat 'scan/%s stages: threat-model %d/%d • discovery %d/%d • validation %d/%d • patch %d/%d • elapsed %ss' \
-    "${scan_name}" "${th_done}" "${th_total:-1}" "${di_done}" "${di_total:-0}" \
-    "${val_done}" "${val_total:-0}" "${patch_done}" "${patch_total:-0}" "${elapsed}"
+    # Live heartbeat with counts.
+    __demo_heartbeat 'scan/%s stages: threat-model %d/%d • discovery %d/%d • validation %d/%d • patch %d/%d • elapsed %ss' \
+      "${scan_name}" "${th_done}" "${th_total:-1}" "${di_done}" "${di_total:-0}" \
+      "${val_done}" "${val_total:-0}" "${patch_done}" "${patch_total:-0}" "${elapsed}"
+  } 1>&2
 }
 
 DEMO_WAIT_STATUS_HOOK=_security_stage_status
