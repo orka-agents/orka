@@ -8,7 +8,7 @@ This directory contains a small `demo-magic` kit for showing Orka in six ways:
 - `40-security-scanning.sh`: repository scan -> findings -> patch -> PR
 - `50-kontxt.sh`: workload SA token -> in-cluster TTS -> request-scoped TxToken -> Orka API call (one identity, two outcomes)
 - `60-agent-sandbox.sh`: three turns share a single SandboxClaim via `sessionRef` (scout -> builder -> CI fixup, same workspace)
-- `70-agent-substrate.sh`: a real gpt-5.4 codex agent in a gVisor Actor (Agent Substrate) clones a repo, edits it, and opens a PR; a second task reuses the warm workspace with no cold start
+- `70-agent-substrate.sh`: a real gpt-5.5 codex agent in a gVisor Actor (Agent Substrate) clones a repo, edits it, and opens a PR; a second task reuses the warm workspace with no cold start
 
 There is also:
 
@@ -38,10 +38,10 @@ export DEMO_NAMESPACE="demo-magic"
 
 # Must match metadata.name from: kubectl get provider -n "$DEMO_NAMESPACE"
 export DEMO_PROVIDER_REF="<existing-provider-name>"
-export DEMO_AI_MODEL="gpt-5.4"
+export DEMO_AI_MODEL="claude-opus-4.8"
 
 export DEMO_RUNTIME_TYPE="codex"
-export DEMO_RUNTIME_MODEL="gpt-5.4"
+export DEMO_RUNTIME_MODEL="gpt-5.5"
 export DEMO_RUNTIME_SECRET_REF="<runtime-secret-name>"
 
 export DEMO_GIT_REPO="https://github.com/sozercan/vekil.git"
@@ -75,7 +75,7 @@ spec:
     name: copilot-provider-key
     key: api-key
   baseURL: https://api.githubcopilot.com
-  defaultModel: gpt-5.4
+  defaultModel: gpt-5.5
 YAML
 ```
 
@@ -154,8 +154,8 @@ Claude Code chat defaults:
 ```bash
 export DEMO_CHAT_CLIENT="claude-code"
 export DEMO_CLAUDE_BIN="claude"
-# Optional override. By default the scripts compute provider/model, e.g. copilot-proxy-openai/gpt-5.4.
-# export DEMO_CLAUDE_MODEL="copilot-proxy-openai/gpt-5.4"
+# Optional override. By default the scripts compute provider/model, e.g. copilot-proxy-openai/gpt-5.5.
+# export DEMO_CLAUDE_MODEL="copilot-proxy-openai/gpt-5.5"
 ```
 
 Optional tuning:
@@ -261,7 +261,7 @@ DEMO_NAMESPACE=default ./hack/demos/50-kontxt.sh
 # (orka-live-template) and the sandbox-model-key Secret into `demo-magic`, so
 # the demo MUST run there — DEMO_NAMESPACE=default fails with
 # "template orka-live-template not found in namespace default".
-DEMO_NAMESPACE=demo-magic DEMO_RUNTIME_TYPE=codex DEMO_RUNTIME_MODEL=gpt-5.4 \
+DEMO_NAMESPACE=demo-magic DEMO_RUNTIME_TYPE=codex DEMO_RUNTIME_MODEL=gpt-5.5 \
   DEMO_RUNTIME_SECRET_REF=sandbox-model-key DEMO_GIT_SECRET_REF=github-credentials \
   DEMO_SANDBOX_TEMPLATE_REF=orka-live-template ./hack/demos/60-agent-sandbox.sh
 
@@ -365,7 +365,7 @@ The scenarios are:
 
 `10-chat-pr.sh` intentionally uses Claude Code only as a local Anthropic client. The script applies the prepared coordinator/coder/reviewer Agents, renders the exact operational prompt to `${DEMO_WORKDIR}/chat-request.txt`, prints it by default for transparency, sends it to Orka, and saves the raw Claude Code JSON response to `${DEMO_WORKDIR}/chat-client-result.json` for debugging. Set `DEMO_SHOW_FULL_PROMPT=0` if you want the presenter view to show only the story and file path.
 
-Use a fully qualified Anthropic model name for this path, such as `copilot-proxy-openai/gpt-5.4`. If `DEMO_CLAUDE_MODEL` is empty, the helper computes it from `DEMO_PROVIDER_REF` and `DEMO_AI_MODEL`.
+Use a fully qualified Anthropic model name for this path, such as `copilot-proxy-openai/gpt-5.5`. If `DEMO_CLAUDE_MODEL` is empty, the helper computes it from `DEMO_PROVIDER_REF` and `DEMO_AI_MODEL`.
 
 The default `DEMO_CLAUDE_SETTING_SOURCES=""` is deliberate: the generated Claude Code command passes `--setting-sources ""` so local `~/.claude/settings.json` environment overrides do not silently point Claude Code at a different API base URL. When `DEMO_CLAUDE_TOOLS=""`, the scripts omit `--tools` entirely because current Claude Code builds reject an empty tool name; set `DEMO_CLAUDE_TOOLS` only when you intentionally want to pass a local Claude Code tool allow-list. Orka injects the Kubernetes task tools server-side.
 

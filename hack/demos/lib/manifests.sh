@@ -971,7 +971,7 @@ Beyond this demo, any multi-turn workflow (planner -> builder -> tester, scout -
 : "${DEMO_SUBSTRATE_COLD_TASK:=demo-substrate-cold}"
 : "${DEMO_SUBSTRATE_WARM_TASK:=demo-substrate-warm}"
 : "${DEMO_SUBSTRATE_RUNTIME_TYPE:=codex}"
-: "${DEMO_SUBSTRATE_RUNTIME_MODEL:=gpt-5.4}"
+: "${DEMO_SUBSTRATE_RUNTIME_MODEL:=gpt-5.5}"
 : "${DEMO_SUBSTRATE_MODEL_SECRET:=substrate-model-key}"
 : "${DEMO_SUBSTRATE_GIT_SECRET:=github-credentials}"
 : "${DEMO_SUBSTRATE_GIT_REPO:=https://github.com/sozercan/vekil.git}"

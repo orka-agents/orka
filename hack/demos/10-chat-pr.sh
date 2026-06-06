@@ -66,7 +66,7 @@ pick_chat_opus_model() {
   token="$(get_orka_token)"
   body_file="$(mktemp)"
   trap 'rm -f "${body_file}"' RETURN
-  for candidate in claude-opus-4.7 claude-opus-4.6; do
+  for candidate in claude-opus-4.8 claude-opus-4.7 claude-opus-4.6; do
     model_id="${provider}/${candidate}"
     http_code="$(curl -sS -m 15 -o "${body_file}" -w '%{http_code}' \
       -X POST "${ORKA_API_BASE%/}/anthropic/v1/messages" \
@@ -90,7 +90,7 @@ require_orka_api_reachable
 
 DEMO_CHAT_OPUS_MODEL="$(pick_chat_opus_model || true)"
 if [[ -z "${DEMO_CHAT_OPUS_MODEL}" ]]; then
-  die "no Opus model accepted by ${ORKA_API_BASE}/anthropic — tried claude-opus-4.7, claude-opus-4.6. Set DEMO_CHAT_MODEL=<provider>/<model> to override."
+  die "no Opus model accepted by ${ORKA_API_BASE}/anthropic — tried claude-opus-4.8, claude-opus-4.7, claude-opus-4.6. Set DEMO_CHAT_MODEL=<provider>/<model> to override."
 fi
 # Make the chosen model the one demo_anthropic_model emits.
 export DEMO_CLAUDE_MODEL="${DEMO_CHAT_OPUS_MODEL}"

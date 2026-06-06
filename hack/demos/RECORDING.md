@@ -73,7 +73,7 @@ Six demos total. Four exist; two are new.
 | 40 | Security remediation | `40-security-scanning.sh` | exists, needs polish | Finding → patch proposal → reviewable PR |
 | 50 | **Kontxt transaction tokens** | `50-kontxt.sh` | **new** | Caller Pod proves identity → kontxt mints TxToken → Orka stamps immutable provenance |
 | 60 | **Agent sandbox workspaces** | `60-agent-sandbox.sh` | **new** | One session, two agents, three turns — Scout, Builder, and a CI fixup share one warm sandbox |
-| 70 | **Agent Substrate workspaces** | `70-agent-substrate.sh` | **new** | Real gpt-5.4 agent in a gVisor Actor clones + edits + opens a PR; warm reuse with no cold start |
+| 70 | **Agent Substrate workspaces** | `70-agent-substrate.sh` | **new** | Real gpt-5.5 agent in a gVisor Actor clones + edits + opens a PR; warm reuse with no cold start |
 
 Demos 50 and 60 are designed in [§7](#7-new-scenario-storyboards).
 
@@ -725,7 +725,7 @@ by an order of magnitude.
 shows agent-sandbox; Demo 70 shows the *same Orka agent Task API* backed by a
 second provider — **Agent Substrate** — where each workspace is a
 gVisor-isolated Actor drawn from a pre-warmed WorkerPool and kept warm between
-turns. A **real `gpt-5.4` codex agent** runs inside the gVisor sandbox: it
+turns. A **real `gpt-5.5` codex agent** runs inside the gVisor sandbox: it
 clones a repo, makes a change, and a real PR is opened. The message: swap one
 field (`execution.workspace.provider: substrate`) and the entire agent Task
 contract — model call, git push, PR — is unchanged. Orka abstracts the
@@ -761,7 +761,7 @@ comes from `GIT_TOKEN`/`GITHUB_TOKEN` or the local `gh` CLI.
 
 | # | Beat | What the audience sees |
 |---|------|------------------------|
-| 1 | Cold | A Task with `provider: substrate` + `reusePolicy: session` + `sessionRef.create: true`. A fresh gVisor Actor; a real `gpt-5.4` agent clones the repo, edits a file, stops. Orka pushes the branch; the demo opens a real PR. `status.executionWorkspace.provider == substrate`. |
+| 1 | Cold | A Task with `provider: substrate` + `reusePolicy: session` + `sessionRef.create: true`. A fresh gVisor Actor; a real `gpt-5.5` agent clones the repo, edits a file, stops. Orka pushes the branch; the demo opens a real PR. `status.executionWorkspace.provider == substrate`. |
 | 2 | PR | The demo opens the pull request via `gh` (the agent edited only — clean exit; Orka pushed). The real PR URL appears. |
 | 3 | Warm | A second Task, same `sessionRef` (`create: false`). Reattaches the retained workspace: `status.executionWorkspace.reused == true` — repo already cloned, no cold start. A follow-up commit lands on the same PR. |
 
@@ -988,7 +988,7 @@ demo only applies the Orka `Agent` + two `Task`s and opens the PR. All carry
 `orka.ai/demo: substrate` / `demo.orka.ai/scenario: substrate`.
 
 - **Agent** (`render_substrate_agent`) — `core.orka.ai/v1alpha1` Agent, runtime
-  `codex`, model `gpt-5.4`. A real model run: `secretRef` (NOT `providerRef` —
+  `codex`, model `gpt-5.5`. A real model run: `secretRef` (NOT `providerRef` —
   mutually exclusive with `runtime`) points at a Secret carrying
   `OPENAI_BASE_URL` (→ the in-cluster vekil proxy) + a placeholder
   `OPENAI_API_KEY`. The system prompt tells the agent to edit files only and

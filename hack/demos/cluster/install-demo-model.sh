@@ -27,7 +27,7 @@ vekil_ns="${VEKIL_NAMESPACE:-vekil-system}"
 provider_ref="${DEMO_PROVIDER_REF:-vekil-proxy}"
 provider_secret="${DEMO_PROVIDER_SECRET_REF:-demo-provider-key}"
 provider_secret_key="${DEMO_PROVIDER_SECRET_KEY:-api-key}"
-provider_model="${DEMO_AI_MODEL:-claude-opus-4.7}"
+provider_model="${DEMO_AI_MODEL:-claude-opus-4.8}"
 runtime_secret="${DEMO_RUNTIME_SECRET_REF:-demo-runtime-key}"
 git_secret="${DEMO_GIT_SECRET_REF:-github-credentials}"
 

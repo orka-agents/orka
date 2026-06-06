@@ -35,9 +35,9 @@ fi
 # Model: the type: ai coordinator (demos 10/20) uses the Provider; the CLI
 # agents use the runtime secret. Both resolve to the in-cluster vekil proxy.
 export DEMO_PROVIDER_REF="${DEMO_PROVIDER_REF:-vekil-proxy}"
-export DEMO_AI_MODEL="${DEMO_AI_MODEL:-claude-opus-4.7}"
+export DEMO_AI_MODEL="${DEMO_AI_MODEL:-claude-opus-4.8}"
 export DEMO_RUNTIME_TYPE="${DEMO_RUNTIME_TYPE:-codex}"
-export DEMO_RUNTIME_MODEL="${DEMO_RUNTIME_MODEL:-gpt-5.4}"
+export DEMO_RUNTIME_MODEL="${DEMO_RUNTIME_MODEL:-gpt-5.5}"
 export DEMO_RUNTIME_SECRET_REF="${DEMO_RUNTIME_SECRET_REF:-demo-runtime-key}"
 
 # Git: the PR demos push branches + open PRs against this repo.
