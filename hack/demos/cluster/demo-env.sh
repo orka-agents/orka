@@ -18,6 +18,16 @@
 # (demo-magic); kontxt + the orka-client API SA live in `default` (handled by
 # the installers). Select the unified cluster context.
 export DEMO_NAMESPACE="${DEMO_NAMESPACE:-demo-magic}"
+# Mint the Orka API token from the SA in DEMO_NAMESPACE (orka-client exists in
+# both default and demo-magic on the unified cluster). The Anthropic/OpenAI
+# compat endpoints resolve the Provider CRD from the caller token's namespace
+# when no ?namespace= is given — and the `claude` CLI in Demo 10 cannot carry a
+# query string on ANTHROPIC_BASE_URL. Minting from demo-magic (where the
+# vekil-proxy Provider lives) makes the probe, the chat client, and the
+# coordinator all resolve the Provider without URL surgery. Defaulting this to
+# `default` (as the base lib does) breaks Demo 10 with "no provider
+# \"vekil-proxy\" found and no 'default' Provider CRD exists".
+export ORKA_TOKEN_NAMESPACE="${ORKA_TOKEN_NAMESPACE:-${DEMO_NAMESPACE}}"
 if command -v kubectl >/dev/null 2>&1; then
   kubectl config use-context "kind-${KIND_CLUSTER:-orka-agent-substrate-e2e}" >/dev/null 2>&1 || true
 fi
