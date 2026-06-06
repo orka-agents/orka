@@ -26,12 +26,16 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/store/sqlite"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
 	githubWebhookTestDefaultBranch = "main"
 	githubWebhookTestGitSecret     = "git-credentials"
+	githubWebhookTestHeadSHA       = "head-sha"
+	githubWebhookTestNewHeadSHA    = "new-head-sha"
 )
 
 func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
@@ -106,7 +110,7 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 	fc := newGitHubWebhookFakeClient(t, runtimeAgent("claude-agent"))
 	server := NewServer(fc, nil, ServerConfig{})
 
-	body := []byte(`{
+	body := []byte(strings.ReplaceAll(`{
 		"action":"labeled",
 		"label":{"name":"agent:update-branch"},
 		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
@@ -116,10 +120,10 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 			"body":"Update me",
 			"html_url":"https://github.com/sozercan/vekil/pull/34",
 			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}},
-			"head":{"ref":"feature/x","sha":"head-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}}
+			"head":{"ref":"feature/x","sha":"{{HEAD_SHA}}","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}}
 		},
 		"sender":{"login":"octocat"}
-	}`)
+	}`, "{{HEAD_SHA}}", githubWebhookTestHeadSHA))
 
 	delivery := "delivery-2"
 	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, delivery, secret, body)
@@ -135,8 +139,8 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 	if ws.Branch != "feature/x" {
 		t.Errorf("branch = %q, want feature/x", ws.Branch)
 	}
-	if ws.Ref != "head-sha" {
-		t.Errorf("ref = %q, want head-sha", ws.Ref)
+	if ws.Ref != githubWebhookTestHeadSHA {
+		t.Errorf("ref = %q, want %s", ws.Ref, githubWebhookTestHeadSHA)
 	}
 	if ws.PushBranch != "feature/x" {
 		t.Errorf("pushBranch = %q, want feature/x", ws.PushBranch)
@@ -277,7 +281,7 @@ func TestGitHubWebhook_PullRequestReviewMountsGitSecretWithoutPushBranch(t *test
 	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
 	server := NewServer(fc, nil, ServerConfig{})
 
-	body := []byte(`{
+	body := []byte(strings.ReplaceAll(`{
 		"action":"labeled",
 		"label":{"name":"agent:review"},
 		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
@@ -287,10 +291,10 @@ func TestGitHubWebhook_PullRequestReviewMountsGitSecretWithoutPushBranch(t *test
 			"body":"Please review",
 			"html_url":"https://github.com/sozercan/vekil/pull/37",
 			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}},
-			"head":{"ref":"feature/review","sha":"head-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}}
+			"head":{"ref":"feature/review","sha":"{{HEAD_SHA}}","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}}
 		},
 		"sender":{"login":"octocat"}
-	}`)
+	}`, "{{HEAD_SHA}}", githubWebhookTestHeadSHA))
 
 	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-review-pr", secret, body)
 	if resp.StatusCode != http.StatusCreated {
@@ -424,6 +428,275 @@ func TestGitHubWebhook_IgnoresNonAgentLabelsAndUnsupportedTargets(t *testing.T) 
 	assertNoTasks(t, fc)
 }
 
+func TestGitHubWebhook_PullRequestEventQueuesRepositoryMonitorRun(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, nil)
+	monitorStore := setupGitHubWebhookMonitorStore(t)
+	monitor := githubWebhookRepositoryMonitor("repo-monitor", true)
+	fc := newGitHubWebhookFakeClient(t, monitor)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
+
+	body := []byte(strings.ReplaceAll(`{
+		"action":"synchronize",
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"pull_request":{
+			"number":34,
+			"title":"Feature branch",
+			"body":"Update me",
+			"html_url":"https://github.com/sozercan/vekil/pull/34",
+			"state":"open",
+			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}},
+			"head":{"ref":"feature/x","sha":"{{HEAD_SHA}}","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}}
+		},
+		"sender":{"login":"octocat"}
+	}`, "{{HEAD_SHA}}", githubWebhookTestHeadSHA))
+
+	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-exact-1", secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
+	}
+	assertNoTasks(t, fc)
+
+	runs, _, err := monitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "default", MonitorName: "repo-monitor", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorRuns() error = %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs = %#v, want one exact event run", runs)
+	}
+	run := runs[0]
+	if run.Trigger != githubMonitorTriggerPullRequestEvent || run.TargetKind != repositoryMonitorTargetKindPullRequest || run.TargetNumber != 34 || run.TargetSHA != githubWebhookTestHeadSHA || run.Phase != repositoryMonitorRunPhaseQueued {
+		t.Fatalf("run = %#v, want queued exact PR event run", run)
+	}
+	var signaled corev1alpha1.RepositoryMonitor
+	if err := fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "repo-monitor"}, &signaled); err != nil {
+		t.Fatalf("Get RepositoryMonitor() error = %v", err)
+	}
+	if signaled.Annotations[repositoryMonitorRunRequestAnnotation] != run.ID {
+		t.Fatalf("run signal annotation = %q, want %q", signaled.Annotations[repositoryMonitorRunRequestAnnotation], run.ID)
+	}
+
+	events, _, err := monitorStore.ListMonitorEvents(t.Context(), store.MonitorEventFilter{Namespace: "default", MonitorName: "repo-monitor", RunID: run.ID, EventType: githubMonitorEventTypeExactRunQueued, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorEvents() error = %v", err)
+	}
+	if len(events) != 1 || events[0].ItemNumber != 34 || events[0].ItemSHA != githubWebhookTestHeadSHA {
+		t.Fatalf("events = %#v, want exact event audit for PR head", events)
+	}
+
+	newHeadBody := []byte(strings.ReplaceAll(string(body), githubWebhookTestHeadSHA, githubWebhookTestNewHeadSHA))
+	updated := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-exact-2", secret, newHeadBody)
+	if updated.StatusCode != http.StatusCreated {
+		t.Fatalf("updated status = %d, want %d; body: %s", updated.StatusCode, http.StatusCreated, readRespBody(t, updated))
+	}
+	runs, _, err = monitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "default", MonitorName: "repo-monitor", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorRuns(after newer head) error = %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("runs after newer head = %#v, want old and new queued exact-event runs", runs)
+	}
+	foundNewHead := false
+	for _, queuedRun := range runs {
+		if queuedRun.TargetSHA == githubWebhookTestNewHeadSHA {
+			foundNewHead = true
+		}
+	}
+	if !foundNewHead {
+		t.Fatalf("runs after newer head = %#v, want queued run for newest head", runs)
+	}
+
+	duplicate := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-exact-2", secret, newHeadBody)
+	if duplicate.StatusCode != http.StatusAccepted {
+		t.Fatalf("duplicate status = %d, want %d; body: %s", duplicate.StatusCode, http.StatusAccepted, readRespBody(t, duplicate))
+	}
+	runs, _, err = monitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "default", MonitorName: "repo-monitor", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorRuns(after duplicate) error = %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("runs after duplicate = %#v, want duplicate exact event ignored", runs)
+	}
+}
+
+func TestGitHubWebhook_PullRequestEventRequiresExactEventEnabledMonitor(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, nil)
+	monitorStore := setupGitHubWebhookMonitorStore(t)
+	monitor := githubWebhookRepositoryMonitor("repo-monitor", false)
+	fc := newGitHubWebhookFakeClient(t, monitor)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
+
+	body := []byte(strings.ReplaceAll(`{
+		"action":"synchronize",
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"pull_request":{
+			"number":34,
+			"title":"Feature branch",
+			"body":"Update me",
+			"html_url":"https://github.com/sozercan/vekil/pull/34",
+			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}},
+			"head":{"ref":"feature/x","sha":"{{HEAD_SHA}}","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}}
+		}
+	}`, "{{HEAD_SHA}}", githubWebhookTestHeadSHA))
+
+	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-exact-disabled", secret, body)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusAccepted, readRespBody(t, resp))
+	}
+	runs, _, err := monitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "default", MonitorName: "repo-monitor", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorRuns() error = %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("runs = %#v, want none when exact events are disabled", runs)
+	}
+	assertNoTasks(t, fc)
+}
+
+func TestGitHubWebhook_PullRequestEventQueuesBehindRunningMonitorRun(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, nil)
+	monitorStore := setupGitHubWebhookMonitorStore(t)
+	monitor := githubWebhookRepositoryMonitor("repo-monitor", true)
+	fc := newGitHubWebhookFakeClient(t, monitor)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
+	if err := monitorStore.CreateMonitorRun(t.Context(), &store.MonitorRun{
+		ID:               "running-run",
+		MonitorNamespace: "default",
+		MonitorName:      "repo-monitor",
+		Trigger:          "manual",
+		Phase:            repositoryMonitorRunPhaseRunning,
+	}); err != nil {
+		t.Fatalf("CreateMonitorRun(running) error = %v", err)
+	}
+
+	body := []byte(strings.ReplaceAll(`{
+		"action":"synchronize",
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"pull_request":{
+			"number":34,
+			"title":"Feature branch",
+			"body":"Update me",
+			"html_url":"https://github.com/sozercan/vekil/pull/34",
+			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}},
+			"head":{"ref":"feature/x","sha":"{{HEAD_SHA}}","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}}
+		}
+	}`, "{{HEAD_SHA}}", githubWebhookTestHeadSHA))
+
+	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-running", secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
+	}
+
+	queuedRuns, _, err := monitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "default", MonitorName: "repo-monitor", Phase: repositoryMonitorRunPhaseQueued, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorRuns(queued) error = %v", err)
+	}
+	if len(queuedRuns) != 1 || queuedRuns[0].TargetSHA != githubWebhookTestHeadSHA {
+		t.Fatalf("queued runs = %#v, want one queued exact event run for head %s", queuedRuns, githubWebhookTestHeadSHA)
+	}
+
+	runningRuns, _, err := monitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "default", MonitorName: "repo-monitor", Phase: repositoryMonitorRunPhaseRunning, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorRuns(running) error = %v", err)
+	}
+	if len(runningRuns) != 1 || runningRuns[0].ID != "running-run" {
+		t.Fatalf("running runs = %#v, want existing running run retained", runningRuns)
+	}
+}
+
+func TestGitHubWebhook_PullRequestEventQueuesBehindQueuedManualRun(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, nil)
+	monitorStore := setupGitHubWebhookMonitorStore(t)
+	monitor := githubWebhookRepositoryMonitor("repo-monitor", true)
+	fc := newGitHubWebhookFakeClient(t, monitor)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
+	if err := monitorStore.CreateMonitorRun(t.Context(), &store.MonitorRun{
+		ID:               "manual-run",
+		MonitorNamespace: "default",
+		MonitorName:      "repo-monitor",
+		Trigger:          "manual",
+		Phase:            repositoryMonitorRunPhaseQueued,
+	}); err != nil {
+		t.Fatalf("CreateMonitorRun(manual) error = %v", err)
+	}
+
+	body := []byte(strings.ReplaceAll(`{
+		"action":"synchronize",
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"pull_request":{
+			"number":34,
+			"title":"Feature branch",
+			"body":"Update me",
+			"html_url":"https://github.com/sozercan/vekil/pull/34",
+			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}},
+			"head":{"ref":"feature/x","sha":"{{HEAD_SHA}}","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}}
+		}
+	}`, "{{HEAD_SHA}}", githubWebhookTestHeadSHA))
+
+	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-queued", secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
+	}
+
+	queuedRuns, _, err := monitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "default", MonitorName: "repo-monitor", Phase: repositoryMonitorRunPhaseQueued, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorRuns(queued) error = %v", err)
+	}
+	if len(queuedRuns) != 2 {
+		t.Fatalf("queued runs = %#v, want manual run plus exact event run", queuedRuns)
+	}
+	foundExact := false
+	for _, run := range queuedRuns {
+		if run.Trigger == githubMonitorTriggerPullRequestEvent && run.TargetSHA == githubWebhookTestHeadSHA {
+			foundExact = true
+		}
+	}
+	if !foundExact {
+		t.Fatalf("queued runs = %#v, want queued exact event run retained behind manual run", queuedRuns)
+	}
+}
+
+func TestGitHubWebhook_PullRequestEventUsesDistinctRunIDsForNormalizedMonitorNames(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, nil)
+	monitorStore := setupGitHubWebhookMonitorStore(t)
+	dotted := githubWebhookRepositoryMonitor("repo.monitor", true)
+	dashed := githubWebhookRepositoryMonitor("repo-monitor", true)
+	fc := newGitHubWebhookFakeClient(t, dotted, dashed)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
+
+	body := []byte(strings.ReplaceAll(`{
+		"action":"synchronize",
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"pull_request":{
+			"number":34,
+			"title":"Feature branch",
+			"body":"Update me",
+			"html_url":"https://github.com/sozercan/vekil/pull/34",
+			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}},
+			"head":{"ref":"feature/x","sha":"{{HEAD_SHA}}","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}}
+		}
+	}`, "{{HEAD_SHA}}", githubWebhookTestHeadSHA))
+
+	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-normalized", secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
+	}
+
+	runs, _, err := monitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "default", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorRuns() error = %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("runs = %#v, want one run per matching monitor", runs)
+	}
+	runIDs := map[string]struct{}{}
+	for _, run := range runs {
+		runIDs[run.ID] = struct{}{}
+	}
+	if len(runIDs) != 2 {
+		t.Fatalf("runs = %#v, want distinct run IDs for distinct monitor names", runs)
+	}
+}
+
 func TestGitHubWebhook_RejectsInvalidSignature(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{
 		githubLabelTriggerAgentEnv: "codex-agent",
@@ -504,6 +777,32 @@ func runtimeAgent(name string) *corev1alpha1.Agent {
 			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 		},
 	}
+}
+
+func githubWebhookRepositoryMonitor(name string, exactEvents bool) *corev1alpha1.RepositoryMonitor {
+	return &corev1alpha1.RepositoryMonitor{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: corev1alpha1.RepositoryMonitorSpec{
+			RepoURL: "https://github.com/sozercan/vekil",
+			Branch:  githubWebhookTestDefaultBranch,
+			Agents: corev1alpha1.RepositoryMonitorAgents{
+				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
+			},
+			Review: corev1alpha1.RepositoryMonitorReviewSpec{
+				ExactEventEnabled: exactEvents,
+			},
+		},
+	}
+}
+
+func setupGitHubWebhookMonitorStore(t *testing.T) store.RepositoryMonitorStore {
+	t.Helper()
+	db, err := sqlite.NewDB(":memory:")
+	if err != nil {
+		t.Fatalf("NewDB() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return sqlite.NewStore(db, ":memory:")
 }
 
 func performSignedGitHubWebhook(t *testing.T, server *Server, event, delivery, secret string, body []byte) *http.Response {

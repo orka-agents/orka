@@ -84,6 +84,7 @@ type Handlers struct {
 	memoryStore               store.MemoryStore
 	memoryProposalStore       store.MemoryProposalStore
 	securityStore             store.SecurityStore
+	repositoryMonitorStore    store.RepositoryMonitorStore
 }
 
 // HandlersConfig holds configuration for creating Handlers.
@@ -101,6 +102,7 @@ type HandlersConfig struct {
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
 	SecurityStore             store.SecurityStore
+	RepositoryMonitorStore    store.RepositoryMonitorStore
 }
 
 // NewHandlers creates a new Handlers instance
@@ -119,6 +121,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		memoryStore:               cfg.MemoryStore,
 		memoryProposalStore:       cfg.MemoryProposalStore,
 		securityStore:             cfg.SecurityStore,
+		repositoryMonitorStore:    cfg.RepositoryMonitorStore,
 	}
 }
 

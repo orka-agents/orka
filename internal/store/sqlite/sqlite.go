@@ -262,6 +262,167 @@ func migrate(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_security_patch_proposals_finding
 			ON security_patch_proposals(namespace, finding_id, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS repository_monitors (
+			namespace  TEXT NOT NULL,
+			name       TEXT NOT NULL,
+			uid        TEXT NOT NULL DEFAULT '',
+			repo_url   TEXT NOT NULL,
+			owner      TEXT NOT NULL DEFAULT '',
+			repository TEXT NOT NULL DEFAULT '',
+			branch     TEXT NOT NULL DEFAULT '',
+			generation INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (namespace, name)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_repository_monitors_repo
+			ON repository_monitors(namespace, owner, repository)`,
+		`CREATE TABLE IF NOT EXISTS monitor_runs (
+			id                 TEXT PRIMARY KEY,
+			monitor_namespace  TEXT NOT NULL,
+			monitor_name       TEXT NOT NULL,
+			trigger            TEXT NOT NULL,
+			target_kind        TEXT NOT NULL DEFAULT '',
+			target_number      INTEGER NOT NULL DEFAULT 0,
+			target_sha         TEXT NOT NULL DEFAULT '',
+			phase              TEXT NOT NULL,
+			started_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			completed_at       TIMESTAMP,
+			selected_count     INTEGER NOT NULL DEFAULT 0,
+			created_task_count INTEGER NOT NULL DEFAULT 0,
+			skipped_count      INTEGER NOT NULL DEFAULT 0,
+			error              TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_monitor_runs_monitor
+			ON monitor_runs(monitor_namespace, monitor_name, started_at DESC, id DESC)`,
+		`DROP INDEX IF EXISTS idx_monitor_runs_active`,
+		`DROP INDEX IF EXISTS idx_monitor_runs_queued`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_monitor_runs_running
+			ON monitor_runs(monitor_namespace, monitor_name)
+			WHERE phase = 'running'`,
+		`CREATE TABLE IF NOT EXISTS monitor_items (
+			monitor_namespace     TEXT NOT NULL,
+			monitor_name          TEXT NOT NULL,
+			kind                  TEXT NOT NULL,
+			item_key              TEXT NOT NULL,
+			number                INTEGER NOT NULL DEFAULT 0,
+			sha                   TEXT NOT NULL DEFAULT '',
+			title                 TEXT NOT NULL DEFAULT '',
+			author                TEXT NOT NULL DEFAULT '',
+			state                 TEXT NOT NULL DEFAULT '',
+			labels_json           TEXT NOT NULL DEFAULT '[]',
+			base_branch           TEXT NOT NULL DEFAULT '',
+			head_branch           TEXT NOT NULL DEFAULT '',
+			head_sha              TEXT NOT NULL DEFAULT '',
+			base_sha              TEXT NOT NULL DEFAULT '',
+			draft                 BOOLEAN NOT NULL DEFAULT FALSE,
+			mergeable_state       TEXT NOT NULL DEFAULT '',
+			ci_state              TEXT NOT NULL DEFAULT '',
+			skip_reason           TEXT NOT NULL DEFAULT '',
+			last_review_id        TEXT NOT NULL DEFAULT '',
+			last_reviewed_head_sha TEXT NOT NULL DEFAULT '',
+			last_verdict          TEXT NOT NULL DEFAULT '',
+			repair_state          TEXT NOT NULL DEFAULT '',
+			automerge_state       TEXT NOT NULL DEFAULT '',
+			status_comment_id     TEXT NOT NULL DEFAULT '',
+			status_comment_url    TEXT NOT NULL DEFAULT '',
+			updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			last_seen_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (monitor_namespace, monitor_name, kind, item_key)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_monitor_items_queue
+			ON monitor_items(monitor_namespace, monitor_name, kind, state, last_verdict, repair_state, automerge_state, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS review_records (
+			id                 TEXT PRIMARY KEY,
+			monitor_namespace  TEXT NOT NULL,
+			monitor_name       TEXT NOT NULL,
+			kind               TEXT NOT NULL,
+			number             INTEGER NOT NULL DEFAULT 0,
+			head_sha           TEXT NOT NULL DEFAULT '',
+			task_name          TEXT NOT NULL DEFAULT '',
+			task_namespace     TEXT NOT NULL DEFAULT '',
+			verdict            TEXT NOT NULL DEFAULT '',
+			confidence         TEXT NOT NULL DEFAULT '',
+			repairable         BOOLEAN NOT NULL DEFAULT FALSE,
+			security_status    TEXT NOT NULL DEFAULT '',
+			findings_json      TEXT NOT NULL DEFAULT '[]',
+			summary            TEXT NOT NULL DEFAULT '',
+			suggested_comment  TEXT NOT NULL DEFAULT '',
+			rendered_comment   TEXT NOT NULL DEFAULT '',
+			marker             TEXT NOT NULL DEFAULT '',
+			github_review_id   TEXT NOT NULL DEFAULT '',
+			github_comment_id  TEXT NOT NULL DEFAULT '',
+			github_comment_url TEXT NOT NULL DEFAULT '',
+			created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_review_records_item
+			ON review_records(monitor_namespace, monitor_name, kind, number, head_sha, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS command_events (
+			id                    TEXT PRIMARY KEY,
+			monitor_namespace     TEXT NOT NULL,
+			monitor_name          TEXT NOT NULL,
+			repo                  TEXT NOT NULL DEFAULT '',
+			kind                  TEXT NOT NULL DEFAULT '',
+			number                INTEGER NOT NULL DEFAULT 0,
+			comment_id            TEXT NOT NULL DEFAULT '',
+			comment_url           TEXT NOT NULL DEFAULT '',
+			author                TEXT NOT NULL DEFAULT '',
+			author_association    TEXT NOT NULL DEFAULT '',
+			permission            TEXT NOT NULL DEFAULT '',
+			command               TEXT NOT NULL DEFAULT '',
+			intent                TEXT NOT NULL DEFAULT '',
+			head_sha              TEXT NOT NULL DEFAULT '',
+			status                TEXT NOT NULL DEFAULT '',
+			status_comment_id     TEXT NOT NULL DEFAULT '',
+			created_repair_job_id TEXT NOT NULL DEFAULT '',
+			created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			processed_at          TIMESTAMP,
+			error                 TEXT NOT NULL DEFAULT '',
+			UNIQUE(monitor_namespace, monitor_name, comment_id, command, head_sha)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_command_events_monitor
+			ON command_events(monitor_namespace, monitor_name, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS repair_jobs (
+			id                  TEXT PRIMARY KEY,
+			monitor_namespace   TEXT NOT NULL,
+			monitor_name        TEXT NOT NULL,
+			repo                TEXT NOT NULL DEFAULT '',
+			pr_number           INTEGER NOT NULL DEFAULT 0,
+			intent              TEXT NOT NULL DEFAULT '',
+			source              TEXT NOT NULL DEFAULT '',
+			head_sha            TEXT NOT NULL DEFAULT '',
+			base_sha            TEXT NOT NULL DEFAULT '',
+			phase               TEXT NOT NULL DEFAULT '',
+			repair_count_pr     INTEGER NOT NULL DEFAULT 0,
+			repair_count_head   INTEGER NOT NULL DEFAULT 0,
+			validation_attempts INTEGER NOT NULL DEFAULT 0,
+			review_fix_attempts INTEGER NOT NULL DEFAULT 0,
+			task_name           TEXT NOT NULL DEFAULT '',
+			branch              TEXT NOT NULL DEFAULT '',
+			pushed_sha          TEXT NOT NULL DEFAULT '',
+			last_error          TEXT NOT NULL DEFAULT '',
+			created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			completed_at        TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_repair_jobs_monitor
+			ON repair_jobs(monitor_namespace, monitor_name, pr_number, phase, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS monitor_events (
+			id                 TEXT PRIMARY KEY,
+			monitor_namespace  TEXT NOT NULL,
+			monitor_name       TEXT NOT NULL,
+			run_id             TEXT NOT NULL DEFAULT '',
+			item_kind          TEXT NOT NULL DEFAULT '',
+			item_number        INTEGER NOT NULL DEFAULT 0,
+			item_sha           TEXT NOT NULL DEFAULT '',
+			event_type         TEXT NOT NULL,
+			actor              TEXT NOT NULL DEFAULT '',
+			summary            TEXT NOT NULL DEFAULT '',
+			metadata_json      TEXT NOT NULL DEFAULT '{}',
+			created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_monitor_events_monitor
+			ON monitor_events(monitor_namespace, monitor_name, created_at DESC)`,
 	}
 
 	for _, stmt := range statements {
@@ -279,6 +440,11 @@ func migrate(db *sql.DB) error {
 		{Name: "applied_memory_id", Definition: "applied_memory_id TEXT NOT NULL DEFAULT ''"},
 		{Name: "applied_by", Definition: "applied_by TEXT NOT NULL DEFAULT ''"},
 		{Name: "applied_at", Definition: "applied_at TIMESTAMP"},
+	}); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumns(db, "monitor_items", []sqliteColumnMigration{
+		{Name: "skip_reason", Definition: "skip_reason TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return err
 	}

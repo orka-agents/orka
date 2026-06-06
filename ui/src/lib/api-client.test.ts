@@ -178,6 +178,23 @@ describe('api.post', () => {
     await api.post('/tasks', { type: 'container', image: 'alpine' })
     expect(capturedBody).toEqual({ type: 'container', image: 'alpine' })
   })
+
+  it('sends JSON body with params', async () => {
+    let capturedBody: unknown = null
+    let capturedUrl = ''
+    server.use(
+      http.post(`${API}/monitors/repositories/:name/runs`, async ({ request }) => {
+        capturedBody = await request.json()
+        capturedUrl = request.url
+        return HttpResponse.json({ id: 'run-1' })
+      })
+    )
+
+    await api.post('/monitors/repositories/repo/runs', {}, { namespace: 'demo' })
+    expect(capturedBody).toEqual({})
+    const url = new URL(capturedUrl)
+    expect(url.searchParams.get('namespace')).toBe('demo')
+  })
 })
 
 describe('api.put', () => {

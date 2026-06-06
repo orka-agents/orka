@@ -66,6 +66,12 @@ const (
 	ContextTokenScopeSecurityRead = "orka:security:read"
 	// ContextTokenScopeSecurityWrite authorizes context-token callers to mutate security scan resources.
 	ContextTokenScopeSecurityWrite = "orka:security:write"
+	// ContextTokenScopeMonitorsRead authorizes context-token callers to read repository monitor resources.
+	ContextTokenScopeMonitorsRead = "orka:monitors:read"
+	// ContextTokenScopeMonitorsWrite authorizes context-token callers to mutate repository monitor resources.
+	ContextTokenScopeMonitorsWrite = "orka:monitors:write"
+	// ContextTokenScopeMonitorsOperate authorizes context-token callers to enqueue repository monitor operations.
+	ContextTokenScopeMonitorsOperate = "orka:monitors:operate"
 	// ContextTokenScopeSkillsRead authorizes context-token callers to read Skills.
 	ContextTokenScopeSkillsRead = "orka:skills:read"
 	// ContextTokenScopeSkillsWrite authorizes context-token callers to mutate Skills.
@@ -75,49 +81,55 @@ const (
 // ContextTokenAuthorizationConfig controls optional authorization checks derived
 // from verified context-token scope and transaction context claims.
 type ContextTokenAuthorizationConfig struct {
-	Mode                string
-	TaskCreateScopes    []string
-	TaskReadScopes      []string
-	TaskListScopes      []string
-	TaskDeleteScopes    []string
-	ToolReadScopes      []string
-	ToolUseScopes       []string
-	ProviderUseScopes   []string
-	SecretReadScopeList []string
-	AgentReadScopes     []string
-	AgentWriteScopes    []string
-	MemoryReadScopes    []string
-	MemoryWriteScopes   []string
-	SessionReadScopes   []string
-	SessionWriteScopes  []string
-	SecurityReadScopes  []string
-	SecurityWriteScopes []string
-	SkillReadScopes     []string
-	SkillWriteScopes    []string
+	Mode                 string
+	TaskCreateScopes     []string
+	TaskReadScopes       []string
+	TaskListScopes       []string
+	TaskDeleteScopes     []string
+	ToolReadScopes       []string
+	ToolUseScopes        []string
+	ProviderUseScopes    []string
+	SecretReadScopeList  []string
+	AgentReadScopes      []string
+	AgentWriteScopes     []string
+	MemoryReadScopes     []string
+	MemoryWriteScopes    []string
+	SessionReadScopes    []string
+	SessionWriteScopes   []string
+	SecurityReadScopes   []string
+	SecurityWriteScopes  []string
+	MonitorReadScopes    []string
+	MonitorWriteScopes   []string
+	MonitorOperateScopes []string
+	SkillReadScopes      []string
+	SkillWriteScopes     []string
 }
 
 // ContextTokenAuthorizationConfigOptions names the inputs used to build
 // context-token authorization config.
 type ContextTokenAuthorizationConfigOptions struct {
-	Mode                string
-	TaskCreateScopes    string
-	TaskReadScopes      string
-	TaskListScopes      string
-	TaskDeleteScopes    string
-	ToolReadScopes      string
-	ToolUseScopes       string
-	ProviderUseScopes   string
-	SecretReadScopes    string
-	AgentReadScopes     string
-	AgentWriteScopes    string
-	MemoryReadScopes    string
-	MemoryWriteScopes   string
-	SessionReadScopes   string
-	SessionWriteScopes  string
-	SecurityReadScopes  string
-	SecurityWriteScopes string
-	SkillReadScopes     string
-	SkillWriteScopes    string
+	Mode                 string
+	TaskCreateScopes     string
+	TaskReadScopes       string
+	TaskListScopes       string
+	TaskDeleteScopes     string
+	ToolReadScopes       string
+	ToolUseScopes        string
+	ProviderUseScopes    string
+	SecretReadScopes     string
+	AgentReadScopes      string
+	AgentWriteScopes     string
+	MemoryReadScopes     string
+	MemoryWriteScopes    string
+	SessionReadScopes    string
+	SessionWriteScopes   string
+	SecurityReadScopes   string
+	SecurityWriteScopes  string
+	MonitorReadScopes    string
+	MonitorWriteScopes   string
+	MonitorOperateScopes string
+	SkillReadScopes      string
+	SkillWriteScopes     string
 }
 
 // NewContextTokenAuthorizationConfig builds context-token authorization config.
@@ -148,28 +160,34 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 	sessionWrite := defaultScopes(opts.SessionWriteScopes, ContextTokenScopeSessionsWrite)
 	securityRead := defaultScopes(opts.SecurityReadScopes, ContextTokenScopeSecurityRead)
 	securityWrite := defaultScopes(opts.SecurityWriteScopes, ContextTokenScopeSecurityWrite)
+	monitorRead := defaultScopes(opts.MonitorReadScopes, ContextTokenScopeMonitorsRead)
+	monitorWrite := defaultScopes(opts.MonitorWriteScopes, ContextTokenScopeMonitorsWrite)
+	monitorOperate := defaultScopes(opts.MonitorOperateScopes, ContextTokenScopeMonitorsOperate)
 	skillRead := defaultScopes(opts.SkillReadScopes, ContextTokenScopeSkillsRead)
 	skillWrite := defaultScopes(opts.SkillWriteScopes, ContextTokenScopeSkillsWrite)
 	return ContextTokenAuthorizationConfig{
-		Mode:                mode,
-		TaskCreateScopes:    createScopes,
-		TaskReadScopes:      readScopes,
-		TaskListScopes:      listScopes,
-		TaskDeleteScopes:    deleteScopes,
-		ToolReadScopes:      toolRead,
-		ToolUseScopes:       toolUse,
-		ProviderUseScopes:   providerUse,
-		SecretReadScopeList: secretRead,
-		AgentReadScopes:     agentRead,
-		AgentWriteScopes:    agentWrite,
-		MemoryReadScopes:    memoryRead,
-		MemoryWriteScopes:   memoryWrite,
-		SessionReadScopes:   sessionRead,
-		SessionWriteScopes:  sessionWrite,
-		SecurityReadScopes:  securityRead,
-		SecurityWriteScopes: securityWrite,
-		SkillReadScopes:     skillRead,
-		SkillWriteScopes:    skillWrite,
+		Mode:                 mode,
+		TaskCreateScopes:     createScopes,
+		TaskReadScopes:       readScopes,
+		TaskListScopes:       listScopes,
+		TaskDeleteScopes:     deleteScopes,
+		ToolReadScopes:       toolRead,
+		ToolUseScopes:        toolUse,
+		ProviderUseScopes:    providerUse,
+		SecretReadScopeList:  secretRead,
+		AgentReadScopes:      agentRead,
+		AgentWriteScopes:     agentWrite,
+		MemoryReadScopes:     memoryRead,
+		MemoryWriteScopes:    memoryWrite,
+		SessionReadScopes:    sessionRead,
+		SessionWriteScopes:   sessionWrite,
+		SecurityReadScopes:   securityRead,
+		SecurityWriteScopes:  securityWrite,
+		MonitorReadScopes:    monitorRead,
+		MonitorWriteScopes:   monitorWrite,
+		MonitorOperateScopes: monitorOperate,
+		SkillReadScopes:      skillRead,
+		SkillWriteScopes:     skillWrite,
 	}, nil
 }
 

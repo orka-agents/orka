@@ -1,0 +1,478 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: repositorymonitors.core.orka.ai
+spec:
+  group: core.orka.ai
+  names:
+    kind: RepositoryMonitor
+    listKind: RepositoryMonitorList
+    plural: repositorymonitors
+    singular: repositorymonitor
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.repository
+      name: Repo
+      type: string
+    - jsonPath: .spec.branch
+      name: Branch
+      type: string
+    - jsonPath: .spec.schedule
+      name: Schedule
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.pendingReviews
+      name: Pending
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: RepositoryMonitor is the Schema for repository maintainer automation.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: RepositoryMonitorSpec defines the desired state of RepositoryMonitor.
+            properties:
+              agents:
+                description: Agents configures the agents used by monitor review and
+                  repair tasks.
+                properties:
+                  implementer:
+                    description: Implementer is the agent used for guarded issue implementation
+                      tasks.
+                    properties:
+                      name:
+                        description: Name is the name of the Agent
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the Agent (defaults
+                          to Task namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  repairer:
+                    description: Repairer is the agent used for repair tasks.
+                    properties:
+                      name:
+                        description: Name is the name of the Agent
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the Agent (defaults
+                          to Task namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  reviewer:
+                    description: Reviewer is the agent used for pull-request review
+                      tasks.
+                    properties:
+                      name:
+                        description: Name is the name of the Agent
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the Agent (defaults
+                          to Task namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+              automerge:
+                description: Automerge controls deterministic merge behavior.
+                properties:
+                  allowedMergeMethods:
+                    description: AllowedMergeMethods lists merge methods allowed by
+                      policy.
+                    items:
+                      enum:
+                      - merge
+                      - squash
+                      - rebase
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
+                  enabled:
+                    description: Enabled enables automerge jobs.
+                    type: boolean
+                  requireGlobalMergeGate:
+                    default: true
+                    description: RequireGlobalMergeGate requires the controller-wide
+                      merge gate.
+                    type: boolean
+                  requireMaintainerOptIn:
+                    default: true
+                    description: RequireMaintainerOptIn requires explicit maintainer
+                      opt-in.
+                    type: boolean
+                type: object
+              branch:
+                default: main
+                description: Branch is the default base branch for repository-wide
+                  monitoring decisions.
+                type: string
+              gitSecretRef:
+                description: GitSecretRef references GitHub credentials for repository
+                  monitor operations.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              owner:
+                description: Owner is the repository owner or organization.
+                type: string
+              policy:
+                description: Policy contains authorization and safety policy for monitor
+                  operations.
+                properties:
+                  advisoryLabels:
+                    description: AdvisoryLabels controls advisory label synchronization.
+                    properties:
+                      enabled:
+                        description: Enabled enables advisory label sync.
+                        type: boolean
+                    type: object
+                  allowedRepositoryPermissions:
+                    description: AllowedRepositoryPermissions lists GitHub permissions
+                      allowed to issue write commands.
+                    items:
+                      enum:
+                      - admin
+                      - maintain
+                      - write
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
+                  optInLabels:
+                    description: OptInLabels names labels that opt a PR into repair
+                      or automerge.
+                    properties:
+                      autofix:
+                        description: Autofix opts a PR into autofix.
+                        type: string
+                      automerge:
+                        description: Automerge opts a PR into automerge.
+                        type: string
+                    type: object
+                  pauseLabels:
+                    description: PauseLabels block further automation while present.
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
+                  protectedLabels:
+                    description: ProtectedLabels block automated review, repair, or
+                      merge according to policy.
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
+                type: object
+              provider:
+                default: github
+                description: Provider is the source control provider. GitHub is the
+                  only supported v1 provider.
+                enum:
+                - github
+                type: string
+              repair:
+                description: Repair controls bounded repair behavior.
+                properties:
+                  enabled:
+                    description: Enabled enables repair jobs.
+                    type: boolean
+                  maxRepairsPerHead:
+                    description: MaxRepairsPerHead bounds automated repairs per PR
+                      head SHA.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  maxRepairsPerPR:
+                    description: MaxRepairsPerPR bounds total automated repairs per
+                      PR.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  maxReviewFixRetries:
+                    description: MaxReviewFixRetries bounds review-fix loop retries.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  maxValidationRetries:
+                    description: MaxValidationRetries bounds validation retries for
+                      one repair job.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  requireMaintainerOptIn:
+                    default: true
+                    description: RequireMaintainerOptIn requires an explicit maintainer
+                      command or label.
+                    type: boolean
+                type: object
+              repoURL:
+                description: RepoURL is the repository URL to monitor.
+                minLength: 1
+                pattern: ^(https://github[.]com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+([.]git)?/?|git@github[.]com:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+([.]git)?)$
+                type: string
+              repository:
+                description: Repository is the repository name.
+                type: string
+              review:
+                description: Review controls pull-request review behavior.
+                properties:
+                  event:
+                    default: COMMENT
+                    description: Event is the default GitHub review event rendered
+                      after analysis.
+                    enum:
+                    - COMMENT
+                    - APPROVE
+                    - REQUEST_CHANGES
+                    type: string
+                  exactEventEnabled:
+                    description: ExactEventEnabled enables exact-head review from
+                      repository events.
+                    type: boolean
+                  requireGreenCI:
+                    description: RequireGreenCI requires acceptable CI before background
+                      review selection.
+                    type: boolean
+                  staleReviewTTL:
+                    description: StaleReviewTTL bounds how long an unchanged head
+                      review remains fresh.
+                    type: string
+                type: object
+              schedule:
+                description: Schedule is the cron expression for background monitor
+                  runs.
+                type: string
+              suspend:
+                description: Suspend pauses scheduled monitor runs.
+                type: boolean
+              targets:
+                description: Targets selects the repository item types covered by
+                  this monitor.
+                properties:
+                  commits:
+                    description: Commits configures commit monitoring.
+                    properties:
+                      enabled:
+                        description: Enabled enables commit monitoring.
+                        type: boolean
+                      maxPerRun:
+                        description: MaxPerRun limits commits selected by one background
+                          run.
+                        format: int32
+                        maximum: 100
+                        minimum: 1
+                        type: integer
+                    type: object
+                  issues:
+                    description: Issues configures issue monitoring.
+                    properties:
+                      enabled:
+                        description: Enabled enables issue monitoring.
+                        type: boolean
+                      maxPerRun:
+                        description: MaxPerRun limits issues selected by one background
+                          run.
+                        format: int32
+                        maximum: 100
+                        minimum: 1
+                        type: integer
+                    type: object
+                  pullRequests:
+                    description: PullRequests configures pull request monitoring.
+                    properties:
+                      enabled:
+                        default: true
+                        description: Enabled enables pull request monitoring.
+                        type: boolean
+                      includeDrafts:
+                        description: IncludeDrafts allows draft pull requests to be
+                          selected for review.
+                        type: boolean
+                      maxPerRun:
+                        default: 20
+                        description: MaxPerRun limits pull requests selected by one
+                          background run.
+                        format: int32
+                        maximum: 100
+                        minimum: 1
+                        type: integer
+                    type: object
+                type: object
+              timeZone:
+                description: TimeZone is the IANA time zone for the schedule.
+                type: string
+              validation:
+                description: Validation configures deterministic validation commands
+                  for repair.
+                properties:
+                  commands:
+                    description: Commands are validation commands repair jobs must
+                      run.
+                    items:
+                      type: string
+                    type: array
+                  mode:
+                    default: changed
+                    description: Mode selects validation scope.
+                    enum:
+                    - "off"
+                    - changed
+                    - full
+                    type: string
+                type: object
+            required:
+            - repoURL
+            type: object
+          status:
+            description: RepositoryMonitorStatus defines the observed state of RepositoryMonitor.
+            properties:
+              activeRepairs:
+                description: ActiveRepairs is the count of repair jobs currently active.
+                format: int32
+                type: integer
+              blockedItems:
+                description: BlockedItems is the count of items blocked by policy,
+                  failures, or human action.
+                format: int32
+                type: integer
+              conditions:
+                description: Conditions represent the current state of the repository
+                  monitor.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastRunID:
+                description: LastRunID is the most recent monitor run identifier stored
+                  in SQLite.
+                type: string
+              lastRunTime:
+                description: LastRunTime is the completion time of the most recent
+                  run, regardless of success.
+                format: date-time
+                type: string
+              lastSuccessfulRunTime:
+                description: LastSuccessfulRunTime is the completion time of the most
+                  recent successful run.
+                format: date-time
+                type: string
+              mergeReadyItems:
+                description: MergeReadyItems is the count of items ready for merge.
+                format: int32
+                type: integer
+              observedGeneration:
+                description: ObservedGeneration is the latest spec generation reflected
+                  in status.
+                format: int64
+                type: integer
+              openPullRequests:
+                description: OpenPullRequests is the current count of open pull requests
+                  seen by the monitor.
+                format: int32
+                type: integer
+              pendingReviews:
+                description: PendingReviews is the count of items waiting for review.
+                format: int32
+                type: integer
+              phase:
+                description: Phase describes the high-level monitor lifecycle state.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

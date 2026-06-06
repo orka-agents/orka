@@ -222,6 +222,61 @@ func ParseRepositoryURL(repoURL string) (owner string, repository string) {
 	return segments[0], strings.TrimSuffix(segments[1], ".git")
 }
 
+// ParseGitHubRepositoryURL validates a credential-free GitHub repository URL
+// and returns its owner and repository name.
+func ParseGitHubRepositoryURL(repoURL string) (owner string, repository string, err error) {
+	value := strings.TrimSpace(repoURL)
+	if value == "" {
+		return "", "", fmt.Errorf("repository URL is required")
+	}
+	if after, ok := strings.CutPrefix(value, "git@"); ok {
+		trimmed := after
+		host, repoPath, ok := strings.Cut(trimmed, ":")
+		if !ok || !strings.EqualFold(host, "github.com") {
+			return "", "", fmt.Errorf("repository URL must be a GitHub repository URL")
+		}
+		return githubOwnerRepoFromPath(repoPath)
+	}
+
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return "", "", fmt.Errorf("repository URL must be a valid GitHub repository URL")
+	}
+	if parsed.User != nil {
+		return "", "", fmt.Errorf("repository URL must not include credentials")
+	}
+	if parsed.Scheme != "https" || !strings.EqualFold(parsed.Hostname(), "github.com") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", "", fmt.Errorf("repository URL must be a GitHub repository URL")
+	}
+	return githubOwnerRepoFromPath(parsed.Path)
+}
+
+func githubOwnerRepoFromPath(repoPath string) (string, string, error) {
+	repoPath = strings.Trim(repoPath, "/")
+	segments := strings.Split(strings.TrimSuffix(repoPath, ".git"), "/")
+	if len(segments) != 2 || !githubRepositoryPathSegmentIsSafe(segments[0]) || !githubRepositoryPathSegmentIsSafe(segments[1]) {
+		return "", "", fmt.Errorf("repository URL must include GitHub owner and repository")
+	}
+	return segments[0], segments[1], nil
+}
+
+func githubRepositoryPathSegmentIsSafe(segment string) bool {
+	if segment == "" || segment == "." || segment == ".." {
+		return false
+	}
+	for _, r := range segment {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '.', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func shortHash(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])[:12]

@@ -41,9 +41,11 @@ type UpdateThreatModelRequest struct {
 	Source  string `json:"source,omitempty"`
 }
 
+const sourceProviderGitHub = "github"
+
 func (h *Handlers) normalizeRepositoryScanSpec(spec *corev1alpha1.RepositoryScanSpec) {
 	if spec.Provider == "" {
-		spec.Provider = "github"
+		spec.Provider = sourceProviderGitHub
 	}
 	if spec.ValidationMode == "" {
 		spec.ValidationMode = "light"

@@ -124,6 +124,9 @@ func main() {
 	var contextTokenSessionWriteScopes string
 	var contextTokenSecurityReadScopes string
 	var contextTokenSecurityWriteScopes string
+	var contextTokenMonitorReadScopes string
+	var contextTokenMonitorWriteScopes string
+	var contextTokenMonitorOperateScopes string
 	var contextTokenSkillReadScopes string
 	var contextTokenSkillWriteScopes string
 	var contextTokenTTSURL string
@@ -340,6 +343,16 @@ func main() {
 	flag.StringVar(&contextTokenSecurityWriteScopes, "context-token-security-write-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_SECURITY_WRITE_SCOPES"),
 		"Comma-separated context-token scopes that authorize security scan writes. Defaults to orka:security:write.")
+	flag.StringVar(&contextTokenMonitorReadScopes, "context-token-monitor-read-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_MONITOR_READ_SCOPES"),
+		"Comma-separated context-token scopes that authorize repository monitor reads. Defaults to orka:monitors:read.")
+	flag.StringVar(&contextTokenMonitorWriteScopes, "context-token-monitor-write-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_MONITOR_WRITE_SCOPES"),
+		"Comma-separated context-token scopes that authorize repository monitor writes. Defaults to orka:monitors:write.")
+	flag.StringVar(&contextTokenMonitorOperateScopes, "context-token-monitor-operate-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_MONITOR_OPERATE_SCOPES"),
+		"Comma-separated context-token scopes that authorize repository monitor operations. "+
+			"Defaults to orka:monitors:operate.")
 	flag.StringVar(&contextTokenSkillReadScopes, "context-token-skill-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_SKILL_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize Skill reads. Defaults to orka:skills:read.")
@@ -423,25 +436,28 @@ func main() {
 		os.Exit(1)
 	}
 	contextTokenAuthzConfig, err := api.NewContextTokenAuthorizationConfig(api.ContextTokenAuthorizationConfigOptions{
-		Mode:                contextTokenAuthzMode,
-		TaskCreateScopes:    contextTokenTaskCreateScopes,
-		TaskReadScopes:      contextTokenTaskReadScopes,
-		TaskListScopes:      contextTokenTaskListScopes,
-		TaskDeleteScopes:    contextTokenTaskDeleteScopes,
-		ToolReadScopes:      contextTokenToolReadScopes,
-		ToolUseScopes:       contextTokenToolUseScopes,
-		ProviderUseScopes:   contextTokenProviderUseScopes,
-		SecretReadScopes:    contextTokenSecretReadScopes,
-		AgentReadScopes:     contextTokenAgentReadScopes,
-		AgentWriteScopes:    contextTokenAgentWriteScopes,
-		MemoryReadScopes:    contextTokenMemoryReadScopes,
-		MemoryWriteScopes:   contextTokenMemoryWriteScopes,
-		SessionReadScopes:   contextTokenSessionReadScopes,
-		SessionWriteScopes:  contextTokenSessionWriteScopes,
-		SecurityReadScopes:  contextTokenSecurityReadScopes,
-		SecurityWriteScopes: contextTokenSecurityWriteScopes,
-		SkillReadScopes:     contextTokenSkillReadScopes,
-		SkillWriteScopes:    contextTokenSkillWriteScopes,
+		Mode:                 contextTokenAuthzMode,
+		TaskCreateScopes:     contextTokenTaskCreateScopes,
+		TaskReadScopes:       contextTokenTaskReadScopes,
+		TaskListScopes:       contextTokenTaskListScopes,
+		TaskDeleteScopes:     contextTokenTaskDeleteScopes,
+		ToolReadScopes:       contextTokenToolReadScopes,
+		ToolUseScopes:        contextTokenToolUseScopes,
+		ProviderUseScopes:    contextTokenProviderUseScopes,
+		SecretReadScopes:     contextTokenSecretReadScopes,
+		AgentReadScopes:      contextTokenAgentReadScopes,
+		AgentWriteScopes:     contextTokenAgentWriteScopes,
+		MemoryReadScopes:     contextTokenMemoryReadScopes,
+		MemoryWriteScopes:    contextTokenMemoryWriteScopes,
+		SessionReadScopes:    contextTokenSessionReadScopes,
+		SessionWriteScopes:   contextTokenSessionWriteScopes,
+		SecurityReadScopes:   contextTokenSecurityReadScopes,
+		SecurityWriteScopes:  contextTokenSecurityWriteScopes,
+		MonitorReadScopes:    contextTokenMonitorReadScopes,
+		MonitorWriteScopes:   contextTokenMonitorWriteScopes,
+		MonitorOperateScopes: contextTokenMonitorOperateScopes,
+		SkillReadScopes:      contextTokenSkillReadScopes,
+		SkillWriteScopes:     contextTokenSkillWriteScopes,
 	})
 	if err != nil {
 		setupLog.Error(err, "invalid context token authorization configuration")
@@ -713,6 +729,15 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryScan")
 		os.Exit(1)
 	}
+
+	if err := (&controller.RepositoryMonitorReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Store:  sqliteStore,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "RepositoryMonitor")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -744,6 +769,7 @@ func main() {
 		MemoryStore:               sqliteStore,
 		MemoryProposalStore:       sqliteStore,
 		SecurityStore:             sqliteStore,
+		RepositoryMonitorStore:    sqliteStore,
 		HealthChecker:             sqliteStore,
 		Clientset:                 kubeClient,
 		Chat: api.ChatConfig{

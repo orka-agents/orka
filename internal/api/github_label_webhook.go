@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -23,35 +24,39 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
-	githubWebhookSecretEnv                = "ORKA_GITHUB_WEBHOOK_SECRET"
-	githubLabelTriggerAgentEnv            = "ORKA_GITHUB_LABEL_TRIGGER_AGENT"
-	githubLabelTriggerNamespaceEnv        = "ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE"
-	githubLabelTriggerGitSecretEnv        = "ORKA_GITHUB_LABEL_TRIGGER_GIT_SECRET"
-	githubLabelTriggerPrefixEnv           = "ORKA_GITHUB_LABEL_TRIGGER_PREFIX"
-	githubLabelTriggerTimeoutEnv          = "ORKA_GITHUB_LABEL_TRIGGER_TIMEOUT"
-	githubLabelTriggerMaxTurnsEnv         = "ORKA_GITHUB_LABEL_TRIGGER_MAX_TURNS"
-	githubLabelTriggerDefaultPrefix       = "agent:"
-	githubDeliveryHeader                  = "X-GitHub-Delivery"
-	githubEventHeader                     = "X-GitHub-Event"
-	githubSignature256Header              = "X-Hub-Signature-256"
-	githubSignature256Prefix              = "sha256="
-	githubEventIssues                     = "issues"
-	githubEventPullRequest                = "pull_request"
-	githubEventPing                       = "ping"
-	githubWebhookCreatedBy                = "github-label"
-	githubActionImplement                 = "implement"
-	githubActionReview                    = "review"
-	githubActionToIssues                  = "to-issues"
-	githubActionUpdateBranch              = "update-branch"
-	githubWebhookDefaultTimeout           = 30 * time.Minute
-	githubWebhookDefaultMaxTurns    int32 = 100
+	githubWebhookSecretEnv                     = "ORKA_GITHUB_WEBHOOK_SECRET"
+	githubLabelTriggerAgentEnv                 = "ORKA_GITHUB_LABEL_TRIGGER_AGENT"
+	githubLabelTriggerNamespaceEnv             = "ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE"
+	githubLabelTriggerGitSecretEnv             = "ORKA_GITHUB_LABEL_TRIGGER_GIT_SECRET"
+	githubLabelTriggerPrefixEnv                = "ORKA_GITHUB_LABEL_TRIGGER_PREFIX"
+	githubLabelTriggerTimeoutEnv               = "ORKA_GITHUB_LABEL_TRIGGER_TIMEOUT"
+	githubLabelTriggerMaxTurnsEnv              = "ORKA_GITHUB_LABEL_TRIGGER_MAX_TURNS"
+	githubLabelTriggerDefaultPrefix            = "agent:"
+	githubDeliveryHeader                       = "X-GitHub-Delivery"
+	githubEventHeader                          = "X-GitHub-Event"
+	githubSignature256Header                   = "X-Hub-Signature-256"
+	githubSignature256Prefix                   = "sha256="
+	githubEventIssues                          = "issues"
+	githubEventPullRequest                     = "pull_request"
+	githubEventPing                            = "ping"
+	githubWebhookCreatedBy                     = "github-label"
+	githubActionImplement                      = "implement"
+	githubActionReview                         = "review"
+	githubActionToIssues                       = "to-issues"
+	githubActionUpdateBranch                   = "update-branch"
+	githubMonitorTriggerPullRequestEvent       = "pull_request_event"
+	githubMonitorEventTypeExactRunQueued       = "exact_event_run_queued"
+	githubWebhookDefaultTimeout                = 30 * time.Minute
+	githubWebhookDefaultMaxTurns         int32 = 100
 )
 
 var nonDNSNameCharRE = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -97,6 +102,7 @@ type githubWebhookPullRequest struct {
 	Title   string `json:"title"`
 	Body    string `json:"body"`
 	HTMLURL string `json:"html_url"`
+	State   string `json:"state"`
 	Draft   bool   `json:"draft"`
 	Base    struct {
 		Ref  string                  `json:"ref"`
@@ -128,6 +134,14 @@ type githubLabelTarget struct {
 	HeadRepo     githubWebhookRepository
 }
 
+type githubRepositoryMonitorEventResult struct {
+	Matched       int
+	Queued        int
+	Duplicate     int
+	SkippedActive int
+	RunIDs        []string
+}
+
 func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 	body := append([]byte(nil), c.Body()...)
 	secret := strings.TrimSpace(os.Getenv(githubWebhookSecretEnv))
@@ -153,12 +167,29 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid GitHub webhook payload")
 	}
+
+	var monitorResult githubRepositoryMonitorEventResult
+	if event == githubEventPullRequest {
+		var err error
+		delivery := strings.TrimSpace(c.Get(githubDeliveryHeader))
+		monitorResult, err = h.enqueueRepositoryMonitorPullRequestEventRuns(c, body, delivery, payload)
+		if err != nil {
+			return err
+		}
+	}
+
 	if payload.Action != "labeled" {
+		if monitorResult.Matched > 0 {
+			return githubRepositoryMonitorEventResponse(c, monitorResult)
+		}
 		return githubWebhookIgnored(c, fmt.Sprintf("ignored action %q", payload.Action))
 	}
 
 	action, ok := githubLabelAction(payload.Label.Name)
 	if !ok {
+		if monitorResult.Matched > 0 {
+			return githubRepositoryMonitorEventResponse(c, monitorResult)
+		}
 		return githubWebhookIgnored(c, "label is not an Orka agent trigger")
 	}
 
@@ -203,11 +234,181 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"status":    "created",
-		"taskName":  task.Name,
-		"namespace": task.Namespace,
-		"action":    action,
-		"label":     payload.Label.Name,
+		"status":             "created",
+		"taskName":           task.Name,
+		"namespace":          task.Namespace,
+		"action":             action,
+		"label":              payload.Label.Name,
+		"monitorRunsQueued":  monitorResult.Queued,
+		"monitorRunsSkipped": monitorResult.SkippedActive,
+	})
+}
+
+func (h *Handlers) enqueueRepositoryMonitorPullRequestEventRuns(c fiber.Ctx, body []byte, delivery string, payload githubLabelWebhookPayload) (githubRepositoryMonitorEventResult, error) {
+	var result githubRepositoryMonitorEventResult
+	if h.repositoryMonitorStore == nil || !repositoryMonitorExactPullRequestAction(payload.Action) || payload.PullRequest == nil {
+		return result, nil
+	}
+	target, ok := payload.target()
+	if !ok || !target.IsPR || target.IncompletePR || target.HeadSHA == "" {
+		return result, nil
+	}
+
+	namespace := h.githubWebhookNamespace()
+	monitors := &corev1alpha1.RepositoryMonitorList{}
+	if err := h.client.List(c.Context(), monitors, crclient.InNamespace(namespace)); err != nil {
+		return result, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list repository monitors: %v", err))
+	}
+
+	deliveryKey := strings.TrimSpace(delivery)
+	if deliveryKey == "" {
+		deliveryKey = githubWebhookReplayKey(body)
+	}
+	for i := range monitors.Items {
+		monitor := &monitors.Items[i]
+		if !repositoryMonitorAcceptsPullRequestEvent(monitor, payload.Repository, target) {
+			continue
+		}
+		result.Matched++
+		runID := githubRepositoryMonitorExactRunID(monitor, deliveryKey)
+		run := &store.MonitorRun{
+			ID:               runID,
+			MonitorNamespace: monitor.Namespace,
+			MonitorName:      monitor.Name,
+			Trigger:          githubMonitorTriggerPullRequestEvent,
+			TargetKind:       repositoryMonitorTargetKindPullRequest,
+			TargetNumber:     int64(target.Number),
+			TargetSHA:        target.HeadSHA,
+			Phase:            repositoryMonitorRunPhaseQueued,
+			StartedAt:        time.Now(),
+		}
+		duplicate, err := h.queuedRepositoryMonitorPullRequestEventRunExists(c, monitor, run)
+		if err != nil {
+			return result, err
+		}
+		if duplicate {
+			result.Duplicate++
+			continue
+		}
+		if err := h.repositoryMonitorStore.CreateMonitorRun(c.Context(), run); err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				result.SkippedActive++
+				continue
+			}
+			return result, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create repository monitor event run: %v", err))
+		}
+		if err := h.annotateRepositoryMonitorRunRequest(c, monitor, run); err != nil {
+			if failErr := h.markRepositoryMonitorRunSignalFailed(c, run, err); failErr != nil {
+				return result, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("%v; additionally failed to mark monitor run failed: %v", err, failErr))
+			}
+			return result, err
+		}
+		if err := h.createRepositoryMonitorEventRunAudit(c, monitor, run, payload, target, deliveryKey, githubMonitorEventTypeExactRunQueued); err != nil {
+			return result, err
+		}
+		result.Queued++
+		result.RunIDs = append(result.RunIDs, runID)
+	}
+	return result, nil
+}
+
+func (h *Handlers) queuedRepositoryMonitorPullRequestEventRunExists(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, next *store.MonitorRun) (bool, error) {
+	runs, _, err := h.repositoryMonitorStore.ListMonitorRuns(c.Context(), store.MonitorRunFilter{
+		Namespace:   monitor.Namespace,
+		MonitorName: monitor.Name,
+		Phase:       repositoryMonitorRunPhaseQueued,
+		Limit:       100,
+	})
+	if err != nil {
+		return false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to inspect active repository monitor run: %v", err))
+	}
+	for i := range runs {
+		run := runs[i]
+		if run.Trigger != githubMonitorTriggerPullRequestEvent || run.TargetKind != repositoryMonitorTargetKindPullRequest || run.TargetNumber != next.TargetNumber {
+			continue
+		}
+		if run.TargetSHA == next.TargetSHA {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func repositoryMonitorExactPullRequestAction(action string) bool {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "opened", "reopened", "synchronize", "ready_for_review", "labeled", "unlabeled":
+		return true
+	default:
+		return false
+	}
+}
+
+func repositoryMonitorAcceptsPullRequestEvent(monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget) bool {
+	if monitor == nil || repositoryMonitorWebhookSuspended(monitor) || !monitor.Spec.Review.ExactEventEnabled || !repositoryMonitorPullRequestsEnabled(monitor.Spec) {
+		return false
+	}
+	if target.BaseBranch != "" && !strings.EqualFold(target.BaseBranch, effectiveRepositoryMonitorBranch(monitor)) {
+		return false
+	}
+	owner, repository, err := parseRepositoryMonitorGitHubURL(monitor.Spec.RepoURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(repo.FullName), owner+"/"+repository)
+}
+
+func repositoryMonitorWebhookSuspended(monitor *corev1alpha1.RepositoryMonitor) bool {
+	return monitor.Spec.Suspend != nil && *monitor.Spec.Suspend
+}
+
+func githubRepositoryMonitorExactRunID(monitor *corev1alpha1.RepositoryMonitor, delivery string) string {
+	monitorKey := monitor.Namespace + "/" + monitor.Name + "/" + delivery
+	return fmt.Sprintf("monrun-%s-%s", dnsNamePart(monitor.Name), githubReplayKeySuffix(githubWebhookReplayKey([]byte(monitorKey))))
+}
+
+func (h *Handlers) createRepositoryMonitorEventRunAudit(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, payload githubLabelWebhookPayload, target githubLabelTarget, delivery, eventType string) error {
+	eventKey := githubWebhookReplayKey([]byte(eventType + "-" + delivery))
+	metadataJSON, err := json.Marshal(map[string]any{
+		"action":     payload.Action,
+		"delivery":   delivery,
+		"repository": payload.Repository.FullName,
+		"sender":     payload.Sender.Login,
+	})
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to encode monitor event metadata: %v", err))
+	}
+	if err := h.repositoryMonitorStore.CreateMonitorEvent(c.Context(), &store.MonitorEvent{
+		ID:               fmt.Sprintf("mevt-%s-%s", run.ID, githubReplayKeySuffix(eventKey)),
+		MonitorNamespace: monitor.Namespace,
+		MonitorName:      monitor.Name,
+		RunID:            run.ID,
+		ItemKind:         repositoryMonitorTargetKindPullRequest,
+		ItemNumber:       int64(target.Number),
+		ItemSHA:          target.HeadSHA,
+		EventType:        eventType,
+		Actor:            "github-webhook",
+		Summary:          fmt.Sprintf("Exact pull request event queued repository monitor run for PR #%d", target.Number),
+		MetadataJSON:     string(metadataJSON),
+	}); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record repository monitor event run audit: %v", err))
+	}
+	return nil
+}
+
+func githubRepositoryMonitorEventResponse(c fiber.Ctx, result githubRepositoryMonitorEventResult) error {
+	status := fiber.StatusAccepted
+	responseStatus := "accepted"
+	if result.Queued > 0 {
+		status = fiber.StatusCreated
+		responseStatus = "created"
+	}
+	return c.Status(status).JSON(fiber.Map{
+		"status":             responseStatus,
+		"monitorRunsQueued":  result.Queued,
+		"monitorRunsCached":  result.Duplicate,
+		"monitorRunsSkipped": result.SkippedActive,
+		"matchedMonitors":    result.Matched,
+		"runIDs":             result.RunIDs,
 	})
 }
 
@@ -445,7 +646,7 @@ func githubTaskName(action string, number int, replayKey string) string {
 		base = strings.Trim(base[:maxBaseLen], "-")
 	}
 	if base == "" {
-		base = "github"
+		base = sourceProviderGitHub
 	}
 	return base + "-" + deliveryHash
 }
