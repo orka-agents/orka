@@ -181,5 +181,35 @@ general_image="${DEMO_GENERAL_WORKER_IMAGE:-localhost:${KIND_REGISTRY_PORT:-5001
 build_and_repoint_worker "general-worker-image" "workers/general/Dockerfile" \
   "${general_image}" "${DEMO_BUILD_GENERAL_IMAGE:-1}" "general worker"
 
+# --- Codex sandbox mode (gVisor cluster contract) ---------------------------
+# This unified cluster runs gVisor (runsc) nodes. Codex's default sandbox
+# (workspace-write -> inner bubblewrap) cannot create a user namespace under
+# runsc, and even its no-sandbox retry trips the kernel-capability check
+# ("codex without sandbox after kernel capability check: exit status 1"). The
+# workspace demos (60/70) bypass this by setting ORKA_CODEX_DISABLE_SANDBOX=true
+# in their Task manifests, but the type: ai coordinators in demos 10/20 create
+# codex child Tasks at runtime via the create_agent/create_task tool path, which
+# carry no such env. Setting the controller's --codex-sandbox-mode injects
+# ORKA_CODEX_SANDBOX_MODE into EVERY codex agent Task (coordinator-created
+# included), so codex runs `--sandbox <mode>` directly and skips bwrap +
+# kernel-cap probing. danger-full-access is appropriate inside the gVisor jail.
+codex_sandbox_mode="${DEMO_CODEX_SANDBOX_MODE:-danger-full-access}"
+if kubectl -n "${orka_namespace}" get deployment "${controller_deployment}" >/dev/null 2>&1; then
+  log "Setting ${controller_deployment} --codex-sandbox-mode -> ${codex_sandbox_mode}"
+  kubectl -n "${orka_namespace}" get deployment "${controller_deployment}" -o json \
+    | jq --arg mode "${codex_sandbox_mode}" '
+        .spec.template.spec.containers |= map(
+          if .name == "manager" then
+            .args = (
+              (.args // []) as $a |
+              if ($a | map(startswith("--codex-sandbox-mode=")) | any)
+              then ($a | map(if startswith("--codex-sandbox-mode=") then "--codex-sandbox-mode=" + $mode else . end))
+              else ($a + ["--codex-sandbox-mode=" + $mode])
+              end)
+          else . end)' \
+    | kubectl apply -f -
+  kubectl -n "${orka_namespace}" rollout status deployment/"${controller_deployment}" --timeout=300s
+fi
+
 log "Demo model stack ready: Provider ${provider_ref} + runtime/provider/git secrets in ${demo_namespace}."
 log "Run demos 10/20/30/40 with: source hack/demos/cluster/demo-env.sh"
