@@ -191,8 +191,13 @@ if [[ "${AGENTIC}" == "1" ]]; then
   fi
   if [[ -n "${git_token}" ]]; then
     log "Creating git Secret ${demo_namespace}/${sandbox_git_secret} (token not printed)"
+    # Include a `token` key alongside username/password: on the unified cluster
+    # this installer runs LAST and would otherwise clobber the 3-key secret that
+    # install-demo-model.sh creates, breaking Demo 30 (it reads GH_TOKEN from the
+    # `token` key -> CreateContainerConfigError "couldn't find key token").
     kubectl -n "${demo_namespace}" create secret generic "${sandbox_git_secret}" \
       --from-literal=username=oauth2 --from-literal=password="${git_token}" \
+      --from-literal=token="${git_token}" \
       --dry-run=client -o yaml | kubectl apply -f -
     unset git_token
   else
