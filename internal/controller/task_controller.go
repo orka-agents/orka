@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -31,7 +32,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -41,6 +41,7 @@ import (
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/workerenv"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -49,6 +50,8 @@ import (
 const (
 	taskTransactionTokenPendingTimeout = 2 * time.Minute
 	failedMountEventStaleAfter         = 2 * time.Minute
+	podLogLimitBytes                   = int64(5 << 20)
+	stdoutResultLogLimitBytes          = int64(15 << 20)
 
 	eventInvolvedObjectNameField = "involvedObject.name"
 	eventReasonField             = "reason"
@@ -1367,19 +1370,37 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 		return err
 	}
 
-	// No result yet — capture pod logs for container tasks that actually created a Job.
+	// No result yet — capture pod logs for tasks that actually created a Job.
 	// Some validation failures happen before Job creation; those terminal tasks should
 	// not produce noisy best-effort log collection errors for a non-existent Job.
-	if task.Spec.Type != corev1alpha1.TaskTypeContainer || r.KubeClient == nil || task.Status.JobName == "" {
+	stdoutResult := taskUsesStdoutResult(task)
+	if (task.Spec.Type != corev1alpha1.TaskTypeContainer && !stdoutResult) || r.KubeClient == nil || task.Status.JobName == "" {
 		return nil
 	}
 
-	logs, err := r.readPodLogs(ctx, task)
-	if err != nil {
-		return fmt.Errorf("reading pod logs: %w", err)
+	var result []byte
+	if stdoutResult {
+		logs, err := r.readStdoutResultPodLogs(ctx, task)
+		if err != nil {
+			return fmt.Errorf("reading stdout result pod logs: %w", err)
+		}
+		stdoutPayload, ok, decodeErr := extractStdoutTaskResult(logs)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		if !ok {
+			return nil
+		}
+		result = stdoutPayload
+	} else {
+		logs, err := r.readPodLogs(ctx, task)
+		if err != nil {
+			return fmt.Errorf("reading pod logs: %w", err)
+		}
+		result = []byte(logs)
 	}
 
-	if err := r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, []byte(logs)); err != nil {
+	if err := r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, result); err != nil {
 		return fmt.Errorf("saving result: %w", err)
 	}
 
@@ -1390,8 +1411,52 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 	return nil
 }
 
+func taskUsesStdoutResult(task *corev1alpha1.Task) bool {
+	return taskRequestsReadOnlyAgent(task)
+}
+
+func extractStdoutTaskResult(logs string) ([]byte, bool, error) {
+	var payload string
+	for line := range strings.SplitSeq(logs, "\n") {
+		line = strings.TrimSpace(line)
+		if encoded, ok := strings.CutPrefix(line, workerenv.ResultStdoutPrefix); ok {
+			payload = strings.TrimSpace(encoded)
+		}
+	}
+	if payload == "" {
+		return nil, false, nil
+	}
+	result, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, true, fmt.Errorf("decoding stdout task result: %w", err)
+	}
+	return result, true, nil
+}
+
 // readPodLogs reads logs from the first pod of a task's job.
 func (r *TaskReconciler) readPodLogs(ctx context.Context, task *corev1alpha1.Task) (string, error) {
+	return r.readPodLogsWithOptions(ctx, task, fullPodLogOptions(), true)
+}
+
+func (r *TaskReconciler) readStdoutResultPodLogs(ctx context.Context, task *corev1alpha1.Task) (string, error) {
+	return r.readPodLogsWithOptions(ctx, task, stdoutResultPodLogOptions(), false)
+}
+
+func fullPodLogOptions() corev1.PodLogOptions {
+	limit := podLogLimitBytes
+	return corev1.PodLogOptions{
+		LimitBytes: &limit,
+	}
+}
+
+func stdoutResultPodLogOptions() corev1.PodLogOptions {
+	limit := stdoutResultLogLimitBytes
+	return corev1.PodLogOptions{
+		LimitBytes: &limit,
+	}
+}
+
+func (r *TaskReconciler) readPodLogsWithOptions(ctx context.Context, task *corev1alpha1.Task, opts corev1.PodLogOptions, appendTruncatedMarker bool) (string, error) {
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList,
 		client.InNamespace(task.Namespace),
@@ -1404,24 +1469,24 @@ func (r *TaskReconciler) readPodLogs(ctx context.Context, task *corev1alpha1.Tas
 		return "", fmt.Errorf("no pods found for job %s", task.Status.JobName)
 	}
 
-	const maxLogBytes = int64(5 << 20) // 5MB
-
 	pod := podList.Items[len(podList.Items)-1]
-	req := r.KubeClient.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
-		LimitBytes: ptr.To(maxLogBytes),
-	})
+	req := r.KubeClient.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &opts)
 	stream, err := req.Stream(ctx)
 	if err != nil {
 		return "", fmt.Errorf("streaming logs: %w", err)
 	}
 	defer stream.Close() //nolint:errcheck
 
-	data, err := io.ReadAll(io.LimitReader(stream, maxLogBytes))
+	limit := podLogLimitBytes
+	if opts.LimitBytes != nil && *opts.LimitBytes > 0 {
+		limit = *opts.LimitBytes
+	}
+	data, err := io.ReadAll(io.LimitReader(stream, limit))
 	if err != nil {
 		return "", fmt.Errorf("reading logs: %w", err)
 	}
 
-	if int64(len(data)) == maxLogBytes {
+	if appendTruncatedMarker && int64(len(data)) == limit {
 		data = append(data, "\n[truncated]"...)
 	}
 

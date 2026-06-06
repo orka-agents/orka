@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -37,6 +38,7 @@ import (
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
@@ -1813,6 +1815,64 @@ func TestCollectResult_NilResultStore_DoesNotPanic(t *testing.T) {
 	}
 	if task.Status.ResultRef != nil {
 		t.Fatalf("expected ResultRef to remain nil when result store is nil, got %#v", task.Status.ResultRef)
+	}
+}
+
+func TestExtractStdoutTaskResult(t *testing.T) {
+	first := base64.StdEncoding.EncodeToString([]byte("first"))
+	second := base64.StdEncoding.EncodeToString([]byte("second"))
+	logs := strings.Join([]string{
+		"Worker started",
+		workerenv.ResultStdoutPrefix + first,
+		"Task completed",
+		workerenv.ResultStdoutPrefix + second,
+	}, "\n")
+
+	got, ok, err := extractStdoutTaskResult(logs)
+	if err != nil {
+		t.Fatalf("extractStdoutTaskResult() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("extractStdoutTaskResult() ok = false, want true")
+	}
+	if string(got) != "second" {
+		t.Fatalf("extractStdoutTaskResult() = %q, want second", string(got))
+	}
+}
+
+func TestExtractStdoutTaskResultMissingMarker(t *testing.T) {
+	got, ok, err := extractStdoutTaskResult("Worker started\nTask completed")
+	if err != nil {
+		t.Fatalf("extractStdoutTaskResult() error = %v", err)
+	}
+	if ok {
+		t.Fatal("extractStdoutTaskResult() ok = true, want false")
+	}
+	if got != nil {
+		t.Fatalf("extractStdoutTaskResult() = %#v, want nil", got)
+	}
+}
+
+func TestExtractStdoutTaskResultInvalidBase64(t *testing.T) {
+	_, ok, err := extractStdoutTaskResult(workerenv.ResultStdoutPrefix + "not base64")
+	if err == nil {
+		t.Fatal("extractStdoutTaskResult() error = nil, want error")
+	}
+	if !ok {
+		t.Fatal("extractStdoutTaskResult() ok = false, want true")
+	}
+}
+
+func TestStdoutResultPodLogOptionsReadsBoundedFullLog(t *testing.T) {
+	opts := stdoutResultPodLogOptions()
+	if opts.TailLines != nil {
+		t.Fatalf("TailLines = %#v, want nil so stdout markers are not tailed away", opts.TailLines)
+	}
+	if opts.LimitBytes == nil || *opts.LimitBytes != stdoutResultLogLimitBytes {
+		t.Fatalf("LimitBytes = %#v, want %d", opts.LimitBytes, stdoutResultLogLimitBytes)
+	}
+	if stdoutResultLogLimitBytes <= podLogLimitBytes {
+		t.Fatalf("stdoutResultLogLimitBytes = %d, want greater than podLogLimitBytes %d", stdoutResultLogLimitBytes, podLogLimitBytes)
 	}
 }
 

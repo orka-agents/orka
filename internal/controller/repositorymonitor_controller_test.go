@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,10 +20,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 )
 
-const repositoryMonitorTestDefaultBranch = "main"
+const (
+	repositoryMonitorTestDefaultBranch = "main"
+	repositoryMonitorTestRepoURL       = "https://github.com/sozercan/orka"
+)
 
 func TestRepositoryMonitorReconcileRecordsMetadataAndStatus(t *testing.T) {
 	ctx := context.Background()
@@ -752,8 +757,21 @@ func TestRepositoryMonitorReconcileProcessesQueuedPRInventoryRun(t *testing.T) {
 		Kind:                repositoryMonitorPullRequestKind,
 		Number:              5,
 		LastReviewedHeadSHA: "sha5",
+		LastVerdict:         repositoryMonitorVerdictSkipped,
+		SkipReason:          "blocked_label",
 	}); err != nil {
 		t.Fatalf("UpsertMonitorItem(existing) error = %v", err)
+	}
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID:               "review-record-pr-5-sha5",
+		MonitorNamespace: "default",
+		MonitorName:      "inventory",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           5,
+		HeadSHA:          "sha5",
+		Verdict:          repositoryMonitorReviewVerdictNeedsChanges,
+	}); err != nil {
+		t.Fatalf("CreateReviewRecord(existing) error = %v", err)
 	}
 
 	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "inventory"}})
@@ -768,19 +786,20 @@ func TestRepositoryMonitorReconcileProcessesQueuedPRInventoryRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetMonitorRun() error = %v", err)
 	}
-	if run.Phase != repositoryMonitorRunPhaseSucceeded || run.SelectedCount != 1 || run.SkippedCount != 4 {
-		t.Fatalf("run = %#v, want succeeded with 1 selected and 4 skipped", run)
+	if run.Phase != repositoryMonitorRunPhaseSucceeded || run.SelectedCount != 1 || run.CreatedTaskCount != 1 || run.SkippedCount != 4 {
+		t.Fatalf("run = %#v, want succeeded with 1 selected, 1 created task, and 4 skipped", run)
 	}
 
 	assertRepositoryMonitorInventoryItems(t, ctx, monitorStore)
 	assertRepositoryMonitorInventoryEvents(t, ctx, monitorStore)
+	assertRepositoryMonitorReviewTask(t, ctx, cl, monitorStore)
 
 	var current corev1alpha1.RepositoryMonitor
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: "inventory"}, &current); err != nil {
 		t.Fatalf("Get monitor() error = %v", err)
 	}
-	if current.Status.OpenPullRequests != 5 || current.Status.PendingReviews != 1 || current.Status.BlockedItems != 4 {
-		t.Fatalf("status counts = %#v, want open=5 pending=1 blocked=4", current.Status)
+	if current.Status.OpenPullRequests != 5 || current.Status.PendingReviews != 1 || current.Status.BlockedItems != 3 {
+		t.Fatalf("status counts = %#v, want open=5 pending=1 blocked=3", current.Status)
 	}
 	if current.Status.LastSuccessfulRunTime == nil {
 		t.Fatal("LastSuccessfulRunTime is nil, want completed successful run time")
@@ -822,7 +841,13 @@ func TestRepositoryMonitorReconcileSkipsPendingReviewWithoutConsumingCapacity(t 
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(monitor, &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pending-review-task",
+				Namespace: "default",
+			},
+			Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		}).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -838,6 +863,7 @@ func TestRepositoryMonitorReconcileSkipsPendingReviewWithoutConsumingCapacity(t 
 		State:            repositoryMonitorItemStateOpen,
 		HeadSHA:          "sha1",
 		LastVerdict:      repositoryMonitorRunPhaseQueued,
+		LastReviewID:     "pending-review-task",
 	}); err != nil {
 		t.Fatalf("UpsertMonitorItem(pending) error = %v", err)
 	}
@@ -877,6 +903,819 @@ func TestRepositoryMonitorReconcileSkipsPendingReviewWithoutConsumingCapacity(t 
 	}
 	if selected.LastVerdict != repositoryMonitorRunPhaseQueued || selected.SkipReason != "" {
 		t.Fatalf("selected item = %#v, want newly queued review", selected)
+	}
+}
+
+func TestRepositoryMonitorReconcileCreatesTaskForQueuedItemMissingBackingTask(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	server := newRepositoryMonitorPullRequestInventoryServerWithoutAuth(t, `[
+		{"number":1,"title":"Previously queued","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1"},"head":{"ref":"queued","sha":"sha1"},"labels":[]}
+	]`)
+	t.Cleanup(server.Close)
+
+	monitor := &corev1alpha1.RepositoryMonitor{
+		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "queued-without-task",
+			Namespace: "default",
+			UID:       "uid-queued-without-task",
+		},
+		Spec: corev1alpha1.RepositoryMonitorSpec{
+			RepoURL: "https://github.com/sozercan/orka",
+			Agents: corev1alpha1.RepositoryMonitorAgents{
+				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
+			},
+		},
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(monitor).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		Store:            monitorStore,
+		GitHubAPIBaseURL: server.URL,
+	}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
+		MonitorNamespace: "default",
+		MonitorName:      "queued-without-task",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           1,
+		State:            repositoryMonitorItemStateOpen,
+		HeadSHA:          "sha1",
+		LastVerdict:      repositoryMonitorRunPhaseQueued,
+		LastReviewID:     "missing-review-task",
+	}); err != nil {
+		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
+	}
+	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{
+		ID:               "run-queued-without-task",
+		MonitorNamespace: "default",
+		MonitorName:      "queued-without-task",
+		Trigger:          "manual",
+		Phase:            repositoryMonitorRunPhaseQueued,
+		StartedAt:        time.Now().Add(-1 * time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "queued-without-task"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	run, err := monitorStore.GetMonitorRun(ctx, "default", "run-queued-without-task")
+	if err != nil {
+		t.Fatalf("GetMonitorRun() error = %v", err)
+	}
+	if run.SelectedCount != 1 || run.CreatedTaskCount != 1 || run.SkippedCount != 0 {
+		t.Fatalf("run = %#v, want selected item to get a backing task", run)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, "default", "queued-without-task", repositoryMonitorPullRequestKind, "1")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	if item.LastReviewID == "" || item.LastReviewID == "missing-review-task" || item.SkipReason != "" {
+		t.Fatalf("item = %#v, want fresh review task link without skip reason", item)
+	}
+	var task corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: item.LastReviewID}, &task); err != nil {
+		t.Fatalf("Get review task %q error = %v", item.LastReviewID, err)
+	}
+}
+
+func TestRepositoryMonitorReconcileFailsClosedOnReviewTaskNameCollision(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	server := newRepositoryMonitorPullRequestInventoryServerWithoutAuth(t, `[
+		{"number":1,"title":"Ready","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"feature","sha":"sha1","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]}
+	]`)
+	t.Cleanup(server.Close)
+
+	monitor := &corev1alpha1.RepositoryMonitor{
+		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "collision",
+			Namespace: "default",
+			UID:       "uid-collision",
+		},
+		Spec: corev1alpha1.RepositoryMonitorSpec{
+			RepoURL: "https://github.com/sozercan/orka",
+			Agents: corev1alpha1.RepositoryMonitorAgents{
+				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
+			},
+		},
+	}
+	run := &store.MonitorRun{
+		ID:               "run-collision",
+		MonitorNamespace: "default",
+		MonitorName:      "collision",
+		Trigger:          "manual",
+		Phase:            repositoryMonitorRunPhaseQueued,
+		StartedAt:        time.Now().Add(-1 * time.Minute),
+	}
+	pr := repositoryMonitorPullRequest{
+		Number:      1,
+		HeadSHA:     "sha1",
+		HeadRepo:    "sozercan/orka",
+		HeadRepoURL: "https://github.com/sozercan/orka.git",
+	}
+	collidingTaskName := repositoryMonitorReviewTaskName(monitor, run, pr)
+	collidingTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      collidingTaskName,
+			Namespace: "default",
+			Labels: map[string]string{
+				labels.LabelManaged:           "true",
+				labels.LabelCreatedBy:         "repository-monitor",
+				labels.LabelRepositoryMonitor: labels.SelectorValue("collision"),
+				labels.LabelMonitorRun:        labels.SelectorValue("run-collision"),
+				labels.LabelGitHubRepository:  labels.SelectorValue("sozercan/orka"),
+				labels.LabelGitHubTarget:      labels.SelectorValue(repositoryMonitorPullRequestKind),
+				labels.LabelGitHubNumber:      labels.SelectorValue("1"),
+			},
+			Annotations: map[string]string{
+				labels.AnnotationRepositoryMonitorName:  "collision",
+				labels.AnnotationMonitorRunID:           "run-collision",
+				labels.AnnotationMonitorItemKind:        repositoryMonitorPullRequestKind,
+				labels.AnnotationMonitorItemNumber:      "1",
+				labels.AnnotationMonitorHeadSHA:         "sha1",
+				labels.AnnotationGitHubRepository:       "sozercan/orka",
+				labels.AnnotationAgentReadOnly:          "true",
+				labels.AnnotationWorkspaceInitContainer: "true",
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(monitor, corev1alpha1.GroupVersion.WithKind("RepositoryMonitor")),
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "spoofed-reviewer"},
+			Prompt:   "spoofed review result",
+		},
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(monitor, collidingTask).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		Store:            monitorStore,
+		GitHubAPIBaseURL: server.URL,
+	}
+	if err := monitorStore.CreateMonitorRun(ctx, run); err != nil {
+		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "collision"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	gotRun, err := monitorStore.GetMonitorRun(ctx, "default", "run-collision")
+	if err != nil {
+		t.Fatalf("GetMonitorRun() error = %v", err)
+	}
+	if gotRun.Phase != repositoryMonitorRunPhaseFailed || !strings.Contains(gotRun.Error, "spec does not match") {
+		t.Fatalf("run = %#v, want failed run from unsafe review task collision", gotRun)
+	}
+}
+
+func TestRepositoryMonitorReviewTaskReuseAllowsDefaultedTaskScheduleFields(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	monitor := &corev1alpha1.RepositoryMonitor{
+		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "defaulted-task",
+			Namespace: "default",
+			UID:       "uid-defaulted-task",
+		},
+		Spec: corev1alpha1.RepositoryMonitorSpec{
+			RepoURL: "https://github.com/sozercan/orka",
+			Agents: corev1alpha1.RepositoryMonitorAgents{
+				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
+			},
+		},
+	}
+	run := &store.MonitorRun{
+		ID:               "run-defaulted-task",
+		MonitorNamespace: "default",
+		MonitorName:      "defaulted-task",
+		Trigger:          "manual",
+		Phase:            repositoryMonitorRunPhaseQueued,
+		StartedAt:        time.Now().Add(-1 * time.Minute),
+	}
+	pr := repositoryMonitorPullRequest{
+		Number:      1,
+		BaseBranch:  repositoryMonitorTestDefaultBranch,
+		HeadSHA:     "sha1",
+		HeadRepo:    "sozercan/orka",
+		HeadRepoURL: "https://github.com/sozercan/orka.git",
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(monitor).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{
+		Client: cl,
+		Scheme: scheme,
+		Store:  setupControllerSQLiteStore(t),
+	}
+
+	taskName, created, err := reconciler.createRepositoryMonitorReviewTask(ctx, monitor, run, "sozercan", "orka", pr)
+	if err != nil {
+		t.Fatalf("createRepositoryMonitorReviewTask() error = %v", err)
+	}
+	if !created {
+		t.Fatal("createRepositoryMonitorReviewTask() created = false, want true")
+	}
+
+	var existing corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: taskName}, &existing); err != nil {
+		t.Fatalf("Get review task() error = %v", err)
+	}
+	expected := existing.DeepCopy()
+	startingDeadlineSeconds := int64(100)
+	successfulRunsHistoryLimit := int32(3)
+	failedRunsHistoryLimit := int32(1)
+	existing.Spec.ConcurrencyPolicy = corev1alpha1.ForbidConcurrent
+	existing.Spec.StartingDeadlineSeconds = &startingDeadlineSeconds
+	existing.Spec.SuccessfulRunsHistoryLimit = &successfulRunsHistoryLimit
+	existing.Spec.FailedRunsHistoryLimit = &failedRunsHistoryLimit
+
+	if err := validateRepositoryMonitorReviewTaskMatchesExpected(&existing, expected, monitor, run, "sozercan/orka", pr); err != nil {
+		t.Fatalf("validateRepositoryMonitorReviewTaskMatchesExpected() error = %v", err)
+	}
+}
+
+func TestRepositoryMonitorReconcileKeepsSucceededBackingTaskPendingWithoutTypedResult(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	const terminalReviewHeadSHA = "sha1"
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	server := newRepositoryMonitorPullRequestInventoryServerWithoutAuth(t, `[
+		{"number":1,"title":"Completed task","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1"},"head":{"ref":"queued","sha":"sha1"},"labels":[]}
+	]`)
+	t.Cleanup(server.Close)
+
+	monitor := &corev1alpha1.RepositoryMonitor{
+		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "queued-terminal-task",
+			Namespace: "default",
+			UID:       "uid-queued-terminal-task",
+		},
+		Spec: corev1alpha1.RepositoryMonitorSpec{
+			RepoURL: "https://github.com/sozercan/orka",
+			Agents: corev1alpha1.RepositoryMonitorAgents{
+				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
+			},
+		},
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(monitor, &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: "completed-review-task", Namespace: "default"},
+			Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+			Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+		}).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		Store:            monitorStore,
+		GitHubAPIBaseURL: server.URL,
+	}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
+		MonitorNamespace: "default",
+		MonitorName:      "queued-terminal-task",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           1,
+		State:            repositoryMonitorItemStateOpen,
+		HeadSHA:          terminalReviewHeadSHA,
+		LastVerdict:      repositoryMonitorRunPhaseQueued,
+		LastReviewID:     "completed-review-task",
+	}); err != nil {
+		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
+	}
+	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{
+		ID:               "run-queued-terminal-task",
+		MonitorNamespace: "default",
+		MonitorName:      "queued-terminal-task",
+		Trigger:          "manual",
+		Phase:            repositoryMonitorRunPhaseQueued,
+		StartedAt:        time.Now().Add(-1 * time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "queued-terminal-task"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	run, err := monitorStore.GetMonitorRun(ctx, "default", "run-queued-terminal-task")
+	if err != nil {
+		t.Fatalf("GetMonitorRun() error = %v", err)
+	}
+	if run.SelectedCount != 0 || run.CreatedTaskCount != 0 || run.SkippedCount != 1 {
+		t.Fatalf("run = %#v, want succeeded task to stay pending without typed result ingest", run)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, "default", "queued-terminal-task", repositoryMonitorPullRequestKind, "1")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	if item.LastReviewID != "completed-review-task" || item.LastReviewedHeadSHA != "" || item.LastVerdict != repositoryMonitorRunPhaseQueued || item.SkipReason != repositoryMonitorSkipReasonPending {
+		t.Fatalf("item = %#v, want succeeded task to remain pending until typed result ingest", item)
+	}
+}
+
+func TestRepositoryMonitorReconcileIngestsTypedReviewResult(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	const reviewHeadSHA = "sha1"
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	monitor := repositoryMonitorReviewIngestTestMonitor("review-ingest")
+	task := repositoryMonitorReviewIngestTestTask("completed-review-task", "review-ingest", 1, reviewHeadSHA)
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(monitor, task).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{
+		Client:      cl,
+		Scheme:      scheme,
+		Store:       monitorStore,
+		ResultStore: monitorStore,
+	}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
+		MonitorNamespace: "default",
+		MonitorName:      "review-ingest",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           1,
+		State:            repositoryMonitorItemStateOpen,
+		HeadSHA:          reviewHeadSHA,
+		LastVerdict:      repositoryMonitorRunPhaseQueued,
+		LastReviewID:     "completed-review-task",
+	}); err != nil {
+		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
+	}
+	if err := monitorStore.SaveResult(ctx, "default", "completed-review-task", repositoryMonitorReviewResultEnvelope(t, "sozercan/orka", 1, reviewHeadSHA, repositoryMonitorReviewVerdictNeedsChanges)); err != nil {
+		t.Fatalf("SaveResult() error = %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "review-ingest"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	records, _, err := monitorStore.ListReviewRecords(ctx, store.ReviewRecordFilter{Namespace: "default", MonitorName: "review-ingest", Number: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListReviewRecords() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %#v, want one typed review record", records)
+	}
+	record := records[0]
+	if record.TaskName != "completed-review-task" || record.HeadSHA != reviewHeadSHA || record.Verdict != repositoryMonitorReviewVerdictNeedsChanges || !record.Repairable || record.SecurityStatus != "clear" {
+		t.Fatalf("record = %#v, want typed exact-head review result", record)
+	}
+	var findings []repositoryMonitorReviewFinding
+	if err := json.Unmarshal([]byte(record.FindingsJSON), &findings); err != nil {
+		t.Fatalf("FindingsJSON invalid: %v", err)
+	}
+	if len(findings) != 1 || findings[0].Priority != "P1" {
+		t.Fatalf("findings = %#v, want one P1 finding", findings)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, "default", "review-ingest", repositoryMonitorPullRequestKind, "1")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	if item.LastReviewID != record.ID || item.LastReviewedHeadSHA != reviewHeadSHA || item.LastVerdict != repositoryMonitorReviewVerdictNeedsChanges || item.SkipReason != "" {
+		t.Fatalf("item = %#v, want ingested review result applied", item)
+	}
+	events, _, err := monitorStore.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: "default", MonitorName: "review-ingest", EventType: "review_result_ingested", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorEvents() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %#v, want one ingest event", events)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "review-ingest"}}); err != nil {
+		t.Fatalf("second Reconcile() error = %v", err)
+	}
+	records, _, err = monitorStore.ListReviewRecords(ctx, store.ReviewRecordFilter{Namespace: "default", MonitorName: "review-ingest", Number: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListReviewRecords(second) error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records after second reconcile = %#v, want idempotent ingest", records)
+	}
+}
+
+func TestRepositoryMonitorReconcileRetriesTransientReviewResultReadError(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	const reviewHeadSHA = "sha1"
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	monitor := repositoryMonitorReviewIngestTestMonitor("review-transient-result-error")
+	task := repositoryMonitorReviewIngestTestTask("transient-review-task", "review-transient-result-error", 1, reviewHeadSHA)
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(monitor, task).
+		Build()
+	readErr := errors.New("sqlite busy")
+	reconciler := &RepositoryMonitorReconciler{
+		Client:      cl,
+		Scheme:      scheme,
+		Store:       monitorStore,
+		ResultStore: transientGetResultErrorStore{ResultStore: monitorStore, err: readErr},
+	}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
+		MonitorNamespace: "default",
+		MonitorName:      "review-transient-result-error",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           1,
+		State:            repositoryMonitorItemStateOpen,
+		HeadSHA:          reviewHeadSHA,
+		LastVerdict:      repositoryMonitorRunPhaseQueued,
+		LastReviewID:     "transient-review-task",
+	}); err != nil {
+		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "review-transient-result-error"}})
+	if err == nil {
+		t.Fatal("Reconcile() error = nil, want transient result-store error")
+	}
+	if !strings.Contains(err.Error(), readErr.Error()) {
+		t.Fatalf("Reconcile() error = %q, want %q", err.Error(), readErr.Error())
+	}
+
+	records, _, err := monitorStore.ListReviewRecords(ctx, store.ReviewRecordFilter{Namespace: "default", MonitorName: "review-transient-result-error", Number: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListReviewRecords() error = %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("records = %#v, want no immutable rejection for transient result-store error", records)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, "default", "review-transient-result-error", repositoryMonitorPullRequestKind, "1")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	if item.LastVerdict != repositoryMonitorRunPhaseQueued || item.LastReviewID != "transient-review-task" || item.LastReviewedHeadSHA != "" {
+		t.Fatalf("item = %#v, want queued review preserved for retry", item)
+	}
+}
+
+func TestRepositoryMonitorReconcileRejectsMalformedReviewResult(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	monitor := repositoryMonitorReviewIngestTestMonitor("review-malformed")
+	task := repositoryMonitorReviewIngestTestTask("malformed-review-task", "review-malformed", 2, "sha2")
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(monitor, task).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
+		MonitorNamespace: "default",
+		MonitorName:      "review-malformed",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           2,
+		State:            repositoryMonitorItemStateOpen,
+		HeadSHA:          "sha2",
+		LastVerdict:      repositoryMonitorRunPhaseQueued,
+		LastReviewID:     "malformed-review-task",
+	}); err != nil {
+		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
+	}
+	if err := monitorStore.SaveResult(ctx, "default", "malformed-review-task", []byte("not a review result")); err != nil {
+		t.Fatalf("SaveResult() error = %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "review-malformed"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	record, item := assertRepositoryMonitorRejectedReview(t, ctx, monitorStore, "review-malformed", "2")
+	if record.Verdict != repositoryMonitorReviewVerdictFailed || item.LastVerdict != repositoryMonitorReviewVerdictFailed || item.SkipReason != repositoryMonitorReviewSkipReasonMalformed {
+		t.Fatalf("record = %#v item = %#v, want malformed review failure", record, item)
+	}
+}
+
+func TestRepositoryMonitorReconcileRejectsStaleReviewResult(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	monitor := repositoryMonitorReviewIngestTestMonitor("review-stale")
+	task := repositoryMonitorReviewIngestTestTask("stale-review-task", "review-stale", 3, "oldsha")
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(monitor, task).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
+		MonitorNamespace: "default",
+		MonitorName:      "review-stale",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           3,
+		State:            repositoryMonitorItemStateOpen,
+		HeadSHA:          "newsha",
+		LastVerdict:      repositoryMonitorRunPhaseQueued,
+		LastReviewID:     "stale-review-task",
+	}); err != nil {
+		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
+	}
+	if err := monitorStore.SaveResult(ctx, "default", "stale-review-task", repositoryMonitorReviewResultEnvelope(t, "sozercan/orka", 3, "oldsha", repositoryMonitorReviewVerdictPassed)); err != nil {
+		t.Fatalf("SaveResult() error = %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "review-stale"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	record, item := assertRepositoryMonitorRejectedReview(t, ctx, monitorStore, "review-stale", "3")
+	if record.Verdict != repositoryMonitorReviewVerdictStale || record.HeadSHA != "oldsha" || item.LastVerdict != repositoryMonitorReviewVerdictStale || item.LastReviewedHeadSHA != "" || item.SkipReason != repositoryMonitorReviewSkipReasonStaleHead {
+		t.Fatalf("record = %#v item = %#v, want stale review rejection", record, item)
+	}
+}
+
+func TestRepositoryMonitorReconcileRejectsReviewTaskBindingMismatch(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	monitor := repositoryMonitorReviewIngestTestMonitor("review-task-mismatch")
+	task := repositoryMonitorReviewIngestTestTask("mismatched-review-task", "review-task-mismatch", 99, "sha4")
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(monitor, task).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
+		MonitorNamespace: "default",
+		MonitorName:      "review-task-mismatch",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           4,
+		State:            repositoryMonitorItemStateOpen,
+		HeadSHA:          "sha4",
+		LastVerdict:      repositoryMonitorRunPhaseQueued,
+		LastReviewID:     "mismatched-review-task",
+	}); err != nil {
+		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
+	}
+	if err := monitorStore.SaveResult(ctx, "default", "mismatched-review-task", repositoryMonitorReviewResultEnvelope(t, "sozercan/orka", 4, "sha4", repositoryMonitorReviewVerdictPassed)); err != nil {
+		t.Fatalf("SaveResult() error = %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "review-task-mismatch"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	record, item := assertRepositoryMonitorRejectedReview(t, ctx, monitorStore, "review-task-mismatch", "4")
+	if record.Verdict != repositoryMonitorReviewVerdictFailed || item.LastVerdict != repositoryMonitorReviewVerdictFailed || item.SkipReason != repositoryMonitorReviewSkipReasonTaskMismatch {
+		t.Fatalf("record = %#v item = %#v, want task binding mismatch rejection", record, item)
+	}
+	if !strings.Contains(record.Summary, `item number "99", want "4"`) {
+		t.Fatalf("record summary = %q, want item number mismatch detail", record.Summary)
+	}
+}
+
+func TestRepositoryMonitorReconcileForkPullRequestTaskUsesHeadRepoWithoutBaseSecret(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("core AddToScheme() error = %v", err)
+	}
+
+	server := newRepositoryMonitorPullRequestInventoryServerWithBody(t, `[
+		{"number":7,"title":"Fork PR","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"forker"},"base":{"ref":"main","sha":"base7","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"feature","sha":"fork-sha","repo":{"full_name":"forker/orka","clone_url":"https://github.com/forker/orka.git"}},"labels":[]}
+	]`)
+	t.Cleanup(server.Close)
+
+	monitor, secret := repositoryMonitorInventoryTestObjects("fork-pr")
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(monitor, secret).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		Store:            monitorStore,
+		GitHubAPIBaseURL: server.URL,
+	}
+	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{
+		ID:               "run-fork-pr",
+		MonitorNamespace: "default",
+		MonitorName:      "fork-pr",
+		Trigger:          "manual",
+		Phase:            repositoryMonitorRunPhaseQueued,
+		StartedAt:        time.Now().Add(-1 * time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "fork-pr"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	item, err := monitorStore.GetMonitorItem(ctx, "default", "fork-pr", repositoryMonitorPullRequestKind, "7")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	var task corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: item.LastReviewID}, &task); err != nil {
+		t.Fatalf("Get review task %q error = %v", item.LastReviewID, err)
+	}
+	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+		t.Fatalf("task AgentRuntime.Workspace is nil")
+	}
+	if task.Spec.AgentRuntime.Workspace.GitRepo != "https://github.com/forker/orka.git" || task.Spec.AgentRuntime.Workspace.Ref != "fork-sha" {
+		t.Fatalf("workspace = %#v, want fork repo at exact fork head", task.Spec.AgentRuntime.Workspace)
+	}
+	if task.Spec.AgentRuntime.Workspace.GitSecretRef != nil {
+		t.Fatalf("workspace GitSecretRef = %#v, want nil for fork PR review", task.Spec.AgentRuntime.Workspace.GitSecretRef)
+	}
+	if !strings.Contains(task.Spec.Prompt, `"headRepo": "forker/orka"`) {
+		t.Fatalf("prompt does not include fork head repo:\n%s", task.Spec.Prompt)
+	}
+}
+
+func TestRepositoryMonitorReconcileSameRepoSSHMonitorUsesHTTPSCloneURL(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("core AddToScheme() error = %v", err)
+	}
+
+	server := newRepositoryMonitorPullRequestInventoryServerWithBody(t, `[
+		{"number":9,"title":"Same repo SSH monitor","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base9","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"feature","sha":"ssh-head-sha","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]}
+	]`)
+	t.Cleanup(server.Close)
+
+	monitor, secret := repositoryMonitorInventoryTestObjects("ssh-same-repo")
+	monitor.Spec.RepoURL = "git@github.com:sozercan/orka.git"
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(monitor, secret).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		Store:            monitorStore,
+		GitHubAPIBaseURL: server.URL,
+	}
+	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{
+		ID:               "run-ssh-same-repo",
+		MonitorNamespace: "default",
+		MonitorName:      "ssh-same-repo",
+		Trigger:          "manual",
+		Phase:            repositoryMonitorRunPhaseQueued,
+		StartedAt:        time.Now().Add(-1 * time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "ssh-same-repo"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	item, err := monitorStore.GetMonitorItem(ctx, "default", "ssh-same-repo", repositoryMonitorPullRequestKind, "9")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	var task corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: item.LastReviewID}, &task); err != nil {
+		t.Fatalf("Get review task %q error = %v", item.LastReviewID, err)
+	}
+	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+		t.Fatalf("task AgentRuntime.Workspace is nil")
+	}
+	if task.Spec.AgentRuntime.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.AgentRuntime.Workspace.Ref != "ssh-head-sha" {
+		t.Fatalf("workspace = %#v, want HTTPS monitored repo at exact head", task.Spec.AgentRuntime.Workspace)
+	}
+	if task.Spec.AgentRuntime.Workspace.GitSecretRef == nil || task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "github-token" {
+		t.Fatalf("workspace GitSecretRef = %#v, want github-token for same-repo review", task.Spec.AgentRuntime.Workspace.GitSecretRef)
+	}
+}
+
+func TestRepositoryMonitorReconcileMissingHeadRepoDoesNotAttachBaseSecret(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("core AddToScheme() error = %v", err)
+	}
+
+	server := newRepositoryMonitorPullRequestInventoryServerWithBody(t, `[
+		{"number":8,"title":"Missing head repo","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"forker"},"base":{"ref":"main","sha":"base8","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"feature","sha":"unknown-head-sha"},"labels":[]}
+	]`)
+	t.Cleanup(server.Close)
+
+	monitor, secret := repositoryMonitorInventoryTestObjects("missing-head-repo")
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(monitor, secret).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		Store:            monitorStore,
+		GitHubAPIBaseURL: server.URL,
+	}
+	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{
+		ID:               "run-missing-head-repo",
+		MonitorNamespace: "default",
+		MonitorName:      "missing-head-repo",
+		Trigger:          "manual",
+		Phase:            repositoryMonitorRunPhaseQueued,
+		StartedAt:        time.Now().Add(-1 * time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "missing-head-repo"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	item, err := monitorStore.GetMonitorItem(ctx, "default", "missing-head-repo", repositoryMonitorPullRequestKind, "8")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	var task corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: item.LastReviewID}, &task); err != nil {
+		t.Fatalf("Get review task %q error = %v", item.LastReviewID, err)
+	}
+	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+		t.Fatalf("task AgentRuntime.Workspace is nil")
+	}
+	if task.Spec.AgentRuntime.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.AgentRuntime.Workspace.Ref != "unknown-head-sha" {
+		t.Fatalf("workspace = %#v, want monitored repo at exact head", task.Spec.AgentRuntime.Workspace)
+	}
+	if task.Spec.AgentRuntime.Workspace.GitSecretRef != nil {
+		t.Fatalf("workspace GitSecretRef = %#v, want nil when head repo is unverified", task.Spec.AgentRuntime.Workspace.GitSecretRef)
 	}
 }
 
@@ -1089,6 +1928,43 @@ func TestRepositoryMonitorReconcileTargetedRunPreservesRepositoryWideStatusCount
 	}
 	if retired.State != repositoryMonitorItemStateOutOfScope {
 		t.Fatalf("retired item state = %q, want unchanged out_of_scope", retired.State)
+	}
+}
+
+func TestRepositoryMonitorStatusCountsIncludesTerminalBlockedReviewVerdicts(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{
+		ObjectMeta: metav1.ObjectMeta{Name: "review-status", Namespace: defaultNS},
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	items := []store.MonitorItem{
+		{Number: 1, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorRunPhaseQueued},
+		{Number: 2, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorVerdictSkipped},
+		{Number: 3, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorReviewVerdictFailed},
+		{Number: 4, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorReviewVerdictStale},
+		{Number: 5, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorReviewVerdictNeedsHuman},
+		{Number: 6, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorReviewVerdictSecuritySensitive},
+		{Number: 7, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorReviewVerdictPassed},
+		{Number: 8, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorReviewVerdictNeedsChanges},
+		{Number: 9, State: repositoryMonitorItemStateOutOfScope, LastVerdict: repositoryMonitorReviewVerdictFailed},
+	}
+	for i := range items {
+		item := items[i]
+		item.MonitorNamespace = defaultNS
+		item.MonitorName = "review-status"
+		item.Kind = repositoryMonitorPullRequestKind
+		if err := monitorStore.UpsertMonitorItem(ctx, &item); err != nil {
+			t.Fatalf("UpsertMonitorItem(%d) error = %v", item.Number, err)
+		}
+	}
+
+	counts, err := reconciler.repositoryMonitorStatusCounts(ctx, monitor)
+	if err != nil {
+		t.Fatalf("repositoryMonitorStatusCounts() error = %v", err)
+	}
+	if counts.openPullRequests != 8 || counts.pendingReviews != 1 || counts.blockedItems != 5 {
+		t.Fatalf("counts = %#v, want open=8 pending=1 blocked=5", counts)
 	}
 }
 
@@ -1398,12 +2274,12 @@ func TestRepositoryMonitorReconcileProcessesOldestQueuedRunFirst(t *testing.T) {
 func newRepositoryMonitorPullRequestInventoryServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return newRepositoryMonitorPullRequestInventoryServerWithBody(t, `[
-		{"number":1,"title":"Ready","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1"},"head":{"ref":"feature","sha":"sha1"},"labels":[]},
-		{"number":2,"title":"Draft","state":"open","draft":true,"mergeable_state":"unknown","user":{"login":"bob"},"base":{"ref":"main","sha":"base2"},"head":{"ref":"draft","sha":"sha2"},"labels":[]},
-		{"number":3,"title":"Blocked","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"cara"},"base":{"ref":"main","sha":"base3"},"head":{"ref":"blocked","sha":"sha3"},"labels":[{"name":"orka:human-review"}]},
-		{"number":4,"title":"Over limit","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"dev"},"base":{"ref":"main","sha":"base4"},"head":{"ref":"second","sha":"sha4"},"labels":[]},
-		{"number":5,"title":"Already reviewed","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"erin"},"base":{"ref":"main","sha":"base5"},"head":{"ref":"reviewed","sha":"sha5"},"labels":[]},
-		{"number":6,"title":"Backport","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"frank"},"base":{"ref":"release","sha":"base6"},"head":{"ref":"backport","sha":"sha6"},"labels":[]}
+		{"number":1,"title":"Ready","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"feature","sha":"sha1","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]},
+		{"number":2,"title":"Draft","state":"open","draft":true,"mergeable_state":"unknown","user":{"login":"bob"},"base":{"ref":"main","sha":"base2","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"draft","sha":"sha2","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]},
+		{"number":3,"title":"Blocked","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"cara"},"base":{"ref":"main","sha":"base3","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"blocked","sha":"sha3","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[{"name":"orka:human-review"}]},
+		{"number":4,"title":"Over limit","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"dev"},"base":{"ref":"main","sha":"base4","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"second","sha":"sha4","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]},
+		{"number":5,"title":"Already reviewed","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"erin"},"base":{"ref":"main","sha":"base5","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"reviewed","sha":"sha5","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]},
+		{"number":6,"title":"Backport","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"frank"},"base":{"ref":"release","sha":"base6","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"backport","sha":"sha6","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]}
 	]`)
 }
 
@@ -1463,6 +2339,142 @@ func repositoryMonitorInventoryTestObjects(name string) (*corev1alpha1.Repositor
 	return monitor, secret
 }
 
+func repositoryMonitorReviewIngestTestMonitor(name string) *corev1alpha1.RepositoryMonitor {
+	return &corev1alpha1.RepositoryMonitor{
+		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+			UID:       types.UID("uid-" + name),
+		},
+		Spec: corev1alpha1.RepositoryMonitorSpec{
+			RepoURL: "https://github.com/sozercan/orka",
+			Agents: corev1alpha1.RepositoryMonitorAgents{
+				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
+			},
+		},
+	}
+}
+
+func repositoryMonitorReviewIngestTestTask(name, monitorName string, prNumber int64, headSHA string) *corev1alpha1.Task {
+	controller := true
+	return &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(),
+				Kind:       "RepositoryMonitor",
+				Name:       monitorName,
+				UID:        types.UID("uid-" + monitorName),
+				Controller: &controller,
+			}},
+			Annotations: map[string]string{
+				labels.AnnotationRepositoryMonitorName: monitorName,
+				labels.AnnotationMonitorItemKind:       repositoryMonitorPullRequestKind,
+				labels.AnnotationMonitorItemNumber:     strconv.FormatInt(prNumber, 10),
+				labels.AnnotationMonitorHeadSHA:        headSHA,
+				labels.AnnotationGitHubRepository:      "sozercan/orka",
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseSucceeded,
+			ResultRef: &corev1alpha1.ResultReference{Available: true},
+		},
+	}
+}
+
+type transientGetResultErrorStore struct {
+	store.ResultStore
+	err error
+}
+
+func (s transientGetResultErrorStore) GetResult(_ context.Context, _, _ string) ([]byte, error) {
+	return nil, s.err
+}
+
+func repositoryMonitorReviewResultEnvelope(t *testing.T, repo string, prNumber int64, headSHA, verdict string) []byte {
+	t.Helper()
+
+	payload := map[string]any{
+		"schemaVersion": repositoryMonitorReviewSchemaVersion,
+		"repo":          repo,
+		"prNumber":      prNumber,
+		"headSHA":       headSHA,
+		"verdict":       verdict,
+		"confidence":    repositoryMonitorReviewConfidenceHigh,
+		"repairable":    true,
+		"summary":       "Review found one issue.",
+		"findings": []map[string]any{
+			{
+				"priority":       "P1",
+				"confidence":     repositoryMonitorReviewConfidenceHigh,
+				"file":           "internal/example.go",
+				"line":           42,
+				"title":          "Bug",
+				"body":           "This can fail.",
+				"recommendation": "Handle the failure.",
+			},
+		},
+		"security": map[string]any{
+			"status": "clear",
+			"notes":  "",
+		},
+		"tests": map[string]any{
+			"status":   "not_run",
+			"evidence": "",
+		},
+		"suggestedComment": "Please fix the failing path.",
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal review payload: %v", err)
+	}
+	envelopeJSON, err := json.Marshal(map[string]any{
+		"version": 1,
+		"summary": string(payloadJSON),
+	})
+	if err != nil {
+		t.Fatalf("marshal review envelope: %v", err)
+	}
+	return envelopeJSON
+}
+
+func assertRepositoryMonitorRejectedReview(t *testing.T, ctx context.Context, monitorStore store.RepositoryMonitorStore, monitorName, itemKey string) (*store.ReviewRecord, *store.MonitorItem) {
+	t.Helper()
+
+	item, err := monitorStore.GetMonitorItem(ctx, "default", monitorName, repositoryMonitorPullRequestKind, itemKey)
+	if err != nil {
+		t.Fatalf("GetMonitorItem(%s) error = %v", itemKey, err)
+	}
+	records, _, err := monitorStore.ListReviewRecords(ctx, store.ReviewRecordFilter{
+		Namespace:   "default",
+		MonitorName: monitorName,
+		Number:      item.Number,
+		Limit:       10,
+	})
+	if err != nil {
+		t.Fatalf("ListReviewRecords() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %#v, want one rejected review record", records)
+	}
+	events, _, err := monitorStore.ListMonitorEvents(ctx, store.MonitorEventFilter{
+		Namespace:   "default",
+		MonitorName: monitorName,
+		EventType:   "review_result_rejected",
+		Limit:       10,
+	})
+	if err != nil {
+		t.Fatalf("ListMonitorEvents() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %#v, want one rejection event", events)
+	}
+	return &records[0], item
+}
+
 func assertRepositoryMonitorInventoryItems(t *testing.T, ctx context.Context, monitorStore store.RepositoryMonitorStore) {
 	t.Helper()
 	wantReasons := map[string]string{
@@ -1483,6 +2495,15 @@ func assertRepositoryMonitorInventoryItems(t *testing.T, ctx context.Context, mo
 		if wantReason == "" && item.LastVerdict != repositoryMonitorRunPhaseQueued {
 			t.Fatalf("item %s verdict = %q, want queued", itemKey, item.LastVerdict)
 		}
+		if itemKey == "1" && item.LastReviewID == "" {
+			t.Fatalf("item %s LastReviewID is empty, want review task name", itemKey)
+		}
+		if itemKey == "5" {
+			if item.LastVerdict != repositoryMonitorReviewVerdictNeedsChanges {
+				t.Fatalf("item %s verdict = %q, want previous review verdict %q", itemKey, item.LastVerdict, repositoryMonitorReviewVerdictNeedsChanges)
+			}
+			continue
+		}
 		if wantReason != "" && item.LastVerdict != "skipped" {
 			t.Fatalf("item %s verdict = %q, want skipped", itemKey, item.LastVerdict)
 		}
@@ -1502,9 +2523,45 @@ func assertRepositoryMonitorInventoryEvents(t *testing.T, ctx context.Context, m
 	for _, event := range events {
 		eventCounts[event.EventType]++
 	}
-	if eventCounts["item_selected"] != 1 || eventCounts["item_skipped"] != 4 || eventCounts["run_succeeded"] != 1 {
+	if eventCounts["review_task_created"] != 1 || eventCounts["item_selected"] != 1 || eventCounts["item_skipped"] != 4 || eventCounts["run_succeeded"] != 1 {
 		data, _ := json.Marshal(events)
-		t.Fatalf("events = %s, want selected/skipped/run_succeeded counts", data)
+		t.Fatalf("events = %s, want review_task_created/selected/skipped/run_succeeded counts", data)
+	}
+}
+
+func assertRepositoryMonitorReviewTask(t *testing.T, ctx context.Context, cl crclient.Client, monitorStore store.RepositoryMonitorStore) {
+	t.Helper()
+	item, err := monitorStore.GetMonitorItem(ctx, "default", "inventory", repositoryMonitorPullRequestKind, "1")
+	if err != nil {
+		t.Fatalf("GetMonitorItem(selected) error = %v", err)
+	}
+	var task corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: item.LastReviewID}, &task); err != nil {
+		t.Fatalf("Get review task %q error = %v", item.LastReviewID, err)
+	}
+	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
+		t.Fatalf("task type = %q, want agent", task.Spec.Type)
+	}
+	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "reviewer" {
+		t.Fatalf("task AgentRef = %#v, want reviewer", task.Spec.AgentRef)
+	}
+	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+		t.Fatalf("task AgentRuntime.Workspace is nil")
+	}
+	if task.Spec.AgentRuntime.Workspace.GitRepo != repositoryMonitorTestRepoURL || task.Spec.AgentRuntime.Workspace.Ref != "sha1" || task.Spec.AgentRuntime.Workspace.PRBaseBranch != "main" {
+		t.Fatalf("workspace = %#v, want repo with exact PR head sha1", task.Spec.AgentRuntime.Workspace)
+	}
+	if task.Spec.AgentRuntime.Workspace.GitSecretRef == nil || task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "github-token" {
+		t.Fatalf("workspace GitSecretRef = %#v, want github-token", task.Spec.AgentRuntime.Workspace.GitSecretRef)
+	}
+	if task.Labels[labels.LabelRepositoryMonitor] != labels.SelectorValue("inventory") || task.Labels[labels.LabelMonitorRun] != labels.SelectorValue("run-1") {
+		t.Fatalf("task labels = %#v, want monitor and run labels", task.Labels)
+	}
+	if task.Annotations[labels.AnnotationMonitorHeadSHA] != "sha1" || task.Annotations[labels.AnnotationMonitorItemNumber] != "1" {
+		t.Fatalf("task annotations = %#v, want PR number and exact head", task.Annotations)
+	}
+	if !strings.Contains(task.Spec.Prompt, `"schemaVersion": "orka.prReview.input.v1"`) || !strings.Contains(task.Spec.Prompt, `"headSHA": "sha1"`) || !strings.Contains(task.Spec.Prompt, `"schemaVersion": "orka.prReview.v1"`) {
+		t.Fatalf("task prompt does not include expected review input/output contracts:\n%s", task.Spec.Prompt)
 	}
 }
 

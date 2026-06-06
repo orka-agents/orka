@@ -124,17 +124,58 @@ func buildClaudeArgs(cfg *common.AgentConfig, prompt string) []string {
 	if os.Getenv(workerenv.AllowBash) == "true" {
 		args = append(args, "--dangerously-skip-permissions")
 	}
+	if workerenv.IsTrue(os.Getenv(workerenv.ClaudeBare)) {
+		args = append(args, "--bare")
+	}
+	if workerenv.IsTrue(os.Getenv(workerenv.ClaudeDisableSettingSources)) {
+		args = append(args, "--setting-sources", "")
+	}
+	if permissionMode := strings.TrimSpace(os.Getenv(workerenv.ClaudePermissionMode)); permissionMode != "" {
+		args = append(args, "--permission-mode", permissionMode)
+	}
+	if tools := claudeAvailableTools(cfg.AllowedTools); len(tools) > 0 {
+		args = append(args, "--tools", strings.Join(tools, ","))
+	}
 	for _, tool := range cfg.AllowedTools {
-		args = append(args, "--allowedTools", strings.TrimSpace(tool))
+		if tool = strings.TrimSpace(tool); tool != "" {
+			args = append(args, "--allowedTools", tool)
+		}
 	}
 	for _, tool := range cfg.DisallowedTools {
-		args = append(args, "--disallowedTools", strings.TrimSpace(tool))
+		if tool = strings.TrimSpace(tool); tool != "" {
+			args = append(args, "--disallowedTools", tool)
+		}
 	}
 
 	// Prompt (use -p flag to avoid ambiguity with variadic tool flags)
 	args = append(args, "-p", prompt)
 
 	return args
+}
+
+func claudeAvailableTools(allowedTools []string) []string {
+	seen := map[string]struct{}{}
+	tools := make([]string, 0, len(allowedTools))
+	for _, allowedTool := range allowedTools {
+		tool := claudeToolName(allowedTool)
+		if tool == "" {
+			continue
+		}
+		if _, ok := seen[tool]; ok {
+			continue
+		}
+		seen[tool] = struct{}{}
+		tools = append(tools, tool)
+	}
+	return tools
+}
+
+func claudeToolName(toolSpec string) string {
+	toolSpec = strings.TrimSpace(toolSpec)
+	if name, _, ok := strings.Cut(toolSpec, "("); ok {
+		toolSpec = name
+	}
+	return strings.TrimSpace(toolSpec)
 }
 
 // claudePath returns the path to the claude CLI binary.

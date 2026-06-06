@@ -387,7 +387,7 @@ func (r *TaskReconciler) validateSubstrateWorkspaceTemplate(ctx context.Context,
 
 	labels := template.GetLabels()
 	annotations := template.GetAnnotations()
-	if labels["orka.ai/execution-workspace"] != "true" {
+	if labels["orka.ai/execution-workspace"] != scheduledRunLabelValue {
 		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing label orka.ai/execution-workspace=true", request.TemplateName, request.TemplateNamespace)
 	}
 	if labels["orka.ai/workspace-provider"] != string(corev1alpha1.WorkspaceProviderSubstrate) {

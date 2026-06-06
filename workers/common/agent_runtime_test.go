@@ -8,6 +8,7 @@ package common
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -405,6 +406,168 @@ func TestRunAgent_ExecutorSuccess(t *testing.T) {
 	}
 }
 
+func TestRunAgent_ResultStdoutSubmitsRawExecutorOutputWithGitWorkspace(t *testing.T) {
+	workspaceDir := t.TempDir()
+	runGit(t, workspaceDir, "init")
+	runGit(t, workspaceDir, "config", "user.email", "test@test.com")
+	runGit(t, workspaceDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(workspaceDir, "initial.txt"), []byte("init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workspaceDir, "add", ".")
+	runGit(t, workspaceDir, "commit", "-m", "initial")
+
+	rawResultBytes, err := json.Marshal(map[string]any{
+		"kind":    "typed-review",
+		"payload": strings.Repeat("x", MaxStructuredSummaryChars+128),
+	})
+	if err != nil {
+		t.Fatalf("marshal raw result: %v", err)
+	}
+	rawResult := string(rawResultBytes)
+
+	t.Setenv("ORKA_PROMPT", "test prompt")
+	t.Setenv("ORKA_TASK_NAME", "t1")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_MAX_TURNS", "")
+	t.Setenv("ORKA_ALLOWED_TOOLS", "")
+	t.Setenv("ORKA_DISALLOWED_TOOLS", "")
+	t.Setenv("ORKA_TIMEOUT_SECONDS", "")
+	t.Setenv("ORKA_GIT_REPO", "https://github.com/example/repo.git")
+	t.Setenv("ORKA_GIT_BRANCH", "")
+	t.Setenv("ORKA_GIT_REF", "")
+	t.Setenv("ORKA_WORKSPACE_SUBPATH", "")
+	t.Setenv("ORKA_PRIOR_TASK", "")
+	t.Setenv(workerenv.ResultStdout, "true")
+	t.Setenv(workerenv.WorkspacePrepared, "true")
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = RunAgent("test-agent", workspaceDir, 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+			return rawResult, nil
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("RunAgent() error = %v", runErr)
+	}
+
+	payload := decodeStdoutResultPayload(t, stdout)
+	if string(payload) != rawResult {
+		t.Fatalf("stdout result payload was changed, got %d bytes want %d", len(payload), len(rawResult))
+	}
+
+	var sr StructuredResult
+	if err := json.Unmarshal(payload, &sr); err == nil && sr.Version != 0 {
+		t.Fatalf("stdout result payload was wrapped as StructuredResult: %#v", sr)
+	}
+}
+
+func TestRunAgent_PreparedWorkspaceSkipsPriorTaskPreparation(t *testing.T) {
+	workspaceDir := t.TempDir()
+	runGit(t, workspaceDir, "init")
+	runGit(t, workspaceDir, "config", "user.email", "test@test.com")
+	runGit(t, workspaceDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(workspaceDir, "file.txt"), []byte("original\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workspaceDir, "add", ".")
+	runGit(t, workspaceDir, "commit", "-m", "initial")
+	if err := os.WriteFile(filepath.Join(workspaceDir, "file.txt"), []byte("modified\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var priorResultRequests atomic.Int64
+	controllerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/api/v1/tasks/") {
+			priorResultRequests.Add(1)
+			http.Error(w, "prior result should not be fetched", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer controllerServer.Close()
+
+	resultServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer resultServer.Close()
+
+	t.Setenv("ORKA_PROMPT", "test prompt")
+	t.Setenv("ORKA_TASK_NAME", "t1")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_MAX_TURNS", "")
+	t.Setenv("ORKA_ALLOWED_TOOLS", "")
+	t.Setenv("ORKA_DISALLOWED_TOOLS", "")
+	t.Setenv("ORKA_TIMEOUT_SECONDS", "")
+	t.Setenv("ORKA_GIT_REPO", "https://github.com/example/repo.git")
+	t.Setenv("ORKA_GIT_BRANCH", "")
+	t.Setenv("ORKA_GIT_REF", "")
+	t.Setenv("ORKA_WORKSPACE_SUBPATH", "")
+	t.Setenv("ORKA_PRIOR_TASK", "prior-task")
+	t.Setenv("ORKA_PRIOR_TASK_NAMESPACE", "default")
+	t.Setenv(workerenv.ControllerURL, controllerServer.URL)
+	t.Setenv(workerenv.ResultEndpoint, resultServer.URL)
+	t.Setenv(workerenv.WorkspacePrepared, "true")
+
+	err := RunAgent("test-agent", workspaceDir, 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		content, readErr := os.ReadFile(filepath.Join(workspaceDir, "file.txt"))
+		if readErr != nil {
+			return "", readErr
+		}
+		if string(content) != "modified\n" {
+			return "", fmt.Errorf("workspace file = %q, want modified", string(content))
+		}
+		return "prepared workspace used", nil
+	})
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if got := priorResultRequests.Load(); got != 0 {
+		t.Fatalf("prior result requests = %d, want 0", got)
+	}
+}
+
+func TestRunAgent_ExistingGitWorkspaceRequiresPreparedMarker(t *testing.T) {
+	workspaceDir := t.TempDir()
+	runGit(t, workspaceDir, "init")
+	runGit(t, workspaceDir, "config", "user.email", "test@test.com")
+	runGit(t, workspaceDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(workspaceDir, "initial.txt"), []byte("init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workspaceDir, "add", ".")
+	runGit(t, workspaceDir, "commit", "-m", "initial")
+
+	t.Setenv("ORKA_PROMPT", "test prompt")
+	t.Setenv("ORKA_TASK_NAME", "t1")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_MAX_TURNS", "")
+	t.Setenv("ORKA_ALLOWED_TOOLS", "")
+	t.Setenv("ORKA_DISALLOWED_TOOLS", "")
+	t.Setenv("ORKA_TIMEOUT_SECONDS", "")
+	t.Setenv("ORKA_GIT_REPO", "https://github.com/example/repo.git")
+	t.Setenv("ORKA_GIT_BRANCH", "")
+	t.Setenv("ORKA_GIT_REF", "")
+	t.Setenv("ORKA_WORKSPACE_SUBPATH", "")
+	t.Setenv("ORKA_PRIOR_TASK", "")
+	t.Setenv(workerenv.WorkspacePrepared, "")
+
+	var executorCalled atomic.Bool
+	err := RunAgent("test-agent", workspaceDir, 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		executorCalled.Store(true)
+		return executorResultDone, nil
+	})
+	if err == nil {
+		t.Fatal("expected existing git workspace without prepared marker to fail")
+	}
+	if !strings.Contains(err.Error(), workerenv.WorkspacePrepared) {
+		t.Fatalf("RunAgent() error = %q, want %s context", err.Error(), workerenv.WorkspacePrepared)
+	}
+	if executorCalled.Load() {
+		t.Fatal("executor ran against unmarked existing git workspace")
+	}
+}
+
 func TestRunAgent_ExecutorEmptyResultSubmitsPlaceholder(t *testing.T) {
 	t.Setenv("ORKA_PROMPT", "test prompt")
 	t.Setenv("ORKA_TASK_NAME", "t1")
@@ -521,6 +684,145 @@ func TestRunAgent_AgentSandboxExecutesInnerWorkerAndDeletesWorkspace(t *testing.
 	assertAgentSandboxUploadRequest(t, recorder)
 	assertAgentSandboxExecRequest(t, recorder, workspaceDir)
 	assertAgentSandboxDeleteRequest(t, recorder)
+}
+
+func TestRunAgent_AgentSandboxForwardsStdoutResultMarker(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "delete")
+	t.Setenv(workerenv.ResultStdout, "true")
+
+	rawResult := `{"kind":"typed-review","payload":"sandbox-result"}`
+	recorder := newRecordingWorkspaceExecutor()
+	recorder.fake.EnqueueExecResult(workspace.ExecResult{
+		ExitCode: 0,
+		Stdout: strings.Join([]string{
+			"inner worker log",
+			workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString([]byte(rawResult)),
+			"ignored trailing log",
+		}, "\n"),
+	}, nil)
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = RunAgent("test-agent", "/sandbox/workspace", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+			t.Fatal("outer agent executor should not run when agent sandbox is enabled")
+			return "", nil
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("RunAgent returned error: %v", runErr)
+	}
+
+	if payload := decodeStdoutResultPayload(t, stdout); string(payload) != rawResult {
+		t.Fatalf("forwarded stdout payload = %q, want %q", string(payload), rawResult)
+	}
+	execReqs := recorder.execRequests()
+	if len(execReqs) != 1 {
+		t.Fatalf("recorded %d exec requests, want 1", len(execReqs))
+	}
+	if execReqs[0].MaxOutputBytes != agentSandboxStdoutResultMaxOutputBytes {
+		t.Fatalf(
+			"exec max output bytes = %d, want %d",
+			execReqs[0].MaxOutputBytes,
+			agentSandboxStdoutResultMaxOutputBytes,
+		)
+	}
+	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "delete")
+}
+
+func TestRunAgent_AgentSandboxForwardsStdoutResultMarkerOnCommandFailure(t *testing.T) {
+	setRequiredAgentSandboxEnv(t, "delete")
+	t.Setenv(workerenv.ResultStdout, "true")
+
+	rawResult := `{"kind":"typed-review","payload":"sandbox-error-result"}`
+	recorder := newRecordingWorkspaceExecutor()
+	recorder.fake.EnqueueExecResult(workspace.ExecResult{
+		ExitCode: 42,
+		Stdout: strings.Join([]string{
+			"inner worker log",
+			workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString([]byte(rawResult)),
+			"ignored trailing log",
+		}, "\n"),
+		Stderr: "inner stderr",
+	}, nil)
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = RunAgent("test-agent", "/sandbox/workspace", 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+			t.Fatal("outer agent executor should not run when agent sandbox is enabled")
+			return "", nil
+		})
+	})
+	if runErr == nil {
+		t.Fatal("expected sandbox command failure")
+	}
+	if !strings.Contains(runErr.Error(), "test-agent sandbox execution failed") {
+		t.Fatalf("RunAgent() error = %q, want sandbox execution context", runErr.Error())
+	}
+	if payload := decodeStdoutResultPayload(t, stdout); string(payload) != rawResult {
+		t.Fatalf("forwarded stdout payload = %q, want %q", string(payload), rawResult)
+	}
+	execReqs := recorder.execRequests()
+	if len(execReqs) != 1 {
+		t.Fatalf("recorded %d exec requests, want 1", len(execReqs))
+	}
+	if execReqs[0].MaxOutputBytes != agentSandboxStdoutResultMaxOutputBytes {
+		t.Fatalf(
+			"exec max output bytes = %d, want %d",
+			execReqs[0].MaxOutputBytes,
+			agentSandboxStdoutResultMaxOutputBytes,
+		)
+	}
+	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "delete")
+}
+
+func TestWorkspaceStdoutResultMarkerDownloadsMarkerWhenStdoutTruncated(t *testing.T) {
+	t.Setenv(workerenv.ResultStdout, "true")
+
+	rawResult := `{"kind":"typed-review","payload":"downloaded-result"}`
+	marker := workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString([]byte(rawResult))
+	recorder := newRecordingWorkspaceExecutor()
+	claim, err := recorder.Claim(context.Background(), workspace.ClaimRequest{
+		Namespace: "task-ns",
+		TaskName:  "task-name",
+		Template:  workspace.TemplateRef{Name: "agent-template"},
+		Timeout:   time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	if _, err := recorder.Upload(context.Background(), workspace.UploadRequest{
+		Ref: claim.Ref,
+		Artifacts: []workspace.UploadArtifact{{
+			Path: agentSandboxResultMarkerUploadPath,
+			Data: []byte(marker + "\n"),
+			Mode: 0o600,
+		}},
+		Timeout: time.Second,
+	}); err != nil {
+		t.Fatalf("Upload() error = %v", err)
+	}
+
+	got, err := workspaceStdoutResultMarker(
+		context.Background(),
+		recorder,
+		claim.Ref,
+		time.Second,
+		&workspace.ExecResult{
+			Stdout:          workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString([]byte("partial")),
+			StdoutTruncated: true,
+		},
+		"",
+	)
+	if err != nil {
+		t.Fatalf("workspaceStdoutResultMarker() error = %v", err)
+	}
+	if got != marker {
+		t.Fatalf("workspaceStdoutResultMarker() = %q, want downloaded marker %q", got, marker)
+	}
 }
 
 func TestRunAgent_AgentSandboxRetainsWorkspace(t *testing.T) {
@@ -708,6 +1010,127 @@ func TestRunAgent_SubstratePreHandoffRetainFailureDeletesNewWorkspace(t *testing
 	if !deleteReqs[0].SkipScrub {
 		t.Fatal("delete SkipScrub = false, want true before handoff bootstrap")
 	}
+}
+
+func TestRunAgent_ExecutionWorkspaceForwardsStdoutResultMarker(t *testing.T) {
+	t.Setenv(workerenv.TaskName, "task-name")
+	t.Setenv(workerenv.TaskNamespace, "task-ns")
+	t.Setenv(workerenv.ResultStdout, "true")
+	t.Setenv(workerenv.ServiceAccountToken, "")
+	t.Setenv(workerenv.ServiceAccountTokenPath, filepath.Join(t.TempDir(), "missing-token"))
+
+	rawResult := `{"kind":"typed-review","payload":"workspace-result"}`
+	recorder := newRecordingWorkspaceExecutor()
+	recorder.fake.EnqueueExecResult(workspace.ExecResult{
+		ExitCode: 0,
+		Stdout: strings.Join([]string{
+			"inner worker log",
+			workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString([]byte(rawResult)),
+			"ignored trailing log",
+		}, "\n"),
+	}, nil)
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = runAgentInWorkspace(
+			context.Background(),
+			"test-agent",
+			"/sandbox/workspace",
+			workerenv.ExecutionWorkspaceEnv{
+				Provider:          string(corev1alpha1.WorkspaceProviderAgentSandbox),
+				TemplateName:      "agent-template",
+				TemplateNamespace: testAgentSandboxTemplateNamespace,
+				ClaimNamespace:    testAgentSandboxTemplateNamespace,
+				ClaimName:         "claim-name",
+				ClaimTimeout:      3 * time.Second,
+				CommandTimeout:    9 * time.Second,
+				CleanupPolicy:     "delete",
+			},
+		)
+	})
+	if runErr != nil {
+		t.Fatalf("runAgentInWorkspace returned error: %v", runErr)
+	}
+
+	if payload := decodeStdoutResultPayload(t, stdout); string(payload) != rawResult {
+		t.Fatalf("forwarded stdout payload = %q, want %q", string(payload), rawResult)
+	}
+	execReqs := recorder.execRequests()
+	if len(execReqs) != 1 {
+		t.Fatalf("recorded %d exec requests, want 1", len(execReqs))
+	}
+	if execReqs[0].MaxOutputBytes != agentSandboxStdoutResultMaxOutputBytes {
+		t.Fatalf(
+			"exec max output bytes = %d, want %d",
+			execReqs[0].MaxOutputBytes,
+			agentSandboxStdoutResultMaxOutputBytes,
+		)
+	}
+	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "delete")
+}
+
+func TestRunAgent_ExecutionWorkspaceForwardsStdoutResultMarkerOnCommandFailure(t *testing.T) {
+	t.Setenv(workerenv.TaskName, "task-name")
+	t.Setenv(workerenv.TaskNamespace, "task-ns")
+	t.Setenv(workerenv.ResultStdout, "true")
+	t.Setenv(workerenv.ServiceAccountToken, "")
+	t.Setenv(workerenv.ServiceAccountTokenPath, filepath.Join(t.TempDir(), "missing-token"))
+
+	rawResult := `{"kind":"typed-review","payload":"workspace-error-result"}`
+	recorder := newRecordingWorkspaceExecutor()
+	recorder.fake.EnqueueExecResult(workspace.ExecResult{
+		ExitCode: 42,
+		Stdout: strings.Join([]string{
+			"inner worker log",
+			workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString([]byte(rawResult)),
+			"ignored trailing log",
+		}, "\n"),
+		Stderr: "inner stderr",
+	}, nil)
+	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
+	t.Cleanup(restoreExecutor)
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = runAgentInWorkspace(
+			context.Background(),
+			"test-agent",
+			"/sandbox/workspace",
+			workerenv.ExecutionWorkspaceEnv{
+				Provider:          string(corev1alpha1.WorkspaceProviderAgentSandbox),
+				TemplateName:      "agent-template",
+				TemplateNamespace: testAgentSandboxTemplateNamespace,
+				ClaimNamespace:    testAgentSandboxTemplateNamespace,
+				ClaimName:         "claim-name",
+				ClaimTimeout:      3 * time.Second,
+				CommandTimeout:    9 * time.Second,
+				CleanupPolicy:     "delete",
+			},
+		)
+	})
+	if runErr == nil {
+		t.Fatal("expected workspace command failure")
+	}
+	if !strings.Contains(runErr.Error(), "test-agent workspace execution failed") {
+		t.Fatalf("runAgentInWorkspace() error = %q, want workspace execution context", runErr.Error())
+	}
+	if payload := decodeStdoutResultPayload(t, stdout); string(payload) != rawResult {
+		t.Fatalf("forwarded stdout payload = %q, want %q", string(payload), rawResult)
+	}
+	execReqs := recorder.execRequests()
+	if len(execReqs) != 1 {
+		t.Fatalf("recorded %d exec requests, want 1", len(execReqs))
+	}
+	if execReqs[0].MaxOutputBytes != agentSandboxStdoutResultMaxOutputBytes {
+		t.Fatalf(
+			"exec max output bytes = %d, want %d",
+			execReqs[0].MaxOutputBytes,
+			agentSandboxStdoutResultMaxOutputBytes,
+		)
+	}
+	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "delete")
 }
 
 func TestRunAgent_SubstratePreHandoffRetainFailurePreservesReusedWorkspace(t *testing.T) {
@@ -1502,6 +1925,55 @@ func runGit(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %v failed: %v\n%s", args, err, out)
 	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	original := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdout pipe: %v", err)
+	}
+
+	done := make(chan []byte)
+	go func() {
+		out, _ := io.ReadAll(reader)
+		done <- out
+	}()
+
+	os.Stdout = writer
+	defer func() {
+		os.Stdout = original
+	}()
+
+	fn()
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close stdout writer: %v", err)
+	}
+	out := <-done
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close stdout reader: %v", err)
+	}
+	return string(out)
+}
+
+func decodeStdoutResultPayload(t *testing.T, logs string) []byte {
+	t.Helper()
+	var encoded string
+	for line := range strings.SplitSeq(logs, "\n") {
+		if payload, ok := strings.CutPrefix(strings.TrimSpace(line), workerenv.ResultStdoutPrefix); ok {
+			encoded = strings.TrimSpace(payload)
+		}
+	}
+	if encoded == "" {
+		t.Fatalf("stdout missing %s marker:\n%s", workerenv.ResultStdoutPrefix, logs)
+	}
+	payload, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode stdout result payload: %v", err)
+	}
+	return payload
 }
 
 func assertAgentSandboxClaimRequest(t *testing.T, recorder *recordingWorkspaceExecutor) {

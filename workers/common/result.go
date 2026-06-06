@@ -8,6 +8,7 @@ package common
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,10 +31,25 @@ const (
 	MaxStructuredSummaryChars = 32 * 1024
 )
 
+var resultStdoutMarkerPath = agentSandboxResultMarkerExecPath
+
 // SubmitResult sends the task result to the controller via HTTP POST.
 // It reads ORKA_RESULT_ENDPOINT or constructs the URL from ORKA_CONTROLLER_URL.
 // Retries up to 5 times with exponential backoff (2s, 4s, 8s, 16s) on failure.
 func SubmitResult(result []byte) error {
+	if workerenv.IsTrue(os.Getenv(workerenv.ResultStdout)) {
+		marker := workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString(result)
+		fileData := marker + "\n"
+		if token := strings.TrimSpace(os.Getenv(workerenv.ResultStdoutToken)); token != "" {
+			fileData = agentSandboxResultTokenPrefix + token + "\n" + fileData
+		}
+		if err := os.WriteFile(resultStdoutMarkerPath, []byte(fileData), 0o600); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to write stdout result marker file: %v\n", err)
+		}
+		fmt.Println(marker)
+		return nil
+	}
+
 	endpoint, err := resultEndpoint()
 	if err != nil {
 		return err

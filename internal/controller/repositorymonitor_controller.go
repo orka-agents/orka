@@ -48,6 +48,7 @@ type RepositoryMonitorReconciler struct {
 	client.Client
 	Scheme           *runtime.Scheme
 	Store            store.RepositoryMonitorStore
+	ResultStore      store.ResultStore
 	HTTPClient       *http.Client
 	GitHubAPIBaseURL string
 }
@@ -55,6 +56,7 @@ type RepositoryMonitorReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositorymonitors,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositorymonitors/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositorymonitors/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 
 // Reconcile keeps monitor metadata durable and publishes basic status.
@@ -178,6 +180,12 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorSpec(ctx context.
 func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, state repositoryMonitorReconcileState) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithName("repositorymonitor")
 
+	ingestedReviews, err := r.ingestCompletedRepositoryMonitorReviewTasks(ctx, monitor)
+	if err != nil {
+		logger.Error(err, "failed to ingest completed repository monitor review task")
+		return ctrl.Result{}, err
+	}
+
 	processedRun, runningRunRequeueAfter, err := r.processNextQueuedMonitorRun(ctx, monitor, state.owner, state.repository)
 	if err != nil {
 		logger.Error(err, "failed to process queued repository monitor run")
@@ -230,6 +238,19 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 			}
 			return ctrl.Result{}, nil
 		}
+	}
+
+	if ingestedReviews {
+		latestRun, err := r.latestCompletedMonitorRun(ctx, monitor)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if latestRun != nil {
+			if err := r.updateStatusAfterMonitorRun(ctx, monitor, latestRun); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
 	if err := r.updateStatusWithRetry(ctx, monitor, func(m *corev1alpha1.RepositoryMonitor) {
@@ -434,10 +455,11 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 		return &run, 0, nil
 	}
 
-	selected, skipped, processErr := r.processPullRequestInventoryRun(ctx, monitor, &run, owner, repository)
+	selected, createdTasks, skipped, processErr := r.processPullRequestInventoryRun(ctx, monitor, &run, owner, repository)
 	completedAt := time.Now()
 	run.CompletedAt = &completedAt
 	run.SelectedCount = selected
+	run.CreatedTaskCount = createdTasks
 	run.SkippedCount = skipped
 	if processErr != nil {
 		run.Phase = repositoryMonitorRunPhaseFailed
@@ -457,8 +479,9 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 		return nil, 0, err
 	}
 	if err := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", "run_succeeded", "Repository monitor run completed", map[string]any{
-		"selected": selected,
-		"skipped":  skipped,
+		"selected":     selected,
+		"createdTasks": createdTasks,
+		"skipped":      skipped,
 	}); err != nil {
 		return nil, 0, err
 	}
@@ -558,11 +581,26 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorStatusCounts(ctx context.
 		switch item.LastVerdict {
 		case repositoryMonitorRunPhaseQueued:
 			counts.pendingReviews++
-		case repositoryMonitorVerdictSkipped:
-			counts.blockedItems++
+		default:
+			if repositoryMonitorItemVerdictBlocked(item.LastVerdict) {
+				counts.blockedItems++
+			}
 		}
 	}
 	return counts, nil
+}
+
+func repositoryMonitorItemVerdictBlocked(verdict string) bool {
+	switch strings.TrimSpace(verdict) {
+	case repositoryMonitorVerdictSkipped,
+		repositoryMonitorReviewVerdictFailed,
+		repositoryMonitorReviewVerdictStale,
+		repositoryMonitorReviewVerdictNeedsHuman,
+		repositoryMonitorReviewVerdictSecuritySensitive:
+		return true
+	default:
+		return false
+	}
 }
 
 func errorsIsStoreNotFound(err error) bool {
@@ -588,5 +626,7 @@ func (r *RepositoryMonitorReconciler) updateStatusWithRetry(ctx context.Context,
 func (r *RepositoryMonitorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.RepositoryMonitor{}).
+		Owns(&corev1alpha1.Task{}).
+		Named("repositorymonitor").
 		Complete(r)
 }

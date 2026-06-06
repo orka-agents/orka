@@ -56,6 +56,8 @@ func TestBuildClaudeArgs_Full(t *testing.T) {
 	assertContains(t, args, "You are a code reviewer")
 	assertContains(t, args, "--max-turns")
 	assertContains(t, args, "100")
+	assertContains(t, args, "--tools")
+	assertContains(t, args, "Read,Write")
 	assertContains(t, args, "--allowedTools")
 	assertContains(t, args, "Read")
 	assertContains(t, args, "Write")
@@ -83,6 +85,66 @@ func TestBuildClaudeArgs_AllowBash(t *testing.T) {
 
 	args := buildClaudeArgs(cfg, cfg.Prompt)
 	assertContains(t, args, "--dangerously-skip-permissions")
+}
+
+func TestBuildClaudeArgs_ScopesReadOnlyPermissions(t *testing.T) {
+	t.Setenv("ORKA_ALLOW_BASH", "")
+	t.Setenv("ORKA_CLAUDE_BARE", "true")
+	t.Setenv("ORKA_CLAUDE_DISABLE_SETTING_SOURCES", "true")
+	t.Setenv("ORKA_CLAUDE_PERMISSION_MODE", "dontAsk")
+
+	cfg := &common.AgentConfig{
+		Prompt:   "review",
+		MaxTurns: 50,
+		AllowedTools: []string{
+			"Read(/workspace/**)",
+			"Glob(/workspace/**)",
+			"Grep(/workspace/**)",
+			"LS(/workspace/**)",
+			"Read(/workspace/**)",
+			" ",
+		},
+		DisallowedTools: []string{
+			"Bash",
+			"Read(/proc/**)",
+			" ",
+		},
+	}
+
+	args := buildClaudeArgs(cfg, cfg.Prompt)
+
+	assertContains(t, args, "--bare")
+	assertFlagValue(t, args, "--setting-sources", "")
+	assertContains(t, args, "--permission-mode")
+	assertContains(t, args, "dontAsk")
+	assertContains(t, args, "--tools")
+	assertContains(t, args, "Read,Glob,Grep,LS")
+	assertContains(t, args, "--allowedTools")
+	assertContains(t, args, "Read(/workspace/**)")
+	assertContains(t, args, "Glob(/workspace/**)")
+	assertContains(t, args, "Grep(/workspace/**)")
+	assertContains(t, args, "LS(/workspace/**)")
+	assertContains(t, args, "--disallowedTools")
+	assertContains(t, args, "Bash")
+	assertContains(t, args, "Read(/proc/**)")
+	if slices.Contains(args, "Read(/workspace/**),Glob(/workspace/**),Grep(/workspace/**),LS(/workspace/**)") {
+		t.Fatal("--tools should receive bare tool names, not scoped permission specs")
+	}
+}
+
+func TestClaudeAvailableToolsDeduplicatesScopedToolSpecs(t *testing.T) {
+	got := claudeAvailableTools([]string{
+		"Read(/workspace/**)",
+		"Read(/workspace/src/**)",
+		"Glob(/workspace/**)",
+		"",
+		"  ",
+		"LS",
+	})
+	want := []string{"Read", "Glob", "LS"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("claudeAvailableTools() = %#v, want %#v", got, want)
+	}
 }
 
 func TestClaudePath_Default(t *testing.T) {
@@ -194,6 +256,18 @@ func TestBuildClaudeArgs_NoTools(t *testing.T) {
 	if slices.Contains(args, "--allowedTools") {
 		t.Error("should not contain --allowedTools when none specified")
 	}
+	if slices.Contains(args, "--tools") {
+		t.Error("should not contain --tools when no tools are specified")
+	}
+	if slices.Contains(args, "--bare") {
+		t.Error("should not contain --bare when unset")
+	}
+	if slices.Contains(args, "--setting-sources") {
+		t.Error("should not contain --setting-sources when unset")
+	}
+	if slices.Contains(args, "--permission-mode") {
+		t.Error("should not contain --permission-mode when unset")
+	}
 	if slices.Contains(args, "--disallowedTools") {
 		t.Error("should not contain --disallowedTools when none specified")
 	}
@@ -223,5 +297,19 @@ func TestBuildClaudeArgs_PromptIsLast(t *testing.T) {
 	// -p flag should be second to last
 	if args[len(args)-2] != "-p" {
 		t.Errorf("expected -p flag before prompt, got %q", args[len(args)-2])
+	}
+}
+
+func assertFlagValue(t *testing.T, args []string, flag, want string) {
+	t.Helper()
+	idx := slices.Index(args, flag)
+	if idx == -1 {
+		t.Fatalf("expected args to contain %q, got %v", flag, args)
+	}
+	if idx+1 >= len(args) {
+		t.Fatalf("expected %q to have value %q, got no following arg in %v", flag, want, args)
+	}
+	if got := args[idx+1]; got != want {
+		t.Fatalf("%s value = %q, want %q", flag, got, want)
 	}
 }

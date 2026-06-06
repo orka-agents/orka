@@ -45,6 +45,8 @@ const (
 	LabelGitHubRepository  = "orka.ai/github-repository"
 	LabelGitHubTarget      = "orka.ai/github-target"
 	LabelGitHubNumber      = "orka.ai/github-number"
+	LabelRepositoryMonitor = "orka.ai/repository-monitor"
+	LabelMonitorRun        = "orka.ai/monitor-run"
 	LabelTransactionID     = "orka.ai/transaction-id"
 	LabelAuthProfile       = "orka.ai/auth-profile"
 
@@ -74,6 +76,13 @@ const (
 	AnnotationGitHubURL                     = "orka.ai/github-url"
 	AnnotationGitHubSender                  = "orka.ai/github-sender"
 	AnnotationPRMonitorName                 = "orka.ai/pr-monitor-name"
+	AnnotationRepositoryMonitorName         = "orka.ai/repository-monitor-name"
+	AnnotationMonitorRunID                  = "orka.ai/monitor-run-id"
+	AnnotationMonitorItemKind               = "orka.ai/monitor-item-kind"
+	AnnotationMonitorItemNumber             = "orka.ai/monitor-item-number"
+	AnnotationMonitorHeadSHA                = "orka.ai/monitor-head-sha"
+	AnnotationAgentReadOnly                 = "orka.ai/agent-read-only"
+	AnnotationWorkspaceInitContainer        = "orka.ai/workspace-init-container"
 	AnnotationDisableCoordinationToolInject = "orka.ai/disable-coordination-tool-injection"
 )
 
