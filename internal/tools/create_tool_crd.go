@@ -69,7 +69,7 @@ func (t *CreateToolCRDTool) Execute(ctx context.Context, args json.RawMessage) (
 		},
 		Spec: corev1alpha1.ToolSpec{
 			Description: description,
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL:    url,
 				Method: method,
 			},

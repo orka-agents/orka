@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/robfig/cron/v3"
 	batchv1 "k8s.io/api/batch/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -32,16 +34,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
+	"github.com/sozercan/orka/internal/workspace"
 )
 
 const (
 	staleResourceLabelKey   = "stale"
 	staleResourceLabelValue = scheduledRunLabelValue
+	testSubstrateActorID    = "actor-1"
 )
 
 // newTestScheme creates a scheme with all types needed for unit tests.
@@ -50,6 +55,7 @@ func newTestScheme() *runtime.Scheme {
 	_ = corev1alpha1.AddToScheme(s)
 	_ = corev1.AddToScheme(s)
 	_ = batchv1.AddToScheme(s)
+	_ = coordinationv1.AddToScheme(s)
 	_ = rbacv1.AddToScheme(s)
 	_ = sandboxextv1alpha1.AddToScheme(s)
 	return s
@@ -81,6 +87,53 @@ func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskRecon
 		ResultStore:    ss,
 		PlanStore:      ss,
 	}
+}
+
+type recordingTaskWorkspaceExecutor struct {
+	deleteReqs  []workspace.DeleteRequest
+	deleteErr   error
+	closeCalled bool
+}
+
+func (e *recordingTaskWorkspaceExecutor) Claim(ctx context.Context, req workspace.ClaimRequest) (*workspace.ClaimResult, error) {
+	return &workspace.ClaimResult{Ref: workspace.WorkspaceRef{Namespace: req.Namespace, ClaimName: req.ClaimName, ID: req.ClaimName}}, nil
+}
+
+func (e *recordingTaskWorkspaceExecutor) WaitReady(ctx context.Context, req workspace.WaitReadyRequest) (*workspace.ReadyResult, error) {
+	return &workspace.ReadyResult{Ref: req.Ref, Phase: workspace.PhaseReady}, nil
+}
+
+func (e *recordingTaskWorkspaceExecutor) Exec(ctx context.Context, req workspace.ExecRequest) (*workspace.ExecResult, error) {
+	return &workspace.ExecResult{Ref: req.Ref}, nil
+}
+
+func (e *recordingTaskWorkspaceExecutor) Upload(ctx context.Context, req workspace.UploadRequest) (*workspace.UploadResult, error) {
+	return &workspace.UploadResult{Ref: req.Ref}, nil
+}
+
+func (e *recordingTaskWorkspaceExecutor) Download(ctx context.Context, req workspace.DownloadRequest) (*workspace.DownloadResult, error) {
+	return &workspace.DownloadResult{Ref: req.Ref}, nil
+}
+
+func (e *recordingTaskWorkspaceExecutor) Release(ctx context.Context, req workspace.ReleaseRequest) (*workspace.ReleaseResult, error) {
+	return &workspace.ReleaseResult{Ref: req.Ref}, nil
+}
+
+func (e *recordingTaskWorkspaceExecutor) Delete(ctx context.Context, req workspace.DeleteRequest) (*workspace.DeleteResult, error) {
+	e.deleteReqs = append(e.deleteReqs, req)
+	if e.deleteErr != nil {
+		return nil, e.deleteErr
+	}
+	return &workspace.DeleteResult{Ref: req.Ref, Deleted: true, Phase: workspace.PhaseDeleted}, nil
+}
+
+func (e *recordingTaskWorkspaceExecutor) Describe(ctx context.Context, req workspace.DescribeRequest) (*workspace.Description, error) {
+	return &workspace.Description{Ref: req.Ref}, nil
+}
+
+func (e *recordingTaskWorkspaceExecutor) Close() error {
+	e.closeCalled = true
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -478,7 +531,7 @@ func TestValidateTaskAgentCompatibility_ContainerTask(t *testing.T) {
 func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testing.T) {
 	scheme := newTestScheme()
 
-	workspace := func(name string, namespace string) *corev1alpha1.ExecutionWorkspaceSpec {
+	executionWorkspace := func(name string, namespace string) *corev1alpha1.ExecutionWorkspaceSpec {
 		ws := &corev1alpha1.ExecutionWorkspaceSpec{
 			Enabled: true,
 			TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
@@ -510,7 +563,7 @@ func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testi
 		r := newUnitReconciler(scheme, template)
 		r.AgentSandboxEnabled = true
 
-		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-ok", workspace("task-template", "")))
+		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-ok", executionWorkspace("task-template", "")))
 		if err != nil {
 			t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
 		}
@@ -523,7 +576,7 @@ func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testi
 		r := newUnitReconciler(scheme)
 		r.AgentSandboxEnabled = true
 
-		_, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-missing", workspace("missing-template", "")))
+		_, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-missing", executionWorkspace("missing-template", "")))
 		if err == nil {
 			t.Fatal("resolveExecutionWorkspaceRequest() error = nil, want missing template error")
 		}
@@ -540,7 +593,7 @@ func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testi
 		r := newUnitReconciler(scheme, template)
 		r.AgentSandboxEnabled = true
 
-		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-cross-ns", workspace("shared-template", "sandbox-templates")))
+		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-cross-ns", executionWorkspace("shared-template", "sandbox-templates")))
 		if err != nil {
 			t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
 		}
@@ -551,7 +604,7 @@ func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testi
 }
 
 func TestValidateExecutionWorkspace(t *testing.T) {
-	workspace := func(mutators ...func(*corev1alpha1.ExecutionWorkspaceSpec)) *corev1alpha1.ExecutionWorkspaceSpec {
+	executionWorkspace := func(mutators ...func(*corev1alpha1.ExecutionWorkspaceSpec)) *corev1alpha1.ExecutionWorkspaceSpec {
 		ws := &corev1alpha1.ExecutionWorkspaceSpec{
 			Enabled:     true,
 			TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: "default"},
@@ -565,8 +618,10 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 	tests := []struct {
 		name                string
 		agentSandboxEnabled bool
+		substrateEnabled    bool
 		task                *corev1alpha1.Task
 		agentSandboxConfig  AgentSandboxConfig
+		substrateConfig     SubstrateConfig
 		wantErr             string
 	}{
 		{
@@ -589,7 +644,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
 				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: workspace(),
+					Workspace: executionWorkspace(),
 				},
 			}},
 			wantErr: "requires agent sandbox",
@@ -600,7 +655,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAI,
 				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: workspace(),
+					Workspace: executionWorkspace(),
 				},
 			}},
 			wantErr: "only supported for type: agent",
@@ -611,7 +666,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
 				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.TemplateRef = nil }),
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.TemplateRef = nil }),
 				},
 			}},
 			wantErr: "templateRef.name is required",
@@ -622,7 +677,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
 				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.TemplateRef.Name = "" }),
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.TemplateRef.Name = "" }),
 				},
 			}},
 			wantErr: "templateRef.name is required",
@@ -634,7 +689,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
 				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.TemplateRef = nil }),
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.TemplateRef = nil }),
 				},
 			}},
 		},
@@ -644,7 +699,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
 				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 						ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicy("forever")
 					}),
 				},
@@ -657,7 +712,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
 				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 						ws.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy("archive")
 					}),
 				},
@@ -670,7 +725,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
 				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 						ws.Boot = true
 					}),
 				},
@@ -678,12 +733,94 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			wantErr: "execution workspace boot is only supported",
 		},
 		{
+			name: "substrate snapshot restore unsupported",
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
+						ws.Snapshot = &corev1alpha1.ExecutionWorkspaceSnapshotSpec{RestoreURI: "gs://snapshots/restore"}
+					}),
+				},
+			}},
+			wantErr: "snapshot restore/checkpoint is not supported yet",
+		},
+		{
+			name: "substrate snapshot checkpoint unsupported",
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
+						ws.Snapshot = &corev1alpha1.ExecutionWorkspaceSnapshotSpec{
+							CheckpointURI:       "gs://snapshots/checkpoint",
+							CheckpointOnRelease: true,
+						}
+					}),
+				},
+			}},
+			wantErr: "snapshot restore/checkpoint is not supported yet",
+		},
+		{
+			name: "substrate resident process unsupported",
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
+						ws.Hibernation = &corev1alpha1.ExecutionWorkspaceHibernationSpec{
+							ProcessMode: corev1alpha1.ExecutionWorkspaceProcessModeResident,
+						}
+					}),
+				},
+			}},
+			wantErr: "processMode \"resident\" is not supported yet",
+		},
+		{
+			name:             "substrate poolRef accepted",
+			substrateEnabled: true,
+			substrateConfig: SubstrateConfig{
+				APIInsecureSkipVerify: true,
+				BootstrapSecretName:   testSubstrateBootstrapSecretName,
+				BootstrapSecretKey:    testSubstrateBootstrapSecretKey,
+			},
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
+						ws.PoolRef = &corev1alpha1.SubstrateActorPoolReference{Name: "codex-pool"}
+					}),
+				},
+			}},
+		},
+		{
+			name:             "substrate poolRef rejects retain cleanup policy",
+			substrateEnabled: true,
+			substrateConfig: SubstrateConfig{
+				APIInsecureSkipVerify: true,
+				BootstrapSecretName:   testSubstrateBootstrapSecretName,
+				BootstrapSecretKey:    testSubstrateBootstrapSecretKey,
+			},
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
+						ws.PoolRef = &corev1alpha1.SubstrateActorPoolReference{Name: "codex-pool"}
+						ws.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyRetain
+					}),
+				},
+			}},
+			wantErr: "poolRef does not support cleanupPolicy \"retain\"",
+		},
+		{
 			name:                "session reuse without sessionRef",
 			agentSandboxEnabled: true,
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
 				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 						ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 					}),
 				},
@@ -697,7 +834,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 				Type:       corev1alpha1.TaskTypeAgent,
 				SessionRef: &corev1alpha1.SessionReference{Name: ""},
 				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 						ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 					}),
 				},
@@ -710,7 +847,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
 				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: workspace(),
+					Workspace: executionWorkspace(),
 				},
 			}},
 		},
@@ -721,7 +858,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 				Type:       corev1alpha1.TaskTypeAgent,
 				SessionRef: &corev1alpha1.SessionReference{Name: "session-1"},
 				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: workspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
 						ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 						ws.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyRetain
 					}),
@@ -734,7 +871,9 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &TaskReconciler{
 				AgentSandboxEnabled: tt.agentSandboxEnabled,
+				SubstrateEnabled:    tt.substrateEnabled,
 				AgentSandboxConfig:  tt.agentSandboxConfig,
+				SubstrateConfig:     tt.substrateConfig,
 			}
 
 			err := r.validateExecutionWorkspace(tt.task)
@@ -1343,6 +1482,262 @@ func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
 	}
 	if result.RequeueAfter != 10*time.Second {
 		t.Errorf("expected 10s requeue, got %v", result.RequeueAfter)
+	}
+}
+
+func TestTryReserveSubstratePoolActorUsesOptimisticLockWhenTakingOverStaleLease(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	oldHolder := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "old-task", Namespace: "default", UID: "old-task-uid"},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseSucceeded,
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				Phase:  corev1alpha1.ExecutionWorkspacePhaseDeleted,
+				Reason: corev1alpha1.ExecutionWorkspaceReasonDeleted,
+			},
+		},
+	}
+	lease := newSubstratePoolActorLease(oldHolder, "default", testSubstrateActorID, testSubstrateActorID)
+	lease.ResourceVersion = "42"
+
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(oldHolder, lease).Build()
+	patchInspected := false
+	fc := interceptor.NewClient(base, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			data, err := patch.Data(obj)
+			if err != nil {
+				return err
+			}
+			var patchBody map[string]any
+			if err := json.Unmarshal(data, &patchBody); err != nil {
+				return err
+			}
+			metadata, ok := patchBody["metadata"].(map[string]any)
+			if !ok {
+				return fmt.Errorf("patch metadata missing from %s", string(data))
+			}
+			if got := metadata["resourceVersion"]; got != "42" {
+				return fmt.Errorf("patch resourceVersion = %v, want 42", got)
+			}
+			patchInspected = true
+			return nil
+		},
+	})
+	r := &TaskReconciler{Client: fc}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "new-task", Namespace: "default", UID: "new-task-uid"},
+	}
+
+	reserved, err := r.tryReserveSubstratePoolActor(ctx, task, "default", testSubstrateActorID)
+	if err != nil {
+		t.Fatalf("tryReserveSubstratePoolActor() error = %v", err)
+	}
+	if !reserved {
+		t.Fatal("tryReserveSubstratePoolActor() reserved = false, want true")
+	}
+	if !patchInspected {
+		t.Fatal("patch was not inspected")
+	}
+}
+
+func TestTryReserveSubstratePoolActorDoesNotTakeOverMissingTaskHolderLease(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	oldHolder := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "old-task", Namespace: "default", UID: "old-task-uid"},
+	}
+	lease := newSubstratePoolActorLease(oldHolder, "default", testSubstrateActorID, testSubstrateActorID)
+	r := &TaskReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(lease).Build(),
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "new-task", Namespace: "default", UID: "new-task-uid"},
+	}
+
+	reserved, err := r.tryReserveSubstratePoolActor(ctx, task, "default", testSubstrateActorID)
+	if err != nil {
+		t.Fatalf("tryReserveSubstratePoolActor() error = %v", err)
+	}
+	if reserved {
+		t.Fatal("tryReserveSubstratePoolActor() reserved missing holder's actor, want false")
+	}
+	var got coordinationv1.Lease
+	if err := r.Get(ctx, types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); err != nil {
+		t.Fatalf("Get lease: %v", err)
+	}
+	if !substratePoolActorLeaseHeldByTask(&got, oldHolder) {
+		t.Fatalf("lease holder changed to annotations %#v, want missing old task", got.Annotations)
+	}
+}
+
+func TestTryReserveSubstratePoolActorDoesNotTakeOverMissingToolHolderLease(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	oldHolder := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "old-tool", Namespace: "default", UID: "old-tool-uid"},
+	}
+	lease := newSubstrateMCPPoolActorLease(oldHolder, "default", testSubstrateActorID, testSubstrateActorID)
+	r := &TaskReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(lease).Build(),
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "new-task", Namespace: "default", UID: "new-task-uid"},
+	}
+
+	reserved, err := r.tryReserveSubstratePoolActor(ctx, task, "default", testSubstrateActorID)
+	if err != nil {
+		t.Fatalf("tryReserveSubstratePoolActor() error = %v", err)
+	}
+	if reserved {
+		t.Fatal("tryReserveSubstratePoolActor() reserved missing tool holder's actor, want false")
+	}
+	var got coordinationv1.Lease
+	if err := r.Get(ctx, types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); err != nil {
+		t.Fatalf("Get lease: %v", err)
+	}
+	if !substratePoolActorLeaseHeldByTool(&got, oldHolder) {
+		t.Fatalf("lease holder changed to annotations %#v, want missing old tool", got.Annotations)
+	}
+}
+
+func TestTryReserveSubstratePoolActorDoesNotTakeOverUnverifiedCleanupLease(t *testing.T) {
+	tests := []struct {
+		name               string
+		executionWorkspace *corev1alpha1.ExecutionWorkspaceStatus
+	}{
+		{
+			name: "cleanup failed",
+			executionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
+				Reason: corev1alpha1.ExecutionWorkspaceReasonSecretScrubFailed,
+			},
+		},
+		{
+			name:               "missing workspace status",
+			executionWorkspace: nil,
+		},
+		{
+			name:               "empty workspace status",
+			executionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			ctx := context.Background()
+			oldHolder := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "old-task", Namespace: "default", UID: "old-task-uid"},
+				Status: corev1alpha1.TaskStatus{
+					Phase:              corev1alpha1.TaskPhaseFailed,
+					ExecutionWorkspace: tt.executionWorkspace,
+				},
+			}
+			lease := newSubstratePoolActorLease(oldHolder, "default", testSubstrateActorID, testSubstrateActorID)
+			r := &TaskReconciler{
+				Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(oldHolder, lease).Build(),
+			}
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "new-task", Namespace: "default", UID: "new-task-uid"},
+			}
+
+			reserved, err := r.tryReserveSubstratePoolActor(ctx, task, "default", testSubstrateActorID)
+			if err != nil {
+				t.Fatalf("tryReserveSubstratePoolActor() error = %v", err)
+			}
+			if reserved {
+				t.Fatal("tryReserveSubstratePoolActor() reserved unverified actor, want false")
+			}
+			var got coordinationv1.Lease
+			if err := r.Get(ctx, types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); err != nil {
+				t.Fatalf("Get lease: %v", err)
+			}
+			if !substratePoolActorLeaseHeldByTask(&got, oldHolder) {
+				t.Fatalf("lease holder changed to annotations %#v, want old task", got.Annotations)
+			}
+		})
+	}
+}
+
+func TestTryReserveSubstratePoolActorDoesNotTakeOverDeletingHolder(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	oldHolder := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "old-task", Namespace: "default", UID: "old-task-uid"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed},
+	}
+	lease := newSubstratePoolActorLease(oldHolder, "default", testSubstrateActorID, testSubstrateActorID)
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(oldHolder, lease).Build()
+	fc := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if task, ok := obj.(*corev1alpha1.Task); ok && task.Name == oldHolder.Name {
+				task.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+			}
+			return nil
+		},
+	})
+	r := &TaskReconciler{Client: fc}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "new-task", Namespace: "default", UID: "new-task-uid"},
+	}
+
+	reserved, err := r.tryReserveSubstratePoolActor(ctx, task, "default", testSubstrateActorID)
+	if err != nil {
+		t.Fatalf("tryReserveSubstratePoolActor() error = %v", err)
+	}
+	if reserved {
+		t.Fatal("tryReserveSubstratePoolActor() reserved deleting holder's actor, want false")
+	}
+	var got coordinationv1.Lease
+	if err := r.Get(ctx, types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); err != nil {
+		t.Fatalf("Get lease: %v", err)
+	}
+	if !substratePoolActorLeaseHeldByTask(&got, oldHolder) {
+		t.Fatalf("lease holder changed to annotations %#v, want deleting old task", got.Annotations)
+	}
+}
+
+func TestReserveSubstratePoolActorDoesNotReuseTaskLeaseBeforeRetryCleanupSucceeds(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "retry-task", Namespace: "default", UID: "retry-task-uid"},
+		Status: corev1alpha1.TaskStatus{
+			Phase:    corev1alpha1.TaskPhasePending,
+			Attempts: 1,
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
+				Reason: corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
+			},
+		},
+	}
+	lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
+	r := newUnitReconciler(scheme, task, lease)
+	request := &ExecutionWorkspaceRequest{
+		PoolName:         "codex-pool",
+		PoolNamespace:    "default",
+		PoolTargetActors: 3,
+		ClaimName:        "actor-2",
+	}
+
+	reserved, err := r.reserveSubstratePoolActor(context.Background(), task, request)
+	if err != nil {
+		t.Fatalf("reserveSubstratePoolActor() error = %v", err)
+	}
+	if reserved {
+		t.Fatal("reserveSubstratePoolActor() reserved existing retry lease before cleanup success, want false")
+	}
+	if request.ClaimName != "actor-2" {
+		t.Fatalf("request ClaimName = %q, want unchanged while cleanup is incomplete", request.ClaimName)
+	}
+	var got coordinationv1.Lease
+	if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); err != nil {
+		t.Fatalf("Get lease: %v", err)
+	}
+	if !substratePoolActorLeaseHeldByTask(&got, task) {
+		t.Fatalf("lease holder changed to annotations %#v, want retry task", got.Annotations)
 	}
 }
 
@@ -2039,6 +2434,94 @@ func TestHandleDeletion_WithJobName(t *testing.T) {
 	}
 }
 
+func TestHandleDeletionPreservesPoolLeaseAfterCleanupFailure(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "del-pooled",
+			Namespace:  "default",
+			UID:        "del-pooled-uid",
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+		Status: corev1alpha1.TaskStatus{
+			JobName: "missing-job",
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
+				Reason: corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
+			},
+		},
+	}
+	lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
+	r := newUnitReconciler(scheme, task, lease)
+	executor := &recordingTaskWorkspaceExecutor{deleteErr: errors.New("delete actor")}
+	r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+		return executor, nil
+	}
+
+	result, err := r.handleDeletion(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleDeletion() error = %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 30s", result.RequeueAfter)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &coordinationv1.Lease{}); err != nil {
+		t.Fatalf("pool lease after failed cleanup error = %v, want lease preserved", err)
+	}
+	var got corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "del-pooled", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("Get task: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(&got, labels.TaskFinalizer) {
+		t.Fatal("task finalizer was removed before workspace cleanup succeeded")
+	}
+	if len(executor.deleteReqs) != 1 || executor.deleteReqs[0].Ref.ID != testSubstrateActorID {
+		t.Fatalf("delete requests = %#v, want %s cleanup attempt", executor.deleteReqs, testSubstrateActorID)
+	}
+	if !executor.closeCalled {
+		t.Fatal("workspace executor was not closed")
+	}
+}
+
+func TestHandleDeletionReleasesPoolLeaseAfterWorkspaceCleanup(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "del-pooled-clean",
+			Namespace:  "default",
+			UID:        "del-pooled-clean-uid",
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+		Status: corev1alpha1.TaskStatus{
+			JobName: "missing-job",
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				Phase:  corev1alpha1.ExecutionWorkspacePhaseDeleted,
+				Reason: corev1alpha1.ExecutionWorkspaceReasonDeleted,
+			},
+		},
+	}
+	lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
+	r := newUnitReconciler(scheme, task, lease)
+
+	result, err := r.handleDeletion(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleDeletion() error = %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("RequeueAfter = %v, want no requeue", result.RequeueAfter)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("pool lease after deletion error = %v, want not found", err)
+	}
+	var got corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "del-pooled-clean", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("Get task: %v", err)
+	}
+	if controllerutil.ContainsFinalizer(&got, labels.TaskFinalizer) {
+		t.Fatal("task finalizer was not removed")
+	}
+}
+
 func TestHandleDeletion_WithMessageStore(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -2177,6 +2660,158 @@ func TestHandleCompleted_FailedInactiveJobRetainsJob(t *testing.T) {
 
 	if err := r.Get(context.Background(), types.NamespacedName{Name: "failed-inactive-job", Namespace: "default"}, &batchv1.Job{}); err != nil {
 		t.Fatalf("expected inactive failed task Job to be retained, got %v", err)
+	}
+}
+
+func TestHandleCompletedPreservesPoolLeaseAfterWorkspaceCleanupFailure(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "cleanup-failed-task", Namespace: "default", UID: "cleanup-failed-task-uid"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseFailed,
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
+				Reason: corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
+			},
+		},
+	}
+	lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
+	r := newUnitReconciler(scheme, task, lease)
+	executor := &recordingTaskWorkspaceExecutor{deleteErr: errors.New("delete actor")}
+	r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+		return executor, nil
+	}
+
+	result, err := r.handleCompleted(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleCompleted() error = %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 30s", result.RequeueAfter)
+	}
+	var got coordinationv1.Lease
+	if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); err != nil {
+		t.Fatalf("pool lease was not preserved after cleanup failure: %v", err)
+	}
+	if len(executor.deleteReqs) != 1 || executor.deleteReqs[0].Ref.ID != testSubstrateActorID {
+		t.Fatalf("delete requests = %#v, want %s cleanup attempt", executor.deleteReqs, testSubstrateActorID)
+	}
+	if !executor.closeCalled {
+		t.Fatal("workspace executor was not closed")
+	}
+}
+
+func TestHandleCompletedPreservesPoolLeaseWithoutWorkspaceCleanupSuccess(t *testing.T) {
+	tests := []struct {
+		name               string
+		executionWorkspace *corev1alpha1.ExecutionWorkspaceStatus
+	}{
+		{
+			name: "command failed",
+			executionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
+				Reason: corev1alpha1.ExecutionWorkspaceReasonCommandFailed,
+			},
+		},
+		{
+			name:               "missing workspace status",
+			executionWorkspace: nil,
+		},
+		{
+			name:               "empty workspace status",
+			executionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "command-failed-task", Namespace: "default", UID: types.UID("command-failed-task-uid-" + tt.name)},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+				Status: corev1alpha1.TaskStatus{
+					Phase:              corev1alpha1.TaskPhaseFailed,
+					ExecutionWorkspace: tt.executionWorkspace,
+				},
+			}
+			lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
+			r := newUnitReconciler(scheme, task, lease)
+			executor := &recordingTaskWorkspaceExecutor{deleteErr: errors.New("delete actor")}
+			r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+				return executor, nil
+			}
+
+			result, err := r.handleCompleted(context.Background(), task)
+			if err != nil {
+				t.Fatalf("handleCompleted() error = %v", err)
+			}
+			if result.RequeueAfter != 30*time.Second {
+				t.Fatalf("RequeueAfter = %v, want 30s", result.RequeueAfter)
+			}
+			var got coordinationv1.Lease
+			if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); err != nil {
+				t.Fatalf("pool lease was not preserved without cleanup success: %v", err)
+			}
+			if len(executor.deleteReqs) != 1 || executor.deleteReqs[0].Ref.ID != testSubstrateActorID {
+				t.Fatalf("delete requests = %#v, want %s cleanup attempt", executor.deleteReqs, testSubstrateActorID)
+			}
+			if !executor.closeCalled {
+				t.Fatal("workspace executor was not closed")
+			}
+		})
+	}
+}
+
+func TestHandleCompletedReleasesPoolLeaseAfterWorkspaceCleanupSuccess(t *testing.T) {
+	tests := []struct {
+		name   string
+		phase  corev1alpha1.ExecutionWorkspacePhase
+		reason corev1alpha1.ExecutionWorkspaceReason
+	}{
+		{
+			name:   "retained",
+			phase:  corev1alpha1.ExecutionWorkspacePhaseRetained,
+			reason: corev1alpha1.ExecutionWorkspaceReasonRetained,
+		},
+		{
+			name:   "deleted",
+			phase:  corev1alpha1.ExecutionWorkspacePhaseDeleted,
+			reason: corev1alpha1.ExecutionWorkspaceReasonDeleted,
+		},
+		{
+			name:   "released",
+			phase:  corev1alpha1.ExecutionWorkspacePhaseReleased,
+			reason: corev1alpha1.ExecutionWorkspaceReasonReleased,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "cleanup-succeeded-task", Namespace: "default", UID: types.UID("cleanup-succeeded-task-uid-" + tt.name)},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+				Status: corev1alpha1.TaskStatus{
+					Phase: corev1alpha1.TaskPhaseSucceeded,
+					ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+						Phase:  tt.phase,
+						Reason: tt.reason,
+					},
+				},
+			}
+			lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
+			r := newUnitReconciler(scheme, task, lease)
+
+			result, err := r.handleCompleted(context.Background(), task)
+			if err != nil {
+				t.Fatalf("handleCompleted() error = %v", err)
+			}
+			if result != (ctrl.Result{}) {
+				t.Fatalf("handleCompleted() result = %#v, want zero", result)
+			}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("pool lease after cleanup success error = %v, want not found", err)
+			}
+		})
 	}
 }
 
@@ -3005,6 +3640,156 @@ func TestRetryTask_NoExistingJob(t *testing.T) {
 	}
 	if task.Status.Phase != corev1alpha1.TaskPhasePending {
 		t.Errorf("expected Pending, got %s", task.Status.Phase)
+	}
+}
+
+func TestRetryTask_PooledLeaseWaitsForOldJobDeletion(t *testing.T) {
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "retry-pooled-job", Namespace: "default"},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "retry-pooled", Namespace: "default", UID: "retry-pooled-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAgent,
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:    corev1alpha1.TaskPhaseRunning,
+			JobName:  "retry-pooled-job",
+			Attempts: 1,
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
+				Reason: corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
+			},
+		},
+	}
+	lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
+	r := newUnitReconciler(scheme, task, job, lease)
+	executor := &recordingTaskWorkspaceExecutor{}
+	r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+		return executor, nil
+	}
+
+	result, err := r.retryTask(context.Background(), task)
+	if err != nil {
+		t.Fatalf("retryTask() error = %v", err)
+	}
+	if result.RequeueAfter != 2*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 2s while old Job is deleting", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Fatalf("phase = %s, want Running until pooled retry cleanup finishes", task.Status.Phase)
+	}
+	if task.Status.JobName != "retry-pooled-job" {
+		t.Fatalf("JobName = %q, want old Job retained in status until retry cleanup finishes", task.Status.JobName)
+	}
+	if len(executor.deleteReqs) != 0 {
+		t.Fatalf("delete requests = %#v, want no actor cleanup until old Job is gone", executor.deleteReqs)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "retry-pooled-job", Namespace: "default"}, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("old Job error = %v, want NotFound after retry cleanup delete", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &coordinationv1.Lease{}); err != nil {
+		t.Fatalf("pool lease error = %v, want lease preserved while old Job deletes", err)
+	}
+}
+
+func TestRetryTask_PooledLeaseDeletesActorBeforeReset(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "retry-cleanup", Namespace: "default", UID: "retry-cleanup-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAgent,
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:    corev1alpha1.TaskPhaseRunning,
+			JobName:  "missing-job",
+			Attempts: 1,
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
+				Reason: corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
+			},
+		},
+	}
+	lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
+	r := newUnitReconciler(scheme, task, lease)
+	executor := &recordingTaskWorkspaceExecutor{}
+	r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+		return executor, nil
+	}
+
+	result, err := r.retryTask(context.Background(), task)
+	if err != nil {
+		t.Fatalf("retryTask() error = %v", err)
+	}
+	if result.RequeueAfter <= 0 || result.RequeueAfter == 30*time.Second {
+		t.Fatalf("RequeueAfter = %v, want retry delay after cleanup success", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Fatalf("phase = %s, want Pending after pooled retry cleanup", task.Status.Phase)
+	}
+	if task.Status.JobName != "" {
+		t.Fatalf("JobName = %q, want cleared after pooled retry cleanup", task.Status.JobName)
+	}
+	if len(executor.deleteReqs) != 1 || executor.deleteReqs[0].Ref.ID != testSubstrateActorID {
+		t.Fatalf("delete requests = %#v, want %s cleanup before retry reset", executor.deleteReqs, testSubstrateActorID)
+	}
+	if !executor.closeCalled {
+		t.Fatal("workspace executor was not closed")
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("pool lease error = %v, want NotFound after pooled retry cleanup", err)
+	}
+}
+
+func TestRetryTask_PooledLeasePreservedWhenActorCleanupFails(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "retry-cleanup-fails", Namespace: "default", UID: "retry-cleanup-fails-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAgent,
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:    corev1alpha1.TaskPhaseRunning,
+			JobName:  "missing-job",
+			Attempts: 1,
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
+				Reason: corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
+			},
+		},
+	}
+	lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
+	r := newUnitReconciler(scheme, task, lease)
+	executor := &recordingTaskWorkspaceExecutor{deleteErr: errors.New("delete actor")}
+	r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+		return executor, nil
+	}
+
+	result, err := r.retryTask(context.Background(), task)
+	if err != nil {
+		t.Fatalf("retryTask() error = %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 30s after pooled retry cleanup failure", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Fatalf("phase = %s, want Running until pooled retry cleanup succeeds", task.Status.Phase)
+	}
+	if task.Status.JobName != "missing-job" {
+		t.Fatalf("JobName = %q, want old JobName preserved until pooled retry cleanup succeeds", task.Status.JobName)
+	}
+	if len(executor.deleteReqs) != 1 || executor.deleteReqs[0].Ref.ID != testSubstrateActorID {
+		t.Fatalf("delete requests = %#v, want %s cleanup attempt", executor.deleteReqs, testSubstrateActorID)
+	}
+	if !executor.closeCalled {
+		t.Fatal("workspace executor was not closed")
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &coordinationv1.Lease{}); err != nil {
+		t.Fatalf("pool lease error = %v, want lease preserved after cleanup failure", err)
 	}
 }
 

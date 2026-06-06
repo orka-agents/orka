@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -38,6 +39,8 @@ const (
 	substrateDefaultHandoffTokenEnv   = "ORKA_WORKSPACE_HANDOFF_TOKEN"
 	substrateDefaultBootstrapTokenEnv = "ORKA_WORKSPACE_BOOTSTRAP_TOKEN"
 	substrateHandoffTokenUploadPath   = "orka-workspace-handoff-token"
+	substrateSessionCertUploadPath    = "orka-workspace-session.crt"
+	substrateSessionKeyUploadPath     = "orka-workspace-session.key"
 	substrateDefaultIdentityAudience  = "orka-workspace-daemon"
 	substrateDefaultIdentityAppID     = "orka"
 	substrateDefaultIdentityUserID    = "orka-worker"
@@ -64,6 +67,7 @@ type SubstrateConfig struct {
 	SessionIdentityAppID    string
 	SessionIdentityUserID   string
 	SessionIdentityRequired bool
+	SessionIdentityMintCert bool
 	SessionIdentityClient   substrateSessionIdentityClient
 }
 
@@ -123,6 +127,15 @@ func NewSubstrateExecutor(cfg SubstrateConfig, opts ...SubstrateOption) (*Substr
 	}
 	if strings.TrimSpace(cfg.ActorDNSSuffix) == "" {
 		return nil, NewError("configure substrate", ErrorKindInvalidArgument, "actor DNS suffix is required", false, nil)
+	}
+	if cfg.SessionIdentityMintCert {
+		return nil, NewError(
+			"configure substrate",
+			ErrorKindFailedPrecondition,
+			"Substrate SessionIdentity certificate minting is not supported yet",
+			false,
+			nil,
+		)
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{}
@@ -304,8 +317,12 @@ func (e *SubstrateWorkspaceExecutor) reattachedSubstrateClaimResult(
 }
 
 func validateSubstrateActorTemplate(actor *substrateActor, template TemplateRef) error {
+	return validateSubstrateActorTemplateForOp("claim", actor, template)
+}
+
+func validateSubstrateActorTemplateForOp(op string, actor *substrateActor, template TemplateRef) error {
 	if actor == nil {
-		return NewError("claim", ErrorKindFailedPrecondition, "Substrate actor lookup returned no actor", false, nil)
+		return NewError(op, ErrorKindFailedPrecondition, "Substrate actor lookup returned no actor", false, nil)
 	}
 	actualNamespace := strings.TrimSpace(actor.TemplateNamespace)
 	actualName := strings.TrimSpace(actor.TemplateName)
@@ -315,7 +332,7 @@ func validateSubstrateActorTemplate(actor *substrateActor, template TemplateRef)
 		return nil
 	}
 	return NewError(
-		"claim",
+		op,
 		ErrorKindFailedPrecondition,
 		fmt.Sprintf(
 			"existing Substrate actor uses template %s/%s, want %s/%s",
@@ -329,6 +346,18 @@ func validateSubstrateActorTemplate(actor *substrateActor, template TemplateRef)
 	)
 }
 
+// Close releases network resources owned by this executor.
+func (e *SubstrateWorkspaceExecutor) Close() error {
+	var closeErr error
+	if closer, ok := e.control.(interface{ Close() error }); ok {
+		closeErr = errors.Join(closeErr, closer.Close())
+	}
+	if closer, ok := e.sessionIdentity.(interface{ Close() error }); ok {
+		closeErr = errors.Join(closeErr, closer.Close())
+	}
+	return closeErr
+}
+
 func (e *SubstrateWorkspaceExecutor) WaitReady(ctx context.Context, req WaitReadyRequest) (*ReadyResult, error) {
 	ctx, cancel := contextWithTimeout(ctx, req.Timeout)
 	defer cancel()
@@ -338,6 +367,15 @@ func (e *SubstrateWorkspaceExecutor) WaitReady(ctx context.Context, req WaitRead
 	actorID := substrateActorID(req.Ref)
 	if actorID == "" {
 		return nil, NewError("wait ready", ErrorKindInvalidArgument, "actor id is required", false, nil)
+	}
+	if strings.TrimSpace(req.SnapshotRestoreURI) != "" {
+		return nil, NewError(
+			"wait ready",
+			ErrorKindFailedPrecondition,
+			"explicit Substrate snapshot restore is not available through the public control API yet",
+			false,
+			nil,
+		)
 	}
 	resumeStartedAt := e.now()
 	if _, err := e.control.ResumeActor(ctx, actorID, req.Boot); err != nil {
@@ -400,6 +438,15 @@ func (e *SubstrateWorkspaceExecutor) Exec(ctx context.Context, req ExecRequest) 
 	actorID := substrateActorID(req.Ref)
 	if actorID == "" {
 		return nil, NewError("exec", ErrorKindInvalidArgument, "actor id is required", false, nil)
+	}
+	if req.Resident {
+		return nil, NewError(
+			"exec",
+			ErrorKindFailedPrecondition,
+			"Substrate resident execution is not supported yet",
+			false,
+			nil,
+		)
 	}
 
 	var resp substrateExecResponse
@@ -587,6 +634,15 @@ func (e *SubstrateWorkspaceExecutor) Release(ctx context.Context, req ReleaseReq
 	if actorID == "" {
 		return nil, NewError("release", ErrorKindInvalidArgument, "actor id is required", false, nil)
 	}
+	if strings.TrimSpace(req.SnapshotCheckpointURI) != "" {
+		return nil, NewError(
+			"release",
+			ErrorKindFailedPrecondition,
+			"explicit Substrate snapshot checkpoint is not available through the public control API yet",
+			false,
+			nil,
+		)
+	}
 	if !req.SkipScrub {
 		if err := e.scrubDaemon(ctx, actorID); err != nil {
 			return nil, NewError("release", ErrorKindFailedPrecondition, "failed to scrub workspace before release", false, err)
@@ -753,6 +809,182 @@ func (e *SubstrateWorkspaceExecutor) Describe(ctx context.Context, req DescribeR
 		Placement: placement,
 		Density:   density,
 	}, nil
+}
+
+// SubstratePoolTelemetry reports safe actor/worker density for a single Orka pool.
+func (e *SubstrateWorkspaceExecutor) SubstratePoolTelemetry(
+	ctx context.Context,
+	prefix string,
+	template TemplateRef,
+	workerPool TemplateRef,
+) (Density, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	prefix = strings.Trim(strings.TrimSpace(prefix), "-")
+	workers, err := e.control.ListWorkers(ctx)
+	if err != nil {
+		return Density{}, err
+	}
+	actors, err := e.control.ListActors(ctx)
+	if err != nil {
+		return Density{}, err
+	}
+	filteredActors := make([]substrateActor, 0, len(actors))
+	actorIDs := make(map[string]struct{}, len(actors))
+	for _, actor := range actors {
+		actorID := strings.TrimSpace(actor.ActorID)
+		if prefix != "" && !strings.HasPrefix(actorID, prefix+"-") {
+			continue
+		}
+		if strings.TrimSpace(template.Namespace) != "" && strings.TrimSpace(actor.TemplateNamespace) != strings.TrimSpace(template.Namespace) {
+			continue
+		}
+		if strings.TrimSpace(template.Name) != "" && strings.TrimSpace(actor.TemplateName) != strings.TrimSpace(template.Name) {
+			continue
+		}
+		filteredActors = append(filteredActors, actor)
+		actorIDs[actorID] = struct{}{}
+	}
+	filteredWorkers := make([]substrateWorker, 0, len(workers))
+	for _, worker := range workers {
+		if strings.TrimSpace(workerPool.Name) != "" && strings.TrimSpace(worker.WorkerPool) != strings.TrimSpace(workerPool.Name) {
+			continue
+		}
+		if strings.TrimSpace(workerPool.Namespace) != "" && strings.TrimSpace(worker.WorkerNamespace) != strings.TrimSpace(workerPool.Namespace) {
+			continue
+		}
+		if workerActorID := strings.TrimSpace(worker.ActorID); workerActorID != "" {
+			if _, ok := actorIDs[workerActorID]; !ok {
+				continue
+			}
+		} else if strings.TrimSpace(workerPool.Name) == "" {
+			continue
+		}
+		filteredWorkers = append(filteredWorkers, worker)
+	}
+	return substrateDensity(filteredWorkers, filteredActors), nil
+}
+
+// EnsureSubstrateActors creates deterministic actor records for a pool target.
+func (e *SubstrateWorkspaceExecutor) EnsureSubstrateActors(
+	ctx context.Context,
+	prefix string,
+	target int,
+	template TemplateRef,
+) (int, error) {
+	if target <= 0 {
+		return 0, nil
+	}
+	prefix = strings.Trim(strings.TrimSpace(prefix), "-")
+	if prefix == "" {
+		return 0, NewError("ensure substrate actors", ErrorKindInvalidArgument, "actor prefix is required", false, nil)
+	}
+	created := 0
+	for i := range target {
+		actorID := deterministicSubstratePoolActorID(prefix, i)
+		if actor, err := e.control.GetActor(ctx, actorID); err == nil {
+			if err := validateSubstrateActorTemplateForOp("ensure substrate actors", actor, template); err != nil {
+				return created, err
+			}
+			continue
+		} else if !IsKind(err, ErrorKindNotFound) {
+			return created, err
+		}
+		if _, err := e.control.CreateActor(ctx, actorID, template.Namespace, template.Name); err != nil {
+			if IsKind(err, ErrorKindAlreadyExists) {
+				actor, getErr := e.control.GetActor(ctx, actorID)
+				if getErr != nil {
+					return created, getErr
+				}
+				if err := validateSubstrateActorTemplateForOp("ensure substrate actors", actor, template); err != nil {
+					return created, err
+				}
+				continue
+			}
+			return created, err
+		}
+		created++
+	}
+	return created, nil
+}
+
+// ConvergeSubstrateActors creates missing deterministic actors below target and
+// deletes deterministic pool actors at or above target.
+func (e *SubstrateWorkspaceExecutor) ConvergeSubstrateActors(
+	ctx context.Context,
+	prefix string,
+	target int,
+	template TemplateRef,
+) (int, int, error) {
+	if target < 0 {
+		return 0, 0, NewError("converge substrate actors", ErrorKindInvalidArgument, "actor target must be non-negative", false, nil)
+	}
+	prefix = strings.Trim(strings.TrimSpace(prefix), "-")
+	if prefix == "" {
+		return 0, 0, NewError("converge substrate actors", ErrorKindInvalidArgument, "actor prefix is required", false, nil)
+	}
+
+	created := 0
+	if target > 0 {
+		var err error
+		created, err = e.EnsureSubstrateActors(ctx, prefix, target, template)
+		if err != nil {
+			return created, 0, err
+		}
+	}
+
+	actors, err := e.control.ListActors(ctx)
+	if err != nil {
+		return created, 0, err
+	}
+	actorsByOrdinal := make(map[int]string)
+	ordinals := make([]int, 0)
+	for _, actor := range actors {
+		ordinal, ok := substratePoolActorOrdinal(actor.ActorID, prefix)
+		if !ok || ordinal < target {
+			continue
+		}
+		if _, exists := actorsByOrdinal[ordinal]; exists {
+			continue
+		}
+		actorsByOrdinal[ordinal] = strings.TrimSpace(actor.ActorID)
+		ordinals = append(ordinals, ordinal)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(ordinals)))
+
+	deleted := 0
+	for _, ordinal := range ordinals {
+		if err := e.control.DeleteActor(ctx, actorsByOrdinal[ordinal]); err != nil {
+			if IsKind(err, ErrorKindNotFound) {
+				continue
+			}
+			return created, deleted, err
+		}
+		deleted++
+	}
+	return created, deleted, nil
+}
+
+func deterministicSubstratePoolActorID(prefix string, ordinal int) string {
+	return fmt.Sprintf("%s-%05d", prefix, ordinal)
+}
+
+func substratePoolActorOrdinal(actorID, prefix string) (int, bool) {
+	actorID = strings.TrimSpace(actorID)
+	prefix = strings.Trim(strings.TrimSpace(prefix), "-")
+	suffix, ok := strings.CutPrefix(actorID, prefix+"-")
+	if !ok || len(suffix) != 5 {
+		return 0, false
+	}
+	ordinal := 0
+	for _, ch := range suffix {
+		if ch < '0' || ch > '9' {
+			return 0, false
+		}
+		ordinal = ordinal*10 + int(ch-'0')
+	}
+	return ordinal, true
 }
 
 func (e *SubstrateWorkspaceExecutor) substrateTelemetry(ctx context.Context, actor *substrateActor) (Placement, Density) {
@@ -1005,6 +1237,8 @@ func defaultSubstrateScrubPaths() []string {
 		"/app/orka-context-subject-token",
 		"/app/orka-git-askpass",
 		"/app/orka-workspace-handoff-token",
+		"/app/" + substrateSessionCertUploadPath,
+		"/app/" + substrateSessionKeyUploadPath,
 	}
 }
 
@@ -1016,6 +1250,8 @@ type substrateExecRequest struct {
 	TimeoutSeconds int64             `json:"timeoutSeconds,omitempty"`
 	MaxOutputBytes int64             `json:"maxOutputBytes,omitempty"`
 	Detach         bool              `json:"detach,omitempty"`
+	Resident       bool              `json:"resident,omitempty"`
+	ResidentKey    string            `json:"residentKey,omitempty"`
 }
 
 type substrateExecResponse struct {
@@ -1095,6 +1331,20 @@ func newGRPCSubstrateSessionIdentityClient(cfg SubstrateConfig) (*grpcSubstrateS
 		return nil, NewError("configure substrate", ErrorKindUnknown, "failed to create Substrate SessionIdentity client", false, err)
 	}
 	return &grpcSubstrateSessionIdentityClient{conn: conn, client: ateapipb.NewSessionIdentityClient(conn)}, nil
+}
+
+func (c *grpcSubstrateControlClient) Close() error {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	return c.conn.Close()
+}
+
+func (c *grpcSubstrateSessionIdentityClient) Close() error {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	return c.conn.Close()
 }
 
 func substrateTransportCredentials(cfg SubstrateConfig) (credentials.TransportCredentials, error) {

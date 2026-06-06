@@ -19,6 +19,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/workerenv"
@@ -283,11 +285,54 @@ func (r *TaskReconciler) resolveSubstrateWorkspaceRequest(ctx context.Context, t
 	}
 	templateName := substrateTemplateName(ws, cfg)
 	templateNamespace := substrateTemplateNamespace(ws, task.Namespace, cfg)
+	snapshotRestoreURI, snapshotCheckpointURI, snapshotOnRelease := executionWorkspaceSnapshot(ws)
+	processMode, residentKey := executionWorkspaceHibernation(ws)
 	reuseKey := ""
 	claimName := deterministicSubstrateTaskActorID(string(task.UID), task.Status.Attempts+1)
+	poolTargetActors := int32(0)
 	if reusePolicy == corev1alpha1.WorkspaceReusePolicySession && task.Spec.SessionRef != nil {
 		reuseKey = task.Spec.SessionRef.Name
 		claimName = deterministicSubstrateSessionActorID(task.Namespace, templateNamespace, templateName, reuseKey)
+	}
+	if residentKey == "" && processMode == corev1alpha1.ExecutionWorkspaceProcessModeResident {
+		residentKey = deterministicSubstrateSessionActorID(task.Namespace, templateNamespace, templateName, firstNonEmpty(reuseKey, claimName))
+	}
+	poolName, poolNamespace := executionWorkspacePoolRef(ws, task.Namespace)
+	if poolName != "" {
+		if r.EnforceNamespaceIsolation && poolNamespace != task.Namespace {
+			return nil, fmt.Errorf(
+				"cross-namespace substrate actor poolRef not allowed when namespace isolation is enforced: pool %q in namespace %q, task in %q",
+				poolName,
+				poolNamespace,
+				task.Namespace,
+			)
+		}
+		pool, err := r.resolveExecutionWorkspacePool(ctx, poolNamespace, poolName, templateNamespace, templateName)
+		if err != nil {
+			return nil, err
+		}
+		prefix := deterministicSubstratePoolActorPrefix(poolNamespace, poolName)
+		ordinal := deterministicSubstratePoolActorOrdinal(
+			pool.Spec.TargetActors,
+			prefix,
+			task.Namespace,
+			string(task.UID),
+			fmt.Sprint(task.Status.Attempts+1),
+			reuseKey,
+		)
+		if reusePolicy == corev1alpha1.WorkspaceReusePolicySession && reuseKey != "" {
+			ordinal = deterministicSubstratePoolActorOrdinal(
+				pool.Spec.TargetActors,
+				prefix,
+				task.Namespace,
+				templateNamespace,
+				templateName,
+				reuseKey,
+			)
+		}
+		claimName = deterministicSubstratePoolActorID(prefix, ordinal)
+		cleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyDelete
+		poolTargetActors = pool.Spec.TargetActors
 	}
 
 	request := &ExecutionWorkspaceRequest{
@@ -300,6 +345,14 @@ func (r *TaskReconciler) resolveSubstrateWorkspaceRequest(ctx context.Context, t
 		ReuseKey:                           reuseKey,
 		CleanupPolicy:                      cleanupPolicy,
 		Boot:                               ws.Boot,
+		PoolName:                           poolName,
+		PoolNamespace:                      poolNamespace,
+		PoolTargetActors:                   poolTargetActors,
+		SnapshotRestoreURI:                 snapshotRestoreURI,
+		SnapshotCheckpointURI:              snapshotCheckpointURI,
+		SnapshotOnRelease:                  snapshotOnRelease,
+		ProcessMode:                        processMode,
+		ResidentKey:                        residentKey,
 		ClaimTimeout:                       cfg.ClaimTimeout,
 		CommandTimeout:                     cfg.CommandTimeout,
 		SubstrateAPIEndpoint:               cfg.APIEndpoint,
@@ -312,6 +365,7 @@ func (r *TaskReconciler) resolveSubstrateWorkspaceRequest(ctx context.Context, t
 		SubstrateSessionIdentitySecretName: cfg.SessionIdentitySecretName,
 		SubstrateSessionIdentitySecretKey:  cfg.SessionIdentitySecretKey,
 		SubstrateSessionIdentityRequired:   cfg.SessionIdentityRequired,
+		SubstrateSessionIdentityMintCert:   cfg.SessionIdentityMintCert,
 		SubstrateSessionIdentityAudience:   cfg.SessionIdentityAudience,
 		SubstrateSessionIdentityAppID:      cfg.SessionIdentityAppID,
 		SubstrateSessionIdentityUserID:     cfg.SessionIdentityUserID,
@@ -321,6 +375,98 @@ func (r *TaskReconciler) resolveSubstrateWorkspaceRequest(ctx context.Context, t
 		return nil, err
 	}
 	return request, nil
+}
+
+func executionWorkspacePoolRef(ws *corev1alpha1.ExecutionWorkspaceSpec, taskNamespace string) (string, string) {
+	if ws == nil || ws.PoolRef == nil {
+		return "", ""
+	}
+	return substrateActorPoolReference(ws.PoolRef, taskNamespace)
+}
+
+func substrateActorPoolReference(ref *corev1alpha1.SubstrateActorPoolReference, defaultNamespace string) (string, string) {
+	if ref == nil {
+		return "", ""
+	}
+	name := strings.TrimSpace(ref.Name)
+	if name == "" {
+		return "", ""
+	}
+	namespace := strings.TrimSpace(ref.Namespace)
+	if namespace == "" {
+		namespace = defaultNamespace
+	}
+	return name, namespace
+}
+
+func (r *TaskReconciler) resolveExecutionWorkspacePool(
+	ctx context.Context,
+	poolNamespace string,
+	poolName string,
+	templateNamespace string,
+	templateName string,
+) (*corev1alpha1.SubstrateActorPool, error) {
+	if r == nil || r.Client == nil {
+		return nil, fmt.Errorf("substrate actor poolRef %q/%q cannot be resolved without a Kubernetes client", poolNamespace, poolName)
+	}
+	return resolveSubstrateActorPoolReference(ctx, r.Client, poolNamespace, poolName, templateNamespace, templateName)
+}
+
+func resolveSubstrateActorPoolReference(
+	ctx context.Context,
+	reader client.Reader,
+	poolNamespace string,
+	poolName string,
+	templateNamespace string,
+	templateName string,
+) (*corev1alpha1.SubstrateActorPool, error) {
+	if reader == nil {
+		return nil, fmt.Errorf("substrate actor poolRef %q/%q cannot be resolved without a Kubernetes client", poolNamespace, poolName)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	pool := &corev1alpha1.SubstrateActorPool{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: poolName}, pool); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("substrate actor poolRef %q not found in namespace %q", poolName, poolNamespace)
+		}
+		return nil, fmt.Errorf("failed to resolve substrate actor poolRef %q in namespace %q: %w", poolName, poolNamespace, err)
+	}
+	if !pool.DeletionTimestamp.IsZero() {
+		return nil, fmt.Errorf("substrate actor poolRef %q in namespace %q is deleting", poolName, poolNamespace)
+	}
+	if err := validateSubstrateActorPoolTargetActors(poolNamespace, poolName, pool.Spec.TargetActors, false); err != nil {
+		return nil, err
+	}
+	if !controllerutil.ContainsFinalizer(pool, substrateActorPoolFinalizer) {
+		updater, ok := reader.(client.Client)
+		if !ok {
+			return nil, fmt.Errorf("substrate actor poolRef %q in namespace %q cannot persist cleanup finalizer", poolName, poolNamespace)
+		}
+		patch := client.MergeFrom(pool.DeepCopy())
+		controllerutil.AddFinalizer(pool, substrateActorPoolFinalizer)
+		if err := updater.Patch(ctx, pool, patch); err != nil {
+			return nil, fmt.Errorf("failed to persist cleanup finalizer for substrate actor poolRef %q in namespace %q: %w", poolName, poolNamespace, err)
+		}
+	}
+	poolTemplateNamespace := strings.TrimSpace(pool.Spec.TemplateRef.Namespace)
+	if poolTemplateNamespace == "" {
+		poolTemplateNamespace = pool.Namespace
+	}
+	poolTemplateName := strings.TrimSpace(pool.Spec.TemplateRef.Name)
+	if poolTemplateNamespace != strings.TrimSpace(templateNamespace) || poolTemplateName != strings.TrimSpace(templateName) {
+		return nil, fmt.Errorf(
+			"substrate actor poolRef %q in namespace %q uses template %s/%s, want %s/%s",
+			poolName,
+			poolNamespace,
+			poolTemplateNamespace,
+			poolTemplateName,
+			strings.TrimSpace(templateNamespace),
+			strings.TrimSpace(templateName),
+		)
+	}
+	return pool, nil
 }
 
 func (r *TaskReconciler) validateExecutionWorkspaceTemplateExists(ctx context.Context, task *corev1alpha1.Task, request *AgentSandboxWorkspaceRequest) error {
@@ -362,7 +508,15 @@ func (r *TaskReconciler) validateExecutionWorkspaceTemplateExists(ctx context.Co
 }
 
 func (r *TaskReconciler) validateSubstrateWorkspaceTemplate(ctx context.Context, task *corev1alpha1.Task, request *ExecutionWorkspaceRequest) error {
-	if r == nil || r.Client == nil || request == nil || request.TemplateName == "" {
+	_ = task
+	if r == nil {
+		return nil
+	}
+	return validateSubstrateActorTemplateResource(ctx, r.Client, request)
+}
+
+func validateSubstrateActorTemplateResource(ctx context.Context, reader client.Reader, request *ExecutionWorkspaceRequest) error {
+	if reader == nil || request == nil || request.TemplateName == "" {
 		return nil
 	}
 	if ctx == nil {
@@ -375,7 +529,7 @@ func (r *TaskReconciler) validateSubstrateWorkspaceTemplate(ctx context.Context,
 		Version: "v1alpha1",
 		Kind:    "ActorTemplate",
 	})
-	err := r.Get(ctx, types.NamespacedName{Namespace: request.TemplateNamespace, Name: request.TemplateName}, template)
+	err := reader.Get(ctx, types.NamespacedName{Namespace: request.TemplateNamespace, Name: request.TemplateName}, template)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return fmt.Errorf(
@@ -427,7 +581,6 @@ func (r *TaskReconciler) validateSubstrateWorkspaceTemplate(ctx context.Context,
 	if err := validateSubstrateWorkspaceTemplateBootstrapEnv(template, request); err != nil {
 		return fmt.Errorf("substrate ActorTemplate %q in namespace %q %w", request.TemplateName, request.TemplateNamespace, err)
 	}
-	_ = task
 	return nil
 }
 

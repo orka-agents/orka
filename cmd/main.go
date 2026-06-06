@@ -275,6 +275,9 @@ func main() {
 	flag.BoolVar(&substrateConfig.SessionIdentityRequired, "substrate-session-identity-required",
 		substrateConfig.SessionIdentityRequired,
 		"Fail Substrate workspace handoff when SessionIdentity cannot mint a per-actor JWT.")
+	flag.BoolVar(&substrateConfig.SessionIdentityMintCert, "substrate-session-identity-mint-cert",
+		substrateConfig.SessionIdentityMintCert,
+		"Unsupported alpha option for Substrate SessionIdentity certificate minting; currently rejected when enabled.")
 	flag.StringVar(&substrateConfig.SessionIdentityAudience, "substrate-session-identity-audience",
 		substrateConfig.SessionIdentityAudience,
 		"Comma-separated audiences requested from Substrate SessionIdentity minted JWTs.")
@@ -690,10 +693,23 @@ func main() {
 	}
 
 	if err := (&controller.ToolReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:                    mgr.GetClient(),
+		Scheme:                    mgr.GetScheme(),
+		SubstrateEnabled:          substrateEnabled,
+		SubstrateConfig:           substrateConfig,
+		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Tool")
+		os.Exit(1)
+	}
+
+	if err := (&controller.SubstrateActorPoolReconciler{
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		SubstrateEnabled: substrateEnabled,
+		SubstrateConfig:  substrateConfig,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "SubstrateActorPool")
 		os.Exit(1)
 	}
 

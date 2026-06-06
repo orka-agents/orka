@@ -11,16 +11,47 @@ export const httpExecutionSchema = z.object({
   authBodyKey: z.string().optional(),
 })
 
+export const workspaceTemplateReferenceSchema = z.object({
+  name: z.string().optional(),
+  namespace: z.string().optional(),
+})
+
+export const substrateActorPoolReferenceSchema = z.object({
+  name: z.string().optional(),
+  namespace: z.string().optional(),
+})
+
+export const mcpToolServerSchema = z.object({
+  path: z.string().optional(),
+  substrateActor: z.object({
+    templateRef: workspaceTemplateReferenceSchema,
+    poolRef: substrateActorPoolReferenceSchema.optional(),
+    boot: z.boolean().optional(),
+  }),
+})
+
 export const toolSpecSchema = z.object({
   description: z.string(),
   parameters: z.any().optional(),
-  http: httpExecutionSchema,
+  http: httpExecutionSchema.optional(),
+  mcp: mcpToolServerSchema.optional(),
+}).refine((spec) => spec.http || spec.mcp?.substrateActor, {
+  message: 'http or mcp.substrateActor is required',
+  path: ['http'],
 })
 
 export const toolStatusSchema = z.object({
   available: z.boolean(),
   lastCheck: z.string().optional(),
   error: z.string().optional(),
+  endpoint: z.string().optional(),
+  actor: z.object({
+    provider: z.string().optional(),
+    actorID: z.string().optional(),
+    routeHost: z.string().optional(),
+    templateRef: workspaceTemplateReferenceSchema.optional(),
+    poolRef: substrateActorPoolReferenceSchema.optional(),
+  }).optional(),
   conditions: z.array(conditionSchema).optional(),
 })
 

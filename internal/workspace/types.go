@@ -135,9 +135,10 @@ type ClaimResult struct {
 
 // WaitReadyRequest waits until a workspace can execute commands.
 type WaitReadyRequest struct {
-	Ref     WorkspaceRef
-	Timeout time.Duration
-	Boot    bool
+	Ref                WorkspaceRef
+	Timeout            time.Duration
+	Boot               bool
+	SnapshotRestoreURI string
 }
 
 // ReadyResult describes a workspace that became ready.
@@ -160,6 +161,8 @@ type ExecRequest struct {
 	Stdin          []byte
 	Timeout        time.Duration
 	MaxOutputBytes int64
+	Resident       bool
+	ResidentKey    string
 }
 
 // ExecResult captures command execution output and metadata.
@@ -252,6 +255,9 @@ type ReleaseRequest struct {
 	// SkipScrub bypasses backend daemon scrubbing when the caller knows the
 	// current handoff credential is unavailable or not yet installed.
 	SkipScrub bool
+	// SnapshotCheckpointURI asks backends that support explicit snapshot
+	// addressing to checkpoint to this provider-native URI before releasing.
+	SnapshotCheckpointURI string
 }
 
 // ReleaseResult describes the release/retain decision.

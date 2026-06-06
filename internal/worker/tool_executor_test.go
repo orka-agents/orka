@@ -76,7 +76,7 @@ func TestToolExecutor_Execute_Success(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 			},
 		},
@@ -90,6 +90,64 @@ func TestToolExecutor_Execute_Success(t *testing.T) {
 
 	if result != expectedResponse {
 		t.Errorf("Execute() = %v, want %v", result, expectedResponse)
+	}
+}
+
+func TestToolExecutor_Execute_MCPSubstrateActorUsesStatusEndpointAndRouteHost(t *testing.T) {
+	var gotHost string
+	expectedResponse := `{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"mcp"}]}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(expectedResponse)) //nolint:errcheck
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "lookup"},
+		Spec: corev1alpha1.ToolSpec{
+			MCP: &corev1alpha1.MCPToolServer{
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Endpoint: server.URL + "/mcp",
+			Actor: &corev1alpha1.ToolActorStatus{
+				RouteHost: "actor-1.actors.test",
+			},
+		},
+	}
+
+	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != "mcp" {
+		t.Fatalf("Execute() = %q, want mcp", result)
+	}
+	if gotHost != "actor-1.actors.test" {
+		t.Fatalf("Host = %q, want actor route host", gotHost)
+	}
+}
+
+func TestDecodeMCPToolCallResponsePreservesNonTextContent(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"resource","resource":{"uri":"file:///tmp/result.json","mimeType":"application/json","text":"{\"ok\":true}"}}]}}`)
+
+	result, err := decodeMCPToolCallResponse(body)
+	if err != nil {
+		t.Fatalf("decodeMCPToolCallResponse() error = %v", err)
+	}
+
+	want := `{"type":"resource","resource":{"uri":"file:///tmp/result.json","mimeType":"application/json","text":"{\"ok\":true}"}}`
+	if result != want {
+		t.Fatalf("decodeMCPToolCallResponse() = %q, want raw content %q", result, want)
 	}
 }
 
@@ -109,7 +167,7 @@ func TestToolExecutor_Execute_DefaultMethodPOST(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL:    server.URL,
 				Method: "", // Empty, should default to POST
 			},
@@ -142,7 +200,7 @@ func TestToolExecutor_Execute_CustomMethod(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL:    server.URL,
 				Method: http.MethodPut,
 			},
@@ -175,7 +233,7 @@ func TestToolExecutor_Execute_CustomHeaders(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 				Headers: map[string]string{
 					"X-Custom-Header": "custom-value",
@@ -219,7 +277,7 @@ func TestToolExecutor_Execute_AuthHeader(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 				AuthSecretRef: &corev1alpha1.SecretKeySelector{
 					Name: "secret-name",
@@ -261,7 +319,7 @@ func TestToolExecutor_Execute_PropagatesTransactionTokenFile(t *testing.T) {
 	}
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{URL: server.URL},
+			HTTP: &corev1alpha1.HTTPExecution{URL: server.URL},
 		},
 	}
 
@@ -294,7 +352,7 @@ func TestToolExecutor_Execute_FailsClosedOnConfiguredTransactionTokenHeader(t *t
 	}
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 				Headers: map[string]string{
 					kontxttoken.HeaderName: "user-configured-token",
@@ -401,7 +459,7 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{Name: "downstream"},
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{URL: toolServer.URL},
+			HTTP: &corev1alpha1.HTTPExecution{URL: toolServer.URL},
 		},
 	}
 
@@ -478,7 +536,7 @@ func TestToolExecutor_Execute_DefaultsOutboundTTSToServiceAccountSubjectToken(t 
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{Name: "downstream"},
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{URL: toolServer.URL},
+			HTTP: &corev1alpha1.HTTPExecution{URL: toolServer.URL},
 		},
 	}
 
@@ -541,7 +599,7 @@ func TestToolExecutor_Execute_ReusesOutboundTTSClient(t *testing.T) {
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{Name: "downstream"},
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{URL: toolServer.URL},
+			HTTP: &corev1alpha1.HTTPExecution{URL: toolServer.URL},
 		},
 	}
 
@@ -600,7 +658,7 @@ func TestToolExecutor_Execute_FailsClosedWhenOutboundTTSExchangeFails(t *testing
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{Name: "downstream"},
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{URL: toolServer.URL},
+			HTTP: &corev1alpha1.HTTPExecution{URL: toolServer.URL},
 		},
 	}
 
@@ -622,7 +680,7 @@ func TestToolExecutor_Execute_TransactionTokenFileMissingFails(t *testing.T) {
 	}
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{URL: "http://127.0.0.1"},
+			HTTP: &corev1alpha1.HTTPExecution{URL: "http://127.0.0.1"},
 		},
 	}
 
@@ -654,7 +712,7 @@ func TestToolExecutor_Execute_AuthBody(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 				AuthSecretRef: &corev1alpha1.SecretKeySelector{
 					Name: "secret-name",
@@ -694,7 +752,7 @@ func TestToolExecutor_Execute_AuthBodyMissingKey(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: "http://localhost",
 				AuthSecretRef: &corev1alpha1.SecretKeySelector{
 					Name: "secret-name",
@@ -727,7 +785,7 @@ func TestToolExecutor_Execute_HTTPError(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 			},
 		},
@@ -759,7 +817,7 @@ func TestToolExecutor_Execute_HTTPErrorRedactsPropagatedTransactionToken(t *test
 	}
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{URL: server.URL},
+			HTTP: &corev1alpha1.HTTPExecution{URL: server.URL},
 		},
 	}
 
@@ -784,7 +842,7 @@ func TestToolExecutor_Execute_InvalidArgs(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: "http://localhost",
 			},
 		},
@@ -811,7 +869,7 @@ func TestToolExecutor_Execute_Timeout(t *testing.T) {
 	timeout := metav1.Duration{Duration: 5 * time.Second}
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL:     server.URL,
 				Timeout: &timeout,
 			},
@@ -838,7 +896,7 @@ func TestToolExecutor_Execute_MissingAuthSecret(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: "http://localhost",
 				AuthSecretRef: &corev1alpha1.SecretKeySelector{
 					Name: "nonexistent-secret",
@@ -965,7 +1023,7 @@ func TestToolExecutor_Execute_EmptyArgs(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 			},
 		},
@@ -1003,7 +1061,7 @@ func TestToolExecutor_Execute_DefaultAuthInject(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 				AuthSecretRef: &corev1alpha1.SecretKeySelector{
 					Name: "secret-name",
@@ -1044,7 +1102,7 @@ func TestToolExecutor_Execute_URLInterpolation(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL:    server.URL + "/repos/{{owner}}/{{repo}}/commits/{{ref}}/check-runs",
 				Method: http.MethodGet,
 			},
@@ -1095,7 +1153,7 @@ func TestToolExecutor_Execute_URLInterpolation_Partial(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL:    server.URL + "/repos/{{owner}}/{{repo}}/pulls/{{pull_number}}/merge",
 				Method: http.MethodPut,
 			},
@@ -1146,7 +1204,7 @@ func TestToolExecutor_Execute_URLInterpolation_NoPlaceholders(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL + "/api/search",
 			},
 		},
@@ -1189,7 +1247,7 @@ func TestToolExecutor_Execute_ResponseSizeLimit(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 			},
 		},

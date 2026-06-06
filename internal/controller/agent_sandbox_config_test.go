@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 const (
@@ -222,6 +223,22 @@ func TestSubstrateConfigValidateRequiresSessionIdentitySecretWhenRequired(t *tes
 	}
 	if got := cfg.WithDefaults().SessionIdentitySecretKey; got != "token" {
 		t.Fatalf("default SessionIdentity secret key = %q, want token", got)
+	}
+}
+
+func TestSubstrateConfigValidateRejectsSessionIdentityCertificateMinting(t *testing.T) {
+	cfg := DefaultSubstrateConfig()
+	cfg.APIInsecureSkipVerify = true
+	cfg.BootstrapSecretName = testSubstrateBootstrapSecretName
+	cfg.SessionIdentitySecretName = testSubstrateSessionIdentitySecretName
+	cfg.SessionIdentityMintCert = true
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil, want unsupported certificate minting error")
+	}
+	if !strings.Contains(err.Error(), "certificate minting is not supported yet") {
+		t.Fatalf("Validate() error = %q, want unsupported certificate minting context", err.Error())
 	}
 }
 
@@ -719,6 +736,347 @@ func TestResolveExecutionWorkspaceRequest(t *testing.T) {
 			t.Fatalf("request SessionIdentity config = %#v, want resolved controller config", request)
 		}
 	})
+
+}
+
+func TestResolveSubstrateWorkspaceRequestResolvesPoolRef(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   "ate.dev",
+		Version: "v1alpha1",
+		Kind:    "ActorTemplate",
+	}, &unstructured.Unstructured{})
+	template := readySubstrateActorTemplateForTest([]any{
+		map[string]any{
+			"name":  workerenv.WorkspaceBootstrapToken,
+			"value": "bootstrap-token",
+		},
+	})
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "codex-pool", Namespace: defaultNS},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex", Namespace: "ate-demo"},
+			TargetActors: 3,
+		},
+	}
+	r := &TaskReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template, pool).Build(),
+		SubstrateEnabled: true,
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "agent-task",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			Execution: &corev1alpha1.ExecutionSpec{
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					Enabled:  true,
+					Provider: corev1alpha1.WorkspaceProviderSubstrate,
+					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
+						Name:      "orka-codex",
+						Namespace: "ate-demo",
+					},
+					PoolRef: &corev1alpha1.SubstrateActorPoolReference{Name: "codex-pool"},
+				},
+			},
+		},
+	}
+
+	request, err := r.resolveSubstrateWorkspaceRequest(context.Background(), task)
+	if err != nil {
+		t.Fatalf("resolveSubstrateWorkspaceRequest() error = %v", err)
+	}
+	if request.PoolName != "codex-pool" || request.PoolNamespace != defaultNS {
+		t.Fatalf("request pool = %s/%s, want %s/codex-pool", request.PoolNamespace, request.PoolName, defaultNS)
+	}
+	if request.CleanupPolicy != corev1alpha1.WorkspaceCleanupPolicyDelete {
+		t.Fatalf("cleanup policy = %q, want delete for pool actor", request.CleanupPolicy)
+	}
+	var gotPool corev1alpha1.SubstrateActorPool
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "codex-pool", Namespace: defaultNS}, &gotPool); err != nil {
+		t.Fatalf("Get pool: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(&gotPool, substrateActorPoolFinalizer) {
+		t.Fatal("pool finalizer was not persisted during poolRef resolution")
+	}
+	prefix := deterministicSubstratePoolActorPrefix(defaultNS, "codex-pool")
+	if !strings.HasPrefix(request.ClaimName, prefix+"-") {
+		t.Fatalf("claim name = %q, want pool prefix %q", request.ClaimName, prefix+"-")
+	}
+	if request.ClaimName == deterministicSubstrateTaskActorID(string(task.UID), task.Status.Attempts+1) {
+		t.Fatalf("claim name = %q, want pool actor id instead of task actor id", request.ClaimName)
+	}
+}
+
+func TestResolveSubstrateWorkspaceRequestRejectsCrossNamespacePoolRefWhenIsolated(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   "ate.dev",
+		Version: "v1alpha1",
+		Kind:    "ActorTemplate",
+	}, &unstructured.Unstructured{})
+	template := readySubstrateActorTemplateForTest([]any{
+		map[string]any{
+			"name":  workerenv.WorkspaceBootstrapToken,
+			"value": "bootstrap-token",
+		},
+	})
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "codex-pool", Namespace: "shared"},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex", Namespace: "ate-demo"},
+			TargetActors: 3,
+		},
+	}
+	r := &TaskReconciler{
+		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template, pool).Build(),
+		SubstrateEnabled:          true,
+		EnforceNamespaceIsolation: true,
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "agent-task",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			Execution: &corev1alpha1.ExecutionSpec{
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					Enabled:  true,
+					Provider: corev1alpha1.WorkspaceProviderSubstrate,
+					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
+						Name:      "orka-codex",
+						Namespace: "ate-demo",
+					},
+					PoolRef: &corev1alpha1.SubstrateActorPoolReference{Name: "codex-pool", Namespace: "shared"},
+				},
+			},
+		},
+	}
+
+	request, err := r.resolveSubstrateWorkspaceRequest(context.Background(), task)
+	if err == nil {
+		t.Fatal("resolveSubstrateWorkspaceRequest() error = nil, want namespace isolation error")
+	}
+	if request != nil {
+		t.Fatalf("request = %#v, want nil on namespace isolation error", request)
+	}
+	if !strings.Contains(err.Error(), "cross-namespace substrate actor poolRef not allowed") {
+		t.Fatalf("error = %q, want namespace isolation failure", err.Error())
+	}
+	var gotPool corev1alpha1.SubstrateActorPool
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "codex-pool", Namespace: "shared"}, &gotPool); err != nil {
+		t.Fatalf("Get pool: %v", err)
+	}
+	if controllerutil.ContainsFinalizer(&gotPool, substrateActorPoolFinalizer) {
+		t.Fatal("cross-namespace pool finalizer was added before namespace isolation rejection")
+	}
+}
+
+func TestResolveSubstrateWorkspaceRequestRejectsOversizedPoolRefBeforeFinalizer(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   "ate.dev",
+		Version: "v1alpha1",
+		Kind:    "ActorTemplate",
+	}, &unstructured.Unstructured{})
+	template := readySubstrateActorTemplateForTest([]any{
+		map[string]any{
+			"name":  workerenv.WorkspaceBootstrapToken,
+			"value": "bootstrap-token",
+		},
+	})
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "codex-pool", Namespace: defaultNS},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex", Namespace: "ate-demo"},
+			TargetActors: corev1alpha1.MaxSubstrateActorPoolTargetActors + 1,
+		},
+	}
+	r := &TaskReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template, pool).Build(),
+		SubstrateEnabled: true,
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "agent-task",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			Execution: &corev1alpha1.ExecutionSpec{
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					Enabled:  true,
+					Provider: corev1alpha1.WorkspaceProviderSubstrate,
+					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
+						Name:      "orka-codex",
+						Namespace: "ate-demo",
+					},
+					PoolRef: &corev1alpha1.SubstrateActorPoolReference{Name: "codex-pool"},
+				},
+			},
+		},
+	}
+
+	request, err := r.resolveSubstrateWorkspaceRequest(context.Background(), task)
+	if err == nil {
+		t.Fatal("resolveSubstrateWorkspaceRequest() error = nil, want targetActors cap error")
+	}
+	if !strings.Contains(err.Error(), "no greater than") {
+		t.Fatalf("resolveSubstrateWorkspaceRequest() error = %q, want targetActors cap context", err)
+	}
+	if request != nil {
+		t.Fatalf("request = %#v, want nil on oversized poolRef", request)
+	}
+	var gotPool corev1alpha1.SubstrateActorPool
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "codex-pool", Namespace: defaultNS}, &gotPool); err != nil {
+		t.Fatalf("Get pool: %v", err)
+	}
+	if controllerutil.ContainsFinalizer(&gotPool, substrateActorPoolFinalizer) {
+		t.Fatal("oversized pool finalizer was added before validation rejection")
+	}
+}
+
+func TestResolveSubstrateWorkspaceRequestRejectsInvalidPoolRef(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   "ate.dev",
+		Version: "v1alpha1",
+		Kind:    "ActorTemplate",
+	}, &unstructured.Unstructured{})
+	template := readySubstrateActorTemplateForTest([]any{
+		map[string]any{
+			"name":  workerenv.WorkspaceBootstrapToken,
+			"value": "bootstrap-token",
+		},
+	})
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "codex-pool", Namespace: defaultNS},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "other-template", Namespace: "ate-demo"},
+			TargetActors: 3,
+		},
+	}
+	r := &TaskReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template, pool).Build(),
+		SubstrateEnabled: true,
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "agent-task",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			Execution: &corev1alpha1.ExecutionSpec{
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					Enabled:  true,
+					Provider: corev1alpha1.WorkspaceProviderSubstrate,
+					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
+						Name:      "orka-codex",
+						Namespace: "ate-demo",
+					},
+					PoolRef: &corev1alpha1.SubstrateActorPoolReference{Name: "codex-pool"},
+				},
+			},
+		},
+	}
+
+	request, err := r.resolveSubstrateWorkspaceRequest(context.Background(), task)
+	if err == nil {
+		t.Fatal("resolveSubstrateWorkspaceRequest() error = nil, want template mismatch")
+	}
+	if !strings.Contains(err.Error(), "uses template ate-demo/other-template") {
+		t.Fatalf("resolveSubstrateWorkspaceRequest() error = %q, want pool template mismatch", err)
+	}
+	if request != nil {
+		t.Fatalf("request = %#v, want nil on invalid poolRef", request)
+	}
+}
+
+func TestResolveSubstrateWorkspaceRequestRejectsDeletingPoolRef(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   "ate.dev",
+		Version: "v1alpha1",
+		Kind:    "ActorTemplate",
+	}, &unstructured.Unstructured{})
+	template := readySubstrateActorTemplateForTest([]any{
+		map[string]any{
+			"name":  workerenv.WorkspaceBootstrapToken,
+			"value": "bootstrap-token",
+		},
+	})
+	deletingAt := metav1.Now()
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "codex-pool",
+			Namespace:         defaultNS,
+			DeletionTimestamp: &deletingAt,
+			Finalizers:        []string{substrateActorPoolFinalizer},
+		},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "orka-codex", Namespace: "ate-demo"},
+			TargetActors: 3,
+		},
+	}
+	r := &TaskReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template, pool).Build(),
+		SubstrateEnabled: true,
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "agent-task",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			Execution: &corev1alpha1.ExecutionSpec{
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					Enabled:  true,
+					Provider: corev1alpha1.WorkspaceProviderSubstrate,
+					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
+						Name:      "orka-codex",
+						Namespace: "ate-demo",
+					},
+					PoolRef: &corev1alpha1.SubstrateActorPoolReference{Name: "codex-pool"},
+				},
+			},
+		},
+	}
+
+	request, err := r.resolveSubstrateWorkspaceRequest(context.Background(), task)
+	if err == nil {
+		t.Fatal("resolveSubstrateWorkspaceRequest() error = nil, want deleting pool error")
+	}
+	if !strings.Contains(err.Error(), "is deleting") {
+		t.Fatalf("resolveSubstrateWorkspaceRequest() error = %q, want deleting pool context", err)
+	}
+	if request != nil {
+		t.Fatalf("request = %#v, want nil on deleting poolRef", request)
+	}
 }
 
 func TestResolveExecutionWorkspaceRequestValidatesResolvedTemplateNamespace(t *testing.T) {

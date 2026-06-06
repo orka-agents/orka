@@ -122,12 +122,25 @@ rules:
   - update
   - watch
 - apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - core.orka.ai
   resources:
   - agents
   - providers
   - repositoryscans
   - skills
+  - substrateactorpools
   - tasks
   - tools
   verbs:
@@ -145,6 +158,7 @@ rules:
   - providers/finalizers
   - repositoryscans/finalizers
   - skills/finalizers
+  - substrateactorpools/finalizers
   - tasks/finalizers
   - tools/finalizers
   verbs:
@@ -156,6 +170,7 @@ rules:
   - providers/status
   - repositoryscans/status
   - skills/status
+  - substrateactorpools/status
   - tasks/status
   - tools/status
   verbs:

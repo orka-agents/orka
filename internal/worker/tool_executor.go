@@ -29,7 +29,12 @@ import (
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
-// ToolExecutor handles execution of custom Tool CRDs via HTTP
+const (
+	mcpJSONRPCVersion  = "2.0"
+	mcpToolsCallMethod = "tools/call"
+)
+
+// ToolExecutor handles execution of custom Tool CRDs via HTTP or MCP-over-HTTP.
 type ToolExecutor struct {
 	client     *http.Client
 	secretPath string
@@ -64,107 +69,21 @@ func NewToolExecutor() *ToolExecutor {
 	}
 }
 
-// Execute executes a Tool CRD by making an HTTP request
+// Execute executes a Tool CRD by making an HTTP request.
 func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (string, error) {
-	// Parse the arguments into a map for potential body injection
-	var params map[string]any
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &params); err != nil {
-			return "", fmt.Errorf("failed to parse tool arguments: %w", err)
-		}
-	} else {
-		params = make(map[string]any)
-	}
-
-	// Get auth token if configured
-	var authToken string
-	if tool.Spec.HTTP.AuthSecretRef != nil {
-		token, err := e.getSecretKey(ctx, tool.Spec.HTTP.AuthSecretRef.Name, tool.Spec.HTTP.AuthSecretRef.Key)
-		if err != nil {
-			return "", fmt.Errorf("failed to get auth secret: %w", err)
-		}
-		authToken = token
-	}
-
-	// Handle body-based auth injection
-	authInject := tool.Spec.HTTP.AuthInject
-	if authInject == "" {
-		authInject = "header" // default
-	}
-
-	if authInject == "body" && authToken != "" {
-		bodyKey := tool.Spec.HTTP.AuthBodyKey
-		if bodyKey == "" {
-			return "", fmt.Errorf("authBodyKey is required when authInject=body")
-		}
-		params[bodyKey] = authToken
-	}
-
-	// Interpolate URL path parameters
-	url := tool.Spec.HTTP.URL
-	interpolatedKeys := map[string]bool{}
-	for key, val := range params {
-		placeholder := "{{" + key + "}}"
-		if strings.Contains(url, placeholder) {
-			url = strings.ReplaceAll(url, placeholder, neturl.PathEscape(fmt.Sprintf("%v", val)))
-			interpolatedKeys[key] = true
-		}
-	}
-
-	// Remove interpolated keys from body params
-	for key := range interpolatedKeys {
-		delete(params, key)
-	}
-
-	// Build request body
-	body, err := json.Marshal(params)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal request body: %w", err)
-	}
-
-	// Determine HTTP method
-	method := tool.Spec.HTTP.Method
-	if method == "" {
-		method = http.MethodPost
-	}
-
-	// Create request
-	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Set default content type for JSON
-	req.Header.Set("Content-Type", "application/json")
-
-	// Add configured headers
-	for k, v := range tool.Spec.HTTP.Headers {
-		req.Header.Set(k, v)
-	}
-
-	// Handle header-based auth injection
-	if authInject == "header" && authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+authToken)
-	}
-	transactionToken, err := e.outboundTransactionToken(ctx, tool)
+	prepared, err := e.prepareRequest(ctx, tool, args)
 	if err != nil {
 		return "", err
-	}
-	if transactionToken != "" {
-		if values, ok := req.Header[http.CanonicalHeaderKey(contexttoken.HeaderName)]; ok && len(values) > 0 {
-			return "", fmt.Errorf("tool configured reserved header %q while transaction token propagation is enabled", contexttoken.HeaderName)
-		}
-		req.Header.Set(contexttoken.HeaderName, transactionToken)
 	}
 
 	// Configure timeout
 	httpClient := e.client
-	if tool.Spec.HTTP.Timeout != nil {
-		httpClient = &http.Client{Timeout: tool.Spec.HTTP.Timeout.Duration}
+	if prepared.httpConfig.Timeout != nil {
+		httpClient = &http.Client{Timeout: prepared.httpConfig.Timeout.Duration}
 	}
 
 	// Execute request
-	resp, err := httpClient.Do(req)
+	resp, err := httpClient.Do(prepared.request)
 	if err != nil {
 		return "", fmt.Errorf("tool request failed: %w", err)
 	}
@@ -178,10 +97,295 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 
 	// Check for HTTP errors
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("tool returned HTTP %d: %s", resp.StatusCode, redactToolHTTPErrorBody(string(respBody), authToken, transactionToken))
+		return "", fmt.Errorf("tool returned HTTP %d: %s", resp.StatusCode, redactToolHTTPErrorBody(string(respBody), prepared.authToken, prepared.transactionToken))
+	}
+
+	if prepared.mcp {
+		return decodeMCPToolCallResponse(respBody, prepared.authToken, prepared.transactionToken)
 	}
 
 	return string(respBody), nil
+}
+
+type preparedToolRequest struct {
+	httpConfig       corev1alpha1.HTTPExecution
+	request          *http.Request
+	authToken        string
+	transactionToken string
+	mcp              bool
+}
+
+func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
+	var params map[string]any
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &params); err != nil {
+			return preparedToolRequest{}, fmt.Errorf("failed to parse tool arguments: %w", err)
+		}
+	} else {
+		params = make(map[string]any)
+	}
+
+	httpConfig, routeHost, err := toolHTTPConfig(tool)
+	if err != nil {
+		return preparedToolRequest{}, err
+	}
+	isMCP := isMCPSubstrateActorTool(tool)
+
+	var authToken string
+	if httpConfig.AuthSecretRef != nil {
+		token, err := e.getSecretKey(ctx, httpConfig.AuthSecretRef.Name, httpConfig.AuthSecretRef.Key)
+		if err != nil {
+			return preparedToolRequest{}, fmt.Errorf("failed to get auth secret: %w", err)
+		}
+		authToken = token
+	}
+
+	authInject, err := applyToolBodyAuth(params, httpConfig, authToken)
+	if err != nil {
+		return preparedToolRequest{}, err
+	}
+
+	url := httpConfig.URL
+	method := httpConfig.Method
+	if method == "" {
+		method = http.MethodPost
+	}
+	var body []byte
+	if isMCP {
+		method = http.MethodPost
+		body, err = marshalMCPToolCallRequest(tool, params)
+		if err != nil {
+			return preparedToolRequest{}, err
+		}
+	} else {
+		url = interpolateToolURL(url, params)
+		body, err = json.Marshal(params)
+		if err != nil {
+			return preparedToolRequest{}, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+	if err != nil {
+		return preparedToolRequest{}, fmt.Errorf("failed to create request: %w", err)
+	}
+	if routeHost != "" {
+		req.Host = routeHost
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if isMCP {
+		req.Header.Set("Accept", "application/json")
+	}
+	for k, v := range httpConfig.Headers {
+		req.Header.Set(k, v)
+	}
+	if authInject == "header" && authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+authToken)
+	}
+
+	transactionToken, err := e.outboundTransactionToken(ctx, tool)
+	if err != nil {
+		return preparedToolRequest{}, err
+	}
+	if transactionToken != "" {
+		if values, ok := req.Header[http.CanonicalHeaderKey(contexttoken.HeaderName)]; ok && len(values) > 0 {
+			return preparedToolRequest{}, fmt.Errorf("tool configured reserved header %q while transaction token propagation is enabled", contexttoken.HeaderName)
+		}
+		req.Header.Set(contexttoken.HeaderName, transactionToken)
+	}
+
+	return preparedToolRequest{
+		httpConfig:       httpConfig,
+		request:          req,
+		authToken:        authToken,
+		transactionToken: transactionToken,
+		mcp:              isMCP,
+	}, nil
+}
+
+func toolHTTPConfig(tool *corev1alpha1.Tool) (corev1alpha1.HTTPExecution, string, error) {
+	var httpConfig corev1alpha1.HTTPExecution
+	if tool != nil && tool.Spec.HTTP != nil {
+		httpConfig = *tool.Spec.HTTP
+	}
+	if !isMCPSubstrateActorTool(tool) {
+		if tool == nil || tool.Spec.HTTP == nil {
+			return corev1alpha1.HTTPExecution{}, "", fmt.Errorf("http tool endpoint is not configured")
+		}
+		return httpConfig, "", nil
+	}
+
+	httpConfig.URL = strings.TrimSpace(tool.Status.Endpoint)
+	if httpConfig.Method == "" {
+		httpConfig.Method = http.MethodPost
+	}
+	routeHost := ""
+	if tool.Status.Actor != nil {
+		routeHost = strings.TrimSpace(tool.Status.Actor.RouteHost)
+	}
+	if httpConfig.URL == "" || routeHost == "" {
+		return corev1alpha1.HTTPExecution{}, "", fmt.Errorf("MCP tool actor endpoint is not ready")
+	}
+	return httpConfig, routeHost, nil
+}
+
+func isMCPSubstrateActorTool(tool *corev1alpha1.Tool) bool {
+	return tool != nil && tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil
+}
+
+type mcpToolCallRequest struct {
+	JSONRPC string                `json:"jsonrpc"`
+	ID      string                `json:"id"`
+	Method  string                `json:"method"`
+	Params  mcpToolCallParameters `json:"params"`
+}
+
+type mcpToolCallParameters struct {
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments,omitempty"`
+}
+
+func marshalMCPToolCallRequest(tool *corev1alpha1.Tool, arguments map[string]any) ([]byte, error) {
+	toolName := strings.TrimSpace(tool.Name)
+	if toolName == "" {
+		return nil, fmt.Errorf("MCP tool name is required")
+	}
+	body, err := json.Marshal(mcpToolCallRequest{
+		JSONRPC: mcpJSONRPCVersion,
+		ID:      "1",
+		Method:  mcpToolsCallMethod,
+		Params: mcpToolCallParameters{
+			Name:      toolName,
+			Arguments: arguments,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal MCP tool call request: %w", err)
+	}
+	return body, nil
+}
+
+type mcpToolCallResponse struct {
+	JSONRPC string           `json:"jsonrpc,omitempty"`
+	ID      any              `json:"id,omitempty"`
+	Result  json.RawMessage  `json:"result,omitempty"`
+	Error   *mcpJSONRPCError `json:"error,omitempty"`
+}
+
+type mcpJSONRPCError struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data,omitempty"`
+}
+
+type mcpToolCallResult struct {
+	Content []mcpToolContent `json:"content,omitempty"`
+	IsError bool             `json:"isError,omitempty"`
+}
+
+type mcpToolContent struct {
+	Type string          `json:"type,omitempty"`
+	Text string          `json:"text,omitempty"`
+	Raw  json.RawMessage `json:"-"`
+}
+
+func (c *mcpToolContent) UnmarshalJSON(data []byte) error {
+	type mcpToolContentAlias struct {
+		Type string `json:"type,omitempty"`
+		Text string `json:"text,omitempty"`
+	}
+	var parsed mcpToolContentAlias
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	c.Type = parsed.Type
+	c.Text = parsed.Text
+	c.Raw = append(json.RawMessage(nil), data...)
+	return nil
+}
+
+func decodeMCPToolCallResponse(body []byte, secrets ...string) (string, error) {
+	var response mcpToolCallResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", fmt.Errorf("failed to parse MCP response: %w", err)
+	}
+	if response.Error != nil {
+		message := response.Error.Message
+		if len(response.Error.Data) > 0 {
+			message = strings.TrimSpace(message + ": " + string(response.Error.Data))
+		}
+		return "", fmt.Errorf("MCP tool returned error %d: %s", response.Error.Code, redactToolHTTPErrorBody(message, secrets...))
+	}
+	if len(response.Result) == 0 {
+		return "", fmt.Errorf("MCP response missing result")
+	}
+
+	var result mcpToolCallResult
+	if err := json.Unmarshal(response.Result, &result); err == nil && (len(result.Content) > 0 || result.IsError) {
+		text := mcpToolContentText(result.Content)
+		if result.IsError {
+			if text == "" {
+				text = string(response.Result)
+			}
+			return "", fmt.Errorf("MCP tool reported error: %s", redactToolHTTPErrorBody(text, secrets...))
+		}
+		if text != "" {
+			return text, nil
+		}
+	}
+
+	return string(response.Result), nil
+}
+
+func mcpToolContentText(content []mcpToolContent) string {
+	parts := make([]string, 0, len(content))
+	for _, item := range content {
+		if item.Type == "text" && item.Text != "" {
+			parts = append(parts, item.Text)
+			continue
+		}
+		if len(item.Raw) > 0 {
+			parts = append(parts, string(item.Raw))
+			continue
+		}
+		raw, err := json.Marshal(item)
+		if err == nil && string(raw) != "{}" {
+			parts = append(parts, string(raw))
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func applyToolBodyAuth(params map[string]any, httpConfig corev1alpha1.HTTPExecution, authToken string) (string, error) {
+	authInject := httpConfig.AuthInject
+	if authInject == "" {
+		authInject = "header"
+	}
+	if authInject != "body" || authToken == "" {
+		return authInject, nil
+	}
+	bodyKey := httpConfig.AuthBodyKey
+	if bodyKey == "" {
+		return "", fmt.Errorf("authBodyKey is required when authInject=body")
+	}
+	params[bodyKey] = authToken
+	return authInject, nil
+}
+
+func interpolateToolURL(url string, params map[string]any) string {
+	interpolatedKeys := map[string]bool{}
+	for key, val := range params {
+		placeholder := "{{" + key + "}}"
+		if strings.Contains(url, placeholder) {
+			url = strings.ReplaceAll(url, placeholder, neturl.PathEscape(fmt.Sprintf("%v", val)))
+			interpolatedKeys[key] = true
+		}
+	}
+	for key := range interpolatedKeys {
+		delete(params, key)
+	}
+	return url
 }
 
 func redactToolHTTPErrorBody(body string, secrets ...string) string {
