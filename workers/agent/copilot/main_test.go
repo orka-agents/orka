@@ -348,7 +348,7 @@ func TestRecoverArtifactsAfterFollowUpWritesThreatModelFromPlainText(t *testing.
 	followUp := "# Threat Model\n\nRecovered from the follow-up response."
 
 	result, updatedMissing, directRecovered, transcriptRecovered, err :=
-		recoverArtifactsAfterFollowUp(required, missing, initial, followUp)
+		recoverArtifactsAfterFollowUp(required, missing, initial, followUp, &common.AgentConfig{})
 	if err != nil {
 		t.Fatalf("recoverArtifactsAfterFollowUp() error = %v", err)
 	}

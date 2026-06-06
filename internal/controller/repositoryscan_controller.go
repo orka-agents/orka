@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	cron "github.com/robfig/cron/v3"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,6 +47,15 @@ const (
 	scanRunPhaseRunning   = "running"
 	scanRunPhaseSucceeded = "succeeded"
 	scanRunPhaseFailed    = "failed"
+
+	scanModeIncremental = "incremental"
+	confidenceHigh      = "high"
+
+	reviewSliceStatusPending   = "pending"
+	reviewSliceStatusReviewed  = "reviewed"
+	reviewSliceStatusFailed    = "failed"
+	reviewSliceStatusSkipped   = "skipped"
+	reviewSliceStatusCompleted = "completed"
 
 	findingStateOpen                 = "open"
 	findingStatePatchPending         = "patch_pending"
@@ -216,7 +226,7 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: time.Until(nextRun)}, nil
 	}
 
-	if err := r.createScanRun(ctx, scan, "incremental", scan.Status.LastProcessedCommit, ""); err != nil {
+	if err := r.createScanRun(ctx, scan, scanModeIncremental, scan.Status.LastProcessedCommit, ""); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
@@ -242,7 +252,7 @@ func taskSecurityStage(task *corev1alpha1.Task) string {
 
 func isScanPipelineStage(stage string) bool {
 	switch stage {
-	case security.StageCombined, security.StageThreatModel, security.StageDiscovery:
+	case security.StageCombined, security.StageThreatModel, security.StageMapper, security.StageDiscovery, security.StageReview:
 		return true
 	default:
 		return false
@@ -424,69 +434,87 @@ func (r *RepositoryScanReconciler) ensureScanRunRecord(ctx context.Context, run 
 	return nil
 }
 
-func (r *RepositoryScanReconciler) progressLatestScanRun(ctx context.Context, scan *corev1alpha1.RepositoryScan) (bool, error) {
-	if r.Client == nil || r.SecurityStore == nil {
-		return false, nil
+func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
+	timeout := metav1.Duration{Duration: 30 * time.Minute}
+	priority := int32(690)
+	taskName := security.ScanStageTaskName(scan.Name, run.Mode, security.StageMapper, "")
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      taskName,
+			Namespace: scan.Namespace,
+			Labels: map[string]string{
+				labels.LabelManaged:        "true",
+				labels.LabelCreatedBy:      "repository-security",
+				labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
+				labels.LabelSecurityScanID: run.ID,
+				labels.LabelSecurityMode:   run.Mode,
+				labels.LabelSecurityStage:  security.StageMapper,
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeContainer,
+			Command:  []string{"--security-mapper"},
+			Timeout:  &timeout,
+			Priority: &priority,
+			Env: []corev1.EnvVar{
+				{Name: security.EnvRepositoryScanName, Value: scan.Name},
+				{Name: security.EnvScanBaseCommit, Value: run.BaseCommit},
+				{Name: security.EnvScanHeadCommit, Value: run.HeadCommit},
+			},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:      scan.Spec.RepoURL,
+				Branch:       security.EffectiveBranch(scan),
+				GitSecretRef: scan.Spec.GitSecretRef,
+				SubPath:      scan.Spec.SubPath,
+				ForkRepo:     scan.Spec.ForkRepo,
+				PRBaseBranch: scan.Spec.PRBaseBranch,
+			},
+		},
 	}
+	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Create(ctx, task); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	return nil
+}
 
-	var tasks corev1alpha1.TaskList
-	if err := r.List(ctx, &tasks,
-		client.InNamespace(scan.Namespace),
-		client.MatchingLabels(map[string]string{
-			labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
-		}),
-	); err != nil {
-		return false, err
-	}
+type latestScanPipelineState struct {
+	hasSucceededThreatModel bool
+	hasMapperTasks          bool
+	hasSucceededMapper      bool
+	hasDiscoveryTasks       bool
+	hasReviewTasks          bool
+	hasActiveTask           bool
+}
 
-	scanID := latestOwnedScanPipelineRunID(tasks.Items)
-	if scanID == "" {
-		scanID = strings.TrimSpace(scan.Status.LastScanID)
-	}
-	if scanID == "" {
-		return false, nil
-	}
-
-	hasSucceededThreatModel := false
-	hasDiscoveryTasks := false
-	for i := range tasks.Items {
-		task := &tasks.Items[i]
+func latestScanPipelineStateForRun(tasks []corev1alpha1.Task, scanID string) latestScanPipelineState {
+	state := latestScanPipelineState{}
+	for i := range tasks {
+		task := &tasks[i]
 		if scanTaskRunID(task) != scanID {
 			continue
 		}
-		stage := taskSecurityStage(task)
-		switch stage {
+		switch taskSecurityStage(task) {
 		case security.StageThreatModel:
-			if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
-				hasSucceededThreatModel = true
-			}
+			state.hasSucceededThreatModel = task.Status.Phase == corev1alpha1.TaskPhaseSucceeded || state.hasSucceededThreatModel
+		case security.StageMapper:
+			state.hasMapperTasks = true
+			state.hasSucceededMapper = task.Status.Phase == corev1alpha1.TaskPhaseSucceeded || state.hasSucceededMapper
 		case security.StageDiscovery:
-			hasDiscoveryTasks = true
+			state.hasDiscoveryTasks = true
+		case security.StageReview:
+			state.hasReviewTasks = true
 		}
 		if isActiveTaskPhase(task.Status.Phase) {
-			return false, nil
+			state.hasActiveTask = true
 		}
 	}
+	return state
+}
 
-	if !hasSucceededThreatModel || hasDiscoveryTasks {
-		return false, nil
-	}
-
-	run, err := r.SecurityStore.GetScanRun(ctx, scan.Namespace, scanID)
-	if err != nil {
-		return false, err
-	}
-
-	var threatModel string
-	if r.SecurityStore != nil {
-		model, err := r.SecurityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
-		if err == nil {
-			threatModel = model.Content
-		} else if !errors.Is(err, store.ErrNotFound) {
-			return false, err
-		}
-	}
-
+func (r *RepositoryScanReconciler) createDiscoveryTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, threatModel string) error {
 	timeout := metav1.Duration{Duration: 2 * time.Hour}
 	priority := int32(700)
 	for index, scope := range security.DiscoveryScopes() {
@@ -524,14 +552,316 @@ func (r *RepositoryScanReconciler) progressLatestScanRun(ctx context.Context, sc
 			},
 		}
 		if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
-			return false, err
+			return err
 		}
 		if err := r.Create(ctx, task); err != nil {
 			if apierrors.IsAlreadyExists(err) {
 				continue
 			}
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *RepositoryScanReconciler) pendingReviewSlices(ctx context.Context, scan *corev1alpha1.RepositoryScan, runID string) ([]store.ReviewSlice, error) {
+	const pageSize = 1000
+	var all []store.ReviewSlice
+	cursor := ""
+	for {
+		reviewSlices, nextCursor, err := r.SecurityStore.ListReviewSlices(ctx, store.ReviewSliceFilter{
+			Namespace:      scan.Namespace,
+			RepositoryScan: scan.Name,
+			Status:         reviewSliceStatusPending,
+			LastScanRunID:  runID,
+			Limit:          pageSize,
+			Cursor:         cursor,
+		})
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, reviewSlices...)
+		if nextCursor == "" {
+			return all, nil
+		}
+		cursor = nextCursor
+	}
+}
+
+func reviewSliceMatchesChangedFiles(slice store.ReviewSlice, changedFiles map[string]struct{}) bool {
+	for _, file := range slice.OwnedFiles {
+		if _, ok := changedFiles[normalizeRepoPath(file.Path)]; ok {
+			return true
+		}
+	}
+	if slice.Confidence != confidenceHigh {
+		return false
+	}
+	for _, file := range slice.ContextFiles {
+		if _, ok := changedFiles[normalizeRepoPath(file.Path)]; ok {
+			return true
+		}
+	}
+	for _, test := range slice.Tests {
+		if _, ok := changedFiles[normalizeRepoPath(test.Path)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeRepoPath(value string) string {
+	return strings.TrimSpace(strings.ReplaceAll(value, "\\", "/"))
+}
+
+func changedFileSet(files []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		file = normalizeRepoPath(file)
+		if file == "" {
+			continue
+		}
+		out[file] = struct{}{}
+	}
+	return out
+}
+
+func trustedFindingsRepository(scan *corev1alpha1.RepositoryScan, run *store.ScanRun) security.FindingsV2Repository {
+	repo := security.FindingsV2Repository{
+		RepoURL: strings.TrimSpace(scan.Spec.RepoURL),
+		Branch:  security.EffectiveBranch(scan),
+		SubPath: strings.Trim(strings.TrimSpace(scan.Spec.SubPath), "/"),
+	}
+	if run != nil {
+		repo.BaseSHA = run.BaseCommit
+		repo.HeadSHA = run.HeadCommit
+	}
+	return repo
+}
+
+func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, threatModel string, reviewSlices []store.ReviewSlice) error {
+	timeout := metav1.Duration{Duration: 2 * time.Hour}
+	priority := int32(700)
+	for _, reviewSlice := range reviewSlices {
+		sliceJSON, err := json.Marshal(reviewSlice)
+		if err != nil {
+			return err
+		}
+		taskName := security.ScanStageTaskName(scan.Name, run.Mode, security.StageReview, reviewSlice.ID)
+		task := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      taskName,
+				Namespace: scan.Namespace,
+				Labels: map[string]string{
+					labels.LabelManaged:         "true",
+					labels.LabelCreatedBy:       "repository-security",
+					labels.LabelSecurityTarget:  labels.SelectorValue(scan.Name),
+					labels.LabelSecurityScanID:  run.ID,
+					labels.LabelSecurityMode:    run.Mode,
+					labels.LabelSecurityStage:   security.StageReview,
+					labels.LabelSecuritySliceID: reviewSlice.ID,
+				},
+			},
+			Spec: corev1alpha1.TaskSpec{
+				Type:     corev1alpha1.TaskTypeAgent,
+				AgentRef: &scan.Spec.AnalysisAgentRef,
+				Prompt:   security.BuildReviewPrompt(scan, run.Mode, run.BaseCommit, run.HeadCommit, threatModel, reviewSlice),
+				Timeout:  &timeout,
+				Priority: &priority,
+				Env: []corev1.EnvVar{
+					{Name: security.EnvReviewSliceJSON, Value: string(sliceJSON)},
+				},
+				AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+					Workspace: &corev1alpha1.WorkspaceConfig{
+						GitRepo:      scan.Spec.RepoURL,
+						Branch:       security.EffectiveBranch(scan),
+						GitSecretRef: scan.Spec.GitSecretRef,
+						SubPath:      scan.Spec.SubPath,
+						ForkRepo:     scan.Spec.ForkRepo,
+						PRBaseBranch: scan.Spec.PRBaseBranch,
+					},
+				},
+			},
+		}
+		if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
+			return err
+		}
+		if err := r.Create(ctx, task); err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *RepositoryScanReconciler) progressLatestScanRun(ctx context.Context, scan *corev1alpha1.RepositoryScan) (bool, error) {
+	if r.Client == nil || r.SecurityStore == nil {
+		return false, nil
+	}
+
+	var tasks corev1alpha1.TaskList
+	if err := r.List(ctx, &tasks,
+		client.InNamespace(scan.Namespace),
+		client.MatchingLabels(map[string]string{
+			labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
+		}),
+	); err != nil {
+		return false, err
+	}
+
+	scanID := latestOwnedScanPipelineRunID(tasks.Items)
+	if scanID == "" {
+		scanID = strings.TrimSpace(scan.Status.LastScanID)
+	}
+	if scanID == "" {
+		return false, nil
+	}
+
+	state := latestScanPipelineStateForRun(tasks.Items, scanID)
+	if state.hasActiveTask {
+		return false, nil
+	}
+
+	if !state.hasSucceededThreatModel || state.hasDiscoveryTasks {
+		return false, nil
+	}
+
+	run, err := r.SecurityStore.GetScanRun(ctx, scan.Namespace, scanID)
+	if err != nil {
+		return false, err
+	}
+	if run.Phase == scanRunPhaseSucceeded || run.Phase == scanRunPhaseFailed {
+		return false, nil
+	}
+
+	if state.hasReviewTasks {
+		return r.retryMissingReviewSliceTasks(ctx, scan, run, tasks.Items)
+	}
+
+	if !state.hasMapperTasks {
+		if err := r.createMapperTask(ctx, scan, run); err != nil {
 			return false, err
 		}
+		run.Phase = scanRunPhaseRunning
+		run.Summary = "Threat model generated; deterministic mapper started"
+		if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if !state.hasSucceededMapper {
+		return false, nil
+	}
+
+	return r.progressScanRunAfterMapper(ctx, scan, run)
+}
+
+func (r *RepositoryScanReconciler) retryMissingReviewSliceTasks(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	run *store.ScanRun,
+	tasks []corev1alpha1.Task,
+) (bool, error) {
+	reviewSlices, err := r.pendingReviewSlices(ctx, scan, run.ID)
+	if err != nil {
+		return false, err
+	}
+	missing := make([]store.ReviewSlice, 0, len(reviewSlices))
+	for _, reviewSlice := range reviewSlices {
+		if reviewSliceTaskExists(tasks, run.ID, reviewSlice.ID) {
+			continue
+		}
+		missing = append(missing, reviewSlice)
+	}
+	if len(missing) == 0 {
+		return false, nil
+	}
+
+	var threatModel string
+	if r.SecurityStore != nil {
+		model, err := r.SecurityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
+		if err == nil {
+			threatModel = model.Content
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return false, err
+		}
+	}
+	if err := r.createReviewTasks(ctx, scan, run, threatModel, missing); err != nil {
+		return false, err
+	}
+	run.Summary = fmt.Sprintf("Threat model generated; retrying %d pending review slices", len(missing))
+	run.Phase = scanRunPhaseRunning
+	run.CompletedAt = nil
+	run.ErrorMessage = ""
+	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func reviewSliceTaskExists(tasks []corev1alpha1.Task, runID, sliceID string) bool {
+	for i := range tasks {
+		task := &tasks[i]
+		if scanTaskRunID(task) != runID || taskSecurityStage(task) != security.StageReview {
+			continue
+		}
+		if strings.TrimSpace(task.Labels[labels.LabelSecuritySliceID]) == sliceID {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *RepositoryScanReconciler) progressScanRunAfterMapper(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) (bool, error) {
+	var threatModel string
+	if r.SecurityStore != nil {
+		model, err := r.SecurityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
+		if err == nil {
+			threatModel = model.Content
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return false, err
+		}
+	}
+
+	reviewSlices, err := r.pendingReviewSlices(ctx, scan, run.ID)
+	if err != nil {
+		return false, err
+	}
+	if len(reviewSlices) > 0 {
+		if err := r.createReviewTasks(ctx, scan, run, threatModel, reviewSlices); err != nil {
+			return false, err
+		}
+		run.Summary = fmt.Sprintf("Threat model generated; %d deterministic review slices started", len(reviewSlices))
+		run.Phase = scanRunPhaseRunning
+		run.CompletedAt = nil
+		run.ErrorMessage = ""
+		if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	if run.Mode == scanModeIncremental && run.SliceCount > 0 && run.SkippedSliceCount == run.SliceCount {
+		now := time.Now()
+		run.Phase = scanRunPhaseSucceeded
+		run.CompletedAt = &now
+		run.ErrorMessage = ""
+		if run.Summary == "" {
+			run.Summary = "Threat model generated; no changed files matched deterministic review slices"
+		}
+		if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
+			return false, err
+		}
+		if err := r.updateNoopScanStatus(ctx, scan, run); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	if err := r.createDiscoveryTasks(ctx, scan, run, threatModel); err != nil {
+		return false, err
 	}
 
 	if run.Summary == "" || strings.Contains(run.Summary, "discovery pending") {
@@ -545,6 +875,47 @@ func (r *RepositoryScanReconciler) progressLatestScanRun(ctx context.Context, sc
 	}
 
 	return true, nil
+}
+
+func (r *RepositoryScanReconciler) updateNoopScanStatus(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
+	counts, err := r.SecurityStore.GetFindingCounts(ctx, scan.Namespace, scan.Name)
+	if err != nil {
+		return err
+	}
+
+	var threatModelVersion int64
+	if model, err := r.SecurityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name); err == nil {
+		threatModelVersion = model.Version
+	}
+
+	return r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
+		s.Status.Phase = repositoryScanPhaseReady
+		s.Status.LastScanID = run.ID
+		s.Status.LastScanTaskName = run.TaskName
+		s.Status.LastObservedHeadSHA = run.HeadCommit
+		s.Status.LastProcessedCommit = run.HeadCommit
+		s.Status.ThreatModelVersion = threatModelVersion
+		s.Status.FindingCounts = corev1alpha1.FindingCountsStatus{
+			Total:    counts.Total,
+			Critical: counts.Critical,
+			High:     counts.High,
+			Medium:   counts.Medium,
+			Low:      counts.Low,
+		}
+		if run.CompletedAt != nil {
+			completedAt := &metav1.Time{Time: *run.CompletedAt}
+			s.Status.LastScanAt = completedAt
+			s.Status.LastSuccessfulScanAt = completedAt
+		}
+		meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionTrue,
+			Reason:             "ScanSucceeded",
+			Message:            repositoryScanConditionMessage(run.Summary, "scan completed successfully"),
+			LastTransitionTime: metav1.Now(),
+			ObservedGeneration: s.Generation,
+		})
+	})
 }
 
 func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan) error {
@@ -781,6 +1152,80 @@ func (r *RepositoryScanReconciler) loadDiscoveryFindingsArtifact(ctx context.Con
 	}
 }
 
+func (r *RepositoryScanReconciler) loadDiscoveryFindingsV2Artifact(ctx context.Context, task *corev1alpha1.Task) (*security.FindingsV2Artifact, *security.ReviewContextManifest, string, error) {
+	if r.ArtifactStore == nil {
+		return nil, nil, "", nil
+	}
+
+	findingsData, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, security.ArtifactFindingsV2)
+	switch {
+	case err == nil:
+		if len(strings.TrimSpace(string(findingsData))) == 0 {
+			return nil, nil, fmt.Sprintf("%s is empty", security.ArtifactFindingsV2), nil
+		}
+	case errors.Is(err, store.ErrNotFound):
+		return nil, nil, "", nil
+	default:
+		return nil, nil, "", err
+	}
+
+	findings, err := security.ParseFindingsV2Artifact(findingsData)
+	if err != nil {
+		return nil, nil, fmt.Sprintf("%s is invalid: %v", security.ArtifactFindingsV2, err), nil
+	}
+	trustedSliceID := strings.TrimSpace(task.Labels[labels.LabelSecuritySliceID])
+	artifactSliceID := strings.TrimSpace(findings.Scan.SliceID)
+	if trustedSliceID == "" {
+		return nil, nil, "v2 findings require trusted security slice task label", nil
+	}
+	if artifactSliceID == "" {
+		return nil, nil, "v2 findings artifact missing scan.sliceId", nil
+	}
+	if artifactSliceID != trustedSliceID {
+		return nil, nil, fmt.Sprintf("v2 findings scan.sliceId %q does not match task slice %q", artifactSliceID, trustedSliceID), nil
+	}
+	contextName := security.ReviewContextArtifactName(trustedSliceID)
+	contextData, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, contextName)
+	switch {
+	case err == nil:
+		manifest, err := security.ParseReviewContextManifest(contextData)
+		if err != nil {
+			return nil, nil, fmt.Sprintf("%s is invalid: %v", contextName, err), nil
+		}
+		if strings.TrimSpace(manifest.SliceID) != trustedSliceID {
+			return nil, nil, fmt.Sprintf("%s sliceId %q does not match task slice %q", contextName, manifest.SliceID, trustedSliceID), nil
+		}
+		return findings, manifest, "", nil
+	case errors.Is(err, store.ErrNotFound):
+		return nil, nil, fmt.Sprintf("%s is missing", contextName), nil
+	default:
+		return nil, nil, "", err
+	}
+}
+
+func (r *RepositoryScanReconciler) loadReviewSlicesArtifact(ctx context.Context, task *corev1alpha1.Task) (*security.ReviewSlicesArtifact, string, error) {
+	if r.ArtifactStore == nil {
+		return nil, "", nil
+	}
+
+	data, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, security.ArtifactSlices)
+	switch {
+	case err == nil:
+		if len(strings.TrimSpace(string(data))) == 0 {
+			return nil, fmt.Sprintf("%s is empty", security.ArtifactSlices), nil
+		}
+		artifact, err := security.ParseReviewSlicesArtifact(data)
+		if err != nil {
+			return nil, fmt.Sprintf("%s is invalid: %v", security.ArtifactSlices, err), nil
+		}
+		return artifact, "", nil
+	case errors.Is(err, store.ErrNotFound):
+		return nil, fmt.Sprintf("%s is missing", security.ArtifactSlices), nil
+	default:
+		return nil, "", err
+	}
+}
+
 func (r *RepositoryScanReconciler) loadScanTaskArtifacts(ctx context.Context, task *corev1alpha1.Task) (*scanTaskArtifacts, string, error) {
 	if r.ArtifactStore == nil {
 		return nil, "", nil
@@ -910,14 +1355,24 @@ func pipelineTaskDisplayName(task *corev1alpha1.Task) string {
 			return fmt.Sprintf("discovery:%s", scope)
 		}
 	}
+	if stage == security.StageReview {
+		if sliceID := strings.TrimSpace(task.Labels[labels.LabelSecuritySliceID]); sliceID != "" {
+			return fmt.Sprintf("review:%s", sliceID)
+		}
+	}
 	return stage
 }
 
 type scanRunProgress struct {
 	hasActive           bool
 	hasThreatModelReady bool
+	hasMapper           bool
+	hasMapperReady      bool
+	hasReview           bool
 	hasDiscovery        bool
 	hasCombined         bool
+	reviewCount         int
+	reviewSucceeded     int
 	discoveryCount      int
 	discoverySucceeded  int
 	failedStages        []string
@@ -959,6 +1414,23 @@ func (r *RepositoryScanReconciler) collectScanRunProgress(
 			}
 			if task.Status.Phase == corev1alpha1.TaskPhaseFailed {
 				recordScanProgressFailure(&progress, task, r.pipelineTaskSummary(ctx, task, "threat model stage failed"))
+			}
+		case security.StageMapper:
+			progress.hasMapper = true
+			if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+				progress.hasMapperReady = true
+			}
+			if task.Status.Phase == corev1alpha1.TaskPhaseFailed {
+				recordScanProgressFailure(&progress, task, r.pipelineTaskSummary(ctx, task, "mapper stage failed"))
+			}
+		case security.StageReview:
+			progress.hasReview = true
+			progress.reviewCount++
+			if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+				progress.reviewSucceeded++
+			}
+			if task.Status.Phase == corev1alpha1.TaskPhaseFailed {
+				recordScanProgressFailure(&progress, task, r.pipelineTaskSummary(ctx, task, "review stage failed"))
 			}
 		case security.StageDiscovery, security.StageCombined:
 			if stage == security.StageCombined {
@@ -1008,11 +1480,43 @@ func applyScanRunProgress(run *store.ScanRun, progress scanRunProgress) {
 		return
 	}
 
-	if progress.hasThreatModelReady && !progress.hasDiscovery {
+	if progress.hasThreatModelReady && !progress.hasDiscovery && !progress.hasReview {
+		if progress.hasMapper && !progress.hasMapperReady {
+			run.Phase = scanRunPhaseRunning
+			run.CompletedAt = nil
+			run.ErrorMessage = ""
+			run.Summary = "Threat model generated; deterministic mapper pending"
+			return
+		}
 		run.Phase = scanRunPhaseRunning
 		run.CompletedAt = nil
 		run.ErrorMessage = ""
 		run.Summary = scanSummaryThreatModelPending
+		return
+	}
+
+	if progress.hasThreatModelReady && progress.hasReview && !progress.hasDiscovery && !progress.hasCombined {
+		if progress.reviewSucceeded < progress.reviewCount {
+			run.Phase = scanRunPhaseRunning
+			run.CompletedAt = nil
+			run.ErrorMessage = ""
+			run.Summary = fmt.Sprintf(
+				"Threat model generated and %d/%d review slices completed successfully",
+				progress.reviewSucceeded,
+				progress.reviewCount,
+			)
+			return
+		}
+		run.Phase = scanRunPhaseSucceeded
+		run.ErrorMessage = ""
+		if progress.latestCompletion != nil {
+			run.CompletedAt = progress.latestCompletion
+		}
+		run.Summary = fmt.Sprintf(
+			"Threat model generated and %d/%d review slices completed successfully",
+			progress.reviewSucceeded,
+			progress.reviewCount,
+		)
 		return
 	}
 
@@ -1086,6 +1590,9 @@ func (r *RepositoryScanReconciler) refreshScanRunStatus(
 
 	progress := r.collectScanRunProgress(ctx, tasks.Items)
 	applyScanRunProgress(run, progress)
+	if err := r.keepScanRunningForPendingReviewSlices(ctx, scan, run, progress); err != nil {
+		return err
+	}
 
 	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
 		return err
@@ -1161,6 +1668,32 @@ func (r *RepositoryScanReconciler) refreshScanRunStatus(
 	})
 }
 
+func (r *RepositoryScanReconciler) keepScanRunningForPendingReviewSlices(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	run *store.ScanRun,
+	progress scanRunProgress,
+) error {
+	if r.SecurityStore == nil || run == nil || run.Phase != scanRunPhaseSucceeded {
+		return nil
+	}
+	if !progress.hasReview || progress.hasDiscovery || progress.hasCombined {
+		return nil
+	}
+	reviewSlices, err := r.pendingReviewSlices(ctx, scan, run.ID)
+	if err != nil {
+		return err
+	}
+	if len(reviewSlices) == 0 {
+		return nil
+	}
+	run.Phase = scanRunPhaseRunning
+	run.CompletedAt = nil
+	run.ErrorMessage = ""
+	run.Summary = fmt.Sprintf("Threat model generated; %d review slices remain pending", len(reviewSlices))
+	return nil
+}
+
 func (r *RepositoryScanReconciler) shouldAutoValidateFinding(scan *corev1alpha1.RepositoryScan, finding *store.Finding, createdForTask int) bool {
 	switch security.EffectiveValidationMode(scan) {
 	case "off":
@@ -1171,7 +1704,7 @@ func (r *RepositoryScanReconciler) shouldAutoValidateFinding(scan *corev1alpha1.
 		if createdForTask >= 2 {
 			return false
 		}
-		return finding.Severity == "critical" || finding.Severity == "high" || finding.Confidence == "high"
+		return finding.Severity == "critical" || finding.Severity == confidenceHigh || finding.Confidence == confidenceHigh
 	}
 }
 
@@ -1253,11 +1786,11 @@ func mergeEvidenceRefs(existing []store.FindingEvidenceRef, refs ...store.Findin
 	merged := append([]store.FindingEvidenceRef{}, existing...)
 	seen := map[string]struct{}{}
 	for _, ref := range merged {
-		key := strings.Join([]string{ref.Kind, ref.TaskName, ref.Name, ref.Label}, "|")
+		key := evidenceRefKey(ref)
 		seen[key] = struct{}{}
 	}
 	for _, ref := range refs {
-		key := strings.Join([]string{ref.Kind, ref.TaskName, ref.Name, ref.Label}, "|")
+		key := evidenceRefKey(ref)
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -1265,6 +1798,92 @@ func mergeEvidenceRefs(existing []store.FindingEvidenceRef, refs ...store.Findin
 		merged = append(merged, ref)
 	}
 	return merged
+}
+
+func evidenceRefKey(ref store.FindingEvidenceRef) string {
+	return strings.Join([]string{
+		ref.Kind,
+		ref.TaskName,
+		ref.Name,
+		ref.Label,
+		ref.Path,
+		fmt.Sprint(ref.StartLine),
+		fmt.Sprint(ref.EndLine),
+		ref.Symbol,
+		ref.Quote,
+	}, "|")
+}
+
+func (r *RepositoryScanReconciler) mergeExistingFinding(ctx context.Context, scan *corev1alpha1.RepositoryScan, finding *store.Finding) error {
+	existing, err := r.SecurityStore.GetFinding(ctx, scan.Namespace, finding.ID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if existing.State != "" && existing.State != findingStateOpen {
+		finding.State = existing.State
+	}
+	if existing.PatchProposalID != "" {
+		finding.PatchProposalID = existing.PatchProposalID
+	}
+	finding.PRNumber = existing.PRNumber
+	finding.PRURL = existing.PRURL
+	finding.CreatedAt = existing.CreatedAt
+	if existing.ValidationStatus == findingValidationStatusValidated ||
+		existing.ValidationStatus == findingValidationStatusPending {
+		finding.ValidationStatus = existing.ValidationStatus
+	}
+	if len(existing.Evidence) > 0 {
+		finding.Evidence = mergeEvidenceRefs(existing.Evidence, finding.Evidence...)
+	}
+	if existing.ValidationJSON != "" {
+		finding.ValidationJSON = existing.ValidationJSON
+	}
+	return nil
+}
+
+func (r *RepositoryScanReconciler) persistDroppedFindingDiagnostics(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	task *corev1alpha1.Task,
+	run *store.ScanRun,
+	diagnostics []security.DroppedFindingDiagnostic,
+) error {
+	if len(diagnostics) == 0 {
+		return nil
+	}
+	sliceID := strings.TrimSpace(task.Labels[labels.LabelSecuritySliceID])
+	for _, diagnostic := range diagnostics {
+		dropped := &store.DroppedFinding{
+			ID:             "drop_" + security.FindingID(strings.Join([]string{run.ID, task.Name, sliceID, fmt.Sprint(diagnostic.Index), diagnostic.Reason}, "|")),
+			Namespace:      scan.Namespace,
+			RepositoryScan: scan.Name,
+			ScanRunID:      run.ID,
+			TaskName:       task.Name,
+			SliceID:        sliceID,
+			Reason:         diagnostic.Reason,
+			SampleJSON:     security.DroppedFindingSampleJSON(diagnostic),
+		}
+		if err := r.SecurityStore.CreateDroppedFinding(ctx, dropped); err != nil {
+			return err
+		}
+	}
+	if r.ArtifactStore != nil {
+		artifact := security.DroppedFindingArtifact{
+			SchemaVersion: 1,
+			Dropped:       diagnostics,
+		}
+		data, err := json.MarshalIndent(artifact, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactDroppedFindings, "application/json", data); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *RepositoryScanReconciler) enqueueAutoValidationTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan, findings []*store.Finding) error {
@@ -1330,6 +1949,24 @@ func clearDiscoveryRunError(run *store.ScanRun, scope string) {
 	}
 }
 
+func clearReviewRunError(run *store.ScanRun, sliceID string) {
+	if run == nil || run.ErrorMessage == "" {
+		return
+	}
+	if sliceID != "" {
+		if strings.Contains(run.ErrorMessage, fmt.Sprintf("slice %s:", sliceID)) {
+			clearRunError(run)
+		}
+		if strings.Contains(run.ErrorMessage, "slice ") {
+			return
+		}
+	}
+	if strings.Contains(run.ErrorMessage, security.ArtifactFindingsV2) ||
+		strings.Contains(run.ErrorMessage, "review stage failed") {
+		clearRunError(run)
+	}
+}
+
 func (r *RepositoryScanReconciler) ingestThreatModelTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, run *store.ScanRun, updateStatus bool) error {
 	run.TaskName = task.Name
 	if mode := task.Labels[labels.LabelSecurityMode]; mode != "" {
@@ -1357,8 +1994,174 @@ func (r *RepositoryScanReconciler) ingestThreatModelTask(ctx context.Context, sc
 	return r.refreshScanRunStatus(ctx, scan, run, run.ID, updateStatus)
 }
 
+func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, run *store.ScanRun, updateStatus bool) error {
+	sliceID := strings.TrimSpace(task.Labels[labels.LabelSecuritySliceID])
+	reviewSlice, staleReviewTask, err := r.reviewSliceForTaskRun(ctx, scan, sliceID, run.ID)
+	if err != nil {
+		return err
+	}
+	if staleReviewTask {
+		return nil
+	}
+
+	if task.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		run.ErrorMessage = r.pipelineTaskSummary(ctx, task, "review stage failed")
+		if sliceID != "" {
+			if err := r.SecurityStore.UpdateReviewSliceStatus(ctx, scan.Namespace, scan.Name, sliceID, run.ID, reviewSliceStatusFailed); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+		}
+		return r.refreshScanRunStatus(ctx, scan, run, run.ID, updateStatus)
+	}
+
+	findingsV2, manifest, validationProblem, err := r.loadDiscoveryFindingsV2Artifact(ctx, task)
+	if err != nil {
+		return err
+	}
+	if findingsV2 == nil && validationProblem == "" {
+		validationProblem = fmt.Sprintf("%s is missing", security.ArtifactFindingsV2)
+	}
+	if validationProblem != "" {
+		if sliceID != "" {
+			run.ErrorMessage = fmt.Sprintf("slice %s: %s", sliceID, validationProblem)
+			if err := r.SecurityStore.UpdateReviewSliceStatus(ctx, scan.Namespace, scan.Name, sliceID, run.ID, reviewSliceStatusFailed); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+		} else {
+			run.ErrorMessage = validationProblem
+		}
+		return r.refreshScanRunStatus(ctx, scan, run, run.ID, updateStatus)
+	}
+
+	alreadyReviewed := false
+	if reviewSlice != nil {
+		alreadyReviewed = reviewSlice.Status == reviewSliceStatusReviewed
+	}
+
+	clearReviewRunError(run, sliceID)
+	if findingsV2.Scan.Mode != "" {
+		run.Mode = findingsV2.Scan.Mode
+	}
+	trustedRepo := trustedFindingsRepository(scan, run)
+	partition := security.ValidateFindingsV2(*findingsV2, *manifest, security.FindingValidationOptions{
+		Namespace:            scan.Namespace,
+		RepositoryScan:       scan.Name,
+		ScanRunID:            run.ID,
+		TaskName:             task.Name,
+		TrustedRepository:    trustedRepo,
+		UseTrustedRepository: true,
+	})
+	if err := r.persistDroppedFindingDiagnostics(ctx, scan, task, run, partition.Dropped); err != nil {
+		return err
+	}
+	if !alreadyReviewed {
+		run.AcceptedFindings += len(partition.Accepted)
+		run.DroppedFindings += len(partition.Dropped)
+		run.ReviewedSliceCount++
+	}
+	if findingsV2.Scan.Summary != "" {
+		run.Summary = findingsV2.Scan.Summary
+	} else if sliceID != "" {
+		run.Summary = fmt.Sprintf("Reviewed slice %s", sliceID)
+	}
+	upserted := make([]*store.Finding, 0, len(partition.Accepted))
+	for _, finding := range partition.Accepted {
+		if err := r.mergeExistingFinding(ctx, scan, finding); err != nil {
+			return err
+		}
+		if err := r.SecurityStore.UpsertFinding(ctx, finding); err != nil {
+			return err
+		}
+		upserted = append(upserted, finding)
+	}
+	if err := r.enqueueAutoValidationTasks(ctx, scan, upserted); err != nil {
+		return err
+	}
+	if sliceID != "" {
+		if err := r.SecurityStore.UpdateReviewSliceStatus(ctx, scan.Namespace, scan.Name, sliceID, run.ID, reviewSliceStatusReviewed); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+	}
+	return r.refreshScanRunStatus(ctx, scan, run, run.ID, updateStatus)
+}
+
+func (r *RepositoryScanReconciler) reviewSliceForTaskRun(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	sliceID string,
+	runID string,
+) (*store.ReviewSlice, bool, error) {
+	if strings.TrimSpace(sliceID) == "" {
+		return nil, false, nil
+	}
+	reviewSlice, err := r.SecurityStore.GetReviewSlice(ctx, scan.Namespace, scan.Name, sliceID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if reviewSlice.LastScanRunID != "" && reviewSlice.LastScanRunID != runID {
+		return reviewSlice, true, nil
+	}
+	return reviewSlice, false, nil
+}
+
 func (r *RepositoryScanReconciler) ingestDiscoveryTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, run *store.ScanRun, updateStatus bool) error {
 	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+		if strings.TrimSpace(task.Labels[labels.LabelSecuritySliceID]) != "" {
+			findingsV2, manifest, validationProblem, err := r.loadDiscoveryFindingsV2Artifact(ctx, task)
+			if err != nil {
+				return err
+			}
+			if validationProblem != "" {
+				scope := strings.TrimSpace(task.Labels[labels.LabelSecurityScope])
+				if scope != "" {
+					run.ErrorMessage = fmt.Sprintf("scope %s: %s", scope, validationProblem)
+				} else {
+					run.ErrorMessage = validationProblem
+				}
+				return r.refreshScanRunStatus(ctx, scan, run, run.ID, updateStatus)
+			}
+			if findingsV2 != nil && manifest != nil {
+				clearDiscoveryRunError(run, strings.TrimSpace(task.Labels[labels.LabelSecurityScope]))
+				if findingsV2.Scan.Mode != "" {
+					run.Mode = findingsV2.Scan.Mode
+				}
+				trustedRepo := trustedFindingsRepository(scan, run)
+				partition := security.ValidateFindingsV2(*findingsV2, *manifest, security.FindingValidationOptions{
+					Namespace:            scan.Namespace,
+					RepositoryScan:       scan.Name,
+					ScanRunID:            run.ID,
+					TaskName:             task.Name,
+					TrustedRepository:    trustedRepo,
+					UseTrustedRepository: true,
+				})
+				if err := r.persistDroppedFindingDiagnostics(ctx, scan, task, run, partition.Dropped); err != nil {
+					return err
+				}
+				run.AcceptedFindings += len(partition.Accepted)
+				run.DroppedFindings += len(partition.Dropped)
+				if findingsV2.Scan.Summary != "" {
+					run.Summary = findingsV2.Scan.Summary
+				}
+				upserted := make([]*store.Finding, 0, len(partition.Accepted))
+				for _, finding := range partition.Accepted {
+					if err := r.mergeExistingFinding(ctx, scan, finding); err != nil {
+						return err
+					}
+					if err := r.SecurityStore.UpsertFinding(ctx, finding); err != nil {
+						return err
+					}
+					upserted = append(upserted, finding)
+				}
+				if err := r.enqueueAutoValidationTasks(ctx, scan, upserted); err != nil {
+					return err
+				}
+				return r.refreshScanRunStatus(ctx, scan, run, run.ID, updateStatus)
+			}
+		}
+
 		findingsArtifact, validationProblem, err := r.loadDiscoveryFindingsArtifact(ctx, task)
 		if err != nil {
 			return err
@@ -1386,26 +2189,8 @@ func (r *RepositoryScanReconciler) ingestDiscoveryTask(ctx context.Context, scan
 			upserted := make([]*store.Finding, 0, len(findingsArtifact.Findings))
 			for _, item := range findingsArtifact.Findings {
 				finding := security.ToFinding(scan.Namespace, scan.Name, run.ID, task.Name, item)
-				if existing, err := r.SecurityStore.GetFinding(ctx, scan.Namespace, finding.ID); err == nil {
-					if existing.State != "" && existing.State != findingStateOpen {
-						finding.State = existing.State
-					}
-					if existing.PatchProposalID != "" {
-						finding.PatchProposalID = existing.PatchProposalID
-					}
-					finding.PRNumber = existing.PRNumber
-					finding.PRURL = existing.PRURL
-					finding.CreatedAt = existing.CreatedAt
-					if existing.ValidationStatus == findingValidationStatusValidated ||
-						existing.ValidationStatus == findingValidationStatusPending {
-						finding.ValidationStatus = existing.ValidationStatus
-					}
-					if len(existing.Evidence) > 0 {
-						finding.Evidence = mergeEvidenceRefs(existing.Evidence, finding.Evidence...)
-					}
-					if existing.ValidationJSON != "" {
-						finding.ValidationJSON = existing.ValidationJSON
-					}
+				if err := r.mergeExistingFinding(ctx, scan, finding); err != nil {
+					return err
 				}
 				if err := r.SecurityStore.UpsertFinding(ctx, finding); err != nil {
 					return err
@@ -1421,6 +2206,98 @@ func (r *RepositoryScanReconciler) ingestDiscoveryTask(ctx context.Context, scan
 	}
 
 	return r.refreshScanRunStatus(ctx, scan, run, run.ID, updateStatus)
+}
+
+func (r *RepositoryScanReconciler) ingestMapperTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, run *store.ScanRun, updateStatus bool) error {
+	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
+		artifact, validationProblem, err := r.loadReviewSlicesArtifact(ctx, task)
+		if err != nil {
+			return err
+		}
+		if validationProblem != "" {
+			run.ErrorMessage = "mapper stage failed: " + validationProblem
+		} else if artifact != nil {
+			changedFiles := changedFileSet(artifact.ChangedFiles)
+			incrementalSelection := run.Mode == scanModeIncremental && artifact.ChangedFilesComputed
+			skippedSlices := 0
+			for i := range artifact.Slices {
+				slice := artifact.Slices[i]
+				slice.Namespace = scan.Namespace
+				slice.RepositoryScan = scan.Name
+				slice.LastScanRunID = run.ID
+				if incrementalSelection {
+					if reviewSliceMatchesChangedFiles(slice, changedFiles) {
+						slice.Status = reviewSliceStatusPending
+					} else {
+						slice.Status = reviewSliceStatusSkipped
+						skippedSlices++
+					}
+				}
+				if err := r.preserveCurrentRunReviewSliceTerminalState(ctx, scan, &slice); err != nil {
+					return err
+				}
+				if err := r.SecurityStore.UpsertReviewSlice(ctx, &slice); err != nil {
+					return err
+				}
+			}
+			clearRunError(run)
+			if artifact.BaseCommit != "" {
+				run.BaseCommit = artifact.BaseCommit
+			}
+			if artifact.HeadCommit != "" {
+				run.HeadCommit = artifact.HeadCommit
+			}
+			run.SliceCount = len(artifact.Slices)
+			run.SkippedSliceCount = skippedSlices
+			switch {
+			case incrementalSelection && skippedSlices == len(artifact.Slices):
+				run.Summary = fmt.Sprintf("Threat model generated; no review slices matched %d changed files", len(artifact.ChangedFiles))
+			case incrementalSelection:
+				run.Summary = fmt.Sprintf(
+					"Threat model generated; deterministic mapper selected %d/%d review slices from %d changed files",
+					len(artifact.Slices)-skippedSlices,
+					len(artifact.Slices),
+					len(artifact.ChangedFiles),
+				)
+			case run.Mode == scanModeIncremental && artifact.ChangedFilesError != "":
+				run.Summary = fmt.Sprintf("Threat model generated; deterministic mapper produced %d review slices after changed-file selection failed", len(artifact.Slices))
+			default:
+				run.Summary = fmt.Sprintf("Threat model generated; deterministic mapper produced %d review slices", len(artifact.Slices))
+			}
+		}
+	} else {
+		run.ErrorMessage = r.pipelineTaskSummary(ctx, task, "mapper stage failed")
+	}
+
+	return r.refreshScanRunStatus(ctx, scan, run, run.ID, updateStatus)
+}
+
+func (r *RepositoryScanReconciler) preserveCurrentRunReviewSliceTerminalState(ctx context.Context, scan *corev1alpha1.RepositoryScan, slice *store.ReviewSlice) error {
+	if slice == nil || strings.TrimSpace(slice.ID) == "" || strings.TrimSpace(slice.LastScanRunID) == "" {
+		return nil
+	}
+	existing, err := r.SecurityStore.GetReviewSlice(ctx, scan.Namespace, scan.Name, slice.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if existing.LastScanRunID != slice.LastScanRunID || !terminalReviewSliceStatus(existing.Status) {
+		return nil
+	}
+	slice.Status = existing.Status
+	slice.LastReviewedAt = existing.LastReviewedAt
+	return nil
+}
+
+func terminalReviewSliceStatus(status string) bool {
+	switch status {
+	case reviewSliceStatusReviewed, reviewSliceStatusFailed, reviewSliceStatusCompleted:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *RepositoryScanReconciler) ingestCombinedScanTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, run *store.ScanRun, updateStatus bool) error {
@@ -1577,6 +2454,10 @@ func (r *RepositoryScanReconciler) ingestScanTask(ctx context.Context, scan *cor
 	switch taskSecurityStage(task) {
 	case security.StageThreatModel:
 		return r.ingestThreatModelTask(ctx, scan, task, run, updateStatus)
+	case security.StageMapper:
+		return r.ingestMapperTask(ctx, scan, task, run, updateStatus)
+	case security.StageReview:
+		return r.ingestReviewTask(ctx, scan, task, run, updateStatus)
 	case security.StageDiscovery:
 		return r.ingestDiscoveryTask(ctx, scan, task, run, updateStatus)
 	default:
@@ -1648,6 +2529,211 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 	return r.SecurityStore.UpsertFinding(ctx, finding)
 }
 
+type patchVerificationResult struct {
+	diffArtifact    string
+	summaryArtifact string
+}
+
+func patchArtifactNames(findingID string) (string, string) {
+	return fmt.Sprintf("security-patch-%s.diff", findingID), fmt.Sprintf("security-patch-%s.json", findingID)
+}
+
+func patchTaskRequiresArtifactVerification(task *corev1alpha1.Task, findingID string) bool {
+	if task == nil {
+		return false
+	}
+	diffName, summaryName := patchArtifactNames(findingID)
+	required := map[string]struct{}{}
+	for line := range strings.SplitSeq(task.Spec.Prompt, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "REQUIRED_SECURITY_ARTIFACTS:") {
+			continue
+		}
+		for item := range strings.SplitSeq(strings.TrimPrefix(line, "REQUIRED_SECURITY_ARTIFACTS:"), ",") {
+			name := strings.TrimSpace(item)
+			if name != "" {
+				required[name] = struct{}{}
+			}
+		}
+	}
+	_, hasDiff := required[diffName]
+	_, hasSummary := required[summaryName]
+	return hasDiff && hasSummary
+}
+
+func normalizedPatchDiff(diff string) string {
+	diff = strings.ReplaceAll(diff, "\r\n", "\n")
+	diff = strings.ReplaceAll(diff, "\r", "\n")
+	lines := strings.Split(diff, "\n")
+	normalized := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.HasPrefix(line, "index ") {
+			continue
+		}
+		normalized = append(normalized, line)
+	}
+	for len(normalized) > 0 && strings.TrimSpace(normalized[0]) == "" {
+		normalized = normalized[1:]
+	}
+	for len(normalized) > 0 && strings.TrimSpace(normalized[len(normalized)-1]) == "" {
+		normalized = normalized[:len(normalized)-1]
+	}
+	return strings.Join(normalized, "\n")
+}
+
+func (r *RepositoryScanReconciler) verifyPatchTaskArtifacts(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, findingID string, sr *common.StructuredResult) (patchVerificationResult, string, error) {
+	if r.ArtifactStore == nil {
+		return patchVerificationResult{}, "artifact store is not configured", nil
+	}
+	if sr == nil {
+		return patchVerificationResult{}, "structured task result is missing", nil
+	}
+	if strings.TrimSpace(sr.Diff) == "" {
+		return patchVerificationResult{}, "structured task result does not include a workspace diff", nil
+	}
+
+	diffName, summaryName := patchArtifactNames(findingID)
+	diffData, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, diffName)
+	switch {
+	case err == nil:
+	case errors.Is(err, store.ErrNotFound):
+		return patchVerificationResult{}, fmt.Sprintf("%s is missing", diffName), nil
+	default:
+		return patchVerificationResult{}, "", err
+	}
+	summaryData, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, summaryName)
+	switch {
+	case err == nil:
+	case errors.Is(err, store.ErrNotFound):
+		return patchVerificationResult{}, fmt.Sprintf("%s is missing", summaryName), nil
+	default:
+		return patchVerificationResult{}, "", err
+	}
+
+	var summary security.PatchSummaryArtifact
+	if err := json.Unmarshal(summaryData, &summary); err != nil {
+		return patchVerificationResult{}, fmt.Sprintf("%s is invalid JSON: %v", summaryName, err), nil
+	}
+	if summary.SchemaVersion != security.SchemaVersionPatchSummary {
+		return patchVerificationResult{}, fmt.Sprintf("%s has unsupported schemaVersion %d", summaryName, summary.SchemaVersion), nil
+	}
+	if strings.TrimSpace(summary.FindingID) != findingID {
+		return patchVerificationResult{}, fmt.Sprintf("%s findingId does not match finding", summaryName), nil
+	}
+	if !sameStringSet(rootRelativePatchSummaryFiles(summary.ChangedFiles, scan), sr.Files) {
+		return patchVerificationResult{}, "patch summary changedFiles do not match actual workspace changed files", nil
+	}
+	artifactDiff := normalizedPatchDiff(string(diffData))
+	if artifactDiff == "" {
+		return patchVerificationResult{}, "patch diff artifact is empty", nil
+	}
+	if artifactDiff != normalizedPatchDiff(sr.Diff) {
+		return patchVerificationResult{}, "patch diff artifact does not match actual workspace diff", nil
+	}
+	return patchVerificationResult{diffArtifact: diffName, summaryArtifact: summaryName}, "", nil
+}
+
+func rootRelativePatchSummaryFiles(files []string, scan *corev1alpha1.RepositoryScan) []string {
+	subPath := ""
+	if scan != nil {
+		subPath = strings.Trim(strings.TrimSpace(strings.ReplaceAll(scan.Spec.SubPath, "\\", "/")), "/")
+	}
+	if subPath == "" || subPath == "." || !security.SafeRepoPath(subPath) {
+		return files
+	}
+
+	out := make([]string, 0, len(files))
+	for _, file := range files {
+		normalized := normalizeRepoPath(file)
+		for strings.HasPrefix(normalized, "./") {
+			normalized = strings.TrimPrefix(normalized, "./")
+		}
+		if normalized == "" || normalized == subPath || strings.HasPrefix(normalized, subPath+"/") || strings.HasPrefix(normalized, "/") {
+			out = append(out, normalized)
+			continue
+		}
+		out = append(out, subPath+"/"+normalized)
+	}
+	return out
+}
+
+func sameStringSet(left, right []string) bool {
+	normalize := func(values []string) []string {
+		out := make([]string, 0, len(values))
+		seen := map[string]struct{}{}
+		for _, value := range values {
+			value = strings.TrimSpace(strings.ReplaceAll(value, "\\", "/"))
+			if value == "" {
+				continue
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			out = append(out, value)
+		}
+		slices.Sort(out)
+		return out
+	}
+	left = normalize(left)
+	right = normalize(right)
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *RepositoryScanReconciler) updatePatchProposalFromSucceededTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, findingID string, proposal *store.PatchProposal) error {
+	switch {
+	case r.ResultStore == nil:
+		proposal.Status = scanRunPhasePending
+		return nil
+	case task.Status.ResultRef == nil || !task.Status.ResultRef.Available:
+		proposal.Status = scanRunPhasePending
+		return nil
+	}
+
+	result, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			proposal.Status = scanRunPhasePending
+			return nil
+		}
+		return err
+	}
+
+	sr := common.ParseStructuredResult(string(result))
+	switch {
+	case strings.TrimSpace(sr.PushError) != "":
+		proposal.Status = scanRunPhaseFailed
+	case strings.TrimSpace(sr.PushBranch) == "":
+		proposal.Status = scanRunPhaseFailed
+	default:
+		var verified patchVerificationResult
+		if patchTaskRequiresArtifactVerification(task, findingID) {
+			var reason string
+			verified, reason, err = r.verifyPatchTaskArtifacts(ctx, scan, task, findingID, sr)
+			if err != nil {
+				return err
+			}
+			if reason != "" {
+				proposal.Status = scanRunPhaseFailed
+				return nil
+			}
+		}
+		proposal.Branch = strings.TrimSpace(sr.PushBranch)
+		proposal.DiffArtifact = verified.diffArtifact
+		proposal.SummaryArtifact = verified.summaryArtifact
+		proposal.Status = scanRunPhaseSucceeded
+	}
+	return nil
+}
+
 func (r *RepositoryScanReconciler) ingestPatchTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task) error {
 	findingID := task.Labels[labels.LabelSecurityFindingID]
 	if findingID == "" {
@@ -1682,35 +2768,12 @@ func (r *RepositoryScanReconciler) ingestPatchTask(ctx context.Context, scan *co
 	}
 
 	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
-		switch {
-		case r.ResultStore == nil:
-			proposal.Status = scanRunPhasePending
-		case task.Status.ResultRef == nil || !task.Status.ResultRef.Available:
-			proposal.Status = scanRunPhasePending
-		default:
-			result, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
-			if err != nil {
-				if errors.Is(err, store.ErrNotFound) {
-					proposal.Status = scanRunPhasePending
-				} else {
-					return err
-				}
-			} else {
-				sr := common.ParseStructuredResult(string(result))
-				switch {
-				case strings.TrimSpace(sr.PushError) != "":
-					proposal.Status = scanRunPhaseFailed
-				case strings.TrimSpace(sr.PushBranch) != "":
-					proposal.Branch = strings.TrimSpace(sr.PushBranch)
-					proposal.Status = scanRunPhaseSucceeded
-				default:
-					proposal.Status = scanRunPhaseFailed
-				}
-			}
+		if err := r.updatePatchProposalFromSucceededTask(ctx, scan, task, findingID, proposal); err != nil {
+			return err
 		}
 	}
 
-	if r.ArtifactStore != nil {
+	if r.ArtifactStore != nil && proposal.Status != scanRunPhaseSucceeded {
 		artifacts, err := r.ArtifactStore.ListArtifacts(ctx, task.Namespace, task.Name)
 		if err == nil {
 			for _, artifact := range artifacts {

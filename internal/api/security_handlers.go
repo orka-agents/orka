@@ -670,6 +670,8 @@ func (h *Handlers) ListSecurityFindings(c fiber.Ctx) error {
 	findings, next, err := h.securityStore.ListFindings(c.Context(), store.FindingFilter{
 		Namespace:        namespace,
 		RepositoryScan:   c.Params("name"),
+		SliceID:          c.Query("sliceID"),
+		Category:         c.Query("category"),
 		Severity:         c.Query("severity"),
 		ValidationStatus: c.Query("validationStatus"),
 		State:            c.Query("state"),
@@ -694,6 +696,114 @@ func (h *Handlers) ListSecurityFindings(c fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"items": findings, "metadata": fiber.Map{"continue": next}})
+}
+
+// ListSecurityReviewSlices lists deterministic review slices for a repository.
+func (h *Handlers) ListSecurityReviewSlices(c fiber.Ctx) error {
+	if err := h.ensureSecurityStore(); err != nil {
+		return err
+	}
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "listSecurityReviewSlices", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
+		return err
+	}
+	scan, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name"))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "listSecurityReviewSlices", scan, scan.Spec.AnalysisAgentRef); err != nil {
+		return err
+	}
+	limit, err := strconv.Atoi(c.Query("limit", "100"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid limit")
+	}
+	slices, next, err := h.securityStore.ListReviewSlices(c.Context(), store.ReviewSliceFilter{
+		Namespace:      namespace,
+		RepositoryScan: c.Params("name"),
+		Status:         c.Query("status"),
+		Limit:          limit,
+		Cursor:         c.Query("cursor"),
+	})
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list review slices: %v", err))
+	}
+	if slices == nil {
+		slices = []store.ReviewSlice{}
+	}
+	return c.JSON(fiber.Map{"items": slices, "metadata": fiber.Map{"continue": next}})
+}
+
+// GetSecurityReviewSlice returns one deterministic review slice.
+func (h *Handlers) GetSecurityReviewSlice(c fiber.Ctx) error {
+	if err := h.ensureSecurityStore(); err != nil {
+		return err
+	}
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "getSecurityReviewSlice", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
+		return err
+	}
+	scan, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name"))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "getSecurityReviewSlice", scan, scan.Spec.AnalysisAgentRef); err != nil {
+		return err
+	}
+	slice, err := h.securityStore.GetReviewSlice(c.Context(), namespace, c.Params("name"), c.Params("sliceID"))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "review slice not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get review slice: %v", err))
+	}
+	return c.JSON(slice)
+}
+
+// ListSecurityDroppedFindings lists diagnostics for v2 findings rejected during ingestion.
+func (h *Handlers) ListSecurityDroppedFindings(c fiber.Ctx) error {
+	if err := h.ensureSecurityStore(); err != nil {
+		return err
+	}
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "listSecurityDroppedFindings", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
+		return err
+	}
+	scan, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name"))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "listSecurityDroppedFindings", scan, scan.Spec.AnalysisAgentRef); err != nil {
+		return err
+	}
+	limit, err := strconv.Atoi(c.Query("limit", "50"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid limit")
+	}
+	dropped, next, err := h.securityStore.ListDroppedFindings(c.Context(), store.DroppedFindingFilter{
+		Namespace:      namespace,
+		RepositoryScan: c.Params("name"),
+		ScanRunID:      c.Query("scanRunID"),
+		SliceID:        c.Query("sliceID"),
+		Limit:          limit,
+		Cursor:         c.Query("cursor"),
+	})
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list dropped findings: %v", err))
+	}
+	if dropped == nil {
+		dropped = []store.DroppedFinding{}
+	}
+	return c.JSON(fiber.Map{"items": dropped, "metadata": fiber.Map{"continue": next}})
 }
 
 // GetSecurityFinding returns a finding by ID.

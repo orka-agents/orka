@@ -210,6 +210,9 @@ func materializeRequiredSecurityArtifacts(
 	cfg *common.AgentConfig,
 	result string,
 ) (string, error) {
+	if err := common.RestoreSecurityReviewContextArtifact(cfg); err != nil {
+		return result, err
+	}
 	required := requiredSecurityArtifacts(cfg)
 	if len(required) == 0 {
 		return result, nil
@@ -230,6 +233,9 @@ func materializeRequiredSecurityArtifacts(
 		)
 	} else if recovered > 0 {
 		fmt.Printf("Recovered %d security artifacts from direct result\n", recovered)
+		if err := common.RestoreSecurityReviewContextArtifact(cfg); err != nil {
+			return result, err
+		}
 		missing, err = common.MissingArtifacts(required)
 		if err != nil {
 			return result, err
@@ -246,6 +252,9 @@ func materializeRequiredSecurityArtifacts(
 		)
 	} else if recovered > 0 {
 		fmt.Printf("Recovered %d security artifacts from transcript\n", recovered)
+		if err := common.RestoreSecurityReviewContextArtifact(cfg); err != nil {
+			return result, err
+		}
 		missing, err = common.MissingArtifacts(required)
 		if err != nil {
 			return result, err
@@ -272,7 +281,7 @@ func materializeRequiredSecurityArtifacts(
 		var directRecovered int
 		var transcriptRecovered int
 		result, missing, directRecovered, transcriptRecovered, err =
-			recoverArtifactsAfterFollowUp(required, missing, result, followUp)
+			recoverArtifactsAfterFollowUp(required, missing, result, followUp, cfg)
 		if err != nil {
 			return result, err
 		}
@@ -287,6 +296,9 @@ func materializeRequiredSecurityArtifacts(
 			return result, nil
 		}
 	} else {
+		if err := common.RestoreSecurityReviewContextArtifact(cfg); err != nil {
+			return result, err
+		}
 		missing, err = common.MissingArtifacts(required)
 		if err != nil {
 			return result, err
@@ -309,9 +321,13 @@ func recoverArtifactsAfterFollowUp(
 	missing []string,
 	result string,
 	followUp string,
+	cfg *common.AgentConfig,
 ) (string, []string, int, int, error) {
 	trimmedFollowUp := strings.TrimSpace(followUp)
 	if trimmedFollowUp == "" {
+		if err := common.RestoreSecurityReviewContextArtifact(cfg); err != nil {
+			return result, nil, 0, 0, err
+		}
 		updatedMissing, err := common.MissingArtifacts(required)
 		return result, updatedMissing, 0, 0, err
 	}
@@ -326,6 +342,9 @@ func recoverArtifactsAfterFollowUp(
 	if err != nil {
 		return result, nil, 0, 0, fmt.Errorf("failed to recover artifacts from follow-up direct result: %w", err)
 	}
+	if err := common.RestoreSecurityReviewContextArtifact(cfg); err != nil {
+		return result, nil, directRecovered, 0, err
+	}
 
 	updatedMissing, err := common.MissingArtifacts(required)
 	if err != nil {
@@ -338,6 +357,9 @@ func recoverArtifactsAfterFollowUp(
 	transcriptRecovered, err := recoverArtifactsFromTranscript(trimmedFollowUp)
 	if err != nil {
 		return result, nil, directRecovered, 0, fmt.Errorf("failed to recover artifacts from follow-up transcript: %w", err)
+	}
+	if err := common.RestoreSecurityReviewContextArtifact(cfg); err != nil {
+		return result, nil, directRecovered, transcriptRecovered, err
 	}
 
 	updatedMissing, err = common.MissingArtifacts(required)
@@ -600,12 +622,19 @@ func validArtifactCandidate(filename string, data []byte) bool {
 	case security.ArtifactFindings:
 		var artifact security.FindingsArtifact
 		return json.Unmarshal([]byte(trimmed), &artifact) == nil
+	case security.ArtifactFindingsV2:
+		_, err := security.ParseFindingsV2Artifact([]byte(trimmed))
+		return err == nil
 	case security.ArtifactValidation:
 		var artifact security.ValidationArtifact
 		return json.Unmarshal([]byte(trimmed), &artifact) == nil
 	case security.ArtifactThreatModel:
 		return trimmed != "" && !looksLikeToolTranscript(trimmed)
 	default:
+		if strings.HasPrefix(filename, "security-review-context-") && strings.HasSuffix(filename, ".json") {
+			_, err := security.ParseReviewContextManifest([]byte(trimmed))
+			return err == nil
+		}
 		return true
 	}
 }

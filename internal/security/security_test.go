@@ -165,6 +165,15 @@ func TestBuildPatchPromptRequiresWorkspaceEditAndManagedPush(t *testing.T) {
 	if !strings.Contains(got, "Orka can create the commit and push it to the patch branch automatically.") {
 		t.Fatalf("BuildPatchPrompt() missing Orka-managed push instruction:\n%s", got)
 	}
+	if !strings.Contains(got, "REQUIRED_SECURITY_ARTIFACTS: security-patch-fnd_123.diff, security-patch-fnd_123.json") {
+		t.Fatalf("BuildPatchPrompt() missing required patch artifacts directive:\n%s", got)
+	}
+	if !strings.Contains(got, `"schemaVersion":1,"findingId":"fnd_123"`) {
+		t.Fatalf("BuildPatchPrompt() missing patch summary schema:\n%s", got)
+	}
+	if !strings.Contains(got, "changedFiles array must exactly match") {
+		t.Fatalf("BuildPatchPrompt() missing changedFiles verification guidance:\n%s", got)
+	}
 }
 
 func TestGeneratedSecurityTaskNamesStayLabelSafe(t *testing.T) {

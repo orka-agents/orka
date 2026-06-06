@@ -18,7 +18,7 @@ execution system.
 |----------|-----------|
 | **`RepositoryScan` is a first-class CRD**, not config embedded in ad hoc tasks | Scan config is durable, namespace-scoped, and policy-like, with its own status, conditions, and reconciliation lifecycle. Dynamic outputs (findings, evidence) stay in SQLite. |
 | **Dynamic security data lives in SQLite**, not CRD status | Findings are high-volume and change frequently; the store enables filtering by repository, severity, validation status, and patch status, consistent with results/plans/sessions/artifacts. |
-| **Scans run as `type: agent` tasks** with a git workspace | Agent runtime tasks already clone repos, inspect history, run validation commands, and emit structured outputs. This avoids depending on AI coordinators delegating runtime-backed children. |
+| **Scans run as Kubernetes-backed tasks** with a git workspace | Threat-model, review, validation, and patch work run as agent tasks. The deterministic mapper runs as a container task using the managed general worker, so slice generation does not require model access. |
 | **Human approval is mandatory for remediation** | Patch generation and PR creation are explicit user actions, matching the safer Codex Security interaction pattern and reducing the risk of noisy or unsafe automated changes. |
 
 This design mirrors the broad Codex Security workflow (threat model first; scan history and
@@ -55,11 +55,15 @@ Fiber API (/api/v1/security/*)
   +--> Task creation for scan runs / patch runs
            |
            v
-      Agent runtime worker (git workspace)
+      Agent/general worker (git workspace)
            |
            +--> result summary
+           +--> security-slices.json
+           +--> security-review-context-<slice-id>.json
            +--> security-threat-model.md
            +--> security-findings.json
+           +--> security-findings.v2.json
+           +--> security-dropped-findings.json
            +--> security-validation-*.txt
            +--> security-patch-*.diff
            |
@@ -128,7 +132,7 @@ Notes:
 The `SecurityStore` interface (`internal/store/store.go`, SQLite implementation under
 `internal/store/sqlite/`) persists dynamic security data. Domain types live in
 `internal/store/security_types.go`: `ScanRun`, `ThreatModel`, `Finding`,
-`FindingEvidenceRef`, `PatchProposal`, and `FindingFeedback`.
+`FindingEvidenceRef`, `ReviewSlice`, `DroppedFinding`, and `PatchProposal`.
 
 ```go
 type SecurityStore interface {
@@ -136,6 +140,11 @@ type SecurityStore interface {
     UpdateScanRun(ctx context.Context, run *ScanRun) error
     GetScanRun(ctx context.Context, namespace, id string) (*ScanRun, error)
     ListScanRuns(ctx context.Context, namespace, repositoryScan string, limit int, cursor string) ([]ScanRun, string, error)
+
+    UpsertReviewSlice(ctx context.Context, slice *ReviewSlice) error
+    ListReviewSlices(ctx context.Context, filter ReviewSliceFilter) ([]ReviewSlice, string, error)
+    GetReviewSlice(ctx context.Context, namespace, repositoryScan, id string) (*ReviewSlice, error)
+    UpdateReviewSliceStatus(ctx context.Context, namespace, repositoryScan, id, status string) error
 
     GetLatestThreatModel(ctx context.Context, namespace, repositoryScan string) (*ThreatModel, error)
     SaveThreatModel(ctx context.Context, model *ThreatModel) error
@@ -149,13 +158,19 @@ type SecurityStore interface {
     CreatePatchProposal(ctx context.Context, proposal *PatchProposal) error
     UpdatePatchProposal(ctx context.Context, proposal *PatchProposal) error
     ListPatchProposals(ctx context.Context, namespace, findingID string) ([]PatchProposal, error)
+
+    CreateDroppedFinding(ctx context.Context, dropped *DroppedFinding) error
+    ListDroppedFindings(ctx context.Context, filter DroppedFindingFilter) ([]DroppedFinding, string, error)
 }
 ```
 
 ### SQLite tables
 
-Four tables back the store: `security_scan_runs`, `security_threat_models`,
-`security_findings`, and `security_patch_proposals`.
+Six tables back the security store: `security_scan_runs`, `security_threat_models`,
+`security_review_slices`, `security_findings`, `security_dropped_findings`, and
+`security_patch_proposals`. Existing databases are upgraded idempotently with additive
+columns for slice counts, accepted/dropped counts, v2 finding metadata, and structured
+evidence references.
 
 ```sql
 CREATE TABLE IF NOT EXISTS security_scan_runs (
@@ -244,6 +259,10 @@ Evidence and validation metadata use JSON text columns rather than a fully norma
 evidence model: artifact blobs are stored separately, the UI mainly needs structured
 metadata plus artifact filenames, and JSON keeps the store API and migrations manageable.
 
+Review slices store JSON arrays for entrypoints, owned files, context files, tests, tags,
+and trust boundaries. Dropped finding diagnostics store only a reason and compact sample
+JSON; they must not contain secrets, raw tokens, raw transcripts, or full request contexts.
+
 > **Threat-model history:** although `security_threat_models` carries a `version` column,
 > `SaveThreatModel` is currently replace-only — it deletes existing rows for the repository
 > before inserting the new model, so only the latest threat model is retained. The versioned
@@ -255,16 +274,19 @@ Security runs communicate detailed outputs through artifacts, not just the task 
 text. Because `workers/common/artifacts.go` uploads a flat directory under
 `/tmp/artifacts/`, artifact filenames must be flat and path-safe.
 
-Required:
+Current scan artifacts:
 
-- `security-scan-summary.json`
-- `security-threat-model.md`
-- `security-findings.json`
+- `security-threat-model.md` — required from the threat-model stage.
+- `security-slices.json` — deterministic mapper output, schema version 1.
+- `security-review-context-<slice-id>.json` — bounded prompt/context manifest, schema version 1.
+- `security-findings.json` — legacy v1 findings payload, still accepted for compatibility.
+- `security-findings.v2.json` — evidence-backed v2 findings payload, schema version 2.
+- `security-dropped-findings.json` — controller-written diagnostics for invalid v2 findings.
 
 Optional:
 
-- `security-validation-<finding-id>.txt`
-- `security-validation-<finding-id>.json`
+- `security-validation.json`
+- `security-validation.txt`
 - `security-patch-<finding-id>.diff`
 - `security-patch-<finding-id>.json`
 
@@ -272,7 +294,68 @@ Agent runtime tasks call `common.UploadArtifacts()` after result submission on b
 success path and the failure path where partial artifacts still exist, so the threat model,
 findings payload, validation evidence, and patch diff persist reliably.
 
-### `security-findings.json`
+### `security-slices.json`
+
+The mapper writes stable, deterministic review slices:
+
+```json
+{
+  "schemaVersion": 1,
+  "slices": [
+    {
+      "schemaVersion": 1,
+      "id": "slice_...",
+      "repositoryScan": "example",
+      "source": "deterministic-go-package",
+      "title": "Go package internal/security",
+      "summary": "Security artifact parsing and prompt contracts.",
+      "kind": "package",
+      "entrypoints": [{"path": "internal/security/security.go", "reason": "primary package source"}],
+      "ownedFiles": [{"path": "internal/security/security.go", "reason": "primary package source"}],
+      "contextFiles": [{"path": "internal/security/security_test.go", "reason": "package tests"}],
+      "tests": [{"path": "internal/security/security_test.go", "command": "go test ./internal/security"}],
+      "tags": ["language:go", "project-root:."],
+      "trustBoundaries": ["filesystem", "serialization"],
+      "confidence": "high",
+      "status": "pending"
+    }
+  ]
+}
+```
+
+Mapper output must use repo-relative paths, must not follow symlinked directories, and must
+skip dependency/build/cache/generated directories and likely secret files.
+
+### `security-review-context-<slice-id>.json`
+
+The context manifest records exactly which files and line ranges were included in the
+bounded review prompt:
+
+```json
+{
+  "schemaVersion": 1,
+  "sliceId": "slice_...",
+  "includedFiles": [
+    {
+      "path": "internal/security/security.go",
+      "role": "owned",
+      "bytes": 18200,
+      "includedBytes": 18200,
+      "includedLineRanges": [{"startLine": 1, "endLine": 420}],
+      "truncated": false,
+      "readable": true,
+      "skippedReason": null
+    }
+  ],
+  "omittedFiles": [
+    {"path": "internal/security/large_fixture.json", "role": "context", "reason": "maxFiles"}
+  ],
+  "promptBytes": 41000,
+  "approximateTokens": 10250
+}
+```
+
+### `security-findings.json` (legacy v1)
 
 The scanner writes a single compact JSON payload; large code excerpts are forbidden in this
 file (long evidence belongs in artifacts):
@@ -317,6 +400,82 @@ file (long evidence belongs in artifacts):
 }
 ```
 
+### `security-findings.v2.json`
+
+New review output uses schema version 2 and must cite evidence from the review context
+manifest:
+
+```json
+{
+  "schemaVersion": 2,
+  "repository": {
+    "repoURL": "https://github.com/example/app",
+    "branch": "main",
+    "subPath": "",
+    "baseSHA": "",
+    "headSHA": ""
+  },
+  "scan": {
+    "mode": "initial",
+    "sliceId": "slice_...",
+    "summary": "Reviewed one bounded slice."
+  },
+  "findings": [
+    {
+      "title": "Untrusted archive path can escape extraction directory",
+      "category": "path-traversal",
+      "severity": "high",
+      "confidence": "high",
+      "triage": "confirmed-risk",
+      "evidence": [
+        {
+          "path": "internal/archive/extract.go",
+          "startLine": 42,
+          "endLine": 58,
+          "symbol": "Extract",
+          "quote": null
+        }
+      ],
+      "summary": "Archive entry names are joined without checking the resolved destination.",
+      "rootCause": "The extraction code trusts archive-controlled paths.",
+      "reproduction": "A tar entry named ../../tmp/pwn writes outside the destination.",
+      "remediation": "Clean and resolve each destination path, then require it to remain under the extraction root.",
+      "suggestedAction": "Generate a patch with a path containment check and regression test.",
+      "whyTestsDoNotAlreadyCoverThis": "Existing extraction tests cover normal relative paths only.",
+      "suggestedRegressionTest": "Add an archive entry with ../ and assert extraction fails.",
+      "minimumFixScope": "Update extraction path resolution and add one focused test."
+    }
+  ]
+}
+```
+
+Controller ingestion validates v2 findings independently. A valid finding is stored with an
+Orka-owned fingerprint derived from namespace, repository scan, repo URL, branch, subPath,
+slice ID, category, normalized title, and canonical sorted evidence refs. Invalid findings
+are dropped individually and recorded in `security_dropped_findings` plus
+`security-dropped-findings.json`.
+
+Validation rejects missing required fields, empty evidence, unsafe/path-traversal evidence,
+evidence files omitted from the context manifest, inverted or stale line ranges, line
+ranges outside included manifest ranges, and quote mismatches when workspace content is
+available for quote verification.
+
+### `security-patch-<finding-id>.json`
+
+Patch tasks must write a summary artifact that matches the actual structured workspace
+diff:
+
+```json
+{
+  "schemaVersion": 1,
+  "findingId": "fnd_...",
+  "summary": "Added archive path containment check.",
+  "changedFiles": ["internal/archive/extract.go", "internal/archive/extract_test.go"],
+  "testsRun": [{"command": "go test ./internal/archive", "exitCode": 0}],
+  "risk": "low"
+}
+```
+
 ## Execution Model
 
 The `RepositoryScan` controller (`internal/controller/repositoryscan_controller.go`):
@@ -329,7 +488,8 @@ The `RepositoryScan` controller (`internal/controller/repositoryscan_controller.
 - updates `RepositoryScan.status`.
 
 Security-created tasks carry labels so the reconciler can find and ingest them:
-`orka.ai/security-target`, `orka.ai/security-scan-id`, `orka.ai/security-scan-mode`, and
+`orka.ai/security-target`, `orka.ai/security-scan-id`, `orka.ai/security-scan-mode`,
+`orka.ai/security-stage`, `orka.ai/security-scope`, `orka.ai/security-slice-id`, and
 `orka.ai/security-finding-id`.
 
 ### Scan task shape
@@ -354,14 +514,20 @@ spec:
 ### Scan logic
 
 - **Initial**: scan newest commits backward, cap by `historyDays`, generate a first threat
-  model artifact even with zero findings, and persist all findings as `open`.
+  model artifact even with zero findings, run the deterministic mapper, persist review
+  slices, then run discovery/review tasks. Legacy broad discovery remains as fallback while
+  slice-based review rolls out.
 - **Incremental**: fetch the current head SHA and compare with `status.lastProcessedCommit`.
   If unchanged, mark the run succeeded with a no-op summary; if changed, focus the agent on
   commits after the last processed SHA while still using the current threat model as context.
+  Slice-aware changed-file selection is the preferred direction; broad scheduled review
+  remains the compatibility fallback.
 - **Patch**: create a dedicated `type: agent` task with `pushBranch` set to
   `orka/security/<finding-id>` (using `forkRepo`/`prBaseBranch` when configured), prompt for
-  a minimal reviewable fix and a diff artifact, and persist a `PatchProposal` in `pending`
-  state that transitions to `succeeded`/`failed` on completion.
+  a minimal reviewable fix, a diff artifact, and a patch summary artifact. A
+  `PatchProposal` transitions to `succeeded` only after Orka confirms the task completed,
+  branch metadata is present, the summary changed-file list matches the structured
+  workspace result, and the diff artifact matches the actual workspace diff.
 
 Prompt builders live under `internal/security/` (e.g. `internal/security/prompts.go` with
 markdown templates) rather than inline in handlers. The scan prompt includes repo identity
@@ -371,15 +537,21 @@ hints for incremental scans.
 
 ### Controller ingestion
 
-When a labeled security **scan** task completes, the controller loads the task result and
-artifacts, parses `security-scan-summary.json`, `security-threat-model.md`, and
-`security-findings.json`, upserts the scan-run row, replaces the stored threat model when
-generated content differs from the current one, upserts findings by stable fingerprint,
-and updates `RepositoryScan.status`.
+When a labeled security **mapper** task completes, the controller parses
+`security-slices.json`, upserts review slices, and records slice counts on the scan run.
+
+When a labeled security **scan/review** task completes, the controller loads the task
+result and artifacts. It accepts legacy `security-findings.json` payloads and prefers
+`security-findings.v2.json` when present. For v2 payloads, the controller also loads the
+matching `security-review-context-<slice-id>.json`, validates each finding against the
+manifest, upserts accepted findings by Orka-owned stable fingerprint, records dropped
+diagnostics for rejected findings, and updates accepted/dropped counts on the scan run.
 
 When a labeled security **patch** task completes, the controller locates the associated
-finding, reads the patch diff artifact, upserts the `PatchProposal`, and updates finding
-state to `patch_ready` or `patch_failed`.
+finding, parses the structured worker result, loads `security-patch-<finding-id>.diff` and
+`security-patch-<finding-id>.json`, verifies both artifacts against actual workspace
+changes, upserts the `PatchProposal`, and updates finding state to `patch_ready` only when
+verification succeeds.
 
 ## Prompt Contracts
 
@@ -411,8 +583,11 @@ you can scrape. (For metrics Orka actually exposes, see
 [Configuration → Prometheus Metrics](../concepts/configuration.md#prometheus-metrics).)
 
 - `orka_security_scan_runs_total{mode,status}`
-- `orka_security_findings_total{severity,state}`
-- `orka_security_patch_requests_total{status}`
+- `orka_security_review_slices_total{status}`
+- `orka_security_findings_ingested_total{schema_version,result}`
+- `orka_security_findings_dropped_total{reason}`
+- `orka_security_review_context_bytes`
+- `orka_security_patch_verification_total{result,reason}`
 - `orka_security_threat_model_updates_total{source}`
 
 ## Safety

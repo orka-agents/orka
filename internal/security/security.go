@@ -28,7 +28,9 @@ const (
 const (
 	StageCombined    = "combined"
 	StageThreatModel = "threat-model"
+	StageMapper      = "mapper"
 	StageDiscovery   = "discovery"
+	StageReview      = "review"
 	StageValidation  = "validation"
 	StagePatch       = "patch"
 )
@@ -541,6 +543,61 @@ func BuildDiscoveryPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, h
 	return prompt.String()
 }
 
+// BuildReviewPrompt returns the prompt for one deterministic review slice.
+func BuildReviewPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit, threatModel string, slice store.ReviewSlice) string {
+	var prompt strings.Builder
+	artifactDir := ArtifactWorkspacePath(scan.Spec.SubPath)
+	contextArtifact := ReviewContextArtifactName(slice.ID)
+	sliceJSON, err := json.MarshalIndent(slice, "", "  ")
+	if err != nil {
+		sliceJSON = []byte("{}")
+	}
+
+	fmt.Fprintf(&prompt, "You are reviewing one deterministic security slice for %s on branch %s.\n", scan.Spec.RepoURL, EffectiveBranch(scan))
+	fmt.Fprintf(&prompt, "Scan mode: %s\n", mode)
+	fmt.Fprintf(&prompt, "Slice ID: %s\n", slice.ID)
+	fmt.Fprintf(&prompt, "Slice title: %s\n", slice.Title)
+	fmt.Fprintf(&prompt, "Slice kind: %s\n", slice.Kind)
+	fmt.Fprintf(&prompt, "Max findings for this slice: %d\n", min(DiscoveryMaxFindingsPerScope(scan), 3))
+	if scan.Spec.SubPath != "" {
+		fmt.Fprintf(&prompt, "Sub-path focus: %s\n", scan.Spec.SubPath)
+	}
+	if baseCommit != "" || headCommit != "" {
+		fmt.Fprintf(&prompt, "Commit focus: base=%s head=%s\n", baseCommit, headCommit)
+	}
+
+	prompt.WriteString("\nYour job in this stage is to review only the bounded slice below and produce evidence-backed findings.\n")
+	prompt.WriteString("Do not rewrite the threat model. Do not edit code, commit, push, or create pull requests.\n")
+	prompt.WriteString("Inspect owned files first, then context files and tests. Avoid unrelated repository exploration unless absolutely necessary to understand a cited line.\n")
+	prompt.WriteString("Prefer a small number of high-signal findings over broad speculation. If you cannot support a claim from the included slice files, omit it.\n")
+	prompt.WriteString("Every finding must cite repo-relative file evidence with startLine and endLine from the files recorded in the review context manifest.\n")
+	prompt.WriteString("Quote fields are optional; use them only when you can copy the cited file text exactly.\n")
+
+	fmt.Fprintf(&prompt, "\nWrite these artifacts under %s/:\n", artifactDir)
+	fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, ArtifactFindingsV2)
+	appendRequiredArtifactsDirective(&prompt, ArtifactFindingsV2)
+	prompt.WriteString("The stage will be treated as failed if the findings artifact is missing, empty, or invalid.\n")
+	prompt.WriteString("Prefer Bash heredocs or shell redirection when writing artifact files so they are persisted on disk.\n")
+
+	fmt.Fprintf(&prompt, "\nOrka generated and will upload %s before and after model execution.\n", contextArtifact)
+	prompt.WriteString("Do not create, edit, or replace the review context manifest. Findings that cite paths or line ranges outside the generated manifest will be dropped.\n")
+
+	prompt.WriteString("\nsecurity-findings.v2.json must be valid JSON with this top-level shape:\n")
+	prompt.WriteString(`{"schemaVersion":2,"repository":{"repoURL":"...","branch":"...","subPath":"...","baseSHA":"...","headSHA":"..."},"scan":{"mode":"initial|incremental|manual","sliceId":"...","summary":"..."},"findings":[]}` + "\n")
+	prompt.WriteString("Each finding object must use these keys: title, category, severity, confidence, triage, evidence, summary, rootCause, reproduction, remediation, suggestedAction, whyTestsDoNotAlreadyCoverThis, suggestedRegressionTest, minimumFixScope.\n")
+	prompt.WriteString("Set scan.sliceId exactly to the slice ID above. Even when this slice has zero findings, write valid JSON with an empty findings array.\n")
+
+	prompt.WriteString("\nReview slice metadata:\n")
+	prompt.Write(sliceJSON)
+	prompt.WriteString("\n")
+	if strings.TrimSpace(threatModel) != "" {
+		prompt.WriteString("\nShared threat model context:\n")
+		prompt.WriteString(threatModel)
+		prompt.WriteString("\n")
+	}
+	return prompt.String()
+}
+
 // BuildValidationPrompt returns the prompt for the dedicated validator/repro stage for a finding.
 func BuildValidationPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding) string {
 	var prompt strings.Builder
@@ -620,8 +677,19 @@ func BuildPatchPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding,
 	prompt.WriteString("6. The diff artifact must match the actual workspace changes after your edit.\n")
 	prompt.WriteString("7. Do not commit, push, or open a pull request directly. Leave the final file changes in the workspace so Orka can create the commit and push it to the patch branch automatically.\n")
 	fmt.Fprintf(&prompt, "\nWrite these artifacts under %s/:\n", artifactDir)
-	fmt.Fprintf(&prompt, "- %s/security-patch-%s.diff\n", artifactDir, finding.ID)
-	fmt.Fprintf(&prompt, "- %s/security-patch-%s.json\n", artifactDir, finding.ID)
+	diffArtifact := fmt.Sprintf("security-patch-%s.diff", finding.ID)
+	summaryArtifact := fmt.Sprintf("security-patch-%s.json", finding.ID)
+	fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, diffArtifact)
+	fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, summaryArtifact)
+	appendRequiredArtifactsDirective(&prompt, diffArtifact, summaryArtifact)
+	prompt.WriteString("The JSON patch summary must be valid JSON with this exact shape:\n")
+	fmt.Fprintf(
+		&prompt,
+		`{"schemaVersion":%d,"findingId":%q,"summary":"...","changedFiles":["path/to/changed-file"],"testsRun":[{"command":"go test ./...","exitCode":0}],"risk":"low|medium|high"}`+"\n",
+		SchemaVersionPatchSummary,
+		finding.ID,
+	)
+	prompt.WriteString("The changedFiles array must exactly match the files changed in the workspace diff.\n")
 	prompt.WriteString("Prefer Bash heredocs or shell redirection when writing artifact files so they are persisted on disk.\n")
 	return prompt.String()
 }

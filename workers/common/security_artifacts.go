@@ -27,6 +27,8 @@ var (
 	artifactHeredocStart     = regexp.MustCompile(
 		`cat > ([^\n]+?\.orka-artifacts/([A-Za-z0-9._-]+)) << '?([A-Za-z0-9_]+)'?\n`,
 	)
+	patchDiffArtifactPattern    = regexp.MustCompile(`^security-patch-([A-Za-z0-9._-]+)\.diff$`)
+	patchSummaryArtifactPattern = regexp.MustCompile(`^security-patch-([A-Za-z0-9._-]+)\.json$`)
 )
 
 // SecurityArtifactFollowUp runs a focused follow-up prompt that should write
@@ -43,6 +45,9 @@ func EnsureRequiredSecurityArtifacts(
 	result string,
 	followUp SecurityArtifactFollowUp,
 ) (string, error) {
+	if err := RestoreSecurityReviewContextArtifact(cfg); err != nil {
+		return result, err
+	}
 	required := requiredSecurityArtifacts(cfg)
 	if len(required) == 0 {
 		return result, nil
@@ -61,6 +66,9 @@ func EnsureRequiredSecurityArtifacts(
 	} else if recovered > 0 {
 		fmt.Printf("Recovered %d security artifacts from direct result\n", recovered)
 	}
+	if err := RestoreSecurityReviewContextArtifact(cfg); err != nil {
+		return result, err
+	}
 
 	missing, err = MissingArtifacts(required)
 	if err != nil {
@@ -74,6 +82,9 @@ func EnsureRequiredSecurityArtifacts(
 		fmt.Fprintf(os.Stderr, "warning: failed to recover artifacts from transcript: %v\n", recoverErr)
 	} else if recovered > 0 {
 		fmt.Printf("Recovered %d security artifacts from transcript\n", recovered)
+	}
+	if err := RestoreSecurityReviewContextArtifact(cfg); err != nil {
+		return result, err
 	}
 
 	missing, err = MissingArtifacts(required)
@@ -111,6 +122,9 @@ func EnsureRequiredSecurityArtifacts(
 	} else if recovered > 0 {
 		fmt.Printf("Recovered %d security artifacts from follow-up direct result\n", recovered)
 	}
+	if err := RestoreSecurityReviewContextArtifact(cfg); err != nil {
+		return result, err
+	}
 
 	missing, err = MissingArtifacts(required)
 	if err != nil {
@@ -125,6 +139,9 @@ func EnsureRequiredSecurityArtifacts(
 		fmt.Fprintf(os.Stderr, "warning: failed to recover artifacts from follow-up transcript: %v\n", recoverErr)
 	} else if recovered > 0 {
 		fmt.Printf("Recovered %d security artifacts from follow-up transcript\n", recovered)
+	}
+	if err := RestoreSecurityReviewContextArtifact(cfg); err != nil {
+		return result, err
 	}
 
 	missing, err = MissingArtifacts(required)
@@ -197,9 +214,25 @@ func securityArtifactsFollowUpPrompt(cfg *AgentConfig, missing []string) string 
 					"root_cause, remediation, suggested_action, evidence.\n",
 			)
 			prompt.WriteString("If there are zero findings, write valid JSON with version=1 and an empty findings array.\n")
+		case security.ArtifactFindingsV2:
+			prompt.WriteString(
+				"security-findings.v2.json must be valid JSON with schemaVersion=2, " +
+					"repository, scan, and findings fields.\n",
+			)
+			prompt.WriteString(
+				"Set scan.sliceId to the review slice ID and use an empty findings array " +
+					"when there are no supported findings.\n",
+			)
 		case security.ArtifactValidation:
 			prompt.WriteString("security-validation.json must be valid JSON with this shape:\n")
 			prompt.WriteString(validationSchemaExample + "\n")
+		default:
+			if strings.HasPrefix(name, "security-review-context-") && strings.HasSuffix(name, ".json") {
+				prompt.WriteString(
+					"security-review-context-<slice-id>.json must be valid JSON with schemaVersion=1, " +
+						"sliceId, includedFiles, omittedFiles, promptBytes, and approximateTokens.\n",
+				)
+			}
 		}
 	}
 	prompt.WriteString("After writing the files, reply with only: SECURITY_ARTIFACTS_WRITTEN\n")
@@ -273,12 +306,30 @@ func validArtifactCandidate(filename string, data []byte) bool {
 	case security.ArtifactFindings:
 		var artifact security.FindingsArtifact
 		return json.Unmarshal([]byte(trimmed), &artifact) == nil
+	case security.ArtifactFindingsV2:
+		_, err := security.ParseFindingsV2Artifact([]byte(trimmed))
+		return err == nil
 	case security.ArtifactValidation:
 		var artifact security.ValidationArtifact
 		return json.Unmarshal([]byte(trimmed), &artifact) == nil
 	case security.ArtifactThreatModel:
 		return true
 	default:
+		if strings.HasPrefix(filename, "security-review-context-") && strings.HasSuffix(filename, ".json") {
+			_, err := security.ParseReviewContextManifest([]byte(trimmed))
+			return err == nil
+		}
+		if patchDiffArtifactPattern.MatchString(filename) {
+			return strings.Contains(trimmed, "diff --git ")
+		}
+		if match := patchSummaryArtifactPattern.FindStringSubmatch(filename); len(match) == 2 {
+			var artifact security.PatchSummaryArtifact
+			if err := json.Unmarshal([]byte(trimmed), &artifact); err != nil {
+				return false
+			}
+			return artifact.SchemaVersion == security.SchemaVersionPatchSummary &&
+				strings.TrimSpace(artifact.FindingID) == match[1]
+		}
 		return false
 	}
 }

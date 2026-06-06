@@ -1,0 +1,338 @@
+package security
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/sozercan/orka/internal/store"
+)
+
+func TestParseContractsAcceptValidExamples(t *testing.T) {
+	slicesData := []byte(`{"schemaVersion":1,"slices":[{"id":"slice_demo","repositoryScan":"repo","source":"deterministic-go-package","title":"Go package internal/security","summary":"Security parsing.","kind":"package","ownedFiles":[{"path":"internal/security/security.go","reason":"source"}],"confidence":"high","status":"pending"}]}`)
+	if _, err := ParseReviewSlicesArtifact(slicesData); err != nil {
+		t.Fatalf("ParseReviewSlicesArtifact() error = %v", err)
+	}
+
+	contextData := []byte(`{"schemaVersion":1,"sliceId":"slice_demo","includedFiles":[{"path":"internal/security/security.go","role":"owned","bytes":10,"includedBytes":10,"includedLineRanges":[{"startLine":1,"endLine":2}],"truncated":false,"readable":true,"skippedReason":null}],"promptBytes":100,"approximateTokens":25}`)
+	if _, err := ParseReviewContextManifest(contextData); err != nil {
+		t.Fatalf("ParseReviewContextManifest() error = %v", err)
+	}
+
+	findingsData := []byte(`{"schemaVersion":2,"repository":{"repoURL":"https://github.com/example/app","branch":"main","subPath":"","baseSHA":"","headSHA":""},"scan":{"mode":"initial","sliceId":"slice_demo","summary":"Reviewed."},"findings":[]}`)
+	if _, err := ParseFindingsV2Artifact(findingsData); err != nil {
+		t.Fatalf("ParseFindingsV2Artifact() error = %v", err)
+	}
+}
+
+func TestParseContractsRejectMalformedExamples(t *testing.T) {
+	if _, err := ParseReviewSlicesArtifact([]byte(`{"schemaVersion":1,"slices":[{"id":"slice_bad","repositoryScan":"repo","source":"mapper","title":"bad","ownedFiles":[{"path":"../secret"}]}]}`)); err == nil {
+		t.Fatal("ParseReviewSlicesArtifact() error = nil, want unsafe path rejected")
+	}
+	if _, err := ParseReviewContextManifest([]byte(`{"schemaVersion":1,"sliceId":"slice_bad","includedFiles":[{"path":"app.go","role":"owned","includedLineRanges":[{"startLine":5,"endLine":3}]}]}`)); err == nil {
+		t.Fatal("ParseReviewContextManifest() error = nil, want invalid range rejected")
+	}
+	if _, err := ParseFindingsV2Artifact([]byte(`{"schemaVersion":2}`)); err == nil {
+		t.Fatal("ParseFindingsV2Artifact() error = nil, want missing findings array rejected")
+	}
+}
+
+func TestValidateFindingsV2PartitionsAcceptedAndDropped(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "internal/archive/extract.go", "package archive\n\nfunc Extract(name string) string {\n\treturn name\n}\n")
+	quote := "return name"
+	artifact := FindingsV2Artifact{
+		SchemaVersion: SchemaVersionFindingsV2,
+		Repository: FindingsV2Repository{
+			RepoURL: "https://github.com/example/app",
+			Branch:  "main",
+			HeadSHA: "abc123",
+		},
+		Scan: FindingsV2Scan{Mode: "initial", SliceID: "slice_archive"},
+		Findings: []FindingsV2Finding{
+			{
+				Title:       "Archive path escape",
+				Category:    "path-traversal",
+				Severity:    "high",
+				Confidence:  "high",
+				Triage:      "confirmed-risk",
+				Summary:     "Archive path is trusted.",
+				Remediation: "Check resolved paths.",
+				Evidence: []FindingsV2EvidenceRef{{
+					Path:      "internal/archive/extract.go",
+					StartLine: 4,
+					EndLine:   4,
+					Quote:     &quote,
+				}},
+			},
+			{
+				Title:       "Traversal",
+				Category:    "path-traversal",
+				Severity:    "high",
+				Confidence:  "high",
+				Summary:     "bad path",
+				Remediation: "fix",
+				Evidence: []FindingsV2EvidenceRef{{
+					Path:      "../secret.txt",
+					StartLine: 1,
+					EndLine:   1,
+				}},
+			},
+		},
+	}
+	manifest := ReviewContextManifest{
+		SchemaVersion: SchemaVersionReviewContext,
+		SliceID:       "slice_archive",
+		IncludedFiles: []ReviewContextIncludedFile{{
+			Path:               "internal/archive/extract.go",
+			IncludedLineRanges: []ReviewContextLineRange{{StartLine: 1, EndLine: 5}},
+			Readable:           true,
+		}},
+	}
+
+	got := ValidateFindingsV2(artifact, manifest, FindingValidationOptions{
+		Namespace:      "default",
+		RepositoryScan: "repo",
+		ScanRunID:      "scan1",
+		TaskName:       "task1",
+		WorkspaceRoot:  root,
+	})
+	if len(got.Accepted) != 1 || len(got.Dropped) != 1 {
+		t.Fatalf("ValidateFindingsV2() accepted=%d dropped=%d, want 1/1", len(got.Accepted), len(got.Dropped))
+	}
+	if got.Accepted[0].Category != "path-traversal" || got.Accepted[0].SliceID != "slice_archive" {
+		t.Fatalf("accepted finding = %#v, want v2 metadata", got.Accepted[0])
+	}
+	if got.Accepted[0].ValidationStatus != "unvalidated" {
+		t.Fatalf("accepted validation status = %q, want unvalidated", got.Accepted[0].ValidationStatus)
+	}
+	if got.Dropped[0].Reason == "" {
+		t.Fatalf("dropped diagnostic = %#v, want reason", got.Dropped[0])
+	}
+}
+
+func TestValidateFindingsV2AcceptsButDoesNotPersistQuoteWithoutWorkspaceRoot(t *testing.T) {
+	quote := "func main"
+	finding := validFinding()
+	finding.Evidence[0].Quote = &quote
+
+	got := ValidateFindingsV2(FindingsV2Artifact{
+		SchemaVersion: SchemaVersionFindingsV2,
+		Repository:    FindingsV2Repository{RepoURL: "https://github.com/example/app", Branch: "main"},
+		Scan:          FindingsV2Scan{Mode: "initial", SliceID: "slice_app"},
+		Findings:      []FindingsV2Finding{finding},
+	}, ReviewContextManifest{
+		SchemaVersion: SchemaVersionReviewContext,
+		SliceID:       "slice_app",
+		IncludedFiles: []ReviewContextIncludedFile{{
+			Path:               "app.go",
+			IncludedLineRanges: []ReviewContextLineRange{{StartLine: 1, EndLine: 2}},
+			Readable:           true,
+		}},
+	}, FindingValidationOptions{
+		Namespace:      "default",
+		RepositoryScan: "repo",
+		ScanRunID:      "scan1",
+		TaskName:       "task1",
+	})
+	if len(got.Accepted) != 1 || len(got.Dropped) != 0 {
+		t.Fatalf("ValidateFindingsV2() accepted=%d dropped=%d, want 1/0", len(got.Accepted), len(got.Dropped))
+	}
+	if got.Accepted[0].Evidence[0].Quote != "" {
+		t.Fatalf("accepted quote = %q, want quote omitted from durable evidence", got.Accepted[0].Evidence[0].Quote)
+	}
+}
+
+func TestValidateFindingsV2RejectsMissingEvidenceStaleRangesAndQuoteMismatch(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "app.go", "package main\nfunc main() {}\n")
+	badQuote := "not in file"
+	compactedQuote := "package main func main() {}"
+	base := validFinding()
+	tests := []struct {
+		name     string
+		mutate   func(*FindingsV2Finding)
+		wantDrop string
+	}{
+		{
+			name: "missing evidence",
+			mutate: func(f *FindingsV2Finding) {
+				f.Evidence = nil
+			},
+			wantDrop: "evidence is required",
+		},
+		{
+			name: "stale range",
+			mutate: func(f *FindingsV2Finding) {
+				f.Evidence[0].StartLine = 20
+				f.Evidence[0].EndLine = 21
+			},
+			wantDrop: "outside included review context",
+		},
+		{
+			name: "quote mismatch",
+			mutate: func(f *FindingsV2Finding) {
+				f.Evidence[0].Quote = &badQuote
+			},
+			wantDrop: "quote does not match",
+		},
+		{
+			name: "quote requires exact substring",
+			mutate: func(f *FindingsV2Finding) {
+				f.Evidence[0].StartLine = 1
+				f.Evidence[0].EndLine = 2
+				f.Evidence[0].Quote = &compactedQuote
+			},
+			wantDrop: "quote does not match",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			finding := base
+			finding.Evidence = append([]FindingsV2EvidenceRef{}, base.Evidence...)
+			tt.mutate(&finding)
+			got := ValidateFindingsV2(FindingsV2Artifact{
+				SchemaVersion: SchemaVersionFindingsV2,
+				Repository:    FindingsV2Repository{RepoURL: "https://github.com/example/app", Branch: "main"},
+				Scan:          FindingsV2Scan{Mode: "initial", SliceID: "slice_app"},
+				Findings:      []FindingsV2Finding{finding},
+			}, ReviewContextManifest{
+				SchemaVersion: SchemaVersionReviewContext,
+				SliceID:       "slice_app",
+				IncludedFiles: []ReviewContextIncludedFile{{
+					Path:               "app.go",
+					IncludedLineRanges: []ReviewContextLineRange{{StartLine: 1, EndLine: 2}},
+					Readable:           true,
+				}},
+			}, FindingValidationOptions{
+				Namespace:      "default",
+				RepositoryScan: "repo",
+				ScanRunID:      "scan1",
+				TaskName:       "task1",
+				WorkspaceRoot:  root,
+			})
+			if len(got.Accepted) != 0 || len(got.Dropped) != 1 {
+				t.Fatalf("ValidateFindingsV2() accepted=%d dropped=%d, want 0/1", len(got.Accepted), len(got.Dropped))
+			}
+			if !strings.Contains(got.Dropped[0].Reason, tt.wantDrop) {
+				t.Fatalf("drop reason = %q, want contains %q", got.Dropped[0].Reason, tt.wantDrop)
+			}
+		})
+	}
+}
+
+func TestFindingV2FingerprintIgnoresEvidenceOrder(t *testing.T) {
+	first := validFinding()
+	first.Evidence = append(first.Evidence, FindingsV2EvidenceRef{Path: "other.go", StartLine: 2, EndLine: 2})
+	second := first
+	second.Evidence = []FindingsV2EvidenceRef{first.Evidence[1], first.Evidence[0]}
+
+	left := FindingV2Fingerprint("ns", "repo", "https://github.com/example/app", "main", "", "slice", first)
+	right := FindingV2Fingerprint("ns", "repo", "https://github.com/example/app", "main", "", "slice", second)
+	if left != right {
+		t.Fatalf("fingerprints differ for reordered evidence: %q vs %q", left, right)
+	}
+}
+
+func TestFindingV2FingerprintIgnoresEvidenceQuote(t *testing.T) {
+	quoteA := "token := \"secret\""
+	quoteB := "token := os.Getenv(\"TOKEN\")"
+	first := validFinding()
+	first.Evidence[0].Quote = &quoteA
+	second := validFinding()
+	second.Evidence[0].Quote = &quoteB
+
+	left := FindingV2Fingerprint("ns", "repo", "https://github.com/example/app", "main", "", "slice", first)
+	right := FindingV2Fingerprint("ns", "repo", "https://github.com/example/app", "main", "", "slice", second)
+	if left != right {
+		t.Fatalf("fingerprints differ for quote-only change: %q vs %q", left, right)
+	}
+}
+
+func TestFindingV2FingerprintCanonicalizesEquivalentEvidence(t *testing.T) {
+	emptySymbol := ""
+	first := validFinding()
+	second := validFinding()
+	second.Evidence = []FindingsV2EvidenceRef{
+		{Path: " app.go ", StartLine: 2, EndLine: 2, Symbol: &emptySymbol},
+		{Path: "app.go", StartLine: 2, EndLine: 2},
+	}
+
+	left := FindingV2Fingerprint("ns", "repo", "https://github.com/example/app", "main", "", "slice", first)
+	right := FindingV2Fingerprint("ns", "repo", "https://github.com/example/app", "main", "", "slice", second)
+	if left != right {
+		t.Fatalf("fingerprints differ for equivalent evidence refs: %q vs %q", left, right)
+	}
+}
+
+func TestBuildReviewContextBoundsPromptAndManifest(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "app.go", strings.Repeat("line\n", 20))
+	writeFile(t, root, "db.go", strings.Repeat("db\n", 20))
+	slice := store.ReviewSlice{
+		ID:             "slice_app",
+		RepositoryScan: "repo",
+		Title:          "App",
+		Kind:           "package",
+		OwnedFiles:     []store.ReviewSliceFile{{Path: "app.go"}, {Path: "db.go"}},
+	}
+	prompt, manifest, err := BuildReviewContext(root, slice, ReviewContextOptions{MaxFiles: 2, MaxBytes: 360})
+	if err != nil {
+		t.Fatalf("BuildReviewContext() error = %v", err)
+	}
+	if len(manifest.IncludedFiles) != 1 || !manifest.IncludedFiles[0].Truncated {
+		t.Fatalf("manifest = %#v, want one truncated included file", manifest)
+	}
+	if len(manifest.OmittedFiles) != 1 || manifest.OmittedFiles[0].Path != "db.go" || manifest.OmittedFiles[0].Reason != "maxBytes" {
+		t.Fatalf("omitted files = %#v, want db.go omitted by maxBytes", manifest.OmittedFiles)
+	}
+	if manifest.PromptBytes != len(prompt) || len(prompt) > 360 {
+		t.Fatalf("prompt bytes = manifest:%d actual:%d, want actual under max", manifest.PromptBytes, len(prompt))
+	}
+	if !strings.Contains(prompt, "Valid evidence paths") || !strings.Contains(prompt, "app.go") {
+		t.Fatalf("prompt = %q, want evidence path list and file excerpt", prompt)
+	}
+	if strings.Contains(prompt, "db.go") {
+		t.Fatalf("prompt = %q, want omitted file absent from valid evidence paths", prompt)
+	}
+}
+
+func validFinding() FindingsV2Finding {
+	return FindingsV2Finding{
+		Title:       "Finding",
+		Category:    "test",
+		Severity:    "high",
+		Confidence:  "high",
+		Summary:     "summary",
+		Remediation: "remediation",
+		Evidence: []FindingsV2EvidenceRef{{
+			Path:      "app.go",
+			StartLine: 2,
+			EndLine:   2,
+		}},
+	}
+}
+
+func writeFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+}
+
+func TestDroppedFindingSampleJSON(t *testing.T) {
+	raw := DroppedFindingSampleJSON(DroppedFindingDiagnostic{Sample: map[string]string{"title": "bad"}})
+	var got map[string]string
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("DroppedFindingSampleJSON() returned invalid JSON: %v", err)
+	}
+	if got["title"] != "bad" {
+		t.Fatalf("sample = %#v, want title", got)
+	}
+}

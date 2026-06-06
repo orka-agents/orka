@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
-import type { PatchProposal, RepositoryScan, ScanRun, SecurityFinding, ThreatModel } from '@/schemas/security'
+import type { DroppedFinding, PatchProposal, RepositoryScan, ReviewSlice, ScanRun, SecurityFinding, ThreatModel } from '@/schemas/security'
 
 interface ListResponse<T> {
   items: T[]
@@ -11,6 +11,8 @@ interface ListResponse<T> {
 const ALL_FINDINGS_PAGE_LIMIT = '100'
 
 export interface FindingsFilters {
+  sliceID?: string
+  category?: string
   severity?: string
   validationStatus?: string
   state?: string
@@ -73,6 +75,29 @@ export function useScanRuns(name: string) {
   return useQuery({
     queryKey: ['security', 'scans', namespace, name],
     queryFn: () => api.get<ListResponse<ScanRun>>(`/security/repositories/${name}/scans`, { namespace }),
+    enabled: !!name,
+    refetchInterval: 10000,
+  })
+}
+
+export function useReviewSlices(name: string) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['security', 'slices', namespace, name],
+    queryFn: () => api.get<ListResponse<ReviewSlice>>(`/security/repositories/${name}/slices`, { namespace }),
+    enabled: !!name,
+    refetchInterval: 10000,
+  })
+}
+
+export function useDroppedFindings(name: string, scanRunID?: string) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['security', 'dropped-findings', namespace, name, scanRunID],
+    queryFn: () => api.get<ListResponse<DroppedFinding>>(`/security/repositories/${name}/dropped-findings`, {
+      namespace,
+      ...(scanRunID ? { scanRunID } : {}),
+    }),
     enabled: !!name,
     refetchInterval: 10000,
   })

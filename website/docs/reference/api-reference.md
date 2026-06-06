@@ -163,6 +163,9 @@ Repository security endpoints manage `RepositoryScan` configurations and their g
 | `/api/v1/security/repositories/:name/threat-model` | PUT | Update threat model |
 | `/api/v1/security/repositories/:name/scans` | GET | List scan runs |
 | `/api/v1/security/repositories/:name/scans` | POST | Trigger manual scan |
+| `/api/v1/security/repositories/:name/slices` | GET | List deterministic review slices |
+| `/api/v1/security/repositories/:name/slices/:sliceID` | GET | Get review slice details |
+| `/api/v1/security/repositories/:name/dropped-findings` | GET | List v2 dropped-finding diagnostics |
 | `/api/v1/security/repositories/:name/findings` | GET | List findings |
 | `/api/v1/security/findings/:id` | GET | Get finding details |
 | `/api/v1/security/findings/:id/dismiss` | POST | Dismiss finding |
@@ -177,8 +180,10 @@ Common query parameters:
 - `namespace` — Kubernetes namespace to operate in.
 - `limit` — page size for list endpoints that support pagination.
 - `continue` — Kubernetes continue token for `GET /api/v1/security/repositories`.
-- `cursor` — store cursor for `GET /api/v1/security/repositories/:name/scans` and `GET /api/v1/security/repositories/:name/findings`.
-- `severity`, `validationStatus`, `state` — filters for `GET /api/v1/security/repositories/:name/findings`.
+- `cursor` — store cursor for `GET /api/v1/security/repositories/:name/scans`, `GET /api/v1/security/repositories/:name/slices`, `GET /api/v1/security/repositories/:name/dropped-findings`, and `GET /api/v1/security/repositories/:name/findings`.
+- `severity`, `validationStatus`, `state`, `sliceID`, `category` — filters for `GET /api/v1/security/repositories/:name/findings`.
+- `status` — filter for `GET /api/v1/security/repositories/:name/slices`.
+- `scanRunID`, `sliceID` — filters for `GET /api/v1/security/repositories/:name/dropped-findings`.
 - `recommended=true` — filters findings to recommended remediation candidates.
 
 ### Create Repository Scan
@@ -213,8 +218,14 @@ A typical remediation workflow is:
 2. Inspect evidence with `GET /api/v1/security/findings/:id`.
 3. Optionally validate with `POST /api/v1/security/findings/:id/validate`.
 4. Generate a patch with `POST /api/v1/security/findings/:id/patch`.
-5. Review patch proposals with `GET /api/v1/security/findings/:id/patches`.
+5. Review patch proposals with `GET /api/v1/security/findings/:id/patches`. A proposal is successful only after patch summary and diff verification passes.
 6. Create a remediation pull request with `POST /api/v1/security/findings/:id/pull-request`.
+
+Review slice and dropped-output inspection:
+
+1. List slices with `GET /api/v1/security/repositories/:name/slices?namespace=default`.
+2. Inspect one slice with `GET /api/v1/security/repositories/:name/slices/:sliceID?namespace=default`.
+3. List rejected v2 model output with `GET /api/v1/security/repositories/:name/dropped-findings?namespace=default&scanRunID=scan_...`.
 
 ## Auth
 
