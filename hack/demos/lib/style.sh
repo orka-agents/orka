@@ -735,20 +735,32 @@ payoff_card_sandbox() {
   local t2="$3"
   local t3="$4"
   local ns="${DEMO_NAMESPACE:-demo-magic}"
+  local workdir="${DEMO_WORKDIR:-/tmp/orka-demo}"
 
+  # Resolve each turn's reattached claim. Primary source is an eager capture
+  # file written at turn-success time (pod still alive) by the demo — this
+  # survives pod garbage collection, which can delete turn-1's pod long before
+  # this end-of-demo card runs. Fall back to live pod logs when no capture
+  # exists. Every path is `set -e`/`pipefail` safe (trailing `|| true`): a
+  # missed grep must NOT abort the script before the card box renders.
   __sandbox_claim_for() {
     local task="$1"
+    local capture="${workdir}/sandbox-claim-${task}.txt"
+    if [[ -s "${capture}" ]]; then
+      head -n 1 "${capture}" 2>/dev/null || true
+      return 0
+    fi
     local pod
     pod="$(kubectl get pods -n "${ns}" -l "orka.ai/task=${task}" \
+             --sort-by=.metadata.creationTimestamp \
              -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)"
     if [[ -z "${pod}" ]]; then
-      printf ''
       return 0
     fi
     kubectl logs -n "${ns}" "${pod}" --all-containers=true 2>/dev/null \
-      | grep -Eo 'completed in sandbox workspace [a-z0-9-]+' \
+      | grep -Eo 'completed in (agent-)?sandbox workspace [a-z0-9-]+' \
       | tail -n 1 \
-      | awk '{print $NF}'
+      | awk '{print $NF}' || true
   }
 
   local c1 c2 c3

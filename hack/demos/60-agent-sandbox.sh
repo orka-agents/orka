@@ -71,6 +71,26 @@ sandbox_session_claim_name() {
   printf 'orka-session-%.32s\n' "${digest}"
 }
 
+# Capture a turn's reattached sandbox claim name the moment it succeeds, while
+# the worker pod (and its logs) are guaranteed to still exist. Persisted to
+# ${DEMO_WORKDIR}/sandbox-claim-<task>.txt so the Chapter 8 payoff card reads a
+# durable file instead of racing pod garbage collection at end-of-demo. set -e
+# safe: a miss writes nothing and never aborts the run.
+capture_sandbox_claim() {
+  local task="$1"
+  local out="${DEMO_WORKDIR}/sandbox-claim-${task}.txt"
+  local pod claim
+  pod="$(kubectl get pods -n "${DEMO_NAMESPACE}" -l "orka.ai/task=${task}" \
+           --sort-by=.metadata.creationTimestamp \
+           -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)"
+  [[ -z "${pod}" ]] && return 0
+  claim="$(kubectl logs -n "${DEMO_NAMESPACE}" "${pod}" --all-containers=true 2>/dev/null \
+    | grep -Eo 'completed in (agent-)?sandbox workspace [a-z0-9-]+' \
+    | tail -n 1 | awk '{print $NF}' || true)"
+  [[ -n "${claim}" ]] && printf '%s\n' "${claim}" > "${out}"
+  return 0
+}
+
 render_sandbox_scout_agent      > "${DEMO_WORKDIR}/sandbox-scout-agent.yaml"
 render_sandbox_builder_agent    > "${DEMO_WORKDIR}/sandbox-builder-agent.yaml"
 render_sandbox_turn_task "${t1}" "${scout_agent}"   "${prompts_dir}/sandbox-turn-1-scout.txt"   --create-session > "${DEMO_WORKDIR}/sandbox-turn-1.yaml"
@@ -85,6 +105,12 @@ demo_event "🧹" "Clearing any prior sandbox session ${session} so this run sta
 delete_task_if_exists "${t1}"
 delete_task_if_exists "${t2}"
 delete_task_if_exists "${t3}"
+# Drop stale eager-capture files from a prior run — task names are
+# deterministic, so a leftover sandbox-claim-<task>.txt would feed the payoff
+# card a previous run's claim and mask a real reuse failure.
+rm -f "${DEMO_WORKDIR}/sandbox-claim-${t1}.txt" \
+      "${DEMO_WORKDIR}/sandbox-claim-${t2}.txt" \
+      "${DEMO_WORKDIR}/sandbox-claim-${t3}.txt" 2>/dev/null || true
 sandbox_claim_namespace="${DEMO_SANDBOX_CLAIM_NAMESPACE:-${DEMO_NAMESPACE}}"
 kubectl delete sandboxclaims -n "${sandbox_claim_namespace}" \
   -l "orka.ai/session=${session}" --ignore-not-found >/dev/null 2>&1 || true
@@ -163,6 +189,7 @@ demo_announce_reset "turn-${t1}-"
 DEMO_WAIT_STATUS_HOOK=_sandbox_turn_status \
   wait_for_task_succeeded         "${t1}" "${DEMO_SANDBOX_TURN_TIMEOUT:-1800}" >/dev/null
 wait_for_task_result_available  "${t1}" "${DEMO_SANDBOX_RESULT_TIMEOUT:-120}" >/dev/null
+capture_sandbox_claim "${t1}"
 demo_event "✅" "Turn 1 succeeded. SandboxClaim bound and warm — git checkout, deps cached, runtime booted."
 demo_pe "kubectl get sandboxclaims -n ${sandbox_claim_namespace} -l orka.ai/session=${session}"
 
@@ -175,6 +202,7 @@ demo_announce_reset "turn-${t2}-"
 DEMO_WAIT_STATUS_HOOK=_sandbox_turn_status \
   wait_for_task_succeeded         "${t2}" "${DEMO_SANDBOX_TURN_TIMEOUT:-1800}" >/dev/null
 wait_for_task_result_available  "${t2}" "${DEMO_SANDBOX_RESULT_TIMEOUT:-120}" >/dev/null
+capture_sandbox_claim "${t2}"
 demo_event "🚀" "Turn 2 succeeded — file written, branch pushed, PR opened. Watch chapter 6 for the PR URL."
 
 # Chapter 5 ------------------------------------------------------------------
@@ -186,6 +214,7 @@ demo_announce_reset "turn-${t3}-"
 DEMO_WAIT_STATUS_HOOK=_sandbox_turn_status \
   wait_for_task_succeeded         "${t3}" "${DEMO_SANDBOX_TURN_TIMEOUT:-1800}" >/dev/null
 wait_for_task_result_available  "${t3}" "${DEMO_SANDBOX_RESULT_TIMEOUT:-120}" >/dev/null
+capture_sandbox_claim "${t3}"
 demo_event "✅" "Turn 3 succeeded. Three Tasks, one workspace, zero cold starts beyond the first."
 
 # Chapter 6 ------------------------------------------------------------------

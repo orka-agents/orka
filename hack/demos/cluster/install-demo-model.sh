@@ -127,5 +127,38 @@ if kubectl -n "${orka_namespace}" get deployment "${controller_deployment}" >/de
   kubectl -n "${orka_namespace}" rollout status deployment/"${controller_deployment}" --timeout=300s
 fi
 
+# --- AI worker image (type: ai coordinator in demos 10/20) ------------------
+# The manual/chat PR coordinators run as a `type: ai` Task, which uses the AI
+# worker image (workers/ai/Dockerfile), NOT the codex worker. The Substrate e2e
+# never builds or wires this image, so the controller falls back to the code
+# default ghcr.io/sozercan/orka/ai-worker:latest, which the kind cluster cannot
+# pull -> ImagePullBackOff and the coordinator never starts. Build the AI worker
+# for the node arch, push to the local registry, and repoint the controller's
+# --ai-worker-image (ADD the flag if the e2e deployment omits it).
+ai_image="${DEMO_AI_WORKER_IMAGE:-localhost:${KIND_REGISTRY_PORT:-5001}/orka/ai-worker:demo}"
+if command -v docker >/dev/null 2>&1 && [[ "${DEMO_BUILD_AI_IMAGE:-1}" == "1" ]]; then
+  node_arch="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
+  log "Building AI worker image ${ai_image} (arch ${node_arch})"
+  docker build --platform "linux/${node_arch}" -t "${ai_image}" \
+    -f "${repo_root}/workers/ai/Dockerfile" "${repo_root}"
+  docker push "${ai_image}"
+fi
+if kubectl -n "${orka_namespace}" get deployment "${controller_deployment}" >/dev/null 2>&1; then
+  log "Repointing ${controller_deployment} --ai-worker-image -> ${ai_image}"
+  kubectl -n "${orka_namespace}" get deployment "${controller_deployment}" -o json \
+    | jq --arg img "${ai_image}" '
+        .spec.template.spec.containers |= map(
+          if .name == "manager" then
+            .args = (
+              (.args // []) as $a |
+              if ($a | map(startswith("--ai-worker-image=")) | any)
+              then ($a | map(if startswith("--ai-worker-image=") then "--ai-worker-image=" + $img else . end))
+              else ($a + ["--ai-worker-image=" + $img])
+              end)
+          else . end)' \
+    | kubectl apply -f -
+  kubectl -n "${orka_namespace}" rollout status deployment/"${controller_deployment}" --timeout=300s
+fi
+
 log "Demo model stack ready: Provider ${provider_ref} + runtime/provider/git secrets in ${demo_namespace}."
 log "Run demos 10/20/30/40 with: source hack/demos/cluster/demo-env.sh"
