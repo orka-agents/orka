@@ -15,20 +15,16 @@ func TestEnsureRequiredSecurityArtifactsFollowUpWritesMissingArtifact(t *testing
 	cleanupSecurityArtifactsDir(t)
 
 	cfg := &AgentConfig{
-		Prompt: "REQUIRED_SECURITY_ARTIFACTS: security-findings.json",
+		Prompt: "REQUIRED_SECURITY_ARTIFACTS: security-findings.v2.json",
 	}
-
-	findings := security.FindingsArtifact{
-		Version: 1,
-		Repository: security.FindingsArtifactRepo{
+	findings := security.FindingsV2Artifact{
+		SchemaVersion: security.SchemaVersionFindingsV2,
+		Repository: security.FindingsV2Repository{
 			RepoURL: "https://github.com/sozercan/actions-test.git",
 			Branch:  "main",
 		},
-		Scan: security.FindingsArtifactScan{
-			Mode:    "initial",
-			Summary: "No findings in scope",
-		},
-		Findings: []security.FindingsArtifactFinding{},
+		Scan:     security.FindingsV2Scan{Mode: "initial", SliceID: "slice_app", Summary: "No findings in scope"},
+		Findings: []security.FindingsV2Finding{},
 	}
 	data, err := json.Marshal(findings)
 	if err != nil {
@@ -40,10 +36,10 @@ func TestEnsureRequiredSecurityArtifactsFollowUpWritesMissingArtifact(t *testing
 		cfg,
 		"analysis summary only",
 		func(_ context.Context, prompt string) (string, error) {
-			if !strings.Contains(prompt, "security-findings.json") {
-				t.Fatalf("follow-up prompt = %q, want security-findings.json", prompt)
+			if !strings.Contains(prompt, "security-findings.v2.json") {
+				t.Fatalf("follow-up prompt = %q, want security-findings.v2.json", prompt)
 			}
-			if err := WriteArtifactFile(security.ArtifactFindings, data); err != nil {
+			if err := WriteArtifactFile(security.ArtifactFindingsV2, data); err != nil {
 				return "", err
 			}
 			return "SECURITY_ARTIFACTS_WRITTEN", nil
@@ -56,7 +52,7 @@ func TestEnsureRequiredSecurityArtifactsFollowUpWritesMissingArtifact(t *testing
 		t.Fatalf("result = %q, want follow-up confirmation appended", result)
 	}
 
-	saved, err := os.ReadFile(filepath.Join(artifactsDir, security.ArtifactFindings))
+	saved, err := os.ReadFile(filepath.Join(artifactsDir, security.ArtifactFindingsV2))
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
@@ -69,14 +65,14 @@ func TestEnsureRequiredSecurityArtifactsRecoversFromTranscript(t *testing.T) {
 	cleanupSecurityArtifactsDir(t)
 
 	cfg := &AgentConfig{
-		Prompt: "REQUIRED_SECURITY_ARTIFACTS: security-findings.json",
+		Prompt: "REQUIRED_SECURITY_ARTIFACTS: security-findings.v2.json",
 	}
 
-	transcript := "cat > /workspace/.orka-artifacts/security-findings.json << 'EOF'\n" +
-		`{"version":1,"repository":{` +
-		`"repo_url":"https://github.com/sozercan/actions-test.git",` +
-		`"branch":"main","head_sha":"","base_sha":""},` +
-		`"scan":{"mode":"initial","commit_count":0,"summary":"empty"},` +
+	transcript := "cat > /workspace/.orka-artifacts/security-findings.v2.json << 'EOF'\n" +
+		`{"schemaVersion":2,"repository":{` +
+		`"repoURL":"https://github.com/sozercan/actions-test.git",` +
+		`"branch":"main","subPath":"","headSHA":"","baseSHA":""},` +
+		`"scan":{"mode":"initial","sliceId":"slice_app","summary":"empty"},` +
 		`"findings":[]}` +
 		"\nEOF"
 
@@ -84,7 +80,7 @@ func TestEnsureRequiredSecurityArtifactsRecoversFromTranscript(t *testing.T) {
 		t.Fatalf("EnsureRequiredSecurityArtifacts() error = %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(artifactsDir, security.ArtifactFindings)); err != nil {
+	if _, err := os.Stat(filepath.Join(artifactsDir, security.ArtifactFindingsV2)); err != nil {
 		t.Fatalf("artifact not recovered: %v", err)
 	}
 }

@@ -22,12 +22,12 @@ import (
 const (
 	testArtifactsDir        = "/tmp/artifacts/"
 	testDetailedThreatModel = "# Threat Model\n\nDetailed content"
-	testFindingsJSONManual1 = `{"version":1,"repository":{"repo_url":"https://github.com/example/repo",` +
-		`"branch":"main","head_sha":"abc","base_sha":"def"},"scan":{"mode":"manual",` +
-		`"commit_count":1,"summary":"ok"},"findings":[]}`
-	testFindingsJSONManual0 = `{"version":1,"repository":{"repo_url":"https://github.com/example/repo",` +
-		`"branch":"main","head_sha":"abc","base_sha":"def"},"scan":{"mode":"manual",` +
-		`"commit_count":0,"summary":"ok"},"findings":[]}`
+	testFindingsJSONManual1 = `{"schemaVersion":2,"repository":{"repoURL":"https://github.com/example/repo",` +
+		`"branch":"main","subPath":"","headSHA":"abc","baseSHA":"def"},` +
+		`"scan":{"mode":"manual","sliceId":"slice_app","summary":"ok"},"findings":[]}`
+	testFindingsJSONManual0 = `{"schemaVersion":2,"repository":{"repoURL":"https://github.com/example/repo",` +
+		`"branch":"main","subPath":"","headSHA":"abc","baseSHA":"def"},` +
+		`"scan":{"mode":"manual","sliceId":"slice_app","summary":"ok"},"findings":[]}`
 )
 
 func TestBuildSessionConfig_Minimal(t *testing.T) {
@@ -237,14 +237,14 @@ func TestExtractResult_EmptyResultContent(t *testing.T) {
 
 func TestRequiredSecurityArtifacts(t *testing.T) {
 	cfg := &common.AgentConfig{
-		Prompt: "REQUIRED_SECURITY_ARTIFACTS: security-threat-model.md, security-findings.json",
+		Prompt: "REQUIRED_SECURITY_ARTIFACTS: security-threat-model.md, security-findings.v2.json",
 	}
 
 	got := requiredSecurityArtifacts(cfg)
 	if len(got) != 2 {
 		t.Fatalf("requiredSecurityArtifacts() len = %d, want 2", len(got))
 	}
-	if got[0] != "security-threat-model.md" || got[1] != "security-findings.json" {
+	if got[0] != "security-threat-model.md" || got[1] != "security-findings.v2.json" {
 		t.Fatalf("requiredSecurityArtifacts() = %v", got)
 	}
 }
@@ -263,12 +263,18 @@ func TestRequiredSecurityArtifactsParsesValidationDirective(t *testing.T) {
 func TestSecurityArtifactsFollowUpPrompt(t *testing.T) {
 	cfg := &common.AgentConfig{SubPath: "Sources/Kaset"}
 
-	got := securityArtifactsFollowUpPrompt(cfg, []string{"security-threat-model.md", "security-findings.json"})
+	got := securityArtifactsFollowUpPrompt(cfg, []string{"security-threat-model.md", "security-findings.v2.json"})
 	if !strings.Contains(got, "../../.orka-artifacts/security-threat-model.md") {
 		t.Fatalf("follow-up prompt missing threat model path: %q", got)
 	}
 	if !strings.Contains(got, "Use the Bash tool only") {
 		t.Fatalf("follow-up prompt missing bash-only instruction: %q", got)
+	}
+	if !strings.Contains(got, "security-findings.v2.json must be valid JSON with schemaVersion=2") {
+		t.Fatalf("follow-up prompt missing v2 findings schema guidance: %q", got)
+	}
+	if !strings.Contains(got, "Set scan.sliceId to the review slice ID") {
+		t.Fatalf("follow-up prompt missing v2 slice guidance: %q", got)
 	}
 	if !strings.Contains(got, "SECURITY_ARTIFACTS_WRITTEN") {
 		t.Fatalf("follow-up prompt missing completion sentinel: %q", got)
@@ -399,10 +405,10 @@ func TestRecoverArtifactsFromTranscript(t *testing.T) {
 <tool_call>
 <tool_name>shell</tool_name>
 <parameters>
-<command>cat > /workspace/.orka-artifacts/security-findings.json << 'EOF'
-{"version":1,"findings":[]}
+	<command>cat > /workspace/.orka-artifacts/security-findings.v2.json << 'EOF'
+` + testFindingsJSONManual1 + `
 EOF
-</command>
+	</command>
 </parameters>
 </tool_call>`
 
@@ -422,11 +428,11 @@ EOF
 		t.Fatalf("threat model contents = %q", string(threatModel))
 	}
 
-	findings, err := os.ReadFile(filepath.Join(testArtifactsDir, "security-findings.json"))
+	findings, err := os.ReadFile(filepath.Join(testArtifactsDir, security.ArtifactFindingsV2))
 	if err != nil {
 		t.Fatalf("ReadFile(findings) error = %v", err)
 	}
-	if string(findings) != "{\"version\":1,\"findings\":[]}" {
+	if string(findings) != testFindingsJSONManual1 {
 		t.Fatalf("findings contents = %q", string(findings))
 	}
 }
@@ -437,8 +443,8 @@ func TestRecoverArtifactsFromTranscriptPrefersValidShellArtifact(t *testing.T) {
 	transcript := `<tool_call>
 <tool_name>create_file</tool_name>
 <parameters>
-<path>/workspace/.orka-artifacts/security-findings.json</path>
-<content>{"version":1,"scan":{"summary":"broken
+	<path>/workspace/.orka-artifacts/security-findings.v2.json</path>
+	<content>{"schemaVersion":2,"scan":{"summary":"broken
 </content>
 </parameters>
 </tool_call>
@@ -446,7 +452,7 @@ func TestRecoverArtifactsFromTranscriptPrefersValidShellArtifact(t *testing.T) {
 	<tool_call>
 	<tool_name>shell</tool_name>
 	<parameters>
-	<command>cat > /workspace/.orka-artifacts/security-findings.json << 'EOF'
+		<command>cat > /workspace/.orka-artifacts/security-findings.v2.json << 'EOF'
 ` + testFindingsJSONManual1 + `
 EOF
 </command>
@@ -461,7 +467,7 @@ EOF
 		t.Fatalf("recoverArtifactsFromTranscript() = %d, want 1", recovered)
 	}
 
-	findings, err := os.ReadFile(filepath.Join(testArtifactsDir, security.ArtifactFindings))
+	findings, err := os.ReadFile(filepath.Join(testArtifactsDir, security.ArtifactFindingsV2))
 	if err != nil {
 		t.Fatalf("ReadFile(findings) error = %v", err)
 	}
@@ -479,12 +485,12 @@ func TestRecoverArtifactsFromTranscriptSupportsJSONToolCallShell(t *testing.T) {
 
 	escapedFindings := strings.ReplaceAll(testFindingsJSONManual0, `"`, `\"`)
 	transcript := `<tool_call>
-{"name":"shell","arguments":{"command":"mkdir -p /workspace/.orka-artifacts && ` +
-		`cat > /workspace/.orka-artifacts/security-findings.json << 'ENDOFJSON'\n` +
+	{"name":"shell","arguments":{"command":"mkdir -p /workspace/.orka-artifacts && ` +
+		`cat > /workspace/.orka-artifacts/security-findings.v2.json << 'ENDOFJSON'\n` +
 		escapedFindings +
 		`\nENDOFJSON\npython3 -m json.tool ` +
-		`/workspace/.orka-artifacts/security-findings.json > /dev/null && echo VALID"}}
-</tool_call>`
+		`/workspace/.orka-artifacts/security-findings.v2.json > /dev/null && echo VALID"}}
+	</tool_call>`
 
 	recovered, err := recoverArtifactsFromTranscript(transcript)
 	if err != nil {
@@ -494,7 +500,7 @@ func TestRecoverArtifactsFromTranscriptSupportsJSONToolCallShell(t *testing.T) {
 		t.Fatalf("recoverArtifactsFromTranscript() = %d, want 1", recovered)
 	}
 
-	findings, err := os.ReadFile(filepath.Join(testArtifactsDir, security.ArtifactFindings))
+	findings, err := os.ReadFile(filepath.Join(testArtifactsDir, security.ArtifactFindingsV2))
 	if err != nil {
 		t.Fatalf("ReadFile(findings) error = %v", err)
 	}
@@ -511,8 +517,8 @@ func TestRecoverArtifactsFromTranscriptFallsBackToRawShellHeredoc(t *testing.T) 
 	cleanupRecoveredArtifacts(t)
 
 	result := `The file is now written:
-cat > /workspace/.orka-artifacts/security-findings.json << 'EOF'
-	` + testFindingsJSONManual0 + `
+	cat > /workspace/.orka-artifacts/security-findings.v2.json << 'EOF'
+		` + testFindingsJSONManual0 + `
 EOF
 SECURITY_ARTIFACTS_WRITTEN`
 
@@ -524,7 +530,7 @@ SECURITY_ARTIFACTS_WRITTEN`
 		t.Fatalf("recoverArtifactsFromTranscript() = %d, want 1", recovered)
 	}
 
-	findings, err := os.ReadFile(filepath.Join(testArtifactsDir, security.ArtifactFindings))
+	findings, err := os.ReadFile(filepath.Join(testArtifactsDir, security.ArtifactFindingsV2))
 	if err != nil {
 		t.Fatalf("ReadFile(findings) error = %v", err)
 	}

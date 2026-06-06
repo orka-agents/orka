@@ -9,7 +9,6 @@ package controller
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -171,93 +170,11 @@ func mustParseTime(t *testing.T, value string) time.Time {
 	return parsed
 }
 
-func saveTestFindingsArtifact(
-	t *testing.T,
-	ctx context.Context,
-	store storepkg.ArtifactStore,
-	namespace string,
-	taskName string,
-	headSHA string,
-) {
-	t.Helper()
-
-	findings := security.FindingsArtifact{
-		Version: 1,
-		Repository: security.FindingsArtifactRepo{
-			RepoURL: "https://github.com/example/repo",
-			Branch:  "main",
-			HeadSHA: headSHA,
-			BaseSHA: "base-" + headSHA,
-		},
-		Scan: security.FindingsArtifactScan{
-			Mode:    "initial",
-			Summary: "No findings",
-		},
-		Findings: []security.FindingsArtifactFinding{},
-	}
-	data, err := json.Marshal(findings)
-	if err != nil {
-		t.Fatalf("json.Marshal(findings) error = %v", err)
-	}
-	if err := store.SaveArtifact(ctx, namespace, taskName, security.ArtifactFindings, "application/json", data); err != nil {
-		t.Fatalf("SaveArtifact(%s) error = %v", taskName, err)
-	}
-}
-
-func saveTestFindingsArtifactWithFinding(
-	t *testing.T,
-	ctx context.Context,
-	store storepkg.ArtifactStore,
-	namespace string,
-	taskName string,
-	headSHA string,
-	fingerprint string,
-) {
-	t.Helper()
-
-	findings := security.FindingsArtifact{
-		Version: 1,
-		Repository: security.FindingsArtifactRepo{
-			RepoURL: "https://github.com/example/repo",
-			Branch:  "main",
-			HeadSHA: headSHA,
-			BaseSHA: "base-" + headSHA,
-		},
-		Scan: security.FindingsArtifactScan{
-			Mode:    "initial",
-			Summary: "One finding",
-		},
-		Findings: []security.FindingsArtifactFinding{{
-			Fingerprint:      fingerprint,
-			Title:            "Late artifact finding",
-			Summary:          "Finding persisted after terminal run re-ingest",
-			Severity:         "high",
-			Confidence:       "high",
-			ValidationStatus: "unvalidated",
-			FilePath:         "app/routes/index.js",
-			Line:             42,
-			RootCause:        "late artifact",
-			Remediation:      "fix it",
-			SuggestedAction:  "patch",
-		}},
-	}
-	data, err := json.Marshal(findings)
-	if err != nil {
-		t.Fatalf("json.Marshal(findings) error = %v", err)
-	}
-	if err := store.SaveArtifact(ctx, namespace, taskName, security.ArtifactFindings, "application/json", data); err != nil {
-		t.Fatalf("SaveArtifact(%s) error = %v", taskName, err)
-	}
-}
-
-func newSucceededSecurityTask(name, scanName, scanID, stage, scope string, completed metav1.Time) *corev1alpha1.Task {
+func newSucceededSecurityTask(name, scanID, stage string, completed metav1.Time) *corev1alpha1.Task {
 	labelsMap := map[string]string{
-		labels.LabelSecurityTarget: scanName,
+		labels.LabelSecurityTarget: "kaset",
 		labels.LabelSecurityScanID: scanID,
 		labels.LabelSecurityStage:  stage,
-	}
-	if scope != "" {
-		labelsMap[labels.LabelSecurityScope] = scope
 	}
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -269,379 +186,6 @@ func newSucceededSecurityTask(name, scanName, scanID, stage, scope string, compl
 			Phase:          corev1alpha1.TaskPhaseSucceeded,
 			CompletionTime: &completed,
 		},
-	}
-}
-
-func TestIngestScanTaskRefreshesNonLatestSplitRun(t *testing.T) {
-	ctx := context.Background()
-	secStore := setupControllerSQLiteStore(t)
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme() error = %v", err)
-	}
-
-	scanName := "split-nonlatest"
-	scanID := "scan_split_nonlatest"
-	scan := &corev1alpha1.RepositoryScan{
-		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
-		ObjectMeta: metav1.ObjectMeta{Name: scanName, Namespace: defaultNS},
-		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
-	}
-	completed := metav1.NewTime(mustParseTime(t, "2026-05-10T10:00:00Z"))
-	threatTask := newSucceededSecurityTask("split-nonlatest-threat", scanName, scanID, security.StageThreatModel, "", completed)
-	objects := []client.Object{scan, threatTask}
-	discoveryTasks := []*corev1alpha1.Task{}
-	for index, scope := range security.DiscoveryScopes() {
-		task := newSucceededSecurityTask(
-			fmt.Sprintf("split-nonlatest-discovery-%d", index),
-			scanName,
-			scanID,
-			security.StageDiscovery,
-			scope.Name,
-			completed,
-		)
-		objects = append(objects, task)
-		discoveryTasks = append(discoveryTasks, task)
-		saveTestFindingsArtifact(t, ctx, secStore, task.Namespace, task.Name, fmt.Sprintf("head-%d", index))
-	}
-	if err := secStore.SaveArtifact(ctx, threatTask.Namespace, threatTask.Name, security.ArtifactThreatModel, "text/markdown", []byte("# Threat Model")); err != nil {
-		t.Fatalf("SaveArtifact(threat model) error = %v", err)
-	}
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithObjects(objects...).
-		Build()
-	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: secStore, ArtifactStore: secStore}
-	run := &storepkg.ScanRun{ID: scanID, Namespace: defaultNS, RepositoryScan: scanName, TaskName: threatTask.Name, Mode: "initial", Phase: scanRunPhasePending, StartedAt: completed.Time}
-	if err := secStore.CreateScanRun(ctx, run); err != nil {
-		t.Fatalf("CreateScanRun() error = %v", err)
-	}
-
-	if err := r.ingestScanTask(ctx, scan, discoveryTasks[0], false); err != nil {
-		t.Fatalf("ingestScanTask() error = %v", err)
-	}
-
-	updated, err := secStore.GetScanRun(ctx, scan.Namespace, scanID)
-	if err != nil {
-		t.Fatalf("GetScanRun() error = %v", err)
-	}
-	if updated.Phase != scanRunPhaseSucceeded {
-		t.Fatalf("run.Phase = %q, want %q", updated.Phase, scanRunPhaseSucceeded)
-	}
-	if updated.CompletedAt == nil || !updated.CompletedAt.Equal(completed.Time) {
-		t.Fatalf("run.CompletedAt = %v, want %v", updated.CompletedAt, completed.Time)
-	}
-}
-
-func TestIngestOwnedTasksReingestsTerminalRunWhenArtifactsArrive(t *testing.T) {
-	ctx := context.Background()
-	secStore := setupControllerSQLiteStore(t)
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme() error = %v", err)
-	}
-
-	scanName := "split-terminal-late-artifacts"
-	scanID := "scan_split_terminal_late_artifacts"
-	scan := &corev1alpha1.RepositoryScan{
-		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
-		ObjectMeta: metav1.ObjectMeta{Name: scanName, Namespace: defaultNS},
-		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
-	}
-	completed := metav1.NewTime(mustParseTime(t, "2026-05-10T11:00:00Z"))
-	threatTask := newSucceededSecurityTask("split-terminal-late-threat", scanName, scanID, security.StageThreatModel, "", completed)
-	objects := []client.Object{scan, threatTask}
-	if err := secStore.SaveArtifact(ctx, threatTask.Namespace, threatTask.Name, security.ArtifactThreatModel, "text/markdown", []byte("# Threat Model")); err != nil {
-		t.Fatalf("SaveArtifact(threat model) error = %v", err)
-	}
-	lateFingerprint := "late-artifact-finding"
-	for index, scope := range security.DiscoveryScopes() {
-		task := newSucceededSecurityTask(
-			fmt.Sprintf("split-terminal-late-discovery-%d", index),
-			scanName,
-			scanID,
-			security.StageDiscovery,
-			scope.Name,
-			completed,
-		)
-		objects = append(objects, task)
-		if index == 0 {
-			saveTestFindingsArtifactWithFinding(t, ctx, secStore, task.Namespace, task.Name, fmt.Sprintf("head-%d", index), lateFingerprint)
-			continue
-		}
-		saveTestFindingsArtifact(t, ctx, secStore, task.Namespace, task.Name, fmt.Sprintf("head-%d", index))
-	}
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithObjects(objects...).
-		Build()
-	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: secStore, ArtifactStore: secStore}
-	completedTime := completed.Time
-	run := &storepkg.ScanRun{
-		ID:             scanID,
-		Namespace:      defaultNS,
-		RepositoryScan: scanName,
-		TaskName:       threatTask.Name,
-		Mode:           "initial",
-		Phase:          scanRunPhaseFailed,
-		StartedAt:      completed.Add(-5 * time.Minute),
-		CompletedAt:    &completedTime,
-		ErrorMessage:   security.ArtifactFindings + " is missing",
-		Summary:        security.ArtifactFindings + " is missing",
-	}
-	if err := secStore.CreateScanRun(ctx, run); err != nil {
-		t.Fatalf("CreateScanRun() error = %v", err)
-	}
-
-	if err := r.ingestOwnedTasks(ctx, scan); err != nil {
-		t.Fatalf("ingestOwnedTasks() error = %v", err)
-	}
-
-	updated, err := secStore.GetScanRun(ctx, scan.Namespace, scanID)
-	if err != nil {
-		t.Fatalf("GetScanRun() error = %v", err)
-	}
-	if updated.Phase != scanRunPhaseSucceeded {
-		t.Fatalf("run.Phase = %q, want %q", updated.Phase, scanRunPhaseSucceeded)
-	}
-	if updated.ErrorMessage != "" {
-		t.Fatalf("run.ErrorMessage = %q, want empty after successful re-ingest", updated.ErrorMessage)
-	}
-	if _, err := secStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name); err != nil {
-		t.Fatalf("GetLatestThreatModel() error = %v", err)
-	}
-	if _, err := secStore.GetFinding(ctx, scan.Namespace, security.FindingID(lateFingerprint)); err != nil {
-		t.Fatalf("GetFinding(late artifact) error = %v", err)
-	}
-}
-
-func TestIngestOwnedTasksPreservesLatestCombinedScanSummary(t *testing.T) {
-	ctx := context.Background()
-	secStore := setupControllerSQLiteStore(t)
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme() error = %v", err)
-	}
-
-	scanName := "combined-latest-summary"
-	scanID := "scan_combined_latest_summary"
-	scan := &corev1alpha1.RepositoryScan{
-		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
-		ObjectMeta: metav1.ObjectMeta{Name: scanName, Namespace: defaultNS},
-		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
-	}
-	completed := metav1.NewTime(mustParseTime(t, "2026-05-10T12:00:00Z"))
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "combined-latest-summary-task",
-			Namespace: defaultNS,
-			Labels: map[string]string{
-				labels.LabelSecurityTarget: scanName,
-				labels.LabelSecurityScanID: scanID,
-				labels.LabelSecurityMode:   "initial",
-			},
-		},
-		Status: corev1alpha1.TaskStatus{
-			Phase:          corev1alpha1.TaskPhaseSucceeded,
-			CompletionTime: &completed,
-		},
-	}
-	findings := security.FindingsArtifact{
-		Version: 1,
-		Repository: security.FindingsArtifactRepo{
-			RepoURL: "https://github.com/example/repo",
-			Branch:  "main",
-			HeadSHA: "head-combined",
-			BaseSHA: "base-combined",
-		},
-		Scan: security.FindingsArtifactScan{
-			Mode:        "initial",
-			CommitCount: 7,
-			Summary:     "Rich combined scan summary from findings artifact",
-		},
-		Findings: []security.FindingsArtifactFinding{},
-	}
-	findingsJSON, err := json.Marshal(findings)
-	if err != nil {
-		t.Fatalf("json.Marshal() error = %v", err)
-	}
-	if err := secStore.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactFindings, "application/json", findingsJSON); err != nil {
-		t.Fatalf("SaveArtifact(findings) error = %v", err)
-	}
-	if err := secStore.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactThreatModel, "text/markdown", []byte("# Threat Model")); err != nil {
-		t.Fatalf("SaveArtifact(threat model) error = %v", err)
-	}
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithObjects(scan, task).
-		Build()
-	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: secStore, ArtifactStore: secStore}
-
-	if err := r.ingestOwnedTasks(ctx, scan); err != nil {
-		t.Fatalf("ingestOwnedTasks() error = %v", err)
-	}
-
-	run, err := secStore.GetScanRun(ctx, scan.Namespace, scanID)
-	if err != nil {
-		t.Fatalf("GetScanRun() error = %v", err)
-	}
-	if run.Summary != findings.Scan.Summary {
-		t.Fatalf("run.Summary = %q, want %q", run.Summary, findings.Scan.Summary)
-	}
-	current := &corev1alpha1.RepositoryScan{}
-	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
-		t.Fatalf("cl.Get() error = %v", err)
-	}
-	condition := meta.FindStatusCondition(current.Status.Conditions, "Ready")
-	if condition == nil || condition.Message != findings.Scan.Summary {
-		t.Fatalf("Ready condition = %#v, want message %q", condition, findings.Scan.Summary)
-	}
-}
-
-func TestIngestScanTaskFailsSucceededTaskWithoutRequiredArtifacts(t *testing.T) {
-	ctx := context.Background()
-	store := setupControllerSQLiteStore(t)
-
-	reconciler := &RepositoryScanReconciler{
-		SecurityStore: store,
-		ArtifactStore: store,
-		ResultStore:   store,
-	}
-	scan := &corev1alpha1.RepositoryScan{
-		ObjectMeta: metav1.ObjectMeta{Name: "kaset", Namespace: defaultNS},
-	}
-	completedAt := metav1.NewTime(mustParseTime(t, "2026-04-10T05:18:35Z"))
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "kaset-manual-1",
-			Namespace:         defaultNS,
-			CreationTimestamp: metav1.NewTime(mustParseTime(t, "2026-04-10T05:15:08Z")),
-			Labels: map[string]string{
-				labels.LabelSecurityTarget: "kaset",
-				labels.LabelSecurityScanID: "scan_missing_artifacts",
-				labels.LabelSecurityMode:   "manual",
-			},
-		},
-		Status: corev1alpha1.TaskStatus{
-			Phase:          corev1alpha1.TaskPhaseSucceeded,
-			CompletionTime: &completedAt,
-		},
-	}
-
-	if err := store.SaveResult(ctx, task.Namespace, task.Name, []byte("scan said success")); err != nil {
-		t.Fatalf("SaveResult() error = %v", err)
-	}
-
-	if err := reconciler.ingestScanTask(ctx, scan, task, false); err != nil {
-		t.Fatalf("ingestScanTask() error = %v", err)
-	}
-
-	run, err := store.GetScanRun(ctx, scan.Namespace, "scan_missing_artifacts")
-	if err != nil {
-		t.Fatalf("GetScanRun() error = %v", err)
-	}
-	if run.Phase != scanRunPhaseFailed {
-		t.Fatalf("run.Phase = %q, want failed", run.Phase)
-	}
-	if !strings.Contains(run.ErrorMessage, security.ArtifactThreatModel) {
-		t.Fatalf("run.ErrorMessage = %q, want it to mention %s", run.ErrorMessage, security.ArtifactThreatModel)
-	}
-	if !strings.Contains(run.ErrorMessage, security.ArtifactFindings) {
-		t.Fatalf("run.ErrorMessage = %q, want it to mention %s", run.ErrorMessage, security.ArtifactFindings)
-	}
-
-	_, err = store.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
-	if !errors.Is(err, storepkg.ErrNotFound) {
-		t.Fatalf("GetLatestThreatModel() error = %v, want ErrNotFound", err)
-	}
-}
-
-func TestIngestScanTaskPersistsThreatModelWhenRequiredArtifactsExist(t *testing.T) {
-	ctx := context.Background()
-	store := setupControllerSQLiteStore(t)
-
-	reconciler := &RepositoryScanReconciler{
-		SecurityStore: store,
-		ArtifactStore: store,
-		ResultStore:   store,
-	}
-	scan := &corev1alpha1.RepositoryScan{
-		ObjectMeta: metav1.ObjectMeta{Name: "kaset", Namespace: defaultNS},
-	}
-	completedAt := metav1.NewTime(mustParseTime(t, "2026-04-10T05:20:35Z"))
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "kaset-manual-2",
-			Namespace:         defaultNS,
-			CreationTimestamp: metav1.NewTime(mustParseTime(t, "2026-04-10T05:19:08Z")),
-			Labels: map[string]string{
-				labels.LabelSecurityTarget: "kaset",
-				labels.LabelSecurityScanID: "scan_with_artifacts",
-				labels.LabelSecurityMode:   "manual",
-			},
-		},
-		Status: corev1alpha1.TaskStatus{
-			Phase:          corev1alpha1.TaskPhaseSucceeded,
-			CompletionTime: &completedAt,
-		},
-	}
-
-	findings := security.FindingsArtifact{
-		Version: 1,
-		Repository: security.FindingsArtifactRepo{
-			RepoURL: "https://github.com/sozercan/kaset",
-			Branch:  "main",
-			HeadSHA: "abc123",
-			BaseSHA: "def456",
-		},
-		Scan: security.FindingsArtifactScan{
-			Mode:        "manual",
-			CommitCount: 3,
-			Summary:     "Validated 0 findings",
-		},
-		Findings: []security.FindingsArtifactFinding{},
-	}
-	findingsJSON, err := json.Marshal(findings)
-	if err != nil {
-		t.Fatalf("json.Marshal() error = %v", err)
-	}
-	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactFindings, "application/json", findingsJSON); err != nil {
-		t.Fatalf("SaveArtifact(findings) error = %v", err)
-	}
-	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactThreatModel, "text/markdown", []byte("# Threat Model\n\n- protect secrets")); err != nil {
-		t.Fatalf("SaveArtifact(threat model) error = %v", err)
-	}
-
-	if err := reconciler.ingestScanTask(ctx, scan, task, false); err != nil {
-		t.Fatalf("ingestScanTask() error = %v", err)
-	}
-
-	run, err := store.GetScanRun(ctx, scan.Namespace, "scan_with_artifacts")
-	if err != nil {
-		t.Fatalf("GetScanRun() error = %v", err)
-	}
-	if run.Phase != scanRunPhaseSucceeded {
-		t.Fatalf("run.Phase = %q, want succeeded", run.Phase)
-	}
-	if run.HeadCommit != "abc123" {
-		t.Fatalf("run.HeadCommit = %q, want abc123", run.HeadCommit)
-	}
-	if run.Summary != "Validated 0 findings" {
-		t.Fatalf("run.Summary = %q, want findings summary", run.Summary)
-	}
-
-	model, err := store.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
-	if err != nil {
-		t.Fatalf("GetLatestThreatModel() error = %v", err)
-	}
-	if !strings.Contains(model.Content, "protect secrets") {
-		t.Fatalf("model.Content = %q, want saved threat model", model.Content)
 	}
 }
 
@@ -690,7 +234,7 @@ func TestIngestMapperTaskPersistsReviewSlices(t *testing.T) {
 		t.Fatalf("SaveArtifact(slices) error = %v", err)
 	}
 
-	if err := reconciler.ingestScanTask(ctx, scan, task, false); err != nil {
+	if err := reconciler.ingestScanTask(ctx, scan, task); err != nil {
 		t.Fatalf("ingestScanTask() error = %v", err)
 	}
 	got, err := store.GetReviewSlice(ctx, defaultNS, "kaset", "slice_kaset_api")
@@ -716,8 +260,12 @@ func TestIngestMapperTaskSelectsIncrementalSlicesFromChangedFiles(t *testing.T) 
 		SecurityStore: store,
 		ArtifactStore: store,
 	}
+	maxFindings := int32(1)
 	scan := &corev1alpha1.RepositoryScan{
 		ObjectMeta: metav1.ObjectMeta{Name: "kaset", Namespace: defaultNS},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			MaxFindingsPerRun: &maxFindings,
+		},
 	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -795,7 +343,7 @@ func TestIngestMapperTaskSelectsIncrementalSlicesFromChangedFiles(t *testing.T) 
 		t.Fatalf("CreateScanRun() error = %v", err)
 	}
 
-	if err := reconciler.ingestScanTask(ctx, scan, task, false); err != nil {
+	if err := reconciler.ingestScanTask(ctx, scan, task); err != nil {
 		t.Fatalf("ingestScanTask() error = %v", err)
 	}
 
@@ -834,8 +382,12 @@ func TestMapperReingestPreservesReviewedSliceForCurrentRun(t *testing.T) {
 		SecurityStore: store,
 		ArtifactStore: store,
 	}
+	maxFindings := int32(1)
 	scan := &corev1alpha1.RepositoryScan{
 		ObjectMeta: metav1.ObjectMeta{Name: "kaset", Namespace: defaultNS},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			MaxFindingsPerRun: &maxFindings,
+		},
 	}
 
 	mapperTask := &corev1alpha1.Task{
@@ -934,16 +486,16 @@ func TestMapperReingestPreservesReviewedSliceForCurrentRun(t *testing.T) {
 		t.Fatalf("SaveArtifact(findings v2) error = %v", err)
 	}
 
-	if err := reconciler.ingestScanTask(ctx, scan, mapperTask, false); err != nil {
+	if err := reconciler.ingestScanTask(ctx, scan, mapperTask); err != nil {
 		t.Fatalf("ingest mapper error = %v", err)
 	}
-	if err := reconciler.ingestScanTask(ctx, scan, reviewTask, false); err != nil {
+	if err := reconciler.ingestScanTask(ctx, scan, reviewTask); err != nil {
 		t.Fatalf("ingest review error = %v", err)
 	}
-	if err := reconciler.ingestScanTask(ctx, scan, mapperTask, false); err != nil {
+	if err := reconciler.ingestScanTask(ctx, scan, mapperTask); err != nil {
 		t.Fatalf("reingest mapper error = %v", err)
 	}
-	if err := reconciler.ingestScanTask(ctx, scan, reviewTask, false); err != nil {
+	if err := reconciler.ingestScanTask(ctx, scan, reviewTask); err != nil {
 		t.Fatalf("reingest review error = %v", err)
 	}
 
@@ -984,8 +536,8 @@ func TestProgressLatestScanRunStartsReviewTasksForPendingSlices(t *testing.T) {
 		},
 		Status: corev1alpha1.RepositoryScanStatus{LastScanID: "scan_review"},
 	}
-	threatTask := newSucceededSecurityTask("kaset-initial-threat", "kaset", "scan_review", security.StageThreatModel, "", metav1.Now())
-	mapperTask := newSucceededSecurityTask("kaset-initial-mapper", "kaset", "scan_review", security.StageMapper, "", metav1.Now())
+	threatTask := newSucceededSecurityTask("kaset-initial-threat", "scan_review", security.StageThreatModel, metav1.Now())
+	mapperTask := newSucceededSecurityTask("kaset-initial-mapper", "scan_review", security.StageMapper, metav1.Now())
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
@@ -1052,19 +604,87 @@ func TestProgressLatestScanRunStartsReviewTasksForPendingSlices(t *testing.T) {
 		t.Fatalf("review prompt does not mention required v2 artifacts: %q", reviewTasks.Items[0].Spec.Prompt)
 	}
 
-	var discoveryTasks corev1alpha1.TaskList
-	if err := cl.List(ctx, &discoveryTasks,
-		client.InNamespace(defaultNS),
-		client.MatchingLabels(map[string]string{
-			labels.LabelSecurityTarget: "kaset",
-			labels.LabelSecurityScanID: "scan_review",
-			labels.LabelSecurityStage:  security.StageDiscovery,
-		}),
-	); err != nil {
-		t.Fatalf("List(discovery tasks) error = %v", err)
+}
+
+func TestProgressLatestScanRunFailsMapperArtifactValidationProblem(t *testing.T) {
+	ctx := context.Background()
+	store := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
 	}
-	if len(discoveryTasks.Items) != 0 {
-		t.Fatalf("len(discovery tasks) = %d, want 0 while review slices exist", len(discoveryTasks.Items))
+
+	scan := &corev1alpha1.RepositoryScan{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: corev1alpha1.GroupVersion.String(),
+			Kind:       "RepositoryScan",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: "kaset", Namespace: defaultNS},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:          "https://github.com/sozercan/kaset",
+			Branch:           "main",
+			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "scan-reviewer"},
+		},
+		Status: corev1alpha1.RepositoryScanStatus{LastScanID: "scan_mapper_failed"},
+	}
+	completed := metav1.Now()
+	threatTask := newSucceededSecurityTask("kaset-initial-threat", "scan_mapper_failed", security.StageThreatModel, completed)
+	mapperTask := newSucceededSecurityTask("kaset-initial-mapper", "scan_mapper_failed", security.StageMapper, completed)
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
+		WithObjects(scan, threatTask, mapperTask).
+		Build()
+	reconciler := &RepositoryScanReconciler{
+		Client:        cl,
+		Scheme:        scheme,
+		SecurityStore: store,
+	}
+	if err := store.CreateScanRun(ctx, &storepkg.ScanRun{
+		ID:             "scan_mapper_failed",
+		Namespace:      defaultNS,
+		RepositoryScan: "kaset",
+		TaskName:       threatTask.Name,
+		Mode:           "initial",
+		Phase:          scanRunPhaseRunning,
+		ErrorMessage:   "mapper stage failed: security-slices.json is missing",
+		StartedAt:      time.Now(),
+	}); err != nil {
+		t.Fatalf("CreateScanRun() error = %v", err)
+	}
+
+	progressed, err := reconciler.progressLatestScanRun(ctx, scan)
+	if err != nil {
+		t.Fatalf("progressLatestScanRun() error = %v", err)
+	}
+	if !progressed {
+		t.Fatal("progressLatestScanRun() = false, want true")
+	}
+
+	run, err := store.GetScanRun(ctx, defaultNS, "scan_mapper_failed")
+	if err != nil {
+		t.Fatalf("GetScanRun() error = %v", err)
+	}
+	if run.Phase != scanRunPhaseFailed {
+		t.Fatalf("run.Phase = %q, want failed", run.Phase)
+	}
+	if !strings.Contains(run.Summary, security.ArtifactSlices) {
+		t.Fatalf("run.Summary = %q, want mapper artifact failure", run.Summary)
+	}
+
+	current := &corev1alpha1.RepositoryScan{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		t.Fatalf("Get(scan) error = %v", err)
+	}
+	if current.Status.Phase != repositoryScanPhaseError {
+		t.Fatalf("scan status phase = %q, want Error", current.Status.Phase)
+	}
+	ready := meta.FindStatusCondition(current.Status.Conditions, "Ready")
+	if ready == nil {
+		t.Fatal("Ready condition missing")
+	}
+	if ready.Status != metav1.ConditionFalse || ready.Reason != "ScanFailed" {
+		t.Fatalf("Ready condition = %#v, want failed condition", ready)
 	}
 }
 
@@ -1090,9 +710,9 @@ func TestProgressLatestScanRunRetriesPendingSlicesWithoutTasks(t *testing.T) {
 		Status: corev1alpha1.RepositoryScanStatus{LastScanID: "scan_partial_review"},
 	}
 	const sliceAPI = "slice_api"
-	threatTask := newSucceededSecurityTask("kaset-partial-threat", "kaset", "scan_partial_review", security.StageThreatModel, "", metav1.Now())
-	mapperTask := newSucceededSecurityTask("kaset-partial-mapper", "kaset", "scan_partial_review", security.StageMapper, "", metav1.Now())
-	reviewTask := newSucceededSecurityTask("kaset-review-slice-api", "kaset", "scan_partial_review", security.StageReview, "", metav1.Now())
+	threatTask := newSucceededSecurityTask("kaset-partial-threat", "scan_partial_review", security.StageThreatModel, metav1.Now())
+	mapperTask := newSucceededSecurityTask("kaset-partial-mapper", "scan_partial_review", security.StageMapper, metav1.Now())
+	reviewTask := newSucceededSecurityTask("kaset-review-slice-api", "scan_partial_review", security.StageReview, metav1.Now())
 	reviewTask.Labels[labels.LabelSecuritySliceID] = sliceAPI
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -1258,8 +878,8 @@ func TestProgressLatestScanRunCompletesNoopIncrementalWhenNoSlicesMatch(t *testi
 		},
 		Status: corev1alpha1.RepositoryScanStatus{LastScanID: "scan_noop_incremental"},
 	}
-	threatTask := newSucceededSecurityTask("kaset-incremental-threat", "kaset", "scan_noop_incremental", security.StageThreatModel, "", metav1.Now())
-	mapperTask := newSucceededSecurityTask("kaset-incremental-mapper", "kaset", "scan_noop_incremental", security.StageMapper, "", metav1.Now())
+	threatTask := newSucceededSecurityTask("kaset-incremental-threat", "scan_noop_incremental", security.StageThreatModel, metav1.Now())
+	mapperTask := newSucceededSecurityTask("kaset-incremental-mapper", "scan_noop_incremental", security.StageMapper, metav1.Now())
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
@@ -1313,20 +933,6 @@ func TestProgressLatestScanRunCompletesNoopIncrementalWhenNoSlicesMatch(t *testi
 		t.Fatal("progressLatestScanRun() = false, want true")
 	}
 
-	var discoveryTasks corev1alpha1.TaskList
-	if err := cl.List(ctx, &discoveryTasks,
-		client.InNamespace(defaultNS),
-		client.MatchingLabels(map[string]string{
-			labels.LabelSecurityTarget: "kaset",
-			labels.LabelSecurityScanID: "scan_noop_incremental",
-			labels.LabelSecurityStage:  security.StageDiscovery,
-		}),
-	); err != nil {
-		t.Fatalf("List(discovery tasks) error = %v", err)
-	}
-	if len(discoveryTasks.Items) != 0 {
-		t.Fatalf("len(discovery tasks) = %d, want 0 for no-op incremental", len(discoveryTasks.Items))
-	}
 	run, err := store.GetScanRun(ctx, defaultNS, "scan_noop_incremental")
 	if err != nil {
 		t.Fatalf("GetScanRun() error = %v", err)
@@ -1334,12 +940,22 @@ func TestProgressLatestScanRunCompletesNoopIncrementalWhenNoSlicesMatch(t *testi
 	if run.Phase != scanRunPhaseSucceeded || run.CompletedAt == nil {
 		t.Fatalf("run phase/completedAt = %q/%v, want succeeded with completion", run.Phase, run.CompletedAt)
 	}
+	if run.Summary != "Threat model generated; no review slices matched 1 changed files" {
+		t.Fatalf("run.Summary = %q, want mapper no-op summary", run.Summary)
+	}
 	current := &corev1alpha1.RepositoryScan{}
 	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
 		t.Fatalf("Get(scan) error = %v", err)
 	}
 	if current.Status.Phase != repositoryScanPhaseReady || current.Status.LastProcessedCommit != "head456" {
 		t.Fatalf("scan status phase/processed = %q/%q, want Ready/head456", current.Status.Phase, current.Status.LastProcessedCommit)
+	}
+	ready := meta.FindStatusCondition(current.Status.Conditions, "Ready")
+	if ready == nil {
+		t.Fatal("Ready condition missing")
+	}
+	if strings.Contains(ready.Message, "pending") {
+		t.Fatalf("Ready condition message = %q, want completed no-op summary", ready.Message)
 	}
 }
 
@@ -1365,9 +981,9 @@ func TestRefreshScanRunStatusKeepsReviewRunRunningWithPendingSlices(t *testing.T
 		Status: corev1alpha1.RepositoryScanStatus{LastScanID: "scan_review_incomplete"},
 	}
 	completed := metav1.Now()
-	threatTask := newSucceededSecurityTask("kaset-incomplete-threat", "kaset", "scan_review_incomplete", security.StageThreatModel, "", completed)
-	mapperTask := newSucceededSecurityTask("kaset-incomplete-mapper", "kaset", "scan_review_incomplete", security.StageMapper, "", completed)
-	reviewTask := newSucceededSecurityTask("kaset-incomplete-review-api", "kaset", "scan_review_incomplete", security.StageReview, "", completed)
+	threatTask := newSucceededSecurityTask("kaset-incomplete-threat", "scan_review_incomplete", security.StageThreatModel, completed)
+	mapperTask := newSucceededSecurityTask("kaset-incomplete-mapper", "scan_review_incomplete", security.StageMapper, completed)
+	reviewTask := newSucceededSecurityTask("kaset-incomplete-review-api", "scan_review_incomplete", security.StageReview, completed)
 	reviewTask.Labels[labels.LabelSecuritySliceID] = "slice_api"
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -1451,114 +1067,6 @@ func TestRefreshScanRunStatusKeepsReviewRunRunningWithPendingSlices(t *testing.T
 	}
 	if current.Status.Phase != repositoryScanPhaseScanning || current.Status.LastProcessedCommit != "" {
 		t.Fatalf("scan status phase/processed = %q/%q, want Scanning with no processed commit", current.Status.Phase, current.Status.LastProcessedCommit)
-	}
-}
-
-func TestIngestDiscoveryTaskPartitionsV2Findings(t *testing.T) {
-	ctx := context.Background()
-	store := setupControllerSQLiteStore(t)
-	reconciler := &RepositoryScanReconciler{
-		SecurityStore: store,
-		ArtifactStore: store,
-	}
-	scan := &corev1alpha1.RepositoryScan{
-		ObjectMeta: metav1.ObjectMeta{Name: "kaset", Namespace: defaultNS},
-	}
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "kaset-review-slice",
-			Namespace: defaultNS,
-			Labels: map[string]string{
-				labels.LabelSecurityTarget:  "kaset",
-				labels.LabelSecurityScanID:  "scan_v2",
-				labels.LabelSecurityMode:    "initial",
-				labels.LabelSecurityStage:   security.StageDiscovery,
-				labels.LabelSecuritySliceID: "slice_api",
-			},
-		},
-		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
-	}
-	manifest := security.ReviewContextManifest{
-		SchemaVersion: security.SchemaVersionReviewContext,
-		SliceID:       "slice_api",
-		IncludedFiles: []security.ReviewContextIncludedFile{{
-			Path:               "internal/api/security.go",
-			Role:               "owned",
-			IncludedLineRanges: []security.ReviewContextLineRange{{StartLine: 1, EndLine: 20}},
-			Readable:           true,
-		}},
-	}
-	manifestData, err := json.Marshal(manifest)
-	if err != nil {
-		t.Fatalf("json.Marshal(manifest) error = %v", err)
-	}
-	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ReviewContextArtifactName("slice_api"), "application/json", manifestData); err != nil {
-		t.Fatalf("SaveArtifact(manifest) error = %v", err)
-	}
-	findings := security.FindingsV2Artifact{
-		SchemaVersion: security.SchemaVersionFindingsV2,
-		Repository: security.FindingsV2Repository{
-			RepoURL: "https://github.com/example/repo",
-			Branch:  "main",
-			HeadSHA: "head123",
-		},
-		Scan: security.FindingsV2Scan{Mode: "initial", SliceID: "slice_api", Summary: "one accepted, one dropped"},
-		Findings: []security.FindingsV2Finding{
-			{
-				Title:       "Unsafe API behavior",
-				Category:    "authz",
-				Severity:    "high",
-				Confidence:  "high",
-				Summary:     "API path lacks authorization.",
-				Remediation: "Add authorization checks.",
-				Evidence: []security.FindingsV2EvidenceRef{{
-					Path:      "internal/api/security.go",
-					StartLine: 5,
-					EndLine:   8,
-				}},
-			},
-			{
-				Title:       "Speculative issue",
-				Category:    "authz",
-				Severity:    "high",
-				Confidence:  "low",
-				Summary:     "Cites an omitted file.",
-				Remediation: "Fix it.",
-				Evidence: []security.FindingsV2EvidenceRef{{
-					Path:      "internal/api/omitted.go",
-					StartLine: 1,
-					EndLine:   1,
-				}},
-			},
-		},
-	}
-	findingsData, err := json.Marshal(findings)
-	if err != nil {
-		t.Fatalf("json.Marshal(findings) error = %v", err)
-	}
-	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactFindingsV2, "application/json", findingsData); err != nil {
-		t.Fatalf("SaveArtifact(findings v2) error = %v", err)
-	}
-
-	if err := reconciler.ingestScanTask(ctx, scan, task, false); err != nil {
-		t.Fatalf("ingestScanTask() error = %v", err)
-	}
-	listed, _, err := store.ListFindings(ctx, storepkg.FindingFilter{Namespace: defaultNS, RepositoryScan: "kaset", Category: "authz"})
-	if err != nil {
-		t.Fatalf("ListFindings() error = %v", err)
-	}
-	if len(listed) != 1 || listed[0].SliceID != "slice_api" || listed[0].Category != "authz" {
-		t.Fatalf("findings = %#v, want one accepted v2 finding", listed)
-	}
-	dropped, _, err := store.ListDroppedFindings(ctx, storepkg.DroppedFindingFilter{Namespace: defaultNS, RepositoryScan: "kaset", ScanRunID: "scan_v2"})
-	if err != nil {
-		t.Fatalf("ListDroppedFindings() error = %v", err)
-	}
-	if len(dropped) != 1 || dropped[0].Reason == "" {
-		t.Fatalf("dropped = %#v, want one diagnostic", dropped)
-	}
-	if _, _, err := store.GetArtifact(ctx, task.Namespace, task.Name, security.ArtifactDroppedFindings); err != nil {
-		t.Fatalf("GetArtifact(dropped findings) error = %v", err)
 	}
 }
 
@@ -1660,7 +1168,7 @@ func TestIngestReviewTaskRejectsMismatchedV2SliceID(t *testing.T) {
 		t.Fatalf("SaveArtifact(findings v2) error = %v", err)
 	}
 
-	if err := reconciler.ingestScanTask(ctx, scan, task, false); err != nil {
+	if err := reconciler.ingestScanTask(ctx, scan, task); err != nil {
 		t.Fatalf("ingestScanTask() error = %v", err)
 	}
 
@@ -1694,8 +1202,12 @@ func TestIngestReviewTaskPartitionsV2FindingsAndMarksSliceReviewed(t *testing.T)
 		SecurityStore: store,
 		ArtifactStore: store,
 	}
+	maxFindings := int32(1)
 	scan := &corev1alpha1.RepositoryScan{
 		ObjectMeta: metav1.ObjectMeta{Name: "kaset", Namespace: defaultNS},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			MaxFindingsPerRun: &maxFindings,
+		},
 	}
 	if err := store.CreateScanRun(ctx, &storepkg.ScanRun{
 		ID:             "scan_review_ingest",
@@ -1765,7 +1277,7 @@ func TestIngestReviewTaskPartitionsV2FindingsAndMarksSliceReviewed(t *testing.T)
 			BaseSHA: "artifact-base",
 			HeadSHA: "artifact-head",
 		},
-		Scan: security.FindingsV2Scan{Mode: "initial", SliceID: "slice_api", Summary: "one accepted, one dropped"},
+		Scan: security.FindingsV2Scan{Mode: "initial", SliceID: "slice_api", Summary: "one accepted, two dropped"},
 		Findings: []security.FindingsV2Finding{
 			{
 				Title:       "Unsafe API behavior",
@@ -1778,6 +1290,19 @@ func TestIngestReviewTaskPartitionsV2FindingsAndMarksSliceReviewed(t *testing.T)
 					Path:      "internal/api/security.go",
 					StartLine: 5,
 					EndLine:   8,
+				}},
+			},
+			{
+				Title:       "Unsafe API audit bypass",
+				Category:    "authz",
+				Severity:    "medium",
+				Confidence:  "high",
+				Summary:     "A second valid API issue exceeds the configured run cap.",
+				Remediation: "Add authorization checks.",
+				Evidence: []security.FindingsV2EvidenceRef{{
+					Path:      "internal/api/security.go",
+					StartLine: 9,
+					EndLine:   12,
 				}},
 			},
 			{
@@ -1803,18 +1328,18 @@ func TestIngestReviewTaskPartitionsV2FindingsAndMarksSliceReviewed(t *testing.T)
 		t.Fatalf("SaveArtifact(findings v2) error = %v", err)
 	}
 
-	if err := reconciler.ingestScanTask(ctx, scan, task, false); err != nil {
+	if err := reconciler.ingestScanTask(ctx, scan, task); err != nil {
 		t.Fatalf("ingestScanTask() error = %v", err)
 	}
-	if err := reconciler.ingestScanTask(ctx, scan, task, false); err != nil {
+	if err := reconciler.ingestScanTask(ctx, scan, task); err != nil {
 		t.Fatalf("second ingestScanTask() error = %v", err)
 	}
 	run, err := store.GetScanRun(ctx, defaultNS, "scan_review_ingest")
 	if err != nil {
 		t.Fatalf("GetScanRun() error = %v", err)
 	}
-	if run.ReviewedSliceCount != 1 || run.AcceptedFindings != 1 || run.DroppedFindings != 1 {
-		t.Fatalf("run counts = reviewed:%d accepted:%d dropped:%d, want 1/1/1", run.ReviewedSliceCount, run.AcceptedFindings, run.DroppedFindings)
+	if run.ReviewedSliceCount != 1 || run.AcceptedFindings != 1 || run.DroppedFindings != 2 {
+		t.Fatalf("run counts = reviewed:%d accepted:%d dropped:%d, want 1/1/2", run.ReviewedSliceCount, run.AcceptedFindings, run.DroppedFindings)
 	}
 	if run.BaseCommit != "trusted-base" || run.HeadCommit != "trusted-head" {
 		t.Fatalf("run commits = %q/%q, want trusted-base/trusted-head", run.BaseCommit, run.HeadCommit)
@@ -1840,8 +1365,17 @@ func TestIngestReviewTaskPartitionsV2FindingsAndMarksSliceReviewed(t *testing.T)
 	if err != nil {
 		t.Fatalf("ListDroppedFindings() error = %v", err)
 	}
-	if len(dropped) != 1 {
-		t.Fatalf("len(dropped) = %d, want one diagnostic", len(dropped))
+	if len(dropped) != 2 {
+		t.Fatalf("len(dropped) = %d, want two diagnostics", len(dropped))
+	}
+	sawCapDrop := false
+	for _, item := range dropped {
+		if strings.Contains(item.Reason, "maxFindingsPerRun limit 1 reached") {
+			sawCapDrop = true
+		}
+	}
+	if !sawCapDrop {
+		t.Fatalf("dropped diagnostics = %#v, want maxFindingsPerRun cap diagnostic", dropped)
 	}
 }
 
@@ -1957,7 +1491,7 @@ func TestIngestReviewTaskSkipsStaleSliceRun(t *testing.T) {
 		t.Fatalf("SaveArtifact(findings v2) error = %v", err)
 	}
 
-	if err := reconciler.ingestScanTask(ctx, scan, task, false); err != nil {
+	if err := reconciler.ingestScanTask(ctx, scan, task); err != nil {
 		t.Fatalf("ingestScanTask() error = %v", err)
 	}
 	run, err := store.GetScanRun(ctx, defaultNS, "scan_old_review")
@@ -1980,71 +1514,6 @@ func TestIngestReviewTaskSkipsStaleSliceRun(t *testing.T) {
 	}
 	if len(listed) != 0 {
 		t.Fatalf("len(findings) = %d, want stale task findings ignored", len(listed))
-	}
-}
-
-func TestIngestScanTaskPersistsThreatModelWhenFindingsAreInvalid(t *testing.T) {
-	ctx := context.Background()
-	store := setupControllerSQLiteStore(t)
-
-	reconciler := &RepositoryScanReconciler{
-		SecurityStore: store,
-		ArtifactStore: store,
-		ResultStore:   store,
-	}
-	scan := &corev1alpha1.RepositoryScan{
-		ObjectMeta: metav1.ObjectMeta{Name: "kaset", Namespace: defaultNS},
-	}
-	completedAt := metav1.NewTime(mustParseTime(t, "2026-04-10T18:24:55Z"))
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "kaset-manual-invalid-findings",
-			Namespace:         defaultNS,
-			CreationTimestamp: metav1.NewTime(mustParseTime(t, "2026-04-10T18:20:31Z")),
-			Labels: map[string]string{
-				labels.LabelSecurityTarget: "kaset",
-				labels.LabelSecurityScanID: "scan_invalid_findings",
-				labels.LabelSecurityMode:   "manual",
-			},
-		},
-		Status: corev1alpha1.TaskStatus{
-			Phase:          corev1alpha1.TaskPhaseSucceeded,
-			CompletionTime: &completedAt,
-		},
-	}
-
-	invalidFindings := []byte("{\"version\":1,\"scan\":{\"summary\":\"broken\nline\"},\"findings\":[]}")
-	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactFindings, "application/json", invalidFindings); err != nil {
-		t.Fatalf("SaveArtifact(findings) error = %v", err)
-	}
-	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactThreatModel, "text/markdown", []byte("# Threat Model\n\n- richer model")); err != nil {
-		t.Fatalf("SaveArtifact(threat model) error = %v", err)
-	}
-
-	if err := reconciler.ingestScanTask(ctx, scan, task, false); err != nil {
-		t.Fatalf("ingestScanTask() error = %v", err)
-	}
-
-	run, err := store.GetScanRun(ctx, scan.Namespace, "scan_invalid_findings")
-	if err != nil {
-		t.Fatalf("GetScanRun() error = %v", err)
-	}
-	if run.Phase != scanRunPhaseFailed {
-		t.Fatalf("run.Phase = %q, want failed", run.Phase)
-	}
-	if !strings.Contains(run.ErrorMessage, "invalid JSON") {
-		t.Fatalf("run.ErrorMessage = %q, want invalid JSON", run.ErrorMessage)
-	}
-
-	model, err := store.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
-	if err != nil {
-		t.Fatalf("GetLatestThreatModel() error = %v", err)
-	}
-	if !strings.Contains(model.Content, "richer model") {
-		t.Fatalf("model.Content = %q, want persisted threat model", model.Content)
-	}
-	if model.GeneratedByScan != "scan_invalid_findings" {
-		t.Fatalf("model.GeneratedByScan = %q, want scan_invalid_findings", model.GeneratedByScan)
 	}
 }
 
@@ -2209,7 +1678,7 @@ func TestIngestValidationTaskUpdatesFindingValidationDetails(t *testing.T) {
 		Summary:            "Confirmed injection path",
 		ValidationSteps:    []string{"Trace input to shell execution", "Confirm shell metacharacters are preserved"},
 		AttackPathAnalysis: "Attacker controls package names which reach shell execution.",
-		Evidence: security.FindingsArtifactEvidenceRefs{
+		Evidence: []storepkg.FindingEvidenceRef{
 			{Kind: "artifact", Name: "security-validation.txt", Label: "Validation transcript"},
 		},
 	}
@@ -2385,27 +1854,12 @@ func TestProgressLatestScanRunUsesNewestOwnedScanWhenStatusIsStale(t *testing.T)
 		t.Fatal("progressLatestScanRun() = false, want true")
 	}
 
-	var tasks corev1alpha1.TaskList
-	if err := cl.List(ctx, &tasks,
-		client.InNamespace(defaultNS),
-		client.MatchingLabels(map[string]string{
-			labels.LabelSecurityTarget: "kaset",
-			labels.LabelSecurityScanID: "scan_new",
-			labels.LabelSecurityStage:  security.StageDiscovery,
-		}),
-	); err != nil {
-		t.Fatalf("List(discovery tasks) error = %v", err)
-	}
-	if len(tasks.Items) != len(security.DiscoveryScopes()) {
-		t.Fatalf("len(discovery tasks) = %d, want %d", len(tasks.Items), len(security.DiscoveryScopes()))
-	}
-
 	run, err := store.GetScanRun(ctx, defaultNS, "scan_new")
 	if err != nil {
 		t.Fatalf("GetScanRun() error = %v", err)
 	}
-	if run.Phase != scanRunPhaseRunning {
-		t.Fatalf("run.Phase = %q, want running", run.Phase)
+	if run.Phase != scanRunPhaseSucceeded || run.CompletedAt == nil {
+		t.Fatalf("run phase/completedAt = %q/%v, want succeeded with completion", run.Phase, run.CompletedAt)
 	}
 }
 
@@ -2798,9 +2252,9 @@ func TestIngestPatchTaskRejectsStaleDiffArtifact(t *testing.T) {
 	assertPatchIngestState(t, fixture, scanRunPhaseFailed, findingStateOpen)
 }
 
-func TestIngestPatchTaskAcceptsLegacyConfirmedPushWithoutArtifactContract(t *testing.T) {
+func TestIngestPatchTaskRejectsConfirmedPushWithoutArtifactContract(t *testing.T) {
 	ctx := context.Background()
-	fixture := newPatchIngestFixture(t, "legacy-no-artifacts")
+	fixture := newPatchIngestFixture(t, "no-artifacts")
 	savePatchStructuredResult(t, fixture, &common.StructuredResult{
 		Summary:    "patched successfully",
 		Diff:       "diff --git a/app.py b/app.py",
@@ -2813,7 +2267,7 @@ func TestIngestPatchTaskAcceptsLegacyConfirmedPushWithoutArtifactContract(t *tes
 	if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, task); err != nil {
 		t.Fatalf("ingestPatchTask() error = %v", err)
 	}
-	assertPatchIngestState(t, fixture, scanRunPhaseSucceeded, findingStatePatchReady)
+	assertPatchIngestState(t, fixture, scanRunPhaseFailed, findingStateOpen)
 }
 
 func TestIngestPatchTaskRejectsMismatchedChangedFiles(t *testing.T) {
@@ -2881,35 +2335,6 @@ func TestIngestPatchTaskKeepsPatchPendingUntilResultExists(t *testing.T) {
 		t.Fatalf("ingestPatchTask() error = %v", err)
 	}
 	assertPatchIngestState(t, fixture, scanRunPhasePending, findingStatePatchPending)
-}
-
-func TestApplyCombinedScanPhaseStatusUsesRunCompletion(t *testing.T) {
-	completed := mustParseTime(t, "2026-05-07T23:30:00Z")
-
-	succeeded := &corev1alpha1.RepositoryScan{}
-	applyCombinedScanPhaseStatus(succeeded, corev1alpha1.TaskPhaseSucceeded, &storepkg.ScanRun{
-		Phase:       scanRunPhaseSucceeded,
-		CompletedAt: &completed,
-		HeadCommit:  "abc123",
-	})
-	if succeeded.Status.LastScanAt == nil || !succeeded.Status.LastScanAt.Time.Equal(completed) {
-		t.Fatalf("succeeded LastScanAt = %v, want %v", succeeded.Status.LastScanAt, completed)
-	}
-	if succeeded.Status.LastSuccessfulScanAt == nil || !succeeded.Status.LastSuccessfulScanAt.Time.Equal(completed) {
-		t.Fatalf("succeeded LastSuccessfulScanAt = %v, want %v", succeeded.Status.LastSuccessfulScanAt, completed)
-	}
-
-	failed := &corev1alpha1.RepositoryScan{}
-	applyCombinedScanPhaseStatus(failed, corev1alpha1.TaskPhaseFailed, &storepkg.ScanRun{
-		Phase:       scanRunPhaseFailed,
-		CompletedAt: &completed,
-	})
-	if failed.Status.LastScanAt == nil || !failed.Status.LastScanAt.Time.Equal(completed) {
-		t.Fatalf("failed LastScanAt = %v, want %v", failed.Status.LastScanAt, completed)
-	}
-	if failed.Status.LastSuccessfulScanAt != nil {
-		t.Fatalf("failed LastSuccessfulScanAt = %v, want nil", failed.Status.LastSuccessfulScanAt)
-	}
 }
 
 func TestRefreshScanRunStatusSetsLastScanAtOnFailedRun(t *testing.T) {
@@ -2983,367 +2408,6 @@ func TestRefreshScanRunStatusSetsBothTimestampsOnSuccess(t *testing.T) {
 	}
 	if current.Status.LastSuccessfulScanAt == nil || !current.Status.LastSuccessfulScanAt.Time.Equal(completed) {
 		t.Fatalf("LastSuccessfulScanAt = %v, want %v", current.Status.LastSuccessfulScanAt, completed)
-	}
-}
-
-func TestRefreshScanRunStatusWaitsForAllDiscoveryScopes(t *testing.T) {
-	ctx := context.Background()
-	secStore := setupControllerSQLiteStore(t)
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme() error = %v", err)
-	}
-
-	scan := &corev1alpha1.RepositoryScan{
-		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
-		ObjectMeta: metav1.ObjectMeta{Name: "split-pending", Namespace: defaultNS},
-		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
-	}
-	completed := metav1.NewTime(mustParseTime(t, "2026-05-09T10:00:00Z"))
-	threatTask := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "split-pending-threat",
-			Namespace: defaultNS,
-			Labels: map[string]string{
-				labels.LabelSecurityTarget: "split-pending",
-				labels.LabelSecurityScanID: "scan_split_pending",
-				labels.LabelSecurityStage:  security.StageThreatModel,
-			},
-		},
-		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, CompletionTime: &completed},
-	}
-	discoveryTask := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "split-pending-discovery-0",
-			Namespace: defaultNS,
-			Labels: map[string]string{
-				labels.LabelSecurityTarget: "split-pending",
-				labels.LabelSecurityScanID: "scan_split_pending",
-				labels.LabelSecurityStage:  security.StageDiscovery,
-				labels.LabelSecurityScope:  security.DiscoveryScopes()[0].Name,
-			},
-		},
-		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, CompletionTime: &completed},
-	}
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithObjects(scan, threatTask, discoveryTask).
-		Build()
-	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: secStore, ArtifactStore: secStore}
-
-	if err := secStore.SaveArtifact(ctx, threatTask.Namespace, threatTask.Name, security.ArtifactThreatModel, "text/markdown", []byte("# Threat Model")); err != nil {
-		t.Fatalf("SaveArtifact(threat model) error = %v", err)
-	}
-	saveTestFindingsArtifact(t, ctx, secStore, discoveryTask.Namespace, discoveryTask.Name, "head-0")
-
-	run := &storepkg.ScanRun{ID: "scan_split_pending", Namespace: defaultNS, RepositoryScan: "split-pending", TaskName: threatTask.Name, Mode: "initial", Phase: scanRunPhaseRunning, StartedAt: completed.Time}
-	if err := secStore.CreateScanRun(ctx, run); err != nil {
-		t.Fatalf("CreateScanRun() error = %v", err)
-	}
-	if err := r.refreshScanRunStatus(ctx, scan, run, run.ID, true); err != nil {
-		t.Fatalf("refreshScanRunStatus() error = %v", err)
-	}
-
-	current := &corev1alpha1.RepositoryScan{}
-	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
-		t.Fatalf("cl.Get() error = %v", err)
-	}
-	if current.Status.Phase != repositoryScanPhaseScanning {
-		t.Fatalf("scan.Status.Phase = %q, want %q", current.Status.Phase, repositoryScanPhaseScanning)
-	}
-	if current.Status.LastSuccessfulScanAt != nil {
-		t.Fatalf("LastSuccessfulScanAt = %v, want nil while discovery scopes are pending", current.Status.LastSuccessfulScanAt)
-	}
-}
-
-func TestIngestDiscoveryTaskIgnoresUnsupportedV2ArtifactWhenLegacyFindingsExist(t *testing.T) {
-	ctx := context.Background()
-	secStore := setupControllerSQLiteStore(t)
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme() error = %v", err)
-	}
-
-	scan := &corev1alpha1.RepositoryScan{
-		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
-		ObjectMeta: metav1.ObjectMeta{Name: "legacy-with-extra-v2", Namespace: defaultNS},
-		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
-	}
-	completed := metav1.NewTime(mustParseTime(t, "2026-05-09T10:30:00Z"))
-	discoveryTask := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "legacy-with-extra-v2-discovery",
-			Namespace: defaultNS,
-			Labels: map[string]string{
-				labels.LabelSecurityTarget: "legacy-with-extra-v2",
-				labels.LabelSecurityScanID: "scan_legacy_extra_v2",
-				labels.LabelSecurityStage:  security.StageDiscovery,
-				labels.LabelSecurityScope:  security.DiscoveryScopes()[0].Name,
-			},
-		},
-		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, CompletionTime: &completed},
-	}
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithObjects(scan, discoveryTask).
-		Build()
-	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: secStore, ArtifactStore: secStore}
-	run := &storepkg.ScanRun{
-		ID:             "scan_legacy_extra_v2",
-		Namespace:      defaultNS,
-		RepositoryScan: "legacy-with-extra-v2",
-		TaskName:       discoveryTask.Name,
-		Mode:           "initial",
-		Phase:          scanRunPhaseRunning,
-		StartedAt:      completed.Time,
-	}
-	if err := secStore.CreateScanRun(ctx, run); err != nil {
-		t.Fatalf("CreateScanRun() error = %v", err)
-	}
-	saveTestFindingsArtifactWithFinding(t, ctx, secStore, discoveryTask.Namespace, discoveryTask.Name, "head-legacy", "legacy-finding")
-	extraV2 := security.FindingsV2Artifact{
-		SchemaVersion: security.SchemaVersionFindingsV2,
-		Repository: security.FindingsV2Repository{
-			RepoURL: "https://github.com/example/repo",
-			Branch:  "main",
-			HeadSHA: "head-legacy",
-		},
-		Scan:     security.FindingsV2Scan{Mode: "initial", SliceID: "slice_extra"},
-		Findings: []security.FindingsV2Finding{},
-	}
-	extraV2Data, err := json.Marshal(extraV2)
-	if err != nil {
-		t.Fatalf("json.Marshal(extraV2) error = %v", err)
-	}
-	if err := secStore.SaveArtifact(ctx, discoveryTask.Namespace, discoveryTask.Name, security.ArtifactFindingsV2, "application/json", extraV2Data); err != nil {
-		t.Fatalf("SaveArtifact(v2) error = %v", err)
-	}
-
-	if err := r.ingestDiscoveryTask(ctx, scan, discoveryTask, run, false); err != nil {
-		t.Fatalf("ingestDiscoveryTask() error = %v", err)
-	}
-	findings, _, err := secStore.ListFindings(ctx, storepkg.FindingFilter{Namespace: defaultNS, RepositoryScan: "legacy-with-extra-v2"})
-	if err != nil {
-		t.Fatalf("ListFindings() error = %v", err)
-	}
-	if len(findings) != 1 || findings[0].Fingerprint != "legacy-finding" {
-		t.Fatalf("findings = %#v, want legacy v1 finding ingested", findings)
-	}
-	updatedRun, err := secStore.GetScanRun(ctx, defaultNS, "scan_legacy_extra_v2")
-	if err != nil {
-		t.Fatalf("GetScanRun() error = %v", err)
-	}
-	if strings.Contains(updatedRun.ErrorMessage, security.ArtifactFindingsV2) {
-		t.Fatalf("run.ErrorMessage = %q, want unsupported v2 artifact ignored for broad discovery", updatedRun.ErrorMessage)
-	}
-}
-
-func TestIngestOwnedTasksFailsSucceededDiscoveryWithoutFindingsArtifact(t *testing.T) {
-	ctx := context.Background()
-	secStore := setupControllerSQLiteStore(t)
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme() error = %v", err)
-	}
-
-	scan := &corev1alpha1.RepositoryScan{
-		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
-		ObjectMeta: metav1.ObjectMeta{Name: "split-missing", Namespace: defaultNS},
-		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
-	}
-	completed := metav1.NewTime(mustParseTime(t, "2026-05-09T11:00:00Z"))
-	threatTask := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "split-missing-threat",
-			Namespace: defaultNS,
-			Labels: map[string]string{
-				labels.LabelSecurityTarget: "split-missing",
-				labels.LabelSecurityScanID: "scan_split_missing",
-				labels.LabelSecurityStage:  security.StageThreatModel,
-			},
-		},
-		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, CompletionTime: &completed},
-	}
-	objects := []client.Object{scan, threatTask}
-	missingScope := security.DiscoveryScopes()[len(security.DiscoveryScopes())-1].Name
-	for index, scope := range security.DiscoveryScopes() {
-		task := &corev1alpha1.Task{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("split-missing-discovery-%d", index),
-				Namespace: defaultNS,
-				Labels: map[string]string{
-					labels.LabelSecurityTarget: "split-missing",
-					labels.LabelSecurityScanID: "scan_split_missing",
-					labels.LabelSecurityStage:  security.StageDiscovery,
-					labels.LabelSecurityScope:  scope.Name,
-				},
-			},
-			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, CompletionTime: &completed},
-		}
-		objects = append(objects, task)
-		if scope.Name != missingScope {
-			saveTestFindingsArtifact(t, ctx, secStore, task.Namespace, task.Name, fmt.Sprintf("head-%d", index))
-		}
-	}
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
-		WithObjects(objects...).
-		Build()
-	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: secStore, ArtifactStore: secStore}
-
-	if err := secStore.SaveArtifact(ctx, threatTask.Namespace, threatTask.Name, security.ArtifactThreatModel, "text/markdown", []byte("# Threat Model")); err != nil {
-		t.Fatalf("SaveArtifact(threat model) error = %v", err)
-	}
-
-	if err := r.ingestOwnedTasks(ctx, scan); err != nil {
-		t.Fatalf("ingestOwnedTasks() error = %v", err)
-	}
-
-	current := &corev1alpha1.RepositoryScan{}
-	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
-		t.Fatalf("cl.Get() error = %v", err)
-	}
-	if current.Status.Phase != repositoryScanPhaseError {
-		t.Fatalf("scan.Status.Phase = %q, want %q", current.Status.Phase, repositoryScanPhaseError)
-	}
-	condition := meta.FindStatusCondition(current.Status.Conditions, "Ready")
-	if condition == nil {
-		t.Fatal("Ready condition = nil, want failed condition")
-	}
-	if !strings.Contains(condition.Message, missingScope) || !strings.Contains(condition.Message, security.ArtifactFindings) {
-		t.Fatalf("condition.Message = %q, want missing scope and artifact", condition.Message)
-	}
-	if current.Status.LastSuccessfulScanAt != nil {
-		t.Fatalf("LastSuccessfulScanAt = %v, want nil for failed artifact validation", current.Status.LastSuccessfulScanAt)
-	}
-}
-
-func TestIngestCombinedScanTaskSetsLastScanAtOnFailure(t *testing.T) {
-	ctx := context.Background()
-	store := setupControllerSQLiteStore(t)
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme() error = %v", err)
-	}
-
-	scan := &corev1alpha1.RepositoryScan{
-		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
-		ObjectMeta: metav1.ObjectMeta{Name: "combined-fail", Namespace: defaultNS},
-		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
-	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).Build()
-	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: store, ArtifactStore: store, ResultStore: store}
-
-	completedAt := metav1.NewTime(mustParseTime(t, "2026-05-08T01:00:00Z"))
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "combined-fail-scan-1",
-			Namespace:         defaultNS,
-			CreationTimestamp: metav1.NewTime(mustParseTime(t, "2026-05-08T00:55:00Z")),
-			Labels: map[string]string{
-				labels.LabelSecurityTarget: "combined-fail",
-				labels.LabelSecurityScanID: "scan_combined_fail",
-				labels.LabelSecurityMode:   "initial",
-			},
-		},
-		Status: corev1alpha1.TaskStatus{
-			Phase:          corev1alpha1.TaskPhaseFailed,
-			CompletionTime: &completedAt,
-			Message:        "task failed",
-		},
-	}
-
-	if err := r.ingestScanTask(ctx, scan, task, true); err != nil {
-		t.Fatalf("ingestScanTask() error = %v", err)
-	}
-
-	current := &corev1alpha1.RepositoryScan{}
-	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
-		t.Fatalf("cl.Get() error = %v", err)
-	}
-	if current.Status.LastScanAt == nil || !current.Status.LastScanAt.Time.Equal(completedAt.Time) {
-		t.Fatalf("LastScanAt = %v, want %v", current.Status.LastScanAt, completedAt.Time)
-	}
-	if current.Status.LastSuccessfulScanAt != nil {
-		t.Fatalf("LastSuccessfulScanAt = %v, want nil for failed scan", current.Status.LastSuccessfulScanAt)
-	}
-}
-
-func TestIngestCombinedScanTaskSetsBothTimestampsOnSuccess(t *testing.T) {
-	ctx := context.Background()
-	store := setupControllerSQLiteStore(t)
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme() error = %v", err)
-	}
-
-	scan := &corev1alpha1.RepositoryScan{
-		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
-		ObjectMeta: metav1.ObjectMeta{Name: "combined-ok", Namespace: defaultNS},
-		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "a"}},
-	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).Build()
-	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: store, ArtifactStore: store, ResultStore: store}
-
-	completedAt := metav1.NewTime(mustParseTime(t, "2026-05-08T02:00:00Z"))
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "combined-ok-scan-1",
-			Namespace:         defaultNS,
-			CreationTimestamp: metav1.NewTime(mustParseTime(t, "2026-05-08T01:55:00Z")),
-			Labels: map[string]string{
-				labels.LabelSecurityTarget: "combined-ok",
-				labels.LabelSecurityScanID: "scan_combined_ok",
-				labels.LabelSecurityMode:   "initial",
-			},
-		},
-		Status: corev1alpha1.TaskStatus{
-			Phase:          corev1alpha1.TaskPhaseSucceeded,
-			CompletionTime: &completedAt,
-		},
-	}
-
-	findings := security.FindingsArtifact{
-		Version: 1,
-		Repository: security.FindingsArtifactRepo{
-			RepoURL: "https://github.com/example/repo",
-			Branch:  "main",
-			HeadSHA: "abc123",
-			BaseSHA: "def456",
-		},
-		Scan: security.FindingsArtifactScan{
-			Mode:    "initial",
-			Summary: "No findings",
-		},
-		Findings: []security.FindingsArtifactFinding{},
-	}
-	findingsJSON, err := json.Marshal(findings)
-	if err != nil {
-		t.Fatalf("json.Marshal() error = %v", err)
-	}
-	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactFindings, "application/json", findingsJSON); err != nil {
-		t.Fatalf("SaveArtifact(findings) error = %v", err)
-	}
-	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactThreatModel, "text/plain", []byte("threat model")); err != nil {
-		t.Fatalf("SaveArtifact(threat-model) error = %v", err)
-	}
-
-	if err := r.ingestScanTask(ctx, scan, task, true); err != nil {
-		t.Fatalf("ingestScanTask() error = %v", err)
-	}
-
-	current := &corev1alpha1.RepositoryScan{}
-	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
-		t.Fatalf("cl.Get() error = %v", err)
-	}
-	if current.Status.LastScanAt == nil || !current.Status.LastScanAt.Time.Equal(completedAt.Time) {
-		t.Fatalf("LastScanAt = %v, want %v", current.Status.LastScanAt, completedAt.Time)
-	}
-	if current.Status.LastSuccessfulScanAt == nil || !current.Status.LastSuccessfulScanAt.Time.Equal(completedAt.Time) {
-		t.Fatalf("LastSuccessfulScanAt = %v, want %v", current.Status.LastSuccessfulScanAt, completedAt.Time)
 	}
 }
 

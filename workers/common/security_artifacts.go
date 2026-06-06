@@ -13,9 +13,6 @@ import (
 )
 
 const (
-	findingsSchemaExample = `{"version":1,"repository":{"repo_url":"...","branch":"...","head_sha":"...",` +
-		`"base_sha":"..."},"scan":{"mode":"initial|incremental|manual","commit_count":0,` +
-		`"summary":"..."},"findings":[]}`
 	validationSchemaExample = `{"version":1,"finding_id":"fnd_...","status":"validated|failed|skipped",` +
 		`"summary":"...","validation_steps":["..."],"reproduction":"...","attack_path_analysis":"...",` +
 		`"likelihood":"...","impact":"...","assumptions":["..."],"controls":["..."],` +
@@ -181,10 +178,6 @@ func requiredSecurityArtifacts(cfg *AgentConfig) []string {
 		}
 		return required
 	}
-	if strings.Contains(cfg.Prompt, security.ArtifactThreatModel) &&
-		strings.Contains(cfg.Prompt, security.ArtifactFindings) {
-		return []string{security.ArtifactThreatModel, security.ArtifactFindings}
-	}
 	return nil
 }
 
@@ -205,15 +198,6 @@ func securityArtifactsFollowUpPrompt(cfg *AgentConfig, missing []string) string 
 		switch name {
 		case security.ArtifactThreatModel:
 			prompt.WriteString("security-threat-model.md must be non-empty markdown grounded in the repository.\n")
-		case security.ArtifactFindings:
-			prompt.WriteString("security-findings.json must be valid JSON with this shape:\n")
-			prompt.WriteString(findingsSchemaExample + "\n")
-			prompt.WriteString(
-				"Each finding object must use these keys: fingerprint, title, summary, " +
-					"severity, confidence, validation_status, file_path, line, commit_sha, " +
-					"root_cause, remediation, suggested_action, evidence.\n",
-			)
-			prompt.WriteString("If there are zero findings, write valid JSON with version=1 and an empty findings array.\n")
 		case security.ArtifactFindingsV2:
 			prompt.WriteString(
 				"security-findings.v2.json must be valid JSON with schemaVersion=2, " +
@@ -303,9 +287,6 @@ func validArtifactCandidate(filename string, data []byte) bool {
 	}
 
 	switch filename {
-	case security.ArtifactFindings:
-		var artifact security.FindingsArtifact
-		return json.Unmarshal([]byte(trimmed), &artifact) == nil
 	case security.ArtifactFindingsV2:
 		_, err := security.ParseFindingsV2Artifact([]byte(trimmed))
 		return err == nil

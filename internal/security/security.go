@@ -16,7 +16,6 @@ import (
 
 const (
 	ArtifactThreatModel    = "security-threat-model.md"
-	ArtifactFindings       = "security-findings.json"
 	ArtifactValidation     = "security-validation.json"
 	ArtifactValidationText = "security-validation.txt"
 	// ArtifactWorkspaceDir is the repo-root symlink the worker exposes for
@@ -26,119 +25,42 @@ const (
 )
 
 const (
-	StageCombined    = "combined"
 	StageThreatModel = "threat-model"
 	StageMapper      = "mapper"
-	StageDiscovery   = "discovery"
 	StageReview      = "review"
 	StageValidation  = "validation"
 	StagePatch       = "patch"
 )
 
-// FindingsArtifact captures the v1 security-findings.json payload.
-type FindingsArtifact struct {
-	Version    int                       `json:"version"`
-	Repository FindingsArtifactRepo      `json:"repository"`
-	Scan       FindingsArtifactScan      `json:"scan"`
-	Findings   []FindingsArtifactFinding `json:"findings"`
-}
-
-type FindingsArtifactRepo struct {
-	RepoURL string `json:"repo_url"`
-	Branch  string `json:"branch"`
-	HeadSHA string `json:"head_sha"`
-	BaseSHA string `json:"base_sha"`
-}
-
-type FindingsArtifactScan struct {
-	Mode        string `json:"mode"`
-	CommitCount int    `json:"commit_count"`
-	Summary     string `json:"summary"`
-}
-
-type FindingsArtifactFinding struct {
-	Fingerprint      string                       `json:"fingerprint"`
-	Title            string                       `json:"title"`
-	Summary          string                       `json:"summary"`
-	Severity         string                       `json:"severity"`
-	Confidence       string                       `json:"confidence"`
-	ValidationStatus string                       `json:"validation_status"`
-	FilePath         string                       `json:"file_path"`
-	Line             int                          `json:"line"`
-	CommitSHA        string                       `json:"commit_sha"`
-	RootCause        string                       `json:"root_cause"`
-	Remediation      string                       `json:"remediation"`
-	SuggestedAction  string                       `json:"suggested_action"`
-	Evidence         FindingsArtifactEvidenceRefs `json:"evidence"`
-}
-
 // ValidationArtifact captures the per-finding validator/repro payload.
 type ValidationArtifact struct {
-	Version            int                          `json:"version"`
-	FindingID          string                       `json:"finding_id"`
-	Status             string                       `json:"status"`
-	Summary            string                       `json:"summary"`
-	ValidationSteps    []string                     `json:"validation_steps,omitempty"`
-	Reproduction       string                       `json:"reproduction,omitempty"`
-	AttackPathAnalysis string                       `json:"attack_path_analysis,omitempty"`
-	Likelihood         string                       `json:"likelihood,omitempty"`
-	Impact             string                       `json:"impact,omitempty"`
-	Assumptions        []string                     `json:"assumptions,omitempty"`
-	Controls           []string                     `json:"controls,omitempty"`
-	Blindspots         []string                     `json:"blindspots,omitempty"`
-	Evidence           FindingsArtifactEvidenceRefs `json:"evidence,omitempty"`
+	Version            int                            `json:"version"`
+	FindingID          string                         `json:"finding_id"`
+	Status             string                         `json:"status"`
+	Summary            string                         `json:"summary"`
+	ValidationSteps    []string                       `json:"validation_steps,omitempty"`
+	Reproduction       string                         `json:"reproduction,omitempty"`
+	AttackPathAnalysis string                         `json:"attack_path_analysis,omitempty"`
+	Likelihood         string                         `json:"likelihood,omitempty"`
+	Impact             string                         `json:"impact,omitempty"`
+	Assumptions        []string                       `json:"assumptions,omitempty"`
+	Controls           []string                       `json:"controls,omitempty"`
+	Blindspots         []string                       `json:"blindspots,omitempty"`
+	Evidence           ValidationArtifactEvidenceRefs `json:"evidence,omitempty"`
 }
 
-// DiscoveryScope describes a focused discovery lens for an independent finding task.
-type DiscoveryScope struct {
-	Name         string
-	Label        string
-	Instructions string
-}
+// ValidationArtifactEvidenceRefs accepts the structured validation evidence
+// array and the existing shorthand forms used by validation agents.
+type ValidationArtifactEvidenceRefs []store.FindingEvidenceRef
 
-// DiscoveryScopes returns the default independent finding lenses for a scan.
-func DiscoveryScopes() []DiscoveryScope {
-	return []DiscoveryScope{
-		{
-			Name:         "app-logic-inputs",
-			Label:        "Application logic, input handling, and injection risk",
-			Instructions: "Focus on untrusted inputs, parser edges, command execution, template use, unsafe file access, path traversal, SSRF, and code paths where user or repo-controlled data changes behavior.",
-		},
-		{
-			Name:         "auth-secrets-privilege",
-			Label:        "Authentication, secrets, and privilege boundaries",
-			Instructions: "Focus on auth flows, token handling, session trust, key or secret exposure, privilege escalation, entitlement scope, and components that cross trust boundaries or run with elevated rights.",
-		},
-		{
-			Name:         "ci-cd-supply-chain",
-			Label:        "CI/CD, release, and supply-chain surfaces",
-			Instructions: "Focus on GitHub Actions, release scripts, packaging, update channels, build pipelines, artifact integrity, dependency execution, and automation that could be influenced by untrusted inputs.",
-		},
-		{
-			Name:         "data-exposure-logging",
-			Label:        "Data exposure, privacy, and logging",
-			Instructions: "Focus on logging, telemetry, diagnostics, debug tooling, persistence, caches, and any paths that might leak secrets, tokens, sensitive user data, or internal trust assumptions.",
-		},
-		{
-			Name:         "recent-commits-history",
-			Label:        "Recent commits and security-relevant history",
-			Instructions: "Focus on the commit range in scope, newly introduced trust-boundary changes, security regressions, missing validation, and risky deltas that matter more than older architectural issues.",
-		},
-	}
-}
-
-// FindingsArtifactEvidenceRefs accepts either the structured v1 evidence array
-// or a legacy shorthand string/object and normalizes it to evidence refs.
-type FindingsArtifactEvidenceRefs []store.FindingEvidenceRef
-
-func (e *FindingsArtifactEvidenceRefs) UnmarshalJSON(data []byte) error {
+func (e *ValidationArtifactEvidenceRefs) UnmarshalJSON(data []byte) error {
 	trimmed := strings.TrimSpace(string(data))
 	switch {
 	case trimmed == "", trimmed == "null":
 		*e = nil
 		return nil
 	case strings.HasPrefix(trimmed, `"`):
-		ref, ok, err := findingsArtifactEvidenceRefFromJSON(data)
+		ref, ok, err := validationArtifactEvidenceRefFromJSON(data)
 		if err != nil {
 			return err
 		}
@@ -146,14 +68,14 @@ func (e *FindingsArtifactEvidenceRefs) UnmarshalJSON(data []byte) error {
 			*e = nil
 			return nil
 		}
-		*e = FindingsArtifactEvidenceRefs{ref}
+		*e = ValidationArtifactEvidenceRefs{ref}
 		return nil
 	case strings.HasPrefix(trimmed, "{"):
-		ref, _, err := findingsArtifactEvidenceRefFromJSON(data)
+		ref, _, err := validationArtifactEvidenceRefFromJSON(data)
 		if err != nil {
 			return err
 		}
-		*e = FindingsArtifactEvidenceRefs{ref}
+		*e = ValidationArtifactEvidenceRefs{ref}
 		return nil
 	default:
 		var items []json.RawMessage
@@ -162,7 +84,7 @@ func (e *FindingsArtifactEvidenceRefs) UnmarshalJSON(data []byte) error {
 		}
 		refs := make([]store.FindingEvidenceRef, 0, len(items))
 		for _, item := range items {
-			ref, ok, err := findingsArtifactEvidenceRefFromJSON(item)
+			ref, ok, err := validationArtifactEvidenceRefFromJSON(item)
 			if err != nil {
 				return err
 			}
@@ -171,12 +93,12 @@ func (e *FindingsArtifactEvidenceRefs) UnmarshalJSON(data []byte) error {
 			}
 			refs = append(refs, ref)
 		}
-		*e = FindingsArtifactEvidenceRefs(refs)
+		*e = ValidationArtifactEvidenceRefs(refs)
 		return nil
 	}
 }
 
-func findingsArtifactEvidenceRefFromJSON(data []byte) (store.FindingEvidenceRef, bool, error) {
+func validationArtifactEvidenceRefFromJSON(data []byte) (store.FindingEvidenceRef, bool, error) {
 	trimmed := strings.TrimSpace(string(data))
 	switch {
 	case trimmed == "", trimmed == "null":
@@ -324,7 +246,7 @@ func boundedTaskName(parts ...string) string {
 	return visible + "-" + hash
 }
 
-// EffectiveValidationMode returns the configured validation mode or the v1 default.
+// EffectiveValidationMode returns the configured validation mode or the default.
 func EffectiveValidationMode(scan *corev1alpha1.RepositoryScan) string {
 	if scan.Spec.ValidationMode != "" {
 		return scan.Spec.ValidationMode
@@ -348,24 +270,6 @@ func EffectiveMaxFindingsPerRun(scan *corev1alpha1.RepositoryScan) int32 {
 	return 10
 }
 
-// DiscoveryMaxFindingsPerScope keeps the per-agent scope output bounded while
-// still allowing a few strong findings from each lens.
-func DiscoveryMaxFindingsPerScope(scan *corev1alpha1.RepositoryScan) int32 {
-	total := EffectiveMaxFindingsPerRun(scan)
-	scopeCount := int32(len(DiscoveryScopes()))
-	if scopeCount <= 0 {
-		return total
-	}
-	perScope := total / scopeCount
-	if total%scopeCount != 0 {
-		perScope++
-	}
-	if perScope < 2 {
-		perScope = 2
-	}
-	return perScope
-}
-
 // EffectiveBranch returns the configured branch or the standard default.
 func EffectiveBranch(scan *corev1alpha1.RepositoryScan) string {
 	if scan.Spec.Branch != "" {
@@ -377,46 +281,6 @@ func EffectiveBranch(scan *corev1alpha1.RepositoryScan) string {
 // IsSuspended returns whether scheduled scans are paused.
 func IsSuspended(scan *corev1alpha1.RepositoryScan) bool {
 	return scan.Spec.Suspend != nil && *scan.Spec.Suspend
-}
-
-func withTaskNameEvidenceRefs(refs FindingsArtifactEvidenceRefs, taskName string) []store.FindingEvidenceRef {
-	out := make([]store.FindingEvidenceRef, 0, len(refs))
-	for _, ref := range refs {
-		normalized := ref
-		if normalized.Kind == "artifact" && normalized.TaskName == "" {
-			normalized.TaskName = taskName
-		}
-		out = append(out, normalized)
-	}
-	return out
-}
-
-// ToFinding converts an artifact finding into a stored finding.
-func ToFinding(namespace, repositoryScan, scanRunID, taskName string, item FindingsArtifactFinding) *store.Finding {
-	validationStatus := item.ValidationStatus
-	if validationStatus == "" {
-		validationStatus = "unvalidated"
-	}
-	return &store.Finding{
-		ID:               FindingID(item.Fingerprint),
-		Namespace:        namespace,
-		RepositoryScan:   repositoryScan,
-		ScanRunID:        scanRunID,
-		Fingerprint:      item.Fingerprint,
-		Title:            item.Title,
-		Summary:          item.Summary,
-		Severity:         item.Severity,
-		Confidence:       item.Confidence,
-		ValidationStatus: validationStatus,
-		State:            "open",
-		FilePath:         item.FilePath,
-		Line:             item.Line,
-		CommitSHA:        item.CommitSHA,
-		RootCause:        item.RootCause,
-		Remediation:      item.Remediation,
-		SuggestedAction:  item.SuggestedAction,
-		Evidence:         withTaskNameEvidenceRefs(item.Evidence, taskName),
-	}
 }
 
 // ArtifactWorkspacePath returns the relative path from the agent working
@@ -497,52 +361,6 @@ func BuildThreatModelPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit,
 	return prompt.String()
 }
 
-// BuildDiscoveryPrompt returns the prompt for an independent finding-discovery stage.
-func BuildDiscoveryPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit, threatModel string, scope DiscoveryScope) string {
-	var prompt strings.Builder
-	artifactDir := ArtifactWorkspacePath(scan.Spec.SubPath)
-
-	fmt.Fprintf(&prompt, "You are an independent security finding agent for %s on branch %s.\n", scan.Spec.RepoURL, EffectiveBranch(scan))
-	fmt.Fprintf(&prompt, "Scan mode: %s\n", mode)
-	fmt.Fprintf(&prompt, "Discovery scope: %s\n", scope.Label)
-	fmt.Fprintf(&prompt, "Validation mode: %s\n", EffectiveValidationMode(scan))
-	fmt.Fprintf(&prompt, "Max findings for this scope: %d\n", DiscoveryMaxFindingsPerScope(scan))
-	if scan.Spec.SubPath != "" {
-		fmt.Fprintf(&prompt, "Sub-path focus: %s\n", scan.Spec.SubPath)
-	}
-	if baseCommit != "" || headCommit != "" {
-		fmt.Fprintf(&prompt, "Commit focus: base=%s head=%s\n", baseCommit, headCommit)
-	}
-
-	prompt.WriteString("\nYour job in this stage is to discover candidate findings only for the assigned security lens.\n")
-	prompt.WriteString("Scope instructions: ")
-	prompt.WriteString(scope.Instructions)
-	prompt.WriteString("\n")
-	prompt.WriteString("Reuse the shared threat model below as canonical repository context.\n")
-	prompt.WriteString("Do not rewrite the threat model in this stage. Do not edit code, commit, or push.\n")
-	prompt.WriteString("Prefer a small number of high-signal findings over broad speculation.\n")
-	prompt.WriteString("Do not do deep reproduction here; reserve heavy validation and repro work for the validator agent.\n")
-	prompt.WriteString("If you cannot support a claim from the code or recent commits, omit it.\n")
-
-	fmt.Fprintf(&prompt, "\nWrite these artifacts under %s/:\n", artifactDir)
-	fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, ArtifactFindings)
-	appendRequiredArtifactsDirective(&prompt, ArtifactFindings)
-	prompt.WriteString("The stage will be treated as failed if the findings artifact is missing, empty, or invalid.\n")
-	fmt.Fprintf(&prompt, "Even when this scope has zero findings, still write %s/%s with valid JSON and an empty findings array.\n", artifactDir, ArtifactFindings)
-	prompt.WriteString("Prefer Bash heredocs or shell redirection when writing artifact files so they are persisted on disk.\n")
-	prompt.WriteString("security-findings.json must be valid JSON with this top-level shape:\n")
-	prompt.WriteString(`{"version":1,"repository":{"repo_url":"...","branch":"...","head_sha":"...","base_sha":"..."},"scan":{"mode":"initial|incremental|manual","commit_count":0,"summary":"..."},"findings":[]}` + "\n")
-	prompt.WriteString("Each finding object must use these keys: fingerprint, title, summary, severity, confidence, validation_status, file_path, line, commit_sha, root_cause, remediation, suggested_action, evidence.\n")
-	prompt.WriteString("Set validation_status to unvalidated unless you safely and directly validated the issue in this stage.\n")
-	prompt.WriteString("Keep security-findings.json compact and avoid large code excerpts.\n")
-	if strings.TrimSpace(threatModel) != "" {
-		prompt.WriteString("\nShared threat model context:\n")
-		prompt.WriteString(threatModel)
-		prompt.WriteString("\n")
-	}
-	return prompt.String()
-}
-
 // BuildReviewPrompt returns the prompt for one deterministic review slice.
 func BuildReviewPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit, threatModel string, slice store.ReviewSlice) string {
 	var prompt strings.Builder
@@ -558,7 +376,7 @@ func BuildReviewPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, head
 	fmt.Fprintf(&prompt, "Slice ID: %s\n", slice.ID)
 	fmt.Fprintf(&prompt, "Slice title: %s\n", slice.Title)
 	fmt.Fprintf(&prompt, "Slice kind: %s\n", slice.Kind)
-	fmt.Fprintf(&prompt, "Max findings for this slice: %d\n", min(DiscoveryMaxFindingsPerScope(scan), 3))
+	fmt.Fprintf(&prompt, "Max findings for this slice: %d\n", min(EffectiveMaxFindingsPerRun(scan), 3))
 	if scan.Spec.SubPath != "" {
 		fmt.Fprintf(&prompt, "Sub-path focus: %s\n", scan.Spec.SubPath)
 	}

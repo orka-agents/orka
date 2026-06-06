@@ -83,10 +83,10 @@ patch → pull-request remediation flow.
 
 | Phase | What happens |
 |-------|--------------|
-| **Initial scan** | Clones the repo, generates `security-threat-model.md`, runs a deterministic mapper that writes `security-slices.json`, reviews repository scope through stored slices and/or broad discovery fallback, and stores a run summary. A threat model is generated even when no findings are emitted. |
+| **Initial scan** | Clones the repo, generates `security-threat-model.md`, runs a deterministic mapper that writes `security-slices.json`, reviews selected stored slices, and stores a run summary. A threat model is generated even when no findings are emitted. |
 | **Threat model review** | The repository detail page shows the generated threat model in an editor. Saving an edit (or a regenerated model) replaces the current threat model and influences ranking on later scans. Prior threat models are not retained as history. |
-| **Incremental scans** | Run on the configured schedule and process commits after the last completed run. Slice metadata makes changed-file-based selection possible while broad scheduled review remains available as fallback. Manual re-scan stays available. |
-| **Evidence ingestion** | v2 findings are stored only when their evidence cites safe repo-relative paths and line ranges included in the review context manifest. Invalid model output is recorded as dropped diagnostics instead of becoming a finding. Legacy v1 findings remain accepted for compatibility. |
+| **Incremental scans** | Run on the configured schedule and process commits after the last completed run. Slice metadata drives changed-file-based selection. Manual re-scan stays available. |
+| **Evidence ingestion** | v2 findings are stored only when their evidence cites safe repo-relative paths and line ranges included in the review context manifest. Invalid model output is recorded as dropped diagnostics instead of becoming a finding. |
 | **Patch generation** | From a finding, Orka creates a dedicated patch task that writes a patch summary and diff artifact. The proposal is marked ready only when the recorded changed files and diff match the actual workspace result. |
 | **PR creation** | Orka uses the latest successful, verified patch proposal to open a PR against the configured base branch. |
 

@@ -61,7 +61,6 @@ Fiber API (/api/v1/security/*)
            +--> security-slices.json
            +--> security-review-context-<slice-id>.json
            +--> security-threat-model.md
-           +--> security-findings.json
            +--> security-findings.v2.json
            +--> security-dropped-findings.json
            +--> security-validation-*.txt
@@ -279,7 +278,6 @@ Current scan artifacts:
 - `security-threat-model.md` — required from the threat-model stage.
 - `security-slices.json` — deterministic mapper output, schema version 1.
 - `security-review-context-<slice-id>.json` — bounded prompt/context manifest, schema version 1.
-- `security-findings.json` — legacy v1 findings payload, still accepted for compatibility.
 - `security-findings.v2.json` — evidence-backed v2 findings payload, schema version 2.
 - `security-dropped-findings.json` — controller-written diagnostics for invalid v2 findings.
 
@@ -355,55 +353,9 @@ bounded review prompt:
 }
 ```
 
-### `security-findings.json` (legacy v1)
-
-The scanner writes a single compact JSON payload; large code excerpts are forbidden in this
-file (long evidence belongs in artifacts):
-
-```json
-{
-  "version": 1,
-  "repository": {
-    "repo_url": "https://github.com/org/repo",
-    "branch": "main",
-    "head_sha": "abc123",
-    "base_sha": "def456"
-  },
-  "scan": {
-    "mode": "initial",
-    "commit_count": 42,
-    "summary": "Validated 2 high-confidence findings"
-  },
-  "findings": [
-    {
-      "fingerprint": "sha256:...",
-      "title": "Unsanitized shell execution in backup endpoint",
-      "summary": "User-controlled input reaches exec.Command through the backup request path.",
-      "severity": "high",
-      "confidence": "high",
-      "validation_status": "validated",
-      "file_path": "internal/backup/handler.go",
-      "line": 88,
-      "commit_sha": "abc123",
-      "root_cause": "Untrusted request field is concatenated into shell arguments",
-      "remediation": "Pass validated arguments directly and reject shell metacharacters",
-      "suggested_action": "generate_patch",
-      "evidence": [
-        {
-          "kind": "artifact",
-          "name": "security-validation-finding-01.txt",
-          "label": "Validation transcript"
-        }
-      ]
-    }
-  ]
-}
-```
-
 ### `security-findings.v2.json`
 
-New review output uses schema version 2 and must cite evidence from the review context
-manifest:
+Review output uses schema version 2 and must cite evidence from the review context manifest:
 
 ```json
 {
@@ -515,13 +467,12 @@ spec:
 
 - **Initial**: scan newest commits backward, cap by `historyDays`, generate a first threat
   model artifact even with zero findings, run the deterministic mapper, persist review
-  slices, then run discovery/review tasks. Legacy broad discovery remains as fallback while
-  slice-based review rolls out.
+  slices, then run selected review tasks. If the mapper produces no selected slices, the
+  run completes with a no-op summary.
 - **Incremental**: fetch the current head SHA and compare with `status.lastProcessedCommit`.
   If unchanged, mark the run succeeded with a no-op summary; if changed, focus the agent on
-  commits after the last processed SHA while still using the current threat model as context.
-  Slice-aware changed-file selection is the preferred direction; broad scheduled review
-  remains the compatibility fallback.
+  commits after the last processed SHA while still using the current threat model as
+  context and slice-aware changed-file selection.
 - **Patch**: create a dedicated `type: agent` task with `pushBranch` set to
   `orka/security/<finding-id>` (using `forkRepo`/`prBaseBranch` when configured), prompt for
   a minimal reviewable fix, a diff artifact, and a patch summary artifact. A
@@ -540,12 +491,11 @@ hints for incremental scans.
 When a labeled security **mapper** task completes, the controller parses
 `security-slices.json`, upserts review slices, and records slice counts on the scan run.
 
-When a labeled security **scan/review** task completes, the controller loads the task
-result and artifacts. It accepts legacy `security-findings.json` payloads and prefers
-`security-findings.v2.json` when present. For v2 payloads, the controller also loads the
-matching `security-review-context-<slice-id>.json`, validates each finding against the
-manifest, upserts accepted findings by Orka-owned stable fingerprint, records dropped
-diagnostics for rejected findings, and updates accepted/dropped counts on the scan run.
+When a labeled security **review** task completes, the controller loads the task result and
+artifacts. It loads the matching `security-review-context-<slice-id>.json`, validates each
+`security-findings.v2.json` finding against the manifest, upserts accepted findings by
+Orka-owned stable fingerprint, records dropped diagnostics for rejected findings, and
+updates accepted/dropped counts on the scan run.
 
 When a labeled security **patch** task completes, the controller locates the associated
 finding, parses the structured worker result, loads `security-patch-<finding-id>.diff` and

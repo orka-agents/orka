@@ -19,7 +19,7 @@ This plan keeps Orka's existing architecture:
 - Initial scans cover the repository through bounded review slices instead of unbounded prompts.
 - Incremental scans review only slices affected by changed files when possible.
 - Patch proposals are marked ready only when the recorded diff matches actual workspace changes.
-- Existing `RepositoryScan` users remain compatible during rollout.
+- Repository security scanning uses the v2 artifact contracts directly.
 
 ## Non-Goals
 
@@ -27,7 +27,7 @@ This plan keeps Orka's existing architecture:
 - Do not move durable security state into repo-local files.
 - Do not create automatic patch, commit, push, or PR behavior beyond Orka's explicit existing user actions.
 - Do not require every repository to be buildable before scanning.
-- Do not block legacy scan artifacts during the transition.
+- Do not support pre-v2 findings artifacts.
 - Do not add new long-lived credentials or expose raw tokens in artifacts, logs, specs, statuses, or UI responses.
 
 ## Current Baseline
@@ -213,7 +213,7 @@ Recommended `security-findings.v2.json` shape:
 
 - Contracts are added to `website/docs/development/security-scanning-design.md`.
 - Contracts use `schemaVersion` and are forward-extensible.
-- Existing v1 `security-findings.json` ingestion still works.
+- `security-findings.v2.json` is the only findings ingestion contract.
 - No raw secrets, raw tokens, or full sensitive request contexts are allowed in new contracts.
 - Unit tests parse valid examples and reject malformed examples.
 
@@ -282,8 +282,8 @@ Store interface additions:
 
 - Migration is idempotent.
 - Store tests cover insert, update, list, filtering, JSON round trip, and namespace isolation.
-- Existing databases migrate without losing findings, patches, or scan runs.
-- Existing scan flow works when the new tables are empty.
+- Fresh databases initialize all scan, slice, dropped-output, finding, patch, and validation tables.
+- Scan flow handles empty slice tables by running the mapper before review.
 
 ## Phase 3: Deterministic Review Slice Mapper
 
@@ -340,8 +340,7 @@ Recommended sequence:
 
 1. Threat model stage runs first as today.
 2. Mapper stage produces and ingests review slices.
-3. Discovery/review tasks run for selected slices.
-4. Existing broad discovery scopes remain as fallback when slice coverage is weak.
+3. Review tasks run for selected slices.
 
 Task labeling:
 
@@ -360,7 +359,7 @@ New artifacts:
 
 - Initial scan creates review slices before slice review tasks.
 - If mapper fails, the scan reports mapper failure clearly.
-- If mapper produces weak coverage, broad discovery fallback still runs.
+- If mapper produces no selected slices, the scan completes with a no-op summary.
 - Controller can ingest slice review tasks independently and update scan status.
 - Scan run summary includes slice counts and accepted/dropped finding counts.
 
@@ -619,7 +618,7 @@ UI additions:
 - User can inspect why a finding was accepted.
 - User can inspect why model output was dropped.
 - User can filter by slice, category, state, severity, validation status.
-- Existing repository and finding pages continue to work with legacy findings.
+- Repository and finding pages show v2 evidence and dropped-output diagnostics.
 
 ## Phase 12: Configuration
 
@@ -642,37 +641,34 @@ Prefer controller defaults and SQLite/internal config before CRD fields unless u
 ### Success Criteria
 
 - Defaults improve quality without new required config.
-- Legacy behavior can be temporarily restored during rollout.
 - Documentation explains each knob and its production tradeoff.
 
-## Rollout Strategy
+## Implementation Stages
 
 ### Stage A: Passive Contracts
 
 - Add stores and parsers.
-- Keep existing scan behavior.
 - Add tests and docs.
 
 Success:
 
-- No user-visible behavior change.
-- Existing scan tests pass.
+- Contract and store tests pass.
+- Scan tests cover the mapper-first pipeline.
 
 ### Stage B: Mapper Enabled, Review Unchanged
 
 - Generate and ingest slices during scans.
-- Do not yet use slices for findings.
+- Persist slice rows for API/UI inspection.
 
 Success:
 
 - UI/API can show slices.
-- No finding behavior change.
+- Mapper output is stable and scoped to the repository workspace.
 
 ### Stage C: v2 Ingestion Enabled in Audit Mode
 
 - Accept v2 artifacts from new prompts.
 - Validate and record dropped findings.
-- Allow legacy v1.
 
 Success:
 
@@ -682,7 +678,6 @@ Success:
 ### Stage D: Slice-Based Review Enabled
 
 - Review selected slices.
-- Run broad discovery only as fallback.
 
 Success:
 
@@ -772,12 +767,12 @@ Update:
 Document:
 
 - Slice lifecycle.
-- v1 and v2 artifact compatibility.
+- v2 artifact contracts.
 - Evidence validation.
 - Dropped finding diagnostics.
 - Incremental scan behavior.
 - Patch verification behavior.
-- Rollout and compatibility flags.
+- Configuration flags.
 
 ## Risks and Mitigations
 
@@ -785,7 +780,6 @@ Document:
 
 Mitigation:
 
-- Keep broad discovery fallback.
 - Track source coverage.
 - Add generic fallback slices.
 - Allow manual re-scan and future user-tuned slice settings.
@@ -813,8 +807,7 @@ Mitigation:
 Mitigation:
 
 - Version fingerprinting.
-- Preserve legacy fingerprint lookup.
-- Merge findings with matching old fingerprint and equivalent evidence during migration.
+- Merge findings with matching evidence-derived fingerprints.
 
 ### Risk: Patch verification lacks access to actual workspace diff
 
@@ -847,7 +840,7 @@ Mitigation:
 - `make manifests generate` passes if any CRD type or marker changes are made.
 - UI lint and tests pass if UI surfaces are changed.
 - Repository scan E2E covers initial scan, incremental scan, invalid evidence, validation, and patch verification.
-- Documentation describes the new artifact contracts and compatibility path.
+- Documentation describes the v2 artifact contracts.
 - No raw secrets, credentials, tokens, raw transaction tokens, or sensitive contexts appear in persisted artifacts, Task specs/statuses, logs, metrics, or UI responses.
 - Stored v2 findings have validated evidence or are not stored.
 - Patch proposals cannot reach `patch_ready` without deterministic verification.
