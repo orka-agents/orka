@@ -82,6 +82,12 @@ pick_chat_opus_model() {
   return 1
 }
 
+# The Opus probe below hits the live Orka API, so the API must be reachable
+# first. prepare_api_env only mints the token; the port-forward is established
+# by require_orka_api_reachable. Without this the probe fires against a
+# not-yet-bound :8080 (HTTP 000) and mis-reports "no Opus model accepted".
+require_orka_api_reachable
+
 DEMO_CHAT_OPUS_MODEL="$(pick_chat_opus_model || true)"
 if [[ -z "${DEMO_CHAT_OPUS_MODEL}" ]]; then
   die "no Opus model accepted by ${ORKA_API_BASE}/anthropic — tried claude-opus-4.7, claude-opus-4.6. Set DEMO_CHAT_MODEL=<provider>/<model> to override."
