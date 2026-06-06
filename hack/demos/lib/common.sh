@@ -854,7 +854,7 @@ orka_api() {
   local body_file="${3:-}"
   local token status attempt
 
-  for attempt in 1 2; do
+  for attempt in 1 2 3; do
     token="$(get_orka_token)"
     local args=(
       -fsS
@@ -871,8 +871,19 @@ orka_api() {
     fi
     status="$?"
 
-    if [[ "${status}" == "22" && "${attempt}" == "1" && "${ORKA_TOKEN_MANAGED:-0}" == "1" ]]; then
+    if [[ "${status}" == "22" && "${attempt}" -lt 3 && "${ORKA_TOKEN_MANAGED:-0}" == "1" ]]; then
       refresh_orka_token
+      continue
+    fi
+
+    # curl exit 7 = couldn't connect: on long runs the auto port-forward can die
+    # (idle timeout / kube-apiserver hiccup), which would spuriously fail an
+    # otherwise-successful demo's final assertion. Re-establish the tunnel and
+    # retry before giving up. Only meaningful for the local-tunnel path.
+    if [[ "${status}" == "7" && "${attempt}" -lt 3 ]] \
+        && declare -f require_orka_api_reachable >/dev/null 2>&1; then
+      printf 'orka_api: connection failed; re-establishing API tunnel and retrying…\n' >&2
+      require_orka_api_reachable >/dev/null 2>&1 || true
       continue
     fi
 
