@@ -43,6 +43,14 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 # Pin to the same Substrate revision CI uses, unless overridden.
 SUBSTRATE_REF="${SUBSTRATE_REF:-b80031d260959b1fc5c6f61e3099fe2a6d368af1}"
 KIND_CLUSTER="${KIND_CLUSTER:-orka-agent-substrate-e2e}"
+# Reuse-or-recreate behavior when the kind cluster already exists. The Substrate
+# standup (scripts/agent-substrate-e2e.sh -> hack/create-kind-cluster.sh) does
+# `kind delete cluster` then recreate, so re-running this bootstrap on a live
+# cluster would DESTROY it (and any completed vekil device-code login, which is
+# cached in an emptyDir). When a cluster already exists we prompt the operator
+# reuse / recreate / cancel. Set DEMO_CLUSTER_REUSE=reuse|recreate|cancel to skip
+# the prompt (required for non-interactive runs that should not just recreate).
+DEMO_CLUSTER_REUSE="${DEMO_CLUSTER_REUSE:-}"
 # Exercise the retained-workspace path during standup so the warm-reuse beat is
 # smoke-tested before Demo 70 runs. Override to 0 to skip.
 SUBSTRATE_E2E_EXTENDED="${SUBSTRATE_E2E_EXTENDED:-1}"
@@ -82,14 +90,107 @@ docker info >/dev/null 2>&1 || die "docker daemon is not reachable — start Doc
 e2e_script="${repo_root}/scripts/agent-substrate-e2e.sh"
 [[ -f "${e2e_script}" ]] || die "expected ${e2e_script} to exist"
 
-log "Standing up Agent Substrate (ref ${SUBSTRATE_REF}, cluster kind-${KIND_CLUSTER})"
-log "This builds 4 images and the Substrate control plane — first run takes several minutes."
+# cluster_exists: true when a kind cluster named ${KIND_CLUSTER} is present.
+cluster_exists() {
+  command -v kind >/dev/null 2>&1 || return 1
+  kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER}"
+}
 
-KEEP_CLUSTER=1 \
-  SUBSTRATE_REF="${SUBSTRATE_REF}" \
-  KIND_CLUSTER="${KIND_CLUSTER}" \
-  SUBSTRATE_E2E_EXTENDED="${SUBSTRATE_E2E_EXTENDED}" \
-  bash "${e2e_script}"
+# cluster_health: prints a one-line health summary to stdout and returns 0 when
+# the existing cluster looks healthy enough to reuse (node Ready + Orka
+# controller 1/1 + at least one Running ate-system pod), 1 otherwise. Minimal by
+# design: over-strict checks would force needless destructive recreates.
+cluster_health() {
+  local ctx="kind-${KIND_CLUSTER}" node ctrl ate healthy=0
+  node="$(kubectl --context "${ctx}" get nodes \
+    -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
+  ctrl="$(kubectl --context "${ctx}" -n orka-system get deploy orka-controller-manager \
+    -o jsonpath='{.status.readyReplicas}/{.status.replicas}' 2>/dev/null || true)"
+  ate="$(kubectl --context "${ctx}" -n ate-system get pods --no-headers 2>/dev/null \
+    | grep -c Running || true)"
+  [[ "${node}" == "True" && "${ctrl}" == "1/1" && "${ate:-0}" -ge 1 ]] && healthy=1
+  printf 'node Ready=%s, controller=%s, ate-system Running=%s' \
+    "${node:-?}" "${ctrl:-?}" "${ate:-0}"
+  [[ "${healthy}" == 1 ]]
+}
+
+# prompt_cluster_action: resolves reuse|recreate|cancel for an existing cluster.
+# Honors DEMO_CLUSTER_REUSE when set; otherwise prompts on /dev/tty (so it works
+# even when the script's stdin is redirected, e.g. via make). With no tty and no
+# override it preserves the historical behavior (recreate). Echoes the choice.
+prompt_cluster_action() {
+  local healthy_flag="$1"  # "1" healthy, "0" unhealthy
+  case "${DEMO_CLUSTER_REUSE}" in
+    reuse|recreate|cancel) printf '%s' "${DEMO_CLUSTER_REUSE}"; return 0 ;;
+    "") : ;;
+    *) die "invalid DEMO_CLUSTER_REUSE='${DEMO_CLUSTER_REUSE}' (expected reuse|recreate|cancel)" ;;
+  esac
+  if [[ ! -r /dev/tty ]]; then
+    # Non-interactive, no override: keep today's behavior so automation that
+    # expects a fresh cluster is not silently changed.
+    printf 'recreate'
+    return 0
+  fi
+  local default_hint="reuse" ans
+  [[ "${healthy_flag}" == 1 ]] || default_hint="recreate"
+  {
+    printf '\n'
+    printf 'A kind cluster named %q already exists.\n' "${KIND_CLUSTER}"
+    if [[ "${healthy_flag}" == 1 ]]; then
+      printf 'It looks healthy. Reusing keeps it (and any vekil login) intact.\n'
+    else
+      printf 'WARNING: it does NOT look healthy — reusing may carry that breakage forward.\n'
+    fi
+    printf '  [r] reuse    — keep the cluster; reconcile add-ons only (non-destructive)\n'
+    printf '  [c] recreate — DELETE and rebuild from scratch (destroys vekil login + state)\n'
+    printf '  [x] cancel   — exit without changes\n'
+    printf 'Choose r/c/x [default: %s]: ' "${default_hint}"
+  } >/dev/tty
+  read -r ans </dev/tty || ans=""
+  case "${ans:-}" in
+    r|R|reuse)    printf 'reuse' ;;
+    c|C|recreate) printf 'recreate' ;;
+    x|X|cancel)   printf 'cancel' ;;
+    "")           printf '%s' "${default_hint}" ;;
+    *)            printf '%s' "${default_hint}" ;;
+  esac
+}
+
+run_e2e=1
+if cluster_exists; then
+  health_summary="$(cluster_health)" && health_flag=1 || health_flag=0
+  log "Existing cluster kind-${KIND_CLUSTER} detected (${health_summary})"
+  action="$(prompt_cluster_action "${health_flag}")"
+  case "${action}" in
+    reuse)
+      log "Reusing existing cluster — skipping the Substrate standup (kind delete + rebuild)."
+      log "Reconciling the agentic add-ons idempotently below."
+      run_e2e=0
+      ;;
+    recreate)
+      log "Recreating cluster — the Substrate standup will delete and rebuild kind-${KIND_CLUSTER}."
+      run_e2e=1
+      ;;
+    cancel)
+      log "Cancelled — leaving cluster kind-${KIND_CLUSTER} untouched."
+      exit 0
+      ;;
+    *)
+      die "unexpected cluster action '${action}'"
+      ;;
+  esac
+fi
+
+if [[ "${run_e2e}" == 1 ]]; then
+  log "Standing up Agent Substrate (ref ${SUBSTRATE_REF}, cluster kind-${KIND_CLUSTER})"
+  log "This builds 4 images and the Substrate control plane — first run takes several minutes."
+
+  KEEP_CLUSTER=1 \
+    SUBSTRATE_REF="${SUBSTRATE_REF}" \
+    KIND_CLUSTER="${KIND_CLUSTER}" \
+    SUBSTRATE_E2E_EXTENDED="${SUBSTRATE_E2E_EXTENDED}" \
+    bash "${e2e_script}"
+fi
 
 if [[ "${AGENTIC}" == "1" ]]; then
   ctx="kind-${KIND_CLUSTER}"

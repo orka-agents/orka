@@ -250,7 +250,17 @@ a single bootstrap can host **all** demos (00–70) on it:
 ```bash
 make demo-cluster-up-all        # substrate cluster + Orka + kontxt + agent-sandbox + vekil + Provider/secrets
                                 # (one-time GitHub device-code login for vekil — follow the log prompt)
+```
 
+> **Re-running is guarded.** If a kind cluster named `orka-agent-substrate-e2e`
+> already exists, the bootstrap prompts **reuse / recreate / cancel** instead of
+> silently destroying it (the Substrate standup does `kind delete` + rebuild,
+> which would wipe a completed vekil login). Choose **reuse** to keep the cluster
+> and just reconcile the add-ons. For non-interactive runs, set
+> `DEMO_CLUSTER_REUSE=reuse|recreate|cancel` to skip the prompt; with no TTY and
+> no override it defaults to `recreate` (the historical behavior).
+
+```bash
 # Workspace demos bring their own namespace/env:
 kubectl config use-context kind-orka-agent-substrate-e2e
 
