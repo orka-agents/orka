@@ -66,6 +66,8 @@ dump_diagnostics() {
     log "Logs for job/${job}"
     run_redacted kubectl -n default logs "job/${job}" --all-containers --tail=-1 || true
   done
+  run_redacted kubectl -n default get substrateactorpools,tools,leases -o wide || true
+  run_redacted kubectl -n default get substrateactorpools,tools,leases -o yaml || true
 
   run_redacted kubectl -n ate-system get pods,svc,deploy,daemonset,statefulset -o wide || true
   run_redacted kubectl -n ate-system logs deployment/ate-api-server-deployment --all-containers --tail=400 || true
@@ -157,6 +159,32 @@ wait_jsonpath_equals() {
     now="$(date +%s)"
     if (( now - started > timeout_seconds )); then
       echo "timed out waiting for ${description}; expected ${expected}, got ${value:-<empty>}" >&2
+      return 1
+    fi
+    sleep 5
+  done
+}
+
+wait_jsonpath_int_at_least() {
+  local description="$1"
+  local command="$2"
+  local minimum="$3"
+  local timeout_seconds="$4"
+  local started now value
+  started="$(date +%s)"
+
+  while true; do
+    set +e
+    value="$(eval "${command}" 2>/dev/null)"
+    local rc=$?
+    set -e
+    if [[ "${rc}" -eq 0 && "${value}" =~ ^[0-9]+$ && "${value}" -ge "${minimum}" ]]; then
+      log "${description}: ${value}"
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - started > timeout_seconds )); then
+      echo "timed out waiting for ${description}; expected >= ${minimum}, got ${value:-<empty>}" >&2
       return 1
     fi
     sleep 5
@@ -280,6 +308,7 @@ publish_ateom_image() {
 create_substrate_resources() {
   local ateom_image="$1"
   local workspace_actor_image="$2"
+  local mcp_actor_image="$3"
 
   log "Creating Substrate WorkerPool and ActorTemplate"
   kubectl create namespace ate-demo --dry-run=client -o yaml | kubectl apply -f -
@@ -339,11 +368,58 @@ spec:
     arm64:
       url: gs://gvisor/releases/nightly/2026-05-19/aarch64/runsc
       sha256Hash: 1ba2366ae2efceba166046f51a4104f9261c9cb72c6db8f5b3fe2dc57dea86b9
+---
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: orka-mcp-ci
+  namespace: ate-demo
+  labels:
+    orka.ai/execution-workspace: "true"
+    orka.ai/workspace-provider: substrate
+  annotations:
+    orka.ai/workspace-daemon-port: "8080"
+    orka.ai/workspace-protocol: http-json-v1
+    orka.ai/workspace-staging-root: /app
+spec:
+  pauseImage: registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4
+  containers:
+  - name: workspace
+    image: ${mcp_actor_image}
+    command:
+      - /orka-mcp-e2e-server
+    env:
+      - name: ORKA_WORKSPACE_AGENT_LISTEN_ADDR
+        value: ":8080"
+      - name: ORKA_WORKSPACE_BOOTSTRAP_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: ${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME}
+            key: ${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY}
+    ports:
+      - containerPort: 8080
+  workerPoolRef:
+    name: orka-workers
+    namespace: ate-demo
+  snapshotsConfig:
+    location: gs://ate-snapshots/orka-mcp-ci/
+  runsc:
+    amd64:
+      url: gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc
+      sha256Hash: a397be1abc2420d26bce6c70e6e2ff96c73aaaab929756c56f5e2089ea842b63
+    arm64:
+      url: gs://gvisor/releases/nightly/2026-05-19/aarch64/runsc
+      sha256Hash: 1ba2366ae2efceba166046f51a4104f9261c9cb72c6db8f5b3fe2dc57dea86b9
 YAML
 
   wait_jsonpath_equals \
     "actortemplate/orka-codex-ci readiness" \
     "kubectl -n ate-demo get actortemplate orka-codex-ci -o jsonpath='{.status.phase}'" \
+    "Ready" \
+    900
+  wait_jsonpath_equals \
+    "actortemplate/orka-mcp-ci readiness" \
+    "kubectl -n ate-demo get actortemplate orka-mcp-ci -o jsonpath='{.status.phase}'" \
     "Ready" \
     900
 }
@@ -538,14 +614,211 @@ run_default_workspace_task() {
   accept_task_cleanup_failure_after_result "${task_name}"
 }
 
+create_substrate_actor_pools() {
+  log "Creating Orka SubstrateActorPools"
+  kubectl apply -f - <<'YAML'
+apiVersion: core.orka.ai/v1alpha1
+kind: SubstrateActorPool
+metadata:
+  name: codex-substrate-pool-ci
+  namespace: default
+spec:
+  templateRef:
+    name: orka-codex-ci
+    namespace: ate-demo
+  workerPoolRef:
+    name: orka-workers
+    namespace: ate-demo
+  targetActors: 2
+  targetWorkers: 1
+  precreateActors: true
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: SubstrateActorPool
+metadata:
+  name: mcp-substrate-pool-ci
+  namespace: default
+spec:
+  templateRef:
+    name: orka-mcp-ci
+    namespace: ate-demo
+  workerPoolRef:
+    name: orka-workers
+    namespace: ate-demo
+  targetActors: 2
+  targetWorkers: 1
+  precreateActors: true
+YAML
+
+  for pool in codex-substrate-pool-ci mcp-substrate-pool-ci; do
+    wait_jsonpath_equals \
+      "substrateactorpool/${pool} readiness" \
+      "kubectl -n default get substrateactorpool ${pool} -o jsonpath='{.status.phase}'" \
+      "Ready" \
+      600
+    wait_jsonpath_int_at_least \
+      "substrateactorpool/${pool} actor count" \
+      "kubectl -n default get substrateactorpool ${pool} -o jsonpath='{.status.actorCount}'" \
+      2 \
+      600
+  done
+}
+
+run_pooled_workspace_task() {
+  local task_name="$1"
+
+  log "Running pooled Substrate task/${task_name}"
+  if ! apply_task "${task_name}" "      enabled: true
+      provider: substrate
+      templateRef:
+        name: orka-codex-ci
+        namespace: ate-demo
+      poolRef:
+        name: codex-substrate-pool-ci
+      boot: true"; then
+    return 1
+  fi
+
+  if wait_task_phase "${task_name}" "Succeeded"; then
+    assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.provider}" "substrate"
+    assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.templateRef.name}" "orka-codex-ci"
+    assert_task_jsonpath "${task_name}" "{.status.executionWorkspace.phase}" "Deleted"
+    assert_task_jsonpath "${task_name}" "{.status.resultRef.available}" "true"
+    assert_task_workspace_teleport_visibility "${task_name}"
+    return 0
+  fi
+
+  accept_task_cleanup_failure_after_result "${task_name}"
+}
+
+create_mcp_tool() {
+  log "Creating pooled MCP Tool"
+  kubectl apply -f - <<'YAML'
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: mcp-ci
+  namespace: default
+spec:
+  description: E2E MCP tool backed by a durable Substrate actor.
+  parameters:
+    type: object
+    properties:
+      message:
+        type: string
+    required:
+      - message
+  mcp:
+    path: /mcp
+    substrateActor:
+      templateRef:
+        name: orka-mcp-ci
+        namespace: ate-demo
+      poolRef:
+        name: mcp-substrate-pool-ci
+      boot: true
+YAML
+
+  wait_jsonpath_equals \
+    "tool/mcp-ci availability" \
+    "kubectl -n default get tool mcp-ci -o jsonpath='{.status.available}'" \
+    "true" \
+    600
+  wait_jsonpath_equals \
+    "tool/mcp-ci actor provider" \
+    "kubectl -n default get tool mcp-ci -o jsonpath='{.status.actor.provider}'" \
+    "substrate" \
+    60
+  wait_jsonpath_equals \
+    "tool/mcp-ci poolRef" \
+    "kubectl -n default get tool mcp-ci -o jsonpath='{.status.actor.poolRef.name}'" \
+    "mcp-substrate-pool-ci" \
+    60
+}
+
+run_mcp_tool_client_job() {
+  local tool_client_image="$1"
+
+  log "Executing MCP Tool through worker ToolExecutor"
+  kubectl -n default delete job/mcp-tool-exec-ci --ignore-not-found --wait=true >/dev/null
+  kubectl apply -f - <<YAML
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mcp-tool-exec-ci
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mcp-tool-exec-ci
+  namespace: default
+rules:
+  - apiGroups:
+      - core.orka.ai
+    resources:
+      - tools
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mcp-tool-exec-ci
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mcp-tool-exec-ci
+subjects:
+  - kind: ServiceAccount
+    name: mcp-tool-exec-ci
+    namespace: default
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mcp-tool-exec-ci
+  namespace: default
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: mcp-tool-exec-ci
+      restartPolicy: Never
+      containers:
+        - name: tool-client
+          image: ${tool_client_image}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ORKA_TOOL_NAMESPACE
+              value: default
+            - name: ORKA_TOOL_NAME
+              value: mcp-ci
+            - name: ORKA_TOOL_ARGS
+              value: '{"message":"ci"}'
+            - name: ORKA_TOOL_EXPECT_RESULT
+              value: mcp-e2e-ok:mcp-ci:ci
+YAML
+  kubectl -n default wait --for=condition=Complete job/mcp-tool-exec-ci --timeout=5m
+  run_redacted kubectl -n default logs job/mcp-tool-exec-ci --all-containers --tail=-1
+}
+
 exercise_orka_tasks() {
+  local tool_client_image="$1"
+
   create_agent
+  create_substrate_actor_pools
 
   run_default_workspace_task "codex-substrate-default-ci"
+  run_pooled_workspace_task "codex-substrate-pool-ci"
 
   if [[ "${SUBSTRATE_E2E_EXTENDED}" == "1" ]]; then
     run_retained_workspace_task "codex-substrate-retain-ci"
   fi
+
+  create_mcp_tool
+  run_mcp_tool_client_job "${tool_client_image}"
 
   log "Running missing-template negative task"
   apply_task "codex-substrate-missing-template-ci" "      enabled: true
@@ -645,6 +918,7 @@ main() {
   require_command kubectl
 
   TMP_ROOT="$(mktemp -d)"
+  export KUBECONFIG="${TMP_ROOT}/kubeconfig"
   DOCKER_CONFIG_DIR="$(mktemp -d)"
   printf '{"auths":{}}\n' > "${DOCKER_CONFIG_DIR}/config.json"
   SUBSTRATE_DIR="${TMP_ROOT}/substrate"
@@ -672,7 +946,7 @@ main() {
   log "Building kubectl-ate"
   (cd "${SUBSTRATE_DIR}" && go build -o "${TMP_ROOT}/kubectl-ate" ./cmd/kubectl-ate)
 
-  local registry_ip registry_addr controller_image codex_image workspace_push_image workspace_actor_image ateom_image
+  local registry_ip registry_addr controller_image codex_image workspace_push_image workspace_actor_image mcp_push_image mcp_actor_image tool_client_image ateom_image
   registry_ip="$(docker inspect -f '{{with index .NetworkSettings.Networks "kind"}}{{.IPAddress}}{{end}}' "${KIND_REGISTRY_NAME}")"
   if [[ -z "${registry_ip}" ]]; then
     registry_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{println .IPAddress}}{{end}}' "${KIND_REGISTRY_NAME}" | head -n1)"
@@ -686,21 +960,28 @@ main() {
   codex_image="${registry_addr}/orka/agent-worker-codex:${IMAGE_TAG}"
   workspace_push_image="${registry_addr}/orka/workspace-agent-root:${IMAGE_TAG}"
   workspace_actor_image="${registry_ip}:5000/orka/workspace-agent-root:${IMAGE_TAG}"
+  mcp_push_image="${registry_addr}/orka/mcp-e2e-server:${IMAGE_TAG}"
+  mcp_actor_image="${registry_ip}:5000/orka/mcp-e2e-server:${IMAGE_TAG}"
+  tool_client_image="${registry_addr}/orka/tool-e2e-client:${IMAGE_TAG}"
 
   log "Building and pushing Orka images"
   docker build -t "${controller_image}" -f "${ROOT_DIR}/Dockerfile" "${ROOT_DIR}"
   docker build -t "${codex_image}" -f "${ROOT_DIR}/workers/agent/codex/Dockerfile.substrate-e2e" "${ROOT_DIR}"
   docker build -t "${workspace_push_image}" -f "${ROOT_DIR}/cmd/orka-workspace-agent/Dockerfile" "${ROOT_DIR}"
+  docker build -t "${mcp_push_image}" -f "${ROOT_DIR}/cmd/orka-mcp-e2e-server/Dockerfile" "${ROOT_DIR}"
+  docker build -t "${tool_client_image}" -f "${ROOT_DIR}/cmd/orka-tool-e2e-client/Dockerfile" "${ROOT_DIR}"
   docker push "${controller_image}"
   docker push "${codex_image}"
   docker push "${workspace_push_image}"
+  docker push "${mcp_push_image}"
+  docker push "${tool_client_image}"
 
   log "Publishing Substrate ateom-gvisor image"
   ateom_image="$(publish_ateom_image)"
-  create_substrate_resources "${ateom_image}" "${workspace_actor_image}"
+  create_substrate_resources "${ateom_image}" "${workspace_actor_image}" "${mcp_actor_image}"
   deploy_orka "${controller_image}" "${codex_image}"
   exercise_direct_substrate
-  exercise_orka_tasks
+  exercise_orka_tasks "${tool_client_image}"
 
   log "Agent Substrate E2E passed"
 }
