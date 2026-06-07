@@ -118,6 +118,7 @@ func BuildReviewContext(root string, slice store.ReviewSlice, opts ReviewContext
 				StartLine: 1,
 				EndLine:   endLine,
 			}},
+			Excerpt:   linesInRange(string(data), 1, endLine),
 			Truncated: truncated || totalBytes > len(data),
 			Readable:  true,
 		})

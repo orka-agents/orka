@@ -146,8 +146,6 @@ func TestValidateFindingsV2AcceptsButDoesNotPersistQuoteWithoutWorkspaceRoot(t *
 }
 
 func TestValidateFindingsV2RejectsMissingEvidenceStaleRangesAndQuoteMismatch(t *testing.T) {
-	root := t.TempDir()
-	writeFile(t, root, "app.go", "package main\nfunc main() {}\n")
 	badQuote := "not in file"
 	compactedQuote := "package main func main() {}"
 	base := validFinding()
@@ -204,6 +202,7 @@ func TestValidateFindingsV2RejectsMissingEvidenceStaleRangesAndQuoteMismatch(t *
 				IncludedFiles: []ReviewContextIncludedFile{{
 					Path:               "app.go",
 					IncludedLineRanges: []ReviewContextLineRange{{StartLine: 1, EndLine: 2}},
+					Excerpt:            "package main\nfunc main() {}\n",
 					Readable:           true,
 				}},
 			}, FindingValidationOptions{
@@ -211,7 +210,6 @@ func TestValidateFindingsV2RejectsMissingEvidenceStaleRangesAndQuoteMismatch(t *
 				RepositoryScan: "repo",
 				ScanRunID:      "scan1",
 				TaskName:       "task1",
-				WorkspaceRoot:  root,
 			})
 			if len(got.Accepted) != 0 || len(got.Dropped) != 1 {
 				t.Fatalf("ValidateFindingsV2() accepted=%d dropped=%d, want 0/1", len(got.Accepted), len(got.Dropped))
@@ -293,6 +291,13 @@ func TestBuildReviewContextBoundsPromptAndManifest(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Valid evidence paths") || !strings.Contains(prompt, "app.go") {
 		t.Fatalf("prompt = %q, want evidence path list and file excerpt", prompt)
+	}
+	included := manifest.IncludedFiles[0]
+	if included.Excerpt == "" || !strings.Contains(included.Excerpt, "line") {
+		t.Fatalf("manifest excerpt = %q, want trusted file excerpt", included.Excerpt)
+	}
+	if gotLines := strings.Count(included.Excerpt, "line"); gotLines != included.IncludedLineRanges[0].EndLine {
+		t.Fatalf("manifest excerpt line count = %d, want advertised end line %d", gotLines, included.IncludedLineRanges[0].EndLine)
 	}
 	if strings.Contains(prompt, "db.go") {
 		t.Fatalf("prompt = %q, want omitted file absent from valid evidence paths", prompt)

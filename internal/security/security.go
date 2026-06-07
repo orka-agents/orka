@@ -278,6 +278,23 @@ func EffectiveBranch(scan *corev1alpha1.RepositoryScan) string {
 	return "main"
 }
 
+// EffectiveRef returns the configured checkout ref, if any.
+func EffectiveRef(scan *corev1alpha1.RepositoryScan) string {
+	return strings.TrimSpace(scan.Spec.Ref)
+}
+
+// EffectiveWorkspaceBranch returns the branch to pass to git clone for scan workspaces.
+// Ref-only scans must not force the default branch before the worker can check out the ref.
+func EffectiveWorkspaceBranch(scan *corev1alpha1.RepositoryScan) string {
+	if scan.Spec.Branch != "" {
+		return scan.Spec.Branch
+	}
+	if EffectiveRef(scan) != "" {
+		return ""
+	}
+	return EffectiveBranch(scan)
+}
+
 // IsSuspended returns whether scheduled scans are paused.
 func IsSuspended(scan *corev1alpha1.RepositoryScan) bool {
 	return scan.Spec.Suspend != nil && *scan.Spec.Suspend

@@ -160,10 +160,16 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 			Prompt:   security.BuildThreatModelPrompt(scan, mode, baseCommit, headCommit, threatModel),
 			Timeout:  &timeout,
 			Priority: &priority,
+			Env: []corev1.EnvVar{
+				{Name: security.EnvRepositoryScanName, Value: scan.Name},
+				{Name: security.EnvStage, Value: security.StageThreatModel},
+				{Name: security.EnvScanID, Value: scanID},
+			},
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
 					GitRepo:      scan.Spec.RepoURL,
-					Branch:       security.EffectiveBranch(scan),
+					Branch:       security.EffectiveWorkspaceBranch(scan),
+					Ref:          security.EffectiveRef(scan),
 					GitSecretRef: scan.Spec.GitSecretRef,
 					SubPath:      scan.Spec.SubPath,
 					ForkRepo:     scan.Spec.ForkRepo,
@@ -225,10 +231,17 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 			Prompt:   security.BuildValidationPrompt(scan, finding),
 			Timeout:  &timeout,
 			Priority: &priority,
+			Env: []corev1.EnvVar{
+				{Name: security.EnvRepositoryScanName, Value: scan.Name},
+				{Name: security.EnvStage, Value: security.StageValidation},
+				{Name: security.EnvScanID, Value: finding.ScanRunID},
+				{Name: security.EnvFindingID, Value: finding.ID},
+			},
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
 					GitRepo:      scan.Spec.RepoURL,
-					Branch:       security.EffectiveBranch(scan),
+					Branch:       security.EffectiveWorkspaceBranch(scan),
+					Ref:          security.EffectiveRef(scan),
 					GitSecretRef: scan.Spec.GitSecretRef,
 					SubPath:      scan.Spec.SubPath,
 					ForkRepo:     scan.Spec.ForkRepo,
@@ -294,11 +307,17 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, sc
 			Priority: &priority,
 			Env: []corev1.EnvVar{
 				{Name: workerenv.RequirePushBranch, Value: "true"},
+				{Name: security.EnvRepositoryScanName, Value: scan.Name},
+				{Name: security.EnvStage, Value: security.StagePatch},
+				{Name: security.EnvScanID, Value: proposalID},
+				{Name: security.EnvFindingID, Value: finding.ID},
+				{Name: security.EnvPatchBranch, Value: branch},
 			},
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
 					GitRepo:      scan.Spec.RepoURL,
-					Branch:       security.EffectiveBranch(scan),
+					Branch:       security.EffectiveWorkspaceBranch(scan),
+					Ref:          security.EffectiveRef(scan),
 					GitSecretRef: scan.Spec.GitSecretRef,
 					SubPath:      scan.Spec.SubPath,
 					ForkRepo:     scan.Spec.ForkRepo,
@@ -1024,8 +1043,18 @@ func contextTokenSecurityScanFailures(token *ContextToken, scan *corev1alpha1.Re
 	if want, ok := contextString(token.TransactionContext, "repo"); ok && scan.Spec.RepoURL != want {
 		failures = append(failures, fmt.Sprintf("repository %q does not match token context %q", scan.Spec.RepoURL, want))
 	}
-	if want, ok := contextString(token.TransactionContext, "branch"); ok && security.EffectiveBranch(scan) != want {
-		failures = append(failures, fmt.Sprintf("workspace branch %q does not match token context %q", security.EffectiveBranch(scan), want))
+	ref := security.EffectiveRef(scan)
+	wantRef, hasWantRef := contextString(token.TransactionContext, "ref")
+	if want, ok := contextString(token.TransactionContext, "branch"); ok {
+		refOnlyScanMatches := scan.Spec.Branch == "" && ref != "" && hasWantRef && ref == wantRef
+		if !refOnlyScanMatches && security.EffectiveBranch(scan) != want {
+			failures = append(failures, fmt.Sprintf("workspace branch %q does not match token context %q", security.EffectiveBranch(scan), want))
+		}
+	}
+	if hasWantRef && ref != wantRef {
+		failures = append(failures, fmt.Sprintf("workspace ref %q does not match token context %q", ref, wantRef))
+	} else if _, branchScoped := contextString(token.TransactionContext, "branch"); !hasWantRef && branchScoped && ref != "" {
+		failures = append(failures, fmt.Sprintf("workspace ref %q is not allowed by branch-only token context", ref))
 	}
 
 	agentNamespace := agentRef.Namespace

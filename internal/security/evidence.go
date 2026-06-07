@@ -106,7 +106,7 @@ func validateFindingEvidence(finding FindingsV2Finding, included map[string]Revi
 			return "evidence line range is outside included review context"
 		}
 		if ref.Quote != nil && strings.TrimSpace(*ref.Quote) != "" {
-			if reason := validateEvidenceQuote(workspaceRoot, ref); reason != "" {
+			if reason := validateEvidenceQuote(file, workspaceRoot, ref); reason != "" {
 				return reason
 			}
 		}
@@ -123,7 +123,10 @@ func lineRangeIncluded(startLine, endLine int, ranges []ReviewContextLineRange) 
 	return false
 }
 
-func validateEvidenceQuote(workspaceRoot string, ref FindingsV2EvidenceRef) string {
+func validateEvidenceQuote(file ReviewContextIncludedFile, workspaceRoot string, ref FindingsV2EvidenceRef) string {
+	if strings.TrimSpace(file.Excerpt) != "" {
+		return validateEvidenceQuoteInContent(file.Excerpt, ref)
+	}
 	if strings.TrimSpace(workspaceRoot) == "" {
 		return ""
 	}
@@ -143,7 +146,11 @@ func validateEvidenceQuote(workspaceRoot string, ref FindingsV2EvidenceRef) stri
 	if err != nil {
 		return "evidence file is not readable"
 	}
-	excerpt := linesInRange(string(data), ref.StartLine, ref.EndLine)
+	return validateEvidenceQuoteInContent(string(data), ref)
+}
+
+func validateEvidenceQuoteInContent(content string, ref FindingsV2EvidenceRef) string {
+	excerpt := linesInRange(content, ref.StartLine, ref.EndLine)
 	if excerpt == "" {
 		return "evidence line range is stale"
 	}

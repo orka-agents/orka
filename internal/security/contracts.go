@@ -19,6 +19,11 @@ const (
 
 	EnvRepositoryScanName = "ORKA_SECURITY_REPOSITORY_SCAN"
 	EnvReviewSliceJSON    = "ORKA_SECURITY_REVIEW_SLICE_JSON"
+	EnvStage              = "ORKA_SECURITY_STAGE"
+	EnvScanID             = "ORKA_SECURITY_SCAN_ID"
+	EnvSliceID            = "ORKA_SECURITY_SLICE_ID"
+	EnvFindingID          = "ORKA_SECURITY_FINDING_ID"
+	EnvPatchBranch        = "ORKA_SECURITY_PATCH_BRANCH"
 	EnvScanBaseCommit     = "ORKA_SECURITY_SCAN_BASE_COMMIT"
 	EnvScanHeadCommit     = "ORKA_SECURITY_SCAN_HEAD_COMMIT"
 
@@ -54,6 +59,7 @@ type ReviewContextIncludedFile struct {
 	Bytes              int                      `json:"bytes"`
 	IncludedBytes      int                      `json:"includedBytes"`
 	IncludedLineRanges []ReviewContextLineRange `json:"includedLineRanges"`
+	Excerpt            string                   `json:"excerpt,omitempty"`
 	Truncated          bool                     `json:"truncated"`
 	Readable           bool                     `json:"readable"`
 	SkippedReason      *string                  `json:"skippedReason"`

@@ -357,10 +357,16 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 			Prompt:   security.BuildThreatModelPrompt(scan, mode, baseCommit, headCommit, threatModel),
 			Timeout:  &timeout,
 			Priority: &priority,
+			Env: []corev1.EnvVar{
+				{Name: security.EnvRepositoryScanName, Value: scan.Name},
+				{Name: security.EnvStage, Value: security.StageThreatModel},
+				{Name: security.EnvScanID, Value: scanID},
+			},
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
 					GitRepo:      scan.Spec.RepoURL,
-					Branch:       security.EffectiveBranch(scan),
+					Branch:       security.EffectiveWorkspaceBranch(scan),
+					Ref:          security.EffectiveRef(scan),
 					GitSecretRef: scan.Spec.GitSecretRef,
 					SubPath:      scan.Spec.SubPath,
 					ForkRepo:     scan.Spec.ForkRepo,
@@ -457,12 +463,15 @@ func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *c
 			Priority: &priority,
 			Env: []corev1.EnvVar{
 				{Name: security.EnvRepositoryScanName, Value: scan.Name},
+				{Name: security.EnvStage, Value: security.StageMapper},
+				{Name: security.EnvScanID, Value: run.ID},
 				{Name: security.EnvScanBaseCommit, Value: run.BaseCommit},
 				{Name: security.EnvScanHeadCommit, Value: run.HeadCommit},
 			},
 			Workspace: &corev1alpha1.WorkspaceConfig{
 				GitRepo:      scan.Spec.RepoURL,
-				Branch:       security.EffectiveBranch(scan),
+				Branch:       security.EffectiveWorkspaceBranch(scan),
+				Ref:          security.EffectiveRef(scan),
 				GitSecretRef: scan.Spec.GitSecretRef,
 				SubPath:      scan.Spec.SubPath,
 				ForkRepo:     scan.Spec.ForkRepo,
@@ -616,11 +625,16 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 				Priority: &priority,
 				Env: []corev1.EnvVar{
 					{Name: security.EnvReviewSliceJSON, Value: string(sliceJSON)},
+					{Name: security.EnvRepositoryScanName, Value: scan.Name},
+					{Name: security.EnvStage, Value: security.StageReview},
+					{Name: security.EnvScanID, Value: run.ID},
+					{Name: security.EnvSliceID, Value: reviewSlice.ID},
 				},
 				AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 					Workspace: &corev1alpha1.WorkspaceConfig{
 						GitRepo:      scan.Spec.RepoURL,
-						Branch:       security.EffectiveBranch(scan),
+						Branch:       security.EffectiveWorkspaceBranch(scan),
+						Ref:          security.EffectiveRef(scan),
 						GitSecretRef: scan.Spec.GitSecretRef,
 						SubPath:      scan.Spec.SubPath,
 						ForkRepo:     scan.Spec.ForkRepo,
@@ -1600,10 +1614,17 @@ func (r *RepositoryScanReconciler) createValidationTask(ctx context.Context, sca
 			Prompt:   security.BuildValidationPrompt(scan, finding),
 			Timeout:  &timeout,
 			Priority: &priority,
+			Env: []corev1.EnvVar{
+				{Name: security.EnvRepositoryScanName, Value: scan.Name},
+				{Name: security.EnvStage, Value: security.StageValidation},
+				{Name: security.EnvScanID, Value: finding.ScanRunID},
+				{Name: security.EnvFindingID, Value: finding.ID},
+			},
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
 					GitRepo:      scan.Spec.RepoURL,
-					Branch:       security.EffectiveBranch(scan),
+					Branch:       security.EffectiveWorkspaceBranch(scan),
+					Ref:          security.EffectiveRef(scan),
 					GitSecretRef: scan.Spec.GitSecretRef,
 					SubPath:      scan.Spec.SubPath,
 					ForkRepo:     scan.Spec.ForkRepo,

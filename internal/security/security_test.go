@@ -31,6 +31,39 @@ func TestArtifactWorkspacePath(t *testing.T) {
 	}
 }
 
+func TestEffectiveWorkspaceBranch(t *testing.T) {
+	tests := []struct {
+		name string
+		spec corev1alpha1.RepositoryScanSpec
+		want string
+	}{
+		{
+			name: "explicit branch wins",
+			spec: corev1alpha1.RepositoryScanSpec{Branch: "release", Ref: "v1.2.3"},
+			want: "release",
+		},
+		{
+			name: "ref only omits implicit branch",
+			spec: corev1alpha1.RepositoryScanSpec{Ref: "v1.2.3"},
+			want: "",
+		},
+		{
+			name: "default branch without ref",
+			spec: corev1alpha1.RepositoryScanSpec{},
+			want: "main",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scan := &corev1alpha1.RepositoryScan{Spec: tt.spec}
+			if got := EffectiveWorkspaceBranch(scan); got != tt.want {
+				t.Fatalf("EffectiveWorkspaceBranch() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildThreatModelPromptRequiresThreatModelOnly(t *testing.T) {
 	scan := &corev1alpha1.RepositoryScan{
 		Spec: corev1alpha1.RepositoryScanSpec{
