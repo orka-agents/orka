@@ -387,7 +387,7 @@ metadata:
     orka.ai/execution-workspace: "true"
     orka.ai/workspace-provider: substrate
   annotations:
-    orka.ai/workspace-daemon-port: "8080"
+    orka.ai/workspace-daemon-port: "80"
     orka.ai/workspace-protocol: http-json-v1
     orka.ai/workspace-staging-root: /app
 spec:
@@ -399,14 +399,14 @@ spec:
       - /orka-mcp-e2e-server
     env:
       - name: ORKA_WORKSPACE_AGENT_LISTEN_ADDR
-        value: ":8080"
+        value: ":80"
       - name: ORKA_WORKSPACE_BOOTSTRAP_TOKEN
         valueFrom:
           secretKeyRef:
             name: ${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME}
             key: ${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY}
     ports:
-      - containerPort: 8080
+      - containerPort: 80
   workerPoolRef:
     name: orka-workers
     namespace: ate-demo
@@ -742,20 +742,31 @@ YAML
 
 run_mcp_tool_client_job() {
   local tool_client_image="$1"
+  local job_name="${2:-mcp-tool-exec-ci}"
+  local message="${3:-ci}"
+  local expected
+  local args_json
+
+  if [[ "$#" -ge 4 ]]; then
+    expected="$4"
+  else
+    expected="mcp-e2e-ok:mcp-ci:${message}"
+  fi
+  args_json="$(jq -cn --arg message "${message}" '{message: $message}')"
 
   log "Executing MCP Tool through worker ToolExecutor"
-  kubectl -n default delete job/mcp-tool-exec-ci --ignore-not-found --wait=true >/dev/null
+  kubectl -n default delete "job/${job_name}" --ignore-not-found --wait=true >/dev/null
   kubectl apply -f - <<YAML
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: mcp-tool-exec-ci
+  name: ${job_name}
   namespace: default
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: mcp-tool-exec-ci
+  name: ${job_name}
   namespace: default
 rules:
   - apiGroups:
@@ -768,27 +779,27 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: mcp-tool-exec-ci
+  name: ${job_name}
   namespace: default
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: mcp-tool-exec-ci
+  name: ${job_name}
 subjects:
   - kind: ServiceAccount
-    name: mcp-tool-exec-ci
+    name: ${job_name}
     namespace: default
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mcp-tool-exec-ci
+  name: ${job_name}
   namespace: default
 spec:
   backoffLimit: 0
   template:
     spec:
-      serviceAccountName: mcp-tool-exec-ci
+      serviceAccountName: ${job_name}
       restartPolicy: Never
       containers:
         - name: tool-client
@@ -800,12 +811,74 @@ spec:
             - name: ORKA_TOOL_NAME
               value: mcp-ci
             - name: ORKA_TOOL_ARGS
-              value: '{"message":"ci"}'
+              value: '${args_json}'
             - name: ORKA_TOOL_EXPECT_RESULT
-              value: mcp-e2e-ok:mcp-ci:ci
+              value: '${expected}'
 YAML
-  kubectl -n default wait --for=condition=Complete job/mcp-tool-exec-ci --timeout=5m
-  run_redacted kubectl -n default logs job/mcp-tool-exec-ci --all-containers --tail=-1
+  kubectl -n default wait --for=condition=Complete "job/${job_name}" --timeout=5m
+  run_redacted kubectl -n default logs "job/${job_name}" --all-containers --tail=-1
+}
+
+mcp_tool_client_result() {
+  local job_name="$1"
+  kubectl -n default logs "job/${job_name}" --all-containers --tail=-1 | redact | tail -n1
+}
+
+verify_mcp_tool_boots_actor_once() {
+  local tool_client_image="$1"
+  local actor_id booted_actor_id generation before after before_started before_count after_started after_count
+
+  log "Verifying MCP Tool actor is booted once across forced reconcile"
+  actor_id="$(kubectl -n default get tool mcp-ci -o jsonpath='{.status.actor.actorID}')"
+  booted_actor_id="$(kubectl -n default get tool mcp-ci -o json | jq -r '.metadata.annotations["orka.ai/substrate-mcp-tool-booted-id"] // ""')"
+  if [[ -z "${actor_id}" || "${booted_actor_id}" != "${actor_id}" ]]; then
+    echo "tool/mcp-ci booted actor annotation = ${booted_actor_id:-<empty>}, want ${actor_id:-<empty>}" >&2
+    exit 1
+  fi
+
+  run_mcp_tool_client_job "${tool_client_image}" "mcp-tool-state-before-ci" "boot-state" ""
+  before="$(mcp_tool_client_result mcp-tool-state-before-ci)"
+  if [[ ! "${before}" =~ ^mcp-e2e-state:mcp-ci:([0-9]+):([0-9]+)$ ]]; then
+    echo "unexpected pre-reconcile MCP state response: ${before}" >&2
+    exit 1
+  fi
+  before_started="${BASH_REMATCH[1]}"
+  before_count="${BASH_REMATCH[2]}"
+
+  generation="$(
+    kubectl -n default patch tool mcp-ci --type=merge \
+      -p '{"spec":{"description":"E2E MCP tool backed by a durable Substrate actor after forced reconcile."}}' \
+      -o json | jq -r '.metadata.generation'
+  )"
+  wait_jsonpath_equals \
+    "tool/mcp-ci forced reconcile observed generation" \
+    "kubectl -n default get tool mcp-ci -o json | jq -r '.status.conditions[]? | select(.type == \"Available\") | .observedGeneration'" \
+    "${generation}" \
+    120
+
+  booted_actor_id="$(kubectl -n default get tool mcp-ci -o json | jq -r '.metadata.annotations["orka.ai/substrate-mcp-tool-booted-id"] // ""')"
+  if [[ "${booted_actor_id}" != "${actor_id}" ]]; then
+    echo "tool/mcp-ci booted actor annotation after reconcile = ${booted_actor_id:-<empty>}, want ${actor_id}" >&2
+    exit 1
+  fi
+
+  run_mcp_tool_client_job "${tool_client_image}" "mcp-tool-state-after-ci" "boot-state" ""
+  after="$(mcp_tool_client_result mcp-tool-state-after-ci)"
+  if [[ ! "${after}" =~ ^mcp-e2e-state:mcp-ci:([0-9]+):([0-9]+)$ ]]; then
+    echo "unexpected post-reconcile MCP state response: ${after}" >&2
+    exit 1
+  fi
+  after_started="${BASH_REMATCH[1]}"
+  after_count="${BASH_REMATCH[2]}"
+  if [[ "${after_started}" != "${before_started}" ]]; then
+    echo "tool/mcp-ci actor process restarted across forced reconcile: before=${before}, after=${after}" >&2
+    exit 1
+  fi
+  if (( after_count <= before_count )); then
+    echo "tool/mcp-ci actor state did not advance across forced reconcile: before=${before}, after=${after}" >&2
+    exit 1
+  fi
+  log "tool/mcp-ci retained MCP actor state across forced reconcile"
 }
 
 exercise_orka_tasks() {
@@ -816,6 +889,7 @@ exercise_orka_tasks() {
 
   create_mcp_tool
   run_mcp_tool_client_job "${tool_client_image}"
+  verify_mcp_tool_boots_actor_once "${tool_client_image}"
 
   run_default_workspace_task "codex-substrate-default-ci"
   run_pooled_workspace_task "codex-substrate-pool-ci"

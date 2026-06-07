@@ -228,11 +228,12 @@ func TestToolReconcilerMCPSubstrateActorPublishesEndpoint(t *testing.T) {
 				Path: testMCPPath,
 				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
 					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+					Boot:        true,
 				},
 			},
 		},
 	}
-	executor := &recordingToolWorkspaceExecutor{}
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
 		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
 		Scheme:           scheme,
@@ -269,6 +270,9 @@ func TestToolReconcilerMCPSubstrateActorPublishesEndpoint(t *testing.T) {
 	if executor.claimName != wantActorID || !executor.waitReadyCalled {
 		t.Fatalf("executor claimName=%q waitReady=%t, want actor claim and resume", executor.claimName, executor.waitReadyCalled)
 	}
+	if !executor.waitReadyBoot {
+		t.Fatal("WaitReady Boot = false, want true for newly-created MCP actor")
+	}
 	if !executor.closeCalled {
 		t.Fatal("Substrate MCP executor was not closed after reconcile")
 	}
@@ -285,6 +289,208 @@ func TestToolReconcilerMCPSubstrateActorPublishesEndpoint(t *testing.T) {
 	}
 	if gotHost != wantRouteHost {
 		t.Fatalf("MCP readiness Host = %q, want %q", gotHost, wantRouteHost)
+	}
+}
+
+func TestToolReconcilerMCPSubstrateActorBootsRecreatedActor(t *testing.T) {
+	scheme := newToolScheme()
+	template := approvedMCPActorTemplateForTest()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != testMCPPath {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	actorID := deterministicSubstrateToolActorID(defaultNS, "mcp-tool", "ate-demo", "mcp-template")
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "mcp-tool",
+			Namespace:  defaultNS,
+			Finalizers: []string{substrateMCPToolActorFinalizer},
+			Annotations: map[string]string{
+				substrateMCPToolActorIDAnno:  actorID,
+				substrateMCPToolBootedIDAnno: actorID,
+			},
+		},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "MCP tool",
+			MCP: &corev1alpha1.MCPToolServer{
+				Path: testMCPPath,
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+					Boot:        true,
+				},
+			},
+		},
+	}
+	executor := &recordingToolWorkspaceExecutor{claimCreated: true}
+	r := &ToolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:           scheme,
+		HTTPClient:       srv.Client(),
+		SubstrateEnabled: true,
+		SubstrateConfig: SubstrateConfig{
+			RouterURL:      srv.URL,
+			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
+			ClaimTimeout:   1,
+		},
+		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if len(executor.waitReadyBoots) != 1 || !executor.waitReadyBoots[0] {
+		t.Fatalf("WaitReady boot history = %#v, want [true] for recreated actor", executor.waitReadyBoots)
+	}
+}
+
+func TestToolReconcilerMCPSubstrateActorDoesNotRebootAfterWaitReadyFailure(t *testing.T) {
+	scheme := newToolScheme()
+	template := approvedMCPActorTemplateForTest()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != testMCPPath {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	actorID := deterministicSubstrateToolActorID(defaultNS, "mcp-tool", "ate-demo", "mcp-template")
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "mcp-tool",
+			Namespace:  defaultNS,
+			Finalizers: []string{substrateMCPToolActorFinalizer},
+			Annotations: map[string]string{
+				substrateMCPToolActorIDAnno: actorID,
+			},
+		},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "MCP tool",
+			MCP: &corev1alpha1.MCPToolServer{
+				Path: testMCPPath,
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+					Boot:        true,
+				},
+			},
+		},
+	}
+	executor := &recordingToolWorkspaceExecutor{
+		claimCreateds: []bool{true, false},
+		waitReadyErrs: []error{errors.New("timed out waiting for actor readiness")},
+	}
+	r := &ToolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:           scheme,
+		HTTPClient:       srv.Client(),
+		SubstrateEnabled: true,
+		SubstrateConfig: SubstrateConfig{
+			RouterURL:      srv.URL,
+			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
+			ClaimTimeout:   1,
+		},
+		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() wait ready failure error = %v", err)
+	}
+	var got corev1alpha1.Tool
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
+		t.Fatalf("Get tool after wait ready failure: %v", err)
+	}
+	if got.Annotations[substrateMCPToolBootedIDAnno] != actorID {
+		t.Fatalf("booted actor annotation after wait ready failure = %q, want %q", got.Annotations[substrateMCPToolBootedIDAnno], actorID)
+	}
+	if len(executor.waitReadyBoots) != 1 || !executor.waitReadyBoots[0] {
+		t.Fatalf("WaitReady boot history after failure = %#v, want [true]", executor.waitReadyBoots)
+	}
+
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() retry error = %v", err)
+	}
+	if len(executor.waitReadyBoots) != 2 || !executor.waitReadyBoots[0] || executor.waitReadyBoots[1] {
+		t.Fatalf("WaitReady boot history after retry = %#v, want [true false]", executor.waitReadyBoots)
+	}
+}
+
+func TestToolReconcilerMCPSubstrateActorSeedsBootedAnnotationWithoutReboot(t *testing.T) {
+	scheme := newToolScheme()
+	template := approvedMCPActorTemplateForTest()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != testMCPPath {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	actorID := deterministicSubstrateToolActorID(defaultNS, "mcp-tool", "ate-demo", "mcp-template")
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "mcp-tool",
+			Namespace:  defaultNS,
+			Finalizers: []string{substrateMCPToolActorFinalizer},
+			Annotations: map[string]string{
+				substrateMCPToolActorIDAnno: actorID,
+			},
+		},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "MCP tool",
+			MCP: &corev1alpha1.MCPToolServer{
+				Path: testMCPPath,
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+					Boot:        true,
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Available: true,
+			Endpoint:  "http://old-router/mcp",
+			Actor: &corev1alpha1.ToolActorStatus{
+				Provider:  corev1alpha1.WorkspaceProviderSubstrate,
+				ActorID:   actorID,
+				RouteHost: actorID + ".actors.resources.substrate.ate.dev",
+			},
+		},
+	}
+	executor := &recordingToolWorkspaceExecutor{}
+	r := &ToolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:           scheme,
+		HTTPClient:       srv.Client(),
+		SubstrateEnabled: true,
+		SubstrateConfig: SubstrateConfig{
+			RouterURL:      srv.URL,
+			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
+			ClaimTimeout:   1,
+		},
+		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if len(executor.waitReadyBoots) != 1 || executor.waitReadyBoots[0] {
+		t.Fatalf("WaitReady boot history = %#v, want [false] for existing actor", executor.waitReadyBoots)
+	}
+	var got corev1alpha1.Tool
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
+		t.Fatalf("Get tool: %v", err)
+	}
+	if got.Annotations[substrateMCPToolBootedIDAnno] != actorID {
+		t.Fatalf("booted actor annotation = %q, want %q", got.Annotations[substrateMCPToolBootedIDAnno], actorID)
 	}
 }
 
@@ -307,7 +513,7 @@ func TestToolReconcilerMCPSubstrateActorRequiresEndpointReadiness(t *testing.T) 
 			},
 		},
 	}
-	executor := &recordingToolWorkspaceExecutor{}
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
 		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
 		Scheme:           scheme,
@@ -377,7 +583,7 @@ func TestToolReconcilerMCPSubstrateActorReplacementIgnoresNonPooledAnnotationOwn
 			},
 		},
 	}
-	executor := &recordingToolWorkspaceExecutor{}
+	executor := &recordingToolWorkspaceExecutor{claimCreated: true}
 	r := &ToolReconciler{
 		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
 		Scheme:           scheme,
@@ -561,7 +767,7 @@ func TestToolReconcilerMCPSubstrateActorReplacementDeletesAnnotatedPooledActorBe
 		},
 	}
 	lease := newSubstrateMCPPoolActorLease(tool, defaultNS, oldActorID, oldActorID)
-	executor := &recordingToolWorkspaceExecutor{}
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
 		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, lease).Build(),
 		Scheme:           scheme,
@@ -637,6 +843,7 @@ func TestToolReconcilerMCPSubstrateActorFailedReplacementPreservesPreviousEndpoi
 				Path: testMCPPath,
 				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
 					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+					Boot:        true,
 				},
 			},
 		},
@@ -650,7 +857,7 @@ func TestToolReconcilerMCPSubstrateActorFailedReplacementPreservesPreviousEndpoi
 			},
 		},
 	}
-	executor := &recordingToolWorkspaceExecutor{}
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
 		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
 		Scheme:           scheme,
@@ -672,6 +879,7 @@ func TestToolReconcilerMCPSubstrateActorFailedReplacementPreservesPreviousEndpoi
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() failed replacement error = %v", err)
 	}
+	wantActorID := deterministicSubstrateToolActorID(defaultNS, "mcp-tool", "ate-demo", "mcp-template")
 	var got corev1alpha1.Tool
 	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
 		t.Fatalf("Get tool after failed replacement: %v", err)
@@ -687,6 +895,19 @@ func TestToolReconcilerMCPSubstrateActorFailedReplacementPreservesPreviousEndpoi
 	}
 	if len(executor.deletedActorIDs) != 0 {
 		t.Fatalf("deleted actors = %#v, want no cleanup before replacement readiness", executor.deletedActorIDs)
+	}
+	if got.Annotations[substrateMCPToolBootedIDAnno] != wantActorID {
+		t.Fatalf("booted actor annotation = %q, want replacement actor %q", got.Annotations[substrateMCPToolBootedIDAnno], wantActorID)
+	}
+	if len(executor.waitReadyBoots) != 1 || !executor.waitReadyBoots[0] {
+		t.Fatalf("WaitReady boot history after first retry = %#v, want [true]", executor.waitReadyBoots)
+	}
+
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() repeated failed replacement error = %v", err)
+	}
+	if len(executor.waitReadyBoots) != 2 || !executor.waitReadyBoots[0] || executor.waitReadyBoots[1] {
+		t.Fatalf("WaitReady boot history after second retry = %#v, want [true false]", executor.waitReadyBoots)
 	}
 }
 
@@ -717,11 +938,12 @@ func TestToolReconcilerMCPSubstrateActorUsesPoolRef(t *testing.T) {
 				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
 					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
 					PoolRef:     &corev1alpha1.SubstrateActorPoolReference{Name: testMCPPoolName},
+					Boot:        true,
 				},
 			},
 		},
 	}
-	executor := &recordingToolWorkspaceExecutor{}
+	executor := &recordingToolWorkspaceExecutor{claimCreated: true}
 	r := &ToolReconciler{
 		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, pool).Build(),
 		Scheme:           scheme,
@@ -757,6 +979,9 @@ func TestToolReconcilerMCPSubstrateActorUsesPoolRef(t *testing.T) {
 	prefix := deterministicSubstratePoolActorPrefix(defaultNS, testMCPPoolName)
 	if !strings.HasPrefix(executor.claimName, prefix+"-") || !executor.waitReadyCalled {
 		t.Fatalf("executor claimName=%q waitReady=%t, want pooled actor claim and resume", executor.claimName, executor.waitReadyCalled)
+	}
+	if !executor.waitReadyBoot {
+		t.Fatal("WaitReady Boot = false, want true for booting pooled MCP actor")
 	}
 	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
 		t.Fatalf("Get tool: %v", err)
@@ -794,6 +1019,76 @@ func TestToolReconcilerMCPSubstrateActorUsesPoolRef(t *testing.T) {
 	}
 	if reserved {
 		t.Fatal("task reserved MCP tool-held pool actor, want busy")
+	}
+}
+
+func TestToolReconcilerMCPSubstrateActorBootsPrecreatedPooledActor(t *testing.T) {
+	scheme := newToolScheme()
+	template := approvedMCPActorTemplateForTest()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != testMCPPath {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: defaultNS},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+			TargetActors: 5,
+		},
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp-tool", Namespace: defaultNS},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "MCP tool",
+			MCP: &corev1alpha1.MCPToolServer{
+				Path: testMCPPath,
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+					PoolRef:     &corev1alpha1.SubstrateActorPoolReference{Name: testMCPPoolName},
+					Boot:        true,
+				},
+			},
+		},
+	}
+	executor := &recordingToolWorkspaceExecutor{}
+	r := &ToolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, pool).Build(),
+		Scheme:           scheme,
+		HTTPClient:       srv.Client(),
+		SubstrateEnabled: true,
+		SubstrateConfig: SubstrateConfig{
+			RouterURL:      srv.URL,
+			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
+			ClaimTimeout:   1,
+		},
+		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() ownership update error = %v", err)
+	}
+	if executor.claimName != "" || executor.waitReadyCalled {
+		t.Fatalf("executor claimName=%q waitReady=%t, want ownership-only first reconcile", executor.claimName, executor.waitReadyCalled)
+	}
+
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() claim error = %v", err)
+	}
+	if len(executor.waitReadyBoots) != 1 || !executor.waitReadyBoots[0] {
+		t.Fatalf("WaitReady boot history = %#v, want [true] for first claim of precreated pooled actor", executor.waitReadyBoots)
+	}
+	var got corev1alpha1.Tool
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
+		t.Fatalf("Get tool: %v", err)
+	}
+	if got.Annotations[substrateMCPToolBootedIDAnno] != got.Status.Actor.ActorID {
+		t.Fatalf("booted actor annotation = %q, want claimed actor %q", got.Annotations[substrateMCPToolBootedIDAnno], got.Status.Actor.ActorID)
 	}
 }
 
@@ -1885,7 +2180,12 @@ func mcpToolRequest() ctrl.Request {
 
 type recordingToolWorkspaceExecutor struct {
 	claimName       string
+	claimCreated    bool
+	claimCreateds   []bool
 	waitReadyCalled bool
+	waitReadyBoot   bool
+	waitReadyBoots  []bool
+	waitReadyErrs   []error
 	closeCalled     bool
 	deletedActorIDs []string
 	deleteReqs      []workspace.DeleteRequest
@@ -1894,6 +2194,11 @@ type recordingToolWorkspaceExecutor struct {
 
 func (e *recordingToolWorkspaceExecutor) Claim(ctx context.Context, req workspace.ClaimRequest) (*workspace.ClaimResult, error) {
 	e.claimName = req.ClaimName
+	created := e.claimCreated
+	if len(e.claimCreateds) > 0 {
+		created = e.claimCreateds[0]
+		e.claimCreateds = e.claimCreateds[1:]
+	}
 	return &workspace.ClaimResult{
 		Ref: workspace.WorkspaceRef{
 			Namespace: req.Namespace,
@@ -1901,12 +2206,22 @@ func (e *recordingToolWorkspaceExecutor) Claim(ctx context.Context, req workspac
 			ID:        req.ClaimName,
 		},
 		Template: req.Template,
+		Created:  created,
 		Phase:    workspace.PhasePending,
 	}, nil
 }
 
 func (e *recordingToolWorkspaceExecutor) WaitReady(ctx context.Context, req workspace.WaitReadyRequest) (*workspace.ReadyResult, error) {
 	e.waitReadyCalled = true
+	e.waitReadyBoot = req.Boot
+	e.waitReadyBoots = append(e.waitReadyBoots, req.Boot)
+	if len(e.waitReadyErrs) > 0 {
+		err := e.waitReadyErrs[0]
+		e.waitReadyErrs = e.waitReadyErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &workspace.ReadyResult{Ref: req.Ref, Phase: workspace.PhaseReady}, nil
 }
 

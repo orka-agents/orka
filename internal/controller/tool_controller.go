@@ -45,6 +45,7 @@ const (
 
 	substrateMCPToolActorFinalizer = "orka.ai/substrate-mcp-tool-actor-cleanup"
 	substrateMCPToolActorIDAnno    = "orka.ai/substrate-mcp-tool-actor-id"
+	substrateMCPToolBootedIDAnno   = "orka.ai/substrate-mcp-tool-booted-id"
 
 	substrateMCPToolActorPoolNameAnno      = "orka.ai/substrate-mcp-tool-actor-pool-name"
 	substrateMCPToolActorPoolNamespaceAnno = "orka.ai/substrate-mcp-tool-actor-pool-namespace"
@@ -349,12 +350,8 @@ func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *co
 	if err != nil {
 		return r.updateStatus(ctx, tool, false, err.Error())
 	}
-	if _, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
-		Ref:     claim.Ref,
-		Timeout: cfg.ClaimTimeout,
-		Boot:    actorSpec.Boot && claim.Created,
-	}); err != nil {
-		return r.updateStatus(ctx, tool, false, err.Error())
+	if result, done, err := r.waitForSubstrateMCPToolActor(ctx, tool, executor, claim, actorID, actorSpec.Boot, cfg.ClaimTimeout); done || err != nil {
+		return result, err
 	}
 
 	path := strings.TrimSpace(tool.Spec.MCP.Path)
@@ -382,6 +379,71 @@ func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *co
 		return ctrl.Result{}, err
 	}
 	return r.updateStatusWithActor(ctx, tool, true, "", endpoint, actorStatus)
+}
+
+func (r *ToolReconciler) waitForSubstrateMCPToolActor(
+	ctx context.Context,
+	tool *corev1alpha1.Tool,
+	executor workspace.WorkspaceExecutor,
+	claim *workspace.ClaimResult,
+	actorID string,
+	bootRequested bool,
+	timeout time.Duration,
+) (ctrl.Result, bool, error) {
+	bootActor := shouldBootSubstrateMCPToolActor(tool, actorID, bootRequested, claim.Created)
+	if bootActor && markSubstrateMCPToolActorBooted(tool, actorID) {
+		if err := r.Update(ctx, tool); err != nil {
+			return ctrl.Result{}, true, err
+		}
+	}
+	if _, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
+		Ref:     claim.Ref,
+		Timeout: timeout,
+		Boot:    bootActor,
+	}); err != nil {
+		result, updateErr := r.updateStatus(ctx, tool, false, err.Error())
+		return result, true, updateErr
+	}
+	if !bootActor && bootRequested && markSubstrateMCPToolActorBooted(tool, actorID) {
+		if err := r.Update(ctx, tool); err != nil {
+			return ctrl.Result{}, true, err
+		}
+	}
+	return ctrl.Result{}, false, nil
+}
+
+func shouldBootSubstrateMCPToolActor(tool *corev1alpha1.Tool, actorID string, requested bool, created bool) bool {
+	actorID = strings.TrimSpace(actorID)
+	if !requested || actorID == "" {
+		return false
+	}
+	if created {
+		return true
+	}
+	if tool == nil {
+		return true
+	}
+	if strings.TrimSpace(tool.Annotations[substrateMCPToolBootedIDAnno]) == actorID {
+		return false
+	}
+	return tool.Status.Actor == nil ||
+		tool.Status.Actor.Provider != corev1alpha1.WorkspaceProviderSubstrate ||
+		strings.TrimSpace(tool.Status.Actor.ActorID) != actorID
+}
+
+func markSubstrateMCPToolActorBooted(tool *corev1alpha1.Tool, actorID string) bool {
+	actorID = strings.TrimSpace(actorID)
+	if tool == nil || actorID == "" {
+		return false
+	}
+	if tool.Annotations == nil {
+		tool.Annotations = map[string]string{}
+	}
+	if strings.TrimSpace(tool.Annotations[substrateMCPToolBootedIDAnno]) == actorID {
+		return false
+	}
+	tool.Annotations[substrateMCPToolBootedIDAnno] = actorID
+	return true
 }
 
 func (r *ToolReconciler) resolveSubstrateMCPActorPool(
@@ -1355,6 +1417,7 @@ func removeSubstrateMCPToolActorOwnership(tool *corev1alpha1.Tool) {
 		return
 	}
 	delete(tool.Annotations, substrateMCPToolActorIDAnno)
+	delete(tool.Annotations, substrateMCPToolBootedIDAnno)
 	delete(tool.Annotations, substrateMCPToolActorPoolNameAnno)
 	delete(tool.Annotations, substrateMCPToolActorPoolNamespaceAnno)
 	delete(tool.Annotations, substrateMCPToolCleanupActorIDAnno)

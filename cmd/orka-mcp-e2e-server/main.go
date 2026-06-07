@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
+	"time"
 )
 
 const (
@@ -23,6 +25,11 @@ const (
 	mcpInitializeMethod = "initialize"
 	mcpInitialized      = "notifications/initialized"
 	mcpToolsCallMethod  = "tools/call"
+)
+
+var (
+	processStartedAt = time.Now().UnixNano()
+	toolCallCount    atomic.Uint64
 )
 
 type jsonRPCRequest struct {
@@ -101,6 +108,11 @@ func handleMCP(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(message) == "" {
 			message = "empty"
 		}
+		result := fmt.Sprintf("mcp-e2e-ok:%s:%s", params.Name, message)
+		callCount := toolCallCount.Add(1)
+		if message == "boot-state" {
+			result = fmt.Sprintf("mcp-e2e-state:%s:%d:%d", params.Name, processStartedAt, callCount)
+		}
 		writeJSON(w, map[string]any{
 			"jsonrpc": "2.0",
 			"id":      rawID(req.ID),
@@ -108,7 +120,7 @@ func handleMCP(w http.ResponseWriter, r *http.Request) {
 				"content": []map[string]string{
 					{
 						"type": "text",
-						"text": fmt.Sprintf("mcp-e2e-ok:%s:%s", params.Name, message),
+						"text": result,
 					},
 				},
 			},
