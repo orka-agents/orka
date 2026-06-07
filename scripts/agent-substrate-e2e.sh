@@ -368,7 +368,16 @@ spec:
     arm64:
       url: gs://gvisor/releases/nightly/2026-05-19/aarch64/runsc
       sha256Hash: 1ba2366ae2efceba166046f51a4104f9261c9cb72c6db8f5b3fe2dc57dea86b9
----
+YAML
+
+  wait_jsonpath_equals \
+    "actortemplate/orka-codex-ci readiness" \
+    "kubectl -n ate-demo get actortemplate orka-codex-ci -o jsonpath='{.status.phase}'" \
+    "Ready" \
+    900
+
+  log "Creating Substrate MCP ActorTemplate"
+  kubectl apply -f - <<YAML
 apiVersion: ate.dev/v1alpha1
 kind: ActorTemplate
 metadata:
@@ -412,11 +421,6 @@ spec:
       sha256Hash: 1ba2366ae2efceba166046f51a4104f9261c9cb72c6db8f5b3fe2dc57dea86b9
 YAML
 
-  wait_jsonpath_equals \
-    "actortemplate/orka-codex-ci readiness" \
-    "kubectl -n ate-demo get actortemplate orka-codex-ci -o jsonpath='{.status.phase}'" \
-    "Ready" \
-    900
   wait_jsonpath_equals \
     "actortemplate/orka-mcp-ci readiness" \
     "kubectl -n ate-demo get actortemplate orka-mcp-ci -o jsonpath='{.status.phase}'" \
@@ -810,15 +814,15 @@ exercise_orka_tasks() {
   create_agent
   create_substrate_actor_pools
 
+  create_mcp_tool
+  run_mcp_tool_client_job "${tool_client_image}"
+
   run_default_workspace_task "codex-substrate-default-ci"
   run_pooled_workspace_task "codex-substrate-pool-ci"
 
   if [[ "${SUBSTRATE_E2E_EXTENDED}" == "1" ]]; then
     run_retained_workspace_task "codex-substrate-retain-ci"
   fi
-
-  create_mcp_tool
-  run_mcp_tool_client_job "${tool_client_image}"
 
   log "Running missing-template negative task"
   apply_task "codex-substrate-missing-template-ci" "      enabled: true
