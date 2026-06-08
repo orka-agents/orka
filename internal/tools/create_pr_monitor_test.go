@@ -343,7 +343,7 @@ func TestCreatePRMonitorTool_ExecuteRejectsMissingGitCredentials(t *testing.T) {
 	}
 }
 
-func TestCreatePRMonitorTool_ExecutePreservesExplicitGitSecretWithoutLookup(t *testing.T) {
+func TestCreatePRMonitorTool_ExecuteRejectsMissingExplicitGitSecret(t *testing.T) {
 	fc := newFakeClient(&corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
 		Spec: corev1alpha1.AgentSpec{
@@ -365,16 +365,17 @@ func TestCreatePRMonitorTool_ExecutePreservesExplicitGitSecretWithoutLookup(t *t
 	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
 		t.Fatalf("failed to unmarshal result: %v", err)
 	}
-	if !result.Success {
-		t.Fatalf("expected success without probing explicit gitSecretRef, got error: %s", result.Error)
+	if result.Success {
+		t.Fatalf("expected missing gitSecretRef failure, got success: %s", resultJSON)
+	}
+	if result.ErrorType != errTypeInvalidArgs || !strings.Contains(result.Error, "missing-secret") {
+		t.Fatalf("result = %#v, want missing explicit gitSecretRef invalid_arguments", result)
 	}
 
 	var task corev1alpha1.Task
-	if err := fc.Get(context.Background(), types.NamespacedName{Name: "pr-monitor-task", Namespace: defaultNamespace}, &task); err != nil {
-		t.Fatalf("failed to get created task: %v", err)
-	}
-	if task.Spec.Workspace == nil || task.Spec.Workspace.GitSecretRef == nil || task.Spec.Workspace.GitSecretRef.Name != "missing-secret" {
-		t.Fatalf("workspace.gitSecretRef = %#v, want missing-secret", task.Spec.Workspace)
+	err = fc.Get(context.Background(), types.NamespacedName{Name: "pr-monitor-task", Namespace: defaultNamespace}, &task)
+	if err == nil {
+		t.Fatal("task was created despite missing explicit gitSecretRef")
 	}
 }
 

@@ -806,6 +806,184 @@ func TestRepositoryMonitorReconcileProcessesQueuedPRInventoryRun(t *testing.T) {
 	}
 }
 
+func TestRepositoryMonitorReviewedHeadFreshHonorsStaleReviewTTL(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	ttl := metav1.Duration{Duration: time.Minute}
+	monitor := &corev1alpha1.RepositoryMonitor{
+		ObjectMeta: metav1.ObjectMeta{Name: "ttl-review", Namespace: "default"},
+		Spec: corev1alpha1.RepositoryMonitorSpec{
+			Review: corev1alpha1.RepositoryMonitorReviewSpec{StaleReviewTTL: &ttl},
+		},
+	}
+	item := &store.MonitorItem{
+		MonitorNamespace:    "default",
+		MonitorName:         "ttl-review",
+		Kind:                repositoryMonitorPullRequestKind,
+		Number:              1,
+		HeadSHA:             "sha1",
+		LastReviewedHeadSHA: "sha1",
+		UpdatedAt:           time.Now(),
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+
+	fresh, err := reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, "sha1")
+	if err != nil {
+		t.Fatalf("repositoryMonitorReviewedHeadFresh(no records) error = %v", err)
+	}
+	if fresh {
+		t.Fatal("fresh = true, want reviewed head without an immutable review record to expire when staleReviewTTL is set")
+	}
+
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID:               "old-review-record",
+		MonitorNamespace: "default",
+		MonitorName:      "ttl-review",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           1,
+		HeadSHA:          "sha1",
+		Verdict:          repositoryMonitorReviewVerdictPassed,
+		CreatedAt:        time.Now().Add(-2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateReviewRecord(old) error = %v", err)
+	}
+	fresh, err = reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, "sha1")
+	if err != nil {
+		t.Fatalf("repositoryMonitorReviewedHeadFresh(old) error = %v", err)
+	}
+	if fresh {
+		t.Fatal("fresh = true, want old review record to expire past staleReviewTTL")
+	}
+
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID:               "fresh-skipped-record",
+		MonitorNamespace: "default",
+		MonitorName:      "ttl-review",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           1,
+		HeadSHA:          "sha1",
+		Verdict:          repositoryMonitorVerdictSkipped,
+		CreatedAt:        time.Now(),
+	}); err != nil {
+		t.Fatalf("CreateReviewRecord(skipped) error = %v", err)
+	}
+	fresh, err = reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, "sha1")
+	if err != nil {
+		t.Fatalf("repositoryMonitorReviewedHeadFresh(skipped) error = %v", err)
+	}
+	if fresh {
+		t.Fatal("fresh = true, want skipped retry record not to refresh stale review TTL")
+	}
+
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID:               "fresh-review-record",
+		MonitorNamespace: "default",
+		MonitorName:      "ttl-review",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           1,
+		HeadSHA:          "sha1",
+		Verdict:          repositoryMonitorReviewVerdictPassed,
+		CreatedAt:        time.Now(),
+	}); err != nil {
+		t.Fatalf("CreateReviewRecord(fresh) error = %v", err)
+	}
+	fresh, err = reconciler.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, "sha1")
+	if err != nil {
+		t.Fatalf("repositoryMonitorReviewedHeadFresh(fresh) error = %v", err)
+	}
+	if !fresh {
+		t.Fatal("fresh = false, want newest review record inside staleReviewTTL to stay fresh")
+	}
+}
+
+func TestRepositoryMonitorReconcileExpiredReviewedHeadRespectsMaxPerRun(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("core AddToScheme() error = %v", err)
+	}
+
+	server := newRepositoryMonitorPullRequestInventoryServerWithBody(t, `[
+		{"number":1,"title":"Ready","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"ready","sha":"sha1","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]},
+		{"number":2,"title":"Expired review","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"bob"},"base":{"ref":"main","sha":"base2","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"expired","sha":"sha2","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]}
+	]`)
+	t.Cleanup(server.Close)
+
+	monitor, secret := repositoryMonitorInventoryTestObjects("ttl-capacity")
+	maxPerRun := int32(1)
+	ttl := metav1.Duration{Duration: time.Minute}
+	monitor.Spec.Targets.PullRequests.MaxPerRun = &maxPerRun
+	monitor.Spec.Review.StaleReviewTTL = &ttl
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(monitor, secret).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		Store:            monitorStore,
+		GitHubAPIBaseURL: server.URL,
+	}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
+		MonitorNamespace:    "default",
+		MonitorName:         "ttl-capacity",
+		Kind:                repositoryMonitorPullRequestKind,
+		Number:              2,
+		State:               repositoryMonitorItemStateOpen,
+		HeadSHA:             "sha2",
+		LastReviewedHeadSHA: "sha2",
+		LastVerdict:         repositoryMonitorReviewVerdictPassed,
+	}); err != nil {
+		t.Fatalf("UpsertMonitorItem(reviewed) error = %v", err)
+	}
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID:               "expired-review-record",
+		MonitorNamespace: "default",
+		MonitorName:      "ttl-capacity",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           2,
+		HeadSHA:          "sha2",
+		Verdict:          repositoryMonitorReviewVerdictPassed,
+		CreatedAt:        time.Now().Add(-2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateReviewRecord(expired) error = %v", err)
+	}
+	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{
+		ID:               "run-ttl-capacity",
+		MonitorNamespace: "default",
+		MonitorName:      "ttl-capacity",
+		Trigger:          "manual",
+		Phase:            repositoryMonitorRunPhaseQueued,
+		StartedAt:        time.Now().Add(-1 * time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "ttl-capacity"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	run, err := monitorStore.GetMonitorRun(ctx, "default", "run-ttl-capacity")
+	if err != nil {
+		t.Fatalf("GetMonitorRun() error = %v", err)
+	}
+	if run.SelectedCount != 1 || run.CreatedTaskCount != 1 || run.SkippedCount != 1 {
+		t.Fatalf("run = %#v, want one selected task and one over-limit stale reviewed item", run)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, "default", "ttl-capacity", repositoryMonitorPullRequestKind, "2")
+	if err != nil {
+		t.Fatalf("GetMonitorItem(expired) error = %v", err)
+	}
+	if item.SkipReason != repositoryMonitorSkipReasonOverLimit || item.LastVerdict != repositoryMonitorVerdictSkipped {
+		t.Fatalf("item = %#v, want expired reviewed item skipped over_limit after capacity is consumed", item)
+	}
+}
+
 func TestRepositoryMonitorReconcileSkipsPendingReviewWithoutConsumingCapacity(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -1287,7 +1465,7 @@ func TestRepositoryMonitorReconcileIngestsTypedReviewResult(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
 	}
-	if err := monitorStore.SaveResult(ctx, "default", "completed-review-task", repositoryMonitorReviewResultEnvelope(t, "sozercan/orka", 1, reviewHeadSHA, repositoryMonitorReviewVerdictNeedsChanges)); err != nil {
+	if err := monitorStore.SaveResult(ctx, "default", "completed-review-task", repositoryMonitorReviewResultEnvelope(t, 1, reviewHeadSHA, repositoryMonitorReviewVerdictNeedsChanges)); err != nil {
 		t.Fatalf("SaveResult() error = %v", err)
 	}
 
@@ -1337,6 +1515,57 @@ func TestRepositoryMonitorReconcileIngestsTypedReviewResult(t *testing.T) {
 	}
 	if len(records) != 1 {
 		t.Fatalf("records after second reconcile = %#v, want idempotent ingest", records)
+	}
+}
+
+func TestRepositoryMonitorReconcileSkippedReviewResultDoesNotMarkHeadFresh(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	const reviewHeadSHA = "sha1"
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	monitor := repositoryMonitorReviewIngestTestMonitor("review-skipped")
+	task := repositoryMonitorReviewIngestTestTask("skipped-review-task", "review-skipped", 1, reviewHeadSHA)
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(monitor, task).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{
+		Client:      cl,
+		Scheme:      scheme,
+		Store:       monitorStore,
+		ResultStore: monitorStore,
+	}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
+		MonitorNamespace: "default",
+		MonitorName:      "review-skipped",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           1,
+		State:            repositoryMonitorItemStateOpen,
+		HeadSHA:          reviewHeadSHA,
+		LastVerdict:      repositoryMonitorRunPhaseQueued,
+		LastReviewID:     "skipped-review-task",
+	}); err != nil {
+		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
+	}
+	if err := monitorStore.SaveResult(ctx, "default", "skipped-review-task", repositoryMonitorReviewResultEnvelope(t, 1, reviewHeadSHA, repositoryMonitorVerdictSkipped)); err != nil {
+		t.Fatalf("SaveResult() error = %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "review-skipped"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	item, err := monitorStore.GetMonitorItem(ctx, "default", "review-skipped", repositoryMonitorPullRequestKind, "1")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	if item.LastReviewID != repositoryMonitorReviewRecordID(task) || item.LastReviewedHeadSHA != "" || item.LastVerdict != repositoryMonitorVerdictSkipped || item.SkipReason != repositoryMonitorVerdictSkipped {
+		t.Fatalf("item = %#v, want skipped review result applied without marking head fresh", item)
 	}
 }
 
@@ -1470,7 +1699,7 @@ func TestRepositoryMonitorReconcileRejectsStaleReviewResult(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
 	}
-	if err := monitorStore.SaveResult(ctx, "default", "stale-review-task", repositoryMonitorReviewResultEnvelope(t, "sozercan/orka", 3, "oldsha", repositoryMonitorReviewVerdictPassed)); err != nil {
+	if err := monitorStore.SaveResult(ctx, "default", "stale-review-task", repositoryMonitorReviewResultEnvelope(t, 3, "oldsha", repositoryMonitorReviewVerdictPassed)); err != nil {
 		t.Fatalf("SaveResult() error = %v", err)
 	}
 
@@ -1512,7 +1741,7 @@ func TestRepositoryMonitorReconcileRejectsReviewTaskBindingMismatch(t *testing.T
 	}); err != nil {
 		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
 	}
-	if err := monitorStore.SaveResult(ctx, "default", "mismatched-review-task", repositoryMonitorReviewResultEnvelope(t, "sozercan/orka", 4, "sha4", repositoryMonitorReviewVerdictPassed)); err != nil {
+	if err := monitorStore.SaveResult(ctx, "default", "mismatched-review-task", repositoryMonitorReviewResultEnvelope(t, 4, "sha4", repositoryMonitorReviewVerdictPassed)); err != nil {
 		t.Fatalf("SaveResult() error = %v", err)
 	}
 
@@ -2394,12 +2623,12 @@ func (s transientGetResultErrorStore) GetResult(_ context.Context, _, _ string) 
 	return nil, s.err
 }
 
-func repositoryMonitorReviewResultEnvelope(t *testing.T, repo string, prNumber int64, headSHA, verdict string) []byte {
+func repositoryMonitorReviewResultEnvelope(t *testing.T, prNumber int64, headSHA, verdict string) []byte {
 	t.Helper()
 
 	payload := map[string]any{
 		"schemaVersion": repositoryMonitorReviewSchemaVersion,
-		"repo":          repo,
+		"repo":          "sozercan/orka",
 		"prNumber":      prNumber,
 		"headSHA":       headSHA,
 		"verdict":       verdict,
@@ -2481,7 +2710,7 @@ func assertRepositoryMonitorInventoryItems(t *testing.T, ctx context.Context, mo
 		"1": "",
 		"2": "draft",
 		"3": "blocked_label",
-		"4": "over_limit",
+		"4": repositoryMonitorSkipReasonOverLimit,
 		"5": "already_reviewed",
 	}
 	for itemKey, wantReason := range wantReasons {

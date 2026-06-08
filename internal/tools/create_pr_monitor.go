@@ -191,7 +191,19 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 		return result, nil
 	}
 
+	if requestedGitSecretRef != "" {
+		var secret corev1.Secret
+		if err := tc.Client.Get(ctx, types.NamespacedName{Name: requestedGitSecretRef, Namespace: namespace}, &secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("git secretRef %q not found in namespace %q", requestedGitSecretRef, namespace), "Create the Secret or provide a valid gitSecretRef")
+			}
+			return classifyChatK8sErr(err)
+		}
+	}
 	if secretRefErr != nil {
+		if requestedGitSecretRef != "" {
+			return ChatToolErrorResult("invalid_arguments", secretRefErr.Error(), "Create the Secret or provide a valid gitSecretRef")
+		}
 		return classifyChatK8sErr(secretRefErr)
 	}
 	if secretRef == nil {

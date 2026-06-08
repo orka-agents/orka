@@ -495,7 +495,7 @@ func TestCreatePullRequestTool_EmptyToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty token")
 	}
-	if !strings.Contains(err.Error(), "does not contain a 'token' or 'password' key") {
+	if !strings.Contains(err.Error(), "does not contain a 'token', 'password', or 'GITHUB_TOKEN' key") {
 		t.Errorf("unexpected error: %s", err.Error())
 	}
 }

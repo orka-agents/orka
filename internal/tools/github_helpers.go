@@ -251,14 +251,16 @@ func resolveTaskGitSecretToken(ctx context.Context, k8sClient client.Client, tas
 	}
 
 	var token string
-	for _, key := range []string{tokenKey, passwordKey} {
+	for _, key := range []string{tokenKey, passwordKey, workerenv.GitHubToken} {
 		if v, ok := secret.Data[key]; ok {
 			token = strings.TrimSpace(string(v))
-			break
+			if token != "" {
+				break
+			}
 		}
 	}
 	if token == "" {
-		return "", fmt.Errorf("git secret %s does not contain a 'token' or 'password' key", ws.GitSecretRef.Name)
+		return "", fmt.Errorf("git secret %s does not contain a 'token', 'password', or 'GITHUB_TOKEN' key", ws.GitSecretRef.Name)
 	}
 
 	return token, nil
@@ -268,7 +270,7 @@ func resolveTaskGitSecretToken(ctx context.Context, k8sClient client.Client, tas
 // and environment variables.
 func resolveToken() string {
 	// Try mounted secret files
-	for _, path := range []string{"/secrets/git/token", "/secrets/git/password"} {
+	for _, path := range []string{"/secrets/git/token", "/secrets/git/password", "/secrets/git/" + workerenv.GitHubToken} {
 		if data, err := os.ReadFile(path); err == nil {
 			if t := strings.TrimSpace(string(data)); t != "" {
 				return t

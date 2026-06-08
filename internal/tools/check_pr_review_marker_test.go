@@ -295,6 +295,11 @@ func TestContainsPRReviewMarkerRequiresSignedMarker(t *testing.T) {
 	if !containsPRReviewMarker("reviewed\n"+oldSignedMarker, testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, []string{testGitHubToken}, "reviewer-bot", "reviewer-bot") {
 		t.Fatalf("containsPRReviewMarker did not match old signed marker from trusted author")
 	}
+	staleSignedMarker := formatPRReviewMarker(testGitHubOwner, testRepositoryName, prNumber, "old-head-sha", "old-token")
+	staleBody := "reviewed\n" + staleSignedMarker + "\nnew head is " + checkPRReviewMarkerTestSHA + " sig=mentioned-in-prose"
+	if containsPRReviewMarker(staleBody, testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, []string{testGitHubToken}, "reviewer-bot", "reviewer-bot") {
+		t.Fatalf("containsPRReviewMarker matched trusted-author prose instead of an exact marker")
+	}
 	previousKeyMarker := formatPRReviewMarker(testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, "previous-secret")
 	if !containsPRReviewMarker("reviewed\n"+previousKeyMarker, testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, []string{testGitHubToken, "previous-secret"}, "contributor", "reviewer-bot") {
 		t.Fatalf("containsPRReviewMarker did not match marker signed with previous key")

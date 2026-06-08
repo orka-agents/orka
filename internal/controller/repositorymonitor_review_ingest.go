@@ -185,7 +185,11 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	if err := r.Store.CreateReviewRecord(ctx, record); err != nil {
 		return false, err
 	}
-	if err := r.applyRepositoryMonitorReviewRecordToItem(ctx, item, record, ""); err != nil {
+	reason := ""
+	if record.Verdict == repositoryMonitorVerdictSkipped {
+		reason = repositoryMonitorVerdictSkipped
+	}
+	if err := r.applyRepositoryMonitorReviewRecordToItem(ctx, item, record, reason); err != nil {
 		return false, err
 	}
 	if err := r.createMonitorEvent(ctx, monitor, "", repositoryMonitorPullRequestKind, item.Number, record.HeadSHA, "review_result_ingested", fmt.Sprintf("Pull request #%d review result ingested", item.Number), map[string]any{
@@ -417,10 +421,26 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecordToItem(c
 	item.LastReviewID = record.ID
 	item.LastVerdict = record.Verdict
 	item.SkipReason = reason
-	if record.HeadSHA == item.HeadSHA && (reason == "" || record.Verdict == repositoryMonitorVerdictSkipped) {
-		item.LastReviewedHeadSHA = record.HeadSHA
+	if record.HeadSHA == item.HeadSHA {
+		if reason == "" && repositoryMonitorReviewVerdictMarksHeadFresh(record.Verdict) {
+			item.LastReviewedHeadSHA = record.HeadSHA
+		} else {
+			item.LastReviewedHeadSHA = ""
+		}
 	}
 	return r.Store.UpsertMonitorItem(ctx, item)
+}
+
+func repositoryMonitorReviewVerdictMarksHeadFresh(verdict string) bool {
+	switch strings.TrimSpace(verdict) {
+	case repositoryMonitorReviewVerdictPassed,
+		repositoryMonitorReviewVerdictNeedsChanges,
+		repositoryMonitorReviewVerdictNeedsHuman,
+		repositoryMonitorReviewVerdictSecuritySensitive:
+		return true
+	default:
+		return false
+	}
 }
 
 func repositoryMonitorReviewRecordID(task *corev1alpha1.Task) string {

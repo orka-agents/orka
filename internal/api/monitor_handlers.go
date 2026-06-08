@@ -104,6 +104,34 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	return nil
 }
 
+func (h *Handlers) validateRepositoryMonitorReviewerAgent(c fiber.Ctx, namespace string, spec corev1alpha1.RepositoryMonitorSpec) error {
+	if !repositoryMonitorPullRequestsEnabled(spec) {
+		return nil
+	}
+	reviewer := spec.Agents.Reviewer
+	if reviewer == nil || strings.TrimSpace(reviewer.Name) == "" {
+		return nil
+	}
+	agentNamespace := reviewer.Namespace
+	if agentNamespace == "" {
+		agentNamespace = namespace
+	}
+	var agent corev1alpha1.Agent
+	if err := h.client.Get(c.Context(), types.NamespacedName{Name: reviewer.Name, Namespace: agentNamespace}, &agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.reviewer %q not found in namespace %q", reviewer.Name, agentNamespace))
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get reviewer agent %q: %v", reviewer.Name, err))
+	}
+	if agent.Spec.Runtime == nil {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.reviewer %q must use the claude runtime for read-only repository monitor reviews", reviewer.Name))
+	}
+	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeClaude {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.reviewer %q runtime %q is not supported for read-only repository monitor reviews; use claude", reviewer.Name, agent.Spec.Runtime.Type))
+	}
+	return nil
+}
+
 func validateRepositoryMonitorSupportedTargets(spec corev1alpha1.RepositoryMonitorSpec) error {
 	if spec.Targets.Issues.Enabled {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.targets.issues is not supported; only pull request monitoring is supported")
@@ -297,6 +325,9 @@ func (h *Handlers) CreateRepositoryMonitor(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenRepositoryMonitor(c, "createRepositoryMonitor", monitor); err != nil {
 		return err
 	}
+	if err := h.validateRepositoryMonitorReviewerAgent(c, namespace, req.Spec); err != nil {
+		return err
+	}
 	if err := h.client.Create(c.Context(), monitor); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "repository monitor already exists")
@@ -398,6 +429,9 @@ func (h *Handlers) UpdateRepositoryMonitor(c fiber.Ctx) error {
 	updated := monitor.DeepCopy()
 	updated.Spec = req.Spec
 	if err := h.authorizeContextTokenRepositoryMonitor(c, "updateRepositoryMonitor", updated); err != nil {
+		return err
+	}
+	if err := h.validateRepositoryMonitorReviewerAgent(c, namespace, req.Spec); err != nil {
 		return err
 	}
 	if err := h.client.Update(c.Context(), updated); err != nil {

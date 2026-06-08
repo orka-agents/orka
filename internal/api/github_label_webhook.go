@@ -207,9 +207,15 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 	namespace := h.githubWebhookNamespace()
 	agentName := githubAgentForAction(action)
 	if agentName == "" {
+		if monitorResult.Matched > 0 {
+			return githubRepositoryMonitorEventResponse(c, monitorResult)
+		}
 		return fiber.NewError(fiber.StatusServiceUnavailable, "GitHub label trigger agent is not configured")
 	}
 	if err := h.ensureAgentExists(c, namespace, agentName); err != nil {
+		if monitorResult.Matched > 0 && githubWebhookAgentNotFound(err) {
+			return githubRepositoryMonitorEventResponse(c, monitorResult)
+		}
 		return err
 	}
 
@@ -573,6 +579,13 @@ func (h *Handlers) ensureAgentExists(c fiber.Ctx, namespace, agentName string) e
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("agent %q must have runtime configured", agentName))
 	}
 	return nil
+}
+
+func githubWebhookAgentNotFound(err error) bool {
+	var fiberErr *fiber.Error
+	return errors.As(err, &fiberErr) &&
+		fiberErr.Code == fiber.StatusBadRequest &&
+		strings.Contains(fiberErr.Message, " not found in namespace ")
 }
 
 func buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, event string, payload githubLabelWebhookPayload, target githubLabelTarget) *corev1alpha1.Task {

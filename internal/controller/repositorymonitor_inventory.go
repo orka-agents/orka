@@ -42,6 +42,7 @@ const (
 	repositoryMonitorSkipReasonMissing   = "not_open_or_base_branch_changed"
 	repositoryMonitorSkipReasonReviewed  = "already_reviewed"
 	repositoryMonitorSkipReasonPending   = "review_pending"
+	repositoryMonitorSkipReasonOverLimit = "over_limit"
 	repositoryMonitorReviewTaskTimeout   = 2 * time.Hour
 
 	repositoryMonitorReviewTaskStateMissing   = "missing"
@@ -119,6 +120,19 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 		}
 
 		skipReason := repositoryMonitorPullRequestSkipReason(monitor.Spec, pr, skipExisting, includeDrafts, selected, maxPerRun, run)
+		if skipReason == repositoryMonitorSkipReasonReviewed {
+			fresh, err := r.repositoryMonitorReviewedHeadFresh(ctx, monitor, existing, pr.HeadSHA)
+			if err != nil {
+				return selected, createdTasks, skipped, err
+			}
+			if !fresh {
+				if selected >= maxPerRun {
+					skipReason = repositoryMonitorSkipReasonOverLimit
+				} else {
+					skipReason = ""
+				}
+			}
+		}
 		if skipReason != "" {
 			skipped++
 			switch skipReason {
@@ -650,9 +664,41 @@ func repositoryMonitorPullRequestSkipReason(spec corev1alpha1.RepositoryMonitorS
 		return repositoryMonitorSkipReasonReviewed
 	}
 	if selected >= maxPerRun {
-		return "over_limit"
+		return repositoryMonitorSkipReasonOverLimit
 	}
 	return ""
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorReviewedHeadFresh(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, existing *store.MonitorItem, headSHA string) (bool, error) {
+	if existing == nil || strings.TrimSpace(existing.LastReviewedHeadSHA) == "" || existing.LastReviewedHeadSHA != headSHA {
+		return false, nil
+	}
+	ttl := monitor.Spec.Review.StaleReviewTTL
+	if ttl == nil || ttl.Duration <= 0 {
+		return true, nil
+	}
+	records, _, err := r.Store.ListReviewRecords(ctx, store.ReviewRecordFilter{
+		Namespace:   monitor.Namespace,
+		MonitorName: monitor.Name,
+		Kind:        repositoryMonitorPullRequestKind,
+		Number:      existing.Number,
+		HeadSHA:     headSHA,
+		Limit:       25,
+	})
+	if err != nil {
+		return false, err
+	}
+	var freshSince time.Time
+	for _, record := range records {
+		if repositoryMonitorReviewVerdictMarksHeadFresh(record.Verdict) && !record.CreatedAt.IsZero() {
+			freshSince = record.CreatedAt
+			break
+		}
+	}
+	if freshSince.IsZero() {
+		return false, nil
+	}
+	return time.Since(freshSince) < ttl.Duration, nil
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorExistingReviewVerdict(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, existing *store.MonitorItem, headSHA string) (string, error) {

@@ -11,7 +11,9 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -21,14 +23,16 @@ import (
 
 const monitorTestRepoURL = "https://github.com/sozercan/orka"
 
-func setupRepositoryMonitorHandlers(t *testing.T, ctxTokenConfig ContextTokenConfig, mode string) (*fiber.App, *Handlers) {
+func setupRepositoryMonitorHandlers(t *testing.T, ctxTokenConfig ContextTokenConfig, mode string, objects ...crclient.Object) (*fiber.App, *Handlers) {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	objects = append([]crclient.Object{repositoryMonitorHandlerTestAgent("reviewer", corev1alpha1.AgentRuntimeClaude)}, objects...)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(objects...).
 		Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
@@ -56,6 +60,15 @@ func setupRepositoryMonitorHandlers(t *testing.T, ctxTokenConfig ContextTokenCon
 	app.Get("/monitors/repositories/:name/items", handlers.ListRepositoryMonitorItems)
 	app.Get("/monitors/events", handlers.ListRepositoryMonitorEvents)
 	return app, handlers
+}
+
+func repositoryMonitorHandlerTestAgent(name string, runtimeType corev1alpha1.AgentRuntimeType) *corev1alpha1.Agent {
+	return &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "demo"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: runtimeType},
+		},
+	}
 }
 
 func TestRepositoryMonitorHandlers_CRUDAndManualRun(t *testing.T) {
@@ -215,6 +228,60 @@ func TestCreateRepositoryMonitor_RejectsUnsupportedTargets(t *testing.T) {
 			resp, err := app.Test(req)
 			require.NoError(t, err)
 			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		})
+	}
+}
+
+func TestCreateRepositoryMonitor_RejectsUnsupportedReviewerAgent(t *testing.T) {
+	tests := []struct {
+		name     string
+		agent    *corev1alpha1.Agent
+		reviewer string
+		want     string
+	}{
+		{name: "missing agent", reviewer: "missing-reviewer", want: "not found"},
+		{
+			name:     "missing runtime",
+			agent:    &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "no-runtime", Namespace: "demo"}},
+			reviewer: "no-runtime",
+			want:     "must use the claude runtime",
+		},
+		{
+			name:     "codex runtime",
+			agent:    repositoryMonitorHandlerTestAgent("codex-reviewer", corev1alpha1.AgentRuntimeCodex),
+			reviewer: "codex-reviewer",
+			want:     "is not supported",
+		},
+		{
+			name:     "copilot runtime",
+			agent:    repositoryMonitorHandlerTestAgent("copilot-reviewer", corev1alpha1.AgentRuntimeCopilot),
+			reviewer: "copilot-reviewer",
+			want:     "is not supported",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objects []crclient.Object
+			if tt.agent != nil {
+				objects = append(objects, tt.agent)
+			}
+			app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, objects...)
+			body := fmt.Sprintf(`{
+				"name":"repo-monitor",
+				"namespace":"demo",
+				"spec":{
+					"repoURL":%q,
+					"agents":{"reviewer":{"name":%q}}
+				}
+			}`, monitorTestRepoURL, tt.reviewer)
+
+			req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			require.Contains(t, readRespBody(t, resp), tt.want)
 		})
 	}
 }
@@ -385,4 +452,32 @@ func TestCreateRepositoryMonitor_ContextTokenAgentScopeRejectsExtraAgents(t *tes
 			require.Equal(t, tt.want, resp.StatusCode)
 		})
 	}
+}
+
+func TestCreateRepositoryMonitor_ContextTokenAgentScopeAuthorizesBeforeReviewerLookup(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app, _ := setupRepositoryMonitorHandlers(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+	body := fmt.Sprintf(`{
+		"name":"repo-monitor",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"agents":{"reviewer":{"name":"missing-reviewer"}}
+		}
+	}`, monitorTestRepoURL)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeMonitorsWrite,
+		"tctx": map[string]any{
+			"agent": "demo/reviewer",
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	require.NotContains(t, readRespBody(t, resp), "missing-reviewer")
 }

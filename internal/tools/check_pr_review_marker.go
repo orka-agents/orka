@@ -233,7 +233,7 @@ func containsPRReviewMarker(body, owner, repo string, prNumber int, headSHA stri
 		}
 	}
 	if trustedAuthor != "" && strings.EqualFold(strings.TrimSpace(author), trustedAuthor) {
-		return containsAnyPRReviewMarkerForHead(body, headSHA)
+		return containsAnyPRReviewMarkerForHead(body, owner, repo, prNumber, headSHA)
 	}
 	return false
 }
@@ -294,7 +294,7 @@ func githubAuthenticatedLogin(ctx context.Context, token, baseURL string) (strin
 	return strings.TrimSpace(user.Login), nil
 }
 
-func containsAnyPRReviewMarkerForHead(body, headSHA string) bool {
+func containsAnyPRReviewMarkerForHead(body, owner, repo string, prNumber int, headSHA string) bool {
 	body = strings.TrimSpace(body)
 	headSHA = strings.TrimSpace(headSHA)
 	if headSHA == "" || !strings.Contains(body, defaultPRReviewMarkerPrefix) {
@@ -304,7 +304,51 @@ func containsAnyPRReviewMarkerForHead(body, headSHA string) bool {
 	if strings.Contains(body, legacyMarker) {
 		return true
 	}
-	return strings.Contains(body, "head_sha="+headSHA) && strings.Contains(body, "sig=")
+	wantRepo := strings.ToLower(strings.TrimSpace(owner)) + "/" + strings.ToLower(strings.TrimSpace(repo))
+	wantPR := fmt.Sprintf("%d", prNumber)
+	for _, marker := range prReviewMarkerBlocks(body) {
+		attrs := prReviewMarkerAttrs(marker)
+		if strings.EqualFold(attrs["repo"], wantRepo) &&
+			attrs["pr"] == wantPR &&
+			attrs["head_sha"] == headSHA &&
+			strings.TrimSpace(attrs["sig"]) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func prReviewMarkerBlocks(body string) []string {
+	var markers []string
+	rest := body
+	for {
+		start := strings.Index(rest, defaultPRReviewMarkerPrefix)
+		if start < 0 {
+			return markers
+		}
+		rest = rest[start:]
+		end := strings.Index(rest, "-->")
+		if end < 0 {
+			return markers
+		}
+		markers = append(markers, rest[:end+len("-->")])
+		rest = rest[end+len("-->"):]
+	}
+}
+
+func prReviewMarkerAttrs(marker string) map[string]string {
+	marker = strings.TrimSpace(marker)
+	marker = strings.TrimPrefix(marker, defaultPRReviewMarkerPrefix)
+	marker = strings.TrimSuffix(marker, "-->")
+	attrs := map[string]string{}
+	for field := range strings.FieldsSeq(marker) {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		attrs[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	return attrs
 }
 
 func prReviewMarkerSignature(owner, repo string, prNumber int, headSHA, markerKey string) string {

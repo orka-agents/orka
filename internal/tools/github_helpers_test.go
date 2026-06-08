@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const testEnvToken = "env-token"
@@ -158,6 +159,47 @@ func TestResolveRepoAndToken_TaskName_PasswordKey(t *testing.T) {
 	}
 	if token != "pw-token" {
 		t.Errorf("got token=%q, want pw-token", token)
+	}
+}
+
+func TestResolveRepoAndToken_TaskName_GitHubTokenKey(t *testing.T) {
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-token-task", Namespace: defaultNamespace},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/githuborg/githubrepo",
+					GitSecretRef: &corev1.LocalObjectReference{Name: "github-token-secret"},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-token-secret", Namespace: defaultNamespace},
+		Data: map[string][]byte{
+			tokenKey:              []byte(" \n"),
+			workerenv.GitHubToken: []byte("github-key-token"),
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+
+	_, _, token, _, err := resolveRepoAndToken(
+		context.Background(), k8sClient,
+		"github-token-task", "", "",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if token != "github-key-token" {
+		t.Errorf("got token=%q, want github-key-token", token)
 	}
 }
 
