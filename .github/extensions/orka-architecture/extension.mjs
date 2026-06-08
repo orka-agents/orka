@@ -374,6 +374,7 @@ const presets = [
 const defaultPresetId = "full-demo";
 const defaultSelectedComponentId = "api-chat";
 const componentById = new Map(components.map((component) => [component.id, component]));
+const layerById = new Map(layers.map((layer) => [layer.id, layer]));
 const presetById = new Map(presets.map((preset) => [preset.id, preset]));
 const servers = new Map();
 
@@ -491,6 +492,433 @@ function escapeHtml(value) {
         .replaceAll("'", "&#39;");
 }
 
+function wrapText(value, maxLength) {
+    const words = String(value).split(/\s+/).filter(Boolean);
+    const lines = [];
+    let current = "";
+
+    for (const word of words) {
+        const candidate = current ? `${current} ${word}` : word;
+        if (candidate.length > maxLength && current) {
+            lines.push(current);
+            current = word;
+        } else {
+            current = candidate;
+        }
+    }
+
+    if (current) {
+        lines.push(current);
+    }
+
+    return lines.length ? lines : [""];
+}
+
+function hashSeed(value) {
+    let hash = 2166136261;
+    for (const char of String(value)) {
+        hash ^= char.charCodeAt(0);
+        hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+}
+
+function elementId(prefix, value) {
+    return `${prefix}_${String(value).replaceAll(/[^a-zA-Z0-9]+/g, "_")}`.slice(0, 48);
+}
+
+function buildArchitectureLayout(payload) {
+    const primaryLayerIds = ["entry", "controller", "kubernetes", "workers"];
+    const card = { width: 250, height: 112 };
+    const frame = { x: 60, width: 900, pad: 28, header: 62 };
+    const side = { x: 1000, y: 0, width: 390, pad: 28, header: 62 };
+    const gap = { x: 22, y: 18, layer: 36 };
+    const positioned = [];
+    const positions = new Map();
+    const frames = [];
+    const enabled = payload.components.filter((component) => component.enabled);
+    let y = 84;
+
+    function addFrame(layerId, layerComponents, frameX, frameY, frameWidth, columns) {
+        const layer = layerById.get(layerId);
+        const rows = Math.max(1, Math.ceil(layerComponents.length / columns));
+        const height = frame.header + rows * card.height + (rows - 1) * gap.y + frame.pad;
+        const diagramFrame = {
+            id: layerId,
+            title: layer?.title ?? layerId,
+            description: layer?.description ?? "",
+            x: frameX,
+            y: frameY,
+            width: frameWidth,
+            height,
+        };
+        frames.push(diagramFrame);
+
+        for (const [index, component] of layerComponents.entries()) {
+            const row = Math.floor(index / columns);
+            const column = index % columns;
+            const componentWidth = columns === 1 ? frameWidth - frame.pad * 2 : card.width;
+            const node = {
+                ...component,
+                x: frameX + frame.pad + column * (card.width + gap.x),
+                y: frameY + frame.header + row * (card.height + gap.y),
+                width: componentWidth,
+                height: card.height,
+            };
+            positioned.push(node);
+            positions.set(component.id, node);
+        }
+
+        return height;
+    }
+
+    for (const layerId of primaryLayerIds) {
+        const layerComponents = enabled.filter((component) => component.layer === layerId);
+        if (!layerComponents.length) {
+            continue;
+        }
+        const height = addFrame(layerId, layerComponents, frame.x, y, frame.width, 3);
+        y += height + gap.layer;
+    }
+
+    const integrationComponents = enabled.filter((component) => component.layer === "integrations");
+    if (integrationComponents.length) {
+        const controllerFrame = frames.find((candidate) => candidate.id === "controller");
+        side.y = controllerFrame ? controllerFrame.y : 84;
+        addFrame("integrations", integrationComponents, side.x, side.y, side.width, 1);
+    }
+
+    const layoutEdges = payload.edges
+        .filter((edge) => positions.has(edge.from) && positions.has(edge.to))
+        .map((edge) => {
+            const from = positions.get(edge.from);
+            const to = positions.get(edge.to);
+            const geometry = edgeGeometry(from, to);
+            return {
+                ...edge,
+                ...geometry,
+            };
+        });
+
+    const frameBottom = frames.reduce((bottom, current) => Math.max(bottom, current.y + current.height), 0);
+    const width = integrationComponents.length ? 1450 : 1040;
+    const height = Math.max(620, frameBottom + 92);
+    const preset = presetById.get(payload.state.presetId);
+
+    return {
+        title: "Orka Architecture",
+        subtitle: "Enabled components only",
+        presetTitle: preset?.title ?? "Custom selection",
+        width,
+        height,
+        frames,
+        components: positioned,
+        edges: layoutEdges,
+        stats: payload.stats,
+        empty: positioned.length === 0,
+    };
+}
+
+function edgeGeometry(from, to) {
+    const fromCenter = {
+        x: from.x + from.width / 2,
+        y: from.y + from.height / 2,
+    };
+    const toCenter = {
+        x: to.x + to.width / 2,
+        y: to.y + to.height / 2,
+    };
+
+    if (to.x > from.x + from.width + 20) {
+        const sx = from.x + from.width;
+        const sy = fromCenter.y;
+        const tx = to.x;
+        const ty = toCenter.y;
+        return {
+            sx,
+            sy,
+            tx,
+            ty,
+            cx1: sx + 110,
+            cy1: sy,
+            cx2: tx - 110,
+            cy2: ty,
+            lx: (sx + tx) / 2,
+            ly: (sy + ty) / 2 - 12,
+        };
+    }
+
+    if (to.x + to.width + 20 < from.x) {
+        const sx = from.x;
+        const sy = fromCenter.y;
+        const tx = to.x + to.width;
+        const ty = toCenter.y;
+        return {
+            sx,
+            sy,
+            tx,
+            ty,
+            cx1: sx - 110,
+            cy1: sy,
+            cx2: tx + 110,
+            cy2: ty,
+            lx: (sx + tx) / 2,
+            ly: (sy + ty) / 2 - 12,
+        };
+    }
+
+    if (toCenter.y >= fromCenter.y) {
+        const sx = fromCenter.x;
+        const sy = from.y + from.height;
+        const tx = toCenter.x;
+        const ty = to.y;
+        const distance = Math.max(70, Math.abs(ty - sy) * 0.46);
+        return {
+            sx,
+            sy,
+            tx,
+            ty,
+            cx1: sx,
+            cy1: sy + distance,
+            cx2: tx,
+            cy2: ty - distance,
+            lx: (sx + tx) / 2 + 20,
+            ly: (sy + ty) / 2,
+        };
+    }
+
+    const sx = fromCenter.x;
+    const sy = from.y;
+    const tx = toCenter.x;
+    const ty = to.y + to.height;
+    const distance = Math.max(70, Math.abs(ty - sy) * 0.46);
+    return {
+        sx,
+        sy,
+        tx,
+        ty,
+        cx1: sx,
+        cy1: sy - distance,
+        cx2: tx,
+        cy2: ty + distance,
+        lx: (sx + tx) / 2 + 20,
+        ly: (sy + ty) / 2,
+    };
+}
+
+function svgText(value, x, y, options = {}) {
+    const lines = wrapText(value, options.maxLength ?? 28).slice(0, options.maxLines ?? 3);
+    const className = options.className ? ` class="${options.className}"` : "";
+    const lineHeight = options.lineHeight ?? 18;
+    const tspans = lines
+        .map((line, index) => `<tspan x="${x}" dy="${index === 0 ? 0 : lineHeight}">${escapeHtml(line)}</tspan>`)
+        .join("");
+    return `<text${className} x="${x}" y="${y}">${tspans}</text>`;
+}
+
+function renderArchitectureSvg(layout) {
+    if (layout.empty) {
+        return `<svg xmlns="http://www.w3.org/2000/svg" width="980" height="540" viewBox="0 0 980 540" role="img" aria-label="No enabled Orka architecture components">
+  <rect width="980" height="540" rx="28" fill="#fffdf7" stroke="#d6cfc2" stroke-width="2"/>
+  <text x="490" y="250" text-anchor="middle" fill="#34322e" font-family="Virgil, Comic Sans MS, Segoe Print, cursive" font-size="34">No components enabled</text>
+  <text x="490" y="296" text-anchor="middle" fill="#6f6a60" font-family="Arial, sans-serif" font-size="18">Go back to the selector and enable the components you want in the demo.</text>
+</svg>`;
+    }
+
+    const framesSvg = layout.frames
+        .map((current) => {
+            const title = svgText(current.title, current.x + 26, current.y + 37, { className: "frame-title", maxLength: 42, maxLines: 1 });
+            return `<g>
+  <rect class="rough-frame shadow" x="${current.x + 3}" y="${current.y + 4}" width="${current.width}" height="${current.height}" rx="26"/>
+  <rect class="rough-frame" x="${current.x}" y="${current.y}" width="${current.width}" height="${current.height}" rx="26"/>
+  ${title}
+</g>`;
+        })
+        .join("");
+
+    const edgesSvg = layout.edges
+        .map((edge) => {
+            const path = `M ${edge.sx} ${edge.sy} C ${edge.cx1} ${edge.cy1}, ${edge.cx2} ${edge.cy2}, ${edge.tx} ${edge.ty}`;
+            return `<g>
+  <path class="rough-edge" d="${path}" marker-end="url(#arrowhead)"/>
+  <text class="edge-text" x="${edge.lx}" y="${edge.ly}">${escapeHtml(edge.label)}</text>
+</g>`;
+        })
+        .join("");
+
+    const componentsSvg = layout.components
+        .map((component) => {
+            const title = svgText(component.title, component.x + 18, component.y + 34, { className: "component-title", maxLength: 23, maxLines: 2, lineHeight: 18 });
+            const subtitle = svgText(component.subtitle, component.x + 18, component.y + 76, { className: "component-subtitle", maxLength: 32, maxLines: 2, lineHeight: 15 });
+            return `<g>
+  <rect class="component-shadow" x="${component.x + 4}" y="${component.y + 5}" width="${component.width}" height="${component.height}" rx="20"/>
+  <rect class="component-box" x="${component.x}" y="${component.y}" width="${component.width}" height="${component.height}" rx="20" stroke="${component.accent}"/>
+  <circle cx="${component.x + component.width - 26}" cy="${component.y + 25}" r="8" fill="${component.accent}"/>
+  ${title}
+  ${subtitle}
+</g>`;
+        })
+        .join("");
+
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${layout.width}" height="${layout.height}" viewBox="0 0 ${layout.width} ${layout.height}" role="img" aria-label="Orka architecture diagram">
+  <defs>
+    <marker id="arrowhead" markerWidth="13" markerHeight="13" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 12 6 L 0 12 z" fill="#34322e"/>
+    </marker>
+    <filter id="pencil">
+      <feTurbulence type="fractalNoise" baseFrequency="0.018" numOctaves="2" seed="9"/>
+      <feDisplacementMap in="SourceGraphic" scale="0.7"/>
+    </filter>
+  </defs>
+  <style>
+    .rough-frame { fill: rgba(255, 255, 255, 0.72); stroke: #34322e; stroke-width: 2.2; filter: url(#pencil); }
+    .shadow, .component-shadow { fill: rgba(31, 35, 40, 0.08); stroke: none; filter: none; }
+    .frame-title { fill: #34322e; font-family: "Virgil", "Comic Sans MS", "Segoe Print", cursive; font-size: 24px; font-weight: 700; }
+    .component-box { fill: #fffdf7; stroke-width: 2.4; filter: url(#pencil); }
+    .component-title { fill: #24292f; font-family: "Virgil", "Comic Sans MS", "Segoe Print", cursive; font-size: 17px; font-weight: 700; }
+    .component-subtitle { fill: #6f6a60; font-family: Arial, sans-serif; font-size: 12px; }
+    .rough-edge { fill: none; stroke: #34322e; stroke-width: 2.2; stroke-linecap: round; filter: url(#pencil); }
+    .edge-text { fill: #6f6a60; font-family: Arial, sans-serif; font-size: 12px; font-weight: 700; paint-order: stroke; stroke: #fffdf7; stroke-width: 5px; stroke-linejoin: round; }
+  </style>
+  <rect width="${layout.width}" height="${layout.height}" rx="0" fill="#fffdf7"/>
+  <text x="60" y="48" fill="#24292f" font-family="Virgil, Comic Sans MS, Segoe Print, cursive" font-size="34" font-weight="700">Orka Architecture</text>
+  <text x="60" y="75" fill="#6f6a60" font-family="Arial, sans-serif" font-size="15">${escapeHtml(layout.presetTitle)} - ${layout.stats.enabled} enabled components</text>
+  ${framesSvg}
+  ${edgesSvg}
+  ${componentsSvg}
+</svg>`;
+}
+
+function excalidrawBase(id, type, x, y, width, height, strokeColor = "#34322e", backgroundColor = "transparent") {
+    const seed = hashSeed(id);
+    return {
+        id,
+        type,
+        x,
+        y,
+        width,
+        height,
+        angle: 0,
+        strokeColor,
+        backgroundColor,
+        fillStyle: "hachure",
+        strokeWidth: 2,
+        strokeStyle: "solid",
+        roughness: 1,
+        opacity: 100,
+        groupIds: [],
+        frameId: null,
+        roundness: { type: 3 },
+        seed,
+        version: 1,
+        versionNonce: seed,
+        isDeleted: false,
+        boundElements: null,
+        updated: 1,
+        link: null,
+        locked: false,
+    };
+}
+
+function excalidrawText(id, text, x, y, width, fontSize, color = "#24292f") {
+    const lines = wrapText(text, Math.max(12, Math.floor(width / (fontSize * 0.56))));
+    return {
+        ...excalidrawBase(id, "text", x, y, width, lines.length * fontSize * 1.25, color, "transparent"),
+        fontSize,
+        fontFamily: 1,
+        text: lines.join("\n"),
+        rawText: lines.join("\n"),
+        textAlign: "left",
+        verticalAlign: "top",
+        containerId: null,
+        originalText: text,
+        lineHeight: 1.25,
+    };
+}
+
+function buildExcalidrawFile(layout) {
+    const elements = [];
+
+    elements.push(excalidrawText("title_orka_architecture", "Orka Architecture", 60, 30, 520, 34));
+    elements.push(excalidrawText("subtitle_orka_architecture", `${layout.presetTitle} - ${layout.stats.enabled} enabled components`, 60, 74, 520, 16, "#6f6a60"));
+
+    for (const current of layout.frames) {
+        elements.push({
+            ...excalidrawBase(elementId("frame", current.id), "rectangle", current.x, current.y, current.width, current.height, "#34322e", "#fffdf7"),
+            strokeStyle: "dashed",
+            roughness: 1.4,
+        });
+        elements.push(excalidrawText(elementId("frame_title", current.id), current.title, current.x + 26, current.y + 20, current.width - 52, 24));
+    }
+
+    for (const component of layout.components) {
+        elements.push(excalidrawBase(elementId("component", component.id), "rectangle", component.x, component.y, component.width, component.height, component.accent, "#fffdf7"));
+        elements.push(excalidrawText(elementId("component_title", component.id), component.title, component.x + 18, component.y + 18, component.width - 56, 18));
+        elements.push(excalidrawText(elementId("component_subtitle", component.id), component.subtitle, component.x + 18, component.y + 66, component.width - 36, 12, "#6f6a60"));
+    }
+
+    for (const edge of layout.edges) {
+        const x = Math.min(edge.sx, edge.tx);
+        const y = Math.min(edge.sy, edge.ty);
+        const start = [edge.sx - x, edge.sy - y];
+        const end = [edge.tx - x, edge.ty - y];
+        elements.push({
+            ...excalidrawBase(elementId("edge", `${edge.from}_${edge.to}`), "arrow", x, y, Math.max(1, Math.abs(edge.tx - edge.sx)), Math.max(1, Math.abs(edge.ty - edge.sy)), "#34322e", "transparent"),
+            roundness: { type: 2 },
+            points: [start, end],
+            lastCommittedPoint: null,
+            startBinding: null,
+            endBinding: null,
+            startArrowhead: null,
+            endArrowhead: "arrow",
+        });
+        elements.push(excalidrawText(elementId("edge_label", `${edge.from}_${edge.to}`), edge.label, edge.lx, edge.ly - 16, 150, 12, "#6f6a60"));
+    }
+
+    return {
+        type: "excalidraw",
+        version: 2,
+        source: "https://excalidraw.com",
+        elements,
+        appState: {
+            theme: "light",
+            viewBackgroundColor: "#fffdf7",
+            currentItemStrokeColor: "#34322e",
+            currentItemBackgroundColor: "transparent",
+            currentItemFillStyle: "hachure",
+            currentItemStrokeWidth: 2,
+            currentItemStrokeStyle: "solid",
+            currentItemRoughness: 1,
+            currentItemOpacity: 100,
+            currentItemFontFamily: 1,
+            currentItemFontSize: 20,
+            scrollX: 0,
+            scrollY: 0,
+            zoom: { value: 0.72 },
+            gridSize: null,
+        },
+        files: {},
+    };
+}
+
+function buildExcalidrawResponse(entry) {
+    const payload = buildPayload(entry);
+    const layout = buildArchitectureLayout(payload);
+    return {
+        model: {
+            title: layout.title,
+            subtitle: layout.subtitle,
+            presetTitle: layout.presetTitle,
+            enabled: layout.stats.enabled,
+            total: layout.stats.total,
+            width: layout.width,
+            height: layout.height,
+            svg: renderArchitectureSvg(layout),
+        },
+        file: buildExcalidrawFile(layout),
+    };
+}
+
 function sendJson(res, status, payload) {
     res.writeHead(status, {
         "Content-Type": "application/json; charset=utf-8",
@@ -542,8 +970,18 @@ async function handleRequest(req, res, entry) {
         return;
     }
 
+    if (method === "GET" && url.pathname === "/excalidraw") {
+        sendHtml(res, renderExcalidrawHtml(entry.instanceId));
+        return;
+    }
+
     if (method === "GET" && url.pathname === "/api/state") {
         sendJson(res, 200, buildPayload(entry));
+        return;
+    }
+
+    if (method === "GET" && url.pathname === "/api/excalidraw") {
+        sendJson(res, 200, buildExcalidrawResponse(entry));
         return;
     }
 
@@ -603,6 +1041,282 @@ async function startServer(instanceId, input) {
     entry.server = server;
     entry.url = `http://127.0.0.1:${port}/`;
     return entry;
+}
+
+function renderExcalidrawHtml(instanceId) {
+    const safeInstanceId = escapeHtml(instanceId);
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Orka Excalidraw Diagram</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #fffdf7;
+      --ink: #34322e;
+      --muted: #6f6a60;
+      --line: #d8d0c3;
+      --accent: #0969da;
+      --panel: rgba(255, 255, 255, 0.88);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 10% 8%, rgba(9, 105, 218, 0.12), transparent 28rem),
+        radial-gradient(circle at 82% 14%, rgba(130, 80, 223, 0.12), transparent 30rem),
+        var(--paper);
+    }
+
+    .toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: center;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      backdrop-filter: blur(16px);
+      box-shadow: 0 10px 28px rgba(52, 50, 46, 0.08);
+    }
+
+    .title {
+      min-width: 0;
+    }
+
+    h1 {
+      margin: 0;
+      font-family: "Virgil", "Comic Sans MS", "Segoe Print", cursive;
+      font-size: clamp(24px, 3vw, 38px);
+      line-height: 1;
+      letter-spacing: -0.04em;
+    }
+
+    .meta {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 18px;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    button,
+    a.button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 38px;
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #ffffff;
+      color: var(--ink);
+      box-shadow: 0 8px 18px rgba(52, 50, 46, 0.08);
+      cursor: pointer;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 750;
+      text-decoration: none;
+    }
+
+    button.primary {
+      border-color: rgba(9, 105, 218, 0.28);
+      background: #0969da;
+      color: #ffffff;
+    }
+
+    .viewport {
+      overflow: auto;
+      min-height: calc(100vh - 86px);
+      padding: 28px;
+    }
+
+    .paper {
+      width: max-content;
+      min-width: 100%;
+      padding: 22px;
+    }
+
+    .paper svg {
+      display: block;
+      max-width: none;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: 0 26px 80px rgba(52, 50, 46, 0.14);
+      background: var(--paper);
+    }
+
+    .loading,
+    .error {
+      display: grid;
+      min-height: 420px;
+      place-items: center;
+      color: var(--muted);
+      font-weight: 750;
+    }
+
+    .toast {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      max-width: 360px;
+      padding: 11px 13px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #ffffff;
+      box-shadow: 0 16px 44px rgba(52, 50, 46, 0.15);
+      opacity: 0;
+      transform: translateY(14px);
+      pointer-events: none;
+      transition: opacity 150ms ease, transform 150ms ease;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    @media print {
+      .toolbar,
+      .toast {
+        display: none;
+      }
+
+      .viewport {
+        padding: 0;
+      }
+
+      .paper {
+        padding: 0;
+      }
+
+      .paper svg {
+        border: 0;
+        border-radius: 0;
+        box-shadow: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="toolbar">
+    <div class="title">
+      <h1>Orka Architecture</h1>
+      <div class="meta" id="meta">Loading Excalidraw-style board for ${safeInstanceId}.</div>
+    </div>
+    <div class="actions">
+      <a class="button" href="/" target="_self">Back to selector</a>
+      <button type="button" id="refresh-button">Refresh from selector</button>
+      <button type="button" id="copy-button">Copy .excalidraw JSON</button>
+      <button type="button" id="print-button">Print / save PDF</button>
+      <button class="primary" type="button" id="download-button">Download .excalidraw</button>
+    </div>
+  </header>
+  <main class="viewport">
+    <div class="paper" id="paper"><div class="loading">Drawing selected components...</div></div>
+  </main>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    let latest = null;
+
+    function qs(selector) {
+      return document.querySelector(selector);
+    }
+
+    function showToast(message) {
+      const toast = qs("#toast");
+      toast.textContent = message;
+      toast.classList.add("show");
+      window.setTimeout(function () {
+        toast.classList.remove("show");
+      }, 2600);
+    }
+
+    async function loadDiagram() {
+      const response = await fetch("/api/excalidraw", { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) {
+        const message = payload && payload.error ? payload.error.message : "Failed to load diagram";
+        throw new Error(message);
+      }
+      latest = payload;
+      qs("#meta").textContent = payload.model.presetTitle + " - " + payload.model.enabled + " of " + payload.model.total + " components included";
+      qs("#paper").innerHTML = payload.model.svg;
+    }
+
+    function downloadExcalidraw() {
+      if (!latest) {
+        showToast("Diagram is still loading.");
+        return;
+      }
+      const blob = new Blob([JSON.stringify(latest.file, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "orka-architecture.excalidraw";
+      document.body.append(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showToast("Downloaded orka-architecture.excalidraw");
+    }
+
+    async function copyExcalidrawJson() {
+      if (!latest) {
+        showToast("Diagram is still loading.");
+        return;
+      }
+      await navigator.clipboard.writeText(JSON.stringify(latest.file, null, 2));
+      showToast("Copied Excalidraw JSON");
+    }
+
+    qs("#refresh-button").addEventListener("click", function () {
+      loadDiagram().then(function () {
+        showToast("Diagram refreshed");
+      }).catch(function (error) {
+        showToast(error.message);
+      });
+    });
+
+    qs("#download-button").addEventListener("click", downloadExcalidraw);
+    qs("#copy-button").addEventListener("click", function () {
+      copyExcalidrawJson().catch(function (error) {
+        showToast(error.message);
+      });
+    });
+    qs("#print-button").addEventListener("click", function () {
+      window.print();
+    });
+
+    loadDiagram().catch(function (error) {
+      const errorNode = document.createElement("div");
+      errorNode.className = "error";
+      errorNode.textContent = error.message;
+      qs("#paper").replaceChildren(errorNode);
+      showToast(error.message);
+    });
+  </script>
+</body>
+</html>`;
 }
 
 function renderHtml(instanceId) {
@@ -1220,6 +1934,33 @@ function renderHtml(instanceId) {
       cursor: pointer;
     }
 
+    .diagram-actions {
+      background:
+        linear-gradient(145deg, rgba(9, 105, 218, 0.12), rgba(130, 80, 223, 0.1)),
+        color-mix(in srgb, var(--canvas-card-strong) 78%, transparent);
+    }
+
+    .popout-button {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      min-height: 44px;
+      margin-top: 12px;
+      padding: 10px 12px;
+      border: 1px solid color-mix(in srgb, var(--canvas-focus) 38%, var(--canvas-border));
+      border-radius: 15px;
+      background: var(--canvas-focus);
+      color: var(--color-white, #ffffff);
+      box-shadow: 0 14px 30px rgba(9, 105, 218, 0.18);
+      font-weight: 850;
+      text-decoration: none;
+    }
+
+    .popout-button:hover {
+      filter: brightness(1.04);
+    }
+
     .toast {
       position: fixed;
       right: 22px;
@@ -1315,6 +2056,12 @@ function renderHtml(instanceId) {
           <h2>Presentation presets</h2>
           <p>Switch between architecture slices during a demo.</p>
           <div class="preset-grid" id="presets"></div>
+        </section>
+
+        <section class="panel-section diagram-actions">
+          <h2>Pop-out architecture diagram</h2>
+          <p>Open a clean Excalidraw-style board using only the components currently enabled below.</p>
+          <a class="popout-button" href="/excalidraw" target="_blank" rel="noopener">Pop out Excalidraw diagram</a>
         </section>
 
         <section class="panel-section" id="inspector"></section>
@@ -1720,7 +2467,7 @@ await joinSession({
         createCanvas({
             id: "orka-architecture",
             displayName: "Orka Architecture",
-            description: "Interactive Orka architecture diagram with demo presets and enable-disable component toggles.",
+            description: "Interactive Orka architecture diagram with demo presets, component toggles, and an Excalidraw-style pop-out.",
             inputSchema,
             actions: [
                 {
@@ -1749,6 +2496,11 @@ await joinSession({
                         applyPresetToState(entry.state, input.presetId);
                         return buildPayload(entry);
                     },
+                },
+                {
+                    name: "get_excalidraw_export",
+                    description: "Return an Excalidraw-compatible JSON export for the currently enabled components.",
+                    handler: async (ctx) => buildExcalidrawResponse(requireEntry(ctx.instanceId)).file,
                 },
                 {
                     name: "reset_architecture",
