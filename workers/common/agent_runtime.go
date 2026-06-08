@@ -46,6 +46,9 @@ type AgentConfig struct {
 	GitRef             string
 	SubPath            string
 	TimeoutSeconds     int
+
+	securityReviewContextArtifact string
+	securityReviewContextManifest []byte
 }
 
 // LoadConfig reads and validates agent configuration from environment variables.
@@ -362,6 +365,9 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	if err := EnsureWorkspaceArtifactsLink(workspaceDir); err != nil {
 		return fmt.Errorf("artifact workspace setup failed: %w", err)
 	}
+	if err := PrepareSecurityReviewContext(workspaceDir, cfg); err != nil {
+		return fmt.Errorf("security review context preparation failed: %w", err)
+	}
 
 	result, err := executor(ctx, cfg)
 	if err != nil {
@@ -378,6 +384,9 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 		}
 		if submitErr := SubmitResult(resultBytes); submitErr != nil {
 			fmt.Fprintf(os.Stderr, "failed to submit error result: %v\n", submitErr)
+		}
+		if restoreErr := RestoreSecurityReviewContextArtifact(cfg); restoreErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to restore security review context artifact: %v\n", restoreErr)
 		}
 		if artifactErr := UploadArtifacts(); artifactErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", artifactErr)
@@ -400,6 +409,9 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	}
 	if err := SubmitResult(resultBytes); err != nil {
 		return fmt.Errorf("failed to submit result: %w", err)
+	}
+	if err := RestoreSecurityReviewContextArtifact(cfg); err != nil {
+		return fmt.Errorf("failed to restore security review context artifact: %w", err)
 	}
 	if err := UploadArtifacts(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", err)

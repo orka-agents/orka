@@ -8,6 +8,7 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -364,5 +365,123 @@ func TestUpsertFindingPreservesFinalStatesOverOpen(t *testing.T) {
 				t.Fatalf("State = %q, want %q", got.State, finalState)
 			}
 		})
+	}
+}
+
+func TestReviewSliceStoreRoundTripFilteringAndNamespaceIsolation(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	slice := &store.ReviewSlice{
+		ID:              "slice_repo1_api",
+		Namespace:       "ns1",
+		RepositoryScan:  "repo1",
+		Source:          "deterministic-go-package",
+		Title:           "Go package internal/api",
+		Summary:         "API handlers",
+		Kind:            "package",
+		Confidence:      "high",
+		Status:          "pending",
+		LastScanRunID:   "scan-current",
+		Entrypoints:     []store.ReviewSliceFile{{Path: "internal/api/security.go", Reason: "handler"}},
+		OwnedFiles:      []store.ReviewSliceFile{{Path: "internal/api/security.go", Reason: "source"}},
+		ContextFiles:    []store.ReviewSliceFile{{Path: "internal/api/security_test.go", Reason: "tests"}},
+		Tests:           []store.ReviewSliceTest{{Path: "internal/api/security_test.go", Command: "go test ./internal/api"}},
+		Tags:            []string{"language:go"},
+		TrustBoundaries: []string{"network"},
+	}
+	if err := s.UpsertReviewSlice(ctx, slice); err != nil {
+		t.Fatalf("UpsertReviewSlice() error = %v", err)
+	}
+
+	got, err := s.GetReviewSlice(ctx, "ns1", "repo1", "slice_repo1_api")
+	if err != nil {
+		t.Fatalf("GetReviewSlice() error = %v", err)
+	}
+	if got.Title != slice.Title || len(got.OwnedFiles) != 1 || got.OwnedFiles[0].Path != "internal/api/security.go" {
+		t.Fatalf("GetReviewSlice() = %#v, want JSON fields round-tripped", got)
+	}
+
+	if err := s.UpdateReviewSliceStatus(ctx, "ns1", "repo1", "slice_repo1_api", "scan-stale", "reviewed"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("UpdateReviewSliceStatus(stale run) error = %v, want not found", err)
+	}
+	if err := s.UpdateReviewSliceStatus(ctx, "ns1", "repo1", "slice_repo1_api", "scan-current", "reviewed"); err != nil {
+		t.Fatalf("UpdateReviewSliceStatus() error = %v", err)
+	}
+	reviewed, _, err := s.ListReviewSlices(ctx, store.ReviewSliceFilter{
+		Namespace:      "ns1",
+		RepositoryScan: "repo1",
+		Status:         "reviewed",
+		LastScanRunID:  "scan-current",
+	})
+	if err != nil {
+		t.Fatalf("ListReviewSlices(reviewed) error = %v", err)
+	}
+	if len(reviewed) != 1 || reviewed[0].LastReviewedAt == nil {
+		t.Fatalf("reviewed slices = %#v, want reviewed slice with timestamp", reviewed)
+	}
+	staleRun, _, err := s.ListReviewSlices(ctx, store.ReviewSliceFilter{
+		Namespace:      "ns1",
+		RepositoryScan: "repo1",
+		Status:         "reviewed",
+		LastScanRunID:  "scan-stale",
+	})
+	if err != nil {
+		t.Fatalf("ListReviewSlices(stale run) error = %v", err)
+	}
+	if len(staleRun) != 0 {
+		t.Fatalf("ListReviewSlices(stale run) = %#v, want run isolation", staleRun)
+	}
+
+	otherNamespace, _, err := s.ListReviewSlices(ctx, store.ReviewSliceFilter{
+		Namespace:      "ns2",
+		RepositoryScan: "repo1",
+	})
+	if err != nil {
+		t.Fatalf("ListReviewSlices(ns2) error = %v", err)
+	}
+	if len(otherNamespace) != 0 {
+		t.Fatalf("ListReviewSlices(ns2) = %#v, want namespace isolation", otherNamespace)
+	}
+}
+
+func TestDroppedFindingStoreRoundTripFiltering(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	first := &store.DroppedFinding{
+		ID:             "drop1",
+		Namespace:      "ns1",
+		RepositoryScan: "repo1",
+		ScanRunID:      "scan1",
+		TaskName:       "task1",
+		SliceID:        "slice1",
+		Reason:         "evidence file was not included in review context",
+		SampleJSON:     `{"title":"bad"}`,
+	}
+	if err := s.CreateDroppedFinding(ctx, first); err != nil {
+		t.Fatalf("CreateDroppedFinding(first) error = %v", err)
+	}
+	if err := s.CreateDroppedFinding(ctx, &store.DroppedFinding{
+		ID:             "drop2",
+		Namespace:      "ns1",
+		RepositoryScan: "repo1",
+		ScanRunID:      "scan2",
+		TaskName:       "task2",
+		Reason:         "missing evidence",
+	}); err != nil {
+		t.Fatalf("CreateDroppedFinding(second) error = %v", err)
+	}
+
+	got, _, err := s.ListDroppedFindings(ctx, store.DroppedFindingFilter{
+		Namespace:      "ns1",
+		RepositoryScan: "repo1",
+		ScanRunID:      "scan1",
+	})
+	if err != nil {
+		t.Fatalf("ListDroppedFindings() error = %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "drop1" || got[0].SampleJSON != first.SampleJSON {
+		t.Fatalf("ListDroppedFindings() = %#v, want scan1 diagnostic", got)
 	}
 }

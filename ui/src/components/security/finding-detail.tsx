@@ -145,6 +145,9 @@ export function FindingDetail({ findingId }: { findingId: string }) {
           <CardHeader><CardTitle>Context</CardTitle></CardHeader>
           <CardContent className="space-y-2 text-sm">
             <div>Repository: <span className="font-medium">{finding.repositoryScan}</span></div>
+            {finding.sliceID && <div>Slice: <span className="font-mono text-xs">{finding.sliceID}</span></div>}
+            {finding.category && <div>Category: <span className="font-medium">{finding.category}</span></div>}
+            {finding.triage && <div>Triage: <span className="font-medium">{finding.triage}</span></div>}
             <div>Confidence: <span className="font-medium">{finding.confidence}</span></div>
             <div>Commit: <span className="font-mono text-xs">{finding.commitSHA || '-'}</span></div>
             <div>Location: <span className="font-mono text-xs">{finding.filePath ? `${finding.filePath}${finding.line ? `:${finding.line}` : ''}` : '-'}</span></div>
@@ -179,6 +182,30 @@ export function FindingDetail({ findingId }: { findingId: string }) {
                 <p className="text-muted-foreground">{finding.suggestedAction}</p>
               </div>
             )}
+            {finding.reproduction && (
+              <div>
+                <div className="font-medium">Reproduction</div>
+                <p className="text-muted-foreground">{finding.reproduction}</p>
+              </div>
+            )}
+            {finding.suggestedRegressionTest && (
+              <div>
+                <div className="font-medium">Suggested regression test</div>
+                <p className="text-muted-foreground">{finding.suggestedRegressionTest}</p>
+              </div>
+            )}
+            {finding.whyTestsDoNotAlreadyCoverThis && (
+              <div>
+                <div className="font-medium">Why existing tests miss this</div>
+                <p className="text-muted-foreground">{finding.whyTestsDoNotAlreadyCoverThis}</p>
+              </div>
+            )}
+            {finding.minimumFixScope && (
+              <div>
+                <div className="font-medium">Minimum fix scope</div>
+                <p className="text-muted-foreground">{finding.minimumFixScope}</p>
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>
@@ -202,10 +229,16 @@ export function FindingDetail({ findingId }: { findingId: string }) {
                       {evidence.label || evidence.name || 'Evidence'}
                     </a>
                   ) : (
-                    <div className="font-medium">{evidence.label || evidence.name || 'Evidence'}</div>
+                    <div className="font-medium">
+                      {evidence.path
+                        ? `${evidence.path}${evidence.startLine ? `:${evidence.startLine}${evidence.endLine && evidence.endLine !== evidence.startLine ? `-${evidence.endLine}` : ''}` : ''}`
+                        : evidence.label || evidence.name || 'Evidence'}
+                    </div>
                   )}
                   <div className="text-muted-foreground">{evidence.kind}</div>
+                  {evidence.symbol && <div className="text-xs text-muted-foreground">Symbol: {evidence.symbol}</div>}
                   {evidence.taskName && <div className="text-xs text-muted-foreground">Task: {evidence.taskName}</div>}
+                  {evidence.quote && <div className="mt-2 rounded bg-muted p-2 font-mono text-xs">{evidence.quote}</div>}
                 </div>
               ))}
             </div>

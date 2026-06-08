@@ -21,14 +21,15 @@ an explicit user action.
 
 ```text
 Register repository (UI or RepositoryScan CRD)
-  → initial scan: clone repo, generate threat model, scan history, store findings
-  → scheduled incremental scans process only new commits
+  → initial scan: clone repo, generate threat model, map review slices, store findings
+  → scheduled incremental scans process new commits and reuse slice metadata where possible
   → review threat model + findings in the dashboard
   → from a finding: generate a patch, then open a remediation PR
 ```
 
 Each scan runs as a `type: agent` task with a git workspace. The agent writes structured
-artifacts (threat model, findings JSON, validation evidence, patch diffs) that the
+artifacts (threat model, deterministic review slices, bounded context manifests, findings
+JSON, validation evidence, patch summaries, and patch diffs) that the
 `RepositoryScan` controller ingests into the security store and surfaces through the
 `/api/v1/security/*` API and the **Security** area of the dashboard.
 
@@ -82,11 +83,12 @@ patch → pull-request remediation flow.
 
 | Phase | What happens |
 |-------|--------------|
-| **Initial scan** | Clones the repo, scans newest commits backward within `historyDays`, generates `security-threat-model.md`, writes `security-findings.json`, and stores a run summary. A threat model is generated even when no findings are emitted. |
+| **Initial scan** | Clones the repo, generates `security-threat-model.md`, runs a deterministic mapper that writes `security-slices.json`, reviews selected stored slices, and stores a run summary. A threat model is generated even when no findings are emitted. |
 | **Threat model review** | The repository detail page shows the generated threat model in an editor. Saving an edit (or a regenerated model) replaces the current threat model and influences ranking on later scans. Prior threat models are not retained as history. |
-| **Incremental scans** | Run on the configured schedule and process only commits after the last completed run. Manual re-scan stays available. |
-| **Patch generation** | From a finding, Orka creates a dedicated patch task that writes a diff artifact and stores patch metadata. |
-| **PR creation** | Orka uses the latest successful patch proposal to open a PR against the configured base branch. |
+| **Incremental scans** | Run on the configured schedule and process commits after the last completed run. Slice metadata drives changed-file-based selection. Manual re-scan stays available. |
+| **Evidence ingestion** | v2 findings are stored only when their evidence cites safe repo-relative paths and line ranges included in the review context manifest. Invalid model output is recorded as dropped diagnostics instead of becoming a finding. |
+| **Patch generation** | From a finding, Orka creates a dedicated patch task that writes a patch summary and diff artifact. The proposal is marked ready only when the recorded changed files and diff match the actual workspace result. |
+| **PR creation** | Orka uses the latest successful, verified patch proposal to open a PR against the configured base branch. |
 
 ## Validation Modes
 
@@ -104,9 +106,13 @@ Scanning never requires a buildable repository; validation may build when useful
   read-only rootfs, dropped capabilities).
 - Private repositories require an explicit `gitSecretRef` (or detected credentials).
 - Patches and PRs are never created automatically — both are explicit user actions.
+- Patch proposals cannot reach `patch_ready` without a pushed branch, patch summary, and
+  diff artifact that matches the worker's structured workspace diff.
 - Edited threat models are treated as ranking input, not executable instructions.
-- Evidence is stored as flat, sanitized artifacts within the per-file (10 MB) and total
-  (50 MB) artifact upload limits.
+- Finding evidence is structured as repo-relative file/line references or flat sanitized
+  artifacts within the per-file (10 MB) and total (50 MB) artifact upload limits.
+- Dropped-finding diagnostics contain compact reasons and samples only; they must not
+  include raw tokens, credentials, full transcripts, or sensitive request context.
 
 ## See Also
 

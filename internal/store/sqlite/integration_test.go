@@ -3,6 +3,7 @@ package sqlite
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"math/rand"
 	"os"
@@ -748,6 +749,129 @@ func TestIntegration_MigrateIdempotent(t *testing.T) {
 	if err := s.HealthCheck(context.Background()); err != nil {
 		t.Fatalf("HealthCheck after double-migrate: %v", err)
 	}
+}
+
+func TestIntegration_MigrateSecurityScanLegacySchema(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "security-legacy.db")
+	legacyDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, err := legacyDB.Exec(`
+		CREATE TABLE security_findings (
+			id                TEXT PRIMARY KEY,
+			namespace         TEXT NOT NULL,
+			repository_scan   TEXT NOT NULL,
+			scan_run_id       TEXT NOT NULL,
+			fingerprint       TEXT NOT NULL,
+			title             TEXT NOT NULL,
+			summary           TEXT NOT NULL,
+			severity          TEXT NOT NULL,
+			confidence        TEXT NOT NULL,
+			validation_status TEXT NOT NULL,
+			state             TEXT NOT NULL,
+			file_path         TEXT NOT NULL DEFAULT '',
+			line              INTEGER NOT NULL DEFAULT 0,
+			commit_sha        TEXT NOT NULL DEFAULT '',
+			root_cause        TEXT NOT NULL DEFAULT '',
+			remediation       TEXT NOT NULL DEFAULT '',
+			suggested_action  TEXT NOT NULL DEFAULT '',
+			evidence_json     TEXT NOT NULL DEFAULT '',
+			validation_json   TEXT NOT NULL DEFAULT '',
+			patch_proposal_id TEXT NOT NULL DEFAULT '',
+			pr_number         INTEGER,
+			pr_url            TEXT NOT NULL DEFAULT '',
+			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(namespace, repository_scan, fingerprint)
+		);
+		CREATE TABLE security_review_slices (
+			id                TEXT PRIMARY KEY,
+			namespace         TEXT NOT NULL,
+			repository_scan   TEXT NOT NULL,
+			source            TEXT NOT NULL,
+			title             TEXT NOT NULL,
+			summary           TEXT NOT NULL DEFAULT '',
+			kind              TEXT NOT NULL DEFAULT 'unknown',
+			confidence        TEXT NOT NULL DEFAULT 'medium',
+			status            TEXT NOT NULL DEFAULT 'pending',
+			entrypoints_json  TEXT NOT NULL DEFAULT '[]',
+			owned_files_json  TEXT NOT NULL DEFAULT '[]',
+			context_files_json TEXT NOT NULL DEFAULT '[]',
+			tests_json        TEXT NOT NULL DEFAULT '[]',
+			tags_json         TEXT NOT NULL DEFAULT '[]',
+			trust_boundaries_json TEXT NOT NULL DEFAULT '[]',
+			last_scan_run_id  TEXT NOT NULL DEFAULT '',
+			last_reviewed_at  TIMESTAMP,
+			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(namespace, repository_scan, id)
+		);
+		INSERT INTO security_review_slices (id, namespace, repository_scan, source, title)
+		VALUES ('slice_api', 'ns1', 'repo1', 'legacy', 'Legacy API slice');
+	`); err != nil {
+		_ = legacyDB.Close()
+		t.Fatalf("seed legacy schema error = %v", err)
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatalf("legacyDB.Close() error = %v", err)
+	}
+
+	db, err := NewDB(dbPath)
+	if err != nil {
+		t.Fatalf("NewDB() migrated legacy security schema error = %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	secStore := NewStore(db, dbPath)
+
+	if _, err := secStore.GetReviewSlice(context.Background(), "ns1", "repo1", "slice_api"); err != nil {
+		t.Fatalf("GetReviewSlice() after migration error = %v", err)
+	}
+	for _, column := range []string{"slice_id", "category", "triage", "reproduction", "minimum_fix_scope"} {
+		if !sqliteTableHasColumn(t, db, "security_findings", column) {
+			t.Fatalf("security_findings missing migrated column %q", column)
+		}
+	}
+
+	ctx := context.Background()
+	if err := secStore.UpsertReviewSlice(ctx, &store.ReviewSlice{
+		ID:             "slice_api",
+		Namespace:      "ns2",
+		RepositoryScan: "repo1",
+		Source:         "legacy-migration-test",
+		Title:          "Same ID in different namespace",
+	}); err != nil {
+		t.Fatalf("UpsertReviewSlice() same id in different namespace error = %v", err)
+	}
+	if _, err := secStore.GetReviewSlice(ctx, "ns2", "repo1", "slice_api"); err != nil {
+		t.Fatalf("GetReviewSlice(ns2) error = %v", err)
+	}
+}
+
+func sqliteTableHasColumn(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(%s) error = %v", table, err)
+	}
+	defer rows.Close() //nolint:errcheck
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, pk int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatalf("scan table_info(%s) error = %v", table, err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("table_info(%s) rows error = %v", table, err)
+	}
+	return false
 }
 
 func TestIntegration_WALModeEnabled(t *testing.T) {

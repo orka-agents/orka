@@ -3,7 +3,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { useAllFindings, useRepositoryScan, useRunSecurityScan, useScanRuns } from '@/hooks/use-security'
+import { useAllFindings, useDroppedFindings, useRepositoryScan, useReviewSlices, useRunSecurityScan, useScanRuns } from '@/hooks/use-security'
 import { ThreatModelEditor } from './threat-model-editor'
 import { RecommendedFindings } from './recommended-findings'
 import { FindingTable } from './finding-table'
@@ -21,6 +21,8 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
   const { data: repo, isLoading } = useRepositoryScan(repositoryName)
   const findings = useAllFindings(repositoryName)
   const scanRuns = useScanRuns(repositoryName)
+  const reviewSlices = useReviewSlices(repositoryName)
+  const droppedFindings = useDroppedFindings(repositoryName, repo?.status?.lastScanID)
   const runScan = useRunSecurityScan(repositoryName)
 
   if (isLoading) {
@@ -83,6 +85,30 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
         </Card>
       </div>
 
+      <div className="grid gap-4 md:grid-cols-3">
+        <Card>
+          <CardHeader><CardTitle className="text-base">Review Slices</CardTitle></CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{reviewSlices.data?.items?.length ?? 0}</div>
+            <div className="mt-1 text-xs text-muted-foreground">Deterministic repository review units</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader><CardTitle className="text-base">Accepted Output</CardTitle></CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{scanRuns.data?.items?.[0]?.acceptedFindings ?? 0}</div>
+            <div className="mt-1 text-xs text-muted-foreground">Latest scan v2 findings accepted</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader><CardTitle className="text-base">Dropped Output</CardTitle></CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{droppedFindings.data?.items?.length ?? scanRuns.data?.items?.[0]?.droppedFindings ?? 0}</div>
+            <div className="mt-1 text-xs text-muted-foreground">Rejected model findings with diagnostics</div>
+          </CardContent>
+        </Card>
+      </div>
+
       <ThreatModelEditor repositoryName={repositoryName} />
       <RecommendedFindings repositoryName={repositoryName} />
 
@@ -114,7 +140,7 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
                   </div>
                   <div className="mt-1 text-muted-foreground">{run.summary || run.taskName}</div>
                   <div className="mt-2 text-xs text-muted-foreground">
-                    Started {timeAgo(run.startedAt)} · Commits {run.commitCount ?? 0}
+                    Started {timeAgo(run.startedAt)} · Commits {run.commitCount ?? 0} · Slices {run.sliceCount ?? 0} · Dropped {run.droppedFindings ?? 0}
                   </div>
                 </div>
               ))}

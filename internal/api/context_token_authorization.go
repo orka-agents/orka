@@ -1215,17 +1215,21 @@ func contextTokenProviderModelConstraintFailures(token *ContextToken, provider P
 
 func contextTokenWorkspaceFailures(token *ContextToken, workspace *corev1alpha1.WorkspaceConfig) []string {
 	failures := []string{}
-	for _, constraint := range []struct {
-		key string
-		got string
-	}{
-		{key: "repo", got: workspaceGitRepo(workspace)},
-		{key: "branch", got: workspaceBranch(workspace)},
-		{key: "ref", got: workspaceRef(workspace)},
-	} {
-		if want, ok := contextString(token.TransactionContext, constraint.key); ok && constraint.got != want {
-			failures = append(failures, fmt.Sprintf("workspace %s %q does not match token context %q", constraint.key, constraint.got, want))
+	if want, ok := contextString(token.TransactionContext, "repo"); ok && workspaceGitRepo(workspace) != want {
+		failures = append(failures, fmt.Sprintf("workspace repo %q does not match token context %q", workspaceGitRepo(workspace), want))
+	}
+
+	gotBranch := workspaceBranch(workspace)
+	gotRef := workspaceRef(workspace)
+	wantRef, hasWantRef := contextString(token.TransactionContext, "ref")
+	if want, ok := contextString(token.TransactionContext, "branch"); ok {
+		refOnlyWorkspaceMatches := gotBranch == "" && hasWantRef && gotRef == wantRef
+		if !refOnlyWorkspaceMatches && gotBranch != want {
+			failures = append(failures, fmt.Sprintf("workspace branch %q does not match token context %q", gotBranch, want))
 		}
+	}
+	if hasWantRef && gotRef != wantRef {
+		failures = append(failures, fmt.Sprintf("workspace ref %q does not match token context %q", gotRef, wantRef))
 	}
 	return failures
 }

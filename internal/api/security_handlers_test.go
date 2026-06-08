@@ -25,6 +25,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/security"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
 )
@@ -285,8 +286,9 @@ func TestCreateManualSecurityScan_ContextTokenTransactionContextAuthorizationDen
 	repoURL := securityTestRepoURL
 
 	tests := []struct {
-		name string
-		tctx map[string]any
+		name    string
+		scanRef string
+		tctx    map[string]any
 	}{
 		{
 			name: "mismatched repo denied",
@@ -303,6 +305,27 @@ func TestCreateManualSecurityScan_ContextTokenTransactionContextAuthorizationDen
 				"namespace": "demo",
 				"repo":      repoURL,
 				"branch":    "release",
+				"agent":     "demo/analysis",
+			},
+		},
+		{
+			name:    "mismatched ref denied",
+			scanRef: "refs/tags/allowed",
+			tctx: map[string]any{
+				"namespace": "demo",
+				"repo":      repoURL,
+				"branch":    "main",
+				"ref":       "refs/tags/disallowed",
+				"agent":     "demo/analysis",
+			},
+		},
+		{
+			name:    "branch-only token denies ref checkout",
+			scanRef: "refs/tags/allowed",
+			tctx: map[string]any{
+				"namespace": "demo",
+				"repo":      repoURL,
+				"branch":    "main",
 				"agent":     "demo/analysis",
 			},
 		},
@@ -327,6 +350,7 @@ func TestCreateManualSecurityScan_ContextTokenTransactionContextAuthorizationDen
 				Spec: corev1alpha1.RepositoryScanSpec{
 					RepoURL:          repoURL,
 					Branch:           "main",
+					Ref:              tt.scanRef,
 					AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
 				},
 			}
@@ -346,6 +370,49 @@ func TestCreateManualSecurityScan_ContextTokenTransactionContextAuthorizationDen
 			require.Empty(t, tasks.Items)
 		})
 	}
+}
+
+func TestCreateManualSecurityScan_ContextTokenAllowsRefOnlyWorkspaceWithBranchAndRef(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	repoURL := securityTestRepoURL
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "scan-1",
+			Namespace: "demo",
+		},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:          repoURL,
+			Ref:              "refs/tags/v1.0.0",
+			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+		},
+	}
+	app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, scan)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeSecurityWrite,
+		"tctx": map[string]any{
+			"namespace": "demo",
+			"repo":      repoURL,
+			"branch":    "release",
+			"ref":       "refs/tags/v1.0.0",
+			"agent":     "demo/analysis",
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/security/repositories/scan-1/scans?namespace=demo", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	var run store.ScanRun
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&run))
+	task := &corev1alpha1.Task{}
+	require.NoError(t, handlers.client.Get(context.Background(), clientObjectKey(run.TaskName), task))
+	require.NotNil(t, task.Spec.AgentRuntime)
+	require.NotNil(t, task.Spec.AgentRuntime.Workspace)
+	require.Empty(t, task.Spec.AgentRuntime.Workspace.Branch)
+	require.Equal(t, "refs/tags/v1.0.0", task.Spec.AgentRuntime.Workspace.Ref)
 }
 
 func TestRepositoryScanMutations_ContextTokenTransactionContextAuthorizationDenials(t *testing.T) {
@@ -425,6 +492,158 @@ func TestRepositoryScanMutations_ContextTokenTransactionContextAuthorizationDeni
 			var got corev1alpha1.RepositoryScan
 			err = handlers.client.Get(context.Background(), clientObjectKey("scan-create"), &got)
 			require.Error(t, err)
+		})
+	}
+}
+
+func TestRepositoryScanMutations_ContextTokenRefAuthorizationDenials(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	repoURL := securityTestRepoURL
+	createBody := fmt.Sprintf(`{
+		"name":"scan-create",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"branch":"main",
+			"ref":"refs/tags/disallowed",
+			"analysisAgentRef":{"name":"analysis"}
+		}
+	}`, securityTestRepoURL)
+	updateBody := fmt.Sprintf(`{
+		"spec":{
+			"repoURL":%q,
+			"branch":"main",
+			"ref":"refs/tags/disallowed",
+			"analysisAgentRef":{"name":"analysis"}
+		}
+	}`, securityTestRepoURL)
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{
+			name:   "create repository scan mismatched ref denied",
+			method: http.MethodPost,
+			path:   "/security/repositories",
+			body:   createBody,
+		},
+		{
+			name:   "update repository scan mismatched ref denied",
+			method: http.MethodPut,
+			path:   "/security/repositories/scan-1?namespace=demo",
+			body:   updateBody,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			existing := securityAuthzTestRepositoryScan("scan-1", repoURL)
+			existing.Spec.Ref = "refs/tags/allowed"
+			app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, existing)
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"scope": ContextTokenScopeSecurityWrite,
+				"tctx": map[string]any{
+					"namespace": "demo",
+					"repo":      repoURL,
+					"branch":    "main",
+					"ref":       "refs/tags/allowed",
+					"agent":     "demo/analysis",
+				},
+			})
+
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+			var created corev1alpha1.RepositoryScan
+			err = handlers.client.Get(context.Background(), clientObjectKey("scan-create"), &created)
+			require.Error(t, err)
+
+			var updated corev1alpha1.RepositoryScan
+			require.NoError(t, handlers.client.Get(context.Background(), clientObjectKey("scan-1"), &updated))
+			require.Equal(t, "refs/tags/allowed", updated.Spec.Ref)
+		})
+	}
+}
+
+func TestRepositoryScanMutations_ContextTokenBranchOnlyDeniesRef(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	repoURL := securityTestRepoURL
+	createBody := fmt.Sprintf(`{
+		"name":"scan-create",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"branch":"main",
+			"ref":"refs/tags/disallowed",
+			"analysisAgentRef":{"name":"analysis"}
+		}
+	}`, securityTestRepoURL)
+	updateBody := fmt.Sprintf(`{
+		"spec":{
+			"repoURL":%q,
+			"branch":"main",
+			"ref":"refs/tags/disallowed",
+			"analysisAgentRef":{"name":"analysis"}
+		}
+	}`, securityTestRepoURL)
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{
+			name:   "create repository scan ref denied by branch-only token",
+			method: http.MethodPost,
+			path:   "/security/repositories",
+			body:   createBody,
+		},
+		{
+			name:   "update repository scan ref denied by branch-only token",
+			method: http.MethodPut,
+			path:   "/security/repositories/scan-1?namespace=demo",
+			body:   updateBody,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			existing := securityAuthzTestRepositoryScan("scan-1", repoURL)
+			app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, existing)
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"scope": ContextTokenScopeSecurityWrite,
+				"tctx": map[string]any{
+					"namespace": "demo",
+					"repo":      repoURL,
+					"branch":    "main",
+					"agent":     "demo/analysis",
+				},
+			})
+
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+			var created corev1alpha1.RepositoryScan
+			err = handlers.client.Get(context.Background(), clientObjectKey("scan-create"), &created)
+			require.Error(t, err)
+
+			var updated corev1alpha1.RepositoryScan
+			require.NoError(t, handlers.client.Get(context.Background(), clientObjectKey("scan-1"), &updated))
+			require.Empty(t, updated.Spec.Ref)
 		})
 	}
 }
@@ -925,7 +1144,7 @@ func TestCreateManualSecurityScan_ContextTokenStampsTaskRequesterAndTransaction(
 		},
 		Spec: corev1alpha1.RepositoryScanSpec{
 			RepoURL:          securityTestRepoURL,
-			Branch:           "main",
+			Ref:              "refs/tags/v1.0.0",
 			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
 		},
 	}
@@ -950,6 +1169,12 @@ func TestCreateManualSecurityScan_ContextTokenStampsTaskRequesterAndTransaction(
 	require.Equal(t, testContextTokenTransactionID, task.Spec.Transaction.ID)
 	require.Equal(t, labels.SelectorValue(testContextTokenTransactionID), task.Labels[labels.LabelTransactionID])
 	require.Equal(t, testContextTokenTransactionID, task.Annotations[labels.AnnotationTransactionID])
+	require.Equal(t, security.StageThreatModel, envValue(task.Spec.Env, security.EnvStage))
+	require.Equal(t, "scan-1", envValue(task.Spec.Env, security.EnvRepositoryScanName))
+	require.NotNil(t, task.Spec.AgentRuntime)
+	require.NotNil(t, task.Spec.AgentRuntime.Workspace)
+	require.Empty(t, task.Spec.AgentRuntime.Workspace.Branch)
+	require.Equal(t, "refs/tags/v1.0.0", task.Spec.AgentRuntime.Workspace.Ref)
 }
 
 func TestCreateSecurityPullRequest_ExistingPR(t *testing.T) {
@@ -1083,7 +1308,7 @@ func TestCreateSecurityPatchTaskRequiresPushedBranch(t *testing.T) {
 		},
 		Spec: corev1alpha1.RepositoryScanSpec{
 			RepoURL: securityTestRepoURL,
-			Branch:  "main",
+			Ref:     "f00dbabe",
 			GitSecretRef: &corev1.LocalObjectReference{
 				Name: "git-creds",
 			},
@@ -1119,6 +1344,12 @@ func TestCreateSecurityPatchTaskRequiresPushedBranch(t *testing.T) {
 	require.Equal(t, "true", envValue(task.Spec.Env, "ORKA_REQUIRE_PUSH_BRANCH"))
 	require.NotNil(t, task.Spec.AgentRuntime)
 	require.NotNil(t, task.Spec.AgentRuntime.Workspace)
+	require.Equal(t, security.StagePatch, envValue(task.Spec.Env, security.EnvStage))
+	require.Equal(t, "scan-1", envValue(task.Spec.Env, security.EnvRepositoryScanName))
+	require.Equal(t, "fnd_123", envValue(task.Spec.Env, security.EnvFindingID))
+	require.Equal(t, proposal.Branch, envValue(task.Spec.Env, security.EnvPatchBranch))
+	require.Empty(t, task.Spec.AgentRuntime.Workspace.Branch)
+	require.Equal(t, "f00dbabe", task.Spec.AgentRuntime.Workspace.Ref)
 	require.Equal(t, proposal.Branch, task.Spec.AgentRuntime.Workspace.PushBranch)
 }
 

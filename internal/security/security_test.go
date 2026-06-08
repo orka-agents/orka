@@ -31,43 +31,36 @@ func TestArtifactWorkspacePath(t *testing.T) {
 	}
 }
 
-func TestFindingsArtifactEvidenceRefsUnmarshalJSON(t *testing.T) {
+func TestEffectiveWorkspaceBranch(t *testing.T) {
 	tests := []struct {
 		name string
-		raw  string
-		want int
+		spec corev1alpha1.RepositoryScanSpec
+		want string
 	}{
-		{name: "array", raw: `[{"kind":"artifact","name":"file.txt","label":"trace"}]`, want: 1},
-		{name: "string array shorthand", raw: `["inline evidence"]`, want: 1},
-		{name: "array of strings", raw: `["note one","note two"]`, want: 2},
-		{name: "mixed array shorthand", raw: `["inline evidence", {"kind":"artifact","name":"file.txt"}]`, want: 2},
-		{name: "mixed array with blanks", raw: `["inline evidence",{"kind":"artifact","name":"file.txt","label":"trace"},null,"  "]`, want: 2},
-		{name: "string shorthand", raw: `"inline evidence"`, want: 1},
-		{name: "object shorthand", raw: `{"kind":"artifact","name":"file.txt"}`, want: 1},
-		{name: "null", raw: `null`, want: 0},
+		{
+			name: "explicit branch wins",
+			spec: corev1alpha1.RepositoryScanSpec{Branch: "release", Ref: "v1.2.3"},
+			want: "release",
+		},
+		{
+			name: "ref only omits implicit branch",
+			spec: corev1alpha1.RepositoryScanSpec{Ref: "v1.2.3"},
+			want: "",
+		},
+		{
+			name: "default branch without ref",
+			spec: corev1alpha1.RepositoryScanSpec{},
+			want: "main",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var got FindingsArtifactEvidenceRefs
-			if err := json.Unmarshal([]byte(tt.raw), &got); err != nil {
-				t.Fatalf("json.Unmarshal() error = %v", err)
-			}
-			if len(got) != tt.want {
-				t.Fatalf("len(got) = %d, want %d", len(got), tt.want)
+			scan := &corev1alpha1.RepositoryScan{Spec: tt.spec}
+			if got := EffectiveWorkspaceBranch(scan); got != tt.want {
+				t.Fatalf("EffectiveWorkspaceBranch() = %q, want %q", got, tt.want)
 			}
 		})
-	}
-
-	var got FindingsArtifactEvidenceRefs
-	if err := json.Unmarshal([]byte(`["inline evidence"]`), &got); err != nil {
-		t.Fatalf("json.Unmarshal(array shorthand) error = %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("len(got) = %d, want 1", len(got))
-	}
-	if got[0].Kind != "note" || got[0].Label != "inline evidence" {
-		t.Fatalf("got[0] = %#v, want note shorthand normalization", got[0])
 	}
 }
 
@@ -86,28 +79,8 @@ func TestBuildThreatModelPromptRequiresThreatModelOnly(t *testing.T) {
 	if !strings.Contains(got, "REQUIRED_SECURITY_ARTIFACTS: security-threat-model.md") {
 		t.Fatalf("BuildThreatModelPrompt() missing required artifacts directive:\n%s", got)
 	}
-	if strings.Contains(got, "security-findings.json") {
+	if strings.Contains(got, "security-findings") {
 		t.Fatalf("BuildThreatModelPrompt() unexpectedly references findings artifact:\n%s", got)
-	}
-}
-
-func TestBuildDiscoveryPromptRequiresFindingsOnly(t *testing.T) {
-	scan := &corev1alpha1.RepositoryScan{
-		Spec: corev1alpha1.RepositoryScanSpec{
-			RepoURL: "https://github.com/example/project",
-			Branch:  "main",
-		},
-	}
-
-	got := BuildDiscoveryPrompt(scan, "manual", "abc", "def", "# Threat Model", DiscoveryScopes()[0])
-	if !strings.Contains(got, "Do not rewrite the threat model in this stage.") {
-		t.Fatalf("BuildDiscoveryPrompt() missing discovery-stage instruction:\n%s", got)
-	}
-	if !strings.Contains(got, "REQUIRED_SECURITY_ARTIFACTS: security-findings.json") {
-		t.Fatalf("BuildDiscoveryPrompt() missing findings directive:\n%s", got)
-	}
-	if !strings.Contains(got, "Shared threat model context:\n# Threat Model") {
-		t.Fatalf("BuildDiscoveryPrompt() missing threat model context:\n%s", got)
 	}
 }
 
@@ -134,6 +107,55 @@ func TestBuildValidationPromptIncludesAttackPathAnalysis(t *testing.T) {
 	}
 	if !strings.Contains(got, "attack_path_analysis") {
 		t.Fatalf("BuildValidationPrompt() missing attack path schema:\n%s", got)
+	}
+}
+
+func TestValidationArtifactEvidenceRefsUnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []store.FindingEvidenceRef
+	}{
+		{
+			name: "string shorthand",
+			raw:  `"validation transcript"`,
+			want: []store.FindingEvidenceRef{{Kind: "note", Label: "validation transcript"}},
+		},
+		{
+			name: "object shorthand",
+			raw:  `{"kind":"artifact","name":"security-validation.txt","label":"trace"}`,
+			want: []store.FindingEvidenceRef{{Kind: "artifact", Name: "security-validation.txt", Label: "trace"}},
+		},
+		{
+			name: "mixed array",
+			raw:  `["validation transcript",{"kind":"artifact","name":"security-validation.txt"},null,"  "]`,
+			want: []store.FindingEvidenceRef{
+				{Kind: "note", Label: "validation transcript"},
+				{Kind: "artifact", Name: "security-validation.txt"},
+			},
+		},
+		{
+			name: "null",
+			raw:  `null`,
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got ValidationArtifactEvidenceRefs
+			if err := json.Unmarshal([]byte(tt.raw), &got); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("len(got) = %d, want %d: %#v", len(got), len(tt.want), got)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("got[%d] = %#v, want %#v", i, got[i], tt.want[i])
+				}
+			}
+		})
 	}
 }
 
@@ -164,6 +186,15 @@ func TestBuildPatchPromptRequiresWorkspaceEditAndManagedPush(t *testing.T) {
 	}
 	if !strings.Contains(got, "Orka can create the commit and push it to the patch branch automatically.") {
 		t.Fatalf("BuildPatchPrompt() missing Orka-managed push instruction:\n%s", got)
+	}
+	if !strings.Contains(got, "REQUIRED_SECURITY_ARTIFACTS: security-patch-fnd_123.diff, security-patch-fnd_123.json") {
+		t.Fatalf("BuildPatchPrompt() missing required patch artifacts directive:\n%s", got)
+	}
+	if !strings.Contains(got, `"schemaVersion":1,"findingId":"fnd_123"`) {
+		t.Fatalf("BuildPatchPrompt() missing patch summary schema:\n%s", got)
+	}
+	if !strings.Contains(got, "changedFiles array must exactly match") {
+		t.Fatalf("BuildPatchPrompt() missing changedFiles verification guidance:\n%s", got)
 	}
 }
 

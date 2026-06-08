@@ -39,6 +39,7 @@ const (
 	LabelSecurityMode      = "orka.ai/security-scan-mode"
 	LabelSecurityStage     = "orka.ai/security-stage"
 	LabelSecurityScope     = "orka.ai/security-scope"
+	LabelSecuritySliceID   = "orka.ai/security-slice-id"
 	LabelSecurityFindingID = "orka.ai/security-finding-id"
 	LabelTransactionID     = "orka.ai/transaction-id"
 	LabelAuthProfile       = "orka.ai/auth-profile"
