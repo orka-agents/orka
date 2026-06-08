@@ -1940,13 +1940,12 @@ function renderHtml(instanceId) {
         color-mix(in srgb, var(--canvas-card-strong) 78%, transparent);
     }
 
-    .popout-button {
+    .popout-button,
+    .modal-button {
       display: flex;
       align-items: center;
       justify-content: center;
-      width: 100%;
       min-height: 44px;
-      margin-top: 12px;
       padding: 10px 12px;
       border: 1px solid color-mix(in srgb, var(--canvas-focus) 38%, var(--canvas-border));
       border-radius: 15px;
@@ -1957,15 +1956,114 @@ function renderHtml(instanceId) {
       text-decoration: none;
     }
 
+    .popout-button {
+      width: 100%;
+      margin-top: 12px;
+    }
+
     .popout-button:hover {
       filter: brightness(1.04);
+    }
+
+    .excalidraw-modal[hidden] {
+      display: none;
+    }
+
+    .excalidraw-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      display: grid;
+      padding: 22px;
+      background: rgba(31, 35, 40, 0.46);
+      backdrop-filter: blur(12px);
+    }
+
+    .modal-card {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      min-height: 0;
+      overflow: hidden;
+      border: 1px solid color-mix(in srgb, var(--canvas-border) 72%, transparent);
+      border-radius: 26px;
+      background: #fffdf7;
+      box-shadow: 0 34px 100px rgba(31, 35, 40, 0.32);
+      color: #34322e;
+    }
+
+    .modal-toolbar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: center;
+      padding: 16px 18px;
+      border-bottom: 1px solid #d8d0c3;
+      background: rgba(255, 255, 255, 0.82);
+      backdrop-filter: blur(12px);
+    }
+
+    .modal-toolbar h2 {
+      margin: 0;
+      font-family: "Comic Sans MS", "Segoe Print", cursive;
+      font-size: 26px;
+      line-height: 30px;
+      letter-spacing: -0.04em;
+    }
+
+    .modal-toolbar p {
+      margin: 4px 0 0;
+      color: #6f6a60;
+      font-size: 12px;
+      line-height: 17px;
+    }
+
+    .modal-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    .modal-button {
+      width: auto;
+      min-height: 38px;
+      border-color: #d8d0c3;
+      background: #ffffff;
+      color: #34322e;
+      box-shadow: 0 8px 18px rgba(52, 50, 46, 0.08);
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    .modal-button.primary {
+      border-color: rgba(9, 105, 218, 0.28);
+      background: #0969da;
+      color: #ffffff;
+    }
+
+    .modal-paper {
+      min-height: 0;
+      overflow: auto;
+      padding: 22px;
+      background:
+        radial-gradient(circle at 12% 8%, rgba(9, 105, 218, 0.12), transparent 28rem),
+        #fffdf7;
+    }
+
+    .modal-paper svg {
+      display: block;
+      max-width: none;
+      border: 1px solid #d8d0c3;
+      border-radius: 24px;
+      background: #fffdf7;
+      box-shadow: 0 24px 72px rgba(52, 50, 46, 0.14);
     }
 
     .toast {
       position: fixed;
       right: 22px;
       bottom: 22px;
-      z-index: 10;
+      z-index: 30;
       max-width: 360px;
       padding: 12px 14px;
       border: 1px solid color-mix(in srgb, var(--canvas-border) 72%, transparent);
@@ -2061,7 +2159,7 @@ function renderHtml(instanceId) {
         <section class="panel-section diagram-actions">
           <h2>Pop-out architecture diagram</h2>
           <p>Open a clean Excalidraw-style board using only the components currently enabled below.</p>
-          <a class="popout-button" href="/excalidraw" target="_blank" rel="noopener">Pop out Excalidraw diagram</a>
+          <button class="popout-button" id="popout-button" type="button">Pop out Excalidraw diagram</button>
         </section>
 
         <section class="panel-section" id="inspector"></section>
@@ -2078,6 +2176,25 @@ function renderHtml(instanceId) {
       </aside>
     </section>
   </main>
+  <div class="excalidraw-modal" id="excalidraw-modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="excalidraw-modal-title">
+      <header class="modal-toolbar">
+        <div>
+          <h2 id="excalidraw-modal-title">Orka Architecture Diagram</h2>
+          <p id="excalidraw-modal-meta">Drawing selected components...</p>
+        </div>
+        <div class="modal-actions">
+          <a class="modal-button" href="/excalidraw" target="_self">Open full page</a>
+          <button class="modal-button" id="modal-refresh-button" type="button">Refresh</button>
+          <button class="modal-button" id="modal-copy-button" type="button">Copy JSON</button>
+          <button class="modal-button" id="modal-print-button" type="button">Print</button>
+          <button class="modal-button primary" id="modal-download-button" type="button">Download</button>
+          <button class="modal-button" id="modal-close-button" type="button">Close</button>
+        </div>
+      </header>
+      <div class="modal-paper" id="excalidraw-modal-paper"><div class="loading">Drawing selected components...</div></div>
+    </div>
+  </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <script>
@@ -2397,6 +2514,87 @@ function renderHtml(instanceId) {
         labels.append(label);
       }
     }
+
+    let latestExcalidraw = null;
+
+    async function loadExcalidrawModal() {
+      const paper = qs("#excalidraw-modal-paper");
+      paper.replaceChildren(el("div", "loading", "Drawing selected components..."));
+      const payload = await request("/api/excalidraw");
+      latestExcalidraw = payload;
+      qs("#excalidraw-modal-meta").textContent = payload.model.presetTitle + " - " + payload.model.enabled + " of " + payload.model.total + " components included";
+      paper.innerHTML = payload.model.svg;
+    }
+
+    function openExcalidrawModal() {
+      const modal = qs("#excalidraw-modal");
+      modal.hidden = false;
+      document.body.style.overflow = "hidden";
+      loadExcalidrawModal().catch(function (error) {
+        qs("#excalidraw-modal-paper").replaceChildren(el("div", "loading", error.message));
+        showToast(error.message);
+      });
+    }
+
+    function closeExcalidrawModal() {
+      qs("#excalidraw-modal").hidden = true;
+      document.body.style.overflow = "";
+    }
+
+    function downloadExcalidraw() {
+      if (!latestExcalidraw) {
+        showToast("Diagram is still loading.");
+        return;
+      }
+      const blob = new Blob([JSON.stringify(latestExcalidraw.file, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "orka-architecture.excalidraw";
+      document.body.append(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showToast("Downloaded orka-architecture.excalidraw");
+    }
+
+    async function copyExcalidrawJson() {
+      if (!latestExcalidraw) {
+        showToast("Diagram is still loading.");
+        return;
+      }
+      await navigator.clipboard.writeText(JSON.stringify(latestExcalidraw.file, null, 2));
+      showToast("Copied Excalidraw JSON");
+    }
+
+    qs("#popout-button").addEventListener("click", openExcalidrawModal);
+    qs("#modal-refresh-button").addEventListener("click", function () {
+      loadExcalidrawModal().then(function () {
+        showToast("Diagram refreshed");
+      }).catch(function (error) {
+        showToast(error.message);
+      });
+    });
+    qs("#modal-download-button").addEventListener("click", downloadExcalidraw);
+    qs("#modal-copy-button").addEventListener("click", function () {
+      copyExcalidrawJson().catch(function (error) {
+        showToast(error.message);
+      });
+    });
+    qs("#modal-print-button").addEventListener("click", function () {
+      window.print();
+    });
+    qs("#modal-close-button").addEventListener("click", closeExcalidrawModal);
+    qs("#excalidraw-modal").addEventListener("click", function (event) {
+      if (event.target === event.currentTarget) {
+        closeExcalidrawModal();
+      }
+    });
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && !qs("#excalidraw-modal").hidden) {
+        closeExcalidrawModal();
+      }
+    });
 
     qs("#reset-button").addEventListener("click", function () {
       reset().catch(function (error) {
