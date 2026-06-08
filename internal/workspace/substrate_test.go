@@ -249,6 +249,75 @@ func TestSubstrateConvergeActorsDeletesDeterministicActorsAboveTarget(t *testing
 	}
 }
 
+func TestSubstratePruneActorsDeletesDeterministicActorsAboveTarget(t *testing.T) {
+	const prefix = "orka-p-test"
+	control := &recordingSubstrateControlClient{
+		actors: []substrateActor{
+			{ActorID: prefix + "-00000", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: prefix + "-00001", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: prefix + "-00002", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: prefix + "-manual", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: "other-pool-00002", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+		},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     http.DefaultClient,
+		routerURL:      "http://router.test",
+		actorDNSSuffix: "actors.test",
+		now:            time.Now,
+	}
+
+	deleted, err := executor.PruneSubstrateActors(t.Context(), prefix, 1)
+	if err != nil {
+		t.Fatalf("PruneSubstrateActors() error = %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("PruneSubstrateActors() deleted=%d, want 2", deleted)
+	}
+	wantDeleted := []string{prefix + "-00002", prefix + "-00001"}
+	if !slices.Equal(control.deletedActorIDs, wantDeleted) {
+		t.Fatalf("deleted actors = %#v, want %#v", control.deletedActorIDs, wantDeleted)
+	}
+	if control.createCalls != 0 {
+		t.Fatalf("CreateActor calls = %d, want 0", control.createCalls)
+	}
+}
+
+func TestSubstrateConvergeActorsReturnsPartialPruneCountOnError(t *testing.T) {
+	const prefix = "orka-p-test"
+	control := &recordingSubstrateControlClient{
+		actors: []substrateActor{
+			{ActorID: prefix + "-00000", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: prefix + "-00001", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: prefix + "-00002", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+		},
+		deleteErrs: []error{
+			nil,
+			NewError("delete actor", ErrorKindUnknown, "delete failed", false, nil),
+		},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     http.DefaultClient,
+		routerURL:      "http://router.test",
+		actorDNSSuffix: "actors.test",
+		now:            time.Now,
+	}
+
+	created, deleted, err := executor.ConvergeSubstrateActors(t.Context(), prefix, 1, TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"})
+	if err == nil {
+		t.Fatal("ConvergeSubstrateActors() error = nil, want delete error")
+	}
+	if created != 0 || deleted != 1 {
+		t.Fatalf("ConvergeSubstrateActors() created=%d deleted=%d, want 0/1", created, deleted)
+	}
+	wantDeleted := []string{prefix + "-00002", prefix + "-00001"}
+	if !slices.Equal(control.deletedActorIDs, wantDeleted) {
+		t.Fatalf("deleted actors = %#v, want %#v", control.deletedActorIDs, wantDeleted)
+	}
+}
+
 func TestSubstrateConvergeActorsRejectsTemplateMismatchBelowTarget(t *testing.T) {
 	const prefix = "orka-p-test"
 	control := &recordingSubstrateControlClient{
@@ -1498,6 +1567,7 @@ type recordingSubstrateControlClient struct {
 	templateName      string
 	templateNamespace string
 	deleted           bool
+	deleteErrs        []error
 	deletedActorIDs   []string
 }
 
@@ -1601,8 +1671,12 @@ func (c *recordingSubstrateControlClient) SuspendActor(ctx context.Context, acto
 }
 
 func (c *recordingSubstrateControlClient) DeleteActor(ctx context.Context, actorID string) error {
+	call := len(c.deletedActorIDs)
 	c.deleted = true
 	c.deletedActorIDs = append(c.deletedActorIDs, actorID)
+	if call < len(c.deleteErrs) && c.deleteErrs[call] != nil {
+		return c.deleteErrs[call]
+	}
 	return nil
 }
 

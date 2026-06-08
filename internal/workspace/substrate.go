@@ -934,9 +934,30 @@ func (e *SubstrateWorkspaceExecutor) ConvergeSubstrateActors(
 		}
 	}
 
+	deleted, err := e.PruneSubstrateActors(ctx, prefix, target)
+	if err != nil {
+		return created, deleted, err
+	}
+	return created, deleted, nil
+}
+
+// PruneSubstrateActors deletes deterministic pool actors at or above target.
+func (e *SubstrateWorkspaceExecutor) PruneSubstrateActors(
+	ctx context.Context,
+	prefix string,
+	target int,
+) (int, error) {
+	if target < 0 {
+		return 0, NewError("prune substrate actors", ErrorKindInvalidArgument, "actor target must be non-negative", false, nil)
+	}
+	prefix = strings.Trim(strings.TrimSpace(prefix), "-")
+	if prefix == "" {
+		return 0, NewError("prune substrate actors", ErrorKindInvalidArgument, "actor prefix is required", false, nil)
+	}
+
 	actors, err := e.control.ListActors(ctx)
 	if err != nil {
-		return created, 0, err
+		return 0, err
 	}
 	actorsByOrdinal := make(map[int]string)
 	ordinals := make([]int, 0)
@@ -959,11 +980,11 @@ func (e *SubstrateWorkspaceExecutor) ConvergeSubstrateActors(
 			if IsKind(err, ErrorKindNotFound) {
 				continue
 			}
-			return created, deleted, err
+			return deleted, err
 		}
 		deleted++
 	}
-	return created, deleted, nil
+	return deleted, nil
 }
 
 func deterministicSubstratePoolActorID(prefix string, ordinal int) string {

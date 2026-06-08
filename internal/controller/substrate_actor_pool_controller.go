@@ -37,6 +37,7 @@ const (
 // SubstratePoolExecutor is the executor surface the pool controller needs.
 type SubstratePoolExecutor interface {
 	ConvergeSubstrateActors(ctx context.Context, prefix string, target int, template workspace.TemplateRef) (int, int, error)
+	PruneSubstrateActors(ctx context.Context, prefix string, target int) (int, error)
 	SubstratePoolTelemetry(ctx context.Context, prefix string, template workspace.TemplateRef, workerPool workspace.TemplateRef) (workspace.Density, error)
 }
 
@@ -101,20 +102,18 @@ func (r *SubstrateActorPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	if pool.Spec.PrecreateActors {
-		blocked, err := r.activeSubstratePoolActorLeaseCount(ctx, pool.Namespace, prefix, int(pool.Spec.TargetActors))
-		if err != nil {
-			return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
-		}
-		if blocked > 0 {
-			return r.updateSubstrateActorPoolStatus(
-				ctx,
-				pool,
-				corev1alpha1.SubstrateActorPoolPhasePending,
-				workspace.Density{},
-				fmt.Sprintf("waiting for %d active actor lease(s) before scaling pool to %d actors", blocked, pool.Spec.TargetActors),
-			)
-		}
+	blocked, err := r.activeSubstratePoolActorLeaseCount(ctx, pool.Namespace, prefix, int(pool.Spec.TargetActors))
+	if err != nil {
+		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
+	}
+	if blocked > 0 {
+		return r.updateSubstrateActorPoolStatus(
+			ctx,
+			pool,
+			corev1alpha1.SubstrateActorPoolPhasePending,
+			workspace.Density{},
+			fmt.Sprintf("waiting for %d active actor lease(s) before scaling pool to %d actors", blocked, pool.Spec.TargetActors),
+		)
 	}
 	executor, err := r.substratePoolExecutor()
 	if err != nil {
@@ -124,6 +123,11 @@ func (r *SubstrateActorPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if pool.Spec.PrecreateActors {
 		if _, _, err := executor.ConvergeSubstrateActors(ctx, prefix, int(pool.Spec.TargetActors), template); err != nil {
 			logger.Error(err, "failed to converge substrate pool actors", "pool", pool.Name)
+			return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
+		}
+	} else {
+		if _, err := executor.PruneSubstrateActors(ctx, prefix, int(pool.Spec.TargetActors)); err != nil {
+			logger.Error(err, "failed to prune substrate pool actors", "pool", pool.Name)
 			return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
 		}
 	}

@@ -240,6 +240,22 @@ wait_actor_absent() {
   done
 }
 
+sha256_hex() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+substrate_actor_pool_prefix() {
+  local namespace="$1"
+  local name="$2"
+  local hash
+  hash="$(printf '%s\0%s' "${namespace}" "${name}" | sha256_hex)"
+  printf 'orka-p-%s' "${hash:0:24}"
+}
+
 wait_resource_absent() {
   local namespace="$1"
   local resource="$2"
@@ -993,9 +1009,9 @@ verify_mcp_tool_boots_actor_once() {
 }
 
 verify_mcp_tool_cleanup() {
-  local actor_id pool_name generation
+  local actor_id pool_name generation pool_prefix pool_actor_0 pool_actor_1
 
-  log "Verifying MCP Tool deletion cleans up actor and lease"
+  log "Verifying MCP Tool deletion and non-precreating pool scale-down prune actors"
   actor_id="$(kubectl -n default get tool mcp-ci -o jsonpath='{.status.actor.actorID}')"
   pool_name="$(kubectl -n default get tool mcp-ci -o jsonpath='{.status.actor.poolRef.name}')"
   if [[ -z "${actor_id}" ]]; then
@@ -1006,6 +1022,9 @@ verify_mcp_tool_cleanup() {
     echo "tool/mcp-ci missing status.actor.poolRef.name before cleanup" >&2
     exit 1
   fi
+  pool_prefix="$(substrate_actor_pool_prefix default "${pool_name}")"
+  pool_actor_0="${pool_prefix}-00000"
+  pool_actor_1="${pool_prefix}-00001"
   kubectl -n default get lease "${actor_id}" >/dev/null
 
   generation="$(
@@ -1023,7 +1042,19 @@ verify_mcp_tool_cleanup() {
   wait_resource_absent default tool mcp-ci 300
   wait_resource_absent default lease "${actor_id}" 300
   wait_actor_absent "${actor_id}" 300
-  log "tool/mcp-ci cleanup removed actor ${actor_id} and its pool lease"
+  wait_jsonpath_equals \
+    "substrateactorpool/${pool_name} non-precreate scale-down readiness" \
+    "kubectl -n default get substrateactorpool ${pool_name} -o jsonpath='{.status.phase}'" \
+    "Ready" \
+    300
+  wait_jsonpath_equals \
+    "substrateactorpool/${pool_name} actor count after non-precreate prune" \
+    "kubectl -n default get substrateactorpool ${pool_name} -o json | jq -r '.status.actorCount // 0'" \
+    "0" \
+    300
+  wait_actor_absent "${pool_actor_0}" 300
+  wait_actor_absent "${pool_actor_1}" 300
+  log "tool/mcp-ci cleanup removed actor ${actor_id}, its pool lease, and scaled down pool actors"
 }
 
 exercise_orka_tasks() {

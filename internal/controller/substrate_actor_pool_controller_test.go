@@ -202,7 +202,7 @@ func TestSubstrateActorPoolReconcilerRejectsOversizedTargetBeforeConverge(t *tes
 	}
 }
 
-func TestSubstrateActorPoolReconcilerAddsFinalizerWithoutPrecreate(t *testing.T) {
+func TestSubstrateActorPoolReconcilerPrunesActorsWithoutPrecreate(t *testing.T) {
 	scheme := newSubstrateActorPoolTestScheme(t)
 	pool := &corev1alpha1.SubstrateActorPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "codex-pool", Namespace: "default"},
@@ -243,12 +243,21 @@ func TestSubstrateActorPoolReconcilerAddsFinalizerWithoutPrecreate(t *testing.T)
 	if executor.convergeCalled {
 		t.Fatal("ConvergeSubstrateActors was called for non-precreating pool")
 	}
+	if executor.pruneCalled {
+		t.Fatal("PruneSubstrateActors was called before finalizer was persisted")
+	}
 
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 	if executor.convergeCalled {
 		t.Fatal("ConvergeSubstrateActors was called for non-precreating pool")
+	}
+	if !executor.pruneCalled {
+		t.Fatal("PruneSubstrateActors was not called for non-precreating pool")
+	}
+	if executor.pruneTarget != 3 {
+		t.Fatalf("prune target = %d, want 3", executor.pruneTarget)
 	}
 }
 
@@ -434,6 +443,8 @@ func TestSubstrateActorPoolReconcilerFinalizerWaitsForActiveToolLease(t *testing
 type recordingSubstratePoolExecutor struct {
 	convergeCalled bool
 	convergeTarget int
+	pruneCalled    bool
+	pruneTarget    int
 	closeCalled    bool
 	density        workspace.Density
 }
@@ -447,6 +458,16 @@ func (e *recordingSubstratePoolExecutor) ConvergeSubstrateActors(
 	e.convergeCalled = true
 	e.convergeTarget = target
 	return target, 0, nil
+}
+
+func (e *recordingSubstratePoolExecutor) PruneSubstrateActors(
+	ctx context.Context,
+	prefix string,
+	target int,
+) (int, error) {
+	e.pruneCalled = true
+	e.pruneTarget = target
+	return 0, nil
 }
 
 func (e *recordingSubstratePoolExecutor) SubstratePoolTelemetry(
