@@ -1,4 +1,8 @@
 import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
+import { writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { CanvasError, createCanvas, joinSession } from "@github/copilot-sdk/extension";
 
 const layers = [
@@ -373,6 +377,7 @@ const presets = [
 
 const defaultPresetId = "full-demo";
 const defaultSelectedComponentId = "api-chat";
+const defaultExcalidrawExportPath = join(homedir(), "orka-architecture.excalidraw");
 const componentById = new Map(components.map((component) => [component.id, component]));
 const layerById = new Map(layers.map((layer) => [layer.id, layer]));
 const presetById = new Map(presets.map((preset) => [preset.id, preset]));
@@ -527,6 +532,35 @@ function elementId(prefix, value) {
     return `${prefix}_${String(value).replaceAll(/[^a-zA-Z0-9]+/g, "_")}`.slice(0, 48);
 }
 
+const flowStyles = {
+    access: { id: "access", label: "Client input", color: "#0969da" },
+    control: { id: "control", label: "Control plane", color: "#fb8500" },
+    execution: { id: "execution", label: "Kubernetes execution", color: "#1f883d" },
+    state: { id: "state", label: "State/results", color: "#8250df" },
+    integration: { id: "integration", label: "External integrations", color: "#bf3989" },
+    security: { id: "security", label: "Auth/secrets", color: "#d1242f" },
+};
+
+function flowStyleForEdge(edge) {
+    const label = edge.label.toLowerCase();
+    if (label.includes("authorize") || label.includes("secret") || label.includes("sa +")) {
+        return flowStyles.security;
+    }
+    if (label.includes("results") || label.includes("status") || label.includes("persist")) {
+        return flowStyles.state;
+    }
+    if (label.includes("create jobs") || label.includes("container task") || label.includes("ai task") || label.includes("agent task") || label.includes("workspace")) {
+        return flowStyles.execution;
+    }
+    if (label.includes("complete") || label.includes("tool") || label.includes("repo") || label.includes("scan") || label.includes("callback")) {
+        return flowStyles.integration;
+    }
+    if (label.includes("ui") || label.includes("rest") || label.includes("apply") || label.includes("watch")) {
+        return flowStyles.access;
+    }
+    return flowStyles.control;
+}
+
 function buildArchitectureLayout(payload) {
     const primaryLayerIds = ["entry", "controller", "kubernetes", "workers"];
     const card = { width: 250, height: 112 };
@@ -590,19 +624,33 @@ function buildArchitectureLayout(payload) {
 
     const layoutEdges = payload.edges
         .filter((edge) => positions.has(edge.from) && positions.has(edge.to))
-        .map((edge) => {
+        .map((edge, index) => {
             const from = positions.get(edge.from);
             const to = positions.get(edge.to);
-            const geometry = edgeGeometry(from, to);
+            const style = flowStyleForEdge(edge);
+            const geometry = edgeGeometry(from, to, index);
             return {
                 ...edge,
+                index: index + 1,
+                code: `F${index + 1}`,
+                flowId: style.id,
+                flowLabel: style.label,
+                color: style.color,
                 ...geometry,
             };
         });
 
+    const legend = Array.from(new Map(layoutEdges.map((edge) => [edge.flowId, {
+        id: edge.flowId,
+        label: edge.flowLabel,
+        color: edge.color,
+    }])).values());
     const frameBottom = frames.reduce((bottom, current) => Math.max(bottom, current.y + current.height), 0);
-    const width = integrationComponents.length ? 1450 : 1040;
-    const height = Math.max(620, frameBottom + 92);
+    const baseWidth = integrationComponents.length ? 1450 : 1040;
+    const legendWidth = legend.length ? 60 + 150 + legend.length * 190 + 120 : baseWidth;
+    const width = Math.max(baseWidth, legendWidth);
+    const legendY = frameBottom + 32;
+    const height = Math.max(620, legendY + 112);
     const preset = presetById.get(payload.state.presetId);
 
     return {
@@ -614,12 +662,14 @@ function buildArchitectureLayout(payload) {
         frames,
         components: positioned,
         edges: layoutEdges,
+        legend,
+        legendY,
         stats: payload.stats,
         empty: positioned.length === 0,
     };
 }
 
-function edgeGeometry(from, to) {
+function edgeGeometry(from, to, index) {
     const fromCenter = {
         x: from.x + from.width / 2,
         y: from.y + from.height / 2,
@@ -628,24 +678,16 @@ function edgeGeometry(from, to) {
         x: to.x + to.width / 2,
         y: to.y + to.height / 2,
     };
+    const laneOffset = ((index % 7) - 3) * 14;
 
     if (to.x > from.x + from.width + 20) {
         const sx = from.x + from.width;
         const sy = fromCenter.y;
         const tx = to.x;
         const ty = toCenter.y;
-        return {
-            sx,
-            sy,
-            tx,
-            ty,
-            cx1: sx + 110,
-            cy1: sy,
-            cx2: tx - 110,
-            cy2: ty,
-            lx: (sx + tx) / 2,
-            ly: (sy + ty) / 2 - 12,
-        };
+        const midX = (sx + tx) / 2 + laneOffset;
+        const points = [{ x: sx, y: sy }, { x: midX, y: sy }, { x: midX, y: ty }, { x: tx, y: ty }];
+        return edgeGeometryResult(points, midX, (sy + ty) / 2);
     }
 
     if (to.x + to.width + 20 < from.x) {
@@ -653,18 +695,9 @@ function edgeGeometry(from, to) {
         const sy = fromCenter.y;
         const tx = to.x + to.width;
         const ty = toCenter.y;
-        return {
-            sx,
-            sy,
-            tx,
-            ty,
-            cx1: sx - 110,
-            cy1: sy,
-            cx2: tx + 110,
-            cy2: ty,
-            lx: (sx + tx) / 2,
-            ly: (sy + ty) / 2 - 12,
-        };
+        const midX = (sx + tx) / 2 + laneOffset;
+        const points = [{ x: sx, y: sy }, { x: midX, y: sy }, { x: midX, y: ty }, { x: tx, y: ty }];
+        return edgeGeometryResult(points, midX, (sy + ty) / 2);
     }
 
     if (toCenter.y >= fromCenter.y) {
@@ -672,38 +705,39 @@ function edgeGeometry(from, to) {
         const sy = from.y + from.height;
         const tx = toCenter.x;
         const ty = to.y;
-        const distance = Math.max(70, Math.abs(ty - sy) * 0.46);
-        return {
-            sx,
-            sy,
-            tx,
-            ty,
-            cx1: sx,
-            cy1: sy + distance,
-            cx2: tx,
-            cy2: ty - distance,
-            lx: (sx + tx) / 2 + 20,
-            ly: (sy + ty) / 2,
-        };
+        const midY = (sy + ty) / 2 + laneOffset;
+        const points = [{ x: sx, y: sy }, { x: sx, y: midY }, { x: tx, y: midY }, { x: tx, y: ty }];
+        return edgeGeometryResult(points, (sx + tx) / 2 + 20, midY);
     }
 
     const sx = fromCenter.x;
     const sy = from.y;
     const tx = toCenter.x;
     const ty = to.y + to.height;
-    const distance = Math.max(70, Math.abs(ty - sy) * 0.46);
+    const midY = (sy + ty) / 2 - laneOffset;
+    const points = [{ x: sx, y: sy }, { x: sx, y: midY }, { x: tx, y: midY }, { x: tx, y: ty }];
+    return edgeGeometryResult(points, (sx + tx) / 2 + 20, midY);
+}
+
+function edgeGeometryResult(points, lx, ly) {
+    const first = points[0];
+    const last = points[points.length - 1];
     return {
-        sx,
-        sy,
-        tx,
-        ty,
-        cx1: sx,
-        cy1: sy - distance,
-        cx2: tx,
-        cy2: ty + distance,
-        lx: (sx + tx) / 2 + 20,
-        ly: (sy + ty) / 2,
+        sx: first.x,
+        sy: first.y,
+        tx: last.x,
+        ty: last.y,
+        lx,
+        ly,
+        points,
+        path: pathFromPoints(points),
     };
+}
+
+function pathFromPoints(points) {
+    return points
+        .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
+        .join(" ");
 }
 
 function svgText(value, x, y, options = {}) {
@@ -738,13 +772,40 @@ function renderArchitectureSvg(layout) {
 
     const edgesSvg = layout.edges
         .map((edge) => {
-            const path = `M ${edge.sx} ${edge.sy} C ${edge.cx1} ${edge.cy1}, ${edge.cx2} ${edge.cy2}, ${edge.tx} ${edge.ty}`;
+            const labelWidth = Math.max(120, Math.min(210, 34 + edge.label.length * 7));
+            const labelX = edge.lx + 18;
+            const labelY = edge.ly - 17;
             return `<g>
-  <path class="rough-edge" d="${path}" marker-end="url(#arrowhead)"/>
-  <text class="edge-text" x="${edge.lx}" y="${edge.ly}">${escapeHtml(edge.label)}</text>
+  <path class="edge-halo" d="${edge.path}"/>
+  <path class="flow-edge" d="${edge.path}" stroke="${edge.color}" marker-end="url(#arrowhead-${edge.flowId})"/>
+  <circle class="endpoint-dot" cx="${edge.sx}" cy="${edge.sy}" r="5" stroke="${edge.color}"/>
+  <circle class="edge-number-dot" cx="${edge.lx}" cy="${edge.ly}" r="14" fill="${edge.color}"/>
+  <text class="edge-number" x="${edge.lx}" y="${edge.ly + 4}" text-anchor="middle">${escapeHtml(edge.code)}</text>
+  <rect class="edge-label-box" x="${labelX}" y="${labelY}" width="${labelWidth}" height="34" rx="17" stroke="${edge.color}"/>
+  <text class="edge-text" x="${labelX + 14}" y="${edge.ly + 5}">${escapeHtml(edge.label)}</text>
 </g>`;
         })
         .join("");
+
+    const markerDefs = layout.legend
+        .map((item) => `<marker id="arrowhead-${item.id}" markerWidth="18" markerHeight="18" refX="15" refY="9" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 18 9 L 0 18 z" fill="${item.color}"/>
+    </marker>`)
+        .join("");
+
+    const legendSvg = layout.legend.length
+        ? `<g class="flow-legend" transform="translate(60 ${layout.legendY})">
+  <rect class="legend-box" x="0" y="0" width="${layout.width - 120}" height="72" rx="22"/>
+  <text class="legend-title" x="24" y="29">Flow key</text>
+  ${layout.legend.map((item, index) => {
+        const x = 150 + index * 190;
+        return `<g transform="translate(${x} 20)">
+    <line x1="0" y1="14" x2="42" y2="14" stroke="${item.color}" stroke-width="4" marker-end="url(#arrowhead-${item.id})"/>
+    <text class="legend-text" x="54" y="19">${escapeHtml(item.label)}</text>
+  </g>`;
+    }).join("")}
+</g>`
+        : "";
 
     const componentsSvg = layout.components
         .map((component) => {
@@ -762,9 +823,7 @@ function renderArchitectureSvg(layout) {
 
     return `<svg xmlns="http://www.w3.org/2000/svg" width="${layout.width}" height="${layout.height}" viewBox="0 0 ${layout.width} ${layout.height}" role="img" aria-label="Orka architecture diagram">
   <defs>
-    <marker id="arrowhead" markerWidth="13" markerHeight="13" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
-      <path d="M 0 0 L 12 6 L 0 12 z" fill="#34322e"/>
-    </marker>
+    ${markerDefs}
     <filter id="pencil">
       <feTurbulence type="fractalNoise" baseFrequency="0.018" numOctaves="2" seed="9"/>
       <feDisplacementMap in="SourceGraphic" scale="0.7"/>
@@ -777,8 +836,16 @@ function renderArchitectureSvg(layout) {
     .component-box { fill: #fffdf7; stroke-width: 2.4; filter: url(#pencil); }
     .component-title { fill: #24292f; font-family: "Virgil", "Comic Sans MS", "Segoe Print", cursive; font-size: 17px; font-weight: 700; }
     .component-subtitle { fill: #6f6a60; font-family: Arial, sans-serif; font-size: 12px; }
-    .rough-edge { fill: none; stroke: #34322e; stroke-width: 2.2; stroke-linecap: round; filter: url(#pencil); }
-    .edge-text { fill: #6f6a60; font-family: Arial, sans-serif; font-size: 12px; font-weight: 700; paint-order: stroke; stroke: #fffdf7; stroke-width: 5px; stroke-linejoin: round; }
+    .edge-halo { fill: none; stroke: #fffdf7; stroke-width: 10px; stroke-linecap: round; stroke-linejoin: round; opacity: 0.92; }
+    .flow-edge { fill: none; stroke-width: 4px; stroke-linecap: round; stroke-linejoin: round; filter: drop-shadow(0 3px 4px rgba(52, 50, 46, 0.18)); }
+    .endpoint-dot { fill: #fffdf7; stroke-width: 3px; }
+    .edge-number-dot { filter: drop-shadow(0 2px 4px rgba(52, 50, 46, 0.18)); }
+    .edge-number { fill: #ffffff; font-family: Arial, sans-serif; font-size: 10px; font-weight: 900; }
+    .edge-label-box { fill: rgba(255, 253, 247, 0.94); stroke-width: 2px; }
+    .edge-text { fill: #34322e; font-family: Arial, sans-serif; font-size: 12px; font-weight: 800; }
+    .legend-box { fill: rgba(255, 255, 255, 0.78); stroke: #d8d0c3; stroke-width: 2px; }
+    .legend-title { fill: #34322e; font-family: "Virgil", "Comic Sans MS", "Segoe Print", cursive; font-size: 22px; font-weight: 700; }
+    .legend-text { fill: #34322e; font-family: Arial, sans-serif; font-size: 12px; font-weight: 800; }
   </style>
   <rect width="${layout.width}" height="${layout.height}" rx="0" fill="#fffdf7"/>
   <text x="60" y="48" fill="#24292f" font-family="Virgil, Comic Sans MS, Segoe Print, cursive" font-size="34" font-weight="700">Orka Architecture</text>
@@ -786,6 +853,7 @@ function renderArchitectureSvg(layout) {
   ${framesSvg}
   ${edgesSvg}
   ${componentsSvg}
+  ${legendSvg}
 </svg>`;
 }
 
@@ -858,21 +926,40 @@ function buildExcalidrawFile(layout) {
     }
 
     for (const edge of layout.edges) {
-        const x = Math.min(edge.sx, edge.tx);
-        const y = Math.min(edge.sy, edge.ty);
-        const start = [edge.sx - x, edge.sy - y];
-        const end = [edge.tx - x, edge.ty - y];
+        const minX = Math.min(...edge.points.map((point) => point.x));
+        const minY = Math.min(...edge.points.map((point) => point.y));
+        const maxX = Math.max(...edge.points.map((point) => point.x));
+        const maxY = Math.max(...edge.points.map((point) => point.y));
+        const points = edge.points.map((point) => [point.x - minX, point.y - minY]);
         elements.push({
-            ...excalidrawBase(elementId("edge", `${edge.from}_${edge.to}`), "arrow", x, y, Math.max(1, Math.abs(edge.tx - edge.sx)), Math.max(1, Math.abs(edge.ty - edge.sy)), "#34322e", "transparent"),
+            ...excalidrawBase(elementId("edge", `${edge.from}_${edge.to}`), "arrow", minX, minY, Math.max(1, maxX - minX), Math.max(1, maxY - minY), edge.color, "transparent"),
             roundness: { type: 2 },
-            points: [start, end],
+            strokeWidth: 3,
+            roughness: 0.6,
+            points,
             lastCommittedPoint: null,
             startBinding: null,
             endBinding: null,
             startArrowhead: null,
             endArrowhead: "arrow",
         });
-        elements.push(excalidrawText(elementId("edge_label", `${edge.from}_${edge.to}`), edge.label, edge.lx, edge.ly - 16, 150, 12, "#6f6a60"));
+        elements.push(excalidrawText(elementId("edge_label", `${edge.from}_${edge.to}`), `${edge.code}: ${edge.label}`, edge.lx + 18, edge.ly - 16, 170, 12, edge.color));
+    }
+
+    for (const [index, item] of layout.legend.entries()) {
+        const x = 60 + index * 220;
+        const y = layout.legendY + 24;
+        elements.push({
+            ...excalidrawBase(elementId("legend_line", item.id), "arrow", x, y, 46, 0, item.color, "transparent"),
+            strokeWidth: 3,
+            points: [[0, 0], [46, 0]],
+            lastCommittedPoint: null,
+            startBinding: null,
+            endBinding: null,
+            startArrowhead: null,
+            endArrowhead: "arrow",
+        });
+        elements.push(excalidrawText(elementId("legend_text", item.id), item.label, x + 58, y - 10, 150, 13, "#34322e"));
     }
 
     return {
@@ -913,10 +1000,27 @@ function buildExcalidrawResponse(entry) {
             total: layout.stats.total,
             width: layout.width,
             height: layout.height,
+            saveToken: entry.saveToken,
             svg: renderArchitectureSvg(layout),
         },
         file: buildExcalidrawFile(layout),
     };
+}
+
+async function saveExcalidrawFile(entry) {
+    const response = buildExcalidrawResponse(entry);
+    await writeFile(defaultExcalidrawExportPath, `${JSON.stringify(response.file, null, 2)}\n`, "utf8");
+    return {
+        path: defaultExcalidrawExportPath,
+        bytes: Buffer.byteLength(JSON.stringify(response.file, null, 2), "utf8") + 1,
+        file: response.file,
+    };
+}
+
+function requireSaveToken(req, entry) {
+    if (req.headers["x-orka-architecture-token"] !== entry.saveToken) {
+        throw new CanvasError("save_token_invalid", "Refresh the diagram and try saving again.");
+    }
 }
 
 function sendJson(res, status, payload) {
@@ -985,6 +1089,12 @@ async function handleRequest(req, res, entry) {
         return;
     }
 
+    if (method === "POST" && url.pathname === "/api/save-excalidraw") {
+        requireSaveToken(req, entry);
+        sendJson(res, 200, await saveExcalidrawFile(entry));
+        return;
+    }
+
     if (method === "POST" && url.pathname === "/api/component") {
         const input = await readJson(req);
         setComponentEnabled(entry.state, input.componentId, input.enabled);
@@ -1025,6 +1135,7 @@ function handleError(res, error) {
 async function startServer(instanceId, input) {
     const entry = {
         instanceId,
+        saveToken: randomUUID(),
         server: undefined,
         state: createInitialState(),
         url: undefined,
@@ -1225,6 +1336,7 @@ function renderExcalidrawHtml(instanceId) {
     <div class="actions">
       <a class="button" href="/" target="_self">Back to selector</a>
       <button type="button" id="refresh-button">Refresh from selector</button>
+      <button type="button" id="save-local-button">Save local file</button>
       <button type="button" id="copy-button">Copy .excalidraw JSON</button>
       <button type="button" id="print-button">Print / save PDF</button>
       <button class="primary" type="button" id="download-button">Download .excalidraw</button>
@@ -1280,6 +1392,23 @@ function renderExcalidrawHtml(instanceId) {
       showToast("Downloaded orka-architecture.excalidraw");
     }
 
+    async function saveExcalidrawLocal() {
+      if (!latest) {
+        showToast("Diagram is still loading.");
+        return;
+      }
+      const response = await fetch("/api/save-excalidraw", {
+        method: "POST",
+        headers: { "X-Orka-Architecture-Token": latest.model.saveToken },
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        const message = payload && payload.error ? payload.error.message : "Failed to save file";
+        throw new Error(message);
+      }
+      showToast("Saved to " + payload.path);
+    }
+
     async function copyExcalidrawJson() {
       if (!latest) {
         showToast("Diagram is still loading.");
@@ -1298,6 +1427,11 @@ function renderExcalidrawHtml(instanceId) {
     });
 
     qs("#download-button").addEventListener("click", downloadExcalidraw);
+    qs("#save-local-button").addEventListener("click", function () {
+      saveExcalidrawLocal().catch(function (error) {
+        showToast(error.message);
+      });
+    });
     qs("#copy-button").addEventListener("click", function () {
       copyExcalidrawJson().catch(function (error) {
         showToast(error.message);
@@ -2186,6 +2320,7 @@ function renderHtml(instanceId) {
         <div class="modal-actions">
           <a class="modal-button" href="/excalidraw" target="_self">Open full page</a>
           <button class="modal-button" id="modal-refresh-button" type="button">Refresh</button>
+          <button class="modal-button" id="modal-save-local-button" type="button">Save local file</button>
           <button class="modal-button" id="modal-copy-button" type="button">Copy JSON</button>
           <button class="modal-button" id="modal-print-button" type="button">Print</button>
           <button class="modal-button primary" id="modal-download-button" type="button">Download</button>
@@ -2558,6 +2693,18 @@ function renderHtml(instanceId) {
       showToast("Downloaded orka-architecture.excalidraw");
     }
 
+    async function saveExcalidrawLocal() {
+      if (!latestExcalidraw) {
+        showToast("Diagram is still loading.");
+        return;
+      }
+      const payload = await request("/api/save-excalidraw", {
+        method: "POST",
+        headers: { "X-Orka-Architecture-Token": latestExcalidraw.model.saveToken },
+      });
+      showToast("Saved to " + payload.path);
+    }
+
     async function copyExcalidrawJson() {
       if (!latestExcalidraw) {
         showToast("Diagram is still loading.");
@@ -2576,6 +2723,11 @@ function renderHtml(instanceId) {
       });
     });
     qs("#modal-download-button").addEventListener("click", downloadExcalidraw);
+    qs("#modal-save-local-button").addEventListener("click", function () {
+      saveExcalidrawLocal().catch(function (error) {
+        showToast(error.message);
+      });
+    });
     qs("#modal-copy-button").addEventListener("click", function () {
       copyExcalidrawJson().catch(function (error) {
         showToast(error.message);
@@ -2699,6 +2851,11 @@ await joinSession({
                     name: "get_excalidraw_export",
                     description: "Return an Excalidraw-compatible JSON export for the currently enabled components.",
                     handler: async (ctx) => buildExcalidrawResponse(requireEntry(ctx.instanceId)).file,
+                },
+                {
+                    name: "save_excalidraw_file",
+                    description: `Save the currently enabled components to ${defaultExcalidrawExportPath}.`,
+                    handler: async (ctx) => saveExcalidrawFile(requireEntry(ctx.instanceId)),
                 },
                 {
                     name: "reset_architecture",
