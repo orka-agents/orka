@@ -22,14 +22,14 @@ describe('httpExecutionSchema', () => {
     expect(httpExecutionSchema.parse(data)).toEqual(data)
   })
 
-  it('parses with only required fields', () => {
+  it('parses with only URL', () => {
     const data = { url: 'https://api.example.com' }
     expect(httpExecutionSchema.parse(data)).toEqual(data)
   })
 
-  it('rejects missing url', () => {
-    expect(() => httpExecutionSchema.parse({})).toThrow()
-    expect(() => httpExecutionSchema.parse({ method: 'GET' })).toThrow()
+  it('parses auth-only HTTP config for MCP transport auth', () => {
+    const data = { authSecretRef: { name: 'mcp-auth', key: 'token' }, authInject: 'header' }
+    expect(httpExecutionSchema.parse(data)).toEqual(data)
   })
 
   it('rejects wrong types', () => {
@@ -77,12 +77,30 @@ describe('toolSpecSchema', () => {
     expect(toolSpecSchema.parse(data)).toEqual(data)
   })
 
+  it('parses MCP tools with HTTP transport auth but no URL', () => {
+    const data = {
+      description: 'MCP actor tool',
+      http: { authSecretRef: { name: 'mcp-auth', key: 'token' } },
+      mcp: {
+        path: '/mcp',
+        substrateActor: {
+          templateRef: { name: 'mcp-template', namespace: 'ate-demo' },
+        },
+      },
+    }
+    expect(toolSpecSchema.parse(data)).toEqual(data)
+  })
+
   it('rejects missing description', () => {
     expect(() => toolSpecSchema.parse({ http: { url: 'http://x' } })).toThrow()
   })
 
   it('rejects missing backend configuration', () => {
     expect(() => toolSpecSchema.parse({ description: 'A tool' })).toThrow()
+  })
+
+  it('rejects plain HTTP tools without URL', () => {
+    expect(() => toolSpecSchema.parse({ description: 'A tool', http: { method: 'GET' } })).toThrow()
   })
 
   it('rejects MCP tools without substrate actor backing', () => {

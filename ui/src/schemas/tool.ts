@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { conditionSchema } from './task'
 
 export const httpExecutionSchema = z.object({
-  url: z.string(),
+  url: z.string().optional(),
   method: z.string().optional(),
   headers: z.record(z.string()).optional(),
   timeout: z.string().optional(),
@@ -38,6 +38,9 @@ export const toolSpecSchema = z.object({
 }).refine((spec) => spec.http || spec.mcp?.substrateActor, {
   message: 'http or mcp.substrateActor is required',
   path: ['http'],
+}).refine((spec) => spec.mcp?.substrateActor || !spec.http || Boolean(spec.http.url), {
+  message: 'http.url is required unless mcp.substrateActor is set',
+  path: ['http', 'url'],
 })
 
 export const toolStatusSchema = z.object({

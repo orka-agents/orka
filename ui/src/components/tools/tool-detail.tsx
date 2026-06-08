@@ -49,7 +49,7 @@ export function ToolDetail({ toolName }: { toolName: string }) {
             <Card>
               <CardHeader><CardTitle>HTTP Configuration</CardTitle></CardHeader>
               <CardContent className="space-y-2 text-sm">
-                <div><span className="text-muted-foreground">URL:</span> {httpConfig.url}</div>
+                {httpConfig.url && <div><span className="text-muted-foreground">URL:</span> {httpConfig.url}</div>}
                 <div><span className="text-muted-foreground">Method:</span> {httpConfig.method ?? 'POST'}</div>
                 {httpConfig.timeout && <div><span className="text-muted-foreground">Timeout:</span> {httpConfig.timeout}</div>}
                 {httpConfig.authInject && <div><span className="text-muted-foreground">Auth Inject:</span> {httpConfig.authInject}</div>}
