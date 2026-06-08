@@ -35,6 +35,10 @@ type RepositoryScanSpec struct {
 	// +optional
 	Branch string `json:"branch,omitempty"`
 
+	// Ref is a specific git ref, tag, or commit SHA to checkout for scan tasks.
+	// +optional
+	Ref string `json:"ref,omitempty"`
+
 	// SubPath scopes scanning to a subdirectory in a monorepo.
 	// +optional
 	SubPath string `json:"subPath,omitempty"`

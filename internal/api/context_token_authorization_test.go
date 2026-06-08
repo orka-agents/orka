@@ -42,6 +42,27 @@ func TestContextTokenTaskCreateFailures(t *testing.T) {
 		require.Empty(t, failures)
 	})
 
+	t.Run("allows matching ref-only workspace with branch and ref context", func(t *testing.T) {
+		token := &ContextToken{
+			Scopes: []string{ContextTokenScopeTaskCreate},
+			TransactionContext: map[string]any{
+				"namespace": "team-a",
+				"taskType":  string(corev1alpha1.TaskTypeAgent),
+				"agent":     "team-a/codex",
+				"provider":  "team-a/openai-prod",
+				"model":     "gpt-4o",
+				"repo":      "https://github.com/example/repo",
+				"branch":    "main",
+				"ref":       "abc123",
+			},
+		}
+		authzCtx := testTaskCreateAuthorizationContext()
+		authzCtx.Request.AgentRuntime.Workspace.Branch = ""
+
+		failures := contextTokenTaskCreateFailures(token, cfg, authzCtx)
+		require.Empty(t, failures)
+	})
+
 	t.Run("reports scope and context mismatches", func(t *testing.T) {
 		token := &ContextToken{
 			Scopes: []string{ContextTokenScopeTaskGet},

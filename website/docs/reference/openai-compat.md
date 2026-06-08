@@ -133,8 +133,7 @@ curl -X POST https://orka.example.com/openai/v1/chat/completions \
   -d '{
     "model": "anthropic/claude-sonnet-4-20250514",
     "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 1024,
-    "stream": true
+    "max_tokens": 1024
   }'
 ```
 
@@ -165,15 +164,15 @@ curl https://orka.example.com/openai/v1/models \
 ## Architecture
 
 ```
-┌──────────────┐     ┌─────────────────────────┐     ┌──────────────────┐
-│  Continue    │────▶│  Orka API Server       │────▶│  Anthropic API   │
-│  (or any     │     │  /openai/v1/chat/completions│     │  OpenAI API      │
-│   OAI client)│◀────│                          │◀────│  Azure OpenAI    │
-└──────────────┘     │  Provider resolution:    │     └──────────────────┘
-                     │  - Provider CRD lookup   │
-                     │  - Secret-based API keys │
-                     │  - Model routing         │
-                     └─────────────────────────┘
+┌─────────────┐     ┌─────────────────────────────┐     ┌───────────────┐
+│ Continue    │────▶│ Orka API Server             │────▶│ Anthropic API │
+│ (or any     │◀────│ /openai/v1/chat/completions │◀────│ OpenAI API    │
+│ OAI client) │     │                             │     │ Azure OpenAI  │
+└─────────────┘     │ Provider resolution:        │     └───────────────┘
+                    │ - Provider CRD lookup       │
+                    │ - Secret-based API keys     │
+                    │ - Model routing             │
+                    └─────────────────────────────┘
 ```
 
 Orka transparently proxies requests to the backend LLM provider. The client manages its own tool execution loop — Orka simply forwards the messages and tool definitions to the LLM and returns the response.

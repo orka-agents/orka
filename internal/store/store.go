@@ -110,6 +110,11 @@ type SecurityStore interface {
 	GetScanRun(ctx context.Context, namespace, id string) (*ScanRun, error)
 	ListScanRuns(ctx context.Context, namespace, repositoryScan string, limit int, cursor string) ([]ScanRun, string, error)
 
+	UpsertReviewSlice(ctx context.Context, slice *ReviewSlice) error
+	ListReviewSlices(ctx context.Context, filter ReviewSliceFilter) ([]ReviewSlice, string, error)
+	GetReviewSlice(ctx context.Context, namespace, repositoryScan, id string) (*ReviewSlice, error)
+	UpdateReviewSliceStatus(ctx context.Context, namespace, repositoryScan, id, lastScanRunID, status string) error
+
 	GetLatestThreatModel(ctx context.Context, namespace, repositoryScan string) (*ThreatModel, error)
 	SaveThreatModel(ctx context.Context, model *ThreatModel) error
 
@@ -122,6 +127,9 @@ type SecurityStore interface {
 	CreatePatchProposal(ctx context.Context, proposal *PatchProposal) error
 	UpdatePatchProposal(ctx context.Context, proposal *PatchProposal) error
 	ListPatchProposals(ctx context.Context, namespace, findingID string) ([]PatchProposal, error)
+
+	CreateDroppedFinding(ctx context.Context, dropped *DroppedFinding) error
+	ListDroppedFindings(ctx context.Context, filter DroppedFindingFilter) ([]DroppedFinding, string, error)
 }
 
 // RepositoryMonitorStore handles durable repository monitor state.

@@ -61,6 +61,11 @@ export const scanRunSchema = z.object({
   baseCommit: z.string().optional(),
   headCommit: z.string().optional(),
   commitCount: z.number().optional(),
+  sliceCount: z.number().optional(),
+  reviewedSliceCount: z.number().optional(),
+  skippedSliceCount: z.number().optional(),
+  acceptedFindings: z.number().optional(),
+  droppedFindings: z.number().optional(),
   summary: z.string().optional(),
   errorMessage: z.string().optional(),
 })
@@ -81,6 +86,11 @@ export const findingEvidenceRefSchema = z.object({
   taskName: z.string().optional(),
   name: z.string().optional(),
   label: z.string().optional(),
+  path: z.string().optional(),
+  startLine: z.number().optional(),
+  endLine: z.number().optional(),
+  symbol: z.string().optional(),
+  quote: z.string().optional(),
 })
 
 export const securityFindingSchema = z.object({
@@ -89,19 +99,26 @@ export const securityFindingSchema = z.object({
   repositoryScan: z.string(),
   scanRunID: z.string().optional(),
   scanTaskName: z.string().optional(),
+  sliceID: z.string().optional(),
   fingerprint: z.string(),
   title: z.string(),
+  category: z.string().optional(),
   summary: z.string(),
   severity: z.string(),
   confidence: z.string(),
+  triage: z.string().optional(),
   validationStatus: z.string(),
   state: z.string(),
   filePath: z.string().optional(),
   line: z.number().optional(),
   commitSHA: z.string().optional(),
   rootCause: z.string().optional(),
+  reproduction: z.string().optional(),
   remediation: z.string().optional(),
   suggestedAction: z.string().optional(),
+  whyTestsDoNotAlreadyCoverThis: z.string().optional(),
+  suggestedRegressionTest: z.string().optional(),
+  minimumFixScope: z.string().optional(),
   evidence: z.array(findingEvidenceRefSchema).optional(),
   validationJSON: z.string().optional(),
   patchProposalID: z.string().optional(),
@@ -109,6 +126,54 @@ export const securityFindingSchema = z.object({
   prURL: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
+})
+
+export const reviewSliceFileSchema = z.object({
+  path: z.string(),
+  reason: z.string().optional(),
+  symbol: z.string().optional(),
+  route: z.string().optional(),
+  command: z.string().optional(),
+})
+
+export const reviewSliceTestSchema = z.object({
+  path: z.string(),
+  command: z.string().optional(),
+})
+
+export const reviewSliceSchema = z.object({
+  schemaVersion: z.number().optional(),
+  id: z.string(),
+  namespace: z.string().optional(),
+  repositoryScan: z.string(),
+  source: z.string(),
+  title: z.string(),
+  summary: z.string().optional(),
+  kind: z.string(),
+  entrypoints: z.array(reviewSliceFileSchema).optional(),
+  ownedFiles: z.array(reviewSliceFileSchema).optional(),
+  contextFiles: z.array(reviewSliceFileSchema).optional(),
+  tests: z.array(reviewSliceTestSchema).optional(),
+  tags: z.array(z.string()).optional(),
+  trustBoundaries: z.array(z.string()).optional(),
+  confidence: z.string(),
+  status: z.string(),
+  lastScanRunID: z.string().optional(),
+  lastReviewedAt: z.string().optional(),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+})
+
+export const droppedFindingSchema = z.object({
+  id: z.string(),
+  namespace: z.string(),
+  repositoryScan: z.string(),
+  scanRunID: z.string(),
+  taskName: z.string(),
+  sliceID: z.string().optional(),
+  reason: z.string(),
+  sampleJSON: z.string().optional(),
+  createdAt: z.string(),
 })
 
 export const patchProposalSchema = z.object({
@@ -132,3 +197,5 @@ export type ScanRun = z.infer<typeof scanRunSchema>
 export type ThreatModel = z.infer<typeof threatModelSchema>
 export type SecurityFinding = z.infer<typeof securityFindingSchema>
 export type PatchProposal = z.infer<typeof patchProposalSchema>
+export type ReviewSlice = z.infer<typeof reviewSliceSchema>
+export type DroppedFinding = z.infer<typeof droppedFindingSchema>

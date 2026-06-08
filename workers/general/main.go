@@ -9,20 +9,27 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
+	"github.com/sozercan/orka/internal/security"
+	securityslices "github.com/sozercan/orka/internal/security/slices"
 	"github.com/sozercan/orka/internal/workerenv"
 
 	"github.com/sozercan/orka/workers/common"
 )
 
-const workspaceDir = "/workspace"
+var (
+	workspaceDir                  = "/workspace"
+	setupGitCredentialsForGeneral = common.SetupGitCredentials
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -37,6 +44,9 @@ func run() error {
 
 	if len(os.Args) > 1 && os.Args[1] == "--prepare-workspace-only" {
 		return prepareWorkspace(ctx)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--security-mapper" {
+		return runSecurityMapper(ctx)
 	}
 
 	baseEnv := workerenv.ParseBaseEnv(os.Getenv)
@@ -106,11 +116,23 @@ func run() error {
 }
 
 func prepareWorkspaceIfConfigured(ctx context.Context) (string, error) {
-	if os.Getenv(workerenv.GitRepo) == "" {
+	cfg, err := common.LoadWorkspaceConfig()
+	if err != nil {
+		return "", err
+	}
+	if cfg.GitRepo == "" {
 		return "", nil
 	}
+	if cfg.SubPath != os.Getenv(workerenv.WorkspaceSubpath) {
+		if err := os.Setenv(workerenv.WorkspaceSubpath, cfg.SubPath); err != nil {
+			return "", err
+		}
+	}
+	setupGitCredentialsForGeneral()
 	if _, err := os.Stat(filepath.Join(workspaceDir, ".git")); err == nil {
 		return workspaceRoot(), nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("stat workspace: %w", err)
 	}
 	if err := prepareWorkspace(ctx); err != nil {
 		return "", err
@@ -127,7 +149,7 @@ func prepareWorkspace(ctx context.Context) error {
 		return nil
 	}
 
-	common.SetupGitCredentials()
+	setupGitCredentialsForGeneral()
 	if _, err := os.Stat(filepath.Join(workspaceDir, ".git")); os.IsNotExist(err) {
 		if err := common.CloneRepo(ctx, cfg, workspaceDir); err != nil {
 			return err
@@ -164,4 +186,204 @@ func submitResult(workDir, output string) error {
 		return err
 	}
 	return common.UploadArtifacts()
+}
+
+func runSecurityMapper(ctx context.Context) error {
+	workDir, err := prepareWorkspaceIfConfigured(ctx)
+	if err != nil {
+		return err
+	}
+	if workDir == "" {
+		return fmt.Errorf("security mapper requires a git workspace")
+	}
+	repositoryScan := strings.TrimSpace(os.Getenv(security.EnvRepositoryScanName))
+	slices, err := securityslices.MapRepository(workDir, securityslices.MapperOptions{
+		RepositoryScan: repositoryScan,
+		SubPath:        os.Getenv(workerenv.WorkspaceSubpath),
+	})
+	if err != nil {
+		return err
+	}
+	baseCommit := strings.TrimSpace(os.Getenv(security.EnvScanBaseCommit))
+	headCommit := strings.TrimSpace(os.Getenv(security.EnvScanHeadCommit))
+	changedFilesComputed, changedFiles, changedFilesError, resolvedHeadCommit :=
+		changedFilesForSecurityScan(ctx, workDir, baseCommit, headCommit)
+	if headCommit == "" {
+		headCommit = resolvedHeadCommit
+	}
+	artifact := security.ReviewSlicesArtifact{
+		SchemaVersion:        security.SchemaVersionReviewSlices,
+		BaseCommit:           baseCommit,
+		HeadCommit:           headCommit,
+		ChangedFilesComputed: changedFilesComputed,
+		ChangedFiles:         changedFiles,
+		ChangedFilesError:    changedFilesError,
+		Slices:               slices,
+	}
+	data, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := common.WriteArtifactFile(security.ArtifactSlices, data); err != nil {
+		return err
+	}
+	output := fmt.Sprintf("security mapper wrote %d review slices\n", len(slices))
+	fmt.Print(output)
+	return submitResult(workDir, output)
+}
+
+func changedFilesForSecurityScan(
+	ctx context.Context,
+	workDir, baseCommit, headCommit string,
+) (bool, []string, string, string) {
+	if headCommit == "" {
+		out, err := exec.CommandContext(ctx, "git", "-C", workDir, "rev-parse", "HEAD").CombinedOutput()
+		if err == nil {
+			headCommit = strings.TrimSpace(string(out))
+		}
+	}
+	if baseCommit == "" || headCommit == "" {
+		return false, nil, "", headCommit
+	}
+	for _, commit := range []string{baseCommit, headCommit} {
+		if !safeGitCommitID(commit) {
+			return false, nil, fmt.Sprintf("commit %q is not a hex SHA", commit), headCommit
+		}
+		if err := ensureCommitAvailableForDiff(ctx, workDir, commit); err != nil {
+			return false, nil, err.Error(), headCommit
+		}
+	}
+
+	deletedOut, err := exec.CommandContext(ctx,
+		"git", "-C", workDir,
+		"diff", "--name-only", "--diff-filter=D", "--relative",
+		baseCommit, headCommit, "--", ".",
+	).CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(deletedOut))
+		if message == "" {
+			message = err.Error()
+		}
+		return false, nil, message, headCommit
+	}
+	deletedFiles := safeChangedFileLines(deletedOut)
+	if len(deletedFiles) > 0 {
+		message := fmt.Sprintf(
+			"changed-file selection disabled because deleted files require full review: %s",
+			strings.Join(deletedFiles, ", "),
+		)
+		return false, nil, message, headCommit
+	}
+
+	out, err := exec.CommandContext(ctx,
+		"git", "-C", workDir,
+		"diff", "--name-only", "--diff-filter=ACMRT", "--relative",
+		baseCommit, headCommit, "--", ".",
+	).CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(out))
+		if message == "" {
+			message = err.Error()
+		}
+		return false, nil, message, headCommit
+	}
+
+	files := safeChangedFileLines(out)
+	return true, files, "", headCommit
+}
+
+func safeChangedFileLines(out []byte) []string {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	seen := make(map[string]struct{}, len(lines))
+	files := make([]string, 0, len(lines))
+	for _, line := range lines {
+		file := strings.TrimSpace(strings.ReplaceAll(line, "\\", "/"))
+		if file == "" || !security.SafeRepoPath(file) {
+			continue
+		}
+		if _, ok := seen[file]; ok {
+			continue
+		}
+		seen[file] = struct{}{}
+		files = append(files, file)
+	}
+	sort.Strings(files)
+	return files
+}
+
+func ensureCommitAvailableForDiff(ctx context.Context, workDir, commit string) error {
+	if !safeGitCommitID(commit) {
+		return fmt.Errorf("commit %q is not a hex SHA", commit)
+	}
+	if gitCommitAvailable(ctx, workDir, commit) {
+		return nil
+	}
+
+	out, err := exec.CommandContext(
+		ctx,
+		"git",
+		"-C",
+		workDir,
+		"fetch",
+		"--no-tags",
+		"--depth=1",
+		"origin",
+		commit,
+	).CombinedOutput()
+	if err == nil && gitCommitAvailable(ctx, workDir, commit) {
+		return nil
+	}
+	firstMessage := strings.TrimSpace(string(out))
+	if firstMessage == "" && err != nil {
+		firstMessage = err.Error()
+	}
+
+	args := []string{"fetch", "--no-tags", "origin"}
+	if isShallowGitRepository(ctx, workDir) {
+		args = []string{"fetch", "--no-tags", "--unshallow", "origin"}
+	}
+	out, err = exec.CommandContext(ctx, "git", append([]string{"-C", workDir}, args...)...).CombinedOutput()
+	if err == nil && gitCommitAvailable(ctx, workDir, commit) {
+		return nil
+	}
+	message := strings.TrimSpace(string(out))
+	if message == "" && err != nil {
+		message = err.Error()
+	}
+	if firstMessage != "" && message != "" {
+		message = firstMessage + "; " + message
+	} else if message == "" {
+		message = firstMessage
+	}
+	if message == "" {
+		message = "commit is not available after fetching origin"
+	}
+	return fmt.Errorf("fetch commit for incremental diff: %s", message)
+}
+
+func gitCommitAvailable(ctx context.Context, workDir, commit string) bool {
+	if strings.TrimSpace(commit) == "" {
+		return false
+	}
+	err := exec.CommandContext(ctx, "git", "-C", workDir, "cat-file", "-e", commit+"^{commit}").Run()
+	return err == nil
+}
+
+func safeGitCommitID(commit string) bool {
+	commit = strings.TrimSpace(commit)
+	if len(commit) < 7 || len(commit) > 64 {
+		return false
+	}
+	for _, ch := range commit {
+		if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isShallowGitRepository(ctx context.Context, workDir string) bool {
+	out, err := exec.CommandContext(ctx, "git", "-C", workDir, "rev-parse", "--is-shallow-repository").CombinedOutput()
+	return err == nil && strings.TrimSpace(string(out)) == "true"
 }

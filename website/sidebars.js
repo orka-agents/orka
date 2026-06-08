@@ -7,6 +7,7 @@ const sidebars = {
     {
       type: 'category',
       label: 'Core Concepts',
+      collapsed: false,
       items: [
         'concepts/architecture',
         'concepts/configuration',
@@ -21,6 +22,7 @@ const sidebars = {
     {
       type: 'category',
       label: 'Guides',
+      collapsed: false,
       items: [
         'guides/chat',
         'guides/multi-agent-coordination',
@@ -35,6 +37,7 @@ const sidebars = {
     {
       type: 'category',
       label: 'API Reference',
+      collapsed: false,
       items: [
         'reference/api-reference',
         'reference/openai-compat',
@@ -44,7 +47,12 @@ const sidebars = {
     {
       type: 'category',
       label: 'Development',
-      items: ['development/development', 'development/testing'],
+      collapsed: false,
+      items: [
+        'development/development',
+        'development/testing',
+        'development/security-scanning-design',
+      ],
     },
   ],
 };

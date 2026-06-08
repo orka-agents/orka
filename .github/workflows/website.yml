@@ -5,10 +5,12 @@ on:
     branches:
       - main
     paths:
+      - "_typos.toml"
       - "website/**"
       - ".github/workflows/website.yml"
   pull_request:
     paths:
+      - "_typos.toml"
       - "website/**"
       - ".github/workflows/website.yml"
   workflow_dispatch:
