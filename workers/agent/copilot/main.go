@@ -638,7 +638,7 @@ func validArtifactCandidate(filename string, data []byte) bool {
 			return artifact.SchemaVersion == security.SchemaVersionPatchSummary &&
 				strings.TrimSpace(artifact.FindingID) == match[1]
 		}
-		return true
+		return false
 	}
 }
 

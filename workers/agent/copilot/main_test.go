@@ -611,6 +611,9 @@ func TestValidArtifactCandidateRejectsInvalidPatchArtifacts(t *testing.T) {
 	)) {
 		t.Fatal("validArtifactCandidate() = true, want false for mismatched patch summary findingId")
 	}
+	if validArtifactCandidate("security-notes.md", []byte("notes")) {
+		t.Fatal("validArtifactCandidate() = true, want false for unknown artifact filename")
+	}
 }
 
 func TestExecuteCopilot_NoGitHubToken(t *testing.T) {
