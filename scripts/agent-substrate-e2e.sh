@@ -262,18 +262,33 @@ task_jsonpath() {
 
 assert_task_workspace_teleport_visibility() {
   local task="$1"
-  local worker_pool worker_pod resume_latency
+  local worker_pool worker_pod resume_latency worker_count actor_count actors_per_worker
 
   worker_pool="$(task_jsonpath "${task}" "{.status.executionWorkspace.placement.workerPool}")"
   worker_pod="$(task_jsonpath "${task}" "{.status.executionWorkspace.placement.workerPodName}")"
   resume_latency="$(task_jsonpath "${task}" "{.status.executionWorkspace.resumeLatency}")"
+  worker_count="$(task_jsonpath "${task}" "{.status.executionWorkspace.density.workerCount}")"
+  actor_count="$(task_jsonpath "${task}" "{.status.executionWorkspace.density.actorCount}")"
+  actors_per_worker="$(task_jsonpath "${task}" "{.status.executionWorkspace.density.actorsPerWorker}")"
 
   if [[ -z "${resume_latency}" ]]; then
     echo "task/${task} missing Substrate teleport latency: resumeLatency=<empty>" >&2
     exit 1
   fi
+  if [[ ! "${worker_count}" =~ ^[0-9]+$ || "${worker_count}" -lt 1 ]]; then
+    echo "task/${task} missing Substrate density worker count: workerCount=${worker_count:-<empty>}" >&2
+    exit 1
+  fi
+  if [[ ! "${actor_count}" =~ ^[0-9]+$ || "${actor_count}" -lt 1 ]]; then
+    echo "task/${task} missing Substrate density actor count: actorCount=${actor_count:-<empty>}" >&2
+    exit 1
+  fi
+  if [[ -z "${actors_per_worker}" ]]; then
+    echo "task/${task} missing Substrate density ratio: actorsPerWorker=<empty>" >&2
+    exit 1
+  fi
 
-  log "task/${task} teleport visibility: workerPool=${worker_pool} workerPodName=${worker_pod} resumeLatency=${resume_latency}"
+  log "task/${task} teleport visibility: workerPool=${worker_pool} workerPodName=${worker_pod} resumeLatency=${resume_latency} density=${actor_count}/${worker_count} actorsPerWorker=${actors_per_worker}"
 }
 
 patch_substrate_kind_registry_script() {

@@ -349,9 +349,12 @@ The script:
 7. Exercises direct Substrate actor create, resume, router, daemon exec,
    suspend, and delete.
 8. Deploys Orka with Substrate enabled.
-9. Runs Orka Tasks through the Substrate workspace provider.
-10. Validates Task result submission, cleanup status, and missing-template
-    failure.
+9. Creates Orka `SubstrateActorPool` resources for agent and MCP actors.
+10. Runs Orka Tasks through default and pooled Substrate workspaces.
+11. Executes an MCP Tool backed by a pooled Substrate actor and verifies forced
+    reconciles do not reboot the MCP actor.
+12. Validates Task result submission, workspace placement/density telemetry,
+    cleanup status, and missing-template failure.
 
 The pinned Substrate revision can fail `runsc delete` after an Orka Task has
 already produced its result in GitHub-hosted kind. The E2E treats that as a
@@ -382,8 +385,13 @@ workflow is secret-free and is intended to catch regressions in:
 
 - Orka controller validation for Substrate workspaces
 - worker Job environment injection
+- SubstrateActorPool reconciliation and density reporting
 - Substrate actor lifecycle handling
+- pooled Task placement
+- MCP Tool execution through a Substrate actor
+- MCP actor boot-once reuse across forced reconciles
 - workspace daemon command execution
+- workspace placement, density, and resume latency status
 - secret scrub and cleanup behavior
 - task status updates for `Deleted`, `Retained`, and validation failures
 
