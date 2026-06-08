@@ -226,6 +226,96 @@ A typical remediation workflow is:
 5. Review patch proposals with `GET /api/v1/security/findings/:id/patches`.
 6. Create a remediation pull request with `POST /api/v1/security/findings/:id/pull-request`.
 
+## Repository Monitors
+
+Repository monitor endpoints manage `RepositoryMonitor` configurations and their durable monitor runs, PR queue items, review state, and audit events. The current implementation supports GitHub pull request monitoring and read-only review task creation.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/monitors/repositories` | POST | Create a repository monitor |
+| `/api/v1/monitors/repositories` | GET | List repository monitors |
+| `/api/v1/monitors/repositories/:name` | GET | Get repository monitor details |
+| `/api/v1/monitors/repositories/:name` | PUT | Update repository monitor spec |
+| `/api/v1/monitors/repositories/:name` | DELETE | Delete repository monitor |
+| `/api/v1/monitors/repositories/:name/runs` | POST | Trigger a manual monitor run |
+| `/api/v1/monitors/repositories/:name/runs` | GET | List monitor runs |
+| `/api/v1/monitors/repositories/:name/items` | GET | List current monitor items |
+| `/api/v1/monitors/events` | GET | List monitor audit events |
+
+Common query parameters:
+
+- `namespace` - Kubernetes namespace to operate in.
+- `limit` - page size for list endpoints.
+- `continue` or `cursor` - pagination cursor for store-backed list endpoints.
+- `kind`, `state`, `verdict`, `repairState`, and `automergeState` - filters for `GET /api/v1/monitors/repositories/:name/items`.
+- `name`, `runID`, `itemKind`, `itemNumber`, and `eventType` - filters for `GET /api/v1/monitors/events`; `name` is required.
+
+Context-token authorization scopes are `orka:monitors:read` for list/get endpoints, `orka:monitors:write` for create/update/delete, and `orka:monitors:operate` for manual run creation.
+
+### Create Repository Monitor
+
+**Endpoint:** `POST /api/v1/monitors/repositories`
+
+**Request Body:**
+```json
+{
+  "name": "example-app",
+  "namespace": "default",
+  "spec": {
+    "provider": "github",
+    "repoURL": "https://github.com/example/app",
+    "branch": "main",
+    "gitSecretRef": {"name": "repo-monitor-github"},
+    "schedule": "*/30 * * * *",
+    "targets": {
+      "pullRequests": {
+        "enabled": true,
+        "includeDrafts": false,
+        "maxPerRun": 10
+      }
+    },
+    "agents": {
+      "reviewer": {"name": "repo-reviewer"}
+    },
+    "review": {
+      "event": "COMMENT",
+      "staleReviewTTL": "24h"
+    },
+    "policy": {
+      "protectedLabels": ["security-sensitive"],
+      "pauseLabels": ["orka:pause"]
+    },
+    "validation": {
+      "mode": "changed",
+      "commands": ["make test"]
+    }
+  }
+}
+```
+
+**Response (201):** The created `RepositoryMonitor` resource.
+
+Required fields are `name`, `spec.repoURL`, and `spec.agents.reviewer.name` when pull request monitoring is enabled. The API defaults or infers provider, owner, repository, branch, pull request enablement, pull request `maxPerRun`, `review.event`, and validation mode where possible.
+
+Only GitHub pull request monitoring is supported in this slice. Requests that enable issue or commit targets, disable pull request monitoring, use a non-GitHub provider, set `review.requireGreenCI`, or reference a non-Claude reviewer runtime are rejected with `400`.
+
+### Trigger Manual Monitor Run
+
+**Endpoint:** `POST /api/v1/monitors/repositories/{name}/runs`
+
+**Request Body:**
+```json
+{
+  "targetKind": "pull_request",
+  "targetNumber": 123,
+  "targetSHA": "abc123"
+}
+```
+
+The request body can be omitted to run a full pull request inventory pass. `targetKind` must be empty or `pull_request`; `targetNumber` and `targetSHA` narrow the run to one PR or exact head. The API returns `409` when the monitor already has a queued or running run.
+
+See [Repository Monitors](../guides/repository-monitors.md) for the full workflow and CRD example.
+
 ## Auth
 
 | Endpoint | Method | Description |

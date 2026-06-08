@@ -125,6 +125,7 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Kontxt Quickstart](website/docs/guides/kontxt-quickstart.md)               | Use OIDC identity to call Orka without long-lived tokens |
 | [Kontxt TxToken Integration](website/docs/concepts/kontxt.md)                 | TxToken verification, authorization, TTS, and audit guidance |
 | [Repository Security Scanning](website/docs/guides/repository-security-scanning.md) | Repository scan workflow, threat models, findings, and remediation |
+| [Repository Monitors](website/docs/guides/repository-monitors.md) | Durable GitHub pull request monitor runs, review tasks, and dashboard state |
 | [GitHub Label Triggers](website/docs/guides/github-label-triggers.md) | Trigger Orka agent tasks from GitHub labels such as `agent:implement` and `agent:review` |
 | [Development](website/docs/development/development.md)                           | Building, testing, and contributing                   |
 | [Testing](website/docs/development/testing.md)                                   | Test structure, patterns, and commands                |
