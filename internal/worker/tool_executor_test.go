@@ -1408,6 +1408,56 @@ func TestToolExecutor_Execute_AuthBodyMissingKey(t *testing.T) {
 	}
 }
 
+func TestToolExecutor_Execute_MCPRejectsBodyAuth(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	secretDir := filepath.Join(tmpDir, "secret-name")
+	os.MkdirAll(secretDir, 0755)                                                      //nolint:errcheck
+	os.WriteFile(filepath.Join(secretDir, "api_key"), []byte("secret-api-key"), 0644) //nolint:errcheck
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: tmpDir,
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp-tool"},
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: &corev1alpha1.HTTPExecution{
+				AuthSecretRef: &corev1alpha1.SecretKeySelector{
+					Name: "secret-name",
+					Key:  "api_key",
+				},
+				AuthInject:  "body",
+				AuthBodyKey: "apiKey",
+			},
+			MCP: &corev1alpha1.MCPToolServer{
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Endpoint: server.URL + "/mcp",
+			Actor:    &corev1alpha1.ToolActorStatus{RouteHost: "actor-1.actors.test"},
+		},
+	}
+
+	_, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"query":"test"}`))
+	if err == nil || !strings.Contains(err.Error(), "MCP tools do not support authInject=body") {
+		t.Fatalf("Execute() error = %v, want MCP body auth rejection", err)
+	}
+	if called {
+		t.Fatal("MCP endpoint was called despite invalid body auth config")
+	}
+}
+
 func TestToolExecutor_Execute_HTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

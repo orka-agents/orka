@@ -153,7 +153,11 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 		authToken = token
 	}
 
-	authInject, err := applyToolBodyAuth(params, httpConfig, authToken)
+	authInject := toolAuthInject(httpConfig)
+	if isMCP && authInject == "body" && authToken != "" {
+		return preparedToolRequest{}, fmt.Errorf("MCP tools do not support authInject=body")
+	}
+	authInject, err = applyToolBodyAuth(params, httpConfig, authToken)
 	if err != nil {
 		return preparedToolRequest{}, err
 	}
@@ -776,10 +780,7 @@ func mcpToolContentText(content []mcpToolContent) string {
 }
 
 func applyToolBodyAuth(params map[string]any, httpConfig corev1alpha1.HTTPExecution, authToken string) (string, error) {
-	authInject := httpConfig.AuthInject
-	if authInject == "" {
-		authInject = "header"
-	}
+	authInject := toolAuthInject(httpConfig)
 	if authInject != "body" || authToken == "" {
 		return authInject, nil
 	}
@@ -789,6 +790,13 @@ func applyToolBodyAuth(params map[string]any, httpConfig corev1alpha1.HTTPExecut
 	}
 	params[bodyKey] = authToken
 	return authInject, nil
+}
+
+func toolAuthInject(httpConfig corev1alpha1.HTTPExecution) string {
+	if httpConfig.AuthInject == "" {
+		return "header"
+	}
+	return httpConfig.AuthInject
 }
 
 func interpolateToolURL(url string, params map[string]any) string {

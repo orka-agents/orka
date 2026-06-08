@@ -1001,17 +1001,76 @@ func (r *TaskReconciler) releaseSubstratePoolActorLeases(ctx context.Context, ta
 	if err != nil {
 		return err
 	}
-	return r.deleteSubstratePoolActorLeases(ctx, leases)
+	return r.deleteSubstratePoolActorLeasesForTask(ctx, task, leases)
 }
 
-func (r *TaskReconciler) deleteSubstratePoolActorLeases(ctx context.Context, leases []coordinationv1.Lease) error {
+func (r *TaskReconciler) deleteSubstratePoolActorLeasesForTask(ctx context.Context, task *corev1alpha1.Task, leases []coordinationv1.Lease) error {
 	for i := range leases {
 		lease := &leases[i]
-		if err := r.Delete(ctx, lease); err != nil && !apierrors.IsNotFound(err) {
+		current := &coordinationv1.Lease{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: lease.Namespace, Name: lease.Name}, current); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+		if !substratePoolActorLeaseHeldByTask(current, task) {
+			continue
+		}
+		if err := r.Delete(ctx, current, deleteCurrentObjectPreconditions(current)...); err != nil && !apierrors.IsNotFound(err) {
+			if apierrors.IsConflict(err) {
+				stillHeld, verifyErr := substrateLeaseStillMatchesAfterDeleteConflict(ctx, r.Client, current, func(latest *coordinationv1.Lease) bool {
+					return substratePoolActorLeaseHeldByTask(latest, task)
+				})
+				if verifyErr != nil {
+					return verifyErr
+				}
+				if !stillHeld {
+					continue
+				}
+			}
 			return err
 		}
 	}
 	return nil
+}
+
+func deleteCurrentObjectPreconditions(obj client.Object) []client.DeleteOption {
+	if obj == nil {
+		return nil
+	}
+	preconditions := &metav1.Preconditions{}
+	if obj.GetUID() != "" {
+		uid := obj.GetUID()
+		preconditions.UID = &uid
+	}
+	if obj.GetResourceVersion() != "" {
+		resourceVersion := obj.GetResourceVersion()
+		preconditions.ResourceVersion = &resourceVersion
+	}
+	if preconditions.UID == nil && preconditions.ResourceVersion == nil {
+		return nil
+	}
+	return []client.DeleteOption{&client.DeleteOptions{Preconditions: preconditions}}
+}
+
+func substrateLeaseStillMatchesAfterDeleteConflict(
+	ctx context.Context,
+	reader client.Reader,
+	lease *coordinationv1.Lease,
+	matches func(*coordinationv1.Lease) bool,
+) (bool, error) {
+	if lease == nil || matches == nil {
+		return false, nil
+	}
+	latest := &coordinationv1.Lease{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: lease.Namespace, Name: lease.Name}, latest); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return matches(latest), nil
 }
 
 func (r *TaskReconciler) releaseSubstratePoolActorLeasesAfterTerminalCleanup(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
@@ -1030,15 +1089,15 @@ func (r *TaskReconciler) releaseSubstratePoolActorLeasesAfterTerminalCleanup(ctx
 			"workspacePhase", taskExecutionWorkspacePhase(task),
 			"workspaceReason", taskExecutionWorkspaceReason(task),
 		)
-		if err := r.deleteSubstratePoolActorsForLeases(ctx, leases); err != nil {
+		if err := r.deleteSubstratePoolActorsForLeases(ctx, task, leases); err != nil {
 			logf.FromContext(ctx).Error(err, "failed to delete substrate pool actors before releasing terminal task leases")
 			return false, nil
 		}
 	}
-	return true, r.deleteSubstratePoolActorLeases(ctx, leases)
+	return true, r.deleteSubstratePoolActorLeasesForTask(ctx, task, leases)
 }
 
-func (r *TaskReconciler) deleteSubstratePoolActorsForLeases(ctx context.Context, leases []coordinationv1.Lease) error {
+func (r *TaskReconciler) deleteSubstratePoolActorsForLeases(ctx context.Context, task *corev1alpha1.Task, leases []coordinationv1.Lease) error {
 	cfg := r.SubstrateConfig.WithDefaults()
 	executorFactory := r.SubstrateExecutorFactory
 	if executorFactory == nil {
@@ -1058,12 +1117,23 @@ func (r *TaskReconciler) deleteSubstratePoolActorsForLeases(ctx context.Context,
 	}
 	defer closeWorkspaceExecutor(ctx, executor)
 	for i := range leases {
-		actorID := substratePoolActorLeaseActorID(&leases[i])
+		lease := &leases[i]
+		current := &coordinationv1.Lease{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: lease.Namespace, Name: lease.Name}, current); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+		if !substratePoolActorLeaseHeldByTask(current, task) {
+			continue
+		}
+		actorID := substratePoolActorLeaseActorID(current)
 		if actorID == "" {
 			continue
 		}
 		if _, err := executor.Delete(ctx, workspace.DeleteRequest{
-			Ref:       workspace.WorkspaceRef{Namespace: leases[i].Namespace, ClaimName: actorID, ID: actorID},
+			Ref:       workspace.WorkspaceRef{Namespace: current.Namespace, ClaimName: actorID, ID: actorID},
 			Reason:    "terminal pooled task actor cleanup",
 			Timeout:   cfg.ClaimTimeout,
 			SkipScrub: true,

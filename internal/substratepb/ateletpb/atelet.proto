@@ -24,7 +24,7 @@ service AteomHerder {
   rpc Run(RunRequest) returns (RunResponse) {}
 
   // Checkpoint tells atelet to save the current state of the workload on an
-  // ateom to object storage, and then completely the ateom to a blank state
+  // ateom to object storage, and then completely reset the ateom to a blank state
   // (back to "available" state.)
   rpc Checkpoint(CheckpointRequest) returns (CheckpointResponse) {}
 

@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -26,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -213,6 +215,9 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 	if tool.Spec.HTTP.AuthInject == "body" && tool.Spec.HTTP.AuthBodyKey == "" {
 		return fmt.Errorf("authBodyKey is required when authInject is 'body'")
 	}
+	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil && tool.Spec.HTTP.AuthInject == "body" {
+		return fmt.Errorf("MCP tools do not support authInject=body")
+	}
 
 	return nil
 }
@@ -391,11 +396,6 @@ func (r *ToolReconciler) waitForSubstrateMCPToolActor(
 	timeout time.Duration,
 ) (ctrl.Result, bool, error) {
 	bootActor := shouldBootSubstrateMCPToolActor(tool, actorID, bootRequested, claim.Created)
-	if bootActor && markSubstrateMCPToolActorBooted(tool, actorID) {
-		if err := r.Update(ctx, tool); err != nil {
-			return ctrl.Result{}, true, err
-		}
-	}
 	if _, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
 		Ref:     claim.Ref,
 		Timeout: timeout,
@@ -404,9 +404,13 @@ func (r *ToolReconciler) waitForSubstrateMCPToolActor(
 		result, updateErr := r.updateStatus(ctx, tool, false, err.Error())
 		return result, true, updateErr
 	}
-	if !bootActor && bootRequested && markSubstrateMCPToolActorBooted(tool, actorID) {
-		if err := r.Update(ctx, tool); err != nil {
+	if bootRequested && !substrateMCPToolActorBootRecorded(tool, actorID) {
+		canContinue, err := r.recordSubstrateMCPToolActorBooted(ctx, tool, actorID)
+		if err != nil {
 			return ctrl.Result{}, true, err
+		}
+		if !canContinue {
+			return ctrl.Result{RequeueAfter: time.Second}, true, nil
 		}
 	}
 	return ctrl.Result{}, false, nil
@@ -431,6 +435,13 @@ func shouldBootSubstrateMCPToolActor(tool *corev1alpha1.Tool, actorID string, re
 		strings.TrimSpace(tool.Status.Actor.ActorID) != actorID
 }
 
+func substrateMCPToolActorBootRecorded(tool *corev1alpha1.Tool, actorID string) bool {
+	if tool == nil {
+		return false
+	}
+	return strings.TrimSpace(tool.Annotations[substrateMCPToolBootedIDAnno]) == strings.TrimSpace(actorID)
+}
+
 func markSubstrateMCPToolActorBooted(tool *corev1alpha1.Tool, actorID string) bool {
 	actorID = strings.TrimSpace(actorID)
 	if tool == nil || actorID == "" {
@@ -444,6 +455,46 @@ func markSubstrateMCPToolActorBooted(tool *corev1alpha1.Tool, actorID string) bo
 	}
 	tool.Annotations[substrateMCPToolBootedIDAnno] = actorID
 	return true
+}
+
+func (r *ToolReconciler) recordSubstrateMCPToolActorBooted(ctx context.Context, tool *corev1alpha1.Tool, actorID string) (bool, error) {
+	actorID = strings.TrimSpace(actorID)
+	if tool == nil || actorID == "" {
+		return true, nil
+	}
+	key := types.NamespacedName{Namespace: tool.Namespace, Name: tool.Name}
+	var latestForStatus *corev1alpha1.Tool
+	specChanged := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &corev1alpha1.Tool{}
+		if getErr := r.Get(ctx, key, latest); getErr != nil {
+			if errors.IsNotFound(getErr) {
+				return nil
+			}
+			return getErr
+		}
+		if latest.Generation != tool.Generation || !reflect.DeepEqual(latest.Spec, tool.Spec) {
+			specChanged = true
+			return nil
+		}
+		if !markSubstrateMCPToolActorBooted(latest, actorID) {
+			latestForStatus = latest.DeepCopy()
+			return nil
+		}
+		if updateErr := r.Update(ctx, latest); updateErr != nil {
+			return updateErr
+		}
+		latestForStatus = latest.DeepCopy()
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if specChanged || latestForStatus == nil {
+		return false, nil
+	}
+	latestForStatus.DeepCopyInto(tool)
+	return true, nil
 }
 
 func (r *ToolReconciler) resolveSubstrateMCPActorPool(
@@ -620,7 +671,18 @@ func (r *ToolReconciler) cleanupSubstrateMCPPoolActor(
 	if err := deleteSubstrateMCPActor(ctx, executor, actorID, reason, timeout); err != nil {
 		return err
 	}
-	if err := r.Delete(ctx, lease); err != nil && !errors.IsNotFound(err) {
+	if err := r.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); err != nil && !errors.IsNotFound(err) {
+		if errors.IsConflict(err) {
+			stillHeld, verifyErr := substrateLeaseStillMatchesAfterDeleteConflict(ctx, r.Client, lease, func(latest *coordinationv1.Lease) bool {
+				return substratePoolActorLeaseHeldByTool(latest, tool)
+			})
+			if verifyErr != nil {
+				return verifyErr
+			}
+			if !stillHeld {
+				return nil
+			}
+		}
 		return err
 	}
 	return nil
@@ -779,7 +841,18 @@ func (r *ToolReconciler) deleteSubstrateMCPToolActorLease(
 	if lease == nil || !held {
 		return nil
 	}
-	if err := r.Delete(ctx, lease); err != nil && !errors.IsNotFound(err) {
+	if err := r.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); err != nil && !errors.IsNotFound(err) {
+		if errors.IsConflict(err) {
+			stillHeld, verifyErr := substrateLeaseStillMatchesAfterDeleteConflict(ctx, r.Client, lease, func(latest *coordinationv1.Lease) bool {
+				return substrateMCPToolActorLeaseHeldByTool(latest, tool)
+			})
+			if verifyErr != nil {
+				return verifyErr
+			}
+			if !stillHeld {
+				return nil
+			}
+		}
 		return err
 	}
 	return nil

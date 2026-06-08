@@ -46,7 +46,7 @@ type AteomHerderClient interface {
 	// ateom.
 	Run(ctx context.Context, in *RunRequest, opts ...grpc.CallOption) (*RunResponse, error)
 	// Checkpoint tells atelet to save the current state of the workload on an
-	// ateom to object storage, and then completely the ateom to a blank state
+	// ateom to object storage, and then completely reset the ateom to a blank state
 	// (back to "available" state.)
 	Checkpoint(ctx context.Context, in *CheckpointRequest, opts ...grpc.CallOption) (*CheckpointResponse, error)
 	// Restore restores a workload from checkpoint onto an ateom.
@@ -99,7 +99,7 @@ type AteomHerderServer interface {
 	// ateom.
 	Run(context.Context, *RunRequest) (*RunResponse, error)
 	// Checkpoint tells atelet to save the current state of the workload on an
-	// ateom to object storage, and then completely the ateom to a blank state
+	// ateom to object storage, and then completely reset the ateom to a blank state
 	// (back to "available" state.)
 	Checkpoint(context.Context, *CheckpointRequest) (*CheckpointResponse, error)
 	// Restore restores a workload from checkpoint onto an ateom.

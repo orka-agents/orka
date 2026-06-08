@@ -1741,6 +1741,96 @@ func TestReserveSubstratePoolActorDoesNotReuseTaskLeaseBeforeRetryCleanupSucceed
 	}
 }
 
+func TestDeleteSubstratePoolActorLeasesForTaskSkipsLeaseReassignedBeforeDelete(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	oldHolder := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "old-task", Namespace: "default", UID: "old-task-uid"},
+	}
+	newHolder := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "new-task", Namespace: "default", UID: "new-task-uid"},
+	}
+	oldSnapshot := newSubstratePoolActorLease(oldHolder, "default", testSubstrateActorID, testSubstrateActorID)
+	current := newSubstratePoolActorLease(newHolder, "default", testSubstrateActorID, testSubstrateActorID)
+	r := &TaskReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(oldHolder, newHolder, current).Build(),
+	}
+
+	if err := r.deleteSubstratePoolActorLeasesForTask(ctx, oldHolder, []coordinationv1.Lease{*oldSnapshot}); err != nil {
+		t.Fatalf("deleteSubstratePoolActorLeasesForTask() error = %v", err)
+	}
+	var got coordinationv1.Lease
+	if err := r.Get(ctx, types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); err != nil {
+		t.Fatalf("Get lease: %v", err)
+	}
+	if !substratePoolActorLeaseHeldByTask(&got, newHolder) {
+		t.Fatalf("lease holder changed to annotations %#v, want new task", got.Annotations)
+	}
+}
+
+func TestDeleteSubstratePoolActorLeasesForTaskReturnsConflictWhenLeaseStillHeld(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	holder := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default", UID: "task-uid"},
+	}
+	lease := newSubstratePoolActorLease(holder, "default", testSubstrateActorID, testSubstrateActorID)
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(holder, lease).Build()
+	conflict := apierrors.NewConflict(coordinationv1.Resource("leases"), testSubstrateActorID, errors.New("resource version changed"))
+	r := &TaskReconciler{
+		Client: interceptor.NewClient(base, interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				return conflict
+			},
+		}),
+	}
+
+	err := r.deleteSubstratePoolActorLeasesForTask(ctx, holder, []coordinationv1.Lease{*lease})
+	if err == nil {
+		t.Fatal("deleteSubstratePoolActorLeasesForTask() error = nil, want conflict while holder still matches")
+	}
+	if !apierrors.IsConflict(err) {
+		t.Fatalf("deleteSubstratePoolActorLeasesForTask() error = %v, want conflict", err)
+	}
+	var got coordinationv1.Lease
+	if getErr := r.Get(ctx, types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); getErr != nil {
+		t.Fatalf("Get lease after conflict: %v", getErr)
+	}
+	if !substratePoolActorLeaseHeldByTask(&got, holder) {
+		t.Fatalf("lease holder changed to annotations %#v, want original task", got.Annotations)
+	}
+}
+
+func TestDeleteSubstratePoolActorsForLeasesSkipsLeaseReassignedBeforeActorDelete(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	oldHolder := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "old-task", Namespace: "default", UID: "old-task-uid"},
+	}
+	newHolder := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "new-task", Namespace: "default", UID: "new-task-uid"},
+	}
+	oldSnapshot := newSubstratePoolActorLease(oldHolder, "default", testSubstrateActorID, testSubstrateActorID)
+	current := newSubstratePoolActorLease(newHolder, "default", testSubstrateActorID, testSubstrateActorID)
+	r := &TaskReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(oldHolder, newHolder, current).Build(),
+	}
+	executor := &recordingTaskWorkspaceExecutor{}
+	r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+		return executor, nil
+	}
+
+	if err := r.deleteSubstratePoolActorsForLeases(ctx, oldHolder, []coordinationv1.Lease{*oldSnapshot}); err != nil {
+		t.Fatalf("deleteSubstratePoolActorsForLeases() error = %v", err)
+	}
+	if len(executor.deleteReqs) != 0 {
+		t.Fatalf("delete requests = %#v, want no actor delete after lease reassignment", executor.deleteReqs)
+	}
+	if !executor.closeCalled {
+		t.Fatal("workspace executor was not closed")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ensureWorkerRBAC
 // ---------------------------------------------------------------------------

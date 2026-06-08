@@ -349,7 +349,7 @@ func TestToolReconcilerMCPSubstrateActorBootsRecreatedActor(t *testing.T) {
 	}
 }
 
-func TestToolReconcilerMCPSubstrateActorDoesNotRebootAfterWaitReadyFailure(t *testing.T) {
+func TestToolReconcilerMCPSubstrateActorRetriesBootAfterWaitReadyFailure(t *testing.T) {
 	scheme := newToolScheme()
 	template := approvedMCPActorTemplateForTest()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -407,8 +407,8 @@ func TestToolReconcilerMCPSubstrateActorDoesNotRebootAfterWaitReadyFailure(t *te
 	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
 		t.Fatalf("Get tool after wait ready failure: %v", err)
 	}
-	if got.Annotations[substrateMCPToolBootedIDAnno] != actorID {
-		t.Fatalf("booted actor annotation after wait ready failure = %q, want %q", got.Annotations[substrateMCPToolBootedIDAnno], actorID)
+	if got.Annotations[substrateMCPToolBootedIDAnno] != "" {
+		t.Fatalf("booted actor annotation after wait ready failure = %q, want empty", got.Annotations[substrateMCPToolBootedIDAnno])
 	}
 	if len(executor.waitReadyBoots) != 1 || !executor.waitReadyBoots[0] {
 		t.Fatalf("WaitReady boot history after failure = %#v, want [true]", executor.waitReadyBoots)
@@ -417,8 +417,57 @@ func TestToolReconcilerMCPSubstrateActorDoesNotRebootAfterWaitReadyFailure(t *te
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() retry error = %v", err)
 	}
-	if len(executor.waitReadyBoots) != 2 || !executor.waitReadyBoots[0] || executor.waitReadyBoots[1] {
-		t.Fatalf("WaitReady boot history after retry = %#v, want [true false]", executor.waitReadyBoots)
+	if len(executor.waitReadyBoots) != 2 || !executor.waitReadyBoots[0] || !executor.waitReadyBoots[1] {
+		t.Fatalf("WaitReady boot history after retry = %#v, want [true true]", executor.waitReadyBoots)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
+		t.Fatalf("Get tool after wait ready retry: %v", err)
+	}
+	if got.Annotations[substrateMCPToolBootedIDAnno] != actorID {
+		t.Fatalf("booted actor annotation after successful retry = %q, want %q", got.Annotations[substrateMCPToolBootedIDAnno], actorID)
+	}
+}
+
+func TestToolReconcilerRecordSubstrateMCPBootedRequeuesWhenSpecChanged(t *testing.T) {
+	scheme := newToolScheme()
+	actorID := deterministicSubstrateToolActorID(defaultNS, "mcp-tool", "ate-demo", "mcp-template")
+	local := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp-tool", Namespace: defaultNS, Generation: 1},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "MCP tool",
+			MCP: &corev1alpha1.MCPToolServer{
+				Path: testMCPPath,
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+					Boot:        true,
+				},
+			},
+		},
+	}
+	latest := local.DeepCopy()
+	latest.Generation = 2
+	latest.Spec.MCP.Path = "/changed"
+	r := &ToolReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(latest).Build(),
+		Scheme: scheme,
+	}
+
+	canContinue, err := r.recordSubstrateMCPToolActorBooted(context.Background(), local, actorID)
+	if err != nil {
+		t.Fatalf("recordSubstrateMCPToolActorBooted() error = %v", err)
+	}
+	if canContinue {
+		t.Fatal("recordSubstrateMCPToolActorBooted() canContinue = true, want false after spec change")
+	}
+	if local.Annotations[substrateMCPToolBootedIDAnno] != "" {
+		t.Fatalf("local booted annotation = %q, want empty after spec change", local.Annotations[substrateMCPToolBootedIDAnno])
+	}
+	var got corev1alpha1.Tool
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
+		t.Fatalf("Get latest tool: %v", err)
+	}
+	if got.Annotations[substrateMCPToolBootedIDAnno] != "" {
+		t.Fatalf("latest booted annotation = %q, want empty after spec change", got.Annotations[substrateMCPToolBootedIDAnno])
 	}
 }
 
