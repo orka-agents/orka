@@ -236,7 +236,7 @@ func (r *ToolReconciler) validateSubstrateMCPTool(ctx context.Context, tool *cor
 		return fmt.Errorf("mcp.substrateActor.poolRef.name is required")
 	}
 	templateRequest := r.substrateMCPTemplateRequest(tool)
-	if err := validateSubstrateActorTemplateResource(ctx, r.Client, templateRequest); err != nil {
+	if err := validateSubstrateMCPActorTemplateResource(ctx, r.Client, templateRequest); err != nil {
 		return err
 	}
 	if _, _, _, err := r.resolveSubstrateMCPActorPool(ctx, tool, templateRequest); err != nil {

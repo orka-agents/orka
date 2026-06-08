@@ -87,7 +87,7 @@ func (r *SubstrateActorPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
 	}
 	cfg := r.SubstrateConfig.WithDefaults()
-	if err := validateSubstrateActorTemplateResource(ctx, r.Client, &ExecutionWorkspaceRequest{
+	if err := validateSubstrateRoutableActorTemplateResource(ctx, r.Client, &ExecutionWorkspaceRequest{
 		TemplateName:                 template.Name,
 		TemplateNamespace:            template.Namespace,
 		SubstrateBootstrapSecretName: cfg.BootstrapSecretName,

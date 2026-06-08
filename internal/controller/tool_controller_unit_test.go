@@ -29,7 +29,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
 )
 
@@ -2024,6 +2023,176 @@ func TestToolReconcilerMCPSubstrateActorRejectsUnapprovedTemplate(t *testing.T) 
 	}
 }
 
+func TestToolReconcilerMCPSubstrateActorAllowsMCPOnlyTemplate(t *testing.T) {
+	scheme := newToolScheme()
+	template := approvedMCPActorTemplateForTest()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build()
+	request := &ExecutionWorkspaceRequest{
+		TemplateName:      "mcp-template",
+		TemplateNamespace: "ate-demo",
+	}
+
+	if err := validateSubstrateMCPActorTemplateResource(context.Background(), k8sClient, request); err != nil {
+		t.Fatalf("validateSubstrateMCPActorTemplateResource() error = %v", err)
+	}
+	if err := validateSubstrateActorTemplateResource(context.Background(), k8sClient, request); err == nil {
+		t.Fatal("validateSubstrateActorTemplateResource() error = nil, want workspace template validation to reject MCP-only template")
+	}
+}
+
+func TestToolReconcilerMCPSubstrateActorRejectsRoutePortMismatch(t *testing.T) {
+	scheme := newToolScheme()
+	template := approvedMCPActorTemplateForTest()
+	annotations := template.GetAnnotations()
+	annotations["orka.ai/workspace-daemon-port"] = "80"
+	template.SetAnnotations(annotations)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build()
+	request := &ExecutionWorkspaceRequest{
+		TemplateName:      "mcp-template",
+		TemplateNamespace: "ate-demo",
+	}
+
+	err := validateSubstrateMCPActorTemplateResource(context.Background(), k8sClient, request)
+	if err == nil {
+		t.Fatal("validateSubstrateMCPActorTemplateResource() error = nil, want route port mismatch")
+	}
+	if !contains(err.Error(), "requires a matching containerPort") {
+		t.Fatalf("error = %q, want matching containerPort context", err.Error())
+	}
+}
+
+func TestToolReconcilerMCPSubstrateActorAcceptsExplicitRoutePort(t *testing.T) {
+	scheme := newToolScheme()
+	template := readySubstrateActorTemplateWithContainersForTest([]any{
+		map[string]any{
+			"name":    "mcp",
+			"command": []any{"/mcp-server"},
+			"ports": []any{
+				map[string]any{"containerPort": int64(9090)},
+			},
+		},
+	})
+	template.SetName("mcp-template")
+	template.SetNamespace("ate-demo")
+	annotations := template.GetAnnotations()
+	annotations["orka.ai/workspace-daemon-port"] = "9090"
+	delete(annotations, "orka.ai/workspace-staging-root")
+	template.SetAnnotations(annotations)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build()
+	request := &ExecutionWorkspaceRequest{
+		TemplateName:      "mcp-template",
+		TemplateNamespace: "ate-demo",
+	}
+
+	if err := validateSubstrateMCPActorTemplateResource(context.Background(), k8sClient, request); err != nil {
+		t.Fatalf("validateSubstrateMCPActorTemplateResource() error = %v", err)
+	}
+}
+
+func TestToolReconcilerMCPSubstrateActorRejectsListenEnvRoutePortMismatch(t *testing.T) {
+	scheme := newToolScheme()
+	template := readySubstrateActorTemplateWithContainersForTest([]any{
+		map[string]any{
+			"name":    "mcp",
+			"command": []any{"/mcp-server"},
+			"env": []any{
+				map[string]any{
+					"name":  substrateWorkspaceDaemonListenEnv,
+					"value": ":9090",
+				},
+			},
+		},
+	})
+	template.SetName("mcp-template")
+	template.SetNamespace("ate-demo")
+	annotations := template.GetAnnotations()
+	annotations["orka.ai/workspace-daemon-port"] = "8080"
+	delete(annotations, "orka.ai/workspace-staging-root")
+	template.SetAnnotations(annotations)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build()
+	request := &ExecutionWorkspaceRequest{
+		TemplateName:      "mcp-template",
+		TemplateNamespace: "ate-demo",
+	}
+
+	err := validateSubstrateMCPActorTemplateResource(context.Background(), k8sClient, request)
+	if err == nil {
+		t.Fatal("validateSubstrateMCPActorTemplateResource() error = nil, want listen env route port mismatch")
+	}
+	if !contains(err.Error(), "no container listen env matches") {
+		t.Fatalf("error = %q, want listen env mismatch context", err.Error())
+	}
+}
+
+func TestToolReconcilerMCPSubstrateActorRejectsListenEnvMismatchDespiteMatchingContainerPort(t *testing.T) {
+	scheme := newToolScheme()
+	template := readySubstrateActorTemplateWithContainersForTest([]any{
+		map[string]any{
+			"name":    "mcp",
+			"command": []any{"/mcp-server"},
+			"env": []any{
+				map[string]any{
+					"name":  substrateWorkspaceDaemonListenEnv,
+					"value": ":9090",
+				},
+			},
+			"ports": []any{
+				map[string]any{"containerPort": int64(8080)},
+			},
+		},
+	})
+	template.SetName("mcp-template")
+	template.SetNamespace("ate-demo")
+	annotations := template.GetAnnotations()
+	annotations["orka.ai/workspace-daemon-port"] = "8080"
+	delete(annotations, "orka.ai/workspace-staging-root")
+	template.SetAnnotations(annotations)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build()
+	request := &ExecutionWorkspaceRequest{
+		TemplateName:      "mcp-template",
+		TemplateNamespace: "ate-demo",
+	}
+
+	err := validateSubstrateMCPActorTemplateResource(context.Background(), k8sClient, request)
+	if err == nil {
+		t.Fatal("validateSubstrateMCPActorTemplateResource() error = nil, want listen env mismatch despite matching containerPort")
+	}
+	if !contains(err.Error(), "no container listen env matches") {
+		t.Fatalf("error = %q, want listen env mismatch context", err.Error())
+	}
+}
+
+func TestToolReconcilerMCPSubstrateActorAcceptsExplicitListenEnvRoutePort(t *testing.T) {
+	scheme := newToolScheme()
+	template := readySubstrateActorTemplateWithContainersForTest([]any{
+		map[string]any{
+			"name":    "mcp",
+			"command": []any{"/mcp-server"},
+			"env": []any{
+				map[string]any{
+					"name":  substrateWorkspaceDaemonListenEnv,
+					"value": ":9090",
+				},
+			},
+		},
+	})
+	template.SetName("mcp-template")
+	template.SetNamespace("ate-demo")
+	annotations := template.GetAnnotations()
+	annotations["orka.ai/workspace-daemon-port"] = "9090"
+	delete(annotations, "orka.ai/workspace-staging-root")
+	template.SetAnnotations(annotations)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build()
+	request := &ExecutionWorkspaceRequest{
+		TemplateName:      "mcp-template",
+		TemplateNamespace: "ate-demo",
+	}
+
+	if err := validateSubstrateMCPActorTemplateResource(context.Background(), k8sClient, request); err != nil {
+		t.Fatalf("validateSubstrateMCPActorTemplateResource() error = %v", err)
+	}
+}
+
 func TestToolReconcilerMCPSubstrateActorRejectsInvalidAuthConfig(t *testing.T) {
 	scheme := newToolScheme()
 	template := approvedMCPActorTemplateForTest()
@@ -2077,14 +2246,17 @@ func TestToolReconcilerMCPSubstrateActorRejectsInvalidAuthConfig(t *testing.T) {
 }
 
 func approvedMCPActorTemplateForTest() *unstructured.Unstructured {
-	template := readySubstrateActorTemplateForTest([]any{
+	template := readySubstrateActorTemplateWithContainersForTest([]any{
 		map[string]any{
-			"name":  workerenv.WorkspaceBootstrapToken,
-			"value": "bootstrap-token",
+			"name":    "mcp",
+			"command": []any{"/mcp-server"},
 		},
 	})
 	template.SetName("mcp-template")
 	template.SetNamespace("ate-demo")
+	annotations := template.GetAnnotations()
+	delete(annotations, "orka.ai/workspace-staging-root")
+	template.SetAnnotations(annotations)
 	return template
 }
 

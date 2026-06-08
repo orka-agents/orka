@@ -117,6 +117,53 @@ func TestSubstrateActorPoolReconcilerPrecreatesActorsAndUpdatesDensity(t *testin
 	}
 }
 
+func TestSubstrateActorPoolReconcilerAcceptsMCPOnlyTemplate(t *testing.T) {
+	scheme := newSubstrateActorPoolTestScheme(t)
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp-pool", Namespace: "default"},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:     corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+			TargetActors:    1,
+			TargetWorkers:   1,
+			PrecreateActors: true,
+		},
+	}
+	template := approvedMCPActorTemplateForTest()
+	executor := &recordingSubstratePoolExecutor{
+		density: workspace.Density{
+			WorkerCount:     1,
+			ActorCount:      1,
+			ActorsPerWorker: "1.00",
+		},
+	}
+	reconciler := &SubstrateActorPoolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template).Build(),
+		Scheme:           scheme,
+		SubstrateEnabled: true,
+		SubstrateExecutorFactory: func(SubstrateConfig) (SubstratePoolExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "mcp-pool", Namespace: "default"}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() add finalizer error = %v", err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if !executor.convergeCalled {
+		t.Fatal("ConvergeSubstrateActors was not called for MCP-only pool template")
+	}
+	var got corev1alpha1.SubstrateActorPool
+	if err := reconciler.Get(context.Background(), req.NamespacedName, &got); err != nil {
+		t.Fatalf("Get pool: %v", err)
+	}
+	if got.Status.Phase != corev1alpha1.SubstrateActorPoolPhaseReady {
+		t.Fatalf("phase = %q, want Ready; status=%#v", got.Status.Phase, got.Status)
+	}
+}
+
 func TestSubstrateActorPoolReconcilerPrecreatesZeroTarget(t *testing.T) {
 	scheme := newSubstrateActorPoolTestScheme(t)
 	pool := &corev1alpha1.SubstrateActorPool{
