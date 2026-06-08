@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -536,6 +537,79 @@ SECURITY_ARTIFACTS_WRITTEN`
 	}
 	if !strings.Contains(string(findings), `"summary":"ok"`) {
 		t.Fatalf("findings contents = %q, want recovered raw heredoc JSON", string(findings))
+	}
+}
+
+func TestRecoverArtifactsFromTranscriptRecoversPatchArtifacts(t *testing.T) {
+	cleanupRecoveredArtifacts(t)
+
+	findingID := "fnd_patch_123"
+	diffName := "security-patch-" + findingID + ".diff"
+	summaryName := "security-patch-" + findingID + ".json"
+	diff := strings.Join([]string{
+		"diff --git a/app.py b/app.py",
+		"--- a/app.py",
+		"+++ b/app.py",
+		"@@ -1 +1 @@",
+		"-unsafe()",
+		"+safe()",
+		"",
+	}, "\n")
+	summary := security.PatchSummaryArtifact{
+		SchemaVersion: security.SchemaVersionPatchSummary,
+		FindingID:     findingID,
+		Summary:       "patched",
+		ChangedFiles:  []string{"app.py"},
+		Risk:          "low",
+	}
+	summaryData, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("json.Marshal(summary) error = %v", err)
+	}
+	transcript := `<tool_call>
+<tool_name>bash</tool_name>
+<parameters>
+<command>cat > /workspace/.orka-artifacts/` + diffName + ` << 'EOF'
+` + diff + `EOF
+cat > /workspace/.orka-artifacts/` + summaryName + ` << 'EOF'
+` + string(summaryData) + `
+EOF
+</command>
+</parameters>
+</tool_call>`
+
+	recovered, err := recoverArtifactsFromTranscript(transcript)
+	if err != nil {
+		t.Fatalf("recoverArtifactsFromTranscript() error = %v", err)
+	}
+	if recovered != 2 {
+		t.Fatalf("recoverArtifactsFromTranscript() = %d, want 2", recovered)
+	}
+
+	savedDiff, err := os.ReadFile(filepath.Join(testArtifactsDir, diffName))
+	if err != nil {
+		t.Fatalf("ReadFile(diff) error = %v", err)
+	}
+	if string(savedDiff) != strings.TrimSuffix(diff, "\n") {
+		t.Fatalf("saved diff = %q, want %q", string(savedDiff), strings.TrimSuffix(diff, "\n"))
+	}
+	savedSummary, err := os.ReadFile(filepath.Join(testArtifactsDir, summaryName))
+	if err != nil {
+		t.Fatalf("ReadFile(summary) error = %v", err)
+	}
+	if string(savedSummary) != string(summaryData) {
+		t.Fatalf("saved summary = %s, want %s", string(savedSummary), string(summaryData))
+	}
+}
+
+func TestValidArtifactCandidateRejectsInvalidPatchArtifacts(t *testing.T) {
+	if validArtifactCandidate("security-patch-fnd_expected.diff", []byte("not a unified diff")) {
+		t.Fatal("validArtifactCandidate() = true, want false for invalid patch diff")
+	}
+	if validArtifactCandidate("security-patch-fnd_expected.json", []byte(
+		`{"schemaVersion":1,"findingId":"fnd_other","summary":"patched","changedFiles":["app.py"],"risk":"low"}`,
+	)) {
+		t.Fatal("validArtifactCandidate() = true, want false for mismatched patch summary findingId")
 	}
 }
 

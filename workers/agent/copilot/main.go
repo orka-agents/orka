@@ -51,7 +51,9 @@ var (
 		`cat > ([^\n]+?\.orka-artifacts/([A-Za-z0-9._-]+))` +
 			` << '?([A-Za-z0-9_]+)'?\n`,
 	)
-	requiredArtifactsPattern = regexp.MustCompile(`(?m)^REQUIRED_SECURITY_ARTIFACTS:\s*(.+?)\s*$`)
+	requiredArtifactsPattern    = regexp.MustCompile(`(?m)^REQUIRED_SECURITY_ARTIFACTS:\s*(.+?)\s*$`)
+	patchDiffArtifactPattern    = regexp.MustCompile(`^security-patch-([A-Za-z0-9._-]+)\.diff$`)
+	patchSummaryArtifactPattern = regexp.MustCompile(`^security-patch-([A-Za-z0-9._-]+)\.json$`)
 )
 
 func main() {
@@ -624,6 +626,17 @@ func validArtifactCandidate(filename string, data []byte) bool {
 		if strings.HasPrefix(filename, "security-review-context-") && strings.HasSuffix(filename, ".json") {
 			_, err := security.ParseReviewContextManifest([]byte(trimmed))
 			return err == nil
+		}
+		if patchDiffArtifactPattern.MatchString(filename) {
+			return strings.Contains(trimmed, "diff --git ")
+		}
+		if match := patchSummaryArtifactPattern.FindStringSubmatch(filename); len(match) == 2 {
+			var artifact security.PatchSummaryArtifact
+			if err := json.Unmarshal([]byte(trimmed), &artifact); err != nil {
+				return false
+			}
+			return artifact.SchemaVersion == security.SchemaVersionPatchSummary &&
+				strings.TrimSpace(artifact.FindingID) == match[1]
 		}
 		return true
 	}
