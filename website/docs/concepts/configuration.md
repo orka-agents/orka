@@ -166,7 +166,7 @@ spec:
 
 ### Execution
 
-Tasks and Agents both support `spec.execution` for worker pod runtime selection and placement. Agent Tasks can also set `Task.spec.execution.workspace` to request experimental workspace-backed execution through upstream `agent-sandbox`; see [Agent Sandbox Workspaces](agent-sandbox.md).
+Tasks and Agents both support `spec.execution` for worker pod runtime selection and placement. Agent Tasks can also set `Task.spec.execution.workspace` to request experimental workspace-backed execution through upstream `agent-sandbox` or Agent Substrate; see [Agent Sandbox Workspaces](agent-sandbox.md) and [Substrate Execution Workspaces](substrate.md).
 
 ```yaml
 execution:
@@ -194,7 +194,7 @@ execution:
 | `nodeSelector` | map[string]string | Restricts worker pods to nodes with matching labels |
 | `tolerations` | list | Allows worker pods onto tainted runtime-specific node pools |
 | `affinity` | object | Adds Kubernetes affinity or anti-affinity rules for worker pods |
-| `workspace` | object | Experimental upstream `agent-sandbox` workspace request under `Task.spec.execution.workspace`. Use only on `type: agent` Tasks. |
+| `workspace` | object | Experimental execution workspace request under `Task.spec.execution.workspace`. Use only on `type: agent` Tasks. |
 
 Resolution order:
 
@@ -203,9 +203,9 @@ Resolution order:
 - `runtimeClassName` is a scalar override
 - `nodeSelector`, `tolerations`, and `affinity` replace Agent defaults when they are set on the Task
 
-#### Agent Sandbox Workspace Requests
+#### Execution Workspace Requests
 
-`Task.spec.execution.workspace` is alpha support for durable, claimable agent workspaces backed by an existing upstream `agent-sandbox` installation. When `workspace.enabled: true`, the Task controller validates the request, resolves defaults, and passes sandbox settings to the agent worker Job. Orka still creates the outer Kubernetes worker Job; the worker wrapper claims and waits for the upstream sandbox workspace, runs the configured agent runtime inside it, and then deletes or retains/releases the workspace according to `cleanupPolicy`.
+`Task.spec.execution.workspace` is alpha support for durable, claimable agent workspaces backed by an existing upstream `agent-sandbox` or Agent Substrate installation. When `workspace.enabled: true`, the Task controller validates the request, resolves defaults, and passes workspace settings to the agent worker Job. Orka still creates the outer Kubernetes worker Job; the worker wrapper claims and waits for the upstream workspace, runs the configured agent runtime inside it, and then deletes or retains/releases the workspace according to `cleanupPolicy`.
 
 This field is distinct from `Task.spec.agentRuntime.workspace`, which configures the git checkout prepared for the agent runtime inside the current execution environment.
 
@@ -226,6 +226,7 @@ spec:
     runtimeClassName: gvisor
     workspace:
       enabled: true
+      provider: agent-sandbox
       templateRef:
         name: coding-agent
       reusePolicy: session
@@ -235,12 +236,49 @@ spec:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enables experimental workspace-backed execution. When false or omitted, sandbox settings are not propagated. |
+| `provider` | string | Controller default provider, defaulting to `agent-sandbox` | Workspace backend: `agent-sandbox` or `substrate`. |
 | `templateRef.name` | string | Controller default template, if configured | Workspace template name. Required when enabled unless the controller has a default template. |
 | `templateRef.namespace` | string | Task namespace | Namespace containing the workspace template. Orka propagates this value in its worker environment/request identity. |
 | `reusePolicy` | string | `none` | Reuse behavior: `none` or `session`. `session` requires `spec.sessionRef.name`. |
 | `cleanupPolicy` | string | Controller default cleanup policy, defaulting to `delete` | Cleanup behavior after execution: `delete` or `retain`. |
+| `boot` | boolean | `false` | Substrate only. Boots the actor from scratch on first resume. |
+| `poolRef.name` | string | empty | Substrate only. Places the workspace on a `SubstrateActorPool`; pooled workspaces currently require `cleanupPolicy: delete`. |
+| `poolRef.namespace` | string | Task namespace | Substrate only. Namespace containing the referenced pool. |
+| `snapshot` | object | empty | Substrate only, reserved. Non-empty restore/checkpoint settings are currently rejected. |
+| `hibernation` | object | empty | Substrate only, reserved. `processMode: resident` is currently rejected. |
 
-See [Agent Sandbox Workspaces](agent-sandbox.md) for validation rules, controller flags, execution flow, and operational limitations.
+See [Agent Sandbox Workspaces](agent-sandbox.md) and [Substrate Execution Workspaces](substrate.md) for validation rules, controller flags, execution flow, and operational limitations.
+
+#### SubstrateActorPool
+
+`SubstrateActorPool` is an operator-owned pool of deterministic Substrate actors for pooled Task placement, MCP actor-backed Tools, and density reporting.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: SubstrateActorPool
+metadata:
+  name: codex-substrate-pool
+spec:
+  templateRef:
+    name: orka-codex
+    namespace: ate-demo
+  workerPoolRef:
+    name: orka-workers
+    namespace: ate-demo
+  targetActors: 4
+  targetWorkers: 2
+  precreateActors: true
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `templateRef.name` | string | required | Substrate `ActorTemplate` used for pool members. |
+| `templateRef.namespace` | string | Pool namespace | Namespace containing the `ActorTemplate`. |
+| `workerPoolRef.name` | string | empty | Optional Substrate `WorkerPool` used for capacity and density reporting. |
+| `workerPoolRef.namespace` | string | Pool namespace | Namespace containing the `WorkerPool`. |
+| `targetActors` | integer | `0` | Desired stateful actor count, capped at `1000`. References from Tasks or Tools require at least `1`. |
+| `targetWorkers` | integer | `0` | Intended physical worker budget. `targetActors` may exceed this value to express oversubscription. |
+| `precreateActors` | boolean | `false` | Pre-create deterministic warm actors up to `targetActors`. |
 
 ### Provider Fallback Chain
 
@@ -378,7 +416,7 @@ status:
 
 ### Tool
 
-Custom HTTP-based tool definitions for agents. Supports header-based or body-based auth injection.
+Custom tool definitions for agents. Tools can call plain HTTP endpoints or MCP servers hosted in durable Substrate actors. HTTP tools support header-based or body-based auth injection.
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -404,6 +442,42 @@ spec:
     authInject: body     # "header" (Bearer token) or "body" (JSON key)
     authBodyKey: api_key # JSON key name when authInject=body
 ```
+
+MCP actor-backed tools can also set `http.authSecretRef` for transport auth, but
+they must use header injection. `authInject: body` is only valid for plain HTTP
+tools because MCP call arguments are forwarded to the MCP server as tool input.
+
+Example MCP actor-backed Tool:
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: repo-inspector
+spec:
+  description: "Inspect repository metadata through an MCP server"
+  parameters:
+    type: object
+    properties:
+      message:
+        type: string
+    required:
+      - message
+  mcp:
+    path: /mcp
+    substrateActor:
+      templateRef:
+        name: orka-mcp
+        namespace: ate-demo
+      poolRef:
+        name: mcp-substrate-pool
+      boot: true
+```
+
+MCP actor-backed Tools require `mcp.substrateActor.templateRef.name`. `mcp.path`
+defaults to `/mcp`, `poolRef` is optional, and `boot` only affects the first
+actor resume. `spec.http` may be omitted unless the resolved actor endpoint
+needs transport auth settings.
 
 #### URL Path Interpolation
 

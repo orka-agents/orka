@@ -164,10 +164,82 @@ Workspace fields:
   session-scoped Actor and requires `spec.sessionRef.name`.
 - `cleanupPolicy`: `delete` removes the Actor after the Task. `retain` scrubs
   staged secrets and suspends the Actor.
+- `boot`: asks Substrate to boot the actor from scratch on first resume instead
+  of relying on the provider's default snapshot behavior.
+- `poolRef`: places the Task on an operator-managed `SubstrateActorPool`.
+  Pooled workspaces currently require `cleanupPolicy: delete`; the controller
+  rejects pooled `retain` until workspace reset is available.
+- `snapshot`: reserved for explicit provider snapshot restore/checkpoint
+  settings. Non-empty snapshot settings are currently rejected.
+- `hibernation`: reserved for resident process reuse. `processMode: resident`
+  is currently rejected.
 
 The controller rejects `provider: substrate` when Substrate support is disabled,
 when the provider name is unknown, when a required template is missing, or when
 the referenced `ActorTemplate` is not Orka-compatible.
+
+## Actor Pools
+
+`SubstrateActorPool` is an Orka CRD for operator-owned actor pool capacity. A
+pool points at one Substrate `ActorTemplate`, optionally records the intended
+Substrate `WorkerPool`, and reports sanitized density telemetry.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: SubstrateActorPool
+metadata:
+  name: codex-substrate-pool
+  namespace: default
+spec:
+  templateRef:
+    name: orka-codex
+    namespace: ate-demo
+  workerPoolRef:
+    name: orka-workers
+    namespace: ate-demo
+  targetActors: 4
+  targetWorkers: 2
+  precreateActors: true
+```
+
+Pool fields:
+
+- `templateRef`: Substrate `ActorTemplate` used for all actors in the pool.
+- `workerPoolRef`: optional Substrate `WorkerPool` the pool targets for
+  capacity and density reporting.
+- `targetActors`: desired stateful actor count, capped at `1000`.
+- `targetWorkers`: intended physical worker budget. `targetActors` may exceed
+  this value to express oversubscription.
+- `precreateActors`: asks the controller to create deterministic warm actors up
+  to `targetActors`; Substrate may suspend actors when workers are full.
+
+Tasks opt into a pool with `spec.execution.workspace.poolRef`:
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: pooled-substrate-agent-task
+spec:
+  type: agent
+  agentRef:
+    name: codex-agent
+  prompt: "Run make test and summarize the result."
+  execution:
+    workspace:
+      enabled: true
+      provider: substrate
+      templateRef:
+        name: orka-codex
+        namespace: ate-demo
+      poolRef:
+        name: codex-substrate-pool
+      boot: true
+```
+
+The pool and Task/Tool template references must resolve to the same
+`ActorTemplate`. When namespace isolation is enforced, cross-namespace `poolRef`
+values are rejected.
 
 ## Workspace Status
 
@@ -185,6 +257,17 @@ status:
     reusePolicy: session
     cleanupPolicy: delete
     reused: false
+    placement:
+      workerNamespace: ate-demo
+      workerPool: orka-workers
+      workerPodName: orka-workers-0
+    density:
+      workerCount: 1
+      actorCount: 2
+      runningActorCount: 1
+      suspendedActorCount: 1
+      actorsPerWorker: "2.00"
+    resumeLatency: 2.3s
     message: workspace deleted
 ```
 
@@ -194,6 +277,10 @@ Possible phases are `Pending`, `Ready`, `Released`, `Retained`, `Deleted`, and
 The status surface is intentionally sanitized. It must not expose Substrate actor
 IDs, snapshot URIs, worker pod IPs, daemon URLs, staged token paths, request
 tokens, or raw provider credentials.
+
+`placement`, `density`, and `resumeLatency` are best-effort visibility fields.
+They are safe for status and telemetry, but they should not be used as stable
+provider-native identifiers.
 
 ## ActorTemplate Requirements
 
@@ -289,6 +376,50 @@ spec:
 Use images and `runsc` artifacts that match the target environment. The example
 above mirrors the local E2E shape; production installations should pin and
 mirror artifacts according to their own supply-chain policy.
+
+## MCP Actor-Backed Tools
+
+Tools can also be backed by a durable Substrate actor that serves MCP over HTTP.
+The Tool controller creates or reuses the actor, waits for the MCP endpoint to
+be reachable through the Substrate router, and publishes the resolved endpoint
+and actor metadata in Tool status.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: repo-inspector
+  namespace: default
+spec:
+  description: "Inspect repository metadata through an MCP server"
+  parameters:
+    type: object
+    properties:
+      message:
+        type: string
+    required:
+      - message
+  mcp:
+    path: /mcp
+    substrateActor:
+      templateRef:
+        name: orka-mcp
+        namespace: ate-demo
+      poolRef:
+        name: mcp-substrate-pool
+      boot: true
+```
+
+`mcp.path` defaults to `/mcp`. `mcp.substrateActor.templateRef.name` is
+required, and `poolRef` is optional. If a pool is set, the pool template must
+match the MCP actor template. `boot: true` boots the actor from scratch only on
+the first resume; forced reconciles should not restart an already booted MCP
+actor.
+
+MCP tools may omit `spec.http` entirely. If the actor endpoint also needs
+transport auth, set `spec.http.authSecretRef` and use header injection. Body
+auth injection is invalid for MCP tools because call arguments are forwarded to
+the MCP server as tool input.
 
 ## Security Model
 
@@ -409,6 +540,8 @@ Start with Orka resources:
 ```bash
 kubectl get task -A
 kubectl -n default get task <task-name> -o yaml
+kubectl -n default get substrateactorpool
+kubectl -n default get tool
 kubectl -n orka-system logs deployment/orka-controller-manager --tail=200
 kubectl -n default get jobs,pods
 kubectl -n default logs job/<worker-job-name> --all-containers=true
@@ -448,12 +581,19 @@ Common failures:
   metadata described above.
 - `ActorTemplate ... is not Ready`: inspect Substrate `WorkerPool`, snapshot
   config, image pulls, and `runsc` configuration.
+- `substrate actor poolRef ... not found`: create the referenced
+  `SubstrateActorPool` or fix `spec.execution.workspace.poolRef`.
+- `poolRef does not support cleanupPolicy "retain"`: omit `cleanupPolicy` or
+  set it to `delete` for pooled workspaces.
 - Task reaches `Failed` with `WorkspaceReadinessFailed`: inspect actor state,
   router logs, workspace daemon logs, and DNS suffix configuration.
 - Task reaches `Failed` with `WorkspaceCleanupFailed` after
   `resultRef.available=true`: the command completed and result submission
   succeeded, but Substrate failed while checkpointing or deleting the actor.
   Inspect `atelet` and `ateom-gvisor` logs for `runsc delete` errors.
+- MCP Tool remains unavailable: inspect `status.error`, verify
+  `mcp.substrateActor.templateRef`, check that the actor template is `Ready`,
+  and confirm the MCP server responds on `mcp.path` through the Substrate router.
 - Cleanup stalls: verify the actor can reach `Suspended`; Substrate deletes only
   suspended Actors.
 

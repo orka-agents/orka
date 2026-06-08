@@ -43,17 +43,23 @@ When a Task is created through OIDC or context-token authentication, Orka stamps
 
 ### Task Execution Workspace Schema
 
-`POST /api/v1/tasks` accepts the Task CRD shape. Agent Tasks may include `spec.execution.workspace` to request experimental workspace-backed execution through an upstream `agent-sandbox` installation. The controller validates the request, resolves/defaults the effective `SandboxTemplate` and workspace settings, and injects the resolved settings into the outer Kubernetes worker Job. The agent worker wrapper then claims and executes inside the sandbox workspace.
+`POST /api/v1/tasks` accepts the Task CRD shape. Agent Tasks may include `spec.execution.workspace` to request experimental workspace-backed execution through an upstream `agent-sandbox` or Agent Substrate installation. The controller validates the request, resolves/defaults the effective workspace settings, and injects them into the outer Kubernetes worker Job. The agent worker wrapper then claims and executes inside the upstream workspace.
 
 | Path | Type | Values/default | Notes |
 |------|------|----------------|-------|
-| `spec.execution.workspace.enabled` | boolean | default `false` | Enables workspace-backed execution for an agent Task. The controller rejects enabled requests unless agent sandbox support is enabled. |
+| `spec.execution.workspace.enabled` | boolean | default `false` | Enables workspace-backed execution for an agent Task. The controller rejects enabled requests unless the selected provider is enabled. |
+| `spec.execution.workspace.provider` | string | controller default provider; built-in default `agent-sandbox` | Workspace backend: `agent-sandbox` or `substrate`. |
 | `spec.execution.workspace.templateRef.name` | string | controller default template, if configured | Workspace template name. Required when `enabled: true` and no controller default template is configured. |
-| `spec.execution.workspace.templateRef.namespace` | string | Task namespace | Namespace containing the workspace template in Orka metadata. Current SDK-backed execution creates claims in the Task namespace and requires the template to be usable there. |
-| `spec.execution.workspace.reusePolicy` | string | `none`; allowed `none`, `session` | `session` derives the reuse key from `spec.sessionRef.name` and requires that field to be set. Automatic cross-Job reattach is limited until Orka persists sandbox claim identity. |
+| `spec.execution.workspace.templateRef.namespace` | string | Task namespace, or provider-specific default namespace when configured | Namespace containing the workspace template. |
+| `spec.execution.workspace.reusePolicy` | string | `none`; allowed `none`, `session` | `session` derives the reuse key from `spec.sessionRef.name` and requires that field to be set. |
 | `spec.execution.workspace.cleanupPolicy` | string | controller default cleanup policy; allowed `delete`, `retain` | Cleanup behavior after the sandbox command exits. |
+| `spec.execution.workspace.boot` | boolean | default `false` | Substrate only. Boots the actor from scratch on first resume. |
+| `spec.execution.workspace.poolRef.name` | string | empty | Substrate only. Places the Task on a `SubstrateActorPool`; pooled workspaces currently require `cleanupPolicy: delete`. |
+| `spec.execution.workspace.poolRef.namespace` | string | Task namespace | Substrate only. Namespace containing the referenced pool. |
+| `spec.execution.workspace.snapshot` | object | empty | Substrate only, reserved. Non-empty restore/checkpoint settings are currently rejected. |
+| `spec.execution.workspace.hibernation` | object | empty | Substrate only, reserved. `processMode: resident` is currently rejected. |
 
-Workspace requests are only valid on `spec.type: agent` Tasks. See [Agent Sandbox Workspaces](../concepts/agent-sandbox.md) for configuration, validation rules, live smoke-test steps, and current limitations.
+Workspace requests are only valid on `spec.type: agent` Tasks. See [Agent Sandbox Workspaces](../concepts/agent-sandbox.md) and [Substrate Execution Workspaces](../concepts/substrate.md) for configuration, validation rules, live smoke-test steps, and current limitations.
 
 ### Get Task Plan
 
