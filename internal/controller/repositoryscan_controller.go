@@ -584,7 +584,7 @@ func changedFileSet(files []string) map[string]struct{} {
 func trustedFindingsRepository(scan *corev1alpha1.RepositoryScan, run *store.ScanRun) security.FindingsV2Repository {
 	repo := security.FindingsV2Repository{
 		RepoURL: strings.TrimSpace(scan.Spec.RepoURL),
-		Branch:  security.EffectiveBranch(scan),
+		Branch:  trustedFindingsBranch(scan),
 		SubPath: strings.Trim(strings.TrimSpace(scan.Spec.SubPath), "/"),
 	}
 	if run != nil {
@@ -592,6 +592,16 @@ func trustedFindingsRepository(scan *corev1alpha1.RepositoryScan, run *store.Sca
 		repo.HeadSHA = run.HeadCommit
 	}
 	return repo
+}
+
+func trustedFindingsBranch(scan *corev1alpha1.RepositoryScan) string {
+	if branch := strings.TrimSpace(scan.Spec.Branch); branch != "" {
+		return branch
+	}
+	if ref := security.EffectiveRef(scan); ref != "" {
+		return "ref:" + ref
+	}
+	return security.EffectiveBranch(scan)
 }
 
 func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, threatModel string, reviewSlices []store.ReviewSlice) error {

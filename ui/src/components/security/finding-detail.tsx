@@ -194,6 +194,12 @@ export function FindingDetail({ findingId }: { findingId: string }) {
                 <p className="text-muted-foreground">{finding.suggestedRegressionTest}</p>
               </div>
             )}
+            {finding.whyTestsDoNotAlreadyCoverThis && (
+              <div>
+                <div className="font-medium">Why existing tests miss this</div>
+                <p className="text-muted-foreground">{finding.whyTestsDoNotAlreadyCoverThis}</p>
+              </div>
+            )}
             {finding.minimumFixScope && (
               <div>
                 <div className="font-medium">Minimum fix scope</div>

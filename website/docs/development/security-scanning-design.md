@@ -143,7 +143,7 @@ type SecurityStore interface {
     UpsertReviewSlice(ctx context.Context, slice *ReviewSlice) error
     ListReviewSlices(ctx context.Context, filter ReviewSliceFilter) ([]ReviewSlice, string, error)
     GetReviewSlice(ctx context.Context, namespace, repositoryScan, id string) (*ReviewSlice, error)
-    UpdateReviewSliceStatus(ctx context.Context, namespace, repositoryScan, id, status string) error
+    UpdateReviewSliceStatus(ctx context.Context, namespace, repositoryScan, id, lastScanRunID, status string) error
 
     GetLatestThreatModel(ctx context.Context, namespace, repositoryScan string) (*ThreatModel, error)
     SaveThreatModel(ctx context.Context, model *ThreatModel) error

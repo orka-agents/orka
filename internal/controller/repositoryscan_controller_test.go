@@ -106,6 +106,48 @@ func TestLatestTerminalScanTaskPrefersNewestCompletedScan(t *testing.T) {
 	}
 }
 
+func TestTrustedFindingsRepositoryScopesRefOnlyScan(t *testing.T) {
+	run := &storepkg.ScanRun{
+		BaseCommit: "base",
+		HeadCommit: "head",
+	}
+	tests := []struct {
+		name string
+		spec corev1alpha1.RepositoryScanSpec
+		want string
+	}{
+		{
+			name: "implicit main",
+			spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo"},
+			want: "main",
+		},
+		{
+			name: "explicit branch wins",
+			spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", Branch: "release", Ref: "v1.2.3"},
+			want: "release",
+		},
+		{
+			name: "ref-only scan is ref scoped",
+			spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", Ref: "refs/tags/v1.2.3"},
+			want: "ref:refs/tags/v1.2.3",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scan := &corev1alpha1.RepositoryScan{Spec: tt.spec}
+
+			got := trustedFindingsRepository(scan, run)
+
+			if got.Branch != tt.want {
+				t.Fatalf("trustedFindingsRepository().Branch = %q, want %q", got.Branch, tt.want)
+			}
+			if got.BaseSHA != "base" || got.HeadSHA != "head" {
+				t.Fatalf("trustedFindingsRepository() SHAs = %q/%q, want base/head", got.BaseSHA, got.HeadSHA)
+			}
+		})
+	}
+}
+
 func TestLatestOwnedScanPipelineRunIDIgnoresPatchAndValidationTasks(t *testing.T) {
 	tasks := []corev1alpha1.Task{
 		{

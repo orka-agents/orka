@@ -145,6 +145,82 @@ func TestValidateFindingsV2AcceptsButDoesNotPersistQuoteWithoutWorkspaceRoot(t *
 	}
 }
 
+func TestValidateFindingsV2NormalizesSeverityAndConfidence(t *testing.T) {
+	finding := validFinding()
+	finding.Severity = " High "
+	finding.Confidence = "MEDIUM"
+
+	got := ValidateFindingsV2(FindingsV2Artifact{
+		SchemaVersion: SchemaVersionFindingsV2,
+		Repository:    FindingsV2Repository{RepoURL: "https://github.com/example/app", Branch: "main"},
+		Scan:          FindingsV2Scan{Mode: "initial", SliceID: "slice_app"},
+		Findings:      []FindingsV2Finding{finding},
+	}, basicReviewContextManifest(), FindingValidationOptions{
+		Namespace:      "default",
+		RepositoryScan: "repo",
+		ScanRunID:      "scan1",
+		TaskName:       "task1",
+	})
+
+	if len(got.Accepted) != 1 || len(got.Dropped) != 0 {
+		t.Fatalf("ValidateFindingsV2() accepted=%d dropped=%d, want 1/0", len(got.Accepted), len(got.Dropped))
+	}
+	if got.Accepted[0].Severity != "high" {
+		t.Fatalf("accepted severity = %q, want high", got.Accepted[0].Severity)
+	}
+	if got.Accepted[0].Confidence != "medium" {
+		t.Fatalf("accepted confidence = %q, want medium", got.Accepted[0].Confidence)
+	}
+}
+
+func TestValidateFindingsV2DropsUnsupportedSeverityAndConfidence(t *testing.T) {
+	tests := []struct {
+		name     string
+		mutate   func(*FindingsV2Finding)
+		wantDrop string
+	}{
+		{
+			name: "unsupported severity",
+			mutate: func(f *FindingsV2Finding) {
+				f.Severity = "critical severity"
+			},
+			wantDrop: "unsupported severity",
+		},
+		{
+			name: "unsupported confidence",
+			mutate: func(f *FindingsV2Finding) {
+				f.Confidence = "very high"
+			},
+			wantDrop: "unsupported confidence",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			finding := validFinding()
+			tt.mutate(&finding)
+
+			got := ValidateFindingsV2(FindingsV2Artifact{
+				SchemaVersion: SchemaVersionFindingsV2,
+				Repository:    FindingsV2Repository{RepoURL: "https://github.com/example/app", Branch: "main"},
+				Scan:          FindingsV2Scan{Mode: "initial", SliceID: "slice_app"},
+				Findings:      []FindingsV2Finding{finding},
+			}, basicReviewContextManifest(), FindingValidationOptions{
+				Namespace:      "default",
+				RepositoryScan: "repo",
+				ScanRunID:      "scan1",
+				TaskName:       "task1",
+			})
+
+			if len(got.Accepted) != 0 || len(got.Dropped) != 1 {
+				t.Fatalf("ValidateFindingsV2() accepted=%d dropped=%d, want 0/1", len(got.Accepted), len(got.Dropped))
+			}
+			if !strings.Contains(got.Dropped[0].Reason, tt.wantDrop) {
+				t.Fatalf("drop reason = %q, want contains %q", got.Dropped[0].Reason, tt.wantDrop)
+			}
+		})
+	}
+}
+
 func TestValidateFindingsV2RejectsMissingEvidenceStaleRangesAndQuoteMismatch(t *testing.T) {
 	badQuote := "not in file"
 	compactedQuote := "package main func main() {}"
@@ -218,6 +294,18 @@ func TestValidateFindingsV2RejectsMissingEvidenceStaleRangesAndQuoteMismatch(t *
 				t.Fatalf("drop reason = %q, want contains %q", got.Dropped[0].Reason, tt.wantDrop)
 			}
 		})
+	}
+}
+
+func basicReviewContextManifest() ReviewContextManifest {
+	return ReviewContextManifest{
+		SchemaVersion: SchemaVersionReviewContext,
+		SliceID:       "slice_app",
+		IncludedFiles: []ReviewContextIncludedFile{{
+			Path:               "app.go",
+			IncludedLineRanges: []ReviewContextLineRange{{StartLine: 1, EndLine: 2}},
+			Readable:           true,
+		}},
 	}
 }
 

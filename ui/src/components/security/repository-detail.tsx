@@ -89,7 +89,7 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
         <Card>
           <CardHeader><CardTitle className="text-base">Review Slices</CardTitle></CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{reviewSlices.data?.items.length ?? 0}</div>
+            <div className="text-2xl font-bold">{reviewSlices.data?.items?.length ?? 0}</div>
             <div className="mt-1 text-xs text-muted-foreground">Deterministic repository review units</div>
           </CardContent>
         </Card>
@@ -103,7 +103,7 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
         <Card>
           <CardHeader><CardTitle className="text-base">Dropped Output</CardTitle></CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{droppedFindings.data?.items.length ?? scanRuns.data?.items?.[0]?.droppedFindings ?? 0}</div>
+            <div className="text-2xl font-bold">{droppedFindings.data?.items?.length ?? scanRuns.data?.items?.[0]?.droppedFindings ?? 0}</div>
             <div className="mt-1 text-xs text-muted-foreground">Rejected model findings with diagnostics</div>
           </CardContent>
         </Card>

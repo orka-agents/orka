@@ -420,6 +420,7 @@ func BuildReviewPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, head
 	prompt.WriteString("\nsecurity-findings.v2.json must be valid JSON with this top-level shape:\n")
 	prompt.WriteString(`{"schemaVersion":2,"repository":{"repoURL":"...","branch":"...","subPath":"...","baseSHA":"...","headSHA":"..."},"scan":{"mode":"initial|incremental|manual","sliceId":"...","summary":"..."},"findings":[]}` + "\n")
 	prompt.WriteString("Each finding object must use these keys: title, category, severity, confidence, triage, evidence, summary, rootCause, reproduction, remediation, suggestedAction, whyTestsDoNotAlreadyCoverThis, suggestedRegressionTest, minimumFixScope.\n")
+	prompt.WriteString("Use severity exactly one of: critical, high, medium, low. Use confidence exactly one of: high, medium, low.\n")
 	prompt.WriteString("Set scan.sliceId exactly to the slice ID above. Even when this slice has zero findings, write valid JSON with an empty findings array.\n")
 
 	prompt.WriteString("\nReview slice metadata:\n")

@@ -11,6 +11,13 @@ import (
 	"github.com/sozercan/orka/internal/store"
 )
 
+const (
+	findingSeverityCritical = "critical"
+	findingLevelHigh        = "high"
+	findingLevelMedium      = "medium"
+	findingLevelLow         = "low"
+)
+
 type FindingValidationOptions struct {
 	Namespace            string
 	RepositoryScan       string
@@ -32,6 +39,12 @@ func ValidateFindingsV2(artifact FindingsV2Artifact, manifest ReviewContextManif
 	included := includedFileMap(manifest)
 	for index, finding := range artifact.Findings {
 		if reason := validateFindingRequiredFields(finding); reason != "" {
+			result.Dropped = append(result.Dropped, droppedDiagnostic(index, reason, finding))
+			continue
+		}
+		var reason string
+		finding, reason = normalizeFindingEnums(finding)
+		if reason != "" {
 			result.Dropped = append(result.Dropped, droppedDiagnostic(index, reason, finding))
 			continue
 		}
@@ -85,6 +98,38 @@ func validateFindingRequiredFields(finding FindingsV2Finding) string {
 		return "evidence is required"
 	}
 	return ""
+}
+
+func normalizeFindingEnums(finding FindingsV2Finding) (FindingsV2Finding, string) {
+	severity, ok := canonicalFindingSeverity(finding.Severity)
+	if !ok {
+		return finding, fmt.Sprintf("unsupported severity %q", finding.Severity)
+	}
+	confidence, ok := canonicalFindingConfidence(finding.Confidence)
+	if !ok {
+		return finding, fmt.Sprintf("unsupported confidence %q", finding.Confidence)
+	}
+	finding.Severity = severity
+	finding.Confidence = confidence
+	return finding, ""
+}
+
+func canonicalFindingSeverity(value string) (string, bool) {
+	switch normalized := strings.ToLower(strings.TrimSpace(value)); normalized {
+	case findingSeverityCritical, findingLevelHigh, findingLevelMedium, findingLevelLow:
+		return normalized, true
+	default:
+		return "", false
+	}
+}
+
+func canonicalFindingConfidence(value string) (string, bool) {
+	switch normalized := strings.ToLower(strings.TrimSpace(value)); normalized {
+	case findingLevelHigh, findingLevelMedium, findingLevelLow:
+		return normalized, true
+	default:
+		return "", false
+	}
 }
 
 func validateFindingEvidence(finding FindingsV2Finding, included map[string]ReviewContextIncludedFile, workspaceRoot string) string {
