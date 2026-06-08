@@ -31,6 +31,11 @@ const layers = [
         title: "External integrations",
         description: "Providers, custom tools, GitHub workflows, and notifications extend execution.",
     },
+    {
+        id: "airunway",
+        title: "AI Runway model serving",
+        description: "Optional in-cluster inference plane for deploying and routing local OpenAI-compatible models.",
+    },
 ];
 
 const components = [
@@ -235,13 +240,79 @@ const components = [
     {
         id: "llm-providers",
         title: "LLM Providers",
-        subtitle: "Anthropic, OpenAI, Azure OpenAI, and compatible endpoints",
+        subtitle: "Anthropic, OpenAI, Azure OpenAI, AI Runway, and compatible endpoints",
         layer: "integrations",
         tier: "optional",
         category: "AI",
         accent: "#8250df",
-        description: "Provider CRDs select model backends while credentials remain referenced through Kubernetes Secrets.",
-        responsibilities: ["Provider CRD", "Streaming", "Fallback and cooldown", "Secret-backed API keys"],
+        description: "Provider CRDs select model backends while credentials remain referenced through Kubernetes Secrets. AI Runway can plug in here as an in-cluster OpenAI-compatible endpoint.",
+        responsibilities: ["Provider CRD", "Streaming", "Fallback and cooldown", "Secret-backed API keys", "AI Runway gateway"],
+    },
+    {
+        id: "airunway-ui-api",
+        title: "AI Runway UI and API",
+        subtitle: "Optional dashboard and REST API for model catalog, GPU fit, installs, logs, and metrics",
+        layer: "airunway",
+        tier: "optional",
+        category: "Experience",
+        accent: "#0a7ea4",
+        description: "AI Runway's swappable UI and Bun/Hono backend let operators browse HuggingFace models, install provider shims, validate capacity, and create ModelDeployment resources.",
+        responsibilities: ["Model catalog", "GPU fit checks", "Provider installation", "Metrics and logs"],
+    },
+    {
+        id: "airunway-model-crds",
+        title: "ModelDeployment CRDs",
+        subtitle: "Unified airunway.ai API for requested models, engines, providers, scaling, and gateway settings",
+        layer: "airunway",
+        tier: "optional",
+        category: "Declarative",
+        accent: "#1f883d",
+        description: "ModelDeployment is the declarative contract AI Runway reconciles into provider-specific model-serving resources.",
+        responsibilities: ["Model ID", "Engine selection", "Provider selection", "Gateway intent"],
+    },
+    {
+        id: "airunway-controller",
+        title: "AI Runway Controller",
+        subtitle: "Kubebuilder operator that validates specs, selects engines/providers, and owns model lifecycle",
+        layer: "airunway",
+        tier: "optional",
+        category: "Control",
+        accent: "#fb8500",
+        description: "The controller watches ModelDeployment and InferenceProviderConfig resources, chooses vLLM, SGLang, TensorRT-LLM, or llama.cpp, and delegates to provider controllers.",
+        responsibilities: ["Spec validation", "Engine auto-selection", "Provider selection", "Unified status"],
+    },
+    {
+        id: "airunway-provider-shims",
+        title: "Provider Shims",
+        subtitle: "KAITO, NVIDIA Dynamo, KubeRay, and llm-d provider controllers",
+        layer: "airunway",
+        tier: "optional",
+        category: "Runtime",
+        accent: "#bf3989",
+        description: "Provider shims register capabilities through InferenceProviderConfig and translate model deployments into upstream CRDs such as KAITO Workspace, DynamoGraphDeployment, or RayService.",
+        responsibilities: ["InferenceProviderConfig", "Capability matrix", "Upstream CRDs", "Provider status"],
+    },
+    {
+        id: "airunway-gateway",
+        title: "Inference Gateway",
+        subtitle: "Gateway API Inference Extension, HTTPRoute, InferencePool, EPP, and body-based routing",
+        layer: "airunway",
+        tier: "optional",
+        category: "Networking",
+        accent: "#0969da",
+        description: "When Gateway API inference CRDs are present, AI Runway exposes deployed models through a unified OpenAI-compatible endpoint that routes by the request model field.",
+        responsibilities: ["OpenAI-compatible API", "HTTPRoute", "InferencePool", "Endpoint picker"],
+    },
+    {
+        id: "airunway-model-pods",
+        title: "Model Server Pods",
+        subtitle: "GPU or CPU serving pods running vLLM, SGLang, TensorRT-LLM, or llama.cpp",
+        layer: "airunway",
+        tier: "optional",
+        category: "Inference",
+        accent: "#2f81f7",
+        description: "Provider-managed Pods host the actual model runtime that Orka agents can call through the AI Runway gateway.",
+        responsibilities: ["vLLM", "SGLang", "TensorRT-LLM", "llama.cpp"],
     },
     {
         id: "tools-skills",
@@ -299,6 +370,14 @@ const edges = [
     { from: "secrets-rbac", to: "jobs-pods", label: "SA + mounts" },
     { from: "secrets-rbac", to: "llm-providers", label: "secretRef" },
     { from: "ai-worker", to: "llm-providers", label: "complete/stream" },
+    { from: "llm-providers", to: "airunway-gateway", label: "OpenAI-compatible" },
+    { from: "airunway-ui-api", to: "airunway-model-crds", label: "create ModelDeployment" },
+    { from: "gitops-crds", to: "airunway-model-crds", label: "model manifests" },
+    { from: "airunway-model-crds", to: "airunway-controller", label: "watch" },
+    { from: "airunway-controller", to: "airunway-provider-shims", label: "select provider" },
+    { from: "airunway-provider-shims", to: "airunway-model-pods", label: "create serving pods" },
+    { from: "airunway-controller", to: "airunway-gateway", label: "HTTPRoute + InferencePool" },
+    { from: "airunway-gateway", to: "airunway-model-pods", label: "route inference" },
     { from: "ai-worker", to: "tools-skills", label: "tool calls" },
     { from: "agent-runtime-workers", to: "github-workflows", label: "repo tasks" },
     { from: "general-worker", to: "api-chat", label: "results" },
@@ -341,8 +420,38 @@ const presets = [
             "ai-worker",
             "agent-runtime-workers",
             "llm-providers",
+            "airunway-gateway",
             "tools-skills",
             "github-workflows",
+            "notification-targets",
+        ],
+    },
+    {
+        id: "airunway-inference",
+        title: "AI Runway inference",
+        description: "Show where AI Runway plugs in as an in-cluster model-serving plane for Orka agents.",
+        enabled: [
+            "web-dashboard",
+            "api-clients",
+            "gitops-crds",
+            "api-chat",
+            "auth-middleware",
+            "reconcilers",
+            "priority-queue",
+            "session-memory",
+            "metrics-webhooks",
+            "crd-store",
+            "jobs-pods",
+            "secrets-rbac",
+            "sqlite-store",
+            "ai-worker",
+            "llm-providers",
+            "airunway-ui-api",
+            "airunway-model-crds",
+            "airunway-controller",
+            "airunway-provider-shims",
+            "airunway-gateway",
+            "airunway-model-pods",
             "notification-targets",
         ],
     },
@@ -538,6 +647,7 @@ const flowStyles = {
     execution: { id: "execution", label: "Kubernetes execution", color: "#1f883d" },
     state: { id: "state", label: "State/results", color: "#8250df" },
     integration: { id: "integration", label: "External integrations", color: "#bf3989" },
+    inference: { id: "inference", label: "Model serving", color: "#0a7ea4" },
     security: { id: "security", label: "Auth/secrets", color: "#d1242f" },
 };
 
@@ -552,6 +662,9 @@ function flowStyleForEdge(edge) {
     if (label.includes("create jobs") || label.includes("container task") || label.includes("ai task") || label.includes("agent task") || label.includes("workspace")) {
         return flowStyles.execution;
     }
+    if (label.includes("openai-compatible") || label.includes("modeldeployment") || label.includes("serving") || label.includes("inference") || label.includes("httproute") || label.includes("gateway")) {
+        return flowStyles.inference;
+    }
     if (label.includes("complete") || label.includes("tool") || label.includes("repo") || label.includes("scan") || label.includes("callback")) {
         return flowStyles.integration;
     }
@@ -565,7 +678,7 @@ function buildArchitectureLayout(payload) {
     const primaryLayerIds = ["entry", "controller", "kubernetes", "workers"];
     const card = { width: 250, height: 112 };
     const frame = { x: 60, width: 900, pad: 28, header: 62 };
-    const side = { x: 1000, y: 0, width: 390, pad: 28, header: 62 };
+    const side = { x: 1000, y: 0, width: 630, pad: 28, header: 62 };
     const gap = { x: 22, y: 18, layer: 36 };
     const positioned = [];
     const positions = new Map();
@@ -615,11 +728,17 @@ function buildArchitectureLayout(payload) {
         y += height + gap.layer;
     }
 
-    const integrationComponents = enabled.filter((component) => component.layer === "integrations");
-    if (integrationComponents.length) {
-        const controllerFrame = frames.find((candidate) => candidate.id === "controller");
-        side.y = controllerFrame ? controllerFrame.y : 84;
-        addFrame("integrations", integrationComponents, side.x, side.y, side.width, 1);
+    const sideLayerIds = ["integrations", "airunway"];
+    const controllerFrame = frames.find((candidate) => candidate.id === "controller");
+    side.y = controllerFrame ? controllerFrame.y : 84;
+    for (const layerId of sideLayerIds) {
+        const sideComponents = enabled.filter((component) => component.layer === layerId);
+        if (!sideComponents.length) {
+            continue;
+        }
+        const columns = sideComponents.length > 3 ? 2 : 1;
+        const height = addFrame(layerId, sideComponents, side.x, side.y, side.width, columns);
+        side.y += height + gap.layer;
     }
 
     const layoutEdges = payload.edges
@@ -646,7 +765,8 @@ function buildArchitectureLayout(payload) {
         color: edge.color,
     }])).values());
     const frameBottom = frames.reduce((bottom, current) => Math.max(bottom, current.y + current.height), 0);
-    const baseWidth = integrationComponents.length ? 1450 : 1040;
+    const hasSideFrames = frames.some((current) => sideLayerIds.includes(current.id));
+    const baseWidth = hasSideFrames ? side.x + side.width + 60 : 1040;
     const legendWidth = legend.length ? 60 + 150 + legend.length * 190 + 120 : baseWidth;
     const width = Math.max(baseWidth, legendWidth);
     const legendY = frameBottom + 32;
