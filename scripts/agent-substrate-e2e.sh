@@ -11,6 +11,8 @@ IMAGE_TAG="${IMAGE_TAG:-agent-substrate-ci}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 TASK_TIMEOUT_SECONDS="${TASK_TIMEOUT_SECONDS:-900}"
 SUBSTRATE_E2E_EXTENDED="${SUBSTRATE_E2E_EXTENDED:-0}"
+MCP_TOOL_EXEC_ATTEMPTS="${MCP_TOOL_EXEC_ATTEMPTS:-3}"
+MCP_TOOL_EXEC_RETRY_DELAY_SECONDS="${MCP_TOOL_EXEC_RETRY_DELAY_SECONDS:-15}"
 SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME="${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME:-orka-substrate-bootstrap}"
 SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY="${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY:-token}"
 SUBSTRATE_BOOTSTRAP_TOKEN="${SUBSTRATE_BOOTSTRAP_TOKEN:-bootstrap-ci-$(date +%s%N)-${RANDOM}}"
@@ -239,6 +241,32 @@ wait_task_phase() {
       return 1
     fi
     sleep 10
+  done
+}
+
+wait_job_succeeded() {
+  local job_name="$1"
+  local timeout_seconds="$2"
+  local started now succeeded failed
+  started="$(date +%s)"
+
+  while true; do
+    succeeded="$(kubectl -n default get "job/${job_name}" -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
+    failed="$(kubectl -n default get "job/${job_name}" -o jsonpath='{.status.failed}' 2>/dev/null || true)"
+    if [[ "${succeeded}" =~ ^[1-9][0-9]*$ ]]; then
+      log "job/${job_name}: Complete"
+      return 0
+    fi
+    if [[ "${failed}" =~ ^[1-9][0-9]*$ ]]; then
+      echo "job/${job_name} failed" >&2
+      return 1
+    fi
+    now="$(date +%s)"
+    if (( now - started > timeout_seconds )); then
+      echo "timed out waiting for job/${job_name} to complete" >&2
+      return 1
+    fi
+    sleep 5
   done
 }
 
@@ -759,8 +787,17 @@ run_mcp_tool_client_job() {
   local tool_client_image="$1"
   local job_name="${2:-mcp-tool-exec-ci}"
   local message="${3:-ci}"
-  local expected
+  local expected attempt
   local args_json
+
+  if [[ ! "${MCP_TOOL_EXEC_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "MCP_TOOL_EXEC_ATTEMPTS must be a positive integer, got ${MCP_TOOL_EXEC_ATTEMPTS}" >&2
+    return 1
+  fi
+  if [[ ! "${MCP_TOOL_EXEC_RETRY_DELAY_SECONDS}" =~ ^[0-9]+$ ]]; then
+    echo "MCP_TOOL_EXEC_RETRY_DELAY_SECONDS must be a non-negative integer, got ${MCP_TOOL_EXEC_RETRY_DELAY_SECONDS}" >&2
+    return 1
+  fi
 
   if [[ "$#" -ge 4 ]]; then
     expected="$4"
@@ -769,9 +806,10 @@ run_mcp_tool_client_job() {
   fi
   args_json="$(jq -cn --arg message "${message}" '{message: $message}')"
 
-  log "Executing MCP Tool through worker ToolExecutor"
-  kubectl -n default delete "job/${job_name}" --ignore-not-found --wait=true >/dev/null
-  kubectl apply -f - <<YAML
+  for ((attempt = 1; attempt <= MCP_TOOL_EXEC_ATTEMPTS; attempt++)); do
+    log "Executing MCP Tool through worker ToolExecutor (attempt ${attempt}/${MCP_TOOL_EXEC_ATTEMPTS})"
+    kubectl -n default delete "job/${job_name}" --ignore-not-found --wait=true >/dev/null
+    kubectl apply -f - <<YAML
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -830,8 +868,19 @@ spec:
             - name: ORKA_TOOL_EXPECT_RESULT
               value: '${expected}'
 YAML
-  kubectl -n default wait --for=condition=Complete "job/${job_name}" --timeout=5m
-  run_redacted kubectl -n default logs "job/${job_name}" --all-containers --tail=-1
+    if wait_job_succeeded "${job_name}" 300; then
+      run_redacted kubectl -n default logs "job/${job_name}" --all-containers --tail=-1
+      return 0
+    fi
+
+    run_redacted kubectl -n default logs "job/${job_name}" --all-containers --tail=-1 || true
+    if (( attempt == MCP_TOOL_EXEC_ATTEMPTS )); then
+      echo "job/${job_name} did not complete after ${MCP_TOOL_EXEC_ATTEMPTS} attempts" >&2
+      return 1
+    fi
+    log "Retrying MCP Tool execution after ${MCP_TOOL_EXEC_RETRY_DELAY_SECONDS}s"
+    sleep "${MCP_TOOL_EXEC_RETRY_DELAY_SECONDS}"
+  done
 }
 
 mcp_tool_client_result() {
