@@ -35,6 +35,12 @@ The first implementation is intentionally narrow:
 - Repair, automerge, maintainer command routing, and public review comment updates are represented in the API/store shape but are not active workflows in this slice.
 - The reviewer Agent must use `runtime.type: claude` for read-only repository monitor reviews.
 
+## CI Coverage
+
+Repository monitor backend coverage has a focused GitHub Actions workflow at `.github/workflows/repository-monitor-smoke.yml`. It runs on pull requests and pushes that touch the workflow, Go API/controller/store code, CRD/config paths, worker code, or Go dependency files.
+
+The smoke workflow creates the UI embed stub and runs targeted Go tests for monitor store CRUD, API handlers, GitHub pull request event handling, controller queue and review flow, read-only review task job construction, stdout result forwarding, and PR review marker tooling. UI monitor pages are covered by the normal frontend test workflow rather than this smoke workflow.
+
 ## Prerequisites
 
 Create a Claude runtime Agent in the same namespace as the monitor, or set `spec.agents.reviewer.namespace` explicitly.
