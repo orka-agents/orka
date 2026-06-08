@@ -91,6 +91,7 @@ type RepositoryScanSpec struct {
     Owner              string                         `json:"owner,omitempty"`      // derived or explicit
     Repository         string                         `json:"repository,omitempty"` // derived or explicit
     Branch             string                         `json:"branch,omitempty"`
+    Ref                string                         `json:"ref,omitempty"`
     SubPath            string                         `json:"subPath,omitempty"`
     GitSecretRef       *corev1.LocalObjectReference   `json:"gitSecretRef,omitempty"`
     ForkRepo           string                         `json:"forkRepo,omitempty"`
@@ -122,6 +123,7 @@ Notes:
 
 - `provider` defaults to `github`.
 - `branch` currently defaults to the literal `main` when omitted (`security.EffectiveBranch`); it is **not** resolved from the repository's actual default branch. Set `spec.branch` explicitly for repositories whose default branch is not `main` (e.g. `master`, `trunk`).
+- `ref` optionally pins scan tasks to a tag, branch, or commit SHA. Ref-only scans leave the worker workspace branch empty so the checkout can resolve the ref directly; trusted finding metadata reports the branch as `ref:<ref>`.
 - `schedule` uses the same cron format as `Task.spec.schedule`.
 - `historyDays` is intentionally simpler than a custom `30d` duration parser.
 - `forkRepo` and `prBaseBranch` map directly to existing workspace/PR concepts.
