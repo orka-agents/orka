@@ -221,6 +221,17 @@ func TestValidateFindingsV2DropsUnsupportedSeverityAndConfidence(t *testing.T) {
 	}
 }
 
+func TestValidateFindingRequiredFieldsUsesDeterministicOrder(t *testing.T) {
+	finding := validFinding()
+	finding.Title = ""
+	finding.Category = ""
+	finding.Severity = ""
+
+	if got := validateFindingRequiredFields(finding); got != "title is required" {
+		t.Fatalf("validateFindingRequiredFields() = %q, want title is required", got)
+	}
+}
+
 func TestValidateFindingsV2RejectsMissingEvidenceStaleRangesAndQuoteMismatch(t *testing.T) {
 	badQuote := "not in file"
 	compactedQuote := "package main func main() {}"

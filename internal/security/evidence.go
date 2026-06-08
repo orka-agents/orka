@@ -81,17 +81,20 @@ func includedFileMap(manifest ReviewContextManifest) map[string]ReviewContextInc
 }
 
 func validateFindingRequiredFields(finding FindingsV2Finding) string {
-	required := map[string]string{
-		"title":       finding.Title,
-		"category":    finding.Category,
-		"severity":    finding.Severity,
-		"confidence":  finding.Confidence,
-		"summary":     finding.Summary,
-		"remediation": finding.Remediation,
+	required := []struct {
+		name  string
+		value string
+	}{
+		{name: "title", value: finding.Title},
+		{name: "category", value: finding.Category},
+		{name: "severity", value: finding.Severity},
+		{name: "confidence", value: finding.Confidence},
+		{name: "summary", value: finding.Summary},
+		{name: "remediation", value: finding.Remediation},
 	}
-	for name, value := range required {
-		if strings.TrimSpace(value) == "" {
-			return name + " is required"
+	for _, field := range required {
+		if strings.TrimSpace(field.value) == "" {
+			return field.name + " is required"
 		}
 	}
 	if len(finding.Evidence) == 0 {

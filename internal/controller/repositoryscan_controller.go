@@ -1891,9 +1891,6 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 	}
 
 	clearReviewRunError(run, sliceID)
-	if findingsV2.Scan.Mode != "" {
-		run.Mode = findingsV2.Scan.Mode
-	}
 	trustedRepo := trustedFindingsRepository(scan, run)
 	partition := security.ValidateFindingsV2(*findingsV2, *manifest, security.FindingValidationOptions{
 		Namespace:            scan.Namespace,

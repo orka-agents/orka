@@ -1319,7 +1319,7 @@ func TestIngestReviewTaskPartitionsV2FindingsAndMarksSliceReviewed(t *testing.T)
 			BaseSHA: "artifact-base",
 			HeadSHA: "artifact-head",
 		},
-		Scan: security.FindingsV2Scan{Mode: "initial", SliceID: "slice_api", Summary: "one accepted, two dropped"},
+		Scan: security.FindingsV2Scan{Mode: "manual", SliceID: "slice_api", Summary: "one accepted, two dropped"},
 		Findings: []security.FindingsV2Finding{
 			{
 				Title:       "Unsafe API behavior",
@@ -1385,6 +1385,9 @@ func TestIngestReviewTaskPartitionsV2FindingsAndMarksSliceReviewed(t *testing.T)
 	}
 	if run.BaseCommit != "trusted-base" || run.HeadCommit != "trusted-head" {
 		t.Fatalf("run commits = %q/%q, want trusted-base/trusted-head", run.BaseCommit, run.HeadCommit)
+	}
+	if run.Mode != "initial" {
+		t.Fatalf("run mode = %q, want trusted initial mode", run.Mode)
 	}
 	reviewSlice, err := store.GetReviewSlice(ctx, defaultNS, "kaset", "slice_api")
 	if err != nil {
