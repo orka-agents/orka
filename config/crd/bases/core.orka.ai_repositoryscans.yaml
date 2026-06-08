@@ -70,8 +70,8 @@ spec:
                 - name
                 type: object
               branch:
-                description: Branch is the base branch to scan. Defaults to the repository
-                  default branch when omitted.
+                description: Branch is the base branch to scan. Defaults to the literal
+                  main branch when omitted.
                 type: string
               forkRepo:
                 description: ForkRepo is the writable fork repository URL used for

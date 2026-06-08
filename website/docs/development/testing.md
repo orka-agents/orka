@@ -83,6 +83,7 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/live_anthropic_compat_test.go` | Live Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` coverage with default tools-enabled behavior |
 | `test/e2e/live_agent_runtime_matrix_test.go` | Live Orka runtime matrix: Codex+GPT, Claude Code+Claude, Copilot+Gemini |
 | `.github/workflows/live-agent-sandbox-e2e.yml` / `scripts/live-agent-sandbox-e2e.sh` | Live upstream `agent-sandbox` Kind validation for Orka agent workspace claim, sandbox execution, delete cleanup, retained-session reuse, and token scrubbing using a fake model-free Claude runtime |
+| `.github/workflows/security-scan-e2e.yml` / `scripts/security-scan-e2e.sh` | Secret-free repository security scan Kind validation against pinned `sozercan/nodejs-goof` using the real mapper, deterministic fake Codex analyzer, v2 finding ingestion/drop diagnostics, threat-model rejection, idempotent rescan, and HITL no-auto-patch gating |
 | `test/e2e/tools_test.go` | Built-in tools (including `web_fetch`, `file_write`) and custom Tool CRD |
 | `test/e2e/scheduled_task_test.go` | Cron scheduling, suspend, `concurrencyPolicy: Forbid`, history-limit cleanup |
 | `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
@@ -103,6 +104,7 @@ missing or mismatched artifacts staying not ready.
 - `E2E_LIVE_COPILOT_PROXY_BASE_URL` (or `E2E_COPILOT_PROXY_BASE_URL` / `COPILOT_PROXY_BASE_URL`): enables the focused live copilot-proxy spec against a running proxy
 - `E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE`, `E2E_LIVE_COPILOT_PROXY_SERVICE_NAME`, `E2E_LIVE_COPILOT_PROXY_SERVICE_PORT`: optional overrides for how the live spec reaches the in-cluster proxy service for `/readyz` and `/v1/models` checks
 - Structural e2e tests (job/env/volume assertions) run without external model keys
+- Security Scan E2E is secret-free and model-free, but requires Docker plus local toolchain dependencies: Go, `kind`, `kubectl`, `curl`, and `jq`
 - Agent Substrate E2E is secret-free, but requires Docker plus local toolchain dependencies: Go, git, curl, `kind`, `kubectl`, `ko`, and `jq`
 
 The live copilot-proxy E2E path runs in a separate workflow and executes the focused live suites for:
