@@ -460,6 +460,71 @@ func TestFinalizeResult_RequirePushBranchWithoutWorkspaceDiff(t *testing.T) {
 	}
 }
 
+// TestFinalizeResult_AgentSelfCommittedSucceeds covers the case where the agent
+// ran its own `git commit` during its turn (some CLI agents do this), leaving a
+// clean worktree and an empty index so `git diff --cached` is "". Previously
+// FinalizeResult errored with "no workspace diff was produced" even though real
+// work landed. The fix detects commits ahead of the remote base, pushes them,
+// and surfaces the committed diff — so finalize succeeds.
+func TestFinalizeResult_AgentSelfCommittedSucceeds(t *testing.T) {
+	bareDir := t.TempDir()
+	runGitWS(t, bareDir, "init", "--bare")
+
+	dir := t.TempDir()
+	runGitWS(t, dir, "init")
+	runGitWS(t, dir, "checkout", "-b", "main")
+	runGitWS(t, dir, "config", "user.email", "test@test.com")
+	runGitWS(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(dir+"/file.txt", []byte("content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, dir, "add", ".")
+	runGitWS(t, dir, "commit", "-m", "initial")
+	runGitWS(t, dir, "remote", "add", "origin", bareDir)
+	runGitWS(t, dir, "push", "-u", "origin", "main")
+
+	// Simulate the agent doing its OWN commit on the push branch (clean worktree
+	// afterwards: no uncommitted changes, empty index -> diff --cached is "").
+	runGitWS(t, dir, "checkout", "-b", "feature-branch")
+	if err := os.WriteFile(dir+"/feature.txt", []byte("agent change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, dir, "add", ".")
+	runGitWS(t, dir, "commit", "-m", "agent self-commit")
+
+	t.Setenv("ORKA_GIT_BRANCH", "main")
+	t.Setenv("ORKA_PUSH_BRANCH", "feature-branch")
+	t.Setenv(requirePushBranchEnvVar, "true")
+
+	data, err := FinalizeResult(dir, "agent output")
+	if err != nil {
+		t.Fatalf("expected finalize to succeed for agent self-committed change, got: %v", err)
+	}
+	var sr StructuredResult
+	if err := json.Unmarshal(data, &sr); err != nil {
+		t.Fatalf("expected JSON result, got: %s", string(data))
+	}
+	if sr.PushBranch != "feature-branch" {
+		t.Errorf("PushBranch = %q, want feature-branch", sr.PushBranch)
+	}
+	if sr.PushError != "" {
+		t.Errorf("PushError = %q, want empty", sr.PushError)
+	}
+	if sr.Diff == "" {
+		t.Error("expected the agent's committed change to be surfaced as a diff")
+	}
+	// The committed file must now exist on the remote feature-branch.
+	branchCmd := exec.Command("git", "branch", "--list", "feature-branch")
+	branchCmd.Dir = bareDir
+	branchOut, berr := branchCmd.CombinedOutput()
+	if berr != nil {
+		t.Fatalf("git branch --list on remote failed: %v\n%s", berr, branchOut)
+	}
+	if !strings.Contains(string(branchOut), "feature-branch") {
+		t.Errorf("expected feature-branch on remote, got branches: %q", string(branchOut))
+	}
+}
+
 func TestPushChanges_NothingToCommit(t *testing.T) {
 	dir := t.TempDir()
 	runGitWS(t, dir, "init")

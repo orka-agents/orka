@@ -168,7 +168,34 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 	}
 	if pushBranch != "" {
 		if diff == "" {
-			if requirePushBranch {
+			// No uncommitted working-tree changes. Before failing, check whether
+			// the agent already committed its work itself (some CLI agents run
+			// their own `git commit`/`git push`, which leaves the tree clean and
+			// the index empty so the diff above is ""). If there are commits on
+			// the local branch that aren't on the remote yet, push them and treat
+			// the run as a successful change rather than "no workspace diff".
+			if committed, baseRef := branchHasCommitsToPush(workDir, pushBranch); committed {
+				if pushErr := pushBranchRef(workDir, pushBranch); pushErr != nil {
+					sr.PushError = pushErr.Error()
+					if requirePushBranch {
+						return nil, fmt.Errorf("failed to push agent-committed changes to %s: %w", pushBranch, pushErr)
+					}
+					fmt.Fprintf(os.Stderr, "warning: failed to push to %s: %v\n", pushBranch, pushErr)
+				} else {
+					fmt.Fprintf(os.Stderr, "pushed agent-committed changes to branch %s\n", pushBranch)
+					sr.PushBranch = pushBranch
+				}
+				// Record the agent's commits as the diff so downstream consumers
+				// (PR body, review) see the change even though the worktree was clean.
+				if baseRef != "" {
+					if committedDiff, derr := execGit(workDir, "diff", "--binary", "--full-index", baseRef+"..HEAD"); derr == nil && committedDiff != "" {
+						sr.Diff = committedDiff
+						if stat, serr := execGit(workDir, "diff", "--stat", baseRef+"..HEAD"); serr == nil {
+							sr.Files = parseDiffStatFiles(stat)
+						}
+					}
+				}
+			} else if requirePushBranch {
 				return nil, fmt.Errorf("%s=%s but no workspace diff was produced", workerenv.PushBranch, pushBranch)
 			}
 		} else if pushErr := pushChanges(workDir, pushBranch); pushErr != nil {
@@ -225,6 +252,69 @@ func pushChanges(workDir, branch string) error {
 		return fmt.Errorf("remote branch %s not visible after push: %w", branch, err)
 	}
 
+	return nil
+}
+
+// branchHasCommitsToPush reports whether the local HEAD carries commits that an
+// agent created itself (via its own git commit) which are not yet reflected on
+// the remote push branch. It returns true plus a base ref to diff HEAD against
+// (so the agent's committed change can still be surfaced as a result diff).
+//
+// This handles agents that run their own `git commit`/`git push`: the worktree
+// is clean and the index is empty, so the normal `git diff --cached` is "" even
+// though real work landed. We treat "HEAD is ahead of the remote base" as a
+// successful change rather than "no workspace diff was produced".
+func branchHasCommitsToPush(workDir, branch string) (bool, string) {
+	headSHA, err := execGit(workDir, "rev-parse", "HEAD")
+	if err != nil {
+		return false, ""
+	}
+	headSHA = strings.TrimSpace(headSHA)
+
+	// Refresh remote refs so origin/<branch> reflects any agent-side push.
+	execGit(workDir, "fetch", "origin", "--quiet") //nolint:errcheck
+
+	// Candidate base refs, in order of preference: the remote push branch
+	// (already pushed by the agent), then the upstream default branch the
+	// workspace was checked out from. The first that exists AND differs from
+	// HEAD gives us the commit range to surface.
+	candidates := []string{"origin/" + branch}
+	if base := strings.TrimSpace(os.Getenv(workerenv.GitBranch)); base != "" {
+		candidates = append(candidates, "origin/"+base)
+	}
+	candidates = append(candidates, "origin/HEAD")
+
+	for _, ref := range candidates {
+		baseSHA, rerr := execGit(workDir, "rev-parse", "--verify", "--quiet", ref)
+		if rerr != nil {
+			continue
+		}
+		baseSHA = strings.TrimSpace(baseSHA)
+		if baseSHA == "" || baseSHA == headSHA {
+			continue
+		}
+		// Is HEAD ahead of this base (i.e. the agent added commits)?
+		ahead, aerr := execGit(workDir, "rev-list", "--count", baseSHA+"..HEAD")
+		if aerr == nil && strings.TrimSpace(ahead) != "" && strings.TrimSpace(ahead) != "0" {
+			return true, baseSHA
+		}
+	}
+	return false, ""
+}
+
+// pushBranchRef force-creates the local branch at HEAD and pushes it. Used when
+// the agent already committed but its push (if any) needs to be (re)asserted to
+// the intended branch.
+func pushBranchRef(workDir, branch string) error {
+	if out, err := execGit(workDir, "checkout", "-B", branch); err != nil {
+		return fmt.Errorf("git checkout -B %s failed: %s: %w", branch, out, err)
+	}
+	if out, err := execGit(workDir, "push", "-u", "origin", branch); err != nil {
+		return fmt.Errorf("git push failed: %s: %w", out, err)
+	}
+	if err := waitForRemoteBranchVisibility(workDir, "origin", branch, 15*time.Second); err != nil {
+		return fmt.Errorf("remote branch %s not visible after push: %w", branch, err)
+	}
 	return nil
 }
 
