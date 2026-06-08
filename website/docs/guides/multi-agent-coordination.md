@@ -55,7 +55,7 @@ Controller: parent Job succeeded → parent Task → Succeeded
 
 ### Coordination Tools
 
-Located in `internal/tools/`. Coordination tools include `delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, PR tools (`create_pull_request`, `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`), issue tools (`list_issues`, `get_issue`, `comment_on_issue`), agent management tools (`create_agent`, `delete_agent`), and `update_plan` (autonomous mode). All are registered via `RegisterCoordinationTools(k8sClient)` in `internal/tools/registry.go` when `ORKA_COORDINATION_ENABLED=true`.
+Located in `internal/tools/`. Coordination tools include `delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, PR tools (`create_pull_request`, `create_pr_monitor`, `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`), issue tools (`list_issues`, `get_issue`, `comment_on_issue`), agent management tools (`create_agent`, `delete_agent`), and `update_plan` (autonomous mode). All are registered via `RegisterCoordinationTools(k8sClient)` in `internal/tools/registry.go` when `ORKA_COORDINATION_ENABLED=true`.
 
 #### `delegate_task` Tool
 
@@ -721,6 +721,25 @@ Creates a GitHub pull request from a branch that was pushed by a completed agent
 | `body` | string | no | Pull request body in Markdown |
 
 The tool reads the git credentials from the child task's `gitSecretRef` secret (looks for `token` or `password` key) and calls the GitHub REST API. The coordinator must have RBAC access to read Secrets.
+
+### create_pr_monitor Tool
+
+Creates a scheduled prompt-orchestrated pull request monitor Task for one GitHub repository. This is the compatibility path for scheduled AI monitor Tasks; use the `RepositoryMonitor` CRD for durable monitor runs, PR queue state, review records, and dashboard visibility.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Human-readable monitor name. The created Task receives an Orka-generated name. |
+| `repo_url` | string | yes | GitHub repository URL to monitor. The created Task stores it in `spec.workspace.gitRepo`. |
+| `schedule` | string | yes | Cron schedule for the monitor Task. |
+| `agent_ref` | string | yes | AI Agent name for the scheduled monitor Task. The Agent must have coordination enabled and autonomous coordination disabled. |
+| `namespace` | string | no | Namespace for the monitor Task. Defaults to the current task namespace. |
+| `provider_ref` | string | no | Optional Provider reference for the scheduled AI Task. |
+| `gitSecretRef` | string | no | Secret containing Git/GitHub credentials. If omitted, Orka tries supported default git credential Secret names. |
+| `per_page` | integer | no | Maximum open PRs to scan per run. Defaults to `30`, maximum `100`. |
+| `review_event` | string | no | Review event to post after analysis: `COMMENT`, `APPROVE`, or `REQUEST_CHANGES`. Defaults to `COMMENT`. |
+| `prompt` | string | no | Additional instructions appended to the generated monitor prompt. |
+
+The created Task receives a narrow tool set: `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The generated prompt tells the Task to pass the same `repo_url` to each PR tool call. Those explicit repository URLs are scope-checked against the Task workspace or signed transaction repository context before Orka resolves credentials or calls GitHub.
 
 ### check_pull_request_ci Tool
 
