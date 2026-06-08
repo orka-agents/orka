@@ -215,6 +215,53 @@ wait_actor_status() {
   done
 }
 
+wait_actor_absent() {
+  local actor_name="$1"
+  local timeout_seconds="$2"
+  local started now output count
+  started="$(date +%s)"
+
+  while true; do
+    if ! output="$(kubectl_ate get actor "${actor_name}" -o json 2>/dev/null)"; then
+      log "actor/${actor_name}: absent"
+      return 0
+    fi
+    count="$(jq -r '.actors | length' <<<"${output}" 2>/dev/null || printf '1')"
+    if [[ "${count}" == "0" ]]; then
+      log "actor/${actor_name}: absent"
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - started > timeout_seconds )); then
+      echo "timed out waiting for actor/${actor_name} to be absent" >&2
+      return 1
+    fi
+    sleep 5
+  done
+}
+
+wait_resource_absent() {
+  local namespace="$1"
+  local resource="$2"
+  local name="$3"
+  local timeout_seconds="$4"
+  local started now
+  started="$(date +%s)"
+
+  while true; do
+    if ! kubectl -n "${namespace}" get "${resource}" "${name}" >/dev/null 2>&1; then
+      log "${resource}/${name}: absent"
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - started > timeout_seconds )); then
+      echo "timed out waiting for ${resource}/${name} in namespace ${namespace} to be absent" >&2
+      return 1
+    fi
+    sleep 5
+  done
+}
+
 wait_task_phase() {
   local task="$1"
   local expected="$2"
@@ -945,6 +992,40 @@ verify_mcp_tool_boots_actor_once() {
   log "tool/mcp-ci retained MCP actor state across forced reconcile"
 }
 
+verify_mcp_tool_cleanup() {
+  local actor_id pool_name generation
+
+  log "Verifying MCP Tool deletion cleans up actor and lease"
+  actor_id="$(kubectl -n default get tool mcp-ci -o jsonpath='{.status.actor.actorID}')"
+  pool_name="$(kubectl -n default get tool mcp-ci -o jsonpath='{.status.actor.poolRef.name}')"
+  if [[ -z "${actor_id}" ]]; then
+    echo "tool/mcp-ci missing status.actor.actorID before cleanup" >&2
+    exit 1
+  fi
+  if [[ -z "${pool_name}" ]]; then
+    echo "tool/mcp-ci missing status.actor.poolRef.name before cleanup" >&2
+    exit 1
+  fi
+  kubectl -n default get lease "${actor_id}" >/dev/null
+
+  generation="$(
+    kubectl -n default patch substrateactorpool "${pool_name}" --type=merge \
+      -p '{"spec":{"targetActors":0,"precreateActors":false}}' \
+      -o json | jq -r '.metadata.generation'
+  )"
+  wait_jsonpath_equals \
+    "substrateactorpool/${pool_name} scale-down observed generation" \
+    "kubectl -n default get substrateactorpool ${pool_name} -o jsonpath='{.status.observedGeneration}'" \
+    "${generation}" \
+    120
+
+  kubectl -n default delete tool mcp-ci --wait=false
+  wait_resource_absent default tool mcp-ci 300
+  wait_resource_absent default lease "${actor_id}" 300
+  wait_actor_absent "${actor_id}" 300
+  log "tool/mcp-ci cleanup removed actor ${actor_id} and its pool lease"
+}
+
 exercise_orka_tasks() {
   local tool_client_image="$1"
 
@@ -954,6 +1035,7 @@ exercise_orka_tasks() {
   create_mcp_tool
   run_mcp_tool_client_job "${tool_client_image}"
   verify_mcp_tool_boots_actor_once "${tool_client_image}"
+  verify_mcp_tool_cleanup
 
   run_default_workspace_task "codex-substrate-default-ci"
   run_pooled_workspace_task "codex-substrate-pool-ci"
