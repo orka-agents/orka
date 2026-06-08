@@ -53,28 +53,38 @@ orka_api DELETE "/api/v1/chat/${DEMO_CHAT_SESSION}?namespace=${DEMO_NAMESPACE}" 
 
 # Pick the best Opus model the cluster will accept. Caller can pin a
 # specific model via DEMO_CHAT_MODEL (full <provider>/<model> form) to
-# skip discovery. Otherwise we ping `/anthropic/v1/messages` with each
-# candidate in preferred order — first 2xx wins. This keeps the demo
-# self-tuning to whatever upstream catalog the cluster's Provider sees.
+# skip discovery. Otherwise we read the provider catalog from
+# `/anthropic/v1/models` and select the first preferred Opus the cluster
+# actually offers. This keeps the demo self-tuning to whatever upstream
+# catalog the cluster's Provider sees.
+#
+# IMPORTANT: do NOT probe by POSTing to `/anthropic/v1/messages`. That
+# endpoint is not a passthrough — it runs Orka's full agentic coordinator
+# (large system prompt + multi-iteration tool loop), so a single "ping"
+# takes 60-120s to return. A short curl timeout there always aborts with
+# HTTP 000 and mis-reports "no Opus model accepted" even though the model
+# is healthy. The models catalog is a cheap GET that returns instantly.
 pick_chat_opus_model() {
   if [[ -n "${DEMO_CHAT_MODEL:-}" ]]; then
     printf '%s\n' "${DEMO_CHAT_MODEL}"
     return 0
   fi
   local provider="${DEMO_PROVIDER_REF}"
-  local token candidate model_id http_code body_file
+  local token catalog candidate model_id
   token="$(get_orka_token)"
-  body_file="$(mktemp)"
-  trap 'rm -f "${body_file}"' RETURN
+  # Fetch the offered model IDs once (provider-qualified and bare forms).
+  catalog="$(curl -sS -m 15 \
+    -H "Authorization: Bearer ${token}" \
+    "${ORKA_API_BASE%/}/anthropic/v1/models" 2>/dev/null \
+    | jq -r '.data[].id' 2>/dev/null || true)"
   for candidate in claude-opus-4.8 claude-opus-4.7 claude-opus-4.6; do
     model_id="${provider}/${candidate}"
-    http_code="$(curl -sS -m 15 -o "${body_file}" -w '%{http_code}' \
-      -X POST "${ORKA_API_BASE%/}/anthropic/v1/messages" \
-      -H "Authorization: Bearer ${token}" \
-      -H "Content-Type: application/json" \
-      -d "{\"model\":\"${model_id}\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
-      2>/dev/null || printf '000')"
-    if [[ "${http_code}" =~ ^2 ]]; then
+    # Accept either the provider-qualified id or the bare candidate.
+    if grep -qx "${model_id}" <<<"${catalog}" 2>/dev/null; then
+      printf '%s\n' "${model_id}"
+      return 0
+    fi
+    if grep -qx "${candidate}" <<<"${catalog}" 2>/dev/null; then
       printf '%s\n' "${model_id}"
       return 0
     fi
@@ -82,15 +92,15 @@ pick_chat_opus_model() {
   return 1
 }
 
-# The Opus probe below hits the live Orka API, so the API must be reachable
-# first. prepare_api_env only mints the token; the port-forward is established
-# by require_orka_api_reachable. Without this the probe fires against a
-# not-yet-bound :8080 (HTTP 000) and mis-reports "no Opus model accepted".
+# The model discovery below reads the live Orka API catalog, so the API
+# must be reachable first. prepare_api_env only mints the token; the
+# port-forward is established by require_orka_api_reachable. Without this
+# the catalog GET fires against a not-yet-bound :8080 and finds no models.
 require_orka_api_reachable
 
 DEMO_CHAT_OPUS_MODEL="$(pick_chat_opus_model || true)"
 if [[ -z "${DEMO_CHAT_OPUS_MODEL}" ]]; then
-  die "no Opus model accepted by ${ORKA_API_BASE}/anthropic — tried claude-opus-4.8, claude-opus-4.7, claude-opus-4.6. Set DEMO_CHAT_MODEL=<provider>/<model> to override."
+  die "no Opus model offered by ${ORKA_API_BASE}/anthropic/v1/models — looked for claude-opus-4.8, claude-opus-4.7, claude-opus-4.6. Set DEMO_CHAT_MODEL=<provider>/<model> to override."
 fi
 # Make the chosen model the one demo_anthropic_model emits.
 export DEMO_CLAUDE_MODEL="${DEMO_CHAT_OPUS_MODEL}"
