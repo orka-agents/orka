@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,10 +23,14 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
@@ -579,6 +584,138 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 	require.Nil(t, afterClaimed.Status.ExecutionWorkspace.Placement)
 	require.Nil(t, afterClaimed.Status.ExecutionWorkspace.Density)
 	require.Nil(t, afterClaimed.Status.ExecutionWorkspace.ResumeLatency)
+}
+
+func TestUpdateExecutionWorkspaceStatusBuildsFreshStatusOnConflictRetry(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	taskUID := types.UID("task-uid")
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-task", Namespace: "default", UID: taskUID},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{
+			JobName: "my-task-job",
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				Provider: corev1alpha1.WorkspaceProviderSubstrate,
+				Phase:    corev1alpha1.ExecutionWorkspacePhaseReady,
+				Reason:   corev1alpha1.ExecutionWorkspaceReasonReady,
+				Placement: &corev1alpha1.ExecutionWorkspacePlacementStatus{
+					WorkerNamespace: "ate-demo",
+					WorkerPool:      "codex-pool",
+					WorkerPodName:   "ateom-worker-1",
+				},
+				Density: &corev1alpha1.ExecutionWorkspaceDensityStatus{
+					WorkerCount:     1,
+					ActorCount:      3,
+					ActorsPerWorker: "3.00",
+				},
+				ResumeLatency: &metav1.Duration{Duration: 750 * time.Millisecond},
+			},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-task-job",
+			Namespace: "default",
+			UID:       types.UID("job-uid"),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(),
+				Kind:       "Task",
+				Name:       "my-task",
+				UID:        taskUID,
+			}},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-task-pod",
+			Namespace: "default",
+			UID:       types.UID("pod-uid"),
+			Labels: map[string]string{
+				labels.LabelTask: labels.SelectorValue("my-task"),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: batchv1.SchemeGroupVersion.String(),
+				Kind:       "Job",
+				Name:       "my-task-job",
+				UID:        types.UID("job-uid"),
+			}},
+		},
+	}
+	baseClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task, job, pod).
+		Build()
+	statusUpdates := 0
+	k8sClient := interceptor.NewClient(baseClient, interceptor.Funcs{
+		SubResourceUpdate: func(
+			ctx context.Context,
+			c client.Client,
+			subResourceName string,
+			obj client.Object,
+			opts ...client.SubResourceUpdateOption,
+		) error {
+			if subResourceName != "status" {
+				return c.SubResource(subResourceName).Update(ctx, obj, opts...)
+			}
+			statusUpdates++
+			if statusUpdates == 1 {
+				latest := &corev1alpha1.Task{}
+				require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: "default", Name: "my-task"}, latest))
+				latest.Status.ExecutionWorkspace = &corev1alpha1.ExecutionWorkspaceStatus{
+					Provider: corev1alpha1.WorkspaceProviderSubstrate,
+					Phase:    corev1alpha1.ExecutionWorkspacePhasePending,
+					Reason:   corev1alpha1.ExecutionWorkspaceReasonClaimed,
+				}
+				require.NoError(t, c.Status().Update(ctx, latest))
+				return apierrors.NewConflict(
+					schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "tasks"},
+					"my-task",
+					errors.New("status changed"),
+				)
+			}
+			return c.SubResource(subResourceName).Update(ctx, obj, opts...)
+		},
+	})
+	h := NewInternalHandlers(nil, nil, nil, nil, nil, InternalHandlersConfig{Client: k8sClient})
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username: "system:serviceaccount:default:worker",
+			AuthType: AuthTypeTokenReview,
+			Extra: map[string]authenticationv1.ExtraValue{
+				"authentication.kubernetes.io/pod-name": {"my-task-pod"},
+				"authentication.kubernetes.io/pod-uid":  {"pod-uid"},
+			},
+		})
+		return c.Next()
+	})
+	app.Post("/internal/v1/tasks/:namespace/:taskName/execution-workspace/status", h.UpdateExecutionWorkspaceStatus)
+
+	body := map[string]any{
+		"provider": "substrate",
+		"phase":    "Failed",
+		"reason":   "WorkspaceCommandFailed",
+		"message":  "workspace command failed",
+	}
+	bodyBytes, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/tasks/default/my-task/execution-workspace/status", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	updated := &corev1alpha1.Task{}
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "my-task"}, updated))
+	require.Equal(t, 2, statusUpdates)
+	require.Equal(t, corev1alpha1.ExecutionWorkspacePhaseFailed, updated.Status.ExecutionWorkspace.Phase)
+	require.Nil(t, updated.Status.ExecutionWorkspace.Placement)
+	require.Nil(t, updated.Status.ExecutionWorkspace.Density)
+	require.Nil(t, updated.Status.ExecutionWorkspace.ResumeLatency)
 }
 
 func TestGetSessionTranscript(t *testing.T) {

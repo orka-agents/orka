@@ -416,7 +416,7 @@ status:
 
 ### Tool
 
-Custom tool definitions for agents. Tools can call plain HTTP endpoints or MCP servers hosted in durable Substrate actors. HTTP tools support header-based or body-based auth injection.
+Custom tool definitions for agents. Tools can call plain HTTP endpoints or MCP servers hosted in durable Substrate actors. Plain HTTP tools require `http.url` and support header-based or body-based auth injection.
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -443,9 +443,11 @@ spec:
     authBodyKey: api_key # JSON key name when authInject=body
 ```
 
-MCP actor-backed tools can also set `http.authSecretRef` for transport auth, but
-they must use header injection. `authInject: body` is only valid for plain HTTP
-tools because MCP call arguments are forwarded to the MCP server as tool input.
+MCP actor-backed tools can also set `http.authSecretRef` for transport auth.
+For these tools, `http.url` may be omitted because Orka uses the resolved actor
+endpoint from Tool status. MCP transport auth must use header injection;
+`authInject: body` is only valid for plain HTTP tools because MCP call arguments
+are forwarded to the MCP server as tool input.
 
 Example MCP actor-backed Tool:
 
@@ -477,7 +479,8 @@ spec:
 MCP actor-backed Tools require `mcp.substrateActor.templateRef.name`. `mcp.path`
 defaults to `/mcp`, `poolRef` is optional, and `boot` only affects the first
 actor resume. `spec.http` may be omitted unless the resolved actor endpoint
-needs transport auth settings.
+needs transport auth settings; when `spec.http` is present for MCP auth only,
+omit `http.url`.
 
 #### URL Path Interpolation
 

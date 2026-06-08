@@ -143,15 +143,16 @@ func (h *InternalHandlers) UpdateExecutionWorkspaceStatus(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 	}
-	status := req.status()
-	if status.Provider == "" || status.Phase == "" || status.Reason == "" {
+	statusForValidation := req.status()
+	if statusForValidation.Provider == "" || statusForValidation.Phase == "" || statusForValidation.Reason == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "provider, phase, and reason are required")
 	}
-	if !validExecutionWorkspaceStatus(status) {
+	if !validExecutionWorkspaceStatus(statusForValidation) {
 		return fiber.NewError(fiber.StatusBadRequest, "unsupported execution workspace status value")
 	}
 
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		status := req.status()
 		task := &corev1alpha1.Task{}
 		if err := h.k8sClient.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: taskName}, task); err != nil {
 			return err

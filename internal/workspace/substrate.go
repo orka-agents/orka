@@ -397,6 +397,20 @@ func (e *SubstrateWorkspaceExecutor) WaitReady(ctx context.Context, req WaitRead
 			}
 		}
 		if err == nil && actor.Status == substrateStatusRunning && strings.TrimSpace(actor.PodIP) != "" {
+			if req.SkipDaemonHealthCheck {
+				readyAt := e.now()
+				resumeLatency := max(readyAt.Sub(resumeStartedAt), 0)
+				placement, density := e.substrateTelemetry(ctx, actor)
+				return &ReadyResult{
+					Ref:           substrateRef(req.Ref.Namespace, actor),
+					Phase:         PhaseReady,
+					Message:       "workspace actor running",
+					ReadyAt:       readyAt,
+					Placement:     placement,
+					Density:       density,
+					ResumeLatency: resumeLatency,
+				}, nil
+			}
 			if err := e.daemonRequest(ctx, actorID, http.MethodGet, "/healthz", nil, nil); err == nil {
 				readyAt := e.now()
 				resumeLatency := max(readyAt.Sub(resumeStartedAt), 0)

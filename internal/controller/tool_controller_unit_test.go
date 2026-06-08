@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -273,6 +275,9 @@ func TestToolReconcilerMCPSubstrateActorPublishesEndpoint(t *testing.T) {
 	if !executor.waitReadyBoot {
 		t.Fatal("WaitReady Boot = false, want true for newly-created MCP actor")
 	}
+	if !executor.waitReadySkipDaemonHealthCheck {
+		t.Fatal("WaitReady SkipDaemonHealthCheck = false, want true for MCP actor readiness")
+	}
 	if !executor.closeCalled {
 		t.Fatal("Substrate MCP executor was not closed after reconcile")
 	}
@@ -289,6 +294,68 @@ func TestToolReconcilerMCPSubstrateActorPublishesEndpoint(t *testing.T) {
 	}
 	if gotHost != wantRouteHost {
 		t.Fatalf("MCP readiness Host = %q, want %q", gotHost, wantRouteHost)
+	}
+}
+
+func TestToolReconcilerMCPSubstrateActorPollsEndpointReadiness(t *testing.T) {
+	scheme := newToolScheme()
+	template := approvedMCPActorTemplateForTest()
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != testMCPPath {
+			http.NotFound(w, r)
+			return
+		}
+		if probes.Add(1) == 1 {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp-tool", Namespace: defaultNS},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "MCP tool",
+			MCP: &corev1alpha1.MCPToolServer{
+				Path: testMCPPath,
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+				},
+			},
+		},
+	}
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
+	r := &ToolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:           scheme,
+		HTTPClient:       srv.Client(),
+		SubstrateEnabled: true,
+		SubstrateConfig: SubstrateConfig{
+			RouterURL:      srv.URL,
+			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
+			ClaimTimeout:   time.Second,
+		},
+		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() add finalizer error = %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() readiness retry error = %v", err)
+	}
+	var got corev1alpha1.Tool
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
+		t.Fatalf("Get tool: %v", err)
+	}
+	if !got.Status.Available {
+		t.Fatalf("Available = false, want true after transient MCP readiness failure: %#v", got.Status)
+	}
+	if probes.Load() < 2 {
+		t.Fatalf("MCP endpoint probes = %d, want retry after transient readiness failure", probes.Load())
 	}
 }
 
@@ -2228,17 +2295,18 @@ func mcpToolRequest() ctrl.Request {
 }
 
 type recordingToolWorkspaceExecutor struct {
-	claimName       string
-	claimCreated    bool
-	claimCreateds   []bool
-	waitReadyCalled bool
-	waitReadyBoot   bool
-	waitReadyBoots  []bool
-	waitReadyErrs   []error
-	closeCalled     bool
-	deletedActorIDs []string
-	deleteReqs      []workspace.DeleteRequest
-	deleteErrs      []error
+	claimName                      string
+	claimCreated                   bool
+	claimCreateds                  []bool
+	waitReadyCalled                bool
+	waitReadyBoot                  bool
+	waitReadyBoots                 []bool
+	waitReadySkipDaemonHealthCheck bool
+	waitReadyErrs                  []error
+	closeCalled                    bool
+	deletedActorIDs                []string
+	deleteReqs                     []workspace.DeleteRequest
+	deleteErrs                     []error
 }
 
 func (e *recordingToolWorkspaceExecutor) Claim(ctx context.Context, req workspace.ClaimRequest) (*workspace.ClaimResult, error) {
@@ -2264,6 +2332,7 @@ func (e *recordingToolWorkspaceExecutor) WaitReady(ctx context.Context, req work
 	e.waitReadyCalled = true
 	e.waitReadyBoot = req.Boot
 	e.waitReadyBoots = append(e.waitReadyBoots, req.Boot)
+	e.waitReadySkipDaemonHealthCheck = req.SkipDaemonHealthCheck
 	if len(e.waitReadyErrs) > 0 {
 		err := e.waitReadyErrs[0]
 		e.waitReadyErrs = e.waitReadyErrs[1:]

@@ -108,10 +108,11 @@ spec:
                     description: 'Timeout is the request timeout (default: 30s)'
                     type: string
                   url:
-                    description: URL is the endpoint to call when the tool is invoked
+                    description: |-
+                      URL is the endpoint to call when the tool is invoked
+                      Required for plain HTTP tools. MCP actor-backed tools may omit it when
+                      HTTP is present only for transport auth settings.
                     type: string
-                required:
-                - url
                 type: object
               mcp:
                 description: |-
@@ -172,6 +173,9 @@ spec:
             x-kubernetes-validations:
             - message: http or mcp.substrateActor is required
               rule: has(self.http) || (has(self.mcp) && has(self.mcp.substrateActor))
+            - message: http.url is required unless mcp.substrateActor is set
+              rule: '!has(self.http) || (has(self.mcp) && has(self.mcp.substrateActor))
+                || (has(self.http.url) && self.http.url.size() > 0)'
           status:
             description: ToolStatus defines the observed state of Tool
             properties:

@@ -417,7 +417,8 @@ the first resume; forced reconciles should not restart an already booted MCP
 actor.
 
 MCP tools may omit `spec.http` entirely. If the actor endpoint also needs
-transport auth, set `spec.http.authSecretRef` and use header injection. Body
+transport auth, set `spec.http.authSecretRef`, omit `spec.http.url`, and use
+header injection. Orka calls the resolved actor endpoint from Tool status. Body
 auth injection is invalid for MCP tools because call arguments are forwarded to
 the MCP server as tool input.
 

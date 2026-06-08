@@ -45,6 +45,8 @@ const (
 	// toolHealthCheckTimeout is the HTTP timeout for health checks.
 	toolHealthCheckTimeout = 10 * time.Second
 
+	mcpEndpointReadinessPollInterval = 250 * time.Millisecond
+
 	substrateMCPToolActorFinalizer = "orka.ai/substrate-mcp-tool-actor-cleanup"
 	substrateMCPToolActorIDAnno    = "orka.ai/substrate-mcp-tool-actor-id"
 	substrateMCPToolBootedIDAnno   = "orka.ai/substrate-mcp-tool-booted-id"
@@ -373,7 +375,7 @@ func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *co
 		TemplateRef: templateRef,
 		PoolRef:     poolRef,
 	}
-	if err := r.healthCheckMCPActorEndpoint(ctx, endpoint, routeHost); err != nil {
+	if err := r.waitForMCPActorEndpoint(ctx, endpoint, routeHost, cfg.ClaimTimeout); err != nil {
 		if cleanupRef != nil && tool.Status.Actor != nil {
 			previousActor := *tool.Status.Actor
 			return r.updateStatusWithActor(ctx, tool, false, err.Error(), tool.Status.Endpoint, &previousActor)
@@ -397,9 +399,10 @@ func (r *ToolReconciler) waitForSubstrateMCPToolActor(
 ) (ctrl.Result, bool, error) {
 	bootActor := shouldBootSubstrateMCPToolActor(tool, actorID, bootRequested, claim.Created)
 	if _, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
-		Ref:     claim.Ref,
-		Timeout: timeout,
-		Boot:    bootActor,
+		Ref:                   claim.Ref,
+		Timeout:               timeout,
+		Boot:                  bootActor,
+		SkipDaemonHealthCheck: true,
 	}); err != nil {
 		result, updateErr := r.updateStatus(ctx, tool, false, err.Error())
 		return result, true, updateErr
@@ -1582,6 +1585,33 @@ func (r *ToolReconciler) healthCheckMCPActorEndpoint(ctx context.Context, endpoi
 		return fmt.Errorf("MCP endpoint returned HTTP %d", resp.StatusCode)
 	default:
 		return nil
+	}
+}
+
+func (r *ToolReconciler) waitForMCPActorEndpoint(ctx context.Context, endpoint string, routeHost string, timeout time.Duration) error {
+	lastErr := r.healthCheckMCPActorEndpoint(ctx, endpoint, routeHost)
+	if lastErr == nil || timeout <= 0 {
+		return lastErr
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	interval := min(timeout, mcpEndpointReadinessPollInterval)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("MCP endpoint readiness canceled: %w", ctx.Err())
+		case <-timer.C:
+			return lastErr
+		case <-ticker.C:
+			lastErr = r.healthCheckMCPActorEndpoint(ctx, endpoint, routeHost)
+			if lastErr == nil {
+				return nil
+			}
+		}
 	}
 }
 

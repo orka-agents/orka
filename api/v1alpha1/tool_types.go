@@ -13,6 +13,7 @@ import (
 
 // ToolSpec defines the desired state of Tool
 // +kubebuilder:validation:XValidation:rule="has(self.http) || (has(self.mcp) && has(self.mcp.substrateActor))",message="http or mcp.substrateActor is required"
+// +kubebuilder:validation:XValidation:rule="!has(self.http) || (has(self.mcp) && has(self.mcp.substrateActor)) || (has(self.http.url) && self.http.url.size() > 0)",message="http.url is required unless mcp.substrateActor is set"
 type ToolSpec struct {
 	// Description is the tool description shown to the LLM
 	// +kubebuilder:validation:Required
@@ -36,8 +37,10 @@ type ToolSpec struct {
 // HTTPExecution defines how to execute the tool via HTTP
 type HTTPExecution struct {
 	// URL is the endpoint to call when the tool is invoked
-	// +kubebuilder:validation:Required
-	URL string `json:"url"`
+	// Required for plain HTTP tools. MCP actor-backed tools may omit it when
+	// HTTP is present only for transport auth settings.
+	// +optional
+	URL string `json:"url,omitempty"`
 
 	// Method is the HTTP method to use (default: POST)
 	// +kubebuilder:validation:Enum=GET;POST;PUT;PATCH;DELETE

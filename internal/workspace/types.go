@@ -135,10 +135,11 @@ type ClaimResult struct {
 
 // WaitReadyRequest waits until a workspace can execute commands.
 type WaitReadyRequest struct {
-	Ref                WorkspaceRef
-	Timeout            time.Duration
-	Boot               bool
-	SnapshotRestoreURI string
+	Ref                   WorkspaceRef
+	Timeout               time.Duration
+	Boot                  bool
+	SnapshotRestoreURI    string
+	SkipDaemonHealthCheck bool
 }
 
 // ReadyResult describes a workspace that became ready.

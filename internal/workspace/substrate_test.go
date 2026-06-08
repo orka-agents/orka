@@ -902,6 +902,46 @@ func TestSubstrateWaitReadyFailsFastOnNonRetryableDaemonError(t *testing.T) {
 	}
 }
 
+func TestSubstrateWaitReadyCanSkipDaemonHealthCheck(t *testing.T) {
+	daemonCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		daemonCalled = true
+		http.Error(w, "workspace daemon should not be probed", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	control := &recordingSubstrateControlClient{
+		getStatuses: []string{substrateStatusRunning},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     server.Client(),
+		routerURL:      server.URL,
+		actorDNSSuffix: "actors.test",
+		handoffToken:   substrateTestToken,
+		now:            time.Now,
+	}
+
+	got, err := executor.WaitReady(t.Context(), WaitReadyRequest{
+		Ref:                   WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
+		Timeout:               time.Second,
+		Boot:                  true,
+		SkipDaemonHealthCheck: true,
+	})
+	if err != nil {
+		t.Fatalf("WaitReady() error = %v", err)
+	}
+	if daemonCalled {
+		t.Fatal("workspace daemon health endpoint was probed despite SkipDaemonHealthCheck")
+	}
+	if control.resumeCalls != 1 || len(control.resumeBoots) != 1 || !control.resumeBoots[0] {
+		t.Fatalf("ResumeActor calls=%d boots=%#v, want one boot resume", control.resumeCalls, control.resumeBoots)
+	}
+	if got.Phase != PhaseReady || got.Message != "workspace actor running" {
+		t.Fatalf("WaitReady() = phase %s message %q, want actor running readiness", got.Phase, got.Message)
+	}
+}
+
 func TestSubstrateWaitReadyReportsPlacementAndResumeLatency(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != substrateTestHealthPath {
