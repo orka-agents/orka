@@ -132,7 +132,7 @@ func TestSubstrateConfigFromEnv(t *testing.T) {
 		EnvSubstrateSessionIdentitySecretKey:  testSubstrateSessionIdentitySecretKey,
 		EnvSubstrateSessionIdentityRequired:   "true",
 		EnvSubstrateSessionIdentityAudience:   "orka-workspace-daemon,custom-audience",
-		EnvSubstrateSessionIdentityAppID:      "orka",
+		EnvSubstrateSessionIdentityAppID:      managedByLabelValue,
 		EnvSubstrateSessionIdentityUserID:     "orka-worker",
 		EnvSubstrateClaimTimeout:              "45s",
 		EnvSubstrateCommandTimeout:            "10m",
@@ -160,7 +160,7 @@ func TestSubstrateConfigFromEnv(t *testing.T) {
 		cfg.SessionIdentitySecretKey != testSubstrateSessionIdentitySecretKey ||
 		!cfg.SessionIdentityRequired ||
 		cfg.SessionIdentityAudience != "orka-workspace-daemon,custom-audience" ||
-		cfg.SessionIdentityAppID != "orka" ||
+		cfg.SessionIdentityAppID != managedByLabelValue ||
 		cfg.SessionIdentityUserID != "orka-worker" {
 		t.Fatalf("unexpected substrate SessionIdentity config: %#v", cfg)
 	}
@@ -696,7 +696,7 @@ func TestResolveExecutionWorkspaceRequest(t *testing.T) {
 				SessionIdentitySecretKey:  testSubstrateSessionIdentitySecretKey,
 				SessionIdentityRequired:   true,
 				SessionIdentityAudience:   "orka-workspace-daemon,custom-audience",
-				SessionIdentityAppID:      "orka",
+				SessionIdentityAppID:      managedByLabelValue,
 				SessionIdentityUserID:     "orka-worker",
 			},
 		}
@@ -731,7 +731,7 @@ func TestResolveExecutionWorkspaceRequest(t *testing.T) {
 			request.SubstrateSessionIdentitySecretKey != testSubstrateSessionIdentitySecretKey ||
 			!request.SubstrateSessionIdentityRequired ||
 			request.SubstrateSessionIdentityAudience != "orka-workspace-daemon,custom-audience" ||
-			request.SubstrateSessionIdentityAppID != "orka" ||
+			request.SubstrateSessionIdentityAppID != managedByLabelValue ||
 			request.SubstrateSessionIdentityUserID != "orka-worker" {
 			t.Fatalf("request SessionIdentity config = %#v, want resolved controller config", request)
 		}
