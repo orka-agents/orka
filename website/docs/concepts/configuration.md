@@ -105,6 +105,16 @@ spec:
 
 `list_issues`, `get_issue`, `comment_on_issue`
 
+**PR review marker environment:**
+
+Prompt-orchestrated PR monitors use `check_pr_review_marker` to produce and detect hidden review markers. These variables are read by the worker Task that runs the tool:
+
+| Environment variable | Description |
+|----------------------|-------------|
+| `ORKA_PR_REVIEW_MARKER_SECRET` | Optional stable HMAC key for PR review marker signatures. Use a Kubernetes Secret or another secret injection path. |
+| `ORKA_PR_REVIEW_MARKER_PREVIOUS_SECRETS` | Optional comma-separated previous marker keys accepted during rotation. |
+| `ORKA_PR_REVIEW_MARKER_TRUSTED_AUTHOR` | Optional GitHub login trusted for legacy marker compatibility. When omitted, Orka resolves the authenticated GitHub user for the Task credential. |
+
 ### RepositoryScan
 
 Repository security scan configuration. A `RepositoryScan` is namespace-scoped and tells Orka which repository to scan, how to schedule incremental scans, and which Agents should perform analysis and remediation.

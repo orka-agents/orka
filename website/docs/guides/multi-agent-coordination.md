@@ -922,6 +922,14 @@ Checks whether a pull request already has an Orka review marker for the current 
 | `repo_url` | string | no | GitHub repository URL. When task context is present, it must match that task's workspace or transaction repository scope. |
 | `head_sha` | string | no | PR head SHA to check. If omitted, the tool fetches the current PR head SHA. |
 
+The tool returns a hidden review marker that should be included unchanged in the later `post_review_comment` body. The marker binds `repo`, `pr`, and `head_sha`, and includes a stable signature:
+
+```html
+<!-- orka:pr-review repo=owner/repo pr=123 head_sha=abc123 sig=... -->
+```
+
+Marker signatures are not derived from the live GitHub token. For stronger verification, set `ORKA_PR_REVIEW_MARKER_SECRET` in the worker Task environment. During rotation, keep old marker keys in comma-separated `ORKA_PR_REVIEW_MARKER_PREVIOUS_SECRETS`. Orka also accepts legacy markers from a trusted review author; set `ORKA_PR_REVIEW_MARKER_TRUSTED_AUTHOR` to the bot login, or omit it to use the authenticated GitHub login for the Task credential.
+
 ### get_issue Tool
 
 Fetches full details of a specific GitHub issue by number, including title, body, labels, assignees, state, and the first page of comments.

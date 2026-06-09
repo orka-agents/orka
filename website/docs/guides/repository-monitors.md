@@ -244,6 +244,20 @@ The tool requires an AI Agent with coordination enabled and autonomous coordinat
 
 The scheduled monitor prompt tells the worker to pass the same `repo_url` to every PR review loop tool. Those GitHub tools are scoped to the current Task: when task context is available, the requested repository must match the Task workspace repository or signed transaction repository context. If it does not match, Orka rejects the tool call before resolving credentials or calling GitHub. This means a monitor created for `owner/repo` cannot use its Task credential to list, review, or comment on another repository by changing tool arguments.
 
+### PR Review Markers
+
+`check_pr_review_marker` returns the exact hidden marker that the monitor should include in the GitHub review body:
+
+```html
+<!-- orka:pr-review repo=owner/repo pr=123 head_sha=abc123 sig=... -->
+```
+
+The marker binds the review to one repository, pull request number, and head SHA. Future monitor runs skip that PR head only when they find a matching marker in a GitHub pull request review.
+
+Markers are stable across GitHub token rotation. They are not signed with the live GitHub token by default. To make marker verification independent of the review author, provide a stable worker environment secret named `ORKA_PR_REVIEW_MARKER_SECRET` to the monitor Task. During rotation, keep the old value in comma-separated `ORKA_PR_REVIEW_MARKER_PREVIOUS_SECRETS` until reviews signed with it have aged out.
+
+For compatibility, Orka also recognizes legacy markers and markers signed before a dedicated marker secret was configured, but only from a trusted reviewer account. Set `ORKA_PR_REVIEW_MARKER_TRUSTED_AUTHOR` to that GitHub login, or omit it to let Orka resolve the authenticated GitHub user for the Task's Git credential. Do not store marker signing secrets in the repository; use Kubernetes Secrets or another secret injection path for Task environment.
+
 ## Related Workflows
 
 - [GitHub Label Triggers](github-label-triggers.md) create one-off agent tasks from labels such as `agent:review` or `agent:implement`.
