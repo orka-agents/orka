@@ -739,7 +739,7 @@ Creates a scheduled prompt-orchestrated pull request monitor Task for one GitHub
 | `review_event` | string | no | Review event to post after analysis: `COMMENT`, `APPROVE`, or `REQUEST_CHANGES`. Defaults to `COMMENT`. |
 | `prompt` | string | no | Additional instructions appended to the generated monitor prompt. |
 
-Pull request, issue, tree, blob, commit, query-string, fragment, and embedded-credential URLs are rejected before Orka creates the monitor Task.
+Pull request, issue, branch/tree, blob/file, commit, query-string, fragment, non-GitHub, HTTP, and embedded-credential URLs are rejected before Orka creates the monitor Task.
 
 If `gitSecretRef` is omitted, Orka searches `git-credentials`, `github-credentials`, `copilot-token`, `github-token`, and `git-token`. The selected Git credential Secret must exist in the target namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key. The created Task receives a narrow tool set: `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The generated prompt tells the Task to pass the same `repo_url` to each PR tool call. Those explicit repository URLs are scope-checked against the Task workspace or signed transaction repository context before Orka resolves credentials or calls GitHub.
 

@@ -225,7 +225,7 @@ spec:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `provider` | string | No | Source control provider. `github` is the supported v1 provider and default. |
-| `repoURL` | string | Yes | Credential-free GitHub repository root URL to monitor. HTTPS and SSH GitHub URLs are accepted; repository subpage URLs, query strings, fragments, and embedded credentials are rejected. |
+| `repoURL` | string | Yes | Credential-free GitHub repository root URL to monitor, such as `https://github.com/owner/repo`, `https://github.com/owner/repo.git`, or `git@github.com:owner/repo.git`. Pull request, issue, branch/tree, blob/file, commit, query-string, fragment, non-GitHub, HTTP, and embedded-credential URLs are rejected. |
 | `owner` | string | No | Repository owner or organization. Inferred from `repoURL` when omitted. |
 | `repository` | string | No | Repository name. Inferred from `repoURL` when omitted. |
 | `branch` | string | No | Base branch used for pull request inventory. Defaults to `main`. |

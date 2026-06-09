@@ -47,12 +47,13 @@ See [Testing](testing.md) for full test structure and patterns.
 
 ### CI Validation
 
-The repository has additional GitHub Actions E2E workflows in addition to the normal test matrix:
+The repository has additional GitHub Actions workflows in addition to the normal test matrix:
 
 - `Live Copilot Proxy E2E` — exercises live model-backed Orka paths through the copilot-proxy harness.
 - `Live Agent Sandbox E2E` — installs the pinned upstream `agent-sandbox` release in Kind, builds the PR controller plus fake Claude/sandbox-runtime and upstream router images, then validates workspace claim, sandbox execution, delete cleanup, retained-session reuse, and token scrubbing without model access.
 - `Live GitHub Label Trigger E2E` — builds the PR controller image, deploys it to Kind, configures a generated webhook secret and synthetic runtime Agent, then verifies signed label webhooks create scoped agent Tasks while invalid signatures and duplicate deliveries are handled correctly. This workflow is manual, model-free, and secret-free.
 - `Live GitHub OIDC E2E` — builds the PR controller image, deploys it to Kind, authenticates to Orka with a real GitHub Actions OIDC token, then generates a real `kontxt` TxToken against an in-cluster JWKS endpoint. It verifies `spec.requestedBy` stamping for both auth modes, rejects client tampering, and rejects a tampered TxToken.
+- `Repository Monitor Smoke` — runs automatically on PRs and pushes touching monitor-relevant Go, CRD/config, worker, or dependency paths. It creates the UI embed stub and runs focused Go tests for monitor store/API/controller behavior, GitHub pull request event queueing, targeted single-PR inventory runs, read-only review task job construction, stdout result forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker tooling.
 - `Agent Substrate E2E` — installs Agent Substrate and Orka into a fresh Kind cluster, creates Orka-compatible `WorkerPool`/`ActorTemplate` resources, validates direct Substrate actor execution, runs default and pooled Orka Tasks through the Substrate workspace provider, exercises pooled MCP actor-backed Tools, and checks workspace placement/density telemetry. This workflow is secret-free.
 
 Validate workflow/script edits locally before pushing:
@@ -67,6 +68,7 @@ go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-agent-sandbox-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-github-label-trigger-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-github-oidc-e2e.yml
+go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/repository-monitor-smoke.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent-substrate-e2e.yml
 ```
 
