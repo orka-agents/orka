@@ -205,6 +205,7 @@ Common query parameters:
     "provider": "github",
     "repoURL": "https://github.com/example/app",
     "branch": "main",
+    "ref": "v1.2.3",
     "schedule": "0 2 * * *",
     "validationMode": "light",
     "analysisAgentRef": {"name": "security-reviewer"}
@@ -214,7 +215,7 @@ Common query parameters:
 
 **Response (201):** The created `RepositoryScan` resource.
 
-Required fields are `name`, `spec.repoURL`, and `spec.analysisAgentRef.name`. The API defaults or infers provider, owner, repository, branch, and validation mode where possible.
+Required fields are `name`, `spec.repoURL`, and `spec.analysisAgentRef.name`. The API defaults or infers provider, owner, repository, branch, and validation mode where possible. Set `spec.ref` to pin scan tasks to a specific tag, branch, or commit SHA; when `ref` is set without `branch`, scan workspaces check out that ref directly instead of forcing the default `main` branch.
 
 ### Security Findings Workflow
 

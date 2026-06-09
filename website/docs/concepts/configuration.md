@@ -121,6 +121,7 @@ spec:
   owner: example
   repository: app
   branch: main
+  ref: "v1.2.3"                 # optional tag, branch, or commit SHA checkout override
   subPath: "services/api"       # optional monorepo scope
   gitSecretRef:                  # optional for private repositories
     name: github-credentials
@@ -147,6 +148,7 @@ spec:
 | `owner` | string | No | Repository owner or organization. Inferred from `repoURL` when omitted. |
 | `repository` | string | No | Repository name. Inferred from `repoURL` when omitted. |
 | `branch` | string | No | Base branch to scan. Defaults to the literal `main` when omitted (not resolved from the repository's actual default branch). Set this explicitly for repositories whose default branch is not `main`. |
+| `ref` | string | No | Specific git ref, tag, or commit SHA to check out for scan tasks. When `ref` is set and `branch` is omitted, scan workspaces check out the ref directly instead of forcing `main`; PR remediation still uses `prBaseBranch` or `main` unless `branch` is set. |
 | `subPath` | string | No | Optional subdirectory to scan in a monorepo. |
 | `gitSecretRef` | LocalObjectReference | No | Secret containing credentials for private repository access. |
 | `forkRepo` | string | No | Writable fork repository URL for patch proposal branches and remediation PRs. |
