@@ -229,7 +229,7 @@ RepositoryScan status reports the current phase, last scan ID/task, last success
 
 `RepositoryMonitor` resources define a GitHub repository, base branch, review agent, schedule, and safety labels for durable PR review automation. The `RepositoryMonitorReconciler` lists open pull requests, skips drafts or policy-blocked PRs, queues read-only reviewer Agent tasks for selected exact heads, ingests structured review results from completed tasks, and stores run/item/review/event history in SQLite.
 
-Signed GitHub pull request webhooks can also enqueue exact-head monitor runs when `spec.review.exactEventEnabled` is true. RepositoryMonitor status reports the current phase, last run, open PR count, pending reviews, blocked items, and merge-ready counts; detailed run and queue state is served through the monitor API and dashboard.
+Signed GitHub pull request webhooks can also enqueue exact-head monitor runs when `spec.review.exactEventEnabled` is true. Manual or webhook runs that target one PR refetch only that PR and leave unrelated inventory items untouched, while full inventory runs can retire PRs that are no longer open or in scope. RepositoryMonitor status reports the current phase, last run, open PR count, pending reviews, blocked items, and merge-ready counts; detailed run and queue state is served through the monitor API and dashboard.
 
 ## LLM Provider Architecture
 

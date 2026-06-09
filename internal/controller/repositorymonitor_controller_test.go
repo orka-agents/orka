@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -833,8 +834,8 @@ func TestRepositoryMonitorReconcileProcessesQueuedPRInventoryRun(t *testing.T) {
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: "inventory"}, &current); err != nil {
 		t.Fatalf("Get monitor() error = %v", err)
 	}
-	if current.Status.OpenPullRequests != 5 || current.Status.PendingReviews != 1 || current.Status.BlockedItems != 3 {
-		t.Fatalf("status counts = %#v, want open=5 pending=1 blocked=3", current.Status)
+	if current.Status.OpenPullRequests != 5 || current.Status.PendingReviews != 1 || current.Status.BlockedItems != 4 {
+		t.Fatalf("status counts = %#v, want open=5 pending=1 blocked=4", current.Status)
 	}
 	if current.Status.LastSuccessfulRunTime == nil {
 		t.Fatal("LastSuccessfulRunTime is nil, want completed successful run time")
@@ -2183,9 +2184,7 @@ func TestRepositoryMonitorReconcileTargetedRunPreservesRepositoryWideStatusCount
 		t.Fatalf("core AddToScheme() error = %v", err)
 	}
 
-	server := newRepositoryMonitorPullRequestInventoryServerWithBody(t, `[
-		{"number":2,"title":"Targeted","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"bob"},"base":{"ref":"main","sha":"base2"},"head":{"ref":"targeted","sha":"sha2"},"labels":[]}
-	]`)
+	server := newRepositoryMonitorSinglePullRequestServerWithBody(t, 2, `{"number":2,"title":"Targeted","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"bob"},"base":{"ref":"main","sha":"base2"},"head":{"ref":"targeted","sha":"sha2"},"labels":[]}`)
 	t.Cleanup(server.Close)
 
 	monitor, secret := repositoryMonitorInventoryTestObjects("targeted-status")
@@ -2283,8 +2282,8 @@ func TestRepositoryMonitorStatusCountsIncludesTerminalBlockedReviewVerdicts(t *t
 	if err != nil {
 		t.Fatalf("repositoryMonitorStatusCounts() error = %v", err)
 	}
-	if counts.openPullRequests != 8 || counts.pendingReviews != 1 || counts.blockedItems != 5 {
-		t.Fatalf("counts = %#v, want open=8 pending=1 blocked=5", counts)
+	if counts.openPullRequests != 8 || counts.pendingReviews != 1 || counts.blockedItems != 6 {
+		t.Fatalf("counts = %#v, want open=8 pending=1 blocked=6", counts)
 	}
 }
 
@@ -2302,9 +2301,7 @@ func TestRepositoryMonitorReconcileStaleExactEventDoesNotRewriteCurrentPullReque
 		t.Fatalf("core AddToScheme() error = %v", err)
 	}
 
-	server := newRepositoryMonitorPullRequestInventoryServerWithBody(t, `[
-		{"number":2,"title":"Current head","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"bob"},"base":{"ref":"main","sha":"base2"},"head":{"ref":"targeted","sha":"new-sha"},"labels":[]}
-	]`)
+	server := newRepositoryMonitorSinglePullRequestServerWithBody(t, 2, `{"number":2,"title":"Current head","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"bob"},"base":{"ref":"main","sha":"base2"},"head":{"ref":"targeted","sha":"new-sha"},"labels":[]}`)
 	t.Cleanup(server.Close)
 
 	monitor, secret := repositoryMonitorInventoryTestObjects("stale-exact-event")
@@ -2623,6 +2620,21 @@ func newRepositoryMonitorPullRequestInventoryServerWithBody(t *testing.T, body s
 func newRepositoryMonitorPullRequestInventoryServerWithoutAuth(t *testing.T, body string) *httptest.Server {
 	t.Helper()
 	return newRepositoryMonitorPullRequestInventoryServerWithAuth(t, body, "")
+}
+
+func newRepositoryMonitorSinglePullRequestServerWithBody(t *testing.T, number int64, body string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantPath := fmt.Sprintf("/repos/sozercan/orka/pulls/%d", number)
+		if r.URL.Path != wantPath {
+			t.Fatalf("request path = %q, want single pull request path %q", r.URL.Path, wantPath)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("Authorization header = %q, want %q", got, "Bearer test-token")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
 }
 
 func newRepositoryMonitorPullRequestInventoryServerWithAuth(t *testing.T, body, wantAuth string) *httptest.Server {

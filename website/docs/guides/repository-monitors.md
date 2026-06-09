@@ -17,6 +17,7 @@ A repository monitor can:
 - skip PRs blocked by configured protected or pause labels
 - skip PR heads that already have a fresh review result
 - queue one read-only review task per selected PR head
+- refetch one pull request for targeted manual and webhook runs before queueing review work
 - queue exact-head monitor runs from GitHub pull request webhook events
 - ingest typed JSON review results from completed review tasks
 - store monitor runs, PR items, review records, and audit events durably
@@ -41,7 +42,7 @@ The first implementation is intentionally narrow:
 
 Repository monitor backend coverage has a focused GitHub Actions workflow at `.github/workflows/repository-monitor-smoke.yml`. It runs on pull requests and pushes that touch the workflow, Go API/controller/store code, CRD/config paths, worker code, or Go dependency files.
 
-The smoke workflow creates the UI embed stub and runs targeted Go tests for monitor store CRUD, API handlers, GitHub pull request event handling, controller queue and review flow, read-only review task job construction, stdout result forwarding, `create_pr_monitor` repository URL and credential validation, and PR review marker tooling. Worker-level PR review diff context generation is covered by the normal Go test workflow. UI monitor pages are covered by the normal frontend test workflow rather than this smoke workflow.
+The smoke workflow creates the UI embed stub and runs targeted Go tests for monitor store CRUD, API handlers, GitHub pull request event handling, targeted single-PR inventory runs, controller queue and review flow, blocked status counts, read-only review task job construction, stdout result forwarding, `create_pr_monitor` repository URL and credential validation, and PR review marker tooling. Worker-level PR review diff context generation is covered by the normal Go test workflow. UI monitor pages are covered by the normal frontend test workflow rather than this smoke workflow.
 
 ## Prerequisites
 
@@ -168,13 +169,15 @@ To target one pull request, include `targetKind` and `targetNumber`:
 
 `targetSHA` can also be supplied to require an exact head SHA match.
 
+When `targetNumber` is set, the controller fetches that pull request directly from GitHub before applying the monitor's open-state, base-branch, draft, label, stale-review, and optional `targetSHA` checks. Targeted runs do not retire missing or out-of-scope items from the repository-wide inventory, so monitor status counts continue to summarize the stored PR queue rather than only the targeted PR.
+
 ## Run From GitHub Events
 
 Repository monitors can also receive exact pull request events through the same signed GitHub webhook endpoint used by label triggers. Configure the repository webhook for `Pull requests` events and set `spec.review.exactEventEnabled: true` on the monitor.
 
 When `/webhooks/github` receives an `opened`, `reopened`, `synchronize`, `ready_for_review`, `labeled`, or `unlabeled` pull request event, Orka matches monitors by repository and base branch. If the controller has a watch namespace, only monitors in that namespace are considered; otherwise monitors across all namespaces are eligible. A matching monitor queues a run with `targetKind: pull_request`, the PR number, and the exact head SHA from the webhook payload. Replayed deliveries and already-queued runs for the same PR head are accepted without creating duplicate monitor work. If a previous exact-event run for the same delivery failed before the queued audit event was recorded, a webhook retry can requeue that failed run.
 
-Exact event runs are still read-only review runs. They are stored with trigger `pull_request_event`, create an `exact_event_run_queued` audit event, and wait behind any active or queued monitor run.
+Exact event runs are still read-only review runs. They are stored with trigger `pull_request_event`, create an `exact_event_run_queued` audit event, and wait behind any active or queued monitor run. When the run executes, Orka refetches the current pull request by number and skips review work if the PR is no longer open, moved to another base branch, or no longer matches the event head SHA.
 
 ## Inspect State
 
@@ -218,6 +221,8 @@ Valid review verdicts are:
 - `needs_human`
 - `security_sensitive`
 - `skipped`
+
+For status summaries, open PRs with `needs_changes`, `needs_human`, `security_sensitive`, stale, failed, or skipped review state count as blocked items. Open PRs with queued review work count as pending reviews.
 
 If a review task fails, is cancelled, returns malformed JSON, or returns a stale head SHA, the controller records a rejected review result and leaves an audit event explaining why.
 

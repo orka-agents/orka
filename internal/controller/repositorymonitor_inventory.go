@@ -81,7 +81,7 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 	}
 
 	baseBranch := effectiveRepositoryMonitorBranch(monitor)
-	pullRequests, err := r.listRepositoryMonitorPullRequests(ctx, owner, repository, token, baseBranch)
+	pullRequests, err := r.listRepositoryMonitorPullRequestsForRun(ctx, owner, repository, token, baseBranch, run)
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -814,6 +814,20 @@ func (r *RepositoryMonitorReconciler) listRepositoryMonitorPullRequests(ctx cont
 	return pullRequests, nil
 }
 
+func (r *RepositoryMonitorReconciler) listRepositoryMonitorPullRequestsForRun(ctx context.Context, owner, repository, token, baseBranch string, run *store.MonitorRun) ([]repositoryMonitorPullRequest, error) {
+	if run != nil && run.TargetNumber > 0 {
+		pr, err := r.fetchRepositoryMonitorPullRequest(ctx, owner, repository, token, run.TargetNumber)
+		if err != nil {
+			return nil, err
+		}
+		if !strings.EqualFold(strings.TrimSpace(pr.State), "open") {
+			return nil, nil
+		}
+		return []repositoryMonitorPullRequest{*pr}, nil
+	}
+	return r.listRepositoryMonitorPullRequests(ctx, owner, repository, token, baseBranch)
+}
+
 func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorPullRequestPage(ctx context.Context, owner, repository, token, baseBranch string, page int) ([]repositoryMonitorPullRequest, error) {
 	baseURL := strings.TrimRight(r.GitHubAPIBaseURL, "/")
 	if baseURL == "" {
@@ -854,62 +868,112 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorPullRequestPage(ctx 
 		return nil, fmt.Errorf("GitHub pull request inventory returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var response []struct {
-		Number         int64  `json:"number"`
-		Title          string `json:"title"`
-		State          string `json:"state"`
-		Draft          bool   `json:"draft"`
-		MergeableState string `json:"mergeable_state"`
-		User           struct {
-			Login string `json:"login"`
-		} `json:"user"`
-		Base struct {
-			Ref  string `json:"ref"`
-			SHA  string `json:"sha"`
-			Repo struct {
-				FullName string `json:"full_name"`
-				CloneURL string `json:"clone_url"`
-			} `json:"repo"`
-		} `json:"base"`
-		Head struct {
-			Ref  string `json:"ref"`
-			SHA  string `json:"sha"`
-			Repo struct {
-				FullName string `json:"full_name"`
-				CloneURL string `json:"clone_url"`
-			} `json:"repo"`
-		} `json:"head"`
-		Labels []struct {
-			Name string `json:"name"`
-		} `json:"labels"`
-	}
+	var response []repositoryMonitorPullRequestResponse
 	if err := json.Unmarshal(respBody, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse GitHub pull request inventory response: %w", err)
 	}
+	return repositoryMonitorPullRequestsFromGitHub(response), nil
+}
 
+func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorPullRequest(ctx context.Context, owner, repository, token string, number int64) (*repositoryMonitorPullRequest, error) {
+	baseURL := strings.TrimRight(r.GitHubAPIBaseURL, "/")
+	if baseURL == "" {
+		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
+	}
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", baseURL, url.PathEscape(owner), url.PathEscape(repository), number)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(token) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	httpClient := r.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GitHub pull request request failed: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	respBody, err := readRepositoryMonitorGitHubResponse(resp.Body, repositoryMonitorGitHubResponseLimit)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("GitHub pull request request returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var response repositoryMonitorPullRequestResponse
+	if err := json.Unmarshal(respBody, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse GitHub pull request response: %w", err)
+	}
+	pr := repositoryMonitorPullRequestFromGitHub(response)
+	return &pr, nil
+}
+
+type repositoryMonitorPullRequestResponse struct {
+	Number         int64  `json:"number"`
+	Title          string `json:"title"`
+	State          string `json:"state"`
+	Draft          bool   `json:"draft"`
+	MergeableState string `json:"mergeable_state"`
+	User           struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	Base struct {
+		Ref  string `json:"ref"`
+		SHA  string `json:"sha"`
+		Repo struct {
+			FullName string `json:"full_name"`
+			CloneURL string `json:"clone_url"`
+		} `json:"repo"`
+	} `json:"base"`
+	Head struct {
+		Ref  string `json:"ref"`
+		SHA  string `json:"sha"`
+		Repo struct {
+			FullName string `json:"full_name"`
+			CloneURL string `json:"clone_url"`
+		} `json:"repo"`
+	} `json:"head"`
+	Labels []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+}
+
+func repositoryMonitorPullRequestsFromGitHub(response []repositoryMonitorPullRequestResponse) []repositoryMonitorPullRequest {
 	items := make([]repositoryMonitorPullRequest, 0, len(response))
 	for _, pr := range response {
-		labelNames := make([]string, 0, len(pr.Labels))
-		for _, label := range pr.Labels {
-			labelNames = append(labelNames, label.Name)
-		}
-		items = append(items, repositoryMonitorPullRequest{
-			Number:         pr.Number,
-			Title:          pr.Title,
-			Author:         pr.User.Login,
-			State:          pr.State,
-			Labels:         labelNames,
-			BaseBranch:     pr.Base.Ref,
-			HeadBranch:     pr.Head.Ref,
-			HeadRepo:       pr.Head.Repo.FullName,
-			HeadRepoURL:    pr.Head.Repo.CloneURL,
-			BaseSHA:        pr.Base.SHA,
-			HeadSHA:        pr.Head.SHA,
-			Draft:          pr.Draft,
-			MergeableState: pr.MergeableState,
-		})
+		items = append(items, repositoryMonitorPullRequestFromGitHub(pr))
 	}
-	return items, nil
+	return items
+}
+
+func repositoryMonitorPullRequestFromGitHub(pr repositoryMonitorPullRequestResponse) repositoryMonitorPullRequest {
+	labelNames := make([]string, 0, len(pr.Labels))
+	for _, label := range pr.Labels {
+		labelNames = append(labelNames, label.Name)
+	}
+	return repositoryMonitorPullRequest{
+		Number:         pr.Number,
+		Title:          pr.Title,
+		Author:         pr.User.Login,
+		State:          pr.State,
+		Labels:         labelNames,
+		BaseBranch:     pr.Base.Ref,
+		HeadBranch:     pr.Head.Ref,
+		HeadRepo:       pr.Head.Repo.FullName,
+		HeadRepoURL:    pr.Head.Repo.CloneURL,
+		BaseSHA:        pr.Base.SHA,
+		HeadSHA:        pr.Head.SHA,
+		Draft:          pr.Draft,
+		MergeableState: pr.MergeableState,
+	}
 }
 
 func readRepositoryMonitorGitHubResponse(body io.Reader, limit int64) ([]byte, error) {

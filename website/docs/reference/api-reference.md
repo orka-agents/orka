@@ -411,7 +411,7 @@ Only GitHub pull request monitoring is supported in this slice. Requests that en
 }
 ```
 
-The request body can be omitted to run a full pull request inventory pass. `targetKind` must be empty or `pull_request`; `targetNumber` and `targetSHA` narrow the run to one PR or exact head. The API returns `409` when the monitor already has a queued or running run.
+The request body can be omitted to run a full pull request inventory pass. `targetKind` must be empty or `pull_request`; `targetNumber` and `targetSHA` narrow the run to one PR or exact head. When `targetNumber` is set, the controller fetches that pull request directly from GitHub and does not retire unrelated monitor items from the repository-wide inventory. The API returns `409` when the monitor already has a queued or running run.
 
 See [Repository Monitors](../guides/repository-monitors.md) for the full workflow and CRD example.
 

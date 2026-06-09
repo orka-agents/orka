@@ -693,6 +693,7 @@ func repositoryMonitorItemVerdictBlocked(verdict string) bool {
 	case repositoryMonitorVerdictSkipped,
 		repositoryMonitorReviewVerdictFailed,
 		repositoryMonitorReviewVerdictStale,
+		repositoryMonitorReviewVerdictNeedsChanges,
 		repositoryMonitorReviewVerdictNeedsHuman,
 		repositoryMonitorReviewVerdictSecuritySensitive:
 		return true
