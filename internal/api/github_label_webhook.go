@@ -218,6 +218,9 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 		}
 		return err
 	}
+	if err := h.validateGitHubLabelTaskGitSecret(c, namespace, target); err != nil {
+		return err
+	}
 
 	replayKey := githubWebhookReplayKey(body)
 	delivery := strings.TrimSpace(c.Get(githubDeliveryHeader))
@@ -260,9 +263,8 @@ func (h *Handlers) enqueueRepositoryMonitorPullRequestEventRuns(c fiber.Ctx, bod
 		return result, nil
 	}
 
-	namespace := h.githubWebhookNamespace()
 	monitors := &corev1alpha1.RepositoryMonitorList{}
-	if err := h.client.List(c.Context(), monitors, crclient.InNamespace(namespace)); err != nil {
+	if err := h.client.List(c.Context(), monitors, h.githubWebhookMonitorListOptions()...); err != nil {
 		return result, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list repository monitors: %v", err))
 	}
 
@@ -298,10 +300,17 @@ func (h *Handlers) enqueueRepositoryMonitorPullRequestEventRuns(c fiber.Ctx, bod
 		}
 		if err := h.repositoryMonitorStore.CreateMonitorRun(c.Context(), run); err != nil {
 			if errors.Is(err, store.ErrConflict) {
-				result.SkippedActive++
-				continue
+				retryQueued, retryErr := h.requeueFailedRepositoryMonitorEventRun(c, run)
+				if retryErr != nil {
+					return result, retryErr
+				}
+				if !retryQueued {
+					result.SkippedActive++
+					continue
+				}
+			} else {
+				return result, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create repository monitor event run: %v", err))
 			}
-			return result, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create repository monitor event run: %v", err))
 		}
 		if err := h.annotateRepositoryMonitorRunRequest(c, monitor, run); err != nil {
 			if failErr := h.markRepositoryMonitorRunSignalFailed(c, run, err); failErr != nil {
@@ -316,6 +325,51 @@ func (h *Handlers) enqueueRepositoryMonitorPullRequestEventRuns(c fiber.Ctx, bod
 		result.RunIDs = append(result.RunIDs, runID)
 	}
 	return result, nil
+}
+
+func (h *Handlers) githubWebhookMonitorListOptions() []crclient.ListOption {
+	if h.watchNamespace == "" {
+		return nil
+	}
+	return []crclient.ListOption{crclient.InNamespace(h.watchNamespace)}
+}
+
+func (h *Handlers) requeueFailedRepositoryMonitorEventRun(c fiber.Ctx, next *store.MonitorRun) (bool, error) {
+	existing, err := h.repositoryMonitorStore.GetMonitorRun(c.Context(), next.MonitorNamespace, next.ID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to inspect repository monitor event run: %v", err))
+	}
+	if existing.Phase != repositoryMonitorRunPhaseFailed {
+		return false, nil
+	}
+	events, _, err := h.repositoryMonitorStore.ListMonitorEvents(c.Context(), store.MonitorEventFilter{
+		Namespace:   next.MonitorNamespace,
+		MonitorName: next.MonitorName,
+		RunID:       next.ID,
+		EventType:   githubMonitorEventTypeExactRunQueued,
+		Limit:       1,
+	})
+	if err != nil {
+		return false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to inspect repository monitor event run audit: %v", err))
+	}
+	if len(events) > 0 {
+		return false, nil
+	}
+	existing.Trigger = next.Trigger
+	existing.TargetKind = next.TargetKind
+	existing.TargetNumber = next.TargetNumber
+	existing.TargetSHA = next.TargetSHA
+	existing.Phase = repositoryMonitorRunPhaseQueued
+	existing.StartedAt = next.StartedAt
+	existing.CompletedAt = nil
+	existing.Error = ""
+	if err := h.repositoryMonitorStore.UpdateMonitorRun(c.Context(), existing); err != nil {
+		return false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to requeue repository monitor event run: %v", err))
+	}
+	return true, nil
 }
 
 func (h *Handlers) queuedRepositoryMonitorPullRequestEventRunExists(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, next *store.MonitorRun) (bool, error) {
@@ -733,6 +787,24 @@ func githubLabelTaskCanUseGitSecret(target githubLabelTarget) bool {
 		return true
 	}
 	return githubSameRepository(target.HeadRepo, target.BaseRepo)
+}
+
+func (h *Handlers) validateGitHubLabelTaskGitSecret(c fiber.Ctx, namespace string, target githubLabelTarget) error {
+	gitSecret := strings.TrimSpace(os.Getenv(githubLabelTriggerGitSecretEnv))
+	if gitSecret == "" || !githubLabelTaskCanUseGitSecret(target) {
+		return nil
+	}
+	var secret corev1.Secret
+	if err := h.client.Get(c.Context(), types.NamespacedName{Name: gitSecret, Namespace: namespace}, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusServiceUnavailable, fmt.Sprintf("GitHub label trigger git secret %q not found in namespace %q", gitSecret, namespace))
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get GitHub label trigger git secret %q: %v", gitSecret, err))
+	}
+	if !repositoryMonitorGitSecretHasToken(&secret) {
+		return fiber.NewError(fiber.StatusServiceUnavailable, fmt.Sprintf("GitHub label trigger git secret %q must contain a non-empty token, password, or %s key", gitSecret, workerenv.GitHubToken))
+	}
+	return nil
 }
 
 func githubSameRepository(a, b githubWebhookRepository) bool {

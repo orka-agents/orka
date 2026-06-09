@@ -124,6 +124,9 @@ controller:
       sessionWrite: ""
       securityRead: ""
       securityWrite: ""
+      monitorRead: ""
+      monitorWrite: ""
+      monitorOperate: ""
       skillRead: ""
       skillWrite: ""
     tts:

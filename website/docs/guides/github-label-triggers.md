@@ -26,7 +26,7 @@ Set these environment variables on the controller Deployment:
 | `ORKA_GITHUB_WEBHOOK_SECRET` | yes | Shared webhook secret used for HMAC verification. Use a Kubernetes Secret. |
 | `ORKA_GITHUB_LABEL_TRIGGER_AGENT` | yes | Default runtime Agent CR used for created `type: agent` Tasks. |
 | `ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE` | no | Namespace for created Tasks. Defaults to the controller watch namespace, then `default`. |
-| `ORKA_GITHUB_LABEL_TRIGGER_GIT_SECRET` | no | Secret name mounted into agent workspaces as `/secrets/git` for clone, push, and GitHub API auth. Automatic push branches are only configured when this secret is set and safe for the target repository. |
+| `ORKA_GITHUB_LABEL_TRIGGER_GIT_SECRET` | no | Secret name mounted into eligible agent workspaces as `/secrets/git` for clone and GitHub API auth when it is safe for the target repository. `agent:review` can use it for private same-repository PR clones but never receives a push branch. When Orka uses this secret, it must exist in the label-trigger namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key. |
 | `ORKA_GITHUB_LABEL_TRIGGER_PREFIX` | no | Label prefix. Defaults to `agent:`. |
 | `ORKA_GITHUB_LABEL_TRIGGER_TIMEOUT` | no | Task timeout. Defaults to `30m`. |
 | `ORKA_GITHUB_LABEL_TRIGGER_MAX_TURNS` | no | Agent max turns. Defaults to `100`. |
@@ -40,8 +40,8 @@ When GitHub sends a `labeled` event and the label starts with the configured pre
 
 Default action prompts:
 
-- `agent:implement` - implement the issue or PR request and run tests. When a safe git secret is configured, Orka commits and pushes final changes to a generated `orka/implement-...` branch (or the PR head branch for same-repository PRs). For fork PRs or deployments without a git secret, Orka captures the final workspace diff in the task result and does not push automatically.
-- `agent:update-branch` - for pull requests only; update the PR head branch from the base branch. Orka pushes back only when a safe git secret is configured for the PR head repository.
+- `agent:implement` - implement the issue or PR request and run tests. When a valid safe git secret is configured, Orka commits and pushes final changes to a generated `orka/implement-...` branch (or the PR head branch for same-repository PRs). For fork PRs or deployments without a git secret, Orka captures the final workspace diff in the task result and does not push automatically.
+- `agent:update-branch` - for pull requests only; update the PR head branch from the base branch. Orka pushes back only when a valid safe git secret is configured for the PR head repository.
 - `agent:review` - for pull requests only; review without changing code.
 - `agent:to-issues` - break the request into independently implementable GitHub issues, creating them when credentials/tools permit or returning drafts.
 - Other `agent:<action>` labels create a generic action task with a scoped prompt.
@@ -52,7 +52,7 @@ GitHub delivery IDs make retries safe: if the same delivery is received again, O
 
 The same `/webhooks/github` endpoint can queue exact-head `RepositoryMonitor` runs from pull request events. This path does not require an `agent:*` label. A monitor is eligible when `spec.review.exactEventEnabled: true`, pull request monitoring is enabled, the webhook repository matches `spec.repoURL`, the PR base branch matches the monitor branch, and the monitor is not suspended.
 
-For `opened`, `reopened`, `synchronize`, `ready_for_review`, `labeled`, and `unlabeled` pull request events, Orka queues a monitor run for the exact PR head SHA and records an audit event. Duplicate deliveries or already-queued runs for the same PR head are accepted without creating duplicate work.
+For `opened`, `reopened`, `synchronize`, `ready_for_review`, `labeled`, and `unlabeled` pull request events, Orka queues a monitor run for the exact PR head SHA and records an audit event. If the controller has a watch namespace, only monitors in that namespace are considered; otherwise monitors across all namespaces are eligible. Duplicate deliveries or already-queued runs for the same PR head are accepted without creating duplicate work. If a previous exact-event run for the same delivery failed before the queued audit event was recorded, a webhook retry can requeue that failed run.
 
 ## CI Coverage
 

@@ -101,7 +101,10 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 				Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
 			},
 		},
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testGitCredentialsSecret, Namespace: defaultNamespace}},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: testGitCredentialsSecret, Namespace: defaultNamespace},
+			Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
+		},
 	)
 	ctx := newCreatePRMonitorToolContext(fc)
 	tool := &CreatePRMonitorTool{}
@@ -190,7 +193,10 @@ func TestCreatePRMonitorTool_ExecuteAuthorizesTaskCreate(t *testing.T) {
 				Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
 			},
 		},
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testGitCredentialsSecret, Namespace: defaultNamespace}},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: testGitCredentialsSecret, Namespace: defaultNamespace},
+			Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
+		},
 	)
 	authorized := false
 	authorizedWithSecret := false

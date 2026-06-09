@@ -16,6 +16,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
@@ -191,27 +192,8 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 		return result, nil
 	}
 
-	if requestedGitSecretRef != "" {
-		var secret corev1.Secret
-		if err := tc.Client.Get(ctx, types.NamespacedName{Name: requestedGitSecretRef, Namespace: namespace}, &secret); err != nil {
-			if apierrors.IsNotFound(err) {
-				return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("git secretRef %q not found in namespace %q", requestedGitSecretRef, namespace), "Create the Secret or provide a valid gitSecretRef")
-			}
-			return classifyChatK8sErr(err)
-		}
-	}
-	if secretRefErr != nil {
-		if requestedGitSecretRef != "" {
-			return ChatToolErrorResult("invalid_arguments", secretRefErr.Error(), "Create the Secret or provide a valid gitSecretRef")
-		}
-		return classifyChatK8sErr(secretRefErr)
-	}
-	if secretRef == nil {
-		return ChatToolErrorResult(
-			"invalid_arguments",
-			fmt.Sprintf("gitSecretRef is required for PR monitor GitHub access; no supported git credential Secret found in namespace %q", namespace),
-			fmt.Sprintf("Provide gitSecretRef or create one of these Secrets in namespace %q: %s", namespace, strings.Join(gitCredentialSecretCandidates, ", ")),
-		)
+	if result, err := validatePRMonitorGitSecretRef(ctx, tc.Client, namespace, requestedGitSecretRef, secretRef, secretRefErr); result != "" || err != nil {
+		return result, err
 	}
 	workspace.GitSecretRef = secretRef
 
@@ -227,6 +209,35 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 		scheduleField:  task.Spec.Schedule,
 		messageField:   "PR monitor task created",
 	})
+}
+
+func validatePRMonitorGitSecretRef(ctx context.Context, k8sClient client.Reader, namespace, requested string, secretRef *corev1.LocalObjectReference, secretRefErr error) (string, error) {
+	if requested != "" {
+		var secret corev1.Secret
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: requested, Namespace: namespace}, &secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("git secretRef %q not found in namespace %q", requested, namespace), "Create the Secret or provide a valid gitSecretRef")
+			}
+			return classifyChatK8sErr(err)
+		}
+	}
+	if secretRefErr != nil {
+		if requested != "" {
+			return ChatToolErrorResult("invalid_arguments", secretRefErr.Error(), "Create the Secret or provide a valid gitSecretRef")
+		}
+		return classifyChatK8sErr(secretRefErr)
+	}
+	if secretRef == nil {
+		return ChatToolErrorResult(
+			"invalid_arguments",
+			fmt.Sprintf("gitSecretRef is required for PR monitor GitHub access; no supported git credential Secret found in namespace %q", namespace),
+			fmt.Sprintf("Provide gitSecretRef or create one of these Secrets in namespace %q: %s", namespace, strings.Join(gitCredentialSecretCandidates, ", ")),
+		)
+	}
+	if err := validateGitCredentialSecret(ctx, k8sClient, namespace, secretRef.Name); err != nil {
+		return ChatToolErrorResult("invalid_arguments", err.Error(), "Use a Secret with a non-empty token, password, or GITHUB_TOKEN key")
+	}
+	return "", nil
 }
 
 func normalizePRMonitorReviewEvent(value string) (string, bool) {

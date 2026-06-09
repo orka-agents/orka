@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -17,6 +18,7 @@ import (
 	"github.com/sozercan/orka/internal/metrics"
 	"github.com/sozercan/orka/internal/security"
 	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 type CreateRepositoryMonitorRequest struct {
@@ -41,6 +43,7 @@ const (
 	repositoryMonitorTargetKindPullRequest = "pull_request"
 	repositoryMonitorRunPhaseQueued        = "queued"
 	repositoryMonitorRunPhaseRunning       = "running"
+	repositoryMonitorRunPhaseFailed        = "failed"
 )
 
 func (h *Handlers) ensureRepositoryMonitorStore() error {
@@ -116,6 +119,9 @@ func (h *Handlers) validateRepositoryMonitorReviewerAgent(c fiber.Ctx, namespace
 	if agentNamespace == "" {
 		agentNamespace = namespace
 	}
+	if h.enforceNamespaceIsolation && agentNamespace != namespace {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.reviewer namespace %q must match monitor namespace %q when namespace isolation is enforced", agentNamespace, namespace))
+	}
 	var agent corev1alpha1.Agent
 	if err := h.client.Get(c.Context(), types.NamespacedName{Name: reviewer.Name, Namespace: agentNamespace}, &agent); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -130,6 +136,36 @@ func (h *Handlers) validateRepositoryMonitorReviewerAgent(c fiber.Ctx, namespace
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.reviewer %q runtime %q is not supported for read-only repository monitor reviews; use claude", reviewer.Name, agent.Spec.Runtime.Type))
 	}
 	return nil
+}
+
+func (h *Handlers) validateRepositoryMonitorGitSecret(c fiber.Ctx, namespace string, spec corev1alpha1.RepositoryMonitorSpec) error {
+	if spec.GitSecretRef == nil || strings.TrimSpace(spec.GitSecretRef.Name) == "" {
+		return nil
+	}
+	secretName := strings.TrimSpace(spec.GitSecretRef.Name)
+	var secret corev1.Secret
+	if err := h.client.Get(c.Context(), types.NamespacedName{Name: secretName, Namespace: namespace}, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.gitSecretRef %q not found in namespace %q", secretName, namespace))
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get spec.gitSecretRef %q: %v", secretName, err))
+	}
+	if !repositoryMonitorGitSecretHasToken(&secret) {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.gitSecretRef %q must contain a non-empty token, password, or %s key", secretName, workerenv.GitHubToken))
+	}
+	return nil
+}
+
+func repositoryMonitorGitSecretHasToken(secret *corev1.Secret) bool {
+	if secret == nil {
+		return false
+	}
+	for _, key := range []string{"token", "password", workerenv.GitHubToken} {
+		if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func validateRepositoryMonitorSupportedTargets(spec corev1alpha1.RepositoryMonitorSpec) error {
@@ -328,6 +364,9 @@ func (h *Handlers) CreateRepositoryMonitor(c fiber.Ctx) error {
 	if err := h.validateRepositoryMonitorReviewerAgent(c, namespace, req.Spec); err != nil {
 		return err
 	}
+	if err := h.validateRepositoryMonitorGitSecret(c, namespace, req.Spec); err != nil {
+		return err
+	}
 	if err := h.client.Create(c.Context(), monitor); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "repository monitor already exists")
@@ -432,6 +471,9 @@ func (h *Handlers) UpdateRepositoryMonitor(c fiber.Ctx) error {
 		return err
 	}
 	if err := h.validateRepositoryMonitorReviewerAgent(c, namespace, req.Spec); err != nil {
+		return err
+	}
+	if err := h.validateRepositoryMonitorGitSecret(c, namespace, req.Spec); err != nil {
 		return err
 	}
 	if err := h.client.Update(c.Context(), updated); err != nil {

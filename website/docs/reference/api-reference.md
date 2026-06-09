@@ -396,7 +396,7 @@ Context-token authorization scopes are `orka:monitors:read` for list/get endpoin
 
 Required fields are `name`, `spec.repoURL`, and `spec.agents.reviewer.name` when pull request monitoring is enabled. The API defaults or infers provider, owner, repository, branch, pull request enablement, pull request `maxPerRun`, `review.event`, and validation mode where possible.
 
-Only GitHub pull request monitoring is supported in this slice. Requests that enable issue or commit targets, disable pull request monitoring, use a non-GitHub provider, set `review.requireGreenCI`, or reference a non-Claude reviewer runtime are rejected with `400`.
+Only GitHub pull request monitoring is supported in this slice. Requests that enable issue or commit targets, disable pull request monitoring, use a non-GitHub provider, set `review.requireGreenCI`, reference a non-Claude reviewer runtime, or reference a missing or empty `gitSecretRef` are rejected with `400`. When `gitSecretRef` is set, the Secret must exist in the monitor namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
 
 ### Trigger Manual Monitor Run
 
@@ -640,4 +640,4 @@ For GitHub tools that accept `repo_url`, explicit repository URLs are scope-chec
 
 `create_pr_monitor` is exposed through the chat/management tool set rather than auto-injected into every coordinator worker. Parameters are `name`, `repo_url`, `schedule`, and `agent_ref` (required), plus optional `namespace`, `provider_ref`, `gitSecretRef`, `per_page`, `review_event`, and `prompt`.
 
-`create_pr_monitor` is the compatibility path for prompt-orchestrated scheduled PR monitors. It creates a scheduled `type: ai` Task, sets `spec.workspace.gitRepo` to `repo_url`, injects only the PR review loop tools, and instructs the task to pass the same `repo_url` to `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The Agent referenced by `agent_ref` must be an AI Agent with coordination enabled and autonomous coordination disabled. The task needs a Git credential Secret through `gitSecretRef` or a supported default Secret name in the target namespace.
+`create_pr_monitor` is the compatibility path for prompt-orchestrated scheduled PR monitors. It creates a scheduled `type: ai` Task, sets `spec.workspace.gitRepo` to `repo_url`, injects only the PR review loop tools, and instructs the task to pass the same `repo_url` to `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The Agent referenced by `agent_ref` must be an AI Agent with coordination enabled and autonomous coordination disabled. The task needs a Git credential Secret through `gitSecretRef` or a supported default Secret name in the target namespace; the Secret must contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key.

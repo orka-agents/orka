@@ -45,7 +45,7 @@ func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 		githubLabelTriggerAgentEnv:     "codex-agent",
 		githubLabelTriggerGitSecretEnv: githubWebhookTestGitSecret,
 	})
-	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
+	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"), githubWebhookGitSecret())
 	server := NewServer(fc, nil, ServerConfig{})
 
 	body := []byte(`{
@@ -109,7 +109,7 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 		githubLabelTriggerAgentEnv:     "claude-agent",
 		githubLabelTriggerGitSecretEnv: githubWebhookTestGitSecret,
 	})
-	fc := newGitHubWebhookFakeClient(t, runtimeAgent("claude-agent"))
+	fc := newGitHubWebhookFakeClient(t, runtimeAgent("claude-agent"), githubWebhookGitSecret())
 	server := NewServer(fc, nil, ServerConfig{})
 
 	body := []byte(strings.ReplaceAll(`{
@@ -280,7 +280,7 @@ func TestGitHubWebhook_PullRequestReviewMountsGitSecretWithoutPushBranch(t *test
 		githubLabelTriggerAgentEnv:     "codex-agent",
 		githubLabelTriggerGitSecretEnv: githubWebhookTestGitSecret,
 	})
-	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
+	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"), githubWebhookGitSecret())
 	server := NewServer(fc, nil, ServerConfig{})
 
 	body := []byte(strings.ReplaceAll(`{
@@ -321,7 +321,7 @@ func TestGitHubWebhook_ToIssuesMountsGitSecretWithoutPushBranch(t *testing.T) {
 		githubLabelTriggerAgentEnv:     "codex-agent",
 		githubLabelTriggerGitSecretEnv: githubWebhookTestGitSecret,
 	})
-	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
+	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"), githubWebhookGitSecret())
 	server := NewServer(fc, nil, ServerConfig{})
 
 	body := []byte(`{
@@ -517,6 +517,134 @@ func TestGitHubWebhook_PullRequestEventQueuesRepositoryMonitorRun(t *testing.T) 
 	}
 	if len(runs) != 2 {
 		t.Fatalf("runs after duplicate = %#v, want duplicate exact event ignored", runs)
+	}
+}
+
+func TestGitHubWebhook_PullRequestEventRequeuesFailedRunBeforeAudit(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, nil)
+	monitorStore := setupGitHubWebhookMonitorStore(t)
+	monitor := githubWebhookRepositoryMonitor("repo-monitor", true)
+	fc := newGitHubWebhookFakeClient(t, monitor)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
+	delivery := "delivery-failed-before-audit"
+	runID := githubRepositoryMonitorExactRunID(monitor, delivery)
+	if err := monitorStore.CreateMonitorRun(t.Context(), &store.MonitorRun{
+		ID:               runID,
+		MonitorNamespace: "default",
+		MonitorName:      "repo-monitor",
+		Trigger:          githubMonitorTriggerPullRequestEvent,
+		TargetKind:       repositoryMonitorTargetKindPullRequest,
+		TargetNumber:     34,
+		TargetSHA:        githubWebhookTestHeadSHA,
+		Phase:            repositoryMonitorRunPhaseFailed,
+		Error:            "failed to signal repository monitor run",
+	}); err != nil {
+		t.Fatalf("CreateMonitorRun(failed) error = %v", err)
+	}
+
+	body := []byte(strings.ReplaceAll(`{
+		"action":"synchronize",
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"pull_request":{
+			"number":34,
+			"title":"Feature branch",
+			"body":"Update me",
+			"html_url":"https://github.com/sozercan/vekil/pull/34",
+			"state":"open",
+			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}},
+			"head":{"ref":"feature/x","sha":"{{HEAD_SHA}}","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}}
+		},
+		"sender":{"login":"octocat"}
+	}`, "{{HEAD_SHA}}", githubWebhookTestHeadSHA))
+
+	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, delivery, secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
+	}
+	run, err := monitorStore.GetMonitorRun(t.Context(), "default", runID)
+	if err != nil {
+		t.Fatalf("GetMonitorRun() error = %v", err)
+	}
+	if run.Phase != repositoryMonitorRunPhaseQueued || run.CompletedAt != nil || run.Error != "" {
+		t.Fatalf("run = %#v, want failed pre-audit run requeued", run)
+	}
+	events, _, err := monitorStore.ListMonitorEvents(t.Context(), store.MonitorEventFilter{Namespace: "default", MonitorName: "repo-monitor", RunID: runID, EventType: githubMonitorEventTypeExactRunQueued, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorEvents() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %#v, want one exact-event audit after requeue", events)
+	}
+}
+
+func TestGitHubWebhook_PullRequestEventDoesNotRequeueAuditedFailedRun(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, nil)
+	monitorStore := setupGitHubWebhookMonitorStore(t)
+	monitor := githubWebhookRepositoryMonitor("repo-monitor", true)
+	fc := newGitHubWebhookFakeClient(t, monitor)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
+	delivery := "delivery-failed-after-audit"
+	runID := githubRepositoryMonitorExactRunID(monitor, delivery)
+	if err := monitorStore.CreateMonitorRun(t.Context(), &store.MonitorRun{
+		ID:               runID,
+		MonitorNamespace: "default",
+		MonitorName:      "repo-monitor",
+		Trigger:          githubMonitorTriggerPullRequestEvent,
+		TargetKind:       repositoryMonitorTargetKindPullRequest,
+		TargetNumber:     34,
+		TargetSHA:        githubWebhookTestHeadSHA,
+		Phase:            repositoryMonitorRunPhaseFailed,
+		Error:            "controller processing failed after audit",
+	}); err != nil {
+		t.Fatalf("CreateMonitorRun(failed) error = %v", err)
+	}
+	if err := monitorStore.CreateMonitorEvent(t.Context(), &store.MonitorEvent{
+		ID:               "event-audited-failed-run",
+		MonitorNamespace: "default",
+		MonitorName:      "repo-monitor",
+		RunID:            runID,
+		ItemKind:         repositoryMonitorTargetKindPullRequest,
+		ItemNumber:       34,
+		ItemSHA:          githubWebhookTestHeadSHA,
+		EventType:        githubMonitorEventTypeExactRunQueued,
+		Actor:            "github-webhook",
+		Summary:          "Exact pull request event queued repository monitor run for PR #34",
+	}); err != nil {
+		t.Fatalf("CreateMonitorEvent() error = %v", err)
+	}
+
+	body := []byte(strings.ReplaceAll(`{
+		"action":"synchronize",
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"pull_request":{
+			"number":34,
+			"title":"Feature branch",
+			"body":"Update me",
+			"html_url":"https://github.com/sozercan/vekil/pull/34",
+			"state":"open",
+			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}},
+			"head":{"ref":"feature/x","sha":"{{HEAD_SHA}}","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}}
+		},
+		"sender":{"login":"octocat"}
+	}`, "{{HEAD_SHA}}", githubWebhookTestHeadSHA))
+
+	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, delivery, secret, body)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusAccepted, readRespBody(t, resp))
+	}
+	run, err := monitorStore.GetMonitorRun(t.Context(), "default", runID)
+	if err != nil {
+		t.Fatalf("GetMonitorRun() error = %v", err)
+	}
+	if run.Phase != repositoryMonitorRunPhaseFailed || run.Error == "" {
+		t.Fatalf("run = %#v, want audited failed run left unchanged", run)
+	}
+	events, _, err := monitorStore.ListMonitorEvents(t.Context(), store.MonitorEventFilter{Namespace: "default", MonitorName: "repo-monitor", RunID: runID, EventType: githubMonitorEventTypeExactRunQueued, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorEvents() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %#v, want existing exact-event audit only", events)
 	}
 }
 
@@ -867,6 +995,13 @@ func runtimeAgent(name string) *corev1alpha1.Agent {
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 		},
+	}
+}
+
+func githubWebhookGitSecret() *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: githubWebhookTestGitSecret, Namespace: "default"},
+		Data:       map[string][]byte{"token": []byte("test-token")},
 	}
 }
 

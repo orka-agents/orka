@@ -123,6 +123,15 @@ spec:
             {{- if .securityWrite }}
             - {{ printf "--context-token-security-write-scopes=%s" .securityWrite | quote }}
             {{- end }}
+            {{- if .monitorRead }}
+            - {{ printf "--context-token-monitor-read-scopes=%s" .monitorRead | quote }}
+            {{- end }}
+            {{- if .monitorWrite }}
+            - {{ printf "--context-token-monitor-write-scopes=%s" .monitorWrite | quote }}
+            {{- end }}
+            {{- if .monitorOperate }}
+            - {{ printf "--context-token-monitor-operate-scopes=%s" .monitorOperate | quote }}
+            {{- end }}
             {{- if .skillRead }}
             - {{ printf "--context-token-skill-read-scopes=%s" .skillRead | quote }}
             {{- end }}

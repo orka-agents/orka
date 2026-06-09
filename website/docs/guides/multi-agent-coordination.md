@@ -73,7 +73,7 @@ LLM-visible parameter schema:
         "gitRepo":      {"type": "string", "description": "Git repository URL"},
         "branch":       {"type": "string", "description": "Git branch name"},
         "ref":          {"type": "string", "description": "Git ref (commit SHA or tag)"},
-        "gitSecretRef": {"type": "string", "description": "Name of the Kubernetes Secret containing git credentials (must have a 'token' key)"},
+        "gitSecretRef": {"type": "string", "description": "Name of the Kubernetes Secret containing git credentials (must have a non-empty token, password, or GITHUB_TOKEN key)"},
         "pushBranch":   {"type": "string", "description": "Remote branch name to push changes to after the agent completes"}
       }
     },
@@ -720,7 +720,7 @@ Creates a GitHub pull request from a branch that was pushed by a completed agent
 | `title` | string | yes | Pull request title |
 | `body` | string | no | Pull request body in Markdown |
 
-The tool reads the git credentials from the child task's `gitSecretRef` secret (looks for `token` or `password` key) and calls the GitHub REST API. The coordinator must have RBAC access to read Secrets.
+The tool reads the git credentials from the child task's `gitSecretRef` secret (looks for a non-empty `token`, `password`, or `GITHUB_TOKEN` key) and calls the GitHub REST API. The coordinator must have RBAC access to read Secrets.
 
 ### create_pr_monitor Tool
 
@@ -739,7 +739,7 @@ Creates a scheduled prompt-orchestrated pull request monitor Task for one GitHub
 | `review_event` | string | no | Review event to post after analysis: `COMMENT`, `APPROVE`, or `REQUEST_CHANGES`. Defaults to `COMMENT`. |
 | `prompt` | string | no | Additional instructions appended to the generated monitor prompt. |
 
-The created Task receives a narrow tool set: `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The generated prompt tells the Task to pass the same `repo_url` to each PR tool call. Those explicit repository URLs are scope-checked against the Task workspace or signed transaction repository context before Orka resolves credentials or calls GitHub.
+The selected Git credential Secret must exist in the target namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key. The created Task receives a narrow tool set: `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The generated prompt tells the Task to pass the same `repo_url` to each PR tool call. Those explicit repository URLs are scope-checked against the Task workspace or signed transaction repository context before Orka resolves credentials or calls GitHub.
 
 ### check_pull_request_ci Tool
 

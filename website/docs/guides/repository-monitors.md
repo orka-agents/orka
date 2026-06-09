@@ -71,7 +71,7 @@ spec:
       Return concise, structured findings and do not mutate GitHub.
 ```
 
-For private repositories or higher GitHub rate limits, create a Secret in the monitor namespace. The controller accepts a token from `token`, `password`, or `GITHUB_TOKEN`.
+For private repositories or higher GitHub rate limits, create a Secret in the monitor namespace. When a monitor is created or updated through the API, Orka validates that the referenced Secret exists and contains a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
 
 ```bash
 kubectl create secret generic repo-monitor-github \
@@ -155,7 +155,7 @@ To target one pull request, include `targetKind` and `targetNumber`:
 
 Repository monitors can also receive exact pull request events through the same signed GitHub webhook endpoint used by label triggers. Configure the repository webhook for `Pull requests` events and set `spec.review.exactEventEnabled: true` on the monitor.
 
-When `/webhooks/github` receives an `opened`, `reopened`, `synchronize`, `ready_for_review`, `labeled`, or `unlabeled` pull request event, Orka matches monitors in the configured webhook namespace by repository and base branch. A matching monitor queues a run with `targetKind: pull_request`, the PR number, and the exact head SHA from the webhook payload. Replayed deliveries and already-queued runs for the same PR head are accepted without creating duplicate monitor work.
+When `/webhooks/github` receives an `opened`, `reopened`, `synchronize`, `ready_for_review`, `labeled`, or `unlabeled` pull request event, Orka matches monitors by repository and base branch. If the controller has a watch namespace, only monitors in that namespace are considered; otherwise monitors across all namespaces are eligible. A matching monitor queues a run with `targetKind: pull_request`, the PR number, and the exact head SHA from the webhook payload. Replayed deliveries and already-queued runs for the same PR head are accepted without creating duplicate monitor work. If a previous exact-event run for the same delivery failed before the queued audit event was recorded, a webhook retry can requeue that failed run.
 
 Exact event runs are still read-only review runs. They are stored with trigger `pull_request_event`, create an `exact_event_run_queued` audit event, and wait behind any active or queued monitor run.
 

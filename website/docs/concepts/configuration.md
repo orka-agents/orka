@@ -666,6 +666,9 @@ controller:
       taskCreate: orka:tasks:create
       providerUse: orka:providers:use
       toolUse: orka:tools:use
+      monitorRead: orka:monitors:read
+      monitorWrite: orka:monitors:write
+      monitorOperate: orka:monitors:operate
     tts:
       url: https://tts.example.com
       audience: orka-workers
@@ -680,7 +683,9 @@ controller:
 The Helm keys mirror the controller flags: for example,
 `controller.contextToken.jwksUrl` renders `--context-token-jwks-url`,
 `controller.contextToken.scopes.secretRead` renders
-`--context-token-secret-read-scopes`, and
+`--context-token-secret-read-scopes`,
+`controller.contextToken.scopes.monitorRead` renders
+`--context-token-monitor-read-scopes`, and
 `controller.contextToken.tts.toolTokenTTL` renders
 `--context-token-tool-token-ttl`.
 
