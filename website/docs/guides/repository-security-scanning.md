@@ -62,6 +62,7 @@ spec:
   provider: github
   repoURL: "https://github.com/example/app"
   branch: main
+  ref: "v1.2.3"                 # optional tag, branch, or commit SHA checkout override
   subPath: "services/api"        # optional monorepo scope
   gitSecretRef:                   # optional for private repositories
     name: github-credentials

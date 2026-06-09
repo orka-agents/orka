@@ -21,6 +21,7 @@ import (
 
 	cron "github.com/robfig/cron/v3"
 	batchv1 "k8s.io/api/batch/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -42,6 +43,7 @@ import (
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/sozercan/orka/internal/workspace"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -72,8 +74,16 @@ const (
 	workerClusterRoleBindingRecreateTimeout  = 5 * time.Second
 
 	scheduledRunLabelValue = "true"
+	managedLabelValue      = scheduledRunLabelValue
 
 	workerRBACReconcileFailedReason = "WorkerRBACReconcileFailed"
+
+	substratePoolActorLeasePurpose        = "substrate-actor-pool-lease"
+	substratePoolActorLeaseActorIDLabel   = "orka.ai/substrate-pool-actor-id"
+	substratePoolActorLeaseHolderUIDLabel = "orka.ai/substrate-pool-holder-uid"
+	substratePoolActorLeaseTaskNSAnno     = "orka.ai/substrate-pool-task-namespace"
+	substratePoolActorLeaseTaskNameAnno   = "orka.ai/substrate-pool-task-name"
+	substratePoolActorLeaseTaskUIDAnno    = "orka.ai/substrate-pool-task-uid"
 )
 
 // TaskReconciler reconciles a Task object
@@ -96,6 +106,7 @@ type TaskReconciler struct {
 	AgentSandboxConfig                 AgentSandboxConfig
 	SubstrateEnabled                   bool
 	SubstrateConfig                    SubstrateConfig
+	SubstrateExecutorFactory           func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
 	AIWorkerClusterRoleName            string
 	VendorWorkerClusterRoleName        string
 	ContainerWorkerClusterRoleName     string
@@ -108,6 +119,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
@@ -317,29 +329,28 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			}
 		}
 
+		waitingForJob, err := r.cleanupDeletedTaskJob(ctx, task)
+		if err != nil {
+			log.Error(err, "failed to delete Job")
+			return ctrl.Result{}, err
+		}
+		if waitingForJob {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		releasedPoolLeases, err := r.releaseSubstratePoolActorLeasesAfterTerminalCleanup(ctx, task)
+		if err != nil {
+			log.Error(err, "failed to release substrate pool actor leases")
+			return ctrl.Result{}, err
+		}
+		if !releasedPoolLeases {
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+
 		// Release session lock if held
 		if task.Spec.SessionRef != nil {
 			if err := r.SessionManager.ReleaseLock(ctx, task); err != nil {
 				log.Error(err, "failed to release session lock")
 				// Continue with finalizer removal anyway
-			}
-		}
-
-		// Clean up associated Job
-		if task.Status.JobName != "" {
-			job := &batchv1.Job{}
-			err := r.Get(ctx, types.NamespacedName{
-				Name:      task.Status.JobName,
-				Namespace: task.Namespace,
-			}, job)
-			if err == nil {
-				propagationPolicy := metav1.DeletePropagationBackground
-				if err := r.Delete(ctx, job, &client.DeleteOptions{
-					PropagationPolicy: &propagationPolicy,
-				}); err != nil && !apierrors.IsNotFound(err) {
-					log.Error(err, "failed to delete Job")
-					return ctrl.Result{}, err
-				}
 			}
 		}
 
@@ -727,6 +738,22 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		}
 		return r.failTask(ctx, task, fmt.Sprintf("failed to resolve execution workspace: %v", err))
 	}
+	reservedPoolActor := false
+	if workspaceRequest != nil && workspaceRequest.PoolName != "" {
+		reserved, err := r.reserveSubstratePoolActor(ctx, task, workspaceRequest)
+		if err != nil {
+			log.Error(err, "failed to reserve substrate pool actor")
+			return ctrl.Result{}, err
+		}
+		if !reserved {
+			log.Info("all substrate pool actors are busy",
+				"pool", workspaceRequest.PoolName,
+				"poolNamespace", workspaceRequest.PoolNamespace,
+			)
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+		reservedPoolActor = true
+	}
 
 	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{
@@ -734,12 +761,22 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	})
 	if err != nil {
 		log.Error(err, "failed to build Job")
+		if reservedPoolActor {
+			if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
+				return ctrl.Result{}, releaseErr
+			}
+		}
 		return r.failTask(ctx, task, fmt.Sprintf("failed to build job: %v", err))
 	}
 
 	// Set owner reference
 	if err := controllerutil.SetControllerReference(task, job, r.Scheme); err != nil {
 		log.Error(err, "failed to set owner reference")
+		if reservedPoolActor {
+			if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
+				return ctrl.Result{}, releaseErr
+			}
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -750,6 +787,11 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			task.Status.JobName = job.Name
 		} else {
 			log.Error(err, "failed to create Job")
+			if reservedPoolActor {
+				if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
+					return ctrl.Result{}, releaseErr
+				}
+			}
 			return r.failTask(ctx, task, fmt.Sprintf("failed to create job: %v", err))
 		}
 	} else {
@@ -791,6 +833,473 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+func (r *TaskReconciler) reserveSubstratePoolActor(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	request *ExecutionWorkspaceRequest,
+) (bool, error) {
+	if task == nil || request == nil || strings.TrimSpace(request.PoolName) == "" {
+		return true, nil
+	}
+	target := int(request.PoolTargetActors)
+	if target <= 0 {
+		return false, fmt.Errorf("substrate actor pool %q in namespace %q has no target actors", request.PoolName, request.PoolNamespace)
+	}
+	if actorID, found, err := r.substratePoolActorLeaseForTask(ctx, task); err != nil {
+		return false, err
+	} else if found {
+		if task.Status.Attempts > 0 && taskSubstratePoolActorCleanupRequired(task) {
+			return false, nil
+		}
+		request.ClaimName = actorID
+		return true, nil
+	}
+
+	prefix := deterministicSubstratePoolActorPrefix(request.PoolNamespace, request.PoolName)
+	startOrdinal := 0
+	if ordinal, ok := substratePoolActorOrdinalFromID(request.ClaimName, prefix); ok {
+		startOrdinal = ordinal
+	}
+	for offset := range target {
+		ordinal := (startOrdinal + offset) % target
+		actorID := deterministicSubstratePoolActorID(prefix, ordinal)
+		reserved, err := r.tryReserveSubstratePoolActor(ctx, task, request.PoolNamespace, actorID)
+		if err != nil {
+			return false, err
+		}
+		if reserved {
+			request.ClaimName = actorID
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (r *TaskReconciler) substratePoolActorLeaseForTask(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (string, bool, error) {
+	if task == nil || task.UID == "" {
+		return "", false, nil
+	}
+	var leases coordinationv1.LeaseList
+	if err := r.List(ctx, &leases, client.MatchingLabels{
+		labels.LabelPurpose:                   substratePoolActorLeasePurpose,
+		substratePoolActorLeaseHolderUIDLabel: labels.SelectorValue(string(task.UID)),
+	}); err != nil {
+		return "", false, err
+	}
+	for i := range leases.Items {
+		lease := &leases.Items[i]
+		if !substratePoolActorLeaseHeldByTask(lease, task) {
+			continue
+		}
+		if actorID := substratePoolActorLeaseActorID(lease); actorID != "" {
+			return actorID, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func (r *TaskReconciler) tryReserveSubstratePoolActor(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	leaseNamespace string,
+	actorID string,
+) (bool, error) {
+	leaseName := substratePoolActorLeaseName(actorID)
+	lease := &coordinationv1.Lease{}
+	key := types.NamespacedName{Namespace: leaseNamespace, Name: leaseName}
+	err := r.Get(ctx, key, lease)
+	if apierrors.IsNotFound(err) {
+		lease = newSubstratePoolActorLease(task, leaseNamespace, leaseName, actorID)
+		if err := r.Create(ctx, lease); err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if substratePoolActorLeaseHeldByTask(lease, task) {
+		return true, nil
+	}
+	busy, err := substratePoolActorLeaseHasActiveHolder(ctx, r.Client, lease)
+	if err != nil || busy {
+		return false, err
+	}
+	patch := client.MergeFromWithOptions(lease.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	setSubstratePoolActorLeaseHolder(lease, task, actorID)
+	if err := r.Patch(ctx, lease, patch); err != nil {
+		if apierrors.IsConflict(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func substratePoolActorLeaseHasActiveHolder(ctx context.Context, reader client.Reader, lease *coordinationv1.Lease) (bool, error) {
+	if lease == nil || lease.Annotations == nil {
+		return true, nil
+	}
+	taskNamespace := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseTaskNSAnno])
+	taskName := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseTaskNameAnno])
+	taskUID := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseTaskUIDAnno])
+	if taskNamespace == "" || taskName == "" || taskUID == "" {
+		toolNamespace := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseToolNSAnno])
+		toolName := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseToolNameAnno])
+		if toolNamespace != "" && toolName != "" {
+			return substratePoolActorLeaseHasActiveToolHolder(ctx, reader, toolNamespace, toolName, lease.Annotations[substratePoolActorLeaseToolUIDAnno])
+		}
+		return true, nil
+	}
+	task := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: taskNamespace, Name: taskName}, task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return true, err
+	}
+	if string(task.UID) != taskUID {
+		return true, nil
+	}
+	if !task.DeletionTimestamp.IsZero() {
+		return true, nil
+	}
+	if substratePoolActorLeaseActiveTaskPhase(task.Status.Phase) {
+		return true, nil
+	}
+	return taskSubstratePoolActorCleanupRequired(task), nil
+}
+
+func substratePoolActorLeaseHasActiveToolHolder(
+	ctx context.Context,
+	reader client.Reader,
+	toolNamespace string,
+	toolName string,
+	toolUID string,
+) (bool, error) {
+	tool := &corev1alpha1.Tool{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: toolNamespace, Name: toolName}, tool); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return true, err
+	}
+	toolUID = strings.TrimSpace(toolUID)
+	if toolUID != "" && string(tool.UID) != toolUID {
+		return true, nil
+	}
+	return true, nil
+}
+
+func (r *TaskReconciler) releaseSubstratePoolActorLeases(ctx context.Context, task *corev1alpha1.Task) error {
+	leases, err := r.substratePoolActorLeasesForTask(ctx, task)
+	if err != nil {
+		return err
+	}
+	return r.deleteSubstratePoolActorLeasesForTask(ctx, task, leases)
+}
+
+func (r *TaskReconciler) deleteSubstratePoolActorLeasesForTask(ctx context.Context, task *corev1alpha1.Task, leases []coordinationv1.Lease) error {
+	for i := range leases {
+		lease := &leases[i]
+		current := &coordinationv1.Lease{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: lease.Namespace, Name: lease.Name}, current); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+		if !substratePoolActorLeaseHeldByTask(current, task) {
+			continue
+		}
+		if err := r.Delete(ctx, current, deleteCurrentObjectPreconditions(current)...); err != nil && !apierrors.IsNotFound(err) {
+			if apierrors.IsConflict(err) {
+				stillHeld, verifyErr := substrateLeaseStillMatchesAfterDeleteConflict(ctx, r.Client, current, func(latest *coordinationv1.Lease) bool {
+					return substratePoolActorLeaseHeldByTask(latest, task)
+				})
+				if verifyErr != nil {
+					return verifyErr
+				}
+				if !stillHeld {
+					continue
+				}
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func deleteCurrentObjectPreconditions(obj client.Object) []client.DeleteOption {
+	if obj == nil {
+		return nil
+	}
+	preconditions := &metav1.Preconditions{}
+	if obj.GetUID() != "" {
+		uid := obj.GetUID()
+		preconditions.UID = &uid
+	}
+	if obj.GetResourceVersion() != "" {
+		resourceVersion := obj.GetResourceVersion()
+		preconditions.ResourceVersion = &resourceVersion
+	}
+	if preconditions.UID == nil && preconditions.ResourceVersion == nil {
+		return nil
+	}
+	return []client.DeleteOption{&client.DeleteOptions{Preconditions: preconditions}}
+}
+
+func substrateLeaseStillMatchesAfterDeleteConflict(
+	ctx context.Context,
+	reader client.Reader,
+	lease *coordinationv1.Lease,
+	matches func(*coordinationv1.Lease) bool,
+) (bool, error) {
+	if lease == nil || matches == nil {
+		return false, nil
+	}
+	latest := &coordinationv1.Lease{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: lease.Namespace, Name: lease.Name}, latest); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return matches(latest), nil
+}
+
+func (r *TaskReconciler) releaseSubstratePoolActorLeasesAfterTerminalCleanup(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	leases, err := r.substratePoolActorLeasesForTask(ctx, task)
+	if err != nil {
+		return false, err
+	}
+	if len(leases) == 0 {
+		return true, nil
+	}
+	if !taskExecutionWorkspaceCleanupSucceeded(task) {
+		logf.FromContext(ctx).Info(
+			"deleting substrate pool actors before releasing terminal task leases",
+			"task", task.Name,
+			"namespace", task.Namespace,
+			"workspacePhase", taskExecutionWorkspacePhase(task),
+			"workspaceReason", taskExecutionWorkspaceReason(task),
+		)
+		if err := r.deleteSubstratePoolActorsForLeases(ctx, task, leases); err != nil {
+			logf.FromContext(ctx).Error(err, "failed to delete substrate pool actors before releasing terminal task leases")
+			return false, nil
+		}
+	}
+	return true, r.deleteSubstratePoolActorLeasesForTask(ctx, task, leases)
+}
+
+func (r *TaskReconciler) deleteSubstratePoolActorsForLeases(ctx context.Context, task *corev1alpha1.Task, leases []coordinationv1.Lease) error {
+	cfg := r.SubstrateConfig.WithDefaults()
+	executorFactory := r.SubstrateExecutorFactory
+	if executorFactory == nil {
+		executorFactory = func(cfg SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return workspace.NewSubstrateExecutor(workspace.SubstrateConfig{
+				APIEndpoint:           cfg.APIEndpoint,
+				APICAFile:             cfg.APICAFile,
+				APIInsecureSkipVerify: cfg.APIInsecureSkipVerify,
+				RouterURL:             cfg.RouterURL,
+				ActorDNSSuffix:        cfg.ActorDNSSuffix,
+			})
+		}
+	}
+	executor, err := executorFactory(cfg)
+	if err != nil {
+		return err
+	}
+	defer closeWorkspaceExecutor(ctx, executor)
+	for i := range leases {
+		lease := &leases[i]
+		current := &coordinationv1.Lease{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: lease.Namespace, Name: lease.Name}, current); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+		if !substratePoolActorLeaseHeldByTask(current, task) {
+			continue
+		}
+		actorID := substratePoolActorLeaseActorID(current)
+		if actorID == "" {
+			continue
+		}
+		if _, err := executor.Delete(ctx, workspace.DeleteRequest{
+			Ref:       workspace.WorkspaceRef{Namespace: current.Namespace, ClaimName: actorID, ID: actorID},
+			Reason:    "terminal pooled task actor cleanup",
+			Timeout:   cfg.ClaimTimeout,
+			SkipScrub: true,
+		}); err != nil {
+			return fmt.Errorf("deleting substrate pool actor %q: %w", actorID, err)
+		}
+	}
+	return nil
+}
+
+func (r *TaskReconciler) substratePoolActorLeasesForTask(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) ([]coordinationv1.Lease, error) {
+	if task == nil || task.UID == "" {
+		return nil, nil
+	}
+	var leases coordinationv1.LeaseList
+	if err := r.List(ctx, &leases, client.MatchingLabels{
+		labels.LabelPurpose:                   substratePoolActorLeasePurpose,
+		substratePoolActorLeaseHolderUIDLabel: labels.SelectorValue(string(task.UID)),
+	}); err != nil {
+		return nil, err
+	}
+	held := make([]coordinationv1.Lease, 0, len(leases.Items))
+	for i := range leases.Items {
+		lease := &leases.Items[i]
+		if substratePoolActorLeaseHeldByTask(lease, task) {
+			held = append(held, *lease)
+		}
+	}
+	return held, nil
+}
+
+func (r *TaskReconciler) taskHasSubstratePoolActorLeases(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	leases, err := r.substratePoolActorLeasesForTask(ctx, task)
+	if err != nil {
+		return false, err
+	}
+	return len(leases) > 0, nil
+}
+
+func newSubstratePoolActorLease(
+	task *corev1alpha1.Task,
+	namespace string,
+	name string,
+	actorID string,
+) *coordinationv1.Lease {
+	lease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      name,
+		},
+	}
+	setSubstratePoolActorLeaseHolder(lease, task, actorID)
+	return lease
+}
+
+func setSubstratePoolActorLeaseHolder(lease *coordinationv1.Lease, task *corev1alpha1.Task, actorID string) {
+	if lease.Labels == nil {
+		lease.Labels = map[string]string{}
+	}
+	lease.Labels[labels.LabelManaged] = managedLabelValue
+	lease.Labels[labels.LabelPurpose] = substratePoolActorLeasePurpose
+	lease.Labels[substratePoolActorLeaseActorIDLabel] = labels.SelectorValue(actorID)
+	lease.Labels[substratePoolActorLeaseHolderUIDLabel] = labels.SelectorValue(string(task.UID))
+	if lease.Annotations == nil {
+		lease.Annotations = map[string]string{}
+	}
+	lease.Annotations[substratePoolActorLeaseTaskNSAnno] = task.Namespace
+	lease.Annotations[substratePoolActorLeaseTaskNameAnno] = task.Name
+	lease.Annotations[substratePoolActorLeaseTaskUIDAnno] = string(task.UID)
+	now := metav1.NewMicroTime(time.Now())
+	holder := fmt.Sprintf("%s/%s/%s", task.Namespace, task.Name, task.UID)
+	lease.Spec.HolderIdentity = &holder
+	lease.Spec.AcquireTime = &now
+	lease.Spec.RenewTime = &now
+}
+
+func substratePoolActorLeaseHeldByTask(lease *coordinationv1.Lease, task *corev1alpha1.Task) bool {
+	if lease == nil || task == nil || task.UID == "" || lease.Annotations == nil {
+		return false
+	}
+	return lease.Annotations[substratePoolActorLeaseTaskNSAnno] == task.Namespace &&
+		lease.Annotations[substratePoolActorLeaseTaskNameAnno] == task.Name &&
+		lease.Annotations[substratePoolActorLeaseTaskUIDAnno] == string(task.UID)
+}
+
+func substratePoolActorLeaseActorID(lease *coordinationv1.Lease) string {
+	if lease == nil {
+		return ""
+	}
+	if lease.Labels != nil {
+		if actorID := strings.TrimSpace(lease.Labels[substratePoolActorLeaseActorIDLabel]); actorID != "" {
+			return actorID
+		}
+	}
+	return strings.TrimSpace(lease.Name)
+}
+
+func substratePoolActorLeaseName(actorID string) string {
+	return strings.TrimSpace(actorID)
+}
+
+func substratePoolActorLeaseActiveTaskPhase(phase corev1alpha1.TaskPhase) bool {
+	switch phase {
+	case "", corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseScheduled, corev1alpha1.TaskPhaseRunning:
+		return true
+	default:
+		return false
+	}
+}
+
+func taskExecutionWorkspaceCleanupSucceeded(task *corev1alpha1.Task) bool {
+	if task == nil || task.Status.ExecutionWorkspace == nil {
+		return false
+	}
+	status := task.Status.ExecutionWorkspace
+	switch status.Reason {
+	case corev1alpha1.ExecutionWorkspaceReasonRetained:
+		return status.Phase == corev1alpha1.ExecutionWorkspacePhaseRetained
+	case corev1alpha1.ExecutionWorkspaceReasonDeleted:
+		return status.Phase == corev1alpha1.ExecutionWorkspacePhaseDeleted
+	case corev1alpha1.ExecutionWorkspaceReasonReleased:
+		return status.Phase == corev1alpha1.ExecutionWorkspacePhaseReleased
+	default:
+		return false
+	}
+}
+
+func taskSubstratePoolActorCleanupRequired(task *corev1alpha1.Task) bool {
+	return task != nil && !taskExecutionWorkspaceCleanupSucceeded(task)
+}
+
+func taskExecutionWorkspacePhase(task *corev1alpha1.Task) corev1alpha1.ExecutionWorkspacePhase {
+	if task == nil || task.Status.ExecutionWorkspace == nil {
+		return ""
+	}
+	return task.Status.ExecutionWorkspace.Phase
+}
+
+func taskExecutionWorkspaceReason(task *corev1alpha1.Task) corev1alpha1.ExecutionWorkspaceReason {
+	if task == nil || task.Status.ExecutionWorkspace == nil {
+		return ""
+	}
+	return task.Status.ExecutionWorkspace.Reason
+}
+
+func substratePoolActorOrdinalFromID(actorID string, prefix string) (int, bool) {
+	actorID = strings.TrimSpace(actorID)
+	prefix = strings.Trim(strings.TrimSpace(prefix), "-")
+	suffix, ok := strings.CutPrefix(actorID, prefix+"-")
+	if !ok || len(suffix) != 5 {
+		return 0, false
+	}
+	ordinal := 0
+	for _, ch := range suffix {
+		if ch < '0' || ch > '9' {
+			return 0, false
+		}
+		ordinal = ordinal*10 + int(ch-'0')
+	}
+	return ordinal, true
 }
 
 // handleRunning handles Tasks in Running phase
@@ -1092,9 +1601,21 @@ func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1al
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	if err := r.cleanupTerminalTaskJob(ctx, task); err != nil {
+	waitingForJob, err := r.cleanupTerminalTaskJob(ctx, task)
+	if err != nil {
 		log.Error(err, "failed to clean up terminal task Job")
 		return ctrl.Result{}, err
+	}
+	if waitingForJob {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+	releasedPoolLeases, err := r.releaseSubstratePoolActorLeasesAfterTerminalCleanup(ctx, task)
+	if err != nil {
+		log.Error(err, "failed to release substrate pool actor leases")
+		return ctrl.Result{}, err
+	}
+	if !releasedPoolLeases {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// Send webhook if configured and not already sent
@@ -1118,31 +1639,65 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	return ctrl.Result{}, nil
 }
 
-func (r *TaskReconciler) cleanupTerminalTaskJob(ctx context.Context, task *corev1alpha1.Task) error {
+func (r *TaskReconciler) cleanupDeletedTaskJob(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
 	if task.Status.JobName == "" {
-		return nil
+		return false, nil
 	}
 
 	job := &batchv1.Job{}
 	if err := r.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: task.Namespace}, job); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("getting terminal task Job %q: %w", task.Status.JobName, err)
+		return false, fmt.Errorf("getting deleted task Job %q: %w", task.Status.JobName, err)
+	}
+
+	holdsPoolActor, err := r.taskHasSubstratePoolActorLeases(ctx, task)
+	if err != nil {
+		return false, err
+	}
+	propagationPolicy := metav1.DeletePropagationBackground
+	if holdsPoolActor {
+		propagationPolicy = metav1.DeletePropagationForeground
+	}
+	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil && !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("deleting deleted task Job %q: %w", task.Status.JobName, err)
+	}
+	return holdsPoolActor, nil
+}
+
+func (r *TaskReconciler) cleanupTerminalTaskJob(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if task.Status.JobName == "" {
+		return false, nil
+	}
+
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: task.Namespace}, job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("getting terminal task Job %q: %w", task.Status.JobName, err)
 	}
 
 	deleteJob := task.Status.Phase == corev1alpha1.TaskPhaseCancelled ||
 		(task.Status.Phase == corev1alpha1.TaskPhaseFailed && job.Status.Active > 0)
 	if !deleteJob {
-		return nil
+		return false, nil
 	}
 
+	holdsPoolActor, err := r.taskHasSubstratePoolActorLeases(ctx, task)
+	if err != nil {
+		return false, err
+	}
 	propagationPolicy := metav1.DeletePropagationBackground
+	if holdsPoolActor {
+		propagationPolicy = metav1.DeletePropagationForeground
+	}
 	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("deleting terminal task Job %q: %w", task.Status.JobName, err)
+		return false, fmt.Errorf("deleting terminal task Job %q: %w", task.Status.JobName, err)
 	}
 
-	return nil
+	return holdsPoolActor, nil
 }
 
 func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, task *corev1alpha1.Task) error {
@@ -1285,6 +1840,28 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 	// Calculate backoff delay
 	delay := r.calculateRetryDelay(task)
 	oldJobName := task.Status.JobName
+	holdsPoolActor, err := r.taskHasSubstratePoolActorLeases(ctx, task)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if holdsPoolActor {
+		waitingForJob, err := r.cleanupRetryTaskJob(ctx, task, oldJobName)
+		if err != nil {
+			log.Error(err, "failed to delete old Job for pooled retry")
+			return ctrl.Result{}, err
+		}
+		if waitingForJob {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		releasedPoolLeases, err := r.releaseSubstratePoolActorLeasesAfterTerminalCleanup(ctx, task)
+		if err != nil {
+			log.Error(err, "failed to release substrate pool actor leases for retry")
+			return ctrl.Result{}, err
+		}
+		if !releasedPoolLeases {
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+	}
 
 	// Reset to pending for retry before deleting the old Job so a transient
 	// NotFound from asynchronous Job deletion does not fail the task.
@@ -1300,7 +1877,7 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 	}
 
 	// Delete the old Job after clearing the running status.
-	if oldJobName != "" {
+	if oldJobName != "" && !holdsPoolActor {
 		job := &batchv1.Job{}
 		err := r.Get(ctx, types.NamespacedName{
 			Name:      oldJobName,
@@ -1317,6 +1894,33 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 	}
 
 	return ctrl.Result{RequeueAfter: delay}, nil
+}
+
+func (r *TaskReconciler) cleanupRetryTaskJob(ctx context.Context, task *corev1alpha1.Task, jobName string) (bool, error) {
+	if jobName == "" {
+		return false, nil
+	}
+
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: task.Namespace}, job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("getting retry task Job %q: %w", jobName, err)
+	}
+
+	holdsPoolActor, err := r.taskHasSubstratePoolActorLeases(ctx, task)
+	if err != nil {
+		return false, err
+	}
+	propagationPolicy := metav1.DeletePropagationBackground
+	if holdsPoolActor {
+		propagationPolicy = metav1.DeletePropagationForeground
+	}
+	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil && !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("deleting retry task Job %q: %w", jobName, err)
+	}
+	return holdsPoolActor, nil
 }
 
 // calculateRetryDelay calculates the delay before retry using exponential backoff
@@ -1523,14 +2127,74 @@ func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) err
 	ws := task.Spec.Execution.Workspace
 	provider := resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
 
+	if err := validateExecutionWorkspaceBasics(task, provider); err != nil {
+		return err
+	}
+	if err := validateExecutionWorkspaceSubstrateOptions(ws, provider); err != nil {
+		return err
+	}
+	if err := r.validateExecutionWorkspaceProviderConfig(ws, provider); err != nil {
+		return err
+	}
+	return validateExecutionWorkspacePolicies(task, ws)
+}
+
+func validateExecutionWorkspaceBasics(
+	task *corev1alpha1.Task,
+	provider corev1alpha1.WorkspaceProvider,
+) error {
 	if !supportedWorkspaceProvider(provider) {
 		return fmt.Errorf("unsupported execution workspace provider %q", provider)
 	}
-
 	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		return fmt.Errorf("execution workspace is only supported for type: agent tasks")
 	}
+	return nil
+}
 
+func validateExecutionWorkspaceSubstrateOptions(
+	ws *corev1alpha1.ExecutionWorkspaceSpec,
+	provider corev1alpha1.WorkspaceProvider,
+) error {
+	if ws.Boot && provider != corev1alpha1.WorkspaceProviderSubstrate {
+		return fmt.Errorf("execution workspace boot is only supported for provider %q", corev1alpha1.WorkspaceProviderSubstrate)
+	}
+	if ws.PoolRef != nil && provider != corev1alpha1.WorkspaceProviderSubstrate {
+		return fmt.Errorf("execution workspace poolRef is only supported for provider %q", corev1alpha1.WorkspaceProviderSubstrate)
+	}
+	if ws.Snapshot != nil && provider != corev1alpha1.WorkspaceProviderSubstrate {
+		return fmt.Errorf("execution workspace snapshot is only supported for provider %q", corev1alpha1.WorkspaceProviderSubstrate)
+	}
+	if ws.Hibernation != nil && provider != corev1alpha1.WorkspaceProviderSubstrate {
+		return fmt.Errorf("execution workspace hibernation is only supported for provider %q", corev1alpha1.WorkspaceProviderSubstrate)
+	}
+	if ws.PoolRef != nil && strings.TrimSpace(ws.PoolRef.Name) == "" {
+		return fmt.Errorf("execution workspace poolRef.name is required")
+	}
+	if ws.Snapshot != nil {
+		if strings.TrimSpace(ws.Snapshot.RestoreURI) != "" ||
+			strings.TrimSpace(ws.Snapshot.CheckpointURI) != "" ||
+			ws.Snapshot.CheckpointOnRelease {
+			return fmt.Errorf("execution workspace snapshot restore/checkpoint is not supported yet")
+		}
+	}
+	if ws.Hibernation != nil {
+		switch ws.Hibernation.ProcessMode {
+		case "", corev1alpha1.ExecutionWorkspaceProcessModeFresh:
+		case corev1alpha1.ExecutionWorkspaceProcessModeResident:
+			return fmt.Errorf("execution workspace hibernation processMode %q is not supported yet", ws.Hibernation.ProcessMode)
+		default:
+			return fmt.Errorf("unsupported execution workspace hibernation processMode %q", ws.Hibernation.ProcessMode)
+		}
+	}
+
+	return nil
+}
+
+func (r *TaskReconciler) validateExecutionWorkspaceProviderConfig(
+	ws *corev1alpha1.ExecutionWorkspaceSpec,
+	provider corev1alpha1.WorkspaceProvider,
+) error {
 	switch provider {
 	case corev1alpha1.WorkspaceProviderAgentSandbox:
 		if !r.AgentSandboxEnabled {
@@ -1555,7 +2219,10 @@ func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) err
 			return fmt.Errorf("execution workspace templateRef.name is required when no substrate default template is configured")
 		}
 	}
+	return nil
+}
 
+func validateExecutionWorkspacePolicies(task *corev1alpha1.Task, ws *corev1alpha1.ExecutionWorkspaceSpec) error {
 	switch ws.ReusePolicy {
 	case "", corev1alpha1.WorkspaceReusePolicyNone, corev1alpha1.WorkspaceReusePolicySession:
 	default:
@@ -1566,6 +2233,9 @@ func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) err
 	case "", corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
 	default:
 		return fmt.Errorf("unsupported execution workspace cleanupPolicy %q", ws.CleanupPolicy)
+	}
+	if ws.PoolRef != nil && ws.CleanupPolicy == corev1alpha1.WorkspaceCleanupPolicyRetain {
+		return fmt.Errorf("execution workspace poolRef does not support cleanupPolicy %q until substrate workspace reset is available", ws.CleanupPolicy)
 	}
 
 	if ws.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession && (task.Spec.SessionRef == nil || task.Spec.SessionRef.Name == "") {
@@ -1995,7 +2665,7 @@ func workerClusterRoleName(configured, fallback string) string {
 
 func workerClusterRoleBindingName(prefix, tier, namespace string) string {
 	if prefix == "" {
-		prefix = "orka"
+		prefix = managedByLabelValue
 	}
 	name := fmt.Sprintf("%s-%s-worker-%s", prefix, tier, namespace)
 	if len(name) <= maxWorkerClusterRoleBindingNameLength {

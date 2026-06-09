@@ -1734,21 +1734,35 @@ func TestJobBuilder_BuildWithOptions_AgentTask_AddsSubstrateWorkspaceEnv(t *test
 		},
 	}
 	request := &ExecutionWorkspaceRequest{
-		Provider:                     corev1alpha1.WorkspaceProviderSubstrate,
-		TemplateName:                 "orka-codex",
-		TemplateNamespace:            "ate-demo",
-		ClaimNamespace:               "ate-demo",
-		ClaimName:                    "orka-t-abc-1",
-		ReusePolicy:                  corev1alpha1.WorkspaceReusePolicyNone,
-		CleanupPolicy:                corev1alpha1.WorkspaceCleanupPolicyDelete,
-		ClaimTimeout:                 2 * time.Minute,
-		CommandTimeout:               30 * time.Minute,
-		SubstrateAPIEndpoint:         "api.ate-system.svc:443",
-		SubstrateAPICAFile:           "/var/run/orka/substrate/ca.crt",
-		SubstrateRouterURL:           "http://atenet-router.ate-system.svc",
-		SubstrateActorDNSSuffix:      "actors.resources.substrate.ate.dev",
-		SubstrateBootstrapSecretName: "orka-substrate-bootstrap",
-		SubstrateBootstrapSecretKey:  "token",
+		Provider:                           corev1alpha1.WorkspaceProviderSubstrate,
+		TemplateName:                       "orka-codex",
+		TemplateNamespace:                  "ate-demo",
+		ClaimNamespace:                     "ate-demo",
+		ClaimName:                          "orka-t-abc-1",
+		ReusePolicy:                        corev1alpha1.WorkspaceReusePolicyNone,
+		CleanupPolicy:                      corev1alpha1.WorkspaceCleanupPolicyDelete,
+		Boot:                               true,
+		PoolName:                           "codex-pool",
+		PoolNamespace:                      "ate-demo",
+		SnapshotRestoreURI:                 "gs://ate-snapshots/restore/",
+		SnapshotCheckpointURI:              "gs://ate-snapshots/checkpoint/",
+		SnapshotOnRelease:                  true,
+		ProcessMode:                        corev1alpha1.ExecutionWorkspaceProcessModeResident,
+		ResidentKey:                        "resident-session",
+		ClaimTimeout:                       2 * time.Minute,
+		CommandTimeout:                     30 * time.Minute,
+		SubstrateAPIEndpoint:               "api.ate-system.svc:443",
+		SubstrateAPICAFile:                 "/var/run/orka/substrate/ca.crt",
+		SubstrateRouterURL:                 "http://atenet-router.ate-system.svc",
+		SubstrateActorDNSSuffix:            "actors.resources.substrate.ate.dev",
+		SubstrateBootstrapSecretName:       "orka-substrate-bootstrap",
+		SubstrateBootstrapSecretKey:        "token",
+		SubstrateSessionIdentitySecretName: "orka-substrate-session-identity",
+		SubstrateSessionIdentitySecretKey:  "session-token",
+		SubstrateSessionIdentityRequired:   true,
+		SubstrateSessionIdentityAudience:   "orka-workspace-daemon,custom-audience",
+		SubstrateSessionIdentityAppID:      "orka",
+		SubstrateSessionIdentityUserID:     "orka-worker",
 	}
 
 	job, err := builder.BuildWithOptions(context.Background(), task, nil, nil, JobBuildOptions{
@@ -1760,15 +1774,27 @@ func TestJobBuilder_BuildWithOptions_AgentTask_AddsSubstrateWorkspaceEnv(t *test
 
 	envVars := job.Spec.Template.Spec.Containers[0].Env
 	expected := map[string]string{
-		workerenv.ExecutionWorkspaceProvider:       "substrate",
-		workerenv.ExecutionWorkspaceTemplateName:   "orka-codex",
-		workerenv.ExecutionWorkspaceClaimName:      "orka-t-abc-1",
-		workerenv.SubstrateAPIEndpoint:             "api.ate-system.svc:443",
-		workerenv.SubstrateAPICAFile:               "/var/run/orka/substrate/ca.crt",
-		workerenv.SubstrateRouterURL:               "http://atenet-router.ate-system.svc",
-		workerenv.SubstrateActorDNSSuffix:          "actors.resources.substrate.ate.dev",
-		workerenv.ExecutionWorkspaceCleanupPolicy:  "delete",
-		workerenv.ExecutionWorkspaceClaimNamespace: "ate-demo",
+		workerenv.ExecutionWorkspaceProvider:              "substrate",
+		workerenv.ExecutionWorkspaceTemplateName:          "orka-codex",
+		workerenv.ExecutionWorkspaceClaimName:             "orka-t-abc-1",
+		workerenv.SubstrateAPIEndpoint:                    "api.ate-system.svc:443",
+		workerenv.SubstrateAPICAFile:                      "/var/run/orka/substrate/ca.crt",
+		workerenv.SubstrateRouterURL:                      "http://atenet-router.ate-system.svc",
+		workerenv.SubstrateActorDNSSuffix:                 "actors.resources.substrate.ate.dev",
+		workerenv.ExecutionWorkspaceCleanupPolicy:         "delete",
+		workerenv.ExecutionWorkspaceClaimNamespace:        "ate-demo",
+		workerenv.ExecutionWorkspaceBoot:                  "true",
+		workerenv.ExecutionWorkspacePoolName:              "codex-pool",
+		workerenv.ExecutionWorkspacePoolNamespace:         "ate-demo",
+		workerenv.ExecutionWorkspaceSnapshotRestoreURI:    "gs://ate-snapshots/restore/",
+		workerenv.ExecutionWorkspaceSnapshotCheckpointURI: "gs://ate-snapshots/checkpoint/",
+		workerenv.ExecutionWorkspaceSnapshotOnRelease:     "true",
+		workerenv.ExecutionWorkspaceProcessMode:           "resident",
+		workerenv.ExecutionWorkspaceResidentKey:           "resident-session",
+		workerenv.SubstrateSessionIdentityRequired:        "true",
+		workerenv.SubstrateSessionIdentityAudience:        "orka-workspace-daemon,custom-audience",
+		workerenv.SubstrateSessionIdentityAppID:           "orka",
+		workerenv.SubstrateSessionIdentityUserID:          "orka-worker",
 	}
 	for name, want := range expected {
 		ev, ok := findEnvVar(envVars, name)
@@ -1792,6 +1818,19 @@ func TestJobBuilder_BuildWithOptions_AgentTask_AddsSubstrateWorkspaceEnv(t *test
 	}
 	if got := bootstrapEnv.ValueFrom.SecretKeyRef.Key; got != "token" {
 		t.Fatalf("bootstrap secret key = %q, want token", got)
+	}
+	sessionIdentityEnv, ok := findEnvVar(envVars, workerenv.SubstrateSessionIdentityToken)
+	if !ok {
+		t.Fatalf("missing %s env var", workerenv.SubstrateSessionIdentityToken)
+	}
+	if sessionIdentityEnv.ValueFrom == nil || sessionIdentityEnv.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("%s ValueFrom = %#v, want SecretKeyRef", workerenv.SubstrateSessionIdentityToken, sessionIdentityEnv.ValueFrom)
+	}
+	if got := sessionIdentityEnv.ValueFrom.SecretKeyRef.Name; got != "orka-substrate-session-identity" {
+		t.Fatalf("SessionIdentity secret name = %q, want orka-substrate-session-identity", got)
+	}
+	if got := sessionIdentityEnv.ValueFrom.SecretKeyRef.Key; got != "session-token" {
+		t.Fatalf("SessionIdentity secret key = %q, want session-token", got)
 	}
 }
 

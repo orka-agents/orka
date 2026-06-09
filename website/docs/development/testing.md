@@ -84,6 +84,7 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/live_agent_runtime_matrix_test.go` | Live Orka runtime matrix: Codex+GPT, Claude Code+Claude, Copilot+Gemini |
 | `.github/workflows/live-agent-sandbox-e2e.yml` / `scripts/live-agent-sandbox-e2e.sh` | Live upstream `agent-sandbox` Kind validation for Orka agent workspace claim, sandbox execution, delete cleanup, retained-session reuse, and token scrubbing using a fake model-free Claude runtime |
 | `.github/workflows/repository-monitor-smoke.yml` | Focused RepositoryMonitor smoke coverage for store CRUD, API handlers, pull request event handling, controller queue/review flow, read-only review task job building, result stdout forwarding, and PR review marker tooling |
+| `.github/workflows/security-scan-e2e.yml` / `scripts/security-scan-e2e.sh` | Secret-free repository security scan Kind validation against pinned `sozercan/nodejs-goof` using the real mapper, deterministic fake Codex analyzer, v2 finding ingestion/drop diagnostics, threat-model rejection, idempotent rescan, and HITL no-auto-patch gating |
 | `test/e2e/tools_test.go` | Built-in tools (including `web_fetch`, `file_write`) and custom Tool CRD |
 | `test/e2e/scheduled_task_test.go` | Cron scheduling, suspend, `concurrencyPolicy: Forbid`, history-limit cleanup |
 | `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
@@ -106,6 +107,7 @@ missing or mismatched artifacts staying not ready.
 - `E2E_LIVE_COPILOT_PROXY_BASE_URL` (or `E2E_COPILOT_PROXY_BASE_URL` / `COPILOT_PROXY_BASE_URL`): enables the focused live copilot-proxy spec against a running proxy
 - `E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE`, `E2E_LIVE_COPILOT_PROXY_SERVICE_NAME`, `E2E_LIVE_COPILOT_PROXY_SERVICE_PORT`: optional overrides for how the live spec reaches the in-cluster proxy service for `/readyz` and `/v1/models` checks
 - Structural e2e tests (job/env/volume assertions) run without external model keys
+- Security Scan E2E is secret-free and model-free, but requires Docker plus local toolchain dependencies: Go, `kind`, `kubectl`, `curl`, and `jq`
 - Agent Substrate E2E is secret-free, but requires Docker plus local toolchain dependencies: Go, git, curl, `kind`, `kubectl`, `ko`, and `jq`
 
 The live copilot-proxy E2E path runs in a separate workflow and executes the focused live suites for:
@@ -146,7 +148,12 @@ The live GitHub OIDC workflow (`.github/workflows/live-github-oidc-e2e.yml`) run
 The Agent Substrate workflow (`.github/workflows/agent-substrate-e2e.yml`) is secret-free and runs `scripts/agent-substrate-e2e.sh` against a fresh Kind cluster. It pins the Substrate checkout with `SUBSTRATE_REF`, installs Substrate, initializes the local RustFS snapshot bucket, builds local Orka controller/workspace/worker images, then validates:
 
 - direct Substrate actor create/resume/router/daemon exec/suspend/delete
+- Orka `SubstrateActorPool` reconciliation and density reporting
 - Orka `Task` execution and result submission with the default Substrate workspace provider
+- pooled Orka `Task` placement through `spec.execution.workspace.poolRef`
+- MCP actor-backed `Tool` execution through a pooled Substrate actor
+- MCP actor reuse across forced Tool reconciles without rebooting an already booted actor
+- workspace placement, density, and resume-latency status fields
 - delete and retained cleanup when the pinned Substrate runtime completes `runsc delete`
 - `WorkspaceCleanupFailed` is tolerated only after the Task result is available, because the pinned Substrate revision can fail `runsc delete` after successful Orka execution in GitHub-hosted kind
 - a missing `ActorTemplate` fails predictably

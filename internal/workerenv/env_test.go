@@ -192,6 +192,7 @@ func TestExecutionWorkspaceEnvRenderAndParse(t *testing.T) {
 		ReusePolicy:       "session",
 		ReuseKey:          "session-1",
 		CleanupPolicy:     "retain",
+		Boot:              true,
 		ClaimTimeout:      2 * time.Minute,
 		CommandTimeout:    30 * time.Minute,
 		StatusEndpoint:    "http://orka/internal/v1/tasks/default/task/execution-workspace/status",
@@ -212,6 +213,44 @@ func TestExecutionWorkspaceEnvRenderAndParse(t *testing.T) {
 	}
 	if parsed.ClaimTimeout != env.ClaimTimeout || parsed.CommandTimeout != env.CommandTimeout {
 		t.Fatalf("parsed timeouts = %s/%s, want %s/%s", parsed.ClaimTimeout, parsed.CommandTimeout, env.ClaimTimeout, env.CommandTimeout)
+	}
+	if !parsed.Boot {
+		t.Fatal("parsed boot = false, want true")
+	}
+}
+
+func TestSubstrateEnvRenderAndParse(t *testing.T) {
+	env := SubstrateEnv{
+		APIEndpoint:             "api.ate-system.svc:443",
+		APICAFile:               "/var/run/orka/substrate/ca.crt",
+		APIInsecureSkipVerify:   true,
+		RouterURL:               "http://atenet-router.ate-system.svc",
+		ActorDNSSuffix:          "actors.resources.substrate.ate.dev",
+		SessionIdentityToken:    "session-identity-token",
+		SessionIdentityRequired: true,
+		SessionIdentityAudience: "orka-workspace-daemon,custom-audience",
+		SessionIdentityAppID:    "orka",
+		SessionIdentityUserID:   "orka-worker",
+	}
+
+	values := map[string]string{}
+	for _, envVar := range env.EnvVars() {
+		values[envVar.Name] = envVar.Value
+	}
+
+	parsed := ParseSubstrateEnv(func(name string) string { return values[name] })
+	if parsed.APIEndpoint != env.APIEndpoint || parsed.RouterURL != env.RouterURL {
+		t.Fatalf("parsed endpoints = %#v, want %#v", parsed, env)
+	}
+	if !parsed.APIInsecureSkipVerify {
+		t.Fatal("parsed insecure skip verify = false, want true")
+	}
+	if parsed.SessionIdentityToken != env.SessionIdentityToken ||
+		!parsed.SessionIdentityRequired ||
+		parsed.SessionIdentityAudience != env.SessionIdentityAudience ||
+		parsed.SessionIdentityAppID != env.SessionIdentityAppID ||
+		parsed.SessionIdentityUserID != env.SessionIdentityUserID {
+		t.Fatalf("parsed SessionIdentity env = %#v, want %#v", parsed, env)
 	}
 }
 

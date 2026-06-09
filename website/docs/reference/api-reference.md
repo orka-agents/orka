@@ -53,17 +53,23 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 
 ### Task Execution Workspace Schema
 
-`POST /api/v1/tasks` accepts the Task CRD shape. Agent Tasks may include `spec.execution.workspace` to request experimental workspace-backed execution through an upstream `agent-sandbox` installation. The controller validates the request, resolves/defaults the effective `SandboxTemplate` and workspace settings, and injects the resolved settings into the outer Kubernetes worker Job. The agent worker wrapper then claims and executes inside the sandbox workspace.
+`POST /api/v1/tasks` accepts the Task CRD shape. Agent Tasks may include `spec.execution.workspace` to request experimental workspace-backed execution through an upstream `agent-sandbox` or Agent Substrate installation. The controller validates the request, resolves/defaults the effective workspace settings, and injects them into the outer Kubernetes worker Job. The agent worker wrapper then claims and executes inside the upstream workspace.
 
 | Path | Type | Values/default | Notes |
 |------|------|----------------|-------|
-| `spec.execution.workspace.enabled` | boolean | default `false` | Enables workspace-backed execution for an agent Task. The controller rejects enabled requests unless agent sandbox support is enabled. |
+| `spec.execution.workspace.enabled` | boolean | default `false` | Enables workspace-backed execution for an agent Task. The controller rejects enabled requests unless the selected provider is enabled. |
+| `spec.execution.workspace.provider` | string | controller default provider; built-in default `agent-sandbox` | Workspace backend: `agent-sandbox` or `substrate`. |
 | `spec.execution.workspace.templateRef.name` | string | controller default template, if configured | Workspace template name. Required when `enabled: true` and no controller default template is configured. |
-| `spec.execution.workspace.templateRef.namespace` | string | Task namespace | Namespace containing the workspace template in Orka metadata. Current SDK-backed execution creates claims in the Task namespace and requires the template to be usable there. |
-| `spec.execution.workspace.reusePolicy` | string | `none`; allowed `none`, `session` | `session` derives the reuse key from `spec.sessionRef.name` and requires that field to be set. Automatic cross-Job reattach is limited until Orka persists sandbox claim identity. |
+| `spec.execution.workspace.templateRef.namespace` | string | Task namespace, or provider-specific default namespace when configured | Namespace containing the workspace template. |
+| `spec.execution.workspace.reusePolicy` | string | `none`; allowed `none`, `session` | `session` derives the reuse key from `spec.sessionRef.name` and requires that field to be set. |
 | `spec.execution.workspace.cleanupPolicy` | string | controller default cleanup policy; allowed `delete`, `retain` | Cleanup behavior after the sandbox command exits. |
+| `spec.execution.workspace.boot` | boolean | default `false` | Substrate only. Boots the actor from scratch on first resume. |
+| `spec.execution.workspace.poolRef.name` | string | empty | Substrate only. Places the Task on a `SubstrateActorPool`; pooled workspaces currently require `cleanupPolicy: delete`. |
+| `spec.execution.workspace.poolRef.namespace` | string | Task namespace | Substrate only. Namespace containing the referenced pool. |
+| `spec.execution.workspace.snapshot` | object | empty | Substrate only, reserved. Non-empty restore/checkpoint settings are currently rejected. |
+| `spec.execution.workspace.hibernation` | object | empty | Substrate only, reserved. `processMode: resident` is currently rejected. |
 
-Workspace requests are only valid on `spec.type: agent` Tasks. See [Agent Sandbox Workspaces](../concepts/agent-sandbox.md) for configuration, validation rules, live smoke-test steps, and current limitations.
+Workspace requests are only valid on `spec.type: agent` Tasks. See [Agent Sandbox Workspaces](../concepts/agent-sandbox.md) and [Substrate Execution Workspaces](../concepts/substrate.md) for configuration, validation rules, live smoke-test steps, and current limitations.
 
 ### Get Task Plan
 
@@ -158,6 +164,86 @@ Common list query parameters: `namespace`, `taskName`, `agentName`, `type`, `sta
 | `/api/v1/tools` | GET | List tools (built-in + CRDs) |
 | `/api/v1/tools/:name` | GET | Get tool details |
 
+### Tool CRD Schema
+
+`GET /api/v1/tools/:name` returns built-in tool metadata or the full `Tool` CRD. Custom Tool CRDs can call plain HTTP endpoints or MCP servers hosted in durable Substrate actors.
+
+Plain HTTP tools set `spec.http.url` and may inject authentication from a Kubernetes Secret into either the `Authorization: Bearer` header or the JSON request body:
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: tavily-search
+spec:
+  description: "Search the web for current information"
+  parameters:
+    type: object
+    properties:
+      query:
+        type: string
+    required:
+      - query
+  http:
+    url: "https://api.tavily.com/search"
+    method: POST
+    authSecretRef:
+      name: tavily-secret
+      key: api-key
+    authInject: body
+    authBodyKey: api_key
+```
+
+MCP actor-backed tools set `spec.mcp.substrateActor` and may omit `spec.http` entirely. Orka creates or reuses the Substrate actor, waits for the MCP endpoint, stores the resolved endpoint in `status.endpoint`, and workers call the MCP tool through JSON-RPC `tools/call` using the Tool name as the MCP tool name.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: repo-inspector
+spec:
+  description: "Inspect repository metadata through an MCP server"
+  parameters:
+    type: object
+    properties:
+      message:
+        type: string
+    required:
+      - message
+  mcp:
+    path: /mcp
+    substrateActor:
+      templateRef:
+        name: orka-mcp
+        namespace: ate-demo
+      poolRef:
+        name: mcp-substrate-pool
+      boot: true
+```
+
+| Path | Type | Values/default | Notes |
+|------|------|----------------|-------|
+| `spec.description` | string | required | Description shown to the LLM. |
+| `spec.parameters` | JSON Schema | empty | Tool argument schema in function-calling format. |
+| `spec.http.url` | string | required for plain HTTP tools | Endpoint called by workers. MCP actor-backed tools may omit it because Orka uses `status.endpoint`. |
+| `spec.http.method` | string | default `POST`; allowed `GET`, `POST`, `PUT`, `PATCH`, `DELETE` | HTTP method for plain HTTP tools. MCP actor-backed tools use `POST`. |
+| `spec.http.headers` | map | empty | Static headers sent with the request. Reserved token propagation headers cannot be overridden when outbound TxToken propagation is enabled. |
+| `spec.http.timeout` | duration | default `30s` | Per-call request timeout. |
+| `spec.http.authSecretRef` | Secret key selector | empty | Secret value used as the auth token. |
+| `spec.http.authInject` | string | default `header`; allowed `header`, `body` | `header` sends `Authorization: Bearer <token>`. `body` injects the token into the JSON request body and is invalid for MCP actor-backed tools. |
+| `spec.http.authBodyKey` | string | empty | JSON key used when `authInject: body`. |
+| `spec.mcp.path` | string | `/mcp` | HTTP path exposed by the MCP server inside the actor. |
+| `spec.mcp.substrateActor.templateRef.name` | string | required | Substrate `ActorTemplate` hosting the MCP server. |
+| `spec.mcp.substrateActor.templateRef.namespace` | string | Tool namespace or configured default | Namespace containing the actor template. |
+| `spec.mcp.substrateActor.poolRef.name` | string | empty | Optional `SubstrateActorPool` for actor placement and reuse. The pool template must match the MCP actor template. |
+| `spec.mcp.substrateActor.poolRef.namespace` | string | Tool namespace | Namespace containing the referenced actor pool. |
+| `spec.mcp.substrateActor.boot` | boolean | `false` | Boots the actor from scratch on first resume; later reconciles reuse an already booted actor. |
+| `status.available` | boolean | false | Whether the controller can reach the resolved endpoint. |
+| `status.endpoint` | string | empty | Resolved non-secret endpoint used by workers. For MCP actor-backed tools this is the Substrate router endpoint. |
+| `status.actor` | object | empty | Safe actor metadata, including provider, actor ID, route host, resolved template, and pool reference. |
+
+MCP actor-backed tools require Substrate support to be enabled on the controller. If transport auth is needed for an MCP endpoint, set `spec.http.authSecretRef`, keep `authInject` as `header` or omit it, and omit `spec.http.url`.
+
 ## Security
 
 Repository security endpoints manage `RepositoryScan` configurations and their generated threat models, scan runs, findings, patch proposals, and remediation pull requests. Like other `/api/v1/*` endpoints, they require ServiceAccount bearer token authentication.
@@ -209,6 +295,7 @@ Common query parameters:
     "provider": "github",
     "repoURL": "https://github.com/example/app",
     "branch": "main",
+    "ref": "v1.2.3",
     "schedule": "0 2 * * *",
     "validationMode": "light",
     "analysisAgentRef": {"name": "security-reviewer"}
@@ -218,7 +305,7 @@ Common query parameters:
 
 **Response (201):** The created `RepositoryScan` resource.
 
-Required fields are `name`, `spec.repoURL`, and `spec.analysisAgentRef.name`. The API defaults or infers provider, owner, repository, branch, and validation mode where possible.
+Required fields are `name`, `spec.repoURL`, and `spec.analysisAgentRef.name`. The API defaults or infers provider, owner, repository, branch, and validation mode where possible. Set `spec.ref` to pin scan tasks to a specific tag, branch, or commit SHA; when `ref` is set without `branch`, scan workspaces check out that ref directly instead of forcing the default `main` branch.
 
 ### Security Findings Workflow
 

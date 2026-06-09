@@ -110,6 +110,84 @@ describe('ToolDetail', () => {
     expect(screen.getByText('Connection refused')).toBeInTheDocument()
   })
 
+  it('MCP-only custom tool shows actor configuration without HTTP config', async () => {
+    server.use(
+      http.get('/api/v1/tools/:name', () =>
+        HttpResponse.json({
+          metadata: { name: 'mcp-tool', namespace: 'default', uid: 'uid-3' },
+          spec: {
+            description: 'Durable MCP tool',
+            mcp: {
+              path: '/mcp',
+              substrateActor: {
+                templateRef: { name: 'mcp-template', namespace: 'ate-demo' },
+                poolRef: { name: 'mcp-pool', namespace: 'default' },
+              },
+            },
+          },
+          status: {
+            available: true,
+            endpoint: 'http://router/mcp',
+            actor: {
+              actorID: 'orka-p-pool-00001',
+              routeHost: 'orka-p-pool-00001.actors.example.com',
+              poolRef: { name: 'mcp-pool', namespace: 'default' },
+            },
+          },
+        })
+      )
+    )
+
+    render(<ToolDetail toolName="mcp-tool" />)
+    await waitFor(() => {
+      expect(screen.getByText('mcp-tool')).toBeInTheDocument()
+    })
+
+    expect(screen.getByText('MCP Actor Configuration')).toBeInTheDocument()
+    expect(screen.getByText('/mcp')).toBeInTheDocument()
+    expect(screen.getByText('http://router/mcp')).toBeInTheDocument()
+    expect(screen.getByText('ate-demo/mcp-template')).toBeInTheDocument()
+    expect(screen.getAllByText('default/mcp-pool').length).toBeGreaterThan(0)
+    expect(screen.getByText('orka-p-pool-00001')).toBeInTheDocument()
+    expect(screen.getByText('orka-p-pool-00001.actors.example.com')).toBeInTheDocument()
+    expect(screen.queryByText('HTTP Configuration')).not.toBeInTheDocument()
+  })
+
+  it('MCP custom tool with transport auth omits empty HTTP URL row', async () => {
+    server.use(
+      http.get('/api/v1/tools/:name', () =>
+        HttpResponse.json({
+          metadata: { name: 'mcp-auth-tool', namespace: 'default', uid: 'uid-4' },
+          spec: {
+            description: 'Authenticated MCP tool',
+            http: { authSecretRef: { name: 'mcp-auth', key: 'token' }, authInject: 'header' },
+            mcp: {
+              path: '/mcp',
+              substrateActor: {
+                templateRef: { name: 'mcp-template', namespace: 'ate-demo' },
+              },
+            },
+          },
+          status: {
+            available: true,
+            endpoint: 'http://router/mcp',
+          },
+        })
+      )
+    )
+
+    render(<ToolDetail toolName="mcp-auth-tool" />)
+    await waitFor(() => {
+      expect(screen.getByText('mcp-auth-tool')).toBeInTheDocument()
+    })
+
+    expect(screen.getByText('HTTP Configuration')).toBeInTheDocument()
+    expect(screen.queryByText('URL:')).not.toBeInTheDocument()
+    expect(screen.getByText('Auth Inject:')).toBeInTheDocument()
+    expect(screen.getByText('header')).toBeInTheDocument()
+    expect(screen.getByText('MCP Actor Configuration')).toBeInTheDocument()
+  })
+
   it('built-in tool shows name, "Built-in" badge, and description', async () => {
     server.use(
       http.get('/api/v1/tools/:name', () =>

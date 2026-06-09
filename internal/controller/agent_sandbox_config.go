@@ -19,6 +19,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/workerenv"
@@ -283,37 +285,188 @@ func (r *TaskReconciler) resolveSubstrateWorkspaceRequest(ctx context.Context, t
 	}
 	templateName := substrateTemplateName(ws, cfg)
 	templateNamespace := substrateTemplateNamespace(ws, task.Namespace, cfg)
+	snapshotRestoreURI, snapshotCheckpointURI, snapshotOnRelease := executionWorkspaceSnapshot(ws)
+	processMode, residentKey := executionWorkspaceHibernation(ws)
 	reuseKey := ""
 	claimName := deterministicSubstrateTaskActorID(string(task.UID), task.Status.Attempts+1)
+	poolTargetActors := int32(0)
 	if reusePolicy == corev1alpha1.WorkspaceReusePolicySession && task.Spec.SessionRef != nil {
 		reuseKey = task.Spec.SessionRef.Name
 		claimName = deterministicSubstrateSessionActorID(task.Namespace, templateNamespace, templateName, reuseKey)
 	}
+	if residentKey == "" && processMode == corev1alpha1.ExecutionWorkspaceProcessModeResident {
+		residentKey = deterministicSubstrateSessionActorID(task.Namespace, templateNamespace, templateName, firstNonEmpty(reuseKey, claimName))
+	}
+	poolName, poolNamespace := executionWorkspacePoolRef(ws, task.Namespace)
+	if poolName != "" {
+		if r.EnforceNamespaceIsolation && poolNamespace != task.Namespace {
+			return nil, fmt.Errorf(
+				"cross-namespace substrate actor poolRef not allowed when namespace isolation is enforced: pool %q in namespace %q, task in %q",
+				poolName,
+				poolNamespace,
+				task.Namespace,
+			)
+		}
+		pool, err := r.resolveExecutionWorkspacePool(ctx, poolNamespace, poolName, templateNamespace, templateName)
+		if err != nil {
+			return nil, err
+		}
+		prefix := deterministicSubstratePoolActorPrefix(poolNamespace, poolName)
+		ordinal := deterministicSubstratePoolActorOrdinal(
+			pool.Spec.TargetActors,
+			prefix,
+			task.Namespace,
+			string(task.UID),
+			fmt.Sprint(task.Status.Attempts+1),
+			reuseKey,
+		)
+		if reusePolicy == corev1alpha1.WorkspaceReusePolicySession && reuseKey != "" {
+			ordinal = deterministicSubstratePoolActorOrdinal(
+				pool.Spec.TargetActors,
+				prefix,
+				task.Namespace,
+				templateNamespace,
+				templateName,
+				reuseKey,
+			)
+		}
+		claimName = deterministicSubstratePoolActorID(prefix, ordinal)
+		cleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyDelete
+		poolTargetActors = pool.Spec.TargetActors
+	}
 
 	request := &ExecutionWorkspaceRequest{
-		Provider:                       corev1alpha1.WorkspaceProviderSubstrate,
-		TemplateName:                   templateName,
-		TemplateNamespace:              templateNamespace,
-		ClaimNamespace:                 templateNamespace,
-		ClaimName:                      claimName,
-		ReusePolicy:                    reusePolicy,
-		ReuseKey:                       reuseKey,
-		CleanupPolicy:                  cleanupPolicy,
-		ClaimTimeout:                   cfg.ClaimTimeout,
-		CommandTimeout:                 cfg.CommandTimeout,
-		SubstrateAPIEndpoint:           cfg.APIEndpoint,
-		SubstrateAPICAFile:             cfg.APICAFile,
-		SubstrateAPIInsecureSkipVerify: cfg.APIInsecureSkipVerify,
-		SubstrateRouterURL:             cfg.RouterURL,
-		SubstrateActorDNSSuffix:        cfg.ActorDNSSuffix,
-		SubstrateBootstrapSecretName:   cfg.BootstrapSecretName,
-		SubstrateBootstrapSecretKey:    cfg.BootstrapSecretKey,
+		Provider:                           corev1alpha1.WorkspaceProviderSubstrate,
+		TemplateName:                       templateName,
+		TemplateNamespace:                  templateNamespace,
+		ClaimNamespace:                     templateNamespace,
+		ClaimName:                          claimName,
+		ReusePolicy:                        reusePolicy,
+		ReuseKey:                           reuseKey,
+		CleanupPolicy:                      cleanupPolicy,
+		Boot:                               ws.Boot,
+		PoolName:                           poolName,
+		PoolNamespace:                      poolNamespace,
+		PoolTargetActors:                   poolTargetActors,
+		SnapshotRestoreURI:                 snapshotRestoreURI,
+		SnapshotCheckpointURI:              snapshotCheckpointURI,
+		SnapshotOnRelease:                  snapshotOnRelease,
+		ProcessMode:                        processMode,
+		ResidentKey:                        residentKey,
+		ClaimTimeout:                       cfg.ClaimTimeout,
+		CommandTimeout:                     cfg.CommandTimeout,
+		SubstrateAPIEndpoint:               cfg.APIEndpoint,
+		SubstrateAPICAFile:                 cfg.APICAFile,
+		SubstrateAPIInsecureSkipVerify:     cfg.APIInsecureSkipVerify,
+		SubstrateRouterURL:                 cfg.RouterURL,
+		SubstrateActorDNSSuffix:            cfg.ActorDNSSuffix,
+		SubstrateBootstrapSecretName:       cfg.BootstrapSecretName,
+		SubstrateBootstrapSecretKey:        cfg.BootstrapSecretKey,
+		SubstrateSessionIdentitySecretName: cfg.SessionIdentitySecretName,
+		SubstrateSessionIdentitySecretKey:  cfg.SessionIdentitySecretKey,
+		SubstrateSessionIdentityRequired:   cfg.SessionIdentityRequired,
+		SubstrateSessionIdentityMintCert:   cfg.SessionIdentityMintCert,
+		SubstrateSessionIdentityAudience:   cfg.SessionIdentityAudience,
+		SubstrateSessionIdentityAppID:      cfg.SessionIdentityAppID,
+		SubstrateSessionIdentityUserID:     cfg.SessionIdentityUserID,
 	}
 
 	if err := r.validateSubstrateWorkspaceTemplate(ctx, task, request); err != nil {
 		return nil, err
 	}
 	return request, nil
+}
+
+func executionWorkspacePoolRef(ws *corev1alpha1.ExecutionWorkspaceSpec, taskNamespace string) (string, string) {
+	if ws == nil || ws.PoolRef == nil {
+		return "", ""
+	}
+	return substrateActorPoolReference(ws.PoolRef, taskNamespace)
+}
+
+func substrateActorPoolReference(ref *corev1alpha1.SubstrateActorPoolReference, defaultNamespace string) (string, string) {
+	if ref == nil {
+		return "", ""
+	}
+	name := strings.TrimSpace(ref.Name)
+	if name == "" {
+		return "", ""
+	}
+	namespace := strings.TrimSpace(ref.Namespace)
+	if namespace == "" {
+		namespace = defaultNamespace
+	}
+	return name, namespace
+}
+
+func (r *TaskReconciler) resolveExecutionWorkspacePool(
+	ctx context.Context,
+	poolNamespace string,
+	poolName string,
+	templateNamespace string,
+	templateName string,
+) (*corev1alpha1.SubstrateActorPool, error) {
+	if r == nil || r.Client == nil {
+		return nil, fmt.Errorf("substrate actor poolRef %q/%q cannot be resolved without a Kubernetes client", poolNamespace, poolName)
+	}
+	return resolveSubstrateActorPoolReference(ctx, r.Client, poolNamespace, poolName, templateNamespace, templateName)
+}
+
+func resolveSubstrateActorPoolReference(
+	ctx context.Context,
+	reader client.Reader,
+	poolNamespace string,
+	poolName string,
+	templateNamespace string,
+	templateName string,
+) (*corev1alpha1.SubstrateActorPool, error) {
+	if reader == nil {
+		return nil, fmt.Errorf("substrate actor poolRef %q/%q cannot be resolved without a Kubernetes client", poolNamespace, poolName)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	pool := &corev1alpha1.SubstrateActorPool{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: poolName}, pool); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("substrate actor poolRef %q not found in namespace %q", poolName, poolNamespace)
+		}
+		return nil, fmt.Errorf("failed to resolve substrate actor poolRef %q in namespace %q: %w", poolName, poolNamespace, err)
+	}
+	if !pool.DeletionTimestamp.IsZero() {
+		return nil, fmt.Errorf("substrate actor poolRef %q in namespace %q is deleting", poolName, poolNamespace)
+	}
+	if err := validateSubstrateActorPoolTargetActors(poolNamespace, poolName, pool.Spec.TargetActors, false); err != nil {
+		return nil, err
+	}
+	if !controllerutil.ContainsFinalizer(pool, substrateActorPoolFinalizer) {
+		updater, ok := reader.(client.Client)
+		if !ok {
+			return nil, fmt.Errorf("substrate actor poolRef %q in namespace %q cannot persist cleanup finalizer", poolName, poolNamespace)
+		}
+		patch := client.MergeFrom(pool.DeepCopy())
+		controllerutil.AddFinalizer(pool, substrateActorPoolFinalizer)
+		if err := updater.Patch(ctx, pool, patch); err != nil {
+			return nil, fmt.Errorf("failed to persist cleanup finalizer for substrate actor poolRef %q in namespace %q: %w", poolName, poolNamespace, err)
+		}
+	}
+	poolTemplateNamespace := strings.TrimSpace(pool.Spec.TemplateRef.Namespace)
+	if poolTemplateNamespace == "" {
+		poolTemplateNamespace = pool.Namespace
+	}
+	poolTemplateName := strings.TrimSpace(pool.Spec.TemplateRef.Name)
+	if poolTemplateNamespace != strings.TrimSpace(templateNamespace) || poolTemplateName != strings.TrimSpace(templateName) {
+		return nil, fmt.Errorf(
+			"substrate actor poolRef %q in namespace %q uses template %s/%s, want %s/%s",
+			poolName,
+			poolNamespace,
+			poolTemplateNamespace,
+			poolTemplateName,
+			strings.TrimSpace(templateNamespace),
+			strings.TrimSpace(templateName),
+		)
+	}
+	return pool, nil
 }
 
 func (r *TaskReconciler) validateExecutionWorkspaceTemplateExists(ctx context.Context, task *corev1alpha1.Task, request *AgentSandboxWorkspaceRequest) error {
@@ -355,8 +508,62 @@ func (r *TaskReconciler) validateExecutionWorkspaceTemplateExists(ctx context.Co
 }
 
 func (r *TaskReconciler) validateSubstrateWorkspaceTemplate(ctx context.Context, task *corev1alpha1.Task, request *ExecutionWorkspaceRequest) error {
-	if r == nil || r.Client == nil || request == nil || request.TemplateName == "" {
+	_ = task
+	if r == nil {
 		return nil
+	}
+	return validateSubstrateActorTemplateResource(ctx, r.Client, request)
+}
+
+func validateSubstrateActorTemplateResource(ctx context.Context, reader client.Reader, request *ExecutionWorkspaceRequest) error {
+	template, err := validateSubstrateActorTemplateMetadata(ctx, reader, request)
+	if err != nil {
+		return err
+	}
+	if template == nil {
+		return nil
+	}
+	annotations := template.GetAnnotations()
+	if err := validateSubstrateWorkspaceTemplateStagingRoot(request, annotations); err != nil {
+		return err
+	}
+	if err := validateSubstrateActorTemplateReady(request, template); err != nil {
+		return err
+	}
+	if err := validateSubstrateWorkspaceTemplateDaemonPort(template, annotations["orka.ai/workspace-daemon-port"]); err != nil {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q %w", request.TemplateName, request.TemplateNamespace, err)
+	}
+	if err := validateSubstrateWorkspaceTemplateBootstrapEnv(template, request); err != nil {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q %w", request.TemplateName, request.TemplateNamespace, err)
+	}
+	return nil
+}
+
+func validateSubstrateMCPActorTemplateResource(ctx context.Context, reader client.Reader, request *ExecutionWorkspaceRequest) error {
+	return validateSubstrateRoutableActorTemplateResource(ctx, reader, request)
+}
+
+func validateSubstrateRoutableActorTemplateResource(ctx context.Context, reader client.Reader, request *ExecutionWorkspaceRequest) error {
+	template, err := validateSubstrateActorTemplateMetadata(ctx, reader, request)
+	if err != nil {
+		return err
+	}
+	if template == nil {
+		return nil
+	}
+	annotations := template.GetAnnotations()
+	if err := validateSubstrateActorTemplateReady(request, template); err != nil {
+		return err
+	}
+	if err := validateSubstrateMCPActorTemplateRoutePort(template, annotations["orka.ai/workspace-daemon-port"]); err != nil {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q %w", request.TemplateName, request.TemplateNamespace, err)
+	}
+	return nil
+}
+
+func validateSubstrateActorTemplateMetadata(ctx context.Context, reader client.Reader, request *ExecutionWorkspaceRequest) (*unstructured.Unstructured, error) {
+	if reader == nil || request == nil || request.TemplateName == "" {
+		return nil, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -368,16 +575,16 @@ func (r *TaskReconciler) validateSubstrateWorkspaceTemplate(ctx context.Context,
 		Version: "v1alpha1",
 		Kind:    "ActorTemplate",
 	})
-	err := r.Get(ctx, types.NamespacedName{Namespace: request.TemplateNamespace, Name: request.TemplateName}, template)
+	err := reader.Get(ctx, types.NamespacedName{Namespace: request.TemplateNamespace, Name: request.TemplateName}, template)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"substrate execution workspace ActorTemplate %q not found in namespace %q",
 				request.TemplateName,
 				request.TemplateNamespace,
 			)
 		}
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"failed to validate substrate execution workspace ActorTemplate %q in namespace %q: %w",
 			request.TemplateName,
 			request.TemplateNamespace,
@@ -387,25 +594,22 @@ func (r *TaskReconciler) validateSubstrateWorkspaceTemplate(ctx context.Context,
 
 	labels := template.GetLabels()
 	annotations := template.GetAnnotations()
-	if labels["orka.ai/execution-workspace"] != scheduledRunLabelValue {
-		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing label orka.ai/execution-workspace=true", request.TemplateName, request.TemplateNamespace)
+	if labels["orka.ai/execution-workspace"] != "true" {
+		return nil, fmt.Errorf("substrate ActorTemplate %q in namespace %q missing label orka.ai/execution-workspace=true", request.TemplateName, request.TemplateNamespace)
 	}
 	if labels["orka.ai/workspace-provider"] != string(corev1alpha1.WorkspaceProviderSubstrate) {
-		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing label orka.ai/workspace-provider=substrate", request.TemplateName, request.TemplateNamespace)
+		return nil, fmt.Errorf("substrate ActorTemplate %q in namespace %q missing label orka.ai/workspace-provider=substrate", request.TemplateName, request.TemplateNamespace)
 	}
 	if annotations["orka.ai/workspace-protocol"] != "http-json-v1" {
-		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing annotation orka.ai/workspace-protocol=http-json-v1", request.TemplateName, request.TemplateNamespace)
+		return nil, fmt.Errorf("substrate ActorTemplate %q in namespace %q missing annotation orka.ai/workspace-protocol=http-json-v1", request.TemplateName, request.TemplateNamespace)
 	}
 	if strings.TrimSpace(annotations["orka.ai/workspace-daemon-port"]) == "" {
-		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing annotation orka.ai/workspace-daemon-port", request.TemplateName, request.TemplateNamespace)
+		return nil, fmt.Errorf("substrate ActorTemplate %q in namespace %q missing annotation orka.ai/workspace-daemon-port", request.TemplateName, request.TemplateNamespace)
 	}
-	stagingRoot := strings.TrimRight(strings.TrimSpace(annotations["orka.ai/workspace-staging-root"]), "/")
-	if stagingRoot == "" {
-		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing annotation orka.ai/workspace-staging-root", request.TemplateName, request.TemplateNamespace)
-	}
-	if stagingRoot != substrateWorkspaceStagingRoot {
-		return fmt.Errorf("substrate ActorTemplate %q in namespace %q must set annotation orka.ai/workspace-staging-root=%s", request.TemplateName, request.TemplateNamespace, substrateWorkspaceStagingRoot)
-	}
+	return template, nil
+}
+
+func validateSubstrateActorTemplateReady(request *ExecutionWorkspaceRequest, template *unstructured.Unstructured) error {
 	phase, _, _ := unstructured.NestedString(template.Object, "status", "phase")
 	phase = strings.TrimSpace(phase)
 	if phase != "Ready" {
@@ -414,14 +618,171 @@ func (r *TaskReconciler) validateSubstrateWorkspaceTemplate(ctx context.Context,
 		}
 		return fmt.Errorf("substrate ActorTemplate %q in namespace %q is not Ready: phase=%s", request.TemplateName, request.TemplateNamespace, phase)
 	}
-	if err := validateSubstrateWorkspaceTemplateDaemonPort(template, annotations["orka.ai/workspace-daemon-port"]); err != nil {
-		return fmt.Errorf("substrate ActorTemplate %q in namespace %q %w", request.TemplateName, request.TemplateNamespace, err)
-	}
-	if err := validateSubstrateWorkspaceTemplateBootstrapEnv(template, request); err != nil {
-		return fmt.Errorf("substrate ActorTemplate %q in namespace %q %w", request.TemplateName, request.TemplateNamespace, err)
-	}
-	_ = task
 	return nil
+}
+
+func validateSubstrateWorkspaceTemplateStagingRoot(request *ExecutionWorkspaceRequest, annotations map[string]string) error {
+	stagingRoot := strings.TrimRight(strings.TrimSpace(annotations["orka.ai/workspace-staging-root"]), "/")
+	if stagingRoot == "" {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing annotation orka.ai/workspace-staging-root", request.TemplateName, request.TemplateNamespace)
+	}
+	if stagingRoot != substrateWorkspaceStagingRoot {
+		return fmt.Errorf("substrate ActorTemplate %q in namespace %q must set annotation orka.ai/workspace-staging-root=%s", request.TemplateName, request.TemplateNamespace, substrateWorkspaceStagingRoot)
+	}
+	return nil
+}
+
+func validateSubstrateMCPActorTemplateRoutePort(template *unstructured.Unstructured, annotatedPort string) error {
+	port, err := parseSubstrateWorkspaceDaemonPort(annotatedPort)
+	if err != nil {
+		return fmt.Errorf("has invalid annotation orka.ai/workspace-daemon-port: %w", err)
+	}
+	containers, found, err := unstructured.NestedSlice(template.Object, "spec", "containers")
+	if err != nil {
+		return fmt.Errorf("has invalid spec.containers: %w", err)
+	}
+	if !found || len(containers) == 0 {
+		return fmt.Errorf("must define an MCP server container")
+	}
+	hasExplicitPorts := false
+	hasMatchingPort := false
+	hasExplicitListenEnv := false
+	hasMatchingListenEnv := false
+	for _, item := range containers {
+		container, ok := item.(map[string]any)
+		if !ok {
+			return fmt.Errorf("has invalid spec.containers entry")
+		}
+		matches, hasPorts, err := substrateContainerHasPort(container, port)
+		if err != nil {
+			return err
+		}
+		hasExplicitPorts = hasExplicitPorts || hasPorts
+		if matches {
+			hasMatchingPort = true
+		}
+		matches, hasListenEnv, err := substrateContainerHasListenEnvPort(container, port)
+		if err != nil {
+			return err
+		}
+		hasExplicitListenEnv = hasExplicitListenEnv || hasListenEnv
+		if matches {
+			hasMatchingListenEnv = true
+		}
+	}
+	if hasExplicitListenEnv {
+		if hasMatchingListenEnv {
+			return nil
+		}
+		return fmt.Errorf("no container listen env matches annotation orka.ai/workspace-daemon-port=%d", port)
+	}
+	if hasExplicitPorts {
+		if hasMatchingPort {
+			return nil
+		}
+		return fmt.Errorf("no container port matches annotation orka.ai/workspace-daemon-port=%d", port)
+	}
+	defaultPort, err := substrateWorkspaceDaemonListenPort(map[string]any{})
+	if err != nil {
+		return err
+	}
+	if port != defaultPort {
+		return fmt.Errorf("annotation orka.ai/workspace-daemon-port=%d requires a matching containerPort when no container ports are declared", port)
+	}
+	return nil
+}
+
+func substrateContainerHasListenEnvPort(container map[string]any, want int) (bool, bool, error) {
+	env, found, err := substrateContainerEnv(container)
+	if err != nil {
+		return false, false, err
+	}
+	if !found {
+		return false, false, nil
+	}
+	value, found, err := substrateContainerLiteralEnv(env, substrateWorkspaceDaemonListenEnv)
+	if err != nil {
+		return false, true, err
+	}
+	if !found {
+		return false, false, nil
+	}
+	_, portValue, err := net.SplitHostPort(strings.TrimSpace(value))
+	if err != nil {
+		return false, true, fmt.Errorf("env %s must be a listen address with a port", substrateWorkspaceDaemonListenEnv)
+	}
+	port, err := parseSubstrateWorkspaceDaemonPort(portValue)
+	if err != nil {
+		return false, true, fmt.Errorf("env %s port %w", substrateWorkspaceDaemonListenEnv, err)
+	}
+	return port == want, true, nil
+}
+
+func substrateContainerHasPort(container map[string]any, want int) (bool, bool, error) {
+	portsValue, found, err := unstructured.NestedFieldNoCopy(container, "ports")
+	if err != nil {
+		return false, false, fmt.Errorf("has invalid container ports: %w", err)
+	}
+	if !found || portsValue == nil {
+		return false, false, nil
+	}
+	ports, ok := portsValue.([]any)
+	if !ok {
+		return false, false, fmt.Errorf("has invalid container ports")
+	}
+	for _, item := range ports {
+		port, ok := item.(map[string]any)
+		if !ok {
+			return false, true, fmt.Errorf("has invalid container port entry")
+		}
+		containerPort, found, err := substrateContainerPortNumber(port)
+		if err != nil {
+			return false, true, err
+		}
+		if found && containerPort == want {
+			return true, true, nil
+		}
+	}
+	return false, true, nil
+}
+
+func substrateContainerPortNumber(port map[string]any) (int, bool, error) {
+	value, found, err := unstructured.NestedFieldNoCopy(port, "containerPort")
+	if err != nil {
+		return 0, false, fmt.Errorf("has invalid containerPort: %w", err)
+	}
+	if !found || value == nil {
+		return 0, false, nil
+	}
+	switch typed := value.(type) {
+	case int:
+		return validateSubstrateContainerPort(typed)
+	case int32:
+		return validateSubstrateContainerPort(int(typed))
+	case int64:
+		return validateSubstrateContainerPort(int(typed))
+	case float64:
+		asInt := int(typed)
+		if typed != float64(asInt) {
+			return 0, true, fmt.Errorf("containerPort must be an integer")
+		}
+		return validateSubstrateContainerPort(asInt)
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(typed))
+		if err != nil {
+			return 0, true, fmt.Errorf("containerPort must be an integer")
+		}
+		return validateSubstrateContainerPort(parsed)
+	default:
+		return 0, true, fmt.Errorf("containerPort must be an integer")
+	}
+}
+
+func validateSubstrateContainerPort(port int) (int, bool, error) {
+	if port < 1 || port > 65535 {
+		return 0, true, fmt.Errorf("containerPort must be a TCP port number from 1 to 65535")
+	}
+	return port, true, nil
 }
 
 func validateSubstrateWorkspaceTemplateDaemonPort(template *unstructured.Unstructured, annotatedPort string) error {

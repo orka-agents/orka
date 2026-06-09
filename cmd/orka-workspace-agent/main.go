@@ -268,6 +268,10 @@ func (s *workspaceAgentServer) handleExec(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if req.Resident {
+		http.Error(w, "resident exec is not supported yet", http.StatusBadRequest)
+		return
+	}
 	if req.Detach {
 		id, err := newExecID()
 		if err != nil {
@@ -285,7 +289,6 @@ func (s *workspaceAgentServer) handleExec(w http.ResponseWriter, r *http.Request
 		writeJSON(w, execResponse{ExecID: id, Running: true})
 		return
 	}
-
 	writeJSON(w, s.runExec(r.Context(), req, normalized))
 }
 
@@ -547,6 +550,8 @@ type execRequest struct {
 	TimeoutSeconds int64             `json:"timeoutSeconds,omitempty"`
 	MaxOutputBytes int64             `json:"maxOutputBytes,omitempty"`
 	Detach         bool              `json:"detach,omitempty"`
+	Resident       bool              `json:"resident,omitempty"`
+	ResidentKey    string            `json:"residentKey,omitempty"`
 }
 
 type execResponse struct {

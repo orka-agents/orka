@@ -9,6 +9,7 @@ resources:
 - bases/core.orka.ai_skills.yaml
 - bases/core.orka.ai_repositoryscans.yaml
 - bases/core.orka.ai_repositorymonitors.yaml
+- bases/core.orka.ai_substrateactorpools.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

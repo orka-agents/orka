@@ -1091,6 +1091,12 @@ spec:
                       resolved sandbox settings to the agent worker Job. The worker wrapper then
                       claims the sandbox workspace and runs the configured agent runtime inside it.
                     properties:
+                      boot:
+                        description: |-
+                          Boot asks providers that support it to boot the workspace workload from scratch
+                          instead of resuming from the provider's default snapshot. Currently supported
+                          by the Substrate provider.
+                        type: boolean
                       cleanupPolicy:
                         description: |-
                           CleanupPolicy controls whether the workspace is deleted or retained after use.
@@ -1104,6 +1110,39 @@ spec:
                         description: Enabled requests use of a durable workspace for
                           the task execution.
                         type: boolean
+                      hibernation:
+                        description: |-
+                          Hibernation configures process lifetime inside the workspace. Resident
+                          mode is currently rejected until the worker protocol can report per-turn
+                          completion separately from resident process lifetime.
+                        properties:
+                          processMode:
+                            description: |-
+                              ProcessMode controls whether each turn starts fresh or reuses a resident
+                              process. Defaults to fresh.
+                            enum:
+                            - fresh
+                            - resident
+                            type: string
+                          residentKey:
+                            description: |-
+                              ResidentKey selects the process slot for resident mode. When omitted, the
+                              worker derives a stable key from namespace, template, and reuse key.
+                            type: string
+                        type: object
+                      poolRef:
+                        description: |-
+                          PoolRef references an operator-managed Substrate actor pool for placement,
+                          density tracking, and oversubscription policy.
+                        properties:
+                          name:
+                            description: Name is the pool name.
+                            type: string
+                          namespace:
+                            description: Namespace is the pool namespace. It defaults
+                              to the Task namespace.
+                            type: string
+                        type: object
                       provider:
                         description: |-
                           Provider selects the workspace backend. When omitted, the controller
@@ -1122,6 +1161,28 @@ spec:
                         - none
                         - session
                         type: string
+                      snapshot:
+                        description: |-
+                          Snapshot configures explicit provider snapshot restore/checkpoint behavior.
+                          Non-empty settings are currently rejected until provider checkpoint/restore
+                          support is available through Orka.
+                        properties:
+                          checkpointOnRelease:
+                            description: |-
+                              CheckpointOnRelease requests a checkpoint when cleanup releases or retains
+                              the workspace. CheckpointURI must be set when this is true.
+                            type: boolean
+                          checkpointURI:
+                            description: |-
+                              CheckpointURI is a provider-native snapshot URI prefix to write when the
+                              workspace is retained or released.
+                            type: string
+                          restoreURI:
+                            description: |-
+                              RestoreURI is a provider-native snapshot URI prefix to restore before the
+                              workspace command runs.
+                            type: string
+                        type: object
                       templateRef:
                         description: |-
                           TemplateRef references the workspace template to instantiate or reuse.

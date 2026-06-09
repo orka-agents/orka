@@ -76,7 +76,7 @@ func TestToolExecutor_Execute_Success(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 			},
 		},
@@ -90,6 +90,702 @@ func TestToolExecutor_Execute_Success(t *testing.T) {
 
 	if result != expectedResponse {
 		t.Errorf("Execute() = %v, want %v", result, expectedResponse)
+	}
+}
+
+func TestToolExecutor_Execute_MCPSubstrateActorUsesStatusEndpointAndRouteHost(t *testing.T) {
+	var gotHosts []string
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHosts = append(gotHosts, r.Host)
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request %d: %v", calls, err)
+		}
+		switch calls {
+		case 0:
+			if got := body["method"]; got != mcpInitializeMethod {
+				t.Fatalf("first MCP method = %v, want %s", got, mcpInitializeMethod)
+			}
+			w.Write([]byte(`{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}`)) //nolint:errcheck
+		case 1:
+			if got := body["method"]; got != mcpInitializedNotificationMethod {
+				t.Fatalf("second MCP method = %v, want %s", got, mcpInitializedNotificationMethod)
+			}
+			w.WriteHeader(http.StatusAccepted)
+		case 2:
+			if got := body["method"]; got != mcpToolsCallMethod {
+				t.Fatalf("third MCP method = %v, want %s", got, mcpToolsCallMethod)
+			}
+			w.Write([]byte(`{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"mcp"}]}}`)) //nolint:errcheck
+		default:
+			t.Fatalf("unexpected MCP request %d", calls)
+		}
+		calls++
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "lookup"},
+		Spec: corev1alpha1.ToolSpec{
+			MCP: &corev1alpha1.MCPToolServer{
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Endpoint: server.URL + "/mcp",
+			Actor: &corev1alpha1.ToolActorStatus{
+				RouteHost: "actor-1.actors.test",
+			},
+		},
+	}
+
+	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != "mcp" {
+		t.Fatalf("Execute() = %q, want mcp", result)
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want 3", calls)
+	}
+	for i, gotHost := range gotHosts {
+		if gotHost != "actor-1.actors.test" {
+			t.Fatalf("Host[%d] = %q, want actor route host", i, gotHost)
+		}
+	}
+}
+
+func TestToolExecutor_Execute_MCPSubstrateActorInitializesSession(t *testing.T) {
+	const sessionID = "session-1"
+	const negotiatedProtocolVersion = "2025-03-26"
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != "actor-1.actors.test" {
+			t.Fatalf("Host = %q, want actor route host", r.Host)
+		}
+		if r.Method == http.MethodDelete {
+			if calls != 3 {
+				t.Fatalf("delete call index = %d, want 3", calls)
+			}
+			if got := r.Header.Get(mcpProtocolVersionHeader); got != negotiatedProtocolVersion {
+				t.Fatalf("delete %s = %q, want %q", mcpProtocolVersionHeader, got, negotiatedProtocolVersion)
+			}
+			if got := r.Header.Get(mcpSessionIDHeader); got != sessionID {
+				t.Fatalf("delete %s = %q, want %q", mcpSessionIDHeader, got, sessionID)
+			}
+			w.WriteHeader(http.StatusNoContent)
+			calls++
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request %d: %v", calls, err)
+		}
+		switch calls {
+		case 0:
+			if got := r.Header.Get(mcpProtocolVersionHeader); got != mcpProtocolVersion {
+				t.Fatalf("initialize %s = %q, want %q", mcpProtocolVersionHeader, got, mcpProtocolVersion)
+			}
+			if got := body["method"]; got != mcpInitializeMethod {
+				t.Fatalf("first MCP method = %v, want %s", got, mcpInitializeMethod)
+			}
+			if got := r.Header.Get(mcpSessionIDHeader); got != "" {
+				t.Fatalf("initial %s = %q, want empty", mcpSessionIDHeader, got)
+			}
+			w.Header().Set(mcpSessionIDHeader, sessionID)
+			w.Write([]byte(`{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"` + negotiatedProtocolVersion + `","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}`)) //nolint:errcheck
+		case 1:
+			if got := r.Header.Get(mcpProtocolVersionHeader); got != negotiatedProtocolVersion {
+				t.Fatalf("initialized %s = %q, want %q", mcpProtocolVersionHeader, got, negotiatedProtocolVersion)
+			}
+			if got := body["method"]; got != mcpInitializedNotificationMethod {
+				t.Fatalf("second MCP method = %v, want %s", got, mcpInitializedNotificationMethod)
+			}
+			if got := r.Header.Get(mcpSessionIDHeader); got != sessionID {
+				t.Fatalf("initialized %s = %q, want %q", mcpSessionIDHeader, got, sessionID)
+			}
+			w.WriteHeader(http.StatusAccepted)
+		case 2:
+			if got := r.Header.Get(mcpProtocolVersionHeader); got != negotiatedProtocolVersion {
+				t.Fatalf("tools/call %s = %q, want %q", mcpProtocolVersionHeader, got, negotiatedProtocolVersion)
+			}
+			if got := body["method"]; got != mcpToolsCallMethod {
+				t.Fatalf("third MCP method = %v, want %s", got, mcpToolsCallMethod)
+			}
+			if got := r.Header.Get(mcpSessionIDHeader); got != sessionID {
+				t.Fatalf("tools/call %s = %q, want %q", mcpSessionIDHeader, got, sessionID)
+			}
+			params, ok := body["params"].(map[string]any)
+			if !ok {
+				t.Fatalf("params = %T, want object", body["params"])
+			}
+			if got := params["name"]; got != "lookup" {
+				t.Fatalf("tools/call name = %v, want lookup", got)
+			}
+			args, ok := params["arguments"].(map[string]any)
+			if !ok {
+				t.Fatalf("arguments = %T, want object", params["arguments"])
+			}
+			if got := args["x"]; got != float64(1) {
+				t.Fatalf("argument x = %v, want 1", got)
+			}
+			w.Write([]byte(`{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"mcp-session-ok"}]}}`)) //nolint:errcheck
+		default:
+			t.Fatalf("unexpected MCP request %d", calls)
+		}
+		calls++
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "lookup"},
+		Spec: corev1alpha1.ToolSpec{
+			MCP: &corev1alpha1.MCPToolServer{
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Endpoint: server.URL + "/mcp",
+			Actor: &corev1alpha1.ToolActorStatus{
+				RouteHost: "actor-1.actors.test",
+			},
+		},
+	}
+
+	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != "mcp-session-ok" {
+		t.Fatalf("Execute() = %q, want mcp-session-ok", result)
+	}
+	if calls != 4 {
+		t.Fatalf("calls = %d, want 4", calls)
+	}
+}
+
+func TestToolExecutor_Execute_MCPSubstrateActorAllowsUnsupportedSessionTermination(t *testing.T) {
+	const sessionID = "session-1"
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			if got := r.Header.Get(mcpSessionIDHeader); got != sessionID {
+				t.Fatalf("delete %s = %q, want %q", mcpSessionIDHeader, got, sessionID)
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			calls++
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request %d: %v", calls, err)
+		}
+		switch calls {
+		case 0:
+			w.Header().Set(mcpSessionIDHeader, sessionID)
+			w.Write([]byte(`{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}`)) //nolint:errcheck
+		case 1:
+			if got := body["method"]; got != mcpInitializedNotificationMethod {
+				t.Fatalf("second MCP method = %v, want %s", got, mcpInitializedNotificationMethod)
+			}
+			w.WriteHeader(http.StatusAccepted)
+		case 2:
+			if got := body["method"]; got != mcpToolsCallMethod {
+				t.Fatalf("third MCP method = %v, want %s", got, mcpToolsCallMethod)
+			}
+			w.Write([]byte(`{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"cleanup-allowed"}]}}`)) //nolint:errcheck
+		default:
+			t.Fatalf("unexpected MCP request %d", calls)
+		}
+		calls++
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "lookup"},
+		Spec: corev1alpha1.ToolSpec{
+			MCP: &corev1alpha1.MCPToolServer{
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Endpoint: server.URL + "/mcp",
+			Actor: &corev1alpha1.ToolActorStatus{
+				RouteHost: "actor-1.actors.test",
+			},
+		},
+	}
+
+	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != "cleanup-allowed" {
+		t.Fatalf("Execute() = %q, want cleanup-allowed", result)
+	}
+	if calls != 4 {
+		t.Fatalf("calls = %d, want 4", calls)
+	}
+}
+
+func TestToolExecutor_Execute_MCPSubstrateActorSendsInitializedWithoutSession(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request %d: %v", len(methods), err)
+		}
+		method, _ := body["method"].(string)
+		methods = append(methods, method)
+		if got := r.Header.Get(mcpSessionIDHeader); got != "" {
+			t.Fatalf("%s = %q, want empty for stateless MCP server", mcpSessionIDHeader, got)
+		}
+		switch method {
+		case mcpInitializeMethod:
+			w.Write([]byte(`{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}`)) //nolint:errcheck
+		case mcpInitializedNotificationMethod:
+			w.WriteHeader(http.StatusAccepted)
+		case mcpToolsCallMethod:
+			w.Write([]byte(`{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"stateless-ok"}]}}`)) //nolint:errcheck
+		default:
+			t.Fatalf("unexpected MCP method %q", method)
+		}
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "lookup"},
+		Spec: corev1alpha1.ToolSpec{
+			MCP: &corev1alpha1.MCPToolServer{
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Endpoint: server.URL + "/mcp",
+			Actor: &corev1alpha1.ToolActorStatus{
+				RouteHost: "actor-1.actors.test",
+			},
+		},
+	}
+
+	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != "stateless-ok" {
+		t.Fatalf("Execute() = %q, want stateless-ok", result)
+	}
+	wantMethods := []string{mcpInitializeMethod, mcpInitializedNotificationMethod, mcpToolsCallMethod}
+	if fmt.Sprint(methods) != fmt.Sprint(wantMethods) {
+		t.Fatalf("methods = %v, want %v", methods, wantMethods)
+	}
+}
+
+func TestToolExecutor_Execute_MCPSubstrateActorRedactsSessionIDOnErrors(t *testing.T) {
+	const sessionID = "session-secret-1"
+	for _, tt := range []struct {
+		name      string
+		failStep  int
+		wantError string
+	}{
+		{name: "initialized notification", failStep: 1, wantError: "MCP initialized notification failed"},
+		{name: "tool call", failStep: 2, wantError: "tool returned HTTP 500"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls int
+			var deleted bool
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					deleted = true
+					if got := r.Header.Get(mcpSessionIDHeader); got != sessionID {
+						t.Fatalf("delete %s = %q, want %q", mcpSessionIDHeader, got, sessionID)
+					}
+					w.WriteHeader(http.StatusNoContent)
+					calls++
+					return
+				}
+				switch calls {
+				case 0:
+					w.Header().Set(mcpSessionIDHeader, sessionID)
+					w.Write([]byte(`{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}`)) //nolint:errcheck
+				case tt.failStep:
+					w.WriteHeader(http.StatusInternalServerError)
+					w.Write([]byte(`{"error":"echoed ` + sessionID + `"}`)) //nolint:errcheck
+				default:
+					if calls == 1 {
+						w.WriteHeader(http.StatusAccepted)
+					} else {
+						w.Write([]byte(`{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"ok"}]}}`)) //nolint:errcheck
+					}
+				}
+				calls++
+			}))
+			defer server.Close()
+
+			executor := &ToolExecutor{
+				client:     server.Client(),
+				namespace:  "default",
+				secretPath: "/secrets/tools",
+			}
+			tool := &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "lookup"},
+				Spec: corev1alpha1.ToolSpec{
+					MCP: &corev1alpha1.MCPToolServer{
+						SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+							TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+						},
+					},
+				},
+				Status: corev1alpha1.ToolStatus{
+					Endpoint: server.URL + "/mcp",
+					Actor: &corev1alpha1.ToolActorStatus{
+						RouteHost: "actor-1.actors.test",
+					},
+				},
+			}
+
+			_, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
+			if err == nil {
+				t.Fatal("Execute() error = nil, want MCP HTTP error")
+			}
+			if !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("Execute() error = %q, want %q", err, tt.wantError)
+			}
+			if strings.Contains(err.Error(), sessionID) {
+				t.Fatalf("Execute() error leaked session id: %q", err)
+			}
+			if !strings.Contains(err.Error(), "[REDACTED]") {
+				t.Fatalf("Execute() error = %q, want redaction marker", err)
+			}
+			if !deleted {
+				t.Fatal("session was not terminated after MCP error")
+			}
+		})
+	}
+}
+
+func TestToolExecutor_Execute_MCPSubstrateActorRejectsInvalidInitializeResponse(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		response  string
+		wantError string
+	}{
+		{
+			name:      "mismatched response id",
+			response:  `{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"not initialize"}]}}`,
+			wantError: `MCP response id did not match expected "initialize"`,
+		},
+		{
+			name:      "missing protocol version",
+			response:  `{"jsonrpc":"2.0","id":"initialize","result":{"capabilities":{},"serverInfo":{"name":"test","version":"1"}}}`,
+			wantError: "MCP initialize result missing protocolVersion",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				if calls > 1 {
+					t.Fatalf("unexpected MCP request %d after invalid initialize response", calls)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(tt.response)) //nolint:errcheck
+			}))
+			defer server.Close()
+
+			executor := &ToolExecutor{
+				client:     server.Client(),
+				namespace:  "default",
+				secretPath: "/secrets/tools",
+			}
+			tool := &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "lookup"},
+				Spec: corev1alpha1.ToolSpec{
+					MCP: &corev1alpha1.MCPToolServer{
+						SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+							TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+						},
+					},
+				},
+				Status: corev1alpha1.ToolStatus{
+					Endpoint: server.URL + "/mcp",
+					Actor: &corev1alpha1.ToolActorStatus{
+						RouteHost: "actor-1.actors.test",
+					},
+				},
+			}
+
+			_, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
+			if err == nil {
+				t.Fatal("Execute() error = nil, want invalid initialize response error")
+			}
+			if !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("Execute() error = %q, want %q", err, tt.wantError)
+			}
+			if calls != 1 {
+				t.Fatalf("calls = %d, want only initialize request", calls)
+			}
+		})
+	}
+}
+
+func TestToolExecutor_Execute_MCPSubstrateActorTerminatesSessionAfterInvalidInitializeResponse(t *testing.T) {
+	const sessionID = "session-secret-1"
+	for _, tt := range []struct {
+		name      string
+		response  string
+		wantError string
+	}{
+		{
+			name:      "mismatched response id",
+			response:  `{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"not initialize"}]}}`,
+			wantError: `MCP response id did not match expected "initialize"`,
+		},
+		{
+			name:      "missing protocol version",
+			response:  `{"jsonrpc":"2.0","id":"initialize","result":{"capabilities":{},"serverInfo":{"name":"test","version":"1"}}}`,
+			wantError: "MCP initialize result missing protocolVersion",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var initializeRequests int
+			var deletes int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					deletes++
+					if got := r.Header.Get(mcpSessionIDHeader); got != sessionID {
+						t.Fatalf("delete %s = %q, want %q", mcpSessionIDHeader, got, sessionID)
+					}
+					if got := r.Header.Get(mcpProtocolVersionHeader); got != mcpProtocolVersion {
+						t.Fatalf("delete %s = %q, want %q", mcpProtocolVersionHeader, got, mcpProtocolVersion)
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				initializeRequests++
+				if initializeRequests > 1 {
+					t.Fatalf("unexpected MCP request %d after invalid initialize response", initializeRequests)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set(mcpSessionIDHeader, sessionID)
+				w.Write([]byte(tt.response)) //nolint:errcheck
+			}))
+			defer server.Close()
+
+			executor := &ToolExecutor{
+				client:     server.Client(),
+				namespace:  "default",
+				secretPath: "/secrets/tools",
+			}
+			tool := &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "lookup"},
+				Spec: corev1alpha1.ToolSpec{
+					MCP: &corev1alpha1.MCPToolServer{
+						SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+							TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+						},
+					},
+				},
+				Status: corev1alpha1.ToolStatus{
+					Endpoint: server.URL + "/mcp",
+					Actor: &corev1alpha1.ToolActorStatus{
+						RouteHost: "actor-1.actors.test",
+					},
+				},
+			}
+
+			_, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
+			if err == nil {
+				t.Fatal("Execute() error = nil, want invalid initialize response error")
+			}
+			if !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("Execute() error = %q, want %q", err, tt.wantError)
+			}
+			if strings.Contains(err.Error(), sessionID) {
+				t.Fatalf("Execute() error leaked session id: %q", err)
+			}
+			if initializeRequests != 1 {
+				t.Fatalf("initialize requests = %d, want 1", initializeRequests)
+			}
+			if deletes != 1 {
+				t.Fatalf("deletes = %d, want 1", deletes)
+			}
+		})
+	}
+}
+
+func TestToolExecutor_Execute_MCPSubstrateActorIgnoresSessionTerminationFailureAfterSuccess(t *testing.T) {
+	const sessionID = "session-secret-1"
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"cleanup echoed ` + sessionID + `"}`)) //nolint:errcheck
+			calls++
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request %d: %v", calls, err)
+		}
+		switch calls {
+		case 0:
+			w.Header().Set(mcpSessionIDHeader, sessionID)
+			w.Write([]byte(`{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}`)) //nolint:errcheck
+		case 1:
+			if got := body["method"]; got != mcpInitializedNotificationMethod {
+				t.Fatalf("second MCP method = %v, want %s", got, mcpInitializedNotificationMethod)
+			}
+			w.WriteHeader(http.StatusAccepted)
+		case 2:
+			if got := body["method"]; got != mcpToolsCallMethod {
+				t.Fatalf("third MCP method = %v, want %s", got, mcpToolsCallMethod)
+			}
+			w.Write([]byte(`{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"tool-ok"}]}}`)) //nolint:errcheck
+		default:
+			t.Fatalf("unexpected MCP request %d", calls)
+		}
+		calls++
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "lookup"},
+		Spec: corev1alpha1.ToolSpec{
+			MCP: &corev1alpha1.MCPToolServer{
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Endpoint: server.URL + "/mcp",
+			Actor: &corev1alpha1.ToolActorStatus{
+				RouteHost: "actor-1.actors.test",
+			},
+		},
+	}
+
+	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != "tool-ok" {
+		t.Fatalf("Execute() = %q, want tool-ok", result)
+	}
+	if calls != 4 {
+		t.Fatalf("calls = %d, want 4", calls)
+	}
+}
+
+func TestNormalizeMCPResponseBodySkipsIntermediateSSEEvents(t *testing.T) {
+	body := []byte(strings.Join([]string{
+		"event: message",
+		`data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1}}`,
+		"",
+		"event: message",
+		`data: {"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"done"}]}}`,
+		"",
+	}, "\n"))
+
+	got := normalizeMCPResponseBody("text/event-stream", body)
+	want := `{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"done"}]}}`
+	if string(got) != want {
+		t.Fatalf("normalizeMCPResponseBody() = %q, want %q", got, want)
+	}
+}
+
+func TestExecuteMCPHTTPRequestReturnsOnMatchingSSEEventBeforeStreamCloses(t *testing.T) {
+	unblock := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("response writer does not implement http.Flusher")
+		}
+		fmt.Fprint(w, "event: message\n")                                                                                        //nolint:errcheck
+		fmt.Fprint(w, `data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1}}`+"\n\n")                //nolint:errcheck
+		fmt.Fprint(w, "event: message\n")                                                                                        //nolint:errcheck
+		fmt.Fprint(w, `data: {"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"done"}]}}`+"\n\n")            //nolint:errcheck
+		fmt.Fprint(w, `data: {"jsonrpc":"2.0","id":"unrelated","result":{"content":[{"type":"text","text":"ignored"}]}}`+"\n\n") //nolint:errcheck
+		flusher.Flush()
+		select {
+		case <-unblock:
+		case <-r.Context().Done():
+		}
+	}))
+	defer func() {
+		close(unblock)
+		server.Close()
+	}()
+
+	req, err := http.NewRequest(http.MethodPost, server.URL, nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	client := server.Client()
+	client.Timeout = 2 * time.Second
+
+	started := time.Now()
+	body, err := executeMCPHTTPRequest(client, req, mcpToolCallRequestID)
+	if err != nil {
+		t.Fatalf("executeMCPHTTPRequest() error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("executeMCPHTTPRequest() took %s, want return before stream closes", elapsed)
+	}
+	want := `{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"done"}]}}`
+	if string(body) != want {
+		t.Fatalf("executeMCPHTTPRequest() body = %q, want %q", body, want)
+	}
+}
+
+func TestDecodeMCPToolCallResponsePreservesNonTextContent(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"resource","resource":{"uri":"file:///tmp/result.json","mimeType":"application/json","text":"{\"ok\":true}"}}]}}`)
+
+	result, err := decodeMCPToolCallResponse(body)
+	if err != nil {
+		t.Fatalf("decodeMCPToolCallResponse() error = %v", err)
+	}
+
+	want := `{"type":"resource","resource":{"uri":"file:///tmp/result.json","mimeType":"application/json","text":"{\"ok\":true}"}}`
+	if result != want {
+		t.Fatalf("decodeMCPToolCallResponse() = %q, want raw content %q", result, want)
 	}
 }
 
@@ -109,7 +805,7 @@ func TestToolExecutor_Execute_DefaultMethodPOST(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL:    server.URL,
 				Method: "", // Empty, should default to POST
 			},
@@ -142,7 +838,7 @@ func TestToolExecutor_Execute_CustomMethod(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL:    server.URL,
 				Method: http.MethodPut,
 			},
@@ -175,7 +871,7 @@ func TestToolExecutor_Execute_CustomHeaders(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 				Headers: map[string]string{
 					"X-Custom-Header": "custom-value",
@@ -219,7 +915,7 @@ func TestToolExecutor_Execute_AuthHeader(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 				AuthSecretRef: &corev1alpha1.SecretKeySelector{
 					Name: "secret-name",
@@ -261,7 +957,7 @@ func TestToolExecutor_Execute_PropagatesTransactionTokenFile(t *testing.T) {
 	}
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{URL: server.URL},
+			HTTP: &corev1alpha1.HTTPExecution{URL: server.URL},
 		},
 	}
 
@@ -294,7 +990,7 @@ func TestToolExecutor_Execute_FailsClosedOnConfiguredTransactionTokenHeader(t *t
 	}
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 				Headers: map[string]string{
 					kontxttoken.HeaderName: "user-configured-token",
@@ -401,7 +1097,7 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{Name: "downstream"},
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{URL: toolServer.URL},
+			HTTP: &corev1alpha1.HTTPExecution{URL: toolServer.URL},
 		},
 	}
 
@@ -478,7 +1174,7 @@ func TestToolExecutor_Execute_DefaultsOutboundTTSToServiceAccountSubjectToken(t 
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{Name: "downstream"},
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{URL: toolServer.URL},
+			HTTP: &corev1alpha1.HTTPExecution{URL: toolServer.URL},
 		},
 	}
 
@@ -541,7 +1237,7 @@ func TestToolExecutor_Execute_ReusesOutboundTTSClient(t *testing.T) {
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{Name: "downstream"},
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{URL: toolServer.URL},
+			HTTP: &corev1alpha1.HTTPExecution{URL: toolServer.URL},
 		},
 	}
 
@@ -600,7 +1296,7 @@ func TestToolExecutor_Execute_FailsClosedWhenOutboundTTSExchangeFails(t *testing
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{Name: "downstream"},
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{URL: toolServer.URL},
+			HTTP: &corev1alpha1.HTTPExecution{URL: toolServer.URL},
 		},
 	}
 
@@ -622,7 +1318,7 @@ func TestToolExecutor_Execute_TransactionTokenFileMissingFails(t *testing.T) {
 	}
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{URL: "http://127.0.0.1"},
+			HTTP: &corev1alpha1.HTTPExecution{URL: "http://127.0.0.1"},
 		},
 	}
 
@@ -654,7 +1350,7 @@ func TestToolExecutor_Execute_AuthBody(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 				AuthSecretRef: &corev1alpha1.SecretKeySelector{
 					Name: "secret-name",
@@ -694,7 +1390,7 @@ func TestToolExecutor_Execute_AuthBodyMissingKey(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: "http://localhost",
 				AuthSecretRef: &corev1alpha1.SecretKeySelector{
 					Name: "secret-name",
@@ -709,6 +1405,56 @@ func TestToolExecutor_Execute_AuthBodyMissingKey(t *testing.T) {
 	_, err := executor.Execute(context.Background(), tool, nil)
 	if err == nil {
 		t.Error("Execute() expected error for missing authBodyKey")
+	}
+}
+
+func TestToolExecutor_Execute_MCPRejectsBodyAuth(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	secretDir := filepath.Join(tmpDir, "secret-name")
+	os.MkdirAll(secretDir, 0755)                                                      //nolint:errcheck
+	os.WriteFile(filepath.Join(secretDir, "api_key"), []byte("secret-api-key"), 0644) //nolint:errcheck
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: tmpDir,
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp-tool"},
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: &corev1alpha1.HTTPExecution{
+				AuthSecretRef: &corev1alpha1.SecretKeySelector{
+					Name: "secret-name",
+					Key:  "api_key",
+				},
+				AuthInject:  "body",
+				AuthBodyKey: "apiKey",
+			},
+			MCP: &corev1alpha1.MCPToolServer{
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Endpoint: server.URL + "/mcp",
+			Actor:    &corev1alpha1.ToolActorStatus{RouteHost: "actor-1.actors.test"},
+		},
+	}
+
+	_, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"query":"test"}`))
+	if err == nil || !strings.Contains(err.Error(), "MCP tools do not support authInject=body") {
+		t.Fatalf("Execute() error = %v, want MCP body auth rejection", err)
+	}
+	if called {
+		t.Fatal("MCP endpoint was called despite invalid body auth config")
 	}
 }
 
@@ -727,7 +1473,7 @@ func TestToolExecutor_Execute_HTTPError(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 			},
 		},
@@ -759,7 +1505,7 @@ func TestToolExecutor_Execute_HTTPErrorRedactsPropagatedTransactionToken(t *test
 	}
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{URL: server.URL},
+			HTTP: &corev1alpha1.HTTPExecution{URL: server.URL},
 		},
 	}
 
@@ -784,7 +1530,7 @@ func TestToolExecutor_Execute_InvalidArgs(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: "http://localhost",
 			},
 		},
@@ -811,7 +1557,7 @@ func TestToolExecutor_Execute_Timeout(t *testing.T) {
 	timeout := metav1.Duration{Duration: 5 * time.Second}
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL:     server.URL,
 				Timeout: &timeout,
 			},
@@ -838,7 +1584,7 @@ func TestToolExecutor_Execute_MissingAuthSecret(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: "http://localhost",
 				AuthSecretRef: &corev1alpha1.SecretKeySelector{
 					Name: "nonexistent-secret",
@@ -965,7 +1711,7 @@ func TestToolExecutor_Execute_EmptyArgs(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 			},
 		},
@@ -1003,7 +1749,7 @@ func TestToolExecutor_Execute_DefaultAuthInject(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 				AuthSecretRef: &corev1alpha1.SecretKeySelector{
 					Name: "secret-name",
@@ -1044,7 +1790,7 @@ func TestToolExecutor_Execute_URLInterpolation(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL:    server.URL + "/repos/{{owner}}/{{repo}}/commits/{{ref}}/check-runs",
 				Method: http.MethodGet,
 			},
@@ -1095,7 +1841,7 @@ func TestToolExecutor_Execute_URLInterpolation_Partial(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL:    server.URL + "/repos/{{owner}}/{{repo}}/pulls/{{pull_number}}/merge",
 				Method: http.MethodPut,
 			},
@@ -1146,7 +1892,7 @@ func TestToolExecutor_Execute_URLInterpolation_NoPlaceholders(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL + "/api/search",
 			},
 		},
@@ -1189,7 +1935,7 @@ func TestToolExecutor_Execute_ResponseSizeLimit(t *testing.T) {
 
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 			},
 		},
