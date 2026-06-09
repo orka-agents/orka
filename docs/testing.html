@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Testing | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://sozercan.github.io/orka/docs/testing"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Testing | Orka"><meta data-rh="true" name="description" content="Orka has comprehensive test coverage across all packages, including unit tests, integration tests (envtest), end-to-end tests (Kind cluster), and frontend tests."><meta data-rh="true" property="og:description" content="Orka has comprehensive test coverage across all packages, including unit tests, integration tests (envtest), end-to-end tests (Kind cluster), and frontend tests."><link data-rh="true" rel="canonical" href="https://sozercan.github.io/orka/docs/testing"><link data-rh="true" rel="alternate" href="https://sozercan.github.io/orka/docs/testing" hreflang="en"><link data-rh="true" rel="alternate" href="https://sozercan.github.io/orka/docs/testing" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Testing","item":"https://sozercan.github.io/orka/docs/testing"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.01a08f18.css">
-<script src="/orka/assets/js/runtime~main.2f2e80a3.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.605c9433.js" defer="defer"></script>
 <script src="/orka/assets/js/main.1be29a24.js" defer="defer"></script>
 </head>
 <body>
@@ -75,7 +75,12 @@ missing or mismatched artifacts staying not ready.</p>
 <p>The Agent Substrate workflow (<code>.github/workflows/agent-substrate-e2e.yml</code>) is secret-free and runs <code>scripts/agent-substrate-e2e.sh</code> against a fresh Kind cluster. It pins the Substrate checkout with <code>SUBSTRATE_REF</code>, installs Substrate, initializes the local RustFS snapshot bucket, builds local Orka controller/workspace/worker images, then validates:</p>
 <ul>
 <li class="">direct Substrate actor create/resume/router/daemon exec/suspend/delete</li>
+<li class="">Orka <code>SubstrateActorPool</code> reconciliation and density reporting</li>
 <li class="">Orka <code>Task</code> execution and result submission with the default Substrate workspace provider</li>
+<li class="">pooled Orka <code>Task</code> placement through <code>spec.execution.workspace.poolRef</code></li>
+<li class="">MCP actor-backed <code>Tool</code> execution through a pooled Substrate actor</li>
+<li class="">MCP actor reuse across forced Tool reconciles without rebooting an already booted actor</li>
+<li class="">workspace placement, density, and resume-latency status fields</li>
 <li class="">delete and retained cleanup when the pinned Substrate runtime completes <code>runsc delete</code></li>
 <li class=""><code>WorkspaceCleanupFailed</code> is tolerated only after the Task result is available, because the pinned Substrate revision can fail <code>runsc delete</code> after successful Orka execution in GitHub-hosted kind</li>
 <li class="">a missing <code>ActorTemplate</code> fails predictably</li>
