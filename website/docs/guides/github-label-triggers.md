@@ -48,6 +48,20 @@ Default action prompts:
 
 GitHub delivery IDs make retries safe: if the same delivery is received again, Orka returns `202 Accepted` with the existing task name instead of creating a duplicate.
 
+## CI Coverage
+
+`.github/workflows/live-github-label-trigger-e2e.yml` is a manual GitHub Actions workflow for the label trigger path. It runs focused Go tests for webhook and PR monitor tooling, then builds the controller image, deploys Orka into a fresh Kind cluster, creates a synthetic runtime Agent, and sends signed webhook payloads to `/webhooks/github`.
+
+The workflow is model-free and secret-free. It generates the webhook secret during the run and uses a synthetic `agent:implement` issue label payload for the configured `target_repo_url` and `target_number` inputs. The script verifies that invalid signatures return `401`, a valid label event creates one scoped agent Task, and a repeated GitHub delivery returns `202` with the original task name.
+
+Run the same validation locally with:
+
+```bash
+GITHUB_LABEL_TRIGGER_TARGET_REPO_URL=https://github.com/sozercan/orka \
+GITHUB_LABEL_TRIGGER_TARGET_NUMBER=1 \
+bash scripts/live-github-label-trigger-e2e.sh
+```
+
 ## Minimal Helm configuration
 
 ```yaml
