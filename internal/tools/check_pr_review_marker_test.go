@@ -312,8 +312,28 @@ func TestContainsPRReviewMarkerRequiresSignedMarker(t *testing.T) {
 	}
 }
 
+func TestPRReviewMarkerSigningDoesNotDefaultToLiveToken(t *testing.T) {
+	const prNumber = 42
+	t.Setenv(prReviewMarkerSecretEnv, "")
+	t.Setenv(prReviewMarkerPreviousSecretsEnv, "")
+	marker := formatPRReviewMarker(testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, prReviewMarkerPrimarySigningKey())
+	if strings.Contains(marker, prReviewMarkerSignature(testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, testGitHubToken)) {
+		t.Fatalf("marker %q was signed with the live GitHub token", marker)
+	}
+	if keys := prReviewMarkerSigningKeys(); len(keys) != 0 {
+		t.Fatalf("signing keys = %v, want none without %s", keys, prReviewMarkerSecretEnv)
+	}
+	if containsPRReviewMarker("reviewed\n"+marker, testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, prReviewMarkerSigningKeys(), "contributor", "reviewer-bot") {
+		t.Fatalf("containsPRReviewMarker accepted unsigned-by-config marker from untrusted author")
+	}
+	if !containsPRReviewMarker("reviewed\n"+marker, testGitHubOwner, testRepositoryName, prNumber, checkPRReviewMarkerTestSHA, prReviewMarkerSigningKeys(), "reviewer-bot", "reviewer-bot") {
+		t.Fatalf("containsPRReviewMarker rejected stable marker from trusted author")
+	}
+}
+
 func setCheckPRReviewMarkerTestEnv(t *testing.T) {
 	t.Helper()
+	t.Setenv(prReviewMarkerSecretEnv, testGitHubToken)
 	t.Setenv(prReviewMarkerTrustedAuthorEnv, "reviewer-bot")
 }
 

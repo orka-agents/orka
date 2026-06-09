@@ -130,8 +130,7 @@ func (t *CheckPRReviewMarkerTool) Execute(ctx context.Context, argsJSON json.Raw
 		}
 	}
 
-	markerKeys := prReviewMarkerSigningKeys(token)
-	marker := formatPRReviewMarker(owner, repo, args.PRNumber, headSHA, markerKeys[0])
+	marker := formatPRReviewMarker(owner, repo, args.PRNumber, headSHA, prReviewMarkerPrimarySigningKey())
 	match, err := findPRReviewMarker(ctx, token, owner, repo, args.PRNumber, headSHA, baseURL)
 	if err != nil {
 		return "", err
@@ -170,7 +169,7 @@ func findPRReviewMarker(ctx context.Context, token, owner, repo string, prNumber
 
 func findPRReviewMarkerInReviews(ctx context.Context, token, owner, repo string, prNumber int, headSHA, baseURL string) (*prReviewMarkerMatch, error) {
 	const perPage = 100
-	markerKeys := prReviewMarkerSigningKeys(token)
+	markerKeys := prReviewMarkerSigningKeys()
 	trustedAuthor := trustedPRReviewMarkerAuthor(ctx, token, baseURL)
 	for page := 1; ; page++ {
 		endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=%d&page=%d", baseURL, owner, repo, prNumber, perPage, page)
@@ -248,19 +247,19 @@ func formatPRReviewMarker(owner, repo string, prNumber int, headSHA, markerKey s
 	)
 }
 
-func prReviewMarkerSigningKeys(token string) []string {
-	primary := strings.TrimSpace(os.Getenv(prReviewMarkerSecretEnv))
-	if primary == "" {
-		primary = strings.TrimSpace(token)
+func prReviewMarkerPrimarySigningKey() string {
+	return strings.TrimSpace(os.Getenv(prReviewMarkerSecretEnv))
+}
+
+func prReviewMarkerSigningKeys() []string {
+	keys := []string{}
+	if primary := prReviewMarkerPrimarySigningKey(); primary != "" {
+		keys = append(keys, primary)
 	}
-	keys := []string{primary}
 	for previous := range strings.SplitSeq(os.Getenv(prReviewMarkerPreviousSecretsEnv), ",") {
 		if previous = strings.TrimSpace(previous); previous != "" {
 			keys = append(keys, previous)
 		}
-	}
-	if token = strings.TrimSpace(token); token != "" && token != primary {
-		keys = append(keys, token)
 	}
 	return keys
 }
