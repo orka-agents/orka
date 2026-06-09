@@ -44,6 +44,8 @@ Repository monitor backend coverage has a focused GitHub Actions workflow at `.g
 
 The smoke workflow creates the UI embed stub and runs targeted Go tests for monitor store CRUD, API handlers, GitHub pull request event handling, targeted single-PR inventory runs, controller queue and review flow, blocked status counts, read-only review task job construction, stdout result forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker signing/detection tooling. Worker-level PR review diff context generation is covered by the normal Go test workflow. UI monitor pages are covered by the normal frontend test workflow rather than this smoke workflow.
 
+The smoke workflow is secret-free. Exact pull request event queueing is exercised with synthetic signed webhook payloads and test clients, so repository monitor PRs do not need live GitHub credentials just to verify queueing, scope checks, or review result ingestion in CI.
+
 ## Prerequisites
 
 Create Claude runtime credentials in the monitor namespace:
