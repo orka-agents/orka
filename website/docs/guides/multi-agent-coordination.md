@@ -734,12 +734,12 @@ Creates a scheduled prompt-orchestrated pull request monitor Task for one GitHub
 | `agent_ref` | string | yes | AI Agent name for the scheduled monitor Task. The Agent must have coordination enabled and autonomous coordination disabled. |
 | `namespace` | string | no | Namespace for the monitor Task. Defaults to the current task namespace. |
 | `provider_ref` | string | no | Optional Provider reference for the scheduled AI Task. |
-| `gitSecretRef` | string | no | Secret containing Git/GitHub credentials. If omitted, Orka tries supported default git credential Secret names. |
+| `gitSecretRef` | string | no | Secret containing Git/GitHub credentials. If omitted, Orka tries supported default git credential Secret names in the target namespace. |
 | `per_page` | integer | no | Maximum open PRs to scan per run. Defaults to `30`, maximum `100`. |
 | `review_event` | string | no | Review event to post after analysis: `COMMENT`, `APPROVE`, or `REQUEST_CHANGES`. Defaults to `COMMENT`. |
 | `prompt` | string | no | Additional instructions appended to the generated monitor prompt. |
 
-The selected Git credential Secret must exist in the target namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key. The created Task receives a narrow tool set: `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The generated prompt tells the Task to pass the same `repo_url` to each PR tool call. Those explicit repository URLs are scope-checked against the Task workspace or signed transaction repository context before Orka resolves credentials or calls GitHub.
+If `gitSecretRef` is omitted, Orka searches `git-credentials`, `github-credentials`, `copilot-token`, `github-token`, and `git-token`. The selected Git credential Secret must exist in the target namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key. The created Task receives a narrow tool set: `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The generated prompt tells the Task to pass the same `repo_url` to each PR tool call. Those explicit repository URLs are scope-checked against the Task workspace or signed transaction repository context before Orka resolves credentials or calls GitHub.
 
 ### check_pull_request_ci Tool
 

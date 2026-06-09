@@ -216,7 +216,7 @@ See [API Reference](../reference/api-reference.md#repository-monitors) for endpo
 
 `create_pr_monitor` remains the compatibility path for prompt-orchestrated scheduled PR monitors. It creates a scheduled `type: ai` Task with `spec.workspace.gitRepo` set to the requested GitHub repository, injects the PR review loop tools, and instructs the monitor to call `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment` with the same `repo_url`.
 
-The tool requires an AI Agent with coordination enabled and autonomous coordination disabled. The created Task uses a narrow explicit tool set instead of the full coordination tool set, and it requires a Git credential Secret either through `gitSecretRef` or one of the supported default Secret names in the target namespace.
+The tool requires an AI Agent with coordination enabled and autonomous coordination disabled. The created Task uses a narrow explicit tool set instead of the full coordination tool set, and it requires a Git credential Secret either through `gitSecretRef` or one of the supported default Secret names in the target namespace: `git-credentials`, `github-credentials`, `copilot-token`, `github-token`, or `git-token`. Orka validates the selected Secret before creating the monitor Task; it must contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
 
 GitHub tools that accept explicit `repo_url` values are scoped to the current Task. If a tool call provides a different repository than the Task workspace or signed transaction context permits, Orka rejects the call before resolving credentials or calling GitHub.
 
