@@ -90,7 +90,7 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/scheduled_task_test.go` | Cron scheduling, suspend, `concurrencyPolicy: Forbid`, history-limit cleanup |
 | `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
 
-The Repository Monitor Smoke workflow runs in GitHub Actions on pull requests and pushes that touch the workflow, API, controller, CRD/config, worker, or Go dependency paths. It creates the UI embed stub and runs focused `go test` selections for the monitor store, API handlers, GitHub pull request event handling, controller queue/review flow, read-only review job construction, result stdout forwarding, `create_pr_monitor` repository URL and credential validation, and PR review marker tooling. The normal Go Tests workflow runs `make test` for non-doc code changes and covers worker-level PR review diff context generation.
+The Repository Monitor Smoke workflow runs in GitHub Actions on pull requests and pushes that touch the workflow, API, controller, CRD/config, worker, or Go dependency paths. It creates the UI embed stub and runs focused `go test` selections for the monitor store, API handlers, GitHub pull request event handling, controller queue/review flow, read-only review job construction, result stdout forwarding, `create_pr_monitor` repository URL and credential validation, PR review marker `repo_url` scope enforcement, and PR review marker tooling. The normal Go Tests workflow runs `make test` for non-doc code changes and covers worker-level PR review diff context generation.
 
 Repository security E2E coverage should include initial deterministic slice creation,
 incremental scan behavior, invalid v2 evidence being dropped and visible through API,

@@ -233,11 +233,11 @@ See [API Reference](../reference/api-reference.md#repository-monitors) for endpo
 
 `create_pr_monitor` remains the compatibility path for prompt-orchestrated scheduled PR monitors. It creates a scheduled `type: ai` Task with `spec.workspace.gitRepo` set to the requested GitHub repository, injects the PR review loop tools, and instructs the monitor to call `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment` with the same `repo_url`.
 
-`repo_url` must be a credential-free GitHub repository root URL, for example `https://github.com/owner/repo`, `https://github.com/owner/repo.git`, or `git@github.com:owner/repo.git`. Pull request, issue, tree, blob, commit, query-string, fragment, and embedded-credential URLs are rejected before Orka creates the monitor Task.
+`repo_url` must be a credential-free GitHub repository root URL, for example `https://github.com/owner/repo`, `https://github.com/owner/repo.git`, or `git@github.com:owner/repo.git`. Do not pass a pull request, issue, branch, file, commit, query-string, fragment, or token-bearing URL. Orka rejects non-root repository URLs before it creates the monitor Task, which prevents prompts or copied browser URLs from widening the monitor's repository scope.
 
 The tool requires an AI Agent with coordination enabled and autonomous coordination disabled. The created Task uses a narrow explicit tool set instead of the full coordination tool set, and it requires a Git credential Secret either through `gitSecretRef` or one of the supported default Secret names in the target namespace: `git-credentials`, `github-credentials`, `copilot-token`, `github-token`, or `git-token`. Orka validates the selected Secret before creating the monitor Task; it must contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
 
-GitHub tools that accept explicit `repo_url` values are scoped to the current Task. If a tool call provides a different repository than the Task workspace or signed transaction context permits, Orka rejects the call before resolving credentials or calling GitHub.
+The scheduled monitor prompt tells the worker to pass the same `repo_url` to every PR review loop tool. Those GitHub tools are scoped to the current Task: when task context is available, the requested repository must match the Task workspace repository or signed transaction repository context. If it does not match, Orka rejects the tool call before resolving credentials or calling GitHub. This means a monitor created for `owner/repo` cannot use its Task credential to list, review, or comment on another repository by changing tool arguments.
 
 ## Related Workflows
 
