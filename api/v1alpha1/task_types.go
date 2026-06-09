@@ -497,6 +497,18 @@ type ExecutionWorkspaceStatus struct {
 	// +optional
 	Reused bool `json:"reused,omitempty"`
 
+	// Placement reports non-secret runtime placement metadata for the workspace.
+	// +optional
+	Placement *ExecutionWorkspacePlacementStatus `json:"placement,omitempty"`
+
+	// Density reports non-secret actor and worker counts for the workspace provider.
+	// +optional
+	Density *ExecutionWorkspaceDensityStatus `json:"density,omitempty"`
+
+	// ResumeLatency is the observed time spent resuming the workspace until it was ready.
+	// +optional
+	ResumeLatency *metav1.Duration `json:"resumeLatency,omitempty"`
+
 	// Message contains sanitized lifecycle context.
 	// +optional
 	Message string `json:"message,omitempty"`
@@ -504,6 +516,44 @@ type ExecutionWorkspaceStatus struct {
 	// LastUpdateTime is the last time workspace status was updated.
 	// +optional
 	LastUpdateTime *metav1.Time `json:"lastUpdateTime,omitempty"`
+}
+
+// ExecutionWorkspacePlacementStatus is the safe placement surface for an execution workspace.
+type ExecutionWorkspacePlacementStatus struct {
+	// WorkerNamespace is the namespace containing the selected worker pod.
+	// +optional
+	WorkerNamespace string `json:"workerNamespace,omitempty"`
+
+	// WorkerPool is the provider's worker-pool name when available.
+	// +optional
+	WorkerPool string `json:"workerPool,omitempty"`
+
+	// WorkerPodName is the selected worker pod name when available.
+	// +optional
+	WorkerPodName string `json:"workerPodName,omitempty"`
+}
+
+// ExecutionWorkspaceDensityStatus reports provider-level actor density.
+type ExecutionWorkspaceDensityStatus struct {
+	// WorkerCount is the number of workers reported by the provider.
+	// +optional
+	WorkerCount int32 `json:"workerCount,omitempty"`
+
+	// ActorCount is the number of actors reported by the provider.
+	// +optional
+	ActorCount int32 `json:"actorCount,omitempty"`
+
+	// RunningActorCount is the number of actors currently running on workers.
+	// +optional
+	RunningActorCount int32 `json:"runningActorCount,omitempty"`
+
+	// SuspendedActorCount is the number of actors currently suspended.
+	// +optional
+	SuspendedActorCount int32 `json:"suspendedActorCount,omitempty"`
+
+	// ActorsPerWorker is ActorCount divided by WorkerCount, formatted as a decimal string.
+	// +optional
+	ActorsPerWorker string `json:"actorsPerWorker,omitempty"`
 }
 
 // ChildTaskStatus tracks the status of a delegated child task

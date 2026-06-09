@@ -131,6 +131,29 @@ type ExecutionWorkspaceSpec struct {
 	// Defaults to delete when omitted.
 	// +optional
 	CleanupPolicy WorkspaceCleanupPolicy `json:"cleanupPolicy,omitempty"`
+
+	// Boot asks providers that support it to boot the workspace workload from scratch
+	// instead of resuming from the provider's default snapshot. Currently supported
+	// by the Substrate provider.
+	// +optional
+	Boot bool `json:"boot,omitempty"`
+
+	// PoolRef references an operator-managed Substrate actor pool for placement,
+	// density tracking, and oversubscription policy.
+	// +optional
+	PoolRef *SubstrateActorPoolReference `json:"poolRef,omitempty"`
+
+	// Snapshot configures explicit provider snapshot restore/checkpoint behavior.
+	// Non-empty settings are currently rejected until provider checkpoint/restore
+	// support is available through Orka.
+	// +optional
+	Snapshot *ExecutionWorkspaceSnapshotSpec `json:"snapshot,omitempty"`
+
+	// Hibernation configures process lifetime inside the workspace. Resident
+	// mode is currently rejected until the worker protocol can report per-turn
+	// completion separately from resident process lifetime.
+	// +optional
+	Hibernation *ExecutionWorkspaceHibernationSpec `json:"hibernation,omitempty"`
 }
 
 // WorkspaceTemplateReference references an execution workspace template.
@@ -143,4 +166,58 @@ type WorkspaceTemplateReference struct {
 	// It defaults to the Task namespace, or the controller namespace when configured.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
+}
+
+// SubstrateActorPoolReference references a SubstrateActorPool.
+type SubstrateActorPoolReference struct {
+	// Name is the pool name.
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// Namespace is the pool namespace. It defaults to the Task namespace.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// ExecutionWorkspaceSnapshotSpec selects explicit provider snapshots.
+type ExecutionWorkspaceSnapshotSpec struct {
+	// RestoreURI is a provider-native snapshot URI prefix to restore before the
+	// workspace command runs.
+	// +optional
+	RestoreURI string `json:"restoreURI,omitempty"`
+
+	// CheckpointURI is a provider-native snapshot URI prefix to write when the
+	// workspace is retained or released.
+	// +optional
+	CheckpointURI string `json:"checkpointURI,omitempty"`
+
+	// CheckpointOnRelease requests a checkpoint when cleanup releases or retains
+	// the workspace. CheckpointURI must be set when this is true.
+	// +optional
+	CheckpointOnRelease bool `json:"checkpointOnRelease,omitempty"`
+}
+
+// ExecutionWorkspaceProcessMode controls process lifetime inside a workspace.
+// +kubebuilder:validation:Enum=fresh;resident
+type ExecutionWorkspaceProcessMode string
+
+const (
+	// ExecutionWorkspaceProcessModeFresh starts a fresh command for each task.
+	ExecutionWorkspaceProcessModeFresh ExecutionWorkspaceProcessMode = "fresh"
+	// ExecutionWorkspaceProcessModeResident reuses a long-lived process when the
+	// runtime command supports a stdin-driven resident protocol.
+	ExecutionWorkspaceProcessModeResident ExecutionWorkspaceProcessMode = "resident"
+)
+
+// ExecutionWorkspaceHibernationSpec configures resident process reuse.
+type ExecutionWorkspaceHibernationSpec struct {
+	// ProcessMode controls whether each turn starts fresh or reuses a resident
+	// process. Defaults to fresh.
+	// +optional
+	ProcessMode ExecutionWorkspaceProcessMode `json:"processMode,omitempty"`
+
+	// ResidentKey selects the process slot for resident mode. When omitted, the
+	// worker derives a stable key from namespace, template, and reuse key.
+	// +optional
+	ResidentKey string `json:"residentKey,omitempty"`
 }

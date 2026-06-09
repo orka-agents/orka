@@ -143,7 +143,12 @@ The live GitHub OIDC workflow (`.github/workflows/live-github-oidc-e2e.yml`) run
 The Agent Substrate workflow (`.github/workflows/agent-substrate-e2e.yml`) is secret-free and runs `scripts/agent-substrate-e2e.sh` against a fresh Kind cluster. It pins the Substrate checkout with `SUBSTRATE_REF`, installs Substrate, initializes the local RustFS snapshot bucket, builds local Orka controller/workspace/worker images, then validates:
 
 - direct Substrate actor create/resume/router/daemon exec/suspend/delete
+- Orka `SubstrateActorPool` reconciliation and density reporting
 - Orka `Task` execution and result submission with the default Substrate workspace provider
+- pooled Orka `Task` placement through `spec.execution.workspace.poolRef`
+- MCP actor-backed `Tool` execution through a pooled Substrate actor
+- MCP actor reuse across forced Tool reconciles without rebooting an already booted actor
+- workspace placement, density, and resume-latency status fields
 - delete and retained cleanup when the pinned Substrate runtime completes `runsc delete`
 - `WorkspaceCleanupFailed` is tolerated only after the Task result is available, because the pinned Substrate revision can fail `runsc delete` after successful Orka execution in GitHub-hosted kind
 - a missing `ActorTemplate` fails predictably

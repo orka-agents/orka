@@ -302,11 +302,17 @@ func getSubstrateWorkspaceExecutor() (workspace.WorkspaceExecutor, error) {
 	}
 	substrateEnv := workerenv.ParseSubstrateEnv(os.Getenv)
 	substrateWorkspaceExecutor, substrateWorkspaceExecutorErr = workspace.NewSubstrateExecutor(workspace.SubstrateConfig{
-		APIEndpoint:           substrateEnv.APIEndpoint,
-		APICAFile:             substrateEnv.APICAFile,
-		APIInsecureSkipVerify: substrateEnv.APIInsecureSkipVerify,
-		RouterURL:             substrateEnv.RouterURL,
-		ActorDNSSuffix:        substrateEnv.ActorDNSSuffix,
+		APIEndpoint:             substrateEnv.APIEndpoint,
+		APICAFile:               substrateEnv.APICAFile,
+		APIInsecureSkipVerify:   substrateEnv.APIInsecureSkipVerify,
+		RouterURL:               substrateEnv.RouterURL,
+		ActorDNSSuffix:          substrateEnv.ActorDNSSuffix,
+		SessionIdentityToken:    substrateEnv.SessionIdentityToken,
+		SessionIdentityAudience: strings.Split(substrateEnv.SessionIdentityAudience, ","),
+		SessionIdentityAppID:    substrateEnv.SessionIdentityAppID,
+		SessionIdentityUserID:   substrateEnv.SessionIdentityUserID,
+		SessionIdentityRequired: substrateEnv.SessionIdentityRequired,
+		SessionIdentityMintCert: substrateEnv.SessionIdentityMintCert,
 	})
 	return substrateWorkspaceExecutor, substrateWorkspaceExecutorErr
 }
@@ -493,7 +499,7 @@ func runAgentInWorkspace(
 			ref,
 			cleanupEnv,
 			claim.Reused,
-			false,
+			executionWorkspaceDeferredCleanupSubmitsStatus(cleanupEnv),
 			cleanupOptions,
 		); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to clean up execution workspace: %v\n", err)
@@ -507,10 +513,13 @@ func runAgentInWorkspace(
 		"workspace claimed",
 	)
 
-	if _, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
-		Ref:     ref,
-		Timeout: workspaceEnv.ClaimTimeout,
-	}); err != nil {
+	ready, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
+		Ref:                ref,
+		Timeout:            workspaceEnv.ClaimTimeout,
+		Boot:               workspaceEnv.Boot,
+		SnapshotRestoreURI: workspaceEnv.SnapshotRestoreURI,
+	})
+	if err != nil {
 		submitExecutionWorkspaceStatus(
 			workspaceEnv,
 			corev1alpha1.ExecutionWorkspacePhaseFailed,
@@ -520,12 +529,14 @@ func runAgentInWorkspace(
 		)
 		return fmt.Errorf("wait for execution workspace: %w", err)
 	}
+	readyStatusOptions := []executionWorkspaceStatusOption{withExecutionWorkspaceReadyResult(ready)}
 	submitExecutionWorkspaceStatus(
 		workspaceEnv,
 		corev1alpha1.ExecutionWorkspacePhaseReady,
 		corev1alpha1.ExecutionWorkspaceReasonReady,
 		claim.Reused,
 		"workspace ready",
+		readyStatusOptions...,
 	)
 
 	if handoffToken != "" {
@@ -536,6 +547,7 @@ func runAgentInWorkspace(
 				corev1alpha1.ExecutionWorkspaceReasonHandoffFailed,
 				claim.Reused,
 				"workspace handoff failed",
+				readyStatusOptions...,
 			)
 			return err
 		}
@@ -558,6 +570,7 @@ func runAgentInWorkspace(
 			corev1alpha1.ExecutionWorkspaceReasonHandoffFailed,
 			claim.Reused,
 			"workspace handoff failed",
+			readyStatusOptions...,
 		)
 		return err
 	}
@@ -569,6 +582,8 @@ func runAgentInWorkspace(
 		WorkDir:        workspaceDir,
 		Timeout:        workspaceEnv.CommandTimeout,
 		MaxOutputBytes: agentSandboxExecMaxOutputBytes,
+		Resident:       executionWorkspaceResidentProcess(workspaceEnv),
+		ResidentKey:    executionWorkspaceResidentKey(workspaceEnv, ref),
 	})
 	if err != nil {
 		submitExecutionWorkspaceStatus(
@@ -577,6 +592,7 @@ func runAgentInWorkspace(
 			corev1alpha1.ExecutionWorkspaceReasonCommandFailed,
 			claim.Reused,
 			"workspace command failed",
+			readyStatusOptions...,
 		)
 		return fmt.Errorf("%s workspace execution failed: %w%s", name, err, formatSandboxExecOutput(execResult))
 	}
@@ -587,6 +603,7 @@ func runAgentInWorkspace(
 			corev1alpha1.ExecutionWorkspaceReasonCommandFailed,
 			claim.Reused,
 			"workspace command failed",
+			readyStatusOptions...,
 		)
 		return fmt.Errorf(
 			"%s workspace execution failed: command exited with code %d%s",
@@ -598,7 +615,15 @@ func runAgentInWorkspace(
 
 	cleanupCtx, cleanupCancel := agentSandboxCleanupContext(workspaceEnv.ClaimTimeout)
 	defer cleanupCancel()
-	if err := cleanupExecutionWorkspace(cleanupCtx, executor, ref, workspaceEnv, claim.Reused, true); err != nil {
+	if err := cleanupExecutionWorkspaceWithOptions(
+		cleanupCtx,
+		executor,
+		ref,
+		workspaceEnv,
+		claim.Reused,
+		true,
+		executionWorkspaceCleanupOptions{statusOptions: readyStatusOptions},
+	); err != nil {
 		reason := corev1alpha1.ExecutionWorkspaceReasonCleanupFailed
 		if errors.Is(err, errExecutionWorkspaceSecretScrubFailed) {
 			reason = corev1alpha1.ExecutionWorkspaceReasonSecretScrubFailed
@@ -609,6 +634,7 @@ func runAgentInWorkspace(
 			reason,
 			claim.Reused,
 			"workspace cleanup failed",
+			readyStatusOptions...,
 		)
 		return fmt.Errorf("execution workspace cleanup failed: %w", err)
 	}
@@ -640,6 +666,7 @@ func executionWorkspaceCompletionMessage(
 type executionWorkspaceCleanupOptions struct {
 	skipSubstrateDeleteScrub  bool
 	skipSubstrateReleaseScrub bool
+	statusOptions             []executionWorkspaceStatusOption
 }
 
 func preTerminalExecutionWorkspaceCleanup(
@@ -655,13 +682,30 @@ func preTerminalExecutionWorkspaceCleanup(
 		skipSubstrateDeleteScrub:  true,
 		skipSubstrateReleaseScrub: true,
 	}
-	if claimedNewWorkspace && strings.EqualFold(
-		strings.TrimSpace(workspaceEnv.CleanupPolicy),
-		string(corev1alpha1.WorkspaceCleanupPolicyRetain),
-	) {
+	if claimedNewWorkspace &&
+		strings.EqualFold(
+			strings.TrimSpace(workspaceEnv.CleanupPolicy),
+			string(corev1alpha1.WorkspaceCleanupPolicyRetain),
+		) {
 		workspaceEnv.CleanupPolicy = string(corev1alpha1.WorkspaceCleanupPolicyDelete)
 	}
 	return workspaceEnv, options
+}
+
+func executionWorkspaceCleanupPolicy(workspaceEnv workerenv.ExecutionWorkspaceEnv) string {
+	policy := strings.TrimSpace(strings.ToLower(workspaceEnv.CleanupPolicy))
+	if strings.TrimSpace(workspaceEnv.Provider) == string(corev1alpha1.WorkspaceProviderSubstrate) &&
+		strings.TrimSpace(workspaceEnv.PoolName) != "" &&
+		policy != "" &&
+		policy != string(corev1alpha1.WorkspaceCleanupPolicyDelete) {
+		return string(corev1alpha1.WorkspaceCleanupPolicyDelete)
+	}
+	return policy
+}
+
+func executionWorkspaceDeferredCleanupSubmitsStatus(workspaceEnv workerenv.ExecutionWorkspaceEnv) bool {
+	return strings.TrimSpace(workspaceEnv.Provider) == string(corev1alpha1.WorkspaceProviderSubstrate) &&
+		strings.TrimSpace(workspaceEnv.PoolName) != ""
 }
 
 func runAgentInSandbox(ctx context.Context, name, workspaceDir string, sandboxEnv workerenv.AgentSandboxEnv) error {
@@ -846,6 +890,31 @@ func workspaceWarmPoolPolicy(workspaceEnv workerenv.ExecutionWorkspaceEnv) strin
 		return ""
 	}
 	return agentSandboxClaimWarmPoolPolicy(workerenv.ParseAgentSandboxEnv(os.Getenv).WarmPoolPolicy)
+}
+
+func executionWorkspaceResidentProcess(workspaceEnv workerenv.ExecutionWorkspaceEnv) bool {
+	return strings.TrimSpace(workspaceEnv.Provider) == string(corev1alpha1.WorkspaceProviderSubstrate) &&
+		strings.TrimSpace(workspaceEnv.ProcessMode) == string(corev1alpha1.ExecutionWorkspaceProcessModeResident)
+}
+
+func executionWorkspaceResidentKey(workspaceEnv workerenv.ExecutionWorkspaceEnv, ref workspace.WorkspaceRef) string {
+	if key := strings.TrimSpace(workspaceEnv.ResidentKey); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(workspaceEnv.ReuseKey); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(ref.ID); key != "" {
+		return key
+	}
+	return strings.TrimSpace(ref.ClaimName)
+}
+
+func executionWorkspaceCheckpointURI(workspaceEnv workerenv.ExecutionWorkspaceEnv) string {
+	if !workspaceEnv.SnapshotOnRelease {
+		return ""
+	}
+	return strings.TrimSpace(workspaceEnv.SnapshotCheckpointURI)
 }
 
 func stageAgentSandboxExecutable(
@@ -1105,7 +1174,13 @@ func cleanupExecutionWorkspaceWithOptions(
 		return nil
 	}
 
-	switch strings.TrimSpace(strings.ToLower(workspaceEnv.CleanupPolicy)) {
+	cleanupPolicy := executionWorkspaceCleanupPolicy(workspaceEnv)
+	statusEnv := workspaceEnv
+	if cleanupPolicy != "" {
+		statusEnv.CleanupPolicy = cleanupPolicy
+	}
+
+	switch cleanupPolicy {
 	case "retain":
 		if shouldPreScrubExecutionWorkspaceSecrets(workspaceEnv) {
 			if err := scrubExecutionWorkspaceSecrets(ctx, executor, ref, workspaceEnv); err != nil {
@@ -1113,21 +1188,23 @@ func cleanupExecutionWorkspaceWithOptions(
 			}
 		}
 		if _, err := executor.Release(ctx, workspace.ReleaseRequest{
-			Ref:       ref,
-			Retain:    true,
-			Reason:    "execution workspace cleanup policy retain",
-			Timeout:   workspaceEnv.ClaimTimeout,
-			SkipScrub: options.skipSubstrateReleaseScrub,
+			Ref:                   ref,
+			Retain:                true,
+			Reason:                "execution workspace cleanup policy retain",
+			Timeout:               workspaceEnv.ClaimTimeout,
+			SkipScrub:             options.skipSubstrateReleaseScrub,
+			SnapshotCheckpointURI: executionWorkspaceCheckpointURI(workspaceEnv),
 		}); err != nil {
 			return fmt.Errorf("retain workspace: %w", err)
 		}
 		if submitStatus {
 			submitExecutionWorkspaceStatus(
-				workspaceEnv,
+				statusEnv,
 				corev1alpha1.ExecutionWorkspacePhaseRetained,
 				corev1alpha1.ExecutionWorkspaceReasonRetained,
 				reused,
 				"workspace retained",
+				options.statusOptions...,
 			)
 		}
 		return nil
@@ -1142,11 +1219,12 @@ func cleanupExecutionWorkspaceWithOptions(
 		}
 		if submitStatus {
 			submitExecutionWorkspaceStatus(
-				workspaceEnv,
+				statusEnv,
 				corev1alpha1.ExecutionWorkspacePhaseDeleted,
 				corev1alpha1.ExecutionWorkspaceReasonDeleted,
 				reused,
 				"workspace deleted",
+				options.statusOptions...,
 			)
 		}
 		return nil
@@ -1162,21 +1240,23 @@ func cleanupExecutionWorkspaceWithOptions(
 			}
 		}
 		if _, err := executor.Release(ctx, workspace.ReleaseRequest{
-			Ref:       ref,
-			Retain:    true,
-			Reason:    "unsupported execution workspace cleanup policy",
-			Timeout:   workspaceEnv.ClaimTimeout,
-			SkipScrub: options.skipSubstrateReleaseScrub,
+			Ref:                   ref,
+			Retain:                true,
+			Reason:                "unsupported execution workspace cleanup policy",
+			Timeout:               workspaceEnv.ClaimTimeout,
+			SkipScrub:             options.skipSubstrateReleaseScrub,
+			SnapshotCheckpointURI: executionWorkspaceCheckpointURI(workspaceEnv),
 		}); err != nil {
 			return fmt.Errorf("retain workspace after unsupported cleanup policy: %w", err)
 		}
 		if submitStatus {
 			submitExecutionWorkspaceStatus(
-				workspaceEnv,
+				statusEnv,
 				corev1alpha1.ExecutionWorkspacePhaseRetained,
 				corev1alpha1.ExecutionWorkspaceReasonRetained,
 				reused,
 				"workspace retained",
+				options.statusOptions...,
 			)
 		}
 		return nil
@@ -1364,6 +1444,14 @@ func scrubInnerExecutionWorkspaceEnv(env map[string]string) {
 		workerenv.ExecutionWorkspaceReusePolicy,
 		workerenv.ExecutionWorkspaceReuseKey,
 		workerenv.ExecutionWorkspaceCleanupPolicy,
+		workerenv.ExecutionWorkspaceBoot,
+		workerenv.ExecutionWorkspacePoolName,
+		workerenv.ExecutionWorkspacePoolNamespace,
+		workerenv.ExecutionWorkspaceSnapshotRestoreURI,
+		workerenv.ExecutionWorkspaceSnapshotCheckpointURI,
+		workerenv.ExecutionWorkspaceSnapshotOnRelease,
+		workerenv.ExecutionWorkspaceProcessMode,
+		workerenv.ExecutionWorkspaceResidentKey,
 		workerenv.ExecutionWorkspaceClaimTimeoutSeconds,
 		workerenv.ExecutionWorkspaceCommandTimeoutSeconds,
 		workerenv.ExecutionWorkspaceStatusEndpoint,
@@ -1372,6 +1460,12 @@ func scrubInnerExecutionWorkspaceEnv(env map[string]string) {
 		workerenv.SubstrateAPIInsecureSkipVerify,
 		workerenv.SubstrateRouterURL,
 		workerenv.SubstrateActorDNSSuffix,
+		workerenv.SubstrateSessionIdentityToken,
+		workerenv.SubstrateSessionIdentityRequired,
+		workerenv.SubstrateSessionIdentityMintCert,
+		workerenv.SubstrateSessionIdentityAudience,
+		workerenv.SubstrateSessionIdentityAppID,
+		workerenv.SubstrateSessionIdentityUserID,
 		workerenv.WorkspaceBootstrapToken,
 	} {
 		delete(env, name)

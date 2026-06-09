@@ -63,7 +63,7 @@ func TestDeleteToolTool_Execute(t *testing.T) {
 		},
 		Spec: corev1alpha1.ToolSpec{
 			Description: "test tool",
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL:    exampleDotComURL,
 				Method: httpMethodPostString,
 			},

@@ -9,6 +9,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -161,6 +162,38 @@ func TestWorkspaceAgentDetachedExecCanBePolled(t *testing.T) {
 	server.routes().ServeHTTP(statusResp, statusReq)
 	if statusResp.Code != http.StatusNotFound {
 		t.Fatalf("completed detached exec status after poll = %d, want %d", statusResp.Code, http.StatusNotFound)
+	}
+}
+
+func TestWorkspaceAgentRejectsResidentExec(t *testing.T) {
+	t.Setenv(envHandoffToken, "secret")
+	server := newWorkspaceAgentServer()
+
+	for _, detach := range []bool{false, true} {
+		t.Run(fmt.Sprintf("detach=%t", detach), func(t *testing.T) {
+			body, err := json.Marshal(execRequest{
+				Command:     []string{"sh", "-c", "printf unreachable"},
+				WorkDir:     "/tmp",
+				Detach:      detach,
+				Resident:    true,
+				ResidentKey: "session-1",
+			})
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/exec", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer secret")
+			resp := httptest.NewRecorder()
+
+			server.routes().ServeHTTP(resp, req)
+
+			if resp.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
+			}
+			if !strings.Contains(resp.Body.String(), "resident exec is not supported yet") {
+				t.Fatalf("body = %q, want unsupported resident message", resp.Body.String())
+			}
+		})
 	}
 }
 

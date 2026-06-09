@@ -53,7 +53,9 @@ spec:
                 description: Description is the tool description shown to the LLM
                 type: string
               http:
-                description: HTTP defines the HTTP execution configuration
+                description: |-
+                  HTTP defines the HTTP execution configuration. It is required unless MCP
+                  is set.
                 properties:
                   authBodyKey:
                     description: |-
@@ -106,10 +108,60 @@ spec:
                     description: 'Timeout is the request timeout (default: 30s)'
                     type: string
                   url:
-                    description: URL is the endpoint to call when the tool is invoked
+                    description: |-
+                      URL is the endpoint to call when the tool is invoked
+                      Required for plain HTTP tools. MCP actor-backed tools may omit it when
+                      HTTP is present only for transport auth settings.
                     type: string
+                type: object
+              mcp:
+                description: |-
+                  MCP defines a durable MCP server backend for this tool. MCP tools must set
+                  substrateActor.
+                properties:
+                  path:
+                    description: |-
+                      Path is the HTTP path exposed by the MCP server inside the actor.
+                      Defaults to /mcp.
+                    type: string
+                  substrateActor:
+                    description: SubstrateActor configures a durable Substrate actor
+                      that hosts the MCP server.
+                    properties:
+                      boot:
+                        description: Boot asks Substrate to boot this actor from scratch
+                          on first resume.
+                        type: boolean
+                      poolRef:
+                        description: PoolRef optionally assigns this tool actor to
+                          an Orka SubstrateActorPool.
+                        properties:
+                          name:
+                            description: Name is the pool name.
+                            type: string
+                          namespace:
+                            description: Namespace is the pool namespace. It defaults
+                              to the Task namespace.
+                            type: string
+                        type: object
+                      templateRef:
+                        description: TemplateRef references the ActorTemplate that
+                          runs the MCP server.
+                        properties:
+                          name:
+                            description: Name is the name of the workspace template.
+                            type: string
+                          namespace:
+                            description: |-
+                              Namespace is the namespace of the workspace template and claim.
+                              It defaults to the Task namespace, or the controller namespace when configured.
+                            type: string
+                        type: object
+                    required:
+                    - templateRef
+                    type: object
                 required:
-                - url
+                - substrateActor
                 type: object
               parameters:
                 description: Parameters is the JSON Schema for tool parameters (OpenAI
@@ -117,11 +169,57 @@ spec:
                 x-kubernetes-preserve-unknown-fields: true
             required:
             - description
-            - http
             type: object
+            x-kubernetes-validations:
+            - message: http or mcp.substrateActor is required
+              rule: has(self.http) || (has(self.mcp) && has(self.mcp.substrateActor))
+            - message: http.url is required unless mcp.substrateActor is set
+              rule: '!has(self.http) || (has(self.mcp) && has(self.mcp.substrateActor))
+                || (has(self.http.url) && self.http.url.size() > 0)'
           status:
             description: ToolStatus defines the observed state of Tool
             properties:
+              actor:
+                description: Actor reports durable actor metadata when this tool is
+                  MCP actor-backed.
+                properties:
+                  actorID:
+                    description: ActorID is the stable provider actor id.
+                    type: string
+                  poolRef:
+                    description: PoolRef is the resolved Orka actor pool.
+                    properties:
+                      name:
+                        description: Name is the pool name.
+                        type: string
+                      namespace:
+                        description: Namespace is the pool namespace. It defaults
+                          to the Task namespace.
+                        type: string
+                    type: object
+                  provider:
+                    description: Provider is the actor provider.
+                    enum:
+                    - agent-sandbox
+                    - substrate
+                    type: string
+                  routeHost:
+                    description: RouteHost is the HTTP Host value used with the provider
+                      router.
+                    type: string
+                  templateRef:
+                    description: TemplateRef is the resolved actor template.
+                    properties:
+                      name:
+                        description: Name is the name of the workspace template.
+                        type: string
+                      namespace:
+                        description: |-
+                          Namespace is the namespace of the workspace template and claim.
+                          It defaults to the Task namespace, or the controller namespace when configured.
+                        type: string
+                    type: object
+                type: object
               available:
                 description: Available indicates whether the tool endpoint is reachable
                 type: boolean
@@ -185,6 +283,10 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              endpoint:
+                description: Endpoint is the resolved non-secret endpoint used by
+                  workers.
+                type: string
               error:
                 description: Error is the error message if the tool is unavailable
                 type: string

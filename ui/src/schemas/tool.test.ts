@@ -22,14 +22,14 @@ describe('httpExecutionSchema', () => {
     expect(httpExecutionSchema.parse(data)).toEqual(data)
   })
 
-  it('parses with only required fields', () => {
+  it('parses with only URL', () => {
     const data = { url: 'https://api.example.com' }
     expect(httpExecutionSchema.parse(data)).toEqual(data)
   })
 
-  it('rejects missing url', () => {
-    expect(() => httpExecutionSchema.parse({})).toThrow()
-    expect(() => httpExecutionSchema.parse({ method: 'GET' })).toThrow()
+  it('parses auth-only HTTP config for MCP transport auth', () => {
+    const data = { authSecretRef: { name: 'mcp-auth', key: 'token' }, authInject: 'header' }
+    expect(httpExecutionSchema.parse(data)).toEqual(data)
   })
 
   it('rejects wrong types', () => {
@@ -62,12 +62,51 @@ describe('toolSpecSchema', () => {
     expect(toolSpecSchema.parse(data)).toEqual(data)
   })
 
+  it('parses MCP-only tools without HTTP configuration', () => {
+    const data = {
+      description: 'MCP actor tool',
+      mcp: {
+        path: '/mcp',
+        substrateActor: {
+          templateRef: { name: 'mcp-template', namespace: 'ate-demo' },
+          poolRef: { name: 'mcp-pool', namespace: 'default' },
+          boot: true,
+        },
+      },
+    }
+    expect(toolSpecSchema.parse(data)).toEqual(data)
+  })
+
+  it('parses MCP tools with HTTP transport auth but no URL', () => {
+    const data = {
+      description: 'MCP actor tool',
+      http: { authSecretRef: { name: 'mcp-auth', key: 'token' } },
+      mcp: {
+        path: '/mcp',
+        substrateActor: {
+          templateRef: { name: 'mcp-template', namespace: 'ate-demo' },
+        },
+      },
+    }
+    expect(toolSpecSchema.parse(data)).toEqual(data)
+  })
+
   it('rejects missing description', () => {
     expect(() => toolSpecSchema.parse({ http: { url: 'http://x' } })).toThrow()
   })
 
-  it('rejects missing http', () => {
+  it('rejects missing backend configuration', () => {
     expect(() => toolSpecSchema.parse({ description: 'A tool' })).toThrow()
+  })
+
+  it('rejects plain HTTP tools without URL', () => {
+    expect(() => toolSpecSchema.parse({ description: 'A tool', http: { method: 'GET' } })).toThrow()
+  })
+
+  it('rejects MCP tools without substrate actor backing', () => {
+    expect(() =>
+      toolSpecSchema.parse({ description: 'MCP actor tool', mcp: { path: '/mcp' } })
+    ).toThrow()
   })
 
   it('rejects empty object', () => {
@@ -89,6 +128,21 @@ describe('toolStatusSchema', () => {
   it('parses with only required fields', () => {
     expect(toolStatusSchema.parse({ available: true })).toEqual({ available: true })
     expect(toolStatusSchema.parse({ available: false })).toEqual({ available: false })
+  })
+
+  it('parses MCP actor endpoint status', () => {
+    const data = {
+      available: true,
+      endpoint: 'http://router/mcp',
+      actor: {
+        provider: 'substrate',
+        actorID: 'orka-p-pool-00001',
+        routeHost: 'orka-p-pool-00001.actors.example.com',
+        templateRef: { name: 'mcp-template', namespace: 'ate-demo' },
+        poolRef: { name: 'mcp-pool', namespace: 'default' },
+      },
+    }
+    expect(toolStatusSchema.parse(data)).toEqual(data)
   })
 
   it('rejects missing available', () => {
@@ -132,6 +186,32 @@ describe('toolSchema', () => {
       spec: {
         description: 'A tool',
         http: { url: 'https://example.com' },
+      },
+    }
+    expect(toolSchema.parse(data)).toEqual(data)
+  })
+
+  it('parses MCP-only tool detail response', () => {
+    const data = {
+      metadata: { name: 'mcp-tool', namespace: 'default' },
+      spec: {
+        description: 'Durable MCP tool',
+        mcp: {
+          path: '/mcp',
+          substrateActor: {
+            templateRef: { name: 'mcp-template', namespace: 'ate-demo' },
+            poolRef: { name: 'mcp-pool', namespace: 'default' },
+          },
+        },
+      },
+      status: {
+        available: true,
+        endpoint: 'http://router/mcp',
+        actor: {
+          provider: 'substrate',
+          actorID: 'orka-p-pool-00001',
+          routeHost: 'orka-p-pool-00001.actors.example.com',
+        },
       },
     }
     expect(toolSchema.parse(data)).toEqual(data)
@@ -191,6 +271,21 @@ describe('exported types', () => {
     const tool: Tool = {
       metadata: { name: 'test' },
       spec: { description: 'test', http: { url: 'http://x' } },
+    }
+    expect(toolSchema.parse(tool)).toBeDefined()
+  })
+
+  it('Tool type accepts MCP-only specs', () => {
+    const tool: Tool = {
+      metadata: { name: 'mcp-test' },
+      spec: {
+        description: 'test',
+        mcp: {
+          substrateActor: {
+            templateRef: { name: 'mcp-template' },
+          },
+        },
+      },
     }
     expect(toolSchema.parse(tool)).toBeDefined()
   })

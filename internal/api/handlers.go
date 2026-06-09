@@ -70,6 +70,13 @@ func builtinToolResponse(tool tools.Tool) fiber.Map {
 	}
 }
 
+func toolSpecHTTPURL(tool *corev1alpha1.Tool) string {
+	if tool == nil || tool.Spec.HTTP == nil {
+		return ""
+	}
+	return tool.Spec.HTTP.URL
+}
+
 type Handlers struct {
 	client                    client.Client
 	clientset                 kubernetes.Interface
@@ -881,7 +888,7 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 			"builtin":     false,
 			"description": tool.Spec.Description,
 			"available":   tool.Status.Available,
-			"url":         tool.Spec.HTTP.URL,
+			"url":         toolSpecHTTPURL(&tool),
 		})
 	}
 

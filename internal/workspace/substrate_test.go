@@ -23,6 +23,8 @@ const (
 	substrateTestBootstrapBearer = "Bearer bootstrap-token"
 	substrateTestFilesPath       = "/v1/files"
 	substrateTestScrubPath       = "/v1/scrub"
+	substrateTestExecPath        = "/v1/exec"
+	substrateTestHealthPath      = "/healthz"
 	substrateTestToken           = "token"
 )
 
@@ -40,6 +42,24 @@ func TestNewSubstrateExecutorDefaultHTTPClientHasNoTimeout(t *testing.T) {
 	}
 	if executor.httpClient.Timeout != 0 {
 		t.Fatalf("default HTTP timeout = %s, want operation context controlled timeout", executor.httpClient.Timeout)
+	}
+}
+
+func TestNewSubstrateExecutorRejectsSessionIdentityCertificateMinting(t *testing.T) {
+	_, err := NewSubstrateExecutor(SubstrateConfig{
+		RouterURL:               "http://router.test",
+		ActorDNSSuffix:          "actors.test",
+		ControlClient:           &recordingSubstrateControlClient{},
+		SessionIdentityMintCert: true,
+	})
+	if err == nil {
+		t.Fatal("NewSubstrateExecutor() error = nil, want unsupported certificate minting error")
+	}
+	if !IsKind(err, ErrorKindFailedPrecondition) {
+		t.Fatalf("NewSubstrateExecutor() error kind = %s, want %s", KindOf(err), ErrorKindFailedPrecondition)
+	}
+	if !strings.Contains(err.Error(), "certificate minting is not supported yet") {
+		t.Fatalf("NewSubstrateExecutor() error = %q, want unsupported certificate minting context", err.Error())
 	}
 }
 
@@ -193,6 +213,234 @@ func TestSubstrateClaimDerivesRetainedPhaseFromSuspendedActor(t *testing.T) {
 	}
 }
 
+func TestSubstrateConvergeActorsDeletesDeterministicActorsAboveTarget(t *testing.T) {
+	const prefix = "orka-p-test"
+	control := &recordingSubstrateControlClient{
+		actors: []substrateActor{
+			{ActorID: prefix + "-00000", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: prefix + "-00001", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: prefix + "-00002", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: prefix + "-00003", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: prefix + "-manual", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: "other-pool-00099", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+		},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     http.DefaultClient,
+		routerURL:      "http://router.test",
+		actorDNSSuffix: "actors.test",
+		now:            time.Now,
+	}
+
+	created, deleted, err := executor.ConvergeSubstrateActors(t.Context(), prefix, 2, TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"})
+	if err != nil {
+		t.Fatalf("ConvergeSubstrateActors() error = %v", err)
+	}
+	if created != 0 || deleted != 2 {
+		t.Fatalf("ConvergeSubstrateActors() created=%d deleted=%d, want 0/2", created, deleted)
+	}
+	wantDeleted := []string{prefix + "-00003", prefix + "-00002"}
+	if !slices.Equal(control.deletedActorIDs, wantDeleted) {
+		t.Fatalf("deleted actors = %#v, want %#v", control.deletedActorIDs, wantDeleted)
+	}
+	if control.createCalls != 0 {
+		t.Fatalf("CreateActor calls = %d, want 0", control.createCalls)
+	}
+}
+
+func TestSubstratePruneActorsDeletesDeterministicActorsAboveTarget(t *testing.T) {
+	const prefix = "orka-p-test"
+	control := &recordingSubstrateControlClient{
+		actors: []substrateActor{
+			{ActorID: prefix + "-00000", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: prefix + "-00001", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: prefix + "-00002", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: prefix + "-manual", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: "other-pool-00002", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+		},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     http.DefaultClient,
+		routerURL:      "http://router.test",
+		actorDNSSuffix: "actors.test",
+		now:            time.Now,
+	}
+
+	deleted, err := executor.PruneSubstrateActors(t.Context(), prefix, 1)
+	if err != nil {
+		t.Fatalf("PruneSubstrateActors() error = %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("PruneSubstrateActors() deleted=%d, want 2", deleted)
+	}
+	wantDeleted := []string{prefix + "-00002", prefix + "-00001"}
+	if !slices.Equal(control.deletedActorIDs, wantDeleted) {
+		t.Fatalf("deleted actors = %#v, want %#v", control.deletedActorIDs, wantDeleted)
+	}
+	if control.createCalls != 0 {
+		t.Fatalf("CreateActor calls = %d, want 0", control.createCalls)
+	}
+}
+
+func TestSubstrateConvergeActorsReturnsPartialPruneCountOnError(t *testing.T) {
+	const prefix = "orka-p-test"
+	control := &recordingSubstrateControlClient{
+		actors: []substrateActor{
+			{ActorID: prefix + "-00000", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: prefix + "-00001", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+			{ActorID: prefix + "-00002", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
+		},
+		deleteErrs: []error{
+			nil,
+			NewError("delete actor", ErrorKindUnknown, "delete failed", false, nil),
+		},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     http.DefaultClient,
+		routerURL:      "http://router.test",
+		actorDNSSuffix: "actors.test",
+		now:            time.Now,
+	}
+
+	created, deleted, err := executor.ConvergeSubstrateActors(t.Context(), prefix, 1, TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"})
+	if err == nil {
+		t.Fatal("ConvergeSubstrateActors() error = nil, want delete error")
+	}
+	if created != 0 || deleted != 1 {
+		t.Fatalf("ConvergeSubstrateActors() created=%d deleted=%d, want 0/1", created, deleted)
+	}
+	wantDeleted := []string{prefix + "-00002", prefix + "-00001"}
+	if !slices.Equal(control.deletedActorIDs, wantDeleted) {
+		t.Fatalf("deleted actors = %#v, want %#v", control.deletedActorIDs, wantDeleted)
+	}
+}
+
+func TestSubstrateConvergeActorsRejectsTemplateMismatchBelowTarget(t *testing.T) {
+	const prefix = "orka-p-test"
+	control := &recordingSubstrateControlClient{
+		templateName: "old-template",
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     http.DefaultClient,
+		routerURL:      "http://router.test",
+		actorDNSSuffix: "actors.test",
+		now:            time.Now,
+	}
+
+	created, deleted, err := executor.ConvergeSubstrateActors(t.Context(), prefix, 2, TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"})
+	if err == nil {
+		t.Fatal("ConvergeSubstrateActors() error = nil, want template mismatch")
+	}
+	if !IsKind(err, ErrorKindFailedPrecondition) {
+		t.Fatalf("ConvergeSubstrateActors() error kind = %s, want %s", KindOf(err), ErrorKindFailedPrecondition)
+	}
+	if !strings.Contains(err.Error(), "existing Substrate actor uses template ate-demo/old-template") {
+		t.Fatalf("ConvergeSubstrateActors() error = %q, want template mismatch context", err.Error())
+	}
+	if created != 0 || deleted != 0 {
+		t.Fatalf("ConvergeSubstrateActors() created=%d deleted=%d, want 0/0 on mismatch", created, deleted)
+	}
+	if control.createCalls != 0 || control.listActorsCalls != 0 {
+		t.Fatalf("create/list calls = %d/%d, want 0/0 after mismatch", control.createCalls, control.listActorsCalls)
+	}
+}
+
+func TestSubstrateConvergeActorsRevalidatesConcurrentCreateAlreadyExists(t *testing.T) {
+	const prefix = "orka-p-test"
+	tests := []struct {
+		name         string
+		templateName string
+		wantErr      bool
+	}{
+		{name: "matching template"},
+		{name: "template mismatch", templateName: "old-template", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			control := &recordingSubstrateControlClient{
+				getErrs: []error{
+					NewError("get actor", ErrorKindNotFound, "actor not found", false, nil),
+				},
+				createErr:    NewError("create actor", ErrorKindAlreadyExists, "actor already exists", false, nil),
+				templateName: tt.templateName,
+			}
+			executor := &SubstrateWorkspaceExecutor{
+				control:        control,
+				httpClient:     http.DefaultClient,
+				routerURL:      "http://router.test",
+				actorDNSSuffix: "actors.test",
+				now:            time.Now,
+			}
+
+			created, deleted, err := executor.ConvergeSubstrateActors(t.Context(), prefix, 1, TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"})
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("ConvergeSubstrateActors() error = nil, want template mismatch")
+				}
+				if !IsKind(err, ErrorKindFailedPrecondition) {
+					t.Fatalf("ConvergeSubstrateActors() error kind = %s, want %s", KindOf(err), ErrorKindFailedPrecondition)
+				}
+				if !strings.Contains(err.Error(), "existing Substrate actor uses template ate-demo/old-template") {
+					t.Fatalf("ConvergeSubstrateActors() error = %q, want template mismatch context", err.Error())
+				}
+				if control.listActorsCalls != 0 {
+					t.Fatalf("ListActors calls = %d, want 0 after mismatch", control.listActorsCalls)
+				}
+			} else if err != nil {
+				t.Fatalf("ConvergeSubstrateActors() error = %v", err)
+			}
+			if created != 0 || deleted != 0 {
+				t.Fatalf("ConvergeSubstrateActors() created=%d deleted=%d, want 0/0", created, deleted)
+			}
+			if control.getCalls != 2 {
+				t.Fatalf("GetActor calls = %d, want 2", control.getCalls)
+			}
+			if control.createCalls != 1 {
+				t.Fatalf("CreateActor calls = %d, want 1", control.createCalls)
+			}
+		})
+	}
+}
+
+func TestSubstrateConvergeActorsDeletesStaleTemplateActorsWhenTargetZero(t *testing.T) {
+	const prefix = "orka-p-test"
+	control := &recordingSubstrateControlClient{
+		actors: []substrateActor{
+			{ActorID: prefix + "-00000", TemplateNamespace: "ate-demo", TemplateName: "old-template", Status: substrateStatusSuspended},
+			{ActorID: prefix + "-00001", TemplateNamespace: "ate-demo", TemplateName: "old-template", Status: substrateStatusSuspended},
+			{ActorID: prefix + "-manual", TemplateNamespace: "ate-demo", TemplateName: "old-template", Status: substrateStatusSuspended},
+			{ActorID: "other-pool-00099", TemplateNamespace: "ate-demo", TemplateName: "old-template", Status: substrateStatusSuspended},
+		},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     http.DefaultClient,
+		routerURL:      "http://router.test",
+		actorDNSSuffix: "actors.test",
+		now:            time.Now,
+	}
+
+	created, deleted, err := executor.ConvergeSubstrateActors(t.Context(), prefix, 0, TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"})
+	if err != nil {
+		t.Fatalf("ConvergeSubstrateActors() error = %v", err)
+	}
+	if created != 0 || deleted != 2 {
+		t.Fatalf("ConvergeSubstrateActors() created=%d deleted=%d, want 0/2", created, deleted)
+	}
+	wantDeleted := []string{prefix + "-00001", prefix + "-00000"}
+	if !slices.Equal(control.deletedActorIDs, wantDeleted) {
+		t.Fatalf("deleted actors = %#v, want %#v", control.deletedActorIDs, wantDeleted)
+	}
+	if control.createCalls != 0 {
+		t.Fatalf("CreateActor calls = %d, want 0", control.createCalls)
+	}
+}
+
 func TestSubstrateExecUsesDetachedPolling(t *testing.T) {
 	var sawDetached bool
 	var polls int
@@ -205,7 +453,7 @@ func TestSubstrateExecUsesDetachedPolling(t *testing.T) {
 		}
 
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/exec":
+		case r.Method == http.MethodPost && r.URL.Path == substrateTestExecPath:
 			var req substrateExecRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Errorf("decode exec request: %v", err)
@@ -254,11 +502,42 @@ func TestSubstrateExecUsesDetachedPolling(t *testing.T) {
 	}
 }
 
+func TestSubstrateExecRejectsResidentModeBeforeDaemonRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected daemon request %s %s", r.Method, r.URL.Path)
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	executor := &SubstrateWorkspaceExecutor{
+		httpClient:     server.Client(),
+		routerURL:      server.URL,
+		actorDNSSuffix: "actors.test",
+		handoffToken:   substrateTestToken,
+	}
+
+	_, err := executor.Exec(t.Context(), ExecRequest{
+		Ref:      WorkspaceRef{ID: "actor-1"},
+		Command:  []string{"echo", "ok"},
+		Timeout:  time.Second,
+		Resident: true,
+	})
+	if err == nil {
+		t.Fatal("Exec() error = nil, want unsupported resident execution error")
+	}
+	if !IsKind(err, ErrorKindFailedPrecondition) {
+		t.Fatalf("Exec() error kind = %s, want %s", KindOf(err), ErrorKindFailedPrecondition)
+	}
+	if !strings.Contains(err.Error(), "resident execution is not supported yet") {
+		t.Fatalf("Exec() error = %q, want resident unsupported context", err.Error())
+	}
+}
+
 func TestSubstrateExecRetriesTransientPollingErrors(t *testing.T) {
 	var polls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/exec":
+		case r.Method == http.MethodPost && r.URL.Path == substrateTestExecPath:
 			_ = json.NewEncoder(w).Encode(substrateExecResponse{ExecID: "exec-1", Running: true})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/exec/exec-1":
 			polls++
@@ -356,6 +635,213 @@ func TestSubstrateBootstrapHandoffUploadUsesBootstrapToken(t *testing.T) {
 	}
 }
 
+func TestSubstrateBootstrapHandoffUploadUsesMintedSessionIdentity(t *testing.T) {
+	var uploaded bool
+	var execAuthorized bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == substrateTestFilesPath:
+			if got := r.Header.Get("Authorization"); got != substrateTestBootstrapBearer {
+				t.Errorf("upload Authorization = %q, want bootstrap bearer", got)
+			}
+			var req substrateUploadRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode upload request: %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if len(req.Files) != 1 {
+				t.Errorf("upload files len = %d, want 1", len(req.Files))
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if string(req.Files[0].Data) != "session-jwt" {
+				t.Errorf("uploaded handoff token = %q, want minted session JWT", string(req.Files[0].Data))
+			}
+			uploaded = true
+			_ = json.NewEncoder(w).Encode(substrateUploadResponse{})
+		case r.Method == http.MethodPost && r.URL.Path == substrateTestExecPath:
+			if got := r.Header.Get("Authorization"); got == "Bearer session-jwt" {
+				execAuthorized = true
+			} else {
+				t.Errorf("exec Authorization = %q, want minted session JWT", got)
+			}
+			_ = json.NewEncoder(w).Encode(substrateExecResponse{ExitCode: 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	identity := &recordingSubstrateSessionIdentityClient{jwt: "session-jwt"}
+	executor := &SubstrateWorkspaceExecutor{
+		httpClient:              server.Client(),
+		routerURL:               server.URL,
+		actorDNSSuffix:          "actors.test",
+		handoffToken:            substrateTestToken,
+		bootstrapToken:          "bootstrap-token",
+		sessionIdentity:         identity,
+		sessionIdentityToken:    "worker-sa-token",
+		sessionIdentityAudience: []string{substrateDefaultIdentityAudience},
+		sessionIdentityAppID:    substrateDefaultIdentityAppID,
+		sessionIdentityUserID:   substrateDefaultIdentityUserID,
+	}
+
+	_, err := executor.Upload(t.Context(), UploadRequest{
+		Ref:              WorkspaceRef{ID: "actor-1"},
+		BootstrapHandoff: true,
+		Artifacts: []UploadArtifact{{
+			Path: substrateHandoffTokenUploadPath,
+			Data: []byte(substrateTestToken),
+			Mode: 0o600,
+		}},
+		Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Upload() error = %v", err)
+	}
+	if !uploaded {
+		t.Fatal("Upload() did not send handoff token")
+	}
+	if identity.calls != 1 {
+		t.Fatalf("MintJWT calls = %d, want 1", identity.calls)
+	}
+	if identity.bearerToken != "worker-sa-token" {
+		t.Fatalf("MintJWT bearer token = %q, want worker-sa-token", identity.bearerToken)
+	}
+	if identity.req.SessionID != "actor-1" ||
+		identity.req.AppID != substrateDefaultIdentityAppID ||
+		identity.req.UserID != substrateDefaultIdentityUserID ||
+		!slices.Equal(identity.req.Audience, []string{substrateDefaultIdentityAudience}) {
+		t.Fatalf("MintJWT request = %#v, want default Orka identity for actor-1", identity.req)
+	}
+
+	_, err = executor.Exec(t.Context(), ExecRequest{
+		Ref:     WorkspaceRef{ID: "actor-1"},
+		Command: []string{"true"},
+		Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Exec() error = %v", err)
+	}
+	if !execAuthorized {
+		t.Fatal("Exec() did not use minted session JWT")
+	}
+}
+
+func TestSubstrateBootstrapHandoffRequiredSessionIdentityFailsClosedWithoutCredentials(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected daemon request %s %s", r.Method, r.URL.Path)
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	tests := []struct {
+		name     string
+		executor *SubstrateWorkspaceExecutor
+	}{
+		{
+			name: "missing client",
+			executor: &SubstrateWorkspaceExecutor{
+				httpClient:              server.Client(),
+				routerURL:               server.URL,
+				actorDNSSuffix:          "actors.test",
+				bootstrapToken:          "bootstrap-token",
+				sessionIdentityToken:    "worker-sa-token",
+				sessionIdentityRequired: true,
+			},
+		},
+		{
+			name: "missing bearer token",
+			executor: &SubstrateWorkspaceExecutor{
+				httpClient:              server.Client(),
+				routerURL:               server.URL,
+				actorDNSSuffix:          "actors.test",
+				bootstrapToken:          "bootstrap-token",
+				sessionIdentity:         &recordingSubstrateSessionIdentityClient{jwt: "session-jwt"},
+				sessionIdentityRequired: true,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.executor.Upload(t.Context(), UploadRequest{
+				Ref:              WorkspaceRef{ID: "actor-1"},
+				BootstrapHandoff: true,
+				Artifacts: []UploadArtifact{{
+					Path: substrateHandoffTokenUploadPath,
+					Data: []byte(substrateTestToken),
+					Mode: 0o600,
+				}},
+				Timeout: time.Second,
+			})
+			if err == nil {
+				t.Fatal("Upload() error = nil, want required session identity error")
+			}
+			if !IsKind(err, ErrorKindFailedPrecondition) {
+				t.Fatalf("Upload() error kind = %s, want %s", KindOf(err), ErrorKindFailedPrecondition)
+			}
+		})
+	}
+}
+
+func TestSubstrateBootstrapHandoffConfiguredSessionIdentityFailsClosed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected daemon request %s %s", r.Method, r.URL.Path)
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	tests := []struct {
+		name     string
+		identity *recordingSubstrateSessionIdentityClient
+		wantKind ErrorKind
+	}{
+		{
+			name:     "mint error",
+			identity: &recordingSubstrateSessionIdentityClient{err: NewError("mint session identity", ErrorKindFailedPrecondition, "not authorized", false, nil)},
+			wantKind: ErrorKindFailedPrecondition,
+		},
+		{
+			name:     "empty jwt",
+			identity: &recordingSubstrateSessionIdentityClient{},
+			wantKind: ErrorKindFailedPrecondition,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executor := &SubstrateWorkspaceExecutor{
+				httpClient:           server.Client(),
+				routerURL:            server.URL,
+				actorDNSSuffix:       "actors.test",
+				bootstrapToken:       "bootstrap-token",
+				sessionIdentity:      tt.identity,
+				sessionIdentityToken: "session-identity-bearer",
+			}
+
+			_, err := executor.Upload(t.Context(), UploadRequest{
+				Ref:              WorkspaceRef{ID: "actor-1"},
+				BootstrapHandoff: true,
+				Artifacts: []UploadArtifact{{
+					Path: substrateHandoffTokenUploadPath,
+					Data: []byte(substrateTestToken),
+					Mode: 0o600,
+				}},
+				Timeout: time.Second,
+			})
+			if err == nil {
+				t.Fatal("Upload() error = nil, want session identity error")
+			}
+			if !IsKind(err, tt.wantKind) {
+				t.Fatalf("Upload() error kind = %s, want %s", KindOf(err), tt.wantKind)
+			}
+			if tt.identity.calls != 1 {
+				t.Fatalf("MintJWT calls = %d, want 1", tt.identity.calls)
+			}
+		})
+	}
+}
+
 func TestSubstrateWaitReadyFailsFastOnNonRetryableActorError(t *testing.T) {
 	control := &recordingSubstrateControlClient{
 		getErrs: []error{NewError("get actor", ErrorKindNotFound, "actor missing", false, nil)},
@@ -413,6 +899,218 @@ func TestSubstrateWaitReadyFailsFastOnNonRetryableDaemonError(t *testing.T) {
 	}
 	if control.getCalls != 1 {
 		t.Fatalf("GetActor calls = %d, want fail-fast single call", control.getCalls)
+	}
+}
+
+func TestSubstrateWaitReadyCanSkipDaemonHealthCheck(t *testing.T) {
+	daemonCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		daemonCalled = true
+		http.Error(w, "workspace daemon should not be probed", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	control := &recordingSubstrateControlClient{
+		getStatuses: []string{substrateStatusRunning},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     server.Client(),
+		routerURL:      server.URL,
+		actorDNSSuffix: "actors.test",
+		handoffToken:   substrateTestToken,
+		now:            time.Now,
+	}
+
+	got, err := executor.WaitReady(t.Context(), WaitReadyRequest{
+		Ref:                   WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
+		Timeout:               time.Second,
+		Boot:                  true,
+		SkipDaemonHealthCheck: true,
+	})
+	if err != nil {
+		t.Fatalf("WaitReady() error = %v", err)
+	}
+	if daemonCalled {
+		t.Fatal("workspace daemon health endpoint was probed despite SkipDaemonHealthCheck")
+	}
+	if control.resumeCalls != 1 || len(control.resumeBoots) != 1 || !control.resumeBoots[0] {
+		t.Fatalf("ResumeActor calls=%d boots=%#v, want one boot resume", control.resumeCalls, control.resumeBoots)
+	}
+	if got.Phase != PhaseReady || got.Message != "workspace actor running" {
+		t.Fatalf("WaitReady() = phase %s message %q, want actor running readiness", got.Phase, got.Message)
+	}
+}
+
+func TestSubstrateWaitReadyReportsPlacementAndResumeLatency(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != substrateTestHealthPath {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	times := []time.Time{
+		time.Unix(100, 0).UTC(),
+		time.Unix(100, int64(750*time.Millisecond)).UTC(),
+	}
+	control := &recordingSubstrateControlClient{
+		getStatuses: []string{substrateStatusRunning},
+		workers: []substrateWorker{{
+			WorkerNamespace: "ate-demo",
+			WorkerPool:      "codex-pool",
+			WorkerPod:       "ateom-worker-1",
+			ActorID:         "actor-1",
+			IP:              "10.244.0.42",
+		}},
+		actors: []substrateActor{
+			{ActorID: "actor-1", Status: substrateStatusRunning},
+			{ActorID: "actor-2", Status: substrateStatusSuspended},
+			{ActorID: "actor-3", Status: substrateStatusSuspended},
+		},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     server.Client(),
+		routerURL:      server.URL,
+		actorDNSSuffix: "actors.test",
+		handoffToken:   substrateTestToken,
+		now: func() time.Time {
+			if len(times) == 0 {
+				return time.Unix(100, int64(750*time.Millisecond)).UTC()
+			}
+			next := times[0]
+			times = times[1:]
+			return next
+		},
+	}
+
+	got, err := executor.WaitReady(t.Context(), WaitReadyRequest{
+		Ref:     WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
+		Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("WaitReady() error = %v", err)
+	}
+	if control.listWorkersCalls != 1 {
+		t.Fatalf("ListWorkers calls = %d, want 1", control.listWorkersCalls)
+	}
+	if control.listActorsCalls != 1 {
+		t.Fatalf("ListActors calls = %d, want 1", control.listActorsCalls)
+	}
+	wantPlacement := Placement{
+		WorkerNamespace: "ate-demo",
+		WorkerPool:      "codex-pool",
+		WorkerPodName:   "ateom-worker-1",
+		PodIP:           "10.244.0.42",
+	}
+	if got.Placement != wantPlacement {
+		t.Fatalf("placement = %#v, want %#v", got.Placement, wantPlacement)
+	}
+	if got.ResumeLatency != 750*time.Millisecond {
+		t.Fatalf("resume latency = %s, want 750ms", got.ResumeLatency)
+	}
+	wantDensity := Density{
+		WorkerCount:         1,
+		ActorCount:          3,
+		RunningActorCount:   1,
+		SuspendedActorCount: 2,
+		ActorsPerWorker:     "3.00",
+	}
+	if got.Density != wantDensity {
+		t.Fatalf("density = %#v, want %#v", got.Density, wantDensity)
+	}
+}
+
+func TestSubstrateWaitReadyTreatsPlacementLookupAsBestEffort(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != substrateTestHealthPath {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	control := &recordingSubstrateControlClient{
+		getStatuses:      []string{substrateStatusRunning},
+		listWorkersDelay: time.Second,
+		workers: []substrateWorker{{
+			WorkerNamespace: "ate-demo",
+			WorkerPool:      "codex-pool",
+			WorkerPod:       "ateom-worker-1",
+			ActorID:         "actor-1",
+			IP:              "10.244.0.42",
+		}},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     server.Client(),
+		routerURL:      server.URL,
+		actorDNSSuffix: "actors.test",
+		handoffToken:   substrateTestToken,
+		now:            time.Now,
+	}
+
+	start := time.Now()
+	got, err := executor.WaitReady(t.Context(), WaitReadyRequest{
+		Ref:     WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
+		Timeout: 2 * time.Second,
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("WaitReady() error = %v", err)
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("WaitReady() elapsed = %s, want placement lookup capped below 500ms", elapsed)
+	}
+	if control.listWorkersCalls != 1 {
+		t.Fatalf("ListWorkers calls = %d, want 1", control.listWorkersCalls)
+	}
+	wantPlacement := Placement{
+		WorkerNamespace: "ate-demo",
+		WorkerPodName:   "ateom-pod-1",
+		PodIP:           "10.244.0.10",
+	}
+	if got.Placement != wantPlacement {
+		t.Fatalf("placement = %#v, want fallback %#v", got.Placement, wantPlacement)
+	}
+}
+
+func TestSubstrateWaitReadyPassesBootToResumeActor(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != substrateTestHealthPath {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	control := &recordingSubstrateControlClient{
+		getStatuses: []string{substrateStatusRunning},
+	}
+	executor := &SubstrateWorkspaceExecutor{
+		control:        control,
+		httpClient:     server.Client(),
+		routerURL:      server.URL,
+		actorDNSSuffix: "actors.test",
+		handoffToken:   substrateTestToken,
+		now:            time.Now,
+	}
+
+	_, err := executor.WaitReady(t.Context(), WaitReadyRequest{
+		Ref:     WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
+		Timeout: time.Second,
+		Boot:    true,
+	})
+	if err != nil {
+		t.Fatalf("WaitReady() error = %v", err)
+	}
+	if len(control.resumeBoots) != 1 || !control.resumeBoots[0] {
+		t.Fatalf("ResumeActor boot flags = %#v, want [true]", control.resumeBoots)
 	}
 }
 
@@ -895,12 +1593,44 @@ type recordingSubstrateControlClient struct {
 	createCalls       int
 	resumeErr         error
 	resumeCalls       int
+	resumeBoots       []bool
 	suspendStatus     string
 	suspendErr        error
 	suspendCalls      int
+	listWorkersErr    error
+	listWorkersCalls  int
+	listWorkersDelay  time.Duration
+	workers           []substrateWorker
+	listActorsErr     error
+	listActorsCalls   int
+	actors            []substrateActor
 	templateName      string
 	templateNamespace string
 	deleted           bool
+	deleteErrs        []error
+	deletedActorIDs   []string
+}
+
+type recordingSubstrateSessionIdentityClient struct {
+	calls       int
+	req         substrateMintJWTRequest
+	bearerToken string
+	jwt         string
+	err         error
+}
+
+func (c *recordingSubstrateSessionIdentityClient) MintJWT(
+	ctx context.Context,
+	req substrateMintJWTRequest,
+	bearerToken string,
+) (string, error) {
+	c.calls++
+	c.req = req
+	c.bearerToken = bearerToken
+	if c.err != nil {
+		return "", c.err
+	}
+	return c.jwt, nil
 }
 
 func (c *recordingSubstrateControlClient) GetActor(ctx context.Context, actorID string) (*substrateActor, error) {
@@ -929,6 +1659,8 @@ func (c *recordingSubstrateControlClient) GetActor(ctx context.Context, actorID 
 		TemplateNamespace: templateNamespace,
 		TemplateName:      templateName,
 		Status:            status,
+		PodNamespace:      "ate-demo",
+		PodName:           "ateom-pod-1",
 		PodIP:             "10.244.0.10",
 	}, nil
 }
@@ -941,8 +1673,9 @@ func (c *recordingSubstrateControlClient) CreateActor(ctx context.Context, actor
 	return nil, fmt.Errorf("unexpected CreateActor")
 }
 
-func (c *recordingSubstrateControlClient) ResumeActor(ctx context.Context, actorID string) (*substrateActor, error) {
+func (c *recordingSubstrateControlClient) ResumeActor(ctx context.Context, actorID string, boot bool) (*substrateActor, error) {
 	c.resumeCalls++
+	c.resumeBoots = append(c.resumeBoots, boot)
 	if c.resumeErr != nil {
 		return nil, c.resumeErr
 	}
@@ -951,6 +1684,8 @@ func (c *recordingSubstrateControlClient) ResumeActor(ctx context.Context, actor
 		TemplateNamespace: "ate-demo",
 		TemplateName:      "orka-codex-ci",
 		Status:            substrateStatusResuming,
+		PodNamespace:      "ate-demo",
+		PodName:           "ateom-pod-1",
 		PodIP:             "10.244.0.10",
 	}, nil
 }
@@ -969,11 +1704,43 @@ func (c *recordingSubstrateControlClient) SuspendActor(ctx context.Context, acto
 		TemplateNamespace: "ate-demo",
 		TemplateName:      "orka-codex-ci",
 		Status:            status,
+		PodNamespace:      "ate-demo",
+		PodName:           "ateom-pod-1",
 		PodIP:             "10.244.0.10",
 	}, nil
 }
 
 func (c *recordingSubstrateControlClient) DeleteActor(ctx context.Context, actorID string) error {
+	call := len(c.deletedActorIDs)
 	c.deleted = true
+	c.deletedActorIDs = append(c.deletedActorIDs, actorID)
+	if call < len(c.deleteErrs) && c.deleteErrs[call] != nil {
+		return c.deleteErrs[call]
+	}
 	return nil
+}
+
+func (c *recordingSubstrateControlClient) ListWorkers(ctx context.Context) ([]substrateWorker, error) {
+	c.listWorkersCalls++
+	if c.listWorkersDelay > 0 {
+		timer := time.NewTimer(c.listWorkersDelay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	if c.listWorkersErr != nil {
+		return nil, c.listWorkersErr
+	}
+	return append([]substrateWorker(nil), c.workers...), nil
+}
+
+func (c *recordingSubstrateControlClient) ListActors(ctx context.Context) ([]substrateActor, error) {
+	c.listActorsCalls++
+	if c.listActorsErr != nil {
+		return nil, c.listActorsErr
+	}
+	return append([]substrateActor(nil), c.actors...), nil
 }

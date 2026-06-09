@@ -51,7 +51,7 @@ var _ = Describe("Tool Controller", func() {
 					},
 					Spec: corev1alpha1.ToolSpec{
 						Description: "A test tool with reachable endpoint",
-						HTTP: corev1alpha1.HTTPExecution{
+						HTTP: &corev1alpha1.HTTPExecution{
 							URL:    server.URL,
 							Method: "POST",
 						},
@@ -115,7 +115,7 @@ var _ = Describe("Tool Controller", func() {
 					},
 					Spec: corev1alpha1.ToolSpec{
 						Description: "A test tool with unreachable endpoint",
-						HTTP: corev1alpha1.HTTPExecution{
+						HTTP: &corev1alpha1.HTTPExecution{
 							URL:    "http://127.0.0.1:19999/nonexistent",
 							Method: "POST",
 						},
@@ -180,7 +180,7 @@ var _ = Describe("Tool Controller", func() {
 					},
 					Spec: corev1alpha1.ToolSpec{
 						Description: "A tool with missing auth secret",
-						HTTP: corev1alpha1.HTTPExecution{
+						HTTP: &corev1alpha1.HTTPExecution{
 							URL:    "http://localhost:8080/test",
 							Method: "POST",
 							AuthSecretRef: &corev1alpha1.SecretKeySelector{
@@ -256,7 +256,7 @@ var _ = Describe("Tool Controller", func() {
 					},
 					Spec: corev1alpha1.ToolSpec{
 						Description: "A tool with wrong key in auth secret",
-						HTTP: corev1alpha1.HTTPExecution{
+						HTTP: &corev1alpha1.HTTPExecution{
 							URL:    "http://localhost:8080/test",
 							Method: "POST",
 							AuthSecretRef: &corev1alpha1.SecretKeySelector{
@@ -321,7 +321,7 @@ var _ = Describe("Tool Controller", func() {
 					},
 					Spec: corev1alpha1.ToolSpec{
 						Description: "A tool with an invalid URL",
-						HTTP: corev1alpha1.HTTPExecution{
+						HTTP: &corev1alpha1.HTTPExecution{
 							URL:    "not-a-url",
 							Method: "POST",
 						},
@@ -377,7 +377,7 @@ var _ = Describe("Tool Controller", func() {
 					},
 					Spec: corev1alpha1.ToolSpec{
 						Description: "A tool with body inject but no key",
-						HTTP: corev1alpha1.HTTPExecution{
+						HTTP: &corev1alpha1.HTTPExecution{
 							URL:        "http://localhost:8080/test",
 							Method:     "POST",
 							AuthInject: "body",

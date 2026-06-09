@@ -143,15 +143,16 @@ func (h *InternalHandlers) UpdateExecutionWorkspaceStatus(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 	}
-	status := req.status()
-	if status.Provider == "" || status.Phase == "" || status.Reason == "" {
+	statusForValidation := req.status()
+	if statusForValidation.Provider == "" || statusForValidation.Phase == "" || statusForValidation.Reason == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "provider, phase, and reason are required")
 	}
-	if !validExecutionWorkspaceStatus(status) {
+	if !validExecutionWorkspaceStatus(statusForValidation) {
 		return fiber.NewError(fiber.StatusBadRequest, "unsupported execution workspace status value")
 	}
 
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		status := req.status()
 		task := &corev1alpha1.Task{}
 		if err := h.k8sClient.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: taskName}, task); err != nil {
 			return err
@@ -159,6 +160,7 @@ func (h *InternalHandlers) UpdateExecutionWorkspaceStatus(c fiber.Ctx) error {
 		if err := verifyCallerOwnsTaskWorker(c.Context(), h.k8sClient, GetUserInfo(c), task); err != nil {
 			return err
 		}
+		preserveExecutionWorkspaceStatusTelemetry(status, task.Status.ExecutionWorkspace)
 		task.Status.ExecutionWorkspace = status
 		return h.k8sClient.Status().Update(c.Context(), task)
 	})
@@ -174,15 +176,18 @@ func (h *InternalHandlers) UpdateExecutionWorkspaceStatus(c fiber.Ctx) error {
 }
 
 type executionWorkspaceStatusRequest struct {
-	Provider      corev1alpha1.WorkspaceProvider           `json:"provider"`
-	TemplateRef   *corev1alpha1.WorkspaceTemplateReference `json:"templateRef,omitempty"`
-	Phase         corev1alpha1.ExecutionWorkspacePhase     `json:"phase"`
-	Reason        corev1alpha1.ExecutionWorkspaceReason    `json:"reason"`
-	ReusePolicy   corev1alpha1.WorkspaceReusePolicy        `json:"reusePolicy,omitempty"`
-	CleanupPolicy corev1alpha1.WorkspaceCleanupPolicy      `json:"cleanupPolicy,omitempty"`
-	Reused        bool                                     `json:"reused,omitempty"`
-	Message       string                                   `json:"message,omitempty"`
-	ObservedAt    *metav1.Time                             `json:"observedAt,omitempty"`
+	Provider      corev1alpha1.WorkspaceProvider                  `json:"provider"`
+	TemplateRef   *corev1alpha1.WorkspaceTemplateReference        `json:"templateRef,omitempty"`
+	Phase         corev1alpha1.ExecutionWorkspacePhase            `json:"phase"`
+	Reason        corev1alpha1.ExecutionWorkspaceReason           `json:"reason"`
+	ReusePolicy   corev1alpha1.WorkspaceReusePolicy               `json:"reusePolicy,omitempty"`
+	CleanupPolicy corev1alpha1.WorkspaceCleanupPolicy             `json:"cleanupPolicy,omitempty"`
+	Reused        bool                                            `json:"reused,omitempty"`
+	Placement     *corev1alpha1.ExecutionWorkspacePlacementStatus `json:"placement,omitempty"`
+	Density       *corev1alpha1.ExecutionWorkspaceDensityStatus   `json:"density,omitempty"`
+	ResumeLatency *metav1.Duration                                `json:"resumeLatency,omitempty"`
+	Message       string                                          `json:"message,omitempty"`
+	ObservedAt    *metav1.Time                                    `json:"observedAt,omitempty"`
 }
 
 func (r executionWorkspaceStatusRequest) status() *corev1alpha1.ExecutionWorkspaceStatus {
@@ -199,8 +204,56 @@ func (r executionWorkspaceStatusRequest) status() *corev1alpha1.ExecutionWorkspa
 		ReusePolicy:    r.ReusePolicy,
 		CleanupPolicy:  r.CleanupPolicy,
 		Reused:         r.Reused,
+		Placement:      sanitizeWorkspacePlacementStatus(r.Placement),
+		Density:        sanitizeWorkspaceDensityStatus(r.Density),
+		ResumeLatency:  r.ResumeLatency,
 		Message:        sanitizeWorkspaceStatusMessage(r.Message),
 		LastUpdateTime: updateTime,
+	}
+}
+
+func preserveExecutionWorkspaceStatusTelemetry(
+	status *corev1alpha1.ExecutionWorkspaceStatus,
+	previous *corev1alpha1.ExecutionWorkspaceStatus,
+) {
+	if status == nil || previous == nil {
+		return
+	}
+	if !shouldPreserveExecutionWorkspaceStatusTelemetry(status, previous) {
+		return
+	}
+	if status.Placement == nil && previous.Placement != nil {
+		placement := *previous.Placement
+		status.Placement = &placement
+	}
+	if status.Density == nil && previous.Density != nil {
+		density := *previous.Density
+		status.Density = &density
+	}
+	if status.ResumeLatency == nil && previous.ResumeLatency != nil {
+		resumeLatency := *previous.ResumeLatency
+		status.ResumeLatency = &resumeLatency
+	}
+}
+
+func shouldPreserveExecutionWorkspaceStatusTelemetry(
+	status *corev1alpha1.ExecutionWorkspaceStatus,
+	previous *corev1alpha1.ExecutionWorkspaceStatus,
+) bool {
+	if previous.Phase != corev1alpha1.ExecutionWorkspacePhaseReady {
+		return false
+	}
+	switch status.Reason {
+	case corev1alpha1.ExecutionWorkspaceReasonReleased,
+		corev1alpha1.ExecutionWorkspaceReasonRetained,
+		corev1alpha1.ExecutionWorkspaceReasonDeleted,
+		corev1alpha1.ExecutionWorkspaceReasonHandoffFailed,
+		corev1alpha1.ExecutionWorkspaceReasonCommandFailed,
+		corev1alpha1.ExecutionWorkspaceReasonSecretScrubFailed,
+		corev1alpha1.ExecutionWorkspaceReasonCleanupFailed:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -261,6 +314,56 @@ func sanitizeWorkspaceStatusMessage(message string) string {
 		return message[:1024] + "...<truncated>"
 	}
 	return message
+}
+
+func sanitizeWorkspacePlacementStatus(
+	placement *corev1alpha1.ExecutionWorkspacePlacementStatus,
+) *corev1alpha1.ExecutionWorkspacePlacementStatus {
+	if placement == nil {
+		return nil
+	}
+	sanitized := &corev1alpha1.ExecutionWorkspacePlacementStatus{
+		WorkerNamespace: sanitizeWorkspacePlacementValue(placement.WorkerNamespace),
+		WorkerPool:      sanitizeWorkspacePlacementValue(placement.WorkerPool),
+		WorkerPodName:   sanitizeWorkspacePlacementValue(placement.WorkerPodName),
+	}
+	if sanitized.WorkerNamespace == "" &&
+		sanitized.WorkerPool == "" &&
+		sanitized.WorkerPodName == "" {
+		return nil
+	}
+	return sanitized
+}
+
+func sanitizeWorkspacePlacementValue(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 256 {
+		return value[:256]
+	}
+	return value
+}
+
+func sanitizeWorkspaceDensityStatus(
+	density *corev1alpha1.ExecutionWorkspaceDensityStatus,
+) *corev1alpha1.ExecutionWorkspaceDensityStatus {
+	if density == nil {
+		return nil
+	}
+	sanitized := &corev1alpha1.ExecutionWorkspaceDensityStatus{
+		WorkerCount:         max(density.WorkerCount, 0),
+		ActorCount:          max(density.ActorCount, 0),
+		RunningActorCount:   max(density.RunningActorCount, 0),
+		SuspendedActorCount: max(density.SuspendedActorCount, 0),
+		ActorsPerWorker:     sanitizeWorkspacePlacementValue(density.ActorsPerWorker),
+	}
+	if sanitized.WorkerCount == 0 &&
+		sanitized.ActorCount == 0 &&
+		sanitized.RunningActorCount == 0 &&
+		sanitized.SuspendedActorCount == 0 &&
+		sanitized.ActorsPerWorker == "" {
+		return nil
+	}
+	return sanitized
 }
 
 // UploadArtifact handles POST /internal/v1/artifacts/{namespace}/{taskName}/{filename}.

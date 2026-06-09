@@ -620,28 +620,41 @@ func (b *JobBuilder) addExecutionWorkspaceEnvVars(envVars []corev1.EnvVar, task 
 	}
 
 	envVars = append(envVars, workerenv.ExecutionWorkspaceEnv{
-		Enabled:           true,
-		Provider:          string(request.Provider),
-		TemplateName:      request.TemplateName,
-		TemplateNamespace: request.TemplateNamespace,
-		ClaimNamespace:    request.ClaimNamespace,
-		ClaimName:         request.ClaimName,
-		ReusePolicy:       string(request.ReusePolicy),
-		ReuseKey:          request.ReuseKey,
-		CleanupPolicy:     string(request.CleanupPolicy),
-		ClaimTimeout:      request.ClaimTimeout,
-		CommandTimeout:    request.CommandTimeout,
-		StatusEndpoint:    fmt.Sprintf("%s/internal/v1/tasks/%s/%s/execution-workspace/status", b.ControllerURL, task.Namespace, task.Name),
-		Depth:             0,
+		Enabled:               true,
+		Provider:              string(request.Provider),
+		TemplateName:          request.TemplateName,
+		TemplateNamespace:     request.TemplateNamespace,
+		ClaimNamespace:        request.ClaimNamespace,
+		ClaimName:             request.ClaimName,
+		ReusePolicy:           string(request.ReusePolicy),
+		ReuseKey:              request.ReuseKey,
+		CleanupPolicy:         string(request.CleanupPolicy),
+		Boot:                  request.Boot,
+		PoolName:              request.PoolName,
+		PoolNamespace:         request.PoolNamespace,
+		SnapshotRestoreURI:    request.SnapshotRestoreURI,
+		SnapshotCheckpointURI: request.SnapshotCheckpointURI,
+		SnapshotOnRelease:     request.SnapshotOnRelease,
+		ProcessMode:           string(request.ProcessMode),
+		ResidentKey:           request.ResidentKey,
+		ClaimTimeout:          request.ClaimTimeout,
+		CommandTimeout:        request.CommandTimeout,
+		StatusEndpoint:        fmt.Sprintf("%s/internal/v1/tasks/%s/%s/execution-workspace/status", b.ControllerURL, task.Namespace, task.Name),
+		Depth:                 0,
 	}.EnvVars()...)
 
 	if request.Provider == corev1alpha1.WorkspaceProviderSubstrate {
 		envVars = append(envVars, workerenv.SubstrateEnv{
-			APIEndpoint:           request.SubstrateAPIEndpoint,
-			APICAFile:             request.SubstrateAPICAFile,
-			APIInsecureSkipVerify: request.SubstrateAPIInsecureSkipVerify,
-			RouterURL:             request.SubstrateRouterURL,
-			ActorDNSSuffix:        request.SubstrateActorDNSSuffix,
+			APIEndpoint:             request.SubstrateAPIEndpoint,
+			APICAFile:               request.SubstrateAPICAFile,
+			APIInsecureSkipVerify:   request.SubstrateAPIInsecureSkipVerify,
+			RouterURL:               request.SubstrateRouterURL,
+			ActorDNSSuffix:          request.SubstrateActorDNSSuffix,
+			SessionIdentityRequired: request.SubstrateSessionIdentityRequired,
+			SessionIdentityMintCert: request.SubstrateSessionIdentityMintCert,
+			SessionIdentityAudience: request.SubstrateSessionIdentityAudience,
+			SessionIdentityAppID:    request.SubstrateSessionIdentityAppID,
+			SessionIdentityUserID:   request.SubstrateSessionIdentityUserID,
 		}.EnvVars()...)
 		if strings.TrimSpace(request.SubstrateBootstrapSecretName) != "" {
 			envVars = append(envVars, corev1.EnvVar{
@@ -652,6 +665,19 @@ func (b *JobBuilder) addExecutionWorkspaceEnvVars(envVars []corev1.EnvVar, task 
 							Name: request.SubstrateBootstrapSecretName,
 						},
 						Key: request.SubstrateBootstrapSecretKey,
+					},
+				},
+			})
+		}
+		if strings.TrimSpace(request.SubstrateSessionIdentitySecretName) != "" {
+			envVars = append(envVars, corev1.EnvVar{
+				Name: workerenv.SubstrateSessionIdentityToken,
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: request.SubstrateSessionIdentitySecretName,
+						},
+						Key: request.SubstrateSessionIdentitySecretKey,
 					},
 				},
 			})

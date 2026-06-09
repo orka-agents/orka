@@ -266,6 +266,27 @@ func main() {
 	flag.StringVar(&substrateConfig.BootstrapSecretKey, "substrate-bootstrap-token-secret-key",
 		substrateConfig.BootstrapSecretKey,
 		"Kubernetes Secret key containing the Substrate workspace daemon bootstrap token.")
+	flag.StringVar(&substrateConfig.SessionIdentitySecretName, "substrate-session-identity-token-secret-name",
+		substrateConfig.SessionIdentitySecretName,
+		"Kubernetes Secret name containing the bearer token for Substrate SessionIdentity.")
+	flag.StringVar(&substrateConfig.SessionIdentitySecretKey, "substrate-session-identity-token-secret-key",
+		substrateConfig.SessionIdentitySecretKey,
+		"Kubernetes Secret key containing the bearer token for Substrate SessionIdentity.")
+	flag.BoolVar(&substrateConfig.SessionIdentityRequired, "substrate-session-identity-required",
+		substrateConfig.SessionIdentityRequired,
+		"Fail Substrate workspace handoff when SessionIdentity cannot mint a per-actor JWT.")
+	flag.BoolVar(&substrateConfig.SessionIdentityMintCert, "substrate-session-identity-mint-cert",
+		substrateConfig.SessionIdentityMintCert,
+		"Unsupported alpha option for Substrate SessionIdentity certificate minting; currently rejected when enabled.")
+	flag.StringVar(&substrateConfig.SessionIdentityAudience, "substrate-session-identity-audience",
+		substrateConfig.SessionIdentityAudience,
+		"Comma-separated audiences requested from Substrate SessionIdentity minted JWTs.")
+	flag.StringVar(&substrateConfig.SessionIdentityAppID, "substrate-session-identity-app-id",
+		substrateConfig.SessionIdentityAppID,
+		"Application ID requested from Substrate SessionIdentity minted JWTs.")
+	flag.StringVar(&substrateConfig.SessionIdentityUserID, "substrate-session-identity-user-id",
+		substrateConfig.SessionIdentityUserID,
+		"User ID requested from Substrate SessionIdentity minted JWTs.")
 	flag.DurationVar(&substrateConfig.ClaimTimeout, "substrate-claim-timeout", substrateConfig.ClaimTimeout,
 		"Timeout for Substrate actor claim, readiness, release, retain, and delete operations.")
 	flag.DurationVar(&substrateConfig.CommandTimeout, "substrate-command-timeout", substrateConfig.CommandTimeout,
@@ -672,10 +693,23 @@ func main() {
 	}
 
 	if err := (&controller.ToolReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:                    mgr.GetClient(),
+		Scheme:                    mgr.GetScheme(),
+		SubstrateEnabled:          substrateEnabled,
+		SubstrateConfig:           substrateConfig,
+		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Tool")
+		os.Exit(1)
+	}
+
+	if err := (&controller.SubstrateActorPoolReconciler{
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		SubstrateEnabled: substrateEnabled,
+		SubstrateConfig:  substrateConfig,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "SubstrateActorPool")
 		os.Exit(1)
 	}
 
