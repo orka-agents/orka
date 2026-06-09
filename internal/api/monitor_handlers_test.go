@@ -11,6 +11,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -19,16 +20,22 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const monitorTestRepoURL = "https://github.com/sozercan/orka"
+const monitorTestReviewerSecret = "reviewer-credentials"
 
 func setupRepositoryMonitorHandlers(t *testing.T, ctxTokenConfig ContextTokenConfig, mode string, objects ...crclient.Object) (*fiber.App, *Handlers) {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
-	objects = append([]crclient.Object{repositoryMonitorHandlerTestAgent("reviewer", corev1alpha1.AgentRuntimeClaude)}, objects...)
+	require.NoError(t, corev1.AddToScheme(scheme))
+	objects = append([]crclient.Object{
+		repositoryMonitorHandlerTestAgent("reviewer", corev1alpha1.AgentRuntimeClaude),
+		repositoryMonitorHandlerTestReviewerSecret(),
+	}, objects...)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
@@ -66,7 +73,17 @@ func repositoryMonitorHandlerTestAgent(name string, runtimeType corev1alpha1.Age
 	return &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "demo"},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: runtimeType},
+			Runtime:   &corev1alpha1.AgentCLIRuntime{Type: runtimeType},
+			SecretRef: &corev1.LocalObjectReference{Name: monitorTestReviewerSecret},
+		},
+	}
+}
+
+func repositoryMonitorHandlerTestReviewerSecret() *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: monitorTestReviewerSecret, Namespace: "demo"},
+		Data: map[string][]byte{
+			workerenv.AnthropicAPIKey: []byte("anthropic-key"),
 		},
 	}
 }
@@ -267,6 +284,68 @@ func TestCreateRepositoryMonitor_RejectsUnsupportedReviewerAgent(t *testing.T) {
 				objects = append(objects, tt.agent)
 			}
 			app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, objects...)
+			body := fmt.Sprintf(`{
+				"name":"repo-monitor",
+				"namespace":"demo",
+				"spec":{
+					"repoURL":%q,
+					"agents":{"reviewer":{"name":%q}}
+				}
+			}`, monitorTestRepoURL, tt.reviewer)
+
+			req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			require.Contains(t, readRespBody(t, resp), tt.want)
+		})
+	}
+}
+
+func TestCreateRepositoryMonitor_RejectsReviewerWithoutClaudeCredentials(t *testing.T) {
+	tests := []struct {
+		name     string
+		objects  []crclient.Object
+		reviewer string
+		want     string
+	}{
+		{
+			name: "missing secretRef",
+			objects: []crclient.Object{
+				&corev1alpha1.Agent{
+					ObjectMeta: metav1.ObjectMeta{Name: "no-secret", Namespace: "demo"},
+					Spec: corev1alpha1.AgentSpec{
+						Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+					},
+				},
+			},
+			reviewer: "no-secret",
+			want:     "must reference a Secret",
+		},
+		{
+			name: "secret without auth key",
+			objects: []crclient.Object{
+				&corev1alpha1.Agent{
+					ObjectMeta: metav1.ObjectMeta{Name: "bad-secret-reviewer", Namespace: "demo"},
+					Spec: corev1alpha1.AgentSpec{
+						Runtime:   &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+						SecretRef: &corev1.LocalObjectReference{Name: "bad-reviewer-secret"},
+					},
+				},
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "bad-reviewer-secret", Namespace: "demo"},
+					Data:       map[string][]byte{workerenv.AnthropicBaseURL: []byte("https://anthropic.example")},
+				},
+			},
+			reviewer: "bad-secret-reviewer",
+			want:     "must contain a supported Claude auth key",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, tt.objects...)
 			body := fmt.Sprintf(`{
 				"name":"repo-monitor",
 				"namespace":"demo",

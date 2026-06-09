@@ -22,11 +22,13 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
-	repositoryMonitorTestDefaultBranch = "main"
-	repositoryMonitorTestRepoURL       = "https://github.com/sozercan/orka"
+	repositoryMonitorTestDefaultBranch  = "main"
+	repositoryMonitorTestRepoURL        = "https://github.com/sozercan/orka"
+	repositoryMonitorTestReviewerSecret = "reviewer-credentials"
 )
 
 func TestRepositoryMonitorReconcileRecordsMetadataAndStatus(t *testing.T) {
@@ -35,6 +37,9 @@ func TestRepositoryMonitorReconcileRecordsMetadataAndStatus(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
 	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
@@ -55,7 +60,7 @@ func TestRepositoryMonitorReconcileRecordsMetadataAndStatus(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -90,6 +95,9 @@ func TestRepositoryMonitorReconcileSkipsNoOpIdleStatusPatch(t *testing.T) {
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
 		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
@@ -109,7 +117,7 @@ func TestRepositoryMonitorReconcileSkipsNoOpIdleStatusPatch(t *testing.T) {
 		Client: fake.NewClientBuilder().
 			WithScheme(scheme).
 			WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-			WithObjects(monitor).
+			WithObjects(repositoryMonitorControllerObjects(monitor)...).
 			Build(),
 	}
 	reconciler := &RepositoryMonitorReconciler{Client: countingClient, Scheme: scheme, Store: monitorStore}
@@ -137,6 +145,9 @@ func TestRepositoryMonitorReconcileQueuesDueScheduledRun(t *testing.T) {
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
 		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
@@ -157,7 +168,7 @@ func TestRepositoryMonitorReconcileQueuesDueScheduledRun(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -193,6 +204,9 @@ func TestRepositoryMonitorReconcileDoesNotQueueScheduledRunWhenActiveRunExists(t
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
 		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
@@ -223,7 +237,7 @@ func TestRepositoryMonitorReconcileDoesNotQueueScheduledRunWhenActiveRunExists(t
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -251,6 +265,9 @@ func TestRepositoryMonitorReconcileProcessesQueuedRunBeforeInvalidSchedule(t *te
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	server := newRepositoryMonitorPullRequestInventoryServerWithoutAuth(t, `[
 		{"number":1,"title":"Ready","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1"},"head":{"ref":"feature","sha":"sha1"},"labels":[]}
@@ -275,7 +292,7 @@ func TestRepositoryMonitorReconcileProcessesQueuedRunBeforeInvalidSchedule(t *te
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -347,6 +364,9 @@ func TestRepositoryMonitorReconcilePreservesLatestFailedRunStatus(t *testing.T) 
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
 		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
@@ -366,7 +386,7 @@ func TestRepositoryMonitorReconcilePreservesLatestFailedRunStatus(t *testing.T) 
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 
 	completedAt := time.Now().Add(-1 * time.Minute)
@@ -410,6 +430,9 @@ func TestRepositoryMonitorReconcileReplaysLatestSuccessfulRunStatus(t *testing.T
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
 		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
@@ -429,7 +452,7 @@ func TestRepositoryMonitorReconcileReplaysLatestSuccessfulRunStatus(t *testing.T
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 
 	completedAt := time.Now().Add(-1 * time.Minute).Round(time.Second)
@@ -491,6 +514,9 @@ func TestRepositoryMonitorReconcileRecoversStaleRunningRun(t *testing.T) {
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
 		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
@@ -509,7 +535,7 @@ func TestRepositoryMonitorReconcileRecoversStaleRunningRun(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{
 		ID:               "stale-run",
@@ -563,6 +589,9 @@ func TestRepositoryMonitorReconcileKeepsFreshRunningRunActive(t *testing.T) {
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
 		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
@@ -581,7 +610,7 @@ func TestRepositoryMonitorReconcileKeepsFreshRunningRunActive(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{
 		ID:               "fresh-run",
@@ -619,6 +648,9 @@ func TestRepositoryMonitorReconcileMarksRunFailedWhenStartEventWriteFails(t *tes
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
 		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
@@ -637,7 +669,7 @@ func TestRepositoryMonitorReconcileMarksRunFailedWhenStartEventWriteFails(t *tes
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{
 		ID:               "run-event-failure",
@@ -698,6 +730,9 @@ func TestRepositoryMonitorReconcileProcessesQueuedPRInventoryRun(t *testing.T) {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("core AddToScheme() error = %v", err)
 	}
 
@@ -733,7 +768,7 @@ func TestRepositoryMonitorReconcileProcessesQueuedPRInventoryRun(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, secret).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -904,6 +939,9 @@ func TestRepositoryMonitorReconcileExpiredReviewedHeadRespectsMaxPerRun(t *testi
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("core AddToScheme() error = %v", err)
 	}
 
@@ -921,7 +959,7 @@ func TestRepositoryMonitorReconcileExpiredReviewedHeadRespectsMaxPerRun(t *testi
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, secret).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -991,6 +1029,9 @@ func TestRepositoryMonitorReconcileSkipsPendingReviewWithoutConsumingCapacity(t 
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	server := newRepositoryMonitorPullRequestInventoryServerWithoutAuth(t, `[
 		{"number":1,"title":"Pending","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1"},"head":{"ref":"pending","sha":"sha1"},"labels":[]},
@@ -1016,16 +1057,17 @@ func TestRepositoryMonitorReconcileSkipsPendingReviewWithoutConsumingCapacity(t 
 			},
 		},
 	}
+	pendingReviewTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pending-review-task",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+	}
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, &corev1alpha1.Task{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "pending-review-task",
-				Namespace: "default",
-			},
-			Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
-		}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, pendingReviewTask)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -1091,6 +1133,9 @@ func TestRepositoryMonitorReconcileCreatesTaskForQueuedItemMissingBackingTask(t 
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	server := newRepositoryMonitorPullRequestInventoryServerWithoutAuth(t, `[
 		{"number":1,"title":"Previously queued","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1"},"head":{"ref":"queued","sha":"sha1"},"labels":[]}
@@ -1114,7 +1159,7 @@ func TestRepositoryMonitorReconcileCreatesTaskForQueuedItemMissingBackingTask(t 
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -1175,6 +1220,9 @@ func TestRepositoryMonitorReconcileFailsClosedOnReviewTaskNameCollision(t *testi
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
 	}
 
 	server := newRepositoryMonitorPullRequestInventoryServerWithoutAuth(t, `[
@@ -1247,7 +1295,7 @@ func TestRepositoryMonitorReconcileFailsClosedOnReviewTaskNameCollision(t *testi
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, collidingTask).
+		WithObjects(repositoryMonitorControllerObjects(monitor, collidingTask)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -1277,6 +1325,9 @@ func TestRepositoryMonitorReviewTaskReuseAllowsDefaultedTaskScheduleFields(t *te
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
 	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
@@ -1311,7 +1362,7 @@ func TestRepositoryMonitorReviewTaskReuseAllowsDefaultedTaskScheduleFields(t *te
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client: cl,
@@ -1353,6 +1404,9 @@ func TestRepositoryMonitorReconcileKeepsSucceededBackingTaskPendingWithoutTypedR
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	server := newRepositoryMonitorPullRequestInventoryServerWithoutAuth(t, `[
 		{"number":1,"title":"Completed task","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1"},"head":{"ref":"queued","sha":"sha1"},"labels":[]}
@@ -1373,14 +1427,15 @@ func TestRepositoryMonitorReconcileKeepsSucceededBackingTaskPendingWithoutTypedR
 			},
 		},
 	}
+	completedReviewTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "completed-review-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, &corev1alpha1.Task{
-			ObjectMeta: metav1.ObjectMeta{Name: "completed-review-task", Namespace: "default"},
-			Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
-			Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
-		}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, completedReviewTask)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -1439,13 +1494,16 @@ func TestRepositoryMonitorReconcileIngestsTypedReviewResult(t *testing.T) {
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := repositoryMonitorReviewIngestTestMonitor("review-ingest")
 	task := repositoryMonitorReviewIngestTestTask("completed-review-task", "review-ingest", 1, reviewHeadSHA)
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, task).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:      cl,
@@ -1526,13 +1584,16 @@ func TestRepositoryMonitorReconcileSkippedReviewResultDoesNotMarkHeadFresh(t *te
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := repositoryMonitorReviewIngestTestMonitor("review-skipped")
 	task := repositoryMonitorReviewIngestTestTask("skipped-review-task", "review-skipped", 1, reviewHeadSHA)
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, task).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:      cl,
@@ -1577,13 +1638,16 @@ func TestRepositoryMonitorReconcileRetriesTransientReviewResultReadError(t *test
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := repositoryMonitorReviewIngestTestMonitor("review-transient-result-error")
 	task := repositoryMonitorReviewIngestTestTask("transient-review-task", "review-transient-result-error", 1, reviewHeadSHA)
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, task).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).
 		Build()
 	readErr := errors.New("sqlite busy")
 	reconciler := &RepositoryMonitorReconciler{
@@ -1636,13 +1700,16 @@ func TestRepositoryMonitorReconcileRejectsMalformedReviewResult(t *testing.T) {
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := repositoryMonitorReviewIngestTestMonitor("review-malformed")
 	task := repositoryMonitorReviewIngestTestTask("malformed-review-task", "review-malformed", 2, "sha2")
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, task).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
 	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
@@ -1678,13 +1745,16 @@ func TestRepositoryMonitorReconcileRejectsStaleReviewResult(t *testing.T) {
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := repositoryMonitorReviewIngestTestMonitor("review-stale")
 	task := repositoryMonitorReviewIngestTestTask("stale-review-task", "review-stale", 3, "oldsha")
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, task).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
 	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
@@ -1720,13 +1790,16 @@ func TestRepositoryMonitorReconcileRejectsReviewTaskBindingMismatch(t *testing.T
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := repositoryMonitorReviewIngestTestMonitor("review-task-mismatch")
 	task := repositoryMonitorReviewIngestTestTask("mismatched-review-task", "review-task-mismatch", 99, "sha4")
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, task).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
 	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
@@ -1766,6 +1839,9 @@ func TestRepositoryMonitorReconcileForkPullRequestTaskUsesHeadRepoWithoutBaseSec
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("core AddToScheme() error = %v", err)
 	}
 
@@ -1778,7 +1854,7 @@ func TestRepositoryMonitorReconcileForkPullRequestTaskUsesHeadRepoWithoutBaseSec
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, secret).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -1831,6 +1907,9 @@ func TestRepositoryMonitorReconcileSameRepoSSHMonitorUsesHTTPSCloneURL(t *testin
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("core AddToScheme() error = %v", err)
 	}
 
@@ -1844,7 +1923,7 @@ func TestRepositoryMonitorReconcileSameRepoSSHMonitorUsesHTTPSCloneURL(t *testin
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, secret).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -1894,6 +1973,9 @@ func TestRepositoryMonitorReconcileMissingHeadRepoDoesNotAttachBaseSecret(t *tes
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("core AddToScheme() error = %v", err)
 	}
 
@@ -1906,7 +1988,7 @@ func TestRepositoryMonitorReconcileMissingHeadRepoDoesNotAttachBaseSecret(t *tes
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, secret).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -1955,6 +2037,9 @@ func TestRepositoryMonitorReconcileProcessesPublicInventoryWithoutGitSecret(t *t
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	server := newRepositoryMonitorPullRequestInventoryServerWithoutAuth(t, `[
 		{"number":1,"title":"Ready","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1"},"head":{"ref":"feature","sha":"sha1"},"labels":[]}
@@ -1978,7 +2063,7 @@ func TestRepositoryMonitorReconcileProcessesPublicInventoryWithoutGitSecret(t *t
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -2018,6 +2103,9 @@ func TestRepositoryMonitorReconcileProcessesQueuedRunWhenSuspended(t *testing.T)
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("core AddToScheme() error = %v", err)
 	}
 
@@ -2032,7 +2120,7 @@ func TestRepositoryMonitorReconcileProcessesQueuedRunWhenSuspended(t *testing.T)
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, secret).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -2089,6 +2177,9 @@ func TestRepositoryMonitorReconcileTargetedRunPreservesRepositoryWideStatusCount
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("core AddToScheme() error = %v", err)
 	}
 
@@ -2101,7 +2192,7 @@ func TestRepositoryMonitorReconcileTargetedRunPreservesRepositoryWideStatusCount
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, secret).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -2205,6 +2296,9 @@ func TestRepositoryMonitorReconcileStaleExactEventDoesNotRewriteCurrentPullReque
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("core AddToScheme() error = %v", err)
 	}
 
@@ -2217,7 +2311,7 @@ func TestRepositoryMonitorReconcileStaleExactEventDoesNotRewriteCurrentPullReque
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, secret).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -2288,6 +2382,9 @@ func TestRepositoryMonitorReconcileFullInventoryRetiresMissingPullRequests(t *te
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("core AddToScheme() error = %v", err)
 	}
 
@@ -2300,7 +2397,7 @@ func TestRepositoryMonitorReconcileFullInventoryRetiresMissingPullRequests(t *te
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor, secret).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{
 		Client:           cl,
@@ -2366,6 +2463,9 @@ func TestRepositoryMonitorReconcileFailsUnsupportedRunTargetKind(t *testing.T) {
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
 		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
@@ -2384,7 +2484,7 @@ func TestRepositoryMonitorReconcileFailsUnsupportedRunTargetKind(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{
@@ -2427,6 +2527,9 @@ func TestRepositoryMonitorReconcileProcessesOldestQueuedRunFirst(t *testing.T) {
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
 		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
@@ -2445,7 +2548,7 @@ func TestRepositoryMonitorReconcileProcessesOldestQueuedRunFirst(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 	now := time.Now()
@@ -2783,6 +2886,12 @@ func assertRepositoryMonitorReviewTask(t *testing.T, ctx context.Context, cl crc
 	if task.Spec.AgentRuntime.Workspace.GitSecretRef == nil || task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "github-token" {
 		t.Fatalf("workspace GitSecretRef = %#v, want github-token", task.Spec.AgentRuntime.Workspace.GitSecretRef)
 	}
+	if got := repositoryMonitorTaskEnvValue(task.Spec.Env, workerenv.PRBaseRepo); got != repositoryMonitorTestRepoURL {
+		t.Fatalf("%s = %q, want %s", workerenv.PRBaseRepo, got, repositoryMonitorTestRepoURL)
+	}
+	if got := repositoryMonitorTaskEnvValue(task.Spec.Env, workerenv.PRBaseSHA); got != "base1" {
+		t.Fatalf("%s = %q, want base1", workerenv.PRBaseSHA, got)
+	}
 	if task.Labels[labels.LabelRepositoryMonitor] != labels.SelectorValue("inventory") || task.Labels[labels.LabelMonitorRun] != labels.SelectorValue("run-1") {
 		t.Fatalf("task labels = %#v, want monitor and run labels", task.Labels)
 	}
@@ -2792,6 +2901,18 @@ func assertRepositoryMonitorReviewTask(t *testing.T, ctx context.Context, cl crc
 	if !strings.Contains(task.Spec.Prompt, `"schemaVersion": "orka.prReview.input.v1"`) || !strings.Contains(task.Spec.Prompt, `"headSHA": "sha1"`) || !strings.Contains(task.Spec.Prompt, `"schemaVersion": "orka.prReview.v1"`) {
 		t.Fatalf("task prompt does not include expected review input/output contracts:\n%s", task.Spec.Prompt)
 	}
+	if !strings.Contains(task.Spec.Prompt, "/workspace/.git/orka/pr-review.diff") {
+		t.Fatalf("task prompt does not include generated PR diff context path:\n%s", task.Spec.Prompt)
+	}
+}
+
+func repositoryMonitorTaskEnvValue(envVars []corev1.EnvVar, name string) string {
+	for _, envVar := range envVars {
+		if envVar.Name == name {
+			return envVar.Value
+		}
+	}
+	return ""
 }
 
 func TestRepositoryMonitorReconcileRejectsInvalidRepoURLWithoutPersistingMetadata(t *testing.T) {
@@ -2800,6 +2921,9 @@ func TestRepositoryMonitorReconcileRejectsInvalidRepoURLWithoutPersistingMetadat
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
 	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
@@ -2818,7 +2942,7 @@ func TestRepositoryMonitorReconcileRejectsInvalidRepoURLWithoutPersistingMetadat
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -2848,6 +2972,9 @@ func TestRepositoryMonitorReconcileRejectsUnsupportedTargetWithoutPersistingMeta
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	pullRequestsEnabled := false
 	monitor := &corev1alpha1.RepositoryMonitor{
@@ -2867,7 +2994,7 @@ func TestRepositoryMonitorReconcileRejectsUnsupportedTargetWithoutPersistingMeta
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -2897,6 +3024,9 @@ func TestRepositoryMonitorReconcileRejectsRequireGreenCIWithoutPersistingMetadat
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
 		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
@@ -2915,7 +3045,7 @@ func TestRepositoryMonitorReconcileRejectsRequireGreenCIWithoutPersistingMetadat
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -2945,6 +3075,9 @@ func TestRepositoryMonitorReconcileRejectsMissingReviewerWithoutPersistingMetada
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
 		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
@@ -2959,7 +3092,7 @@ func TestRepositoryMonitorReconcileRejectsMissingReviewerWithoutPersistingMetada
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -2982,6 +3115,163 @@ func TestRepositoryMonitorReconcileRejectsMissingReviewerWithoutPersistingMetada
 	}
 }
 
+func TestRepositoryMonitorReconcileRejectsInvalidReviewerAgentWithoutPersistingMetadata(t *testing.T) {
+	tests := []struct {
+		name     string
+		reviewer string
+		objects  []crclient.Object
+		reason   string
+	}{
+		{
+			name:     "missing agent",
+			reviewer: "missing-reviewer",
+			reason:   "ReviewerAgentNotFound",
+		},
+		{
+			name:     "agent without runtime",
+			reviewer: "no-runtime",
+			objects: []crclient.Object{
+				&corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "no-runtime", Namespace: "default"}},
+			},
+			reason: "UnsupportedReviewerAgent",
+		},
+		{
+			name:     "agent without secretRef",
+			reviewer: "no-secret",
+			objects: []crclient.Object{
+				repositoryMonitorControllerTestAgent("no-secret", "default", corev1alpha1.AgentRuntimeClaude, ""),
+			},
+			reason: repositoryMonitorReasonReviewerCredentialsInvalid,
+		},
+		{
+			name:     "secret without auth key",
+			reviewer: "bad-secret-reviewer",
+			objects: []crclient.Object{
+				repositoryMonitorControllerTestAgent("bad-secret-reviewer", "default", corev1alpha1.AgentRuntimeClaude, "bad-reviewer-secret"),
+				repositoryMonitorControllerTestSecret("bad-reviewer-secret", "default", map[string][]byte{
+					workerenv.AnthropicBaseURL: []byte("https://anthropic.example"),
+				}),
+			},
+			reason: repositoryMonitorReasonReviewerCredentialsInvalid,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			monitorStore := setupControllerSQLiteStore(t)
+			scheme := runtime.NewScheme()
+			if err := corev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatalf("AddToScheme() error = %v", err)
+			}
+			if err := corev1.AddToScheme(scheme); err != nil {
+				t.Fatalf("corev1 AddToScheme() error = %v", err)
+			}
+
+			monitor := &corev1alpha1.RepositoryMonitor{
+				TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "invalid-reviewer-" + repositoryMonitorBoundedDNSName(tt.name, 24),
+					Namespace: "default",
+				},
+				Spec: corev1alpha1.RepositoryMonitorSpec{
+					RepoURL: "https://github.com/sozercan/orka",
+					Agents: corev1alpha1.RepositoryMonitorAgents{
+						Reviewer: &corev1alpha1.AgentReference{Name: tt.reviewer},
+					},
+				},
+			}
+			objects := repositoryMonitorControllerObjects(append([]crclient.Object{monitor}, tt.objects...)...)
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+				WithObjects(objects...).
+				Build()
+			reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
+
+			result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitor.Name}})
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+			if result.RequeueAfter != repositoryMonitorValidationRetry {
+				t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, repositoryMonitorValidationRetry)
+			}
+
+			if _, err := monitorStore.GetRepositoryMonitor(ctx, "default", monitor.Name); err != store.ErrNotFound {
+				t.Fatalf("GetRepositoryMonitor() error = %v, want ErrNotFound", err)
+			}
+			var current corev1alpha1.RepositoryMonitor
+			if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: monitor.Name}, &current); err != nil {
+				t.Fatalf("Get monitor() error = %v", err)
+			}
+			if current.Status.Phase != repositoryMonitorPhaseError {
+				t.Fatalf("phase = %q, want %q", current.Status.Phase, repositoryMonitorPhaseError)
+			}
+			if len(current.Status.Conditions) != 1 || current.Status.Conditions[0].Reason != tt.reason {
+				t.Fatalf("conditions = %#v, want %s", current.Status.Conditions, tt.reason)
+			}
+		})
+	}
+}
+
+func TestRepositoryMonitorReconcileRejectsInvalidGitSecretWithoutPersistingMetadata(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+
+	monitor := &corev1alpha1.RepositoryMonitor{
+		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "bad-git-secret",
+			Namespace: "default",
+		},
+		Spec: corev1alpha1.RepositoryMonitorSpec{
+			RepoURL:      "https://github.com/sozercan/orka",
+			GitSecretRef: &corev1.LocalObjectReference{Name: "bad-git-secret"},
+			Agents: corev1alpha1.RepositoryMonitorAgents{
+				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
+			},
+		},
+	}
+	secret := repositoryMonitorControllerTestSecret("bad-git-secret", "default", map[string][]byte{
+		"username": []byte("octocat"),
+	})
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "bad-git-secret"}})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter != repositoryMonitorValidationRetry {
+		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, repositoryMonitorValidationRetry)
+	}
+
+	if _, err := monitorStore.GetRepositoryMonitor(ctx, "default", "bad-git-secret"); err != store.ErrNotFound {
+		t.Fatalf("GetRepositoryMonitor() error = %v, want ErrNotFound", err)
+	}
+	var current corev1alpha1.RepositoryMonitor
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: "bad-git-secret"}, &current); err != nil {
+		t.Fatalf("Get monitor() error = %v", err)
+	}
+	if current.Status.Phase != repositoryMonitorPhaseError {
+		t.Fatalf("phase = %q, want %q", current.Status.Phase, repositoryMonitorPhaseError)
+	}
+	if len(current.Status.Conditions) != 1 || current.Status.Conditions[0].Reason != repositoryMonitorReasonGitSecretInvalid {
+		t.Fatalf("conditions = %#v, want %s", current.Status.Conditions, repositoryMonitorReasonGitSecretInvalid)
+	}
+}
+
 func TestReadRepositoryMonitorGitHubResponseRejectsOversizedBody(t *testing.T) {
 	if _, err := readRepositoryMonitorGitHubResponse(strings.NewReader("abcdef"), 5); err == nil || !strings.Contains(err.Error(), "exceeded") {
 		t.Fatalf("readRepositoryMonitorGitHubResponse() error = %v, want exceeded error", err)
@@ -2994,6 +3284,9 @@ func TestRepositoryMonitorReconcileUnsuspendSetsReady(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
 	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
@@ -3013,7 +3306,7 @@ func TestRepositoryMonitorReconcileUnsuspendSetsReady(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(monitor).
+		WithObjects(repositoryMonitorControllerObjects(monitor)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 
@@ -3027,6 +3320,36 @@ func TestRepositoryMonitorReconcileUnsuspendSetsReady(t *testing.T) {
 	}
 	if current.Status.Phase != repositoryMonitorPhaseReady {
 		t.Fatalf("phase = %q, want %q", current.Status.Phase, repositoryMonitorPhaseReady)
+	}
+}
+
+func repositoryMonitorControllerObjects(objects ...crclient.Object) []crclient.Object {
+	defaults := []crclient.Object{
+		repositoryMonitorControllerTestAgent("reviewer", "default", corev1alpha1.AgentRuntimeClaude, repositoryMonitorTestReviewerSecret),
+		repositoryMonitorControllerTestSecret(repositoryMonitorTestReviewerSecret, "default", map[string][]byte{
+			workerenv.AnthropicAPIKey: []byte("anthropic-key"),
+		}),
+	}
+	return append(defaults, objects...)
+}
+
+func repositoryMonitorControllerTestAgent(name, namespace string, runtimeType corev1alpha1.AgentRuntimeType, secretName string) *corev1alpha1.Agent {
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: runtimeType},
+		},
+	}
+	if secretName != "" {
+		agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: secretName}
+	}
+	return agent
+}
+
+func repositoryMonitorControllerTestSecret(name, namespace string, data map[string][]byte) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Data:       data,
 	}
 }
 

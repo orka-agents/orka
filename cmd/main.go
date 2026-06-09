@@ -765,10 +765,11 @@ func main() {
 	}
 
 	if err := (&controller.RepositoryMonitorReconciler{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		Store:       sqliteStore,
-		ResultStore: sqliteStore,
+		Client:                    mgr.GetClient(),
+		Scheme:                    mgr.GetScheme(),
+		Store:                     sqliteStore,
+		ResultStore:               sqliteStore,
+		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryMonitor")
 		os.Exit(1)

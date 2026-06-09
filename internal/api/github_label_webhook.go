@@ -374,24 +374,19 @@ func (h *Handlers) requeueFailedRepositoryMonitorEventRun(c fiber.Ctx, next *sto
 
 func (h *Handlers) queuedRepositoryMonitorPullRequestEventRunExists(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, next *store.MonitorRun) (bool, error) {
 	runs, _, err := h.repositoryMonitorStore.ListMonitorRuns(c.Context(), store.MonitorRunFilter{
-		Namespace:   monitor.Namespace,
-		MonitorName: monitor.Name,
-		Phase:       repositoryMonitorRunPhaseQueued,
-		Limit:       100,
+		Namespace:    monitor.Namespace,
+		MonitorName:  monitor.Name,
+		Trigger:      githubMonitorTriggerPullRequestEvent,
+		TargetKind:   repositoryMonitorTargetKindPullRequest,
+		TargetNumber: next.TargetNumber,
+		TargetSHA:    next.TargetSHA,
+		Phase:        repositoryMonitorRunPhaseQueued,
+		Limit:        1,
 	})
 	if err != nil {
 		return false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to inspect active repository monitor run: %v", err))
 	}
-	for i := range runs {
-		run := runs[i]
-		if run.Trigger != githubMonitorTriggerPullRequestEvent || run.TargetKind != repositoryMonitorTargetKindPullRequest || run.TargetNumber != next.TargetNumber {
-			continue
-		}
-		if run.TargetSHA == next.TargetSHA {
-			return true, nil
-		}
-	}
-	return false, nil
+	return len(runs) > 0, nil
 }
 
 func repositoryMonitorExactPullRequestAction(action string) bool {
@@ -685,18 +680,23 @@ func buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, eve
 			},
 		},
 	}
+	if action == githubActionReview && workspace != nil && workspace.GitSecretRef != nil {
+		task.Annotations[labels.AnnotationWorkspaceInitContainer] = queryTrue
+	}
 	if target.Number > 0 {
 		task.Labels[labels.LabelGitHubNumber] = labels.SelectorValue(strconv.Itoa(target.Number))
 		task.Annotations[labels.AnnotationGitHubNumber] = strconv.Itoa(target.Number)
 	}
-	if action == githubActionUpdateBranch {
-		task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: workerenv.AllowEmptyPushBranch, Value: "true"})
+	if target.IsPR {
 		if baseRepo := repoURL(target.BaseRepo); baseRepo != "" {
 			task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: workerenv.PRBaseRepo, Value: baseRepo})
 		}
 		if target.BaseSHA != "" {
 			task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: workerenv.PRBaseSHA, Value: target.BaseSHA})
 		}
+	}
+	if action == githubActionUpdateBranch {
+		task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: workerenv.AllowEmptyPushBranch, Value: "true"})
 	}
 	return task
 }

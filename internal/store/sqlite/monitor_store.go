@@ -306,6 +306,14 @@ func (s *Store) ListMonitorRuns(ctx context.Context, filter store.MonitorRunFilt
 		query.WriteString(" AND target_kind = ?")
 		args = append(args, filter.TargetKind)
 	}
+	if filter.TargetNumber != 0 {
+		query.WriteString(" AND target_number = ?")
+		args = append(args, filter.TargetNumber)
+	}
+	if filter.TargetSHA != "" {
+		query.WriteString(" AND target_sha = ?")
+		args = append(args, filter.TargetSHA)
+	}
 	if filter.Phase != "" {
 		query.WriteString(" AND phase = ?")
 		args = append(args, filter.Phase)

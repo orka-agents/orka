@@ -44,6 +44,9 @@ type AgentConfig struct {
 	GitRepo            string
 	GitBranch          string
 	GitRef             string
+	PRBaseBranch       string
+	PRBaseRepo         string
+	PRBaseSHA          string
 	SubPath            string
 	TimeoutSeconds     int
 
@@ -74,6 +77,9 @@ func loadConfig(defaultMaxTurns int, requirePrompt bool) (*AgentConfig, error) {
 		GitRepo:            os.Getenv(workerenv.GitRepo),
 		GitBranch:          os.Getenv(workerenv.GitBranch),
 		GitRef:             os.Getenv(workerenv.GitRef),
+		PRBaseBranch:       os.Getenv(workerenv.PRBaseBranch),
+		PRBaseRepo:         os.Getenv(workerenv.PRBaseRepo),
+		PRBaseSHA:          os.Getenv(workerenv.PRBaseSHA),
 		SubPath:            os.Getenv(workerenv.WorkspaceSubpath),
 		MaxTurns:           defaultMaxTurns,
 	}
@@ -388,6 +394,9 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	if !preparedWorkspace {
 		if err := PrepareWorkspace(workspaceDir); err != nil {
 			return fmt.Errorf("workspace preparation failed: %w", err)
+		}
+		if err := PreparePullRequestReviewContext(workspaceDir, cfg); err != nil {
+			return fmt.Errorf("pull request review context preparation failed: %w", err)
 		}
 	}
 	if err := EnsureWorkspaceArtifactsLink(workspaceDir); err != nil {

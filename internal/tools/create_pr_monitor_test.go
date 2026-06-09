@@ -406,6 +406,26 @@ func TestCreatePRMonitorTool_ExecuteMissingRepoURL(t *testing.T) {
 	}
 }
 
+func TestCreatePRMonitorTool_ExecuteRejectsNonRepositoryRepoURL(t *testing.T) {
+	for _, repoURL := range []string{
+		"https://github.com/sozercan/orka/pull/124",
+		"https://github.com/sozercan/orka/issues/124",
+		"https://github.com/sozercan/orka/tree/main",
+	} {
+		t.Run(repoURL, func(t *testing.T) {
+			result := executeCreatePRMonitorForFailure(t, newFakeClient(), map[string]any{
+				nameField:     "daily-pr-monitor",
+				repoURLField:  repoURL,
+				scheduleField: "*/15 * * * *",
+				agentRefField: "reviewer",
+			})
+			if result.ErrorType != errTypeInvalidArgs || !strings.Contains(result.Error, "invalid repo_url") {
+				t.Fatalf("result = %#v, want invalid repo_url", result)
+			}
+		})
+	}
+}
+
 func TestCreatePRMonitorTool_ExecuteAgentNotFound(t *testing.T) {
 	result := executeCreatePRMonitorForFailure(t, newFakeClient(), map[string]any{
 		nameField:     "daily-pr-monitor",

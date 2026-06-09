@@ -135,6 +135,20 @@ func (h *Handlers) validateRepositoryMonitorReviewerAgent(c fiber.Ctx, namespace
 	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeClaude {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.reviewer %q runtime %q is not supported for read-only repository monitor reviews; use claude", reviewer.Name, agent.Spec.Runtime.Type))
 	}
+	if agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.reviewer %q must reference a Secret with Claude credentials for read-only repository monitor reviews", reviewer.Name))
+	}
+	secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
+	var secret corev1.Secret
+	if err := h.client.Get(c.Context(), types.NamespacedName{Name: secretName, Namespace: namespace}, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.reviewer %q credential Secret %q not found in monitor namespace %q", reviewer.Name, secretName, namespace))
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get spec.agents.reviewer %q credential Secret %q: %v", reviewer.Name, secretName, err))
+	}
+	if !repositoryMonitorClaudeSecretHasCredential(&secret) {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.reviewer %q credential Secret %q must contain a supported Claude auth key", reviewer.Name, secretName))
+	}
 	return nil
 }
 
@@ -161,6 +175,18 @@ func repositoryMonitorGitSecretHasToken(secret *corev1.Secret) bool {
 		return false
 	}
 	for _, key := range []string{"token", "password", workerenv.GitHubToken} {
+		if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func repositoryMonitorClaudeSecretHasCredential(secret *corev1.Secret) bool {
+	if secret == nil {
+		return false
+	}
+	for _, key := range []string{workerenv.AnthropicAPIKey, "ANTHROPIC_FOUNDRY_API_KEY"} {
 		if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
 			return true
 		}

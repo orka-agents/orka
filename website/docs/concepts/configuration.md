@@ -219,14 +219,14 @@ spec:
 | `owner` | string | No | Repository owner or organization. Inferred from `repoURL` when omitted. |
 | `repository` | string | No | Repository name. Inferred from `repoURL` when omitted. |
 | `branch` | string | No | Base branch used for pull request inventory. Defaults to `main`. |
-| `gitSecretRef` | LocalObjectReference | No | Secret containing `token`, `password`, or `GITHUB_TOKEN` for GitHub API access and same-repository PR checkout. |
+| `gitSecretRef` | LocalObjectReference | No | Git Secret containing `token`, `password`, or `GITHUB_TOKEN` for GitHub API access and same-repository PR checkout. This is separate from the reviewer Agent's runtime credential Secret. |
 | `schedule` | string | No | Cron expression for scheduled monitor runs. |
 | `timeZone` | string | No | IANA time zone used by `schedule`. |
 | `suspend` | bool | No | Pauses scheduled monitor runs while preserving the monitor configuration. |
 | `targets.pullRequests.enabled` | bool | No | Enables pull request monitoring. Currently this must be true or omitted. |
 | `targets.pullRequests.includeDrafts` | bool | No | Select draft pull requests for review when true. Defaults to false. |
 | `targets.pullRequests.maxPerRun` | int32 | No | Maximum selected PRs per run. Defaults to `20`; allowed range is `1` to `100`. |
-| `agents.reviewer` | AgentReference | Yes | Claude runtime Agent used for read-only PR review tasks. |
+| `agents.reviewer` | AgentReference | Yes | Claude runtime Agent used for read-only PR review tasks. The Agent must reference a Secret in the monitor namespace with `ANTHROPIC_API_KEY` or `ANTHROPIC_FOUNDRY_API_KEY`. |
 | `review.event` | string | No | Default review event value included in review task input. Defaults to `COMMENT`. |
 | `review.staleReviewTTL` | duration | No | Re-review an unchanged head after the previous accepted review is older than this duration. |
 | `review.exactEventEnabled` | bool | No | Queue exact-head monitor runs from signed GitHub pull request webhook events when true. |
@@ -235,7 +235,7 @@ spec:
 | `validation.mode` | string | No | Validation mode included in review task input. Defaults to `changed`; allowed values are `off`, `changed`, and `full`. |
 | `validation.commands` | list | No | Validation commands included in review task input for the reviewer. |
 
-`targets.issues`, `targets.commits`, `review.requireGreenCI`, repair, and automerge fields are present for the broader monitor API shape, but the current controller rejects issue/commit targets and `review.requireGreenCI`; repair and automerge are not active workflows in this implementation slice.
+`targets.issues`, `targets.commits`, `review.requireGreenCI`, repair, and automerge fields are present for the broader monitor API shape, but the current controller rejects issue/commit targets and `review.requireGreenCI`; repair and automerge are not active workflows in this implementation slice. Read-only review tasks check out the exact PR head and receive generated context files under `/workspace/.git/orka/`: `pr-review.md`, `pr-review.files`, and `pr-review.diff`.
 
 **Status fields:**
 

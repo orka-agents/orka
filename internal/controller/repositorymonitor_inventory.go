@@ -254,6 +254,10 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 					PRBaseBranch: pr.BaseBranch,
 				},
 			},
+			Env: []corev1.EnvVar{
+				{Name: workerenv.PRBaseRepo, Value: repositoryMonitorHTTPSCloneURL(owner, repository)},
+				{Name: workerenv.PRBaseSHA, Value: pr.BaseSHA},
+			},
 		},
 	}
 	if err := controllerutil.SetControllerReference(monitor, task, r.Scheme); err != nil {
@@ -440,6 +444,11 @@ func buildRepositoryMonitorReviewPrompt(monitor *corev1alpha1.RepositoryMonitor,
 	return fmt.Sprintf(`Review this exact pull request head for correctness, tests, security, and maintainability.
 
 Do not post comments, push commits, merge, close, label, or otherwise mutate GitHub. Produce only the JSON review result described below.
+
+The workspace is checked out at the pull request head SHA. Review the generated diff context first:
+- /workspace/.git/orka/pr-review.md
+- /workspace/.git/orka/pr-review.files
+- /workspace/.git/orka/pr-review.diff
 
 Input:
 %s

@@ -155,6 +155,14 @@ rules:
     resources: ["tasks/status"]
     verbs: ["get"]
 
+  # RepositoryMonitor permissions
+  - apiGroups: ["core.orka.ai"]
+    resources: ["repositorymonitors"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["repositorymonitors/status"]
+    verbs: ["get"]
+
   # Tool permissions (read-only)
   - apiGroups: ["core.orka.ai"]
     resources: ["tools"]

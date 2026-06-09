@@ -15,13 +15,31 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
-const testEnvToken = "env-token"
+const (
+	testEnvToken       = "env-token"
+	testMyOrgOwner     = "myorg"
+	testMyOrgRepo      = "myrepo"
+	testMyOrgRepoScope = "myorg/myrepo"
+)
+
+type countingClient struct {
+	client.Client
+	taskGets int
+}
+
+func (c *countingClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1alpha1.Task); ok {
+		c.taskGets++
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
 
 func TestResolveRepoAndToken_DirectRepoURL_HTTPS(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", testEnvToken)
@@ -33,8 +51,8 @@ func TestResolveRepoAndToken_DirectRepoURL_HTTPS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if owner != "myorg" || repo != "myrepo" {
-		t.Errorf("got owner=%q repo=%q, want myorg/myrepo", owner, repo)
+	if owner != testMyOrgOwner || repo != testMyOrgRepo {
+		t.Errorf("got owner=%q repo=%q, want %s", owner, repo, testMyOrgRepoScope)
 	}
 	if token != testEnvToken {
 		t.Errorf("got token=%q, want env-token", token)
@@ -54,8 +72,8 @@ func TestResolveRepoAndToken_DirectRepoURL_SSH(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if owner != "myorg" || repo != "myrepo" {
-		t.Errorf("got owner=%q repo=%q, want myorg/myrepo", owner, repo)
+	if owner != testMyOrgOwner || repo != testMyOrgRepo {
+		t.Errorf("got owner=%q repo=%q, want %s", owner, repo, testMyOrgRepoScope)
 	}
 	if token != testEnvToken {
 		t.Errorf("got token=%q, want env-token", token)
@@ -121,6 +139,51 @@ func TestResolveRepoAndToken_TaskName(t *testing.T) {
 	}
 	if baseURL != githubAPIBaseURL {
 		t.Errorf("got baseURL=%q, want %q", baseURL, githubAPIBaseURL)
+	}
+}
+
+func TestResolveRepoAndToken_TaskNameAndRepoURLLoadsTaskOnce(t *testing.T) {
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testMyTaskName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      testMyOrgRepoURL,
+					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
+		Data:       map[string][]byte{tokenKey: []byte("task-secret-token")},
+	}
+
+	k8sClient := &countingClient{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build(),
+	}
+
+	owner, repo, token, _, err := resolveRepoAndToken(
+		context.Background(), k8sClient, testMyTaskName, testMyOrgRepoURL, "",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if owner != testMyOrgOwner || repo != testMyOrgRepo {
+		t.Errorf("got owner=%q repo=%q, want %s", owner, repo, testMyOrgRepoScope)
+	}
+	if token != "task-secret-token" {
+		t.Errorf("got token=%q, want task-secret-token", token)
+	}
+	if k8sClient.taskGets != 1 {
+		t.Errorf("task Get calls = %d, want 1", k8sClient.taskGets)
 	}
 }
 
@@ -458,7 +521,7 @@ func TestResolveRepoAndToken_RepoURLMismatchRejectsTaskToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected repo scope mismatch error")
 	}
-	if !contains(err.Error(), "does not match task repository scope") {
+	if !contains(err.Error(), "does not match permitted repository scope") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package common
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,19 @@ import (
 )
 
 const requirePushBranchEnvVar = workerenv.RequirePushBranch
+
+const (
+	gitOriginRemote                   = "origin"
+	pullRequestReviewContextDir       = ".git/orka"
+	pullRequestReviewDiffPath         = ".git/orka/pr-review.diff"
+	pullRequestReviewFilesPath        = ".git/orka/pr-review.files"
+	pullRequestReviewInstructionsPath = ".git/orka/pr-review.md"
+)
+
+var (
+	pullRequestReviewDiffLimitBytes = int64(10 * 1024 * 1024)
+	pullRequestReviewListLimitBytes = int64(1024 * 1024)
+)
 
 var waitForRemoteBranchVisibility = waitForRemoteBranchVisibilityWithGit
 
@@ -111,6 +125,189 @@ func PrepareWorkspace(workDir string) error {
 
 	fmt.Fprintf(os.Stderr, "successfully applied prior task diff from %s\n", priorTask)
 	return nil
+}
+
+// PreparePullRequestReviewContext writes safe, read-only PR diff context into
+// the workspace for reviewer agents that cannot run git commands themselves.
+func PreparePullRequestReviewContext(workDir string, cfg *AgentConfig) error {
+	if cfg == nil || strings.TrimSpace(cfg.PRBaseBranch) == "" {
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".git")); err != nil {
+		return nil
+	}
+	baseBranch := strings.TrimSpace(cfg.PRBaseBranch)
+	baseRepo := strings.TrimSpace(cfg.PRBaseRepo)
+	baseSHA := strings.TrimSpace(cfg.PRBaseSHA)
+	fetchSource := gitOriginRemote
+	if baseRepo != "" {
+		fetchSource = baseRepo
+	}
+	baseBranchRef := pullRequestReviewBaseBranchRef(fetchSource, baseBranch)
+	baseRef := baseSHA
+	if baseRef != "" {
+		_, fetchErr := execGit(workDir, "fetch", "--depth=1", fetchSource, baseRef)
+		if fetchErr != nil && !commitExists(workDir, baseRef) {
+			if branchErr := fetchPullRequestReviewBaseBranch(workDir, fetchSource, baseBranch, baseBranchRef); branchErr != nil {
+				return fmt.Errorf(
+					"fetch PR base SHA %q failed: %w; fallback base branch fetch failed: %v",
+					shortGitSHA(baseRef),
+					fetchErr,
+					branchErr,
+				)
+			}
+			if !commitExists(workDir, baseRef) {
+				baseRef = baseBranchRef
+			}
+		}
+		if err := ensurePullRequestReviewMergeBase(workDir, fetchSource, baseBranch, baseRef); err != nil {
+			return err
+		}
+	} else {
+		baseRef = baseBranchRef
+		if err := fetchPullRequestReviewBaseBranch(workDir, fetchSource, baseBranch, baseRef); err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(workDir, pullRequestReviewContextDir), 0o755); err != nil {
+		return fmt.Errorf("create pull request review context directory: %w", err)
+	}
+	diff, diffTruncated, err := execGitLimited(
+		workDir,
+		pullRequestReviewDiffLimitBytes,
+		"diff",
+		"--find-renames",
+		"--find-copies",
+		baseRef+"...HEAD",
+	)
+	if err != nil {
+		return fmt.Errorf("generate pull request review diff: %w", err)
+	}
+	files, filesTruncated, err := execGitLimited(
+		workDir,
+		pullRequestReviewListLimitBytes,
+		"diff",
+		"--name-only",
+		baseRef+"...HEAD",
+	)
+	if err != nil {
+		return fmt.Errorf("generate pull request review file list: %w", err)
+	}
+	stat, statTruncated, _ := execGitLimited(
+		workDir,
+		pullRequestReviewListLimitBytes,
+		"diff",
+		"--stat",
+		baseRef+"...HEAD",
+	)
+	if strings.TrimSpace(diff) == "" {
+		diff = "# No diff between " + baseRef + " and HEAD.\n"
+	}
+	if diffTruncated {
+		diff += fmt.Sprintf("\n\n# Orka truncated this diff at %d bytes.\n", pullRequestReviewDiffLimitBytes)
+	}
+	if filesTruncated {
+		files += fmt.Sprintf("\n# Orka truncated this file list at %d bytes.\n", pullRequestReviewListLimitBytes)
+	}
+	truncationNote := "None"
+	if diffTruncated || filesTruncated || statTruncated {
+		var notes []string
+		if diffTruncated {
+			notes = append(notes, fmt.Sprintf("diff truncated at %d bytes", pullRequestReviewDiffLimitBytes))
+		}
+		if filesTruncated {
+			notes = append(notes, fmt.Sprintf("file list truncated at %d bytes", pullRequestReviewListLimitBytes))
+		}
+		if statTruncated {
+			notes = append(notes, fmt.Sprintf("stat truncated at %d bytes", pullRequestReviewListLimitBytes))
+		}
+		truncationNote = strings.Join(notes, "\n")
+	}
+	if err := os.WriteFile(filepath.Join(workDir, pullRequestReviewDiffPath), []byte(diff), 0o644); err != nil {
+		return fmt.Errorf("write pull request review diff: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, pullRequestReviewFilesPath), []byte(files), 0o644); err != nil {
+		return fmt.Errorf("write pull request review file list: %w", err)
+	}
+	instructions := fmt.Sprintf(`# Pull Request Review Context
+
+Base branch: %s
+Base repo: %s
+Base SHA: %s
+Base ref: %s
+Head ref: HEAD
+
+Changed files are listed in %s.
+Unified diff context is in %s.
+
+Truncation: %s
+
+## Stat
+
+%s
+`,
+		baseBranch,
+		baseRepo,
+		baseSHA,
+		baseRef,
+		pullRequestReviewFilesPath,
+		pullRequestReviewDiffPath,
+		truncationNote,
+		strings.TrimSpace(stat),
+	)
+	instructionsPath := filepath.Join(workDir, pullRequestReviewInstructionsPath)
+	if err := os.WriteFile(instructionsPath, []byte(instructions), 0o644); err != nil {
+		return fmt.Errorf("write pull request review instructions: %w", err)
+	}
+	return nil
+}
+
+func pullRequestReviewBaseBranchRef(fetchSource, baseBranch string) string {
+	if fetchSource == gitOriginRemote {
+		return "refs/remotes/origin/" + baseBranch
+	}
+	return "refs/remotes/orka-base/" + baseBranch
+}
+
+func fetchPullRequestReviewBaseBranch(workDir, fetchSource, baseBranch, baseRef string) error {
+	refspec := "+refs/heads/" + baseBranch + ":" + baseRef
+	if _, err := execGit(workDir, "fetch", fetchSource, refspec); err != nil {
+		return fmt.Errorf("fetch PR base branch %q failed: %w", baseBranch, err)
+	}
+	return nil
+}
+
+func ensurePullRequestReviewMergeBase(workDir, fetchSource, baseBranch, baseRef string) error {
+	if pullRequestReviewMergeBaseExists(workDir, baseRef) {
+		return nil
+	}
+	for _, deepen := range []string{"64", "256", "1024"} {
+		_, err := execGit(workDir, "fetch", "--deepen="+deepen, fetchSource, baseRef)
+		if err != nil && !commitExists(workDir, baseRef) {
+			return fmt.Errorf("deepen PR base SHA %q failed: %w", shortGitSHA(baseRef), err)
+		}
+		if pullRequestReviewMergeBaseExists(workDir, baseRef) {
+			return nil
+		}
+	}
+
+	baseBranchRef := "refs/remotes/origin/" + baseBranch
+	if fetchSource != "origin" {
+		baseBranchRef = "refs/remotes/orka-base/" + baseBranch
+	}
+	refspec := "+refs/heads/" + baseBranch + ":" + baseBranchRef
+	if _, err := execGit(workDir, "fetch", fetchSource, refspec); err != nil {
+		return fmt.Errorf("fetch PR base branch %q for merge base failed: %w", baseBranch, err)
+	}
+	if pullRequestReviewMergeBaseExists(workDir, baseRef) {
+		return nil
+	}
+	return fmt.Errorf("resolve merge base between PR base %q and HEAD failed", shortGitSHA(baseRef))
+}
+
+func pullRequestReviewMergeBaseExists(workDir, baseRef string) bool {
+	_, err := execGit(workDir, "merge-base", baseRef, "HEAD")
+	return err == nil
 }
 
 // FinalizeResult builds a structured result from the agent output and any
@@ -421,6 +618,47 @@ func execGit(dir string, args ...string) (string, error) {
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+func execGitLimited(dir string, limit int64, args ...string) (string, bool, error) {
+	var stdout limitedOutputBuffer
+	stdout.limit = limit
+	var stderr limitedOutputBuffer
+	stderr.limit = 64 * 1024
+	cmd := exec.Command("git", gitSafeDirectoryArgs(dir, args...)...)
+	cmd.Dir = dir
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return stdout.String(), stdout.truncated, fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
+	}
+	return stdout.String(), stdout.truncated, nil
+}
+
+type limitedOutputBuffer struct {
+	buf       bytes.Buffer
+	limit     int64
+	truncated bool
+}
+
+func (b *limitedOutputBuffer) Write(p []byte) (int, error) {
+	if b.limit <= 0 {
+		b.truncated = b.truncated || len(p) > 0
+		return len(p), nil
+	}
+	if remaining := b.limit - int64(b.buf.Len()); remaining > 0 {
+		if int64(len(p)) <= remaining {
+			_, _ = b.buf.Write(p)
+			return len(p), nil
+		}
+		_, _ = b.buf.Write(p[:remaining])
+	}
+	b.truncated = true
+	return len(p), nil
+}
+
+func (b *limitedOutputBuffer) String() string {
+	return b.buf.String()
 }
 
 // parseDiffStatFiles extracts file paths from `git diff --stat` output.

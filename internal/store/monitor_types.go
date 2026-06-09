@@ -36,14 +36,16 @@ type MonitorRun struct {
 
 // MonitorRunFilter constrains monitor run list queries.
 type MonitorRunFilter struct {
-	Namespace   string
-	MonitorName string
-	Trigger     string
-	TargetKind  string
-	Phase       string
-	OldestFirst bool
-	Limit       int
-	Cursor      string
+	Namespace    string
+	MonitorName  string
+	Trigger      string
+	TargetKind   string
+	TargetNumber int64
+	TargetSHA    string
+	Phase        string
+	OldestFirst  bool
+	Limit        int
+	Cursor       string
 }
 
 // MonitorItem stores the latest state for one monitored issue, pull request, or commit.

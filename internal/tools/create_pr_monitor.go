@@ -20,6 +20,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/security"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -130,7 +131,7 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 	if repoURL == "" {
 		return ChatToolErrorResult("invalid_arguments", "repo_url is required", "Provide the GitHub repository URL to monitor")
 	}
-	if _, _, err := parseGitHubRepo(repoURL); err != nil {
+	if _, _, err := security.ParseGitHubRepositoryURL(repoURL); err != nil {
 		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("invalid repo_url %q: %v", repoURL, err), "Provide a GitHub repository URL such as https://github.com/owner/repo")
 	}
 	var agent corev1alpha1.Agent

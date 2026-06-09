@@ -22,7 +22,7 @@ A repository monitor can:
 - store monitor runs, PR items, review records, and audit events durably
 - show monitor status, recent runs, and the PR queue in the dashboard under **Monitors**
 
-The review task is bound to the exact PR head SHA. It runs as a `type: agent` task, uses a Claude runtime Agent, checks out the PR head in a read-only workspace, and is instructed to return only the structured review result. It does not post GitHub comments, push commits, merge, close, or mutate labels.
+The review task is bound to the exact PR head SHA. It runs as a `type: agent` task, uses a Claude runtime Agent, checks out the PR head in a read-only workspace, writes generated PR context under `/workspace/.git/orka/`, and is instructed to return only the structured review result. It does not post GitHub comments, push commits, merge, close, or mutate labels.
 
 ## Current Limits
 
@@ -35,17 +35,25 @@ The first implementation is intentionally narrow:
 - `spec.review.requireGreenCI` is rejected until CI state collection is available.
 - GitHub webhook-driven exact runs are opt-in with `spec.review.exactEventEnabled`.
 - Repair, automerge, maintainer command routing, and public review comment updates are represented in the API/store shape but are not active workflows in this slice.
-- The reviewer Agent must use `runtime.type: claude` for read-only repository monitor reviews.
+- The reviewer Agent must use `runtime.type: claude` and reference a Secret in the monitor namespace with `ANTHROPIC_API_KEY` or `ANTHROPIC_FOUNDRY_API_KEY`.
 
 ## CI Coverage
 
 Repository monitor backend coverage has a focused GitHub Actions workflow at `.github/workflows/repository-monitor-smoke.yml`. It runs on pull requests and pushes that touch the workflow, Go API/controller/store code, CRD/config paths, worker code, or Go dependency files.
 
-The smoke workflow creates the UI embed stub and runs targeted Go tests for monitor store CRUD, API handlers, GitHub pull request event handling, controller queue and review flow, read-only review task job construction, stdout result forwarding, and PR review marker tooling. UI monitor pages are covered by the normal frontend test workflow rather than this smoke workflow.
+The smoke workflow creates the UI embed stub and runs targeted Go tests for monitor store CRUD, API handlers, GitHub pull request event handling, controller queue and review flow, read-only review task job construction, stdout result forwarding, and PR review marker tooling. Worker-level PR review diff context generation is covered by the normal Go test workflow. UI monitor pages are covered by the normal frontend test workflow rather than this smoke workflow.
 
 ## Prerequisites
 
-Create a Claude runtime Agent in the same namespace as the monitor, or set `spec.agents.reviewer.namespace` explicitly.
+Create Claude runtime credentials in the monitor namespace:
+
+```bash
+kubectl create secret generic claude-runtime-credentials \
+  --namespace default \
+  --from-literal=ANTHROPIC_API_KEY='<anthropic-api-key>'
+```
+
+Then create a Claude runtime Agent in the same namespace as the monitor, or set `spec.agents.reviewer.namespace` explicitly. Orka validates that the Agent references a Secret in the monitor namespace and that the Secret contains a supported Claude auth key.
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -59,19 +67,18 @@ spec:
   runtime:
     type: claude
     defaultMaxTurns: 50
-    defaultAllowBash: true
     defaultAllowedTools:
       - Read
       - Grep
       - Glob
-      - Bash
+      - LS
   systemPrompt:
     inline: |
       Review the exact pull request head for correctness, tests, security, and maintainability.
       Return concise, structured findings and do not mutate GitHub.
 ```
 
-For private repositories or higher GitHub rate limits, create a Secret in the monitor namespace. When a monitor is created or updated through the API, Orka validates that the referenced Secret exists and contains a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
+For private repositories or higher GitHub rate limits, create a Git Secret in the monitor namespace. This is separate from the reviewer Agent's Claude credential Secret. When a monitor is created or updated through the API, Orka validates that the referenced Git Secret exists and contains a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
 
 ```bash
 kubectl create secret generic repo-monitor-github \
@@ -80,6 +87,16 @@ kubectl create secret generic repo-monitor-github \
 ```
 
 The same Secret is mounted into review workspaces for same-repository PR heads. Fork PR heads are checked out from the fork URL without the monitored repository credential.
+
+## Review Workspace Context
+
+Before the Claude reviewer starts, the worker fetches the PR base branch and writes generated read-only context files:
+
+- `/workspace/.git/orka/pr-review.md` - base/head summary and diff stats
+- `/workspace/.git/orka/pr-review.files` - changed file list
+- `/workspace/.git/orka/pr-review.diff` - unified diff from the base branch to the PR head
+
+The generated files are added to the workspace's git exclude file so they are not captured as task changes. Read-only review tasks receive only scoped file-reading tools for `/workspace/**` and selected Claude runtime environment variables from the reviewer Secret.
 
 ## Create a Monitor
 

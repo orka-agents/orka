@@ -29,6 +29,11 @@ type githubRepoScope struct {
 	repo   string
 }
 
+type githubTaskContext struct {
+	scopes       []githubRepoScope
+	gitSecretRef *corev1.LocalObjectReference
+}
+
 // resolveRepoAndToken resolves GitHub owner/repo, auth token, and API base URL.
 // Repository resolution prefers an explicit repoURL, then task workspace config,
 // then ORKA_GIT_REPO when no task context is available. If taskName, or an
@@ -42,12 +47,21 @@ type githubRepoScope struct {
 //  3. /secrets/git/password file (mounted in pod)
 //  4. GITHUB_TOKEN env var
 func resolveRepoAndToken(ctx context.Context, k8sClient client.Client, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
+	return resolveRepoAndTokenWithScopePolicy(ctx, k8sClient, taskName, repoURL, overrideBaseURL, false)
+}
+
+func resolveScopedRepoAndToken(ctx context.Context, k8sClient client.Client, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
+	return resolveRepoAndTokenWithScopePolicy(ctx, k8sClient, taskName, repoURL, overrideBaseURL, true)
+}
+
+func resolveRepoAndTokenWithScopePolicy(ctx context.Context, k8sClient client.Client, taskName, repoURL, overrideBaseURL string, requireRepoURLScope bool) (owner, repo, token, baseURL string, err error) {
 	baseURL = githubAPIBaseURL
 	if overrideBaseURL != "" {
 		baseURL = overrideBaseURL
 	}
 
-	if repoURL != "" {
+	hasRepoURL := strings.TrimSpace(repoURL) != ""
+	if hasRepoURL {
 		owner, repo, err = parseGitHubRepo(repoURL)
 		if err != nil {
 			return "", "", "", "", fmt.Errorf("failed to parse GitHub repo from %s: %w", repoURL, err)
@@ -55,25 +69,28 @@ func resolveRepoAndToken(ctx context.Context, k8sClient client.Client, taskName,
 	}
 
 	scopeTaskName := githubTaskNameFromContext(ctx, taskName)
+	if hasRepoURL && requireRepoURLScope && scopeTaskName == "" {
+		return "", "", "", "", fmt.Errorf("repo_url repository %s/%s requires a permitted repository scope", owner, repo)
+	}
 	if scopeTaskName != "" {
-		scopes, err := taskRepoScopes(ctx, k8sClient, scopeTaskName)
+		taskContext, err := loadGitHubTaskContext(ctx, k8sClient, scopeTaskName)
 		if err != nil {
 			return "", "", "", "", err
 		}
 		if owner == "" || repo == "" {
-			if len(scopes) == 0 {
+			if len(taskContext.scopes) == 0 {
 				return "", "", "", "", fmt.Errorf("task %s workspace has no GitHub repository scope", scopeTaskName)
 			}
-			owner, repo = scopes[0].owner, scopes[0].repo
-		} else if !githubRepoAllowed(owner, repo, scopes) {
+			owner, repo = taskContext.scopes[0].owner, taskContext.scopes[0].repo
+		} else if !githubRepoAllowed(owner, repo, taskContext.scopes) {
 			return "", "", "", "", fmt.Errorf(
-				"repo_url repository %s/%s does not match task repository scope %s",
+				"repo_url repository %s/%s does not match permitted repository scope %s",
 				owner,
 				repo,
-				formatGitHubRepoScopes(scopes),
+				formatGitHubRepoScopes(taskContext.scopes),
 			)
 		}
-		token, err = resolveTaskGitSecretToken(ctx, k8sClient, scopeTaskName)
+		token, err = resolveGitSecretToken(ctx, k8sClient, taskContext.gitSecretRef)
 		if err != nil {
 			return "", "", "", "", err
 		}
@@ -104,37 +121,6 @@ func resolveRepoAndToken(ctx context.Context, k8sClient client.Client, taskName,
 	return owner, repo, token, baseURL, nil
 }
 
-func validateRepoURLScope(ctx context.Context, k8sClient client.Client, taskName, repoURL string) error {
-	repoURL = strings.TrimSpace(repoURL)
-	if repoURL == "" {
-		return nil
-	}
-	owner, repo, err := parseGitHubRepo(repoURL)
-	if err != nil {
-		return fmt.Errorf("failed to parse repo_url: %w", err)
-	}
-
-	scopes, err := taskRepoScopes(ctx, k8sClient, taskName)
-	if err != nil {
-		return err
-	}
-	if len(scopes) == 0 {
-		return fmt.Errorf("repo_url repository %s/%s requires a permitted repository scope", owner, repo)
-	}
-
-	for _, scope := range scopes {
-		if githubRepoMatches(owner, repo, scope.owner, scope.repo) {
-			return nil
-		}
-	}
-	return fmt.Errorf(
-		"repo_url repository %s/%s does not match permitted repository scope %s",
-		owner,
-		repo,
-		formatGitHubRepoScopes(scopes),
-	)
-}
-
 func githubRepoAllowed(owner, repo string, scopes []githubRepoScope) bool {
 	for _, scope := range scopes {
 		if githubRepoMatches(owner, repo, scope.owner, scope.repo) {
@@ -144,28 +130,32 @@ func githubRepoAllowed(owner, repo string, scopes []githubRepoScope) bool {
 	return false
 }
 
-func taskRepoScopes(ctx context.Context, k8sClient client.Client, taskName string) ([]githubRepoScope, error) {
+func loadGitHubTaskContext(ctx context.Context, k8sClient client.Client, taskName string) (githubTaskContext, error) {
 	taskName = githubTaskNameFromContext(ctx, taskName)
 	if strings.TrimSpace(taskName) == "" {
-		return nil, nil
+		return githubTaskContext{}, nil
 	}
 	if k8sClient == nil {
-		return nil, fmt.Errorf("task_name %q requires a Kubernetes client for repo_url scope validation", taskName)
+		return githubTaskContext{}, fmt.Errorf("task_name %q requires a Kubernetes client for repo_url scope validation", taskName)
 	}
 
 	ns := githubTaskNamespace(ctx)
 
 	var task corev1alpha1.Task
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: taskName, Namespace: ns}, &task); err != nil {
-		return nil, fmt.Errorf("failed to get task %s: %w", taskName, err)
+		return githubTaskContext{}, fmt.Errorf("failed to get task %s: %w", taskName, err)
 	}
 
+	var result githubTaskContext
 	var scopes []githubRepoScope
 	ws := githubTaskWorkspace(&task)
+	if ws != nil {
+		result.gitSecretRef = ws.GitSecretRef
+	}
 	if ws != nil && strings.TrimSpace(ws.GitRepo) != "" {
 		owner, repo, err := parseGitHubRepo(ws.GitRepo)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse GitHub repo from %s: %w", ws.GitRepo, err)
+			return githubTaskContext{}, fmt.Errorf("failed to parse GitHub repo from %s: %w", ws.GitRepo, err)
 		}
 		scopes = append(scopes, githubRepoScope{source: "task workspace", owner: owner, repo: repo})
 	}
@@ -173,20 +163,21 @@ func taskRepoScopes(ctx context.Context, k8sClient client.Client, taskName strin
 		if txRepo := strings.TrimSpace(task.Spec.Transaction.Context["repo"]); txRepo != "" {
 			owner, repo, err := parseGitHubRepo(txRepo)
 			if err != nil {
-				return nil, fmt.Errorf("failed to parse transaction repo context: %w", err)
+				return githubTaskContext{}, fmt.Errorf("failed to parse transaction repo context: %w", err)
 			}
 			scopes = append(scopes, githubRepoScope{source: "transaction repo context", owner: owner, repo: repo})
 		}
 	}
 	if len(scopes) == 0 {
 		if ws == nil {
-			return nil, fmt.Errorf("task %s does not have workspace configuration", taskName)
+			return githubTaskContext{}, fmt.Errorf("task %s does not have workspace configuration", taskName)
 		}
 		if strings.TrimSpace(ws.GitRepo) == "" {
-			return nil, fmt.Errorf("task %s workspace has no gitRepo configured", taskName)
+			return githubTaskContext{}, fmt.Errorf("task %s workspace has no gitRepo configured", taskName)
 		}
 	}
-	return scopes, nil
+	result.scopes = scopes
+	return result, nil
 }
 
 func githubRepoMatches(owner, repo, wantOwner, wantRepo string) bool {
@@ -231,23 +222,13 @@ func githubTaskWorkspace(task *corev1alpha1.Task) *corev1alpha1.WorkspaceConfig 
 	return ws
 }
 
-func resolveTaskGitSecretToken(ctx context.Context, k8sClient client.Client, taskName string) (string, error) {
-	taskName = githubTaskNameFromContext(ctx, taskName)
-	ns := githubTaskNamespace(ctx)
-
-	var task corev1alpha1.Task
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: taskName, Namespace: ns}, &task); err != nil {
-		return "", fmt.Errorf("failed to get task %s: %w", taskName, err)
-	}
-
-	ws := githubTaskWorkspace(&task)
-	if ws == nil || ws.GitSecretRef == nil {
+func resolveGitSecretToken(ctx context.Context, k8sClient client.Client, gitSecretRef *corev1.LocalObjectReference) (string, error) {
+	if gitSecretRef == nil {
 		return "", nil
 	}
-
 	var secret corev1.Secret
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: ws.GitSecretRef.Name, Namespace: ns}, &secret); err != nil {
-		return "", fmt.Errorf("failed to get git secret %s: %w", ws.GitSecretRef.Name, err)
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: gitSecretRef.Name, Namespace: githubTaskNamespace(ctx)}, &secret); err != nil {
+		return "", fmt.Errorf("failed to get git secret %s: %w", gitSecretRef.Name, err)
 	}
 
 	var token string
@@ -260,7 +241,7 @@ func resolveTaskGitSecretToken(ctx context.Context, k8sClient client.Client, tas
 		}
 	}
 	if token == "" {
-		return "", fmt.Errorf("git secret %s does not contain a 'token', 'password', or 'GITHUB_TOKEN' key", ws.GitSecretRef.Name)
+		return "", fmt.Errorf("git secret %s does not contain a 'token', 'password', or 'GITHUB_TOKEN' key", gitSecretRef.Name)
 	}
 
 	return token, nil

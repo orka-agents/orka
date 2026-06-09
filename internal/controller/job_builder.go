@@ -1249,6 +1249,9 @@ func (b *JobBuilder) addReadOnlyAgentRuntimeSecretEnv(ctx context.Context, job *
 		}
 		return fmt.Errorf("failed to get read-only agent runtime secret %q: %w", secretName, err)
 	}
+	if !readOnlyAgentRuntimeSecretHasCredential(secret, agent) {
+		return fmt.Errorf("read-only agent runtime secret %q contains no supported auth credential keys for runtime %q", secretName, readOnlyAgentRuntimeType(agent))
+	}
 
 	added := 0
 	for _, key := range keys {
@@ -1270,6 +1273,23 @@ func (b *JobBuilder) addReadOnlyAgentRuntimeSecretEnv(ctx context.Context, job *
 		return fmt.Errorf("read-only agent runtime secret %q contains no supported keys for runtime %q", secretName, readOnlyAgentRuntimeType(agent))
 	}
 	return nil
+}
+
+func readOnlyAgentRuntimeSecretHasCredential(secret *corev1.Secret, agent *corev1alpha1.Agent) bool {
+	if secret == nil {
+		return false
+	}
+	switch readOnlyAgentRuntimeType(agent) {
+	case corev1alpha1.AgentRuntimeClaude:
+		for _, key := range []string{workerenv.AnthropicAPIKey, "ANTHROPIC_FOUNDRY_API_KEY"} {
+			if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 func readOnlyAgentRuntimeSecretKeys(agent *corev1alpha1.Agent) ([]string, error) {

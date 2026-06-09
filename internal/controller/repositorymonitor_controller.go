@@ -15,10 +15,12 @@ import (
 	"time"
 
 	cron "github.com/robfig/cron/v3"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -27,6 +29,7 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/security"
 	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
@@ -41,16 +44,21 @@ const (
 	repositoryMonitorRunPhaseFailed    = "failed"
 
 	repositoryMonitorRunningRunTimeout = 30 * time.Minute
+	repositoryMonitorValidationRetry   = time.Minute
+
+	repositoryMonitorReasonReviewerCredentialsInvalid = "ReviewerCredentialsInvalid"
+	repositoryMonitorReasonGitSecretInvalid           = "GitSecretInvalid"
 )
 
 // RepositoryMonitorReconciler reconciles RepositoryMonitor resources.
 type RepositoryMonitorReconciler struct {
 	client.Client
-	Scheme           *runtime.Scheme
-	Store            store.RepositoryMonitorStore
-	ResultStore      store.ResultStore
-	HTTPClient       *http.Client
-	GitHubAPIBaseURL string
+	Scheme                    *runtime.Scheme
+	Store                     store.RepositoryMonitorStore
+	ResultStore               store.ResultStore
+	HTTPClient                *http.Client
+	GitHubAPIBaseURL          string
+	EnforceNamespaceIsolation bool
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositorymonitors,verbs=get;list;watch;create;update;patch;delete
@@ -130,9 +138,9 @@ func (r *RepositoryMonitorReconciler) prepareRepositoryMonitor(ctx context.Conte
 		return repositoryMonitorReconcileState{}, true, ctrl.Result{RequeueAfter: time.Minute}, err
 	}
 
-	owner, repository, handled, err := r.validateRepositoryMonitorSpec(ctx, monitor)
+	owner, repository, handled, validationRetryAfter, err := r.validateRepositoryMonitorSpec(ctx, monitor)
 	if handled || err != nil {
-		return repositoryMonitorReconcileState{}, handled, ctrl.Result{}, err
+		return repositoryMonitorReconcileState{}, handled, ctrl.Result{RequeueAfter: validationRetryAfter}, err
 	}
 
 	var schedule cron.Schedule
@@ -159,22 +167,112 @@ func parseRepositoryMonitorSchedule(monitor *corev1alpha1.RepositoryMonitor) (cr
 	return nil, err
 }
 
-func (r *RepositoryMonitorReconciler) validateRepositoryMonitorSpec(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, string, bool, error) {
+func (r *RepositoryMonitorReconciler) validateRepositoryMonitorSpec(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, string, bool, time.Duration, error) {
 	owner, repository, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
 	if err != nil {
 		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, "InvalidRepositoryURL", repositoryScanConditionMessage(err.Error(), "invalid repository URL"))
-		return "", "", true, updateErr
+		return "", "", true, 0, updateErr
 	}
 	if err := validateRepositoryMonitorSupportedTargets(monitor.Spec); err != nil {
 		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, "UnsupportedTarget", repositoryScanConditionMessage(err.Error(), "unsupported repository monitor target"))
-		return "", "", true, updateErr
+		return "", "", true, 0, updateErr
 	}
 	if repositoryMonitorPullRequestsEnabled(monitor.Spec) && (monitor.Spec.Agents.Reviewer == nil || strings.TrimSpace(monitor.Spec.Agents.Reviewer.Name) == "") {
 		message := "spec.agents.reviewer.name is required when pull request monitoring is enabled"
 		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, "MissingReviewerAgent", message)
-		return "", "", true, updateErr
+		return "", "", true, 0, updateErr
 	}
-	return owner, repository, false, nil
+	if reason, message, err := r.validateRepositoryMonitorReviewerAgent(ctx, monitor); reason != "" || err != nil {
+		if err != nil {
+			return "", "", false, 0, err
+		}
+		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, reason, message)
+		return "", "", true, repositoryMonitorValidationRetry, updateErr
+	}
+	if reason, message, err := r.validateRepositoryMonitorGitSecret(ctx, monitor); reason != "" || err != nil {
+		if err != nil {
+			return "", "", false, 0, err
+		}
+		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, reason, message)
+		return "", "", true, repositoryMonitorValidationRetry, updateErr
+	}
+	return owner, repository, false, 0, nil
+}
+
+func (r *RepositoryMonitorReconciler) validateRepositoryMonitorReviewerAgent(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, string, error) {
+	if !repositoryMonitorPullRequestsEnabled(monitor.Spec) {
+		return "", "", nil
+	}
+	reviewer := monitor.Spec.Agents.Reviewer
+	if reviewer == nil || strings.TrimSpace(reviewer.Name) == "" {
+		return "", "", nil
+	}
+	agentNamespace := reviewer.Namespace
+	if agentNamespace == "" {
+		agentNamespace = monitor.Namespace
+	}
+	if r.EnforceNamespaceIsolation && agentNamespace != monitor.Namespace {
+		return "ReviewerNamespaceInvalid", fmt.Sprintf("spec.agents.reviewer namespace %q must match monitor namespace %q when namespace isolation is enforced", agentNamespace, monitor.Namespace), nil
+	}
+
+	var agent corev1alpha1.Agent
+	if err := r.Get(ctx, types.NamespacedName{Name: reviewer.Name, Namespace: agentNamespace}, &agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "ReviewerAgentNotFound", fmt.Sprintf("spec.agents.reviewer %q not found in namespace %q", reviewer.Name, agentNamespace), nil
+		}
+		return "", "", err
+	}
+	if agent.Spec.Runtime == nil {
+		return "UnsupportedReviewerAgent", fmt.Sprintf("spec.agents.reviewer %q must use the claude runtime for read-only repository monitor reviews", reviewer.Name), nil
+	}
+	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeClaude {
+		return "UnsupportedReviewerAgent", fmt.Sprintf("spec.agents.reviewer %q runtime %q is not supported for read-only repository monitor reviews; use claude", reviewer.Name, agent.Spec.Runtime.Type), nil
+	}
+	if agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
+		return repositoryMonitorReasonReviewerCredentialsInvalid, fmt.Sprintf("spec.agents.reviewer %q must reference a Secret with Claude credentials for read-only repository monitor reviews", reviewer.Name), nil
+	}
+	secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
+	var secret corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: monitor.Namespace}, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return repositoryMonitorReasonReviewerCredentialsInvalid, fmt.Sprintf("spec.agents.reviewer %q credential Secret %q not found in monitor namespace %q", reviewer.Name, secretName, monitor.Namespace), nil
+		}
+		return "", "", err
+	}
+	if !readOnlyAgentRuntimeSecretHasCredential(&secret, &agent) {
+		return repositoryMonitorReasonReviewerCredentialsInvalid, fmt.Sprintf("spec.agents.reviewer %q credential Secret %q must contain a supported Claude auth key", reviewer.Name, secretName), nil
+	}
+	return "", "", nil
+}
+
+func (r *RepositoryMonitorReconciler) validateRepositoryMonitorGitSecret(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, string, error) {
+	if monitor.Spec.GitSecretRef == nil || strings.TrimSpace(monitor.Spec.GitSecretRef.Name) == "" {
+		return "", "", nil
+	}
+	secretName := strings.TrimSpace(monitor.Spec.GitSecretRef.Name)
+	var secret corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: monitor.Namespace}, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return repositoryMonitorReasonGitSecretInvalid, fmt.Sprintf("spec.gitSecretRef %q not found in namespace %q", secretName, monitor.Namespace), nil
+		}
+		return "", "", err
+	}
+	if !repositoryMonitorGitSecretHasToken(&secret) {
+		return repositoryMonitorReasonGitSecretInvalid, fmt.Sprintf("spec.gitSecretRef %q must contain a non-empty token, password, or %s key", secretName, workerenv.GitHubToken), nil
+	}
+	return "", "", nil
+}
+
+func repositoryMonitorGitSecretHasToken(secret *corev1.Secret) bool {
+	if secret == nil {
+		return false
+	}
+	for _, key := range []string{"token", "password", workerenv.GitHubToken} {
+		if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, state repositoryMonitorReconcileState) (ctrl.Result, error) {

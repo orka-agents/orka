@@ -21,7 +21,9 @@ import (
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
-const workspaceTestFeatureBranch = "feature-branch"
+const (
+	workspaceTestFeatureBranch = "feature-branch"
+)
 
 func TestPrepareWorkspace_NoOp(t *testing.T) {
 	// When ORKA_PRIOR_TASK is not set, PrepareWorkspace should be a no-op
@@ -95,6 +97,296 @@ func TestParseDiffStatFiles(t *testing.T) {
 	}
 	if files[1] != "middleware.go" {
 		t.Errorf("expected middleware.go, got %q", files[1])
+	}
+}
+
+func TestPreparePullRequestReviewContextWritesIgnoredDiffFiles(t *testing.T) {
+	bareDir := t.TempDir()
+	runGitWS(t, bareDir, "init", "--bare")
+
+	sourceDir := t.TempDir()
+	runGitWS(t, sourceDir, "init")
+	runGitWS(t, sourceDir, "checkout", "-b", "main")
+	runGitWS(t, sourceDir, "config", "user.email", "test@test.com")
+	runGitWS(t, sourceDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sourceDir, ".orka"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, ".orka", "pr-review.diff"), []byte("tracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, sourceDir, "add", ".")
+	runGitWS(t, sourceDir, "commit", "-m", "base")
+	runGitWS(t, sourceDir, "remote", "add", gitOriginRemote, bareDir)
+	runGitWS(t, sourceDir, "push", gitOriginRemote, "main")
+	runGitWS(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	runGitWS(t, sourceDir, "checkout", "-b", workspaceTestFeatureBranch)
+	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\nfeature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, sourceDir, "add", ".")
+	runGitWS(t, sourceDir, "commit", "-m", "feature")
+	runGitWS(t, sourceDir, "push", gitOriginRemote, workspaceTestFeatureBranch)
+
+	cloneDir := filepath.Join(t.TempDir(), "clone")
+	runGitWS(t, t.TempDir(),
+		"clone", "--branch", workspaceTestFeatureBranch, "--single-branch", "file://"+bareDir, cloneDir,
+	)
+	if err := PreparePullRequestReviewContext(cloneDir, &AgentConfig{PRBaseBranch: "main"}); err != nil {
+		t.Fatalf("PreparePullRequestReviewContext() error = %v", err)
+	}
+
+	diff, err := os.ReadFile(filepath.Join(cloneDir, pullRequestReviewDiffPath))
+	if err != nil {
+		t.Fatalf("ReadFile(diff) error = %v", err)
+	}
+	if !strings.Contains(string(diff), "+feature") {
+		t.Fatalf("diff = %q, want feature line", string(diff))
+	}
+	files, err := os.ReadFile(filepath.Join(cloneDir, pullRequestReviewFilesPath))
+	if err != nil {
+		t.Fatalf("ReadFile(files) error = %v", err)
+	}
+	if strings.TrimSpace(string(files)) != "README.md" {
+		t.Fatalf("files = %q, want README.md", string(files))
+	}
+	legacyTracked, err := os.ReadFile(filepath.Join(cloneDir, ".orka", "pr-review.diff"))
+	if err != nil {
+		t.Fatalf("ReadFile(legacy tracked diff) error = %v", err)
+	}
+	if string(legacyTracked) != "tracked\n" {
+		t.Fatalf("legacy tracked diff = %q, want tracked file untouched", string(legacyTracked))
+	}
+	status := strings.TrimSpace(runGitOutputWS(t, cloneDir, "status", "--porcelain"))
+	if status != "" {
+		t.Fatalf("git status = %q, want generated review context ignored", status)
+	}
+}
+
+func TestPreparePullRequestReviewContextFetchesBaseFromTrustedRepo(t *testing.T) {
+	baseBareDir := t.TempDir()
+	runGitWS(t, baseBareDir, "init", "--bare")
+	forkBareDir := t.TempDir()
+	runGitWS(t, forkBareDir, "init", "--bare")
+
+	sourceDir := t.TempDir()
+	runGitWS(t, sourceDir, "init")
+	runGitWS(t, sourceDir, "checkout", "-b", "main")
+	runGitWS(t, sourceDir, "config", "user.email", "test@test.com")
+	runGitWS(t, sourceDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, sourceDir, "add", ".")
+	runGitWS(t, sourceDir, "commit", "-m", "base")
+	runGitWS(t, sourceDir, "remote", "add", gitOriginRemote, baseBareDir)
+	runGitWS(t, sourceDir, "push", gitOriginRemote, "main")
+	runGitWS(t, baseBareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	runGitWS(t, sourceDir, "checkout", "-b", workspaceTestFeatureBranch)
+	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\nfeature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, sourceDir, "add", ".")
+	runGitWS(t, sourceDir, "commit", "-m", "feature")
+	runGitWS(t, sourceDir, "remote", "add", "fork", forkBareDir)
+	runGitWS(t, sourceDir, "push", "fork", workspaceTestFeatureBranch)
+
+	cloneDir := filepath.Join(t.TempDir(), "fork-clone")
+	runGitWS(t, t.TempDir(),
+		"clone", "--branch", workspaceTestFeatureBranch, "--single-branch", "file://"+forkBareDir, cloneDir,
+	)
+	if err := PreparePullRequestReviewContext(cloneDir, &AgentConfig{
+		PRBaseBranch: "main",
+		PRBaseRepo:   "file://" + baseBareDir,
+	}); err != nil {
+		t.Fatalf("PreparePullRequestReviewContext() error = %v", err)
+	}
+
+	diff, err := os.ReadFile(filepath.Join(cloneDir, pullRequestReviewDiffPath))
+	if err != nil {
+		t.Fatalf("ReadFile(diff) error = %v", err)
+	}
+	if !strings.Contains(string(diff), "+feature") {
+		t.Fatalf("diff = %q, want trusted base comparison", string(diff))
+	}
+	instructions, err := os.ReadFile(filepath.Join(cloneDir, pullRequestReviewInstructionsPath))
+	if err != nil {
+		t.Fatalf("ReadFile(instructions) error = %v", err)
+	}
+	if !strings.Contains(string(instructions), "Base repo: file://"+baseBareDir) {
+		t.Fatalf("instructions = %q, want trusted base repo", string(instructions))
+	}
+}
+
+func TestPreparePullRequestReviewContextDeepensBaseSHAForStalePR(t *testing.T) {
+	baseBareDir := t.TempDir()
+	runGitWS(t, baseBareDir, "init", "--bare")
+	forkBareDir := t.TempDir()
+	runGitWS(t, forkBareDir, "init", "--bare")
+
+	sourceDir := t.TempDir()
+	runGitWS(t, sourceDir, "init")
+	runGitWS(t, sourceDir, "checkout", "-b", "main")
+	runGitWS(t, sourceDir, "config", "user.email", "test@test.com")
+	runGitWS(t, sourceDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, sourceDir, "add", ".")
+	runGitWS(t, sourceDir, "commit", "-m", "base")
+
+	runGitWS(t, sourceDir, "checkout", "-b", workspaceTestFeatureBranch)
+	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\nfeature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, sourceDir, "add", ".")
+	runGitWS(t, sourceDir, "commit", "-m", "feature")
+	runGitWS(t, sourceDir, "remote", "add", "fork", forkBareDir)
+	runGitWS(t, sourceDir, "push", "fork", workspaceTestFeatureBranch)
+
+	runGitWS(t, sourceDir, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\nbase branch moved\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, sourceDir, "add", ".")
+	runGitWS(t, sourceDir, "commit", "-m", "advance base")
+	baseSHA := strings.TrimSpace(runGitOutputWS(t, sourceDir, "rev-parse", "HEAD"))
+	runGitWS(t, sourceDir, "remote", "add", gitOriginRemote, baseBareDir)
+	runGitWS(t, sourceDir, "push", gitOriginRemote, "main")
+	runGitWS(t, baseBareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	cloneDir := filepath.Join(t.TempDir(), "fork-clone")
+	runGitWS(t, t.TempDir(),
+		"clone", "--branch", workspaceTestFeatureBranch, "--single-branch", "file://"+forkBareDir, cloneDir,
+	)
+	if err := PreparePullRequestReviewContext(cloneDir, &AgentConfig{
+		PRBaseBranch: "main",
+		PRBaseRepo:   "file://" + baseBareDir,
+		PRBaseSHA:    baseSHA,
+	}); err != nil {
+		t.Fatalf("PreparePullRequestReviewContext() error = %v", err)
+	}
+
+	diff, err := os.ReadFile(filepath.Join(cloneDir, pullRequestReviewDiffPath))
+	if err != nil {
+		t.Fatalf("ReadFile(diff) error = %v", err)
+	}
+	if !strings.Contains(string(diff), "+feature") {
+		t.Fatalf("diff = %q, want feature line", string(diff))
+	}
+	if strings.Contains(string(diff), "base branch moved") {
+		t.Fatalf("diff = %q, want merge-base comparison excluding base-only changes", string(diff))
+	}
+}
+
+func TestPreparePullRequestReviewContextFallsBackToBaseBranchWhenBaseSHAFetchFails(t *testing.T) {
+	bareDir := t.TempDir()
+	runGitWS(t, bareDir, "init", "--bare")
+
+	sourceDir := t.TempDir()
+	runGitWS(t, sourceDir, "init")
+	runGitWS(t, sourceDir, "checkout", "-b", "main")
+	runGitWS(t, sourceDir, "config", "user.email", "test@test.com")
+	runGitWS(t, sourceDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, sourceDir, "add", ".")
+	runGitWS(t, sourceDir, "commit", "-m", "base")
+	runGitWS(t, sourceDir, "remote", "add", gitOriginRemote, bareDir)
+	runGitWS(t, sourceDir, "push", gitOriginRemote, "main")
+	runGitWS(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	runGitWS(t, sourceDir, "checkout", "-b", workspaceTestFeatureBranch)
+	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\nfeature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, sourceDir, "add", ".")
+	runGitWS(t, sourceDir, "commit", "-m", "feature")
+	runGitWS(t, sourceDir, "push", gitOriginRemote, workspaceTestFeatureBranch)
+
+	cloneDir := filepath.Join(t.TempDir(), "clone")
+	runGitWS(t, t.TempDir(),
+		"clone", "--branch", workspaceTestFeatureBranch, "--single-branch", "file://"+bareDir, cloneDir,
+	)
+	if err := PreparePullRequestReviewContext(cloneDir, &AgentConfig{
+		PRBaseBranch: "main",
+		PRBaseSHA:    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}); err != nil {
+		t.Fatalf("PreparePullRequestReviewContext() error = %v", err)
+	}
+
+	diff, err := os.ReadFile(filepath.Join(cloneDir, pullRequestReviewDiffPath))
+	if err != nil {
+		t.Fatalf("ReadFile(diff) error = %v", err)
+	}
+	if !strings.Contains(string(diff), "+feature") {
+		t.Fatalf("diff = %q, want feature line from base branch fallback", string(diff))
+	}
+}
+
+func TestPreparePullRequestReviewContextTruncatesLargeDiff(t *testing.T) {
+	oldDiffLimit := pullRequestReviewDiffLimitBytes
+	oldListLimit := pullRequestReviewListLimitBytes
+	pullRequestReviewDiffLimitBytes = 256
+	pullRequestReviewListLimitBytes = 1024
+	t.Cleanup(func() {
+		pullRequestReviewDiffLimitBytes = oldDiffLimit
+		pullRequestReviewListLimitBytes = oldListLimit
+	})
+
+	bareDir := t.TempDir()
+	runGitWS(t, bareDir, "init", "--bare")
+
+	sourceDir := t.TempDir()
+	runGitWS(t, sourceDir, "init")
+	runGitWS(t, sourceDir, "checkout", "-b", "main")
+	runGitWS(t, sourceDir, "config", "user.email", "test@test.com")
+	runGitWS(t, sourceDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, sourceDir, "add", ".")
+	runGitWS(t, sourceDir, "commit", "-m", "base")
+	runGitWS(t, sourceDir, "remote", "add", gitOriginRemote, bareDir)
+	runGitWS(t, sourceDir, "push", gitOriginRemote, "main")
+	runGitWS(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	runGitWS(t, sourceDir, "checkout", "-b", workspaceTestFeatureBranch)
+	largeReadme := "base\n" + strings.Repeat("feature line\n", 200)
+	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte(largeReadme), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, sourceDir, "add", ".")
+	runGitWS(t, sourceDir, "commit", "-m", "large feature")
+	runGitWS(t, sourceDir, "push", gitOriginRemote, workspaceTestFeatureBranch)
+
+	cloneDir := filepath.Join(t.TempDir(), "clone")
+	runGitWS(t, t.TempDir(),
+		"clone", "--branch", workspaceTestFeatureBranch, "--single-branch", "file://"+bareDir, cloneDir,
+	)
+	if err := PreparePullRequestReviewContext(cloneDir, &AgentConfig{PRBaseBranch: "main"}); err != nil {
+		t.Fatalf("PreparePullRequestReviewContext() error = %v", err)
+	}
+
+	diff, err := os.ReadFile(filepath.Join(cloneDir, pullRequestReviewDiffPath))
+	if err != nil {
+		t.Fatalf("ReadFile(diff) error = %v", err)
+	}
+	if !strings.Contains(string(diff), "Orka truncated this diff") {
+		t.Fatalf("diff = %q, want truncation notice", string(diff))
+	}
+	instructions, err := os.ReadFile(filepath.Join(cloneDir, pullRequestReviewInstructionsPath))
+	if err != nil {
+		t.Fatalf("ReadFile(instructions) error = %v", err)
+	}
+	if !strings.Contains(string(instructions), "diff truncated at 256 bytes") {
+		t.Fatalf("instructions = %q, want truncation note", string(instructions))
 	}
 }
 
@@ -388,8 +680,8 @@ func TestFinalizeResult_PushBranchWithRemote(t *testing.T) {
 	}
 	runGitWS(t, dir, "add", ".")
 	runGitWS(t, dir, "commit", "-m", "initial")
-	runGitWS(t, dir, "remote", "add", "origin", bareDir)
-	runGitWS(t, dir, "push", "-u", "origin", "main")
+	runGitWS(t, dir, "remote", "add", gitOriginRemote, bareDir)
+	runGitWS(t, dir, "push", "-u", gitOriginRemote, "main")
 
 	if err := os.WriteFile(dir+"/new.txt", []byte("new\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -478,10 +770,10 @@ func TestFinalizeResult_RequirePushBranchAllowsEmptyWorkspaceDiff(t *testing.T) 
 	}
 	runGitWS(t, dir, "add", ".")
 	runGitWS(t, dir, "commit", "-m", "initial")
-	runGitWS(t, dir, "remote", "add", "origin", bareDir)
-	runGitWS(t, dir, "push", "-u", "origin", "main")
+	runGitWS(t, dir, "remote", "add", gitOriginRemote, bareDir)
+	runGitWS(t, dir, "push", "-u", gitOriginRemote, "main")
 	runGitWS(t, dir, "checkout", "-b", workspaceTestFeatureBranch)
-	runGitWS(t, dir, "push", "-u", "origin", workspaceTestFeatureBranch)
+	runGitWS(t, dir, "push", "-u", gitOriginRemote, workspaceTestFeatureBranch)
 
 	t.Setenv("ORKA_PUSH_BRANCH", workspaceTestFeatureBranch)
 	t.Setenv(requirePushBranchEnvVar, "true")
@@ -518,14 +810,14 @@ func TestFinalizeResult_RequirePushBranchAllowsEmptyWorkspaceDiffRejectsStaleHea
 	}
 	runGitWS(t, dir, "add", ".")
 	runGitWS(t, dir, "commit", "-m", "initial")
-	runGitWS(t, dir, "remote", "add", "origin", bareDir)
-	runGitWS(t, dir, "push", "-u", "origin", "main")
+	runGitWS(t, dir, "remote", "add", gitOriginRemote, bareDir)
+	runGitWS(t, dir, "push", "-u", gitOriginRemote, "main")
 	runGitWS(t, dir, "checkout", "-b", workspaceTestFeatureBranch)
-	runGitWS(t, dir, "push", "-u", "origin", workspaceTestFeatureBranch)
+	runGitWS(t, dir, "push", "-u", gitOriginRemote, workspaceTestFeatureBranch)
 
 	runGitWS(t, dir, "checkout", "main")
 	runGitWS(t, dir, "commit", "--allow-empty", "-m", "advance base")
-	runGitWS(t, dir, "push", "origin", "main")
+	runGitWS(t, dir, "push", gitOriginRemote, "main")
 	runGitWS(t, dir, "checkout", workspaceTestFeatureBranch)
 
 	t.Setenv("ORKA_PUSH_BRANCH", workspaceTestFeatureBranch)
@@ -556,8 +848,8 @@ func TestFinalizeResult_RequirePushBranchAllowsEmptyWorkspaceDiffPushesAdvancedH
 	}
 	runGitWS(t, dir, "add", ".")
 	runGitWS(t, dir, "commit", "-m", "initial")
-	runGitWS(t, dir, "remote", "add", "origin", bareDir)
-	runGitWS(t, dir, "push", "-u", "origin", "main")
+	runGitWS(t, dir, "remote", "add", gitOriginRemote, bareDir)
+	runGitWS(t, dir, "push", "-u", gitOriginRemote, "main")
 	runGitWS(t, dir, "commit", "--allow-empty", "-m", "advance head")
 	advancedHead := strings.TrimSpace(runGitOutputWS(t, dir, "rev-parse", "HEAD"))
 
@@ -642,8 +934,8 @@ func TestPushChanges_WithRemote(t *testing.T) {
 	}
 	runGitWS(t, dir, "add", ".")
 	runGitWS(t, dir, "commit", "-m", "initial")
-	runGitWS(t, dir, "remote", "add", "origin", bareDir)
-	runGitWS(t, dir, "push", "-u", "origin", "main")
+	runGitWS(t, dir, "remote", "add", gitOriginRemote, bareDir)
+	runGitWS(t, dir, "push", "-u", gitOriginRemote, "main")
 
 	// Make a change
 	if err := os.WriteFile(dir+"/new.txt", []byte("new\n"), 0o644); err != nil {
@@ -655,7 +947,7 @@ func TestPushChanges_WithRemote(t *testing.T) {
 	waitCalled := false
 	waitForRemoteBranchVisibility = func(workDir, remote, branch string, timeout time.Duration) error {
 		waitCalled = true
-		if remote != "origin" {
+		if remote != gitOriginRemote {
 			t.Fatalf("remote = %q, want origin", remote)
 		}
 		if branch != workspaceTestFeatureBranch {
@@ -692,8 +984,8 @@ func TestPushChanges_WithRemoteBranchVisibilityFailure(t *testing.T) {
 	}
 	runGitWS(t, dir, "add", ".")
 	runGitWS(t, dir, "commit", "-m", "initial")
-	runGitWS(t, dir, "remote", "add", "origin", bareDir)
-	runGitWS(t, dir, "push", "-u", "origin", "main")
+	runGitWS(t, dir, "remote", "add", gitOriginRemote, bareDir)
+	runGitWS(t, dir, "push", "-u", gitOriginRemote, "main")
 
 	if err := os.WriteFile(dir+"/new.txt", []byte("new\n"), 0o644); err != nil {
 		t.Fatal(err)

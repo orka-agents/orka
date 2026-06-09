@@ -342,6 +342,8 @@ func migrate(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_monitor_runs_monitor
 			ON monitor_runs(monitor_namespace, monitor_name, started_at DESC, id DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_monitor_runs_target
+			ON monitor_runs(monitor_namespace, monitor_name, phase, trigger, target_kind, target_number, target_sha)`,
 		`DROP INDEX IF EXISTS idx_monitor_runs_active`,
 		`DROP INDEX IF EXISTS idx_monitor_runs_queued`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_monitor_runs_running

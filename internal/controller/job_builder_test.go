@@ -2142,6 +2142,46 @@ func TestJobBuilder_Build_AgentTask_ReadOnlyAnnotationInjectsClaudeRuntimeCreden
 	assertReadOnlyClaudeRuntimeSecretIsolation(t, job, container)
 }
 
+func TestJobBuilder_Build_AgentTask_ReadOnlyAnnotationRejectsClaudeSecretWithoutAuthKey(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	runtimeSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: testAgentSecretName, Namespace: defaultNS},
+		Data: map[string][]byte{
+			workerenv.AnthropicBaseURL: []byte(testProviderBaseURL),
+		},
+	}
+	builder := NewJobBuilder(fake.NewClientBuilder().WithScheme(scheme).WithObjects(runtimeSecret).Build())
+	builder.ControllerURL = testControllerURL
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "agent-task",
+			Namespace: defaultNS,
+			UID:       types.UID("12345678-1234-1234-1234-123456789012"),
+			Annotations: map[string]string{
+				labels.AnnotationAgentReadOnly: scheduledRunLabelValue,
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAgent,
+			Prompt: "Review only",
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime:   &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+			SecretRef: &corev1.LocalObjectReference{Name: testAgentSecretName},
+		},
+	}
+
+	_, err := builder.Build(context.Background(), task, agent, nil)
+	if err == nil || !strings.Contains(err.Error(), "contains no supported auth credential keys") {
+		t.Fatalf("Build() error = %v, want missing auth key error", err)
+	}
+}
+
 func TestJobBuilder_Build_AgentTask_ReadOnlyAnnotationInjectsClaudeCredentialsForNilRuntimeFallback(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
