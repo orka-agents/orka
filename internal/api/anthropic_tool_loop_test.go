@@ -31,7 +31,7 @@ func TestCoordinatorSystemPrompt_PRReviewCIRepairLoop(t *testing.T) {
 }
 
 func TestCoordinatorProxyToolsIncludePRCIWorkflowTools(t *testing.T) {
-	for _, toolName := range []string{"create_agent", "create_pull_request", "check_pull_request_ci"} {
+	for _, toolName := range []string{"create_agent", "create_pr_monitor", "create_pull_request", "check_pull_request_ci"} {
 		if !slices.Contains(coordinatorProxyTools, toolName) {
 			t.Fatalf("coordinatorProxyTools missing %q", toolName)
 		}

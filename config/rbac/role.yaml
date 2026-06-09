@@ -138,6 +138,7 @@ rules:
   resources:
   - agents
   - providers
+  - repositorymonitors
   - repositoryscans
   - skills
   - substrateactorpools
@@ -156,6 +157,7 @@ rules:
   resources:
   - agents/finalizers
   - providers/finalizers
+  - repositorymonitors/finalizers
   - repositoryscans/finalizers
   - skills/finalizers
   - substrateactorpools/finalizers
@@ -168,6 +170,7 @@ rules:
   resources:
   - agents/status
   - providers/status
+  - repositorymonitors/status
   - repositoryscans/status
   - skills/status
   - substrateactorpools/status

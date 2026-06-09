@@ -1,0 +1,106 @@
+import { Link } from '@tanstack/react-router'
+import { Activity, GitPullRequest, Play, Wrench } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Skeleton } from '@/components/ui/skeleton'
+import { useRepositoryMonitors, useRunRepositoryMonitor } from '@/hooks/use-monitors'
+import type { RepositoryMonitor } from '@/schemas/monitor'
+import { repositoryMonitorDisplayName } from './repository-monitor-display'
+
+function timeAgo(ts?: string) {
+  if (!ts) return 'Never'
+  const seconds = Math.max(0, Math.floor((Date.now() - new Date(ts).getTime()) / 1000))
+  if (seconds < 60) return `${seconds}s ago`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
+  return `${Math.floor(seconds / 86400)}d ago`
+}
+
+export function RepositoryMonitorList() {
+  const { data, isLoading } = useRepositoryMonitors()
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h1 className="text-3xl font-bold tracking-tight">Repository Monitors</h1>
+        <p className="text-muted-foreground">Maintainer automation state for pull requests, repairs, and audit trails</p>
+      </div>
+
+      {isLoading ? (
+        <div className="grid gap-4 md:grid-cols-2">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <Card key={index}>
+              <CardHeader><Skeleton className="h-6 w-48" /></CardHeader>
+              <CardContent className="space-y-2">
+                <Skeleton className="h-4 w-full" />
+                <Skeleton className="h-4 w-2/3" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      ) : (data?.items ?? []).length === 0 ? (
+        <Card>
+          <CardContent className="py-12 text-center text-muted-foreground">
+            No repository monitors configured.
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2">
+          {(data?.items ?? []).map((monitor) => (
+            <RepositoryMonitorCard key={monitor.metadata.name} monitor={monitor} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RepositoryMonitorCard({ monitor }: { monitor: RepositoryMonitor }) {
+  const runMonitor = useRunRepositoryMonitor(monitor.metadata.name)
+  const status = monitor.status
+  const displayName = repositoryMonitorDisplayName(monitor)
+
+  return (
+    <Card className="transition-colors hover:border-primary/50">
+      <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
+        <div className="space-y-1">
+          <CardTitle className="flex items-center gap-2 text-lg">
+            <Activity className="h-5 w-5 text-primary" />
+            <Link to="/monitors/$monitorId" params={{ monitorId: monitor.metadata.name }} className="hover:underline">
+              {displayName}
+            </Link>
+          </CardTitle>
+          <p className="text-sm text-muted-foreground">{monitor.spec.branch || 'main'} · {monitor.spec.schedule || 'manual'}</p>
+        </div>
+        <Badge variant={status?.phase === 'Ready' ? 'default' : 'secondary'}>
+          {status?.phase || 'Pending'}
+        </Badge>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="text-sm text-muted-foreground">{monitor.spec.repoURL}</div>
+        <div className="grid gap-2 text-sm md:grid-cols-2">
+          <div className="flex items-center gap-2">
+            <GitPullRequest className="h-4 w-4 text-muted-foreground" />
+            <span>Pending reviews: <span className="font-medium text-foreground">{status?.pendingReviews ?? 0}</span></span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Wrench className="h-4 w-4 text-muted-foreground" />
+            <span>Active repairs: <span className="font-medium text-foreground">{status?.activeRepairs ?? 0}</span></span>
+          </div>
+          <div>Open PRs: <span className="font-medium text-foreground">{status?.openPullRequests ?? 0}</span></div>
+          <div>Last run: <span className="font-medium text-foreground">{timeAgo(status?.lastRunTime ?? status?.lastSuccessfulRunTime)}</span></div>
+        </div>
+        <div className="flex items-center justify-between">
+          <Link to="/monitors/$monitorId" params={{ monitorId: monitor.metadata.name }}>
+            <Button variant="outline">Open</Button>
+          </Link>
+          <Button variant="secondary" onClick={() => runMonitor.mutate()} disabled={runMonitor.isPending}>
+            <Play className="mr-2 h-4 w-4" />
+            Run
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}

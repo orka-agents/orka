@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +41,7 @@ import (
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
+	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
 )
 
@@ -2314,6 +2316,64 @@ func TestCollectResult_NilResultStore_DoesNotPanic(t *testing.T) {
 	}
 }
 
+func TestExtractStdoutTaskResult(t *testing.T) {
+	first := base64.StdEncoding.EncodeToString([]byte("first"))
+	second := base64.StdEncoding.EncodeToString([]byte("second"))
+	logs := strings.Join([]string{
+		"Worker started",
+		workerenv.ResultStdoutPrefix + first,
+		"Task completed",
+		workerenv.ResultStdoutPrefix + second,
+	}, "\n")
+
+	got, ok, err := extractStdoutTaskResult(logs)
+	if err != nil {
+		t.Fatalf("extractStdoutTaskResult() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("extractStdoutTaskResult() ok = false, want true")
+	}
+	if string(got) != "second" {
+		t.Fatalf("extractStdoutTaskResult() = %q, want second", string(got))
+	}
+}
+
+func TestExtractStdoutTaskResultMissingMarker(t *testing.T) {
+	got, ok, err := extractStdoutTaskResult("Worker started\nTask completed")
+	if err != nil {
+		t.Fatalf("extractStdoutTaskResult() error = %v", err)
+	}
+	if ok {
+		t.Fatal("extractStdoutTaskResult() ok = true, want false")
+	}
+	if got != nil {
+		t.Fatalf("extractStdoutTaskResult() = %#v, want nil", got)
+	}
+}
+
+func TestExtractStdoutTaskResultInvalidBase64(t *testing.T) {
+	_, ok, err := extractStdoutTaskResult(workerenv.ResultStdoutPrefix + "not base64")
+	if err == nil {
+		t.Fatal("extractStdoutTaskResult() error = nil, want error")
+	}
+	if !ok {
+		t.Fatal("extractStdoutTaskResult() ok = false, want true")
+	}
+}
+
+func TestStdoutResultPodLogOptionsReadsBoundedFullLog(t *testing.T) {
+	opts := stdoutResultPodLogOptions()
+	if opts.TailLines != nil {
+		t.Fatalf("TailLines = %#v, want nil so stdout markers are not tailed away", opts.TailLines)
+	}
+	if opts.LimitBytes == nil || *opts.LimitBytes != stdoutResultLogLimitBytes {
+		t.Fatalf("LimitBytes = %#v, want %d", opts.LimitBytes, stdoutResultLogLimitBytes)
+	}
+	if stdoutResultLogLimitBytes <= podLogLimitBytes {
+		t.Fatalf("stdoutResultLogLimitBytes = %d, want greater than podLogLimitBytes %d", stdoutResultLogLimitBytes, podLogLimitBytes)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // readPodLogs — requires KubeClient; we test the error path (no pods found)
 // ---------------------------------------------------------------------------
@@ -4186,6 +4246,56 @@ func TestHandleScheduled_CreateChildTask(t *testing.T) {
 	}
 	if task.Status.LastScheduleTime == nil {
 		t.Error("expected LastScheduleTime to be updated")
+	}
+}
+
+func TestHandleScheduled_CopiesCoordinationToolInjectionDisableAnnotation(t *testing.T) {
+	scheme := newTestScheme()
+	lastSchedule := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-pr-monitor",
+			Namespace:         "default",
+			UID:               "12345678-abcd-efgh-ijkl-1234567890ad",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
+			Annotations: map[string]string{
+				labels.AnnotationDisableCoordinationToolInject: scheduledRunLabelValue,
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:                    corev1alpha1.TaskTypeAI,
+			Prompt:                  "review this PR",
+			Schedule:                "* * * * *",
+			StartingDeadlineSeconds: new(int64(300)),
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseScheduled,
+			LastScheduleTime: &lastSchedule,
+		},
+	}
+
+	ctx := context.Background()
+	r := newUnitReconciler(scheme, task)
+	if _, err := r.handleScheduled(ctx, task); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var childList corev1alpha1.TaskList
+	if err := r.List(ctx, &childList, client.InNamespace(task.Namespace), client.MatchingLabels{
+		labels.LabelParentTask: labels.SelectorValue(task.Name),
+	}); err != nil {
+		t.Fatalf("list child tasks: %v", err)
+	}
+	if len(childList.Items) != 1 {
+		t.Fatalf("expected 1 scheduled child task, got %d", len(childList.Items))
+	}
+	child := childList.Items[0]
+	if child.Annotations[labels.AnnotationDisableCoordinationToolInject] != scheduledRunLabelValue {
+		t.Fatalf("child coordination injection disable annotation = %q, want %q",
+			child.Annotations[labels.AnnotationDisableCoordinationToolInject], scheduledRunLabelValue)
+	}
+	if child.Annotations[labels.AnnotationParentTaskName] != task.Name {
+		t.Fatalf("child parent task annotation = %q, want %q", child.Annotations[labels.AnnotationParentTaskName], task.Name)
 	}
 }
 

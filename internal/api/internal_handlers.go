@@ -760,7 +760,7 @@ func (h *InternalHandlers) GetMessages(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "parentTask query parameter is required")
 	}
 
-	markRead := c.Query("markRead", "true") == "true"
+	markRead := c.Query("markRead", queryTrue) == queryTrue
 
 	ctx := c.Context()
 	messages, err := h.messageStore.GetMessages(ctx, namespace, taskName, parentTask, markRead)

@@ -83,10 +83,14 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/live_anthropic_compat_test.go` | Live Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` coverage with default tools-enabled behavior |
 | `test/e2e/live_agent_runtime_matrix_test.go` | Live Orka runtime matrix: Codex+GPT, Claude Code+Claude, Copilot+Gemini |
 | `.github/workflows/live-agent-sandbox-e2e.yml` / `scripts/live-agent-sandbox-e2e.sh` | Live upstream `agent-sandbox` Kind validation for Orka agent workspace claim, sandbox execution, delete cleanup, retained-session reuse, and token scrubbing using a fake model-free Claude runtime |
+| `.github/workflows/live-github-label-trigger-e2e.yml` / `scripts/live-github-label-trigger-e2e.sh` | Manual model-free GitHub label trigger validation for HMAC rejection, signed webhook Task creation, scoped workspace settings, and duplicate delivery idempotency |
+| `.github/workflows/repository-monitor-smoke.yml` | Focused RepositoryMonitor smoke coverage for store CRUD, API handlers, pull request event handling, targeted single-PR inventory runs, controller queue/review flow, blocked status counts, read-only review task job building, result stdout forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker tooling |
 | `.github/workflows/security-scan-e2e.yml` / `scripts/security-scan-e2e.sh` | Secret-free repository security scan Kind validation against pinned `sozercan/nodejs-goof` using the real mapper, deterministic fake Codex analyzer, v2 finding ingestion/drop diagnostics, threat-model rejection, idempotent rescan, and HITL no-auto-patch gating |
 | `test/e2e/tools_test.go` | Built-in tools (including `web_fetch`, `file_write`) and custom Tool CRD |
 | `test/e2e/scheduled_task_test.go` | Cron scheduling, suspend, `concurrencyPolicy: Forbid`, history-limit cleanup |
 | `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
+
+The Repository Monitor Smoke workflow runs in GitHub Actions on pull requests and pushes that touch the workflow, API, controller, CRD/config, worker, or Go dependency paths. It creates the UI embed stub and runs focused `go test` selections for the monitor store, API handlers, GitHub pull request event handling, targeted single-PR inventory runs, controller queue/review flow, blocked status counts, read-only review job construction, result stdout forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker signing/detection tooling. The workflow is secret-free: exact PR event queueing is tested with synthetic signed webhook payloads and fake GitHub clients rather than live repository credentials. The normal Go Tests workflow runs `make test` for non-doc code changes and covers worker-level PR review diff context generation.
 
 Repository security E2E coverage should include initial deterministic slice creation,
 incremental scan behavior, invalid v2 evidence being dropped and visible through API,
@@ -100,6 +104,7 @@ missing or mismatched artifacts staying not ready.
 - `E2E_GITHUB_TOKEN`: required for GitHub/Copilot and live Copilot runtime tests
 - `COPILOT_GITHUB_TOKEN`: required by the live `copilot-proxy` workflow for proxy auth
 - The live agent sandbox workflow requires Docker, Kind, kubectl, curl, jq, and network access to install the pinned upstream `agent-sandbox` release. It does not require model credentials.
+- The live GitHub label trigger workflow is manual, model-free, and secret-free. It requires Docker, Kind, kubectl, curl, jq, and Python locally, accepts `GITHUB_LABEL_TRIGGER_TARGET_REPO_URL` and `GITHUB_LABEL_TRIGGER_TARGET_NUMBER` overrides, and sends only synthetic webhook payloads to the local Orka API.
 - GitHub Actions `id-token: write` permission: required by the live GitHub OIDC workflow. For local/manual runs of `scripts/live-github-oidc-e2e.sh`, set `ORKA_GITHUB_OIDC_TOKEN` to a valid JWT instead. The same workflow also runs a self-contained `kontxt` TxToken check using an ephemeral key/JWKS fixture, so no external kontxt secret is required.
 - `E2E_LIVE_COPILOT_PROXY_BASE_URL` (or `E2E_COPILOT_PROXY_BASE_URL` / `COPILOT_PROXY_BASE_URL`): enables the focused live copilot-proxy spec against a running proxy
 - `E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE`, `E2E_LIVE_COPILOT_PROXY_SERVICE_NAME`, `E2E_LIVE_COPILOT_PROXY_SERVICE_PORT`: optional overrides for how the live spec reaches the in-cluster proxy service for `/readyz` and `/v1/models` checks
@@ -132,6 +137,15 @@ The live agent sandbox workflow (`.github/workflows/live-agent-sandbox-e2e.yml`)
 - `cleanupPolicy: retain` plus `reusePolicy: session` reattaches to the deterministic session claim
 - retained workspace state persists across tasks
 - staged token files are scrubbed before the retained workspace is left behind
+
+The live GitHub label trigger workflow (`.github/workflows/live-github-label-trigger-e2e.yml`) runs `scripts/live-github-label-trigger-e2e.sh` from manual `workflow_dispatch`. It builds the controller from the PR, deploys it to a fresh Kind cluster, configures a generated `ORKA_GITHUB_WEBHOOK_SECRET`, creates a synthetic runtime Agent, and posts a signed `agent:implement` issue label payload to `/webhooks/github`. The script asserts:
+
+- invalid webhook signatures return `401`
+- a signed label event returns `201` and creates a `type: agent` Task
+- the created Task points at the configured GitHub repository clone URL and default branch
+- no push branch or git credential Secret is configured for the synthetic task
+- GitHub delivery annotations are recorded on the Task
+- a repeated delivery returns `202` with the original task name
 
 The live GitHub OIDC workflow (`.github/workflows/live-github-oidc-e2e.yml`) runs `scripts/live-github-oidc-e2e.sh` in GitHub Actions with `id-token: write`. It builds the controller from the PR, deploys it to a fresh Kind cluster, configures `ORKA_OIDC_ISSUER=https://token.actions.githubusercontent.com` and the workflow audience, fetches a real GitHub Actions OIDC token, generates a real `kontxt` TxToken against an in-cluster JWKS endpoint, and validates:
 

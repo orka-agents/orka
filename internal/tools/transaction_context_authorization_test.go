@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 )
 
 func TestValidateChildTaskAgainstParentTransactionUsesAllowedAgentsForDelegation(t *testing.T) {
@@ -156,6 +157,48 @@ func TestValidateChildTaskAgainstParentTransactionRejectsEnabledBashOutsideAllow
 	err := validateChildTaskAgainstParentTransaction(context.Background(), newFakeClient(agent), parent, child, testResearcherAgentName)
 	if err == nil || !strings.Contains(err.Error(), `tool "Bash"`) {
 		t.Fatalf("validateChildTaskAgainstParentTransaction() error = %v, want bash tool denial", err)
+	}
+}
+
+func TestChildTransactionEffectiveAIToolsSkipsDisabledCoordinationInjection(t *testing.T) {
+	agent := researcherAgent()
+	agent.Spec.Coordination = &corev1alpha1.CoordinationConfig{Enabled: true}
+	child := childTaskForResearcherAgent()
+	child.Annotations = map[string]string{labels.AnnotationDisableCoordinationToolInject: "true"}
+	child.Spec.Type = corev1alpha1.TaskTypeAI
+	child.Spec.AI = &corev1alpha1.AISpec{
+		Tools: []string{"list_pull_requests", "check_pr_review_marker"},
+	}
+
+	got := strings.Join(childTransactionEffectiveAITools(child, agent), ",")
+	for _, tool := range []string{"list_pull_requests", "check_pr_review_marker"} {
+		if !strings.Contains(got, tool) {
+			t.Fatalf("expected explicit tool %q in %q", tool, got)
+		}
+	}
+	for _, tool := range []string{"recall_memory", "remember", "propose_memory", "search_transcript"} {
+		if !strings.Contains(got, tool) {
+			t.Fatalf("expected memory tool %q in %q", tool, got)
+		}
+	}
+	for _, tool := range []string{"delegate_task", "merge_pull_request", "auto_merge_pull_request"} {
+		if strings.Contains(got, tool) {
+			t.Fatalf("unexpected coordination tool %q in %q", tool, got)
+		}
+	}
+}
+
+func TestChildTransactionEffectiveAIToolsIncludesPRReviewCoordinationTools(t *testing.T) {
+	agent := researcherAgent()
+	agent.Spec.Coordination = &corev1alpha1.CoordinationConfig{Enabled: true}
+	child := childTaskForResearcherAgent()
+	child.Spec.Type = corev1alpha1.TaskTypeAI
+
+	got := strings.Join(childTransactionEffectiveAITools(child, agent), ",")
+	for _, tool := range []string{"list_pull_requests", "check_pr_review_marker"} {
+		if !strings.Contains(got, tool) {
+			t.Fatalf("expected PR review coordination tool %q in %q", tool, got)
+		}
 	}
 }
 

@@ -1,0 +1,24 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: codex-agent
+spec:
+  runtime:
+    type: codex
+    defaultMaxTurns: 100
+    defaultAllowBash: true
+    defaultAllowedTools:
+      - Read
+      - Write
+      - Edit
+      - Bash
+      - Glob
+      - Grep
+  systemPrompt:
+    inline: |
+      You are a repository automation agent triggered by GitHub labels.
+      Keep every change scoped to the linked issue or pull request.
+      Run relevant tests before finishing.
+      Never print or commit secrets.
+  secretRef:
+    name: codex-runtime-credentials

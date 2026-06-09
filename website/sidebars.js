@@ -29,6 +29,8 @@ const sidebars = {
         'guides/autonomous-tasks',
         'guides/kontxt-quickstart',
         'guides/repository-security-scanning',
+        'guides/repository-monitors',
+        'guides/github-label-triggers',
         'guides/ui',
       ],
     },

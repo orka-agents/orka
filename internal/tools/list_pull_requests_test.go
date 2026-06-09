@@ -360,13 +360,14 @@ func TestListPullRequestsTool_WithRepoURL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tool := &ListPullRequestsTool{apiBaseURL: server.URL}
-	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	task, secret := githubRepoTaskWithSecret(testMyOrgRepoURL)
+	tool := &ListPullRequestsTool{k8sClient: newFakeClient(task, secret), apiBaseURL: server.URL}
+	ctx := contextWithTaskScope()
 
 	args, _ := json.Marshal(ListPullRequestsArgs{
 		RepoURL: testMyOrgRepoURL,
 	})
-	result, err := tool.Execute(context.Background(), args)
+	result, err := tool.Execute(ctx, args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -380,6 +381,32 @@ func TestListPullRequestsTool_WithRepoURL(t *testing.T) {
 	}
 	if listResult.PullRequests[0].Author != "tester" {
 		t.Errorf("unexpected author: %s", listResult.PullRequests[0].Author)
+	}
+}
+
+func TestListPullRequestsTool_RejectsRepoURLWithoutScope(t *testing.T) {
+	serverCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tool := &ListPullRequestsTool{apiBaseURL: server.URL}
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+
+	args, _ := json.Marshal(ListPullRequestsArgs{
+		RepoURL: testMyOrgRepoURL,
+	})
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected repo scope error")
+	}
+	if !strings.Contains(err.Error(), "requires a permitted repository scope") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if serverCalled {
+		t.Fatal("server was called despite missing repo scope")
 	}
 }
 

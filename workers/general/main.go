@@ -160,6 +160,9 @@ func prepareWorkspace(ctx context.Context) error {
 	if err := common.PrepareWorkspace(workspaceDir); err != nil {
 		return err
 	}
+	if err := common.PreparePullRequestReviewContext(workspaceDir, cfg); err != nil {
+		return err
+	}
 	return common.EnsureWorkspaceArtifactsLink(workspaceDir)
 }
 

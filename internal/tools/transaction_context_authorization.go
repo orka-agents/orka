@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/labels"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -306,7 +307,7 @@ func childTransactionEffectiveAITools(child *corev1alpha1.Task, agent *corev1alp
 				tools = append(tools, tool.Name)
 			}
 		}
-		if agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
+		if agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && child.Annotations[labels.AnnotationDisableCoordinationToolInject] != "true" {
 			for _, tool := range transactionCoordinationToolNames() {
 				if !slices.Contains(tools, tool) {
 					tools = append(tools, tool)
@@ -321,7 +322,23 @@ func childTransactionEffectiveAITools(child *corev1alpha1.Task, agent *corev1alp
 			}
 		}
 	}
+	if child.Spec.Type == corev1alpha1.TaskTypeAI {
+		for _, tool := range transactionMemoryToolNames() {
+			if !slices.Contains(tools, tool) {
+				tools = append(tools, tool)
+			}
+		}
+	}
 	return tools
+}
+
+func transactionMemoryToolNames() []string {
+	return []string{
+		"recall_memory",
+		"remember",
+		"propose_memory",
+		"search_transcript",
+	}
 }
 
 func childTransactionEffectiveRuntimeAllowedTools(child *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
@@ -358,6 +375,8 @@ func transactionCoordinationToolNames() []string {
 		"propose_memory",
 		"search_transcript",
 		"create_pull_request",
+		"list_pull_requests",
+		"check_pr_review_marker",
 		"check_pull_request_ci",
 		"merge_pull_request",
 		"auto_merge_pull_request",

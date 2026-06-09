@@ -763,6 +763,7 @@ func executeAgentLoop(
 	if coordinationEnv.AutonomousMode {
 		maxIterations = 100
 	}
+	allowedToolCalls := advertisedToolNames(llmTools)
 
 	for range maxIterations {
 		req := &llm.CompletionRequest{
@@ -805,9 +806,11 @@ func executeAgentLoop(
 
 			var result string
 			var execErr error
+			toolName := strings.TrimSpace(tc.Name)
 
-			// Check if it's a custom tool
-			if customTool, ok := customTools[tc.Name]; ok {
+			if _, ok := allowedToolCalls[toolName]; !ok {
+				execErr = fmt.Errorf("tool %q was not enabled for this task", tc.Name)
+			} else if customTool, ok := customTools[toolName]; ok {
 				result, execErr = toolExecutor.Execute(ctx, customTool, tc.Arguments)
 			} else {
 				// Fall back to built-in tools
@@ -820,7 +823,7 @@ func executeAgentLoop(
 					}
 					execCtx = tools.WithToolContext(ctx, &toolCtxCopy)
 				}
-				result, execErr = tools.DefaultRegistry.Execute(execCtx, tc.Name, tc.Arguments)
+				result, execErr = tools.DefaultRegistry.Execute(execCtx, toolName, tc.Arguments)
 			}
 
 			if execErr != nil {
@@ -838,6 +841,16 @@ func executeAgentLoop(
 	}
 
 	return "", fmt.Errorf("max iterations reached without completion")
+}
+
+func advertisedToolNames(llmTools []llm.Tool) map[string]struct{} {
+	names := make(map[string]struct{}, len(llmTools))
+	for _, tool := range llmTools {
+		if name := strings.TrimSpace(tool.Name); name != "" {
+			names[name] = struct{}{}
+		}
+	}
+	return names
 }
 
 // writeResult submits the result to the controller via HTTP POST.

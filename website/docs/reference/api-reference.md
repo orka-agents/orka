@@ -26,6 +26,16 @@ Txn-Token: <txntoken+jwt>
 
 When a Task is created through OIDC or context-token authentication, Orka stamps the verified caller identity into immutable `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Context-token Task creation also stamps immutable `spec.transaction` plus transaction labels/annotations for audit correlation. Clients cannot provide or override `requestedBy` or `transaction`; requests containing top-level or nested `spec.requestedBy`/`spec.transaction` are rejected with `400`. See [Kontxt TxToken integration](../concepts/kontxt.md) for scope/`tctx` authorization, TTS exchange, delegation, and audit behavior.
 
+## Webhooks
+
+GitHub webhooks use HMAC verification instead of bearer-token authentication.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/webhooks/github` | POST | Accept GitHub `issues` / `pull_request` label triggers and pull request events for exact-head repository monitor runs |
+
+The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Signature-256` header. Label trigger events can create agent Tasks for labels such as `agent:implement`. Pull request events can also queue exact-head `RepositoryMonitor` runs when a matching monitor has `spec.review.exactEventEnabled: true`. See [GitHub Label Triggers](../guides/github-label-triggers.md) for configuration and webhook behavior.
+
 ## Tasks
 
 | Endpoint | Method | Description |
@@ -154,6 +164,86 @@ Common list query parameters: `namespace`, `taskName`, `agentName`, `type`, `sta
 | `/api/v1/tools` | GET | List tools (built-in + CRDs) |
 | `/api/v1/tools/:name` | GET | Get tool details |
 
+### Tool CRD Schema
+
+`GET /api/v1/tools/:name` returns built-in tool metadata or the full `Tool` CRD. Custom Tool CRDs can call plain HTTP endpoints or MCP servers hosted in durable Substrate actors.
+
+Plain HTTP tools set `spec.http.url` and may inject authentication from a Kubernetes Secret into either the `Authorization: Bearer` header or the JSON request body:
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: tavily-search
+spec:
+  description: "Search the web for current information"
+  parameters:
+    type: object
+    properties:
+      query:
+        type: string
+    required:
+      - query
+  http:
+    url: "https://api.tavily.com/search"
+    method: POST
+    authSecretRef:
+      name: tavily-secret
+      key: api-key
+    authInject: body
+    authBodyKey: api_key
+```
+
+MCP actor-backed tools set `spec.mcp.substrateActor` and may omit `spec.http` entirely. Orka creates or reuses the Substrate actor, waits for the MCP endpoint, stores the resolved endpoint in `status.endpoint`, and workers call the MCP tool through JSON-RPC `tools/call` using the Tool name as the MCP tool name.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: repo-inspector
+spec:
+  description: "Inspect repository metadata through an MCP server"
+  parameters:
+    type: object
+    properties:
+      message:
+        type: string
+    required:
+      - message
+  mcp:
+    path: /mcp
+    substrateActor:
+      templateRef:
+        name: orka-mcp
+        namespace: ate-demo
+      poolRef:
+        name: mcp-substrate-pool
+      boot: true
+```
+
+| Path | Type | Values/default | Notes |
+|------|------|----------------|-------|
+| `spec.description` | string | required | Description shown to the LLM. |
+| `spec.parameters` | JSON Schema | empty | Tool argument schema in function-calling format. |
+| `spec.http.url` | string | required for plain HTTP tools | Endpoint called by workers. MCP actor-backed tools may omit it because Orka uses `status.endpoint`. |
+| `spec.http.method` | string | default `POST`; allowed `GET`, `POST`, `PUT`, `PATCH`, `DELETE` | HTTP method for plain HTTP tools. MCP actor-backed tools use `POST`. |
+| `spec.http.headers` | map | empty | Static headers sent with the request. Reserved token propagation headers cannot be overridden when outbound TxToken propagation is enabled. |
+| `spec.http.timeout` | duration | default `30s` | Per-call request timeout. |
+| `spec.http.authSecretRef` | Secret key selector | empty | Secret value used as the auth token. |
+| `spec.http.authInject` | string | default `header`; allowed `header`, `body` | `header` sends `Authorization: Bearer <token>`. `body` injects the token into the JSON request body and is invalid for MCP actor-backed tools. |
+| `spec.http.authBodyKey` | string | empty | JSON key used when `authInject: body`. |
+| `spec.mcp.path` | string | `/mcp` | HTTP path exposed by the MCP server inside the actor. |
+| `spec.mcp.substrateActor.templateRef.name` | string | required | Substrate `ActorTemplate` hosting the MCP server. |
+| `spec.mcp.substrateActor.templateRef.namespace` | string | Tool namespace or configured default | Namespace containing the actor template. |
+| `spec.mcp.substrateActor.poolRef.name` | string | empty | Optional `SubstrateActorPool` for actor placement and reuse. The pool template must match the MCP actor template. |
+| `spec.mcp.substrateActor.poolRef.namespace` | string | Tool namespace | Namespace containing the referenced actor pool. |
+| `spec.mcp.substrateActor.boot` | boolean | `false` | Boots the actor from scratch on first resume; later reconciles reuse an already booted actor. |
+| `status.available` | boolean | false | Whether the controller can reach the resolved endpoint. |
+| `status.endpoint` | string | empty | Resolved non-secret endpoint used by workers. For MCP actor-backed tools this is the Substrate router endpoint. |
+| `status.actor` | object | empty | Safe actor metadata, including provider, actor ID, route host, resolved template, and pool reference. |
+
+MCP actor-backed tools require Substrate support to be enabled on the controller. If transport auth is needed for an MCP endpoint, set `spec.http.authSecretRef`, keep `authInject` as `header` or omit it, and omit `spec.http.url`.
+
 ## Security
 
 Repository security endpoints manage `RepositoryScan` configurations and their generated threat models, scan runs, findings, patch proposals, and remediation pull requests. Like other `/api/v1/*` endpoints, they require ServiceAccount bearer token authentication.
@@ -233,6 +323,97 @@ Review slice and dropped-output inspection:
 1. List slices with `GET /api/v1/security/repositories/:name/slices?namespace=default`.
 2. Inspect one slice with `GET /api/v1/security/repositories/:name/slices/:sliceID?namespace=default`.
 3. List rejected v2 model output with `GET /api/v1/security/repositories/:name/dropped-findings?namespace=default&scanRunID=scan_...`.
+
+## Repository Monitors
+
+Repository monitor endpoints manage `RepositoryMonitor` configurations and their durable monitor runs, PR queue items, review state, and audit events. The current implementation supports GitHub pull request monitoring and read-only review task creation.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/monitors/repositories` | POST | Create a repository monitor |
+| `/api/v1/monitors/repositories` | GET | List repository monitors |
+| `/api/v1/monitors/repositories/:name` | GET | Get repository monitor details |
+| `/api/v1/monitors/repositories/:name` | PUT | Update repository monitor spec |
+| `/api/v1/monitors/repositories/:name` | DELETE | Delete repository monitor |
+| `/api/v1/monitors/repositories/:name/runs` | POST | Trigger a manual monitor run |
+| `/api/v1/monitors/repositories/:name/runs` | GET | List monitor runs |
+| `/api/v1/monitors/repositories/:name/items` | GET | List current monitor items |
+| `/api/v1/monitors/events` | GET | List monitor audit events |
+
+Common query parameters:
+
+- `namespace` - Kubernetes namespace to operate in.
+- `limit` - page size for list endpoints.
+- `continue` or `cursor` - pagination cursor for store-backed list endpoints.
+- `kind`, `state`, `verdict`, `repairState`, and `automergeState` - filters for `GET /api/v1/monitors/repositories/:name/items`.
+- `name`, `runID`, `itemKind`, `itemNumber`, and `eventType` - filters for `GET /api/v1/monitors/events`; `name` is required.
+
+Context-token authorization scopes are `orka:monitors:read` for list/get endpoints, `orka:monitors:write` for create/update/delete, and `orka:monitors:operate` for manual run creation.
+
+### Create Repository Monitor
+
+**Endpoint:** `POST /api/v1/monitors/repositories`
+
+**Request Body:**
+```json
+{
+  "name": "example-app",
+  "namespace": "default",
+  "spec": {
+    "provider": "github",
+    "repoURL": "https://github.com/example/app",
+    "branch": "main",
+    "gitSecretRef": {"name": "repo-monitor-github"},
+    "schedule": "*/30 * * * *",
+    "targets": {
+      "pullRequests": {
+        "enabled": true,
+        "includeDrafts": false,
+        "maxPerRun": 10
+      }
+    },
+    "agents": {
+      "reviewer": {"name": "repo-reviewer"}
+    },
+    "review": {
+      "event": "COMMENT",
+      "staleReviewTTL": "24h",
+      "exactEventEnabled": true
+    },
+    "policy": {
+      "protectedLabels": ["security-sensitive"],
+      "pauseLabels": ["orka:pause"]
+    },
+    "validation": {
+      "mode": "changed",
+      "commands": ["make test"]
+    }
+  }
+}
+```
+
+**Response (201):** The created `RepositoryMonitor` resource.
+
+Required fields are `name`, `spec.repoURL`, and `spec.agents.reviewer.name` when pull request monitoring is enabled. The API defaults or infers provider, owner, repository, branch, pull request enablement, pull request `maxPerRun`, `review.event`, and validation mode where possible. `spec.repoURL` must be a credential-free GitHub repository root URL such as `https://github.com/owner/repo`, `https://github.com/owner/repo.git`, or `git@github.com:owner/repo.git`; pull request, issue, branch/tree, blob/file, commit, query-string, fragment, non-GitHub, HTTP, and embedded-credential URLs are rejected.
+
+Only GitHub pull request monitoring is supported in this slice. Requests that enable issue or commit targets, disable pull request monitoring, use a non-GitHub provider, set `review.requireGreenCI`, reference a missing/non-Claude reviewer runtime, or reference a reviewer Agent without usable Claude credentials are rejected with `400`. The reviewer Agent must use `runtime.type: claude`, must reference a Secret in the monitor namespace, and that Secret must contain a non-empty `ANTHROPIC_API_KEY` or `ANTHROPIC_FOUNDRY_API_KEY` key. When `gitSecretRef` is set, the Git Secret must exist in the monitor namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
+
+### Trigger Manual Monitor Run
+
+**Endpoint:** `POST /api/v1/monitors/repositories/{name}/runs`
+
+**Request Body:**
+```json
+{
+  "targetKind": "pull_request",
+  "targetNumber": 123,
+  "targetSHA": "abc123"
+}
+```
+
+The request body can be omitted to run a full pull request inventory pass. `targetKind` must be empty or `pull_request`; `targetNumber` and `targetSHA` narrow the run to one PR or exact head. When `targetNumber` is set, the controller fetches that pull request directly from GitHub and does not retire unrelated monitor items from the repository-wide inventory. The API returns `409` when the monitor already has a queued or running run.
+
+See [Repository Monitors](../guides/repository-monitors.md) for the full workflow and CRD example.
 
 ## Auth
 
@@ -437,19 +618,28 @@ The following tools are **auto-injected** when coordination is enabled:
 | `search_transcript` | Search prior session transcripts | `query` (required); `session_name`, `exclude_session_name`, `roles`, `limit`, `max_snippet_length` |
 | `create_pull_request` | Create a GitHub pull request | `task_name`, `head_branch`, `base_branch`, `title` (required); `body` |
 | `check_pull_request_ci` | Check GitHub CI status without merging | `pr_number` (required); `task_name`, `repo_url`, `wait_timeout`, `poll_interval` |
+| `list_pull_requests` | List open pull requests in a repository | `task_name`, `repo_url`; `per_page`, `page` |
+| `check_pr_review_marker` | Check for an existing Orka PR review marker on a PR head | `pr_number` (required); `task_name`, `repo_url`, `head_sha` |
 | `merge_pull_request` | Merge a GitHub pull request | `task_name`, `pr_number` (required); `merge_method`, `commit_title`, `commit_message` |
 | `auto_merge_pull_request` | Poll CI checks and merge a PR when all pass | `task_name`, `pr_number` (required); `merge_method`, `commit_title`, `commit_message`, `timeout` |
-| `review_pull_request` | Fetch PR diff for review | `task_name`, `pr_number` (required) |
-| `post_review_comment` | Post a review on a PR | `task_name`, `pr_number`, `body`, `event` (required); `comments` |
+| `review_pull_request` | Fetch PR diff for review | `pr_number` (required); `task_name`, `repo_url` |
+| `post_review_comment` | Post a review on a PR | `pr_number`, `body`, `event` (required); `task_name`, `repo_url`, `comments` |
 | `create_agent` | Create an Agent CRD at runtime | `name`, `provider`, `model` (required); `systemPrompt`, `tools`, `coordination` |
 | `delete_agent` | Delete an Agent CRD | `name` (required), `namespace` |
 | `update_plan` | Update the autonomous execution plan | `summary`, `plan_document` (required); `progress_pct`, `goal_complete` |
 
-The following 4 tools require explicit `spec.tools[]` entries on the Agent CRD:
+The following tools require explicit `spec.tools[]` entries on the Agent CRD:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
 | `list_issues` | List open GitHub issues in a repository | `task_name`, `repo_url`; `unassigned_only` (default true), `per_page`, `page` |
-| `list_pull_requests` | List open pull requests in a repository | `task_name`, `repo_url`; `per_page`, `page` |
 | `get_issue` | Fetch full details of a GitHub issue | `issue_number` (required); `task_name`, `repo_url` |
 | `comment_on_issue` | Post a comment on a GitHub issue | `issue_number`, `body` (required); `task_name`, `repo_url` |
+
+For GitHub tools that accept `repo_url`, explicit repository URLs are scope-checked when task context is available. The requested repository must match the current task's workspace repository or signed transaction repository context; otherwise the tool fails closed before resolving credentials or calling GitHub.
+
+`create_pr_monitor` is exposed through the chat/management tool set rather than auto-injected into every coordinator worker. Parameters are `name`, `repo_url`, `schedule`, and `agent_ref` (required), plus optional `namespace`, `provider_ref`, `gitSecretRef`, `per_page`, `review_event`, and `prompt`. `repo_url` must be a credential-free GitHub repository root URL such as `https://github.com/owner/repo`, `https://github.com/owner/repo.git`, or `git@github.com:owner/repo.git`; pull request, issue, branch/tree, blob/file, commit, query-string, fragment, non-GitHub, HTTP, and embedded-credential URLs are rejected.
+
+`create_pr_monitor` is the compatibility path for prompt-orchestrated scheduled PR monitors. It creates a scheduled `type: ai` Task, sets `spec.workspace.gitRepo` to `repo_url`, injects only the PR review loop tools, and instructs the task to pass the same `repo_url` to `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The Agent referenced by `agent_ref` must be an AI Agent with coordination enabled and autonomous coordination disabled. The task needs a Git credential Secret through `gitSecretRef` or one of the supported default Secret names in the target namespace: `git-credentials`, `github-credentials`, `copilot-token`, `github-token`, or `git-token`. The selected Secret must contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
+
+`check_pr_review_marker` returns a hidden marker that the monitor should include unchanged in the subsequent review body. The marker includes `repo`, `pr`, `head_sha`, and `sig` fields, and matching is scoped to that repository, pull request, and exact head. Marker signatures are stable across GitHub token rotation. Operators can set `ORKA_PR_REVIEW_MARKER_SECRET` in the worker Task environment for dedicated marker signing and `ORKA_PR_REVIEW_MARKER_PREVIOUS_SECRETS` for comma-separated previous keys during rotation. Legacy markers are accepted only from a trusted review author, configured with `ORKA_PR_REVIEW_MARKER_TRUSTED_AUTHOR` or resolved from the Task's authenticated GitHub user.

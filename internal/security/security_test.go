@@ -31,6 +31,73 @@ func TestArtifactWorkspacePath(t *testing.T) {
 	}
 }
 
+func TestParseGitHubRepositoryURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		repoURL   string
+		wantOwner string
+		wantRepo  string
+		wantErr   bool
+	}{
+		{
+			name:      "HTTPS URL",
+			repoURL:   "https://github.com/example/project",
+			wantOwner: "example",
+			wantRepo:  "project",
+		},
+		{
+			name:      "HTTPS URL with git suffix and trailing slash",
+			repoURL:   "https://github.com/example/project.git/",
+			wantOwner: "example",
+			wantRepo:  "project",
+		},
+		{
+			name:      "SSH URL",
+			repoURL:   "git@github.com:example/project.git",
+			wantOwner: "example",
+			wantRepo:  "project",
+		},
+		{
+			name:    "rejects credentials",
+			repoURL: "https://token@github.com/example/project",
+			wantErr: true,
+		},
+		{
+			name:    "rejects SSH URL query",
+			repoURL: "git@github.com:example/project?token=secret",
+			wantErr: true,
+		},
+		{
+			name:    "rejects SSH URL credential-like repo",
+			repoURL: "git@github.com:example/project@secret",
+			wantErr: true,
+		},
+		{
+			name:    "rejects non GitHub host",
+			repoURL: "https://example.com/example/project",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner, repo, err := ParseGitHubRepositoryURL(tt.repoURL)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ParseGitHubRepositoryURL(%q) succeeded, want error", tt.repoURL)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseGitHubRepositoryURL(%q) error = %v", tt.repoURL, err)
+			}
+			if owner != tt.wantOwner || repo != tt.wantRepo {
+				t.Fatalf("ParseGitHubRepositoryURL(%q) = %q/%q, want %q/%q", tt.repoURL, owner, repo, tt.wantOwner, tt.wantRepo)
+			}
+		})
+	}
+}
+
 func TestEffectiveWorkspaceBranch(t *testing.T) {
 	tests := []struct {
 		name string

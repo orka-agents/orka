@@ -99,11 +99,21 @@ spec:
 
 **Auto-injected coordination tools** (when `enabled: true`):
 
-`delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, `create_pull_request`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `create_agent`, `delete_agent`, `update_plan`
+`delegate_task`, `wait_for_tasks`, `create_container_task`, `cancel_task`, `send_message`, `check_messages`, `recall_memory`, `remember`, `propose_memory`, `search_transcript`, `create_pull_request`, `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `create_agent`, `delete_agent`, `update_plan`
 
 **Opt-in coordination tools** (require explicit `spec.tools[]` entries on the Agent):
 
-`list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`
+`list_issues`, `get_issue`, `comment_on_issue`
+
+**PR review marker environment:**
+
+Prompt-orchestrated PR monitors use `check_pr_review_marker` to produce and detect hidden review markers. These variables are read by the worker Task that runs the tool:
+
+| Environment variable | Description |
+|----------------------|-------------|
+| `ORKA_PR_REVIEW_MARKER_SECRET` | Optional stable HMAC key for PR review marker signatures. Use a Kubernetes Secret or another secret injection path. |
+| `ORKA_PR_REVIEW_MARKER_PREVIOUS_SECRETS` | Optional comma-separated previous marker keys accepted during rotation. |
+| `ORKA_PR_REVIEW_MARKER_TRUSTED_AUTHOR` | Optional GitHub login trusted for legacy marker compatibility. When omitted, Orka resolves the authenticated GitHub user for the Task credential. |
 
 ### RepositoryScan
 
@@ -165,6 +175,83 @@ spec:
 **Status fields:**
 
 `status.phase`, `status.lastScanID`, `status.lastScanTaskName`, `status.lastSuccessfulScanAt`, `status.lastObservedHeadSHA`, `status.lastProcessedCommit`, `status.threatModelVersion`, `status.findingCounts`, and `status.conditions` summarize the latest scan lifecycle and open findings. Dynamic scan runs, threat models, findings, and patch proposals are stored by the controller and surfaced through the security API/UI rather than embedded directly in the CRD status.
+
+### RepositoryMonitor
+
+Durable GitHub pull request monitor configuration. A `RepositoryMonitor` is namespace-scoped and tells Orka which repository and branch to inspect, which Claude runtime Agent should review selected PR heads, and which labels or scheduling rules should control review selection.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: RepositoryMonitor
+metadata:
+  name: example-app
+  namespace: default
+spec:
+  provider: github
+  repoURL: "https://github.com/example/app"
+  owner: example                 # optional; inferred from repoURL
+  repository: app                # optional; inferred from repoURL
+  branch: main
+  gitSecretRef:                  # optional for private repositories or higher API rate limits
+    name: repo-monitor-github
+  schedule: "*/30 * * * *"      # optional cron expression
+  timeZone: "UTC"               # optional IANA time zone
+  suspend: false
+  targets:
+    pullRequests:
+      enabled: true
+      includeDrafts: false
+      maxPerRun: 20
+  agents:
+    reviewer:
+      name: repo-reviewer
+  review:
+    event: COMMENT              # COMMENT, APPROVE, or REQUEST_CHANGES
+    staleReviewTTL: 24h
+    exactEventEnabled: true     # queue exact-head runs from signed PR webhooks
+  policy:
+    protectedLabels:
+      - security-sensitive
+    pauseLabels:
+      - orka:pause
+  validation:
+    mode: changed               # off, changed, or full
+    commands:
+      - make test
+```
+
+**Spec fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `provider` | string | No | Source control provider. `github` is the supported v1 provider and default. |
+| `repoURL` | string | Yes | Credential-free GitHub repository root URL to monitor, such as `https://github.com/owner/repo`, `https://github.com/owner/repo.git`, or `git@github.com:owner/repo.git`. Pull request, issue, branch/tree, blob/file, commit, query-string, fragment, non-GitHub, HTTP, and embedded-credential URLs are rejected. |
+| `owner` | string | No | Repository owner or organization. Inferred from `repoURL` when omitted. |
+| `repository` | string | No | Repository name. Inferred from `repoURL` when omitted. |
+| `branch` | string | No | Base branch used for pull request inventory. Defaults to `main`. |
+| `gitSecretRef` | LocalObjectReference | No | Git Secret containing `token`, `password`, or `GITHUB_TOKEN` for GitHub API access and same-repository PR checkout. This is separate from the reviewer Agent's runtime credential Secret. |
+| `schedule` | string | No | Cron expression for scheduled monitor runs. |
+| `timeZone` | string | No | IANA time zone used by `schedule`. |
+| `suspend` | bool | No | Pauses scheduled monitor runs while preserving the monitor configuration. |
+| `targets.pullRequests.enabled` | bool | No | Enables pull request monitoring. Currently this must be true or omitted. |
+| `targets.pullRequests.includeDrafts` | bool | No | Select draft pull requests for review when true. Defaults to false. |
+| `targets.pullRequests.maxPerRun` | int32 | No | Maximum selected PRs per run. Defaults to `20`; allowed range is `1` to `100`. |
+| `agents.reviewer` | AgentReference | Yes | Claude runtime Agent used for read-only PR review tasks. The Agent must reference a Secret in the monitor namespace with `ANTHROPIC_API_KEY` or `ANTHROPIC_FOUNDRY_API_KEY`. |
+| `review.event` | string | No | Default review event value included in review task input. Defaults to `COMMENT`. |
+| `review.staleReviewTTL` | duration | No | Re-review an unchanged head after the previous accepted review is older than this duration. |
+| `review.exactEventEnabled` | bool | No | Queue exact-head monitor runs from signed GitHub pull request webhook events when true. |
+| `policy.protectedLabels` | list | No | PR labels that block automated review selection. |
+| `policy.pauseLabels` | list | No | PR labels that pause monitor automation for that item. |
+| `validation.mode` | string | No | Validation mode included in review task input. Defaults to `changed`; allowed values are `off`, `changed`, and `full`. |
+| `validation.commands` | list | No | Validation commands included in review task input for the reviewer. |
+
+`targets.issues`, `targets.commits`, `review.requireGreenCI`, repair, and automerge fields are present for the broader monitor API shape, but the current controller rejects issue/commit targets and `review.requireGreenCI`; repair and automerge are not active workflows in this implementation slice. Read-only review tasks check out the exact PR head and receive generated context files under `/workspace/.git/orka/`: `pr-review.md`, `pr-review.files`, and `pr-review.diff`.
+
+**Status fields:**
+
+`status.phase`, `status.lastRunID`, `status.lastRunTime`, `status.lastSuccessfulRunTime`, `status.observedGeneration`, `status.openPullRequests`, `status.pendingReviews`, `status.activeRepairs`, `status.blockedItems`, `status.mergeReadyItems`, and `status.conditions` summarize the monitor lifecycle and current queue. Dynamic runs, PR items, review records, repair records, command events, and audit events are stored by the controller and surfaced through the monitor API/UI rather than embedded directly in CRD status.
+
+See [Repository Monitors](../guides/repository-monitors.md) for the workflow, API examples, and current limits.
 
 ### Execution
 
@@ -589,6 +676,9 @@ controller:
       taskCreate: orka:tasks:create
       providerUse: orka:providers:use
       toolUse: orka:tools:use
+      monitorRead: orka:monitors:read
+      monitorWrite: orka:monitors:write
+      monitorOperate: orka:monitors:operate
     tts:
       url: https://tts.example.com
       audience: orka-workers
@@ -603,7 +693,9 @@ controller:
 The Helm keys mirror the controller flags: for example,
 `controller.contextToken.jwksUrl` renders `--context-token-jwks-url`,
 `controller.contextToken.scopes.secretRead` renders
-`--context-token-secret-read-scopes`, and
+`--context-token-secret-read-scopes`,
+`controller.contextToken.scopes.monitorRead` renders
+`--context-token-monitor-read-scopes`, and
 `controller.contextToken.tts.toolTokenTTL` renders
 `--context-token-tool-token-ttl`.
 
@@ -651,6 +743,9 @@ See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/
 | `--context-token-session-write-scopes` | `ORKA_CONTEXT_TOKEN_SESSION_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing session writes/deletes. Defaults to `orka:sessions:write` |
 | `--context-token-security-read-scopes` | `ORKA_CONTEXT_TOKEN_SECURITY_READ_SCOPES` env or `""` | Comma-separated scopes authorizing security scan reads. Defaults to `orka:security:read` |
 | `--context-token-security-write-scopes` | `ORKA_CONTEXT_TOKEN_SECURITY_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing security scan creates, updates, deletes, and other mutations. Defaults to `orka:security:write` |
+| `--context-token-monitor-read-scopes` | `ORKA_CONTEXT_TOKEN_MONITOR_READ_SCOPES` env or `""` | Comma-separated scopes authorizing repository monitor reads. Defaults to `orka:monitors:read` |
+| `--context-token-monitor-write-scopes` | `ORKA_CONTEXT_TOKEN_MONITOR_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing repository monitor create, update, and delete operations. Defaults to `orka:monitors:write` |
+| `--context-token-monitor-operate-scopes` | `ORKA_CONTEXT_TOKEN_MONITOR_OPERATE_SCOPES` env or `""` | Comma-separated scopes authorizing repository monitor manual runs. Defaults to `orka:monitors:operate` |
 | `--context-token-skill-read-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Skill reads. Defaults to `orka:skills:read` |
 | `--context-token-skill-write-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing Skill writes. Defaults to `orka:skills:write` |
 | `--context-token-tts-url` | `ORKA_CONTEXT_TOKEN_TTS_URL` env or `""` | kontxt TTS base URL for optional token exchange/replacement |
@@ -765,7 +860,7 @@ To customize token locations, set `--context-token-headers` or `ORKA_CONTEXT_TOK
 
 `Authorization: Bearer` remains the default location for Kubernetes ServiceAccount and OIDC JWT authentication. Context-token bearer authentication is only attempted when `Authorization:Bearer` is explicitly configured and the bearer JWT has `typ: txntoken+jwt`; other bearer tokens continue through the standard OIDC or Kubernetes TokenReview flow. When an external context-token caller creates a Task, Orka records the verified subject and issuer in immutable `spec.requestedBy` and records safe transaction metadata in immutable `spec.transaction`, transaction labels, and transaction annotations. Clients cannot set `requestedBy` or `transaction` themselves.
 
-Optional authorization is controlled by `--context-token-authz-mode` / `ORKA_CONTEXT_TOKEN_AUTHZ_MODE`. In `audit` mode, Orka logs safe authorization failures and allows the request. In `enforce` mode, Orka rejects context-token callers that lack the configured operation scope or violate signed `tctx` constraints. Task creation can be constrained by `tctx.namespace`, `tctx.taskType`, `tctx.agent`, `tctx.allowedAgents`, workspace `tctx.repo`/`tctx.branch`/`tctx.ref`, and `tctx.allowedTools`. Chat, OpenAI-compatible, and Anthropic-compatible model calls require the provider-use scope (default `orka:providers:use`) and honor `tctx.namespace`, `tctx.provider`, `tctx.allowedProviders`, `tctx.model`, and `tctx.allowedModels`. When Orka-managed server-side tools are exposed to those endpoints, they also require the tool-use scope (default `orka:tools:use`) and honor `tctx.allowedTools`. Security scan read/list/get endpoints require the security-read scope (default `orka:security:read`), and security scan create/update/delete and mutation endpoints require the security-write scope (default `orka:security:write`). The raw TxToken is never logged or persisted in Task specs/status.
+Optional authorization is controlled by `--context-token-authz-mode` / `ORKA_CONTEXT_TOKEN_AUTHZ_MODE`. In `audit` mode, Orka logs safe authorization failures and allows the request. In `enforce` mode, Orka rejects context-token callers that lack the configured operation scope or violate signed `tctx` constraints. Task creation can be constrained by `tctx.namespace`, `tctx.taskType`, `tctx.agent`, `tctx.allowedAgents`, workspace `tctx.repo`/`tctx.branch`/`tctx.ref`, and `tctx.allowedTools`. Chat, OpenAI-compatible, and Anthropic-compatible model calls require the provider-use scope (default `orka:providers:use`) and honor `tctx.namespace`, `tctx.provider`, `tctx.allowedProviders`, `tctx.model`, and `tctx.allowedModels`. When Orka-managed server-side tools are exposed to those endpoints, they also require the tool-use scope (default `orka:tools:use`) and honor `tctx.allowedTools`. Security scan read/list/get endpoints require the security-read scope (default `orka:security:read`), and security scan create/update/delete and mutation endpoints require the security-write scope (default `orka:security:write`). Repository monitor read endpoints require the monitor-read scope (default `orka:monitors:read`), monitor create/update/delete endpoints require the monitor-write scope (default `orka:monitors:write`), and manual monitor runs require the monitor-operate scope (default `orka:monitors:operate`). Repository monitor access can also be constrained by `tctx.namespace`, `tctx.repo`, `tctx.branch`, `tctx.agent`, and `tctx.allowedAgents`. The raw TxToken is never logged or persisted in Task specs/status.
 
 ### Kontxt TTS Exchange and Propagation
 

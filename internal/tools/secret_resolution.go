@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 var (
@@ -98,6 +99,39 @@ func resolveWorkspaceGitSecretRef(ctx context.Context, k8sClient client.Reader, 
 		return nil, nil
 	}
 	return &corev1.LocalObjectReference{Name: name}, nil
+}
+
+func validateGitCredentialSecret(ctx context.Context, k8sClient client.Reader, namespace, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	if k8sClient == nil {
+		return fmt.Errorf("git secretRef %q requires a Kubernetes client", name)
+	}
+	secret := &corev1.Secret{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("git secretRef %q not found in namespace %q", name, namespace)
+		}
+		return fmt.Errorf("failed to get git secretRef %q in namespace %q: %w", name, namespace, err)
+	}
+	if !gitCredentialSecretHasToken(secret) {
+		return fmt.Errorf("git secretRef %q in namespace %q must contain a non-empty token, password, or %s key", name, namespace, workerenv.GitHubToken)
+	}
+	return nil
+}
+
+func gitCredentialSecretHasToken(secret *corev1.Secret) bool {
+	if secret == nil {
+		return false
+	}
+	for _, key := range []string{tokenKey, passwordKey, workerenv.GitHubToken} {
+		if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func taskWorkspace(task *corev1alpha1.Task) *corev1alpha1.WorkspaceConfig {

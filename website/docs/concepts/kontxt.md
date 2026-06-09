@@ -111,6 +111,7 @@ Authorization only applies to authenticated context-token callers. ServiceAccoun
 | Memory read/write | `orka:memory:read` / `orka:memory:write` |
 | Session read/write-delete | `orka:sessions:read` / `orka:sessions:write` |
 | Security scan read/write | `orka:security:read` / `orka:security:write` |
+| Repository monitor read/write/operate | `orka:monitors:read` / `orka:monitors:write` / `orka:monitors:operate` |
 | Skill read/write | `orka:skills:read` / `orka:skills:write` |
 
 Each scope list is configurable with the corresponding `ORKA_CONTEXT_TOKEN_*_SCOPES` environment variable or `--context-token-*-scopes` flag. Use comma-separated values when allowing aliases.

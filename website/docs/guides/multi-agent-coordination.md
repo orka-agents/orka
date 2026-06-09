@@ -55,7 +55,7 @@ Controller: parent Job succeeded → parent Task → Succeeded
 
 ### Coordination Tools
 
-Located in `internal/tools/`. Coordination tools include `delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, PR tools (`create_pull_request`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`), issue tools (`list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`), agent management tools (`create_agent`, `delete_agent`), and `update_plan` (autonomous mode). All are registered via `RegisterCoordinationTools(k8sClient)` in `internal/tools/registry.go` when `ORKA_COORDINATION_ENABLED=true`.
+Located in `internal/tools/`. Coordination tools include `delegate_task`, `wait_for_tasks`, `create_container_task`, `cancel_task`, `send_message`, `check_messages`, memory tools (`recall_memory`, `remember`, `propose_memory`, `search_transcript`), PR tools (`create_pull_request`, `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`), issue tools (`list_issues`, `get_issue`, `comment_on_issue`), agent management tools (`create_agent`, `delete_agent`), and `update_plan` (autonomous mode). These are registered via `RegisterCoordinationTools(k8sClient)` in `internal/tools/registry.go` when `ORKA_COORDINATION_ENABLED=true`. The `create_pr_monitor` compatibility tool is exposed through chat/management tooling and creates a scheduled monitor Task with its own narrow PR review tool set.
 
 #### `delegate_task` Tool
 
@@ -73,7 +73,7 @@ LLM-visible parameter schema:
         "gitRepo":      {"type": "string", "description": "Git repository URL"},
         "branch":       {"type": "string", "description": "Git branch name"},
         "ref":          {"type": "string", "description": "Git ref (commit SHA or tag)"},
-        "gitSecretRef": {"type": "string", "description": "Name of the Kubernetes Secret containing git credentials (must have a 'token' key)"},
+        "gitSecretRef": {"type": "string", "description": "Name of the Kubernetes Secret containing git credentials (must have a non-empty token, password, or GITHUB_TOKEN key)"},
         "pushBranch":   {"type": "string", "description": "Remote branch name to push changes to after the agent completes"}
       }
     },
@@ -720,7 +720,28 @@ Creates a GitHub pull request from a branch that was pushed by a completed agent
 | `title` | string | yes | Pull request title |
 | `body` | string | no | Pull request body in Markdown |
 
-The tool reads the git credentials from the child task's `gitSecretRef` secret (looks for `token` or `password` key) and calls the GitHub REST API. The coordinator must have RBAC access to read Secrets.
+The tool reads the git credentials from the child task's `gitSecretRef` secret (looks for a non-empty `token`, `password`, or `GITHUB_TOKEN` key) and calls the GitHub REST API. The coordinator must have RBAC access to read Secrets.
+
+### create_pr_monitor Tool
+
+Creates a scheduled prompt-orchestrated pull request monitor Task for one GitHub repository. This is the compatibility path for scheduled AI monitor Tasks; use the `RepositoryMonitor` CRD for durable monitor runs, PR queue state, review records, and dashboard visibility.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Human-readable monitor name. The created Task receives an Orka-generated name. |
+| `repo_url` | string | yes | Credential-free GitHub repository root URL to monitor, such as `https://github.com/owner/repo`, `https://github.com/owner/repo.git`, or `git@github.com:owner/repo.git`. The created Task stores it in `spec.workspace.gitRepo`. |
+| `schedule` | string | yes | Cron schedule for the monitor Task. |
+| `agent_ref` | string | yes | AI Agent name for the scheduled monitor Task. The Agent must have coordination enabled and autonomous coordination disabled. |
+| `namespace` | string | no | Namespace for the monitor Task. Defaults to the current task namespace. |
+| `provider_ref` | string | no | Optional Provider reference for the scheduled AI Task. |
+| `gitSecretRef` | string | no | Secret containing Git/GitHub credentials. If omitted, Orka tries supported default git credential Secret names in the target namespace. |
+| `per_page` | integer | no | Maximum open PRs to scan per run. Defaults to `30`, maximum `100`. |
+| `review_event` | string | no | Review event to post after analysis: `COMMENT`, `APPROVE`, or `REQUEST_CHANGES`. Defaults to `COMMENT`. |
+| `prompt` | string | no | Additional instructions appended to the generated monitor prompt. |
+
+Pull request, issue, branch/tree, blob/file, commit, query-string, fragment, non-GitHub, HTTP, and embedded-credential URLs are rejected before Orka creates the monitor Task.
+
+If `gitSecretRef` is omitted, Orka searches `git-credentials`, `github-credentials`, `copilot-token`, `github-token`, and `git-token`. The selected Git credential Secret must exist in the target namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key. The created Task receives a narrow tool set: `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The generated prompt tells the Task to pass the same `repo_url` to each PR tool call. Those explicit repository URLs are scope-checked against the Task workspace or signed transaction repository context before Orka resolves credentials or calls GitHub.
 
 ### check_pull_request_ci Tool
 
@@ -730,7 +751,7 @@ Checks GitHub CI status for a pull request without merging it. Use this after cr
 |-----------|------|----------|-------------|
 | `pr_number` | integer | yes | GitHub pull request number to inspect |
 | `task_name` | string | no | Name of the child task whose workspace config has the repo and git credentials |
-| `repo_url` | string | no | Direct GitHub repository URL. Falls back to `ORKA_GIT_REPO` when `task_name` is empty |
+| `repo_url` | string | no | GitHub repository URL. When task context is present, it must match that task's workspace or transaction repository scope. |
 | `wait_timeout` | string | no | Maximum time to wait for pending checks, e.g. `30m`. Empty means one immediate check |
 | `poll_interval` | string | no | Delay between checks while waiting, e.g. `30s`. Defaults to `30s` when waiting |
 
@@ -758,7 +779,8 @@ Fetches a GitHub pull request's diff, file changes, and metadata for code review
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `task_name` | string | yes | Name of the child task whose workspace config has the repo and git credentials |
+| `task_name` | string | no | Name of the child task whose workspace config has the repo and git credentials |
+| `repo_url` | string | no | GitHub repository URL. When task context is present, it must match that task's workspace or transaction repository scope. |
 | `pr_number` | integer | yes | GitHub pull request number to review |
 
 Returns:
@@ -785,7 +807,8 @@ Posts a review on a GitHub pull request with a verdict (APPROVE, REQUEST_CHANGES
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `task_name` | string | yes | Name of the child task whose workspace config has the repo and git credentials |
+| `task_name` | string | no | Name of the child task whose workspace config has the repo and git credentials |
+| `repo_url` | string | no | GitHub repository URL. When task context is present, it must match that task's workspace or transaction repository scope. |
 | `pr_number` | integer | yes | GitHub pull request number |
 | `body` | string | yes | Top-level review body text |
 | `event` | string | yes | Review verdict: `APPROVE`, `REQUEST_CHANGES`, or `COMMENT` |
@@ -870,12 +893,12 @@ Lists open GitHub issues in a repository. By default only returns unassigned iss
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `task_name` | string | no | Name of a task whose workspace config has the repo and git credentials |
-| `repo_url` | string | no | Direct GitHub repository URL (e.g. `https://github.com/owner/repo`). Falls back to `ORKA_GIT_REPO` env var |
+| `repo_url` | string | no | GitHub repository URL. When task context is present, it must match that task's workspace or transaction repository scope. |
 | `unassigned_only` | boolean | no | If true, only return issues with no assignee (default: `true`) |
 | `per_page` | integer | no | Number of results per page (default: 30, max: 100) |
 | `page` | integer | no | Page number for pagination (default: 1) |
 
-At least one of `task_name` or `repo_url` must be provided (or `ORKA_GIT_REPO` env var set).
+At least one repository source must be available: `task_name`, the current task context, or `ORKA_GIT_REPO`. Explicit `repo_url` is only accepted when it matches the task's permitted repository scope.
 
 ### list_pull_requests Tool
 
@@ -884,9 +907,28 @@ Lists open pull requests in a GitHub repository. Returns PR numbers, titles, aut
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `task_name` | string | no | Name of a task whose workspace config has the repo and git credentials |
-| `repo_url` | string | no | GitHub repository URL. Falls back to `ORKA_GIT_REPO` env var |
+| `repo_url` | string | no | GitHub repository URL. When task context is present, it must match that task's workspace or transaction repository scope. |
 | `per_page` | integer | no | Number of results per page (default: 30, max: 100) |
 | `page` | integer | no | Page number for pagination (default: 1) |
+
+### check_pr_review_marker Tool
+
+Checks whether a pull request already has an Orka review marker for the current head SHA. PR monitor tasks use this before review to avoid duplicate GitHub reviews on the same head.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pr_number` | integer | yes | GitHub pull request number to inspect |
+| `task_name` | string | no | Name of a task whose workspace config has the repo and git credentials |
+| `repo_url` | string | no | GitHub repository URL. When task context is present, it must match that task's workspace or transaction repository scope. |
+| `head_sha` | string | no | PR head SHA to check. If omitted, the tool fetches the current PR head SHA. |
+
+The tool returns a hidden review marker that should be included unchanged in the later `post_review_comment` body. The marker binds `repo`, `pr`, and `head_sha`, and includes a stable signature:
+
+```html
+<!-- orka:pr-review repo=owner/repo pr=123 head_sha=abc123 sig=... -->
+```
+
+Marker signatures are not derived from the live GitHub token. For stronger verification, set `ORKA_PR_REVIEW_MARKER_SECRET` in the worker Task environment. During rotation, keep old marker keys in comma-separated `ORKA_PR_REVIEW_MARKER_PREVIOUS_SECRETS`. Orka also accepts legacy markers from a trusted review author; set `ORKA_PR_REVIEW_MARKER_TRUSTED_AUTHOR` to the bot login, or omit it to use the authenticated GitHub login for the Task credential.
 
 ### get_issue Tool
 
@@ -895,7 +937,7 @@ Fetches full details of a specific GitHub issue by number, including title, body
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `task_name` | string | no | Name of a task whose workspace config has the repo and git credentials |
-| `repo_url` | string | no | Direct GitHub repository URL. Falls back to `ORKA_GIT_REPO` env var |
+| `repo_url` | string | no | GitHub repository URL. When task context is present, it must match that task's workspace or transaction repository scope. |
 | `issue_number` | integer | yes | GitHub issue number to fetch |
 
 ### comment_on_issue Tool
@@ -905,7 +947,7 @@ Posts a comment on a GitHub issue. Use for status updates, progress reports, or 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `task_name` | string | no | Name of a task whose workspace config has the repo and git credentials |
-| `repo_url` | string | no | Direct GitHub repository URL. Falls back to `ORKA_GIT_REPO` env var |
+| `repo_url` | string | no | GitHub repository URL. When task context is present, it must match that task's workspace or transaction repository scope. |
 | `issue_number` | integer | yes | GitHub issue number to comment on |
 | `body` | string | yes | Comment text (Markdown supported) |
 

@@ -155,16 +155,26 @@ func workerServiceAccountForTask(task *corev1alpha1.Task) string {
 	}
 }
 
-func workerAutomountServiceAccountToken(task *corev1alpha1.Task) *bool {
-	return new(podShouldAutomountServiceAccountToken(task))
+func workerAutomountServiceAccountTokenWithOptions(task *corev1alpha1.Task, opts JobBuildOptions) *bool {
+	return new(podShouldAutomountServiceAccountTokenWithOptions(task, opts))
 }
 
 func podShouldAutomountServiceAccountToken(task *corev1alpha1.Task) bool {
+	if taskRequestsReadOnlyAgent(task) {
+		return false
+	}
 	if task == nil || !isUntrustedComputeTask(task) {
 		return true
 	}
 
 	return taskUsesManagedOrkaWorker(task)
+}
+
+func podShouldAutomountServiceAccountTokenWithOptions(task *corev1alpha1.Task, opts JobBuildOptions) bool {
+	if taskRequestsReadOnlyAgent(task) {
+		return opts.ExecutionWorkspace != nil || opts.AgentSandboxWorkspace != nil
+	}
+	return podShouldAutomountServiceAccountToken(task)
 }
 
 func taskUsesManagedOrkaWorker(task *corev1alpha1.Task) bool {
@@ -204,6 +214,9 @@ func (b *JobBuilder) directProviderSecretsAllowed(task *corev1alpha1.Task) bool 
 }
 
 func (b *JobBuilder) directSecretMountsAllowed(task *corev1alpha1.Task) bool {
+	if taskRequestsReadOnlyAgent(task) {
+		return false
+	}
 	return taskAllowsDirectRuntimeSecrets(task) || (b != nil && b.directSecrets.secretMounts)
 }
 
@@ -212,7 +225,7 @@ func taskAllowsDirectRuntimeSecrets(task *corev1alpha1.Task) bool {
 }
 
 func mainContainerNeedsGitCredentials(task *corev1alpha1.Task) bool {
-	return taskUsesManagedOrkaWorker(task)
+	return taskUsesManagedOrkaWorker(task) && !taskRequestsReadOnlyAgent(task)
 }
 
 func (b *JobBuilder) directGitCredentialsAllowed(task *corev1alpha1.Task) bool {
@@ -240,6 +253,9 @@ func agentHasFallbackProviders(agent *corev1alpha1.Agent) bool {
 }
 
 func (b *JobBuilder) needsSecretVolumes(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) bool {
+	if taskRequestsReadOnlyAgent(task) && agent != nil && agent.Spec.SecretRef != nil {
+		return true
+	}
 	if b.directSecretMountsAllowed(task) {
 		if task != nil && task.Spec.SecretRef != nil {
 			return true
@@ -285,6 +301,10 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 
 // BuildWithOptions creates a Job for the given Task using additional resolved options.
 func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) (*batchv1.Job, error) {
+	if err := validateReadOnlyAgentRuntime(task, agent); err != nil {
+		return nil, err
+	}
+
 	jobName := buildTaskJobName(task)
 	execution := resolveExecution(task, agent)
 
@@ -309,7 +329,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 				Spec: corev1.PodSpec{
 					RestartPolicy:                corev1.RestartPolicyNever,
 					ServiceAccountName:           workerServiceAccountForTask(task),
-					AutomountServiceAccountToken: workerAutomountServiceAccountToken(task),
+					AutomountServiceAccountToken: workerAutomountServiceAccountTokenWithOptions(task, opts),
 					SecurityContext:              b.buildPodSecurityContext(),
 					Containers: []corev1.Container{
 						b.buildContainerWithOptions(ctx, task, agent, provider, opts),
@@ -339,7 +359,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 		b.addWorkspaceVolumes(job, task)
 	}
 
-	if task.Spec.Type == corev1alpha1.TaskTypeContainer && effectiveWorkspace(task) != nil && task.Spec.Image != "" {
+	if effectiveWorkspace(task) != nil && (taskUsesWorkspaceInitContainer(task) || (task.Spec.Type == corev1alpha1.TaskTypeContainer && task.Spec.Image != "")) {
 		b.addWorkspaceInitContainer(job, task)
 	}
 
@@ -350,7 +370,9 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 
 	// Add secret volumes if needed
 	if b.needsSecretVolumes(task, agent, provider) {
-		b.addSecretVolumes(ctx, job, task, agent, provider)
+		if err := b.addSecretVolumes(ctx, job, task, agent, provider); err != nil {
+			return nil, fmt.Errorf("failed to add secret volumes: %w", err)
+		}
 	}
 
 	// Add session volume if needed
@@ -564,6 +586,9 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 		ResultEndpoint: fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name),
 		ControllerURL:  b.ControllerURL,
 	}.EnvVars()
+	if taskRequestsReadOnlyAgent(task) {
+		envVars = setControllerEnv(envVars, workerenv.ResultStdout, scheduledRunLabelValue)
+	}
 
 	// Add task-level env vars
 	envVars = append(envVars, task.Spec.Env...)
@@ -598,7 +623,10 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	// Add agent-specific env vars
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
 		envVars = b.addAgentEnvVars(ctx, envVars, task, agent)
-		envVars = b.addCodexSandboxEnvVars(envVars, agent)
+		if taskUsesWorkspaceInitContainer(task) {
+			envVars = setControllerEnv(envVars, workerenv.WorkspacePrepared, scheduledRunLabelValue)
+		}
+		envVars = b.addCodexSandboxEnvVars(envVars, task, agent)
 		workspaceRequest := opts.ExecutionWorkspace
 		if workspaceRequest == nil {
 			workspaceRequest = opts.AgentSandboxWorkspace
@@ -608,6 +636,10 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
 		envVars = b.addWorkspaceEnvVars(envVars, task)
+	}
+	if taskRequestsReadOnlyAgent(task) {
+		envVars = setControllerEnv(envVars, workerenv.AgentReadOnly, scheduledRunLabelValue)
+		envVars = setControllerEnv(envVars, workerenv.ResultStdout, scheduledRunLabelValue)
 	}
 
 	return envVars
@@ -841,8 +873,11 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		AzureAPIVersion: cfg.azureAPIVersion,
 	}.EnvVars()...)
 
-	// Auto-inject coordination tools when coordination is enabled
-	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
+	disableCoordinationToolInjection := task.Annotations[labels.AnnotationDisableCoordinationToolInject] == scheduledRunLabelValue
+
+	// Auto-inject coordination tools when coordination is enabled, unless the
+	// task deliberately supplies a narrower explicit tool set.
+	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && !disableCoordinationToolInjection {
 		for _, ct := range []string{
 			"delegate_task",
 			"wait_for_tasks",
@@ -855,6 +890,8 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 			"propose_memory",
 			"search_transcript",
 			"create_pull_request",
+			"list_pull_requests",
+			"check_pr_review_marker",
 			"check_pull_request_ci",
 			"merge_pull_request",
 			"auto_merge_pull_request",
@@ -873,7 +910,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	// Auto-inject messaging tools for child tasks (tasks delegated by a coordinator)
 	// so they can communicate with sibling tasks via send_message/check_messages
 	_, isChildTask := task.Labels[labels.LabelParentTask]
-	if isChildTask {
+	if isChildTask && !disableCoordinationToolInjection {
 		for _, ct := range []string{"send_message", "check_messages"} {
 			if !slices.Contains(cfg.tools, ct) {
 				cfg.tools = append(cfg.tools, ct)
@@ -891,7 +928,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 
 	// Enable coordination in worker for child tasks so messaging tools are registered
 	if isChildTask && (agent == nil || agent.Spec.Coordination == nil || !agent.Spec.Coordination.Enabled) {
-		envVars = append(envVars, corev1.EnvVar{Name: workerenv.CoordinationEnabled, Value: "true"})
+		envVars = append(envVars, corev1.EnvVar{Name: workerenv.CoordinationEnabled, Value: scheduledRunLabelValue})
 	}
 
 	// Add fallback provider environment variables
@@ -932,7 +969,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	}
 	if allowBash {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: workerenv.AllowBash, Value: "true",
+			Name: workerenv.AllowBash, Value: scheduledRunLabelValue,
 		})
 	}
 
@@ -1038,9 +1075,15 @@ func contextTokenTTSEnvNames() []string {
 }
 
 // addSecretVolumes adds secret volumes to the Job
-func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) {
+func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) error {
 	allowDirectProviderSecrets := b.directProviderSecretsAllowed(task)
 	allowDirectSecretMounts := b.directSecretMountsAllowed(task)
+
+	if taskRequestsReadOnlyAgent(task) {
+		if err := b.addReadOnlyAgentRuntimeSecretEnv(ctx, job, task, agent); err != nil {
+			return err
+		}
+	}
 
 	// Add provider secret (mounted as environment variable source)
 	if allowDirectProviderSecrets && provider != nil {
@@ -1168,6 +1211,118 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 				ReadOnly:  true,
 			},
 		)
+	}
+
+	return nil
+}
+
+func validateReadOnlyAgentRuntime(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if !taskRequestsReadOnlyAgent(task) || agent == nil || agent.Spec.Runtime == nil {
+		return nil
+	}
+	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeCodex {
+		return fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed as environment variables")
+	}
+	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeCopilot {
+		return fmt.Errorf("read-only agent tasks do not support copilot runtime credentials because GITHUB_TOKEN can mutate GitHub")
+	}
+	return nil
+}
+
+func (b *JobBuilder) addReadOnlyAgentRuntimeSecretEnv(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if agent == nil || agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
+		return nil
+	}
+	keys, err := readOnlyAgentRuntimeSecretKeys(agent)
+	if err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+
+	secret := &corev1.Secret{}
+	secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
+	if err := b.Get(ctx, client.ObjectKey{Name: secretName, Namespace: task.Namespace}, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("read-only agent runtime secret %q not found in namespace %q", secretName, task.Namespace)
+		}
+		return fmt.Errorf("failed to get read-only agent runtime secret %q: %w", secretName, err)
+	}
+	if !readOnlyAgentRuntimeSecretHasCredential(secret, agent) {
+		return fmt.Errorf("read-only agent runtime secret %q contains no supported auth credential keys for runtime %q", secretName, readOnlyAgentRuntimeType(agent))
+	}
+
+	added := 0
+	for _, key := range keys {
+		if _, ok := secret.Data[key]; !ok {
+			continue
+		}
+		job.Spec.Template.Spec.Containers[0].Env = append(job.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
+			Name: key,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+					Key:                  key,
+				},
+			},
+		})
+		added++
+	}
+	if added == 0 {
+		return fmt.Errorf("read-only agent runtime secret %q contains no supported keys for runtime %q", secretName, readOnlyAgentRuntimeType(agent))
+	}
+	return nil
+}
+
+func readOnlyAgentRuntimeSecretHasCredential(secret *corev1.Secret, agent *corev1alpha1.Agent) bool {
+	if secret == nil {
+		return false
+	}
+	switch readOnlyAgentRuntimeType(agent) {
+	case corev1alpha1.AgentRuntimeClaude:
+		for _, key := range []string{workerenv.AnthropicAPIKey, "ANTHROPIC_FOUNDRY_API_KEY"} {
+			if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+func readOnlyAgentRuntimeSecretKeys(agent *corev1alpha1.Agent) ([]string, error) {
+	switch readOnlyAgentRuntimeType(agent) {
+	case corev1alpha1.AgentRuntimeCodex:
+		return nil, fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed as environment variables")
+	case corev1alpha1.AgentRuntimeClaude:
+		return []string{
+			workerenv.AnthropicAPIKey,
+			workerenv.AnthropicBaseURL,
+			"CLAUDE_CODE_USE_FOUNDRY",
+			"ANTHROPIC_FOUNDRY_API_KEY",
+			"ANTHROPIC_FOUNDRY_RESOURCE",
+			"ANTHROPIC_DEFAULT_SONNET_MODEL",
+			"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+			"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		}, nil
+	case corev1alpha1.AgentRuntimeCopilot:
+		return nil, fmt.Errorf("read-only agent tasks do not support copilot runtime credentials because GITHUB_TOKEN can mutate GitHub")
+	default:
+		return nil, nil
+	}
+}
+
+func readOnlyAgentRuntimeType(agent *corev1alpha1.Agent) corev1alpha1.AgentRuntimeType {
+	if agent == nil || agent.Spec.Runtime == nil {
+		return corev1alpha1.AgentRuntimeClaude
+	}
+	switch agent.Spec.Runtime.Type {
+	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot:
+		return agent.Spec.Runtime.Type
+	default:
+		return corev1alpha1.AgentRuntimeClaude
 	}
 }
 
@@ -1315,8 +1470,15 @@ func isCodexAgent(agent *corev1alpha1.Agent) bool {
 }
 
 // addCodexSandboxEnvVars injects controller-configured Codex sandbox mode when set.
-func (b *JobBuilder) addCodexSandboxEnvVars(envVars []corev1.EnvVar, agent *corev1alpha1.Agent) []corev1.EnvVar {
-	if b.CodexSandboxMode == "" || !isCodexAgent(agent) || envVarExists(envVars, workerenv.CodexSandboxMode) {
+func (b *JobBuilder) addCodexSandboxEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent) []corev1.EnvVar {
+	if !isCodexAgent(agent) {
+		return envVars
+	}
+	if taskRequestsReadOnlyAgent(task) {
+		envVars = removeControllerEnv(envVars, workerenv.CodexSandboxMode)
+		return append(envVars, corev1.EnvVar{Name: workerenv.CodexSandboxMode, Value: "read-only"})
+	}
+	if b.CodexSandboxMode == "" || envVarExists(envVars, workerenv.CodexSandboxMode) {
 		return envVars
 	}
 
@@ -1418,7 +1580,7 @@ func (b *JobBuilder) addAgentToolsEnvVars(
 		Name: workerenv.MaxTurns, Value: fmt.Sprintf("%d", maxTurns),
 	})
 
-	// AllowedTools: task override > agent default
+	// AllowedTools: read-only task override > task override > agent default
 	var allowedTools []string
 	if agent != nil && agent.Spec.Runtime != nil {
 		allowedTools = agent.Spec.Runtime.DefaultAllowedTools
@@ -1426,17 +1588,33 @@ func (b *JobBuilder) addAgentToolsEnvVars(
 	if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.AllowedTools) > 0 {
 		allowedTools = task.Spec.AgentRuntime.AllowedTools
 	}
+	if taskRequestsReadOnlyAgent(task) {
+		allowedTools = readOnlyAgentAllowedTools()
+		envVars = setControllerEnv(envVars, workerenv.ClaudeBare, scheduledRunLabelValue)
+		envVars = setControllerEnv(envVars, workerenv.ClaudeDisableSettingSources, scheduledRunLabelValue)
+		envVars = setControllerEnv(envVars, workerenv.ClaudePermissionMode, "dontAsk")
+		envVars = removeControllerEnv(envVars, workerenv.AllowedTools)
+		envVars = removeControllerEnv(envVars, workerenv.DisallowedTools)
+		envVars = removeControllerEnv(envVars, workerenv.AllowBash)
+	}
 	if len(allowedTools) > 0 {
 		envVars = append(envVars, corev1.EnvVar{
 			Name: workerenv.AllowedTools, Value: joinStrings(allowedTools),
 		})
 	}
 
-	// DisallowedTools (task only)
+	// DisallowedTools (task only, plus read-only guardrails)
+	var disallowedTools []string
 	if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
+		disallowedTools = task.Spec.AgentRuntime.DisallowedTools
+	}
+	if taskRequestsReadOnlyAgent(task) {
+		disallowedTools = append(disallowedTools, readOnlyAgentDisallowedTools()...)
+	}
+	if len(disallowedTools) > 0 {
 		envVars = append(envVars, corev1.EnvVar{
 			Name:  workerenv.DisallowedTools,
-			Value: joinStrings(task.Spec.AgentRuntime.DisallowedTools),
+			Value: joinStrings(disallowedTools),
 		})
 	}
 
@@ -1448,9 +1626,12 @@ func (b *JobBuilder) addAgentToolsEnvVars(
 	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowBash != nil {
 		allowBash = *task.Spec.AgentRuntime.AllowBash
 	}
+	if taskRequestsReadOnlyAgent(task) {
+		allowBash = false
+	}
 	if allowBash {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: workerenv.AllowBash, Value: "true",
+			Name: workerenv.AllowBash, Value: scheduledRunLabelValue,
 		})
 	}
 
@@ -1506,7 +1687,7 @@ func (b *JobBuilder) addWorkspaceEnvVars(
 			Name: workerenv.PushBranch, Value: ws.PushBranch,
 		})
 		envVars = append(envVars, corev1.EnvVar{
-			Name: workerenv.RequirePushBranch, Value: "true",
+			Name: workerenv.RequirePushBranch, Value: scheduledRunLabelValue,
 		})
 	}
 	return envVars
@@ -1561,7 +1742,7 @@ func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Ta
 				},
 			},
 		})
-		if b.directGitCredentialsAllowed(task) {
+		if b.directGitCredentialsAllowed(task) && !taskUsesWorkspaceInitContainer(task) {
 			job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
 				job.Spec.Template.Spec.Containers[0].VolumeMounts,
 				corev1.VolumeMount{
@@ -1576,6 +1757,42 @@ func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Ta
 
 func taskNeedsWorkspace(task *corev1alpha1.Task) bool {
 	return task != nil && (task.Spec.Type == corev1alpha1.TaskTypeAgent || effectiveWorkspace(task) != nil)
+}
+
+func taskUsesWorkspaceInitContainer(task *corev1alpha1.Task) bool {
+	return task != nil && task.Annotations[labels.AnnotationWorkspaceInitContainer] == scheduledRunLabelValue
+}
+
+func taskRequestsReadOnlyAgent(task *corev1alpha1.Task) bool {
+	return task != nil && task.Annotations[labels.AnnotationAgentReadOnly] == scheduledRunLabelValue
+}
+
+func readOnlyAgentAllowedTools() []string {
+	return []string{
+		"Read(/workspace/**)",
+		"Glob(/workspace/**)",
+		"Grep(/workspace/**)",
+		"LS(/workspace/**)",
+	}
+}
+
+func readOnlyAgentDisallowedTools() []string {
+	deniedReadPaths := []string{
+		"/proc/**",
+		"/var/run/secrets/**",
+		"/secrets/**",
+		"/home/worker/**",
+	}
+	disallowed := []string{"Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"}
+	for _, deniedPath := range deniedReadPaths {
+		disallowed = append(disallowed,
+			"Read("+deniedPath+")",
+			"Glob("+deniedPath+")",
+			"Grep("+deniedPath+")",
+			"LS("+deniedPath+")",
+		)
+	}
+	return disallowed
 }
 
 func effectiveWorkspace(task *corev1alpha1.Task) *corev1alpha1.WorkspaceConfig {
@@ -1769,7 +1986,7 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 			Labels: map[string]string{
 				labels.LabelTask:    labels.SelectorValue(task.Name),
 				labels.LabelPurpose: "skills",
-				labels.LabelManaged: "true",
+				labels.LabelManaged: scheduledRunLabelValue,
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(task, corev1alpha1.GroupVersion.WithKind("Task")),
