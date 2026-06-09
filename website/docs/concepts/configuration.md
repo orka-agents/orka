@@ -99,11 +99,11 @@ spec:
 
 **Auto-injected coordination tools** (when `enabled: true`):
 
-`delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, `create_pull_request`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `create_agent`, `delete_agent`, `update_plan`
+`delegate_task`, `wait_for_tasks`, `create_container_task`, `cancel_task`, `send_message`, `check_messages`, `recall_memory`, `remember`, `propose_memory`, `search_transcript`, `create_pull_request`, `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `create_agent`, `delete_agent`, `update_plan`
 
 **Opt-in coordination tools** (require explicit `spec.tools[]` entries on the Agent):
 
-`list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`
+`list_issues`, `get_issue`, `comment_on_issue`
 
 ### RepositoryScan
 

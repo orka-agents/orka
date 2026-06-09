@@ -55,7 +55,7 @@ Controller: parent Job succeeded → parent Task → Succeeded
 
 ### Coordination Tools
 
-Located in `internal/tools/`. Coordination tools include `delegate_task`, `wait_for_tasks`, `cancel_task`, `send_message`, `check_messages`, PR tools (`create_pull_request`, `create_pr_monitor`, `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`), issue tools (`list_issues`, `get_issue`, `comment_on_issue`), agent management tools (`create_agent`, `delete_agent`), and `update_plan` (autonomous mode). All are registered via `RegisterCoordinationTools(k8sClient)` in `internal/tools/registry.go` when `ORKA_COORDINATION_ENABLED=true`.
+Located in `internal/tools/`. Coordination tools include `delegate_task`, `wait_for_tasks`, `create_container_task`, `cancel_task`, `send_message`, `check_messages`, memory tools (`recall_memory`, `remember`, `propose_memory`, `search_transcript`), PR tools (`create_pull_request`, `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`), issue tools (`list_issues`, `get_issue`, `comment_on_issue`), agent management tools (`create_agent`, `delete_agent`), and `update_plan` (autonomous mode). These are registered via `RegisterCoordinationTools(k8sClient)` in `internal/tools/registry.go` when `ORKA_COORDINATION_ENABLED=true`. The `create_pr_monitor` compatibility tool is exposed through chat/management tooling and creates a scheduled monitor Task with its own narrow PR review tool set.
 
 #### `delegate_task` Tool
 

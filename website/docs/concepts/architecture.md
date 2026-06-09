@@ -256,7 +256,7 @@ Built-in tool categories:
 
 - **Core**: `web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`
 - **Coordination/task**: `delegate_task`, `wait_for_tasks`, `create_container_task`, `cancel_task`, `send_message`, `check_messages`
-- **GitHub**: `create_pull_request`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `list_issues`, `list_pull_requests`, `get_issue`, `comment_on_issue`
+- **GitHub**: `create_pull_request`, `create_pr_monitor`, `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `list_issues`, `get_issue`, `comment_on_issue`
 - **Agent management**: `create_agent`, `delete_agent`, plus chat-management `update_agent`, `list_agents`
 - **Planning/memory/transcript**: `update_plan`, `recall_memory`, `remember`, `propose_memory`, `search_transcript`
 - **Chat/session/task management**: `create_ai_task`, `create_agent_task`, `check_task_progress`, `fetch_task_output`, `wait_for_task`, `list_tools`, `list_tasks`, `create_tool`, `delete_tool`, `delete_session`

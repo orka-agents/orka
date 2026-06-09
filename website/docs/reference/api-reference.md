@@ -616,7 +616,6 @@ The following tools are **auto-injected** when coordination is enabled:
 | `propose_memory` | Submit a memory-adjacent governance proposal | `title` (required); `type`, `skill_name`, `description`, `content`, `patch`, `agent_name` |
 | `search_transcript` | Search prior session transcripts | `query` (required); `session_name`, `exclude_session_name`, `roles`, `limit`, `max_snippet_length` |
 | `create_pull_request` | Create a GitHub pull request | `task_name`, `head_branch`, `base_branch`, `title` (required); `body` |
-| `create_pr_monitor` | Create a scheduled prompt-orchestrated PR monitor Task | `name`, `repo_url`, `schedule`, `agent_ref` (required); `namespace`, `provider_ref`, `gitSecretRef`, `per_page`, `review_event`, `prompt` |
 | `check_pull_request_ci` | Check GitHub CI status without merging | `pr_number` (required); `task_name`, `repo_url`, `wait_timeout`, `poll_interval` |
 | `list_pull_requests` | List open pull requests in a repository | `task_name`, `repo_url`; `per_page`, `page` |
 | `check_pr_review_marker` | Check for an existing Orka PR review marker on a PR head | `pr_number` (required); `task_name`, `repo_url`, `head_sha` |
@@ -637,5 +636,7 @@ The following tools require explicit `spec.tools[]` entries on the Agent CRD:
 | `comment_on_issue` | Post a comment on a GitHub issue | `issue_number`, `body` (required); `task_name`, `repo_url` |
 
 For GitHub tools that accept `repo_url`, explicit repository URLs are scope-checked when task context is available. The requested repository must match the current task's workspace repository or signed transaction repository context; otherwise the tool fails closed instead of acting on a different repository.
+
+`create_pr_monitor` is exposed through the chat/management tool set rather than auto-injected into every coordinator worker. Parameters are `name`, `repo_url`, `schedule`, and `agent_ref` (required), plus optional `namespace`, `provider_ref`, `gitSecretRef`, `per_page`, `review_event`, and `prompt`.
 
 `create_pr_monitor` is the compatibility path for prompt-orchestrated scheduled PR monitors. It creates a scheduled `type: ai` Task, sets `spec.workspace.gitRepo` to `repo_url`, injects only the PR review loop tools, and instructs the task to pass the same `repo_url` to `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The Agent referenced by `agent_ref` must be an AI Agent with coordination enabled and autonomous coordination disabled. The task needs a Git credential Secret through `gitSecretRef` or a supported default Secret name in the target namespace.
