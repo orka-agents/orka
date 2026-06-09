@@ -377,7 +377,8 @@ Context-token authorization scopes are `orka:monitors:read` for list/get endpoin
     },
     "review": {
       "event": "COMMENT",
-      "staleReviewTTL": "24h"
+      "staleReviewTTL": "24h",
+      "exactEventEnabled": true
     },
     "policy": {
       "protectedLabels": ["security-sensitive"],

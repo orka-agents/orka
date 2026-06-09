@@ -51,6 +51,8 @@ The controller is the central component that runs as a Kubernetes Deployment. It
   - agents
   - skills
   - repository security scanning
+  - repository monitors
+  - signed GitHub webhooks
   - chat
   - OpenAI-compatible API
   - Anthropic-compatible API
@@ -63,6 +65,12 @@ The controller is the central component that runs as a Kubernetes Deployment. It
   - reads scan artifacts from the artifact store
   - auto-creates validation and patch proposal tasks when configured
   - updates status with phase, last scan, commits, and finding counts
+- **RepositoryMonitorReconciler**: Watches `RepositoryMonitor` resources and drives durable PR review automation:
+  - schedules manual and cron pull request inventory runs
+  - queues exact-head runs from signed GitHub pull request webhooks
+  - creates read-only reviewer Agent tasks for selected PR heads
+  - persists monitor runs, PR items, review records, and audit events in SQLite
+  - updates status with phase, last run, pending reviews, blocked items, and merge-ready counts
 - **Session Manager**: Manages session persistence (via SQLite store) for conversation continuity with serial execution enforcement
 - **Memory Store**: Persists durable memories, memory proposals, and transcript search data in SQLite for namespace-scoped agent context
 - **Priority Queue**: Schedules tasks based on priority (0-1000)
@@ -71,7 +79,7 @@ The controller is the central component that runs as a Kubernetes Deployment. It
 
 ### Custom Resource Definitions (`api/v1alpha1/`)
 
-Orka uses six CRDs:
+Orka uses seven CRDs:
 
 | CRD | Purpose |
 |-----|---------|
@@ -81,6 +89,7 @@ Orka uses six CRDs:
 | **Provider** | LLM provider configuration (Anthropic, OpenAI, Azure OpenAI) |
 | **Skill** | Reusable prompt content injected into agent system prompts |
 | **RepositoryScan** | Repository security scan configuration, scheduling, status, and finding counts |
+| **RepositoryMonitor** | GitHub pull request monitor configuration, scheduling, status, and queue counts |
 
 ### Worker Images (`workers/`)
 
@@ -215,6 +224,12 @@ Termination occurs when the LLM signals goal completion, max iterations are reac
 `RepositoryScan` resources define repository URLs, branches, scan cadence, agents, validation policy, and patch-generation policy. The `RepositoryScanReconciler` starts with a threat-model task, then fans out discovery tasks across security scopes after the threat model succeeds. It ingests task artifacts from the artifact store, upserts threat models and findings into SQLite, updates scan-run status, and can automatically start validation or patch-proposal tasks based on scan policy.
 
 RepositoryScan status reports the current phase, last scan ID/task, last successful scan time, processed commits, and finding counts so API clients and the UI can display repository security posture without querying all findings.
+
+## Repository Monitors
+
+`RepositoryMonitor` resources define a GitHub repository, base branch, review agent, schedule, and safety labels for durable PR review automation. The `RepositoryMonitorReconciler` lists open pull requests, skips drafts or policy-blocked PRs, queues read-only reviewer Agent tasks for selected exact heads, ingests structured review results from completed tasks, and stores run/item/review/event history in SQLite.
+
+Signed GitHub pull request webhooks can also enqueue exact-head monitor runs when `spec.review.exactEventEnabled` is true. RepositoryMonitor status reports the current phase, last run, open PR count, pending reviews, blocked items, and merge-ready counts; detailed run and queue state is served through the monitor API and dashboard.
 
 ## LLM Provider Architecture
 

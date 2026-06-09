@@ -198,6 +198,7 @@ spec:
   review:
     event: COMMENT              # COMMENT, APPROVE, or REQUEST_CHANGES
     staleReviewTTL: 24h
+    exactEventEnabled: true     # queue exact-head runs from signed PR webhooks
   policy:
     protectedLabels:
       - security-sensitive

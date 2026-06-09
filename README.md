@@ -54,9 +54,10 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 - 💬 **Interactive Chat** — Agentic orchestrator with SSE streaming that creates and manages agents and tasks for you
 - 🧠 **Durable Memory** — Namespace-scoped recall, transcript search, and reviewable memory proposals that can be applied
 - 🛡️ **Repository Security Scanning** — Scheduled and incremental repository scans with threat models, validated findings, patch generation, and remediation PRs
+- 🔎 **Repository Monitors** — Durable GitHub PR review queues with scheduled and webhook-triggered review runs
 - 🧰 **Agent Sandbox Workspaces** — Experimental durable, reusable coding workspaces through `agent-sandbox`
 - 🖥️ **Web Dashboard** — Built-in React UI embedded in the controller binary — zero extra deployments
-- 📦 **Declarative CRDs** — Task, Agent, Tool, Provider, and Skill custom resources for GitOps workflows
+- 📦 **Declarative CRDs** — Task, Agent, Tool, Provider, Skill, RepositoryScan, and RepositoryMonitor custom resources for GitOps workflows
 - ⏰ **Scheduled Tasks** — Cron-based recurring execution with concurrency policies
 - 🔌 **REST & OpenAI-Compatible API** — Full CRUD + `/openai/v1/chat/completions` endpoint for Continue, Cursor, and any OpenAI-compatible client
 - 🔐 **Kubernetes, OIDC & Kontxt TxToken Auth** — ServiceAccount tokens by default, with optional OIDC and scoped `kontxt` transaction-token flows
