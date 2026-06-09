@@ -228,6 +228,7 @@ spec:
 | `agents.reviewer` | AgentReference | Yes | Claude runtime Agent used for read-only PR review tasks. |
 | `review.event` | string | No | Default review event value included in review task input. Defaults to `COMMENT`. |
 | `review.staleReviewTTL` | duration | No | Re-review an unchanged head after the previous accepted review is older than this duration. |
+| `review.exactEventEnabled` | bool | No | Queue exact-head monitor runs from signed GitHub pull request webhook events when true. |
 | `policy.protectedLabels` | list | No | PR labels that block automated review selection. |
 | `policy.pauseLabels` | list | No | PR labels that pause monitor automation for that item. |
 | `validation.mode` | string | No | Validation mode included in review task input. Defaults to `changed`; allowed values are `off`, `changed`, and `full`. |

@@ -48,6 +48,12 @@ Default action prompts:
 
 GitHub delivery IDs make retries safe: if the same delivery is received again, Orka returns `202 Accepted` with the existing task name instead of creating a duplicate.
 
+## Repository Monitor Events
+
+The same `/webhooks/github` endpoint can queue exact-head `RepositoryMonitor` runs from pull request events. This path does not require an `agent:*` label. A monitor is eligible when `spec.review.exactEventEnabled: true`, pull request monitoring is enabled, the webhook repository matches `spec.repoURL`, the PR base branch matches the monitor branch, and the monitor is not suspended.
+
+For `opened`, `reopened`, `synchronize`, `ready_for_review`, `labeled`, and `unlabeled` pull request events, Orka queues a monitor run for the exact PR head SHA and records an audit event. Duplicate deliveries or already-queued runs for the same PR head are accepted without creating duplicate work.
+
 ## CI Coverage
 
 `.github/workflows/live-github-label-trigger-e2e.yml` is a manual GitHub Actions workflow for the label trigger path. It runs focused Go tests for webhook and PR monitor tooling, then builds the controller image, deploys Orka into a fresh Kind cluster, creates a synthetic runtime Agent, and sends signed webhook payloads to `/webhooks/github`.

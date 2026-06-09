@@ -32,9 +32,9 @@ GitHub webhooks use HMAC verification instead of bearer-token authentication.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/webhooks/github` | POST | Accept GitHub `issues` / `pull_request` `labeled` events and create agent Tasks for labels such as `agent:implement` |
+| `/webhooks/github` | POST | Accept GitHub `issues` / `pull_request` label triggers and pull request events for exact-head repository monitor runs |
 
-The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Signature-256` header. See [GitHub Label Triggers](../guides/github-label-triggers.md) for configuration and label behavior.
+The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Signature-256` header. Label trigger events can create agent Tasks for labels such as `agent:implement`. Pull request events can also queue exact-head `RepositoryMonitor` runs when a matching monitor has `spec.review.exactEventEnabled: true`. See [GitHub Label Triggers](../guides/github-label-triggers.md) for configuration and webhook behavior.
 
 ## Tasks
 

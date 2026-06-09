@@ -17,6 +17,7 @@ A repository monitor can:
 - skip PRs blocked by configured protected or pause labels
 - skip PR heads that already have a fresh review result
 - queue one read-only review task per selected PR head
+- queue exact-head monitor runs from GitHub pull request webhook events
 - ingest typed JSON review results from completed review tasks
 - store monitor runs, PR items, review records, and audit events durably
 - show monitor status, recent runs, and the PR queue in the dashboard under **Monitors**
@@ -32,6 +33,7 @@ The first implementation is intentionally narrow:
 - `spec.targets.issues.enabled` and `spec.targets.commits.enabled` are rejected.
 - `spec.targets.pullRequests.enabled` must be true or omitted.
 - `spec.review.requireGreenCI` is rejected until CI state collection is available.
+- GitHub webhook-driven exact runs are opt-in with `spec.review.exactEventEnabled`.
 - Repair, automerge, maintainer command routing, and public review comment updates are represented in the API/store shape but are not active workflows in this slice.
 - The reviewer Agent must use `runtime.type: claude` for read-only repository monitor reviews.
 
@@ -106,6 +108,7 @@ spec:
   review:
     event: COMMENT
     staleReviewTTL: 24h
+    exactEventEnabled: true
   policy:
     protectedLabels:
       - security-sensitive
@@ -147,6 +150,14 @@ To target one pull request, include `targetKind` and `targetNumber`:
 ```
 
 `targetSHA` can also be supplied to require an exact head SHA match.
+
+## Run From GitHub Events
+
+Repository monitors can also receive exact pull request events through the same signed GitHub webhook endpoint used by label triggers. Configure the repository webhook for `Pull requests` events and set `spec.review.exactEventEnabled: true` on the monitor.
+
+When `/webhooks/github` receives an `opened`, `reopened`, `synchronize`, `ready_for_review`, `labeled`, or `unlabeled` pull request event, Orka matches monitors in the configured webhook namespace by repository and base branch. A matching monitor queues a run with `targetKind: pull_request`, the PR number, and the exact head SHA from the webhook payload. Replayed deliveries and already-queued runs for the same PR head are accepted without creating duplicate monitor work.
+
+Exact event runs are still read-only review runs. They are stored with trigger `pull_request_event`, create an `exact_event_run_queued` audit event, and wait behind any active or queued monitor run.
 
 ## Inspect State
 
