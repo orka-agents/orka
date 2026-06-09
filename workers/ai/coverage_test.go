@@ -552,7 +552,7 @@ func TestExecuteAgentLoop_CustomToolExecution(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "my-http-tool"},
 		Spec: corev1alpha1.ToolSpec{
 			Description: "A custom HTTP tool",
-			HTTP: corev1alpha1.HTTPExecution{
+			HTTP: &corev1alpha1.HTTPExecution{
 				URL:    toolServer.URL,
 				Method: "POST",
 			},

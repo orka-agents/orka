@@ -57,8 +57,8 @@ export const api = {
   get: <T>(path: string, params?: Record<string, string>) =>
     request<T>(path, { method: 'GET', params }),
 
-  post: <T>(path: string, body?: unknown) =>
-    request<T>(path, { method: 'POST', body: body ? JSON.stringify(body) : undefined }),
+  post: <T>(path: string, body?: unknown, params?: Record<string, string>) =>
+    request<T>(path, { method: 'POST', body: body ? JSON.stringify(body) : undefined, params }),
 
   put: <T>(path: string, body?: unknown, params?: Record<string, string>) =>
     request<T>(path, { method: 'PUT', body: body ? JSON.stringify(body) : undefined, params }),

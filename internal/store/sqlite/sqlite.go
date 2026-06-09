@@ -196,6 +196,11 @@ func migrate(db *sql.DB) error {
 			base_commit     TEXT NOT NULL DEFAULT '',
 			head_commit     TEXT NOT NULL DEFAULT '',
 			commit_count    INTEGER NOT NULL DEFAULT 0,
+			slice_count     INTEGER NOT NULL DEFAULT 0,
+			reviewed_slice_count INTEGER NOT NULL DEFAULT 0,
+			skipped_slice_count INTEGER NOT NULL DEFAULT 0,
+			accepted_findings INTEGER NOT NULL DEFAULT 0,
+			dropped_findings INTEGER NOT NULL DEFAULT 0,
 			summary         TEXT NOT NULL DEFAULT '',
 			error_message   TEXT NOT NULL DEFAULT '',
 			started_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -221,19 +226,26 @@ func migrate(db *sql.DB) error {
 			namespace         TEXT NOT NULL,
 			repository_scan   TEXT NOT NULL,
 			scan_run_id       TEXT NOT NULL,
+			slice_id          TEXT NOT NULL DEFAULT '',
 			fingerprint       TEXT NOT NULL,
 			title             TEXT NOT NULL,
+			category          TEXT NOT NULL DEFAULT '',
 			summary           TEXT NOT NULL,
 			severity          TEXT NOT NULL,
 			confidence        TEXT NOT NULL,
+			triage            TEXT NOT NULL DEFAULT '',
 			validation_status TEXT NOT NULL,
 			state             TEXT NOT NULL,
 			file_path         TEXT NOT NULL DEFAULT '',
 			line              INTEGER NOT NULL DEFAULT 0,
 			commit_sha        TEXT NOT NULL DEFAULT '',
 			root_cause        TEXT NOT NULL DEFAULT '',
+			reproduction      TEXT NOT NULL DEFAULT '',
 			remediation       TEXT NOT NULL DEFAULT '',
 			suggested_action  TEXT NOT NULL DEFAULT '',
+			why_tests_do_not_cover TEXT NOT NULL DEFAULT '',
+			suggested_regression_test TEXT NOT NULL DEFAULT '',
+			minimum_fix_scope TEXT NOT NULL DEFAULT '',
 			evidence_json     TEXT NOT NULL DEFAULT '',
 			validation_json   TEXT NOT NULL DEFAULT '',
 			patch_proposal_id TEXT NOT NULL DEFAULT '',
@@ -245,6 +257,41 @@ func migrate(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_security_findings_repo
 			ON security_findings(namespace, repository_scan, severity, validation_status, state, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS security_review_slices (
+			id                TEXT NOT NULL,
+			namespace         TEXT NOT NULL,
+			repository_scan   TEXT NOT NULL,
+			source            TEXT NOT NULL,
+			title             TEXT NOT NULL,
+			summary           TEXT NOT NULL DEFAULT '',
+			kind              TEXT NOT NULL DEFAULT 'unknown',
+			confidence        TEXT NOT NULL DEFAULT 'medium',
+			status            TEXT NOT NULL DEFAULT 'pending',
+			entrypoints_json  TEXT NOT NULL DEFAULT '[]',
+			owned_files_json  TEXT NOT NULL DEFAULT '[]',
+			context_files_json TEXT NOT NULL DEFAULT '[]',
+			tests_json        TEXT NOT NULL DEFAULT '[]',
+			tags_json         TEXT NOT NULL DEFAULT '[]',
+			trust_boundaries_json TEXT NOT NULL DEFAULT '[]',
+			last_scan_run_id  TEXT NOT NULL DEFAULT '',
+			last_reviewed_at  TIMESTAMP,
+			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (namespace, repository_scan, id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS security_dropped_findings (
+			id                TEXT PRIMARY KEY,
+			namespace         TEXT NOT NULL,
+			repository_scan   TEXT NOT NULL,
+			scan_run_id       TEXT NOT NULL,
+			task_name         TEXT NOT NULL,
+			slice_id          TEXT NOT NULL DEFAULT '',
+			reason            TEXT NOT NULL,
+			sample_json       TEXT NOT NULL DEFAULT '',
+			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_dropped_findings_run
+			ON security_dropped_findings(namespace, repository_scan, scan_run_id, created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS security_patch_proposals (
 			id                TEXT PRIMARY KEY,
 			namespace         TEXT NOT NULL,
@@ -262,6 +309,169 @@ func migrate(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_security_patch_proposals_finding
 			ON security_patch_proposals(namespace, finding_id, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS repository_monitors (
+			namespace  TEXT NOT NULL,
+			name       TEXT NOT NULL,
+			uid        TEXT NOT NULL DEFAULT '',
+			repo_url   TEXT NOT NULL,
+			owner      TEXT NOT NULL DEFAULT '',
+			repository TEXT NOT NULL DEFAULT '',
+			branch     TEXT NOT NULL DEFAULT '',
+			generation INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (namespace, name)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_repository_monitors_repo
+			ON repository_monitors(namespace, owner, repository)`,
+		`CREATE TABLE IF NOT EXISTS monitor_runs (
+			id                 TEXT PRIMARY KEY,
+			monitor_namespace  TEXT NOT NULL,
+			monitor_name       TEXT NOT NULL,
+			trigger            TEXT NOT NULL,
+			target_kind        TEXT NOT NULL DEFAULT '',
+			target_number      INTEGER NOT NULL DEFAULT 0,
+			target_sha         TEXT NOT NULL DEFAULT '',
+			phase              TEXT NOT NULL,
+			started_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			completed_at       TIMESTAMP,
+			selected_count     INTEGER NOT NULL DEFAULT 0,
+			created_task_count INTEGER NOT NULL DEFAULT 0,
+			skipped_count      INTEGER NOT NULL DEFAULT 0,
+			error              TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_monitor_runs_monitor
+			ON monitor_runs(monitor_namespace, monitor_name, started_at DESC, id DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_monitor_runs_target
+			ON monitor_runs(monitor_namespace, monitor_name, phase, trigger, target_kind, target_number, target_sha)`,
+		`DROP INDEX IF EXISTS idx_monitor_runs_active`,
+		`DROP INDEX IF EXISTS idx_monitor_runs_queued`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_monitor_runs_running
+			ON monitor_runs(monitor_namespace, monitor_name)
+			WHERE phase = 'running'`,
+		`CREATE TABLE IF NOT EXISTS monitor_items (
+			monitor_namespace     TEXT NOT NULL,
+			monitor_name          TEXT NOT NULL,
+			kind                  TEXT NOT NULL,
+			item_key              TEXT NOT NULL,
+			number                INTEGER NOT NULL DEFAULT 0,
+			sha                   TEXT NOT NULL DEFAULT '',
+			title                 TEXT NOT NULL DEFAULT '',
+			author                TEXT NOT NULL DEFAULT '',
+			state                 TEXT NOT NULL DEFAULT '',
+			labels_json           TEXT NOT NULL DEFAULT '[]',
+			base_branch           TEXT NOT NULL DEFAULT '',
+			head_branch           TEXT NOT NULL DEFAULT '',
+			head_sha              TEXT NOT NULL DEFAULT '',
+			base_sha              TEXT NOT NULL DEFAULT '',
+			draft                 BOOLEAN NOT NULL DEFAULT FALSE,
+			mergeable_state       TEXT NOT NULL DEFAULT '',
+			ci_state              TEXT NOT NULL DEFAULT '',
+			skip_reason           TEXT NOT NULL DEFAULT '',
+			last_review_id        TEXT NOT NULL DEFAULT '',
+			last_reviewed_head_sha TEXT NOT NULL DEFAULT '',
+			last_verdict          TEXT NOT NULL DEFAULT '',
+			repair_state          TEXT NOT NULL DEFAULT '',
+			automerge_state       TEXT NOT NULL DEFAULT '',
+			status_comment_id     TEXT NOT NULL DEFAULT '',
+			status_comment_url    TEXT NOT NULL DEFAULT '',
+			updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			last_seen_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (monitor_namespace, monitor_name, kind, item_key)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_monitor_items_queue
+			ON monitor_items(monitor_namespace, monitor_name, kind, state, last_verdict, repair_state, automerge_state, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS review_records (
+			id                 TEXT PRIMARY KEY,
+			monitor_namespace  TEXT NOT NULL,
+			monitor_name       TEXT NOT NULL,
+			kind               TEXT NOT NULL,
+			number             INTEGER NOT NULL DEFAULT 0,
+			head_sha           TEXT NOT NULL DEFAULT '',
+			task_name          TEXT NOT NULL DEFAULT '',
+			task_namespace     TEXT NOT NULL DEFAULT '',
+			verdict            TEXT NOT NULL DEFAULT '',
+			confidence         TEXT NOT NULL DEFAULT '',
+			repairable         BOOLEAN NOT NULL DEFAULT FALSE,
+			security_status    TEXT NOT NULL DEFAULT '',
+			findings_json      TEXT NOT NULL DEFAULT '[]',
+			summary            TEXT NOT NULL DEFAULT '',
+			suggested_comment  TEXT NOT NULL DEFAULT '',
+			rendered_comment   TEXT NOT NULL DEFAULT '',
+			marker             TEXT NOT NULL DEFAULT '',
+			github_review_id   TEXT NOT NULL DEFAULT '',
+			github_comment_id  TEXT NOT NULL DEFAULT '',
+			github_comment_url TEXT NOT NULL DEFAULT '',
+			created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_review_records_item
+			ON review_records(monitor_namespace, monitor_name, kind, number, head_sha, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS command_events (
+			id                    TEXT PRIMARY KEY,
+			monitor_namespace     TEXT NOT NULL,
+			monitor_name          TEXT NOT NULL,
+			repo                  TEXT NOT NULL DEFAULT '',
+			kind                  TEXT NOT NULL DEFAULT '',
+			number                INTEGER NOT NULL DEFAULT 0,
+			comment_id            TEXT NOT NULL DEFAULT '',
+			comment_url           TEXT NOT NULL DEFAULT '',
+			author                TEXT NOT NULL DEFAULT '',
+			author_association    TEXT NOT NULL DEFAULT '',
+			permission            TEXT NOT NULL DEFAULT '',
+			command               TEXT NOT NULL DEFAULT '',
+			intent                TEXT NOT NULL DEFAULT '',
+			head_sha              TEXT NOT NULL DEFAULT '',
+			status                TEXT NOT NULL DEFAULT '',
+			status_comment_id     TEXT NOT NULL DEFAULT '',
+			created_repair_job_id TEXT NOT NULL DEFAULT '',
+			created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			processed_at          TIMESTAMP,
+			error                 TEXT NOT NULL DEFAULT '',
+			UNIQUE(monitor_namespace, monitor_name, comment_id, command, head_sha)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_command_events_monitor
+			ON command_events(monitor_namespace, monitor_name, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS repair_jobs (
+			id                  TEXT PRIMARY KEY,
+			monitor_namespace   TEXT NOT NULL,
+			monitor_name        TEXT NOT NULL,
+			repo                TEXT NOT NULL DEFAULT '',
+			pr_number           INTEGER NOT NULL DEFAULT 0,
+			intent              TEXT NOT NULL DEFAULT '',
+			source              TEXT NOT NULL DEFAULT '',
+			head_sha            TEXT NOT NULL DEFAULT '',
+			base_sha            TEXT NOT NULL DEFAULT '',
+			phase               TEXT NOT NULL DEFAULT '',
+			repair_count_pr     INTEGER NOT NULL DEFAULT 0,
+			repair_count_head   INTEGER NOT NULL DEFAULT 0,
+			validation_attempts INTEGER NOT NULL DEFAULT 0,
+			review_fix_attempts INTEGER NOT NULL DEFAULT 0,
+			task_name           TEXT NOT NULL DEFAULT '',
+			branch              TEXT NOT NULL DEFAULT '',
+			pushed_sha          TEXT NOT NULL DEFAULT '',
+			last_error          TEXT NOT NULL DEFAULT '',
+			created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			completed_at        TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_repair_jobs_monitor
+			ON repair_jobs(monitor_namespace, monitor_name, pr_number, phase, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS monitor_events (
+			id                 TEXT PRIMARY KEY,
+			monitor_namespace  TEXT NOT NULL,
+			monitor_name       TEXT NOT NULL,
+			run_id             TEXT NOT NULL DEFAULT '',
+			item_kind          TEXT NOT NULL DEFAULT '',
+			item_number        INTEGER NOT NULL DEFAULT 0,
+			item_sha           TEXT NOT NULL DEFAULT '',
+			event_type         TEXT NOT NULL,
+			actor              TEXT NOT NULL DEFAULT '',
+			summary            TEXT NOT NULL DEFAULT '',
+			metadata_json      TEXT NOT NULL DEFAULT '{}',
+			created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_monitor_events_monitor
+			ON monitor_events(monitor_namespace, monitor_name, created_at DESC)`,
 	}
 
 	for _, stmt := range statements {
@@ -281,6 +491,42 @@ func migrate(db *sql.DB) error {
 		{Name: "applied_at", Definition: "applied_at TIMESTAMP"},
 	}); err != nil {
 		return err
+	}
+	if err := ensureSQLiteColumns(db, "monitor_items", []sqliteColumnMigration{
+		{Name: "skip_reason", Definition: "skip_reason TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumns(db, "security_scan_runs", []sqliteColumnMigration{
+		{Name: "slice_count", Definition: "slice_count INTEGER NOT NULL DEFAULT 0"},
+		{Name: "reviewed_slice_count", Definition: "reviewed_slice_count INTEGER NOT NULL DEFAULT 0"},
+		{Name: "skipped_slice_count", Definition: "skipped_slice_count INTEGER NOT NULL DEFAULT 0"},
+		{Name: "accepted_findings", Definition: "accepted_findings INTEGER NOT NULL DEFAULT 0"},
+		{Name: "dropped_findings", Definition: "dropped_findings INTEGER NOT NULL DEFAULT 0"},
+	}); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumns(db, "security_findings", []sqliteColumnMigration{
+		{Name: "slice_id", Definition: "slice_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "category", Definition: "category TEXT NOT NULL DEFAULT ''"},
+		{Name: "triage", Definition: "triage TEXT NOT NULL DEFAULT ''"},
+		{Name: "reproduction", Definition: "reproduction TEXT NOT NULL DEFAULT ''"},
+		{Name: "why_tests_do_not_cover", Definition: "why_tests_do_not_cover TEXT NOT NULL DEFAULT ''"},
+		{Name: "suggested_regression_test", Definition: "suggested_regression_test TEXT NOT NULL DEFAULT ''"},
+		{Name: "minimum_fix_scope", Definition: "minimum_fix_scope TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
+	if err := ensureSecurityReviewSlicesScopedPrimaryKey(db); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_security_findings_slice
+		ON security_findings(namespace, repository_scan, slice_id, category, updated_at DESC)`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_security_review_slices_repo
+		ON security_review_slices(namespace, repository_scan, status, updated_at DESC)`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
 	}
 	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_source_proposal
 		ON memories(namespace, source_proposal_id)
@@ -326,6 +572,113 @@ func ensureSQLiteColumns(db *sql.DB, table string, columns []sqliteColumnMigrati
 		}
 	}
 	return nil
+}
+
+func ensureSecurityReviewSlicesScopedPrimaryKey(db *sql.DB) error {
+	pkColumns, err := sqlitePrimaryKeyColumns(db, "security_review_slices")
+	if err != nil {
+		return err
+	}
+	if len(pkColumns) == 3 &&
+		pkColumns[0] == "namespace" &&
+		pkColumns[1] == "repository_scan" &&
+		pkColumns[2] == "id" {
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(`DROP TABLE IF EXISTS security_review_slices_migration`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := tx.Exec(`CREATE TABLE security_review_slices_migration (
+		id                TEXT NOT NULL,
+		namespace         TEXT NOT NULL,
+		repository_scan   TEXT NOT NULL,
+		source            TEXT NOT NULL,
+		title             TEXT NOT NULL,
+		summary           TEXT NOT NULL DEFAULT '',
+		kind              TEXT NOT NULL DEFAULT 'unknown',
+		confidence        TEXT NOT NULL DEFAULT 'medium',
+		status            TEXT NOT NULL DEFAULT 'pending',
+		entrypoints_json  TEXT NOT NULL DEFAULT '[]',
+		owned_files_json  TEXT NOT NULL DEFAULT '[]',
+		context_files_json TEXT NOT NULL DEFAULT '[]',
+		tests_json        TEXT NOT NULL DEFAULT '[]',
+		tags_json         TEXT NOT NULL DEFAULT '[]',
+		trust_boundaries_json TEXT NOT NULL DEFAULT '[]',
+		last_scan_run_id  TEXT NOT NULL DEFAULT '',
+		last_reviewed_at  TIMESTAMP,
+		created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (namespace, repository_scan, id)
+	)`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO security_review_slices_migration
+		(id, namespace, repository_scan, source, title, summary, kind, confidence, status,
+		 entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json,
+		 trust_boundaries_json, last_scan_run_id, last_reviewed_at, created_at, updated_at)
+		SELECT id, namespace, repository_scan, source, title, summary, kind, confidence, status,
+		 entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json,
+		 trust_boundaries_json, last_scan_run_id, last_reviewed_at, created_at, updated_at
+		FROM security_review_slices`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := tx.Exec(`DROP TABLE security_review_slices`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE security_review_slices_migration RENAME TO security_review_slices`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	return nil
+}
+
+func sqlitePrimaryKeyColumns(db *sql.DB, table string) ([]string, error) {
+	type pkColumn struct {
+		name string
+		seq  int
+	}
+	var columns []pkColumn
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return nil, fmt.Errorf("migration failed: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, pk int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return nil, fmt.Errorf("migration failed: %w", err)
+		}
+		if pk > 0 {
+			columns = append(columns, pkColumn{name: name, seq: pk})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("migration failed: %w", err)
+	}
+	for i := range columns {
+		for j := i + 1; j < len(columns); j++ {
+			if columns[j].seq < columns[i].seq {
+				columns[i], columns[j] = columns[j], columns[i]
+			}
+		}
+	}
+	names := make([]string, 0, len(columns))
+	for _, column := range columns {
+		names = append(names, column.name)
+	}
+	return names, nil
 }
 
 // Store implements both store.ResultStore and store.SessionStore.

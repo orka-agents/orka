@@ -12,6 +12,8 @@ import (
 )
 
 // ToolSpec defines the desired state of Tool
+// +kubebuilder:validation:XValidation:rule="has(self.http) || (has(self.mcp) && has(self.mcp.substrateActor))",message="http or mcp.substrateActor is required"
+// +kubebuilder:validation:XValidation:rule="!has(self.http) || (has(self.mcp) && has(self.mcp.substrateActor)) || (has(self.http.url) && self.http.url.size() > 0)",message="http.url is required unless mcp.substrateActor is set"
 type ToolSpec struct {
 	// Description is the tool description shown to the LLM
 	// +kubebuilder:validation:Required
@@ -21,16 +23,24 @@ type ToolSpec struct {
 	// +optional
 	Parameters *apiextensionsv1.JSON `json:"parameters,omitempty"`
 
-	// HTTP defines the HTTP execution configuration
-	// +kubebuilder:validation:Required
-	HTTP HTTPExecution `json:"http"`
+	// HTTP defines the HTTP execution configuration. It is required unless MCP
+	// is set.
+	// +optional
+	HTTP *HTTPExecution `json:"http,omitempty"`
+
+	// MCP defines a durable MCP server backend for this tool. MCP tools must set
+	// substrateActor.
+	// +optional
+	MCP *MCPToolServer `json:"mcp,omitempty"`
 }
 
 // HTTPExecution defines how to execute the tool via HTTP
 type HTTPExecution struct {
 	// URL is the endpoint to call when the tool is invoked
-	// +kubebuilder:validation:Required
-	URL string `json:"url"`
+	// Required for plain HTTP tools. MCP actor-backed tools may omit it when
+	// HTTP is present only for transport auth settings.
+	// +optional
+	URL string `json:"url,omitempty"`
 
 	// Method is the HTTP method to use (default: POST)
 	// +kubebuilder:validation:Enum=GET;POST;PUT;PATCH;DELETE
@@ -78,6 +88,33 @@ type SecretKeySelector struct {
 	Key string `json:"key"`
 }
 
+// MCPToolServer configures a Model Context Protocol server backend.
+type MCPToolServer struct {
+	// Path is the HTTP path exposed by the MCP server inside the actor.
+	// Defaults to /mcp.
+	// +optional
+	Path string `json:"path,omitempty"`
+
+	// SubstrateActor configures a durable Substrate actor that hosts the MCP server.
+	// +kubebuilder:validation:Required
+	SubstrateActor *SubstrateMCPActor `json:"substrateActor"`
+}
+
+// SubstrateMCPActor selects the durable actor that hosts an MCP server.
+type SubstrateMCPActor struct {
+	// TemplateRef references the ActorTemplate that runs the MCP server.
+	// +kubebuilder:validation:Required
+	TemplateRef WorkspaceTemplateReference `json:"templateRef"`
+
+	// PoolRef optionally assigns this tool actor to an Orka SubstrateActorPool.
+	// +optional
+	PoolRef *SubstrateActorPoolReference `json:"poolRef,omitempty"`
+
+	// Boot asks Substrate to boot this actor from scratch on first resume.
+	// +optional
+	Boot bool `json:"boot,omitempty"`
+}
+
 // ToolStatus defines the observed state of Tool
 type ToolStatus struct {
 	// Available indicates whether the tool endpoint is reachable
@@ -91,11 +128,42 @@ type ToolStatus struct {
 	// +optional
 	Error string `json:"error,omitempty"`
 
+	// Endpoint is the resolved non-secret endpoint used by workers.
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// Actor reports durable actor metadata when this tool is MCP actor-backed.
+	// +optional
+	Actor *ToolActorStatus `json:"actor,omitempty"`
+
 	// Conditions represent the current state of the Tool
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// ToolActorStatus reports safe durable actor metadata for a Tool.
+type ToolActorStatus struct {
+	// Provider is the actor provider.
+	// +optional
+	Provider WorkspaceProvider `json:"provider,omitempty"`
+
+	// ActorID is the stable provider actor id.
+	// +optional
+	ActorID string `json:"actorID,omitempty"`
+
+	// RouteHost is the HTTP Host value used with the provider router.
+	// +optional
+	RouteHost string `json:"routeHost,omitempty"`
+
+	// TemplateRef is the resolved actor template.
+	// +optional
+	TemplateRef *WorkspaceTemplateReference `json:"templateRef,omitempty"`
+
+	// PoolRef is the resolved Orka actor pool.
+	// +optional
+	PoolRef *SubstrateActorPoolReference `json:"poolRef,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -7,6 +7,7 @@ Orka is a Kubernetes-native task execution platform that manages Jobs and Pods f
 - **No secrets** — never commit, log, or print API keys, tokens, or credentials. Use Kubernetes Secrets or env vars.
 - **No binaries in repo** — build artifacts go in `bin/` (gitignored) or CI release pipelines.
 - **Scope discipline** — implement exactly what's asked, nothing more.
+- **Pre-land/pre-commit code changes**: use `$autoreview` until no accepted/actionable findings remain, unless equivalent manual review already done, trivial/docs-only, or user opts out.
 - **Git push discipline** — after making a change, push to the current branch when it is not `main`; never push directly to `main`.
 
 ## Build & Test
@@ -21,7 +22,7 @@ make docker-build-all   # All Docker images
 make deploy IMG=<registry>/orka:tag
 ```
 
-UI: `cd ui && bun install && bun run dev` (dev server on :5173). See @docs/development.md for full commands.
+UI: `cd ui && bun install && bun run dev` (dev server on :5173). See @website/docs/development/development.md for full commands.
 
 ## Verification
 

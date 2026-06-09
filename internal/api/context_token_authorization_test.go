@@ -42,6 +42,27 @@ func TestContextTokenTaskCreateFailures(t *testing.T) {
 		require.Empty(t, failures)
 	})
 
+	t.Run("allows matching ref-only workspace with branch and ref context", func(t *testing.T) {
+		token := &ContextToken{
+			Scopes: []string{ContextTokenScopeTaskCreate},
+			TransactionContext: map[string]any{
+				"namespace": "team-a",
+				"taskType":  string(corev1alpha1.TaskTypeAgent),
+				"agent":     "team-a/codex",
+				"provider":  "team-a/openai-prod",
+				"model":     "gpt-4o",
+				"repo":      "https://github.com/example/repo",
+				"branch":    "main",
+				"ref":       "abc123",
+			},
+		}
+		authzCtx := testTaskCreateAuthorizationContext()
+		authzCtx.Request.AgentRuntime.Workspace.Branch = ""
+
+		failures := contextTokenTaskCreateFailures(token, cfg, authzCtx)
+		require.Empty(t, failures)
+	})
+
 	t.Run("reports scope and context mismatches", func(t *testing.T) {
 		token := &ContextToken{
 			Scopes: []string{ContextTokenScopeTaskGet},
@@ -545,6 +566,47 @@ func testTaskCreateAuthorizationContext() contextTokenTaskCreateAuthorizationCon
 		RuntimeAllowedTools: []string{"Bash"},
 		RuntimeAllowBash:    true,
 	}
+}
+
+func TestContextTokenTaskCreateEffectiveAIToolsSkipsDisabledCoordinationInjection(t *testing.T) {
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+		},
+	}
+	req := CreateTaskRequest{
+		Type:        corev1alpha1.TaskTypeAI,
+		Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: "true"},
+		AI: &corev1alpha1.AISpec{
+			Tools: []string{"list_pull_requests", "check_pr_review_marker"},
+		},
+	}
+
+	got := contextTokenTaskCreateEffectiveAITools(req, agent)
+	require.Contains(t, got, "list_pull_requests")
+	require.Contains(t, got, "check_pr_review_marker")
+	require.Contains(t, got, "recall_memory")
+	require.Contains(t, got, "remember")
+	require.Contains(t, got, "propose_memory")
+	require.Contains(t, got, "search_transcript")
+	require.NotContains(t, got, "delegate_task")
+	require.NotContains(t, got, "merge_pull_request")
+	require.NotContains(t, got, "auto_merge_pull_request")
+}
+
+func TestContextTokenTaskCreateEffectiveAIToolsIncludesPRReviewCoordinationTools(t *testing.T) {
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+		},
+	}
+	req := CreateTaskRequest{
+		Type: corev1alpha1.TaskTypeAI,
+	}
+
+	got := contextTokenTaskCreateEffectiveAITools(req, agent)
+	require.Contains(t, got, "list_pull_requests")
+	require.Contains(t, got, "check_pr_review_marker")
 }
 
 func TestRedactedContextTokenAuthorizationFailuresRedactsRepositoryCredentials(t *testing.T) {

@@ -33,6 +33,7 @@ func TestChatRegistry_CoreToolNames(t *testing.T) {
 
 	coreNames := []string{
 		"create_ai_task",
+		"create_pr_monitor",
 		"create_container_task",
 		"create_agent_task",
 		"check_task_progress",
@@ -153,6 +154,7 @@ func TestChatRegistry_RequiredFields(t *testing.T) {
 func TestChatRegistry_NoOverlapBetweenCoreAndManagement(t *testing.T) {
 	coreNames := map[string]bool{
 		"create_ai_task":        true,
+		"create_pr_monitor":     true,
 		"create_container_task": true,
 		"create_agent_task":     true,
 		"check_task_progress":   true,
@@ -196,8 +198,8 @@ func TestChatToolNames_Idempotent(t *testing.T) {
 
 func TestChatToolNames_Count(t *testing.T) {
 	names := tools.ChatToolNames()
-	if len(names) != 16 {
-		t.Errorf("ChatToolNames() returned %d tools, want 16", len(names))
+	if len(names) != 17 {
+		t.Errorf("ChatToolNames() returned %d tools, want 17", len(names))
 	}
 }
 
@@ -206,8 +208,8 @@ func TestChatRegistry_ToLLMTools(t *testing.T) {
 	tools.RegisterChatTools(reg)
 
 	llmTools := reg.ToLLMTools(tools.ChatToolNames())
-	if len(llmTools) != 16 {
-		t.Errorf("ToLLMTools() returned %d tools, want 16", len(llmTools))
+	if len(llmTools) != 17 {
+		t.Errorf("ToLLMTools() returned %d tools, want 17", len(llmTools))
 	}
 
 	nameSet := make(map[string]bool, len(llmTools))

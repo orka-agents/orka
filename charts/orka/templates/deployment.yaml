@@ -123,6 +123,15 @@ spec:
             {{- if .securityWrite }}
             - {{ printf "--context-token-security-write-scopes=%s" .securityWrite | quote }}
             {{- end }}
+            {{- if .monitorRead }}
+            - {{ printf "--context-token-monitor-read-scopes=%s" .monitorRead | quote }}
+            {{- end }}
+            {{- if .monitorWrite }}
+            - {{ printf "--context-token-monitor-write-scopes=%s" .monitorWrite | quote }}
+            {{- end }}
+            {{- if .monitorOperate }}
+            - {{ printf "--context-token-monitor-operate-scopes=%s" .monitorOperate | quote }}
+            {{- end }}
             {{- if .skillRead }}
             - {{ printf "--context-token-skill-read-scopes=%s" .skillRead | quote }}
             {{- end }}
@@ -232,6 +241,43 @@ spec:
               value: {{ include "orka.vendorWorkerClusterRoleName" . | quote }}
             - name: ORKA_CONTAINER_WORKER_CLUSTER_ROLE_NAME
               value: {{ include "orka.containerWorkerClusterRoleName" . | quote }}
+            {{- if .Values.github.webhook.secretName }}
+            - name: ORKA_GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.github.webhook.secretName | quote }}
+                  key: {{ .Values.github.webhook.secretKey | quote }}
+            {{- end }}
+            {{- if .Values.github.labelTrigger.agent }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_AGENT
+              value: {{ .Values.github.labelTrigger.agent | quote }}
+            {{- end }}
+            {{- if .Values.github.labelTrigger.namespace }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE
+              value: {{ .Values.github.labelTrigger.namespace | quote }}
+            {{- end }}
+            {{- if .Values.github.labelTrigger.gitSecret }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_GIT_SECRET
+              value: {{ .Values.github.labelTrigger.gitSecret | quote }}
+            {{- end }}
+            {{- if or .Values.github.webhook.secretName .Values.github.labelTrigger.agent .Values.github.labelTrigger.namespace .Values.github.labelTrigger.gitSecret .Values.github.labelTrigger.agents }}
+            {{- if .Values.github.labelTrigger.prefix }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_PREFIX
+              value: {{ .Values.github.labelTrigger.prefix | quote }}
+            {{- end }}
+            {{- if .Values.github.labelTrigger.timeout }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_TIMEOUT
+              value: {{ .Values.github.labelTrigger.timeout | quote }}
+            {{- end }}
+            {{- if .Values.github.labelTrigger.maxTurns }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_MAX_TURNS
+              value: {{ .Values.github.labelTrigger.maxTurns | quote }}
+            {{- end }}
+            {{- end }}
+            {{- range $action, $agent := .Values.github.labelTrigger.agents }}
+            - name: ORKA_GITHUB_LABEL_AGENT_{{ regexReplaceAll "[^A-Z0-9]+" (upper $action) "_" | trimAll "_" }}
+              value: {{ $agent | quote }}
+            {{- end }}
           ports:
             - name: api
               containerPort: {{ .Values.controller.apiPort }}

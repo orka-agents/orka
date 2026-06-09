@@ -1070,7 +1070,7 @@ func TestInjectOrkaTools_WithToolCRDs(t *testing.T) {
 		Spec: corev1alpha1.ToolSpec{
 			Description: "A custom tool",
 			Parameters:  &apiextensionsv1.JSON{Raw: json.RawMessage(`{"type":"object"}`)},
-			HTTP:        corev1alpha1.HTTPExecution{URL: "http://example.com/tool"},
+			HTTP:        &corev1alpha1.HTTPExecution{URL: "http://example.com/tool"},
 		},
 	}
 

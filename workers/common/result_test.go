@@ -7,10 +7,13 @@ MIT License - see LICENSE file for details.
 package common
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -41,6 +44,37 @@ func TestSubmitResult_Success(t *testing.T) {
 	}
 	if string(received) != "hello result" {
 		t.Errorf("received = %q, want %q", string(received), "hello result")
+	}
+}
+
+func TestSubmitResult_ResultStdoutWritesMarkerFile(t *testing.T) {
+	markerPath := filepath.Join(t.TempDir(), "orka-result-marker")
+	originalMarkerPath := resultStdoutMarkerPath
+	resultStdoutMarkerPath = markerPath
+	t.Cleanup(func() {
+		resultStdoutMarkerPath = originalMarkerPath
+	})
+	t.Setenv(workerenv.ResultStdout, "true")
+
+	result := []byte(`{"kind":"typed-review","payload":"large-review"}`)
+	wantMarker := workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString(result)
+
+	var submitErr error
+	stdout := captureStdout(t, func() {
+		submitErr = SubmitResult(result)
+	})
+	if submitErr != nil {
+		t.Fatalf("SubmitResult() error = %v", submitErr)
+	}
+	if !strings.Contains(stdout, wantMarker+"\n") {
+		t.Fatalf("stdout = %q, want marker %q", stdout, wantMarker)
+	}
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("read marker file: %v", err)
+	}
+	if string(data) != wantMarker+"\n" {
+		t.Fatalf("marker file = %q, want %q", string(data), wantMarker+"\n")
 	}
 }
 

@@ -447,6 +447,7 @@ var coordinatorProxyTools = []string{
 	"create_agent",
 	"create_agent_task",
 	"create_ai_task",
+	"create_pr_monitor",
 	"create_container_task",
 	"check_task_progress",
 	"fetch_task_output",

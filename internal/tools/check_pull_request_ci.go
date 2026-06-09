@@ -26,7 +26,7 @@ type CheckPullRequestCITool struct {
 type CheckPullRequestCIArgs struct {
 	// TaskName is the child task whose workspace config has the repo and git credentials.
 	TaskName string `json:"task_name,omitempty"`
-	// RepoURL is an explicit GitHub repository URL. Falls back to ORKA_GIT_REPO when task_name is empty.
+	// RepoURL is an explicit GitHub repository URL. When provided with task context, it must match that task's repository scope.
 	RepoURL string `json:"repo_url,omitempty"`
 	// PRNumber is the GitHub PR number to inspect.
 	PRNumber int `json:"pr_number"`
@@ -72,7 +72,7 @@ func (t *CheckPullRequestCITool) Description() string {
 
 // Parameters returns the JSON schema for tool parameters.
 func (t *CheckPullRequestCITool) Parameters() json.RawMessage {
-	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional task whose workspace config has the repo and git credentials"}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional GitHub repository URL. Falls back to ORKA_GIT_REPO when task_name is empty"}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number to inspect"}, "wait_timeout": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional maximum time to wait for pending checks (for example '30m'). Empty means one immediate check"},
+	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional task whose workspace config has the repo and git credentials"}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional GitHub repository URL. Requires task_name or current task context and must match that task's repository scope."}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number to inspect"}, "wait_timeout": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional maximum time to wait for pending checks (for example '30m'). Empty means one immediate check"},
 		"poll_interval": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional delay between polls while waiting (for example '30s'). Defaults to '30s' when wait_timeout is set"},
 	}, jsonSchemaRequiredField: []string{githubPRNumberField},
 	}
@@ -96,7 +96,7 @@ func (t *CheckPullRequestCITool) Execute(ctx context.Context, argsJSON json.RawM
 		return "", err
 	}
 
-	owner, repo, token, baseURL, err := resolveRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
+	owner, repo, token, baseURL, err := resolveScopedRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
 		return "", err
 	}

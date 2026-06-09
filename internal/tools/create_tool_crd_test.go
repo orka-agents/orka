@@ -202,7 +202,7 @@ func TestCreateToolCRDTool_Execute_AlreadyExists(t *testing.T) {
 		},
 		Spec: corev1alpha1.ToolSpec{
 			Description: "existing",
-			HTTP:        corev1alpha1.HTTPExecution{URL: "http://old.com", Method: httpMethodPostString},
+			HTTP:        &corev1alpha1.HTTPExecution{URL: "http://old.com", Method: httpMethodPostString},
 		},
 	}
 	fc := newFakeClient(existing)

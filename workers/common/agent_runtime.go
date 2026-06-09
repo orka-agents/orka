@@ -44,8 +44,14 @@ type AgentConfig struct {
 	GitRepo            string
 	GitBranch          string
 	GitRef             string
+	PRBaseBranch       string
+	PRBaseRepo         string
+	PRBaseSHA          string
 	SubPath            string
 	TimeoutSeconds     int
+
+	securityReviewContextArtifact string
+	securityReviewContextManifest []byte
 }
 
 // LoadConfig reads and validates agent configuration from environment variables.
@@ -71,6 +77,9 @@ func loadConfig(defaultMaxTurns int, requirePrompt bool) (*AgentConfig, error) {
 		GitRepo:            os.Getenv(workerenv.GitRepo),
 		GitBranch:          os.Getenv(workerenv.GitBranch),
 		GitRef:             os.Getenv(workerenv.GitRef),
+		PRBaseBranch:       os.Getenv(workerenv.PRBaseBranch),
+		PRBaseRepo:         os.Getenv(workerenv.PRBaseRepo),
+		PRBaseSHA:          os.Getenv(workerenv.PRBaseSHA),
 		SubPath:            os.Getenv(workerenv.WorkspaceSubpath),
 		MaxTurns:           defaultMaxTurns,
 	}
@@ -409,9 +418,15 @@ const (
 	agentSandboxContextSubjectTokenExecPath   = "/app/" + agentSandboxContextSubjectTokenUploadPath
 	agentSandboxGitAskpassUploadPath          = "orka-git-askpass"
 	agentSandboxGitAskpassExecPath            = "/app/" + agentSandboxGitAskpassUploadPath
+	agentSandboxResultMarkerUploadPath        = "orka-result-marker"
+	agentSandboxResultMarkerExecPath          = "/app/" + agentSandboxResultMarkerUploadPath
+	agentSandboxResultTokenPrefix             = "ORKA_RESULT_TOKEN:"
+	agentSandboxWorkerStatusUploadPath        = "orka-worker-status"
+	agentSandboxWorkerStatusExecPath          = "/app/" + agentSandboxWorkerStatusUploadPath
 	workspaceHandoffTokenUploadPath           = "orka-workspace-handoff-token"
 	workspaceHandoffTokenDefaultPath          = "/app/" + workspaceHandoffTokenUploadPath
 	agentSandboxExecMaxOutputBytes            = 2000
+	agentSandboxStdoutResultMaxOutputBytes    = 256 * 1024
 	workerEnvFalse                            = "false"
 	workspaceHandoffTokenEnv                  = "ORKA_WORKSPACE_HANDOFF_TOKEN"
 	workspaceHandoffTokenFileEnv              = "ORKA_WORKSPACE_HANDOFF_TOKEN_FILE"
@@ -480,11 +495,17 @@ func getSubstrateWorkspaceExecutor() (workspace.WorkspaceExecutor, error) {
 	}
 	substrateEnv := workerenv.ParseSubstrateEnv(os.Getenv)
 	substrateWorkspaceExecutor, substrateWorkspaceExecutorErr = workspace.NewSubstrateExecutor(workspace.SubstrateConfig{
-		APIEndpoint:           substrateEnv.APIEndpoint,
-		APICAFile:             substrateEnv.APICAFile,
-		APIInsecureSkipVerify: substrateEnv.APIInsecureSkipVerify,
-		RouterURL:             substrateEnv.RouterURL,
-		ActorDNSSuffix:        substrateEnv.ActorDNSSuffix,
+		APIEndpoint:             substrateEnv.APIEndpoint,
+		APICAFile:               substrateEnv.APICAFile,
+		APIInsecureSkipVerify:   substrateEnv.APIInsecureSkipVerify,
+		RouterURL:               substrateEnv.RouterURL,
+		ActorDNSSuffix:          substrateEnv.ActorDNSSuffix,
+		SessionIdentityToken:    substrateEnv.SessionIdentityToken,
+		SessionIdentityAudience: strings.Split(substrateEnv.SessionIdentityAudience, ","),
+		SessionIdentityAppID:    substrateEnv.SessionIdentityAppID,
+		SessionIdentityUserID:   substrateEnv.SessionIdentityUserID,
+		SessionIdentityRequired: substrateEnv.SessionIdentityRequired,
+		SessionIdentityMintCert: substrateEnv.SessionIdentityMintCert,
 	})
 	return substrateWorkspaceExecutor, substrateWorkspaceExecutorErr
 }
@@ -529,19 +550,41 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	fmt.Printf("Worker %s started task=%s/%s%s\n",
 		name, cfg.TaskNamespace, cfg.TaskName, workerenv.TransactionLogFields(cfg.TransactionID, cfg.TransactionProfile))
 
+	preparedWorkspace := false
+
 	// Clone git repo if configured
 	if cfg.GitRepo != "" {
-		if err := CloneRepo(ctx, cfg, workspaceDir); err != nil {
+		if _, err := os.Stat(filepath.Join(workspaceDir, ".git")); err == nil {
+			if !workerenv.IsTrue(os.Getenv(workerenv.WorkspacePrepared)) {
+				return fmt.Errorf(
+					"workspace %s already contains a git checkout but %s is not true",
+					workspaceDir,
+					workerenv.WorkspacePrepared,
+				)
+			}
+			fmt.Printf("Using prepared git workspace at %s\n", workspaceDir)
+			preparedWorkspace = true
+		} else if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("stat workspace: %w", err)
+		} else if err := CloneRepo(ctx, cfg, workspaceDir); err != nil {
 			return fmt.Errorf("git clone failed: %w", err)
 		}
 	}
 
 	// Apply prior task diff if iterating
-	if err := PrepareWorkspace(workspaceDir); err != nil {
-		return fmt.Errorf("workspace preparation failed: %w", err)
+	if !preparedWorkspace {
+		if err := PrepareWorkspace(workspaceDir); err != nil {
+			return fmt.Errorf("workspace preparation failed: %w", err)
+		}
+		if err := PreparePullRequestReviewContext(workspaceDir, cfg); err != nil {
+			return fmt.Errorf("pull request review context preparation failed: %w", err)
+		}
 	}
 	if err := EnsureWorkspaceArtifactsLink(workspaceDir); err != nil {
 		return fmt.Errorf("artifact workspace setup failed: %w", err)
+	}
+	if err := PrepareSecurityReviewContext(workspaceDir, cfg); err != nil {
+		return fmt.Errorf("security review context preparation failed: %w", err)
 	}
 
 	result, err := executor(ctx, cfg)
@@ -552,13 +595,16 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 		if cfg.GitRepo != "" {
 			resultDir = workspaceDir
 		}
-		resultBytes, finalizeErr := FinalizeResult(resultDir, errorOutput)
+		resultBytes, finalizeErr := finalizeAgentResult(resultDir, errorOutput)
 		if finalizeErr != nil {
 			fmt.Fprintf(os.Stderr, "failed to finalize error result: %v\n", finalizeErr)
 			resultBytes = []byte(errorOutput)
 		}
 		if submitErr := SubmitResult(resultBytes); submitErr != nil {
 			fmt.Fprintf(os.Stderr, "failed to submit error result: %v\n", submitErr)
+		}
+		if restoreErr := RestoreSecurityReviewContextArtifact(cfg); restoreErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to restore security review context artifact: %v\n", restoreErr)
 		}
 		if artifactErr := UploadArtifacts(); artifactErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", artifactErr)
@@ -575,12 +621,15 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	if cfg.GitRepo != "" {
 		resultDir = workspaceDir
 	}
-	resultBytes, err := FinalizeResult(resultDir, result)
+	resultBytes, err := finalizeAgentResult(resultDir, result)
 	if err != nil {
 		return fmt.Errorf("failed to finalize result: %w", err)
 	}
 	if err := SubmitResult(resultBytes); err != nil {
 		return fmt.Errorf("failed to submit result: %w", err)
+	}
+	if err := RestoreSecurityReviewContextArtifact(cfg); err != nil {
+		return fmt.Errorf("failed to restore security review context artifact: %w", err)
 	}
 	if err := UploadArtifacts(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", err)
@@ -589,6 +638,13 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	fmt.Printf("Task %s/%s completed successfully%s\n",
 		cfg.TaskNamespace, cfg.TaskName, workerenv.TransactionLogFields(cfg.TransactionID, cfg.TransactionProfile))
 	return nil
+}
+
+func finalizeAgentResult(resultDir string, result string) ([]byte, error) {
+	if workerenv.IsTrue(os.Getenv(workerenv.ResultStdout)) {
+		return []byte(result), nil
+	}
+	return FinalizeResult(resultDir, result)
 }
 
 func runAgentInWorkspace(
@@ -668,7 +724,7 @@ func runAgentInWorkspace(
 			ref,
 			cleanupEnv,
 			claim.Reused,
-			false,
+			executionWorkspaceDeferredCleanupSubmitsStatus(cleanupEnv),
 			cleanupOptions,
 		); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to clean up execution workspace: %v\n", err)
@@ -682,10 +738,13 @@ func runAgentInWorkspace(
 		"workspace claimed",
 	)
 
-	if _, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
-		Ref:     ref,
-		Timeout: workspaceEnv.ClaimTimeout,
-	}); err != nil {
+	ready, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
+		Ref:                ref,
+		Timeout:            workspaceEnv.ClaimTimeout,
+		Boot:               workspaceEnv.Boot,
+		SnapshotRestoreURI: workspaceEnv.SnapshotRestoreURI,
+	})
+	if err != nil {
 		submitExecutionWorkspaceStatus(
 			workspaceEnv,
 			corev1alpha1.ExecutionWorkspacePhaseFailed,
@@ -695,12 +754,14 @@ func runAgentInWorkspace(
 		)
 		return fmt.Errorf("wait for execution workspace: %w", err)
 	}
+	readyStatusOptions := []executionWorkspaceStatusOption{withExecutionWorkspaceReadyResult(ready)}
 	submitExecutionWorkspaceStatus(
 		workspaceEnv,
 		corev1alpha1.ExecutionWorkspacePhaseReady,
 		corev1alpha1.ExecutionWorkspaceReasonReady,
 		claim.Reused,
 		"workspace ready",
+		readyStatusOptions...,
 	)
 
 	if handoffToken != "" {
@@ -711,6 +772,7 @@ func runAgentInWorkspace(
 				corev1alpha1.ExecutionWorkspaceReasonHandoffFailed,
 				claim.Reused,
 				"workspace handoff failed",
+				readyStatusOptions...,
 			)
 			return err
 		}
@@ -733,9 +795,11 @@ func runAgentInWorkspace(
 			corev1alpha1.ExecutionWorkspaceReasonHandoffFailed,
 			claim.Reused,
 			"workspace handoff failed",
+			readyStatusOptions...,
 		)
 		return err
 	}
+	stdoutResultToken := innerEnv[workerenv.ResultStdoutToken]
 
 	execResult, err := executor.Exec(ctx, workspace.ExecRequest{
 		Ref:            ref,
@@ -743,25 +807,35 @@ func runAgentInWorkspace(
 		Env:            innerEnv,
 		WorkDir:        workspaceDir,
 		Timeout:        workspaceEnv.CommandTimeout,
-		MaxOutputBytes: agentSandboxExecMaxOutputBytes,
+		MaxOutputBytes: sandboxExecMaxOutputBytes(),
+		Resident:       executionWorkspaceResidentProcess(workspaceEnv),
+		ResidentKey:    executionWorkspaceResidentKey(workspaceEnv, ref),
 	})
 	if err != nil {
+		forwardWorkspaceStdoutResultMarkerIfPresent(
+			ctx, executor, ref, workspaceEnv.CommandTimeout, execResult, stdoutResultToken,
+		)
 		submitExecutionWorkspaceStatus(
 			workspaceEnv,
 			corev1alpha1.ExecutionWorkspacePhaseFailed,
 			corev1alpha1.ExecutionWorkspaceReasonCommandFailed,
 			claim.Reused,
 			"workspace command failed",
+			readyStatusOptions...,
 		)
 		return fmt.Errorf("%s workspace execution failed: %w%s", name, err, formatSandboxExecOutput(execResult))
 	}
 	if execResult != nil && !execResult.Succeeded() {
+		forwardWorkspaceStdoutResultMarkerIfPresent(
+			ctx, executor, ref, workspaceEnv.CommandTimeout, execResult, stdoutResultToken,
+		)
 		submitExecutionWorkspaceStatus(
 			workspaceEnv,
 			corev1alpha1.ExecutionWorkspacePhaseFailed,
 			corev1alpha1.ExecutionWorkspaceReasonCommandFailed,
 			claim.Reused,
 			"workspace command failed",
+			readyStatusOptions...,
 		)
 		return fmt.Errorf(
 			"%s workspace execution failed: command exited with code %d%s",
@@ -771,9 +845,32 @@ func runAgentInWorkspace(
 		)
 	}
 
+	marker, err := workspaceStdoutResultMarker(
+		ctx, executor, ref, workspaceEnv.CommandTimeout, execResult, stdoutResultToken,
+	)
+	if err != nil {
+		submitExecutionWorkspaceStatus(
+			workspaceEnv,
+			corev1alpha1.ExecutionWorkspacePhaseFailed,
+			corev1alpha1.ExecutionWorkspaceReasonCommandFailed,
+			claim.Reused,
+			"workspace command failed",
+			readyStatusOptions...,
+		)
+		return fmt.Errorf("%s workspace execution failed: %w%s", name, err, formatSandboxExecOutput(execResult))
+	}
+
 	cleanupCtx, cleanupCancel := agentSandboxCleanupContext(workspaceEnv.ClaimTimeout)
 	defer cleanupCancel()
-	if err := cleanupExecutionWorkspace(cleanupCtx, executor, ref, workspaceEnv, claim.Reused, true); err != nil {
+	if err := cleanupExecutionWorkspaceWithOptions(
+		cleanupCtx,
+		executor,
+		ref,
+		workspaceEnv,
+		claim.Reused,
+		true,
+		executionWorkspaceCleanupOptions{statusOptions: readyStatusOptions},
+	); err != nil {
 		reason := corev1alpha1.ExecutionWorkspaceReasonCleanupFailed
 		if errors.Is(err, errExecutionWorkspaceSecretScrubFailed) {
 			reason = corev1alpha1.ExecutionWorkspaceReasonSecretScrubFailed
@@ -784,10 +881,15 @@ func runAgentInWorkspace(
 			reason,
 			claim.Reused,
 			"workspace cleanup failed",
+			readyStatusOptions...,
 		)
 		return fmt.Errorf("execution workspace cleanup failed: %w", err)
 	}
 	cleaned = true
+
+	if marker != "" {
+		fmt.Println(marker)
+	}
 
 	fmt.Println(executionWorkspaceCompletionMessage(taskNamespace, taskName, workspaceEnv, ref))
 	return nil
@@ -815,6 +917,7 @@ func executionWorkspaceCompletionMessage(
 type executionWorkspaceCleanupOptions struct {
 	skipSubstrateDeleteScrub  bool
 	skipSubstrateReleaseScrub bool
+	statusOptions             []executionWorkspaceStatusOption
 }
 
 func preTerminalExecutionWorkspaceCleanup(
@@ -830,13 +933,30 @@ func preTerminalExecutionWorkspaceCleanup(
 		skipSubstrateDeleteScrub:  true,
 		skipSubstrateReleaseScrub: true,
 	}
-	if claimedNewWorkspace && strings.EqualFold(
-		strings.TrimSpace(workspaceEnv.CleanupPolicy),
-		string(corev1alpha1.WorkspaceCleanupPolicyRetain),
-	) {
+	if claimedNewWorkspace &&
+		strings.EqualFold(
+			strings.TrimSpace(workspaceEnv.CleanupPolicy),
+			string(corev1alpha1.WorkspaceCleanupPolicyRetain),
+		) {
 		workspaceEnv.CleanupPolicy = string(corev1alpha1.WorkspaceCleanupPolicyDelete)
 	}
 	return workspaceEnv, options
+}
+
+func executionWorkspaceCleanupPolicy(workspaceEnv workerenv.ExecutionWorkspaceEnv) string {
+	policy := strings.TrimSpace(strings.ToLower(workspaceEnv.CleanupPolicy))
+	if strings.TrimSpace(workspaceEnv.Provider) == string(corev1alpha1.WorkspaceProviderSubstrate) &&
+		strings.TrimSpace(workspaceEnv.PoolName) != "" &&
+		policy != "" &&
+		policy != string(corev1alpha1.WorkspaceCleanupPolicyDelete) {
+		return string(corev1alpha1.WorkspaceCleanupPolicyDelete)
+	}
+	return policy
+}
+
+func executionWorkspaceDeferredCleanupSubmitsStatus(workspaceEnv workerenv.ExecutionWorkspaceEnv) bool {
+	return strings.TrimSpace(workspaceEnv.Provider) == string(corev1alpha1.WorkspaceProviderSubstrate) &&
+		strings.TrimSpace(workspaceEnv.PoolName) != ""
 }
 
 func runAgentInSandbox(ctx context.Context, name, workspaceDir string, sandboxEnv workerenv.AgentSandboxEnv) error {
@@ -902,6 +1022,7 @@ func runAgentInSandbox(ctx context.Context, name, workspaceDir string, sandboxEn
 	if err != nil {
 		return err
 	}
+	stdoutResultToken := innerEnv[workerenv.ResultStdoutToken]
 
 	execResult, err := executor.Exec(ctx, workspace.ExecRequest{
 		Ref:            ref,
@@ -909,12 +1030,18 @@ func runAgentInSandbox(ctx context.Context, name, workspaceDir string, sandboxEn
 		Env:            innerEnv,
 		WorkDir:        workspaceDir,
 		Timeout:        sandboxEnv.CommandTimeout,
-		MaxOutputBytes: agentSandboxExecMaxOutputBytes,
+		MaxOutputBytes: sandboxExecMaxOutputBytes(),
 	})
 	if err != nil {
+		forwardWorkspaceStdoutResultMarkerIfPresent(
+			ctx, executor, ref, sandboxEnv.CommandTimeout, execResult, stdoutResultToken,
+		)
 		return fmt.Errorf("%s sandbox execution failed: %w%s", name, err, formatSandboxExecOutput(execResult))
 	}
 	if execResult != nil && !execResult.Succeeded() {
+		forwardWorkspaceStdoutResultMarkerIfPresent(
+			ctx, executor, ref, sandboxEnv.CommandTimeout, execResult, stdoutResultToken,
+		)
 		return fmt.Errorf(
 			"%s sandbox execution failed: command exited with code %d%s",
 			name,
@@ -922,9 +1049,181 @@ func runAgentInSandbox(ctx context.Context, name, workspaceDir string, sandboxEn
 			formatSandboxExecOutput(execResult),
 		)
 	}
+	if err := forwardWorkspaceStdoutResultMarker(
+		ctx, executor, ref, sandboxEnv.CommandTimeout, execResult, stdoutResultToken,
+	); err != nil {
+		return fmt.Errorf("%s sandbox execution failed: %w%s", name, err, formatSandboxExecOutput(execResult))
+	}
 
 	fmt.Printf("Task %s/%s completed in sandbox workspace %s\n", taskNamespace, taskName, ref.ClaimName)
 	return nil
+}
+
+func forwardWorkspaceStdoutResultMarker(
+	ctx context.Context,
+	executor workspace.WorkspaceExecutor,
+	ref workspace.WorkspaceRef,
+	timeout time.Duration,
+	result *workspace.ExecResult,
+	expectedToken string,
+) error {
+	if !workerenv.IsTrue(os.Getenv(workerenv.ResultStdout)) {
+		return nil
+	}
+	marker, err := workspaceStdoutResultMarker(ctx, executor, ref, timeout, result, expectedToken)
+	if err != nil {
+		return err
+	}
+	if marker == "" {
+		return fmt.Errorf(
+			"%s is true but inner worker did not write %s",
+			workerenv.ResultStdout,
+			workerenv.ResultStdoutPrefix,
+		)
+	}
+	fmt.Println(marker)
+	return nil
+}
+
+func forwardWorkspaceStdoutResultMarkerIfPresent(
+	ctx context.Context,
+	executor workspace.WorkspaceExecutor,
+	ref workspace.WorkspaceRef,
+	timeout time.Duration,
+	result *workspace.ExecResult,
+	expectedToken string,
+) {
+	if !workerenv.IsTrue(os.Getenv(workerenv.ResultStdout)) {
+		return
+	}
+	marker, err := workspaceStdoutResultMarker(ctx, executor, ref, timeout, result, expectedToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to forward stdout result marker: %v\n", err)
+		return
+	}
+	if marker != "" {
+		fmt.Println(marker)
+	}
+}
+
+func workspaceStdoutResultMarker(
+	ctx context.Context,
+	executor workspace.WorkspaceExecutor,
+	ref workspace.WorkspaceRef,
+	timeout time.Duration,
+	result *workspace.ExecResult,
+	expectedToken string,
+) (string, error) {
+	if !workerenv.IsTrue(os.Getenv(workerenv.ResultStdout)) {
+		return "", nil
+	}
+
+	if result != nil {
+		if result.StdoutTruncated {
+			marker, downloadErr := downloadStdoutResultMarker(ctx, executor, ref, timeout, expectedToken)
+			if marker != "" {
+				return marker, nil
+			}
+			if downloadErr != nil {
+				return "", fmt.Errorf("download stdout result marker after truncated stdout: %w", downloadErr)
+			}
+			return "", fmt.Errorf(
+				"inner worker stdout was truncated before %s could be forwarded and marker file was not available",
+				workerenv.ResultStdoutPrefix,
+			)
+		}
+		if marker, ok := stdoutResultMarker(result.Stdout); ok {
+			return marker, nil
+		}
+	}
+	marker, downloadErr := downloadStdoutResultMarker(ctx, executor, ref, timeout, expectedToken)
+	if marker != "" {
+		return marker, nil
+	}
+	if downloadErr != nil && !workspace.IsKind(downloadErr, workspace.ErrorKindNotFound) {
+		return "", fmt.Errorf("download stdout result marker: %w", downloadErr)
+	}
+	return "", nil
+}
+
+func downloadStdoutResultMarker(
+	ctx context.Context,
+	executor workspace.WorkspaceExecutor,
+	ref workspace.WorkspaceRef,
+	timeout time.Duration,
+	expectedToken string,
+) (string, error) {
+	if executor == nil || ref.IsZero() {
+		return "", workspace.NewError(
+			"download",
+			workspace.ErrorKindNotFound,
+			"workspace reference is unavailable",
+			false,
+			nil,
+		)
+	}
+	result, err := executor.Download(ctx, workspace.DownloadRequest{
+		Ref:     ref,
+		Paths:   []string{agentSandboxResultMarkerUploadPath},
+		Timeout: timeout,
+	})
+	if err != nil {
+		return "", err
+	}
+	for _, artifact := range result.Artifacts {
+		if artifact.Path != agentSandboxResultMarkerUploadPath {
+			continue
+		}
+		data := string(artifact.Data)
+		if err := validateStdoutResultToken(data, expectedToken); err != nil {
+			return "", err
+		}
+		if marker, ok := stdoutResultMarker(data); ok {
+			return marker, nil
+		}
+		return "", fmt.Errorf("downloaded stdout result marker did not contain %s", workerenv.ResultStdoutPrefix)
+	}
+	return "", workspace.NewError(
+		"download",
+		workspace.ErrorKindNotFound,
+		"stdout result marker artifact not found",
+		false,
+		nil,
+	)
+}
+
+func stdoutResultMarker(stdout string) (string, bool) {
+	var marker string
+	for line := range strings.SplitSeq(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if _, ok := strings.CutPrefix(line, workerenv.ResultStdoutPrefix); ok {
+			marker = line
+		}
+	}
+	return marker, marker != ""
+}
+
+func validateStdoutResultToken(data, expectedToken string) error {
+	expectedToken = strings.TrimSpace(expectedToken)
+	if expectedToken == "" {
+		return nil
+	}
+	for line := range strings.SplitSeq(data, "\n") {
+		if token, ok := strings.CutPrefix(strings.TrimSpace(line), agentSandboxResultTokenPrefix); ok {
+			if token == expectedToken {
+				return nil
+			}
+			return fmt.Errorf("downloaded stdout result marker token did not match current execution")
+		}
+	}
+	return fmt.Errorf("downloaded stdout result marker is missing current execution token")
+}
+
+func sandboxExecMaxOutputBytes() int64 {
+	if workerenv.IsTrue(os.Getenv(workerenv.ResultStdout)) {
+		return agentSandboxStdoutResultMaxOutputBytes
+	}
+	return agentSandboxExecMaxOutputBytes
 }
 
 func ensureWorkspaceHandoffToken(workspaceEnv workerenv.ExecutionWorkspaceEnv) (string, error) {
@@ -1029,6 +1328,31 @@ func workspaceWarmPoolPolicy(workspaceEnv workerenv.ExecutionWorkspaceEnv) strin
 	return agentSandboxClaimWarmPoolPolicy(workerenv.ParseAgentSandboxEnv(os.Getenv).WarmPoolPolicy)
 }
 
+func executionWorkspaceResidentProcess(workspaceEnv workerenv.ExecutionWorkspaceEnv) bool {
+	return strings.TrimSpace(workspaceEnv.Provider) == string(corev1alpha1.WorkspaceProviderSubstrate) &&
+		strings.TrimSpace(workspaceEnv.ProcessMode) == string(corev1alpha1.ExecutionWorkspaceProcessModeResident)
+}
+
+func executionWorkspaceResidentKey(workspaceEnv workerenv.ExecutionWorkspaceEnv, ref workspace.WorkspaceRef) string {
+	if key := strings.TrimSpace(workspaceEnv.ResidentKey); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(workspaceEnv.ReuseKey); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(ref.ID); key != "" {
+		return key
+	}
+	return strings.TrimSpace(ref.ClaimName)
+}
+
+func executionWorkspaceCheckpointURI(workspaceEnv workerenv.ExecutionWorkspaceEnv) string {
+	if !workspaceEnv.SnapshotOnRelease {
+		return ""
+	}
+	return strings.TrimSpace(workspaceEnv.SnapshotCheckpointURI)
+}
+
 func stageAgentSandboxExecutable(
 	ctx context.Context,
 	executor workspace.WorkspaceExecutor,
@@ -1052,7 +1376,22 @@ func stageAgentSandboxExecutable(
 			Mode: 0o700,
 		},
 	}
-	if token := workerServiceAccountToken(); token != "" {
+	if workerenv.IsTrue(innerEnv[workerenv.ResultStdout]) {
+		resultToken := strings.TrimSpace(innerEnv[workerenv.ResultStdoutToken])
+		if resultToken == "" {
+			resultToken, err = generateWorkspaceStdoutResultToken()
+			if err != nil {
+				return nil, nil, err
+			}
+			innerEnv[workerenv.ResultStdoutToken] = resultToken
+		}
+		artifacts = append(artifacts, workspace.UploadArtifact{
+			Path: agentSandboxResultMarkerUploadPath,
+			Data: []byte(agentSandboxResultTokenPrefix + resultToken + "\n"),
+			Mode: 0o600,
+		})
+	}
+	if token := workerServiceAccountToken(); token != "" && !workerenv.IsTrue(innerEnv[workerenv.AgentReadOnly]) {
 		tokenUploaded = true
 		artifacts = append(artifacts, workspace.UploadArtifact{
 			Path: agentSandboxSATokenUploadPath,
@@ -1095,6 +1434,14 @@ func stageAgentSandboxExecutable(
 	}
 	command = append(command, args...)
 	return command, innerEnv, nil
+}
+
+func generateWorkspaceStdoutResultToken() (string, error) {
+	var random [32]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate stdout result token: %w", err)
+	}
+	return hex.EncodeToString(random[:]), nil
 }
 
 func agentSandboxWorkerCommand(tokenUploaded, gitAskpassUploaded bool, tokenCleanupPaths ...string) string {
@@ -1286,7 +1633,13 @@ func cleanupExecutionWorkspaceWithOptions(
 		return nil
 	}
 
-	switch strings.TrimSpace(strings.ToLower(workspaceEnv.CleanupPolicy)) {
+	cleanupPolicy := executionWorkspaceCleanupPolicy(workspaceEnv)
+	statusEnv := workspaceEnv
+	if cleanupPolicy != "" {
+		statusEnv.CleanupPolicy = cleanupPolicy
+	}
+
+	switch cleanupPolicy {
 	case "retain":
 		if shouldPreScrubExecutionWorkspaceSecrets(workspaceEnv) {
 			if err := scrubExecutionWorkspaceSecrets(ctx, executor, ref, workspaceEnv); err != nil {
@@ -1294,21 +1647,23 @@ func cleanupExecutionWorkspaceWithOptions(
 			}
 		}
 		if _, err := executor.Release(ctx, workspace.ReleaseRequest{
-			Ref:       ref,
-			Retain:    true,
-			Reason:    "execution workspace cleanup policy retain",
-			Timeout:   workspaceEnv.ClaimTimeout,
-			SkipScrub: options.skipSubstrateReleaseScrub,
+			Ref:                   ref,
+			Retain:                true,
+			Reason:                "execution workspace cleanup policy retain",
+			Timeout:               workspaceEnv.ClaimTimeout,
+			SkipScrub:             options.skipSubstrateReleaseScrub,
+			SnapshotCheckpointURI: executionWorkspaceCheckpointURI(workspaceEnv),
 		}); err != nil {
 			return fmt.Errorf("retain workspace: %w", err)
 		}
 		if submitStatus {
 			submitExecutionWorkspaceStatus(
-				workspaceEnv,
+				statusEnv,
 				corev1alpha1.ExecutionWorkspacePhaseRetained,
 				corev1alpha1.ExecutionWorkspaceReasonRetained,
 				reused,
 				"workspace retained",
+				options.statusOptions...,
 			)
 		}
 		return nil
@@ -1323,11 +1678,12 @@ func cleanupExecutionWorkspaceWithOptions(
 		}
 		if submitStatus {
 			submitExecutionWorkspaceStatus(
-				workspaceEnv,
+				statusEnv,
 				corev1alpha1.ExecutionWorkspacePhaseDeleted,
 				corev1alpha1.ExecutionWorkspaceReasonDeleted,
 				reused,
 				"workspace deleted",
+				options.statusOptions...,
 			)
 		}
 		return nil
@@ -1343,21 +1699,23 @@ func cleanupExecutionWorkspaceWithOptions(
 			}
 		}
 		if _, err := executor.Release(ctx, workspace.ReleaseRequest{
-			Ref:       ref,
-			Retain:    true,
-			Reason:    "unsupported execution workspace cleanup policy",
-			Timeout:   workspaceEnv.ClaimTimeout,
-			SkipScrub: options.skipSubstrateReleaseScrub,
+			Ref:                   ref,
+			Retain:                true,
+			Reason:                "unsupported execution workspace cleanup policy",
+			Timeout:               workspaceEnv.ClaimTimeout,
+			SkipScrub:             options.skipSubstrateReleaseScrub,
+			SnapshotCheckpointURI: executionWorkspaceCheckpointURI(workspaceEnv),
 		}); err != nil {
 			return fmt.Errorf("retain workspace after unsupported cleanup policy: %w", err)
 		}
 		if submitStatus {
 			submitExecutionWorkspaceStatus(
-				workspaceEnv,
+				statusEnv,
 				corev1alpha1.ExecutionWorkspacePhaseRetained,
 				corev1alpha1.ExecutionWorkspaceReasonRetained,
 				reused,
 				"workspace retained",
+				options.statusOptions...,
 			)
 		}
 		return nil
@@ -1545,6 +1903,14 @@ func scrubInnerExecutionWorkspaceEnv(env map[string]string) {
 		workerenv.ExecutionWorkspaceReusePolicy,
 		workerenv.ExecutionWorkspaceReuseKey,
 		workerenv.ExecutionWorkspaceCleanupPolicy,
+		workerenv.ExecutionWorkspaceBoot,
+		workerenv.ExecutionWorkspacePoolName,
+		workerenv.ExecutionWorkspacePoolNamespace,
+		workerenv.ExecutionWorkspaceSnapshotRestoreURI,
+		workerenv.ExecutionWorkspaceSnapshotCheckpointURI,
+		workerenv.ExecutionWorkspaceSnapshotOnRelease,
+		workerenv.ExecutionWorkspaceProcessMode,
+		workerenv.ExecutionWorkspaceResidentKey,
 		workerenv.ExecutionWorkspaceClaimTimeoutSeconds,
 		workerenv.ExecutionWorkspaceCommandTimeoutSeconds,
 		workerenv.ExecutionWorkspaceStatusEndpoint,
@@ -1553,6 +1919,12 @@ func scrubInnerExecutionWorkspaceEnv(env map[string]string) {
 		workerenv.SubstrateAPIInsecureSkipVerify,
 		workerenv.SubstrateRouterURL,
 		workerenv.SubstrateActorDNSSuffix,
+		workerenv.SubstrateSessionIdentityToken,
+		workerenv.SubstrateSessionIdentityRequired,
+		workerenv.SubstrateSessionIdentityMintCert,
+		workerenv.SubstrateSessionIdentityAudience,
+		workerenv.SubstrateSessionIdentityAppID,
+		workerenv.SubstrateSessionIdentityUserID,
 		workerenv.WorkspaceBootstrapToken,
 	} {
 		delete(env, name)

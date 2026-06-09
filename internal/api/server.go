@@ -46,29 +46,31 @@ type ServerConfig struct {
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
 	SecurityStore             store.SecurityStore
+	RepositoryMonitorStore    store.RepositoryMonitorStore
 	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
 }
 
 // Server is the REST API server
 type Server struct {
-	app                 *fiber.App
-	client              client.Client
-	config              ServerConfig
-	sessionManager      *controller.SessionManager
-	handlers            *Handlers
-	chatHandler         *ChatHandler
-	openaiHandler       *OpenAICompatHandler
-	anthropicHandler    *AnthropicCompatHandler
-	internalHandlers    *InternalHandlers
-	ResultStore         store.ResultStore
-	SessionStore        store.SessionStore
-	PlanStore           store.PlanStore
-	MessageStore        store.MessageStore
-	ArtifactStore       store.ArtifactStore
-	MemoryStore         store.MemoryStore
-	MemoryProposalStore store.MemoryProposalStore
-	SecurityStore       store.SecurityStore
+	app                    *fiber.App
+	client                 client.Client
+	config                 ServerConfig
+	sessionManager         *controller.SessionManager
+	handlers               *Handlers
+	chatHandler            *ChatHandler
+	openaiHandler          *OpenAICompatHandler
+	anthropicHandler       *AnthropicCompatHandler
+	internalHandlers       *InternalHandlers
+	ResultStore            store.ResultStore
+	SessionStore           store.SessionStore
+	PlanStore              store.PlanStore
+	MessageStore           store.MessageStore
+	ArtifactStore          store.ArtifactStore
+	MemoryStore            store.MemoryStore
+	MemoryProposalStore    store.MemoryProposalStore
+	SecurityStore          store.SecurityStore
+	RepositoryMonitorStore store.RepositoryMonitorStore
 }
 
 // NewServer creates a new API server
@@ -80,18 +82,19 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	})
 
 	server := &Server{
-		app:                 app,
-		client:              c,
-		config:              config,
-		sessionManager:      sessionManager,
-		ResultStore:         config.ResultStore,
-		SessionStore:        config.SessionStore,
-		PlanStore:           config.PlanStore,
-		MessageStore:        config.MessageStore,
-		ArtifactStore:       config.ArtifactStore,
-		MemoryStore:         config.MemoryStore,
-		MemoryProposalStore: config.MemoryProposalStore,
-		SecurityStore:       config.SecurityStore,
+		app:                    app,
+		client:                 c,
+		config:                 config,
+		sessionManager:         sessionManager,
+		ResultStore:            config.ResultStore,
+		SessionStore:           config.SessionStore,
+		PlanStore:              config.PlanStore,
+		MessageStore:           config.MessageStore,
+		ArtifactStore:          config.ArtifactStore,
+		MemoryStore:            config.MemoryStore,
+		MemoryProposalStore:    config.MemoryProposalStore,
+		SecurityStore:          config.SecurityStore,
+		RepositoryMonitorStore: config.RepositoryMonitorStore,
 	}
 
 	server.handlers = NewHandlers(HandlersConfig{
@@ -108,6 +111,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		MemoryStore:               config.MemoryStore,
 		MemoryProposalStore:       config.MemoryProposalStore,
 		SecurityStore:             config.SecurityStore,
+		RepositoryMonitorStore:    config.RepositoryMonitorStore,
 	})
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
@@ -184,6 +188,9 @@ func (s *Server) setupRoutes() {
 	s.app.Get("/healthz", s.handlers.Healthz)
 	s.app.Get("/readyz", s.handlers.Readyz)
 
+	// GitHub webhooks use HMAC verification instead of Kubernetes/OIDC bearer auth.
+	s.app.Post("/webhooks/github", s.handlers.HandleGitHubWebhook)
+
 	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC, ContextTokens: s.config.ContextTokens})
 
 	// API v1 group
@@ -253,6 +260,9 @@ func (s *Server) setupRoutes() {
 	api.Put("/security/repositories/:name/threat-model", s.handlers.UpdateThreatModel)
 	api.Get("/security/repositories/:name/scans", s.handlers.ListSecurityScanRuns)
 	api.Post("/security/repositories/:name/scans", s.handlers.CreateManualSecurityScan)
+	api.Get("/security/repositories/:name/slices", s.handlers.ListSecurityReviewSlices)
+	api.Get("/security/repositories/:name/slices/:sliceID", s.handlers.GetSecurityReviewSlice)
+	api.Get("/security/repositories/:name/dropped-findings", s.handlers.ListSecurityDroppedFindings)
 	api.Get("/security/repositories/:name/findings", s.handlers.ListSecurityFindings)
 	api.Get("/security/findings/:id", s.handlers.GetSecurityFinding)
 	api.Post("/security/findings/:id/dismiss", s.handlers.DismissSecurityFinding)
@@ -261,6 +271,17 @@ func (s *Server) setupRoutes() {
 	api.Post("/security/findings/:id/patch", s.handlers.GenerateSecurityPatch)
 	api.Get("/security/findings/:id/patches", s.handlers.ListSecurityPatchProposals)
 	api.Post("/security/findings/:id/pull-request", s.handlers.CreateSecurityPullRequest)
+
+	// Repository monitor endpoints
+	api.Post("/monitors/repositories", s.handlers.CreateRepositoryMonitor)
+	api.Get("/monitors/repositories", s.handlers.ListRepositoryMonitors)
+	api.Get("/monitors/repositories/:name", s.handlers.GetRepositoryMonitor)
+	api.Put("/monitors/repositories/:name", s.handlers.UpdateRepositoryMonitor)
+	api.Delete("/monitors/repositories/:name", s.handlers.DeleteRepositoryMonitor)
+	api.Post("/monitors/repositories/:name/runs", s.handlers.CreateRepositoryMonitorRun)
+	api.Get("/monitors/repositories/:name/runs", s.handlers.ListRepositoryMonitorRuns)
+	api.Get("/monitors/repositories/:name/items", s.handlers.ListRepositoryMonitorItems)
+	api.Get("/monitors/events", s.handlers.ListRepositoryMonitorEvents)
 
 	// Auth validation endpoint
 	api.Get("/auth/validate", s.handleAuthValidate)

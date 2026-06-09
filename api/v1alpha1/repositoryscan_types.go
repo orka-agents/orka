@@ -31,9 +31,13 @@ type RepositoryScanSpec struct {
 	// +optional
 	Repository string `json:"repository,omitempty"`
 
-	// Branch is the base branch to scan. Defaults to the repository default branch when omitted.
+	// Branch is the base branch to scan. Defaults to the literal main branch when omitted.
 	// +optional
 	Branch string `json:"branch,omitempty"`
+
+	// Ref is a specific git ref, tag, or commit SHA to checkout for scan tasks.
+	// +optional
+	Ref string `json:"ref,omitempty"`
 
 	// SubPath scopes scanning to a subdirectory in a monorepo.
 	// +optional

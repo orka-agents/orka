@@ -1,0 +1,119 @@
+name: Helm Chart
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "charts/orka/**"
+      - ".github/workflows/helm-chart.yml"
+  pull_request:
+    paths:
+      - "charts/orka/**"
+      - ".github/workflows/helm-chart.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('helm-chart-pr-{0}', github.event.pull_request.number) || 'gh-pages' }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Lint and package Helm chart
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Show Helm version
+        run: helm version
+
+      - name: Lint chart
+        run: helm lint charts/orka
+
+      - name: Package chart
+        run: |
+          mkdir -p .cr-release-packages
+          helm package charts/orka --destination .cr-release-packages
+
+  publish:
+    name: Publish Helm chart repository
+    needs: validate
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Show Helm version
+        run: helm version
+
+      - name: Lint chart
+        run: helm lint charts/orka
+
+      - name: Package chart
+        run: |
+          mkdir -p .cr-release-packages
+          helm package charts/orka --destination .cr-release-packages
+
+      - name: Publish chart repository
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          rm -rf gh-pages
+          git init gh-pages
+          cd gh-pages
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          if git fetch --depth=1 origin gh-pages:refs/remotes/origin/gh-pages; then
+            git checkout -B gh-pages origin/gh-pages
+          else
+            git checkout --orphan gh-pages
+            git rm -rf . || true
+          fi
+
+          mkdir -p charts
+
+          # Migrate chart artifacts from the previous root-level repository layout.
+          shopt -s nullglob
+          for artifact in ./*.tgz ./*.prov; do
+            mv "$artifact" charts/
+          done
+          if [ -f index.yaml ] && [ ! -f charts/index.yaml ]; then
+            mv index.yaml charts/index.yaml
+          else
+            rm -f index.yaml
+          fi
+
+          cp ../.cr-release-packages/*.tgz charts/
+
+          if [ -f charts/index.yaml ]; then
+            helm repo index charts --url "https://sozercan.github.io/orka/charts" --merge charts/index.yaml
+          else
+            helm repo index charts --url "https://sozercan.github.io/orka/charts"
+          fi
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No Helm chart changes to publish."
+            exit 0
+          fi
+
+          git commit -m "Publish Helm chart"
+          git push origin HEAD:gh-pages

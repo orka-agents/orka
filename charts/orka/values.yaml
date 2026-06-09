@@ -124,6 +124,9 @@ controller:
       sessionWrite: ""
       securityRead: ""
       securityWrite: ""
+      monitorRead: ""
+      monitorWrite: ""
+      monitorOperate: ""
       skillRead: ""
       skillWrite: ""
     tts:
@@ -172,6 +175,27 @@ workers:
       pullPolicy: IfNotPresent
     # Optional Codex CLI sandbox mode passed to Codex worker pods (e.g. danger-full-access)
     sandboxMode: ""
+
+# GitHub webhook and label-trigger configuration.
+# Configure a repository webhook to POST to /webhooks/github with the secret below.
+github:
+  webhook:
+    # Kubernetes Secret containing the GitHub webhook shared secret.
+    secretName: ""
+    secretKey: secret
+  labelTrigger:
+    # Default runtime Agent CR used for labels such as agent:implement.
+    agent: ""
+    # Optional namespace for created Tasks; defaults to controller.watchNamespace or default.
+    namespace: ""
+    # Optional Secret name mounted into agent workspaces for git/GitHub auth.
+    gitSecret: ""
+    # Label prefix that marks an Orka trigger.
+    prefix: "agent:"
+    timeout: "30m"
+    maxTurns: 100
+    # Optional action-specific Agent overrides, e.g. implement: codex-agent.
+    agents: {}
 
 # Service configuration
 service:

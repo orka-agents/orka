@@ -126,6 +126,9 @@ func main() {
 	var contextTokenSessionWriteScopes string
 	var contextTokenSecurityReadScopes string
 	var contextTokenSecurityWriteScopes string
+	var contextTokenMonitorReadScopes string
+	var contextTokenMonitorWriteScopes string
+	var contextTokenMonitorOperateScopes string
 	var contextTokenSkillReadScopes string
 	var contextTokenSkillWriteScopes string
 	var contextTokenTTSURL string
@@ -270,6 +273,27 @@ func main() {
 	flag.StringVar(&substrateConfig.BootstrapSecretKey, "substrate-bootstrap-token-secret-key",
 		substrateConfig.BootstrapSecretKey,
 		"Kubernetes Secret key containing the Substrate workspace daemon bootstrap token.")
+	flag.StringVar(&substrateConfig.SessionIdentitySecretName, "substrate-session-identity-token-secret-name",
+		substrateConfig.SessionIdentitySecretName,
+		"Kubernetes Secret name containing the bearer token for Substrate SessionIdentity.")
+	flag.StringVar(&substrateConfig.SessionIdentitySecretKey, "substrate-session-identity-token-secret-key",
+		substrateConfig.SessionIdentitySecretKey,
+		"Kubernetes Secret key containing the bearer token for Substrate SessionIdentity.")
+	flag.BoolVar(&substrateConfig.SessionIdentityRequired, "substrate-session-identity-required",
+		substrateConfig.SessionIdentityRequired,
+		"Fail Substrate workspace handoff when SessionIdentity cannot mint a per-actor JWT.")
+	flag.BoolVar(&substrateConfig.SessionIdentityMintCert, "substrate-session-identity-mint-cert",
+		substrateConfig.SessionIdentityMintCert,
+		"Unsupported alpha option for Substrate SessionIdentity certificate minting; currently rejected when enabled.")
+	flag.StringVar(&substrateConfig.SessionIdentityAudience, "substrate-session-identity-audience",
+		substrateConfig.SessionIdentityAudience,
+		"Comma-separated audiences requested from Substrate SessionIdentity minted JWTs.")
+	flag.StringVar(&substrateConfig.SessionIdentityAppID, "substrate-session-identity-app-id",
+		substrateConfig.SessionIdentityAppID,
+		"Application ID requested from Substrate SessionIdentity minted JWTs.")
+	flag.StringVar(&substrateConfig.SessionIdentityUserID, "substrate-session-identity-user-id",
+		substrateConfig.SessionIdentityUserID,
+		"User ID requested from Substrate SessionIdentity minted JWTs.")
 	flag.DurationVar(&substrateConfig.ClaimTimeout, "substrate-claim-timeout", substrateConfig.ClaimTimeout,
 		"Timeout for Substrate actor claim, readiness, release, retain, and delete operations.")
 	flag.DurationVar(&substrateConfig.CommandTimeout, "substrate-command-timeout", substrateConfig.CommandTimeout,
@@ -344,6 +368,16 @@ func main() {
 	flag.StringVar(&contextTokenSecurityWriteScopes, "context-token-security-write-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_SECURITY_WRITE_SCOPES"),
 		"Comma-separated context-token scopes that authorize security scan writes. Defaults to orka:security:write.")
+	flag.StringVar(&contextTokenMonitorReadScopes, "context-token-monitor-read-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_MONITOR_READ_SCOPES"),
+		"Comma-separated context-token scopes that authorize repository monitor reads. Defaults to orka:monitors:read.")
+	flag.StringVar(&contextTokenMonitorWriteScopes, "context-token-monitor-write-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_MONITOR_WRITE_SCOPES"),
+		"Comma-separated context-token scopes that authorize repository monitor writes. Defaults to orka:monitors:write.")
+	flag.StringVar(&contextTokenMonitorOperateScopes, "context-token-monitor-operate-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_MONITOR_OPERATE_SCOPES"),
+		"Comma-separated context-token scopes that authorize repository monitor operations. "+
+			"Defaults to orka:monitors:operate.")
 	flag.StringVar(&contextTokenSkillReadScopes, "context-token-skill-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_SKILL_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize Skill reads. Defaults to orka:skills:read.")
@@ -427,25 +461,28 @@ func main() {
 		os.Exit(1)
 	}
 	contextTokenAuthzConfig, err := api.NewContextTokenAuthorizationConfig(api.ContextTokenAuthorizationConfigOptions{
-		Mode:                contextTokenAuthzMode,
-		TaskCreateScopes:    contextTokenTaskCreateScopes,
-		TaskReadScopes:      contextTokenTaskReadScopes,
-		TaskListScopes:      contextTokenTaskListScopes,
-		TaskDeleteScopes:    contextTokenTaskDeleteScopes,
-		ToolReadScopes:      contextTokenToolReadScopes,
-		ToolUseScopes:       contextTokenToolUseScopes,
-		ProviderUseScopes:   contextTokenProviderUseScopes,
-		SecretReadScopes:    contextTokenSecretReadScopes,
-		AgentReadScopes:     contextTokenAgentReadScopes,
-		AgentWriteScopes:    contextTokenAgentWriteScopes,
-		MemoryReadScopes:    contextTokenMemoryReadScopes,
-		MemoryWriteScopes:   contextTokenMemoryWriteScopes,
-		SessionReadScopes:   contextTokenSessionReadScopes,
-		SessionWriteScopes:  contextTokenSessionWriteScopes,
-		SecurityReadScopes:  contextTokenSecurityReadScopes,
-		SecurityWriteScopes: contextTokenSecurityWriteScopes,
-		SkillReadScopes:     contextTokenSkillReadScopes,
-		SkillWriteScopes:    contextTokenSkillWriteScopes,
+		Mode:                 contextTokenAuthzMode,
+		TaskCreateScopes:     contextTokenTaskCreateScopes,
+		TaskReadScopes:       contextTokenTaskReadScopes,
+		TaskListScopes:       contextTokenTaskListScopes,
+		TaskDeleteScopes:     contextTokenTaskDeleteScopes,
+		ToolReadScopes:       contextTokenToolReadScopes,
+		ToolUseScopes:        contextTokenToolUseScopes,
+		ProviderUseScopes:    contextTokenProviderUseScopes,
+		SecretReadScopes:     contextTokenSecretReadScopes,
+		AgentReadScopes:      contextTokenAgentReadScopes,
+		AgentWriteScopes:     contextTokenAgentWriteScopes,
+		MemoryReadScopes:     contextTokenMemoryReadScopes,
+		MemoryWriteScopes:    contextTokenMemoryWriteScopes,
+		SessionReadScopes:    contextTokenSessionReadScopes,
+		SessionWriteScopes:   contextTokenSessionWriteScopes,
+		SecurityReadScopes:   contextTokenSecurityReadScopes,
+		SecurityWriteScopes:  contextTokenSecurityWriteScopes,
+		MonitorReadScopes:    contextTokenMonitorReadScopes,
+		MonitorWriteScopes:   contextTokenMonitorWriteScopes,
+		MonitorOperateScopes: contextTokenMonitorOperateScopes,
+		SkillReadScopes:      contextTokenSkillReadScopes,
+		SkillWriteScopes:     contextTokenSkillWriteScopes,
 	})
 	if err != nil {
 		setupLog.Error(err, "invalid context token authorization configuration")
@@ -676,10 +713,23 @@ func main() {
 	}
 
 	if err := (&controller.ToolReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:                    mgr.GetClient(),
+		Scheme:                    mgr.GetScheme(),
+		SubstrateEnabled:          substrateEnabled,
+		SubstrateConfig:           substrateConfig,
+		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Tool")
+		os.Exit(1)
+	}
+
+	if err := (&controller.SubstrateActorPoolReconciler{
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		SubstrateEnabled: substrateEnabled,
+		SubstrateConfig:  substrateConfig,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "SubstrateActorPool")
 		os.Exit(1)
 	}
 
@@ -715,6 +765,17 @@ func main() {
 		ResultStore:   sqliteStore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryScan")
+		os.Exit(1)
+	}
+
+	if err := (&controller.RepositoryMonitorReconciler{
+		Client:                    mgr.GetClient(),
+		Scheme:                    mgr.GetScheme(),
+		Store:                     sqliteStore,
+		ResultStore:               sqliteStore,
+		EnforceNamespaceIsolation: enforceNamespaceIsolation,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "RepositoryMonitor")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
@@ -755,6 +816,7 @@ func main() {
 		MemoryStore:               sqliteStore,
 		MemoryProposalStore:       sqliteStore,
 		SecurityStore:             sqliteStore,
+		RepositoryMonitorStore:    sqliteStore,
 		HealthChecker:             sqliteStore,
 		Clientset:                 kubeClient,
 		Chat: api.ChatConfig{

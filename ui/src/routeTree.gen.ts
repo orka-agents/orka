@@ -18,6 +18,7 @@ import { Route as ToolsIndexRouteImport } from './routes/tools/index'
 import { Route as TasksIndexRouteImport } from './routes/tasks/index'
 import { Route as SessionsIndexRouteImport } from './routes/sessions/index'
 import { Route as SecurityIndexRouteImport } from './routes/security/index'
+import { Route as MonitorsIndexRouteImport } from './routes/monitors/index'
 import { Route as AgentsIndexRouteImport } from './routes/agents/index'
 import { Route as ToolsToolNameRouteImport } from './routes/tools/$toolName'
 import { Route as TasksNewRouteImport } from './routes/tasks/new'
@@ -25,6 +26,7 @@ import { Route as TasksTaskIdRouteImport } from './routes/tasks/$taskId'
 import { Route as SessionsSessionIdRouteImport } from './routes/sessions/$sessionId'
 import { Route as SecurityNewRouteImport } from './routes/security/new'
 import { Route as SecurityRepoIdRouteImport } from './routes/security/$repoId'
+import { Route as MonitorsMonitorIdRouteImport } from './routes/monitors/$monitorId'
 import { Route as AgentsNewRouteImport } from './routes/agents/new'
 import { Route as AgentsAgentIdRouteImport } from './routes/agents/$agentId'
 import { Route as SecurityFindingsFindingIdRouteImport } from './routes/security/findings/$findingId'
@@ -74,6 +76,11 @@ const SecurityIndexRoute = SecurityIndexRouteImport.update({
   path: '/security/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const MonitorsIndexRoute = MonitorsIndexRouteImport.update({
+  id: '/monitors/',
+  path: '/monitors/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AgentsIndexRoute = AgentsIndexRouteImport.update({
   id: '/agents/',
   path: '/agents/',
@@ -109,6 +116,11 @@ const SecurityRepoIdRoute = SecurityRepoIdRouteImport.update({
   path: '/security/$repoId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const MonitorsMonitorIdRoute = MonitorsMonitorIdRouteImport.update({
+  id: '/monitors/$monitorId',
+  path: '/monitors/$monitorId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AgentsNewRoute = AgentsNewRouteImport.update({
   id: '/agents/new',
   path: '/agents/new',
@@ -134,6 +146,7 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
+  '/monitors/$monitorId': typeof MonitorsMonitorIdRoute
   '/security/$repoId': typeof SecurityRepoIdRoute
   '/security/new': typeof SecurityNewRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
@@ -141,6 +154,7 @@ export interface FileRoutesByFullPath {
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
   '/agents/': typeof AgentsIndexRoute
+  '/monitors/': typeof MonitorsIndexRoute
   '/security/': typeof SecurityIndexRoute
   '/sessions/': typeof SessionsIndexRoute
   '/tasks/': typeof TasksIndexRoute
@@ -155,6 +169,7 @@ export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
+  '/monitors/$monitorId': typeof MonitorsMonitorIdRoute
   '/security/$repoId': typeof SecurityRepoIdRoute
   '/security/new': typeof SecurityNewRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
@@ -162,6 +177,7 @@ export interface FileRoutesByTo {
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
   '/agents': typeof AgentsIndexRoute
+  '/monitors': typeof MonitorsIndexRoute
   '/security': typeof SecurityIndexRoute
   '/sessions': typeof SessionsIndexRoute
   '/tasks': typeof TasksIndexRoute
@@ -177,6 +193,7 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
+  '/monitors/$monitorId': typeof MonitorsMonitorIdRoute
   '/security/$repoId': typeof SecurityRepoIdRoute
   '/security/new': typeof SecurityNewRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
@@ -184,6 +201,7 @@ export interface FileRoutesById {
   '/tasks/new': typeof TasksNewRoute
   '/tools/$toolName': typeof ToolsToolNameRoute
   '/agents/': typeof AgentsIndexRoute
+  '/monitors/': typeof MonitorsIndexRoute
   '/security/': typeof SecurityIndexRoute
   '/sessions/': typeof SessionsIndexRoute
   '/tasks/': typeof TasksIndexRoute
@@ -200,6 +218,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/agents/$agentId'
     | '/agents/new'
+    | '/monitors/$monitorId'
     | '/security/$repoId'
     | '/security/new'
     | '/sessions/$sessionId'
@@ -207,6 +226,7 @@ export interface FileRouteTypes {
     | '/tasks/new'
     | '/tools/$toolName'
     | '/agents/'
+    | '/monitors/'
     | '/security/'
     | '/sessions/'
     | '/tasks/'
@@ -221,6 +241,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/agents/$agentId'
     | '/agents/new'
+    | '/monitors/$monitorId'
     | '/security/$repoId'
     | '/security/new'
     | '/sessions/$sessionId'
@@ -228,6 +249,7 @@ export interface FileRouteTypes {
     | '/tasks/new'
     | '/tools/$toolName'
     | '/agents'
+    | '/monitors'
     | '/security'
     | '/sessions'
     | '/tasks'
@@ -242,6 +264,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/agents/$agentId'
     | '/agents/new'
+    | '/monitors/$monitorId'
     | '/security/$repoId'
     | '/security/new'
     | '/sessions/$sessionId'
@@ -249,6 +272,7 @@ export interface FileRouteTypes {
     | '/tasks/new'
     | '/tools/$toolName'
     | '/agents/'
+    | '/monitors/'
     | '/security/'
     | '/sessions/'
     | '/tasks/'
@@ -264,6 +288,7 @@ export interface RootRouteChildren {
   LoginRoute: typeof LoginRoute
   AgentsAgentIdRoute: typeof AgentsAgentIdRoute
   AgentsNewRoute: typeof AgentsNewRoute
+  MonitorsMonitorIdRoute: typeof MonitorsMonitorIdRoute
   SecurityRepoIdRoute: typeof SecurityRepoIdRoute
   SecurityNewRoute: typeof SecurityNewRoute
   SessionsSessionIdRoute: typeof SessionsSessionIdRoute
@@ -271,6 +296,7 @@ export interface RootRouteChildren {
   TasksNewRoute: typeof TasksNewRoute
   ToolsToolNameRoute: typeof ToolsToolNameRoute
   AgentsIndexRoute: typeof AgentsIndexRoute
+  MonitorsIndexRoute: typeof MonitorsIndexRoute
   SecurityIndexRoute: typeof SecurityIndexRoute
   SessionsIndexRoute: typeof SessionsIndexRoute
   TasksIndexRoute: typeof TasksIndexRoute
@@ -343,6 +369,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SecurityIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/monitors/': {
+      id: '/monitors/'
+      path: '/monitors'
+      fullPath: '/monitors/'
+      preLoaderRoute: typeof MonitorsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/agents/': {
       id: '/agents/'
       path: '/agents'
@@ -392,6 +425,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SecurityRepoIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/monitors/$monitorId': {
+      id: '/monitors/$monitorId'
+      path: '/monitors/$monitorId'
+      fullPath: '/monitors/$monitorId'
+      preLoaderRoute: typeof MonitorsMonitorIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/agents/new': {
       id: '/agents/new'
       path: '/agents/new'
@@ -424,6 +464,7 @@ const rootRouteChildren: RootRouteChildren = {
   LoginRoute: LoginRoute,
   AgentsAgentIdRoute: AgentsAgentIdRoute,
   AgentsNewRoute: AgentsNewRoute,
+  MonitorsMonitorIdRoute: MonitorsMonitorIdRoute,
   SecurityRepoIdRoute: SecurityRepoIdRoute,
   SecurityNewRoute: SecurityNewRoute,
   SessionsSessionIdRoute: SessionsSessionIdRoute,
@@ -431,6 +472,7 @@ const rootRouteChildren: RootRouteChildren = {
   TasksNewRoute: TasksNewRoute,
   ToolsToolNameRoute: ToolsToolNameRoute,
   AgentsIndexRoute: AgentsIndexRoute,
+  MonitorsIndexRoute: MonitorsIndexRoute,
   SecurityIndexRoute: SecurityIndexRoute,
   SessionsIndexRoute: SessionsIndexRoute,
   TasksIndexRoute: TasksIndexRoute,

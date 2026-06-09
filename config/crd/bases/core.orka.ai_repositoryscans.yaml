@@ -70,8 +70,8 @@ spec:
                 - name
                 type: object
               branch:
-                description: Branch is the base branch to scan. Defaults to the repository
-                  default branch when omitted.
+                description: Branch is the base branch to scan. Defaults to the literal
+                  main branch when omitted.
                 type: string
               forkRepo:
                 description: ForkRepo is the writable fork repository URL used for
@@ -125,6 +125,10 @@ spec:
                   only supported v1 provider.
                 enum:
                 - github
+                type: string
+              ref:
+                description: Ref is a specific git ref, tag, or commit SHA to checkout
+                  for scan tasks.
                 type: string
               repoURL:
                 description: RepoURL is the repository URL to scan.
