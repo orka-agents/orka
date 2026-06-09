@@ -729,7 +729,7 @@ Creates a scheduled prompt-orchestrated pull request monitor Task for one GitHub
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `name` | string | yes | Human-readable monitor name. The created Task receives an Orka-generated name. |
-| `repo_url` | string | yes | GitHub repository URL to monitor. The created Task stores it in `spec.workspace.gitRepo`. |
+| `repo_url` | string | yes | Credential-free GitHub repository root URL to monitor, such as `https://github.com/owner/repo`, `https://github.com/owner/repo.git`, or `git@github.com:owner/repo.git`. The created Task stores it in `spec.workspace.gitRepo`. |
 | `schedule` | string | yes | Cron schedule for the monitor Task. |
 | `agent_ref` | string | yes | AI Agent name for the scheduled monitor Task. The Agent must have coordination enabled and autonomous coordination disabled. |
 | `namespace` | string | no | Namespace for the monitor Task. Defaults to the current task namespace. |
@@ -738,6 +738,8 @@ Creates a scheduled prompt-orchestrated pull request monitor Task for one GitHub
 | `per_page` | integer | no | Maximum open PRs to scan per run. Defaults to `30`, maximum `100`. |
 | `review_event` | string | no | Review event to post after analysis: `COMMENT`, `APPROVE`, or `REQUEST_CHANGES`. Defaults to `COMMENT`. |
 | `prompt` | string | no | Additional instructions appended to the generated monitor prompt. |
+
+Pull request, issue, tree, blob, commit, query-string, fragment, and embedded-credential URLs are rejected before Orka creates the monitor Task.
 
 If `gitSecretRef` is omitted, Orka searches `git-credentials`, `github-credentials`, `copilot-token`, `github-token`, and `git-token`. The selected Git credential Secret must exist in the target namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key. The created Task receives a narrow tool set: `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The generated prompt tells the Task to pass the same `repo_url` to each PR tool call. Those explicit repository URLs are scope-checked against the Task workspace or signed transaction repository context before Orka resolves credentials or calls GitHub.
 
