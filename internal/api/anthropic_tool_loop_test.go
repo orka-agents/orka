@@ -28,6 +28,9 @@ func TestCoordinatorSystemPrompt_PRReviewCIRepairLoop(t *testing.T) {
 			t.Fatalf("coordinator prompt missing %q", want)
 		}
 	}
+	if strings.Contains(prompt, "agentName") {
+		t.Fatalf("coordinator prompt should use proxy create_agent data.name contract, found agentName")
+	}
 }
 
 func TestCoordinatorSystemPrompt_CreateAgentInvariants(t *testing.T) {
@@ -85,7 +88,6 @@ func TestCoordinatorSystemPrompt_FailureSignalHandling(t *testing.T) {
 
 // AGENT_REF on create_agent_task / create_ai_task MUST be a real Agent name,
 // not a role label. create_agent takes a "role" and generates the Agent name
-// as {parent-task}-{role}-{hash} — the model must copy the returned agentName
 // back into agentRef. The prompt's AGENT_REF SOURCING section pins this rule
 // + a worked example + a recovery path so that Opus 4.7 (which has been
 // observed inventing agentRefs from role labels) actually sees and follows it.
@@ -95,13 +97,12 @@ func TestCoordinatorSystemPrompt_AgentRefSourcing(t *testing.T) {
 	for _, want := range []string{
 		"AGENT_REF SOURCING",
 		"agentRef is a Kubernetes Agent name, NOT a role label",
-		"create_agent takes \"role\"",
-		"{parent-task}-{role}-{hash}",
-		"copy that returned agentName verbatim",
+		"create_agent takes \"name\"",
+		"returned name verbatim",
 		"NEVER invent agentRefs from role labels",
 		"Worked example",
-		`create_agent role="coder"`,
-		`agentRef="proxy-abc-coder-de4f56"`,
+		`create_agent name="demo-coder-1234"`,
+		`agentRef="demo-coder-1234"`,
 		"Do NOT retry the failed Task",
 		"wait_for_task.data.message is",
 	} {
