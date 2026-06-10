@@ -11,7 +11,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
@@ -211,7 +210,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 			// premature text already streamed plus the recovery, but the
 			// workflow continues instead of validation/review/PR being skipped.
 			if len(toolCalls) == 0 {
-				if strings.Contains(textContent, goalStateSentinel) {
+				if hasGoalStateSentinelPrefix(textContent) {
 					stopReason := oaiStopReasonEndTurn
 					_ = writeMessageDelta(w, stopReason, totalOutputTokens)
 					_ = writeMessageStop(w)
@@ -469,7 +468,7 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 		// Use the correct stop reason — "tool_use" if tool calls were emitted
 		stopReason := oaiStopReasonEndTurn
 		if hasToolCalls {
-			stopReason = "tool_use"
+			stopReason = oaiStopReasonToolUse
 		}
 		_ = writeMessageDelta(w, stopReason, 0)
 		_ = writeMessageStop(w)

@@ -33,10 +33,16 @@ const goalStateSentinel = "<ORKA_GOAL_STATE_REACHED>"
 // summary as the body of a premature-end response.
 func truncateForLog(s string, max int) string {
 	s = strings.ReplaceAll(strings.TrimSpace(s), "\n", "⏎ ")
-	if len(s) <= max {
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	return string(runes[:max]) + "…"
+}
+
+func hasGoalStateSentinelPrefix(s string) bool {
+	trimmed := strings.TrimLeft(s, " \t\r\n")
+	return trimmed == goalStateSentinel || strings.HasPrefix(trimmed, goalStateSentinel+"\n") || strings.HasPrefix(trimmed, goalStateSentinel+"\r\n")
 }
 
 // isStreamingRequiredErr returns true when the upstream provider rejects a
@@ -55,8 +61,8 @@ func isStreamingRequiredErr(err error) bool {
 // resulting chunks into a synthesized CompletionResponse. This is the
 // fallback path when provider.Complete is refused with
 // "streaming is required for operations that may take longer than N minutes".
-// The aggregation is intentionally simple: concatenate text content, append
-// each tool call exactly once, sum token counts. Final stop_reason follows
+// The aggregation is intentionally simple: concatenate text content and append
+// each tool call exactly once. Final stop_reason follows
 // the last chunk's reason or defaults to "end_turn".
 func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	streamCh, err := provider.Stream(ctx, req)
@@ -90,6 +96,47 @@ func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.Comp
 		}
 	}
 	return resp, nil
+}
+
+// toolLoopObserver receives best-effort progress events from the server-side
+// coordinator loop. It lets compatibility handlers stream user-visible progress
+// while preserving the loop's single source of truth in runToolLoopWithObserver.
+type toolLoopObserver struct {
+	OnAssistantContent  func(content string)
+	OnFinalContent      func(content string)
+	OnToolResult        func(tc llm.ToolCall, result string)
+	OnPrematureEndRetry func()
+	OnAutoPoll          func()
+}
+
+func (o *toolLoopObserver) assistantContent(content string) {
+	if o != nil && o.OnAssistantContent != nil && content != "" {
+		o.OnAssistantContent(content)
+	}
+}
+
+func (o *toolLoopObserver) finalContent(content string) {
+	if o != nil && o.OnFinalContent != nil && content != "" {
+		o.OnFinalContent(content)
+	}
+}
+
+func (o *toolLoopObserver) toolResult(tc llm.ToolCall, result string) {
+	if o != nil && o.OnToolResult != nil {
+		o.OnToolResult(tc, result)
+	}
+}
+
+func (o *toolLoopObserver) prematureEndRetry() {
+	if o != nil && o.OnPrematureEndRetry != nil {
+		o.OnPrematureEndRetry()
+	}
+}
+
+func (o *toolLoopObserver) autoPoll() {
+	if o != nil && o.OnAutoPoll != nil {
+		o.OnAutoPoll()
+	}
 }
 
 // coordinatorSystemPrompt returns the system prompt supplement for the proxy's coordinator mode.
@@ -126,11 +173,12 @@ POSTCONDITION TABLE (immediate next tool_use after each tool result — never te
 - After fetch_task_output (validation succeeded)      → create_agent_task (reviewer, omit pushBranch)
 - After fetch_task_output (every reviewer LGTM)       → create_pull_request
 - After create_pull_request                            → check_pull_request_ci
-- After check_pull_request_ci (success)               → FINAL TEXT REPORT (GOAL STATE A)
+- After check_pull_request_ci (passed)                → FINAL TEXT REPORT (GOAL STATE A)
 - After check_pull_request_ci (failed)                → create_agent_task (CI repair)
+- After check_pull_request_ci (no_checks/closed/unknown) → FINAL TEXT REPORT (GOAL STATE B)
 - After ANY hard limit hit (6 validation / 8 review / 3 CI repair tasks) → FINAL TEXT REPORT (GOAL STATE B)
-The ONLY two situations that license a text response are GOAL STATE A and GOAL
-STATE B. In every other situation, your response is wrong if it contains text.
+The ONLY situations that license a text response are GOAL STATE A and GOAL STATE B.
+In every other situation, your response is wrong if it contains text.
 
 ROLE: You are a project manager. You do NOT code. You research, plan, delegate, review, and iterate.
 
@@ -156,7 +204,7 @@ TOOLS:
 AGENT_REF SOURCING (the #1 cause of wasted child Tasks — read before any create_agent_task / create_ai_task call):
 - agentRef is a Kubernetes Agent name, NOT a role label. Valid sources:
     (a) .items[*].metadata.name from a list_agents response
-    (b) the agentName field returned by a prior create_agent call in THIS session
+	    (b) the agentName field returned by a prior create_agent call in THIS session
 - create_agent takes "role" (e.g. "coder", "reviewer"), NOT "name". It generates
   the Agent name as {parent-task}-{role}-{hash} and returns it as agentName.
   You must copy that returned agentName verbatim into agentRef on later task calls.
@@ -252,13 +300,14 @@ WORKFLOW:
 
 GOAL STATE — your turn is NOT done until ONE of these is true:
   (A) A pull request exists, validation passed, every reviewer returned LGTM
-      or APPROVED, AND check_pull_request_ci returned status=success.
+      or APPROVED, AND check_pull_request_ci returned status=passed.
       Report the PR URL.
-  (B) You hit a hard limit and report a SPECIFIC terminal status:
+  (B) You hit a hard limit or terminal non-green CI state and report a SPECIFIC terminal status:
       - VALIDATION_BLOCKED after 6 validation-repair tasks
       - REVIEW_BLOCKED after 8 review-repair tasks
       - CI_BLOCKED after 3 CI-repair tasks
       - CI_PENDING if check_pull_request_ci timed out with wait_timed_out=true
+      - CI_NO_CHECKS, CI_CLOSED, or CI_UNKNOWN when check_pull_request_ci returns status=no_checks, closed, or unknown
       - VALIDATION_CONFIG_BLOCKED if a validation environment cannot be determined
   (C) The harness has appended "[System: You have reached the maximum number
       of iterations...]" — provide the requested final summary.
@@ -531,6 +580,18 @@ func runNonStreamingToolLoop(
 	config ChatConfig,
 	toolCtx *tools.ToolContext,
 ) (*llm.CompletionResponse, error) {
+	return runToolLoopWithObserver(ctx, provider, req, model, config, toolCtx, nil)
+}
+
+func runToolLoopWithObserver(
+	ctx context.Context,
+	provider llm.Provider,
+	req *llm.CompletionRequest,
+	model string,
+	config ChatConfig,
+	toolCtx *tools.ToolContext,
+	observer *toolLoopObserver,
+) (*llm.CompletionResponse, error) {
 	repetitionTracker := make(map[string]int)
 	exposedToolNames := completionToolNameSet(req.Tools)
 	messages := make([]llm.Message, len(req.Messages))
@@ -541,10 +602,12 @@ func runNonStreamingToolLoop(
 		// Check context cancellation
 		select {
 		case <-ctx.Done():
-			return &llm.CompletionResponse{
+			resp := &llm.CompletionResponse{
 				Content:    "Request timed out during tool execution.",
 				StopReason: "end_turn",
-			}, nil
+			}
+			observer.finalContent(resp.Content)
+			return resp, nil
 		default:
 		}
 
@@ -562,11 +625,14 @@ func runNonStreamingToolLoop(
 				Temperature:  req.Temperature,
 			})
 			if err != nil {
-				return &llm.CompletionResponse{
+				resp := &llm.CompletionResponse{
 					Content:    "Reached iteration limit.",
 					StopReason: "end_turn",
-				}, nil
+				}
+				observer.finalContent(resp.Content)
+				return resp, nil
 			}
+			observer.finalContent(resp.Content)
 			return resp, nil
 		}
 
@@ -621,7 +687,8 @@ func runNonStreamingToolLoop(
 		// never run. The sentinel + safety net make the end-of-turn explicit
 		// and structurally enforced rather than purely norm-based.
 		if len(resp.ToolCalls) == 0 {
-			if strings.Contains(resp.Content, goalStateSentinel) {
+			if hasGoalStateSentinelPrefix(resp.Content) {
+				observer.finalContent(resp.Content)
 				return resp, nil
 			}
 			if prematureEndRetries >= config.MaxPrematureEndRetries {
@@ -629,6 +696,7 @@ func runNonStreamingToolLoop(
 					"iteration", iteration,
 					"retries", prematureEndRetries,
 				)
+				observer.finalContent(resp.Content)
 				return resp, nil
 			}
 			prematureEndRetries++
@@ -637,6 +705,7 @@ func runNonStreamingToolLoop(
 				"retries", prematureEndRetries,
 				"content_prefix", truncateForLog(resp.Content, 120),
 			)
+			observer.prematureEndRetry()
 			messages = append(messages, llm.Message{
 				Role:    "assistant",
 				Content: resp.Content,
@@ -655,6 +724,7 @@ func runNonStreamingToolLoop(
 			"iteration", iteration,
 			"tool_calls", len(resp.ToolCalls),
 		)
+		observer.assistantContent(resp.Content)
 
 		// Append assistant message with tool calls
 		messages = append(messages, llm.Message{
@@ -675,6 +745,7 @@ func runNonStreamingToolLoop(
 			}
 
 			result := executeExposedToolCall(ctx, tc, config.ToolTimeout, toolCtx, exposedToolNames)
+			observer.toolResult(tc, result)
 
 			messages = append(messages, llm.Message{
 				Role:       "tool",
@@ -698,10 +769,13 @@ func runNonStreamingToolLoop(
 			for {
 				select {
 				case <-ctx.Done():
-					return &llm.CompletionResponse{Content: "Request timed out.", StopReason: "end_turn"}, nil
+					resp := &llm.CompletionResponse{Content: "Request timed out.", StopReason: "end_turn"}
+					observer.finalContent(resp.Content)
+					return resp, nil
 				default:
 				}
 
+				observer.autoPoll()
 				allStillRunning := true
 				messages = messages[:len(messages)-len(resp.ToolCalls)]
 				for _, tc := range resp.ToolCalls {

@@ -213,12 +213,17 @@ EOF
 
 
 render_chat_request_file() {
-  # The visible chat prompt is one line — the maintainer's request, verbatim.
-  # Everything else (agent topology, workflow contract, goal state, failure
-  # handling) lives in the server-side coordinator system prompt injected by
-  # /anthropic/v1/messages (internal/api/anthropic_tool_loop.go). The
-  # coordinator creates the coder/reviewer Agents itself via create_agent.
-  emit_block "" "${DEMO_CHAT_REQUEST}"
+  emit_block "" "${DEMO_CHAT_REQUEST}
+
+Demo workspace contract:
+- namespace: ${DEMO_NAMESPACE}
+- gitRepo: ${DEMO_GIT_REPO}
+- baseBranch: ${DEMO_GIT_BRANCH}
+- gitSecretRef: ${DEMO_GIT_SECRET_REF}
+- pushBranch: ${DEMO_CHAT_PUSH_BRANCH}
+- create_agent roles to use: coder, security-reviewer, quality-reviewer
+
+Use those exact repository coordinates for every create_agent_task, validation container task, review task, create_pull_request, and check_pull_request_ci call. Do not infer a different repository or branch."
 }
 
 render_chat_story_file() {
@@ -403,7 +408,7 @@ EOF
 
 render_cron_task_manifest() {
   local gh_token_secret="${DEMO_CRON_GH_TOKEN_SECRET_REF:-${DEMO_GIT_SECRET_REF:-github-credentials}}"
-  local gh_token_secret_key="${DEMO_CRON_GH_TOKEN_SECRET_KEY:-token}"
+  local gh_token_secret_key="${DEMO_CRON_GH_TOKEN_SECRET_KEY:-password}"
   cat <<EOF
 apiVersion: core.orka.ai/v1alpha1
 kind: Task
@@ -597,7 +602,7 @@ EOF
 : "${DEMO_KONTXT_TTS_AUDIENCE:=kontxt-tts}"
 : "${DEMO_KONTXT_DENIED_NAMESPACE:=not-default}"
 : "${DEMO_KONTXT_TTS_URL:=http://kontxt-tts.default.svc.cluster.local:8080}"
-: "${DEMO_KONTXT_ORKA_API_URL:=http://orka-api.orka-system.svc.cluster.local:8080}"
+: "${DEMO_KONTXT_ORKA_API_URL:=http://orka-api.${ORKA_NAMESPACE:-orka-system}.svc.cluster.local:8080}"
 
 render_kontxt_caller_sa() {
   cat <<EOF
@@ -699,6 +704,7 @@ render_kontxt_denied_caller_job() {
 : "${DEMO_SANDBOX_TURN1_TASK:=demo-sandbox-turn-1-scout}"
 : "${DEMO_SANDBOX_TURN2_TASK:=demo-sandbox-turn-2-builder}"
 : "${DEMO_SANDBOX_TURN3_TASK:=demo-sandbox-turn-3-fixup}"
+: "${DEMO_SANDBOX_PUSH_BRANCH:=demo/sandbox-metrics-${DEMO_RUN_ID}}"
 
 render_sandbox_scout_agent() {
   cat <<EOF
@@ -804,6 +810,7 @@ render_sandbox_turn_task() {
   fi
   local prompt_body
   prompt_body="$(cat "${prompt_file}")"
+  prompt_body="${prompt_body//\{\{DEMO_SANDBOX_PUSH_BRANCH\}\}/${DEMO_SANDBOX_PUSH_BRANCH}}"
   cat <<EOF
 apiVersion: core.orka.ai/v1alpha1
 kind: Task
@@ -976,7 +983,7 @@ Beyond this demo, any multi-turn workflow (planner -> builder -> tester, scout -
 : "${DEMO_SUBSTRATE_GIT_SECRET:=github-credentials}"
 : "${DEMO_SUBSTRATE_GIT_REPO:=https://github.com/sozercan/vekil.git}"
 : "${DEMO_SUBSTRATE_GIT_BASE_BRANCH:=main}"
-: "${DEMO_SUBSTRATE_PUSH_BRANCH:=orka/substrate-demo}"
+: "${DEMO_SUBSTRATE_PUSH_BRANCH:=orka/substrate-demo-${DEMO_RUN_ID}}"
 : "${DEMO_SUBSTRATE_PR_REPO:=sozercan/vekil}"
 
 render_substrate_agent() {

@@ -20,6 +20,24 @@ repo_root="$(cd "${demo_dir}/../.." && pwd)"
 : "${DEMO_WORKDIR:=/tmp/orka-demo}"
 : "${DEMO_AUTO_PORT_FORWARD:=1}"
 
+__DEMO_CLEANUP_DIRS=()
+
+demo_register_cleanup_dir() {
+  local dir="$1"
+  [[ -n "${dir}" ]] || return 0
+  __DEMO_CLEANUP_DIRS+=("${dir}")
+}
+
+demo_run_exit_cleanups() {
+  local dir
+  for dir in "${__DEMO_CLEANUP_DIRS[@]:-}"; do
+    [[ -n "${dir}" ]] || continue
+    rm -rf "${dir}" 2>/dev/null || true
+  done
+}
+
+trap 'demo_run_exit_cleanups' EXIT
+
 : "${DEMO_PROVIDER_TYPE:=openai}"
 : "${DEMO_PROVIDER_SECRET_REF:=}"
 : "${DEMO_PROVIDER_SECRET_KEY:=api-key}"
@@ -611,9 +629,10 @@ get_orka_token() {
           unset ORKA_TOKEN
           ;;
         *)
-          # Network error / API down — trust the caller's token and let
-          # downstream callers surface the real failure.
-          export ORKA_TOKEN_VALIDATED=1
+          # Network error / API down. Return the caller's token for this attempt,
+          # but do NOT mark it validated: require_orka_api_reachable may start the
+          # local port-forward immediately after this, and the next call should
+          # re-probe so stale tokens are rejected before real API calls run.
           printf '%s' "${ORKA_TOKEN}"
           return 0
           ;;
@@ -656,6 +675,42 @@ refresh_orka_token() {
   export ORKA_TOKEN="$(get_orka_token)"
 }
 
+
+
+sandbox_session_claim_name() {
+  local session_name="$1"
+  local claim_namespace="${DEMO_SANDBOX_CLAIM_NAMESPACE:-${DEMO_NAMESPACE}}"
+  local task_namespace="${DEMO_NAMESPACE}"
+  local template_namespace="${DEMO_SANDBOX_TEMPLATE_NAMESPACE:-${DEMO_NAMESPACE}}"
+  local template_ref="${DEMO_SANDBOX_TEMPLATE_REF:-orka-live-template}"
+  local digest
+
+  if command -v shasum >/dev/null 2>&1; then
+    digest="$(
+      printf '%s\0%s\0%s\0%s\0%s' \
+        "${claim_namespace}" \
+        "${task_namespace}" \
+        "${template_namespace}" \
+        "${template_ref}" \
+        "${session_name}" \
+        | shasum -a 256 | awk '{print $1}'
+    )"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest="$(
+      printf '%s\0%s\0%s\0%s\0%s' \
+        "${claim_namespace}" \
+        "${task_namespace}" \
+        "${template_namespace}" \
+        "${template_ref}" \
+        "${session_name}" \
+        | sha256sum | awk '{print $1}'
+    )"
+  else
+    die "shasum or sha256sum is required to compute the demo SandboxClaim name"
+  fi
+
+  printf 'orka-session-%.32s\n' "${digest}"
+}
 
 demo_anthropic_base_url() {
   printf '%s/anthropic\n' "${ORKA_API_BASE%/}"
@@ -745,6 +800,7 @@ run_demo_chat_client_claude_code() {
   local settings_dir
   settings_dir="$(mktemp -d -t orka-demo-claude-cfg.XXXXXX)"
   chmod 700 "${settings_dir}"
+  demo_register_cleanup_dir "${settings_dir}"
   # No secrets logged: the file is written 0600 below and removed when done.
   umask 077
   cat >"${settings_dir}/settings.json" <<JSON
@@ -935,14 +991,38 @@ assert_real_pr_result() {
       printf 'error: chat session produced an empty result\n' >&2
       return 1
     fi
-    if printf '%s\n' "${result}" | grep -Eiq 'implementation failed|did not create a pull request|did not open a pull request|pull request[^\n]*(not created|not opened)|PR:[[:space:]]*not created|not create a pull request|no pull request|VALIDATION_CONFIG_BLOCKED|VALIDATION_BLOCKED|REVIEW_BLOCKED|CI_BLOCKED|CI_PENDING'; then
+    if printf '%s\n' "${result}" | grep -Eiq 'implementation failed|did not create a pull request|did not open a pull request|pull request[^\n]*(not created|not opened)|PR:[[:space:]]*not created|not create a pull request|no pull request|VALIDATION_CONFIG_BLOCKED|VALIDATION_BLOCKED|REVIEW_BLOCKED|CI_BLOCKED|CI_PENDING|CI_NO_CHECKS|CI_CLOSED|CI_UNKNOWN|status[=:][[:space:]]*(no_checks|closed|unknown)|CI:[[:space:]]*(no_checks|closed|unknown)'; then
       printf 'error: chat session result is not a successful PR handoff:\n%s\n' "${result}" >&2
+      return 1
+    fi
+    if printf '%s\n' "${result}" | grep -Eq '(^|[^[:alnum:]_])(FAILED|BLOCKED)([^[:alnum:]_]|$)'; then
+      printf 'error: chat session result contains a failure/blocker marker:\n%s\n' "${result}" >&2
       return 1
     fi
     pr_url="$(printf '%s\n' "${result}" | grep -Eo "https://github[.]com/[^[:space:])\"'<>]+/[^[:space:])\"'<>]+/pull/[0-9]+" | head -n 1 || true)"
     if [[ -z "${pr_url}" ]]; then
       printf 'error: chat session result does not contain a GitHub pull request URL:\n%s\n' "${result}" >&2
       return 1
+    fi
+    children_json="$(kubectl get tasks -n "${DEMO_NAMESPACE}" -l 'orka.ai/source=anthropic-proxy' -o json 2>/dev/null || printf '{"items":[]}')"
+    failed_children="$(jq -r --arg started "${DEMO_CHAT_STARTED_AT:-}" '
+      (.items // [])[]?
+      | select($started == "" or ((.metadata.creationTimestamp // "") >= $started))
+      | (.status.phase // "Unknown") as $phase
+      | select(["Failed", "Cancelled", "Canceled", "Error"] | index($phase))
+      | "\(.metadata.name) agent=\(.spec.agentRef.name // "-") phase=\($phase)"
+    ' <<<"${children_json}")"
+    if [[ -n "${failed_children}" ]]; then
+      if printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?Validation([[:space:]]+status)?):[[:space:]]*(PASS(ED)?|GREEN)([^[:alnum:]_]|$)' \
+        && printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?Review(ers)?([[:space:]]+status)?):[[:space:]]*([0-9]+[[:space:]]+)?(LGTM|APPROVED)([^[:alnum:]_]|$)' \
+        && printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?CI([[:space:]]+status)?):[[:space:]]*(PASS(ED)?|SUCCESS|GREEN)([^[:alnum:]_]|$)'; then
+        local failed_count
+        failed_count="$(printf '%s\n' "${failed_children}" | grep -c . || true)"
+        printf '🔁 self-healed %d intermediate proxy child failure(s) before success\n' "${failed_count}" >&2
+      else
+        printf 'error: chat session has failed proxy child tasks without final pass evidence; refusing to treat result as demo success:\n%s\n' "${failed_children}" >&2
+        return 1
+      fi
     fi
     printf 'validated pull request handoff: %s\n' "${pr_url}"
     return 0
@@ -968,7 +1048,7 @@ assert_real_pr_result() {
     return 1
   fi
 
-  if printf '%s\n' "${result}" | grep -Eiq 'implementation failed|did not create a pull request|did not open a pull request|pull request[^\n]*(not created|not opened)|PR:[[:space:]]*not created|not create a pull request|no pull request|VALIDATION_CONFIG_BLOCKED|VALIDATION_BLOCKED|REVIEW_BLOCKED|CI_BLOCKED|CI_PENDING'; then
+  if printf '%s\n' "${result}" | grep -Eiq 'implementation failed|did not create a pull request|did not open a pull request|pull request[^\n]*(not created|not opened)|PR:[[:space:]]*not created|not create a pull request|no pull request|VALIDATION_CONFIG_BLOCKED|VALIDATION_BLOCKED|REVIEW_BLOCKED|CI_BLOCKED|CI_PENDING|CI_NO_CHECKS|CI_CLOSED|CI_UNKNOWN|status[=:][[:space:]]*(no_checks|closed|unknown)|CI:[[:space:]]*(no_checks|closed|unknown)'; then
     printf 'error: task %s result is not a successful PR handoff:\n%s\n' "${task_name}" "${result}" >&2
     return 1
   fi

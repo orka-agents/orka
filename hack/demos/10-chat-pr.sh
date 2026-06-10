@@ -33,6 +33,13 @@ require_chat_client
 source_demo_magic "$@"
 configure_demo_magic
 ensure_demo_workdir
+# Demo 10's Anthropic-compatible endpoint has no query-string namespace when
+# driven through the Claude CLI, so mint the bearer token from the demo namespace
+# where the Provider lives unless the caller deliberately chose another token
+# namespace.
+if [[ "${ORKA_TOKEN_NAMESPACE:-default}" == "default" && "${DEMO_NAMESPACE}" != "default" ]]; then
+  export ORKA_TOKEN_NAMESPACE="${DEMO_NAMESPACE}"
+fi
 prepare_api_env
 
 render_chat_request_file  > "${DEMO_WORKDIR}/chat-request.txt"
@@ -69,8 +76,12 @@ pick_chat_opus_model() {
     printf '%s\n' "${DEMO_CHAT_MODEL}"
     return 0
   fi
+  if [[ -n "${DEMO_CLAUDE_MODEL:-}" ]]; then
+    printf '%s\n' "${DEMO_CLAUDE_MODEL}"
+    return 0
+  fi
   local provider="${DEMO_PROVIDER_REF}"
-  local token catalog candidate model_id
+  local token catalog candidate model_id fallback_model
   token="$(get_orka_token)"
   # Fetch the offered model IDs once (provider-qualified and bare forms).
   catalog="$(curl -sS -m 15 \
@@ -89,6 +100,11 @@ pick_chat_opus_model() {
       return 0
     fi
   done
+  fallback_model="$(demo_anthropic_model)"
+  if [[ -n "${fallback_model}" ]]; then
+    printf '%s\n' "${fallback_model}"
+    return 0
+  fi
   return 1
 }
 
@@ -100,7 +116,7 @@ require_orka_api_reachable
 
 DEMO_CHAT_OPUS_MODEL="$(pick_chat_opus_model || true)"
 if [[ -z "${DEMO_CHAT_OPUS_MODEL}" ]]; then
-  die "no Opus model offered by ${ORKA_API_BASE}/anthropic/v1/models — looked for claude-opus-4.8, claude-opus-4.7, claude-opus-4.6. Set DEMO_CHAT_MODEL=<provider>/<model> to override."
+  die "no chat model configured and no preferred Opus model offered by ${ORKA_API_BASE}/anthropic/v1/models — looked for claude-opus-4.8, claude-opus-4.7, claude-opus-4.6. Set DEMO_CHAT_MODEL or DEMO_CLAUDE_MODEL to override."
 fi
 # Make the chosen model the one demo_anthropic_model emits.
 export DEMO_CLAUDE_MODEL="${DEMO_CHAT_OPUS_MODEL}"
@@ -171,7 +187,7 @@ require_orka_api_reachable
 log_success "Orka Anthropic API reachable at ${ANTHROPIC_BASE_URL}"
 log_info "Provider-default models exposed by Orka (/anthropic/v1/models):"
 demo_pe "curl -sS -H \"Authorization: Bearer \$(get_orka_token)\" ${ANTHROPIC_BASE_URL}/v1/models | jq -r '.data[].id'"
-log_info "Selected Opus model: ${DEMO_CHAT_OPUS_MODEL} (Orka passes the model name through to ${DEMO_PROVIDER_REF})"
+log_info "Selected chat model: ${DEMO_CHAT_OPUS_MODEL} (Orka passes the model name through to ${DEMO_PROVIDER_REF})"
 DEMO_CHAT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 log_info "Prompt sent to claude -p:"
 demo_show "${DEMO_WORKDIR}/chat-request.txt"
@@ -215,7 +231,7 @@ __demo_chat_heartbeat() {
 }
 __demo_chat_heartbeat &
 __DEMO_CHAT_HB_PID=$!
-trap 'kill "${__DEMO_CHAT_HB_PID}" 2>/dev/null || true; [[ -t 2 ]] && printf "\r\033[2K" >&2 || true' EXIT
+trap 'demo_run_exit_cleanups; kill "${__DEMO_CHAT_HB_PID}" 2>/dev/null || true; [[ -t 2 ]] && printf "\r\033[2K" >&2 || true' EXIT
 run_demo_chat_request_file "${DEMO_WORKDIR}/chat-request.txt" "${DEMO_WORKDIR}/chat-client-result.json"
 kill "${__DEMO_CHAT_HB_PID}" 2>/dev/null || true
 wait "${__DEMO_CHAT_HB_PID}" 2>/dev/null || true

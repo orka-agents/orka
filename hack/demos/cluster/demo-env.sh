@@ -45,9 +45,10 @@ export DEMO_GIT_REPO="${DEMO_GIT_REPO:-https://github.com/sozercan/vekil.git}"
 export DEMO_GIT_BRANCH="${DEMO_GIT_BRANCH:-main}"
 export DEMO_GIT_SECRET_REF="${DEMO_GIT_SECRET_REF:-github-credentials}"
 
-# Security demo (40) uses its own git coordinates; default them to the same repo.
-export DEMO_SECURITY_GIT_REPO="${DEMO_SECURITY_GIT_REPO:-${DEMO_GIT_REPO}}"
-export DEMO_SECURITY_GIT_BRANCH="${DEMO_SECURITY_GIT_BRANCH:-${DEMO_GIT_BRANCH}}"
+# Security demo (40) intentionally defaults to the known-vulnerable nodejs-goof
+# repo from common.sh. Do not point it at the normal PR demo repo unless the
+# caller explicitly exports DEMO_SECURITY_GIT_REPO before sourcing this file.
+export DEMO_SECURITY_GIT_BRANCH="${DEMO_SECURITY_GIT_BRANCH:-main}"
 export DEMO_SECURITY_GIT_SECRET_REF="${DEMO_SECURITY_GIT_SECRET_REF:-${DEMO_GIT_SECRET_REF}}"
 
 # Demo 10 chat client: an external `claude` CLI on the host drives Orka's

@@ -194,6 +194,9 @@ fi
 
 if [[ "${AGENTIC}" == "1" ]]; then
   ctx="kind-${KIND_CLUSTER}"
+  log "Ensuring substrate demo namespace ${SUBSTRATE_NS}"
+  kubectl --context "${ctx}" create namespace "${SUBSTRATE_NS}" --dry-run=client -o yaml \
+    | kubectl --context "${ctx}" apply -f -
 
   # ---- 1. Codex-capable Actor image -------------------------------------
   # The agentic run executes a real codex CLI INSIDE the gVisor Actor, so the
@@ -223,26 +226,33 @@ if [[ "${AGENTIC}" == "1" ]]; then
     [[ "${ph}" == "Ready" ]] && break
     sleep 5
   done
+  ph="$(kubectl --context "${ctx}" -n "${SUBSTRATE_TEMPLATE_NS}" get actortemplate "${SUBSTRATE_TEMPLATE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  [[ "${ph}" == "Ready" ]] || die "ActorTemplate ${SUBSTRATE_TEMPLATE_NS}/${SUBSTRATE_TEMPLATE_NAME} did not become Ready (phase=${ph:-unknown})"
 
   # ---- 2. In-cluster model proxy (vekil) --------------------------------
   # Zero-config Copilot upstream via device-code login (a gho_ gh token has no
   # Copilot entitlement). The deploy script prints a github.com/login/device
   # code in the pod logs; the operator completes it once, and vekil caches the
   # session. We do NOT pass a token secret here.
-  vekil_script="${repo_root}/.claude/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh"
-  if [[ -x "${vekil_script}" ]]; then
-    if kubectl --context "${ctx}" -n "${VEKIL_NS}" get deploy vekil >/dev/null 2>&1; then
-      log "vekil already deployed in ${VEKIL_NS} — leaving it (re-run device-code login if /readyz is down)"
-    else
-      log "Deploying vekil model proxy to ${VEKIL_NS} (device-code login)"
-      bash "${vekil_script}" --context "${ctx}" --namespace "${VEKIL_NS}" --skip-wait || true
-      log "ACTION REQUIRED: complete the GitHub device-code login printed in vekil's logs:"
-      log "  kubectl --context ${ctx} -n ${VEKIL_NS} logs deploy/vekil | grep 'login/device'"
-      log "  (visit the URL, enter the code; then /readyz returns 200)"
+  vekil_script=""
+  for candidate in \
+    "${repo_root}/.codex/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh" \
+    "${repo_root}/.claude/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh"; do
+    if [[ -x "${candidate}" ]]; then
+      vekil_script="${candidate}"
+      break
     fi
+  done
+  if kubectl --context "${ctx}" -n "${VEKIL_NS}" get deploy vekil >/dev/null 2>&1; then
+    log "vekil already deployed in ${VEKIL_NS} — leaving it (re-run device-code login if /readyz is down)"
+  elif [[ -x "${vekil_script}" ]]; then
+    log "Deploying vekil model proxy to ${VEKIL_NS} (device-code login)"
+    bash "${vekil_script}" --context "${ctx}" --namespace "${VEKIL_NS}" --skip-wait
+    log "ACTION REQUIRED: complete the GitHub device-code login printed in vekil's logs:"
+    log "  kubectl --context ${ctx} -n ${VEKIL_NS} logs deploy/vekil | grep 'login/device'"
+    log "  (visit the URL, enter the code; then /readyz returns 200)"
   else
-    log "vekil deploy script not found at ${vekil_script}"
-    log "Deploy any in-cluster OpenAI-compatible proxy and set DEMO_SUBSTRATE_MODEL endpoint accordingly."
+    die "vekil deploy script not found under .codex/skills or .claude/skills; install the skill or deploy an in-cluster OpenAI-compatible proxy before Demo 70"
   fi
   vekil_url="http://vekil.${VEKIL_NS}.svc.cluster.local:1337/v1"
 
@@ -281,6 +291,8 @@ if [[ "${AGENTIC}" == "1" ]]; then
   orka_client_sa="${ORKA_TOKEN_SERVICE_ACCOUNT:-orka-client}"
   orka_client_ns="${ORKA_TOKEN_NAMESPACE:-${SUBSTRATE_NS}}"
   log "Ensuring Orka API client ServiceAccount ${orka_client_ns}/${orka_client_sa}"
+  kubectl --context "${ctx}" create namespace "${orka_client_ns}" --dry-run=client -o yaml \
+    | kubectl --context "${ctx}" apply -f -
   kubectl --context "${ctx}" create serviceaccount "${orka_client_sa}" -n "${orka_client_ns}" \
     --dry-run=client -o yaml | kubectl --context "${ctx}" apply -f -
 

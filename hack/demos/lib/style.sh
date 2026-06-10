@@ -724,8 +724,7 @@ payoff_card_kontxt() {
 # payoff_card_sandbox <session> <turn1-task> <turn2-task> <turn3-task>
 #
 # Hard-asserts all three turns reattached the same workspace claim name by
-# grepping worker pod logs for the literal line emitted by
-# workers/common/agent_runtime.go:424:
+# grepping worker pod logs for the literal line emitted by the agent runtime:
 #     Task <ns>/<name> completed in sandbox workspace <claim>
 # Exits 1 with stderr message on mismatch.
 # ---------------------------------------------------------------------------

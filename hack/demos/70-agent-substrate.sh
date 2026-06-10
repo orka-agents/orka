@@ -105,10 +105,16 @@ delete_task_if_exists "${warm_task}"
 __prev_pr="$(gh pr list --repo "${pr_repo}" --head "${push_branch}" --state open \
   --json number --jq '.[0].number' 2>/dev/null || true)"
 if [[ -n "${__prev_pr}" ]]; then
-  gh pr close "${__prev_pr}" --repo "${pr_repo}" --delete-branch >/dev/null 2>&1 || true
+  gh pr close "${__prev_pr}" --repo "${pr_repo}" --delete-branch >/dev/null 2>&1 \
+    || die "failed to close/delete stale Demo 70 PR branch ${push_branch}"
 else
-  git ls-remote --exit-code --heads "https://github.com/${pr_repo}.git" "${push_branch}" >/dev/null 2>&1 \
-    && gh api -X DELETE "repos/${pr_repo}/git/refs/heads/${push_branch}" >/dev/null 2>&1 || true
+  if git ls-remote --exit-code --heads "https://github.com/${pr_repo}.git" "${push_branch}" >/dev/null 2>&1; then
+    gh api -X DELETE "repos/${pr_repo}/git/refs/heads/${push_branch}" >/dev/null 2>&1 \
+      || die "failed to delete stale Demo 70 branch ${push_branch}"
+  fi
+fi
+if git ls-remote --exit-code --heads "https://github.com/${pr_repo}.git" "${push_branch}" >/dev/null 2>&1; then
+  die "stale Demo 70 branch ${push_branch} still exists after cleanup"
 fi
 
 # ---------------------------------------------------------------------------

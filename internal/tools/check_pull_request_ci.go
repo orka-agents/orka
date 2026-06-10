@@ -16,6 +16,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const checkPullRequestCIStatusNoChecks = "no_checks"
+
 // CheckPullRequestCITool checks GitHub CI status for a pull request without merging it.
 type CheckPullRequestCITool struct {
 	k8sClient  client.Client
@@ -189,8 +191,12 @@ func waitForPullRequestCI(
 		// has no GitHub Actions workflows registered after the full
 		// waitTimeout window, surface that distinctly so the coordinator
 		// can report status=no_checks rather than mis-claiming CI_PENDING.
-		if lastPending.Status == "no_checks" {
-			lastPending.Message = fmt.Sprintf("no CI checks have been registered for this pull request after %s; treating as terminal no_checks (the repository likely has no GitHub Actions workflows configured for this PR)", waitTimeout)
+		if lastPending.Status == checkPullRequestCIStatusNoChecks {
+			lastPending.Message = fmt.Sprintf(
+				"no CI checks have been registered for this pull request after %s; "+
+					"treating as terminal no_checks (the repository likely has no GitHub Actions workflows configured for this PR)",
+				waitTimeout,
+			)
 			return lastPending, nil
 		}
 		lastPending.Status = "pending"
@@ -249,7 +255,7 @@ func checkPullRequestCIOnce(ctx context.Context, token, owner, repo string, prNu
 			// the wait_timeout elapses with no_checks still true, the
 			// final result will correctly say no_checks — but only after
 			// we've given GitHub a real chance to schedule the workflow.
-			result.Status = "no_checks"
+			result.Status = checkPullRequestCIStatusNoChecks
 			result.Message = "no CI checks have been registered yet for this pull request (may still be queueing)"
 			return result, false, nil
 		}

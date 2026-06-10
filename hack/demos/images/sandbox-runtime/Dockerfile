@@ -6,12 +6,13 @@ WORKDIR /workspace
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o /out/worker ./workers/agent/claude
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o /out/worker ./workers/agent/codex
 
 RUN cat >/tmp/sandbox-runtime.go <<'GO'
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 )
 
 const appRoot = "/app"
+const maxExecuteOutputBytes = 4 << 20
 
 type executeRequest struct {
 	Command string `json:"command"`
@@ -71,16 +73,21 @@ func execute(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, executeResponse{Stderr: err.Error(), ExitCode: 1})
 		return
 	}
-	cmd := exec.Command("/bin/sh", "-c", req.Command)
+	cmd := exec.CommandContext(r.Context(), "/bin/sh", "-c", req.Command)
 	cmd.Dir = appRoot
-	out, err := cmd.Output()
-	resp := executeResponse{Stdout: string(out)}
+	var stdout, stderr cappedBuffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	resp := executeResponse{Stdout: stdout.String(), Stderr: stderr.String()}
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			resp.Stderr = string(exitErr.Stderr)
 			resp.ExitCode = exitErr.ExitCode()
 		} else {
-			resp.Stderr = err.Error()
+			if resp.Stderr != "" {
+				resp.Stderr += "\n"
+			}
+			resp.Stderr += err.Error()
 			resp.ExitCode = 1
 		}
 	}
@@ -124,7 +131,7 @@ func download(w http.ResponseWriter, r *http.Request) {
 }
 
 func list(w http.ResponseWriter, r *http.Request) {
-	target, err := safePath(strings.TrimPrefix(r.URL.Path, "/list/"))
+	target, err := safePathAllowRoot(strings.TrimPrefix(r.URL.Path, "/list/"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
@@ -156,8 +163,22 @@ func exists(w http.ResponseWriter, r *http.Request) {
 }
 
 func safePath(name string) (string, error) {
+	return safePathWithRoot(name, false)
+}
+
+func safePathAllowRoot(name string) (string, error) {
+	return safePathWithRoot(name, true)
+}
+
+func safePathWithRoot(name string, allowRoot bool) (string, error) {
 	clean := filepath.Clean(strings.TrimLeft(name, "/"))
-	if clean == "." || strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+	if clean == "." {
+		if allowRoot {
+			return appRoot, nil
+		}
+		return "", fmt.Errorf("invalid path %q", name)
+	}
+	if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
 		return "", fmt.Errorf("invalid path %q", name)
 	}
 	target := filepath.Join(appRoot, clean)
@@ -166,6 +187,34 @@ func safePath(name string) (string, error) {
 		return "", fmt.Errorf("path escapes app root")
 	}
 	return target, nil
+}
+
+type cappedBuffer struct {
+	bytes.Buffer
+	truncated bool
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	remaining := maxExecuteOutputBytes - b.Buffer.Len()
+	if remaining > 0 {
+		if len(p) <= remaining {
+			_, _ = b.Buffer.Write(p)
+		} else {
+			_, _ = b.Buffer.Write(p[:remaining])
+			b.truncated = true
+		}
+	} else if len(p) > 0 {
+		b.truncated = true
+	}
+	return len(p), nil
+}
+
+func (b *cappedBuffer) String() string {
+	out := b.Buffer.String()
+	if b.truncated {
+		out += "\n[output truncated]\n"
+	}
+	return out
 }
 
 func writeMultipartFile(target string, file multipart.File) error {
@@ -191,12 +240,17 @@ GO
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -o /out/sandbox-runtime /tmp/sandbox-runtime.go
 
+FROM --platform=$TARGETPLATFORM golang:1.26 AS go-runtime
+
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
+    make \
+    build-essential \
+    pkg-config \
     ripgrep \
     gnupg \
  && rm -rf /var/lib/apt/lists/*
@@ -232,21 +286,14 @@ RUN set -eux \
 
 COPY --from=builder /out/worker /worker
 COPY --from=builder /out/sandbox-runtime /usr/local/bin/sandbox-runtime
+COPY --from=go-runtime /usr/local/go /usr/local/go
 
-RUN printf '%s\n' \
-    '#!/bin/sh' \
-    'set -eu' \
-    'marker=/workspace/orka-agent-sandbox-retained-marker.txt' \
-    'prompt="$*"' \
-    'if [ "${ORKA_AGENT_SANDBOX_ENABLED:-}" != "false" ]; then echo "ORKA_AGENT_SANDBOX_ENABLED was ${ORKA_AGENT_SANDBOX_ENABLED:-missing}" >&2; exit 41; fi' \
-    'if [ "${ORKA_AGENT_SANDBOX_DEPTH:-}" != "1" ]; then echo "ORKA_AGENT_SANDBOX_DEPTH was ${ORKA_AGENT_SANDBOX_DEPTH:-missing}" >&2; exit 42; fi' \
-    'if [ -z "${ORKA_SA_TOKEN_PATH:-}" ] || [ ! -s "${ORKA_SA_TOKEN_PATH}" ]; then echo "missing staged service account token" >&2; exit 43; fi' \
-    'state=absent' \
-    'if [ -f "$marker" ]; then state=present; fi' \
-    'printf "run=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$marker"' \
-    'printf "ORKA_LIVE_SANDBOX_OK depth=%s enabled=%s retained_marker=%s pwd=%s prompt=%s\n" "${ORKA_AGENT_SANDBOX_DEPTH}" "${ORKA_AGENT_SANDBOX_ENABLED}" "$state" "$(pwd)" "$prompt"' \
-    > /usr/local/bin/claude \
-    && chmod 0755 /worker /usr/local/bin/sandbox-runtime /usr/local/bin/claude
+RUN ln -sf /usr/local/go/bin/go /usr/local/bin/go \
+    && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
+    && chmod 0755 /worker /usr/local/bin/sandbox-runtime
+
+ENV GOROOT=/usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 RUN groupadd -g 1000 worker \
     && useradd -u 1000 -g worker -m worker \

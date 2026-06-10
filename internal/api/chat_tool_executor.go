@@ -59,6 +59,7 @@ type ToolExecutor struct {
 	authorizeAgentCreate      func(context.Context, *corev1alpha1.Agent) error
 	authorizeAgentUpdate      func(context.Context, *corev1alpha1.Agent) error
 	authorizeAgentDelete      func(context.Context, *corev1alpha1.Agent) error
+	authorizeSecretRead       func(context.Context, string, string) error
 }
 
 // NewToolExecutor creates a new ToolExecutor.
@@ -121,6 +122,11 @@ func (e *ToolExecutor) SetAgentUpdateAuthorizer(authorize func(context.Context, 
 // SetAgentDeleteAuthorizer installs an authorization hook for tools that delete Agents.
 func (e *ToolExecutor) SetAgentDeleteAuthorizer(authorize func(context.Context, *corev1alpha1.Agent) error) {
 	e.authorizeAgentDelete = authorize
+}
+
+// SetSecretReadAuthorizer installs an authorization hook for tools that read Secrets.
+func (e *ToolExecutor) SetSecretReadAuthorizer(authorize func(context.Context, string, string) error) {
+	e.authorizeSecretRead = authorize
 }
 
 // ToolResult represents the result of a tool execution.
@@ -193,6 +199,16 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		AuthorizeAgentDelete: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
 			return chatToolAuthorizationError(e.authorizeAgentDelete, ctx, agent, "Use an agent authorized by the context token")
 		},
+		AuthorizeSecretRead: func(ctx context.Context, namespace, secretName string) *tools.ChatToolError {
+			authorize := func(ctx context.Context, _ *corev1alpha1.Task) error {
+				if e.authorizeSecretRead == nil {
+					return nil
+				}
+				return e.authorizeSecretRead(ctx, namespace, secretName)
+			}
+			return chatToolAuthorizationError(authorize, ctx, nil, "Use a context token authorized to read the git credential secret")
+		},
+		RequireSecretReadAuthorization: e.authorizeSecretRead != nil,
 		CheckTaskLimit: func() *tools.ChatToolError {
 			if e.tasksCreated >= e.maxTasks {
 				return &tools.ChatToolError{

@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -469,15 +470,33 @@ func TestWriteStreamDone(t *testing.T) {
 type oaiMockProvider struct {
 	name      string
 	resp      *llm.CompletionResponse
+	responses []*llm.CompletionResponse
 	err       error
 	streamCh  chan llm.StreamChunk
 	streamErr error
+	requests  []*llm.CompletionRequest
+	callIdx   int
 }
 
-func (m *oaiMockProvider) Complete(_ context.Context, _ *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+func (m *oaiMockProvider) Complete(_ context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	if req != nil {
+		reqCopy := *req
+		reqCopy.Messages = append([]llm.Message(nil), req.Messages...)
+		reqCopy.Tools = append([]llm.Tool(nil), req.Tools...)
+		m.requests = append(m.requests, &reqCopy)
+	}
 	if m.err != nil {
 		return nil, m.err
 	}
+	if m.responses != nil {
+		if m.callIdx >= len(m.responses) {
+			return nil, fmt.Errorf("unexpected call %d", m.callIdx)
+		}
+		resp := m.responses[m.callIdx]
+		m.callIdx++
+		return resp, nil
+	}
+	m.callIdx++
 	return m.resp, nil
 }
 
@@ -824,6 +843,115 @@ func TestHandleStreamingCompletion_FallbackWithToolCalls(t *testing.T) {
 	}
 	if !strings.Contains(bodyStr, "tool_calls") {
 		t.Errorf("expected tool_calls finish reason, got: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingToolLoop_StreamsProgressAndHidesServerSideToolCalls(t *testing.T) {
+	filePath := fmt.Sprintf("/tmp/orka-openai-stream-%d.txt", time.Now().UnixNano())
+	if err := os.WriteFile(filePath, []byte("streaming test content"), 0o600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(filePath) })
+
+	mock := &oaiMockProvider{
+		responses: []*llm.CompletionResponse{
+			{
+				Content:    "Reading file before final answer.\n",
+				StopReason: oaiStopReasonToolUse,
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call_file_read",
+					Name:      "file_read",
+					Arguments: json.RawMessage(fmt.Sprintf(`{"path":%q}`, filePath)),
+				}},
+			},
+			{
+				Content:      goalStateSentinel + "\nPR ready: https://example.test/pr/1",
+				StopReason:   oaiStopReasonEndTurn,
+				InputTokens:  10,
+				OutputTokens: 5,
+			},
+		},
+	}
+
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingToolLoop(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{
+				Model:    "gpt-4",
+				Messages: []llm.Message{{Role: "user", Content: "read then report"}},
+				Tools:    []llm.Tool{{Name: "file_read"}},
+			},
+			"chatcmpl-tool-loop", "gpt-4", 1234567890, nil, nil,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	for _, want := range []string{
+		`"role":"assistant"`,
+		"Reading file before final answer.",
+		"[Tool file_read completed]",
+		"PR ready: https://example.test/pr/1",
+		"[DONE]",
+	} {
+		if !strings.Contains(bodyStr, want) {
+			t.Fatalf("expected stream body to contain %q, got: %s", want, bodyStr)
+		}
+	}
+	for _, forbidden := range []string{goalStateSentinel, `"tool_calls"`, "call_file_read", "streaming test content"} {
+		if strings.Contains(bodyStr, forbidden) {
+			t.Fatalf("stream body leaked internal marker/tool call %q: %s", forbidden, bodyStr)
+		}
+	}
+	if mock.callIdx != 2 {
+		t.Fatalf("expected 2 LLM calls, got %d", mock.callIdx)
+	}
+}
+
+func TestHandleNonStreamingToolLoop_StripsGoalStateSentinel(t *testing.T) {
+	mock := &oaiMockProvider{
+		responses: []*llm.CompletionResponse{{
+			Content:    goalStateSentinel + "\nPR ready: https://example.test/pr/2",
+			StopReason: oaiStopReasonEndTurn,
+		}},
+	}
+
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleNonStreamingToolLoop(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4", Messages: []llm.Message{{Role: "user", Content: "ship"}}},
+			"chatcmpl-nonstream-tool-loop", "gpt-4", 1234567890, nil,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var oaiResp OAIResponse
+	json.NewDecoder(resp.Body).Decode(&oaiResp) //nolint:errcheck
+	content := extractContent(oaiResp.Choices[0].Message.Content)
+	if strings.Contains(content, goalStateSentinel) {
+		t.Fatalf("non-streaming response leaked sentinel: %q", content)
+	}
+	if content != "PR ready: https://example.test/pr/2" {
+		t.Fatalf("content = %q", content)
 	}
 }
 

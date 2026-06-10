@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/redact"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
 )
@@ -186,6 +188,11 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 				return err
 			}
 		}
+		if cfg.GitRef == "" {
+			if err := checkoutPushBranchForAgentRun(ctx, workspaceDir); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 
@@ -232,14 +239,23 @@ func CloneRepo(ctx context.Context, cfg *AgentConfig, workspaceDir string) error
 	// overwriting "main" (or whatever the upstream default branch was). Skipped
 	// for ref-pinned validation tasks because those aren't expected to push.
 	if cfg.GitRef == "" {
-		if pushBranch := strings.TrimSpace(os.Getenv(workerenv.PushBranch)); pushBranch != "" {
-			if err := execGitContext(ctx, workspaceDir, "checkout", "-B", pushBranch); err != nil {
-				return fmt.Errorf("pre-checkout push branch %q failed: %w", pushBranch, err)
-			}
-			fmt.Printf("Pre-checked out push branch %s before agent run\n", pushBranch)
+		if err := checkoutPushBranchForAgentRun(ctx, workspaceDir); err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+func checkoutPushBranchForAgentRun(ctx context.Context, workspaceDir string) error {
+	pushBranch := strings.TrimSpace(os.Getenv(workerenv.PushBranch))
+	if pushBranch == "" {
+		return nil
+	}
+	if err := execGitContext(ctx, workspaceDir, "checkout", "-B", pushBranch); err != nil {
+		return fmt.Errorf("pre-checkout push branch %q failed: %w", pushBranch, err)
+	}
+	fmt.Printf("Pre-checked out push branch %s before agent run\n", pushBranch)
 	return nil
 }
 
@@ -260,9 +276,32 @@ func validateReusedGitRemote(ctx context.Context, workspaceDir, expectedRepo str
 		return fmt.Errorf("git inspect origin remote on reused workspace failed: %w", err)
 	}
 	if strings.TrimSpace(remoteURL) != strings.TrimSpace(expectedRepo) {
-		return fmt.Errorf("existing git remote origin does not match configured repo")
+		return fmt.Errorf(
+			"existing git remote origin does not match configured repo (actual %q, expected %q)",
+			gitRemoteForError(remoteURL),
+			gitRemoteForError(expectedRepo),
+		)
 	}
 	return nil
+}
+
+func gitRemoteForError(remote string) string {
+	remote = strings.TrimSpace(remote)
+	if parsed, err := url.Parse(remote); err == nil && parsed.Scheme != "" && parsed.User != nil {
+		parsed.User = url.User("redacted")
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		return redact.SensitiveText(parsed.String())
+	}
+	if at := strings.Index(remote, "@"); at > 0 && strings.Contains(remote[:at], ":") {
+		return redact.SensitiveText("redacted" + remote[at:])
+	}
+	if parsed, err := url.Parse(remote); err == nil && parsed.Scheme != "" {
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		remote = parsed.String()
+	}
+	return redact.SensitiveText(remote)
 }
 
 func fetchGitRef(ctx context.Context, workspaceDir, ref string) (gitRefFetchMode, error) {
@@ -288,25 +327,25 @@ func checkoutGitRef(ctx context.Context, workspaceDir, ref string, fetchMode git
 		}
 	}
 	if fetchMode == gitRefFetchDirect {
-		if err := execGitContext(ctx, workspaceDir, "checkout", "FETCH_HEAD"); err == nil {
-			return nil
-		} else {
+		if err := execGitContext(ctx, workspaceDir, "checkout", "FETCH_HEAD"); err != nil {
 			return fmt.Errorf("git checkout fetched ref %q failed: %w", ref, err)
 		}
+		return nil
 	}
 
 	if isHexGitObjectID(ref) && remoteBranchesContainRef(ctx, workspaceDir, ref) {
-		if err := execGitContext(ctx, workspaceDir, "checkout", ref); err == nil {
-			return nil
-		} else {
+		if err := execGitContext(ctx, workspaceDir, "checkout", ref); err != nil {
 			return fmt.Errorf("git checkout fetched commit ref %q failed: %w", ref, err)
 		}
+		return nil
 	}
 	return fmt.Errorf("git checkout ref %q failed", ref)
 }
 
 func gitBranchNameFromRef(ctx context.Context, workspaceDir, ref string) (string, bool) {
 	branch := strings.TrimPrefix(ref, "refs/heads/")
+	branch = strings.TrimPrefix(branch, "refs/remotes/origin/")
+	branch = strings.TrimPrefix(branch, "origin/")
 	if branch == "" || strings.HasPrefix(branch, "-") {
 		return "", false
 	}

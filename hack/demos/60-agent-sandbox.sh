@@ -36,41 +36,6 @@ t2="${DEMO_SANDBOX_TURN2_TASK}"
 t3="${DEMO_SANDBOX_TURN3_TASK}"
 
 prompts_dir="${script_dir}/prompts"
-
-sandbox_session_claim_name() {
-  local session_name="$1"
-  local claim_namespace="${DEMO_SANDBOX_CLAIM_NAMESPACE:-${DEMO_NAMESPACE}}"
-  local task_namespace="${DEMO_NAMESPACE}"
-  local template_namespace="${DEMO_SANDBOX_TEMPLATE_NAMESPACE:-${DEMO_NAMESPACE}}"
-  local digest
-
-  if command -v shasum >/dev/null 2>&1; then
-    digest="$(
-      printf '%s\0%s\0%s\0%s\0%s' \
-        "${claim_namespace}" \
-        "${task_namespace}" \
-        "${template_namespace}" \
-        "${DEMO_SANDBOX_TEMPLATE_REF}" \
-        "${session_name}" \
-        | shasum -a 256 | awk '{print $1}'
-    )"
-  elif command -v sha256sum >/dev/null 2>&1; then
-    digest="$(
-      printf '%s\0%s\0%s\0%s\0%s' \
-        "${claim_namespace}" \
-        "${task_namespace}" \
-        "${template_namespace}" \
-        "${DEMO_SANDBOX_TEMPLATE_REF}" \
-        "${session_name}" \
-        | sha256sum | awk '{print $1}'
-    )"
-  else
-    die "shasum or sha256sum is required to compute the demo SandboxClaim name"
-  fi
-
-  printf 'orka-session-%.32s\n' "${digest}"
-}
-
 # Capture a turn's reattached sandbox claim name the moment it succeeds, while
 # the worker pod (and its logs) are guaranteed to still exist. Persisted to
 # ${DEMO_WORKDIR}/sandbox-claim-<task>.txt so the Chapter 8 payoff card reads a

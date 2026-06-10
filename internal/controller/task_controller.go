@@ -1618,12 +1618,14 @@ func (r *TaskReconciler) diagnoseFailedJob(ctx context.Context, task *corev1alph
 	}
 
 	var (
-		oomMsg     string
-		exitMsg    string
-		exitReason string
+		oomMsg  string
+		exitMsg string
 	)
 	for i := range podList.Items {
 		pod := &podList.Items[i]
+		if task.Status.JobName != "" && !podBelongsToJob(pod, task.Status.JobName) {
+			continue
+		}
 		// Worker pods only have one container; iterate defensively anyway.
 		for _, cs := range pod.Status.ContainerStatuses {
 			term := cs.State.Terminated
@@ -1649,7 +1651,6 @@ func (r *TaskReconciler) diagnoseFailedJob(ctx context.Context, task *corev1alph
 					reason = "Error"
 				}
 				exitMsg = fmt.Sprintf("job failed: container exited with code %d (reason=%s)", term.ExitCode, reason)
-				exitReason = reason
 			}
 		}
 	}
@@ -1658,11 +1659,37 @@ func (r *TaskReconciler) diagnoseFailedJob(ctx context.Context, task *corev1alph
 		return oomMsg
 	}
 	if exitMsg != "" {
-		// Suppress noisy default exit reasons that add nothing.
-		_ = exitReason
 		return exitMsg
 	}
 	return "job failed"
+}
+
+func podBelongsToJob(pod *corev1.Pod, jobName string) bool {
+	if pod == nil || strings.TrimSpace(jobName) == "" {
+		return true
+	}
+	hasJobIdentity := false
+	if got := pod.Labels[batchv1.JobNameLabel]; got != "" {
+		hasJobIdentity = true
+		if got == jobName {
+			return true
+		}
+	}
+	if got := pod.Labels["job-name"]; got != "" {
+		hasJobIdentity = true
+		if got == jobName {
+			return true
+		}
+	}
+	for _, owner := range pod.OwnerReferences {
+		if owner.Kind == "Job" {
+			hasJobIdentity = true
+			if owner.Name == jobName {
+				return true
+			}
+		}
+	}
+	return !hasJobIdentity
 }
 
 // podContainerMemoryLimit returns the memory limit configured on the named

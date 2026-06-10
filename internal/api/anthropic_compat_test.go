@@ -430,14 +430,14 @@ func TestConvertAnthropicTools(t *testing.T) {
 }
 
 func TestConvertAnthropicTools_FieldMapping(t *testing.T) {
-	tools := []AnthropicTool{
+	anthropicTools := []AnthropicTool{
 		{
 			Name:        "search",
 			Description: "Search the web",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
 		},
 	}
-	result := convertAnthropicTools(tools)
+	result := convertAnthropicTools(anthropicTools)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(result))
 	}
@@ -447,8 +447,8 @@ func TestConvertAnthropicTools_FieldMapping(t *testing.T) {
 	if result[0].Description != "Search the web" {
 		t.Errorf("description = %q", result[0].Description)
 	}
-	if string(result[0].Parameters) != string(tools[0].InputSchema) {
-		t.Errorf("parameters = %s, want %s", result[0].Parameters, tools[0].InputSchema)
+	if string(result[0].Parameters) != string(anthropicTools[0].InputSchema) {
+		t.Errorf("parameters = %s, want %s", result[0].Parameters, anthropicTools[0].InputSchema)
 	}
 }
 

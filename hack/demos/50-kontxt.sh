@@ -92,6 +92,11 @@ demo_event "🚀" "Apply the second Job. Identical code, identical SA — only t
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/kontxt-denied-job.yaml"
 wait_for_job_with_progress "${denied_job}" "${kontxt_ns}" 120 fail \
   || die "denied caller Job did not transition to Failed=True within 120s"
+denied_log="$(kubectl logs -n "${kontxt_ns}" job/"${denied_job}" --tail=50 2>/dev/null || true)"
+if ! printf '%s\n' "${denied_log}" | grep -Eq '^3/3 orka api call: denied status=(401|403) '; then
+  printf 'denied caller log did not contain the expected Orka 401/403 decision:\n%s\n' "${denied_log}" >&2
+  die "denied caller failed before Orka made the scoped authorization decision"
+fi
 demo_event "🛑" "Job failed (expected). Denial happened at the Orka API — TTS still minted the TxToken cleanly."
 
 # Chapter 7 ------------------------------------------------------------------

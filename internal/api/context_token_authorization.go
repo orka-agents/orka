@@ -50,6 +50,8 @@ const (
 	ContextTokenScopeProvidersUse = "orka:providers:use"
 	// ContextTokenScopeSecretsRead authorizes context-token callers to read Secret metadata.
 	ContextTokenScopeSecretsRead = "orka:secrets:read"
+	// ContextTokenScopeSecretsCredentialsRead authorizes use of Secret data as outbound credentials.
+	ContextTokenScopeSecretsCredentialsRead = "orka:secrets:credentials:read"
 	// ContextTokenScopeAgentsRead authorizes context-token callers to read Agent definitions.
 	ContextTokenScopeAgentsRead = "orka:agents:read"
 	// ContextTokenScopeAgentsWrite authorizes context-token callers to mutate Agent definitions.
@@ -81,55 +83,57 @@ const (
 // ContextTokenAuthorizationConfig controls optional authorization checks derived
 // from verified context-token scope and transaction context claims.
 type ContextTokenAuthorizationConfig struct {
-	Mode                 string
-	TaskCreateScopes     []string
-	TaskReadScopes       []string
-	TaskListScopes       []string
-	TaskDeleteScopes     []string
-	ToolReadScopes       []string
-	ToolUseScopes        []string
-	ProviderUseScopes    []string
-	SecretReadScopeList  []string
-	AgentReadScopes      []string
-	AgentWriteScopes     []string
-	MemoryReadScopes     []string
-	MemoryWriteScopes    []string
-	SessionReadScopes    []string
-	SessionWriteScopes   []string
-	SecurityReadScopes   []string
-	SecurityWriteScopes  []string
-	MonitorReadScopes    []string
-	MonitorWriteScopes   []string
-	MonitorOperateScopes []string
-	SkillReadScopes      []string
-	SkillWriteScopes     []string
+	Mode                          string
+	TaskCreateScopes              []string
+	TaskReadScopes                []string
+	TaskListScopes                []string
+	TaskDeleteScopes              []string
+	ToolReadScopes                []string
+	ToolUseScopes                 []string
+	ProviderUseScopes             []string
+	SecretReadScopeList           []string
+	SecretCredentialReadScopeList []string
+	AgentReadScopes               []string
+	AgentWriteScopes              []string
+	MemoryReadScopes              []string
+	MemoryWriteScopes             []string
+	SessionReadScopes             []string
+	SessionWriteScopes            []string
+	SecurityReadScopes            []string
+	SecurityWriteScopes           []string
+	MonitorReadScopes             []string
+	MonitorWriteScopes            []string
+	MonitorOperateScopes          []string
+	SkillReadScopes               []string
+	SkillWriteScopes              []string
 }
 
 // ContextTokenAuthorizationConfigOptions names the inputs used to build
 // context-token authorization config.
 type ContextTokenAuthorizationConfigOptions struct {
-	Mode                 string
-	TaskCreateScopes     string
-	TaskReadScopes       string
-	TaskListScopes       string
-	TaskDeleteScopes     string
-	ToolReadScopes       string
-	ToolUseScopes        string
-	ProviderUseScopes    string
-	SecretReadScopes     string
-	AgentReadScopes      string
-	AgentWriteScopes     string
-	MemoryReadScopes     string
-	MemoryWriteScopes    string
-	SessionReadScopes    string
-	SessionWriteScopes   string
-	SecurityReadScopes   string
-	SecurityWriteScopes  string
-	MonitorReadScopes    string
-	MonitorWriteScopes   string
-	MonitorOperateScopes string
-	SkillReadScopes      string
-	SkillWriteScopes     string
+	Mode                       string
+	TaskCreateScopes           string
+	TaskReadScopes             string
+	TaskListScopes             string
+	TaskDeleteScopes           string
+	ToolReadScopes             string
+	ToolUseScopes              string
+	ProviderUseScopes          string
+	SecretReadScopes           string
+	SecretCredentialReadScopes string
+	AgentReadScopes            string
+	AgentWriteScopes           string
+	MemoryReadScopes           string
+	MemoryWriteScopes          string
+	SessionReadScopes          string
+	SessionWriteScopes         string
+	SecurityReadScopes         string
+	SecurityWriteScopes        string
+	MonitorReadScopes          string
+	MonitorWriteScopes         string
+	MonitorOperateScopes       string
+	SkillReadScopes            string
+	SkillWriteScopes           string
 }
 
 // NewContextTokenAuthorizationConfig builds context-token authorization config.
@@ -152,6 +156,7 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 	toolUse := defaultScopes(opts.ToolUseScopes, ContextTokenScopeToolsUse)
 	providerUse := defaultScopes(opts.ProviderUseScopes, ContextTokenScopeProvidersUse)
 	secretRead := defaultScopes(opts.SecretReadScopes, ContextTokenScopeSecretsRead)
+	secretCredentialRead := defaultScopes(opts.SecretCredentialReadScopes, ContextTokenScopeSecretsCredentialsRead)
 	agentRead := defaultScopes(opts.AgentReadScopes, ContextTokenScopeAgentsRead)
 	agentWrite := defaultScopes(opts.AgentWriteScopes, ContextTokenScopeAgentsWrite)
 	memoryRead := defaultScopes(opts.MemoryReadScopes, ContextTokenScopeMemoryRead)
@@ -166,28 +171,29 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 	skillRead := defaultScopes(opts.SkillReadScopes, ContextTokenScopeSkillsRead)
 	skillWrite := defaultScopes(opts.SkillWriteScopes, ContextTokenScopeSkillsWrite)
 	return ContextTokenAuthorizationConfig{
-		Mode:                 mode,
-		TaskCreateScopes:     createScopes,
-		TaskReadScopes:       readScopes,
-		TaskListScopes:       listScopes,
-		TaskDeleteScopes:     deleteScopes,
-		ToolReadScopes:       toolRead,
-		ToolUseScopes:        toolUse,
-		ProviderUseScopes:    providerUse,
-		SecretReadScopeList:  secretRead,
-		AgentReadScopes:      agentRead,
-		AgentWriteScopes:     agentWrite,
-		MemoryReadScopes:     memoryRead,
-		MemoryWriteScopes:    memoryWrite,
-		SessionReadScopes:    sessionRead,
-		SessionWriteScopes:   sessionWrite,
-		SecurityReadScopes:   securityRead,
-		SecurityWriteScopes:  securityWrite,
-		MonitorReadScopes:    monitorRead,
-		MonitorWriteScopes:   monitorWrite,
-		MonitorOperateScopes: monitorOperate,
-		SkillReadScopes:      skillRead,
-		SkillWriteScopes:     skillWrite,
+		Mode:                          mode,
+		TaskCreateScopes:              createScopes,
+		TaskReadScopes:                readScopes,
+		TaskListScopes:                listScopes,
+		TaskDeleteScopes:              deleteScopes,
+		ToolReadScopes:                toolRead,
+		ToolUseScopes:                 toolUse,
+		ProviderUseScopes:             providerUse,
+		SecretReadScopeList:           secretRead,
+		SecretCredentialReadScopeList: secretCredentialRead,
+		AgentReadScopes:               agentRead,
+		AgentWriteScopes:              agentWrite,
+		MemoryReadScopes:              memoryRead,
+		MemoryWriteScopes:             memoryWrite,
+		SessionReadScopes:             sessionRead,
+		SessionWriteScopes:            sessionWrite,
+		SecurityReadScopes:            securityRead,
+		SecurityWriteScopes:           securityWrite,
+		MonitorReadScopes:             monitorRead,
+		MonitorWriteScopes:            monitorWrite,
+		MonitorOperateScopes:          monitorOperate,
+		SkillReadScopes:               skillRead,
+		SkillWriteScopes:              skillWrite,
 	}, nil
 }
 
@@ -202,6 +208,10 @@ func (c ContextTokenAuthorizationConfig) enforcing() bool {
 
 func (c ContextTokenAuthorizationConfig) SecretReadScopes() []string {
 	return c.SecretReadScopeList
+}
+
+func (c ContextTokenAuthorizationConfig) SecretCredentialReadScopes() []string {
+	return c.SecretCredentialReadScopeList
 }
 
 type contextTokenTaskCreateAuthorizationContext struct {
@@ -410,6 +420,51 @@ func authorizeContextTokenToolAgentDelete(token *ContextToken, cfg ContextTokenA
 		return nil
 	}
 	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
+}
+
+func authorizeContextTokenSecretRead(token *ContextToken, cfg ContextTokenAuthorizationConfig, action, namespace, secretName string) error {
+	if !cfg.Enabled() || token == nil {
+		return nil
+	}
+	failures := []string{}
+	requiredScopes := cfg.SecretCredentialReadScopes()
+	if !hasAnyScope(token.Scopes, requiredScopes) {
+		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(requiredScopes, ",")))
+	}
+	if want, ok := contextString(token.TransactionContext, "namespace"); ok && strings.TrimSpace(namespace) != "" && namespace != want {
+		failures = append(failures, fmt.Sprintf("namespace %q does not match token context %q", namespace, want))
+	}
+	if want, ok := contextString(token.TransactionContext, "secret"); ok && strings.TrimSpace(secretName) != "" && secretName != want {
+		failures = append(failures, fmt.Sprintf("secret %q does not match token context %q", secretName, want))
+	}
+	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
+}
+
+func (h *Handlers) authorizeContextTokenGitCredentialSecretName(c fiber.Ctx, action, namespace, secretName string) error {
+	secretName = strings.TrimSpace(secretName)
+	if secretName == "" || !h.contextTokenAuthorization.Enabled() {
+		return nil
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return nil
+	}
+	return authorizeContextTokenSecretRead(ui.ContextToken, h.contextTokenAuthorization, action, namespace, secretName)
+}
+
+func authorizeContextTokenGitCredentialSecretForUser(ui *UserInfo, cfg ContextTokenAuthorizationConfig, action, namespace, secretName string) error {
+	secretName = strings.TrimSpace(secretName)
+	if secretName == "" || !cfg.Enabled() {
+		return nil
+	}
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return nil
+	}
+	return authorizeContextTokenSecretRead(ui.ContextToken, cfg, action, namespace, secretName)
 }
 
 func contextTokenAgentWriteFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, namespace, agentName string) []string {
@@ -1184,6 +1239,7 @@ func contextTokenTaskCreateEffectiveRuntimeAllowBash(req CreateTaskRequest, agen
 
 func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, authzCtx contextTokenTaskCreateAuthorizationContext) []string {
 	failures := contextTokenTaskCreateScopeFailures(token, cfg)
+	failures = append(failures, contextTokenWorkspaceCredentialFailures(token, cfg, taskRequestWorkspace(authzCtx.Request))...)
 	failures = append(failures, contextTokenTaskContextFailures(token, authzCtx, true)...)
 	return failures
 }
@@ -1193,6 +1249,33 @@ func contextTokenTaskCreateScopeFailures(token *ContextToken, cfg ContextTokenAu
 		return nil
 	}
 	return []string{fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.TaskCreateScopes, ","))}
+}
+
+func contextTokenWorkspaceCredentialFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, workspace *corev1alpha1.WorkspaceConfig) []string {
+	if workspace == nil {
+		return nil
+	}
+	requiredScopes := cfg.SecretCredentialReadScopes()
+	if len(requiredScopes) == 0 {
+		return nil
+	}
+	if workspace.GitSecretRef == nil || strings.TrimSpace(workspace.GitSecretRef.Name) == "" {
+		return nil
+	}
+	failures := []string{}
+	if !hasAnyScope(token.Scopes, requiredScopes) {
+		failures = append(failures, fmt.Sprintf(
+			"workspace git credentials require one of scopes %q",
+			strings.Join(requiredScopes, ","),
+		))
+	}
+	if want, ok := contextString(token.TransactionContext, "secret"); ok && workspace.GitSecretRef.Name != want {
+		failures = append(failures, fmt.Sprintf("git secret %q does not match token context %q", workspace.GitSecretRef.Name, want))
+	}
+	if len(failures) > 0 {
+		return failures
+	}
+	return nil
 }
 
 func contextTokenTaskContextFailures(token *ContextToken, authzCtx contextTokenTaskCreateAuthorizationContext, includeTaskIdentity bool) []string {

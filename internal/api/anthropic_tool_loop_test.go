@@ -175,7 +175,7 @@ func TestCoordinatorSystemPrompt_TurnEndingInvariant(t *testing.T) {
 		"After fetch_task_output (implementation succeeded)  → create_container_task (validation)",
 		"After fetch_task_output (every reviewer LGTM)       → create_pull_request",
 		"After create_pull_request                            → check_pull_request_ci",
-		"After check_pull_request_ci (success)               → FINAL TEXT REPORT (GOAL STATE A)",
+		"After check_pull_request_ci (passed)                → FINAL TEXT REPORT (GOAL STATE A)",
 		"FINAL TEXT REPORT (GOAL STATE B)",
 		// (c) cross-reference from old CRITICAL RULES line
 		"per the TURN-ENDING INVARIANT at the top of this prompt",

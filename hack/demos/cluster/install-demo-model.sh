@@ -35,6 +35,44 @@ log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 command -v kubectl >/dev/null 2>&1 || die "missing required command: kubectl"
+command -v jq      >/dev/null 2>&1 || die "missing required command: jq"
+
+orka_namespace="${ORKA_NAMESPACE:-orka-system}"
+controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
+codex_image="${DEMO_CODEX_WORKER_IMAGE:-localhost:${KIND_REGISTRY_PORT:-5001}/orka/agent-worker-codex:demo}"
+ai_image="${DEMO_AI_WORKER_IMAGE:-localhost:${KIND_REGISTRY_PORT:-5001}/orka/ai-worker:demo}"
+general_image="${DEMO_GENERAL_WORKER_IMAGE:-localhost:${KIND_REGISTRY_PORT:-5001}/orka/general-worker:demo}"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+
+needs_docker=0
+require_image_source() {
+  local label="$1" build_flag="$2" image_var="$3"
+  if [[ "${build_flag}" == "1" ]]; then
+    needs_docker=1
+    return 0
+  fi
+  if [[ -z "${!image_var:-}" ]]; then
+    die "${label} build is disabled but ${image_var} is not set to an existing image"
+  fi
+}
+require_image_source "codex worker" "${DEMO_BUILD_CODEX_IMAGE:-1}" DEMO_CODEX_WORKER_IMAGE
+require_image_source "AI worker" "${DEMO_BUILD_AI_IMAGE:-1}" DEMO_AI_WORKER_IMAGE
+require_image_source "general worker" "${DEMO_BUILD_GENERAL_IMAGE:-1}" DEMO_GENERAL_WORKER_IMAGE
+if [[ "${needs_docker}" == "1" ]]; then
+  command -v docker >/dev/null 2>&1 || die "missing required command: docker (needed to build demo worker images)"
+  docker info >/dev/null 2>&1 || die "docker daemon is not reachable"
+fi
+
+publish_worker_image() {
+  local image="$1"
+  if command -v kind >/dev/null 2>&1 && kind get clusters 2>/dev/null | grep -qx "${cluster_name}"; then
+    log "Loading ${image} into kind/${cluster_name}"
+    kind load docker-image "${image}" --name "${cluster_name}"
+  else
+    log "Pushing ${image} (no local kind cluster named ${cluster_name} detected)"
+    docker push "${image}"
+  fi
+}
 
 if command -v kind >/dev/null 2>&1 && kind get clusters 2>/dev/null | grep -qx "${cluster_name}"; then
   log "Selecting kubectl context kind-${cluster_name}"
@@ -104,11 +142,6 @@ fi
 # which fails these demos with "git: executable not found". Build the PRODUCTION
 # codex image (workers/agent/codex/Dockerfile has git + codex) and repoint the
 # controller's --codex-worker-image at it.
-orka_namespace="${ORKA_NAMESPACE:-orka-system}"
-controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
-codex_image="${DEMO_CODEX_WORKER_IMAGE:-localhost:${KIND_REGISTRY_PORT:-5001}/orka/agent-worker-codex:demo}"
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-
 # build_and_repoint_worker <controller-flag> <dockerfile> <image> <build?> <label>
 # Builds a worker image for the cluster node arch, pushes it to the local
 # registry, and points the controller's <controller-flag> at it — ADDING the
@@ -120,11 +153,11 @@ build_and_repoint_worker() {
   if command -v docker >/dev/null 2>&1 && [[ "${do_build}" == "1" ]]; then
     local node_arch
     node_arch="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
-    log "Building ${label} image ${image} (arch ${node_arch})"
-    docker build --platform "linux/${node_arch}" -t "${image}" \
-      -f "${repo_root}/${dockerfile}" "${repo_root}"
-    docker push "${image}"
-  fi
+	  log "Building ${label} image ${image} (arch ${node_arch})"
+	  docker build --platform "linux/${node_arch}" -t "${image}" \
+	    -f "${repo_root}/${dockerfile}" "${repo_root}"
+	  publish_worker_image "${image}"
+	fi
   if kubectl -n "${orka_namespace}" get deployment "${controller_deployment}" >/dev/null 2>&1; then
     log "Repointing ${controller_deployment} --${flag} -> ${image}"
     kubectl -n "${orka_namespace}" get deployment "${controller_deployment}" -o json \
@@ -145,9 +178,9 @@ build_and_repoint_worker() {
 if command -v docker >/dev/null 2>&1 && [[ "${DEMO_BUILD_CODEX_IMAGE:-1}" == "1" ]]; then
   node_arch="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
   log "Building git-capable codex worker image ${codex_image} (arch ${node_arch})"
-  docker build --platform "linux/${node_arch}" -t "${codex_image}" \
-    -f "${repo_root}/workers/agent/codex/Dockerfile" "${repo_root}"
-  docker push "${codex_image}"
+	docker build --platform "linux/${node_arch}" -t "${codex_image}" \
+	  -f "${repo_root}/workers/agent/codex/Dockerfile" "${repo_root}"
+	publish_worker_image "${codex_image}"
 fi
 if kubectl -n "${orka_namespace}" get deployment "${controller_deployment}" >/dev/null 2>&1; then
   log "Repointing ${controller_deployment} --codex-worker-image -> ${codex_image}"
@@ -167,7 +200,6 @@ fi
 # never builds or wires this image, so the controller falls back to the code
 # default ghcr.io/sozercan/orka/ai-worker:latest, which the kind cluster cannot
 # pull -> ImagePullBackOff and the coordinator never starts.
-ai_image="${DEMO_AI_WORKER_IMAGE:-localhost:${KIND_REGISTRY_PORT:-5001}/orka/ai-worker:demo}"
 build_and_repoint_worker "ai-worker-image" "workers/ai/Dockerfile" \
   "${ai_image}" "${DEMO_BUILD_AI_IMAGE:-1}" "AI worker"
 
@@ -177,7 +209,6 @@ build_and_repoint_worker "ai-worker-image" "workers/ai/Dockerfile" \
 # Dockerfile) when the Task spec pins no image. The Substrate e2e never wires
 # it either, so those children hit ImagePullBackOff on the ghcr default and the
 # coordinator's validation phase stalls. Build + wire it the same way.
-general_image="${DEMO_GENERAL_WORKER_IMAGE:-localhost:${KIND_REGISTRY_PORT:-5001}/orka/general-worker:demo}"
 build_and_repoint_worker "general-worker-image" "workers/general/Dockerfile" \
   "${general_image}" "${DEMO_BUILD_GENERAL_IMAGE:-1}" "general worker"
 

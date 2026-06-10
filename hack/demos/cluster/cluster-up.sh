@@ -44,8 +44,20 @@ log "Ensuring namespace ${namespace} and ${demo_namespace}"
 kubectl create namespace "${namespace}"      --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace "${demo_namespace}" --dry-run=client -o yaml | kubectl apply -f -
 
-log "Deploying Orka (make deploy IMG=${img})"
-(cd "${repo_root}" && make deploy IMG="${img}")
+log "Deploying Orka (namespace ${namespace}, image ${img})"
+if [[ "${namespace}" == "orka-system" ]]; then
+  (cd "${repo_root}" && make deploy IMG="${img}")
+else
+  (cd "${repo_root}" && make manifests kustomize)
+  tmp_config="$(mktemp -d)"
+  cp -R "${repo_root}/config" "${tmp_config}/config"
+  (cd "${tmp_config}/config/manager" && "${repo_root}/bin/kustomize" edit set image controller="${img}")
+  perl -0pi -e "s#--controller-url=http://orka-api\.orka-system\.svc:8080#--controller-url=http://orka-api.${namespace}.svc:8080#g" \
+    "${tmp_config}/config/manager/manager.yaml"
+  (cd "${tmp_config}/config/default" && "${repo_root}/bin/kustomize" edit set namespace "${namespace}")
+  "${repo_root}/bin/kustomize" build "${tmp_config}/config/default" | kubectl apply -f -
+  rm -rf "${tmp_config}"
+fi
 
 log "Waiting for orka-controller-manager rollout"
 kubectl -n "${namespace}" rollout status deployment/orka-controller-manager --timeout=300s
