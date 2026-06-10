@@ -200,7 +200,6 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 					"[System: You emitted text but did not include the literal %q sentinel that marks GOAL STATE A or GOAL STATE B. The workflow is not done. Per the TURN-ENDING INVARIANT, your next response MUST contain a tool_use (not text). Look at the POSTCONDITION TABLE and call the correct next tool. Do NOT emit any text until you are ready to write your final report that begins with %q on its own line.]",
 					goalStateSentinel, goalStateSentinel,
 				)
-				writeAnthropicTextProgress(w, &blockIndex, stripGoalStateSentinel(textContent))
 				writeAnthropicTextProgress(w, &blockIndex, "[Continuing workflow...]\n\n")
 				messages = append(messages, llm.Message{
 					Role:    "assistant",

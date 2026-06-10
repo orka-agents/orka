@@ -955,6 +955,44 @@ func TestHandleNonStreamingToolLoop_StripsGoalStateSentinel(t *testing.T) {
 	}
 }
 
+func TestHandleStreamingToolLoop_DoesNotStreamPrematureCoordinatorText(t *testing.T) {
+	mock := &oaiMockProvider{
+		responses: []*llm.CompletionResponse{
+			{Content: "premature secret progress summary", StopReason: oaiStopReasonEndTurn},
+			{Content: goalStateSentinel + "\nPR ready: https://example.test/pr/5", StopReason: oaiStopReasonEndTurn},
+		},
+	}
+
+	handler, app := setupTestOpenAIHandler()
+	handler.config.MaxPrematureEndRetries = 1
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingToolLoop(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4", Messages: []llm.Message{{Role: "user", Content: "ship"}}},
+			"chatcmpl-premature", "gpt-4", 1234567890, nil, nil,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, "premature secret progress summary") {
+		t.Fatalf("stream body leaked premature coordinator text: %s", bodyStr)
+	}
+	for _, want := range []string{"[Continuing workflow...]", "PR ready: https://example.test/pr/5", "[DONE]"} {
+		if !strings.Contains(bodyStr, want) {
+			t.Fatalf("expected stream body to contain %q, got: %s", want, bodyStr)
+		}
+	}
+	if mock.callIdx != 2 {
+		t.Fatalf("expected 2 LLM calls, got %d", mock.callIdx)
+	}
+}
+
 // --- Tests: extractContent edge cases ---
 
 func TestExtractContent_NonStringNonArray(t *testing.T) {

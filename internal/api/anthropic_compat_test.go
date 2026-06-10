@@ -1122,6 +1122,47 @@ func TestHandleStreamingMessages_StripsSentinelAndStreamsSafeToolProgress(t *tes
 	}
 }
 
+func TestHandleStreamingMessages_DoesNotStreamPrematureCoordinatorText(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		responses: []*llm.CompletionResponse{
+			{Content: "premature anthropic secret progress", StopReason: oaiStopReasonEndTurn},
+			{Content: goalStateSentinel + "\nPR ready: https://example.test/pr/6", StopReason: oaiStopReasonEndTurn},
+		},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	handler.config.MaxPrematureEndRetries = 1
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingMessages(
+			c, mock,
+			&llm.CompletionRequest{
+				Model:    "claude-sonnet-4-20250514",
+				Messages: []llm.Message{{Role: testRoleUser, Content: "ship"}},
+			},
+			"claude-sonnet-4-20250514", 0, nil,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, "premature anthropic secret progress") {
+		t.Fatalf("stream body leaked premature coordinator text: %s", bodyStr)
+	}
+	for _, want := range []string{"[Continuing workflow...]", "PR ready: https://example.test/pr/6", "message_stop"} {
+		if !strings.Contains(bodyStr, want) {
+			t.Fatalf("expected stream body to contain %q, got: %s", want, bodyStr)
+		}
+	}
+	if mock.callIdx != 2 {
+		t.Fatalf("expected 2 LLM calls, got %d", mock.callIdx)
+	}
+}
+
 // --- Tests: injectOrkaTools ---
 
 func TestInjectOrkaTools_BuiltinTools(t *testing.T) {

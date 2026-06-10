@@ -721,7 +721,6 @@ func runToolLoopWithObserver(
 				"retries", prematureEndRetries,
 				"content_prefix", truncateForLog(resp.Content, 120),
 			)
-			observer.assistantContent(resp.Content)
 			observer.prematureEndRetry()
 			messages = append(messages, llm.Message{
 				Role:    "assistant",
