@@ -72,7 +72,7 @@ func validateChildTaskAgainstParentTransaction(ctx context.Context, k8sClient cl
 	workspace := taskWorkspace(child)
 	if workspace != nil && workspace.GitSecretRef != nil && strings.TrimSpace(workspace.GitSecretRef.Name) != "" {
 		const secretCredentialReadScope = "orka:secrets:credentials:read"
-		if !transactionHasScope(parent.Spec.Transaction, secretCredentialReadScope) {
+		if !TransactionHasScope(parent.Spec.Transaction, secretCredentialReadScope) {
 			return fmt.Errorf("child task git secret %q requires transaction scope %q", workspace.GitSecretRef.Name, secretCredentialReadScope)
 		}
 		if want := strings.TrimSpace(txCtx["secret"]); want != "" && workspace.GitSecretRef.Name != want {
@@ -103,7 +103,7 @@ func validateChildTaskAgainstParentTransaction(ctx context.Context, k8sClient cl
 	return nil
 }
 
-func transactionHasScope(tx *corev1alpha1.TaskTransaction, want string) bool {
+func TransactionHasScope(tx *corev1alpha1.TaskTransaction, want string) bool {
 	if tx == nil || strings.TrimSpace(want) == "" {
 		return false
 	}

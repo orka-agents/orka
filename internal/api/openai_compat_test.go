@@ -439,7 +439,7 @@ func TestWriteStreamChunk(t *testing.T) {
 			Delta: &OAIMessage{Role: "assistant", Content: "hello"},
 		}},
 	}
-	writeStreamChunk(w, chunk)
+	_ = writeStreamChunk(w, chunk)
 
 	got := buf.String()
 	if !strings.HasPrefix(got, "data: ") {
@@ -457,7 +457,7 @@ func TestWriteStreamDone(t *testing.T) {
 	var buf bytes.Buffer
 	w := bufio.NewWriter(&buf)
 
-	writeStreamDone(w)
+	_ = writeStreamDone(w)
 
 	got := buf.String()
 	if got != "data: [DONE]\n\n" {

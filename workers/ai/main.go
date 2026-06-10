@@ -897,7 +897,7 @@ func workerSecretReadAuthorizer(
 				"Use a transaction token that grants credential access",
 			)
 		}
-		if !workerTransactionHasScope(tx, secretCredentialReadScope) {
+		if !tools.TransactionHasScope(tx, secretCredentialReadScope) {
 			return workerSecretReadError(
 				fmt.Sprintf(
 					"missing required scope %q for git secret %s/%s",
@@ -930,27 +930,6 @@ func workerSecretReadError(message, suggestion string) *tools.ChatToolError {
 		Message:    message,
 		Suggestion: suggestion,
 	}
-}
-
-func workerTransactionHasScope(tx *corev1alpha1.TaskTransaction, want string) bool {
-	if tx == nil || strings.TrimSpace(want) == "" {
-		return false
-	}
-	for _, scope := range tx.Scopes {
-		if strings.TrimSpace(scope) == want {
-			return true
-		}
-	}
-	for _, scope := range strings.FieldsFunc(tx.Scope, transactionScopeSeparator) {
-		if strings.TrimSpace(scope) == want {
-			return true
-		}
-	}
-	return false
-}
-
-func transactionScopeSeparator(r rune) bool {
-	return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
 }
 
 // loadSkillsFromVolume reads skill content from the mounted volume at /workspace/.skills/.
