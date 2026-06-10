@@ -1,0 +1,6 @@
+CI flagged a lint nit on the PR you just opened: an unused import in the
+metrics handler. The sandbox workspace still has your branch checked out
+from the previous turn — no need to re-clone.
+
+Fix the lint nit, amend the change with a focused commit, and push.
+Reply with the PR URL and the commit SHA of the fixup.

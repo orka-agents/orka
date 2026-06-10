@@ -1,11 +1,14 @@
 # Demo Magic Scenarios
 
-This directory contains a small `demo-magic` kit for showing Orka in four ways:
+This directory contains a small `demo-magic` kit for showing Orka in six ways:
 
 - `10-chat-pr.sh`: Claude Code -> Orka's Anthropic-compatible API -> prepared coordinator -> coder/reviewer/CI loops -> PR
 - `20-manual-workflow.sh`: explicit coordinator Task CR for a focused Vekil metrics first-PR workflow
 - `30-cron-workflow.sh`: scheduled runtime task with recurring child runs
 - `40-security-scanning.sh`: repository scan -> findings -> patch -> PR
+- `50-kontxt.sh`: workload SA token -> in-cluster TTS -> request-scoped TxToken -> Orka API call (one identity, two outcomes)
+- `60-agent-sandbox.sh`: three turns share a single SandboxClaim via `sessionRef` (scout -> builder -> CI fixup, same workspace)
+- `70-agent-substrate.sh`: a real gpt-5.5 codex agent in a gVisor Actor (Agent Substrate) clones a repo, edits it, and opens a PR; a second task reuses the warm workspace with no cold start
 
 There is also:
 
@@ -35,10 +38,10 @@ export DEMO_NAMESPACE="demo-magic"
 
 # Must match metadata.name from: kubectl get provider -n "$DEMO_NAMESPACE"
 export DEMO_PROVIDER_REF="<existing-provider-name>"
-export DEMO_AI_MODEL="gpt-5.4"
+export DEMO_AI_MODEL="claude-opus-4.8"
 
 export DEMO_RUNTIME_TYPE="codex"
-export DEMO_RUNTIME_MODEL="gpt-5.4"
+export DEMO_RUNTIME_MODEL="gpt-5.5"
 export DEMO_RUNTIME_SECRET_REF="<runtime-secret-name>"
 
 export DEMO_GIT_REPO="https://github.com/sozercan/vekil.git"
@@ -72,7 +75,7 @@ spec:
     name: copilot-provider-key
     key: api-key
   baseURL: https://api.githubcopilot.com
-  defaultModel: gpt-5.4
+  defaultModel: gpt-5.5
 YAML
 ```
 
@@ -151,8 +154,8 @@ Claude Code chat defaults:
 ```bash
 export DEMO_CHAT_CLIENT="claude-code"
 export DEMO_CLAUDE_BIN="claude"
-# Optional override. By default the scripts compute provider/model, e.g. copilot-proxy-openai/gpt-5.4.
-# export DEMO_CLAUDE_MODEL="copilot-proxy-openai/gpt-5.4"
+# Optional override. By default the scripts compute provider/model, e.g. copilot-proxy-openai/gpt-5.5.
+# export DEMO_CLAUDE_MODEL="copilot-proxy-openai/gpt-5.5"
 ```
 
 Optional tuning:
@@ -225,7 +228,129 @@ hack/demos/10-chat-pr.sh
 hack/demos/20-manual-workflow.sh
 hack/demos/30-cron-workflow.sh
 hack/demos/40-security-scanning.sh
+hack/demos/50-kontxt.sh           # requires hack/demos/cluster/install-kontxt.sh
+hack/demos/60-agent-sandbox.sh    # requires hack/demos/cluster/install-agent-sandbox.sh
 ```
+
+Demo 70 (Agent Substrate) runs on its **own** kind cluster, not the shared
+demo-magic cluster (Substrate needs a custom registry + gVisor node config):
+
+```bash
+make demo-substrate-up                                # stand up the dedicated cluster
+kubectl config use-context kind-orka-agent-substrate-e2e
+DEMO_SUBSTRATE_NAMESPACE=default ./hack/demos/70-agent-substrate.sh
+make demo-substrate-down                              # tear it down
+```
+
+### One cluster for everything (`demo-cluster-up-all`)
+
+Because the Substrate cluster is the superset (custom registry + gVisor nodes),
+a single bootstrap can host **all** demos (00–70) on it:
+
+```bash
+make demo-cluster-up-all        # substrate cluster + Orka + kontxt + agent-sandbox + vekil + Provider/secrets
+                                # (one-time GitHub device-code login for vekil — follow the log prompt)
+```
+
+> **Re-running is guarded.** If a kind cluster named `orka-agent-substrate-e2e`
+> already exists, the bootstrap prompts **reuse / recreate / cancel** instead of
+> silently destroying it (the Substrate standup does `kind delete` + rebuild,
+> which would wipe a completed vekil login). Choose **reuse** to keep the cluster
+> and just reconcile the add-ons. For non-interactive runs, set
+> `DEMO_CLUSTER_REUSE=reuse|recreate|cancel` to skip the prompt; with no TTY and
+> no override it defaults to `recreate` (the historical behavior).
+
+```bash
+# Workspace demos bring their own namespace/env:
+kubectl config use-context kind-orka-agent-substrate-e2e
+
+# Demo 50 (kontxt): the orka-client API ServiceAccount lives in `default`.
+DEMO_NAMESPACE=default ./hack/demos/50-kontxt.sh
+
+# Demo 60 (agent-sandbox): the bootstrap installs the SandboxTemplate
+# (orka-live-template) and the sandbox-model-key Secret into `demo-magic`, so
+# the demo MUST run there — DEMO_NAMESPACE=default fails with
+# "template orka-live-template not found in namespace default".
+DEMO_NAMESPACE=demo-magic DEMO_RUNTIME_TYPE=codex DEMO_RUNTIME_MODEL=gpt-5.5 \
+  DEMO_RUNTIME_SECRET_REF=sandbox-model-key DEMO_GIT_SECRET_REF=github-credentials \
+  DEMO_SANDBOX_TEMPLATE_REF=orka-live-template ./hack/demos/60-agent-sandbox.sh
+
+# Demo 70 (substrate): sets provider: substrate explicitly; runs in `default`.
+./hack/demos/70-agent-substrate.sh
+
+# Model-backed SDLC demos share one env file (points at the in-cluster vekil + secrets):
+source hack/demos/cluster/demo-env.sh
+./hack/demos/20-manual-workflow.sh
+./hack/demos/30-cron-workflow.sh
+./hack/demos/40-security-scanning.sh
+./hack/demos/10-chat-pr.sh        # also needs the `claude` CLI on PATH
+
+make demo-cluster-up-all-down     # tear it all down
+```
+
+Notes: `install-agent-sandbox.sh` runs **last** in the bootstrap because it sets
+the controller's default workspace provider to `agent-sandbox` (Demo 60 relies
+on that default; Demo 70 sets `provider: substrate` explicitly, so it's
+unaffected). kontxt's `enforce` mode only gates requests carrying a `Txn-Token`
+header, so the other demos (which send normal ServiceAccount tokens) are
+unaffected — they coexist safely.
+
+Known flake (Demo 70): the warm-reuse Task occasionally fails during workspace
+release with a gVisor `RestoreWorkload: ... eth0: Link not found` daemon error
+*after* the agent's work and PR have already landed. This is Substrate runtime
+nondeterminism on `runsc`, not an Orka bug — the demo's story (cold run opens a
+real PR, warm run reattaches with `reused=true`) still completes. Re-run if the
+final card matters for a recording.
+
+## Recording
+
+The demo scripts are recording-ready: they pace themselves via the
+`DEMO_RECORD_PROFILE` env var rather than a wrapper. To capture an
+asciicast, point asciinema at the script directly:
+
+```bash
+asciinema rec --idle-time-limit 1.5 --cols 110 --rows 30 \
+  -c "DEMO_RECORD_PROFILE=docs ./hack/demos/10-chat-pr.sh" \
+  /tmp/10.cast
+```
+
+### `DEMO_RECORD_PROFILE` (default `presenter`)
+
+| Profile     | Typewriter | Chapters       | Best for                                  |
+|-------------|------------|----------------|-------------------------------------------|
+| `presenter` | on         | all + audit JSON | live audience, full transparency        |
+| `docs`      | off        | all + narration cues | embedded GIFs / docs              |
+| `social`    | off        | 1–3 only       | short clips, social media                 |
+| `hero`      | off        | suppressed     | ≤60s hero loops, minimal text             |
+
+### `DEMO_REQUEST_PRESET` (default `quiet-flag`)
+
+Selects the chat / manual request body so recordings finish quickly:
+
+| Preset                | What it asks for                                          |
+|-----------------------|-----------------------------------------------------------|
+| `quiet-flag`          | Add a `--quiet` flag to vekil + a test (short, default)   |
+| `readme-fix`          | Fix one broken link in the README                         |
+| `vekil-metrics`       | Full `/metrics` endpoint implementation (long-form story) |
+| `vekil-metrics-slice` | Focused regression fix on the metrics path                |
+
+An explicit `DEMO_CHAT_REQUEST` / `DEMO_MANUAL_REQUEST` env var or
+`*_REQUEST_FILE` always wins over the preset.
+
+### Bootstrapping a demo cluster
+
+For Demos 50 / 60 (and a clean rerun of 10–40) you can spin up a dedicated
+kind cluster:
+
+```bash
+make demo-cluster-up      # kind + Orka + kontxt + agent-sandbox
+make demo-images          # build + load the kontxt-caller image
+# ... run demos ...
+make demo-cluster-down
+```
+
+See `RECORDING.md` for the full design (visual style §5, helper API §5.5,
+per-script tightening §6, new-scenario storyboards §7, work order §11.5).
 
 ## Presenter Flow
 
@@ -243,14 +368,14 @@ The scenarios are:
 - `00-preflight.sh`: prove the namespace, controller, API tunnel, provider, Secrets, model surface, and local client are ready.
 - `10-chat-pr.sh`: a live or default repo-change request starts as a Claude Code chat request and ends as a coordinator Task, specialist child Tasks, validation/review/CI repair if needed, and PR result.
 - `20-manual-workflow.sh`: the same kind of live or default repo-change workflow runs from declarative Kubernetes YAML.
-- `30-cron-workflow.sh`: a scheduled parent Task creates recurring repository heartbeat child runs.
+- `30-cron-workflow.sh`: a scheduled parent Task triages stale GitHub PRs every tick and produces a paste-ready markdown report — the same Task primitive as demos 10/20 with a `schedule:` field added.
 - `40-security-scanning.sh`: an open finding becomes a patch proposal and human-reviewable PR.
 
 ## How the Claude Code Scenario Works
 
 `10-chat-pr.sh` intentionally uses Claude Code only as a local Anthropic client. The script applies the prepared coordinator/coder/reviewer Agents, renders the exact operational prompt to `${DEMO_WORKDIR}/chat-request.txt`, prints it by default for transparency, sends it to Orka, and saves the raw Claude Code JSON response to `${DEMO_WORKDIR}/chat-client-result.json` for debugging. Set `DEMO_SHOW_FULL_PROMPT=0` if you want the presenter view to show only the story and file path.
 
-Use a fully qualified Anthropic model name for this path, such as `copilot-proxy-openai/gpt-5.4`. If `DEMO_CLAUDE_MODEL` is empty, the helper computes it from `DEMO_PROVIDER_REF` and `DEMO_AI_MODEL`.
+Use a fully qualified Anthropic model name for this path, such as `copilot-proxy-openai/gpt-5.5`. If `DEMO_CLAUDE_MODEL` is empty, the helper computes it from `DEMO_PROVIDER_REF` and `DEMO_AI_MODEL`.
 
 The default `DEMO_CLAUDE_SETTING_SOURCES=""` is deliberate: the generated Claude Code command passes `--setting-sources ""` so local `~/.claude/settings.json` environment overrides do not silently point Claude Code at a different API base URL. When `DEMO_CLAUDE_TOOLS=""`, the scripts omit `--tools` entirely because current Claude Code builds reject an empty tool name; set `DEMO_CLAUDE_TOOLS` only when you intentionally want to pass a local Claude Code tool allow-list. Orka injects the Kubernetes task tools server-side.
 

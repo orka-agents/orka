@@ -44,15 +44,16 @@ const defaultNamespace = "default"
 
 // ChatConfig holds configuration for the chat handler.
 type ChatConfig struct {
-	Enabled         bool
-	Provider        string
-	Model           string
-	MaxIterations   int
-	MaxDuration     time.Duration
-	ToolTimeout     time.Duration
-	MaxConcurrent   int
-	MaxTasksPerTurn int
-	MaxSessionSize  int // bytes
+	Enabled                bool
+	Provider               string
+	Model                  string
+	MaxIterations          int
+	MaxDuration            time.Duration
+	ToolTimeout            time.Duration
+	MaxConcurrent          int
+	MaxTasksPerTurn        int
+	MaxSessionSize         int // bytes
+	MaxPrematureEndRetries int // re-prompts when the model emits text without the GOAL_STATE sentinel
 }
 
 // ChatRequest is the request body for POST /api/v1/chat.
@@ -310,6 +311,9 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	})
 	executor.SetAgentDeleteAuthorizer(func(ctx context.Context, agent *corev1alpha1.Agent) error {
 		return authorizeContextTokenToolAgentDelete(contextToken, ch.contextTokenAuthorization, "chatToolDeleteAgent", agent)
+	})
+	executor.SetSecretReadAuthorizer(func(ctx context.Context, namespace, secretName string) error {
+		return authorizeContextTokenSecretRead(contextToken, ch.contextTokenAuthorization, "chatToolReadSecret", namespace, secretName)
 	})
 
 	// Build tools from the chat registry and restrict execution to the exposed set.

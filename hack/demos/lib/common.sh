@@ -6,6 +6,9 @@ demo_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 demo_dir="$(cd "${demo_lib_dir}/.." && pwd)"
 repo_root="$(cd "${demo_dir}/../.." && pwd)"
 
+# shellcheck source=hack/demos/lib/style.sh
+. "${demo_lib_dir}/style.sh"
+
 : "${ORKA_NAMESPACE:=orka-system}"
 : "${DEMO_NAMESPACE:=demo-magic}"
 : "${ORKA_TOKEN_NAMESPACE:=default}"
@@ -16,6 +19,24 @@ repo_root="$(cd "${demo_dir}/../.." && pwd)"
 : "${ORKA_TOKEN_DURATION:=12h}"
 : "${DEMO_WORKDIR:=/tmp/orka-demo}"
 : "${DEMO_AUTO_PORT_FORWARD:=1}"
+
+__DEMO_CLEANUP_DIRS=()
+
+demo_register_cleanup_dir() {
+  local dir="$1"
+  [[ -n "${dir}" ]] || return 0
+  __DEMO_CLEANUP_DIRS+=("${dir}")
+}
+
+demo_run_exit_cleanups() {
+  local dir
+  for dir in "${__DEMO_CLEANUP_DIRS[@]:-}"; do
+    [[ -n "${dir}" ]] || continue
+    rm -rf "${dir}" 2>/dev/null || true
+  done
+}
+
+trap 'demo_run_exit_cleanups' EXIT
 
 : "${DEMO_PROVIDER_TYPE:=openai}"
 : "${DEMO_PROVIDER_SECRET_REF:=}"
@@ -73,18 +94,98 @@ repo_root="$(cd "${demo_dir}/../.." && pwd)"
 : "${DEMO_SECURITY_SCAN_NAME:=${DEMO_SECURITY_SCAN_PREFIX}-${DEMO_RUN_ID}}"
 : "${DEMO_SECURITY_SCHEDULE:=}"
 
-: "${DEMO_SECURITY_GIT_REPO:=https://github.com/sozercan/actions-test.git}"
-: "${DEMO_SECURITY_GIT_BRANCH:=demo/security-python-command-injection}"
+: "${DEMO_SECURITY_GIT_REPO:=https://github.com/sozercan/nodejs-goof.git}"
+: "${DEMO_SECURITY_GIT_BRANCH:=main}"
 : "${DEMO_SECURITY_GIT_SECRET_REF:=${DEMO_GIT_SECRET_REF:-}}"
+# nodejs-goof IS the fork — leave DEMO_SECURITY_GIT_FORK_REPO unset by default.
 : "${DEMO_SECURITY_GIT_FORK_REPO:=${DEMO_GIT_FORK_REPO:-}}"
 : "${DEMO_SECURITY_PR_BASE_BRANCH:=${DEMO_SECURITY_GIT_BRANCH}}"
 : "${DEMO_SECURITY_GIT_SUB_PATH:=${DEMO_GIT_SUB_PATH:-}}"
 
 : "${DEMO_VEKIL_METRICS_REQUEST:=Implement GitHub issue sozercan/vekil#77: add a Prometheus-compatible /metrics endpoint for Vekil. Mount /metrics on the existing server and keep it enabled by default, with a --metrics/--no-metrics flag or the closest existing flag style. Use github.com/prometheus/client_golang/prometheus and promhttp. Instrument the chat, responses, messages, and Gemini handler paths where applicable with bounded labels: provider, public_model, endpoint, status, direction, reason, and code as appropriate. Include vekil_requests_total, vekil_request_duration_seconds, vekil_tokens_total for prompt/completion usage, vekil_retries_total, vekil_upstream_errors_total, vekil_inflight_requests, vekil_build_info from the existing version ldflags, and standard Go runtime metrics. Treat vekil_endpoint_healthy as optional if endpoint health state is not available yet, and document any defer. Add focused tests, document histogram buckets and the metrics flag in docs/configuration.md, and add an example Grafana dashboard JSON under docs/ or assets/. Acceptance: curl localhost:1337/metrics returns valid Prometheus exposition after a request, handlers increment the relevant counters with correct labels, no user or key labels are added, and no secrets are logged or exposed. Do not implement OpenTelemetry, Pushgateway support, virtual-key dimensions, or unrelated selector work. Keep the diff focused and easy to review.}"
 : "${DEMO_VEKIL_METRICS_SLICE_REQUEST:=Implement GitHub issue sozercan/vekil#77. Important: for Gemini countTokens fallback handling, do not remove or bypass metrics observation for the first probe wholesale. Filter only the expected max_completion_tokens fallback 400; preserve vekil_retries_total and vekil_upstream_errors_total for real first-probe 429/5xx/timeout outcomes, and add regression coverage for a 429-then-success countTokens flow.}"
-: "${DEMO_CHAT_REQUEST:=${DEMO_VEKIL_METRICS_SLICE_REQUEST}}"
-: "${DEMO_MANUAL_REQUEST:=${DEMO_VEKIL_METRICS_SLICE_REQUEST}}"
-: "${DEMO_CRON_REQUEST:=Produce a short repository heartbeat report with the current HEAD commit, a count of Markdown files, and a brief summary of the repo purpose. Do not modify files, commit, or push.}"
+
+# ---------------------------------------------------------------------------
+# Demo request presets.
+#
+# DEMO_REQUEST_PRESET selects the chat/manual prompt. Default is `quiet-flag`
+# because it's short, real, fits on screen, and finishes in under a minute —
+# ideal for recordings. The longer presets stay available for live demos
+# where the full audit story matters.
+#
+# An explicitly-set DEMO_CHAT_REQUEST / DEMO_MANUAL_REQUEST env var or
+# DEMO_CHAT_REQUEST_FILE / DEMO_MANUAL_REQUEST_FILE always wins.
+# ---------------------------------------------------------------------------
+: "${DEMO_QUIET_FLAG_REQUEST:=Add a --quiet flag to vekil that suppresses non-error output when set. Add a test that exercises the flag.}"
+: "${DEMO_README_FIX_REQUEST:=Fix the broken link to docs/configuration.md in the README.}"
+
+: "${DEMO_REQUEST_PRESET:=quiet-flag}"
+case "${DEMO_REQUEST_PRESET}" in
+  quiet-flag)    __DEMO_PRESET_REQUEST="${DEMO_QUIET_FLAG_REQUEST}" ;;
+  readme-fix)    __DEMO_PRESET_REQUEST="${DEMO_README_FIX_REQUEST}" ;;
+  vekil-metrics) __DEMO_PRESET_REQUEST="${DEMO_VEKIL_METRICS_REQUEST}" ;;
+  vekil-metrics-slice) __DEMO_PRESET_REQUEST="${DEMO_VEKIL_METRICS_SLICE_REQUEST}" ;;
+  *)
+    printf 'error: DEMO_REQUEST_PRESET=%s is not one of quiet-flag|readme-fix|vekil-metrics|vekil-metrics-slice\n' \
+      "${DEMO_REQUEST_PRESET}" >&2
+    exit 1
+    ;;
+esac
+
+: "${DEMO_CHAT_REQUEST:=${__DEMO_PRESET_REQUEST}}"
+: "${DEMO_MANUAL_REQUEST:=${__DEMO_PRESET_REQUEST}}"
+: "${DEMO_CRON_REQUEST:=Triage stale pull requests on github.com/sozercan/vekil.
+
+Use curl against api.github.com (no gh CLI is installed). The GitHub token is
+available in the GH_TOKEN environment variable; reference it inside your curl
+commands as the value of an 'Authorization: Bearer ...' header. Never print,
+echo, or include the token value in your output. Also send
+'Accept: application/vnd.github+json' on every request.
+
+Steps:
+1. List open PRs: GET /repos/sozercan/vekil/pulls?state=open&per_page=20
+2. For each PR idle more than 3 days (computed from updated_at vs the current
+   UTC time), fetch its check-runs status and its last review comments so you
+   can understand WHY it is stuck.
+3. Classify each into exactly one blocker bucket from this set:
+   awaiting-review | ci-broken | merge-conflict | author-needs-respond |
+   discussion-stalled | dependabot
+4. Produce a markdown report in this exact shape (no other commentary):
+
+## Stale PR triage — <current UTC timestamp>
+Open: N  |  Idle >3 days: M
+
+| #   | Title (truncated to 50 chars) | Days idle | Blocker | Suggested next action |
+|-----|-------------------------------|-----------|---------|-----------------------|
+| 162 | Add prometheus metrics endpoint | 12 | author-needs-respond | Ping author about reviewer feedback |
+| ... |                                 |    |                       |                                 |
+
+### Top 3 priorities
+1. PR #X — <one-line reason a human reviewer should look here first>
+2. PR #Y — <one-line reason>
+3. PR #Z — <one-line reason>
+
+Output ONLY the markdown report. Do not commit, push, open a PR, comment on
+any PR, or modify any file in the workspace.}"
+
+# ---------------------------------------------------------------------------
+# Recording profile.
+#
+# Controls pacing/verbosity of the visual helpers in lib/style.sh:
+#   presenter (default) — full transparency, typewriter on
+#   docs                — typewriter off, narration cues printed
+#   social              — typewriter off, chapters 1..3 only
+#   hero                — typewriter off, no chapters
+# ---------------------------------------------------------------------------
+: "${DEMO_RECORD_PROFILE:=presenter}"
+case "${DEMO_RECORD_PROFILE}" in
+  presenter|docs|social|hero) ;;
+  *)
+    printf 'error: DEMO_RECORD_PROFILE=%s is not one of presenter|docs|social|hero\n' \
+      "${DEMO_RECORD_PROFILE}" >&2
+    exit 1
+    ;;
+esac
 
 if [[ -n "${DEMO_CHAT_REQUEST_FILE}" ]]; then
   [[ -f "${DEMO_CHAT_REQUEST_FILE}" ]] || { printf 'error: DEMO_CHAT_REQUEST_FILE does not exist: %s\n' "${DEMO_CHAT_REQUEST_FILE}" >&2; exit 1; }
@@ -335,7 +436,12 @@ configure_demo_magic() {
   else
     TYPE_SPEED=""
   fi
-  DEMO_PROMPT="${DEMO_PROMPT:-${GREEN}orka-demo ${CYAN}\W ${COLOR_RESET}}"
+  # Terminal-style prompt: a single ">" with no path/host noise. Keeps the
+  # cast looking like a real shell session rather than a branded demo.
+  # Unconditional overwrite — demo-magic.sh sets its own default at source
+  # time, so a `:-` fallback here would be a no-op. Callers wanting a
+  # different prompt can set DEMO_PROMPT after calling configure_demo_magic.
+  DEMO_PROMPT="${BOLD}${CYAN}> ${COLOR_RESET}"
   PROMPT_TIMEOUT="${PROMPT_TIMEOUT:-0}"
 }
 
@@ -500,8 +606,41 @@ create_orka_service_account_token() {
 
 get_orka_token() {
   if [[ -n "${ORKA_TOKEN:-}" && "${ORKA_TOKEN_MANAGED:-0}" != "1" ]]; then
-    printf '%s' "${ORKA_TOKEN}"
-    return 0
+    # Defend against a stale ORKA_TOKEN carried over from a previous shell
+    # session (e.g., a token minted against a different cluster). We probe
+    # the API once per process; on rejection we forget the pre-set token
+    # and fall through to fresh minting.
+    if [[ "${ORKA_TOKEN_VALIDATED:-0}" != "1" ]]; then
+      local probe_url="${ORKA_SERVER:-${ORKA_API_BASE}}"
+      local probe_code
+      probe_code="$(curl -sS -o /dev/null -w '%{http_code}' \
+        --max-time "${DEMO_API_CHECK_TIMEOUT:-3}" \
+        -H "Authorization: Bearer ${ORKA_TOKEN}" \
+        "${probe_url}/api/v1/version" 2>/dev/null || printf '000')"
+      case "${probe_code}" in
+        2*|3*)
+          export ORKA_TOKEN_VALIDATED=1
+          printf '%s' "${ORKA_TOKEN}"
+          return 0
+          ;;
+        401|403)
+          printf 'warning: pre-set ORKA_TOKEN rejected by %s (HTTP %s); minting a fresh token\n' \
+            "${probe_url}" "${probe_code}" >&2
+          unset ORKA_TOKEN
+          ;;
+        *)
+          # Network error / API down. Return the caller's token for this attempt,
+          # but do NOT mark it validated: require_orka_api_reachable may start the
+          # local port-forward immediately after this, and the next call should
+          # re-probe so stale tokens are rejected before real API calls run.
+          printf '%s' "${ORKA_TOKEN}"
+          return 0
+          ;;
+      esac
+    else
+      printf '%s' "${ORKA_TOKEN}"
+      return 0
+    fi
   fi
   if [[ -z "${ORKA_TOKEN_CACHE:-}" ]]; then
     if [[ -n "${ORKA_TOKEN_COMMAND:-}" ]]; then
@@ -536,6 +675,42 @@ refresh_orka_token() {
   export ORKA_TOKEN="$(get_orka_token)"
 }
 
+
+
+sandbox_session_claim_name() {
+  local session_name="$1"
+  local claim_namespace="${DEMO_SANDBOX_CLAIM_NAMESPACE:-${DEMO_NAMESPACE}}"
+  local task_namespace="${DEMO_NAMESPACE}"
+  local template_namespace="${DEMO_SANDBOX_TEMPLATE_NAMESPACE:-${DEMO_NAMESPACE}}"
+  local template_ref="${DEMO_SANDBOX_TEMPLATE_REF:-orka-live-template}"
+  local digest
+
+  if command -v shasum >/dev/null 2>&1; then
+    digest="$(
+      printf '%s\0%s\0%s\0%s\0%s' \
+        "${claim_namespace}" \
+        "${task_namespace}" \
+        "${template_namespace}" \
+        "${template_ref}" \
+        "${session_name}" \
+        | shasum -a 256 | awk '{print $1}'
+    )"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest="$(
+      printf '%s\0%s\0%s\0%s\0%s' \
+        "${claim_namespace}" \
+        "${task_namespace}" \
+        "${template_namespace}" \
+        "${template_ref}" \
+        "${session_name}" \
+        | sha256sum | awk '{print $1}'
+    )"
+  else
+    die "shasum or sha256sum is required to compute the demo SandboxClaim name"
+  fi
+
+  printf 'orka-session-%.32s\n' "${digest}"
+}
 
 demo_anthropic_base_url() {
   printf '%s/anthropic\n' "${ORKA_API_BASE%/}"
@@ -596,10 +771,15 @@ print_chat_client_json_summary() {
   session_id="$(jq -r '.session_id // empty' "${output_file}")"
   result="$(jq -r '.result // empty' "${output_file}")"
 
-  if [[ -n "${session_id}" ]]; then
-    printf 'chat client session: %s\n' "${session_id}"
+  # Presenter audience wants the full audit trail (session id + on-disk path
+  # for post-run inspection). Recording profiles get the human-readable
+  # result body only — no UUIDs, no /tmp paths.
+  if demo_profile_is presenter; then
+    if [[ -n "${session_id}" ]]; then
+      printf 'chat client session: %s\n' "${session_id}"
+    fi
+    printf 'debug response file: %s\n' "${output_file}"
   fi
-  printf 'debug response file: %s\n' "${output_file}"
 
   if [[ "${DEMO_SHOW_CHAT_CLIENT_RESULT}" == "1" && -n "${result}" ]]; then
     printf 'chat client summary:\n%s\n' "${result}"
@@ -612,10 +792,25 @@ run_demo_chat_client_claude_code() {
   model="$(demo_anthropic_model)"
   base_url="$(demo_anthropic_base_url)"
 
+  # Claude Code merges user-level settings.json AFTER --settings, so an
+  # `env.ANTHROPIC_BASE_URL` in ~/.claude/settings.json silently wins
+  # over what we pass via flag (and over shell env). Workaround: point
+  # the whole config dir at a per-run scratch dir via CLAUDE_CONFIG_DIR.
+  # That dir holds ONLY our settings.json, so user-level env can't shadow.
+  local settings_dir
+  settings_dir="$(mktemp -d -t orka-demo-claude-cfg.XXXXXX)"
+  chmod 700 "${settings_dir}"
+  demo_register_cleanup_dir "${settings_dir}"
+  # No secrets logged: the file is written 0600 below and removed when done.
+  umask 077
+  cat >"${settings_dir}/settings.json" <<JSON
+{"permissions": {"defaultMode": "${DEMO_CLAUDE_PERMISSION_MODE}"},
+ "env": {"ANTHROPIC_BASE_URL": "${base_url}", "ANTHROPIC_API_KEY": "${token}"}}
+JSON
+
   local cmd=(
     "${DEMO_CLAUDE_BIN}"
     --bare
-    --setting-sources "${DEMO_CLAUDE_SETTING_SOURCES}"
     -p
     --model "${model}"
     --no-session-persistence
@@ -641,7 +836,8 @@ run_demo_chat_client_claude_code() {
       had_errexit=1
       set +e
     fi
-    ANTHROPIC_BASE_URL="${base_url}" ANTHROPIC_API_KEY="${token}" "${cmd[@]}" >"${output_file}"
+    CLAUDE_CONFIG_DIR="${settings_dir}" \
+      ANTHROPIC_BASE_URL="${base_url}" ANTHROPIC_API_KEY="${token}" "${cmd[@]}" >"${output_file}"
     status="$?"
     if (( had_errexit )); then
       set -e
@@ -652,12 +848,16 @@ run_demo_chat_client_claude_code() {
       had_errexit=1
       set +e
     fi
-    ANTHROPIC_BASE_URL="${base_url}" ANTHROPIC_API_KEY="${token}" "${cmd[@]}" | tee "${output_file}"
+    CLAUDE_CONFIG_DIR="${settings_dir}" \
+      ANTHROPIC_BASE_URL="${base_url}" ANTHROPIC_API_KEY="${token}" "${cmd[@]}" | tee "${output_file}"
     status="${PIPESTATUS[0]}"
     if (( had_errexit )); then
       set -e
     fi
   fi
+
+  # Scratch config dir held the per-run token; remove it now.
+  rm -rf "${settings_dir}"
 
   if (( status != 0 )); then
     printf 'error: Claude Code exited with status %s\n' "${status}" >&2
@@ -710,7 +910,7 @@ orka_api() {
   local body_file="${3:-}"
   local token status attempt
 
-  for attempt in 1 2; do
+  for attempt in 1 2 3; do
     token="$(get_orka_token)"
     local args=(
       -fsS
@@ -727,8 +927,19 @@ orka_api() {
     fi
     status="$?"
 
-    if [[ "${status}" == "22" && "${attempt}" == "1" && "${ORKA_TOKEN_MANAGED:-0}" == "1" ]]; then
+    if [[ "${status}" == "22" && "${attempt}" -lt 3 && "${ORKA_TOKEN_MANAGED:-0}" == "1" ]]; then
       refresh_orka_token
+      continue
+    fi
+
+    # curl exit 7 = couldn't connect: on long runs the auto port-forward can die
+    # (idle timeout / kube-apiserver hiccup), which would spuriously fail an
+    # otherwise-successful demo's final assertion. Re-establish the tunnel and
+    # retry before giving up. Only meaningful for the local-tunnel path.
+    if [[ "${status}" == "7" && "${attempt}" -lt 3 ]] \
+        && declare -f require_orka_api_reachable >/dev/null 2>&1; then
+      printf 'orka_api: connection failed; re-establishing API tunnel and retrying…\n' >&2
+      require_orka_api_reachable >/dev/null 2>&1 || true
       continue
     fi
 
@@ -761,6 +972,62 @@ assert_real_pr_result() {
   local task_name="$1"
   local task_json result_json children_json result pr_url failed_children task_phase
 
+  # Chat-session sentinel: the chat-driven coordinator lives in the chat
+  # tool loop, not a Task. Validate from the chat-client-result.json file.
+  if [[ "${task_name}" == "chat-session" ]]; then
+    local chat_file="${DEMO_WORKDIR}/chat-client-result.json"
+    if [[ ! -s "${chat_file}" ]]; then
+      printf 'error: chat client result file missing or empty: %s\n' "${chat_file}" >&2
+      return 1
+    fi
+    local is_error
+    is_error="$(jq -r '.is_error // false' "${chat_file}" 2>/dev/null || printf 'true')"
+    result="$(jq -r '.result // ""' "${chat_file}" 2>/dev/null || printf '')"
+    if [[ "${is_error}" == "true" ]]; then
+      printf 'error: chat session ended with an error result:\n%s\n' "${result}" >&2
+      return 1
+    fi
+    if [[ -z "${result}" ]]; then
+      printf 'error: chat session produced an empty result\n' >&2
+      return 1
+    fi
+    if printf '%s\n' "${result}" | grep -Eiq 'implementation failed|did not create a pull request|did not open a pull request|pull request[^\n]*(not created|not opened)|PR:[[:space:]]*not created|not create a pull request|no pull request|VALIDATION_CONFIG_BLOCKED|VALIDATION_BLOCKED|REVIEW_BLOCKED|CI_BLOCKED|CI_PENDING|CI_NO_CHECKS|CI_CLOSED|CI_UNKNOWN|status[=:][[:space:]]*(no_checks|closed|unknown)|CI:[[:space:]]*(no_checks|closed|unknown)'; then
+      printf 'error: chat session result is not a successful PR handoff:\n%s\n' "${result}" >&2
+      return 1
+    fi
+    if printf '%s\n' "${result}" | grep -Eq '(^|[^[:alnum:]_])(FAILED|BLOCKED)([^[:alnum:]_]|$)'; then
+      printf 'error: chat session result contains a failure/blocker marker:\n%s\n' "${result}" >&2
+      return 1
+    fi
+    pr_url="$(printf '%s\n' "${result}" | grep -Eo "https://github[.]com/[^[:space:])\"'<>]+/[^[:space:])\"'<>]+/pull/[0-9]+" | head -n 1 || true)"
+    if [[ -z "${pr_url}" ]]; then
+      printf 'error: chat session result does not contain a GitHub pull request URL:\n%s\n' "${result}" >&2
+      return 1
+    fi
+    children_json="$(kubectl get tasks -n "${DEMO_NAMESPACE}" -l 'orka.ai/source=anthropic-proxy' -o json 2>/dev/null || printf '{"items":[]}')"
+    failed_children="$(jq -r --arg started "${DEMO_CHAT_STARTED_AT:-}" '
+      (.items // [])[]?
+      | select($started == "" or ((.metadata.creationTimestamp // "") >= $started))
+      | (.status.phase // "Unknown") as $phase
+      | select(["Failed", "Cancelled", "Canceled", "Error"] | index($phase))
+      | "\(.metadata.name) agent=\(.spec.agentRef.name // "-") phase=\($phase)"
+    ' <<<"${children_json}")"
+    if [[ -n "${failed_children}" ]]; then
+      if printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?Validation([[:space:]]+status)?):[[:space:]]*(PASS(ED)?|GREEN)([^[:alnum:]_]|$)' \
+        && printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?Review(ers)?([[:space:]]+status)?):[[:space:]]*([0-9]+[[:space:]]+)?(LGTM|APPROVED)([^[:alnum:]_]|$)' \
+        && printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?CI([[:space:]]+status)?):[[:space:]]*(PASS(ED)?|SUCCESS|GREEN)([^[:alnum:]_]|$)'; then
+        local failed_count
+        failed_count="$(printf '%s\n' "${failed_children}" | grep -c . || true)"
+        printf '🔁 self-healed %d intermediate proxy child failure(s) before success\n' "${failed_count}" >&2
+      else
+        printf 'error: chat session has failed proxy child tasks without final pass evidence; refusing to treat result as demo success:\n%s\n' "${failed_children}" >&2
+        return 1
+      fi
+    fi
+    printf 'validated pull request handoff: %s\n' "${pr_url}"
+    return 0
+  fi
+
   task_json="$(orka_api GET "/api/v1/tasks/${task_name}?namespace=${DEMO_NAMESPACE}")" || {
     printf 'error: failed to fetch task %s\n' "${task_name}" >&2
     return 1
@@ -781,7 +1048,7 @@ assert_real_pr_result() {
     return 1
   fi
 
-  if printf '%s\n' "${result}" | grep -Eiq 'implementation failed|did not create a pull request|did not open a pull request|pull request[^\n]*(not created|not opened)|PR:[[:space:]]*not created|not create a pull request|no pull request|VALIDATION_CONFIG_BLOCKED|VALIDATION_BLOCKED|REVIEW_BLOCKED|CI_BLOCKED|CI_PENDING'; then
+  if printf '%s\n' "${result}" | grep -Eiq 'implementation failed|did not create a pull request|did not open a pull request|pull request[^\n]*(not created|not opened)|PR:[[:space:]]*not created|not create a pull request|no pull request|VALIDATION_CONFIG_BLOCKED|VALIDATION_BLOCKED|REVIEW_BLOCKED|CI_BLOCKED|CI_PENDING|CI_NO_CHECKS|CI_CLOSED|CI_UNKNOWN|status[=:][[:space:]]*(no_checks|closed|unknown)|CI:[[:space:]]*(no_checks|closed|unknown)'; then
     printf 'error: task %s result is not a successful PR handoff:\n%s\n' "${task_name}" "${result}" >&2
     return 1
   fi
@@ -811,11 +1078,23 @@ assert_real_pr_result() {
     #   Final status:
     #   - Validation: PASSED
     #   - Review: APPROVED ...
-    #   - CI: PASSED
+    #   - CI: PASSED | NO_CHECKS | NOT_APPLICABLE | NONE
+    #
+    # CI may legitimately report no checks if the target repo's CI workflow is
+    # absent or hasn't run yet — that doesn't invalidate a Validation/Review
+    # pass, so accept the NO_CHECKS family as final-pass evidence too.
     if printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?Validation([[:space:]]+status)?):[[:space:]]*PASS(ED)?([^[:alnum:]_]|$)' \
       && printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?Review([[:space:]]+status)?):[[:space:]]*APPROVED([^[:alnum:]_]|$)' \
-      && printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?CI([[:space:]]+status)?):[[:space:]]*PASS(ED)?([^[:alnum:]_]|$)'; then
-      printf 'note: task %s had recovered intermediate child failures:\n%s\n' "${task_name}" "${failed_children}" >&2
+      && printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?CI([[:space:]]+status)?):[[:space:]]*(PASS(ED)?|NO_CHECKS|NOT_APPLICABLE|NONE)([^[:alnum:]_]|$)'; then
+      # Viewer-friendly note: present the recovery as "self-healed", with
+      # the gory child names only when the presenter wants them.
+      local failed_count
+      failed_count="$(printf '%s\n' "${failed_children}" | grep -c . || true)"
+      if declare -F demo_profile_is >/dev/null 2>&1 && demo_profile_is presenter; then
+        printf 'note: task %s had recovered intermediate child failures:\n%s\n' "${task_name}" "${failed_children}" >&2
+      else
+        printf '🔁 self-healed %d intermediate child failure(s) before success\n' "${failed_count}" >&2
+      fi
     else
       printf 'error: task %s has failed child tasks without final pass evidence; refusing to treat result as demo success:\n%s\n' "${task_name}" "${failed_children}" >&2
       return 1
@@ -829,6 +1108,48 @@ summarize_task_run() {
   local task_name="$1"
   local demo_name="${2:-task-run}"
   local task_json children_json result_json
+
+  # Chat-session sentinel: emit a summary derived from the chat result file
+  # and live cluster Agents/Tasks. payoff_card_pr extracts the PR URL from
+  # .result; the rest is best-effort context for the audit-mode viewer.
+  if [[ "${task_name}" == "chat-session" ]]; then
+    local chat_file="${DEMO_WORKDIR}/chat-client-result.json"
+    local chat_json="{}"
+    if [[ -s "${chat_file}" ]]; then
+      chat_json="$(cat "${chat_file}")"
+    fi
+    children_json="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
+                      -l "orka.ai/source=anthropic-proxy" -o json 2>/dev/null \
+                      || printf '{"items":[]}')"
+    jq -n \
+      --arg demo "${demo_name}" \
+      --arg started_at "${DEMO_CHAT_STARTED_AT:-}" \
+      --argjson chat "${chat_json}" \
+      --argjson children "${children_json}" \
+      '{
+        demo: $demo,
+        task: "chat-session",
+        phase: (if ($chat.is_error // false) then "Failed" else "Succeeded" end),
+        agent: "chat-coordinator",
+        job: null,
+        childTasks: (
+          ($children.items // [])
+          | map(select(($started_at == "") or (.metadata.creationTimestamp >= $started_at)))
+          | length
+        ),
+        children: (
+          ($children.items // [])
+          | map(select(($started_at == "") or (.metadata.creationTimestamp >= $started_at)))
+          | map({
+              name: .metadata.name,
+              agent: (.spec.agentRef.name // null),
+              phase: (.status.phase // "Unknown")
+            })
+        ),
+        result: (($chat.result // "") | tostring | .[0:1200])
+      }'
+    return 0
+  fi
 
   task_json="$(kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" -o json)"
   children_json="$(orka_api GET "/api/v1/tasks/${task_name}/children?namespace=${DEMO_NAMESPACE}" 2>/dev/null || printf '{"items":[]}')"
@@ -916,6 +1237,30 @@ delete_agent_if_exists() {
   kubectl delete agent "$1" -n "${DEMO_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
 }
 
+# delete_demo_chat_agents_if_present removes Agents that the chat-driven
+# coordinator created in a prior run of demo 10. The chat path no longer
+# pre-creates Agents with fixed demo names — the coordinator invents them —
+# so we delete by label (orka.ai/created-by=chat) and by the fixed names
+# from prior versions of the demo, ignoring missing resources.
+delete_demo_chat_agents_if_present() {
+  # New shape: Agents created via the chat `create_agent` tool get this label.
+  local names
+  names="$(
+    kubectl get agents -n "${DEMO_NAMESPACE}" \
+      -l 'orka.ai/created-by=chat' \
+      -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || printf ''
+  )"
+  if [[ -n "${names}" ]]; then
+    # shellcheck disable=SC2086
+    kubectl delete agent -n "${DEMO_NAMESPACE}" ${names} --ignore-not-found >/dev/null 2>&1 || true
+  fi
+  # Legacy shape: Agents the old demo pre-created by name.
+  delete_agent_if_exists "${DEMO_PR_COORDINATOR_NAME}"
+  delete_agent_if_exists "${DEMO_CODER_AGENT_NAME}"
+  delete_agent_if_exists "${DEMO_SECURITY_REVIEWER_NAME}"
+  delete_agent_if_exists "${DEMO_QUALITY_REVIEWER_NAME}"
+}
+
 delete_repository_scan_if_exists() {
   kubectl delete repositoryscan "$1" -n "${DEMO_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
 }
@@ -989,6 +1334,17 @@ latest_chat_parent_task() {
   local started_at="${1:-}"
   local parent
 
+  # New chat-coordinator flow: the "coordinator" lives in the chat session
+  # itself (the proxy's tool loop), not as a Kubernetes Task. When the chat
+  # client has produced its result file, treat the chat session as the
+  # parent — assert_real_pr_result / payoff_card_pr / wait_for_task_succeeded
+  # / wait_for_task_result_available all special-case the "chat-session"
+  # sentinel and read from chat-client-result.json.
+  if [[ -n "${DEMO_WORKDIR:-}" && -s "${DEMO_WORKDIR}/chat-client-result.json" ]]; then
+    printf 'chat-session\n'
+    return 0
+  fi
+
   parent="$(
     kubectl get tasks -n "${DEMO_NAMESPACE}" -l "orka.ai/source=anthropic-proxy" -o json 2>/dev/null |
       jq -r \
@@ -1040,23 +1396,91 @@ latest_scheduled_child_task() {
   latest_task_by_selector "orka.ai/parent-task=${DEMO_CRON_TASK_NAME},orka.ai/scheduled-run=true"
 }
 
+__demo_wait_emit_status() {
+  # Emit a one-line "phase=X children=N latest=child/Phase elapsed=Zs" status
+  # to stderr so callers using $() capture on stdout still see clean output.
+  # Uses \r in-place rewrite when stderr is a tty; falls back to newlines
+  # so log scrapers and non-tty runs still get readable output.
+  #
+  # If DEMO_WAIT_STATUS_HOOK is set to a defined function name, that hook
+  # is called instead (with task_name, elapsed). The hook is expected to
+  # use demo_announce_once / __demo_heartbeat itself. This lets each demo
+  # narrate state transitions in domain-specific terms (threat-model →
+  # discovery → validation in demo 40, parent → child fan-out in demo 10,
+  # etc) instead of the generic phase=X children=N line.
+  local task_name="$1"
+  local elapsed="$2"
+  if [[ "${DEMO_WAIT_QUIET:-0}" == "1" ]] || demo_profile_is hero; then
+    return 0
+  fi
+  if [[ -n "${DEMO_WAIT_STATUS_HOOK:-}" ]] && declare -F "${DEMO_WAIT_STATUS_HOOK}" >/dev/null 2>&1; then
+    "${DEMO_WAIT_STATUS_HOOK}" "${task_name}" "${elapsed}"
+    return 0
+  fi
+  local phase children latest_child latest_phase latest_label
+  phase="$(kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  [[ -z "${phase}" ]] && phase="Pending"
+  children="$(kubectl get tasks -n "${DEMO_NAMESPACE}" -l "orka.ai/parent-task=${task_name}" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+  latest_child="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
+                    -l "orka.ai/parent-task=${task_name}" \
+                    --sort-by=.metadata.creationTimestamp \
+                    -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)"
+  latest_phase="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
+                    -l "orka.ai/parent-task=${task_name}" \
+                    --sort-by=.metadata.creationTimestamp \
+                    -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null || true)"
+  latest_label=""
+  if [[ -n "${latest_child}" ]]; then
+    latest_label=" latest=${latest_child}/${latest_phase:-Pending}"
+  fi
+  local children_field=""
+  if (( children > 0 )); then
+    children_field=" children=${children}"
+  fi
+  __demo_heartbeat '%s phase=%s%s%s elapsed=%ss' \
+    "${task_name}" "${phase}" "${children_field}" "${latest_label}" "${elapsed}"
+}
+
 wait_for_task_terminal() {
   local task_name="$1"
   local timeout_seconds="${2:-900}"
-  local deadline phase
+  local deadline phase elapsed start
+  start="${SECONDS}"
   deadline=$((SECONDS + timeout_seconds))
+  # Adaptive tick: tight cadence for the first minute so viewers see the
+  # workflow start, then back off to 30s so long coordinator runs don't
+  # spam the cast with 100+ heartbeat lines. DEMO_WAIT_TICK_SECONDS still
+  # overrides if the caller pins a value.
+  local tick_initial tick_slow
+  tick_initial="${DEMO_WAIT_TICK_SECONDS:-5}"
+  tick_slow="${DEMO_WAIT_SLOW_TICK_SECONDS:-30}"
+  (( tick_initial < 1 )) && tick_initial=1
+  (( tick_slow < tick_initial )) && tick_slow="${tick_initial}"
 
   while (( SECONDS < deadline )); do
     phase="$(kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
     case "${phase}" in
       Succeeded|Failed|Cancelled)
+        # Newline so the next log line lands on a fresh row after \r updates.
+        if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+          printf '\n' >&2
+        fi
         printf '%s\n' "${phase}"
         return 0
         ;;
     esac
-    sleep 5
+    elapsed=$(( SECONDS - start ))
+    __demo_wait_emit_status "${task_name}" "${elapsed}"
+    if (( elapsed < 60 )); then
+      sleep "${tick_initial}"
+    else
+      sleep "${tick_slow}"
+    fi
   done
 
+  if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+    printf '\n' >&2
+  fi
   return 1
 }
 
@@ -1064,6 +1488,21 @@ wait_for_task_succeeded() {
   local task_name="$1"
   local timeout_seconds="${2:-900}"
   local phase
+
+  if [[ "${task_name}" == "chat-session" ]]; then
+    local chat_file="${DEMO_WORKDIR}/chat-client-result.json"
+    if [[ -s "${chat_file}" ]]; then
+      local is_error
+      is_error="$(jq -r '.is_error // false' "${chat_file}" 2>/dev/null || printf 'true')"
+      if [[ "${is_error}" != "true" ]]; then
+        return 0
+      fi
+      printf 'chat session ended with is_error=true\n' >&2
+      return 1
+    fi
+    printf 'chat session result file missing: %s\n' "${chat_file}" >&2
+    return 1
+  fi
 
   phase="$(wait_for_task_terminal "${task_name}" "${timeout_seconds}")" || return 1
   if [[ "${phase}" == "Succeeded" ]]; then
@@ -1151,6 +1590,17 @@ wait_for_task_result_available() {
   local deadline
   deadline=$((SECONDS + timeout_seconds))
 
+  if [[ "${task_name}" == "chat-session" ]]; then
+    local chat_file="${DEMO_WORKDIR}/chat-client-result.json"
+    while (( SECONDS < deadline )); do
+      if [[ -s "${chat_file}" ]] && jq -e '.result // empty' "${chat_file}" >/dev/null 2>&1; then
+        return 0
+      fi
+      sleep 1
+    done
+    return 1
+  fi
+
   while (( SECONDS < deadline )); do
     if orka_api GET "/api/v1/tasks/${task_name}/result?namespace=${DEMO_NAMESPACE}" >/dev/null 2>&1; then
       return 0
@@ -1167,22 +1617,39 @@ wait_for_task_result_available() {
 wait_for_repository_scan_ready() {
   local scan_name="$1"
   local timeout_seconds="${2:-1800}"
-  local deadline phase
+  local deadline phase start elapsed
+  start="${SECONDS}"
   deadline=$((SECONDS + timeout_seconds))
 
   while (( SECONDS < deadline )); do
     phase="$(kubectl get repositoryscan "${scan_name}" -n "${DEMO_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
     case "${phase}" in
       Ready)
+        if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+          printf '\n' >&2
+        fi
         return 0
         ;;
       Error)
+        if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+          printf '\n' >&2
+        fi
         return 1
         ;;
     esac
+    elapsed=$(( SECONDS - start ))
+    if [[ -n "${DEMO_WAIT_STATUS_HOOK:-}" ]] && declare -F "${DEMO_WAIT_STATUS_HOOK}" >/dev/null 2>&1; then
+      "${DEMO_WAIT_STATUS_HOOK}" "${scan_name}" "${elapsed}"
+    else
+      __demo_heartbeat 'scan/%s phase=%s elapsed=%ss' \
+        "${scan_name}" "${phase:-Pending}" "${elapsed}"
+    fi
     sleep 10
   done
 
+  if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+    printf '\n' >&2
+  fi
   return 1
 }
 
@@ -1205,25 +1672,95 @@ first_security_finding_id() {
 
 wait_for_first_security_finding() {
   local timeout_seconds="${1:-1800}"
-  local deadline finding_id
+  local deadline finding_id start elapsed
+  start="${SECONDS}"
   deadline=$((SECONDS + timeout_seconds))
 
   while (( SECONDS < deadline )); do
     finding_id="$(first_security_finding_id)"
     if [[ -n "${finding_id}" ]]; then
+      if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+        printf '\n' >&2
+      fi
       printf '%s\n' "${finding_id}"
       return 0
     fi
+    elapsed=$(( SECONDS - start ))
+    __demo_heartbeat 'awaiting first finding from %s scan elapsed=%ss' \
+      "${DEMO_SECURITY_SCAN_NAME:-scan}" "${elapsed}"
     sleep 10
   done
 
+  if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+    printf '\n' >&2
+  fi
+  return 1
+}
+
+# wait_for_job_with_progress <job-name> <namespace> <timeout-seconds> <expect>
+# expect = "complete"   → return 0 on Complete=True, 1 on Failed=True
+# expect = "fail"       → return 0 on Failed=True,   1 on Complete=True
+# Emits a per-tick status line to stderr (in-place on tty, newlines off-tty)
+# showing the latest Pod phase so the viewer can see what's happening.
+# Honors DEMO_WAIT_QUIET and hero profile.
+wait_for_job_with_progress() {
+  local job_name="$1"
+  local job_ns="$2"
+  local timeout_seconds="${3:-120}"
+  local expect="${4:-complete}"
+  local deadline start elapsed complete failed pod_phase line
+  start="${SECONDS}"
+  deadline=$((SECONDS + timeout_seconds))
+  local tick_interval="${DEMO_WAIT_TICK_SECONDS:-3}"
+  (( tick_interval < 1 )) && tick_interval=1
+
+  while (( SECONDS < deadline )); do
+    complete="$(kubectl get job "${job_name}" -n "${job_ns}" \
+      -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)"
+    failed="$(kubectl get job "${job_name}" -n "${job_ns}" \
+      -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
+
+    if [[ "${complete}" == "True" ]]; then
+      if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+        printf '\n' >&2
+      fi
+      [[ "${expect}" == "complete" ]] && return 0 || return 1
+    fi
+    if [[ "${failed}" == "True" ]]; then
+      if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+        printf '\n' >&2
+      fi
+      [[ "${expect}" == "fail" ]] && return 0 || return 1
+    fi
+
+    if [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+      pod_phase="$(kubectl get pods -n "${job_ns}" -l "job-name=${job_name}" \
+        --sort-by=.metadata.creationTimestamp \
+        -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null || true)"
+      [[ -z "${pod_phase}" ]] && pod_phase="Pending"
+      elapsed=$(( SECONDS - start ))
+      line="$(printf '[%s] ⏳  job/%s pod=%s elapsed=%ss' \
+              "$(__demo_log_ts)" "${job_name}" "${pod_phase}" "${elapsed}")"
+      if [[ -t 2 ]]; then
+        printf '\r\033[2K%b%s%b' "${DIM}" "${line}" "${COLOR_RESET}" >&2
+      else
+        printf '%s\n' "${line}" >&2
+      fi
+    fi
+    sleep "${tick_interval}"
+  done
+
+  if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+    printf '\n' >&2
+  fi
   return 1
 }
 
 wait_for_patch_proposal_ready() {
   local finding_id="$1"
   local timeout_seconds="${2:-1200}"
-  local deadline status
+  local deadline status start elapsed line
+  start="${SECONDS}"
   deadline=$((SECONDS + timeout_seconds))
 
   while (( SECONDS < deadline )); do
@@ -1231,15 +1768,34 @@ wait_for_patch_proposal_ready() {
       | jq -r '.items[0].status // empty')"
     case "${status}" in
       succeeded|pr_opened)
+        if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+          printf '\n' >&2
+        fi
         return 0
         ;;
       failed)
+        if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+          printf '\n' >&2
+        fi
         return 1
         ;;
     esac
+    if [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+      elapsed=$(( SECONDS - start ))
+      line="$(printf '[%s] ⏳  patch %s status=%s elapsed=%ss' \
+              "$(__demo_log_ts)" "${finding_id}" "${status:-pending}" "${elapsed}")"
+      if [[ -t 2 ]]; then
+        printf '\r\033[2K%b%s%b' "${DIM}" "${line}" "${COLOR_RESET}" >&2
+      else
+        printf '%s\n' "${line}" >&2
+      fi
+    fi
     sleep 10
   done
 
+  if [[ -t 2 ]] && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
+    printf '\n' >&2
+  fi
   return 1
 }
 
@@ -1335,6 +1891,19 @@ require_security_demo_env() {
     DEMO_SECURITY_GIT_REPO \
     DEMO_SECURITY_GIT_BRANCH \
     DEMO_SECURITY_GIT_SECRET_REF
+}
+
+require_substrate_demo_env() {
+  # Demo 70 runs a real codex agent that opens a PR. We validate the coordinates
+  # a user is most likely to override so a typo fails fast instead of mid-run.
+  # The model + git Secrets are created by install-substrate.sh.
+  require_vars \
+    DEMO_SUBSTRATE_AGENT \
+    DEMO_SUBSTRATE_TEMPLATE_NAME \
+    DEMO_SUBSTRATE_TEMPLATE_NAMESPACE \
+    DEMO_SUBSTRATE_SESSION \
+    DEMO_SUBSTRATE_PR_REPO \
+    DEMO_SUBSTRATE_PUSH_BRANCH
 }
 
 open_url() {

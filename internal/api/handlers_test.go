@@ -416,7 +416,7 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceAllowsMatchingToken
 	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
 
 	token := issueTestContextToken(t, provider, nil, map[string]any{
-		"scope": ContextTokenScopeTaskCreate + " orka:agents:run",
+		"scope": ContextTokenScopeTaskCreate + " orka:agents:run " + ContextTokenScopeSecretsCredentialsRead,
 		"tctx": map[string]any{
 			"namespace":    "default",
 			"taskType":     "agent",

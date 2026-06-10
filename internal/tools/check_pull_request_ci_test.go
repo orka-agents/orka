@@ -270,6 +270,137 @@ func TestCheckPullRequestCITool_WaitTimeoutPending(t *testing.T) {
 	}
 }
 
+// Demo 10 run 2026-06-01 10:50 PT regressed when check_pull_request_ci
+// returned a TERMINAL "no_checks" result on a freshly opened PR — the
+// coordinator declared success at status=no_checks while GitHub Actions
+// had simply not registered any check_run objects yet (workflows take
+// 10-60 seconds to be queued on a fresh PR). The real CI then ran and
+// posted a lint=FAILURE that the demo wrapper missed.
+//
+// Fix: when wait_timeout > 0 AND the head SHA has no check_runs, treat
+// no_checks as NON-terminal — keep polling until either (a) check runs
+// register and resolve to a real status, or (b) the wait_timeout
+// elapses. Only at (b) do we report status=no_checks as the final
+// answer, distinguishing "wait timed out with no checks registered"
+// from "checks registered but didn't finish in time".
+//
+// Test (a): server returns "no checks yet" twice, then a passing check.
+// The tool should keep polling through the empty responses and finally
+// report status=success.
+func TestCheckPullRequestCITool_NoChecksKeepsPollingUntilChecksRegister(t *testing.T) {
+	checkRunsCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPullRequestCITestSHA)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
+			checkRunsCalls++
+			w.WriteHeader(http.StatusOK)
+			if checkRunsCalls <= 2 {
+				// First two calls: no checks registered yet (the fresh-PR window).
+				_, _ = fmt.Fprint(w, `{"total_count":0,"check_runs":[]}`)
+			} else {
+				// Third call: passing check_run registered.
+				_, _ = fmt.Fprint(w, `{"total_count":1,"check_runs":[{"name":"build","status":"completed","conclusion":"success"}]}`)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	task, secret := checkPullRequestCITestObjects()
+	tool := &CheckPullRequestCITool{
+		k8sClient:  newFakeClient(task, secret),
+		apiBaseURL: server.URL,
+	}
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+
+	args, _ := json.Marshal(CheckPullRequestCIArgs{
+		TaskName:     testCoderTaskName,
+		PRNumber:     42,
+		WaitTimeout:  "200ms",
+		PollInterval: "5ms",
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var res CheckPullRequestCIResult
+	if err := json.Unmarshal([]byte(result), &res); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if res.Status != "passed" {
+		t.Errorf("status = %q, want passed (no_checks should have been treated as pending)", res.Status)
+	}
+	if checkRunsCalls < 3 {
+		t.Errorf("check runs calls = %d, want at least 3 (polled through 2 empty responses)", checkRunsCalls)
+	}
+}
+
+// Test (b): the head SHA never gets check_runs registered. After the
+// wait_timeout elapses we should report status=no_checks distinctly
+// (not as CI_PENDING) so the coordinator knows this is the terminal
+// state, not a transient pending one.
+func TestCheckPullRequestCITool_NoChecksTerminalAfterTimeout(t *testing.T) {
+	checkRunsCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPullRequestCITestSHA)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
+			checkRunsCalls++
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprint(w, `{"total_count":0,"check_runs":[]}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	task, secret := checkPullRequestCITestObjects()
+	tool := &CheckPullRequestCITool{
+		k8sClient:  newFakeClient(task, secret),
+		apiBaseURL: server.URL,
+	}
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+
+	args, _ := json.Marshal(CheckPullRequestCIArgs{
+		TaskName:     testCoderTaskName,
+		PRNumber:     42,
+		WaitTimeout:  "30ms",
+		PollInterval: "5ms",
+	})
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var res CheckPullRequestCIResult
+	if err := json.Unmarshal([]byte(result), &res); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if res.Status != "no_checks" {
+		t.Errorf("status = %q, want no_checks (terminal after timeout)", res.Status)
+	}
+	if !res.WaitTimedOut {
+		t.Errorf("WaitTimedOut should be true, got: %+v", res)
+	}
+	if !strings.Contains(res.Message, "no CI checks have been registered") {
+		t.Errorf("message = %q, want the no-checks-after-timeout phrasing", res.Message)
+	}
+	if checkRunsCalls < 2 {
+		t.Errorf("check runs calls = %d, want at least 2 (polled multiple times)", checkRunsCalls)
+	}
+}
+
 func TestCheckPullRequestCITool_RejectsRepoURLWithoutScope(t *testing.T) {
 	serverCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -303,7 +434,6 @@ func TestCheckPullRequestCITool_RejectsRepoURLWithoutScope(t *testing.T) {
 
 func TestCheckPullRequestCITool_InvalidArgs(t *testing.T) {
 	tool := NewCheckPullRequestCITool(newFakeClient())
-
 	_, err := tool.Execute(context.Background(), json.RawMessage(`{}`))
 	if err == nil {
 		t.Fatal("expected error")

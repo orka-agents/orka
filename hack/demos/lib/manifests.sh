@@ -213,60 +213,29 @@ EOF
 
 
 render_chat_request_file() {
-  emit_block "" "Claude Code is the local client. Orka is the server-side orchestrator.
-Start exactly one coordinator task for this demo, but first create the coordinator and specialist Agents through Orka's chat tool path.
+  emit_block "" "${DEMO_CHAT_REQUEST}
 
-Create the Agents by translating the Agent specs below into create_agent tool calls. This YAML is the source of truth for the four demo Agents; do not apply it with kubectl and do not create any extra Agents.
-
-Critical tool-use constraints:
-- The first four Orka tool calls MUST be direct create_agent tool calls.
-- Do not use create_ai_task, create_agent_task, or create_container_task to create Agents.
-- A Task whose prompt starts with "create_agent" is incorrect and must not be created.
-- Only after all four create_agent calls return success may you call create_ai_task once for the coordinator.
-
-Create-agent mapping rules:
-- Call create_agent exactly four times before creating the coordinator task, one call for each Agent object in this order: ${DEMO_CODER_AGENT_NAME}, ${DEMO_SECURITY_REVIEWER_NAME}, ${DEMO_QUALITY_REVIEWER_NAME}, ${DEMO_PR_COORDINATOR_NAME}.
-- Pass metadata.name as name and metadata.namespace as namespace.
-- Pass spec.providerRef.name as providerRef when present.
-- Pass spec.model.name as model.name.
-- Pass spec.systemPrompt.inline as systemPrompt verbatim.
-- Pass spec.runtime as runtime. For runtime Agents, map spec.secretRef.name to runtime.secretRef.
-- Preserve runtime.defaultMaxTurns, runtime.defaultAllowedTools, and runtime.defaultAllowBash.
-- Pass spec.resources as resources, including requests and limits, when present.
-- Pass spec.coordination as coordination, including allowedAgents, maxDepth, and maxConcurrentChildren.
-- Do not use create_agent initialPrompt. Agent creation must not start any task.
-- create_agent does not need labels for this chat demo path; ignore metadata.labels if they are not supported by the tool.
-
----BEGIN AGENT SPECS---"
-  render_pr_agents_manifest
-  emit_block "" "---END AGENT SPECS---
-
-After all four create_agent calls succeed, use Orka's create_ai_task tool exactly once with these arguments:
-- name: ${DEMO_CHAT_SESSION}
+Demo workspace contract:
 - namespace: ${DEMO_NAMESPACE}
-- agentRef: ${DEMO_PR_COORDINATOR_NAME}
-- providerRef: ${DEMO_PROVIDER_REF}
-- sessionRef: ${DEMO_CHAT_SESSION}
-- timeout: ${DEMO_PR_WORKFLOW_TIMEOUT}
-- priority: 700
-- prompt: use the entire Coordinator task prompt section below verbatim
+- gitRepo: ${DEMO_GIT_REPO}
+- baseBranch: ${DEMO_GIT_BRANCH}
+- gitSecretRef: ${DEMO_GIT_SECRET_REF}
+- pushBranch: ${DEMO_CHAT_PUSH_BRANCH}
+- create_agent roles to use: coder, security-reviewer, quality-reviewer
 
-Do not create, update, or delete tools or providers in this chat turn.
-Do not create any task except the one coordinator create_ai_task call described above.
-After creating the coordinator task, capture the returned task name, use wait_for_task until it reaches Succeeded or Failed, then use fetch_task_output and report only a concise final status.
-
-Coordinator task prompt (verbatim):
----BEGIN COORDINATOR TASK PROMPT---"
-  pr_repo_details_block "${DEMO_CHAT_PUSH_BRANCH}"
-  printf '\n\n'
-  emit_block "" "Change request:
-${DEMO_CHAT_REQUEST}
----END COORDINATOR TASK PROMPT---"
+Use those exact repository coordinates for every create_agent_task, validation container task, review task, create_pull_request, and check_pull_request_ci call. Do not infer a different repository or branch."
 }
 
 render_chat_story_file() {
   emit_block "" "Scenario:
-A maintainer gives Orka a live change request through an Anthropic-compatible chat client. Orka should turn that request into an auditable coordinator Task, specialist child Tasks, validation, review, and a PR handoff.
+Demo 10 — Chat to PR.
+
+THE FEATURE: Orka speaks the Anthropic Messages protocol on /anthropic/v1/messages. Any client that already speaks Claude — Claude Code, the Anthropic SDK, an IDE plugin, a Slack bot, plain curl — becomes an Orka client without code changes. One chat turn drives a full agentic SDLC workflow that ends in a real GitHub PR.
+
+Why not call Claude directly? Claude alone returns text. With Orka, the same chat protocol drives an auditable Kubernetes Task tree: a coordinator Task, specialist Agents created at runtime via create_agent, implementation + validation + parallel review + CI checks, and a real PR — every step a CR you can inspect, replay, or attach RBAC to.
+
+THIS DEMO:
+A maintainer gives Orka a live change request through an Anthropic-compatible chat client. Orka turns it into an auditable coordinator Task, specialist child Tasks, validation, review, and a PR handoff.
 
 What to watch:
 - Claude Code sends one chat request to Orka's Anthropic-compatible endpoint.
@@ -285,10 +254,17 @@ Repository details:"
 
 render_manual_story_file() {
   emit_block "" "Scenario:
-The platform team submits the same kind of work as declarative Kubernetes YAML instead of a chat turn. The request can be the default Vekil metrics slice or a live request supplied with DEMO_MANUAL_REQUEST, DEMO_REQUEST_FILE, or DEMO_MANUAL_REQUEST_FILE.
+Demo 20 — Manual / GitOps Workflow.
+
+THE FEATURE: Orka Tasks are Kubernetes CRDs. The same agentic SDLC workflow that demo 10 drives from chat is here described declaratively in YAML — kubectl apply, ArgoCD, Flux, or Tekton can trigger it. The Task IS the source of truth: version-controlled, replayable, auditable, gate-able.
+
+Why not the chat endpoint? Chat is great for ad-hoc maintainer work. YAML is what you commit to git and what your CI/CD pipelines apply. Same coordinator, same specialists, same review gates, same PR — just a declarative trigger.
+
+THIS DEMO:
+The platform team submits the same kind of work as a Task CR instead of a chat turn. Default request is the vekil quiet-flag preset, overridable via DEMO_MANUAL_REQUEST or DEMO_MANUAL_REQUEST_FILE.
 
 What to watch:
-- The coordinator, coder, and reviewer Agents are applied up front.
+- The coordinator, coder, and reviewer Agents are applied up front (pre-baked, auditable, version-controlled).
 - The Task CR starts a bounded workflow from the rendered prompt.
 - Orka records child Tasks, runtime logs, validation, review, CI repair if needed, and the final PR status.
 
@@ -325,6 +301,59 @@ EOF
   emit_block "    " "$(pr_repo_details_block "${DEMO_MANUAL_PUSH_BRANCH}")"
 }
 
+render_cron_story_file() {
+  emit_block "" "Scenario:
+Demo 30 — Scheduled Workflow.
+
+THE FEATURE: Orka Tasks can carry a 'schedule:' field. When set, the Task
+acts as a template — Orka's cron controller spawns one child Task per tick,
+just like Kubernetes CronJob, but for AI agents instead of plain containers.
+The same Task primitive that powers demos 10 and 20 just gained recurring
+execution, history retention, and concurrency control.
+
+THIS DEMO:
+An autonomous AI agent runs every cron tick to triage stale pull requests
+on github.com/sozercan/vekil and emit a paste-ready markdown report. The
+report drops into Slack, your standup, or any maintainer dashboard.
+
+What to watch:
+- One Agent CR — a codex/claude/copilot persona with a read-only system
+  prompt. The same Agent shape as demos 10 and 20; nothing scheduled-specific.
+- One Task CR carrying the triage prompt AND a 'schedule:' field. The parent
+  Task stays in phase=Scheduled forever; each tick instantiates a fresh
+  child Task with its own name, pod, and result.
+- Children are labeled 'orka.ai/parent-task=<parent>' and
+  'orka.ai/scheduled-run=true' so dashboards can list runs per schedule.
+  OwnerReferences ensure deleting the parent cleans up children.
+- Each child fetches open PRs from the GitHub API using GH_TOKEN (sourced
+  from a Kubernetes Secret via task spec.env), classifies each PR into a
+  blocker bucket (awaiting-review / ci-broken / merge-conflict /
+  author-needs-respond / discussion-stalled / dependabot), and writes a
+  markdown report into the Task result API.
+- The result API is the SAME one your interactive demos write to — so any
+  dashboard, Slack bot, or CLI that already reads task results gets the
+  triage queue for free.
+
+Why not a plain Kubernetes CronJob?
+- A CronJob runs a container on a schedule; this runs an AI agent on a
+  schedule. The agent gets runtime credentials, an LLM, tools, and a
+  structured result API — none of which a vanilla CronJob ships with.
+- 'concurrencyPolicy: Forbid' prevents two LLM workflows from stacking when
+  a tick fires before the previous one finishes — same flag, but here it
+  guards against running 10 minutes of expensive reasoning twice in parallel.
+- Result API instead of just pod logs: each tick writes structured JSON
+  (the markdown shown in chapter 4 is one field) consumable by other systems.
+
+Schedule:        ${DEMO_CRON_SCHEDULE}  (demo speed; production: */30 * * * * or 0 */4 * * *)
+Target repo:     ${DEMO_GIT_REPO}
+Triage criteria: open PRs idle more than 3 days
+
+Beyond this demo, the same pattern fits any LLM-shaped recurring workload:
+weekly engineering digests, CVE-watch reports, release notes drafts, issue
+triage, on-call handoff summaries — anything you'd reach for a CronJob for,
+plus reasoning."
+}
+
 render_cron_agent_manifest() {
   cat <<EOF
 apiVersion: core.orka.ai/v1alpha1
@@ -350,9 +379,21 @@ spec:
     name: ${DEMO_RUNTIME_MODEL}
   systemPrompt:
     inline: |
-      You are the scheduled repository reporter for a live Orka demo.
-      Read the repository, produce a short report in the task result, and stop.
-      Do not commit, push, or open a pull request.
+      You are a scheduled repository operations agent for a live Orka demo.
+
+      Tools available in this container: bash, git, curl, ripgrep, jq. You do
+      NOT have the gh CLI; use curl against the GitHub REST API
+      (https://api.github.com).
+
+      GitHub authentication: a GitHub token is provided in the GH_TOKEN env
+      variable. Reference it inside your curl commands as the value of an
+      'Authorization: Bearer ...' header. Also send 'Accept:
+      application/vnd.github+json' on every api.github.com call. Never echo,
+      print, or include the token value in your output.
+
+      Your role is read-only reporting. Read the request, produce the requested
+      report in the task result, and stop. Do not modify files, commit, push,
+      open a pull request, or comment on any PR or issue.
   resources:
     requests:
       cpu: ${DEMO_AGENT_CPU_REQUEST}
@@ -366,6 +407,8 @@ EOF
 }
 
 render_cron_task_manifest() {
+  local gh_token_secret="${DEMO_CRON_GH_TOKEN_SECRET_REF:-${DEMO_GIT_SECRET_REF:-github-credentials}}"
+  local gh_token_secret_key="${DEMO_CRON_GH_TOKEN_SECRET_KEY:-password}"
   cat <<EOF
 apiVersion: core.orka.ai/v1alpha1
 kind: Task
@@ -384,6 +427,12 @@ spec:
   successfulRunsHistoryLimit: 2
   failedRunsHistoryLimit: 1
   timeout: 20m
+  env:
+    - name: GH_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: ${gh_token_secret}
+          key: ${gh_token_secret_key}
   prompt: |
 EOF
   emit_block "    " "${DEMO_CRON_REQUEST}"
@@ -529,4 +578,528 @@ EOF
   prBaseBranch: ${DEMO_SECURITY_PR_BASE_BRANCH}
 EOF
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Demo 50 (kontxt) — manifests
+#
+# A ServiceAccount + Job that mints a Transaction Token (TxToken) via the
+# in-cluster TTS endpoint and uses it to call the Orka API. The "allowed"
+# job asks for namespace=${DEMO_NAMESPACE} (typically demo-magic); the
+# "denied" job asks for namespace=not-default so policy can reject it.
+#
+# IMPORTANT: caller.sh redacts JWT prefixes from its own stdout. Helpers
+# here MUST NOT log raw Txn-Token values, subject-token contents, or
+# anything matching eyJ[A-Za-z0-9_=-]{20,}. The kontxt-caller image is
+# expected to enforce that contract.
+# ---------------------------------------------------------------------------
+
+: "${DEMO_KONTXT_NAMESPACE:=default}"
+: "${DEMO_KONTXT_SA_NAME:=orka-kontxt-caller}"
+: "${DEMO_KONTXT_JOB_NAME:=orka-kontxt-caller}"
+: "${DEMO_KONTXT_DENIED_JOB_NAME:=orka-kontxt-caller-denied}"
+: "${DEMO_KONTXT_CALLER_IMAGE:=docker.io/sozercan/orka-kontxt-caller:demo}"
+: "${DEMO_KONTXT_TTS_AUDIENCE:=kontxt-tts}"
+: "${DEMO_KONTXT_DENIED_NAMESPACE:=not-default}"
+: "${DEMO_KONTXT_TTS_URL:=http://kontxt-tts.default.svc.cluster.local:8080}"
+: "${DEMO_KONTXT_ORKA_API_URL:=http://orka-api.${ORKA_NAMESPACE:-orka-system}.svc.cluster.local:8080}"
+
+render_kontxt_caller_sa() {
+  cat <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ${DEMO_KONTXT_SA_NAME}
+  namespace: ${DEMO_KONTXT_NAMESPACE}
+  labels:
+    orka.ai/demo: kontxt
+automountServiceAccountToken: true
+EOF
+}
+
+render_kontxt_caller_job() {
+  local job_name="${1:-${DEMO_KONTXT_JOB_NAME}}"
+  # Default the target to the bound namespace so the allowed path is a clean
+  # match. The denied job overrides target_ns to DEMO_KONTXT_DENIED_NAMESPACE.
+  local target_ns="${2:-${DEMO_KONTXT_NAMESPACE}}"
+  local backoff="${3:-0}"
+  local requested_scope="${4:-orka:tasks:list orka:tasks:get}"
+  # Bind the TxToken to DEMO_KONTXT_NAMESPACE via request_details (becomes
+  # the tctx claim). The allowed job targets the same namespace and is
+  # accepted; the denied job targets DEMO_KONTXT_DENIED_NAMESPACE and is
+  # rejected by Orka's tctx.namespace check.
+  local bound_ns="${5:-${DEMO_KONTXT_NAMESPACE}}"
+  cat <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${job_name}
+  namespace: ${DEMO_KONTXT_NAMESPACE}
+  labels:
+    orka.ai/demo: kontxt
+spec:
+  backoffLimit: ${backoff}
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        orka.ai/demo: kontxt
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ${DEMO_KONTXT_SA_NAME}
+      containers:
+        - name: caller
+          image: ${DEMO_KONTXT_CALLER_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SUBJECT_TOKEN_PATH
+              value: /var/run/orka/token
+            - name: ORKA_CONTEXT_TOKEN_TTS_URL
+              value: ${DEMO_KONTXT_TTS_URL}
+            - name: ORKA_API_URL
+              value: ${DEMO_KONTXT_ORKA_API_URL}
+            - name: TARGET_NAMESPACE
+              value: ${target_ns}
+            - name: KONTXT_TTS_PARENT_SCOPE
+              value: "${requested_scope}"
+            - name: KONTXT_BOUND_NAMESPACE
+              value: ${bound_ns}
+          volumeMounts:
+            - name: kontxt-token
+              mountPath: /var/run/orka
+              readOnly: true
+      volumes:
+        - name: kontxt-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: ${DEMO_KONTXT_TTS_AUDIENCE}
+                  expirationSeconds: 3600
+                  path: token
+EOF
+}
+
+render_kontxt_denied_caller_job() {
+  # Same identity and scope, but target a namespace outside the TxToken context.
+  # The API rejects the cross-namespace /tasks list call.
+  render_kontxt_caller_job \
+    "${DEMO_KONTXT_DENIED_JOB_NAME}" \
+    "${DEMO_KONTXT_DENIED_NAMESPACE}" \
+    "0"
+}
+
+# ---------------------------------------------------------------------------
+# Demo 60 (agent sandbox) — manifests
+#
+# A scout agent (read-only tools) and a builder agent (file write + code exec)
+# share a single SandboxClaim across three Task turns via sessionRef. Turn 1
+# creates the session; turns 2 and 3 reuse it. The payoff helper asserts that
+# all three turns landed on the SAME claim.
+# ---------------------------------------------------------------------------
+
+: "${DEMO_SANDBOX_SESSION:=vekil-metrics-77}"
+: "${DEMO_SANDBOX_SCOUT_AGENT:=demo-sandbox-scout}"
+: "${DEMO_SANDBOX_BUILDER_AGENT:=demo-sandbox-builder}"
+: "${DEMO_SANDBOX_TEMPLATE_REF:=orka-live-template}"
+: "${DEMO_SANDBOX_TURN1_TASK:=demo-sandbox-turn-1-scout}"
+: "${DEMO_SANDBOX_TURN2_TASK:=demo-sandbox-turn-2-builder}"
+: "${DEMO_SANDBOX_TURN3_TASK:=demo-sandbox-turn-3-fixup}"
+: "${DEMO_SANDBOX_PUSH_BRANCH:=demo/sandbox-metrics-${DEMO_RUN_ID}}"
+
+render_sandbox_scout_agent() {
+  cat <<EOF
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: ${DEMO_SANDBOX_SCOUT_AGENT}
+  namespace: ${DEMO_NAMESPACE}
+  labels:
+    orka.ai/demo: sandbox
+    demo.orka.ai/scenario: sandbox
+spec:
+  runtime:
+    type: ${DEMO_RUNTIME_TYPE}
+    defaultMaxTurns: 30
+    # Codex CLI always requires shell execution; setting false makes the
+    # worker refuse to start. We keep the scout's "read-only" intent in
+    # the system prompt + Bash is gated by the allowed-tools list below.
+    defaultAllowBash: true
+    defaultAllowedTools:
+      - Read
+      - Grep
+      - Glob
+      - WebSearch
+      - Bash
+  model:
+    name: ${DEMO_RUNTIME_MODEL}
+  systemPrompt:
+    inline: |
+      You are the scout for a live Orka sandbox demo.
+      The repository is checked out in the sandbox workspace.
+      Read files, search the web for relevant context, and produce a short
+      plan in the task result. Do NOT modify, commit, or push anything —
+      no git add/commit/push, no file edits, no network writes.
+  resources:
+    requests:
+      cpu: ${DEMO_AGENT_CPU_REQUEST}
+      memory: ${DEMO_AGENT_MEMORY_REQUEST}
+    limits:
+      cpu: ${DEMO_AGENT_CPU_LIMIT}
+      memory: ${DEMO_AGENT_MEMORY_LIMIT}
+  secretRef:
+    name: ${DEMO_RUNTIME_SECRET_REF}
+EOF
+}
+
+render_sandbox_builder_agent() {
+  cat <<EOF
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: ${DEMO_SANDBOX_BUILDER_AGENT}
+  namespace: ${DEMO_NAMESPACE}
+  labels:
+    orka.ai/demo: sandbox
+    demo.orka.ai/scenario: sandbox
+spec:
+  runtime:
+    type: ${DEMO_RUNTIME_TYPE}
+    defaultMaxTurns: 80
+    defaultAllowBash: true
+    defaultAllowedTools:
+      - Read
+      - Write
+      - Edit
+      - Bash
+      - Grep
+      - Glob
+  model:
+    name: ${DEMO_RUNTIME_MODEL}
+  systemPrompt:
+    inline: |
+      You are the builder for a live Orka sandbox demo.
+      The sandbox workspace is reused across turns — the scout's notes and
+      any earlier edits are already present.
+      Implement the requested change, run the smallest validation you can,
+      then use git + gh inside the sandbox to push a branch and open a PR.
+      Note: open_pr is NOT a built-in tool; use git/gh from Bash.
+  resources:
+    requests:
+      cpu: ${DEMO_AGENT_CPU_REQUEST}
+      memory: ${DEMO_AGENT_MEMORY_REQUEST}
+    limits:
+      cpu: ${DEMO_AGENT_CPU_LIMIT}
+      memory: ${DEMO_AGENT_MEMORY_LIMIT}
+  secretRef:
+    name: ${DEMO_RUNTIME_SECRET_REF}
+EOF
+}
+
+# render_sandbox_turn_task <name> <agent> <prompt-file> [--create-session]
+render_sandbox_turn_task() {
+  local name="$1"
+  local agent="$2"
+  local prompt_file="$3"
+  local create_session="false"
+  if [[ "${4:-}" == "--create-session" ]]; then
+    create_session="true"
+  fi
+  if [[ ! -f "${prompt_file}" ]]; then
+    printf 'render_sandbox_turn_task: prompt file not found: %s\n' "${prompt_file}" >&2
+    return 1
+  fi
+  local prompt_body
+  prompt_body="$(cat "${prompt_file}")"
+  prompt_body="${prompt_body//\{\{DEMO_SANDBOX_PUSH_BRANCH\}\}/${DEMO_SANDBOX_PUSH_BRANCH}}"
+  cat <<EOF
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: ${name}
+  namespace: ${DEMO_NAMESPACE}
+  labels:
+    orka.ai/demo: sandbox
+    orka.ai/session: ${DEMO_SANDBOX_SESSION}
+    demo.orka.ai/scenario: sandbox
+spec:
+  type: agent
+  agentRef:
+    name: ${agent}
+  sessionRef:
+    name: ${DEMO_SANDBOX_SESSION}
+    create: ${create_session}
+  timeout: 60m
+  env:
+    # agent-sandbox pods drop ALL caps + runAsNonRoot, so codex's inner
+    # bubblewrap sandbox cannot nest (bwrap: Operation not permitted). The
+    # sandbox IS the isolation boundary, so run codex with the sandbox
+    # bypassed. (No effect for non-codex runtimes.)
+    - name: ORKA_CODEX_DISABLE_SANDBOX
+      value: "true"
+  prompt: |
+EOF
+  emit_block "    " "${prompt_body}"
+  printf '\n'
+  cat <<EOF
+  agentRuntime:
+    workspace:
+      gitRepo: ${DEMO_GIT_REPO}
+      branch: ${DEMO_GIT_BRANCH}
+EOF
+  if [[ -n "${DEMO_GIT_SECRET_REF:-}" ]]; then
+    cat <<EOF
+      gitSecretRef:
+        name: ${DEMO_GIT_SECRET_REF}
+EOF
+  fi
+  cat <<EOF
+  execution:
+    workspace:
+      enabled: true
+      templateRef:
+        name: ${DEMO_SANDBOX_TEMPLATE_REF}
+      reusePolicy: session
+      cleanupPolicy: retain
+EOF
+}
+
+render_security_story_file() {
+  emit_block "" "Scenario:
+Demo 40 — Security Scanning + Auto-Remediation.
+
+THE FEATURE: Orka models source-code security as Kubernetes CRDs. A RepositoryScan triggers an LLM-driven SAST pipeline over the target repo (think: hardcoded credentials, injection sinks, auth bypasses, dangerous defaults — vulnerabilities in YOUR code, not in your dependencies). The scan first builds a repository-specific threat model, then runs scoped discovery passes against that model, then validates each candidate. Each Finding becomes a first-class object you can list, rank, and query via the Orka API. A single POST /api/v1/security/findings/<id>/patch turns a finding into a remediation Task that ends in a reviewable PR. Threat-model -> discovery -> findings -> patch -> branch -> PR, all in K8s.
+
+How the scan actually works (you do not have to memorize this; it runs off-camera):
+1. THREAT MODEL FIRST — one child Task reads the repo and produces a canonical threat model (security-threat-model.md): what this app does, where the trust boundaries are, which classes of attack actually matter for THIS codebase. This is the longest single stage and the rest of the pipeline depends on it. (This is why you'll see one task running alone for the first couple of minutes.)
+2. DISCOVERY (5 in parallel) — five child Tasks fan out, each handed the SAME threat model as canonical context, each focused on a different scope: auth-secrets-privilege, data-exposure-logging, ci-cd-supply-chain, app-logic-inputs, recent-commits-history. Each scope is a separate agent run so the model focuses instead of trying to grep everything at once. They are not dumb pattern-matchers — they know the repo's threat model before they start looking.
+3. VALIDATION — candidate findings from discovery each run through a per-finding validator Task that suppresses false positives before they surface in the API.
+4. PATCH (on demand) — POST /api/v1/security/findings/<id>/patch creates a remediation Task that drafts the fix, opens a branch, and opens a PR with a structured 'Summary / Root cause / Remediation guidance' body. The PR carries provenance back to the finding ID.
+
+Why not a traditional SAST tool + Jira workflow? Tools like CodeQL, Semgrep, or SonarQube produce findings; what happens next is human ticket-bouncing. Orka closes the loop: each finding has a one-click /patch endpoint that creates a remediation Task driven by the same Agent runtime as demos 10 / 20. The output is a PR the maintainer reviews, not a ticket the maintainer triages.
+
+The threat-model step is the part that distinguishes this from running a static linter. A linter sees 'hardcoded string'; the threat model sees 'this app auto-provisions a privileged admin account with a hardcoded password on startup' and the discovery passes that run AFTER the threat model surface findings ranked by that context.
+
+(SCA / dependency scanners like Trivy and Snyk live one layer down — they flag CVEs in third-party packages. This demo is about flaws in first-party code.)
+
+THIS DEMO:
+A RepositoryScan inspects a known-vulnerable fork (nodejs-goof). Today's scan surfaces ~10 code-level findings, ranked by severity using the threat-model context. The demo picks the top-ranked one, hits /patch, and Orka opens a real PR for that single finding. In production you would loop the same /patch call over every finding above a severity threshold; the demo focuses on the one-finding mechanic for clarity.
+
+What to watch:
+- The analysis + remediation Agents are pre-applied; the discovery -> threat-model -> validation pipeline runs off-camera and surfaces code-level findings (hardcoded admin password, login bypass, reflected XSS, etc.).
+- Listing findings: severity-ranked using the threat-model context, replayable via the Orka REST API.
+- One POST against /api/v1/security/findings/<id>/patch creates a remediation Task.
+- The Task runs a coder Agent against the target repo; the result is a branch + PR with a structured 'Summary / Root cause / Remediation guidance' body.
+- The PR carries provenance back to the finding ID — every step in the chain is queryable.
+
+Target repo:       ${DEMO_SECURITY_GIT_REPO}
+Scan name:         ${DEMO_SECURITY_SCAN_NAME}
+
+Beyond this demo, any scanner that emits structured findings (custom rules, LLM-driven heuristics, IaC checks, secrets detection) can plug into the same RepositoryScan / Finding / Patch flow. Same RBAC, same audit log, same Task primitive."
+}
+
+render_kontxt_story_file() {
+  emit_block "" "Scenario:
+Demo 50 — kontxt Transaction Tokens (zero-secret zero-trust agent calls).
+
+THE FEATURE: callers prove their identity with a projected Kubernetes ServiceAccount token. An in-cluster Token Translation Service (TTS) exchanges that SA token for a short-lived, narrowly-scoped TxToken. Orka enforces the TxToken's scope on every request and stamps an immutable, redacted record of the transaction into the Task's status. No shared API keys, no agent-side secret management.
+
+Why not a static API key? Shared keys are coarse (one key = full permissions), persistent (rotation is painful), and silent (audit logs show 'key X did Y', not 'caller Z did Y'). TxTokens are per-request, scoped to the action + namespace, and tied back to the caller pod's identity — every Task carries the caller's SA, the granted scope, and a transaction digest you can correlate against TTS logs.
+
+THIS DEMO:
+The same caller workload runs twice. Once it asks for something the TxToken allows (target namespace matches policy). Once it asks for something the TxToken does not allow (wrong namespace). Same identity, two outcomes: a clean success and a clean 403.
+
+What to watch:
+- A caller Job that mounts a projected SA token with audience=${DEMO_KONTXT_TTS_AUDIENCE}.
+- The caller exchanges that SA token at the TTS for a TxToken at runtime — no static creds.
+- The allowed call succeeds with three steps printed (1/3, 2/3, 3/3); JWT material is redacted by the image, never logged.
+- The denied call returns status=403 — same identity, wrong namespace, denied at the Orka API boundary.
+- The transaction summary in Task status shows safe digests + caller SA — the audit trail your security team wants without leaking secrets.
+
+TTS audience:  ${DEMO_KONTXT_TTS_AUDIENCE}
+TTS URL:       ${DEMO_KONTXT_TTS_URL}
+
+Beyond this demo, the same flow plugs in for any in-cluster client — CI pods, operators, ServiceAccount-bearing workloads — that needs scoped, auditable access to Orka APIs without storing long-lived credentials."
+}
+
+render_sandbox_story_file() {
+  emit_block "" "Scenario:
+Demo 60 — Agent Sandbox (warm workspace, session reuse across turns).
+
+THE FEATURE: Orka's workspace executor backs agent Tasks with durable SandboxClaim resources. Multiple Tasks can share a single workspace via sessionRef — the same git checkout, the same dependency cache, the same runtime state. Cold-start costs (clone, dep download, agent boot) happen once per session, not once per Task.
+
+Why not a fresh pod per turn? Every fresh pod re-clones the repo, re-downloads dependencies, re-boots the agent runtime — 30-60s overhead each time. A planner -> builder -> tester workflow that has 90 seconds of real work spends 5+ minutes in cold starts. With sessionRef, the second and third turns reattach the SAME claim and skip all of that.
+
+THIS DEMO:
+Three Tasks share one session. Turn 1 is the scout (read-only persona). Turn 2 is the builder (file write + git push + open PR). Turn 3 is a CI fixup that reattaches the same workspace — the branch is still checked out, the deps are still cached. The payoff card hard-asserts that all three turns landed on the SAME SandboxClaim name; if they did not, the demo fails.
+
+What to watch:
+- Two different Agent personas (scout, builder) — the workspace is the shared resource, not the agent.
+- Turn 1 declares sessionRef.create=true; turns 2 and 3 declare sessionRef.create=false (reattach existing).
+- All three child Tasks complete Succeeded; the second turn opens a real GitHub PR; the third turn lands a follow-up commit on the same branch without re-cloning.
+- A final hard assertion: the claim name on turn 1 == turn 2 == turn 3. Orka stitched the workspace.
+
+Session:       ${DEMO_SANDBOX_SESSION}
+Template:      ${DEMO_SANDBOX_TEMPLATE_REF}
+
+Beyond this demo, any multi-turn workflow (planner -> builder -> tester, scout -> fix -> verify, parallel reviewers on the same diff) gets dramatically faster and cheaper because the heavy state stays warm across calls."
+}
+
+# ---------------------------------------------------------------------------
+# Demo 70 — Agent Substrate (real agentic run in a gVisor workspace).
+#
+# Substrate is a SECOND execution-workspace provider (distinct from Demo 60's
+# agent-sandbox). Orka Tasks request `execution.workspace.provider: substrate`;
+# the controller claims a gVisor-isolated Actor from a Substrate WorkerPool via
+# the ActorTemplate and runs a REAL codex agent inside it. These renderers
+# assume install-substrate.sh already stood up: the Substrate control plane, a
+# WorkerPool + ActorTemplate on a codex-capable image, an in-cluster model
+# proxy (vekil), and the model + git Secrets.
+#
+# Two beats, both with a live gpt model:
+#   COLD  — fresh gVisor workspace: agent clones the repo, makes a change;
+#           Orka pushes the branch; the demo opens a real PR.
+#   WARM  — same sessionRef reattaches the RETAINED workspace (reused=true,
+#           repo already cloned) for a follow-up change — no cold start.
+#
+# Clean-exit contract (validated): the agent EDITS FILES ONLY and stops. Orka's
+# pushBranch pushes the branch; the demo script opens/updates the PR via gh.
+# Having the agent run post-edit commands (git status, a PR curl) can make the
+# codex CLI exit nonzero even when the work succeeded.
+#
+# gVisor contract (validated): the Task sets ORKA_CODEX_DISABLE_SANDBOX=true so
+# codex runs danger-full-access — correct, because gVisor IS the sandbox; its
+# inner bubblewrap cannot nest under runsc.
+# ---------------------------------------------------------------------------
+: "${DEMO_SUBSTRATE_NAMESPACE:=${DEMO_NAMESPACE:-default}}"
+: "${DEMO_SUBSTRATE_AGENT:=demo-substrate-codex}"
+: "${DEMO_SUBSTRATE_TEMPLATE_NAME:=orka-codex-ci}"
+: "${DEMO_SUBSTRATE_TEMPLATE_NAMESPACE:=ate-demo}"
+: "${DEMO_SUBSTRATE_SESSION:=substrate-warm-70}"
+: "${DEMO_SUBSTRATE_COLD_TASK:=demo-substrate-cold}"
+: "${DEMO_SUBSTRATE_WARM_TASK:=demo-substrate-warm}"
+: "${DEMO_SUBSTRATE_RUNTIME_TYPE:=codex}"
+: "${DEMO_SUBSTRATE_RUNTIME_MODEL:=gpt-5.5}"
+: "${DEMO_SUBSTRATE_MODEL_SECRET:=substrate-model-key}"
+: "${DEMO_SUBSTRATE_GIT_SECRET:=github-credentials}"
+: "${DEMO_SUBSTRATE_GIT_REPO:=https://github.com/sozercan/vekil.git}"
+: "${DEMO_SUBSTRATE_GIT_BASE_BRANCH:=main}"
+: "${DEMO_SUBSTRATE_PUSH_BRANCH:=orka/substrate-demo-${DEMO_RUN_ID}}"
+: "${DEMO_SUBSTRATE_PR_REPO:=sozercan/vekil}"
+
+render_substrate_agent() {
+  cat <<EOF
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: ${DEMO_SUBSTRATE_AGENT}
+  namespace: ${DEMO_SUBSTRATE_NAMESPACE}
+  labels:
+    orka.ai/demo: substrate
+    demo.orka.ai/scenario: substrate
+spec:
+  runtime:
+    type: ${DEMO_SUBSTRATE_RUNTIME_TYPE}
+    defaultMaxTurns: 30
+    defaultAllowBash: true
+  model:
+    name: ${DEMO_SUBSTRATE_RUNTIME_MODEL}
+  # secretRef (NOT providerRef — mutually exclusive with runtime) carries the
+  # model endpoint: OPENAI_BASE_URL -> the in-cluster proxy, OPENAI_API_KEY (a
+  # placeholder; the proxy holds the real session). EnvFrom-injected.
+  secretRef:
+    name: ${DEMO_SUBSTRATE_MODEL_SECRET}
+  systemPrompt:
+    inline: |
+      You are a coding agent running inside a gVisor-isolated Substrate
+      workspace for a live Orka demo. The target repository is checked out in
+      the current working directory. Make ONLY the requested file change, then
+      stop. Do not run git status, git commit, git push, or open a pull request
+      yourself — Orka pushes your branch and the demo opens the PR.
+EOF
+}
+
+# render_substrate_task <name> <reuse:none|session> <create:true|false> <prompt>
+# Emits a REAL agentic Task in a Substrate gVisor workspace. The COLD beat uses
+# reuse=session + create=true (mints the warm workspace, retained); the WARM
+# beat uses reuse=session + create=false (reattaches it). Both push the same
+# branch via Orka pushBranch; the demo opens/updates the PR afterward.
+render_substrate_task() {
+  local name="$1"
+  local reuse="${2:-session}"
+  local create="${3:-false}"
+  local prompt="${4:-Make the requested change and stop.}"
+  local cleanup="retain"
+  [[ "${reuse}" == "session" ]] || cleanup="delete"
+  local session_block=""
+  if [[ "${reuse}" == "session" ]]; then
+    session_block="  sessionRef:
+    name: ${DEMO_SUBSTRATE_SESSION}
+    create: ${create}"
+  fi
+  cat <<EOF
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: ${name}
+  namespace: ${DEMO_SUBSTRATE_NAMESPACE}
+  labels:
+    orka.ai/demo: substrate
+    demo.orka.ai/scenario: substrate
+spec:
+  type: agent
+  agentRef:
+    name: ${DEMO_SUBSTRATE_AGENT}
+  prompt: |
+${prompt}
+  timeout: 15m
+  env:
+    # gVisor is the sandbox; disable codex's inner bubblewrap (cannot nest).
+    - name: ORKA_CODEX_DISABLE_SANDBOX
+      value: "true"
+${session_block}
+  agentRuntime:
+    maxTurns: 30
+    allowBash: true
+    workspace:
+      gitRepo: ${DEMO_SUBSTRATE_GIT_REPO}
+      branch: ${DEMO_SUBSTRATE_GIT_BASE_BRANCH}
+      pushBranch: ${DEMO_SUBSTRATE_PUSH_BRANCH}
+      gitSecretRef:
+        name: ${DEMO_SUBSTRATE_GIT_SECRET}
+  execution:
+    workspace:
+      enabled: true
+      provider: substrate
+      cleanupPolicy: ${cleanup}
+      reusePolicy: ${reuse}
+      templateRef:
+        name: ${DEMO_SUBSTRATE_TEMPLATE_NAME}
+        namespace: ${DEMO_SUBSTRATE_TEMPLATE_NAMESPACE}
+EOF
+}
+
+render_substrate_story_file() {
+  emit_block "" "Scenario:
+Demo 70 — Agent Substrate (a real agent in a gVisor-isolated workspace).
+
+THE FEATURE: Orka's workspace executor is provider-neutral. Demo 60 backed agent Tasks with agent-sandbox; this demo backs the SAME Task API with Agent Substrate — a second provider that runs each workspace as a gVisor-isolated Actor (a microVM-class sandbox) drawn from a pre-warmed WorkerPool, and keeps that Actor warm between turns.
+
+One Task field switches backends: execution.workspace.provider: substrate. Everything else — the Agent CR, the Task CR, the model call, the git push — is identical to every other Orka agent Task. Orka abstracts the execution substrate.
+
+THIS DEMO (two beats, real ${DEMO_SUBSTRATE_RUNTIME_MODEL} agent):
+1. COLD — a fresh gVisor workspace. The agent clones ${DEMO_SUBSTRATE_PR_REPO}, makes a change, and stops. Orka pushes the branch; the demo opens a real pull request. status.executionWorkspace.provider == substrate.
+2. WARM — a second Task with the same sessionRef REATTACHES the retained workspace (status.executionWorkspace.reused == true). The repo is already cloned and the Actor is warm, so the follow-up change skips the cold start. The PR is updated with the second commit.
+
+What to watch:
+- provider == substrate on both Tasks — the Orka agent Task contract is unchanged from Demo 60.
+- gVisor isolation: each workspace is an Actor under runsc, reaching the in-cluster model proxy and github.com from inside the sandbox.
+- The WARM Task reports reused == true: the warm workspace was reattached, not rebuilt.
+- A REAL pull request lands on ${DEMO_SUBSTRATE_PR_REPO}, authored by a model-driven agent inside the sandbox.
+
+Agent:    ${DEMO_SUBSTRATE_AGENT}  (runtime ${DEMO_SUBSTRATE_RUNTIME_TYPE}, model ${DEMO_SUBSTRATE_RUNTIME_MODEL})
+Template: ${DEMO_SUBSTRATE_TEMPLATE_NAMESPACE}/${DEMO_SUBSTRATE_TEMPLATE_NAME}  (gVisor)
+Session:  ${DEMO_SUBSTRATE_SESSION}
+Repo:     ${DEMO_SUBSTRATE_PR_REPO}
+
+Beyond this demo, Substrate gives agent workloads strong (gVisor) isolation and warm-state reuse without changing a line of the Orka Task contract — swap the provider, keep the workflow."
 }

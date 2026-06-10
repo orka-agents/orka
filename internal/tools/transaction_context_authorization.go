@@ -44,9 +44,6 @@ func validateChildTaskAgainstParentTransaction(ctx context.Context, k8sClient cl
 		return nil
 	}
 	txCtx := parent.Spec.Transaction.Context
-	if len(txCtx) == 0 {
-		return nil
-	}
 	childCtx, err := resolveChildTransactionContext(ctx, k8sClient, child, agentName)
 	if err != nil {
 		return err
@@ -73,6 +70,18 @@ func validateChildTaskAgainstParentTransaction(ctx context.Context, k8sClient cl
 	}
 
 	workspace := taskWorkspace(child)
+	if workspace != nil && workspace.GitSecretRef != nil && strings.TrimSpace(workspace.GitSecretRef.Name) != "" {
+		const secretCredentialReadScope = "orka:secrets:credentials:read"
+		if !TransactionHasScope(parent.Spec.Transaction, secretCredentialReadScope) {
+			return fmt.Errorf("child task git secret %q requires transaction scope %q", workspace.GitSecretRef.Name, secretCredentialReadScope)
+		}
+		if want := strings.TrimSpace(txCtx["secret"]); want != "" && workspace.GitSecretRef.Name != want {
+			return fmt.Errorf("child task git secret %q does not match transaction context %q", workspace.GitSecretRef.Name, want)
+		}
+	}
+	if len(txCtx) == 0 {
+		return nil
+	}
 	for _, constraint := range []struct {
 		key string
 		got string
@@ -92,6 +101,21 @@ func validateChildTaskAgainstParentTransaction(ctx context.Context, k8sClient cl
 		return err
 	}
 	return nil
+}
+
+func TransactionHasScope(tx *corev1alpha1.TaskTransaction, want string) bool {
+	if tx == nil || strings.TrimSpace(want) == "" {
+		return false
+	}
+	if slices.Contains(tx.Scopes, want) {
+		return true
+	}
+	for _, scope := range strings.FieldsFunc(tx.Scope, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r' }) {
+		if strings.TrimSpace(scope) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveChildTransactionContext(ctx context.Context, k8sClient client.Client, child *corev1alpha1.Task, agentName string) (childTransactionContext, error) {
