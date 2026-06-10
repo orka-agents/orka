@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useAgentList } from '@/hooks/use-agents'
 import { useCreateRepositoryMonitor } from '@/hooks/use-monitors'
 import { useSecretNames } from '@/hooks/use-secrets'
@@ -308,17 +309,17 @@ export function RepositoryMonitorCreateForm() {
 
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <label htmlFor="monitor-review-event" className="text-sm font-medium">Review event</label>
-                <select
-                  id="monitor-review-event"
-                  className="border-input bg-background h-9 w-full rounded-md border px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-                  value={reviewEvent}
-                  onChange={(event) => setReviewEvent(event.target.value as ReviewEvent)}
-                >
-                  {REVIEW_EVENTS.map((event) => (
-                    <option key={event} value={event}>{event}</option>
-                  ))}
-                </select>
+                <label id="monitor-review-event-label" className="text-sm font-medium">Review event</label>
+                <Select value={reviewEvent} onValueChange={(value) => setReviewEvent(value as ReviewEvent)}>
+                  <SelectTrigger aria-labelledby="monitor-review-event-label">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {REVIEW_EVENTS.map((event) => (
+                      <SelectItem key={event} value={event}>{event}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
               <div className="space-y-2">
                 <label htmlFor="monitor-stale-ttl" className="text-sm font-medium">Stale review TTL</label>

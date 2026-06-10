@@ -39,6 +39,30 @@ vi.mock('@/hooks/use-secrets', () => ({
   useSecretNames: () => mockUseSecretNames(),
 }))
 
+
+if (typeof globalThis.ResizeObserver === 'undefined') {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as any
+}
+
+if (typeof HTMLElement !== 'undefined') {
+  if (!HTMLElement.prototype.hasPointerCapture) {
+    HTMLElement.prototype.hasPointerCapture = () => false
+  }
+  if (!HTMLElement.prototype.setPointerCapture) {
+    HTMLElement.prototype.setPointerCapture = () => {}
+  }
+  if (!HTMLElement.prototype.releasePointerCapture) {
+    HTMLElement.prototype.releasePointerCapture = () => {}
+  }
+  if (!HTMLElement.prototype.scrollIntoView) {
+    HTMLElement.prototype.scrollIntoView = () => {}
+  }
+}
+
 import userEvent from '@testing-library/user-event'
 import { render, screen, waitFor } from '@/test/test-utils'
 import { useUIStore } from '@/stores/ui'
@@ -84,7 +108,8 @@ describe('RepositoryMonitorCreateForm', () => {
     await user.type(screen.getByLabelText(/Max PRs per run/i), '10')
     await user.click(screen.getByRole('checkbox', { name: /Include draft pull requests/i }))
     await user.click(screen.getByRole('checkbox', { name: /Enable exact event runs/i }))
-    await user.selectOptions(screen.getByLabelText(/Review event/i), 'REQUEST_CHANGES')
+    await user.click(screen.getByRole('combobox', { name: /Review event/i }))
+    await user.click(await screen.findByRole('option', { name: 'REQUEST_CHANGES' }))
     await user.type(screen.getByLabelText(/Stale review TTL/i), '24h')
     await user.type(screen.getByLabelText(/Protected labels/i), 'security-sensitive, customer-data, security-sensitive')
     await user.type(screen.getByLabelText(/Pause labels/i), 'orka:pause')
