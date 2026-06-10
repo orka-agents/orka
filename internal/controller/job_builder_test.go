@@ -1004,6 +1004,18 @@ func TestJobBuilder_buildResources_Defaults(t *testing.T) {
 	if cpuReq.String() != "100m" {
 		t.Errorf("CPU request = %s, want 100m (default)", cpuReq.String())
 	}
+	memReq := resources.Requests[corev1.ResourceMemory]
+	if memReq.String() != "512Mi" {
+		t.Errorf("memory request = %s, want 512Mi (default)", memReq.String())
+	}
+	cpuLim := resources.Limits[corev1.ResourceCPU]
+	if cpuLim.String() != "1" {
+		t.Errorf("CPU limit = %s, want 1 (default)", cpuLim.String())
+	}
+	memLim := resources.Limits[corev1.ResourceMemory]
+	if memLim.String() != "2Gi" {
+		t.Errorf("memory limit = %s, want 2Gi (default; smaller values OOMKilled real Go/Node test suites)", memLim.String())
+	}
 }
 
 func TestJobBuilder_buildEnvVars(t *testing.T) {

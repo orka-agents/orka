@@ -30,6 +30,7 @@ export const repositoryMonitorSpecSchema = z.object({
   review: z.object({
     event: z.string().optional(),
     requireGreenCI: z.boolean().optional(),
+    staleReviewTTL: z.string().optional(),
     exactEventEnabled: z.boolean().optional(),
     publish: z.object({
       enabled: z.boolean().optional(),
@@ -57,6 +58,18 @@ export const repositoryMonitorSpecSchema = z.object({
     requireMaintainerOptIn: z.boolean().optional(),
     requireGlobalMergeGate: z.boolean().optional(),
     allowedMergeMethods: z.array(z.string()).optional(),
+  }).optional(),
+  policy: z.object({
+    protectedLabels: z.array(z.string()).optional(),
+    pauseLabels: z.array(z.string()).optional(),
+    optInLabels: z.object({
+      autofix: z.string().optional(),
+      automerge: z.string().optional(),
+    }).optional(),
+    advisoryLabels: z.object({
+      enabled: z.boolean().optional(),
+    }).optional(),
+    allowedRepositoryPermissions: z.array(z.string()).optional(),
   }).optional(),
   validation: z.object({
     mode: z.string().optional(),

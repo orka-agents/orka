@@ -59,6 +59,20 @@ describe('RepositoryMonitorList', () => {
     vi.useRealTimers()
   })
 
+
+  it('links to the create form from the empty state', () => {
+    mockUseRepositoryMonitors.mockReturnValue({
+      isLoading: false,
+      data: { items: [] },
+    })
+
+    render(<RepositoryMonitorList />)
+
+    expect(screen.getByText('No repository monitors configured.')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /New Monitor/i })).toHaveAttribute('href', '/monitors/create/new')
+    expect(screen.getByRole('link', { name: /Create repository monitor/i })).toHaveAttribute('href', '/monitors/create/new')
+  })
+
   it('renders repository monitor status and last run time', () => {
     mockUseRepositoryMonitors.mockReturnValue({
       isLoading: false,

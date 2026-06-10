@@ -40,15 +40,17 @@ type ToolContext struct {
 		DeleteSession(ctx context.Context, namespace, sessionID string) error
 	}
 	// Task creation helpers provided by the chat executor
-	GenerateTaskName     func() string
-	TaskLabels           func() map[string]string
-	CheckTaskLimit       func() *ChatToolError
-	AuthorizeTaskCreate  func(context.Context, *corev1alpha1.Task) *ChatToolError
-	AuthorizeTaskDelete  func(context.Context, *corev1alpha1.Task) *ChatToolError
-	AuthorizeAgentCreate func(context.Context, *corev1alpha1.Agent) *ChatToolError
-	AuthorizeAgentUpdate func(context.Context, *corev1alpha1.Agent) *ChatToolError
-	AuthorizeAgentDelete func(context.Context, *corev1alpha1.Agent) *ChatToolError
-	IncrementTasks       func()
+	GenerateTaskName               func() string
+	TaskLabels                     func() map[string]string
+	CheckTaskLimit                 func() *ChatToolError
+	AuthorizeTaskCreate            func(context.Context, *corev1alpha1.Task) *ChatToolError
+	AuthorizeTaskDelete            func(context.Context, *corev1alpha1.Task) *ChatToolError
+	AuthorizeAgentCreate           func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	AuthorizeAgentUpdate           func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	AuthorizeAgentDelete           func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	AuthorizeSecretRead            func(context.Context, string, string) *ChatToolError
+	RequireSecretReadAuthorization bool
+	IncrementTasks                 func()
 }
 
 type toolContextKey struct{}
@@ -258,6 +260,21 @@ func RegisterChatTools(r *Registry) {
 // RegisterChatToolsDefault registers chat tools into DefaultRegistry for use by the proxy.
 func RegisterChatToolsDefault() {
 	RegisterChatTools(DefaultRegistry)
+}
+
+// RegisterProxyPRTools registers the GitHub PR coordination tools that the
+// Anthropic and OpenAI proxies advertise in coordinatorProxyTools but that
+// RegisterChatTools does not provide. Without this the proxy lists the tools
+// for the model, ToLLMTools silently drops them (they are missing from the
+// registry), and the model gets back "tool not available in this request"
+// when it tries to open the PR after all the real work is done.
+//
+// Callers must invoke this once after the controller manager's client is
+// available. Tests that exercise injectOrkaTools should also call this so the
+// advertised tool set matches the runtime registration set.
+func RegisterProxyPRTools(k8sClient client.Client) {
+	DefaultRegistry.Register(NewCreatePullRequestTool(k8sClient))
+	DefaultRegistry.Register(NewCheckPullRequestCITool(k8sClient))
 }
 
 // ChatToolNames returns the names of all chat tools in registration order.

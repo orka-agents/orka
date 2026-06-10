@@ -40,6 +40,7 @@ import (
 	_ "github.com/sozercan/orka/internal/llm/openai"
 	_ "github.com/sozercan/orka/internal/metrics"
 	"github.com/sozercan/orka/internal/store/sqlite"
+	"github.com/sozercan/orka/internal/tools"
 	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
 	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
@@ -91,6 +92,7 @@ func main() {
 	var chatMaxConcurrent int
 	var chatMaxTasksPerTurn int
 	var chatMaxSessionSize int
+	var chatMaxPrematureEndRetries int
 	var aiWorkerImage string
 	var storeBackend string
 	var storePath string
@@ -116,6 +118,7 @@ func main() {
 	var contextTokenToolUseScopes string
 	var contextTokenProviderUseScopes string
 	var contextTokenSecretReadScopes string
+	var contextTokenSecretCredentialReadScopes string
 	var contextTokenAgentReadScopes string
 	var contextTokenAgentWriteScopes string
 	var contextTokenMemoryReadScopes string
@@ -213,6 +216,10 @@ func main() {
 	flag.IntVar(&chatMaxTasksPerTurn, "chat-max-tasks-per-turn", 5, "Max tasks created per chat turn.")
 	flag.IntVar(&chatMaxSessionSize, "chat-max-session-size", 500*1024,
 		"Soft limit for session ConfigMap size before truncation (bytes).")
+	flag.IntVar(&chatMaxPrematureEndRetries, "chat-max-premature-end-retries", 3,
+		"How many times to re-prompt the coordinator with 'continue with tool_use' before accepting a "+
+			"no-tool-use response as the final turn. The model must emit the GOAL_STATE sentinel on its true "+
+			"final turn — see coordinatorSystemPrompt.")
 	flag.StringVar(&storeBackend, "store-backend", "sqlite", "Storage backend (sqlite)")
 	flag.StringVar(&storePath, "store-path", "/data/orka.db", "Path to SQLite database file")
 	flag.StringVar(&controllerURL, "controller-url", "",
@@ -340,6 +347,10 @@ func main() {
 	flag.StringVar(&contextTokenSecretReadScopes, "context-token-secret-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_SECRET_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize Secret metadata reads. Defaults to orka:secrets:read.")
+	flag.StringVar(&contextTokenSecretCredentialReadScopes, "context-token-secret-credential-read-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_SECRET_CREDENTIAL_READ_SCOPES"),
+		"Comma-separated context-token scopes that authorize using Secret data as outbound credentials. "+
+			"Defaults to orka:secrets:credentials:read.")
 	flag.StringVar(&contextTokenAgentReadScopes, "context-token-agent-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_AGENT_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize Agent reads. Defaults to orka:agents:read.")
@@ -457,28 +468,29 @@ func main() {
 		os.Exit(1)
 	}
 	contextTokenAuthzConfig, err := api.NewContextTokenAuthorizationConfig(api.ContextTokenAuthorizationConfigOptions{
-		Mode:                 contextTokenAuthzMode,
-		TaskCreateScopes:     contextTokenTaskCreateScopes,
-		TaskReadScopes:       contextTokenTaskReadScopes,
-		TaskListScopes:       contextTokenTaskListScopes,
-		TaskDeleteScopes:     contextTokenTaskDeleteScopes,
-		ToolReadScopes:       contextTokenToolReadScopes,
-		ToolUseScopes:        contextTokenToolUseScopes,
-		ProviderUseScopes:    contextTokenProviderUseScopes,
-		SecretReadScopes:     contextTokenSecretReadScopes,
-		AgentReadScopes:      contextTokenAgentReadScopes,
-		AgentWriteScopes:     contextTokenAgentWriteScopes,
-		MemoryReadScopes:     contextTokenMemoryReadScopes,
-		MemoryWriteScopes:    contextTokenMemoryWriteScopes,
-		SessionReadScopes:    contextTokenSessionReadScopes,
-		SessionWriteScopes:   contextTokenSessionWriteScopes,
-		SecurityReadScopes:   contextTokenSecurityReadScopes,
-		SecurityWriteScopes:  contextTokenSecurityWriteScopes,
-		MonitorReadScopes:    contextTokenMonitorReadScopes,
-		MonitorWriteScopes:   contextTokenMonitorWriteScopes,
-		MonitorOperateScopes: contextTokenMonitorOperateScopes,
-		SkillReadScopes:      contextTokenSkillReadScopes,
-		SkillWriteScopes:     contextTokenSkillWriteScopes,
+		Mode:                       contextTokenAuthzMode,
+		TaskCreateScopes:           contextTokenTaskCreateScopes,
+		TaskReadScopes:             contextTokenTaskReadScopes,
+		TaskListScopes:             contextTokenTaskListScopes,
+		TaskDeleteScopes:           contextTokenTaskDeleteScopes,
+		ToolReadScopes:             contextTokenToolReadScopes,
+		ToolUseScopes:              contextTokenToolUseScopes,
+		ProviderUseScopes:          contextTokenProviderUseScopes,
+		SecretReadScopes:           contextTokenSecretReadScopes,
+		SecretCredentialReadScopes: contextTokenSecretCredentialReadScopes,
+		AgentReadScopes:            contextTokenAgentReadScopes,
+		AgentWriteScopes:           contextTokenAgentWriteScopes,
+		MemoryReadScopes:           contextTokenMemoryReadScopes,
+		MemoryWriteScopes:          contextTokenMemoryWriteScopes,
+		SessionReadScopes:          contextTokenSessionReadScopes,
+		SessionWriteScopes:         contextTokenSessionWriteScopes,
+		SecurityReadScopes:         contextTokenSecurityReadScopes,
+		SecurityWriteScopes:        contextTokenSecurityWriteScopes,
+		MonitorReadScopes:          contextTokenMonitorReadScopes,
+		MonitorWriteScopes:         contextTokenMonitorWriteScopes,
+		MonitorOperateScopes:       contextTokenMonitorOperateScopes,
+		SkillReadScopes:            contextTokenSkillReadScopes,
+		SkillWriteScopes:           contextTokenSkillWriteScopes,
 	})
 	if err != nil {
 		setupLog.Error(err, "invalid context token authorization configuration")
@@ -785,6 +797,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Register coordination tools the Anthropic/OpenAI proxy advertises but that
+	// RegisterChatToolsDefault does not provide. Without these the proxy lists the
+	// tool in coordinatorProxyTools but ToLLMTools silently drops it, leaving the
+	// coordinator to call a tool name that comes back as "not available in this
+	// request" and aborting the chat-to-PR workflow after all the real work is done.
+	tools.RegisterProxyPRTools(mgr.GetClient())
+
 	// Start REST API server
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
 		Port:                      apiPort,
@@ -809,15 +828,16 @@ func main() {
 		HealthChecker:             sqliteStore,
 		Clientset:                 kubeClient,
 		Chat: api.ChatConfig{
-			Enabled:         chatEnabled,
-			Provider:        chatProvider,
-			Model:           chatModel,
-			MaxIterations:   chatMaxIterations,
-			MaxDuration:     chatMaxDuration,
-			ToolTimeout:     chatToolTimeout,
-			MaxConcurrent:   chatMaxConcurrent,
-			MaxTasksPerTurn: chatMaxTasksPerTurn,
-			MaxSessionSize:  chatMaxSessionSize,
+			Enabled:                chatEnabled,
+			Provider:               chatProvider,
+			Model:                  chatModel,
+			MaxIterations:          chatMaxIterations,
+			MaxDuration:            chatMaxDuration,
+			ToolTimeout:            chatToolTimeout,
+			MaxConcurrent:          chatMaxConcurrent,
+			MaxTasksPerTurn:        chatMaxTasksPerTurn,
+			MaxSessionSize:         chatMaxSessionSize,
+			MaxPrematureEndRetries: chatMaxPrematureEndRetries,
 		},
 	})
 

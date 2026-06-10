@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -46,6 +47,7 @@ const (
 	memoryContextPerEntryMaxChars  = 1200
 	memoryContextResponseBodyLimit = 1 << 20
 	serviceAccountTokenPath        = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	secretCredentialReadScope      = "orka:secrets:credentials:read"
 
 	durableMemoryContextHeader = "## Durable Memory\n\n" +
 		"Reviewed namespace-scoped memories from prior work. " +
@@ -222,6 +224,13 @@ func run() error {
 		Namespace: taskNamespace,
 		Tenant:    taskNamespace,
 		TaskID:    taskName,
+		AuthorizeSecretRead: workerSecretReadAuthorizer(
+			k8sClient,
+			taskNamespace,
+			taskName,
+			workerEnv.TransactionID,
+		),
+		RequireSecretReadAuthorization: workerEnv.TransactionID != "",
 	}
 
 	// Execute the agent loop
@@ -856,6 +865,71 @@ func advertisedToolNames(llmTools []llm.Tool) map[string]struct{} {
 // writeResult submits the result to the controller via HTTP POST.
 func writeResult(result string) error {
 	return common.SubmitResult([]byte(result))
+}
+
+func workerSecretReadAuthorizer(
+	k8sClient client.Client,
+	taskNamespace string,
+	taskName string,
+	transactionID string,
+) func(context.Context, string, string) *tools.ChatToolError {
+	return func(ctx context.Context, namespace, secretName string) *tools.ChatToolError {
+		if strings.TrimSpace(transactionID) == "" {
+			return nil
+		}
+		if k8sClient == nil {
+			return workerSecretReadError(
+				"missing Kubernetes client for secret credential authorization",
+				"Run without git credentials or provide a transaction authorized for credential use",
+			)
+		}
+		var task corev1alpha1.Task
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: taskName, Namespace: taskNamespace}, &task); err != nil {
+			return workerSecretReadError(
+				fmt.Sprintf("load task transaction for secret credential authorization: %v", err),
+				"Retry after the task transaction metadata is available",
+			)
+		}
+		tx := task.Spec.Transaction
+		if tx == nil {
+			return workerSecretReadError(
+				"task transaction metadata is required for secret credential authorization",
+				"Use a transaction token that grants credential access",
+			)
+		}
+		if !tools.TransactionHasScope(tx, secretCredentialReadScope) {
+			return workerSecretReadError(
+				fmt.Sprintf(
+					"missing required scope %q for git secret %s/%s",
+					secretCredentialReadScope,
+					namespace,
+					secretName,
+				),
+				"Use a transaction token that includes the secret credential read scope",
+			)
+		}
+		if want := strings.TrimSpace(tx.Context["namespace"]); want != "" && namespace != want {
+			return workerSecretReadError(
+				fmt.Sprintf("secret namespace %q does not match transaction context %q", namespace, want),
+				"Use a git secret in the transaction namespace",
+			)
+		}
+		if want := strings.TrimSpace(tx.Context["secret"]); want != "" && secretName != want {
+			return workerSecretReadError(
+				fmt.Sprintf("git secret %q does not match transaction context %q", secretName, want),
+				"Use the git secret authorized by the transaction context",
+			)
+		}
+		return nil
+	}
+}
+
+func workerSecretReadError(message, suggestion string) *tools.ChatToolError {
+	return &tools.ChatToolError{
+		Type:       "authorization_failed",
+		Message:    message,
+		Suggestion: suggestion,
+	}
 }
 
 // loadSkillsFromVolume reads skill content from the mounted volume at /workspace/.skills/.

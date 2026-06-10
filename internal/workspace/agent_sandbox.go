@@ -470,7 +470,14 @@ func (e *AgentSandboxExecutor) Exec(ctx context.Context, req ExecRequest) (*Exec
 		}
 	}
 
-	result, err := handle.Run(ctx, command)
+	// Claim normally sizes the cached SDK client for MaxRequestTimeout, which
+	// covers long Exec calls. Keep this per-call timeout as a safety net for
+	// handles created without that larger transport budget.
+	runOpts := []sandbox.CallOption{}
+	if req.Timeout > 0 {
+		runOpts = append(runOpts, sandbox.WithTimeout(req.Timeout))
+	}
+	result, err := handle.Run(ctx, command, runOpts...)
 	if err != nil {
 		e.cleanupAgentSandboxEnvFile(handle, envFileName)
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -740,9 +747,15 @@ func (e *AgentSandboxExecutor) agentSandboxOptions(req ClaimRequest) sandbox.Opt
 		APIURL:       e.apiURLForClaim(),
 		Quiet:        true,
 	}
-	if req.Timeout > 0 {
-		opts.RequestTimeout = req.Timeout
-		opts.PerAttemptTimeout = req.Timeout
+	// The HTTP client built from these Options is reused for the lifetime
+	// of the cached handle, including subsequent Exec calls. Use the
+	// longer of Timeout and MaxRequestTimeout so a long-running command
+	// is not killed by a transport-level ResponseHeaderTimeout sized for
+	// the short claim-readiness window.
+	transportTimeout := max(req.Timeout, req.MaxRequestTimeout)
+	if transportTimeout > 0 {
+		opts.RequestTimeout = transportTimeout
+		opts.PerAttemptTimeout = transportTimeout
 	}
 	return opts
 }

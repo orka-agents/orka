@@ -332,30 +332,54 @@ func TestAgentSandboxExecutorLocalClaimNameReuseSkipsGetSandbox(t *testing.T) {
 }
 
 func TestAgentSandboxExecutorClaimPropagatesTimeoutToSandboxOptions(t *testing.T) {
-	store := newFakeAgentSandboxStore()
-	executor := NewAgentSandboxExecutor()
-	executor.newClient = store.newClient
-
-	_, err := executor.Claim(context.Background(), ClaimRequest{
-		Namespace: fakeTestNamespace,
-		Template:  TemplateRef{Name: fakeCodingAgentTemplate},
-		Timeout:   17 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("Claim() error = %v", err)
+	tests := []struct {
+		name              string
+		timeout           time.Duration
+		maxRequestTimeout time.Duration
+		want              time.Duration
+	}{
+		{
+			name:    "claim timeout only",
+			timeout: 17 * time.Second,
+			want:    17 * time.Second,
+		},
+		{
+			name:              "max request timeout extends transport",
+			timeout:           3 * time.Second,
+			maxRequestTimeout: 120 * time.Second,
+			want:              120 * time.Second,
+		},
 	}
 
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if len(store.clientOptions) != 1 {
-		t.Fatalf("client creations = %d, want 1", len(store.clientOptions))
-	}
-	opts := store.clientOptions[0]
-	if opts.RequestTimeout != 17*time.Second {
-		t.Errorf("RequestTimeout = %v, want 17s", opts.RequestTimeout)
-	}
-	if opts.PerAttemptTimeout != 17*time.Second {
-		t.Errorf("PerAttemptTimeout = %v, want 17s", opts.PerAttemptTimeout)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeAgentSandboxStore()
+			executor := NewAgentSandboxExecutor()
+			executor.newClient = store.newClient
+
+			_, err := executor.Claim(context.Background(), ClaimRequest{
+				Namespace:         fakeTestNamespace,
+				Template:          TemplateRef{Name: fakeCodingAgentTemplate},
+				Timeout:           tt.timeout,
+				MaxRequestTimeout: tt.maxRequestTimeout,
+			})
+			if err != nil {
+				t.Fatalf("Claim() error = %v", err)
+			}
+
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			if len(store.clientOptions) != 1 {
+				t.Fatalf("client creations = %d, want 1", len(store.clientOptions))
+			}
+			opts := store.clientOptions[0]
+			if opts.RequestTimeout != tt.want {
+				t.Errorf("RequestTimeout = %v, want %v", opts.RequestTimeout, tt.want)
+			}
+			if opts.PerAttemptTimeout != tt.want {
+				t.Errorf("PerAttemptTimeout = %v, want %v", opts.PerAttemptTimeout, tt.want)
+			}
+		})
 	}
 }
 

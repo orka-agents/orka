@@ -335,6 +335,17 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 				}
 				return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent authorized by the context token")
 			},
+			AuthorizeSecretRead: func(ctx context.Context, namespace, secretName string) *tools.ChatToolError {
+				if err := authorizeContextTokenSecretRead(contextToken, h.contextTokenAuthorization, "openAIToolReadSecret", namespace, secretName); err != nil {
+					return &tools.ChatToolError{
+						Type:       "authorization_failed",
+						Message:    err.Error(),
+						Suggestion: "Use a context token authorized to read the git credential secret",
+					}
+				}
+				return nil
+			},
+			RequireSecretReadAuthorization: true,
 			CheckTaskLimit: func() *tools.ChatToolError {
 				if tasksCreated >= 20 {
 					return &tools.ChatToolError{Type: "limit_reached", Message: "task creation limit reached (max 20)", Suggestion: "Wait for existing tasks to complete"}
@@ -458,14 +469,17 @@ func (h *OpenAICompatHandler) handleNonStreamingToolLoop(
 		}})
 	}
 
+	resp = stripGoalStateSentinelFromResponse(resp)
 	return h.formatOAIResponse(c, resp, completionID, model, created)
 }
 
-// handleStreamingToolLoop runs the agentic tool loop with streaming for the final response.
-// Intermediate tool calls are executed server-side; only the final text is streamed to the client.
+// handleStreamingToolLoop runs the agentic tool loop inside the SSE response.
+// Orka tool calls remain server-side; user-visible progress is emitted as
+// ordinary assistant content chunks so OpenAI-compatible clients keep receiving
+// bytes during multi-minute coordinator workflows.
 func (h *OpenAICompatHandler) handleStreamingToolLoop(
 	c fiber.Ctx,
-	ctx context.Context,
+	_ context.Context,
 	provider llm.Provider,
 	req *llm.CompletionRequest,
 	completionID, model string,
@@ -473,23 +487,19 @@ func (h *OpenAICompatHandler) handleStreamingToolLoop(
 	streamOpts *StreamOptions,
 	toolCtx *tools.ToolContext,
 ) error {
-	// Run the non-streaming tool loop to execute all tools server-side
-	resp, err := runNonStreamingToolLoop(ctx, provider, req, model, h.config, toolCtx)
-	if err != nil {
-		oaiLog.Error(err, "tool loop failed")
-		return c.Status(500).JSON(OAIError{Error: OAIErrorDetail{
-			Message: "completion failed: " + err.Error(),
-			Type:    "server_error",
-		}})
-	}
-
-	// Stream the final response content as SSE chunks
 	c.Set("Content-Type", "text/event-stream")
 	c.Set("Cache-Control", "no-cache")
 	c.Set("Connection", "keep-alive")
 	c.Set("X-Accel-Buffering", "no")
 
+	capturedProvider := provider
+	capturedReq := req
+	capturedToolCtx := toolCtx
+
 	return c.SendStreamWriter(func(w *bufio.Writer) {
+		streamCtx, streamCancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+		defer streamCancel()
+
 		// Send role chunk
 		roleChunk := OAIResponse{
 			ID:      completionID,
@@ -501,25 +511,43 @@ func (h *OpenAICompatHandler) handleStreamingToolLoop(
 				Delta: &OAIMessage{Role: "assistant"},
 			}},
 		}
-		writeStreamChunk(w, roleChunk)
+		if err := writeStreamChunk(w, roleChunk); err != nil {
+			streamCancel()
+			return
+		}
 
-		// Send content chunk
-		if resp.Content != "" {
-			contentChunk := OAIResponse{
-				ID:      completionID,
-				Object:  "chat.completion.chunk",
-				Created: created,
-				Model:   model,
-				Choices: []OAIChoice{{
-					Index: 0,
-					Delta: &OAIMessage{Content: resp.Content},
-				}},
+		writeContent := func(content string) {
+			if err := writeOpenAIContentChunk(w, completionID, created, model, content); err != nil {
+				streamCancel()
 			}
-			writeStreamChunk(w, contentChunk)
+		}
+		observer := &toolLoopObserver{
+			OnAssistantContent: writeContent,
+			OnFinalContent: func(content string) {
+				writeContent(stripGoalStateSentinel(content))
+			},
+			OnToolResult: func(tc llm.ToolCall, result string) {
+				writeContent(formatOpenAIToolProgress(tc, result))
+			},
+			OnPrematureEndRetry: func() {
+				writeContent("[⚠️  premature end — re-prompting coordinator]\n\n")
+			},
+			OnAutoPoll: func() {
+				writeContent("[⏳ Auto-polling tasks...]\n")
+			},
+		}
+
+		resp, err := runToolLoopWithObserver(streamCtx, capturedProvider, capturedReq, model, h.config, capturedToolCtx, observer)
+		if err != nil {
+			oaiLog.Error(err, "streaming tool loop failed")
+			writeContent("Error: " + err.Error())
 		}
 
 		// Send finish chunk
-		finishReason := mapFinishReason(resp.StopReason)
+		finishReason := finishReasonStop
+		if resp != nil {
+			finishReason = mapFinishReason(resp.StopReason)
+		}
 		finishChunk := OAIResponse{
 			ID:      completionID,
 			Object:  "chat.completion.chunk",
@@ -531,16 +559,71 @@ func (h *OpenAICompatHandler) handleStreamingToolLoop(
 				FinishReason: &finishReason,
 			}},
 		}
-		if streamOpts != nil && streamOpts.IncludeUsage {
+		if resp != nil && streamOpts != nil && streamOpts.IncludeUsage {
 			finishChunk.Usage = &OAIUsage{
 				PromptTokens:     resp.InputTokens,
 				CompletionTokens: resp.OutputTokens,
 				TotalTokens:      resp.InputTokens + resp.OutputTokens,
 			}
 		}
-		writeStreamChunk(w, finishChunk)
-		writeStreamDone(w)
+		_ = writeStreamChunk(w, finishChunk)
+		_ = writeStreamDone(w)
 	})
+}
+
+func writeOpenAIContentChunk(w *bufio.Writer, completionID string, created int64, model, content string) error {
+	if content == "" {
+		return nil
+	}
+	return writeStreamChunk(w, OAIResponse{
+		ID:      completionID,
+		Object:  "chat.completion.chunk",
+		Created: created,
+		Model:   model,
+		Choices: []OAIChoice{{
+			Index: 0,
+			Delta: &OAIMessage{Content: content},
+		}},
+	})
+}
+
+func stripGoalStateSentinel(content string) string {
+	if !strings.Contains(content, goalStateSentinel) {
+		return content
+	}
+	stripped := strings.ReplaceAll(content, goalStateSentinel, "")
+	return strings.TrimLeft(stripped, " \t\r\n")
+}
+
+func stripGoalStateSentinelFromResponse(resp *llm.CompletionResponse) *llm.CompletionResponse {
+	if resp == nil {
+		return nil
+	}
+	strippedContent := stripGoalStateSentinel(resp.Content)
+	if strippedContent == resp.Content {
+		return resp
+	}
+	respCopy := *resp
+	respCopy.Content = strippedContent
+	return &respCopy
+}
+
+func formatOpenAIToolProgress(tc llm.ToolCall, result string) string {
+	status := "completed"
+	var parsed struct {
+		Success *bool `json:"success"`
+		Data    struct {
+			Phase string `json:"phase"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(result), &parsed); err == nil {
+		if parsed.Success != nil && !*parsed.Success {
+			status = "failed"
+		} else if parsed.Data.Phase != "" {
+			status = "phase=" + parsed.Data.Phase
+		}
+	}
+	return fmt.Sprintf("[Tool %s %s]\n\n", tc.Name, status)
 }
 
 // formatOAIResponse formats a CompletionResponse into OpenAI API format.
@@ -629,8 +712,8 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 						Delta: &OAIMessage{Role: "assistant", Content: "Error: " + completeErr.Error()},
 					}},
 				}
-				writeStreamChunk(w, errChunk)
-				writeStreamDone(w)
+				_ = writeStreamChunk(w, errChunk)
+				_ = writeStreamDone(w)
 				return
 			}
 
@@ -645,7 +728,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 					Delta: &OAIMessage{Role: "assistant"},
 				}},
 			}
-			writeStreamChunk(w, roleChunk)
+			_ = writeStreamChunk(w, roleChunk)
 
 			// Send content
 			if resp.Content != "" {
@@ -659,7 +742,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 						Delta: &OAIMessage{Content: resp.Content},
 					}},
 				}
-				writeStreamChunk(w, contentChunk)
+				_ = writeStreamChunk(w, contentChunk)
 			}
 
 			// Send tool calls if any
@@ -685,7 +768,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 						},
 					}},
 				}
-				writeStreamChunk(w, tcChunk)
+				_ = writeStreamChunk(w, tcChunk)
 			}
 
 			// Send finish
@@ -704,7 +787,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 					FinishReason: &finishReason,
 				}},
 			}
-			writeStreamChunk(w, finishChunk)
+			_ = writeStreamChunk(w, finishChunk)
 
 			// Send usage if requested
 			if streamOpts != nil && streamOpts.IncludeUsage {
@@ -720,10 +803,10 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 						TotalTokens:      resp.InputTokens + resp.OutputTokens,
 					},
 				}
-				writeStreamChunk(w, usageChunk)
+				_ = writeStreamChunk(w, usageChunk)
 			}
 
-			writeStreamDone(w)
+			_ = writeStreamDone(w)
 			return
 		}
 
@@ -738,7 +821,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 				Delta: &OAIMessage{Role: "assistant"},
 			}},
 		}
-		writeStreamChunk(w, roleChunk)
+		_ = writeStreamChunk(w, roleChunk)
 
 		toolCallIndex := 0
 		for chunk := range streamCh {
@@ -758,7 +841,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 						Delta: &OAIMessage{Content: chunk.Content},
 					}},
 				}
-				writeStreamChunk(w, contentChunk)
+				_ = writeStreamChunk(w, contentChunk)
 			}
 
 			if chunk.ToolCall != nil {
@@ -784,7 +867,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 						},
 					}},
 				}
-				writeStreamChunk(w, tcChunk)
+				_ = writeStreamChunk(w, tcChunk)
 				toolCallIndex++
 			}
 
@@ -801,11 +884,11 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 						FinishReason: &finishReason,
 					}},
 				}
-				writeStreamChunk(w, finishChunk)
+				_ = writeStreamChunk(w, finishChunk)
 			}
 		}
 
-		writeStreamDone(w)
+		_ = writeStreamDone(w)
 	})
 }
 
@@ -985,17 +1068,21 @@ func mapFinishReason(reason string) string {
 }
 
 // writeStreamChunk writes a single SSE chunk in OpenAI streaming format.
-func writeStreamChunk(w *bufio.Writer, chunk OAIResponse) {
+func writeStreamChunk(w *bufio.Writer, chunk OAIResponse) error {
 	data, err := json.Marshal(chunk)
 	if err != nil {
-		return
+		return err
 	}
-	_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
-	_ = w.Flush()
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+		return err
+	}
+	return w.Flush()
 }
 
 // writeStreamDone writes the final [DONE] marker for OpenAI streaming.
-func writeStreamDone(w *bufio.Writer) {
-	_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
-	_ = w.Flush()
+func writeStreamDone(w *bufio.Writer) error {
+	if _, err := fmt.Fprintf(w, "data: [DONE]\n\n"); err != nil {
+		return err
+	}
+	return w.Flush()
 }

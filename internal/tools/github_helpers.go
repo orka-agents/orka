@@ -226,8 +226,18 @@ func resolveGitSecretToken(ctx context.Context, k8sClient client.Client, gitSecr
 	if gitSecretRef == nil {
 		return "", nil
 	}
+	namespace := githubTaskNamespace(ctx)
+	if tc := GetToolContext(ctx); tc != nil {
+		if tc.AuthorizeSecretRead == nil {
+			if tc.RequireSecretReadAuthorization {
+				return "", fmt.Errorf("git secret %s/%s requires a secret credential authorizer", namespace, gitSecretRef.Name)
+			}
+		} else if authzErr := tc.AuthorizeSecretRead(ctx, namespace, gitSecretRef.Name); authzErr != nil {
+			return "", fmt.Errorf("not authorized to read git secret %s/%s: %s", namespace, gitSecretRef.Name, authzErr.Message)
+		}
+	}
 	var secret corev1.Secret
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: gitSecretRef.Name, Namespace: githubTaskNamespace(ctx)}, &secret); err != nil {
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: gitSecretRef.Name, Namespace: namespace}, &secret); err != nil {
 		return "", fmt.Errorf("failed to get git secret %s: %w", gitSecretRef.Name, err)
 	}
 

@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { Activity, GitPullRequest, Play, Wrench } from 'lucide-react'
+import { Activity, GitPullRequest, Play, Plus, Wrench } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -22,9 +22,17 @@ export function RepositoryMonitorList() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Repository Monitors</h1>
-        <p className="text-muted-foreground">Maintainer automation state for pull requests, repairs, and audit trails</p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Repository Monitors</h1>
+          <p className="text-muted-foreground">Maintainer automation state for pull requests, repairs, and audit trails</p>
+        </div>
+        <Link to="/monitors/create/new">
+          <Button>
+            <Plus className="mr-2 h-4 w-4" />
+            New Monitor
+          </Button>
+        </Link>
       </div>
 
       {isLoading ? (
@@ -41,8 +49,17 @@ export function RepositoryMonitorList() {
         </div>
       ) : (data?.items ?? []).length === 0 ? (
         <Card>
-          <CardContent className="py-12 text-center text-muted-foreground">
-            No repository monitors configured.
+          <CardContent className="space-y-4 py-12 text-center">
+            <div className="space-y-1">
+              <p className="font-medium">No repository monitors configured.</p>
+              <p className="text-sm text-muted-foreground">Create a monitor to review GitHub pull requests from the dashboard.</p>
+            </div>
+            <Link to="/monitors/create/new">
+              <Button>
+                <Plus className="mr-2 h-4 w-4" />
+                Create repository monitor
+              </Button>
+            </Link>
           </CardContent>
         </Card>
       ) : (

@@ -123,6 +123,24 @@ make docker-build docker-push IMG=<registry>/orka:tag
 make deploy IMG=<registry>/orka:tag
 ```
 
+### Demo Cluster + Recordings
+
+For interactive presentations and asciinema recordings of `hack/demos/`,
+a one-shot bootstrap is available:
+
+```bash
+make demo-cluster-up      # kind cluster + Orka + kontxt + agent-sandbox
+make demo-images          # build + load the kontxt-caller image (Demo 50)
+hack/demos/00-preflight.sh
+# ... run ./hack/demos/10-chat-pr.sh, 20-..., etc.
+make demo-cluster-down
+```
+
+The scripts pace themselves via `DEMO_RECORD_PROFILE=presenter|docs|social|hero`
+and pick a short or long request body via
+`DEMO_REQUEST_PRESET=quiet-flag|readme-fix|vekil-metrics`. See
+`hack/demos/RECORDING.md` for the full design.
+
 ## Generate Installer YAML
 
 ```bash

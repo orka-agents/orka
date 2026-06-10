@@ -1,0 +1,5 @@
+Scout the repository.
+List the top-level layout, identify the HTTP server entry point, and write
+a short plan (5–8 bullets) for adding a Prometheus-style /metrics endpoint.
+Do NOT modify, commit, or push any files. Leave your notes in the task
+result so the next turn can pick them up.
