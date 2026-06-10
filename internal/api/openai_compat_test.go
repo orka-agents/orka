@@ -856,7 +856,7 @@ func TestHandleStreamingToolLoop_StreamsProgressAndHidesServerSideToolCalls(t *t
 	mock := &oaiMockProvider{
 		responses: []*llm.CompletionResponse{
 			{
-				Content:    "Reading file before final answer.\n",
+				Content:    "Reading file before final answer.\n" + goalStateSentinel + "\n",
 				StopReason: oaiStopReasonToolUse,
 				ToolCalls: []llm.ToolCall{{
 					ID:        "call_file_read",
