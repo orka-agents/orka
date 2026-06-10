@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -558,5 +560,56 @@ func TestNewTaskCreateCmd_ContainerType(t *testing.T) {
 
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
+	}
+}
+
+func TestTaskCreateManifestInjectsNamespace(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	manifest := filepath.Join(tmp, "task.yaml")
+	manifestData := []byte("metadata:\n  name: manifest-task\nspec:\n  type: container\n  image: alpine\n")
+	if err := os.WriteFile(manifest, manifestData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var captured map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != tasksAPIPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"metadata": map[string]any{"name": "manifest-task", "namespace": "team-a"},
+		})
+	}))
+	defer srv.Close()
+
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "create", "--server", srv.URL, "--namespace", "team-a", "-f", manifest})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	metadata, ok := captured["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata missing in request: %#v", captured)
+	}
+	if got := metadata["namespace"]; got != "team-a" {
+		t.Fatalf("metadata.namespace = %#v, want team-a", got)
+	}
+}
+
+func TestTaskCreateRequiresPromptForDefaultAI(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "create", "--server", "http://127.0.0.1:1"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "prompt is required") {
+		t.Fatalf("Execute() error = %v, want prompt required", err)
 	}
 }

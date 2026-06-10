@@ -10,12 +10,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
-	"sigs.k8s.io/yaml"
 
 	"github.com/sozercan/orka/internal/cli/client"
 )
@@ -27,14 +28,18 @@ func newSkillCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newSkillListCmd())
 	cmd.AddCommand(newSkillGetCmd())
-	cmd.AddCommand(newSkillDeleteCmd())
+	cmd.AddCommand(newSkillContentCmd())
 	cmd.AddCommand(newSkillCreateCmd())
 	cmd.AddCommand(newSkillImportCmd())
+	cmd.AddCommand(newSkillUpdateCmd())
+	cmd.AddCommand(newSkillDeleteCmd())
+	cmd.AddCommand(newSkillValidateCmd())
+	cmd.AddCommand(newSkillInitCmd())
 	return cmd
 }
 
 func newSkillListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List skills",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -44,6 +49,14 @@ func newSkillListCmd() *cobra.Command {
 			})
 			if err != nil {
 				return err
+			}
+
+			format, err := outputFormat(cmd)
+			if err != nil {
+				return err
+			}
+			if format != outputTable {
+				return printStructured(cmd, skills)
 			}
 
 			if len(skills) == 0 {
@@ -76,10 +89,12 @@ func newSkillListCmd() *cobra.Command {
 			return nil
 		},
 	}
+	addOutputFlag(cmd, outputTable)
+	return cmd
 }
 
 func newSkillGetCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "get <name>",
 		Short: "Get skill details",
 		Args:  cobra.ExactArgs(1),
@@ -92,11 +107,28 @@ func newSkillGetCmd() *cobra.Command {
 				return err
 			}
 
-			out, err := json.MarshalIndent(skill, "", "  ")
+			return printStructured(cmd, skill)
+		},
+	}
+	addOutputFlag(cmd, outputJSON)
+	return cmd
+}
+
+func newSkillContentCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "content <name>",
+		Short: "Print raw skill content",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := newClientFromCmd(cmd)
+			body, _, err := c.GetRaw(context.Background(), "/api/v1/skills/"+url.PathEscape(args[0])+"/content", nil)
 			if err != nil {
-				return fmt.Errorf("formatting output: %w", err)
+				return err
 			}
-			fmt.Println(string(out))
+			_, _ = cmd.OutOrStdout().Write(body)
+			if len(body) == 0 || body[len(body)-1] != '\n' {
+				fmt.Fprintln(cmd.OutOrStdout()) //nolint:errcheck
+			}
 			return nil
 		},
 	}
@@ -130,17 +162,11 @@ func newSkillCreateCmd() *cobra.Command {
 				return fmt.Errorf("--file (-f) is required")
 			}
 
-			data, err := os.ReadFile(file)
-			if err != nil {
-				return fmt.Errorf("reading file: %w", err)
-			}
-
-			jsonBody, err := yaml.YAMLToJSON(data)
-			if err != nil {
-				return fmt.Errorf("parsing manifest: %w", err)
-			}
-
 			c := newClientFromCmd(cmd)
+			jsonBody, err := manifestWithNamespaceJSON(cmd, file, c.Namespace)
+			if err != nil {
+				return err
+			}
 			skill, err := c.CreateSkill(context.Background(), jsonBody)
 			if err != nil {
 				return err
@@ -181,8 +207,10 @@ func newSkillImportCmd() *cobra.Command {
 				name = strings.ReplaceAll(name, "_", "-")
 			}
 
+			c := newClientFromCmd(cmd)
 			body := map[string]any{
-				"name": name,
+				"name":      name,
+				"namespace": c.Namespace,
 				"spec": map[string]any{
 					"description": fmt.Sprintf("Imported from %s", filePath),
 					"content": map[string]any{
@@ -196,7 +224,6 @@ func newSkillImportCmd() *cobra.Command {
 				return fmt.Errorf("marshaling request: %w", err)
 			}
 
-			c := newClientFromCmd(cmd)
 			skill, err := c.CreateSkill(context.Background(), bodyJSON)
 			if err != nil {
 				return err
@@ -213,5 +240,136 @@ func newSkillImportCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "Override skill name (default: derived from filename)")
+	return cmd
+}
+
+func newSkillUpdateCmd() *cobra.Command {
+	var file string
+	cmd := &cobra.Command{
+		Use:   "update <name> -f <file>",
+		Short: "Update a skill from a YAML/JSON manifest",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if file == "" {
+				return fmt.Errorf("--file (-f) is required")
+			}
+			manifest, body, err := manifestMap(file)
+			if err != nil {
+				return err
+			}
+			c := newClientFromCmd(cmd)
+			query, err := namespaceQueryForManifest(cmd, c.Namespace, manifest)
+			if err != nil {
+				return err
+			}
+			result, err := c.DoJSON(context.Background(), http.MethodPut, "/api/v1/skills/"+url.PathEscape(args[0]), query, body)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Skill updated: %s\n", metadataName(result)) //nolint:errcheck
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&file, "file", "f", "", "Path to skill YAML/JSON manifest")
+	return cmd
+}
+
+func newSkillValidateCmd() *cobra.Command {
+	var file string
+	cmd := &cobra.Command{
+		Use:   "validate [-f manifest.yaml] [SKILL.md]",
+		Short: "Validate a local skill manifest or SKILL.md file",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if file != "" {
+				m, _, err := manifestMap(file)
+				if err != nil {
+					return err
+				}
+				if metadataName(m) == "" {
+					return fmt.Errorf("skill manifest must include metadata.name or name")
+				}
+				spec, _ := m["spec"].(map[string]any)
+				if spec == nil {
+					return fmt.Errorf("skill manifest must include spec")
+				}
+				if firstString(spec, "description") == "" {
+					return fmt.Errorf("skill manifest spec.description is required")
+				}
+				content, _ := spec["content"].(map[string]any)
+				if content == nil || strings.TrimSpace(anyString(content["inline"])) == "" {
+					return fmt.Errorf("skill manifest spec.content.inline is required")
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), "Skill manifest is valid.") //nolint:errcheck
+				return nil
+			}
+			path := "SKILL.md"
+			if len(args) == 1 {
+				path = args[0]
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("reading skill file: %w", err)
+			}
+			if strings.TrimSpace(string(data)) == "" {
+				return fmt.Errorf("skill file is empty")
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "Skill file is valid.") //nolint:errcheck
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&file, "file", "f", "", "Path to skill YAML/JSON manifest")
+	return cmd
+}
+
+func newSkillInitCmd() *cobra.Command {
+	var name, description string
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "init [dir]",
+		Short: "Initialize a local SKILL.md template",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dir := "."
+			if len(args) == 1 {
+				dir = args[0]
+			}
+			if name == "" {
+				name = "new-skill"
+			}
+			if description == "" {
+				description = "Describe when and how to use this skill."
+			}
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return fmt.Errorf("creating directory: %w", err)
+			}
+			path := dir + string(os.PathSeparator) + "SKILL.md"
+			content := fmt.Sprintf(
+				"# %s\n\n## Description\n\n%s\n\n## Instructions\n\n- Add step-by-step guidance here.\n",
+				name,
+				description,
+			)
+			flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+			if force {
+				flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+			}
+			f, err := os.OpenFile(path, flags, 0o644)
+			if err != nil {
+				if os.IsExist(err) {
+					return fmt.Errorf("%s already exists (use --force to overwrite)", path)
+				}
+				return fmt.Errorf("opening %s: %w", path, err)
+			}
+			defer f.Close() //nolint:errcheck
+			if _, err := f.WriteString(content); err != nil {
+				return fmt.Errorf("writing %s: %w", path, err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Skill template created: %s\n", path) //nolint:errcheck
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&name, "name", "", "Skill name for the template")
+	cmd.Flags().StringVar(&description, "description", "", "Skill description for the template")
+	cmd.Flags().BoolVar(&force, "force", false, "Overwrite an existing SKILL.md")
 	return cmd
 }

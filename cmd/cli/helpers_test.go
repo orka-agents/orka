@@ -575,3 +575,51 @@ func TestDiscoverOrkaService_NotFound(t *testing.T) {
 		t.Errorf("discoverOrkaService() = %q, want empty", got)
 	}
 }
+
+func TestManifestMapYAMLAndJSON(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "skill.yaml")
+	yamlData := []byte("metadata:\n  name: test-skill\nspec:\n  description: hello\n")
+	if err := os.WriteFile(yamlPath, yamlData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, body, err := manifestMap(yamlPath)
+	if err != nil {
+		t.Fatalf("manifestMap yaml error: %v", err)
+	}
+	if metadataName(m) != "test-skill" {
+		t.Fatalf("metadataName = %q, want test-skill", metadataName(m))
+	}
+	if !json.Valid(body) {
+		t.Fatalf("manifest body is not JSON: %s", string(body))
+	}
+
+	jsonPath := filepath.Join(dir, "provider.json")
+	if err := os.WriteFile(jsonPath, []byte(`{"name":"p","spec":{"type":"openai"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, _, err = manifestMap(jsonPath)
+	if err != nil {
+		t.Fatalf("manifestMap json error: %v", err)
+	}
+	if metadataName(m) != "p" {
+		t.Fatalf("metadataName = %q, want p", metadataName(m))
+	}
+}
+
+func TestRootCmdIncludesCoverageCommands(t *testing.T) {
+	cmd := newRootCmd()
+	want := []string{
+		"provider", "tool", "session", "secret", "security", "monitor",
+		"memory", "auth", "models", "workspace", "substrate",
+	}
+	seen := map[string]bool{}
+	for _, sub := range cmd.Commands() {
+		seen[sub.Name()] = true
+	}
+	for _, name := range want {
+		if !seen[name] {
+			t.Fatalf("root command missing %s", name)
+		}
+	}
+}

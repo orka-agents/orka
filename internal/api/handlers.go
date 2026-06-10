@@ -134,8 +134,9 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 
 // MetadataRequest holds Kubernetes-style metadata fields
 type MetadataRequest struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
+	Name        string            `json:"name"`
+	Namespace   string            `json:"namespace"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // resolveNamespace resolves the effective namespace for a request and enforces isolation if enabled.
@@ -195,6 +196,8 @@ type UpdateAgentRequest struct {
 type CreateTaskRequest struct {
 	Name              string                           `json:"name"`
 	Namespace         string                           `json:"namespace"`
+	Metadata          MetadataRequest                  `json:"metadata"`
+	Spec              *corev1alpha1.TaskSpec           `json:"spec,omitempty"`
 	Annotations       map[string]string                `json:"annotations,omitempty"`
 	Type              corev1alpha1.TaskType            `json:"type"`
 	Image             string                           `json:"image,omitempty"`
@@ -218,6 +221,72 @@ type CreateTaskRequest struct {
 	TimeZone          *string                          `json:"timeZone,omitempty"`
 	ConcurrencyPolicy string                           `json:"concurrencyPolicy,omitempty"`
 	Suspend           *bool                            `json:"suspend,omitempty"`
+}
+
+func applyFlatTaskRequest(spec *corev1alpha1.TaskSpec, req CreateTaskRequest) {
+	if req.Type != "" {
+		spec.Type = req.Type
+	}
+	if req.Image != "" {
+		spec.Image = req.Image
+	}
+	if req.Command != nil {
+		spec.Command = req.Command
+	}
+	if req.Args != nil {
+		spec.Args = req.Args
+	}
+	if req.Env != nil {
+		spec.Env = req.Env
+	}
+	if req.Priority != nil {
+		spec.Priority = req.Priority
+	}
+	if req.RetryPolicy != nil {
+		spec.RetryPolicy = req.RetryPolicy
+	}
+	if req.WebhookURL != "" {
+		spec.WebhookURL = req.WebhookURL
+	}
+	if req.SecretRef != nil {
+		spec.SecretRef = req.SecretRef
+	}
+	if req.SessionRef != nil {
+		spec.SessionRef = req.SessionRef
+	}
+	if req.AI != nil {
+		spec.AI = req.AI
+	}
+	if req.AgentRef != nil {
+		spec.AgentRef = req.AgentRef
+	}
+	if req.Prompt != "" {
+		spec.Prompt = req.Prompt
+	}
+	if req.AgentRuntime != nil {
+		spec.AgentRuntime = req.AgentRuntime
+	}
+	if req.Execution != nil {
+		spec.Execution = req.Execution.DeepCopy()
+	}
+	if req.Workspace != nil {
+		spec.Workspace = req.Workspace
+	}
+	if req.PriorTaskRef != nil {
+		spec.PriorTaskRef = req.PriorTaskRef
+	}
+	if req.Schedule != "" {
+		spec.Schedule = req.Schedule
+	}
+	if req.TimeZone != nil {
+		spec.TimeZone = req.TimeZone
+	}
+	if req.ConcurrencyPolicy != "" {
+		spec.ConcurrencyPolicy = corev1alpha1.ConcurrencyPolicy(req.ConcurrencyPolicy)
+	}
+	if req.Suspend != nil {
+		spec.Suspend = req.Suspend
+	}
 }
 
 // ListResponse is a generic list response with pagination
@@ -285,21 +354,28 @@ func rejectRequestedByTampering(body []byte) error {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
 
-	if _, ok := topLevel["requestedBy"]; ok {
-		return fiber.NewError(fiber.StatusBadRequest, "requestedBy cannot be set by clients")
-	}
-	if _, ok := topLevel["transaction"]; ok {
-		return fiber.NewError(fiber.StatusBadRequest, "transaction cannot be set by clients")
+	for key := range topLevel {
+		switch strings.ToLower(key) {
+		case "requestedby":
+			return fiber.NewError(fiber.StatusBadRequest, "requestedBy cannot be set by clients")
+		case "transaction":
+			return fiber.NewError(fiber.StatusBadRequest, "transaction cannot be set by clients")
+		}
 	}
 
-	if specRaw, ok := topLevel["spec"]; ok {
+	for topKey, specRaw := range topLevel {
+		if strings.ToLower(topKey) != "spec" {
+			continue
+		}
 		var spec map[string]json.RawMessage
 		if err := json.Unmarshal(specRaw, &spec); err == nil {
-			if _, ok := spec["requestedBy"]; ok {
-				return fiber.NewError(fiber.StatusBadRequest, "spec.requestedBy cannot be set by clients")
-			}
-			if _, ok := spec["transaction"]; ok {
-				return fiber.NewError(fiber.StatusBadRequest, "spec.transaction cannot be set by clients")
+			for key := range spec {
+				switch strings.ToLower(key) {
+				case "requestedby":
+					return fiber.NewError(fiber.StatusBadRequest, "spec.requestedBy cannot be set by clients")
+				case "transaction":
+					return fiber.NewError(fiber.StatusBadRequest, "spec.transaction cannot be set by clients")
+				}
 			}
 		}
 	}
@@ -327,54 +403,56 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
 
-	// Validate required fields
-	if req.Name == "" {
+	name := req.Name
+	if name == "" {
+		name = req.Metadata.Name
+	}
+	if name == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "name is required")
 	}
-	if req.Type == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "type is required")
+
+	annotations := req.Annotations
+	if annotations == nil {
+		annotations = req.Metadata.Annotations
 	}
-	if err := rejectReservedTaskAnnotations(req.Annotations); err != nil {
+	if err := rejectReservedTaskAnnotations(annotations); err != nil {
 		return err
 	}
 
-	namespace, err := h.resolveNamespace(c, req.Namespace)
+	explicitNamespace := req.Namespace
+	if explicitNamespace == "" {
+		explicitNamespace = req.Metadata.Namespace
+	}
+	namespace, err := h.resolveNamespace(c, explicitNamespace)
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenTaskCreate(c, req, namespace); err != nil {
-		return err
-	}
 
+	spec := corev1alpha1.TaskSpec{}
+	if req.Spec != nil {
+		spec = *req.Spec.DeepCopy()
+	}
+	applyFlatTaskRequest(&spec, req)
+	// Server-owned audit fields are always stamped after authorization.
+	spec.RequestedBy = nil
+	spec.Transaction = nil
+	if spec.Type == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "type is required")
+	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        req.Name,
+			Name:        name,
 			Namespace:   namespace,
-			Annotations: req.Annotations,
+			Annotations: annotations,
 		},
-		Spec: corev1alpha1.TaskSpec{
-			Type:         req.Type,
-			Image:        req.Image,
-			Command:      req.Command,
-			Args:         req.Args,
-			Env:          req.Env,
-			Priority:     req.Priority,
-			RetryPolicy:  req.RetryPolicy,
-			WebhookURL:   req.WebhookURL,
-			SecretRef:    req.SecretRef,
-			SessionRef:   req.SessionRef,
-			AI:           req.AI,
-			AgentRef:     req.AgentRef,
-			Prompt:       req.Prompt,
-			AgentRuntime: req.AgentRuntime,
-			Workspace:    req.Workspace,
-			PriorTaskRef: req.PriorTaskRef,
-			Schedule:     req.Schedule,
-			Suspend:      req.Suspend,
-		},
+		Spec: spec,
 	}
-	if req.Execution != nil {
-		task.Spec.Execution = req.Execution.DeepCopy()
+	authReq := createTaskRequestFromTask(task)
+	if req.Timeout != "" {
+		authReq.Timeout = req.Timeout
+	}
+	if err := h.authorizeContextTokenTaskCreate(c, authReq, namespace); err != nil {
+		return err
 	}
 
 	stampTaskRequesterFromUserInfo(task, GetUserInfo(c))

@@ -1096,3 +1096,35 @@ func TestGetAgent_InvalidJSON(t *testing.T) {
 		t.Errorf("expected decode error, got %v", err)
 	}
 }
+
+func TestDoJSONAndTxnToken(t *testing.T) {
+	var gotTxn string
+	var gotNamespace string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTxn = r.Header.Get("Txn-Token")
+		gotNamespace = r.URL.Query().Get("namespace")
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	c := NewWithNamespace(srv.URL, "bearer", "team-a")
+	c.TxnToken = "txn-secret"
+	result, err := c.DoJSON(context.Background(), http.MethodPost, "/api/v1/example", nil, []byte(`{"hello":"world"}`))
+	if err != nil {
+		t.Fatalf("DoJSON error: %v", err)
+	}
+	m, ok := result.(map[string]any)
+	if !ok || m["ok"] != true {
+		t.Fatalf("result = %#v", result)
+	}
+	if gotTxn != "txn-secret" {
+		t.Fatalf("Txn-Token = %q, want txn-secret", gotTxn)
+	}
+	if gotNamespace != "team-a" {
+		t.Fatalf("namespace query = %q, want team-a", gotNamespace)
+	}
+}
