@@ -522,15 +522,17 @@ func (h *OpenAICompatHandler) handleStreamingToolLoop(
 			}
 		}
 		observer := &toolLoopObserver{
-			OnAssistantContent: writeContent,
+			OnAssistantContent: func(content string) {
+				writeContent(stripGoalStateSentinel(content))
+			},
 			OnFinalContent: func(content string) {
 				writeContent(stripGoalStateSentinel(content))
 			},
 			OnToolResult: func(tc llm.ToolCall, result string) {
-				writeContent(formatOpenAIToolProgress(tc, result))
+				writeContent(formatToolProgress(tc, result))
 			},
 			OnPrematureEndRetry: func() {
-				writeContent("[⚠️  premature end — re-prompting coordinator]\n\n")
+				writeContent("[Continuing workflow...]\n\n")
 			},
 			OnAutoPoll: func() {
 				writeContent("[⏳ Auto-polling tasks...]\n")
@@ -606,24 +608,6 @@ func stripGoalStateSentinelFromResponse(resp *llm.CompletionResponse) *llm.Compl
 	respCopy := *resp
 	respCopy.Content = strippedContent
 	return &respCopy
-}
-
-func formatOpenAIToolProgress(tc llm.ToolCall, result string) string {
-	status := "completed"
-	var parsed struct {
-		Success *bool `json:"success"`
-		Data    struct {
-			Phase string `json:"phase"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(result), &parsed); err == nil {
-		if parsed.Success != nil && !*parsed.Success {
-			status = "failed"
-		} else if parsed.Data.Phase != "" {
-			status = "phase=" + parsed.Data.Phase
-		}
-	}
-	return fmt.Sprintf("[Tool %s %s]\n\n", tc.Name, status)
 }
 
 // formatOAIResponse formats a CompletionResponse into OpenAI API format.
