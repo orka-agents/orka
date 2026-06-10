@@ -30,6 +30,7 @@ import { Route as MonitorsMonitorIdRouteImport } from './routes/monitors/$monito
 import { Route as AgentsNewRouteImport } from './routes/agents/new'
 import { Route as AgentsAgentIdRouteImport } from './routes/agents/$agentId'
 import { Route as SecurityFindingsFindingIdRouteImport } from './routes/security/findings/$findingId'
+import { Route as MonitorsCreateNewRouteImport } from './routes/monitors/create/new'
 
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
@@ -137,6 +138,11 @@ const SecurityFindingsFindingIdRoute =
     path: '/security/findings/$findingId',
     getParentRoute: () => rootRouteImport,
   } as any)
+const MonitorsCreateNewRoute = MonitorsCreateNewRouteImport.update({
+  id: '/monitors/create/new',
+  path: '/monitors/create/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -159,6 +165,7 @@ export interface FileRoutesByFullPath {
   '/sessions/': typeof SessionsIndexRoute
   '/tasks/': typeof TasksIndexRoute
   '/tools/': typeof ToolsIndexRoute
+  '/monitors/create/new': typeof MonitorsCreateNewRoute
   '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
 }
 export interface FileRoutesByTo {
@@ -182,6 +189,7 @@ export interface FileRoutesByTo {
   '/sessions': typeof SessionsIndexRoute
   '/tasks': typeof TasksIndexRoute
   '/tools': typeof ToolsIndexRoute
+  '/monitors/create/new': typeof MonitorsCreateNewRoute
   '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
 }
 export interface FileRoutesById {
@@ -206,6 +214,7 @@ export interface FileRoutesById {
   '/sessions/': typeof SessionsIndexRoute
   '/tasks/': typeof TasksIndexRoute
   '/tools/': typeof ToolsIndexRoute
+  '/monitors/create/new': typeof MonitorsCreateNewRoute
   '/security/findings/$findingId': typeof SecurityFindingsFindingIdRoute
 }
 export interface FileRouteTypes {
@@ -231,6 +240,7 @@ export interface FileRouteTypes {
     | '/sessions/'
     | '/tasks/'
     | '/tools/'
+    | '/monitors/create/new'
     | '/security/findings/$findingId'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -254,6 +264,7 @@ export interface FileRouteTypes {
     | '/sessions'
     | '/tasks'
     | '/tools'
+    | '/monitors/create/new'
     | '/security/findings/$findingId'
   id:
     | '__root__'
@@ -277,6 +288,7 @@ export interface FileRouteTypes {
     | '/sessions/'
     | '/tasks/'
     | '/tools/'
+    | '/monitors/create/new'
     | '/security/findings/$findingId'
   fileRoutesById: FileRoutesById
 }
@@ -301,6 +313,7 @@ export interface RootRouteChildren {
   SessionsIndexRoute: typeof SessionsIndexRoute
   TasksIndexRoute: typeof TasksIndexRoute
   ToolsIndexRoute: typeof ToolsIndexRoute
+  MonitorsCreateNewRoute: typeof MonitorsCreateNewRoute
   SecurityFindingsFindingIdRoute: typeof SecurityFindingsFindingIdRoute
 }
 
@@ -453,6 +466,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SecurityFindingsFindingIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/monitors/create/new': {
+      id: '/monitors/create/new'
+      path: '/monitors/create/new'
+      fullPath: '/monitors/create/new'
+      preLoaderRoute: typeof MonitorsCreateNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -477,6 +497,7 @@ const rootRouteChildren: RootRouteChildren = {
   SessionsIndexRoute: SessionsIndexRoute,
   TasksIndexRoute: TasksIndexRoute,
   ToolsIndexRoute: ToolsIndexRoute,
+  MonitorsCreateNewRoute: MonitorsCreateNewRoute,
   SecurityFindingsFindingIdRoute: SecurityFindingsFindingIdRoute,
 }
 export const routeTree = rootRouteImport
