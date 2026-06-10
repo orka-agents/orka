@@ -115,6 +115,10 @@ func PrepareWorkspace(workDir string) error {
 
 	// Dry-run check.
 	if out, err := execGit(workDir, "apply", "--check", diffPath); err != nil {
+		if _, reverseErr := execGit(workDir, "apply", "--reverse", "--check", diffPath); reverseErr == nil {
+			fmt.Fprintf(os.Stderr, "prior task diff already present in workspace; skipping reapply\n")
+			return nil
+		}
 		return fmt.Errorf("git apply --check failed: %s: %w", out, err)
 	}
 
