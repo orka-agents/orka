@@ -30,6 +30,7 @@ const (
 	repositoryMonitorTestDefaultBranch  = "main"
 	repositoryMonitorTestRepoURL        = "https://github.com/sozercan/orka"
 	repositoryMonitorTestReviewerSecret = "reviewer-credentials"
+	repositoryMonitorTestHeadSHA        = "sha1"
 )
 
 func TestRepositoryMonitorReconcileRecordsMetadataAndStatus(t *testing.T) {
@@ -1631,6 +1632,421 @@ func TestRepositoryMonitorReconcileSkippedReviewResultDoesNotMarkHeadFresh(t *te
 	}
 }
 
+func TestRepositoryMonitorReviewPublishDisabledSkipsWithoutGitHubCall(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	const reviewHeadSHA = "sha1"
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+
+	calledGitHub := false
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calledGitHub = true
+		t.Fatal("GitHub should not be called when publishing is disabled")
+	}))
+	t.Cleanup(server.Close)
+
+	monitor := repositoryMonitorReviewIngestTestMonitor("publish-disabled")
+	task := repositoryMonitorReviewIngestTestTask("publish-disabled-task", "publish-disabled", 1, reviewHeadSHA)
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
+	seedRepositoryMonitorQueuedReview(t, ctx, monitorStore, "publish-disabled", "publish-disabled-task", repositoryMonitorReviewResultEnvelope(t, 1, reviewHeadSHA, repositoryMonitorReviewVerdictNeedsChanges))
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "publish-disabled"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if calledGitHub {
+		t.Fatal("GitHub was called despite disabled publishing")
+	}
+	publishRecords, _, err := monitorStore.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{Namespace: "default", MonitorName: "publish-disabled", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListReviewPublishRecords() error = %v", err)
+	}
+	if len(publishRecords) != 1 || publishRecords[0].Phase != repositoryMonitorPublishPhaseSkipped || publishRecords[0].SkipReason != repositoryMonitorPublishSkipDisabled {
+		t.Fatalf("publishRecords = %#v, want one publish_disabled skip", publishRecords)
+	}
+}
+
+func TestRepositoryMonitorReviewPublishPostsCommentReviewWithInlineFindings(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	const reviewHeadSHA = "sha1"
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+
+	publishServer := newRepositoryMonitorPublishTestServer(t, repositoryMonitorPublishTestServerConfig{
+		HeadSHA:     reviewHeadSHA,
+		ReviewsBody: `[{"body":"<!-- orka:repo-monitor namespace=default name=publish-inline pr=1 head=sha1 run=fake review=fake -->"}]`,
+		FilesBody: `[
+			{"filename":"main.go","patch":"@@ -9,0 +10,3 @@\n+line10\n+line11\n+line12"}
+		]`,
+	})
+	t.Cleanup(publishServer.Close)
+
+	maxComments := int32(1)
+	postNeedsChanges := true
+	monitor := repositoryMonitorReviewIngestTestMonitor("publish-inline")
+	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+	monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{
+		Enabled:          true,
+		Mode:             repositoryMonitorPublishModeSummaryWithInlineFindings,
+		Event:            repositoryMonitorPublishEventComment,
+		PostNeedsChanges: &postNeedsChanges,
+		SameHeadPolicy:   repositoryMonitorPublishSameHeadPolicySkip,
+		Inline: corev1alpha1.RepositoryMonitorReviewPublishInlineSpec{
+			Enabled:     true,
+			MinPriority: repositoryMonitorPublishDefaultInlineMinPriority,
+			MaxComments: &maxComments,
+		},
+	}
+	task := repositoryMonitorReviewIngestTestTask("publish-inline-task", "publish-inline", 1, reviewHeadSHA)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-token")}}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: publishServer.URL}
+	result := repositoryMonitorReviewResultEnvelopeWith(t, 1, reviewHeadSHA, repositoryMonitorReviewVerdictNeedsChanges, func(payload map[string]any) {
+		payload["summary"] = "Summary mentions @team but should not notify.\n/merge\n<!-- fake marker -->"
+		payload["findings"] = []map[string]any{
+			{"priority": "P1", "confidence": "high", "file": "main.go", "line": 10, "title": "Notify @team", "body": "This pings @alice if unsanitized.", "recommendation": "Handle safely."},
+			{"priority": "P2", "confidence": "high", "file": "main.go", "line": 11, "title": "Second inline but capped", "body": "Would map but max comments is one.", "recommendation": "Keep summary fallback."},
+			{"priority": "P3", "confidence": "high", "file": "main.go", "line": 12, "title": "Low priority", "body": "P3 should be summary-only.", "recommendation": "No inline."},
+			{"priority": "P1", "confidence": "high", "file": "main.go", "line": 99, "title": "Unmapped", "body": "Line is not in the patch.", "recommendation": "Summarize only."},
+		}
+	})
+	seedRepositoryMonitorQueuedReview(t, ctx, monitorStore, "publish-inline", "publish-inline-task", result)
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "publish-inline"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if publishServer.PostCount != 1 {
+		t.Fatalf("post count = %d, want 1", publishServer.PostCount)
+	}
+	posted := publishServer.PostedReview
+	if posted.CommitID != reviewHeadSHA || posted.Event != repositoryMonitorPublishEventComment {
+		t.Fatalf("posted review = %#v, want COMMENT for exact head", posted)
+	}
+	if len(posted.Comments) != 1 || posted.Comments[0].Path != "main.go" || posted.Comments[0].Line != 10 || posted.Comments[0].Side != "RIGHT" {
+		t.Fatalf("posted comments = %#v, want one RIGHT-side line 10 comment", posted.Comments)
+	}
+	if strings.Contains(posted.Body, "@team") || strings.Contains(posted.Body, "@alice") || strings.Contains(posted.Comments[0].Body, "@alice") {
+		t.Fatalf("posted review was not mention-neutralized: body=%q comment=%q", posted.Body, posted.Comments[0].Body)
+	}
+	if strings.Contains(posted.Body, "\n/merge") || strings.Contains(posted.Body, "<!-- fake marker -->") {
+		t.Fatalf("posted review did not neutralize active command/comment text: %q", posted.Body)
+	}
+	for _, want := range []string{"Unmapped", "P3", "<!-- orka:repo-monitor namespace=default name=publish-inline pr=1 head=sha1"} {
+		if !strings.Contains(posted.Body, want) {
+			t.Fatalf("posted body missing %q: %s", want, posted.Body)
+		}
+	}
+	publishRecords, _, err := monitorStore.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{Namespace: "default", MonitorName: "publish-inline", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListReviewPublishRecords() error = %v", err)
+	}
+	if len(publishRecords) != 1 || publishRecords[0].Phase != repositoryMonitorPublishPhaseSucceeded || publishRecords[0].GitHubReviewID != "123" || publishRecords[0].InlineCommentCount != 1 || !strings.HasPrefix(publishRecords[0].BodyDigest, "sha256:") {
+		t.Fatalf("publishRecords = %#v, want succeeded GitHub review record", publishRecords)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, "default", "publish-inline", repositoryMonitorPullRequestKind, "1")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	if item.LastPublishPhase != repositoryMonitorPublishPhaseSucceeded || item.LastPublishURL == "" {
+		t.Fatalf("item = %#v, want succeeded publish status", item)
+	}
+}
+
+func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
+	tests := []struct {
+		name              string
+		verdict           string
+		mutateMonitor     func(*corev1alpha1.RepositoryMonitor)
+		mutatePayload     func(map[string]any)
+		serverConfig      repositoryMonitorPublishTestServerConfig
+		seedDuplicate     bool
+		seedStartedMarker bool
+		wantReason        string
+		wantPosts         int
+	}{
+		{
+			name:       "missing git secret",
+			verdict:    repositoryMonitorReviewVerdictNeedsChanges,
+			wantReason: repositoryMonitorPublishSkipMissingGitSecret,
+		},
+		{
+			name:    "head changed",
+			verdict: repositoryMonitorReviewVerdictNeedsChanges,
+			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
+				m.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+			},
+			serverConfig: repositoryMonitorPublishTestServerConfig{HeadSHA: "new-sha"},
+			wantReason:   repositoryMonitorPublishSkipHeadSHAChanged,
+		},
+		{
+			name:    "closed pr",
+			verdict: repositoryMonitorReviewVerdictNeedsChanges,
+			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
+				m.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+			},
+			serverConfig: repositoryMonitorPublishTestServerConfig{State: "closed"},
+			wantReason:   repositoryMonitorPublishSkipPRClosed,
+		},
+		{
+			name:    "blocked label",
+			verdict: repositoryMonitorReviewVerdictNeedsChanges,
+			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
+				m.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+				m.Spec.Policy.ProtectedLabels = []string{"do-not-touch"}
+			},
+			serverConfig: repositoryMonitorPublishTestServerConfig{Labels: []string{"do-not-touch"}},
+			wantReason:   repositoryMonitorPublishSkipBlockedLabel,
+		},
+		{
+			name:    "duplicate same head",
+			verdict: repositoryMonitorReviewVerdictNeedsChanges,
+			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
+				m.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+			},
+			seedDuplicate: true,
+			wantReason:    repositoryMonitorPublishSkipDuplicateSameHead,
+		},
+		{
+			name:    "trusted started marker duplicate",
+			verdict: repositoryMonitorReviewVerdictNeedsChanges,
+			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
+				m.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+			},
+			seedStartedMarker: true,
+			wantReason:        repositoryMonitorPublishSkipDuplicateSameHead,
+		},
+		{
+			name:       "passed default not posted",
+			verdict:    repositoryMonitorReviewVerdictPassed,
+			wantReason: repositoryMonitorPublishSkipVerdictNotConfigured,
+		},
+		{
+			name:       "security sensitive default not public",
+			verdict:    repositoryMonitorReviewVerdictSecuritySensitive,
+			wantReason: repositoryMonitorPublishSkipSecuritySensitiveNotPublic,
+			mutatePayload: func(payload map[string]any) {
+				payload["security"] = map[string]any{"status": "security_sensitive", "notes": "sensitive"}
+			},
+		},
+		{
+			name:       "security status sensitive with needs changes",
+			verdict:    repositoryMonitorReviewVerdictNeedsChanges,
+			wantReason: repositoryMonitorPublishSkipSecuritySensitiveNotPublic,
+			mutatePayload: func(payload map[string]any) {
+				payload["security"] = map[string]any{"status": "security_sensitive", "notes": "sensitive"}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			monitorStore := setupControllerSQLiteStore(t)
+			const reviewHeadSHA = "sha1"
+			scheme := runtime.NewScheme()
+			if err := corev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatalf("AddToScheme() error = %v", err)
+			}
+			if err := corev1.AddToScheme(scheme); err != nil {
+				t.Fatalf("corev1 AddToScheme() error = %v", err)
+			}
+			monitorName := "publish-skip-" + repositoryMonitorBoundedDNSName(strings.ReplaceAll(tt.name, " ", "-"), 40)
+			serverConfig := tt.serverConfig
+			if serverConfig.HeadSHA == "" {
+				serverConfig.HeadSHA = reviewHeadSHA
+			}
+			if tt.seedStartedMarker {
+				serverConfig.ReviewsBody = fmt.Sprintf(`[{"body":"<!-- orka:repo-monitor namespace=default name=%s pr=1 head=sha1 run=run-crashed review=review-crashed publish=reserved-publish -->"}]`, monitorName)
+			}
+			publishServer := newRepositoryMonitorPublishTestServer(t, serverConfig)
+			t.Cleanup(publishServer.Close)
+
+			monitor := repositoryMonitorReviewIngestTestMonitor(monitorName)
+			monitor.Spec.Review.Publish.Enabled = true
+			monitor.Spec.Review.Publish.Event = repositoryMonitorPublishEventComment
+			if tt.mutateMonitor != nil {
+				tt.mutateMonitor(monitor)
+			}
+			task := repositoryMonitorReviewIngestTestTask(monitorName+"-task", monitorName, 1, reviewHeadSHA)
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-token")}}
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+				WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).
+				Build()
+			reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: publishServer.URL}
+			result := repositoryMonitorReviewResultEnvelopeWith(t, 1, reviewHeadSHA, tt.verdict, tt.mutatePayload)
+			seedRepositoryMonitorQueuedReview(t, ctx, monitorStore, monitorName, task.Name, result)
+			if tt.seedDuplicate || tt.seedStartedMarker {
+				phase := repositoryMonitorPublishPhaseSucceeded
+				id := "already-published"
+				if tt.seedStartedMarker {
+					phase = repositoryMonitorPublishPhaseStarted
+					id = "reserved-publish"
+				}
+				if err := monitorStore.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{
+					ID:               id,
+					MonitorNamespace: "default",
+					MonitorName:      monitorName,
+					ItemKind:         repositoryMonitorPullRequestKind,
+					ItemNumber:       1,
+					HeadSHA:          reviewHeadSHA,
+					Phase:            phase,
+					Event:            repositoryMonitorPublishEventComment,
+				}); err != nil {
+					t.Fatalf("CreateReviewPublishRecord(duplicate) error = %v", err)
+				}
+			}
+
+			if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitorName}}); err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+			if publishServer.PostCount != tt.wantPosts {
+				t.Fatalf("post count = %d, want %d", publishServer.PostCount, tt.wantPosts)
+			}
+			publishRecords, _, err := monitorStore.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{Namespace: "default", MonitorName: monitorName, Phase: repositoryMonitorPublishPhaseSkipped, Limit: 10})
+			if err != nil {
+				t.Fatalf("ListReviewPublishRecords() error = %v", err)
+			}
+			if len(publishRecords) != 1 || publishRecords[0].SkipReason != tt.wantReason {
+				t.Fatalf("publishRecords = %#v, want skip reason %q", publishRecords, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestRepositoryMonitorReviewPublishRetriesReviewRecordWithoutTerminalPublish(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	const reviewHeadSHA = "sha1"
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	publishServer := newRepositoryMonitorPublishTestServer(t, repositoryMonitorPublishTestServerConfig{HeadSHA: reviewHeadSHA})
+	t.Cleanup(publishServer.Close)
+
+	postNeedsChanges := true
+	monitor := repositoryMonitorReviewIngestTestMonitor("publish-pending")
+	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+	monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{Enabled: true, Event: repositoryMonitorPublishEventComment, PostNeedsChanges: &postNeedsChanges}
+	task := repositoryMonitorReviewIngestTestTask("publish-pending-task", "publish-pending", 1, reviewHeadSHA)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-token")}}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: publishServer.URL}
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID:               "review-existing",
+		MonitorNamespace: "default",
+		MonitorName:      "publish-pending",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           1,
+		HeadSHA:          reviewHeadSHA,
+		TaskName:         task.Name,
+		TaskNamespace:    task.Namespace,
+		Verdict:          repositoryMonitorReviewVerdictNeedsChanges,
+		Confidence:       repositoryMonitorReviewConfidenceHigh,
+		SecurityStatus:   "clear",
+		FindingsJSON:     "[]",
+		Summary:          "Review already ingested before publish completed.",
+	}); err != nil {
+		t.Fatalf("CreateReviewRecord() error = %v", err)
+	}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
+		MonitorNamespace:    "default",
+		MonitorName:         "publish-pending",
+		Kind:                repositoryMonitorPullRequestKind,
+		Number:              1,
+		State:               repositoryMonitorItemStateOpen,
+		HeadSHA:             reviewHeadSHA,
+		LastVerdict:         repositoryMonitorReviewVerdictNeedsChanges,
+		LastReviewID:        "review-existing",
+		LastReviewedHeadSHA: reviewHeadSHA,
+	}); err != nil {
+		t.Fatalf("UpsertMonitorItem() error = %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "publish-pending"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if publishServer.PostCount != 1 {
+		t.Fatalf("post count = %d, want pending review record to publish once", publishServer.PostCount)
+	}
+}
+
+func TestRepositoryMonitorReviewPublishGitHubPermissionFailureCreatesFailedRecord(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	const reviewHeadSHA = "sha1"
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+
+	publishServer := newRepositoryMonitorPublishTestServer(t, repositoryMonitorPublishTestServerConfig{HeadSHA: reviewHeadSHA, PostStatus: http.StatusForbidden, PostBody: `{"message":"forbidden"}`})
+	t.Cleanup(publishServer.Close)
+
+	postNeedsChanges := true
+	monitor := repositoryMonitorReviewIngestTestMonitor("publish-forbidden")
+	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+	monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{Enabled: true, Event: repositoryMonitorPublishEventComment, PostNeedsChanges: &postNeedsChanges}
+	task := repositoryMonitorReviewIngestTestTask("publish-forbidden-task", "publish-forbidden", 1, reviewHeadSHA)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-token")}}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: publishServer.URL}
+	seedRepositoryMonitorQueuedReview(t, ctx, monitorStore, "publish-forbidden", "publish-forbidden-task", repositoryMonitorReviewResultEnvelope(t, 1, reviewHeadSHA, repositoryMonitorReviewVerdictNeedsChanges))
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "publish-forbidden"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "publish-forbidden"}}); err != nil {
+		t.Fatalf("second Reconcile() error = %v", err)
+	}
+	if publishServer.PostCount != 1 {
+		t.Fatalf("post count after two reconciles = %d, want no retry storm", publishServer.PostCount)
+	}
+	publishRecords, _, err := monitorStore.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{Namespace: "default", MonitorName: "publish-forbidden", Phase: repositoryMonitorPublishPhaseFailed, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListReviewPublishRecords() error = %v", err)
+	}
+	if len(publishRecords) != 1 || publishRecords[0].SkipReason != repositoryMonitorPublishFailureGitHubPermissionDenied || !strings.Contains(publishRecords[0].Error, "403") {
+		t.Fatalf("publishRecords = %#v, want one github_permission_denied failure", publishRecords)
+	}
+}
+
 func TestRepositoryMonitorReconcileRetriesTransientReviewResultReadError(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -2517,6 +2933,39 @@ func TestRepositoryMonitorReconcileFailsUnsupportedRunTargetKind(t *testing.T) {
 	}
 }
 
+func TestParseRepositoryMonitorPatchRightLinesHandlesPlusPlusContent(t *testing.T) {
+	lines := parseRepositoryMonitorPatchRightLines("@@ -1,0 +10,2 @@\n++i\n+next")
+	if _, ok := lines[10]; !ok {
+		t.Fatalf("lines = %#v, want added ++i line 10 commentable", lines)
+	}
+	if _, ok := lines[11]; !ok {
+		t.Fatalf("lines = %#v, want following added line 11 commentable", lines)
+	}
+}
+
+func TestRepositoryMonitorItemFromPullRequestClearsPublishStateOnHeadChange(t *testing.T) {
+	monitor := repositoryMonitorReviewIngestTestMonitor("publish-head-change")
+	existing := &store.MonitorItem{
+		MonitorNamespace: "default",
+		MonitorName:      "publish-head-change",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           1,
+		HeadSHA:          "old-head",
+		LastPublishID:    "publish-old",
+		LastPublishPhase: repositoryMonitorPublishPhaseSucceeded,
+		LastPublishURL:   "https://github.example/review/old",
+	}
+	item := repositoryMonitorItemFromPullRequest(monitor, repositoryMonitorPullRequest{Number: 1, State: repositoryMonitorItemStateOpen, HeadSHA: "new-head"}, existing)
+	if item.LastPublishID != "" || item.LastPublishPhase != "" || item.LastPublishURL != "" {
+		t.Fatalf("item = %#v, want publish status cleared for new head", item)
+	}
+
+	item = repositoryMonitorItemFromPullRequest(monitor, repositoryMonitorPullRequest{Number: 1, State: repositoryMonitorItemStateOpen, HeadSHA: "old-head"}, existing)
+	if item.LastPublishID != "publish-old" || item.LastPublishPhase != repositoryMonitorPublishPhaseSucceeded || item.LastPublishURL == "" {
+		t.Fatalf("item = %#v, want publish status preserved for same head", item)
+	}
+}
+
 func TestRepositoryMonitorReconcileProcessesOldestQueuedRunFirst(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -2740,6 +3189,11 @@ func (s transientGetResultErrorStore) GetResult(_ context.Context, _, _ string) 
 
 func repositoryMonitorReviewResultEnvelope(t *testing.T, prNumber int64, headSHA, verdict string) []byte {
 	t.Helper()
+	return repositoryMonitorReviewResultEnvelopeWith(t, prNumber, headSHA, verdict, nil)
+}
+
+func repositoryMonitorReviewResultEnvelopeWith(t *testing.T, prNumber int64, headSHA, verdict string, mutate func(map[string]any)) []byte {
+	t.Helper()
 
 	payload := map[string]any{
 		"schemaVersion": repositoryMonitorReviewSchemaVersion,
@@ -2771,6 +3225,9 @@ func repositoryMonitorReviewResultEnvelope(t *testing.T, prNumber int64, headSHA
 		},
 		"suggestedComment": "Please fix the failing path.",
 	}
+	if mutate != nil {
+		mutate(payload)
+	}
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal review payload: %v", err)
@@ -2783,6 +3240,130 @@ func repositoryMonitorReviewResultEnvelope(t *testing.T, prNumber int64, headSHA
 		t.Fatalf("marshal review envelope: %v", err)
 	}
 	return envelopeJSON
+}
+
+type repositoryMonitorPublishTestServerConfig struct {
+	State       string
+	HeadSHA     string
+	BaseBranch  string
+	Labels      []string
+	ReviewsBody string
+	FilesBody   string
+	PostStatus  int
+	PostBody    string
+}
+
+type repositoryMonitorPublishTestServer struct {
+	*httptest.Server
+	PostCount    int
+	PostedReview repositoryMonitorPullRequestReviewRequest
+}
+
+func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPublishTestServerConfig) *repositoryMonitorPublishTestServer {
+	t.Helper()
+	if cfg.State == "" {
+		cfg.State = "open"
+	}
+	if cfg.HeadSHA == "" {
+		cfg.HeadSHA = repositoryMonitorTestHeadSHA
+	}
+	if cfg.BaseBranch == "" {
+		cfg.BaseBranch = repositoryMonitorTestDefaultBranch
+	}
+	if cfg.ReviewsBody == "" {
+		cfg.ReviewsBody = `[]`
+	}
+	if cfg.FilesBody == "" {
+		cfg.FilesBody = `[]`
+	}
+	if cfg.PostStatus == 0 {
+		cfg.PostStatus = http.StatusCreated
+	}
+	if cfg.PostBody == "" {
+		cfg.PostBody = `{"id":123,"html_url":"https://github.com/sozercan/orka/pull/1#pullrequestreview-123"}`
+	}
+	testServer := &repositoryMonitorPublishTestServer{}
+	testServer.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("Authorization header = %q, want Bearer test-token", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/sozercan/orka/pulls/1":
+			_, _ = w.Write([]byte(repositoryMonitorPublishPullBody(cfg)))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/sozercan/orka/pulls/1/reviews":
+			_, _ = w.Write([]byte(cfg.ReviewsBody))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/sozercan/orka/pulls/1/files":
+			_, _ = w.Write([]byte(cfg.FilesBody))
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/sozercan/orka/pulls/1/reviews":
+			testServer.PostCount++
+			if err := json.NewDecoder(r.Body).Decode(&testServer.PostedReview); err != nil {
+				t.Fatalf("decode posted review: %v", err)
+			}
+			w.WriteHeader(cfg.PostStatus)
+			_, _ = w.Write([]byte(cfg.PostBody))
+		default:
+			t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	return testServer
+}
+
+func repositoryMonitorPublishPullBody(cfg repositoryMonitorPublishTestServerConfig) string {
+	labelItems := make([]map[string]string, 0, len(cfg.Labels))
+	for _, label := range cfg.Labels {
+		labelItems = append(labelItems, map[string]string{"name": label})
+	}
+	body := map[string]any{
+		"number":          1,
+		"title":           "Publish me",
+		"state":           cfg.State,
+		"draft":           false,
+		"mergeable_state": "clean",
+		"user":            map[string]any{"login": "alice"},
+		"base": map[string]any{
+			"ref": cfg.BaseBranch,
+			"sha": "base1",
+			"repo": map[string]any{
+				"full_name": "sozercan/orka",
+				"clone_url": "https://github.com/sozercan/orka.git",
+			},
+		},
+		"head": map[string]any{
+			"ref": "feature",
+			"sha": cfg.HeadSHA,
+			"repo": map[string]any{
+				"full_name": "sozercan/orka",
+				"clone_url": "https://github.com/sozercan/orka.git",
+			},
+		},
+		"labels": labelItems,
+	}
+	data, _ := json.Marshal(body)
+	return string(data)
+}
+
+func seedRepositoryMonitorQueuedReview(t *testing.T, ctx context.Context, monitorStore store.RepositoryMonitorStore, monitorName, taskName string, result []byte) {
+	t.Helper()
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
+		MonitorNamespace: "default",
+		MonitorName:      monitorName,
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           1,
+		State:            repositoryMonitorItemStateOpen,
+		HeadSHA:          repositoryMonitorTestHeadSHA,
+		LastVerdict:      repositoryMonitorRunPhaseQueued,
+		LastReviewID:     taskName,
+	}); err != nil {
+		t.Fatalf("UpsertMonitorItem(queued) error = %v", err)
+	}
+	resultStore, ok := monitorStore.(store.ResultStore)
+	if !ok {
+		t.Fatalf("monitorStore does not implement ResultStore")
+	}
+	if err := resultStore.SaveResult(ctx, "default", taskName, result); err != nil {
+		t.Fatalf("SaveResult() error = %v", err)
+	}
 }
 
 func assertRepositoryMonitorRejectedReview(t *testing.T, ctx context.Context, monitorStore store.RepositoryMonitorStore, monitorName, itemKey string) (*store.ReviewRecord, *store.MonitorItem) {

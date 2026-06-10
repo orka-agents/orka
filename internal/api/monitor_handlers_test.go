@@ -249,6 +249,75 @@ func TestCreateRepositoryMonitor_RejectsUnsupportedTargets(t *testing.T) {
 	}
 }
 
+func TestCreateRepositoryMonitor_RejectsUnsupportedPublishConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		publish string
+		want    string
+	}{
+		{name: "unsupported event", publish: `{"event":"APPROVE"}`, want: "only supports COMMENT"},
+		{name: "unsupported same head policy", publish: `{"sameHeadPolicy":"replace"}`, want: "sameHeadPolicy only supports skip"},
+		{name: "invalid min priority", publish: `{"inline":{"minPriority":"P4"}}`, want: "minPriority must be one of"},
+		{name: "negative max comments", publish: `{"inline":{"maxComments":-1}}`, want: "maxComments must be between 0 and 50"},
+		{name: "too many max comments", publish: `{"inline":{"maxComments":51}}`, want: "maxComments must be between 0 and 50"},
+		{name: "unsupported mode", publish: `{"mode":"inline_findings"}`, want: "mode must be summary_only"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+			body := fmt.Sprintf(`{
+				"name":"repo-monitor",
+				"namespace":"demo",
+				"spec":{
+					"repoURL":%q,
+					"review":{"publish":%s},
+					"agents":{"reviewer":{"name":"reviewer"}}
+				}
+			}`, monitorTestRepoURL, tt.publish)
+
+			req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			require.Contains(t, readRespBody(t, resp), tt.want)
+		})
+	}
+}
+
+func TestCreateRepositoryMonitor_AcceptsSafePublishConfig(t *testing.T) {
+	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+	body := fmt.Sprintf(`{
+		"name":"repo-monitor",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"review":{"publish":{
+				"enabled":true,
+				"mode":"summary_with_inline_findings",
+				"event":"COMMENT",
+				"postPassed":true,
+				"sameHeadPolicy":"skip",
+				"inline":{"enabled":true,"minPriority":"P2","maxComments":10,"onlyChangedLines":true}
+			}},
+			"agents":{"reviewer":{"name":"reviewer"}}
+		}
+	}`, monitorTestRepoURL)
+
+	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	var created corev1alpha1.RepositoryMonitor
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&created))
+	require.True(t, created.Spec.Review.Publish.Enabled)
+	require.Equal(t, "COMMENT", created.Spec.Review.Publish.Event)
+	require.NotNil(t, created.Spec.Review.Publish.PostPassed)
+	require.True(t, *created.Spec.Review.Publish.PostPassed)
+}
+
 func TestCreateRepositoryMonitor_RejectsUnsupportedReviewerAgent(t *testing.T) {
 	tests := []struct {
 		name     string

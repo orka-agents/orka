@@ -206,9 +206,23 @@ spec:
     reviewer:
       name: repo-reviewer
   review:
-    event: COMMENT              # COMMENT, APPROVE, or REQUEST_CHANGES
+    event: COMMENT              # legacy task input only; does not publish to GitHub
     staleReviewTTL: 24h
     exactEventEnabled: true     # queue exact-head runs from signed PR webhooks
+    publish:
+      enabled: true             # default false; controller-owned GitHub side effect
+      mode: summary_with_inline_findings
+      event: COMMENT            # V1 only supports neutral COMMENT reviews
+      postPassed: false
+      postNeedsChanges: true
+      postNeedsHuman: true
+      postSecuritySensitive: false
+      sameHeadPolicy: skip
+      inline:
+        enabled: true
+        minPriority: P2
+        maxComments: 10
+        onlyChangedLines: true
   policy:
     protectedLabels:
       - security-sensitive
@@ -237,7 +251,17 @@ spec:
 | `targets.pullRequests.includeDrafts` | bool | No | Select draft pull requests for review when true. Defaults to false. |
 | `targets.pullRequests.maxPerRun` | int32 | No | Maximum selected PRs per run. Defaults to `20`; allowed range is `1` to `100`. |
 | `agents.reviewer` | AgentReference | Yes | Claude runtime Agent used for read-only PR review tasks. The Agent must reference a Secret in the monitor namespace with `ANTHROPIC_API_KEY` or `ANTHROPIC_FOUNDRY_API_KEY`. |
-| `review.event` | string | No | Default review event value included in review task input. Defaults to `COMMENT`. |
+| `review.event` | string | No | Legacy/default review event value included in review task input. It does not publish to GitHub; use `review.publish.event`. Defaults to `COMMENT`. |
+| `review.publish.enabled` | bool | No | Enables controller-owned GitHub pull request review publishing. Defaults to `false`. |
+| `review.publish.mode` | string | No | `summary_only` or `summary_with_inline_findings`. Inline comments are only attempted for changed RIGHT-side diff lines. |
+| `review.publish.event` | string | No | GitHub review event submitted by the controller. V1 only supports neutral `COMMENT` reviews; `APPROVE` and `REQUEST_CHANGES` are rejected. |
+| `review.publish.postPassed` | bool | No | Post clean/passed reviews when true. Defaults to `false`. |
+| `review.publish.postNeedsChanges` | bool | No | Post `needs_changes` reviews when true. Defaults to `true`. |
+| `review.publish.postNeedsHuman` | bool | No | Post `needs_human` reviews when true. Defaults to `true`. |
+| `review.publish.postSecuritySensitive` | bool | No | Allow public publishing of `security_sensitive` results. Defaults to `false`; sensitive findings are skipped by default. |
+| `review.publish.sameHeadPolicy` | string | No | Duplicate policy for the same monitor, PR, and head SHA. V1 only supports `skip`. |
+| `review.publish.inline.minPriority` | string | No | Lowest priority eligible for inline comments (`P0`-`P3`). Defaults to `P2`; lower-priority findings remain in the summary. |
+| `review.publish.inline.maxComments` | int32 | No | Max inline comments per GitHub review. Defaults to `10`, allowed range `0` to `50`. |
 | `review.staleReviewTTL` | duration | No | Re-review an unchanged head after the previous accepted review is older than this duration. |
 | `review.exactEventEnabled` | bool | No | Queue exact-head monitor runs from signed GitHub pull request webhook events when true. |
 | `policy.protectedLabels` | list | No | PR labels that block automated review selection. |
@@ -245,7 +269,7 @@ spec:
 | `validation.mode` | string | No | Validation mode included in review task input. Defaults to `changed`; allowed values are `off`, `changed`, and `full`. |
 | `validation.commands` | list | No | Validation commands included in review task input for the reviewer. |
 
-`targets.issues`, `targets.commits`, `review.requireGreenCI`, repair, and automerge fields are present for the broader monitor API shape, but the current controller rejects issue/commit targets and `review.requireGreenCI`; repair and automerge are not active workflows in this implementation slice. Read-only review tasks check out the exact PR head and receive generated context files under `/workspace/.git/orka/`: `pr-review.md`, `pr-review.files`, and `pr-review.diff`.
+`targets.issues`, `targets.commits`, `review.requireGreenCI`, repair, and automerge fields are present for the broader monitor API shape, but the current controller rejects issue/commit targets and `review.requireGreenCI`; repair and automerge are not active workflows in this implementation slice. Review tasks check out the exact PR head and receive generated read-only context files under `/workspace/.git/orka/`: `pr-review.md`, `pr-review.files`, and `pr-review.diff`. GitHub publishing, when enabled, happens later in the controller from the structured review result; the LLM never receives the GitHub mutation token and cannot choose the GitHub event.
 
 **Status fields:**
 

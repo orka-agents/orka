@@ -17,6 +17,20 @@ function formatTime(value?: string) {
   return new Date(value).toLocaleString()
 }
 
+function publishBadgeVariant(phase?: string): 'default' | 'destructive' | 'outline' | 'secondary' {
+  if (phase === 'succeeded') return 'default'
+  if (phase === 'failed') return 'destructive'
+  if (phase === 'skipped') return 'outline'
+  return 'secondary'
+}
+
+function publishLabel(phase?: string, reason?: string) {
+  if (!phase) return 'not attempted'
+  if (phase === 'succeeded') return 'posted'
+  if (reason) return `${phase}: ${reason}`
+  return phase
+}
+
 export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }) {
   const { data: monitor, isLoading } = useRepositoryMonitor(monitorName)
   const runs = useRepositoryMonitorRuns(monitorName)
@@ -80,6 +94,7 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
                     <TableHead>Head</TableHead>
                     <TableHead>CI</TableHead>
                     <TableHead>Review</TableHead>
+                    <TableHead>Publish</TableHead>
                     <TableHead>Repair</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -91,6 +106,15 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
                       <TableCell className="font-mono text-xs">{shortSHA(item.headSHA ?? item.sha)}</TableCell>
                       <TableCell><Badge variant="outline">{item.ciState || 'unknown'}</Badge></TableCell>
                       <TableCell><Badge variant="secondary">{item.lastVerdict || 'unseen'}</Badge></TableCell>
+                      <TableCell>
+                        {item.lastPublishURL ? (
+                          <a href={item.lastPublishURL} target="_blank" rel="noreferrer">
+                            <Badge variant={publishBadgeVariant(item.lastPublishPhase)}>{publishLabel(item.lastPublishPhase, item.lastPublishReason)}</Badge>
+                          </a>
+                        ) : (
+                          <Badge variant={publishBadgeVariant(item.lastPublishPhase)}>{publishLabel(item.lastPublishPhase, item.lastPublishReason)}</Badge>
+                        )}
+                      </TableCell>
                       <TableCell><Badge variant="outline">{item.repairState || 'none'}</Badge></TableCell>
                     </TableRow>
                   ))}
@@ -100,28 +124,53 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Recent Runs</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {(runs.data?.items ?? []).length === 0 ? (
-              <div className="py-8 text-center text-sm text-muted-foreground">No runs recorded yet.</div>
-            ) : (
-              (runs.data?.items ?? []).slice(0, 8).map((run) => (
-                <div key={run.id} className="rounded-md border px-3 py-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-xs">{run.id}</span>
-                    <Badge variant={run.phase === 'succeeded' ? 'default' : 'secondary'}>{run.phase}</Badge>
+        <div className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>GitHub Publishing</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2 text-sm">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-muted-foreground">Status</span>
+                <Badge variant={monitor.spec.review?.publish?.enabled ? 'default' : 'outline'}>
+                  {monitor.spec.review?.publish?.enabled ? 'enabled' : 'disabled'}
+                </Badge>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-muted-foreground">Mode</span>
+                <span>{monitor.spec.review?.publish?.mode || 'summary_only'}</span>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-muted-foreground">Event</span>
+                <span>{monitor.spec.review?.publish?.event || 'COMMENT'}</span>
+              </div>
+              <p className="text-xs text-muted-foreground">V1 publishes neutral COMMENT reviews only. APPROVE and REQUEST_CHANGES are not exposed.</p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Recent Runs</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {(runs.data?.items ?? []).length === 0 ? (
+                <div className="py-8 text-center text-sm text-muted-foreground">No runs recorded yet.</div>
+              ) : (
+                (runs.data?.items ?? []).slice(0, 8).map((run) => (
+                  <div key={run.id} className="rounded-md border px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-xs">{run.id}</span>
+                      <Badge variant={run.phase === 'succeeded' ? 'default' : 'secondary'}>{run.phase}</Badge>
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {run.trigger} · {formatTime(run.startedAt)}
+                    </div>
                   </div>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {run.trigger} · {formatTime(run.startedAt)}
-                  </div>
-                </div>
-              ))
-            )}
-          </CardContent>
-        </Card>
+                ))
+              )}
+            </CardContent>
+          </Card>
+        </div>
       </div>
     </div>
   )

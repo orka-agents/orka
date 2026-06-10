@@ -8,10 +8,11 @@ import (
 	"github.com/sozercan/orka/internal/store"
 )
 
+const publishPhaseFailed = "failed"
+
 func TestRepositoryMonitorStoreCRUD(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-
 	monitor := &store.RepositoryMonitorRecord{
 		Namespace:  "demo",
 		Name:       "orka",
@@ -48,6 +49,7 @@ func TestRepositoryMonitorStoreCRUD(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // This store smoke test intentionally covers related monitor tables together.
 func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -72,14 +74,18 @@ func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 	}
 
 	if err := s.UpsertMonitorItem(ctx, &store.MonitorItem{
-		MonitorNamespace: "demo",
-		MonitorName:      "orka",
-		Kind:             "pull_request",
-		Number:           42,
-		Title:            "test pr",
-		State:            "open",
-		HeadSHA:          "abc123",
-		LastVerdict:      "needs_changes",
+		MonitorNamespace:  "demo",
+		MonitorName:       "orka",
+		Kind:              "pull_request",
+		Number:            42,
+		Title:             "test pr",
+		State:             "open",
+		HeadSHA:           "abc123",
+		LastVerdict:       "needs_changes",
+		LastPublishID:     "publish-1",
+		LastPublishPhase:  "succeeded",
+		LastPublishReason: "",
+		LastPublishURL:    "https://github.example/review/1",
 	}); err != nil {
 		t.Fatalf("UpsertMonitorItem() error = %v", err)
 	}
@@ -87,8 +93,8 @@ func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetMonitorItem() error = %v", err)
 	}
-	if item.HeadSHA != "abc123" || item.LastVerdict != "needs_changes" {
-		t.Fatalf("item = %#v, want stored head SHA and verdict", item)
+	if item.HeadSHA != "abc123" || item.LastVerdict != "needs_changes" || item.LastPublishID != "publish-1" || item.LastPublishURL == "" {
+		t.Fatalf("item = %#v, want stored head SHA, verdict, and publish status", item)
 	}
 
 	if err := s.CreateReviewRecord(ctx, &store.ReviewRecord{
@@ -108,6 +114,55 @@ func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 	}
 	if len(reviews) != 1 || reviews[0].ID != "review-1" {
 		t.Fatalf("reviews = %#v, want review-1", reviews)
+	}
+
+	if err := s.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{
+		ID:                 "publish-1",
+		MonitorNamespace:   "demo",
+		MonitorName:        "orka",
+		ItemKind:           "pull_request",
+		ItemNumber:         42,
+		HeadSHA:            "abc123",
+		ReviewRecordID:     "review-1",
+		Phase:              "succeeded",
+		Event:              "COMMENT",
+		GitHubReviewID:     "123",
+		GitHubReviewURL:    "https://github.example/review/123",
+		BodyDigest:         "sha256:abc",
+		InlineCommentCount: 2,
+	}); err != nil {
+		t.Fatalf("CreateReviewPublishRecord() error = %v", err)
+	}
+	publishRecord, err := s.GetReviewPublishRecord(ctx, "demo", "publish-1")
+	if err != nil {
+		t.Fatalf("GetReviewPublishRecord() error = %v", err)
+	}
+	if publishRecord.GitHubReviewID != "123" || publishRecord.InlineCommentCount != 2 {
+		t.Fatalf("publishRecord = %#v, want GitHub review outcome", publishRecord)
+	}
+	publishRecord.Phase = publishPhaseFailed
+	publishRecord.Error = "ambiguous GitHub response"
+	if err := s.UpdateReviewPublishRecord(ctx, publishRecord); err != nil {
+		t.Fatalf("UpdateReviewPublishRecord() error = %v", err)
+	}
+	publishRecord, err = s.GetReviewPublishRecord(ctx, "demo", "publish-1")
+	if err != nil {
+		t.Fatalf("GetReviewPublishRecord(after update) error = %v", err)
+	}
+	if publishRecord.Phase != publishPhaseFailed || publishRecord.Error == "" {
+		t.Fatalf("publishRecord = %#v, want updated failure outcome", publishRecord)
+	}
+	publishRecord.Phase = "succeeded"
+	publishRecord.Error = ""
+	if err := s.UpdateReviewPublishRecord(ctx, publishRecord); err != nil {
+		t.Fatalf("UpdateReviewPublishRecord(succeeded) error = %v", err)
+	}
+	publishRecords, _, err := s.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{Namespace: "demo", MonitorName: "orka", ItemNumber: 42, HeadSHA: "abc123", Phase: "succeeded"})
+	if err != nil {
+		t.Fatalf("ListReviewPublishRecords() error = %v", err)
+	}
+	if len(publishRecords) != 1 || publishRecords[0].ID != "publish-1" {
+		t.Fatalf("publishRecords = %#v, want publish-1", publishRecords)
 	}
 
 	if err := s.CreateRepairJob(ctx, &store.RepairJob{

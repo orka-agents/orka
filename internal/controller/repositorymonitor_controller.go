@@ -283,6 +283,11 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 		logger.Error(err, "failed to ingest completed repository monitor review task")
 		return ctrl.Result{}, err
 	}
+	publishedReviews, err := r.publishPendingRepositoryMonitorReviewRecords(ctx, monitor)
+	if err != nil {
+		logger.Error(err, "failed to publish pending repository monitor review")
+		return ctrl.Result{}, err
+	}
 
 	processedRun, runningRunRequeueAfter, err := r.processNextQueuedMonitorRun(ctx, monitor, state.owner, state.repository)
 	if err != nil {
@@ -319,6 +324,19 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 		requeueAfter = next
 	}
 
+	if ingestedReviews || publishedReviews {
+		latestRun, err := r.latestCompletedMonitorRun(ctx, monitor)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if latestRun != nil {
+			if err := r.updateStatusAfterMonitorRun(ctx, monitor, latestRun); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+	}
+
 	if queuedRun == nil {
 		latestRun, err := r.latestCompletedMonitorRun(ctx, monitor)
 		if err != nil {
@@ -336,19 +354,6 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 			}
 			return ctrl.Result{}, nil
 		}
-	}
-
-	if ingestedReviews {
-		latestRun, err := r.latestCompletedMonitorRun(ctx, monitor)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if latestRun != nil {
-			if err := r.updateStatusAfterMonitorRun(ctx, monitor, latestRun); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
 	if err := r.updateStatusWithRetry(ctx, monitor, func(m *corev1alpha1.RepositoryMonitor) {
