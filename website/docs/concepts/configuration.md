@@ -260,8 +260,10 @@ spec:
 | `review.publish.postNeedsHuman` | bool | No | Post `needs_human` reviews when true. Defaults to `true`. |
 | `review.publish.postSecuritySensitive` | bool | No | Allow public publishing of `security_sensitive` results. Defaults to `false`; sensitive findings are skipped by default. |
 | `review.publish.sameHeadPolicy` | string | No | Duplicate policy for the same monitor, PR, and head SHA. V1 only supports `skip`. |
+| `review.publish.inline.enabled` | bool | No | Enables inline GitHub review comments when `mode` is `summary_with_inline_findings`. |
 | `review.publish.inline.minPriority` | string | No | Lowest priority eligible for inline comments (`P0`-`P3`). Defaults to `P2`; lower-priority findings remain in the summary. |
 | `review.publish.inline.maxComments` | int32 | No | Max inline comments per GitHub review. Defaults to `10`, allowed range `0` to `50`. |
+| `review.publish.inline.onlyChangedLines` | bool | No | Restricts inline comments to changed RIGHT-side diff lines. V1 treats this as true. |
 | `review.staleReviewTTL` | duration | No | Re-review an unchanged head after the previous accepted review is older than this duration. |
 | `review.exactEventEnabled` | bool | No | Queue exact-head monitor runs from signed GitHub pull request webhook events when true. |
 | `policy.protectedLabels` | list | No | PR labels that block automated review selection. |

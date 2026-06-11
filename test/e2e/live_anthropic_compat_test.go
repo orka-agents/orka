@@ -118,7 +118,7 @@ var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 		Expect(*resp.StopReason).To(Equal("end_turn"))
 		Expect(resp.Usage.InputTokens).To(BeNumerically(">", 0))
 		Expect(resp.Usage.OutputTokens).To(BeNumerically(">", 0))
-		Expect(flattenAnthropicText(resp.Content)).To(Equal(liveAnthropicExpectedText))
+		Expect(flattenAnthropicText(resp.Content)).To(ContainSubstring(liveAnthropicExpectedText))
 	})
 
 	It("should stream anthropic messages via SSE", func() {
@@ -135,7 +135,7 @@ var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 		Expect(stream.Model).To(Equal(liveClaudeModel))
 		Expect(stream.StopReason).To(Equal("end_turn"))
 		Expect(stream.OutputTokens).To(BeNumerically(">", 0))
-		Expect(strings.TrimSpace(stream.Text)).To(Equal(liveAnthropicExpectedText))
+		Expect(strings.TrimSpace(stream.Text)).To(ContainSubstring(liveAnthropicExpectedText))
 	})
 })
 

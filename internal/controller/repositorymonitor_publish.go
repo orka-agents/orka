@@ -60,7 +60,7 @@ const (
 	repositoryMonitorPublishFailureGitHubAPI              = "github_api_error"
 
 	repositoryMonitorReviewBodyMaxBytes    = 60000
-	repositoryMonitorReviewInlineMaxBytes  = 4000
+	repositoryMonitorReviewInlineMaxRunes  = 4000
 	repositoryMonitorReviewTextMaxRunes    = 4000
 	repositoryMonitorReviewFindingMaxRunes = 1200
 )
@@ -275,7 +275,7 @@ func (r *RepositoryMonitorReconciler) publishPendingRepositoryMonitorReviewRecor
 	published := false
 	cursor := ""
 	for {
-		records, next, err := r.Store.ListReviewRecords(ctx, store.ReviewRecordFilter{
+		items, next, err := r.Store.ListMonitorItems(ctx, store.MonitorItemFilter{
 			Namespace:   monitor.Namespace,
 			MonitorName: monitor.Name,
 			Kind:        repositoryMonitorPullRequestKind,
@@ -285,22 +285,22 @@ func (r *RepositoryMonitorReconciler) publishPendingRepositoryMonitorReviewRecor
 		if err != nil {
 			return published, err
 		}
-		for i := range records {
-			record := records[i]
-			if !repositoryMonitorReviewVerdictMarksHeadFresh(record.Verdict) {
+		for i := range items {
+			item := items[i]
+			if strings.TrimSpace(item.LastReviewID) == "" || item.LastVerdict == repositoryMonitorRunPhaseQueued {
 				continue
 			}
-			item, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, record.Kind, strconv.FormatInt(record.Number, 10))
+			record, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, item.LastReviewID)
 			if err != nil {
 				if errors.Is(err, store.ErrNotFound) {
 					continue
 				}
 				return published, err
 			}
-			if item.LastReviewID != record.ID || item.LastVerdict == repositoryMonitorRunPhaseQueued {
+			if record.Kind != repositoryMonitorPullRequestKind || record.Number != item.Number || !repositoryMonitorReviewVerdictMarksHeadFresh(record.Verdict) {
 				continue
 			}
-			shouldPublish, activeReservation, err := r.repositoryMonitorReviewRecordNeedsPublishRetry(ctx, monitor, &record)
+			shouldPublish, activeReservation, err := r.repositoryMonitorReviewRecordNeedsPublishRetry(ctx, monitor, record)
 			if err != nil {
 				return published, err
 			}
@@ -317,7 +317,7 @@ func (r *RepositoryMonitorReconciler) publishPendingRepositoryMonitorReviewRecor
 				}
 				return published, err
 			}
-			if err := r.publishRepositoryMonitorReview(ctx, monitor, item, &task, &record); err != nil {
+			if err := r.publishRepositoryMonitorReview(ctx, monitor, &item, &task, record); err != nil {
 				return published, err
 			}
 			published = true
@@ -678,7 +678,7 @@ func renderRepositoryMonitorInlineFinding(record *store.ReviewRecord, finding re
 		b.WriteString("\n\n")
 	}
 	b.WriteString(fmt.Sprintf("<!-- orka:repo-monitor-inline review=%s -->", sanitizeRepositoryMonitorReviewText(record.ID, 160)))
-	return boundedString(b.String(), repositoryMonitorReviewInlineMaxBytes)
+	return boundedString(b.String(), repositoryMonitorReviewInlineMaxRunes)
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorCommentableRightLines(ctx context.Context, owner, repository, token string, number int64) (map[string]map[int64]struct{}, error) {
