@@ -1,0 +1,242 @@
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"path/filepath"
+	"slices"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/store"
+)
+
+//nolint:gocyclo // Keeps append/list/latest/delete coverage together for store lifecycle readability.
+func TestExecutionEventStoreAppendListLatestDelete(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+
+	first, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace:   "default",
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    "task-1",
+		TaskName:    "task-1",
+		Type:        events.ExecutionEventTypeTaskStarted,
+		Severity:    "WARNING",
+		Summary:     "started",
+		Content:     json.RawMessage(`{"safe":"ok"}`),
+		ContentText: "hello",
+		Truncation: &events.ExecutionEventTruncation{
+			ContentTextTruncated:     true,
+			ContentTextOriginalChars: 100,
+		},
+		CreatedAt: time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("AppendExecutionEvent first: %v", err)
+	}
+	second, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "task-1",
+		TaskName:   "task-1",
+		Type:       events.ExecutionEventTypeToolCallCompleted,
+		Severity:   events.ExecutionEventSeverityInfo,
+		Summary:    "tool done",
+	})
+	if err != nil {
+		t.Fatalf("AppendExecutionEvent second: %v", err)
+	}
+	other, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "task-2",
+		TaskName:   "task-2",
+		Type:       events.ExecutionEventTypeTaskFailed,
+	})
+	if err != nil {
+		t.Fatalf("AppendExecutionEvent other: %v", err)
+	}
+
+	if first.Seq != 1 || second.Seq != 2 || other.Seq != 1 {
+		t.Fatalf("seqs = first %d second %d other %d, want 1 2 1", first.Seq, second.Seq, other.Seq)
+	}
+	if first.ID == "" || second.ID == "" || first.ID == second.ID {
+		t.Fatalf("assigned IDs invalid: first=%q second=%q", first.ID, second.ID)
+	}
+	if first.Severity != events.ExecutionEventSeverityWarning {
+		t.Fatalf("severity = %q, want warning", first.Severity)
+	}
+
+	latest, err := s.GetLatestExecutionEventSeq(ctx, "default", store.ExecutionEventStreamTypeTask, "task-1")
+	if err != nil {
+		t.Fatalf("GetLatestExecutionEventSeq: %v", err)
+	}
+	if latest != 2 {
+		t.Fatalf("latest = %d, want 2", latest)
+	}
+
+	listed, err := s.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "task-1",
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 2 || listed[0].Seq != 1 || listed[1].Seq != 2 {
+		t.Fatalf("listed = %#v, want seqs 1,2", listed)
+	}
+	if string(listed[0].Content) != `{"safe":"ok"}` || listed[0].Truncation == nil || !listed[0].Truncation.ContentTextTruncated {
+		t.Fatalf("listed first payload not preserved: %#v content=%s", listed[0], listed[0].Content)
+	}
+
+	filtered, err := s.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "task-1",
+		AfterSeq:   1,
+		EventTypes: []string{events.ExecutionEventTypeToolCallCompleted},
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents filtered: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].Seq != 2 || filtered[0].Type != events.ExecutionEventTypeToolCallCompleted {
+		t.Fatalf("filtered = %#v, want only seq 2 tool event", filtered)
+	}
+
+	if err := s.DeleteExecutionEvents(ctx, "default", store.ExecutionEventStreamTypeTask, "task-1"); err != nil {
+		t.Fatalf("DeleteExecutionEvents: %v", err)
+	}
+	remainingTask1, err := s.ListExecutionEvents(ctx, store.ExecutionEventFilter{Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-1"})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents after delete: %v", err)
+	}
+	remainingTask2, err := s.ListExecutionEvents(ctx, store.ExecutionEventFilter{Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-2"})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents other after delete: %v", err)
+	}
+	if len(remainingTask1) != 0 || len(remainingTask2) != 1 {
+		t.Fatalf("remaining task1=%d task2=%d, want 0 and 1", len(remainingTask1), len(remainingTask2))
+	}
+	latest, err = s.GetLatestExecutionEventSeq(ctx, "default", store.ExecutionEventStreamTypeTask, "task-1")
+	if err != nil {
+		t.Fatalf("GetLatestExecutionEventSeq after delete: %v", err)
+	}
+	if latest != 0 {
+		t.Fatalf("latest after delete = %d, want 0", latest)
+	}
+}
+
+func TestExecutionEventStoreListDefaultAndMaxLimit(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	for i := range store.MaxExecutionEventLimit + 5 {
+		if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+			Namespace:  "default",
+			StreamType: store.ExecutionEventStreamTypeTask,
+			StreamID:   "task-limit",
+			TaskName:   "task-limit",
+			Type:       events.ExecutionEventTypeModelMessage,
+		}); err != nil {
+			t.Fatalf("AppendExecutionEvent %d: %v", i, err)
+		}
+	}
+	defaulted, err := s.ListExecutionEvents(ctx, store.ExecutionEventFilter{Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-limit"})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents default limit: %v", err)
+	}
+	if len(defaulted) != store.DefaultExecutionEventLimit {
+		t.Fatalf("defaulted len = %d, want %d", len(defaulted), store.DefaultExecutionEventLimit)
+	}
+	capped, err := s.ListExecutionEvents(ctx, store.ExecutionEventFilter{Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-limit", Limit: store.MaxExecutionEventLimit + 50})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents capped limit: %v", err)
+	}
+	if len(capped) != store.MaxExecutionEventLimit {
+		t.Fatalf("capped len = %d, want %d", len(capped), store.MaxExecutionEventLimit)
+	}
+}
+
+func TestExecutionEventStoreConcurrentSameStreamAppends(t *testing.T) {
+	s := setupDiskStore(t)
+	assertConcurrentExecutionEventAppends(t, s)
+}
+
+func TestExecutionEventStoreConcurrentSameStreamAppendsMultiConnection(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "multi-conn.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(8)
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		t.Fatalf("set WAL mode: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		t.Fatalf("set busy timeout: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA synchronous=NORMAL"); err != nil {
+		t.Fatalf("set synchronous mode: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
+		t.Fatalf("set foreign keys: %v", err)
+	}
+	if err := migrate(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	assertConcurrentExecutionEventAppends(t, NewStore(db, dbPath))
+}
+
+func assertConcurrentExecutionEventAppends(t *testing.T, s *Store) {
+	t.Helper()
+	ctx := context.Background()
+	const count = 50
+	seqs := make([]int64, count)
+	var wg sync.WaitGroup
+	errs := make(chan error, count)
+	for i := range count {
+
+		wg.Go(func() {
+			appended, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+				Namespace:  "default",
+				StreamType: store.ExecutionEventStreamTypeTask,
+				StreamID:   "task-concurrent",
+				TaskName:   "task-concurrent",
+				Type:       events.ExecutionEventTypeToolCallStarted,
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+			seqs[i] = appended.Seq
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("AppendExecutionEvent concurrent: %v", err)
+		}
+	}
+	slices.Sort(seqs)
+	for i, seq := range seqs {
+		want := int64(i + 1)
+		if seq != want {
+			t.Fatalf("sorted seqs[%d] = %d, want %d; all=%v", i, seq, want, seqs)
+		}
+	}
+	latest, err := s.GetLatestExecutionEventSeq(ctx, "default", store.ExecutionEventStreamTypeTask, "task-concurrent")
+	if err != nil {
+		t.Fatalf("GetLatestExecutionEventSeq: %v", err)
+	}
+	if latest != count {
+		t.Fatalf("latest = %d, want %d", latest, count)
+	}
+}

@@ -19,16 +19,17 @@ import (
 // Unknown JSON fields are ignored by Go's standard decoder; route handlers can opt into
 // strict decoding later by using json.Decoder.DisallowUnknownFields.
 type SubmitExecutionEventRequest struct {
-	Type        string          `json:"type"`
-	Severity    string          `json:"severity,omitempty"`
-	TaskName    string          `json:"taskName,omitempty"`
-	SessionName string          `json:"sessionName,omitempty"`
-	AgentName   string          `json:"agentName,omitempty"`
-	ToolName    string          `json:"toolName,omitempty"`
-	ToolCallID  string          `json:"toolCallID,omitempty"`
-	Summary     string          `json:"summary,omitempty"`
-	Content     json.RawMessage `json:"content,omitempty"`
-	ContentText string          `json:"contentText,omitempty"`
+	Type        string                           `json:"type"`
+	Severity    string                           `json:"severity,omitempty"`
+	TaskName    string                           `json:"taskName,omitempty"`
+	SessionName string                           `json:"sessionName,omitempty"`
+	AgentName   string                           `json:"agentName,omitempty"`
+	ToolName    string                           `json:"toolName,omitempty"`
+	ToolCallID  string                           `json:"toolCallID,omitempty"`
+	Summary     string                           `json:"summary,omitempty"`
+	Content     json.RawMessage                  `json:"content,omitempty"`
+	ContentText string                           `json:"contentText,omitempty"`
+	Truncation  *events.ExecutionEventTruncation `json:"truncation,omitempty"`
 }
 
 // ToStoreEvent converts a submission DTO to the store-facing event contract.
@@ -55,7 +56,7 @@ func (r SubmitExecutionEventRequest) ToStoreEvent(namespace, streamType, streamI
 		Summary:     payload.Summary,
 		Content:     payload.Content,
 		ContentText: payload.ContentText,
-		Truncation:  payload.Truncation,
+		Truncation:  mergeExecutionEventTruncation(r.Truncation, payload.Truncation),
 	}, nil
 }
 
@@ -150,4 +151,23 @@ func cloneExecutionEventTruncation(value *events.ExecutionEventTruncation) *even
 	}
 	truncationCopy := *value
 	return &truncationCopy
+}
+
+func mergeExecutionEventTruncation(values ...*events.ExecutionEventTruncation) *events.ExecutionEventTruncation {
+	var merged events.ExecutionEventTruncation
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+		merged.SummaryTruncated = merged.SummaryTruncated || value.SummaryTruncated
+		merged.SummaryOriginalChars = max(merged.SummaryOriginalChars, value.SummaryOriginalChars)
+		merged.ContentTextTruncated = merged.ContentTextTruncated || value.ContentTextTruncated
+		merged.ContentTextOriginalChars = max(merged.ContentTextOriginalChars, value.ContentTextOriginalChars)
+		merged.ContentJSONTruncated = merged.ContentJSONTruncated || value.ContentJSONTruncated
+		merged.ContentJSONOriginalBytes = max(merged.ContentJSONOriginalBytes, value.ContentJSONOriginalBytes)
+	}
+	if merged.Empty() {
+		return nil
+	}
+	return &merged
 }

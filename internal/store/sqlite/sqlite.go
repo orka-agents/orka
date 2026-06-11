@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -112,10 +113,38 @@ func migrate(db *sql.DB) error {
 			updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (namespace, task_name)
 		)`,
+		`CREATE TABLE IF NOT EXISTS execution_events (
+			id              TEXT PRIMARY KEY,
+			namespace       TEXT NOT NULL,
+			stream_type     TEXT NOT NULL,
+			stream_id       TEXT NOT NULL,
+			seq             INTEGER NOT NULL,
+			type            TEXT NOT NULL,
+			severity        TEXT NOT NULL DEFAULT 'info',
+			task_name       TEXT NOT NULL DEFAULT '',
+			session_name    TEXT NOT NULL DEFAULT '',
+			agent_name      TEXT NOT NULL DEFAULT '',
+			tool_name       TEXT NOT NULL DEFAULT '',
+			tool_call_id    TEXT NOT NULL DEFAULT '',
+			summary         TEXT NOT NULL DEFAULT '',
+			content_json    TEXT,
+			content_text    TEXT NOT NULL DEFAULT '',
+			truncation_json TEXT,
+			created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(namespace, stream_type, stream_id, seq)
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_session_messages_order ON session_messages(namespace, session_name, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_namespace ON sessions(namespace)`,
 		`CREATE INDEX IF NOT EXISTS idx_results_namespace ON results(namespace)`,
 		`CREATE INDEX IF NOT EXISTS idx_plan_states_namespace ON plan_states(namespace)`,
+		`CREATE INDEX IF NOT EXISTS idx_execution_events_stream_seq
+			ON execution_events(namespace, stream_type, stream_id, seq)`,
+		`CREATE INDEX IF NOT EXISTS idx_execution_events_type
+			ON execution_events(namespace, stream_type, stream_id, type, seq)`,
+		`CREATE INDEX IF NOT EXISTS idx_execution_events_task
+			ON execution_events(namespace, task_name, seq)`,
+		`CREATE INDEX IF NOT EXISTS idx_execution_events_session
+			ON execution_events(namespace, session_name, seq)`,
 		`CREATE TABLE IF NOT EXISTS memories (
 			id                 TEXT PRIMARY KEY,
 			namespace          TEXT NOT NULL,
@@ -722,8 +751,9 @@ func sqlitePrimaryKeyColumns(db *sql.DB, table string) ([]string, error) {
 
 // Store implements both store.ResultStore and store.SessionStore.
 type Store struct {
-	db     *sql.DB
-	dbPath string
+	db               *sql.DB
+	dbPath           string
+	executionEventMu sync.Mutex
 
 	// applyMemoryProposalAfterAcceptedRead is a test hook used to coordinate
 	// multi-connection proposal-apply races after an accepted proposal is read.
