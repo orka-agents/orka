@@ -151,10 +151,23 @@ func newMemoryUpdateCmd() *cobra.Command {
 		Short: "Update a memory",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			c := newClientFromCmd(cmd)
 			var body []byte
+			var query map[string]string
 			var err error
 			if file != "" {
-				_, body, err = manifestMap(file)
+				var manifest map[string]any
+				var manifestBody []byte
+				manifest, manifestBody, err = manifestMap(file)
+				manifestNS := ""
+				if err == nil {
+					manifestNS = strings.TrimSpace(manifestNamespace(manifest))
+					query, err = namespaceQueryForManifest(cmd, c.Namespace, manifest)
+				}
+				if err == nil && manifestNS != "" {
+					query = map[string]string{"namespace": manifestNS}
+				}
+				body = manifestBody
 			} else {
 				patch := map[string]any{}
 				if content != "" {
@@ -174,8 +187,13 @@ func newMemoryUpdateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c := newClientFromCmd(cmd)
-			result, err := c.DoJSON(context.Background(), http.MethodPut, "/api/v1/memories/"+url.PathEscape(args[0]), nil, body)
+			result, err := c.DoJSON(
+				context.Background(),
+				http.MethodPut,
+				"/api/v1/memories/"+url.PathEscape(args[0]),
+				query,
+				body,
+			)
 			if err != nil {
 				return err
 			}

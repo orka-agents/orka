@@ -136,7 +136,17 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 type MetadataRequest struct {
 	Name        string            `json:"name"`
 	Namespace   string            `json:"namespace"`
+	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+func objectMetaFromRequest(name, namespace string, metadata MetadataRequest) metav1.ObjectMeta {
+	return metav1.ObjectMeta{
+		Name:        name,
+		Namespace:   namespace,
+		Labels:      metadata.Labels,
+		Annotations: metadata.Annotations,
+	}
 }
 
 // resolveNamespace resolves the effective namespace for a request and enforces isolation if enabled.
@@ -439,13 +449,11 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	if spec.Type == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "type is required")
 	}
+	objectMeta := objectMetaFromRequest(name, namespace, req.Metadata)
+	objectMeta.Annotations = annotations
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        name,
-			Namespace:   namespace,
-			Annotations: annotations,
-		},
-		Spec: spec,
+		ObjectMeta: objectMeta,
+		Spec:       spec,
 	}
 	authReq := createTaskRequestFromTask(task)
 	if req.Timeout != "" {
@@ -1134,11 +1142,8 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	}
 
 	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
-		Spec: req.Spec,
+		ObjectMeta: objectMetaFromRequest(name, namespace, req.Metadata),
+		Spec:       req.Spec,
 	}
 	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "createAgent", agent.Namespace, agent.Name); err != nil {
 		return err
@@ -1387,11 +1392,8 @@ func (h *Handlers) CreateSkill(c fiber.Ctx) error {
 	}
 
 	skill := &corev1alpha1.Skill{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
-		Spec: req.Spec,
+		ObjectMeta: objectMetaFromRequest(name, namespace, req.Metadata),
+		Spec:       req.Spec,
 	}
 
 	ctx := c.Context()

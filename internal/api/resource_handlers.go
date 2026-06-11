@@ -7,7 +7,6 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -68,8 +67,14 @@ func validateProviderRESTCreate(spec corev1alpha1.ProviderSpec) error {
 	return nil
 }
 
-func validateProviderRESTUpdate(spec corev1alpha1.ProviderSpec) error {
-	return validateProviderRESTCreate(spec)
+func validateProviderRESTUpdate(spec, existing corev1alpha1.ProviderSpec) error {
+	if spec.BaseURL != "" && spec.BaseURL != existing.BaseURL {
+		return fiber.NewError(
+			fiber.StatusBadRequest,
+			"spec.baseURL cannot be changed through the REST API; update providers with Kubernetes RBAC instead",
+		)
+	}
+	return nil
 }
 
 func toolSpecHasProtectedAuth(spec corev1alpha1.ToolSpec) bool {
@@ -285,7 +290,10 @@ func (h *Handlers) CreateProvider(c fiber.Ctx) error {
 	if err := validateProviderRESTCreate(req.Spec); err != nil {
 		return err
 	}
-	provider := &corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}, Spec: req.Spec}
+	provider := &corev1alpha1.Provider{
+		ObjectMeta: objectMetaFromRequest(name, namespace, req.Metadata),
+		Spec:       req.Spec,
+	}
 	if err := h.client.Create(c.Context(), provider); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "provider already exists")
@@ -308,7 +316,7 @@ func (h *Handlers) UpdateProvider(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	if err := validateProviderRESTUpdate(req.Spec); err != nil {
+	if err := validateProviderRESTUpdate(req.Spec, provider.Spec); err != nil {
 		return err
 	}
 	// REST updates cannot set protected routing fields, but they also must not
@@ -381,7 +389,10 @@ func (h *Handlers) CreateTool(c fiber.Ctx) error {
 	if err := validateToolRESTMutation(req.Spec); err != nil {
 		return err
 	}
-	tool := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}, Spec: req.Spec}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: objectMetaFromRequest(name, namespace, req.Metadata),
+		Spec:       req.Spec,
+	}
 	if err := h.client.Create(c.Context(), tool); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "tool already exists")
@@ -533,7 +544,7 @@ func (h *Handlers) CreateSubstrateActorPool(c fiber.Ctx) error {
 		return err
 	}
 	pool := &corev1alpha1.SubstrateActorPool{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		ObjectMeta: objectMetaFromRequest(name, namespace, req.Metadata),
 		Spec:       req.Spec,
 	}
 	if err := h.client.Create(c.Context(), pool); err != nil {

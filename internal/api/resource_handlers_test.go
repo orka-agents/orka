@@ -23,10 +23,14 @@ func TestHandlers_ProviderCRUD(t *testing.T) {
 	app.Delete("/providers/:name", handlers.DeleteProvider)
 
 	createBody := map[string]any{
-		"metadata": map[string]any{"name": "openai", "namespace": "default"},
+		"metadata": map[string]any{
+			"name":        "openai",
+			"namespace":   "default",
+			"labels":      map[string]any{"app.kubernetes.io/name": "orka"},
+			"annotations": map[string]any{"example.com/source": "cli"},
+		},
 		"spec": map[string]any{
 			"type":         "openai",
-			"secretRef":    map[string]any{"name": "openai-secret", "key": "api-key"},
 			"defaultModel": "gpt-4o-mini",
 		},
 	}
@@ -38,11 +42,12 @@ func TestHandlers_ProviderCRUD(t *testing.T) {
 	var got corev1alpha1.Provider
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
 	require.Equal(t, "gpt-4o-mini", got.Spec.DefaultModel)
+	require.Equal(t, map[string]string{"app.kubernetes.io/name": "orka"}, got.Labels)
+	require.Equal(t, map[string]string{"example.com/source": "cli"}, got.Annotations)
 
 	updateBody := map[string]any{
 		"spec": map[string]any{
 			"type":         "openai",
-			"secretRef":    map[string]any{"name": "openai-secret"},
 			"defaultModel": "gpt-4.1",
 		},
 	}
@@ -58,6 +63,41 @@ func TestHandlers_ProviderCRUD(t *testing.T) {
 
 	resp = testJSONRequest(t, app, http.MethodDelete, "/providers/openai", nil)
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+}
+
+func TestHandlers_ProviderUpdatePreservesExistingBaseURL(t *testing.T) {
+	provider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "proxy-provider", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:         corev1alpha1.ProviderTypeOpenAI,
+			BaseURL:      "https://proxy.example/v1",
+			DefaultModel: "gpt-4o-mini",
+		},
+	}
+	handlers, app := setupTestHandlersWithObjects(provider)
+	app.Put("/providers/:name", handlers.UpdateProvider)
+
+	resp := testJSONRequest(t, app, http.MethodPut, "/providers/proxy-provider", map[string]any{
+		"spec": map[string]any{
+			"type":         "openai",
+			"baseURL":      "https://proxy.example/v1",
+			"defaultModel": "gpt-4.1",
+		},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var updated corev1alpha1.Provider
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&updated))
+	require.Equal(t, "https://proxy.example/v1", updated.Spec.BaseURL)
+	require.Equal(t, "gpt-4.1", updated.Spec.DefaultModel)
+
+	resp = testJSONRequest(t, app, http.MethodPut, "/providers/proxy-provider", map[string]any{
+		"spec": map[string]any{
+			"type":         "openai",
+			"baseURL":      "https://other-proxy.example/v1",
+			"defaultModel": "gpt-4.1",
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
 func TestHandlers_ToolWriteRejectsBuiltInAndCRUD(t *testing.T) {
@@ -203,6 +243,7 @@ func TestHandlers_CreateTask_KubernetesStyleManifest(t *testing.T) {
 		"metadata": map[string]any{
 			"name":        "manifest-task",
 			"namespace":   "default",
+			"labels":      map[string]any{"app.kubernetes.io/name": "orka-task"},
 			"annotations": map[string]any{"example.com/source": "cli"},
 		},
 		"spec": map[string]any{
@@ -220,6 +261,7 @@ func TestHandlers_CreateTask_KubernetesStyleManifest(t *testing.T) {
 	require.Equal(t, corev1alpha1.TaskTypeContainer, task.Spec.Type)
 	require.Equal(t, "alpine:3.20", task.Spec.Image)
 	require.Equal(t, map[string]string{"example.com/source": "cli"}, task.Annotations)
+	require.Equal(t, map[string]string{"app.kubernetes.io/name": "orka-task"}, task.Labels)
 }
 
 func TestHandlers_CreateTaskFlatSchedulePreservesManifestTimeZone(t *testing.T) {
@@ -280,7 +322,7 @@ func TestHandlers_ProviderMutationRejectsContextTokenIdentity(t *testing.T) {
 		"name": "openai",
 		"spec": map[string]any{
 			"type":      "openai",
-			"secretRef": map[string]any{"name": "openai-secret"},
+			"secretRef": map[string]any{"name": "openai-config"},
 		},
 	})
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -376,7 +418,7 @@ func TestHandlers_ProviderRESTMutationRejectsBaseURL(t *testing.T) {
 		"name": "proxy-provider",
 		"spec": map[string]any{
 			"type":      "openai",
-			"secretRef": map[string]any{"name": "openai-secret"},
+			"secretRef": map[string]any{"name": "openai-config"},
 			"baseURL":   "https://attacker.example",
 		},
 	})

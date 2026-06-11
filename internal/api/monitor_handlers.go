@@ -10,7 +10,6 @@ import (
 	"github.com/gofiber/fiber/v3"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -406,11 +405,8 @@ func (h *Handlers) CreateRepositoryMonitor(c fiber.Ctx) error {
 	}
 
 	monitor := &corev1alpha1.RepositoryMonitor{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
-		Spec: req.Spec,
+		ObjectMeta: objectMetaFromRequest(name, namespace, req.Metadata),
+		Spec:       req.Spec,
 	}
 	if err := h.authorizeContextTokenRepositoryMonitor(c, "createRepositoryMonitor", monitor); err != nil {
 		return err

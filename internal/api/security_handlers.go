@@ -473,11 +473,8 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	h.normalizeRepositoryScanSpec(&req.Spec)
 
 	scan := &corev1alpha1.RepositoryScan{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
-		Spec: req.Spec,
+		ObjectMeta: objectMetaFromRequest(name, namespace, req.Metadata),
+		Spec:       req.Spec,
 	}
 	if err := h.authorizeContextTokenSecurityScanTask(c, "createRepositoryScan", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
