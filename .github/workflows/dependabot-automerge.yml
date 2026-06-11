@@ -1,0 +1,207 @@
+name: Dependabot Automerge
+
+on:
+  workflow_run:
+    workflows:
+      - Agent Substrate E2E
+      - E2E Tests
+      - Helm Chart
+      - Lint
+      - Live Agent Sandbox E2E
+      - Live Copilot Proxy E2E
+      - Repository Monitor Smoke
+      - Security Scan E2E
+      - Tests
+      - Website
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Optional Dependabot PR number to merge after checks have passed
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  checks: read
+  contents: write
+  pull-requests: write
+  statuses: read
+
+concurrency:
+  group: dependabot-automerge-${{ github.event.workflow_run.head_branch || inputs.pr || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    name: Merge successful Dependabot PR
+    runs-on: ubuntu-latest
+    if: >-
+      ${{
+        (github.event_name == 'workflow_run' &&
+         github.event.workflow_run.conclusion == 'success' &&
+         github.event.workflow_run.event == 'pull_request') ||
+        github.event_name == 'workflow_dispatch'
+      }}
+    steps:
+      - name: Find eligible Dependabot PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || '' }}
+          WORKFLOW_PR: ${{ github.event.workflow_run.pull_requests[0].number || '' }}
+          MANUAL_PR: ${{ inputs.pr || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          pr_number="${MANUAL_PR:-${WORKFLOW_PR:-}}"
+
+          if [ -z "${pr_number:-}" ]; then
+            if [ -z "${HEAD_BRANCH:-}" ]; then
+              echo "No workflow_run head branch; nothing to merge."
+              exit 0
+            fi
+
+            pr_number="$(gh pr list \
+              --repo "$REPO" \
+              --head "$HEAD_BRANCH" \
+              --state open \
+              --json number,author,isDraft \
+              --jq 'map(select((.author.login == "dependabot[bot]" or .author.login == "app/dependabot") and .isDraft == false)) | first.number // empty')"
+          fi
+
+          if [ -z "${pr_number:-}" ]; then
+            echo "No open non-draft Dependabot PR found."
+            exit 0
+          fi
+
+          pr_json="$(gh pr view "$pr_number" \
+            --repo "$REPO" \
+            --json author,isDraft,state,headRefOid,headRefName \
+            --jq '{author: .author.login, isDraft, state, headRefOid, headRefName}')"
+
+          author="$(jq -r '.author' <<<"$pr_json")"
+          case "$author" in
+            dependabot'[bot]'|app/dependabot) ;;
+            *)
+              if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+                echo "Refusing to automerge PR #$pr_number from non-Dependabot author: $author" >&2
+                exit 1
+              fi
+              echo "PR #$pr_number is from $author, not Dependabot; nothing to merge."
+              exit 0
+              ;;
+          esac
+
+          state="$(jq -r '.state' <<<"$pr_json")"
+          if [ "$state" != "OPEN" ]; then
+            echo "PR #$pr_number is not open ($state); nothing to merge."
+            exit 0
+          fi
+
+          is_draft="$(jq -r '.isDraft' <<<"$pr_json")"
+          if [ "$is_draft" != "false" ]; then
+            echo "PR #$pr_number is a draft; not automerging."
+            exit 0
+          fi
+
+          head_sha="$(jq -r '.headRefOid' <<<"$pr_json")"
+          head_ref="$(jq -r '.headRefName' <<<"$pr_json")"
+
+          {
+            echo "number=$pr_number"
+            echo "head_sha=$head_sha"
+            echo "head_ref=$head_ref"
+          } >>"$GITHUB_OUTPUT"
+
+          echo "Found eligible Dependabot PR #$pr_number at $head_ref ($head_sha)."
+
+      - name: Verify all checks passed
+        id: checks
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+
+          check_lines="$(gh api --paginate \
+            "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100&filter=latest" \
+            --jq '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv')"
+
+          if [ -z "$check_lines" ]; then
+            echo "No check runs found for PR #$PR_NUMBER at $HEAD_SHA; refusing to automerge."
+            echo "ready=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          not_ready=0
+          failed=0
+
+          while IFS=$'\t' read -r name status conclusion; do
+            [ -n "${name:-}" ] || continue
+
+            if [ "$status" != "completed" ]; then
+              echo "Check is not complete yet: $name ($status)."
+              not_ready=1
+              continue
+            fi
+
+            case "$conclusion" in
+              success|neutral|skipped) ;;
+              *)
+                echo "Check did not pass: $name ($conclusion)."
+                failed=1
+                ;;
+            esac
+          done <<<"$check_lines"
+
+          status_summary="$(gh api "repos/$REPO/commits/$HEAD_SHA/status" --jq '[.state, (.statuses | length)] | @tsv')"
+          IFS=$'	' read -r combined_status status_count <<<"$status_summary"
+          if [ "$status_count" -gt 0 ] && [ "$combined_status" != "success" ]; then
+            echo "Commit status checks are not all successful yet: $combined_status."
+            not_ready=1
+          fi
+
+          if [ "$failed" -ne 0 ]; then
+            echo "One or more checks failed for PR #$PR_NUMBER; refusing to automerge."
+            echo "ready=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$not_ready" -ne 0 ]; then
+            echo "One or more checks are still pending for PR #$PR_NUMBER; will retry on the next workflow_run completion."
+            echo "ready=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "All checks passed for PR #$PR_NUMBER."
+          echo "ready=true" >>"$GITHUB_OUTPUT"
+
+      - name: Approve and merge Dependabot PR
+        if: steps.checks.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+
+          echo "Approving Dependabot PR #$PR_NUMBER after successful checks."
+          gh pr review "$PR_NUMBER" \
+            --repo "$REPO" \
+            --approve \
+            --body "Automated approval: all checks passed for this Dependabot update." || true
+
+          echo "Merging Dependabot PR #$PR_NUMBER."
+          gh pr merge "$PR_NUMBER" \
+            --repo "$REPO" \
+            --squash \
+            --delete-branch \
+            --match-head-commit "$HEAD_SHA"
