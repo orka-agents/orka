@@ -231,9 +231,19 @@ func (s *Server) setupRoutes() {
 	api.Post("/memory-proposals/:id/apply", s.handlers.ApplyMemoryProposal)
 	api.Post("/memory-proposals/:id/archive", s.handlers.ArchiveMemoryProposal)
 
+	// Provider endpoints
+	api.Get("/providers", s.handlers.ListProviders)
+	api.Post("/providers", s.handlers.CreateProvider)
+	api.Get("/providers/:name", s.handlers.GetProvider)
+	api.Put("/providers/:name", s.handlers.UpdateProvider)
+	api.Delete("/providers/:name", s.handlers.DeleteProvider)
+
 	// Tool endpoints
 	api.Get("/tools", s.handlers.ListTools)
+	api.Post("/tools", s.handlers.CreateTool)
 	api.Get("/tools/:name", s.handlers.GetTool)
+	api.Put("/tools/:name", s.handlers.UpdateTool)
+	api.Delete("/tools/:name", s.handlers.DeleteTool)
 
 	// Agent endpoints
 	api.Post("/agents", s.handlers.CreateAgent)
@@ -283,8 +293,16 @@ func (s *Server) setupRoutes() {
 	api.Get("/monitors/repositories/:name/items", s.handlers.ListRepositoryMonitorItems)
 	api.Get("/monitors/events", s.handlers.ListRepositoryMonitorEvents)
 
-	// Auth validation endpoint
+	// Substrate actor-pool endpoints
+	api.Get("/substrate-actor-pools", s.handlers.ListSubstrateActorPools)
+	api.Post("/substrate-actor-pools", s.handlers.CreateSubstrateActorPool)
+	api.Get("/substrate-actor-pools/:name", s.handlers.GetSubstrateActorPool)
+	api.Put("/substrate-actor-pools/:name", s.handlers.UpdateSubstrateActorPool)
+	api.Delete("/substrate-actor-pools/:name", s.handlers.DeleteSubstrateActorPool)
+
+	// Auth validation endpoints
 	api.Get("/auth/validate", s.handleAuthValidate)
+	api.Get("/auth/whoami", s.handleAuthWhoAmI)
 
 	// Reference endpoints (for dropdowns)
 	api.Get("/secrets", s.handlers.ListSecretNames)

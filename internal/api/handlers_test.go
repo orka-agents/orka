@@ -4440,3 +4440,17 @@ func TestHandlers_CreateAgent_MetadataFormat(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 }
+
+func TestHandlers_CreateTask_RejectsServerOwnedSpecCaseVariants(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/tasks", handlers.CreateTask)
+	body := map[string]any{
+		"metadata": map[string]any{"name": "bad-task"},
+		"Spec": map[string]any{
+			"type":        "container",
+			"RequestedBy": map[string]any{"username": "forged"},
+		},
+	}
+	resp := testJSONRequest(t, app, http.MethodPost, "/tasks", body)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}

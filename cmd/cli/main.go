@@ -46,6 +46,12 @@ func newRootCmd() *cobra.Command {
 	// Global flags
 	cmd.PersistentFlags().StringP("server", "s", "", "Orka server URL (default \"http://localhost:8080\")")
 	cmd.PersistentFlags().StringP("token", "t", "", "Bearer token for authentication")
+	cmd.PersistentFlags().String("txn-token", "", "Kontxt transaction token to send via Txn-Token header")
+	cmd.PersistentFlags().String(
+		"txn-token-file",
+		"",
+		"Path to file containing a Kontxt transaction token (use - for stdin)",
+	)
 	cmd.PersistentFlags().StringP("namespace", "n", "", "Kubernetes namespace (default \"default\")")
 	cmd.PersistentFlags().String("kubeconfig", "", "Path to kubeconfig file")
 
@@ -58,6 +64,17 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newAuditCmd())
 	cmd.AddCommand(newStatusCmd())
 	cmd.AddCommand(newSkillCmd())
+	cmd.AddCommand(newProviderCmd())
+	cmd.AddCommand(newToolCmd())
+	cmd.AddCommand(newSessionCmd())
+	cmd.AddCommand(newSecretCmd())
+	cmd.AddCommand(newSecurityCmd())
+	cmd.AddCommand(newMonitorCmd())
+	cmd.AddCommand(newMemoryCmd())
+	cmd.AddCommand(newAuthCmd())
+	cmd.AddCommand(newModelsCmd())
+	cmd.AddCommand(newWorkspaceCmd())
+	cmd.AddCommand(newSubstrateCmd())
 
 	return cmd
 }

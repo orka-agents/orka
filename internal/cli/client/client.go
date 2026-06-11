@@ -25,6 +25,7 @@ import (
 type Client struct {
 	BaseURL    string
 	Token      string
+	TxnToken   string
 	Namespace  string
 	HTTPClient *http.Client
 }
@@ -151,6 +152,9 @@ func (c *Client) StreamChat(ctx context.Context, req ChatRequest) (*SSEReader, *
 	if c.Token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+c.Token)
 	}
+	if c.TxnToken != "" {
+		httpReq.Header.Set("Txn-Token", c.TxnToken)
+	}
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
@@ -185,30 +189,118 @@ func (c *Client) GetChatConfig(ctx context.Context) (*ChatConfigResponse, error)
 }
 
 func (c *Client) doGet(ctx context.Context, reqURL string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	body, _, err := c.doRaw(ctx, http.MethodGet, reqURL, nil)
+	return body, err
+}
+
+func (c *Client) newRequest(ctx context.Context, method, reqURL string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
+	if c.TxnToken != "" {
+		req.Header.Set("Txn-Token", c.TxnToken)
+	}
+	return req, nil
+}
+
+func (c *Client) doRaw(ctx context.Context, method, reqURL string, body []byte) ([]byte, http.Header, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := c.newRequest(ctx, method, reqURL, reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	if body != nil && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
+		return nil, nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	body, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		return nil, nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(body))
+	if resp.StatusCode >= 400 {
+		return nil, resp.Header, fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}
+	return respBody, resp.Header, nil
+}
 
-	return body, nil
+func (c *Client) resourceURL(path string, query map[string]string) (string, error) {
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	u, err := url.Parse(c.BaseURL + path)
+	if err != nil {
+		return "", fmt.Errorf("invalid base URL: %w", err)
+	}
+	q := u.Query()
+	if c.Namespace != "" {
+		if _, ok := query["namespace"]; !ok {
+			q.Set("namespace", c.Namespace)
+		}
+	}
+	for k, v := range query {
+		if v != "" {
+			q.Set(k, v)
+		}
+	}
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+// DoJSON sends an HTTP request with an optional JSON body and decodes the JSON response into a generic value.
+func (c *Client) DoJSON(ctx context.Context, method, path string, query map[string]string, body []byte) (any, error) {
+	reqURL, err := c.resourceURL(path, query)
+	if err != nil {
+		return nil, err
+	}
+	respBody, _, err := c.doRaw(ctx, method, reqURL, body)
+	if err != nil {
+		return nil, err
+	}
+	if len(strings.TrimSpace(string(respBody))) == 0 {
+		return map[string]any{}, nil
+	}
+	var out any
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return out, nil
+}
+
+// GetRaw gets a raw response body and content type.
+func (c *Client) GetRaw(ctx context.Context, path string, query map[string]string) ([]byte, string, error) {
+	reqURL, err := c.resourceURL(path, query)
+	if err != nil {
+		return nil, "", err
+	}
+	body, headers, err := c.doRaw(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	return body, headers.Get("Content-Type"), nil
+}
+
+// DeleteResource deletes a resource path.
+func (c *Client) DeleteResource(ctx context.Context, path string, query map[string]string) error {
+	reqURL, err := c.resourceURL(path, query)
+	if err != nil {
+		return err
+	}
+	_, _, err = c.doRaw(ctx, http.MethodDelete, reqURL, nil)
+	return err
 }
 
 // HealthCheck calls GET /healthz and returns true if healthy.
@@ -288,18 +380,30 @@ func stringVal(v any) string {
 
 // CreateTaskRequest is the request body for creating a task.
 type CreateTaskRequest struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-	Type      string `json:"type"`
-	Prompt    string `json:"prompt,omitempty"`
-	Timeout   string `json:"timeout,omitempty"`
-	AgentRef  *struct {
+	Name      string   `json:"name"`
+	Namespace string   `json:"namespace"`
+	Type      string   `json:"type"`
+	Image     string   `json:"image,omitempty"`
+	Command   []string `json:"command,omitempty"`
+	Args      []string `json:"args,omitempty"`
+	Env       []struct {
+		Name  string `json:"name"`
+		Value string `json:"value,omitempty"`
+	} `json:"env,omitempty"`
+	Priority *int32  `json:"priority,omitempty"`
+	Prompt   string  `json:"prompt,omitempty"`
+	Timeout  string  `json:"timeout,omitempty"`
+	Schedule string  `json:"schedule,omitempty"`
+	TimeZone *string `json:"timeZone,omitempty"`
+	Suspend  *bool   `json:"suspend,omitempty"`
+	AgentRef *struct {
 		Name string `json:"name"`
 	} `json:"agentRef,omitempty"`
 	AI *struct {
 		ProviderRef *struct {
 			Name string `json:"name"`
 		} `json:"providerRef,omitempty"`
+		Model  string `json:"model,omitempty"`
 		Prompt string `json:"prompt,omitempty"`
 	} `json:"ai,omitempty"`
 }
@@ -309,14 +413,14 @@ type TaskDetail map[string]any
 
 // TaskSummary is a lightweight representation of a task for list display.
 type TaskSummary struct {
-	Name          string
-	Namespace     string
-	Type          string
-	Phase         string
-	Age           string
-	Iteration     int
-	TransactionID string
-	ParentTask    string
+	Name          string `json:"name" yaml:"name"`
+	Namespace     string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	Type          string `json:"type,omitempty" yaml:"type,omitempty"`
+	Phase         string `json:"phase,omitempty" yaml:"phase,omitempty"`
+	Age           string `json:"age,omitempty" yaml:"age,omitempty"`
+	Iteration     int    `json:"iteration,omitempty" yaml:"iteration,omitempty"`
+	TransactionID string `json:"transactionId,omitempty" yaml:"transactionId,omitempty"`
+	ParentTask    string `json:"parentTask,omitempty" yaml:"parentTask,omitempty"`
 }
 
 // taskListResponse matches the API ListResponse shape.
@@ -360,29 +464,14 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (*TaskDe
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
+	return c.CreateTaskRaw(ctx, body)
+}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/v1/tasks", bytes.NewReader(body))
+// CreateTaskRaw creates a task from a JSON request body.
+func (c *Client) CreateTaskRaw(ctx context.Context, body []byte) (*TaskDetail, error) {
+	respBody, _, err := c.doRaw(ctx, http.MethodPost, c.BaseURL+"/api/v1/tasks", body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if c.Token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.Token)
-	}
-
-	resp, err := c.HTTPClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+		return nil, err
 	}
 
 	var detail TaskDetail
@@ -483,6 +572,9 @@ func (c *Client) DeleteTask(ctx context.Context, name string, opts GetOptions) e
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
+	if c.TxnToken != "" {
+		req.Header.Set("Txn-Token", c.TxnToken)
+	}
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -515,6 +607,9 @@ func (c *Client) DeleteAgent(ctx context.Context, name string, opts GetOptions) 
 	}
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	if c.TxnToken != "" {
+		req.Header.Set("Txn-Token", c.TxnToken)
 	}
 
 	resp, err := c.HTTPClient.Do(req)
@@ -621,6 +716,9 @@ func (c *Client) DeleteSkill(ctx context.Context, name string, opts GetOptions) 
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
+	if c.TxnToken != "" {
+		req.Header.Set("Txn-Token", c.TxnToken)
+	}
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -646,6 +744,9 @@ func (c *Client) CreateSkill(ctx context.Context, body []byte) (*SkillDetail, er
 	req.Header.Set("Content-Type", "application/json")
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	if c.TxnToken != "" {
+		req.Header.Set("Txn-Token", c.TxnToken)
 	}
 
 	resp, err := c.HTTPClient.Do(req)
@@ -716,6 +817,9 @@ func (c *Client) StreamTaskLogs(ctx context.Context, name string, opts StreamLog
 	req.Header.Set("Accept", "text/event-stream")
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	if c.TxnToken != "" {
+		req.Header.Set("Txn-Token", c.TxnToken)
 	}
 
 	resp, err := c.HTTPClient.Do(req)
@@ -807,7 +911,11 @@ func (c *Client) ListArtifacts(ctx context.Context, taskName string, opts GetOpt
 }
 
 // DownloadArtifact downloads a specific artifact and returns the raw bytes and content type.
-func (c *Client) DownloadArtifact(ctx context.Context, taskName, filename string, opts GetOptions) ([]byte, string, error) {
+func (c *Client) DownloadArtifact(
+	ctx context.Context,
+	taskName, filename string,
+	opts GetOptions,
+) ([]byte, string, error) {
 	u, err := url.Parse(c.BaseURL + "/api/v1/tasks/" + url.PathEscape(taskName) + "/artifacts/" + url.PathEscape(filename))
 	if err != nil {
 		return nil, "", fmt.Errorf("invalid base URL: %w", err)
@@ -824,6 +932,9 @@ func (c *Client) DownloadArtifact(ctx context.Context, taskName, filename string
 	}
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	if c.TxnToken != "" {
+		req.Header.Set("Txn-Token", c.TxnToken)
 	}
 
 	resp, err := c.HTTPClient.Do(req)
@@ -868,4 +979,41 @@ func extractTaskSummary(item TaskDetail) TaskSummary {
 		}
 	}
 	return s
+}
+
+// GetTaskPlan gets the plan for a task as a generic JSON value.
+func (c *Client) GetTaskPlan(ctx context.Context, name string, opts GetOptions) (any, error) {
+	query := map[string]string{}
+	if opts.Namespace != "" {
+		query["namespace"] = opts.Namespace
+	}
+	return c.DoJSON(ctx, http.MethodGet, "/api/v1/tasks/"+url.PathEscape(name)+"/plan", query, nil)
+}
+
+// GetTaskChildren gets child tasks for a task as a generic list response.
+func (c *Client) GetTaskChildren(ctx context.Context, name string, opts GetOptions) (any, error) {
+	query := map[string]string{}
+	if opts.Namespace != "" {
+		query["namespace"] = opts.Namespace
+	}
+	return c.DoJSON(ctx, http.MethodGet, "/api/v1/tasks/"+url.PathEscape(name)+"/children", query, nil)
+}
+
+// AuthValidate validates the current credentials.
+func (c *Client) AuthValidate(ctx context.Context) (any, error) {
+	return c.DoJSON(ctx, http.MethodGet, "/api/v1/auth/validate", nil, nil)
+}
+
+// AuthWhoAmI returns the sanitized authenticated identity.
+func (c *Client) AuthWhoAmI(ctx context.Context) (any, error) {
+	return c.DoJSON(ctx, http.MethodGet, "/api/v1/auth/whoami", nil, nil)
+}
+
+// ListModels lists compatibility models for the requested API compatibility surface.
+func (c *Client) ListModels(ctx context.Context, compat string) (any, error) {
+	path := "/openai/v1/models"
+	if compat == "anthropic" {
+		path = "/anthropic/v1/models"
+	}
+	return c.DoJSON(ctx, http.MethodGet, path, nil, nil)
 }

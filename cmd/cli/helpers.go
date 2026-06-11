@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -97,6 +98,8 @@ func clearPortForwardCache() {
 func newClientFromCmd(cmd *cobra.Command) *client.Client {
 	server, _ := cmd.Flags().GetString("server")
 	token, _ := cmd.Flags().GetString("token")
+	txnToken, _ := cmd.Flags().GetString("txn-token")
+	txnTokenFile, _ := cmd.Flags().GetString("txn-token-file")
 	ns, _ := cmd.Flags().GetString("namespace")
 
 	// Load config as fallback
@@ -185,7 +188,16 @@ func newClientFromCmd(cmd *cobra.Command) *client.Client {
 		server = defaultServer
 	}
 
-	return client.NewWithNamespace(server, token, ns)
+	c := client.NewWithNamespace(server, token, ns)
+	if txnToken == "" && txnTokenFile != "" {
+		data, err := readFileOrStdin(txnTokenFile)
+		if err != nil {
+			cobra.CheckErr(fmt.Errorf("reading --txn-token-file: %w", err))
+		}
+		txnToken = string(data)
+	}
+	c.TxnToken = strings.TrimSpace(txnToken)
+	return c
 }
 
 // discoverService finds the Orka service in the cluster.

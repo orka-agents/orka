@@ -8,8 +8,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"text/tabwriter"
 
@@ -25,12 +25,14 @@ func newAgentCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newAgentListCmd())
 	cmd.AddCommand(newAgentGetCmd())
+	cmd.AddCommand(newAgentCreateCmd())
+	cmd.AddCommand(newAgentUpdateCmd())
 	cmd.AddCommand(newAgentDeleteCmd())
 	return cmd
 }
 
 func newAgentListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List agents",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -40,6 +42,14 @@ func newAgentListCmd() *cobra.Command {
 			})
 			if err != nil {
 				return err
+			}
+
+			format, err := outputFormat(cmd)
+			if err != nil {
+				return err
+			}
+			if format != outputTable {
+				return printStructured(cmd, agents)
 			}
 
 			if len(agents) == 0 {
@@ -64,10 +74,12 @@ func newAgentListCmd() *cobra.Command {
 			return nil
 		},
 	}
+	addOutputFlag(cmd, outputTable)
+	return cmd
 }
 
 func newAgentGetCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "get <name>",
 		Short: "Get agent details",
 		Args:  cobra.ExactArgs(1),
@@ -80,14 +92,44 @@ func newAgentGetCmd() *cobra.Command {
 				return err
 			}
 
-			out, err := json.MarshalIndent(agent, "", "  ")
-			if err != nil {
-				return fmt.Errorf("formatting output: %w", err)
+			return printStructured(cmd, agent)
+		},
+	}
+	addOutputFlag(cmd, outputJSON)
+	return cmd
+}
+
+func newAgentCreateCmd() *cobra.Command {
+	var file string
+	cmd := &cobra.Command{
+		Use:   "create -f <file>",
+		Short: "Create an agent from a manifest",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if file == "" {
+				return fmt.Errorf("--file (-f) is required")
 			}
-			fmt.Println(string(out))
+			c := newClientFromCmd(cmd)
+			body, err := manifestWithNamespaceJSON(cmd, file, c.Namespace)
+			if err != nil {
+				return err
+			}
+			result, err := c.DoJSON(context.Background(), http.MethodPost, "/api/v1/agents", nil, body)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Agent created: %s\n", metadataName(result)) //nolint:errcheck
 			return nil
 		},
 	}
+	cmd.Flags().StringVarP(&file, "file", "f", "", "Path to agent YAML/JSON manifest")
+	return cmd
+}
+
+func newAgentUpdateCmd() *cobra.Command {
+	return newCRUDUpdateCmd(crudResourceSpec{
+		BasePath: "/api/v1/agents",
+		Name:     "agent",
+	})
 }
 
 func newAgentDeleteCmd() *cobra.Command {

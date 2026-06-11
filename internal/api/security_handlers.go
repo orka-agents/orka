@@ -445,7 +445,11 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	if req.Name == "" {
+	name := req.Name
+	if name == "" {
+		name = req.Metadata.Name
+	}
+	if name == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "name is required")
 	}
 	if req.Spec.RepoURL == "" {
@@ -455,7 +459,11 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.analysisAgentRef.name is required")
 	}
 
-	namespace, err := h.resolveNamespace(c, req.Namespace)
+	explicitNamespace := req.Namespace
+	if explicitNamespace == "" {
+		explicitNamespace = req.Metadata.Namespace
+	}
+	namespace, err := h.resolveNamespace(c, explicitNamespace)
 	if err != nil {
 		return err
 	}
@@ -465,11 +473,8 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	h.normalizeRepositoryScanSpec(&req.Spec)
 
 	scan := &corev1alpha1.RepositoryScan{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      req.Name,
-			Namespace: namespace,
-		},
-		Spec: req.Spec,
+		ObjectMeta: objectMetaFromRequest(name, namespace, req.Metadata),
+		Spec:       req.Spec,
 	}
 	if err := h.authorizeContextTokenSecurityScanTask(c, "createRepositoryScan", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
