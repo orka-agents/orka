@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -440,32 +441,66 @@ func newTaskWaitCmd() *cobra.Command {
 				}
 				deadline = time.After(d)
 			}
+
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+
 			c := newClientFromCmd(cmd)
-			ticker := time.NewTicker(2 * time.Second)
-			defer ticker.Stop()
-			for {
-				detail, err := c.GetTask(context.Background(), args[0], client.GetOptions{Namespace: c.Namespace})
-				if err != nil {
-					return err
-				}
-				phase := client.StringField(*detail, "status", "phase")
-				switch strings.ToLower(phase) {
-				case "succeeded":
-					fmt.Fprintf(cmd.OutOrStdout(), "Task %s succeeded.\n", args[0]) //nolint:errcheck
-					return nil
-				case "failed", "cancelled":
-					return fmt.Errorf("task %s finished with phase %s", args[0], phase)
-				}
-				select {
-				case <-deadline:
-					return fmt.Errorf("timed out waiting for task %s", args[0])
-				case <-ticker.C:
-				}
-			}
+			return waitForTaskPhase(
+				ctx,
+				args[0],
+				deadline,
+				2*time.Second,
+				func(ctx context.Context) (string, error) {
+					detail, err := c.GetTask(ctx, args[0], client.GetOptions{Namespace: c.Namespace})
+					if err != nil {
+						return "", err
+					}
+					return client.StringField(*detail, "status", "phase"), nil
+				},
+				cmd.OutOrStdout(),
+			)
 		},
 	}
 	cmd.Flags().StringVar(&timeout, "timeout", "", "Maximum time to wait (e.g. 5m)")
 	return cmd
+}
+
+func waitForTaskPhase(
+	ctx context.Context,
+	taskName string,
+	deadline <-chan time.Time,
+	pollInterval time.Duration,
+	getPhase func(context.Context) (string, error),
+	out io.Writer,
+) error {
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		phase, err := getPhase(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
+		switch strings.ToLower(phase) {
+		case "succeeded":
+			fmt.Fprintf(out, "Task %s succeeded.\n", taskName) //nolint:errcheck
+			return nil
+		case "failed", "cancelled":
+			return fmt.Errorf("task %s finished with phase %s", taskName, phase)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline:
+			return fmt.Errorf("timed out waiting for task %s", taskName)
+		case <-ticker.C:
+		}
+	}
 }
 
 func newTaskDeleteCmd() *cobra.Command {

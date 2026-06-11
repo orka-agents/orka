@@ -3,8 +3,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -111,6 +114,25 @@ func TestNewTaskGetCmdArgs(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil {
 		t.Error("expected error when no args provided")
+	}
+}
+
+func TestWaitForTaskPhaseContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := waitForTaskPhase(
+		ctx,
+		"my-task",
+		nil,
+		time.Millisecond,
+		func(context.Context) (string, error) {
+			return "Running", nil
+		},
+		io.Discard,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForTaskPhase error = %v, want context.Canceled", err)
 	}
 }
 
