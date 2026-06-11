@@ -168,7 +168,7 @@ func expectOrkaSuccess(result cliResult, forbidden ...string) {
 	GinkgoHelper()
 	expectNoSensitiveOutput(result, forbidden...)
 	if result.Err != nil {
-		Fail(fmt.Sprintf("orka %s failed: %v\n%s", strings.Join(result.Args, " "), result.Err, redactedCLIOutput(result, forbidden...)), 1)
+		Fail(fmt.Sprintf("orka %s failed: %v\n%s", redactedCLIArgs(result, forbidden...), result.Err, redactedCLIOutput(result, forbidden...)), 1)
 	}
 }
 
@@ -176,7 +176,7 @@ func expectOrkaFailure(result cliResult, forbidden ...string) {
 	GinkgoHelper()
 	expectNoSensitiveOutput(result, forbidden...)
 	if result.Err == nil {
-		Fail(fmt.Sprintf("orka %s succeeded unexpectedly\n%s", strings.Join(result.Args, " "), redactedCLIOutput(result, forbidden...)), 1)
+		Fail(fmt.Sprintf("orka %s succeeded unexpectedly\n%s", redactedCLIArgs(result, forbidden...), redactedCLIOutput(result, forbidden...)), 1)
 	}
 }
 
@@ -200,6 +200,10 @@ func expectNoSensitiveOutput(result cliResult, forbidden ...string) {
 func sensitiveDigest(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:8])
+}
+
+func redactedCLIArgs(result cliResult, forbidden ...string) string {
+	return redactSensitive(strings.Join(result.Args, " "), forbidden...)
 }
 
 func redactedCLIOutput(result cliResult, forbidden ...string) string {
@@ -306,4 +310,34 @@ func writeTempManifest(dir, name, body string) string {
 	path := filepath.Join(dir, name)
 	Expect(os.WriteFile(path, []byte(strings.TrimSpace(body)+"\n"), 0o600)).To(Succeed())
 	return path
+}
+
+func runSuccessfulOrka(home string, forbidden []string, args ...string) cliResult {
+	GinkgoHelper()
+	result := runOrka(home, args...)
+	expectOrkaSuccess(result, forbidden...)
+	return result
+}
+
+func expectListDoesNotContainName(decoded any, name string) {
+	GinkgoHelper()
+	for _, item := range extractListItems(decoded) {
+		if itemName(item) == name {
+			Fail(fmt.Sprintf("expected list output not to contain resource %q", name), 1)
+		}
+	}
+}
+
+func deleteK8sResource(kind, name string) {
+	if strings.TrimSpace(name) == "" {
+		return
+	}
+	cmd := exec.Command("kubectl", "delete", kind, name, "-n", namespace, "--ignore-not-found")
+	_, _ = utils.Run(cmd)
+}
+
+func k8sResourceExists(kind, name string) bool {
+	cmd := exec.Command("kubectl", "get", kind, name, "-n", namespace, "--ignore-not-found")
+	output, err := utils.Run(cmd)
+	return err == nil && strings.TrimSpace(output) != ""
 }
