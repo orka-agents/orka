@@ -152,6 +152,11 @@ type RepositoryMonitorStore interface {
 	GetReviewRecord(ctx context.Context, namespace, id string) (*ReviewRecord, error)
 	ListReviewRecords(ctx context.Context, filter ReviewRecordFilter) ([]ReviewRecord, string, error)
 
+	CreateReviewPublishRecord(ctx context.Context, record *ReviewPublishRecord) error
+	UpdateReviewPublishRecord(ctx context.Context, record *ReviewPublishRecord) error
+	GetReviewPublishRecord(ctx context.Context, namespace, id string) (*ReviewPublishRecord, error)
+	ListReviewPublishRecords(ctx context.Context, filter ReviewPublishRecordFilter) ([]ReviewPublishRecord, string, error)
+
 	CreateCommandEvent(ctx context.Context, event *CommandEvent) error
 	UpdateCommandEvent(ctx context.Context, event *CommandEvent) error
 	GetCommandEvent(ctx context.Context, namespace, id string) (*CommandEvent, error)

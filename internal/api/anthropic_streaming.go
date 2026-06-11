@@ -56,6 +56,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 		totalOutputTokens := 0
 		repetitionTracker := make(map[string]int)
 		exposedToolNames := completionToolNameSet(capturedReq.Tools)
+		prematureEndRetries := 0
 
 		for iteration := 0; iteration < h.config.MaxIterations; iteration++ {
 			// Check context cancellation
@@ -70,14 +71,6 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 				_ = writeMessageStop(w)
 				return
 			default:
-			}
-
-			// Progress check every 5 iterations
-			if iteration > 0 && iteration%5 == 0 {
-				messages = append(messages, llm.Message{
-					Role:    "user",
-					Content: "[System: Progress check — summarize what you've done so far and what remains.]",
-				})
 			}
 
 			// Truncate conversation if needed
@@ -117,22 +110,19 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 
 				totalOutputTokens += resp.OutputTokens
 
-				// Emit text content
+				// Capture text content. It is emitted after tool-call/final-state
+				// classification so control markers can be stripped first.
 				if resp.Content != "" {
 					textContent = resp.Content
-					if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{Type: "text", Text: ""}); err == nil {
-						_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{Type: "text_delta", Text: resp.Content})
-						_ = writeContentBlockStop(w, blockIndex)
-						blockIndex++
-					}
 				}
 
 				// Capture tool calls for server-side execution (don't emit tool_use blocks
 				// to the client — the client must not see them or it will try to execute locally)
 				toolCalls = resp.ToolCalls
 			} else {
-				// Consume stream chunks
-				inTextBlock := false
+				// Consume stream chunks. Text is buffered until this iteration's
+				// tool-call/final-state classification is known, so internal
+				// sentinels are never leaked to the client.
 				streamError := false
 				for chunk := range streamCh {
 					if chunk.Error != nil {
@@ -143,49 +133,19 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 
 					// Handle text content
 					if chunk.Content != "" {
-						if !inTextBlock {
-							if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{
-								Type: "text", Text: "",
-							}); err != nil {
-								break
-							}
-							inTextBlock = true
-						}
-						if err := writeContentBlockDelta(w, blockIndex, AnthropicDelta{
-							Type: "text_delta", Text: chunk.Content,
-						}); err != nil {
-							break
-						}
 						textContent += chunk.Content
 					}
 
 					// Handle tool calls — capture for server-side execution but don't
 					// emit tool_use blocks to the client stream
 					if chunk.ToolCall != nil {
-						if inTextBlock {
-							_ = writeContentBlockStop(w, blockIndex)
-							blockIndex++
-							inTextBlock = false
-						}
-
 						toolCalls = append(toolCalls, *chunk.ToolCall)
 					}
 
 					if chunk.Done {
-						if inTextBlock {
-							_ = writeContentBlockStop(w, blockIndex)
-							blockIndex++
-							inTextBlock = false
-						}
 						totalOutputTokens += estimateTokens(textContent)
 						break
 					}
-				}
-
-				// Close text block if stream ended without Done
-				if inTextBlock {
-					_ = writeContentBlockStop(w, blockIndex)
-					blockIndex++
 				}
 
 				// If stream errored with no content, fall back to Complete
@@ -200,22 +160,56 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 					totalOutputTokens += resp.OutputTokens
 					if resp.Content != "" {
 						textContent = resp.Content
-						if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{Type: "text", Text: ""}); err == nil {
-							_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{Type: "text_delta", Text: resp.Content})
-							_ = writeContentBlockStop(w, blockIndex)
-							blockIndex++
-						}
 					}
 					toolCalls = resp.ToolCalls
 				}
 			}
 
-			// No tool calls → final response, close the stream
+			// No tool calls — potentially final response. Guard against premature
+			// end-of-turn: if the streamed text lacks the GOAL_STATE sentinel and
+			// we haven't yet exhausted the retry budget, inject a "continue with
+			// next tool_use" reminder and re-loop. The client will see the
+			// premature text already streamed plus the recovery, but the
+			// workflow continues instead of validation/review/PR being skipped.
 			if len(toolCalls) == 0 {
-				stopReason := oaiStopReasonEndTurn
-				_ = writeMessageDelta(w, stopReason, totalOutputTokens)
-				_ = writeMessageStop(w)
-				return
+				if hasGoalStateSentinelPrefix(textContent) {
+					writeAnthropicTextProgress(w, &blockIndex, stripGoalStateSentinel(textContent))
+					stopReason := oaiStopReasonEndTurn
+					_ = writeMessageDelta(w, stopReason, totalOutputTokens)
+					_ = writeMessageStop(w)
+					return
+				}
+				if prematureEndRetries >= h.config.MaxPrematureEndRetries {
+					anthropicLog.Info("streaming: premature end of turn — retry budget exhausted, closing stream anyway",
+						"iteration", iteration,
+						"retries", prematureEndRetries,
+					)
+					writeAnthropicTextProgress(w, &blockIndex, stripGoalStateSentinel(textContent))
+					stopReason := oaiStopReasonEndTurn
+					_ = writeMessageDelta(w, stopReason, totalOutputTokens)
+					_ = writeMessageStop(w)
+					return
+				}
+				prematureEndRetries++
+				anthropicLog.Info("streaming: premature end of turn — injecting continue message and re-looping",
+					"iteration", iteration,
+					"retries", prematureEndRetries,
+					"content_prefix", truncateForLog(textContent, 120),
+				)
+				continueMsg := fmt.Sprintf(
+					"[System: You emitted text but did not include the literal %q sentinel that marks GOAL STATE A or GOAL STATE B. The workflow is not done. Per the TURN-ENDING INVARIANT, your next response MUST contain a tool_use (not text). Look at the POSTCONDITION TABLE and call the correct next tool. Do NOT emit any text until you are ready to write your final report that begins with %q on its own line.]",
+					goalStateSentinel, goalStateSentinel,
+				)
+				writeAnthropicTextProgress(w, &blockIndex, "[Continuing workflow...]\n\n")
+				messages = append(messages, llm.Message{
+					Role:    "assistant",
+					Content: textContent,
+				})
+				messages = append(messages, llm.Message{
+					Role:    "user",
+					Content: continueMsg,
+				})
+				continue
 			}
 
 			toolNames := make([]string, len(toolCalls))
@@ -227,6 +221,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 				"tool_calls", len(toolCalls),
 				"tools", toolNames,
 			)
+			writeAnthropicTextProgress(w, &blockIndex, stripGoalStateSentinel(textContent))
 
 			// Append assistant message with tool calls
 			messages = append(messages, llm.Message{
@@ -248,21 +243,9 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 
 				result := executeExposedToolCall(streamCtx, tc, h.config.ToolTimeout, toolCtx, exposedToolNames)
 
-				// Emit tool result as a text content block so the user sees what happened
-				resultPreview := result
-				if len(resultPreview) > 2000 {
-					resultPreview = resultPreview[:2000] + "..."
-				}
-				if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{
-					Type: "text", Text: "",
-				}); err == nil {
-					_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{
-						Type: "text_delta",
-						Text: fmt.Sprintf("[Tool %s result]: %s", tc.Name, resultPreview),
-					})
-					_ = writeContentBlockStop(w, blockIndex)
-					blockIndex++
-				}
+				// Emit safe tool progress metadata only. Raw tool results can
+				// contain file contents, task logs, transcripts, or credentials.
+				writeAnthropicTextProgress(w, &blockIndex, formatToolProgress(tc, result))
 
 				messages = append(messages, llm.Message{
 					Role:       "tool",
@@ -434,7 +417,7 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 		// Use the correct stop reason — "tool_use" if tool calls were emitted
 		stopReason := oaiStopReasonEndTurn
 		if hasToolCalls {
-			stopReason = "tool_use"
+			stopReason = oaiStopReasonToolUse
 		}
 		_ = writeMessageDelta(w, stopReason, 0)
 		_ = writeMessageStop(w)
@@ -536,6 +519,19 @@ func writeAnthropicSSE(w *bufio.Writer, eventType string, data any) error {
 	}
 	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, jsonData)
 	return w.Flush()
+}
+
+func writeAnthropicTextProgress(w *bufio.Writer, blockIndex *int, text string) {
+	if text == "" {
+		return
+	}
+	if err := writeContentBlockStart(w, *blockIndex, AnthropicContentBlock{Type: "text", Text: ""}); err != nil {
+		anthropicLog.Error(err, "failed to write progress content_block_start")
+		return
+	}
+	_ = writeContentBlockDelta(w, *blockIndex, AnthropicDelta{Type: "text_delta", Text: text})
+	_ = writeContentBlockStop(w, *blockIndex)
+	(*blockIndex)++
 }
 
 // writeMessageStart emits the message_start event.

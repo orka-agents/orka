@@ -75,6 +75,10 @@ type MonitorItem struct {
 	AutomergeState      string    `json:"automergeState,omitempty"`
 	StatusCommentID     string    `json:"statusCommentID,omitempty"`
 	StatusCommentURL    string    `json:"statusCommentURL,omitempty"`
+	LastPublishID       string    `json:"lastPublishID,omitempty"`
+	LastPublishPhase    string    `json:"lastPublishPhase,omitempty"`
+	LastPublishReason   string    `json:"lastPublishReason,omitempty"`
+	LastPublishURL      string    `json:"lastPublishURL,omitempty"`
 	UpdatedAt           time.Time `json:"updatedAt"`
 	LastSeenAt          time.Time `json:"lastSeenAt"`
 }
@@ -127,6 +131,42 @@ type ReviewRecordFilter struct {
 	Verdict     string
 	Limit       int
 	Cursor      string
+}
+
+// ReviewPublishRecord stores one GitHub review publish attempt/outcome.
+type ReviewPublishRecord struct {
+	ID                 string    `json:"id"`
+	MonitorNamespace   string    `json:"monitorNamespace"`
+	MonitorName        string    `json:"monitorName"`
+	ItemKind           string    `json:"itemKind"`
+	ItemNumber         int64     `json:"itemNumber,omitempty"`
+	HeadSHA            string    `json:"headSHA,omitempty"`
+	RunID              string    `json:"runID,omitempty"`
+	ReviewTaskName     string    `json:"reviewTaskName,omitempty"`
+	ReviewRecordID     string    `json:"reviewRecordID,omitempty"`
+	Phase              string    `json:"phase"`
+	Event              string    `json:"event,omitempty"`
+	GitHubReviewID     string    `json:"githubReviewID,omitempty"`
+	GitHubReviewURL    string    `json:"githubReviewURL,omitempty"`
+	BodyDigest         string    `json:"bodyDigest,omitempty"`
+	InlineCommentCount int       `json:"inlineCommentCount"`
+	SkipReason         string    `json:"skipReason,omitempty"`
+	Error              string    `json:"error,omitempty"`
+	CreatedAt          time.Time `json:"createdAt"`
+	UpdatedAt          time.Time `json:"updatedAt"`
+}
+
+// ReviewPublishRecordFilter constrains review publish record list queries.
+type ReviewPublishRecordFilter struct {
+	Namespace      string
+	MonitorName    string
+	ItemKind       string
+	ItemNumber     int64
+	HeadSHA        string
+	ReviewRecordID string
+	Phase          string
+	Limit          int
+	Cursor         string
 }
 
 // CommandEvent stores one maintainer command intake event.

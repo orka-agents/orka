@@ -101,8 +101,36 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	if err := validateRepositoryMonitorSupportedTargets(spec); err != nil {
 		return err
 	}
+	if err := validateRepositoryMonitorReviewPublishSpec(spec.Review.Publish); err != nil {
+		return err
+	}
 	if repositoryMonitorPullRequestsEnabled(spec) && (spec.Agents.Reviewer == nil || strings.TrimSpace(spec.Agents.Reviewer.Name) == "") {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.agents.reviewer.name is required when pull request monitoring is enabled")
+	}
+	return nil
+}
+
+func validateRepositoryMonitorReviewPublishSpec(publish corev1alpha1.RepositoryMonitorReviewPublishSpec) error {
+	if mode := strings.TrimSpace(publish.Mode); mode != "" && mode != "summary_only" && mode != "summary_with_inline_findings" {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.review.publish.mode must be summary_only or summary_with_inline_findings")
+	}
+	if event := strings.TrimSpace(publish.Event); event != "" && event != "COMMENT" {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.review.publish.event only supports COMMENT in v1")
+	}
+	if policy := strings.TrimSpace(publish.SameHeadPolicy); policy != "" && policy != "skip" {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.review.publish.sameHeadPolicy only supports skip in v1")
+	}
+	if priority := strings.TrimSpace(publish.Inline.MinPriority); priority != "" {
+		switch priority {
+		case "P0", "P1", "P2", "P3":
+		default:
+			return fiber.NewError(fiber.StatusBadRequest, "spec.review.publish.inline.minPriority must be one of P0, P1, P2, or P3")
+		}
+	}
+	if publish.Inline.MaxComments != nil {
+		if *publish.Inline.MaxComments < 0 || *publish.Inline.MaxComments > 50 {
+			return fiber.NewError(fiber.StatusBadRequest, "spec.review.publish.inline.maxComments must be between 0 and 50")
+		}
 	}
 	return nil
 }

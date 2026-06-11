@@ -257,8 +257,9 @@ spec:
                 properties:
                   event:
                     default: COMMENT
-                    description: Event is the default GitHub review event rendered
-                      after analysis.
+                    description: |-
+                      Event is the legacy/default GitHub review event value included in review task input.
+                      It does not control RepositoryMonitor GitHub publishing; use Publish.Event.
                     enum:
                     - COMMENT
                     - APPROVE
@@ -268,6 +269,86 @@ spec:
                     description: ExactEventEnabled enables exact-head review from
                       repository events.
                     type: boolean
+                  publish:
+                    description: |-
+                      Publish controls deterministic GitHub pull request review publishing after review ingestion.
+                      Publishing is disabled by default and V1 only supports neutral COMMENT reviews.
+                    properties:
+                      enabled:
+                        description: Enabled enables GitHub pull request review publishing.
+                          Defaults to false.
+                        type: boolean
+                      event:
+                        default: COMMENT
+                        description: Event is the GitHub review event to submit. V1
+                          only supports COMMENT.
+                        enum:
+                        - COMMENT
+                        type: string
+                      inline:
+                        description: Inline controls optional inline review comments
+                          for eligible findings.
+                        properties:
+                          enabled:
+                            description: Enabled enables inline comments when Mode
+                              is summary_with_inline_findings.
+                            type: boolean
+                          maxComments:
+                            description: MaxComments caps inline comments per review.
+                              Defaults to 10.
+                            format: int32
+                            maximum: 50
+                            minimum: 0
+                            type: integer
+                          minPriority:
+                            default: P2
+                            description: MinPriority is the lowest finding priority
+                              eligible for inline comments. Defaults to P2.
+                            enum:
+                            - P0
+                            - P1
+                            - P2
+                            - P3
+                            type: string
+                          onlyChangedLines:
+                            description: OnlyChangedLines restricts inline comments
+                              to RIGHT-side changed lines. V1 treats this as true.
+                            type: boolean
+                        type: object
+                      mode:
+                        default: summary_only
+                        description: Mode selects whether Orka publishes only a deterministic
+                          summary or also eligible inline findings.
+                        enum:
+                        - summary_only
+                        - summary_with_inline_findings
+                        type: string
+                      postNeedsChanges:
+                        description: PostNeedsChanges controls whether needs_changes
+                          reviews are posted. Defaults to true.
+                        type: boolean
+                      postNeedsHuman:
+                        description: PostNeedsHuman controls whether needs_human reviews
+                          are posted. Defaults to true.
+                        type: boolean
+                      postPassed:
+                        description: PostPassed controls whether clean/passed reviews
+                          are posted. Defaults to false.
+                        type: boolean
+                      postSecuritySensitive:
+                        description: |-
+                          PostSecuritySensitive allows public publishing of security_sensitive findings when true.
+                          Defaults to false.
+                        type: boolean
+                      sameHeadPolicy:
+                        default: skip
+                        description: |-
+                          SameHeadPolicy controls duplicate handling for one monitor, PR, and exact head SHA.
+                          V1 only supports skip.
+                        enum:
+                        - skip
+                        type: string
+                    type: object
                   requireGreenCI:
                     description: RequireGreenCI requires acceptable CI before background
                       review selection.

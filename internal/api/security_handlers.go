@@ -180,6 +180,11 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 			},
 		},
 	}
+	if scan.Spec.GitSecretRef != nil {
+		if err := authorizeContextTokenGitCredentialSecretForUser(ui, h.contextTokenAuthorization, "createSecurityScanTaskGitSecret", scan.Namespace, scan.Spec.GitSecretRef.Name); err != nil {
+			return nil, err
+		}
+	}
 	if err := authorizeAndStampTaskContext(ctx, h.client, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityScanTask", ui, task); err != nil {
 		return nil, err
 	}
@@ -251,6 +256,11 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 				},
 			},
 		},
+	}
+	if scan.Spec.GitSecretRef != nil {
+		if err := authorizeContextTokenGitCredentialSecretForUser(ui, h.contextTokenAuthorization, "createSecurityValidationTaskGitSecret", scan.Namespace, scan.Spec.GitSecretRef.Name); err != nil {
+			return err
+		}
 	}
 	if err := authorizeAndStampTaskContext(ctx, h.client, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityValidationTask", ui, task); err != nil {
 		return err
@@ -328,6 +338,11 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, sc
 				},
 			},
 		},
+	}
+	if scan.Spec.GitSecretRef != nil {
+		if err := authorizeContextTokenGitCredentialSecretForUser(ui, h.contextTokenAuthorization, "createSecurityPatchTaskGitSecret", scan.Namespace, scan.Spec.GitSecretRef.Name); err != nil {
+			return nil, err
+		}
 	}
 	if err := authorizeAndStampTaskContext(ctx, h.client, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityPatchTask", ui, task); err != nil {
 		return nil, err
@@ -467,6 +482,11 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenSecurityScanTask(c, "createRepositoryScan", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
+	if scan.Spec.GitSecretRef != nil {
+		if err := h.authorizeContextTokenGitCredentialSecretName(c, "createRepositoryScanGitSecret", namespace, scan.Spec.GitSecretRef.Name); err != nil {
+			return err
+		}
+	}
 	if err := h.client.Create(c.Context(), scan); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "repository scan already exists")
@@ -510,6 +530,11 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 	updated.Spec = req.Spec
 	if err := h.authorizeContextTokenSecurityScanTask(c, "updateRepositoryScan", updated, updated.Spec.AnalysisAgentRef); err != nil {
 		return err
+	}
+	if updated.Spec.GitSecretRef != nil {
+		if err := h.authorizeContextTokenGitCredentialSecretName(c, "updateRepositoryScanGitSecret", namespace, updated.Spec.GitSecretRef.Name); err != nil {
+			return err
+		}
 	}
 	if err := h.client.Update(c.Context(), updated); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update repository scan: %v", err))
@@ -1185,6 +1210,9 @@ func (h *Handlers) CreateSecurityPullRequest(c fiber.Ctx) error {
 	}
 	if scan.Spec.GitSecretRef == nil {
 		return fiber.NewError(fiber.StatusBadRequest, "repository scan does not have git credentials configured")
+	}
+	if err := h.authorizeContextTokenGitCredentialSecretName(c, "createSecurityPullRequestGitSecret", namespace, scan.Spec.GitSecretRef.Name); err != nil {
+		return err
 	}
 
 	secret := &corev1.Secret{}

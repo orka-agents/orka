@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -442,6 +443,141 @@ var _ = Describe("Task Controller", func() {
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(cond.Reason).To(Equal("TaskFailed"))
+		})
+
+		It("should surface OOMKilled in Status.Message when Job fails with an OOM pod", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-running-oom"
+			ns := defaultNS
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"false"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName + "-pod",
+					Namespace: ns,
+					Labels: map[string]string{
+						labels.LabelTask: labels.SelectorValue(taskName),
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "worker",
+						Image: "alpine:latest",
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceMemory: resource.MustParse("512Mi"),
+							},
+						},
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name: "worker",
+				State: corev1.ContainerState{
+					Terminated: &corev1.ContainerStateTerminated{
+						Reason:   "OOMKilled",
+						ExitCode: 137,
+					},
+				},
+			}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: ns}, job)).To(Succeed())
+			job.Status.Failed = 1
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(task.Status.Message).To(ContainSubstring("OOMKilled"))
+			Expect(task.Status.Message).To(ContainSubstring("512Mi"))
+			Expect(task.Status.Message).To(ContainSubstring("resources.limits.memory"))
+		})
+
+		It("should surface non-zero exit code in Status.Message when Job fails", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			taskName := "test-running-exit2"
+			ns := defaultNS
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"false"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName + "-pod",
+					Namespace: ns,
+					Labels: map[string]string{
+						labels.LabelTask: labels.SelectorValue(taskName),
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "worker", Image: "alpine:latest"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name: "worker",
+				State: corev1.ContainerState{
+					Terminated: &corev1.ContainerStateTerminated{
+						Reason:   "Error",
+						ExitCode: 2,
+					},
+				},
+			}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: ns}, job)).To(Succeed())
+			job.Status.Failed = 1
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(task.Status.Message).To(ContainSubstring("exit"))
+			Expect(task.Status.Message).To(ContainSubstring("2"))
 		})
 
 		It("should wait when a freshly-created Job is not visible yet", func() {

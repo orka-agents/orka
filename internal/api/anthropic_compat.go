@@ -350,6 +350,17 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 				}
 				return nil
 			},
+			AuthorizeSecretRead: func(ctx context.Context, namespace, secretName string) *tools.ChatToolError {
+				if err := authorizeContextTokenSecretRead(contextToken, h.contextTokenAuthorization, "anthropicToolReadSecret", namespace, secretName); err != nil {
+					return &tools.ChatToolError{
+						Type:       "authorization_failed",
+						Message:    err.Error(),
+						Suggestion: "Use a context token authorized to read the git credential secret",
+					}
+				}
+				return nil
+			},
+			RequireSecretReadAuthorization: true,
 			CheckTaskLimit: func() *tools.ChatToolError {
 				if tasksCreated >= 20 {
 					return &tools.ChatToolError{Type: "limit_reached", Message: "task creation limit reached (max 20)", Suggestion: "Wait for existing tasks to complete"}
@@ -375,6 +386,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 			anthropicLog.Error(err, "tool loop failed")
 			return anthropicError(c, 500, "api_error", "completion failed: "+err.Error())
 		}
+		resp = stripGoalStateSentinelFromResponse(resp)
 	} else {
 		// Transparent proxy: single LLM call, return response directly
 		resp, err = provider.Complete(ctx, compReq)

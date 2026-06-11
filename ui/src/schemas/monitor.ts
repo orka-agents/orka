@@ -30,7 +30,24 @@ export const repositoryMonitorSpecSchema = z.object({
   review: z.object({
     event: z.string().optional(),
     requireGreenCI: z.boolean().optional(),
+    staleReviewTTL: z.string().optional(),
     exactEventEnabled: z.boolean().optional(),
+    publish: z.object({
+      enabled: z.boolean().optional(),
+      mode: z.string().optional(),
+      event: z.string().optional(),
+      postPassed: z.boolean().optional(),
+      postNeedsChanges: z.boolean().optional(),
+      postNeedsHuman: z.boolean().optional(),
+      postSecuritySensitive: z.boolean().optional(),
+      sameHeadPolicy: z.string().optional(),
+      inline: z.object({
+        enabled: z.boolean().optional(),
+        minPriority: z.string().optional(),
+        maxComments: z.number().optional(),
+        onlyChangedLines: z.boolean().optional(),
+      }).optional(),
+    }).optional(),
   }).optional(),
   repair: z.object({
     enabled: z.boolean().optional(),
@@ -41,6 +58,18 @@ export const repositoryMonitorSpecSchema = z.object({
     requireMaintainerOptIn: z.boolean().optional(),
     requireGlobalMergeGate: z.boolean().optional(),
     allowedMergeMethods: z.array(z.string()).optional(),
+  }).optional(),
+  policy: z.object({
+    protectedLabels: z.array(z.string()).optional(),
+    pauseLabels: z.array(z.string()).optional(),
+    optInLabels: z.object({
+      autofix: z.string().optional(),
+      automerge: z.string().optional(),
+    }).optional(),
+    advisoryLabels: z.object({
+      enabled: z.boolean().optional(),
+    }).optional(),
+    allowedRepositoryPermissions: z.array(z.string()).optional(),
   }).optional(),
   validation: z.object({
     mode: z.string().optional(),
@@ -104,6 +133,10 @@ export const monitorItemSchema = z.object({
   lastVerdict: z.string().optional(),
   repairState: z.string().optional(),
   automergeState: z.string().optional(),
+  lastPublishID: z.string().optional(),
+  lastPublishPhase: z.string().optional(),
+  lastPublishReason: z.string().optional(),
+  lastPublishURL: z.string().optional(),
   updatedAt: z.string(),
   lastSeenAt: z.string(),
 })

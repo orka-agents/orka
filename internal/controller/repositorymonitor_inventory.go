@@ -779,6 +779,12 @@ func repositoryMonitorItemFromPullRequest(monitor *corev1alpha1.RepositoryMonito
 		item.AutomergeState = existing.AutomergeState
 		item.StatusCommentID = existing.StatusCommentID
 		item.StatusCommentURL = existing.StatusCommentURL
+		if strings.TrimSpace(existing.HeadSHA) != "" && existing.HeadSHA == pr.HeadSHA {
+			item.LastPublishID = existing.LastPublishID
+			item.LastPublishPhase = existing.LastPublishPhase
+			item.LastPublishReason = existing.LastPublishReason
+			item.LastPublishURL = existing.LastPublishURL
+		}
 	}
 	return item
 }
@@ -865,7 +871,7 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorPullRequestPage(ctx 
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("GitHub pull request inventory returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, &repositoryMonitorGitHubAPIError{Operation: "pull request inventory", StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	var response []repositoryMonitorPullRequestResponse
@@ -905,7 +911,7 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorPullRequest(ctx cont
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("GitHub pull request request returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, &repositoryMonitorGitHubAPIError{Operation: "pull request request", StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	var response repositoryMonitorPullRequestResponse

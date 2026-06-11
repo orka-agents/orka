@@ -10,8 +10,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +27,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/tools"
 
 	_ "github.com/sozercan/orka/internal/llm/anthropic"
 	_ "github.com/sozercan/orka/internal/llm/openai"
@@ -429,14 +432,14 @@ func TestConvertAnthropicTools(t *testing.T) {
 }
 
 func TestConvertAnthropicTools_FieldMapping(t *testing.T) {
-	tools := []AnthropicTool{
+	anthropicTools := []AnthropicTool{
 		{
 			Name:        "search",
 			Description: "Search the web",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
 		},
 	}
-	result := convertAnthropicTools(tools)
+	result := convertAnthropicTools(anthropicTools)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(result))
 	}
@@ -446,8 +449,8 @@ func TestConvertAnthropicTools_FieldMapping(t *testing.T) {
 	if result[0].Description != "Search the web" {
 		t.Errorf("description = %q", result[0].Description)
 	}
-	if string(result[0].Parameters) != string(tools[0].InputSchema) {
-		t.Errorf("parameters = %s, want %s", result[0].Parameters, tools[0].InputSchema)
+	if string(result[0].Parameters) != string(anthropicTools[0].InputSchema) {
+		t.Errorf("parameters = %s, want %s", result[0].Parameters, anthropicTools[0].InputSchema)
 	}
 }
 
@@ -586,6 +589,41 @@ func TestConvertToAnthropicResponse(t *testing.T) {
 				tt.checkContent(t, result.Content)
 			}
 		})
+	}
+}
+
+func TestConvertToAnthropicResponse_PreservesGoalStateSentinelForTransparentProxy(t *testing.T) {
+	result := convertToAnthropicResponse(&llm.CompletionResponse{
+		Content:    goalStateSentinel + "\nPR ready: https://example.test/pr/3",
+		StopReason: oaiStopReasonEndTurn,
+	}, "claude-sonnet-4-20250514")
+
+	if len(result.Content) != 1 {
+		t.Fatalf("expected one text block, got %d", len(result.Content))
+	}
+	if result.Content[0].Text != goalStateSentinel+"\nPR ready: https://example.test/pr/3" {
+		t.Fatalf("text = %q", result.Content[0].Text)
+	}
+	if !strings.Contains(result.Content[0].Text, goalStateSentinel) {
+		t.Fatalf("transparent converter should preserve sentinel-like text: %q", result.Content[0].Text)
+	}
+}
+
+func TestAnthropicToolLoopFormatting_StripsGoalStateSentinel(t *testing.T) {
+	resp := stripGoalStateSentinelFromResponse(&llm.CompletionResponse{
+		Content:    goalStateSentinel + "\nPR ready: https://example.test/pr/3",
+		StopReason: oaiStopReasonEndTurn,
+	})
+	result := convertToAnthropicResponse(resp, "claude-sonnet-4-20250514")
+
+	if len(result.Content) != 1 {
+		t.Fatalf("expected one text block, got %d", len(result.Content))
+	}
+	if result.Content[0].Text != "PR ready: https://example.test/pr/3" {
+		t.Fatalf("text = %q", result.Content[0].Text)
+	}
+	if strings.Contains(result.Content[0].Text, goalStateSentinel) {
+		t.Fatalf("tool-loop formatted response leaked sentinel: %q", result.Content[0].Text)
 	}
 }
 
@@ -1010,6 +1048,121 @@ func (m *mockAnthropicProvider) Name() string {
 	return "mock-anthropic"
 }
 
+func TestHandleStreamingMessages_StripsSentinelAndStreamsSafeToolProgress(t *testing.T) {
+	filePath := fmt.Sprintf("/tmp/orka-anthropic-stream-%d.txt", time.Now().UnixNano())
+	if err := os.WriteFile(filePath, []byte("anthropic streaming secret content"), 0o600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(filePath) })
+
+	mock := &mockAnthropicProvider{
+		responses: []*llm.CompletionResponse{
+			{
+				Content:    "Reading file before final answer.\n",
+				StopReason: oaiStopReasonToolUse,
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call_file_read",
+					Name:      "file_read",
+					Arguments: json.RawMessage(fmt.Sprintf(`{"path":%q}`, filePath)),
+				}},
+			},
+			{
+				Content:    goalStateSentinel + "\nPR ready: https://example.test/pr/4",
+				StopReason: oaiStopReasonEndTurn,
+			},
+		},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingMessages(
+			c, mock,
+			&llm.CompletionRequest{
+				Model:    "claude-sonnet-4-20250514",
+				Messages: []llm.Message{{Role: testRoleUser, Content: "read then report"}},
+				Tools:    []llm.Tool{{Name: "file_read"}},
+			},
+			"claude-sonnet-4-20250514", 0, nil,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	for _, want := range []string{
+		"Reading file before final answer.",
+		"[Tool file_read completed]",
+		"PR ready: https://example.test/pr/4",
+		"message_stop",
+	} {
+		if !strings.Contains(bodyStr, want) {
+			t.Fatalf("expected stream body to contain %q, got: %s", want, bodyStr)
+		}
+	}
+	for _, forbidden := range []string{
+		goalStateSentinel,
+		"anthropic streaming secret content",
+		"premature end",
+		"call_file_read",
+	} {
+		if strings.Contains(bodyStr, forbidden) {
+			t.Fatalf("stream body leaked internal content %q: %s", forbidden, bodyStr)
+		}
+	}
+	if mock.callIdx != 2 {
+		t.Fatalf("expected 2 LLM calls, got %d", mock.callIdx)
+	}
+}
+
+func TestHandleStreamingMessages_DoesNotStreamPrematureCoordinatorText(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		responses: []*llm.CompletionResponse{
+			{Content: "premature anthropic secret progress", StopReason: oaiStopReasonEndTurn},
+			{Content: goalStateSentinel + "\nPR ready: https://example.test/pr/6", StopReason: oaiStopReasonEndTurn},
+		},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	handler.config.MaxPrematureEndRetries = 1
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingMessages(
+			c, mock,
+			&llm.CompletionRequest{
+				Model:    "claude-sonnet-4-20250514",
+				Messages: []llm.Message{{Role: testRoleUser, Content: "ship"}},
+			},
+			"claude-sonnet-4-20250514", 0, nil,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, "premature anthropic secret progress") {
+		t.Fatalf("stream body leaked premature coordinator text: %s", bodyStr)
+	}
+	for _, want := range []string{"[Continuing workflow...]", "PR ready: https://example.test/pr/6", "message_stop"} {
+		if !strings.Contains(bodyStr, want) {
+			t.Fatalf("expected stream body to contain %q, got: %s", want, bodyStr)
+		}
+	}
+	if mock.callIdx != 2 {
+		t.Fatalf("expected 2 LLM calls, got %d", mock.callIdx)
+	}
+}
+
 // --- Tests: injectOrkaTools ---
 
 func TestInjectOrkaTools_BuiltinTools(t *testing.T) {
@@ -1091,7 +1244,126 @@ func TestInjectOrkaTools_WithToolCRDs(t *testing.T) {
 	}
 }
 
+// TestInjectOrkaTools_CoordinatorToolsAllRegistered guards against a class of
+// outages where coordinatorProxyTools lists a tool name that is not registered
+// in DefaultRegistry. When that happens ToLLMTools silently drops the tool, the
+// model never sees it in its tool list, but the system prompt still tells the
+// model to call it. The chat-to-PR demo finished all the real work and then
+// blew up with "tool create_pull_request is not available in this request"
+// because exactly this drift had crept in.
+//
+// The test calls every registration path the controller's main.go uses so the
+// assertion is "all advertised tools are reachable in DefaultRegistry once the
+// controller is fully wired", not "this single registration path covers them".
+func TestInjectOrkaTools_CoordinatorToolsAllRegistered(t *testing.T) {
+	handler, _ := setupTestAnthropicHandler()
+	tools.RegisterProxyPRTools(handler.client)
+
+	req := &llm.CompletionRequest{}
+	injectOrkaTools(context.Background(), handler.client, req, "default")
+
+	names := map[string]bool{}
+	for _, tool := range req.Tools {
+		names[tool.Name] = true
+	}
+	for _, expected := range coordinatorProxyTools {
+		if !names[expected] {
+			t.Errorf("coordinatorProxyTools advertises %q but it is not registered in DefaultRegistry; "+
+				"add it to RegisterChatTools, RegisterProxyPRTools, or another initializer the controller calls before serving traffic", expected)
+		}
+	}
+}
+
 // --- Tests: runNonStreamingToolLoop ---
+
+// Demo 10 run 2026-06-01 07:40 PT regressed: coordinator stopped at iter 9
+// emitting "## Progress Summary" + "Hard-limit budget remaining" markdown
+// (instead of a tool_use) right after wait_for_task on the discovery
+// container task. This terminated the SSE stream — validation, review, PR
+// never ran.
+//
+// Two structural fixes in this commit:
+//
+//  1. anthropic_tool_loop.go (and anthropic_streaming.go) used to inject
+//     "[System: Progress check — summarize what you've done so far and what
+//     remains.]" every 5 iterations. That message literally instructed the
+//     model to emit the progress-summary pattern we'd then blame it for.
+//     REMOVED in both files.
+//
+//  2. The "no tool calls → return" branch in both paths now requires the
+//     response to contain the literal goalStateSentinel
+//     ("<ORKA_GOAL_STATE_REACHED>"). Without it, the server treats the text
+//     as a premature progress summary, injects a "continue with tool_use"
+//     reminder, and re-loops up to ChatConfig.MaxPrematureEndRetries times
+//     before giving up and returning the response anyway.
+//
+// This test pins behavior (1)+(2) for the non-streaming path. Streaming
+// equivalent: TestStreamingToolLoop_PrematureEndIsRetried below.
+func TestRunNonStreamingToolLoop_PrematureEndIsRetried(t *testing.T) {
+	_, _ = setupTestAnthropicHandler()
+	mock := &mockAnthropicProvider{
+		responses: []*llm.CompletionResponse{
+			// Iteration 0: model emits markdown progress summary, no tool_use.
+			// Without the safety net, this would be returned to the client.
+			{Content: "## Progress Summary\n\nI've done X.\n\n### Remaining\n1. Y", StopReason: "end_turn"},
+			// Iteration 1 (re-prompt): model still hasn't included sentinel.
+			// Still no tool_use; still must retry.
+			{Content: "Continuing... I'll do Y next.", StopReason: "end_turn"},
+			// Iteration 2 (re-prompt): model finally emits the sentinel + body.
+			// This response must be returned to the client without further re-prompting.
+			{Content: "<ORKA_GOAL_STATE_REACHED>\nPR ready: https://example.test/pr/1", StopReason: "end_turn"},
+		},
+	}
+	req := &llm.CompletionRequest{
+		Model:    "test-model",
+		Messages: []llm.Message{{Role: "user", Content: "ship a PR"}},
+	}
+
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model",
+		ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second, MaxPrematureEndRetries: 3}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(resp.Content, "ORKA_GOAL_STATE_REACHED") {
+		t.Errorf("final content should contain the sentinel, got %q", resp.Content)
+	}
+	if mock.callIdx != 3 {
+		t.Errorf("expected 3 LLM calls (one initial + 2 retries until sentinel), got %d", mock.callIdx)
+	}
+}
+
+// If the model never emits the sentinel, the loop must still terminate after
+// MaxPrematureEndRetries+1 attempts. Otherwise a stubborn model could pin a
+// chat session forever.
+func TestRunNonStreamingToolLoop_PrematureEndExhaustsBudget(t *testing.T) {
+	_, _ = setupTestAnthropicHandler()
+	mock := &mockAnthropicProvider{
+		responses: []*llm.CompletionResponse{
+			{Content: "summary 1", StopReason: "end_turn"},
+			{Content: "summary 2", StopReason: "end_turn"},
+			{Content: "summary 3 (final, but still no sentinel)", StopReason: "end_turn"},
+			// If a 4th call happens, the test fails.
+			{Content: "should not happen", StopReason: "end_turn"},
+		},
+	}
+	req := &llm.CompletionRequest{
+		Model:    "test-model",
+		Messages: []llm.Message{{Role: "user", Content: "ship a PR"}},
+	}
+
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model",
+		ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second, MaxPrematureEndRetries: 2}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Initial call + 2 retries = 3 calls. The 3rd response is returned as-is.
+	if mock.callIdx != 3 {
+		t.Errorf("expected 3 LLM calls, got %d", mock.callIdx)
+	}
+	if !strings.Contains(resp.Content, "summary 3") {
+		t.Errorf("expected final summary content, got %q", resp.Content)
+	}
+}
 
 func TestRunNonStreamingToolLoop_NoToolCalls(t *testing.T) {
 	_, _ = setupTestAnthropicHandler()

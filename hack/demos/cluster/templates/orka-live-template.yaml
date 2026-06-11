@@ -1,0 +1,68 @@
+# SandboxTemplate used by Demo 60.
+#
+# Mirrors the template from scripts/live-agent-sandbox-e2e.sh, but with a
+# runtime image that bundles git + gh + a writable /workspace so the builder
+# agent can `git push` and `gh pr create` from inside the sandbox.
+#
+# Override the runtime image with ORKA_SANDBOX_RUNTIME_IMAGE before
+# applying if you maintain your own:
+#
+#   sed "s|REPLACE_RUNTIME_IMAGE|${ORKA_SANDBOX_RUNTIME_IMAGE}|" \
+#     hack/demos/cluster/templates/orka-live-template.yaml | kubectl apply -f -
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: orka-live-template
+  namespace: demo-magic
+  labels:
+    orka.ai/demo: sandbox-template
+spec:
+  networkPolicyManagement: Unmanaged
+  service: true
+  podTemplate:
+    spec:
+      dnsPolicy: ClusterFirst
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+      containers:
+        - name: agent
+          image: REPLACE_RUNTIME_IMAGE
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/sandbox-runtime"]
+          ports:
+            - containerPort: 8888
+              protocol: TCP
+          # Burstable QoS so the kubelet doesn't pick the sandbox pod first
+          # under memory pressure. Codex running inside the sandbox can spike
+          # well past a BestEffort budget during long-running turns; without
+          # explicit limits the kubelet OOMKilled the pod mid-turn, which the
+          # router then surfaced as 502 "Connection refused" to the worker.
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: app
+              mountPath: /app
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: app
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

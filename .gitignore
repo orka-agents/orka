@@ -1,4 +1,6 @@
 # Binaries for programs and plugins
+__pycache__/
+*.py[cod]
 *.exe
 *.exe~
 *.dll
