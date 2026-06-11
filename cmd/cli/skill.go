@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -244,36 +243,11 @@ func newSkillImportCmd() *cobra.Command {
 }
 
 func newSkillUpdateCmd() *cobra.Command {
-	var file string
-	cmd := &cobra.Command{
-		Use:   "update <name> -f <file>",
-		Short: "Update a skill from a YAML/JSON manifest",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if file == "" {
-				return fmt.Errorf("--file (-f) is required")
-			}
-			manifest, body, err := manifestMap(file)
-			if err != nil {
-				return err
-			}
-			c := newClientFromCmd(cmd)
-			query, err := namespaceQueryForManifest(cmd, c.Namespace, manifest)
-			if err != nil {
-				return err
-			}
-			result, err := c.DoJSON(context.Background(), http.MethodPut, "/api/v1/skills/"+url.PathEscape(args[0]), query, body)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Skill updated: %s\n", metadataName(result)) //nolint:errcheck
-			return nil
-		},
-	}
-	cmd.Flags().StringVarP(&file, "file", "f", "", "Path to skill YAML/JSON manifest")
-	return cmd
+	return newCRUDUpdateCmd(crudResourceSpec{
+		BasePath: "/api/v1/skills",
+		Name:     "skill",
+	})
 }
-
 func newSkillValidateCmd() *cobra.Command {
 	var file string
 	cmd := &cobra.Command{

@@ -357,6 +357,22 @@ func TestHandlers_ProviderRESTMutationRejectsBaseURL(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
+func TestHandlers_ToolRESTMutationRejectsMalformedURL(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/tools", handlers.CreateTool)
+
+	resp := testJSONRequest(t, app, http.MethodPost, "/tools", map[string]any{
+		"name": "bad-url-tool",
+		"spec": map[string]any{
+			"description": "bad url",
+			"http": map[string]any{
+				"url": "https://example.com/%zz",
+			},
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
 func TestHandlers_ToolRESTMutationRejectsAuthSecretRef(t *testing.T) {
 	handlers, app := setupTestHandlers()
 	app.Post("/tools", handlers.CreateTool)

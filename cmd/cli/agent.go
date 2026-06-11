@@ -9,7 +9,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"net/url"
+	"net/http"
 	"os"
 	"text/tabwriter"
 
@@ -113,7 +113,7 @@ func newAgentCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			result, err := c.DoJSON(context.Background(), "POST", "/api/v1/agents", nil, body)
+			result, err := c.DoJSON(context.Background(), http.MethodPost, "/api/v1/agents", nil, body)
 			if err != nil {
 				return err
 			}
@@ -126,36 +126,11 @@ func newAgentCreateCmd() *cobra.Command {
 }
 
 func newAgentUpdateCmd() *cobra.Command {
-	var file string
-	cmd := &cobra.Command{
-		Use:   "update <name> -f <file>",
-		Short: "Update an agent from a manifest",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if file == "" {
-				return fmt.Errorf("--file (-f) is required")
-			}
-			manifest, body, err := manifestMap(file)
-			if err != nil {
-				return err
-			}
-			c := newClientFromCmd(cmd)
-			query, err := namespaceQueryForManifest(cmd, c.Namespace, manifest)
-			if err != nil {
-				return err
-			}
-			result, err := c.DoJSON(context.Background(), "PUT", "/api/v1/agents/"+url.PathEscape(args[0]), query, body)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Agent updated: %s\n", metadataName(result)) //nolint:errcheck
-			return nil
-		},
-	}
-	cmd.Flags().StringVarP(&file, "file", "f", "", "Path to agent YAML/JSON manifest")
-	return cmd
+	return newCRUDUpdateCmd(crudResourceSpec{
+		BasePath: "/api/v1/agents",
+		Name:     "agent",
+	})
 }
-
 func newAgentDeleteCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "delete <name>",

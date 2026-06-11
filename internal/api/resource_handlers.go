@@ -117,7 +117,7 @@ func validateToolRESTURL(rawURL string) error {
 	}
 	parsed, err := neturl.Parse(rawURL)
 	if err != nil {
-		return nil
+		return fiber.NewError(fiber.StatusBadRequest, "spec.http.url is invalid")
 	}
 	if parsed.User != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.http.url must not contain embedded credentials")
