@@ -225,7 +225,7 @@ func postLiveAnthropicJSON(apiBaseURL, token, providerName, model, expectedText 
 		"max_tokens": 32,
 		"messages": [{
 			"role": "user",
-			"content": "Reply with exactly %s and nothing else. Do not use any tools."
+			"content": "User request: perform this live Anthropic compatibility connectivity task by returning the exact marker %s in your final answer. Do not use any tools."
 		}]
 	}`, providerName, model, expectedText)
 
@@ -258,7 +258,7 @@ func postLiveAnthropicSSE(apiBaseURL, token, providerName, model, expectedText s
 		"stream": true,
 		"messages": [{
 			"role": "user",
-			"content": "Reply with exactly %s and nothing else. Do not use any tools."
+			"content": "User request: perform this live Anthropic compatibility connectivity task by returning the exact marker %s in your final answer. Do not use any tools."
 		}]
 	}`, providerName, model, expectedText)
 
