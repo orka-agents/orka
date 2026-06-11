@@ -14,7 +14,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -257,6 +259,19 @@ var _ = Describe("REST API Endpoints", Ordered, func() {
 		downloadBody, err := io.ReadAll(resp.Body)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(downloadBody)).To(Equal(artifactContent))
+
+		By("listing and downloading the artifact through the compiled CLI")
+		cliHome := newIsolatedCLIHome(apiBaseURL, token)
+		cliArtifacts := runOrka(cliHome, "task", "artifacts", taskName)
+		expectOrkaSuccess(cliArtifacts, token)
+		Expect(cliArtifacts.Stdout).To(ContainSubstring(artifactName))
+
+		cliDownloadPath := filepath.Join(GinkgoT().TempDir(), artifactName)
+		cliDownload := runOrka(cliHome, "task", "download", taskName, artifactName, "-o", cliDownloadPath)
+		expectOrkaSuccess(cliDownload, token)
+		downloaded, err := os.ReadFile(cliDownloadPath)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(downloaded)).To(Equal(artifactContent))
 	})
 
 	It("should stream task logs via GET /api/v1/tasks/{id}/logs", func() {
