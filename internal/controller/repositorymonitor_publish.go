@@ -345,8 +345,17 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewRecordNeedsPublishR
 	for i := range publishRecords {
 		publishRecord := publishRecords[i]
 		switch publishRecord.Phase {
-		case repositoryMonitorPublishPhaseSucceeded, repositoryMonitorPublishPhaseSkipped:
+		case repositoryMonitorPublishPhaseSucceeded:
 			needsPublish = false
+		case repositoryMonitorPublishPhaseSkipped:
+			if !repositoryMonitorPublishSkipReasonRecoverable(publishRecord.SkipReason) {
+				needsPublish = false
+				continue
+			}
+			if time.Since(publishRecord.UpdatedAt) < 5*time.Minute {
+				needsPublish = false
+				activeReservation = true
+			}
 		case repositoryMonitorPublishPhaseFailed:
 			if publishRecord.SkipReason != repositoryMonitorPublishFailureGitHubAPI {
 				needsPublish = false
@@ -372,6 +381,19 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewRecordNeedsPublishR
 		}
 	}
 	return needsPublish, activeReservation, nil
+}
+
+func repositoryMonitorPublishSkipReasonRecoverable(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case repositoryMonitorPublishSkipMissingGitSecret,
+		repositoryMonitorPublishSkipPRClosed,
+		repositoryMonitorPublishSkipBaseBranchMismatch,
+		repositoryMonitorPublishSkipDraftPR,
+		repositoryMonitorPublishSkipBlockedLabel:
+		return true
+	default:
+		return false
+	}
 }
 
 func repositoryMonitorBasePublishRecord(monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task, record *store.ReviewRecord) *store.ReviewPublishRecord {

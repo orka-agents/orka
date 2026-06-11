@@ -2000,6 +2000,172 @@ func TestRepositoryMonitorReviewPublishRetriesReviewRecordWithoutTerminalPublish
 	}
 }
 
+func TestRepositoryMonitorReviewPublishRetriesRecoverableSkippedRecord(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	const reviewHeadSHA = "sha1"
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	publishServer := newRepositoryMonitorPublishTestServer(t, repositoryMonitorPublishTestServerConfig{HeadSHA: reviewHeadSHA})
+	t.Cleanup(publishServer.Close)
+
+	postNeedsChanges := true
+	monitor := repositoryMonitorReviewIngestTestMonitor("publish-recoverable-skip")
+	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+	monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{Enabled: true, Event: repositoryMonitorPublishEventComment, PostNeedsChanges: &postNeedsChanges}
+	task := repositoryMonitorReviewIngestTestTask("publish-recoverable-skip-task", "publish-recoverable-skip", 1, reviewHeadSHA)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-token")}}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: publishServer.URL}
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID:               "review-recoverable-skip",
+		MonitorNamespace: "default",
+		MonitorName:      "publish-recoverable-skip",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           1,
+		HeadSHA:          reviewHeadSHA,
+		TaskName:         task.Name,
+		TaskNamespace:    task.Namespace,
+		Verdict:          repositoryMonitorReviewVerdictNeedsChanges,
+		Confidence:       repositoryMonitorReviewConfidenceHigh,
+		SecurityStatus:   "clear",
+		FindingsJSON:     "[]",
+		Summary:          "Review had a recoverable publish skip before credentials existed.",
+	}); err != nil {
+		t.Fatalf("CreateReviewRecord() error = %v", err)
+	}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
+		MonitorNamespace:    "default",
+		MonitorName:         "publish-recoverable-skip",
+		Kind:                repositoryMonitorPullRequestKind,
+		Number:              1,
+		State:               repositoryMonitorItemStateOpen,
+		HeadSHA:             reviewHeadSHA,
+		LastVerdict:         repositoryMonitorReviewVerdictNeedsChanges,
+		LastReviewID:        "review-recoverable-skip",
+		LastReviewedHeadSHA: reviewHeadSHA,
+	}); err != nil {
+		t.Fatalf("UpsertMonitorItem() error = %v", err)
+	}
+	skippedAt := time.Now().Add(-10 * time.Minute)
+	if err := monitorStore.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{
+		ID:               "recoverable-skip",
+		MonitorNamespace: "default",
+		MonitorName:      "publish-recoverable-skip",
+		ItemKind:         repositoryMonitorPullRequestKind,
+		ItemNumber:       1,
+		HeadSHA:          reviewHeadSHA,
+		ReviewTaskName:   task.Name,
+		ReviewRecordID:   "review-recoverable-skip",
+		Phase:            repositoryMonitorPublishPhaseSkipped,
+		Event:            repositoryMonitorPublishEventComment,
+		SkipReason:       repositoryMonitorPublishSkipMissingGitSecret,
+		CreatedAt:        skippedAt,
+		UpdatedAt:        skippedAt,
+	}); err != nil {
+		t.Fatalf("CreateReviewPublishRecord(recoverable skip) error = %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "publish-recoverable-skip"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if publishServer.PostCount != 1 {
+		t.Fatalf("post count = %d, want recovered skipped publish to retry once", publishServer.PostCount)
+	}
+}
+
+func TestRepositoryMonitorReviewPublishWaitsBeforeRetryingRecentRecoverableSkip(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	const reviewHeadSHA = "sha1"
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	publishServer := newRepositoryMonitorPublishTestServer(t, repositoryMonitorPublishTestServerConfig{HeadSHA: reviewHeadSHA})
+	t.Cleanup(publishServer.Close)
+
+	postNeedsChanges := true
+	monitor := repositoryMonitorReviewIngestTestMonitor("publish-recent-skip")
+	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: "github-token"}
+	monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{Enabled: true, Event: repositoryMonitorPublishEventComment, PostNeedsChanges: &postNeedsChanges}
+	task := repositoryMonitorReviewIngestTestTask("publish-recent-skip-task", "publish-recent-skip", 1, reviewHeadSHA)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-token")}}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: publishServer.URL}
+	if err := monitorStore.CreateReviewRecord(ctx, &store.ReviewRecord{
+		ID:               "review-recent-skip",
+		MonitorNamespace: "default",
+		MonitorName:      "publish-recent-skip",
+		Kind:             repositoryMonitorPullRequestKind,
+		Number:           1,
+		HeadSHA:          reviewHeadSHA,
+		TaskName:         task.Name,
+		TaskNamespace:    task.Namespace,
+		Verdict:          repositoryMonitorReviewVerdictNeedsChanges,
+		Confidence:       repositoryMonitorReviewConfidenceHigh,
+		SecurityStatus:   "clear",
+		FindingsJSON:     "[]",
+		Summary:          "Review had a recent recoverable publish skip.",
+	}); err != nil {
+		t.Fatalf("CreateReviewRecord() error = %v", err)
+	}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{
+		MonitorNamespace:    "default",
+		MonitorName:         "publish-recent-skip",
+		Kind:                repositoryMonitorPullRequestKind,
+		Number:              1,
+		State:               repositoryMonitorItemStateOpen,
+		HeadSHA:             reviewHeadSHA,
+		LastVerdict:         repositoryMonitorReviewVerdictNeedsChanges,
+		LastReviewID:        "review-recent-skip",
+		LastReviewedHeadSHA: reviewHeadSHA,
+	}); err != nil {
+		t.Fatalf("UpsertMonitorItem() error = %v", err)
+	}
+	now := time.Now()
+	if err := monitorStore.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{
+		ID:               "recent-recoverable-skip",
+		MonitorNamespace: "default",
+		MonitorName:      "publish-recent-skip",
+		ItemKind:         repositoryMonitorPullRequestKind,
+		ItemNumber:       1,
+		HeadSHA:          reviewHeadSHA,
+		ReviewTaskName:   task.Name,
+		ReviewRecordID:   "review-recent-skip",
+		Phase:            repositoryMonitorPublishPhaseSkipped,
+		Event:            repositoryMonitorPublishEventComment,
+		SkipReason:       repositoryMonitorPublishSkipMissingGitSecret,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}); err != nil {
+		t.Fatalf("CreateReviewPublishRecord(recent skip) error = %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "publish-recent-skip"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if publishServer.PostCount != 0 {
+		t.Fatalf("post count = %d, want recent recoverable skip to stay in cooldown", publishServer.PostCount)
+	}
+}
+
 func TestRepositoryMonitorReviewPublishGitHubPermissionFailureCreatesFailedRecord(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
