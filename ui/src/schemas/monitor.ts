@@ -32,6 +32,22 @@ export const repositoryMonitorSpecSchema = z.object({
     requireGreenCI: z.boolean().optional(),
     staleReviewTTL: z.string().optional(),
     exactEventEnabled: z.boolean().optional(),
+    publish: z.object({
+      enabled: z.boolean().optional(),
+      mode: z.string().optional(),
+      event: z.string().optional(),
+      postPassed: z.boolean().optional(),
+      postNeedsChanges: z.boolean().optional(),
+      postNeedsHuman: z.boolean().optional(),
+      postSecuritySensitive: z.boolean().optional(),
+      sameHeadPolicy: z.string().optional(),
+      inline: z.object({
+        enabled: z.boolean().optional(),
+        minPriority: z.string().optional(),
+        maxComments: z.number().optional(),
+        onlyChangedLines: z.boolean().optional(),
+      }).optional(),
+    }).optional(),
   }).optional(),
   repair: z.object({
     enabled: z.boolean().optional(),
@@ -117,6 +133,10 @@ export const monitorItemSchema = z.object({
   lastVerdict: z.string().optional(),
   repairState: z.string().optional(),
   automergeState: z.string().optional(),
+  lastPublishID: z.string().optional(),
+  lastPublishPhase: z.string().optional(),
+  lastPublishReason: z.string().optional(),
+  lastPublishURL: z.string().optional(),
   updatedAt: z.string(),
   lastSeenAt: z.string(),
 })

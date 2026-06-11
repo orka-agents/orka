@@ -375,6 +375,10 @@ func migrate(db *sql.DB) error {
 			automerge_state       TEXT NOT NULL DEFAULT '',
 			status_comment_id     TEXT NOT NULL DEFAULT '',
 			status_comment_url    TEXT NOT NULL DEFAULT '',
+			last_publish_id       TEXT NOT NULL DEFAULT '',
+			last_publish_phase    TEXT NOT NULL DEFAULT '',
+			last_publish_reason   TEXT NOT NULL DEFAULT '',
+			last_publish_url      TEXT NOT NULL DEFAULT '',
 			updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			last_seen_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (monitor_namespace, monitor_name, kind, item_key)
@@ -406,6 +410,37 @@ func migrate(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_review_records_item
 			ON review_records(monitor_namespace, monitor_name, kind, number, head_sha, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS review_publish_records (
+			id                   TEXT PRIMARY KEY,
+			monitor_namespace    TEXT NOT NULL,
+			monitor_name         TEXT NOT NULL,
+			item_kind            TEXT NOT NULL DEFAULT '',
+			item_number          INTEGER NOT NULL DEFAULT 0,
+			head_sha             TEXT NOT NULL DEFAULT '',
+			run_id               TEXT NOT NULL DEFAULT '',
+			review_task_name     TEXT NOT NULL DEFAULT '',
+			review_record_id     TEXT NOT NULL DEFAULT '',
+			phase                TEXT NOT NULL DEFAULT '',
+			event                TEXT NOT NULL DEFAULT '',
+			github_review_id     TEXT NOT NULL DEFAULT '',
+			github_review_url    TEXT NOT NULL DEFAULT '',
+			body_digest          TEXT NOT NULL DEFAULT '',
+			inline_comment_count INTEGER NOT NULL DEFAULT 0,
+			skip_reason          TEXT NOT NULL DEFAULT '',
+			error                TEXT NOT NULL DEFAULT '',
+			created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_review_publish_records_item
+			ON review_publish_records(monitor_namespace, monitor_name, item_kind, item_number, head_sha, phase, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_review_publish_records_review
+			ON review_publish_records(monitor_namespace, review_record_id, updated_at DESC)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_review_publish_records_succeeded_head
+			ON review_publish_records(monitor_namespace, monitor_name, item_kind, item_number, head_sha)
+			WHERE phase = 'succeeded'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_review_publish_records_active_head
+			ON review_publish_records(monitor_namespace, monitor_name, item_kind, item_number, head_sha)
+			WHERE phase IN ('started', 'succeeded')`,
 		`CREATE TABLE IF NOT EXISTS command_events (
 			id                    TEXT PRIMARY KEY,
 			monitor_namespace     TEXT NOT NULL,
@@ -494,6 +529,10 @@ func migrate(db *sql.DB) error {
 	}
 	if err := ensureSQLiteColumns(db, "monitor_items", []sqliteColumnMigration{
 		{Name: "skip_reason", Definition: "skip_reason TEXT NOT NULL DEFAULT ''"},
+		{Name: "last_publish_id", Definition: "last_publish_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "last_publish_phase", Definition: "last_publish_phase TEXT NOT NULL DEFAULT ''"},
+		{Name: "last_publish_reason", Definition: "last_publish_reason TEXT NOT NULL DEFAULT ''"},
+		{Name: "last_publish_url", Definition: "last_publish_url TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return err
 	}

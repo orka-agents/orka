@@ -6,7 +6,7 @@ slug: /repository-monitors
 
 Repository monitors are durable, Kubernetes-native PR review automation for GitHub repositories. A `RepositoryMonitor` stores the repository scope, review agent, schedule, and safety policy in a CRD. The controller records runs, PR inventory, review results, and audit events in the SQLite store, then exposes that state through the REST API and embedded dashboard.
 
-This is the durable successor path for prompt-orchestrated PR monitor tasks created by the `create_pr_monitor` tool. The current implementation supports GitHub pull request inventory and read-only review task creation.
+This is the durable successor path for prompt-orchestrated PR monitor tasks created by the `create_pr_monitor` tool. The current implementation supports GitHub pull request inventory, read-only review task creation, structured review ingestion, and optional controller-owned GitHub `COMMENT` review publishing.
 
 ## What It Does
 
@@ -23,7 +23,7 @@ A repository monitor can:
 - store monitor runs, PR items, review records, and audit events durably
 - show monitor status, recent runs, and the PR queue in the dashboard under **Monitors**
 
-The review task is bound to the exact PR head SHA. It runs as a `type: agent` task, uses a Claude runtime Agent, checks out the PR head in a read-only workspace, writes generated PR context under `/workspace/.git/orka/`, and is instructed to return only the structured review result. It does not post GitHub comments, push commits, merge, close, or mutate labels.
+The review task is bound to the exact PR head SHA. It runs as a `type: agent` task, uses a Claude runtime Agent, checks out the PR head in a read-only workspace, writes generated PR context under `/workspace/.git/orka/`, and is instructed to return only the structured review result. It does not receive GitHub mutation credentials, post comments, push commits, merge, close, or mutate labels. If `spec.review.publish.enabled` is true, the controller later revalidates the PR state and may publish a deterministic neutral `COMMENT` review from the structured result.
 
 ## Current Limits
 
@@ -146,7 +146,7 @@ Apply it with:
 kubectl apply -f repository-monitor.yaml
 ```
 
-The controller normalizes `provider`, `owner`, `repository`, `branch`, pull request enablement, `maxPerRun`, `review.event`, and validation mode when omitted.
+The controller normalizes `provider`, `owner`, `repository`, `branch`, pull request enablement, `maxPerRun`, `review.event`, and validation mode when omitted. `review.publish.enabled` defaults to `false`; when enabled, V1 rejects publish events other than `COMMENT` and same-head policies other than `skip`.
 
 ## Run Manually
 
@@ -226,7 +226,7 @@ Valid review verdicts are:
 
 For status summaries, open PRs with `needs_changes`, `needs_human`, `security_sensitive`, stale, failed, or skipped review state count as blocked items. Open PRs with queued review work count as pending reviews.
 
-If a review task fails, is cancelled, returns malformed JSON, or returns a stale head SHA, the controller records a rejected review result and leaves an audit event explaining why.
+If a review task fails, is cancelled, returns malformed JSON, or returns a stale head SHA, the controller records a rejected review result and leaves an audit event explaining why. If GitHub publishing is enabled, the controller performs publish-time safety checks immediately after ingestion: it refetches the PR, requires the PR to remain open on the monitor base branch and exact reviewed head SHA, rejects draft or protected-label PRs, skips duplicate same-head publications using Orka publish records and hidden GitHub markers, neutralizes mentions in rendered text, and never posts `security_sensitive` results unless explicitly configured.
 
 ## API And Authorization
 
@@ -264,4 +264,4 @@ For compatibility, Orka also recognizes legacy markers and markers signed before
 
 - [GitHub Label Triggers](github-label-triggers.md) create one-off agent tasks from labels such as `agent:review` or `agent:implement`.
 - [Repository Security Scanning](repository-security-scanning.md) scans repository history for security findings and supports patch proposal workflows.
-- `create_pr_monitor` remains available for prompt-orchestrated scheduled PR monitor tasks, but it does not provide the durable per-PR run, item, review, and event records described here.
+- `create_pr_monitor` remains available for prompt-orchestrated scheduled PR monitor tasks, but it does not provide the durable per-PR run, item, review, publish, and event records described here.

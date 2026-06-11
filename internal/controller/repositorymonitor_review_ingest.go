@@ -201,6 +201,9 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	}); err != nil {
 		return false, err
 	}
+	if err := r.publishRepositoryMonitorReview(ctx, monitor, item, task, record); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -387,6 +390,9 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRejectedReviewRecor
 	}); err != nil {
 		return false, err
 	}
+	if err := r.publishRepositoryMonitorReview(ctx, monitor, item, task, record); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -412,6 +418,9 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecord(ctx con
 		"verdict":  record.Verdict,
 		"headSHA":  record.HeadSHA,
 	}); err != nil {
+		return false, err
+	}
+	if err := r.publishRepositoryMonitorReview(ctx, monitor, item, task, record); err != nil {
 		return false, err
 	}
 	return true, nil

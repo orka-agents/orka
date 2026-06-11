@@ -193,6 +193,7 @@ func deleteRepositoryMonitorDependentState(ctx context.Context, tx *sql.Tx, name
 		`DELETE FROM monitor_runs WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM monitor_items WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM review_records WHERE monitor_namespace = ? AND monitor_name = ?`,
+		`DELETE FROM review_publish_records WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM command_events WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM repair_jobs WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM monitor_events WHERE monitor_namespace = ? AND monitor_name = ?`,
@@ -388,8 +389,8 @@ func (s *Store) UpsertMonitorItem(ctx context.Context, item *store.MonitorItem) 
 		 (monitor_namespace, monitor_name, kind, item_key, number, sha, title, author, state, labels_json,
 		  base_branch, head_branch, head_sha, base_sha, draft, mergeable_state, ci_state, skip_reason,
 		  last_review_id, last_reviewed_head_sha, last_verdict, repair_state, automerge_state, status_comment_id,
-		  status_comment_url, updated_at, last_seen_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		  status_comment_url, last_publish_id, last_publish_phase, last_publish_reason, last_publish_url, updated_at, last_seen_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(monitor_namespace, monitor_name, kind, item_key) DO UPDATE SET
 		   number = excluded.number,
 		   sha = excluded.sha,
@@ -412,13 +413,18 @@ func (s *Store) UpsertMonitorItem(ctx context.Context, item *store.MonitorItem) 
 		   automerge_state = excluded.automerge_state,
 		   status_comment_id = excluded.status_comment_id,
 		   status_comment_url = excluded.status_comment_url,
+		   last_publish_id = excluded.last_publish_id,
+		   last_publish_phase = excluded.last_publish_phase,
+		   last_publish_reason = excluded.last_publish_reason,
+		   last_publish_url = excluded.last_publish_url,
 		   updated_at = excluded.updated_at,
 		   last_seen_at = excluded.last_seen_at`,
 		item.MonitorNamespace, item.MonitorName, item.Kind, item.ItemKey, item.Number, item.SHA,
 		item.Title, item.Author, item.State, item.LabelsJSON, item.BaseBranch, item.HeadBranch,
 		item.HeadSHA, item.BaseSHA, item.Draft, item.MergeableState, item.CIState, item.SkipReason,
 		item.LastReviewID, item.LastReviewedHeadSHA, item.LastVerdict, item.RepairState, item.AutomergeState,
-		item.StatusCommentID, item.StatusCommentURL, item.UpdatedAt, item.LastSeenAt,
+		item.StatusCommentID, item.StatusCommentURL, item.LastPublishID, item.LastPublishPhase, item.LastPublishReason,
+		item.LastPublishURL, item.UpdatedAt, item.LastSeenAt,
 	)
 	return err
 }
@@ -443,7 +449,8 @@ func monitorItemSelectSQL() string {
 	return `SELECT monitor_namespace, monitor_name, kind, item_key, number, sha, title, author, state, labels_json,
 	        base_branch, head_branch, head_sha, base_sha, draft, mergeable_state, ci_state, skip_reason,
 	        last_review_id, last_reviewed_head_sha, last_verdict, repair_state, automerge_state, status_comment_id,
-	        status_comment_url, updated_at, last_seen_at FROM monitor_items`
+	        status_comment_url, last_publish_id, last_publish_phase, last_publish_reason, last_publish_url,
+	        updated_at, last_seen_at FROM monitor_items`
 }
 
 func monitorItemScanDest(item *store.MonitorItem) []any {
@@ -452,7 +459,8 @@ func monitorItemScanDest(item *store.MonitorItem) []any {
 		&item.Title, &item.Author, &item.State, &item.LabelsJSON, &item.BaseBranch, &item.HeadBranch,
 		&item.HeadSHA, &item.BaseSHA, &item.Draft, &item.MergeableState, &item.CIState, &item.SkipReason,
 		&item.LastReviewID, &item.LastReviewedHeadSHA, &item.LastVerdict, &item.RepairState, &item.AutomergeState,
-		&item.StatusCommentID, &item.StatusCommentURL, &item.UpdatedAt, &item.LastSeenAt,
+		&item.StatusCommentID, &item.StatusCommentURL, &item.LastPublishID, &item.LastPublishPhase, &item.LastPublishReason,
+		&item.LastPublishURL, &item.UpdatedAt, &item.LastSeenAt,
 	}
 }
 
@@ -609,6 +617,156 @@ func (s *Store) ListReviewRecords(ctx context.Context, filter store.ReviewRecord
 	for rows.Next() {
 		var record store.ReviewRecord
 		if err := rows.Scan(reviewRecordScanDest(&record)...); err != nil {
+			return nil, "", err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	return records, nextOffsetCursor(offset, len(records), limit), nil
+}
+
+// CreateReviewPublishRecord inserts a review publish attempt/outcome record.
+func (s *Store) CreateReviewPublishRecord(ctx context.Context, record *store.ReviewPublishRecord) error {
+	if record == nil {
+		return store.ValidationErrorf("review publish record is required")
+	}
+	if record.ID == "" || record.MonitorNamespace == "" || record.MonitorName == "" {
+		return store.ValidationErrorf("review publish record id, namespace, and monitor name are required")
+	}
+	now := time.Now()
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = now
+	}
+	if record.UpdatedAt.IsZero() {
+		record.UpdatedAt = record.CreatedAt
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO review_publish_records
+		 (id, monitor_namespace, monitor_name, item_kind, item_number, head_sha, run_id,
+		  review_task_name, review_record_id, phase, event, github_review_id, github_review_url,
+		  body_digest, inline_comment_count, skip_reason, error, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		record.ID, record.MonitorNamespace, record.MonitorName, record.ItemKind, record.ItemNumber,
+		record.HeadSHA, record.RunID, record.ReviewTaskName, record.ReviewRecordID, record.Phase,
+		record.Event, record.GitHubReviewID, record.GitHubReviewURL, record.BodyDigest,
+		record.InlineCommentCount, record.SkipReason, record.Error, record.CreatedAt, record.UpdatedAt,
+	)
+	return err
+}
+
+// UpdateReviewPublishRecord updates a review publish attempt/outcome record.
+func (s *Store) UpdateReviewPublishRecord(ctx context.Context, record *store.ReviewPublishRecord) error {
+	if record == nil {
+		return store.ValidationErrorf("review publish record is required")
+	}
+	if record.ID == "" || record.MonitorNamespace == "" {
+		return store.ValidationErrorf("review publish record id and namespace are required")
+	}
+	if record.UpdatedAt.IsZero() {
+		record.UpdatedAt = time.Now()
+	}
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE review_publish_records
+		 SET phase = ?, event = ?, github_review_id = ?, github_review_url = ?, body_digest = ?,
+		     inline_comment_count = ?, skip_reason = ?, error = ?, updated_at = ?
+		 WHERE monitor_namespace = ? AND id = ?`,
+		record.Phase, record.Event, record.GitHubReviewID, record.GitHubReviewURL, record.BodyDigest,
+		record.InlineCommentCount, record.SkipReason, record.Error, record.UpdatedAt,
+		record.MonitorNamespace, record.ID,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// GetReviewPublishRecord fetches a review publish record by ID.
+func (s *Store) GetReviewPublishRecord(ctx context.Context, namespace, id string) (*store.ReviewPublishRecord, error) {
+	var record store.ReviewPublishRecord
+	err := s.db.QueryRowContext(ctx, reviewPublishRecordSelectSQL()+" WHERE monitor_namespace = ? AND id = ?", namespace, id).
+		Scan(reviewPublishRecordScanDest(&record)...)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
+func reviewPublishRecordSelectSQL() string {
+	return `SELECT id, monitor_namespace, monitor_name, item_kind, item_number, head_sha, run_id,
+	        review_task_name, review_record_id, phase, event, github_review_id, github_review_url,
+	        body_digest, inline_comment_count, skip_reason, error, created_at, updated_at
+	        FROM review_publish_records`
+}
+
+func reviewPublishRecordScanDest(record *store.ReviewPublishRecord) []any {
+	return []any{
+		&record.ID, &record.MonitorNamespace, &record.MonitorName, &record.ItemKind, &record.ItemNumber,
+		&record.HeadSHA, &record.RunID, &record.ReviewTaskName, &record.ReviewRecordID, &record.Phase,
+		&record.Event, &record.GitHubReviewID, &record.GitHubReviewURL, &record.BodyDigest,
+		&record.InlineCommentCount, &record.SkipReason, &record.Error, &record.CreatedAt, &record.UpdatedAt,
+	}
+}
+
+// ListReviewPublishRecords lists review publish records ordered newest first.
+func (s *Store) ListReviewPublishRecords(ctx context.Context, filter store.ReviewPublishRecordFilter) ([]store.ReviewPublishRecord, string, error) {
+	offset, err := parseOffsetCursor(filter.Cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	limit := defaultMonitorLimit(filter.Limit)
+	query := strings.Builder{}
+	query.WriteString(reviewPublishRecordSelectSQL())
+	query.WriteString(" WHERE monitor_namespace = ?")
+	args := []any{filter.Namespace}
+	if filter.MonitorName != "" {
+		query.WriteString(" AND monitor_name = ?")
+		args = append(args, filter.MonitorName)
+	}
+	if filter.ItemKind != "" {
+		query.WriteString(" AND item_kind = ?")
+		args = append(args, filter.ItemKind)
+	}
+	if filter.ItemNumber != 0 {
+		query.WriteString(" AND item_number = ?")
+		args = append(args, filter.ItemNumber)
+	}
+	if filter.HeadSHA != "" {
+		query.WriteString(" AND head_sha = ?")
+		args = append(args, filter.HeadSHA)
+	}
+	if filter.ReviewRecordID != "" {
+		query.WriteString(" AND review_record_id = ?")
+		args = append(args, filter.ReviewRecordID)
+	}
+	if filter.Phase != "" {
+		query.WriteString(" AND phase = ?")
+		args = append(args, filter.Phase)
+	}
+	query.WriteString(" ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?")
+	args = append(args, limit, offset)
+
+	rows, err := s.db.QueryContext(ctx, query.String(), args...)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var records []store.ReviewPublishRecord
+	for rows.Next() {
+		var record store.ReviewPublishRecord
+		if err := rows.Scan(reviewPublishRecordScanDest(&record)...); err != nil {
 			return nil, "", err
 		}
 		records = append(records, record)

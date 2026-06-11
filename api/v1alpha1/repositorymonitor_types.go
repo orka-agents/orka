@@ -160,7 +160,8 @@ type RepositoryMonitorAgents struct {
 
 // RepositoryMonitorReviewSpec configures review behavior.
 type RepositoryMonitorReviewSpec struct {
-	// Event is the default GitHub review event rendered after analysis.
+	// Event is the legacy/default GitHub review event value included in review task input.
+	// It does not control RepositoryMonitor GitHub publishing; use Publish.Event.
 	// +kubebuilder:validation:Enum=COMMENT;APPROVE;REQUEST_CHANGES
 	// +kubebuilder:default=COMMENT
 	// +optional
@@ -177,6 +178,81 @@ type RepositoryMonitorReviewSpec struct {
 	// ExactEventEnabled enables exact-head review from repository events.
 	// +optional
 	ExactEventEnabled bool `json:"exactEventEnabled,omitempty"`
+
+	// Publish controls deterministic GitHub pull request review publishing after review ingestion.
+	// Publishing is disabled by default and V1 only supports neutral COMMENT reviews.
+	// +optional
+	Publish RepositoryMonitorReviewPublishSpec `json:"publish,omitempty"`
+}
+
+// RepositoryMonitorReviewPublishSpec configures safe GitHub review publishing.
+type RepositoryMonitorReviewPublishSpec struct {
+	// Enabled enables GitHub pull request review publishing. Defaults to false.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Mode selects whether Orka publishes only a deterministic summary or also eligible inline findings.
+	// +kubebuilder:validation:Enum=summary_only;summary_with_inline_findings
+	// +kubebuilder:default=summary_only
+	// +optional
+	Mode string `json:"mode,omitempty"`
+
+	// Event is the GitHub review event to submit. V1 only supports COMMENT.
+	// +kubebuilder:validation:Enum=COMMENT
+	// +kubebuilder:default=COMMENT
+	// +optional
+	Event string `json:"event,omitempty"`
+
+	// PostPassed controls whether clean/passed reviews are posted. Defaults to false.
+	// +optional
+	PostPassed *bool `json:"postPassed,omitempty"`
+
+	// PostNeedsChanges controls whether needs_changes reviews are posted. Defaults to true.
+	// +optional
+	PostNeedsChanges *bool `json:"postNeedsChanges,omitempty"`
+
+	// PostNeedsHuman controls whether needs_human reviews are posted. Defaults to true.
+	// +optional
+	PostNeedsHuman *bool `json:"postNeedsHuman,omitempty"`
+
+	// PostSecuritySensitive allows public publishing of security_sensitive findings when true.
+	// Defaults to false.
+	// +optional
+	PostSecuritySensitive bool `json:"postSecuritySensitive,omitempty"`
+
+	// SameHeadPolicy controls duplicate handling for one monitor, PR, and exact head SHA.
+	// V1 only supports skip.
+	// +kubebuilder:validation:Enum=skip
+	// +kubebuilder:default=skip
+	// +optional
+	SameHeadPolicy string `json:"sameHeadPolicy,omitempty"`
+
+	// Inline controls optional inline review comments for eligible findings.
+	// +optional
+	Inline RepositoryMonitorReviewPublishInlineSpec `json:"inline,omitempty"`
+}
+
+// RepositoryMonitorReviewPublishInlineSpec configures optional inline GitHub review comments.
+type RepositoryMonitorReviewPublishInlineSpec struct {
+	// Enabled enables inline comments when Mode is summary_with_inline_findings.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// MinPriority is the lowest finding priority eligible for inline comments. Defaults to P2.
+	// +kubebuilder:validation:Enum=P0;P1;P2;P3
+	// +kubebuilder:default=P2
+	// +optional
+	MinPriority string `json:"minPriority,omitempty"`
+
+	// MaxComments caps inline comments per review. Defaults to 10.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=50
+	// +optional
+	MaxComments *int32 `json:"maxComments,omitempty"`
+
+	// OnlyChangedLines restricts inline comments to RIGHT-side changed lines. V1 treats this as true.
+	// +optional
+	OnlyChangedLines *bool `json:"onlyChangedLines,omitempty"`
 }
 
 // RepositoryMonitorRepairSpec configures bounded repair behavior.

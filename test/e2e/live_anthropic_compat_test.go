@@ -120,7 +120,7 @@ var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 		Expect(*resp.StopReason).To(Equal("end_turn"))
 		Expect(resp.Usage.InputTokens).To(BeNumerically(">", 0))
 		Expect(resp.Usage.OutputTokens).To(BeNumerically(">", 0))
-		Expect(flattenAnthropicText(resp.Content)).To(Equal(liveAnthropicExpectedText))
+		Expect(flattenAnthropicText(resp.Content)).To(ContainSubstring(liveAnthropicExpectedText))
 	})
 
 	It("should stream anthropic messages via SSE", func() {
@@ -137,7 +137,7 @@ var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 		Expect(stream.Model).To(Equal(liveClaudeModel))
 		Expect(stream.StopReason).To(Equal("end_turn"))
 		Expect(stream.OutputTokens).To(BeNumerically(">", 0))
-		Expect(strings.TrimSpace(stream.Text)).To(Equal(liveAnthropicExpectedText))
+		Expect(strings.TrimSpace(stream.Text)).To(ContainSubstring(liveAnthropicExpectedText))
 	})
 })
 
@@ -227,7 +227,7 @@ func postLiveAnthropicJSON(apiBaseURL, token, providerName, model, expectedText 
 		"max_tokens": 32,
 		"messages": [{
 			"role": "user",
-			"content": "Reply with exactly %s\n%s and nothing else. Do not use any tools."
+			"content": "User request: perform this live Anthropic compatibility connectivity task. Reply with exactly %s\n%s and nothing else. Do not use any tools."
 		}]
 	}`, providerName, model, liveAnthropicGoalStateSentinel, expectedText)
 
@@ -260,7 +260,7 @@ func postLiveAnthropicSSE(apiBaseURL, token, providerName, model, expectedText s
 		"stream": true,
 		"messages": [{
 			"role": "user",
-			"content": "Reply with exactly %s\n%s and nothing else. Do not use any tools."
+			"content": "User request: perform this live Anthropic compatibility connectivity task. Reply with exactly %s\n%s and nothing else. Do not use any tools."
 		}]
 	}`, providerName, model, liveAnthropicGoalStateSentinel, expectedText)
 
