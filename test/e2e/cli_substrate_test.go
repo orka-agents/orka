@@ -108,29 +108,3 @@ spec:
   precreateActors: %t
 `, name, templateName, targetActors, targetWorkers, precreateActors)
 }
-
-func nestedNumberFromMap(m map[string]any, path ...string) float64 {
-	var cur any = m
-	for _, key := range path {
-		obj, ok := cur.(map[string]any)
-		if !ok {
-			return 0
-		}
-		cur = obj[key]
-	}
-	value, _ := cur.(float64)
-	return value
-}
-
-func nestedBoolFromMap(m map[string]any, path ...string) bool {
-	var cur any = m
-	for _, key := range path {
-		obj, ok := cur.(map[string]any)
-		if !ok {
-			return false
-		}
-		cur = obj[key]
-	}
-	value, _ := cur.(bool)
-	return value
-}

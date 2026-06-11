@@ -166,7 +166,7 @@ metadata:
 spec:
   repoURL: %s
   branch: main
-  validationMode: off
+  validationMode: "off"
   analysisAgentRef:
     name: %s
 `, name, repoURL, analysisAgent)

@@ -304,6 +304,27 @@ func TestListTasks(t *testing.T) {
 	}
 }
 
+func TestListTasksPageAllUsesLimitZero(t *testing.T) {
+	var capturedQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		json.NewEncoder(w).Encode(taskListResponse{Items: []TaskDetail{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	_, err := c.ListTasksPage(context.Background(), ListTasksOptions{Namespace: "ns1", All: true})
+	if err != nil {
+		t.Fatalf("ListTasksPage() error = %v", err)
+	}
+	if !strings.Contains(capturedQuery, "namespace=ns1") {
+		t.Fatalf("query %q missing namespace", capturedQuery)
+	}
+	if !strings.Contains(capturedQuery, "limit=0") {
+		t.Fatalf("query %q missing limit=0", capturedQuery)
+	}
+}
+
 func TestListTasksPageReturnsPaginationMetadata(t *testing.T) {
 	remaining := int64(42)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
