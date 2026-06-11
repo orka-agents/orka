@@ -1,0 +1,147 @@
+package api
+
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/store"
+)
+
+// SubmitExecutionEventRequest is the internal worker submission DTO.
+// Unknown JSON fields are ignored by Go's standard decoder; route handlers can opt into
+// strict decoding later by using json.Decoder.DisallowUnknownFields.
+type SubmitExecutionEventRequest struct {
+	Type        string          `json:"type"`
+	Severity    string          `json:"severity,omitempty"`
+	TaskName    string          `json:"taskName,omitempty"`
+	SessionName string          `json:"sessionName,omitempty"`
+	AgentName   string          `json:"agentName,omitempty"`
+	ToolName    string          `json:"toolName,omitempty"`
+	ToolCallID  string          `json:"toolCallID,omitempty"`
+	Summary     string          `json:"summary,omitempty"`
+	Content     json.RawMessage `json:"content,omitempty"`
+	ContentText string          `json:"contentText,omitempty"`
+}
+
+// ToStoreEvent converts a submission DTO to the store-facing event contract.
+func (r SubmitExecutionEventRequest) ToStoreEvent(namespace, streamType, streamID string) (*store.ExecutionEvent, error) {
+	typ := events.NormalizeExecutionEventType(r.Type)
+	if typ == "" {
+		return nil, fmt.Errorf("unsupported execution event type %q", r.Type)
+	}
+	payload, err := events.SanitizeExecutionEventPayload(r.Summary, r.Content, r.ContentText)
+	if err != nil {
+		return nil, err
+	}
+	return &store.ExecutionEvent{
+		Namespace:   namespace,
+		StreamType:  streamType,
+		StreamID:    streamID,
+		Type:        typ,
+		Severity:    events.NormalizeExecutionEventSeverity(r.Severity),
+		TaskName:    r.TaskName,
+		SessionName: r.SessionName,
+		AgentName:   r.AgentName,
+		ToolName:    r.ToolName,
+		ToolCallID:  r.ToolCallID,
+		Summary:     payload.Summary,
+		Content:     payload.Content,
+		ContentText: payload.ContentText,
+		Truncation:  payload.Truncation,
+	}, nil
+}
+
+// ExecutionEventResponse is the public API representation of an execution event.
+type ExecutionEventResponse struct {
+	ID          string                           `json:"id"`
+	Namespace   string                           `json:"namespace"`
+	StreamType  string                           `json:"streamType"`
+	StreamID    string                           `json:"streamID"`
+	Seq         int64                            `json:"seq"`
+	Type        string                           `json:"type"`
+	Severity    string                           `json:"severity"`
+	TaskName    string                           `json:"taskName,omitempty"`
+	SessionName string                           `json:"sessionName,omitempty"`
+	AgentName   string                           `json:"agentName,omitempty"`
+	ToolName    string                           `json:"toolName,omitempty"`
+	ToolCallID  string                           `json:"toolCallID,omitempty"`
+	Summary     string                           `json:"summary,omitempty"`
+	Content     json.RawMessage                  `json:"content,omitempty"`
+	ContentText string                           `json:"contentText,omitempty"`
+	Truncation  *events.ExecutionEventTruncation `json:"truncation,omitempty"`
+	CreatedAt   time.Time                        `json:"createdAt"`
+}
+
+// SubmitExecutionEventResponse is returned after an event append succeeds.
+type SubmitExecutionEventResponse struct {
+	ID        string    `json:"id"`
+	Seq       int64     `json:"seq"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// ListExecutionEventsResponse is the API response for listing one event stream.
+type ListExecutionEventsResponse struct {
+	Namespace  string                   `json:"namespace"`
+	StreamType string                   `json:"streamType"`
+	StreamID   string                   `json:"streamID"`
+	AfterSeq   int64                    `json:"afterSeq"`
+	LatestSeq  int64                    `json:"latestSeq"`
+	Events     []ExecutionEventResponse `json:"events"`
+}
+
+// NewExecutionEventResponse converts a store event to an API DTO and intentionally
+// omits store-only fields such as ExecutionEvent.Internal.
+func NewExecutionEventResponse(event store.ExecutionEvent) ExecutionEventResponse {
+	return ExecutionEventResponse{
+		ID:          event.ID,
+		Namespace:   event.Namespace,
+		StreamType:  event.StreamType,
+		StreamID:    event.StreamID,
+		Seq:         event.Seq,
+		Type:        event.Type,
+		Severity:    events.NormalizeExecutionEventSeverity(event.Severity),
+		TaskName:    event.TaskName,
+		SessionName: event.SessionName,
+		AgentName:   event.AgentName,
+		ToolName:    event.ToolName,
+		ToolCallID:  event.ToolCallID,
+		Summary:     event.Summary,
+		Content:     cloneRawMessage(event.Content),
+		ContentText: event.ContentText,
+		Truncation:  cloneExecutionEventTruncation(event.Truncation),
+		CreatedAt:   event.CreatedAt,
+	}
+}
+
+// NewListExecutionEventsResponse builds a list DTO from store events.
+func NewListExecutionEventsResponse(namespace, streamType, streamID string, afterSeq, latestSeq int64, storeEvents []store.ExecutionEvent) ListExecutionEventsResponse {
+	responses := make([]ExecutionEventResponse, 0, len(storeEvents))
+	for _, event := range storeEvents {
+		responses = append(responses, NewExecutionEventResponse(event))
+	}
+	return ListExecutionEventsResponse{
+		Namespace:  namespace,
+		StreamType: streamType,
+		StreamID:   streamID,
+		AfterSeq:   afterSeq,
+		LatestSeq:  latestSeq,
+		Events:     responses,
+	}
+}
+
+func cloneRawMessage(raw json.RawMessage) json.RawMessage {
+	if raw == nil {
+		return nil
+	}
+	return append(json.RawMessage(nil), raw...)
+}
+
+func cloneExecutionEventTruncation(value *events.ExecutionEventTruncation) *events.ExecutionEventTruncation {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}

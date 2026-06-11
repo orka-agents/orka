@@ -1,0 +1,91 @@
+{
+  "namespace": "default",
+  "streamType": "task",
+  "streamID": "task-failed",
+  "afterSeq": 0,
+  "latestSeq": 6,
+  "events": [
+    {
+      "id": "default/task/task-failed/1",
+      "namespace": "default",
+      "streamType": "task",
+      "streamID": "task-failed",
+      "seq": 1,
+      "type": "TaskCreated",
+      "severity": "info",
+      "taskName": "task-failed",
+      "summary": "Task was accepted by the controller.",
+      "createdAt": "2026-06-11T12:00:00Z"
+    },
+    {
+      "id": "default/task/task-failed/2",
+      "namespace": "default",
+      "streamType": "task",
+      "streamID": "task-failed",
+      "seq": 2,
+      "type": "WorkerStarted",
+      "severity": "info",
+      "taskName": "task-failed",
+      "agentName": "codex",
+      "summary": "Worker container started.",
+      "createdAt": "2026-06-11T12:00:01Z"
+    },
+    {
+      "id": "default/task/task-failed/3",
+      "namespace": "default",
+      "streamType": "task",
+      "streamID": "task-failed",
+      "seq": 3,
+      "type": "ToolCallStarted",
+      "severity": "info",
+      "taskName": "task-failed",
+      "agentName": "codex",
+      "toolName": "file_read",
+      "toolCallID": "call-read-missing",
+      "summary": "Reading requested file.",
+      "content": {"path":"missing.txt"},
+      "createdAt": "2026-06-11T12:00:02Z"
+    },
+    {
+      "id": "default/task/task-failed/4",
+      "namespace": "default",
+      "streamType": "task",
+      "streamID": "task-failed",
+      "seq": 4,
+      "type": "ToolCallFailed",
+      "severity": "error",
+      "taskName": "task-failed",
+      "agentName": "codex",
+      "toolName": "file_read",
+      "toolCallID": "call-read-missing",
+      "summary": "Requested file was not found.",
+      "content": {"path":"missing.txt","reason":"not found"},
+      "createdAt": "2026-06-11T12:00:03Z"
+    },
+    {
+      "id": "default/task/task-failed/5",
+      "namespace": "default",
+      "streamType": "task",
+      "streamID": "task-failed",
+      "seq": 5,
+      "type": "WorkerFailed",
+      "severity": "error",
+      "taskName": "task-failed",
+      "agentName": "codex",
+      "summary": "Worker reported a terminal error.",
+      "createdAt": "2026-06-11T12:00:04Z"
+    },
+    {
+      "id": "default/task/task-failed/6",
+      "namespace": "default",
+      "streamType": "task",
+      "streamID": "task-failed",
+      "seq": 6,
+      "type": "TaskFailed",
+      "severity": "error",
+      "taskName": "task-failed",
+      "summary": "Task failed after worker error.",
+      "createdAt": "2026-06-11T12:00:05Z"
+    }
+  ]
+}
