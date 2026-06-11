@@ -60,6 +60,7 @@ func TestSubmitExecutionEventRequestJSONFieldNames(t *testing.T) {
 		Summary:     "reading",
 		Content:     json.RawMessage(`{"path":"README.md"}`),
 		ContentText: "plain",
+		Truncation:  &events.ExecutionEventTruncation{SummaryTruncated: true, SummaryOriginalChars: 5000},
 	}
 	data, err := json.Marshal(request)
 	if err != nil {
@@ -69,7 +70,7 @@ func TestSubmitExecutionEventRequestJSONFieldNames(t *testing.T) {
 	if err := json.Unmarshal(data, &body); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
-	for _, key := range []string{"type", "severity", "taskName", "sessionName", "agentName", "toolName", "toolCallID", "summary", "content", "contentText"} {
+	for _, key := range []string{"type", "severity", "taskName", "sessionName", "agentName", "toolName", "toolCallID", "summary", "content", "contentText", "truncation"} {
 		if _, ok := body[key]; !ok {
 			t.Fatalf("request JSON missing key %q in %s", key, data)
 		}
@@ -125,6 +126,7 @@ func TestSubmitExecutionEventRequestToStoreEventSanitizesPayload(t *testing.T) {
 		Summary:     "Authorization: Bearer " + bearerValue,
 		Content:     mustRawJSON(t, map[string]any{"apiKey": apiKey, "safe": "ok"}),
 		ContentText: strings.Repeat("x", events.MaxExecutionEventContentTextChars+10),
+		Truncation:  &events.ExecutionEventTruncation{SummaryTruncated: true, SummaryOriginalChars: 9000},
 	}
 	storeEvent, err := request.ToStoreEvent("default", events.ExecutionEventStreamTypeTask, "task-1")
 	if err != nil {
@@ -136,8 +138,11 @@ func TestSubmitExecutionEventRequestToStoreEventSanitizesPayload(t *testing.T) {
 	if strings.Contains(storeEvent.Summary, bearerValue) || strings.Contains(string(storeEvent.Content), apiKey) {
 		t.Fatalf("ToStoreEvent leaked secret fields: %#v content=%s", storeEvent, storeEvent.Content)
 	}
-	if storeEvent.Truncation == nil || !storeEvent.Truncation.ContentTextTruncated {
-		t.Fatalf("Truncation = %#v, want contentText truncated", storeEvent.Truncation)
+	if storeEvent.Truncation == nil || !storeEvent.Truncation.ContentTextTruncated || !storeEvent.Truncation.SummaryTruncated {
+		t.Fatalf("Truncation = %#v, want merged client and server truncation metadata", storeEvent.Truncation)
+	}
+	if storeEvent.Truncation.SummaryOriginalChars != 9000 {
+		t.Fatalf("SummaryOriginalChars = %d, want client metadata preserved", storeEvent.Truncation.SummaryOriginalChars)
 	}
 }
 

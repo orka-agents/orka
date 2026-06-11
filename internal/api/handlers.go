@@ -92,6 +92,9 @@ type Handlers struct {
 	memoryProposalStore       store.MemoryProposalStore
 	securityStore             store.SecurityStore
 	repositoryMonitorStore    store.RepositoryMonitorStore
+	executionEventStore       store.ExecutionEventStore
+	eventStreamPollInterval   time.Duration
+	eventStreamHeartbeatEvery time.Duration
 }
 
 // HandlersConfig holds configuration for creating Handlers.
@@ -110,6 +113,7 @@ type HandlersConfig struct {
 	MemoryProposalStore       store.MemoryProposalStore
 	SecurityStore             store.SecurityStore
 	RepositoryMonitorStore    store.RepositoryMonitorStore
+	ExecutionEventStore       store.ExecutionEventStore
 }
 
 // NewHandlers creates a new Handlers instance
@@ -129,6 +133,9 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		memoryProposalStore:       cfg.MemoryProposalStore,
 		securityStore:             cfg.SecurityStore,
 		repositoryMonitorStore:    cfg.RepositoryMonitorStore,
+		executionEventStore:       cfg.ExecutionEventStore,
+		eventStreamPollInterval:   defaultEventStreamPollInterval,
+		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
 	}
 }
 
