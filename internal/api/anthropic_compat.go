@@ -386,6 +386,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 			anthropicLog.Error(err, "tool loop failed")
 			return anthropicError(c, 500, "api_error", "completion failed: "+err.Error())
 		}
+		resp = stripGoalStateSentinelFromResponse(resp)
 	} else {
 		// Transparent proxy: single LLM call, return response directly
 		resp, err = provider.Complete(ctx, compReq)

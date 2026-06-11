@@ -991,6 +991,8 @@ func TestRunAgent_ManagedExecutionWorkspaceReusesExistingGitCheckout(t *testing.
 		t.Fatalf("initial CloneRepo failed: %v", err)
 	}
 	runGit(t, workspaceDir, "checkout", "-B", "stale-retained")
+	runGit(t, workspaceDir, "config", "user.email", "test@test.com")
+	runGit(t, workspaceDir, "config", "user.name", "Test")
 	if err := os.WriteFile(filepath.Join(workspaceDir, "stale.txt"), []byte("stale\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
