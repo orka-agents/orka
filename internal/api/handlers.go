@@ -466,14 +466,6 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		task.Spec.Timeout = duration
 	}
 
-	if req.Schedule != "" {
-		task.Spec.Schedule = req.Schedule
-		task.Spec.TimeZone = req.TimeZone
-		if req.ConcurrencyPolicy != "" {
-			task.Spec.ConcurrencyPolicy = corev1alpha1.ConcurrencyPolicy(req.ConcurrencyPolicy)
-		}
-	}
-
 	ctx := c.Context()
 	if err := h.client.Create(ctx, task); err != nil {
 		if apierrors.IsAlreadyExists(err) {

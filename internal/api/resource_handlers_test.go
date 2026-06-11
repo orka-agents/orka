@@ -222,6 +222,32 @@ func TestHandlers_CreateTask_KubernetesStyleManifest(t *testing.T) {
 	require.Equal(t, map[string]string{"example.com/source": "cli"}, task.Annotations)
 }
 
+func TestHandlers_CreateTaskFlatSchedulePreservesManifestTimeZone(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/tasks", handlers.CreateTask)
+	body := map[string]any{
+		"metadata": map[string]any{
+			"name":      "manifest-scheduled-task",
+			"namespace": "default",
+		},
+		"schedule": "0 8 * * *",
+		"spec": map[string]any{
+			"type":     "container",
+			"image":    "alpine:3.20",
+			"command":  []string{"echo"},
+			"args":     []string{"hello"},
+			"timeZone": "America/Los_Angeles",
+		},
+	}
+	resp := testJSONRequest(t, app, http.MethodPost, "/tasks", body)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	var task corev1alpha1.Task
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&task))
+	require.Equal(t, "0 8 * * *", task.Spec.Schedule)
+	require.NotNil(t, task.Spec.TimeZone)
+	require.Equal(t, "America/Los_Angeles", *task.Spec.TimeZone)
+}
+
 func TestHandlers_ProviderListExistingObject(t *testing.T) {
 	provider := &corev1alpha1.Provider{
 		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "default"},

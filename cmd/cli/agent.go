@@ -131,6 +131,7 @@ func newAgentUpdateCmd() *cobra.Command {
 		Name:     "agent",
 	})
 }
+
 func newAgentDeleteCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "delete <name>",

@@ -248,6 +248,7 @@ func newSkillUpdateCmd() *cobra.Command {
 		Name:     "skill",
 	})
 }
+
 func newSkillValidateCmd() *cobra.Command {
 	var file string
 	cmd := &cobra.Command{
