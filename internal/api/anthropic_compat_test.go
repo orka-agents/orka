@@ -10,8 +10,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -590,6 +592,41 @@ func TestConvertToAnthropicResponse(t *testing.T) {
 	}
 }
 
+func TestConvertToAnthropicResponse_PreservesGoalStateSentinelForTransparentProxy(t *testing.T) {
+	result := convertToAnthropicResponse(&llm.CompletionResponse{
+		Content:    goalStateSentinel + "\nPR ready: https://example.test/pr/3",
+		StopReason: oaiStopReasonEndTurn,
+	}, "claude-sonnet-4-20250514")
+
+	if len(result.Content) != 1 {
+		t.Fatalf("expected one text block, got %d", len(result.Content))
+	}
+	if result.Content[0].Text != goalStateSentinel+"\nPR ready: https://example.test/pr/3" {
+		t.Fatalf("text = %q", result.Content[0].Text)
+	}
+	if !strings.Contains(result.Content[0].Text, goalStateSentinel) {
+		t.Fatalf("transparent converter should preserve sentinel-like text: %q", result.Content[0].Text)
+	}
+}
+
+func TestAnthropicToolLoopFormatting_StripsGoalStateSentinel(t *testing.T) {
+	resp := stripGoalStateSentinelFromResponse(&llm.CompletionResponse{
+		Content:    goalStateSentinel + "\nPR ready: https://example.test/pr/3",
+		StopReason: oaiStopReasonEndTurn,
+	})
+	result := convertToAnthropicResponse(resp, "claude-sonnet-4-20250514")
+
+	if len(result.Content) != 1 {
+		t.Fatalf("expected one text block, got %d", len(result.Content))
+	}
+	if result.Content[0].Text != "PR ready: https://example.test/pr/3" {
+		t.Fatalf("text = %q", result.Content[0].Text)
+	}
+	if strings.Contains(result.Content[0].Text, goalStateSentinel) {
+		t.Fatalf("tool-loop formatted response leaked sentinel: %q", result.Content[0].Text)
+	}
+}
+
 // --- Tests: mapAnthropicStopReason ---
 
 func TestMapAnthropicStopReason(t *testing.T) {
@@ -1009,6 +1046,121 @@ func (m *mockAnthropicProvider) Stream(_ context.Context, _ *llm.CompletionReque
 
 func (m *mockAnthropicProvider) Name() string {
 	return "mock-anthropic"
+}
+
+func TestHandleStreamingMessages_StripsSentinelAndStreamsSafeToolProgress(t *testing.T) {
+	filePath := fmt.Sprintf("/tmp/orka-anthropic-stream-%d.txt", time.Now().UnixNano())
+	if err := os.WriteFile(filePath, []byte("anthropic streaming secret content"), 0o600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(filePath) })
+
+	mock := &mockAnthropicProvider{
+		responses: []*llm.CompletionResponse{
+			{
+				Content:    "Reading file before final answer.\n",
+				StopReason: oaiStopReasonToolUse,
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call_file_read",
+					Name:      "file_read",
+					Arguments: json.RawMessage(fmt.Sprintf(`{"path":%q}`, filePath)),
+				}},
+			},
+			{
+				Content:    goalStateSentinel + "\nPR ready: https://example.test/pr/4",
+				StopReason: oaiStopReasonEndTurn,
+			},
+		},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingMessages(
+			c, mock,
+			&llm.CompletionRequest{
+				Model:    "claude-sonnet-4-20250514",
+				Messages: []llm.Message{{Role: testRoleUser, Content: "read then report"}},
+				Tools:    []llm.Tool{{Name: "file_read"}},
+			},
+			"claude-sonnet-4-20250514", 0, nil,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	for _, want := range []string{
+		"Reading file before final answer.",
+		"[Tool file_read completed]",
+		"PR ready: https://example.test/pr/4",
+		"message_stop",
+	} {
+		if !strings.Contains(bodyStr, want) {
+			t.Fatalf("expected stream body to contain %q, got: %s", want, bodyStr)
+		}
+	}
+	for _, forbidden := range []string{
+		goalStateSentinel,
+		"anthropic streaming secret content",
+		"premature end",
+		"call_file_read",
+	} {
+		if strings.Contains(bodyStr, forbidden) {
+			t.Fatalf("stream body leaked internal content %q: %s", forbidden, bodyStr)
+		}
+	}
+	if mock.callIdx != 2 {
+		t.Fatalf("expected 2 LLM calls, got %d", mock.callIdx)
+	}
+}
+
+func TestHandleStreamingMessages_DoesNotStreamPrematureCoordinatorText(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		responses: []*llm.CompletionResponse{
+			{Content: "premature anthropic secret progress", StopReason: oaiStopReasonEndTurn},
+			{Content: goalStateSentinel + "\nPR ready: https://example.test/pr/6", StopReason: oaiStopReasonEndTurn},
+		},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	handler.config.MaxPrematureEndRetries = 1
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingMessages(
+			c, mock,
+			&llm.CompletionRequest{
+				Model:    "claude-sonnet-4-20250514",
+				Messages: []llm.Message{{Role: testRoleUser, Content: "ship"}},
+			},
+			"claude-sonnet-4-20250514", 0, nil,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, "premature anthropic secret progress") {
+		t.Fatalf("stream body leaked premature coordinator text: %s", bodyStr)
+	}
+	for _, want := range []string{"[Continuing workflow...]", "PR ready: https://example.test/pr/6", "message_stop"} {
+		if !strings.Contains(bodyStr, want) {
+			t.Fatalf("expected stream body to contain %q, got: %s", want, bodyStr)
+		}
+	}
+	if mock.callIdx != 2 {
+		t.Fatalf("expected 2 LLM calls, got %d", mock.callIdx)
+	}
 }
 
 // --- Tests: injectOrkaTools ---

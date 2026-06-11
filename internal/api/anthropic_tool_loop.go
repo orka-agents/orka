@@ -139,6 +139,24 @@ func (o *toolLoopObserver) autoPoll() {
 	}
 }
 
+func formatToolProgress(tc llm.ToolCall, result string) string {
+	status := "completed"
+	var parsed struct {
+		Success *bool `json:"success"`
+		Data    struct {
+			Phase string `json:"phase"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(result), &parsed); err == nil {
+		if parsed.Success != nil && !*parsed.Success {
+			status = "failed"
+		} else if parsed.Data.Phase != "" {
+			status = "phase=" + parsed.Data.Phase
+		}
+	}
+	return fmt.Sprintf("[Tool %s %s]\n\n", tc.Name, status)
+}
+
 // coordinatorSystemPrompt returns the system prompt supplement for the proxy's coordinator mode.
 func coordinatorSystemPrompt(namespace string) string {
 	return fmt.Sprintf(`<orka_coordinator>
