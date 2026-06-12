@@ -66,7 +66,7 @@ export function TaskList() {
               (data?.items ?? []).map((task: Task) => (
                 <TableRow key={task.metadata.uid || task.metadata.name} className="cursor-pointer">
                   <TableCell>
-                    <Link to="/tasks/$taskId" params={{ taskId: task.metadata.name }} className="font-medium hover:underline">
+                    <Link to="/tasks/$taskId" params={{ taskId: task.metadata.name }} className="font-mono text-sm font-medium hover:underline">
                       {task.metadata.name}
                     </Link>
                   </TableCell>

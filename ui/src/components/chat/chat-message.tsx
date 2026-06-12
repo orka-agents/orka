@@ -1,6 +1,7 @@
+import { Link } from '@tanstack/react-router'
 import { Bot, User, AlertCircle, Info } from 'lucide-react'
-import { cn } from '@/lib/utils'
 import { ChatToolCall } from './chat-tool-call'
+import { StatusDot } from '@/components/ui/status-dot'
 import type { ChatMessage as ChatMessageType } from '@/schemas/chat'
 
 export function ChatMessage({ message }: { message: ChatMessageType }) {
@@ -35,26 +36,48 @@ export function ChatMessage({ message }: { message: ChatMessageType }) {
 
   const isUser = message.role === 'user'
 
-  return (
-    <div className={cn('flex gap-3 py-2', isUser ? 'justify-end' : 'justify-start')}>
-      {!isUser && (
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/10">
-          <Bot className="h-4 w-4 text-primary" />
-        </div>
-      )}
-      <div className={cn('max-w-[80%] space-y-1')}>
-        <div
-          className={cn(
-            'rounded-2xl px-4 py-2.5 text-sm',
-            isUser
-              ? 'bg-primary text-primary-foreground'
-              : 'bg-muted text-foreground',
-          )}
-        >
+  // User turns keep a right-aligned bubble; assistant turns render flush (like
+  // an agentic console, not a symmetric consumer chat).
+  if (isUser) {
+    return (
+      <div className="flex justify-end gap-3 py-2">
+        <div className="max-w-[80%] rounded-2xl bg-primary px-4 py-2.5 text-sm text-primary-foreground">
           <div className="whitespace-pre-wrap">{message.content}</div>
         </div>
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-secondary">
+          <User className="h-4 w-4" />
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex gap-3 py-2">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/10">
+        <Bot className="h-4 w-4 text-primary" />
+      </div>
+      <div className="min-w-0 flex-1 space-y-1.5">
+        <div className="whitespace-pre-wrap text-sm text-foreground">{message.content}</div>
+
+        {/* Cross-silo links: tasks created during this turn link into the graph. */}
+        {message.tasksCreatedNames && message.tasksCreatedNames.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {message.tasksCreatedNames.map((name) => (
+              <Link
+                key={name}
+                to="/tasks/$taskId"
+                params={{ taskId: name }}
+                className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-2 py-0.5 text-xs font-mono transition-colors hover:bg-accent"
+              >
+                <StatusDot phase="Pending" hideLabel />
+                {name}
+              </Link>
+            ))}
+          </div>
+        )}
+
         {message.usage && (
-          <div className="flex gap-3 px-2 text-[10px] text-muted-foreground">
+          <div className="flex flex-wrap gap-3 text-[10px] text-muted-foreground tabular-nums">
             {message.usage.llmCalls !== undefined && <span>{message.usage.llmCalls} LLM calls</span>}
             {message.usage.toolCalls !== undefined && <span>{message.usage.toolCalls} tool calls</span>}
             {message.usage.tasksCreated !== undefined && message.usage.tasksCreated > 0 && (
@@ -64,11 +87,6 @@ export function ChatMessage({ message }: { message: ChatMessageType }) {
           </div>
         )}
       </div>
-      {isUser && (
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-secondary">
-          <User className="h-4 w-4" />
-        </div>
-      )}
     </div>
   )
 }

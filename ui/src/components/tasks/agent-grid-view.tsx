@@ -2,9 +2,9 @@ import { useState, useEffect } from 'react'
 import { Link } from '@tanstack/react-router'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Activity } from 'lucide-react'
 import { PageHeader } from '@/components/layout/page-header'
 import { EmptyState } from '@/components/ui/empty-state'
+import { SonarPing } from '@/components/ui/sonar-ping'
 import { useTaskList } from '@/hooks/use-tasks'
 import { useFreshness } from '@/hooks/use-freshness'
 import { cn } from '@/lib/utils'
@@ -86,11 +86,12 @@ export function AgentGridView() {
       />
       {runningTasks.length === 0 ? (
         <Card>
-          <CardContent className="py-8">
+          <CardContent className="flex flex-col items-center gap-4 py-10">
+            <SonarPing />
             <EmptyState
-              icon={Activity}
               headline="No tasks currently running"
               hint="Running agents will appear here as they start."
+              className="py-0"
             />
           </CardContent>
         </Card>

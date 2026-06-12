@@ -59,6 +59,10 @@ export function useSendMessage() {
 
   return useCallback(
     async (messageText: string) => {
+      // Task names created during this turn, harvested from create_task tool
+      // results, so the assistant message can render cross-linking chips.
+      const createdTaskNames: string[] = []
+
       function handleSSEEvent(event: string, data: string) {
         const now = new Date().toISOString()
 
@@ -93,6 +97,22 @@ export function useSendMessage() {
           case 'tool_result': {
             const tr = JSON.parse(data) as SSEToolResultEvent
             const result = tr.result as Record<string, unknown> | undefined
+            // Harvest names ONLY from successful task-CREATION tools, so the
+            // turn links to tasks it actually created. Lookups/updates/deletes
+            // that merely reference a task by name must not appear as "created"
+            // chips. Require both "create" and "task" in the tool name (any
+            // order: create_task, task_create, create_agent_task, ...).
+            const lowerName = tr.name.toLowerCase()
+            const isCreateTaskTool = lowerName.includes('create') && lowerName.includes('task')
+            if (isCreateTaskTool && result && result.success === true) {
+              const name =
+                (typeof result.name === 'string' && result.name) ||
+                (typeof result.taskName === 'string' && result.taskName) ||
+                (typeof (result.task as Record<string, unknown>)?.name === 'string' &&
+                  ((result.task as Record<string, unknown>).name as string)) ||
+                undefined
+              if (name && !createdTaskNames.includes(name)) createdTaskNames.push(name)
+            }
             addMessage({
               id: generateMessageId(),
               role: 'tool_result',
@@ -117,7 +137,7 @@ export function useSendMessage() {
           }
           case 'done': {
             const done = JSON.parse(data) as SSEDoneEvent
-            setUsageOnLastAssistant(done.usage)
+            setUsageOnLastAssistant(done.usage, createdTaskNames)
             break
           }
           case 'error': {

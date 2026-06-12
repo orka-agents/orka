@@ -204,6 +204,52 @@ describe('useSendMessage', () => {
     expect(trMsg!.toolSuccess).toBe(true)
   })
 
+  it('harvests created task names from a successful create_task result onto the assistant turn', async () => {
+    mockSSEFetch([
+      {
+        event: 'tool_result',
+        data: JSON.stringify({ id: 'tc-1', name: 'create_task', result: { success: true, name: 'task-alpha' } }),
+      },
+      {
+        event: 'tool_result',
+        data: JSON.stringify({ id: 'tc-2', name: 'create_task', result: { success: true, name: 'task-beta' } }),
+      },
+      { event: 'message', data: JSON.stringify({ content: 'Created two tasks.' }) },
+      { event: 'done', data: JSON.stringify({ usage: { tasksCreated: 2 } }) },
+    ])
+
+    const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+    await act(async () => {
+      await result.current('make two tasks')
+    })
+
+    const assistant = useChatStore.getState().messages.find((m) => m.role === 'assistant')
+    expect(assistant?.tasksCreatedNames).toEqual(['task-alpha', 'task-beta'])
+  })
+
+  it('does NOT harvest names from non-creation task tools (lookup/update/delete)', async () => {
+    mockSSEFetch([
+      {
+        event: 'tool_result',
+        data: JSON.stringify({ id: 'tc-1', name: 'get_task', result: { success: true, name: 'existing-task' } }),
+      },
+      {
+        event: 'tool_result',
+        data: JSON.stringify({ id: 'tc-2', name: 'update_task', result: { success: true, name: 'existing-task' } }),
+      },
+      { event: 'message', data: JSON.stringify({ content: 'Looked it up.' }) },
+      { event: 'done', data: JSON.stringify({ usage: {} }) },
+    ])
+
+    const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+    await act(async () => {
+      await result.current('look up a task')
+    })
+
+    const assistant = useChatStore.getState().messages.find((m) => m.role === 'assistant')
+    expect(assistant?.tasksCreatedNames).toBeUndefined()
+  })
+
   it('handles fetch error — adds error message', async () => {
     fetchSpy.mockImplementation((input, init) => {
       const url = typeof input === 'string' ? input : (input as Request).url

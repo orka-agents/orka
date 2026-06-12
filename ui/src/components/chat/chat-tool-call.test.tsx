@@ -70,11 +70,15 @@ describe('ChatToolCall', () => {
   it('clicking toggles expanded state', () => {
     render(<ChatToolCall message={toolCallMsg} />)
     const button = screen.getByRole('button')
-    expect(screen.getByText('▼')).toBeInTheDocument()
+    // Collapsed by default; the Args body is not shown.
+    expect(button).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('Args')).not.toBeInTheDocument()
     fireEvent.click(button)
-    expect(screen.getByText('▲')).toBeInTheDocument()
+    expect(button).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('Args')).toBeInTheDocument()
     fireEvent.click(button)
-    expect(screen.getByText('▼')).toBeInTheDocument()
+    expect(button).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('Args')).not.toBeInTheDocument()
   })
 
   it('expanded state shows args for tool_call', () => {

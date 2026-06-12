@@ -11,7 +11,7 @@ interface ChatState {
   setSessionId: (id: string) => void
   setStreaming: (streaming: boolean) => void
   newSession: () => void
-  setUsageOnLastAssistant: (usage: ChatUsage) => void
+  setUsageOnLastAssistant: (usage: ChatUsage, tasksCreatedNames?: string[]) => void
 }
 
 let msgCounter = 0
@@ -43,12 +43,18 @@ export const useChatStore = create<ChatState>()((set) => ({
   setStreaming: (streaming) => set({ isStreaming: streaming }),
   newSession: () => set({ messages: [], currentSessionId: null }),
 
-  setUsageOnLastAssistant: (usage) =>
+  setUsageOnLastAssistant: (usage, tasksCreatedNames) =>
     set((state) => {
       const msgs = [...state.messages]
       for (let i = msgs.length - 1; i >= 0; i--) {
         if (msgs[i].role === 'assistant') {
-          msgs[i] = { ...msgs[i], usage }
+          msgs[i] = {
+            ...msgs[i],
+            usage,
+            ...(tasksCreatedNames && tasksCreatedNames.length > 0
+              ? { tasksCreatedNames }
+              : {}),
+          }
           break
         }
       }

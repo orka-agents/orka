@@ -5,6 +5,14 @@ vi.mock('zustand/middleware', async () => {
   return { ...actual, persist: (fn: any) => fn }
 })
 
+vi.mock('@tanstack/react-router', async () => {
+  const actual = await vi.importActual('@tanstack/react-router')
+  return {
+    ...actual,
+    Link: ({ children, to, ...props }: any) => <a href={to} {...props}>{children}</a>,
+  }
+})
+
 import { render, screen } from '@/test/test-utils'
 import { ChatMessage } from './chat-message'
 import { useUIStore } from '@/stores/ui'
@@ -110,5 +118,26 @@ describe('ChatMessage', () => {
     expect(screen.getByText('1 LLM calls')).toBeInTheDocument()
     expect(screen.getByText('2 tool calls')).toBeInTheDocument()
     expect(screen.getByText('1.5s')).toBeInTheDocument()
+  })
+
+  it('renders clickable task chips when the turn created tasks', () => {
+    const msg: ChatMessageType = {
+      id: 'msg-7',
+      role: 'assistant',
+      content: 'Created two tasks.',
+      timestamp: new Date().toISOString(),
+      usage: { tasksCreated: 2 },
+      tasksCreatedNames: ['task-alpha', 'task-beta'],
+    }
+    render(<ChatMessage message={msg} />)
+    const alpha = screen.getByRole('link', { name: /task-alpha/ })
+    const beta = screen.getByRole('link', { name: /task-beta/ })
+    expect(alpha).toHaveAttribute('href', '/tasks/$taskId')
+    expect(beta).toBeInTheDocument()
+  })
+
+  it('renders no task chips when none were created', () => {
+    render(<ChatMessage message={assistantMsg} />)
+    expect(screen.queryByRole('link')).not.toBeInTheDocument()
   })
 })

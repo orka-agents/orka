@@ -55,7 +55,7 @@ export function SessionList() {
               (data?.items ?? []).map((session) => (
                 <TableRow key={session.name}>
                   <TableCell>
-                    <Link to="/sessions/$sessionId" params={{ sessionId: session.name }} className="font-medium hover:underline">
+                    <Link to="/sessions/$sessionId" params={{ sessionId: session.name }} className="font-mono text-sm font-medium hover:underline">
                       {session.name}
                     </Link>
                   </TableCell>
